@@ -151,7 +151,8 @@ function createDbMock(initialRows = {}) {
         if (f) this._rawFilters.push(f);
         return this;
       },
-      whereNull(column) { this._whereNull = column; return this; },
+      // Every column, not only the last: a query can chain several.
+      whereNull(column) { this._whereNull = column; this._rawFilters.push(row => row[column] == null); return this; },
       whereNotNull(column) { this._rawFilters.push(row => row[column] != null); return this; },
       whereIn(column, values) { this._rawFilters.push(row => values.includes(row[column])); return this; },
       whereNot(arg, value) {
@@ -333,6 +334,36 @@ describe('Google Business review sync', () => {
     expect(err.transport).toBeUndefined();
   });
 
+  test('a refused reply delete (Retract) names the status and Google\'s status word, never the response text', async () => {
+    global.fetch = jest.fn(async () => ({ ok: false, status: 404, headers: { get: () => 'application/json' }, text: async () => '{"error":{"code":404,"message":"No reply \'Thanks Dana W.\' on this review","status":"NOT_FOUND"}}' }));
+    const err = await service.deleteReply('accounts/1/locations/2/reviews/rev-1', 'sarasota').catch((e) => e);
+    expect(err).toMatchObject({ message: 'GBP deleteReply 404 NOT_FOUND', googleStatus: 404 });
+    global.fetch = jest.fn(async () => ({ ok: false, status: 500, headers: { get: () => 'text/html' }, text: async () => { throw new Error('socket hang up'); } }));
+    await expect(service.deleteReply('accounts/1/locations/2/reviews/rev-1', 'sarasota')).rejects.toMatchObject({ message: 'GBP deleteReply 500', googleStatus: 500 });
+  });
+
+  test('the GBP name step never replaces a name the publisher saved after the step read the rows', async () => {
+    const created = '2026-11-18T15:00:00.000Z';
+    db.__state.rows.google_reviews.push(
+      { id: 'r-raced', reviewer_name: 'Dana W.', review_created_at: created, location_id: 'bradenton', gbp_review_name: null },
+      { id: 'r-free', reviewer_name: 'Lee K.', review_created_at: created, location_id: 'bradenton', gbp_review_name: null },
+    );
+    const [raced, free] = db.__state.rows.google_reviews;
+    service.getAllLocationReviews = jest.fn(async () => {
+      // The publisher saves its match while this step waits on Google's list.
+      raced.gbp_review_name = 'accounts/1/locations/2/reviews/publisher-match';
+      return [
+        { name: 'accounts/1/locations/2/reviews/sync-match', reviewer: { displayName: 'Dana W.' }, createTime: created },
+        { name: 'accounts/1/locations/2/reviews/lee', reviewer: { displayName: 'Lee K.' }, createTime: created },
+      ];
+    });
+    await service._resolveGbpResourceNames();
+    expect(raced.gbp_review_name).toBe('accounts/1/locations/2/reviews/publisher-match');
+    expect(free.gbp_review_name).toBe('accounts/1/locations/2/reviews/lee');
+    const lines = require('../services/logger').info.mock.calls.map(([line]) => String(line)).filter((line) => line.includes('Resolved GBP resource name'));
+    expect(lines).toEqual(['[gbp] Resolved GBP resource name for review r-free: accounts/1/locations/2/reviews/lee']);
+  });
+
   describe('getReviews transient retry', () => {
     const failRes = (status) => ({ ok: false, status, headers: { get: () => 'application/json' }, text: async () => `{"error":{"status":"E${status}"}}` });
     const loc = 'accounts/1/locations/2';
@@ -347,14 +378,33 @@ describe('Google Business review sync', () => {
 
     test('503 on every attempt throws the unchanged message after three fetches', async () => {
       global.fetch = jest.fn(async () => failRes(503));
-      await expect(service.getReviews(loc, 'bradenton')).rejects.toThrow(/^GBP getReviews 503: /);
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toThrow(/^GBP getReviews 503$/);
       expect(global.fetch).toHaveBeenCalledTimes(3);
     });
 
     test('403 throws immediately after one fetch', async () => {
       global.fetch = jest.fn(async () => failRes(403));
-      await expect(service.getReviews(loc, 'bradenton')).rejects.toThrow(/^GBP getReviews 403: /);
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toMatchObject({ message: 'GBP getReviews 403', googleStatus: 403 });
       expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('an error body that cannot be read keeps Google\'s status on the error', async () => {
+      global.fetch = jest.fn(async () => ({ ...failRes(403), text: async () => { throw new Error('socket hang up'); } }));
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toMatchObject({ message: 'GBP getReviews 403', googleStatus: 403 });
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('the error message keeps Google\'s status word and never the response text (it can quote a reviewer)', async () => {
+      const body = '{"error":{"code":404,"message":"No review by Dana W. saying great service","status":"NOT_FOUND"}}';
+      global.fetch = jest.fn(async () => ({ ...failRes(404), text: async () => body }));
+      const err = await service.getReviews(loc, 'bradenton').catch((e) => e);
+      expect(err).toMatchObject({ message: 'GBP getReviews 404 NOT_FOUND', googleStatus: 404 });
+      global.fetch = jest.fn(async () => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => '{"reviews":[{"reviewer":{"displayName":"Dana W."}' }));
+      const bad = await service.getReviews(loc, 'bradenton').catch((e) => e);
+      expect(bad.message).toBe('GBP getReviews returned malformed JSON (status 200)');
+      global.fetch = jest.fn(async () => ({ ok: true, status: 200, headers: { get: () => 'text/html' }, text: async () => '<p>Dana W. said great service</p>' }));
+      const html = await service.getReviews(loc, 'bradenton').catch((e) => e);
+      expect(html.message).toBe('GBP getReviews returned non-JSON response (status 200, content-type text/html)');
     });
 
     test('a signal that aborts during the backoff throws and starts no further fetch', async () => {
@@ -2062,6 +2112,34 @@ describe('Google Business review sync', () => {
       r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-copycat',
     );
     expect(copycat).toBeTruthy();
+  });
+
+  test('a second same-name review within a day lands as its own row; the first keeps its row (no fold)', async () => {
+    // Two "Anonymous" reviews on one day. The name+time fallback must not
+    // re-point the first review's row to the second: each sync would then
+    // swap the one row between the two reviews.
+    seedSyncedReview({
+      id: 'anon-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-anon-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-anon-1',
+      reviewer_name: 'Anonymous',
+      review_text: 'First review',
+    });
+    gbpFeed([
+      { name: 'accounts/1/locations/2/reviews/rev-anon-2', reviewer: {}, starRating: 'FOUR', comment: 'Second review', createTime: '2026-05-25T15:00:00Z' },
+      { name: 'accounts/1/locations/2/reviews/rev-anon-1', reviewer: {}, starRating: 'FIVE', comment: 'First review', createTime: '2026-05-25T12:00:00Z' },
+    ]);
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'anon-1')).toMatchObject({
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-anon-1',
+      review_text: 'First review',
+    });
+    const second = db.__state.rows.google_reviews.filter(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-anon-2');
+    expect(second).toHaveLength(1);
+    expect(second[0]).toMatchObject({ review_text: 'Second review' });
+    expect(second[0].id).not.toBe('anon-1');
   });
 
   test('an unexpired publish claim defers the removal stamp; an expired claim does not', async () => {

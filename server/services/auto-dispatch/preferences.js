@@ -92,16 +92,14 @@ async function getCustomerSchedulingPreferences(customerId, serviceType, conn = 
   // undefined and normalizePreferences applies service-type defaults.
   const query = conn('property_preferences').where('customer_id', customerId);
   if (lock) query.forShare();
-  // GATE_AUTO_DISPATCH_MOWING_DAYS (mowing-days.js): the same row's mowing
-  // days, as `mowing`. Off: the column is not read and the prefs are unchanged.
-  const mowingMode = mowingDays.mowingDaysMode();
+  // The same row's mowing days, as `mowing` (mowing-days.js).
   const prefs = await query
     .first(
       'preferred_day', 'preferred_time', 'contact_preference',
       'blackout_start', 'blackout_end', 'access_notes', 'special_instructions',
-      ...(mowingMode === 'off' ? [] : ['mowing_days']),
+      'mowing_days',
     );
-  const normalized = mowingDays.withMowingRule(normalizePreferences(prefs, serviceType), prefs, mowingMode);
+  const normalized = mowingDays.withMowingRule(normalizePreferences(prefs, serviceType), prefs);
   if (serviceId || serviceKey) {
     const [category] = await require('../technician-capabilities').categoriesForServices(
       conn, [{ service_type: serviceType, service_id: serviceId, service_key: serviceKey }],

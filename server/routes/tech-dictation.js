@@ -31,9 +31,9 @@
  * record's spelling ("Hi Sarah." becomes "Hi Sara." for a customer the record calls Sara), under the
  * rules in utils/name-spelling.js. Nothing else in the transcript changes.
  *
- * GATE_DICTATION_MONEY_NORMALIZE reads dictated dollar amounts (utils/spoken-money.js) and adds
- * `money: { changes, ambiguous }` beside `text`. Amounts are never rewritten: a parser can misread a
- * phrase, so it only suggests (changes) and flags (ambiguous). Off = `{ text }`.
+ * Dictated dollar amounts are read (utils/spoken-money.js) and `money: { changes, ambiguous }` rides
+ * beside `text`. Amounts are never rewritten: a parser can misread a phrase, so it only suggests
+ * (changes) and flags (ambiguous).
  *
  * Nothing is stored: no row, no S3 object. The audit line carries sizes and
  * counts only, never the audio or the words (audio has no ledger: lane-policies
@@ -138,10 +138,9 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
     } catch (err) { return next(err); }
   });
 
-// GATE_DICTATION_MONEY_NORMALIZE: suggests "$61.33" for "sixty-one thirty-three" where a money cue is next to
-// it, and flags an amount that could be $61.33 or $6,133. The heard text is never rewritten. Off = { text }.
+// Suggests "$61.33" for "sixty-one thirty-three" where a money cue is next to it, and flags an amount
+// that could be $61.33 or $6,133. The heard text is never rewritten.
 function dictationAnswer(text) {
-  if (featureGates.dictationMoneyNormalizeLive() !== true) return { text };
   const money = normalizeSpokenMoney(text);
   if (money.changes.length || money.ambiguous.length) {
     logger.info(`[server-dictation] money changes=${money.changes.length} ambiguous=${money.ambiguous.length}`);

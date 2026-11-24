@@ -24,7 +24,7 @@ const TANK = {
 // surfactant, whose catalog label is per gallon (20260712100000).
 const HOUSE_MIX = [
   { id: 'taurus', name: 'Taurus SC', category: 'insecticide' },
-  { id: 'talak', name: 'Atticus Talak 7.9 F', category: 'insecticide' },
+  { id: 'crosscheck', name: 'LESCO Crosscheck Plus', category: 'insecticide' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant', default_rate: '0.03-0.64', default_unit: 'fl_oz/gal' },
 ];
 // A lawn liquid on a per-1,000 rate: Total = rate x sq ft / 1,000, in fl oz.
@@ -94,7 +94,7 @@ beforeEach(() => {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
   vi.stubGlobal('scrollTo', vi.fn());
   vi.stubGlobal('alert', vi.fn());
-  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ customer: {}, actions: [], available: false }) })));
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ customer: {}, actions: [], available: false, taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 } }) })));
 });
 
 afterEach(() => {
@@ -169,7 +169,7 @@ describe('tsp on the pest house seed', () => {
 
     // A bare oz may be a dry weight, so 4 oz does not become 24 tsp: the
     // seed is withdrawn for the tech to enter, never kept as "4 tsp".
-    expect(row('Taurus SC').total.value).toBe('4');
+    expect(row('Taurus SC').total.value).toBe('1.6');
     set(row('Taurus SC').amountUnit, 'tsp');
     expect(row('Taurus SC').total.value).toBe('');
     set(row('Taurus SC').amountUnit, 'oz');
@@ -181,7 +181,7 @@ describe('tsp on the pest house seed', () => {
     const byId = Object.fromEntries(body.products.map((product) => [product.productId, product]));
     expect(byId.surfactant).toMatchObject({ totalAmount: 0.25, amountUnit: 'fl_oz' });
     expect(byId.taurus).toMatchObject({ totalAmount: '4', amountUnit: 'oz' });
-    expect(byId.talak).toMatchObject({ totalAmount: 4, amountUnit: 'oz' });
+    expect(byId.crosscheck).toMatchObject({ totalAmount: 4, amountUnit: 'oz' });
   });
 });
 

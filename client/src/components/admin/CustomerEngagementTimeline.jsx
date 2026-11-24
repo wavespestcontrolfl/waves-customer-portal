@@ -1,7 +1,5 @@
 // Read-only "what they were sent and what they did" feed for one customer
-// (GET /admin/customers/:id/activity, GATE_CUSTOMER_ACTIVITY_TIMELINE). The
-// server answers { enabled: false } while the gate is dark and this renders
-// nothing at all. Only first-party, already-filtered evidence (a short-link
+// (GET /admin/customers/:id/activity). Only first-party, already-filtered evidence (a short-link
 // click, a recorded page view, a text reply) carries the "Engaged" badge and
 // sets "Last engaged". Email opens, email-provider clicks and raw token-page
 // views are listed, labelled by the server, and never engaged. "Last seen in
@@ -57,7 +55,7 @@ function SummaryNotes({ summary }) {
 
 // `adminOnly` is the caller's isAdmin: technicians never fetch or see the feed.
 export default function CustomerEngagementTimeline({ customerId, adminOnly = true }) {
-  const [state, setState] = useState({ scope: null, enabled: false, events: [], summary: null, hasMore: false, nextCursor: null, unavailable: [] });
+  const [state, setState] = useState({ scope: null, events: [], summary: null, hasMore: false, nextCursor: null, unavailable: [] });
   const [error, setError] = useState(null);
   // A failed "Load older" must not blank the events already on screen (that is
   // what `error` does for a failed first load), so it has its own state.
@@ -81,12 +79,10 @@ export default function CustomerEngagementTimeline({ customerId, adminOnly = tru
       setError(null);
       setPageError(null);
       setState((prev) => {
-        if (body.enabled !== true) return { ...prev, scope, enabled: false, events: [] };
         const older = cursor && prev.scope === scope ? prev.events : [];
         const seen = new Set(older.map((e) => e.id));
         return {
           scope,
-          enabled: true,
           events: [...older, ...(body.events || []).filter((e) => !seen.has(e.id))],
           // Only the first page carries the summary; keep it while paging.
           summary: cursor && prev.scope === scope ? prev.summary : body.summary || null,
@@ -111,7 +107,7 @@ export default function CustomerEngagementTimeline({ customerId, adminOnly = tru
   }, [load]);
 
   if (!scope) return null;
-  if (error && !(mine && state.enabled)) {
+  if (error && !mine) {
     return (
       <div className="mb-3 flex items-center gap-3 text-14 text-ink-secondary" role="alert">
         <span>Could not load engagement activity.</span>
@@ -119,7 +115,7 @@ export default function CustomerEngagementTimeline({ customerId, adminOnly = tru
       </div>
     );
   }
-  if (!mine || !state.enabled) return null;
+  if (!mine) return null;
 
   const { summary, events } = state;
   return (

@@ -19,6 +19,9 @@ const { EMAIL_RE } = require('../utils/workable-lead-signal');
 // purgeStalePendingSubscribers() after a longer window so the table (and the
 // email's eligibility for a fresh signup) doesn't accrue dead pending rows.
 const CONFIRM_TTL_MS = 7 * 24 * 60 * 60 * 1000;       // 7 days — link still confirms
+// A reader-proof column's value in a comeback write: NULL when the row the UPDATE changes is
+// opted out at that instant, else the column as it is (see the comeback in subscribeOrResubscribeOnce).
+const READER_PROOF_UNLESS_OPTED_OUT = (column) => `CASE WHEN status IN ('unsubscribed', 'inactive') THEN NULL ELSE ${column} END`;
 const PENDING_PURGE_MS = 30 * 24 * 60 * 60 * 1000;    // 30 days — then delete the row
 // Sweep #7765 B5: a public signup form may not trigger another confirmation
 // email for the same address while the last one is younger than this. The
@@ -136,6 +139,24 @@ async function subscribeOrResubscribe(params = {}) {
   return subscribeOrResubscribeOnce(params, { retried: false });
 }
 
+// The address rule every signup applies: null when the address is usable,
+// else the coded error subscribeOrResubscribe throws. The public subscribe
+// route also calls it before its bot check, so a malformed address gets the
+// same 400 whether or not the bot check would drop the request.
+// Only a string is an address: anything else (a JSON array or object from the
+// public form) is refused here, never stringified, so it cannot throw.
+function signupEmailError(email, { strict = true } = {}) {
+  if (!email) return Object.assign(new Error('email required'), { code: 'EMAIL_REQUIRED' });
+  if (typeof email !== 'string') {
+    return Object.assign(new Error(strict ? 'valid email required' : 'email required'), { code: 'INVALID_EMAIL' });
+  }
+  const lc = email.trim().toLowerCase();
+  if (strict ? !EMAIL_RE.test(lc) : !lc.includes('@')) {
+    return Object.assign(new Error(strict ? 'valid email required' : 'email required'), { code: 'INVALID_EMAIL' });
+  }
+  return null;
+}
+
 async function subscribeOrResubscribeOnce({
   email,
   firstName = null,
@@ -161,24 +182,9 @@ async function subscribeOrResubscribeOnce({
   dbh = null,
 } = {}, { retried } = {}) {
   const conn = dbh || db;
-  if (!email) {
-    const err = new Error('email required');
-    err.code = 'EMAIL_REQUIRED';
-    throw err;
-  }
+  const emailError = signupEmailError(email, { strict });
+  if (emailError) throw emailError;
   const lc = String(email).trim().toLowerCase();
-
-  if (strict) {
-    if (!EMAIL_RE.test(lc)) {
-      const err = new Error('valid email required');
-      err.code = 'INVALID_EMAIL';
-      throw err;
-    }
-  } else if (!lc.includes('@')) {
-    const err = new Error('email required');
-    err.code = 'INVALID_EMAIL';
-    throw err;
-  }
 
   const existing = await conn('newsletter_subscribers').where({ email: lc }).first();
 
@@ -229,6 +235,18 @@ async function subscribeOrResubscribeOnce({
         last_name: lastName !== null ? lastName : existing.last_name,
         resubscribed_at: new Date(),
         unsubscribed_at: null,
+        // This comeback is not the reader's click, so it drops the reader's earlier proof
+        // (confirmByToken) when the row is still opted out at the instant of the write. The
+        // opt-out it overrides came after that click, and this same write clears
+        // unsubscribed_at: with the proof left on the row, only a timestamp order would
+        // still say the click is void (pest-insider/tool-block.js optedIn), and this
+        // write's timestamps are taken before it lands. `status` in the CASE is the row's
+        // status BEFORE this update (SQL evaluates SET against the old row). So a row that
+        // the reader's own click on a live re-signup link made active between this
+        // function's read and this write (the write is by id, as it was) keeps that new
+        // proof. After a clear, the reader's next confirm click writes the proof again.
+        reader_confirmed_at: conn.raw(READER_PROOF_UNLESS_OPTED_OUT('reader_confirmed_at')),
+        reader_confirmed_email: conn.raw(READER_PROOF_UNLESS_OPTED_OUT('reader_confirmed_email')),
         updated_at: new Date(),
       };
       // Sunset hygiene markers (newsletter-sunset.js) are cleared on EVERY
@@ -617,12 +635,35 @@ async function confirmByToken(token) {
   // theirs). Zero rows means the token no longer owns the row; re-run the
   // lookup so the caller sees the current truth (the stale link reads
   // 'not_found'; a concurrent same-token confirm reads 'already_active').
+  // The reader's own click also stamps reader_confirmed_at and reader_confirmed_email:
+  // the only writes that set those two columns, with confirmResignupToken (a comeback
+  // that subscribeOrResubscribe writes on an opted-out row clears them). A trusted add
+  // promotes a pending row without them, so the Waves Pest Insider tool block
+  // (pest-insider/tool-block.js) can tell a reader's click from a promotion. The
+  // address is LOWER(email) of the row this UPDATE flips, taken in SQL: it is the
+  // address on the row at that instant, and no address is bound into the query (knex
+  // puts bound values in a failed query's message, which a caller may log).
+  // Accepted cases (the tool block's rule, optedIn, lists them too). A trusted add that
+  // makes a pending row active BEFORE the reader uses the link: the link then reads
+  // 'already_active' (above), the page says so, and no proof is written, so that reader
+  // gets no tool block (the safe side). Recording a click on an already-active row would
+  // need a confirm button and new reader-facing words on that page, which is the owner's
+  // decision and not part of this change. And a trusted add that read the row as pending
+  // and writes in the same instant as this click (its promotion updates by id, with its
+  // own timestamp): this click and its proof stay on the row. A promotion timestamp later
+  // than the click makes the rule drop the click (the safe side); one that is not later
+  // lets the click count, which is right, because the reader clicked for this address and
+  // no opt-out is involved. The trusted promotion is not changed here: it is a live staff
+  // path with its own callers.
+  const now = new Date();
   const flipped = await db('newsletter_subscribers')
     .where({ id: initial.subscriber.id, confirmation_token: token, status: 'pending' })
     .update({
       status: 'active',
-      confirmed_at: new Date(),
-      updated_at: new Date(),
+      confirmed_at: now,
+      reader_confirmed_at: now,
+      reader_confirmed_email: db.raw('LOWER(email)'),
+      updated_at: now,
     });
   if (!flipped) return lookupByToken(token);
   await linkToCustomer(initial.subscriber.email);
@@ -643,6 +684,9 @@ async function confirmResignupToken(token, sub) {
   ).update({
     status: 'active',
     confirmed_at: now,
+    // The reader's click, for the address on the row (see confirmByToken).
+    reader_confirmed_at: now,
+    reader_confirmed_email: db.raw('LOWER(email)'),
     resubscribed_at: now,
     unsubscribed_at: null,
     // Sunset hygiene markers and the win-back tag go on every comeback — the
@@ -888,4 +932,4 @@ async function relinkArchivedLinkedSubscribers(conn = db) {
   });
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS, CONFIRM_RESEND_COOLDOWN_MS, whereOptOutNeedsWrite, hasLiveConfirmation, WAITLIST_SOURCE, sanitizeWaitlistTags, applyWaitlistTags };
+module.exports = { subscribeOrResubscribe, signupEmailError, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS, CONFIRM_RESEND_COOLDOWN_MS, whereOptOutNeedsWrite, hasLiveConfirmation, WAITLIST_SOURCE, sanitizeWaitlistTags, applyWaitlistTags };

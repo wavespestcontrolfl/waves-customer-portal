@@ -55,6 +55,10 @@ const CALLERS = freezeEntries({
   customer_pricing_ai: { surface: 'customer', suiteSizing: false, calls: 1, file: 'services/customer-pricing-ai.js', why: 'customer self-quote' },
   report_cross_sell: { surface: 'customer', suiteSizing: false, calls: 1, file: 'services/service-report/cross-sell.js', why: 'customer report, cache-only' },
   report_cross_sell_prewarm: { surface: 'automation', suiteSizing: false, calls: 1, file: 'services/service-report/evidence-prewarm.js', why: 'warms the cross-sell cache for a customer report' },
+  // The one-time job to plan offer's price (buildStartOffer in cross-sell.js): a job computes it with nobody
+  // watching, and it goes to the customer in an offer email. Its own file and entry, so it never runs under the
+  // report card's decision. Cache-only, with strict cache reads; a customer surface, so never a suite size.
+  plan_start_offer: { surface: 'customer', suiteSizing: false, calls: 1, file: 'services/service-report/start-offer-lookup.js', why: 'customer offer price that a job computes: cache-only, strict cache reads' },
   // Website lead drafts (GATE_LEAD_DRAFT_PROPERTY_LOOKUP): a free cache read
   // when the draft is built, and one live lookup in the background for a
   // draft priced on the default size. Only a county-assessed single-family

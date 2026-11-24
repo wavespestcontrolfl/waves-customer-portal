@@ -148,10 +148,9 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
 const MAX_SYNC_ATTEMPTS = 3;
 
 // GATE_DAY_ONLY_PROMISE part B2: the customer accepted an offered hour, which is a set time, so the move's notice keeps its
-// window and the visit records customer_asked_time = true. `previousDate` is the date the visit moved from. Gate off:
-// nothing, so the call keeps today's exact arguments.
+// window and the visit records customer_asked_time = true. `previousDate` is the date the visit moved from.
 function setTimeMoveOptions(previousDate) {
-  return require('./time-promise').dayOnlyPromiseOn() ? { timePromise: 'set_time', previousDate } : {};
+  return { timePromise: 'set_time', previousDate };
 }
 const stampEffects = (dbh, key) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object(?::text, to_jsonb(now()))", [key]);
 const countAttempt = (dbh) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object('effects_attempts', COALESCE((execution->>'effects_attempts')::int, 0) + 1)");

@@ -55,6 +55,16 @@ function isCardPath(reqPath = '') {
   return /^\/card\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
+// Public new-home postcard page (/h/<32-hex token>) — the token is mail_prospects.page_token, a bearer credential printed
+// as a QR code, and the page renders the home's street address and a quoted price (GET /api/public/home/:token, GATE_MAIL_HOME_PAGE).
+// Same contract as the card shell: never indexed/archived, token never leaks via Referer, no caching.
+// The client route /h/:token matches the decoded path with no regard to case or extra trailing slashes, and for any
+// token, so this matches the same way (as isCareersOfferPath does): every document that opens the page carries the
+// headers, and a bad token only shows the not-available page under them.
+function isMailHomePath(reqPath = '') {
+  return /^\/h\/[^/]+\/*$/i.test(routerDecodedPath(reqPath));
+}
+
 // Public "secure your appointment" card-capture page — bearer token
 // (appointment_card_requests.token) on a payment-adjacent surface, so the
 // shell must never be indexed/archived and must not leak the token via
@@ -136,6 +146,27 @@ function isCareersInterviewPath(reqPath = '') {
   return /^\/careers\/interview\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
+// The path as the browser router (react-router 6) matches it: each segment percent-decoded, an encoded slash kept
+// inside its segment, and a malformed path left as it is.
+function routerDecodedPath(reqPath) {
+  const value = String(reqPath || '');
+  try {
+    return value.split('/').map((segment) => decodeURIComponent(segment).replace(/\//g, '%2F')).join('/');
+  } catch {
+    return value;
+  }
+}
+
+// Public job-offer page — 64-hex bearer token (job_offers.token) that signs, declines or asks for another date on the
+// applicant's offer and renders their first name, pay and start date, so the shell gets the same headers as the interview
+// page (matches the /api/public/careers/offer headers in server/index.js; GATE_JOB_OFFERS).
+// The client route /careers/offer/:token matches the decoded path with no regard to case or extra trailing slashes, and
+// for any token, so this matches the same way: every document that opens the offer page carries the headers, and a bad
+// token only shows the not-valid page under them.
+function isCareersOfferPath(reqPath = '') {
+  return /^\/careers\/offer\/[^/]+\/*$/i.test(routerDecodedPath(reqPath));
+}
+
 // The portal home and login page are an app door, not a search result.
 // GSC audit 2026-10-22: Google indexed portal.wavespestcontrol.com/ and /login
 // (102 impressions in 90 days) beside the marketing site.
@@ -153,7 +184,7 @@ function applySensitiveSpaHeaders(reqPath, res) {
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath) || isReservicePath(reqPath) || isMovingPath(reqPath) || isInspectionPath(reqPath) || isCareersInterviewPath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isMailHomePath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath) || isReservicePath(reqPath) || isMovingPath(reqPath) || isInspectionPath(reqPath) || isCareersInterviewPath(reqPath) || isCareersOfferPath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -163,6 +194,7 @@ function applySensitiveSpaHeaders(reqPath, res) {
 module.exports = {
   isPortalEntryPath,
   isCareersInterviewPath,
+  isCareersOfferPath,
   applySensitiveSpaHeaders,
   isServiceOutlinePath,
   isLawnReportPath,
@@ -170,6 +202,7 @@ module.exports = {
   isServiceReportPath,
   isEstimatePath,
   isCardPath,
+  isMailHomePath,
   isSecureCardPath,
   isPriceChangeNoticePath,
   isContractPath,

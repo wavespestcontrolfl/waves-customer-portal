@@ -31,7 +31,7 @@ const { isInternalEmailRecipient } = require("../utils/internal-email-recipients
 const { billingEmailDetailsLive, customerPropertyAddress, isStreetShapedAddress } = require("./billing-email-details");
 const { estimateDeliverableUnderGate } = require("./pricing-authority-gate");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
-const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY } = require("../constants/email-replay-exclusions");
+const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, ESTIMATE_FOLLOWUP_CATEGORY } = require("../constants/email-replay-exclusions");
 const { customerConvertedSince } = require("./estimate-conversion-guard");
 const { openEstimateEmailPdf } = require("./estimate-email-pdf");
 
@@ -84,12 +84,65 @@ async function loadLegacyStageDelivery() {
 // Engagement signal: if the customer opened the estimate within the last N
 // hours (default 2), skip the scheduled nudge. They're thinking about it
 // right now and don't need a poke.
+const RECENT_OPEN_HOURS = 2;
 function wasRecentlyOpened(est, hours = 2, nowMs = Date.now()) {
   const last = est.last_viewed_at || est.viewed_at;
   if (!last) return false;
   const ts = new Date(last).getTime();
   if (Number.isNaN(ts)) return false;
   return nowMs - ts < hours * 3600000;
+}
+
+// "They are signing up right now": the customer holds a visit time for this
+// estimate (the 15-minute hold, live) or touched its card step in the last
+// CHECKOUT_ACTIVE_MINUTES. An "any questions?" nudge that lands then reads as a
+// follow-up to someone who has already signed up: 8 of 176 follow-up emails
+// since Aug 28 went out 1-3 minutes before the customer accepted (return-visit,
+// multi-view and dark-then-return rules, which fire ~1 minute after a page
+// view, on purpose, while the customer is reading). The email is held, never
+// dropped: the callers send it later if the customer does not finish. A lookup
+// failure fails OPEN, like the reply-pause check beside it (a held email only
+// delays; this guard must not stop every follow-up on a database error).
+// The deferred-text REPLAY passes throwOnError: it authorizes a one-shot send
+// after quiet hours, so an unverifiable checkout state must hold the row (the
+// caller's catch turns the throw into the retryable recheck-failed verdict),
+// the same as the reply-pause check beside it.
+// A grouped estimate (estimate_group_id) shows its siblings on one link page,
+// and the customer can book ANY of them through its own accept link, so the
+// hold and the card step are looked up for the whole group. The ids are EVERY
+// estimate with the same estimate_group_id, one plain read, not the published
+// link lister: that lister drops a sibling whose call or move lookup is
+// unavailable, which would hide that sibling's checkout. `conn` lets the
+// engine run the read inside its final-check snapshot.
+const CHECKOUT_ACTIVE_MINUTES = 20;
+async function checkoutEstimateIds(estimateId, groupId, conn) {
+  if (!groupId) return [estimateId];
+  const rows = await conn("estimates").where({ estimate_group_id: groupId }).select("id");
+  return [...new Set([estimateId, ...(rows || []).map((r) => r.id)])];
+}
+
+async function estimateMidCheckout(estimateId, { throwOnError = false, conn = db, groupId = null } = {}) {
+  try {
+    const ids = await checkoutEstimateIds(estimateId, groupId, conn);
+    // A hold the customer can still commit: live, or lapsed by less than the
+    // commit grace (slot-reservation.js commitGraceMinutes: commitReservation
+    // still graduates it, so the customer may still be confirming).
+    const { commitGraceMinutes } = require("./slot-reservation");
+    const hold = await conn("scheduled_services")
+      .whereIn("source_estimate_id", ids)
+      .whereRaw("reservation_expires_at > NOW() - make_interval(mins => ?)", [commitGraceMinutes()])
+      .first("id");
+    if (hold) return true;
+    const card = await conn("estimate_checkout_events")
+      .whereIn("estimate_id", ids)
+      .whereRaw("updated_at > NOW() - make_interval(mins => ?)", [CHECKOUT_ACTIVE_MINUTES])
+      .first("id");
+    return !!card;
+  } catch (e) {
+    if (throwOnError) throw e;
+    logger.warn(`[est-followup] mid-checkout check skipped for estimate ${estimateId}: ${(e && (e.code || e.name)) || "error"}`);
+    return false;
+  }
 }
 
 // SMS arm of the reply-pause: an inbound text (conversation matched by
@@ -103,18 +156,25 @@ async function hasInboundSmsSince(est, cutoff) {
     .where((q) => { q.whereNull("messages.message_type").orWhere("messages.message_type", "not like", "job\\_%"); })
     .where("messages.created_at", ">=", cutoff)
     .first("messages.id");
-  if (est.customer_id) {
-    q.andWhere(function () {
-      this.where("conversations.customer_id", est.customer_id);
-      if (est.customer_phone)
-        this.orWhere("conversations.contact_phone", est.customer_phone);
-    });
-  } else if (est.customer_phone) {
-    q.andWhere("conversations.contact_phone", est.customer_phone);
-  } else {
-    return false;
-  }
+  // The estimate can hold the phone as staff typed it ("(941) 555-0123"); an inbound text's
+  // conversation holds Twilio's E.164 form. Match either, or a lead's reply is never seen.
+  const phones = replyPhoneForms(est.customer_phone);
+  if (!est.customer_id && !phones.length) return false;
+  q.andWhere(function () {
+    if (est.customer_id) this.where("conversations.customer_id", est.customer_id);
+    for (const phone of phones) this.orWhere("conversations.contact_phone", phone);
+  });
   return !!(await q);
+}
+
+// The stored phone and its E.164 form, without blanks or repeats. utils/phone phoneMatchDigits
+// gives the full digits only for an E.164 number or a plain US one (ten digits, or 1 + ten), so
+// a foreign number typed without "+" is never matched to a US conversation by its last ten digits.
+function replyPhoneForms(phone) {
+  const stored = String(phone || "").trim();
+  if (!stored) return [];
+  const [full] = require("../utils/phone").phoneMatchDigits(stored);
+  return [...new Set([stored, full ? `+${full}` : null].filter(Boolean))];
 }
 
 // Email arm (owner 2026-11-02, option A: an email reply pauses the follow-up
@@ -176,8 +236,81 @@ async function hasInboundEmailSince(est, cutoff) {
 // handle it live. An inbound EMAIL in the same window pauses it too (SMS arm
 // checked first). Soft-fails if the tables aren't
 // present (e.g. fresh env) so we don't break the whole follow-up loop.
-async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {}) {
-  const cutoff = new Date(Date.now() - days * 86400000);
+async function hasRepliedRecently(est, days = 14, { sinceEstimate = false, ...opts } = {}) {
+  const now = Date.now();
+  const windowStart = new Date(now - days * 86400000);
+  // GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE (owner 2026-11-21) applies to the engagement engine's follow-up EMAILS only
+  // (it passes { sinceEstimate: true }). safetyGate (the text stages, the deferred text replay, the payment-step follow-up)
+  // never passes it and keeps the full window, gate on or off. The gate is read at CALL time and defensively: many suites
+  // mock the whole feature-gates module with a bare object.
+  const clamp = sinceEstimate === true && require("../config/feature-gates").estimateReplyPauseSinceEstimateLive?.() === true;
+  const cutoff = clamp ? await replyPauseWindowStart(est, windowStart, now) : windowStart;
+  return hasRepliedSince(est, cutoff, opts);
+}
+
+// The estimate's own creation time as epoch ms, or null when it cannot be read as a time that is not in the future.
+function estimateCreatedMs(est, now) {
+  const raw = est && est.created_at;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const ms = new Date(raw).getTime();
+  return Number.isFinite(ms) && ms <= now ? ms : null;
+}
+
+// Is there another estimate that was sent to the same person, made before OR after this one? Same person = the same
+// customer_id, a phone in one of the stored forms or with the same last ten digits in any format, or an address a reply
+// can come from (expectedReplyAddresses: the estimate's own address and the customer's address on file, never ours).
+// A missed match shortens the pause, so the match is generous: a false match only keeps today's window, the safe side.
+// A person with no identifier at all matches nothing (the reply arms cannot match them either), so no read is made.
+// The window moves only for a person whose only sent estimate is this one; anyone who was sent another estimate at any
+// time is in a conversation with the office and keeps the full pause. The customers read can throw: the caller catches it.
+async function hasOtherSentEstimate(est) {
+  const customerId = est.customer_id || null;
+  const phones = replyPhoneForms(est.customer_phone);
+  const digits = String(est.customer_phone || "").replace(/\D/g, "");
+  const addresses = await expectedReplyAddresses(est);
+  if (!customerId && !phones.length && !addresses.length) return false;
+  const row = await db("estimates")
+    .whereNot("id", est.id)
+    .whereNotNull("sent_at")
+    .andWhere(function () {
+      if (customerId) this.where("customer_id", customerId);
+      for (const phone of phones) this.orWhere("customer_phone", phone);
+      if (digits.length >= 10) {
+        this.orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits.slice(-10)]);
+      }
+      if (addresses.length) this.orWhereRaw("LOWER(TRIM(customer_email)) = ANY(?)", [addresses]);
+    })
+    .first("id");
+  return !!row;
+}
+
+// Reply-pause window start, gate on (owner 2026-11-21, option A). The 14 days also reach back BEFORE the estimate
+// existed, so the inquiry text a new prospect sent ("can I get a quote?") switched off every follow-up for that
+// estimate. For a person's ONLY sent estimate the window starts at the estimate's creation instead, when that is
+// later than the 14-day start. A person who has been sent another estimate, before or after this one, is in a live
+// conversation with the office (a re-quote), so for them the deliberate 14-day pause keeps covering their earlier replies.
+// created_at, never sent_at: a resend overwrites estimates.sent_at, so sent_at would forget a reply made between the
+// first send and the resend. created_at never moves and is never later than any send.
+// Any doubt keeps today's window (it pauses more and sends less): an unreadable or future created_at, a created_at
+// older than the window (nothing to clamp, no extra read), or a failed other-estimate read. The failed read falls
+// back on the replay path too: today's window is the safe side there, so it never throws. Only the error code or
+// name is logged (a knex message carries phone numbers and addresses).
+async function replyPauseWindowStart(est, windowStart, now) {
+  const createdMs = estimateCreatedMs(est, now);
+  if (createdMs === null || createdMs <= windowStart.getTime()) return windowStart;
+  try {
+    if (await hasOtherSentEstimate(est)) return windowStart;
+  } catch (e) {
+    const reason = (e && (e.code || e.name)) || "error";
+    logger.warn(`[est-followup] reply-pause window check skipped for estimate ${est && est.id}: ${reason}`);
+    return windowStart;
+  }
+  return new Date(createdMs);
+}
+
+// The two reply arms (text, then email) since an instant: the reply-pause window above is "the last N days", the 2-hour
+// estimate_sent email asks "since the send that enrolled them".
+async function hasRepliedSince(est, cutoff, { throwOnError = false } = {}) {
   try {
     if (await hasInboundSmsSince(est, cutoff)) return true;
     return await hasInboundEmailSince(est, cutoff);
@@ -232,7 +365,7 @@ async function safetyGate(est, now = new Date(), { replay = false } = {}) {
   // contract test).
   if (estimateOptedOutOfFollowups(est))
     return { skip: true, reason: 'engagement-opted-out' };
-  if (wasRecentlyOpened(est, 2, now.getTime()))
+  if (wasRecentlyOpened(est, RECENT_OPEN_HOURS, now.getTime()))
     return { skip: true, reason: "recently-opened" };
   // Conversion guard: the customer already paid an invoice, booked an
   // appointment after this estimate, or is an active customer — the estimate
@@ -244,7 +377,117 @@ async function safetyGate(est, now = new Date(), { replay = false } = {}) {
     return { skip: true, reason: `customer-converted:${conv.reason}` };
   if (await hasRepliedRecently(est, 14, { throwOnError: replay }))
     return { skip: true, reason: "customer-replied-recently" };
+  // Mid-checkout: held for later, not dropped (see estimateMidCheckout).
+  if (await estimateMidCheckout(est.id, { throwOnError: replay, groupId: est.estimate_group_id }))
+    return { skip: true, reason: "customer-mid-checkout" };
   return { skip: false };
+}
+
+// ── The one "may this nudge still go out" predicate ─────────────────────────
+// Every last step before a follow-up reaches a customer asks THIS, so the rule
+// cannot drift per path: the email provider handoff (every stage, the engine
+// included) and the text's pre-dispatch check (sendCustomerMessage
+// preDispatchCheck) call followupMayStillSend; the deferred-text replay calls
+// followupFinalVerdict (below) and the same checkout lookup through safetyGate.
+// Stored-copy email retries are not a path: follow-up emails are excluded from
+// them (constants/email-replay-exclusions.js).
+const OPEN_STATUSES = new Set(["sent", "viewed"]);
+// The "sent, never opened" reminders: moot for good once the estimate is opened.
+// The engine's stage is `engage_${rule_key}`.
+const UNOPENED_STAGES = new Set(["unviewed", "engage_delivery_unopened_24h", "engage_expiring_never_viewed"]);
+// The stages whose copy quotes the estimate's deadline.
+function quotesDeadline(stage) {
+  return stage === "expiring" || String(stage || "").startsWith("engage_expiring");
+}
+
+// FINAL verdicts only, from one estimate row (no waits): the reason string, or
+// null when none applies. archived, no longer sent/viewed, deadline passed,
+// the deadline the copy quotes has moved, an unopened reminder after an open.
+function followupFinalVerdict(est, { stage = null, quotedExpiresAt = null, nowMs = Date.now() } = {}) {
+  if (est.archived_at) return "estimate-archived";
+  if (TERMINAL_STATUSES.has(est.status)) return `terminal-status:${est.status}`;
+  if (!OPEN_STATUSES.has(est.status)) return `not-open:${est.status}`;
+  const live = est.expires_at ? new Date(est.expires_at).getTime() : null;
+  if (live !== null && !Number.isNaN(live) && live <= nowMs) return "estimate-expired";
+  // The copy quotes the deadline it was built with. If an extension moved it
+  // while the message waited, the copy is wrong for good. A row queued before
+  // the stamp existed has none and skips this check.
+  if (quotedExpiresAt) {
+    const quoted = new Date(quotedExpiresAt).getTime();
+    if (live === null || Number.isNaN(quoted) || live !== quoted) return "deadline-changed";
+  }
+  // Either view stamp: the public route records last_viewed_at before a
+  // separate write sets viewed_at, so a check between them still sees the open.
+  if (UNOPENED_STAGES.has(stage) && (est.viewed_at || est.last_viewed_at)) return "estimate-viewed";
+  return null;
+}
+
+// Re-reads the estimate at the moment of dispatch: { ok: true }, or { ok: false,
+// reason, final } where final=false is a wait (checkout active, retryAt set) and
+// final=true is a final no. The estimate row and the checkout evidence come from
+// ONE read-only REPEATABLE READ snapshot (the engine's FINAL_CHECK_SNAPSHOT):
+// an acceptance that commits between two separate reads could show an open
+// estimate AND its cleared visit-time hold, which would pass. In one snapshot
+// it shows either the hold (a wait) or the accepted row (a final no). A failed
+// read, the checkout lookup's included, throws; the caller decides what an
+// unreadable state means (both legs make it a retryable non-send).
+// `nowMs` (tests) pins the clock; otherwise it is read at each use, and once
+// more after the reads, so a deadline that passed while the pool or the reads
+// waited is seen.
+async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt = null, nowMs = null } = {}) {
+  const { FINAL_CHECK_SNAPSHOT } = require("./estimate-consultation-offer");
+  const clock = () => nowMs ?? Date.now();
+  return db.transaction(async (trx) => {
+    const est = await trx("estimates").where({ id: estimateId }).first();
+    if (!est) return { ok: false, final: true, reason: "estimate-missing" };
+    const reason = followupFinalVerdict(est, { stage, quotedExpiresAt, nowMs: clock() });
+    if (reason) return { ok: false, final: true, reason };
+    if (await estimateMidCheckout(est.id, { conn: trx, groupId: est.estimate_group_id, throwOnError: true })) {
+      return { ok: false, final: false, reason: "customer-mid-checkout", retryAt: new Date(clock() + CHECKOUT_ACTIVE_MINUTES * 60000) };
+    }
+    const late = followupFinalVerdict(est, { stage, quotedExpiresAt, nowMs: clock() });
+    if (late) return { ok: false, final: true, reason: late };
+    return { ok: true };
+  }, FINAL_CHECK_SNAPSHOT);
+}
+
+// The text leg's final check. twilio.js runs it at the provider boundary
+// (providerPreSendCheck), after every other await, for the immediate send and
+// the queued replay alike (deferred-replay-registry estimate_follow_up_deferred).
+// A follow-up text never routes to the App (push-channel-routing
+// APP_FIRST_TYPES has no estimate type), so Twilio always runs it. A final no
+// is a terminal refusal; checkout in progress is a retryable refusal at the
+// time the card step lapses; an unreadable state is a retryable refusal, never
+// a pass.
+async function followupTextProviderCheck(estimateId, { stage = null, quotedExpiresAt = null } = {}) {
+  let verdict;
+  try {
+    verdict = await followupMayStillSend(estimateId, { stage, quotedExpiresAt });
+  } catch (err) {
+    return { ok: false, code: "ESTIMATE_CHECK_FAILED", reason: `estimate ${estimateId} send check unavailable: ${err.message}`, retryable: true };
+  }
+  if (verdict.ok) return { ok: true };
+  if (verdict.final) return { ok: false, code: "ESTIMATE_NOT_SENDABLE", reason: verdict.reason };
+  return { ok: false, code: "CUSTOMER_MID_CHECKOUT", reason: verdict.reason, retryable: true, nextAllowedAt: verdict.retryAt.toISOString() };
+}
+
+// The two TEMPORARY holds in safetyGate are waits, not verdicts: the customer
+// may abandon the card step, and a page view ages out. The queued text must
+// come back, not be settled as stale. Mid-checkout retries after
+// CHECKOUT_ACTIVE_MINUTES, the whole card-step window (a visit-time hold
+// lapses sooner, in 15 minutes); recently-opened retries when the view leaves
+// the RECENT_OPEN_HOURS window. Either way the next pass re-runs the whole
+// gate, so a finished checkout or a terminal estimate ends the row then.
+function replayHoldVerdict(reason, est, nowMs) {
+  let retryAtMs;
+  if (reason === "customer-mid-checkout") {
+    retryAtMs = nowMs + CHECKOUT_ACTIVE_MINUTES * 60000;
+  } else if (reason === "recently-opened") {
+    retryAtMs = new Date(est.last_viewed_at || est.viewed_at).getTime() + RECENT_OPEN_HOURS * 3600000;
+  } else {
+    return null;
+  }
+  return { eligible: false, reason, retryable: true, retryAt: new Date(retryAtMs) };
 }
 
 // Replay-time eligibility for a quiet-hours-deferred follow-up SMS: the
@@ -256,14 +499,27 @@ async function safetyGate(est, now = new Date(), { replay = false } = {}) {
 // authorizing delivery on an unchecked condition could nudge a customer who
 // already declined or paid — the executor reschedules the row and re-checks
 // on the next pass instead.
-async function deferredFollowupStillEligible(estimateId) {
+// `stage` and `quotedExpiresAt` are the queued row's followup_stage and
+// quoted_expires_at (see followupFinalVerdict). Every other stage keeps the
+// timed retry after a view or while the customer is mid-checkout.
+async function deferredFollowupStillEligible(estimateId, { stage = null, quotedExpiresAt = null } = {}) {
   try {
     const est = await db("estimates").where({ id: estimateId }).first();
     if (!est) return { eligible: false, reason: "estimate-missing" };
+    // The shared final verdict first: archived, no longer open, deadline passed
+    // or moved since the text was queued, unopened reminder now opened.
+    const final = followupFinalVerdict(est, { stage, quotedExpiresAt });
+    if (final) return { eligible: false, reason: final };
     // replay:true — the reply-pause lookup THROWS on a transient failure
     // here (codex r27) instead of the cron path's fail-open false, so an
     // unverifiable reply state lands in the catch below and holds the row.
     const gate = await safetyGate(est, new Date(), { replay: true });
+    // A row queued before the stage was recorded (no followup_stage) may be an
+    // unopened reminder, which a view ends for good: a recent view stays a
+    // final no for it, as before this check existed.
+    const waits = gate.skip && (stage || gate.reason !== "recently-opened");
+    const hold = waits ? replayHoldVerdict(gate.reason, est, Date.now()) : null;
+    if (hold) return hold;
     if (gate.skip) return { eligible: false, reason: gate.reason };
     return { eligible: true };
   } catch (e) {
@@ -507,6 +763,74 @@ function averageProviderHandoff(estimateId, expectedText, pdfHandoff = null) {
   });
 }
 
+// Provider-boundary check: the one predicate (followupMayStillSend), run inside
+// the handoff, after every other await and right before the provider request.
+// The customer can accept, reserve a visit time or reach the card step while
+// sendDualChannel waits on link minting, the PDF render and its retries, and
+// none of those writes need touch what the caller read earlier. A veto is a
+// definite non-send (the caller releases its stage claim); `outcome` says why,
+// so the engine can wait (midCheckout) or drop the job (finalReason) instead of
+// counting a failed attempt. An unreadable row is a retryable non-send.
+function checkoutBoundaryCheck(est, outcome, { stage = null, quotedExpiresAt = null } = {}) {
+  return async () => {
+    let verdict;
+    try {
+      verdict = await followupMayStillSend(est.id, { stage, quotedExpiresAt });
+    } catch (err) {
+      const unavailable = new Error(`estimate ${est.id} send check unavailable: ${err.message}`);
+      unavailable.providerBoundaryCheckFailed = true;
+      unavailable.cause = err;
+      throw unavailable;
+    }
+    if (!verdict.ok) {
+      if (outcome) {
+        if (verdict.final) outcome.finalReason = verdict.reason;
+        else outcome.midCheckout = true;
+      }
+      const veto = new Error(`estimate ${est.id} not sent: ${verdict.reason}`);
+      veto.providerBoundaryBlocked = true;
+      veto.reason = verdict.final ? "estimate_not_sendable" : "customer_mid_checkout";
+      throw veto;
+    }
+    return { ok: true };
+  };
+}
+
+// Composes that check after whatever handoff the send already has (the PDF
+// fence, the monthly-average check, both, or none), as averageProviderHandoff does.
+// The content checks run first, with their own reads, exactly as without this
+// check. The final check runs after them, last, in its own short snapshot: an
+// acceptance or a visit-time hold that commits while the PDF fingerprint or the
+// average is recomputed is still seen, and no transaction is held open across
+// that slower work. A content veto (the PDF fence's estimate_not_open, a changed
+// average) can come from the same acceptance the final check reports, so the
+// final check also classifies it, and the caller ends the job or waits instead
+// of counting a failed send. The veto itself still stops the send.
+function checkoutProviderHandoff(est, outcome, inner = null, ctx = {}) {
+  const check = checkoutBoundaryCheck(est, outcome, ctx);
+  const allChecks = (innerCheck) => async (args) => {
+    if (innerCheck) {
+      try {
+        await innerCheck(args);
+      } catch (err) {
+        // Classify only: the final check records a final reason or a wait on `outcome`.
+        if (err.providerBoundaryBlocked) await check().catch(() => {});
+        throw err;
+      }
+    }
+    return check();
+  };
+  if (!inner) {
+    return async (dispatch) => {
+      await dispatch(undefined, allChecks(null));
+      return { ok: true };
+    };
+  }
+  return (dispatch) => inner(async (database, innerCheck) => {
+    await dispatch(database, allChecks(innerCheck));
+  });
+}
+
 function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
   const serviceSummary = inferEstimateServiceInterest({
     ...est,
@@ -592,7 +916,16 @@ async function withFollowupPropertyRow(est, payload) {
   return address ? { ...payload, property_full_address: address } : payload;
 }
 
-async function sendDualChannel(est, { sms, email }) {
+// `outcome` (optional): set to { midCheckout: true } when the email was held at the
+// provider boundary because the customer is mid-checkout. The hold applies with or
+// without it; the engine passes one to tell a hold from a failed send.
+async function sendDualChannel(est, { sms, email, stage = null }, outcome = null) {
+  // The stage travels on its own: an SMS-only stage (email template off) still
+  // stamps the replay's checks. Defaults to the email's stage.
+  const followupStage = stage || email?.stage || null;
+  const quotedExpiresAt = quotesDeadline(followupStage) && est.expires_at
+    ? new Date(est.expires_at).toISOString()
+    : null;
   let attempted = false;
   let smsHold = null;
   // A phone the customer typed on the accept card gets no follow-up text
@@ -620,6 +953,12 @@ async function sendDualChannel(est, { sms, email }) {
             },
         entryPoint: "estimate_follow_up_cron",
         metadata: { original_message_type: "estimate_followup" },
+        // The same final-send predicate as the email handoff, run by twilio.js
+        // right before its request: the customer can accept, open the
+        // estimate or start checkout while links mint, the copy renders and
+        // the pipeline prepares. A no is a plain block (logged, not queued,
+        // not attempted), so the stage looks again on its next tick.
+        providerPreSendCheck: () => followupTextProviderCheck(est.id, { stage: followupStage, quotedExpiresAt }),
       });
       if (result.blocked || result.sent === false) {
         logger.warn(
@@ -678,7 +1017,10 @@ async function sendDualChannel(est, { sms, email }) {
         metadata: JSON.stringify({
           entry_point: "estimate_follow_up_deferred",
           estimate_id: est.id,
-          followup_stage: email?.stage || null,
+          followup_stage: followupStage,
+          // The deadline the text quotes; the replay suppresses it if an
+          // extension moved the deadline while it waited.
+          ...(quotedExpiresAt ? { quoted_expires_at: quotedExpiresAt } : {}),
           original_block_code: smsHold.code,
           // Customer rows resolve their LOCATION from-number at send time
           // (from_phone above is a NOT-NULL placeholder) and re-read the
@@ -727,6 +1069,9 @@ async function sendDualChannel(est, { sms, email }) {
       // carries the PDF copy plus its one-line note. Empty (document gate off, other
       // template, estimate no longer open, render failed) = sent as before.
       const pdfCopy = await openEstimateEmailPdf({ estimateId: est.id, templateKey: email.templateKey, recipient: est.customer_email });
+      const innerHandoff = email.averageText
+        ? averageProviderHandoff(est.id, email.averageText, pdfCopy.withProviderHandoff)
+        : pdfCopy.withProviderHandoff;
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
         // Set only with the monthly average: pins the send to the template version
@@ -737,16 +1082,19 @@ async function sendDualChannel(est, { sms, email }) {
         ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
         // The fence rides every prepared send, with the file or without it. With the
         // monthly average the send-time average check rides too (composed with it).
-        ...(email.averageText
-          ? { withProviderHandoff: averageProviderHandoff(est.id, email.averageText, pdfCopy.withProviderHandoff) }
-          : (pdfCopy.withProviderHandoff ? { withProviderHandoff: pdfCopy.withProviderHandoff } : {})),
+        // The final-send predicate rides every follow-up email (the stage cron's
+        // legacy and payment-step sends too), composed last, after the PDF fence
+        // and the average check. A veto is a definite non-send: sendDualChannel
+        // returns false, and each stage caller releases its claim without
+        // counting an attempt, so the next tick looks again.
+        withProviderHandoff: checkoutProviderHandoff(est, outcome, innerHandoff, { stage: followupStage, quotedExpiresAt }),
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,
         idempotencyKey,
         estimateId: est.id,
         categories: [
-          "estimate_followup",
+          ESTIMATE_FOLLOWUP_CATEGORY, // keeps every follow-up off the stored-copy retry and bounce-replay rails
           `estimate_followup_${email.stage}`,
           // Keeps the stored copy off the provider-retry and bounce-replay rails.
           ...(email.averageText ? [ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY] : []),
@@ -1301,6 +1649,7 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
+            stage: "unviewed",
             email: delivery.unviewed.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.unviewed_followup",
               stage: "unviewed",
@@ -1386,6 +1735,7 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
+            stage: "viewed",
             email: delivery.viewed.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.viewed_followup",
               stage: "viewed",
@@ -1472,6 +1822,7 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
+            stage: "final",
             email: delivery.final.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.followup_final",
               stage: "final",
@@ -1589,6 +1940,7 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
+            stage: "expiring",
             email: delivery.expiring.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.expiring_notice",
               stage: "expiring",
@@ -1646,6 +1998,10 @@ const EstimateFollowUp = {
 module.exports = EstimateFollowUp;
 // Called by the scheduled-SMS executor before replaying a deferred touch.
 module.exports.deferredFollowupStillEligible = deferredFollowupStillEligible;
+// The replay's provider-boundary check (deferred-replay-registry).
+module.exports.followupTextProviderCheck = followupTextProviderCheck;
+// The reply check since an instant (the 2-hour estimate_sent stop, automation-runner.js).
+module.exports.hasRepliedSince = hasRepliedSince;
 module.exports._private = {
   sendDualChannel,
   estimateEmailPayload,
@@ -1667,5 +2023,11 @@ module.exports._private = {
   LEGACY_STAGE_TEMPLATES,
   mintStageLinks,
   hasRepliedRecently,
+  hasRepliedSince,
+  TERMINAL_STATUSES,
   wasRecentlyOpened,
+  estimateMidCheckout,
+  followupMayStillSend,
+  followupFinalVerdict,
+  CHECKOUT_ACTIVE_MINUTES,
 };

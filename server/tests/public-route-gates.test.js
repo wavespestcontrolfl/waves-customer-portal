@@ -48,6 +48,7 @@ beforeAll((done) => {
   const app = express();
   app.use(express.json());
   app.use('/api/pay', require('../routes/pay-v2'));
+  app.use('/api/receipt', require('../routes/receipt-v2'));
   app.use('/r', require('../routes/referral-links'));
   app.use('/api/rate', require('../routes/review-gate'));
   app.use('/l', require('../routes/public-shortlinks'));
@@ -98,6 +99,35 @@ describe('pay-v2 token format gate (url-safe 20-64; legacy 25-32 stay valid)', (
   test('router carries a rate limiter (standard headers present)', async () => {
     const res = await get(`/api/pay/${'ab'.repeat(32)}`);
     expect(res.headers.get('ratelimit-limit')).toBeTruthy();
+  });
+});
+
+// The receipt token is the invoice's pay token: the same range. The receipt
+// viewer is permanent, so every issued shape must still reach the lookup.
+describe('receipt-v2 token format gate (the pay token range, both routes)', () => {
+  test.each([
+    ['too short', '/api/receipt/short-token-19chars'.slice(0, 13 + 19)],
+    ['bad charset', `/api/receipt/${encodeURIComponent("' OR 1=1 --............")}`],
+    ['too long', `/api/receipt/${'a'.repeat(65)}`],
+    ['too short, the PDF route', '/api/receipt/short/pdf'],
+    ['bad charset, the PDF route', `/api/receipt/${encodeURIComponent('a'.repeat(30) + '.')}/pdf`],
+  ])('%s → the unknown token\'s 404, no service or db lookup', async (_label, path) => {
+    const res = await get(path);
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe('Receipt not found');
+    expect(InvoiceService.getByToken).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a legacy 25-char url-safe token', `/api/receipt/${'a'.repeat(25)}`],
+    ['a current 64-hex token', `/api/receipt/${'ab'.repeat(32)}`],
+    ['a current 64-hex token, the PDF route', `/api/receipt/${'ab'.repeat(32)}/pdf`],
+  ])('%s passes the gate (the lookup runs)', async (_label, path) => {
+    const res = await get(path);
+    expect(res.status).toBe(404); // unknown token, but it DID reach the lookup
+    expect((await res.json()).error).toBe('Receipt not found');
+    expect(InvoiceService.getByToken).toHaveBeenCalledTimes(1);
   });
 });
 

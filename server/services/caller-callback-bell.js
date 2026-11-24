@@ -28,7 +28,7 @@
 // on a quote handed off after the bell, as for every lead_contacted bell. A lookup that throws fails CLOSED for that row (no raise, no close) and
 // the run throws at the end, after the other rows, so job_health shows it.
 //
-// THE PROMISE CLOSES TOO (GATE_CALLER_CALLBACK_PROMISE_CLOSE, owner plan 2026-11-04: "the bell AND THE PROMISE close
+// THE PROMISE CLOSES TOO (owner plan 2026-11-04: "the bell AND THE PROMISE close
 // themselves when they call or text, a visit is booked, or staff reach them"). When a promise is settled by `called`,
 // `texted` or `followedUp`, the job writes the promise row as kept (status 'fulfilled'). Both passes do it: the close
 // pass for bells already raised, and the raise pass for EVERY candidate it loads, due or not, so a caller who called
@@ -39,12 +39,8 @@
 // that marker (or a slot booking), so a later refresh or reprocess of the call never reopens this one; only a person
 // reopens it. Waves-party promises are never read or written here.
 //
-// Read-only except admin notifications and, with the promise-close gate on, the caller's own promise row. Sends
-// nothing to a customer, calls no paid API.
-//
-// GATE_CALLER_CALLBACK_BELL (strict 'true', read at call time). Off = the cron returns before any read.
-// GATE_CALLER_CALLBACK_PROMISE_CLOSE (strict 'true', read at call time, consulted only inside this job). Off = the
-// job behaves exactly as before.
+// Read-only except admin notifications and the caller's own promise row. Sends nothing to a customer, calls no paid
+// API.
 
 const db = require('../models/db');
 const logger = require('./logger');
@@ -255,9 +251,9 @@ async function keepPromise(database, promise, { key, record }, now) {
     .update({ status: 'fulfilled', fulfillment: JSON.stringify(proof), fulfilled_at: at, updated_at: new Date() })) || 0;
 }
 
-// Judge each open bell again; close the settled ones, and with `promiseClose` also the promise a settled caller
-// kept. Returns { closed, promisesClosed, failed }.
-async function closePass(database, episodes, { promiseClose = false, now = new Date() } = {}) {
+// Judge each open bell again; close the settled ones, and also the promise a settled caller kept.
+// Returns { closed, promisesClosed, failed }.
+async function closePass(database, episodes, { now = new Date() } = {}) {
   const bells = (await episodes.openAdminAlertMetadata(database, OWN_PREFIX)).filter((meta) => meta.commitmentId);
   const promises = bells.length ? await loadPromises(database, { ids: [...new Set(bells.map((m) => String(m.commitmentId)))] }) : [];
   const promiseById = new Map(promises.map((p) => [String(p.id), p]));
@@ -272,7 +268,7 @@ async function closePass(database, episodes, { promiseClose = false, now = new D
       const { key } = verdict;
       if (key) {
         tally.closed += Number(await episodes.closeAdminAlertKeys(database, [`${OWN_PREFIX}${meta.commitmentId}`], SETTLED[key].reason, { resolution: SETTLED[key].text })) || 0;
-        if (promiseClose) tally.promisesClosed += await keepPromise(database, promise, verdict, now);
+        tally.promisesClosed += await keepPromise(database, promise, verdict, now);
       }
     } catch (err) {
       tally.failed += 1;
@@ -282,25 +278,24 @@ async function closePass(database, episodes, { promiseClose = false, now = new D
   return tally;
 }
 
-// One candidate: with `promiseClose`, judge it settled whether or not it is due (a caller who called back within the
-// hour closes too); raise a bell only for one that fell due in the last 24 hours and is not settled. Returns
-// { raised, promisesClosed } as 0/1 counts.
-async function handleCandidate(database, item, { now, calendar, promiseClose }) {
+// One candidate: judge it settled whether or not it is due (a caller who called back within the hour closes too);
+// raise a bell only for one that fell due in the last 24 hours and is not settled. Returns { raised, promisesClosed }
+// as 0/1 counts.
+async function handleCandidate(database, item, { now, calendar }) {
   const none = { raised: 0, promisesClosed: 0 };
   const due = dueOf(item.promise, item.base, calendar);
   const inWindow = Boolean(due.at) && due.at <= now && due.at > new Date(now.getTime() - DAY_MS);
-  if (!inWindow && !promiseClose) return none;
   const lead = await loadLead(database, item.call, null);
-  // No lead: never a bell; with the promise close on, a kept promise still closes (judged by the call alone).
-  if ((!lead && !promiseClose) || (lead && isInternalTestCustomerId(lead.customer_id))) return none;
+  // No lead: never a bell; a kept promise still closes (judged by the call alone).
+  if (lead && isInternalTestCustomerId(lead.customer_id)) return none;
   const verdict = await judgeSettled(database, { ...item, lead });
-  if (verdict.key) return { raised: 0, promisesClosed: promiseClose ? await keepPromise(database, item.promise, verdict, now) : 0 };
+  if (verdict.key) return { raised: 0, promisesClosed: await keepPromise(database, item.promise, verdict, now) };
   if (!inWindow) return none;
   return { raised: (await raiseBell(database, { ...item, lead, due })) === 'raised' ? 1 : 0, promisesClosed: 0 };
 }
 
 // Judge every candidate; raise a bell for each that fell due in the last 24 hours and is not settled.
-async function raisePass(database, now, { promiseClose = false } = {}) {
+async function raisePass(database, now) {
   const found = await loadPromises(database, { now });
   const calls = found.length ? await loadCalls(database, found) : new Map();
   const items = found.map((promise) => ({ promise, call: calls.get(String(promise.call_log_id)) }))
@@ -311,7 +306,7 @@ async function raisePass(database, now, { promiseClose = false } = {}) {
   const calendar = await loadSlaCalendar(database, new Date(Math.min(...items.map((item) => item.base.getTime()))), now);
   for (const item of items) {
     try {
-      const result = await handleCandidate(database, item, { now, calendar, promiseClose });
+      const result = await handleCandidate(database, item, { now, calendar });
       tally.raised += result.raised;
       tally.promisesClosed += result.promisesClosed;
     } catch (err) {
@@ -323,21 +318,18 @@ async function raisePass(database, now, { promiseClose = false } = {}) {
 }
 
 /**
- * Cron entry point (every 15 minutes in office hours). Returns { skipped } when the gate is off (before any read),
- * else { raised, closed, promisesClosed, candidates, outcome }. A row that failed is counted and the run throws after finishing the
- * others, so runExclusive records it in job_health. `gateEnabled`, `promiseCloseEnabled` and `now` are for tests.
+ * Cron entry point (every 15 minutes in office hours). Returns { skipped } when call commitments or alert episodes
+ * are off, else { raised, closed, promisesClosed, candidates, outcome }. A row that failed is counted and the run
+ * throws after finishing the others, so runExclusive records it in job_health. `now` is for tests.
  */
-async function runCallerCallbackBell({ now = new Date(), database = db, gateEnabled, promiseCloseEnabled } = {}) {
+async function runCallerCallbackBell({ now = new Date(), database = db } = {}) {
   const gates = require('../config/feature-gates');
-  if (!(gateEnabled ?? gates.callerCallbackBellLive())) return { skipped: 'disabled' };
   if (!gates.isEnabled('callCommitments')) return { skipped: 'commitments_off' };
   // ALERT_EPISODES off (alertEpisodesLive): this job closes only through admin-alert-episodes, so it stands down
   // rather than raise bells it could never close. A test that mocks feature-gates without the reader keeps the default.
   if (typeof gates.alertEpisodesLive === 'function' && !gates.alertEpisodesLive()) return { skipped: 'episodes_off' };
-  // The promise-close gate is read here and nowhere else; a test that mocks feature-gates without the reader keeps it off.
-  const promiseClose = Boolean(promiseCloseEnabled ?? (typeof gates.callerCallbackPromiseCloseLive === 'function' && gates.callerCallbackPromiseCloseLive()));
-  const closed = await closePass(database, require('./admin-alert-episodes'), { promiseClose, now });
-  const raised = await raisePass(database, now, { promiseClose });
+  const closed = await closePass(database, require('./admin-alert-episodes'), { now });
+  const raised = await raisePass(database, now);
   const failed = closed.failed + raised.failed;
   if (failed) throw new Error(`${failed} caller callback bell check${failed === 1 ? '' : 's'} failed`);
   const promisesClosed = closed.promisesClosed + raised.promisesClosed;

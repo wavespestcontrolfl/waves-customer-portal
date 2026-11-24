@@ -3646,17 +3646,31 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 router.get('/:serviceId/default-products', async (req, res, next) => {
   try {
     const scheduled = await technicianCurrentVisitFilter(req,
-      db('scheduled_services').where({ id: req.params.serviceId })).first('id');
+      db('scheduled_services').where({ id: req.params.serviceId })).first('id', 'service_type', 'customer_id', 'property_id', 'scheduled_date');
     if (!scheduled) return res.status(404).json({ error: 'Service not found' });
     const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
     const result = await resolveCompletionProductDefaults({ db, serviceId: req.params.serviceId });
     // The resolution reads the visit's application history; a reassignment
     // during that read must not hand it to the former technician (same
     // before-and-after check as the Job Card route).
-    const stillInScope = await technicianCurrentVisitFilter(req,
-      db('scheduled_services').where({ id: req.params.serviceId })).first('id');
+    const recheck = technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', req.params.serviceId));
+    const includeFertilizer = ['tree_shrub', 'palm'].includes(detectServiceLine(scheduled.service_type));
+    // Taurus SC's yearly label limit at this home (from the compliance ledger) for the pest house mix: unknown (no key) leaves Taurus off it.
+    const taurusYearly = await require('../services/taurus-yearly-count').taurusYearlyCount(scheduled);
+    const stillInScope = includeFertilizer
+      ? await recheck.leftJoin('customers', 'customers.id', 'scheduled_services.customer_id')
+        .first('scheduled_services.id', 'scheduled_services.scheduled_date', 'scheduled_services.service_address_line1',
+          'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+          'customers.address_line1', 'customers.city', 'customers.zip')
+      : await recheck.first('id');
     if (!stillInScope) return res.status(404).json({ error: 'Service not found' });
-    res.json(result);
+    if (includeFertilizer) {
+      const { inferTreeShrubOrdinanceZone } = require('../services/tree-shrub-closeout');
+      const { nutriRootPickerEvidence } = require('../services/tree-shrub-fertilizer-evidence');
+      const zone = inferTreeShrubOrdinanceZone(stillInScope);
+      return res.json({ ...result, ...(taurusYearly ? { taurusYearly } : {}), treeShrubFertilizer: { ordinanceZone: zone, ...nutriRootPickerEvidence({ zone, serviceDate: stillInScope.scheduled_date }) } });
+    }
+    res.json({ ...result, ...(taurusYearly ? { taurusYearly } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -3949,8 +3963,15 @@ router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
     // /complete takes a pest visit's stock below zero instead of refusing (the same rule), so the sheet lets a
     // 0-in-stock product through. The key exists only on a pest visit.
     const stockAdvisory = isPestStockAdvisoryCompletion({ service_type: ctx.service?.serviceType });
+    // Taurus SC's yearly label limit at this home (from the compliance ledger): whether another 0.03% application fits, so the house mix can leave it out.
+    // Unknown (no key) leaves Taurus off the house mix; the count never blocks the sheet.
+    const taurusYearly = await require('../services/taurus-yearly-count').taurusYearlyCount({
+      id: ctx.service?.id, customer_id: ctx.service?.customerId, property_id: ctx.service?.propertyId,
+      scheduled_date: ctx.service?.scheduledDate,
+    });
     res.json({
       ...ctx,
+      ...(taurusYearly ? { taurusYearly } : {}),
       // The pest Fast Complete sheet shows its Wrap-up section (a sheet from before the section was permanent still reads this key).
       wrapUp: true,
       ...(gates.oneTapReportLive()
@@ -3975,6 +3996,68 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /:serviceId/pest-recap/report-note — the technician's own note as the customer's report will show it (report speed
+// plan step 2, owner 2026-11-19 *note I*, *read first*). One model call tidies the note, the report's checks read the answer,
+// and the fixed sentence stands in when no tidied note passes: { ok, text, source: 'cleaned' | 'fixed', reason? }. The
+// technician reads the text on the sheet before it is sent. Writes nothing, sends nothing; up to four paid provider calls
+// for a note (two tries, each with the fallback provider) unless the same note was tidied in the last 30 minutes. The
+// param is NAMED :reportNoteServiceId, not :serviceId, so router.param('serviceId') does not read the visit first (the
+// lawn-fast routes' reason): the dark gate (404 {enabled:false}, nothing read), the id must be a uuid, then the sibling
+// routes' ownership assertion. The fixed sentence names no area: the body's labels are not read, so no free text from
+// the request reaches the report. See services/service-report/report-own-note-writer.js.
+function reportNoteVisitRefusal({ ok, reason, svc, profile, eligible }) {
+  if (!ok) return reason;
+  // A failed profile lookup is an outage the sheet may retry (503), not an ineligible visit.
+  if (!profile) return 'profile_unavailable';
+  if (!eligible) return 'not_pest_control';
+  return svc.customer_id ? null : VISIT_NO_CUSTOMER_CODE;
+}
+// Dark gate ahead of the limiter: while off, a request is the 404 and never spends the staff bucket. Paid calls: a cap
+// per staff bucket (rate-limit-key.js), like the voice-fill reads.
+const reportOwnNoteGate = (req, res, next) => (
+  require('../config/feature-gates').reportOwnNoteLive() ? next() : res.status(404).json({ enabled: false })
+);
+const reportOwnNoteLimiter = require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many note previews. Type the report for now.' },
+});
+router.post('/:reportNoteServiceId/pest-recap/report-note', reportOwnNoteGate, reportOwnNoteLimiter, async (req, res, next) => {
+  try {
+    const id = req.params.reportNoteServiceId;
+    if (!require('../services/reservice-office-request').isUuid(id)) {
+      return res.status(404).json({ error: 'Service not found', code: 'not_found' });
+    }
+    req.params.serviceId = id;
+    if (!(await assertRecapOwnership(req, res))) return;
+    // Strict: a failed profile probe refuses (500), never a synthesized pest profile that reaches the paid call.
+    const visit = await PestRecap.resolveEligibility(req.params.serviceId, db, { strict: true });
+    // The row the writer reads is judged again, before any refusal names the visit: a visit reassigned since the
+    // ownership read is refused.
+    if (visit.ok && !technicianVisitRowInScope(req, visit.svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const refusal = reportNoteVisitRefusal(visit);
+    if (refusal) {
+      return res.status(refusal === 'profile_unavailable' ? 503 : recapStatusForReason(refusal)).json({ error: refusal, code: refusal });
+    }
+    const { note } = req.body || {};
+    // The codes on the customer's file are read for this customer before any model reads the note.
+    const { text, source, reason } = await require('../services/service-report/report-own-note-writer').cleanReportNote({
+      note: typeof note === 'string' ? note : '',
+      serviceType: visit.svc.service_type,
+      db,
+      customerId: visit.svc.customer_id,
+    });
+    res.json({
+      ok: true, text, source, ...(reason ? { reason } : {}),
+    });
   } catch (err) { next(err); }
 });
 
@@ -4649,6 +4732,8 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
     const options = await RainOut.getOptions(req.params.serviceId, {
       caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
       reasonCode: typeof req.query.reasonCode === 'string' ? req.query.reasonCode : null,
+      // POST /rain-out below commits as the office for every caller of this route.
+      initiatedBy: 'admin',
     });
     if (!options.ok) {
       return res.status(options.reason === 'not_found' ? 404 : 409).json({ error: options.reason });
@@ -4912,6 +4997,17 @@ function lawnFastProductIds(req) {
 // New-sod capability signal: a sheet that understands the context's `newSod` sends `sodAware=1` (query string).
 const sodAwareRequest = (req) => req.query?.sodAware === '1';
 
+function tetrinoScoutRequest(req) {
+  const target = String(req.query?.tetrinoTarget || '').trim().toLowerCase();
+  const observations = String(req.query?.tetrinoCurrentObservations || '').trim();
+  const pressure = String(req.query?.tetrinoPressure || '').trim().toLowerCase();
+  const grubTimingEvidence = String(req.query?.grubTimingEvidence || '').trim();
+  if (!target && !observations && !pressure && !grubTimingEvidence) return undefined;
+  if (!['chinch', 'grubs', 'none'].includes(target) || observations.length > 1000
+    || (pressure && !['ordinary', 'high'].includes(pressure)) || grubTimingEvidence.length > 1000) return null;
+  return { tetrinoTarget: target, tetrinoCurrentObservations: observations, tetrinoPressure: pressure, grubTimingEvidence };
+}
+
 // GET /api/admin/dispatch/:lawnFastServiceId/lawn-fast/context
 // What the regular lawn Fast Complete sheet opens with (owner 2026-10-03: every
 // lawn visit type is eligible, recurring program visits first): the eligibility
@@ -4926,8 +5022,10 @@ router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
     const productIds = lawnFastProductIds(req);
+    const tetrinoScout = tetrinoScoutRequest(req);
+    if (tetrinoScout === null) return res.status(400).json({ error: 'Check the May scouting fields and try again.', code: 'tetrino_scout_invalid' });
     // The new-sod holds go only to a sheet that sends `sodAware=1` (it understands `newSod`).
-    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(sodAwareRequest(req) ? { sodAware: true } : {}), ...(productIds ? { productIds } : {}) });
+    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(sodAwareRequest(req) ? { sodAware: true } : {}), ...(productIds ? { productIds } : {}), ...(tetrinoScout ? { tetrinoScout } : {}) });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
     const { ok, ...body } = ctx;
     // /complete takes a lawn visit's stock below zero instead of refusing (the same rule), so the sheet lets a
@@ -4979,6 +5077,28 @@ router.get('/:lawnFastServiceId/lawn-fast/treatment-guide', async (req, res, nex
     }
     const { ok, ...body } = result;
     res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:lawnFastServiceId/lawn-fast/prepare-recommendations
+// body: { assessmentId, productIds: [catalog product ids] } (the products of the rows the sheet is about to send to /complete)
+// Starts the completion's lawn recommendation call before the Complete tap, so the completion does not wait on it (report
+// speed plan step 4, owner 2026-11-19). Answers 202 once the call is running; the answer stays in the server's memory and
+// the completion uses it only when the saved visit matches. Writes nothing, sends nothing; one paid model call unless an
+// answer for the same scores and products is already held. Dark behind GATE_LAWN_REC_PREPARE (404 {enabled:false} while
+// off, nothing read). See services/lawn-fast-complete.js prepareLawnRecommendations.
+const PREPARE_RECOMMENDATIONS_STATUS = { invalid_assessment: 400, invalid_products: 400, not_found: 404, not_eligible: 409, not_confirmed: 409, not_usable: 409 };
+router.post('/:lawnFastServiceId/lawn-fast/prepare-recommendations', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').lawnRecPrepareLive()) return res.status(404).json({ enabled: false });
+    const serviceId = await lawnFastRequestId(req, res);
+    if (!serviceId) return;
+    const result = await require('../services/lawn-fast-complete').prepareLawnRecommendations({ serviceId, assessmentId: req.body?.assessmentId, productIds: req.body?.productIds });
+    if (!result.ok) {
+      const status = PREPARE_RECOMMENDATIONS_STATUS[result.reason] || recapStatusForReason(result.reason);
+      return res.status(status).json({ error: result.reason, code: result.reason });
+    }
+    res.status(202).json({ enabled: true, started: result.started });
   } catch (err) { next(err); }
 });
 
@@ -6498,8 +6618,8 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   if (keepSlot) Object.assign(rescheduleOptions, { keepStatus: true, allowLive: false });
   rescheduleOptions.sourceSurface = sourceSurface;
   // GATE_DAY_ONLY_PROMISE part B2/B3: the office's "customer asked for this time" (or day only) for the new slot. The rebooker writes it
-  // in the same UPDATE that moves each visit (per member of a grouped stop), so it belongs to this move alone. Gate off: no key.
-  if (require('../services/time-promise').dayOnlyPromiseOn()) rescheduleOptions.customerAskedTime = body?.customerAskedTime === true;
+  // in the same UPDATE that moves each visit (per member of a grouped stop), so it belongs to this move alone.
+  rescheduleOptions.customerAskedTime = body?.customerAskedTime === true;
   rescheduleOptions.notifyRequested = notifyCustomer !== false;
   if (operationKey) rescheduleOptions.operationKey = operationKey;
   const expectVisit = body.expectVisit;
@@ -6759,6 +6879,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         allowLive: true,
         adminWindowRules: true,
         sourceSurface: 'dispatch_board',
+        // GATE_DAY_ONLY_PROMISE: the office's "customer asked for this time" for the anchor's new slot, as the single move
+        // passes it; the series writer records it on the anchor only.
+        customerAskedTime: req.body?.customerAskedTime === true,
         notifyRequested: notifyCustomer !== false,
         ...(operationKey ? { operationKey } : {}),
         // Staff surface: occupancy clashes commit with a warning instead of

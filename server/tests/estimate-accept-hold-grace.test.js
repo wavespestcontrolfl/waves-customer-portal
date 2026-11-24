@@ -191,7 +191,7 @@ describe('accept-path wiring (source pins)', () => {
     // route's catch forwards to the client.
     const expiredMappings = src.match(/commitErr\.code === 'RESERVATION_EXPIRED'\) \{\s*\n\s*const err = new Error\(HOLD_EXPIRED_409\.error\);\s*\n\s*err\.status = 409;\s*\n\s*err\.code = 'RESERVATION_EXPIRED';/g) || [];
     expect(expiredMappings).toHaveLength(2);
-    const unavailableMappings = src.match(/commitErr\.code === 'SLOT_UNAVAILABLE'\) \{\s*\n\s*const err = new Error\('slot no longer available — re-pick a slot'\);\s*\n\s*err\.status = 409;\s*\n\s*err\.code = 'SLOT_UNAVAILABLE';/g) || [];
+    const unavailableMappings = src.match(/commitErr\.code === 'SLOT_UNAVAILABLE'(?: \|\| commitErr\.code === 'RESERVATION_CLAIMED')?\) \{\s*\n\s*const err = new Error\('slot no longer available — re-pick a slot'\);\s*\n\s*err\.status = 409;\s*\n\s*err\.code = 'SLOT_UNAVAILABLE';/g) || [];
     expect(unavailableMappings).toHaveLength(2);
     // The 4xx translation forwards the code (later fields, like a 409's
     // server-side answer, may follow it).

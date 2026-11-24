@@ -675,11 +675,21 @@ const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_em
 // picking an arbitrary first match there let a bounce mask a coexisting
 // opt-out (codex #3341 r3 P2).
 async function activeSuppressionsFor(template, email, suppressionGroupKey, database = db) {
+  return suppressionsBlocking(await activeSuppressionRows(email, database), template, suppressionGroupKey);
+}
+
+// Its two halves. A caller that must judge several groups on ONE snapshot of
+// an address (email-division's embedded line) reads the rows once and asks
+// the classifier for each group.
+async function activeSuppressionRows(email, database = db) {
   if (!email) return [];
-  const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
-  const rows = await database('email_suppressions')
+  return database('email_suppressions')
     .where(require('../utils/email-equivalence').suppressionCoversEmail(email))
     .where({ status: 'active' });
+}
+
+function suppressionsBlocking(rows, template, suppressionGroupKey) {
+  const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
   if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) {
     return rows.filter((row) => GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase()));
   }
@@ -2095,6 +2105,8 @@ module.exports = {
   alertBlockedOperationalSend,
   resolveTemplateForSend,
   activeSuppressionsFor,
+  activeSuppressionRows,
+  suppressionsBlocking,
   isMarketingSend,
   GLOBAL_SUPPRESSION_TYPES,
   renderTemplate,

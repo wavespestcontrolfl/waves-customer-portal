@@ -86,7 +86,7 @@ describe('customer portal messages routes', () => {
       expect(await ok.json()).toEqual({ message: { id: MSG, from: 'you', body: 'Hi', createdAt: '2026-11-04T20:00:00.000Z' } });
     });
     expect(mockService.customerPost).toHaveBeenCalledTimes(1);
-    expect(mockService.customerPost).toHaveBeenCalledWith({ customer: CUSTOMER, body: 'Hi', clientRequestId: MSG });
+    expect(mockService.customerPost).toHaveBeenCalledWith({ customer: CUSTOMER, body: 'Hi', clientRequestId: MSG, files: [] });
     expect(mockService.customerThread).toHaveBeenCalledWith(CUSTOMER.id, { before: null });
     expect(mockService.customerUnread).toHaveBeenCalledWith(CUSTOMER.id);
     expect(mockService.markRead).toHaveBeenCalledTimes(1);
@@ -104,6 +104,43 @@ describe('customer portal messages routes', () => {
     expect(mockService.customerThread).not.toHaveBeenCalled();
     expect(mockService.customerPost).not.toHaveBeenCalled();
     expect(mockService.markRead).not.toHaveBeenCalled();
+  });
+
+  test('a multipart send passes its photos and words to the service; a photo alone needs no words; too many or too large is refused first', async () => {
+    mockService.customerPost.mockResolvedValue({ id: MSG, from: 'you', body: '', photos: [{ url: 'https://bucket.example/p' }] });
+    const form = (count, { body, bytes = 20 } = {}) => {
+      const data = new FormData();
+      if (body !== undefined) data.append('body', body);
+      for (let i = 0; i < count; i += 1) data.append('photos', new Blob([Buffer.alloc(bytes, 1)], { type: 'image/jpeg' }), `p${i}.jpg`);
+      return data;
+    };
+    const post = (base, data) => fetch(base, { method: 'POST', headers: { Authorization: 'Bearer customer' }, body: data });
+    await withServer(async (base) => {
+      const alone = await post(base, form(1));
+      expect(alone.status).toBe(201);
+      expect((await alone.json()).message.photos).toEqual([{ url: 'https://bucket.example/p' }]);
+      expect(mockService.customerPost).toHaveBeenLastCalledWith({
+        customer: CUSTOMER, body: '', clientRequestId: null,
+        files: [expect.objectContaining({ mimetype: 'image/jpeg', buffer: expect.any(Buffer) })],
+      });
+
+      await post(base, form(3, { body: 'Three of them' }));
+      expect(mockService.customerPost.mock.calls.at(-1)[0]).toMatchObject({ body: 'Three of them' });
+      expect(mockService.customerPost.mock.calls.at(-1)[0].files).toHaveLength(3);
+
+      const calls = mockService.customerPost.mock.calls.length;
+      const many = await post(base, form(4));
+      expect(many.status).toBe(400);
+      expect(await many.json()).toMatchObject({ code: 'too_many_photos' });
+      const big = await post(base, form(1, { bytes: 5 * 1024 * 1024 + 1 }));
+      expect(big.status).toBe(413);
+      expect(await big.json()).toMatchObject({ code: 'invalid_photo', error: 'Each photo must be 5 MB or smaller.' });
+      expect(mockService.customerPost).toHaveBeenCalledTimes(calls);
+
+      // A JSON send is unchanged: no files reach the service.
+      await fetch(base, { method: 'POST', headers: signedIn, body: JSON.stringify({ body: 'Plain words' }) });
+      expect(mockService.customerPost).toHaveBeenLastCalledWith({ customer: CUSTOMER, body: 'Plain words', clientRequestId: null, files: [] });
+    });
   });
 
   test('a write the service refuses keeps its status and words', async () => {

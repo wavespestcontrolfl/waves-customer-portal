@@ -30,6 +30,18 @@ const plan = (overrides) => ({
 });
 const renderCard = (p) => render(<ProtocolMixCard plan={p} selectedConditionalIds={["are"]} onToggleConditional={() => {}} />);
 
+it("shows a field hold on both layouts even after a technician requested the product", () => {
+  const held = { ...TETRINO, selected: false, conditional: true, fieldHold: "tetrino_scout_evidence_required" };
+  render(<ProtocolMixCard
+    plan={plan({ items: [held], selectedItems: [], equipment: { carrierGalPer1000: 1, tankCapacityGal: 110 } })}
+    selectedConditionalIds={["tet"]} onToggleConditional={() => {}}
+  />);
+  expect(screen.getAllByText("On hold")).toHaveLength(2);
+  expect(screen.queryByText("Selected")).not.toBeInTheDocument();
+  expect(screen.queryByText(/appear once calibrated equipment/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Area Mix")).not.toBeInTheDocument();
+});
+
 it("a blocked mix shows the block message as an alert and in the mixing order, not the generic hint", () => {
   renderCard(plan({ blocks: [BLOCK] }));
   const alert = screen.getByRole("alert");

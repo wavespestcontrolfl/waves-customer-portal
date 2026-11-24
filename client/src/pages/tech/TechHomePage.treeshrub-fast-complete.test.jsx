@@ -22,8 +22,8 @@ vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }))
 vi.mock('../../components/ServiceRecapModal', () => ({ default: () => null }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({ default: () => null }));
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
-  default: ({ service, onFullForm }) => (
-    <div>
+  default: ({ service, onFullForm, collectOnSheet }) => (
+    <div data-collect={String(!!collectOnSheet)}>
       Tree and shrub sheet for {service.id} <span data-testid="sheet-access">{(service.propertyAlerts || []).map((a) => a.text).join('|')}</span>
       <button type="button" onClick={onFullForm}>Sheet full form</button>
     </div>
@@ -36,6 +36,8 @@ const row = (id, overrides = {}) => ({
   technicianId: 'tech-fixture',
   customerName: `Fixture ${id}`,
   address: '100 Example Lane',
+  // The day feed always sends the key (visitPremiseFields); Dispatch's sheet rules ask for it.
+  propertyId: 'prop-fixture',
   serviceType: 'Tree & Shrub Program',
   scheduledDate: '2099-01-01',
   status: 'confirmed',
@@ -76,13 +78,15 @@ it('opens the Tree & Shrub Fast Complete sheet when the flag rides the schedule 
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   expect(await screen.findByText('Tree and shrub sheet for svc-ts-on')).toBeInTheDocument();
   expect(assign).not.toHaveBeenCalled();
+  // This page opens no payment prompt of its own: the sheet offers Take payment now.
+  expect(screen.getByText('Tree and shrub sheet for svc-ts-on').closest('[data-collect]')).toHaveAttribute('data-collect', 'true');
 });
 
 it('keeps today\'s Dispatch deep link when the flag is false or absent', async () => {
   rows = [row('svc-ts-off', { treeShrubFastCompleteEnabled: false })];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-ts-off'));
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-ts-off'));
   expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
 });
 
@@ -90,8 +94,30 @@ it('keeps the deep link for a typed visit that is not tree & shrub even with the
   rows = [row('svc-other-typed', { treeShrubFastCompleteEnabled: true, completionProfile: { category: 'pest_control', findingsType: 'palm_injection' } })];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-other-typed'));
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-other-typed'));
   expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
+});
+
+// Admin Dispatch's own order and rule (handleComplete's closeout and project
+// checks, then shouldOpenTreeShrubFastComplete): these keep the deep link.
+it.each([
+  ['back from the payment flow while GATE_FAST_COMPLETE_INVOICED_VISITS is off', { checkoutInvoiceId: 'inv-fixture' }],
+  ['closed out as a whole visit', { visitId: 'visit-fixture', visitCloseoutEnabled: true }],
+  ['completing through a project', { completionProfile: { category: 'lawn_care', findingsType: 'tree_shrub', projectBacked: true } }],
+])('keeps the deep link for a tree & shrub visit %s, as Dispatch does', async (_label, overrides) => {
+  rows = [row('svc-ts-guard', { treeShrubFastCompleteEnabled: true, ...overrides })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-ts-guard'));
+  expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
+});
+
+it('opens the sheet for a tree & shrub visit back from the payment flow under GATE_FAST_COMPLETE_INVOICED_VISITS', async () => {
+  rows = [row('svc-ts-inv', { treeShrubFastCompleteEnabled: true, checkoutInvoiceId: 'inv-fixture', invoicedVisitFastCompleteEnabled: true })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect(await screen.findByText('Tree and shrub sheet for svc-ts-inv')).toBeInTheDocument();
+  expect(assign).not.toHaveBeenCalled();
 });
 
 it('sends the sheet\'s full-form escape to the Dispatch typed completion', async () => {
@@ -99,7 +125,7 @@ it('sends the sheet\'s full-form escape to the Dispatch typed completion', async
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   fireEvent.click(await screen.findByRole('button', { name: 'Sheet full form' }));
-  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-ts-escape'));
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-ts-escape'));
   expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
 });
 

@@ -352,7 +352,8 @@ describe('findLinkedUpcomingAppointment — a Waves Assessment is never adopted'
     const row = await findLinkedUpcomingAppointment(LAWN_ESTIMATE, null, { database: conn });
     expect(row).toEqual(LAWN_ROW);
     const raw = clauseArgs(conn.queries[0], 'whereRaw');
-    expect(raw).toHaveLength(1);
+    // The assessment exclusion, then the five free re-service label checks.
+    expect(raw).toHaveLength(6);
     expect(raw[0][0]).toMatch(/^NOT \(CASE WHEN/);
     expect(raw[0][1]).toEqual(expect.arrayContaining(['services.id', 'lawn_inspection', 'scheduled_services.service_type']));
   });
@@ -556,5 +557,31 @@ describe('findLinkedUpcomingAppointment — property scope on the customer-wide 
     conn = makeFakeConn([null, [stampedApt4]]);
     const rightUnit = { ...ESTIMATE, address: '100 Primary Home St Apt 4, Venice, FL 34285' };
     expect(await findLinkedUpcomingAppointment(rightUnit, null, { database: conn })).toEqual(stampedApt4);
+  });
+});
+
+// A plan offer's quote (owner 2026-11-19: the one-time job is the first plan visit) adopts no visit dated before its
+// firstVisitFrom, as a new-home estimate adopts none before its move-in date.
+describe('findLinkedUpcomingAppointment — a plan offer quote\'s first visit date', () => {
+  const offerEstimate = (firstVisitFrom) => ({
+    ...ESTIMATE,
+    estimate_data: JSON.stringify({ ...JSON.parse(ESTIMATE.estimate_data), planStart: { offer: { jobId: 'job-1', endsAt: '2099-06-10T12:00:00.000Z', firstVisitFrom } } }),
+  });
+  const floorOf = (conn) => clauseArgs(conn.queries[0], 'where').find(([column]) => column === 'scheduled_services.scheduled_date')[2];
+  const { etDateString } = require('../utils/datetime-et');
+
+  it('a first visit date in the future is the earliest date a visit is adopted from', async () => {
+    const conn = makeFakeConn([LINKED_ROW]);
+    await findLinkedUpcomingAppointment(offerEstimate('2099-02-17'), null, { database: conn });
+    expect(floorOf(conn)).toBe('2099-02-17');
+  });
+
+  it('a first visit date that has passed leaves today the floor, as an estimate with no offer has', async () => {
+    const conn = makeFakeConn([LINKED_ROW]);
+    await findLinkedUpcomingAppointment(offerEstimate('2020-01-01'), null, { database: conn });
+    expect(floorOf(conn)).toBe(etDateString());
+    const plain = makeFakeConn([LINKED_ROW]);
+    await findLinkedUpcomingAppointment(ESTIMATE, null, { database: plain });
+    expect(floorOf(plain)).toBe(etDateString());
   });
 });

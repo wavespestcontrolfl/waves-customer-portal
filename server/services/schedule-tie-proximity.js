@@ -8,11 +8,6 @@
  * order index for each stop; nothing here writes route_order or anything
  * else to the database, and it sends no customer communication.
  *
- * Behind GATE_SCHEDULE_TIE_PROXIMITY (server/config/feature-gates.js) —
- * callers check the gate themselves and skip this module entirely when it
- * is off, so gate-off behavior is byte-identical to before this module
- * existed.
- *
  * Rules (owner-approved defaults):
  *   - A "tie" is any stop whose window start is within TIE_WINDOW_MINUTES of
  *     the EARLIEST remaining stop's start (the "anchor"), recomputed on every
@@ -33,8 +28,7 @@
  *     today.
  *
  * Uses the ONE shared in-house drive-time estimator (route-optimizer.js's
- * haversine + milesToDriveMinutes, itself gated by GATE_DRIVE_TIME_CALIBRATION)
- * — no new Google API calls, no new estimator.
+ * haversine + milesToDriveMinutes) — no new Google API calls, no new estimator.
  */
 const { haversine, milesToDriveMinutes, HQ } = require('./route-optimizer');
 

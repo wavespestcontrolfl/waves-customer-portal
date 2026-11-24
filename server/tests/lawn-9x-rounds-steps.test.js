@@ -172,7 +172,9 @@ describe('visitForPlan gives each round its step', () => {
     expect(two.secondary).toBe(liveStep('st_augustine', 2).secondary);
     expect(lineNames(two.secondary)).not.toEqual(expect.arrayContaining(['Headway Fungicide']));
     expect(lineNames(two.secondary)).not.toContain('Arena 50 WDG');
-    // Round 4 in late April: May's Tetrino is the planned treatment; the chinch, take-all and dry-spot lines are April's own (April holds a dry-spot line since owner 2026-11-01).
+    // Round 4 in late April takes May's scout-first primary; April's own conditional
+    // lines stay in force. A May-dated round-4 visit receives May's optional Tetrino
+    // line, and the plan engine holds it until current scouting evidence is recorded.
     const four = (await forRound('2027-04-28')).visit;
     expect(four.primary).toBe(liveStep('st_augustine', 5).primary);
     expect(four.secondary).toBe(liveStep('st_augustine', 4).secondary);
@@ -259,6 +261,7 @@ const WINDOW_KEYS = {
 const NAMES = {
   F24: 'LESCO 24-0-11 with PolyPlus OPTI',
   DIM: 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer',
+  STW: 'LESCO Stonewall 0.37% 18-0-10', // October's bag since owner 2026-11-21 (April's 9x step stays Dimension)
   CEL: 'Celsius WG', CER: 'Certainty Turf Herbicide', NIS: 'LESCO 90/10 Nonionic Surfactant', BLI: 'Blindside Herbicide',
   ART: 'Artavia 2 SC (Azoxy)', NT: 'LESCO Nutra-TECH T&O Micronutrient Package', K20: 'LESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer',
   VEL: 'Velista', DYL: 'Dylox 6.2 G Granular Insecticide', K24: 'LESCO Black Out 0-0-24 AM Spar-TECH',
@@ -266,6 +269,7 @@ const NAMES = {
 const CATALOG = [
   { id: 'p-f24', name: NAMES.F24, category: 'fertilizer', analysis_n: 24, analysis_p: 0, analysis_k: 11, formulation: 'Granular', default_rate_per_1000: 4.17, rate_unit: 'lb', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 1000, inventory_unit: 'lb' },
   { id: 'p-dim', name: NAMES.DIM, category: 'fertilizer', analysis_n: 18, analysis_p: 0, analysis_k: 10, formulation: 'Granular', default_rate_per_1000: 2.78, rate_unit: 'lb', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 1000, inventory_unit: 'lb' },
+  { id: 'p-stw', name: NAMES.STW, category: 'herbicide', analysis_n: 18, analysis_p: 0, analysis_k: 10, formulation: 'Granular', default_rate_per_1000: 4.04, rate_unit: 'lb', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 1000, inventory_unit: 'lb' },
   { id: 'p-cel', name: NAMES.CEL, category: 'herbicide', default_rate_per_1000: 0.085, rate_unit: 'oz', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 100, inventory_unit: 'oz' },
   { id: 'p-cer', name: NAMES.CER, category: 'herbicide', default_rate_per_1000: 0.028, rate_unit: 'oz', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 100, inventory_unit: 'oz' },
   { id: 'p-nis', name: NAMES.NIS, category: 'adjuvant', default_rate_per_1000: null, rate_unit: 'label_rate', active: true, label_verified_at: new Date('2026-10-01'), inventory_on_hand: 100, inventory_unit: 'fl oz' },
@@ -310,7 +314,7 @@ function protocolTables(track = 'st_augustine') {
     row(9, NAMES.NT, { default_in_plan: true, rate_per_1000: 12, rate_unit: 'fl oz', carrier_gal_per_1000: 1, gates: { requiresZeroNP: true } }),
     row(9, NAMES.K20, { role: 'potassium', default_in_plan: true, rate_per_1000: 5, rate_unit: 'fl oz', carrier_gal_per_1000: 1, gates: { requiresZeroNP: true, northPortProductWindow: true } }),
     // October: the fall weed mix without Blindside.
-    row(10, NAMES.DIM, { role: 'nutrition', default_in_plan: true, rate_unit: 'lb_n', gates: { targetN: '0.73 lb N/1000' } }),
+    row(10, NAMES.STW, { role: 'nutrition', default_in_plan: true, rate_unit: 'lb_n', gates: { targetN: '0.73 lb N/1000' } }),
     spot(10, NAMES.CEL, { annualCounter: 'celsius_oz_per_1000' }),
     // November: the weed mix with Blindside (the Nov-Mar rule).
     row(11, NAMES.F24, { role: 'nutrition', default_in_plan: true, rate_unit: 'lb_n', gates: { targetN: '0.75 lb N/1000' } }),
@@ -389,8 +393,8 @@ describe('getProtocolWindowContext with a rounds step', () => {
       { ...asNeeded(10, NAMES.DYL, 'insect_curative', { trigger: 'grubs_or_mole_crickets', spreaderVisitOnly: true }), application_mode: 'broadcast' },
       asNeeded(11, NAMES.VEL, 'fungicide_spot', { trigger: 'mapped_large_patch' }),
     ]);
-    expect(productNames(await read(tables, { date: '2027-10-20', rest: { roundStep: { round: 8, month: 10 } } }))).toEqual([NAMES.DIM, NAMES.DYL, NAMES.CEL]);
-    expect(productNames(await read(tables, { date: '2027-11-05', rest: { roundStep: { round: 8, month: 10 } } }))).toEqual([NAMES.DIM, NAMES.VEL, NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI]);
+    expect(productNames(await read(tables, { date: '2027-10-20', rest: { roundStep: { round: 8, month: 10 } } }))).toEqual([NAMES.STW, NAMES.DYL, NAMES.CEL]);
+    expect(productNames(await read(tables, { date: '2027-11-05', rest: { roundStep: { round: 8, month: 10 } } }))).toEqual([NAMES.STW, NAMES.VEL, NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI]);
   });
 
   test('round 9 on Nov 20: December\'s micronutrients and its large patch potassium bag stay; the spots are November\'s', async () => {
@@ -404,7 +408,7 @@ describe('getProtocolWindowContext with a rounds step', () => {
   test('round 8 on Nov 5: October\'s program rows with November\'s weed rows (Blindside joins)', async () => {
     const context = await read(data(), { date: '2027-11-05', rest: { roundStep: { round: 8, month: 10 } } });
     expect(context.window.window_key).toBe(WINDOW_KEYS[10]);
-    expect(productNames(context)).toEqual([NAMES.DIM, NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI]);
+    expect(productNames(context)).toEqual([NAMES.STW, NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI]);
   });
 
   test('a round whose step window is the real window reads one window (no spot window)', async () => {
@@ -543,10 +547,10 @@ describe('buildPlanForService on a rounds visit', () => {
     expect(lineNamesOf(plan).filter((n) => [NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI].includes(n))).toEqual([NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI]);
   });
 
-  test('round 8 on Nov 5 takes October\'s Dimension bag and November\'s weed mix with Blindside', async () => {
+  test('round 8 on Nov 5 takes October\'s Stonewall bag and November\'s weed mix with Blindside', async () => {
     const plan = await planFor({ date: '2027-11-05' });
     expect(plan.protocol.structured.window.key).toBe(WINDOW_KEYS[10]);
-    expect(selectedNames(plan)).toContain(NAMES.DIM);
+    expect(selectedNames(plan)).toContain(NAMES.STW);
     expect(lineNamesOf(plan).filter((n) => [NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI].includes(n))).toEqual([NAMES.CEL, NAMES.CER, NAMES.NIS, NAMES.BLI]);
   });
 

@@ -14,12 +14,13 @@ jest.mock('../models/db', () => jest.fn(() => { throw new Error('visit-skip read
 const mockImpact = jest.fn();
 jest.mock('../services/appointment-cancel-impact', () => ({ computeCancelAppointmentImpact: (...a) => mockImpact(...a) }));
 
-const { skipVerdict, assertSkippable, skipPreview, _private: { MESSAGES } } = require('../services/visit-skip');
+const { skipVerdict, assertSkippable, skipPreview, nextPlanVisitDate, _private: { MESSAGES } } = require('../services/visit-skip');
 
 // A knex-shaped reader over rows in memory. It honours the filters visit-skip.js writes (equality, the series group,
 // status list, "later than", order, limit), so a query that asks for the wrong rows fails a test.
 function memoryConn(rows) {
   const sortable = (value) => (value instanceof Date ? value.toISOString().slice(0, 10) : String(value));
+  const keyOf = (column) => String(column).replace(/^scheduled_services\./, '');
   const conn = () => {
     const filters = [];
     let order = null;
@@ -29,21 +30,47 @@ function memoryConn(rows) {
         if (typeof column === 'function') {
           const anyOf = [];
           const group = {
-            where(col, val) { anyOf.push((row) => row[col] === val); return group; },
-            orWhere(col, val) { anyOf.push((row) => row[col] === val); return group; },
+            where(col, val) { anyOf.push((row) => row[keyOf(col)] === val); return group; },
+            orWhere(col, val) {
+              if (typeof col === 'function') {
+                const every = [];
+                const nested = {
+                  whereNot(key, expected) { every.push((row) => row[keyOf(key)] !== expected); return nested; },
+                  whereRaw() {
+                    every.push((row) => !(row.source_action === 'voice_agent'
+                      && row.status === 'confirmed' && row.customer_confirmed !== true));
+                    return nested;
+                  },
+                };
+                col(nested);
+                anyOf.push((row) => every.every((match) => match(row)));
+                return group;
+              }
+              anyOf.push(typeof col === 'object'
+                ? (row) => Object.entries(col).every(([key, expected]) => (row[keyOf(key)] ?? null) === expected)
+                : (row) => row[keyOf(col)] === val);
+              return group;
+            },
+            whereNull(col) { anyOf.push((row) => row[keyOf(col)] == null); return group; },
+            whereNotNull(col) { anyOf.push((row) => row[keyOf(col)] != null); return group; },
+            orWhereNotNull(col) { anyOf.push((row) => row[keyOf(col)] != null); return group; },
+            orWhereNotIn(col, values) { anyOf.push((row) => !values.includes(row[keyOf(col)])); return group; },
           };
-          column.call(group);
+          column.call(group, group);
           filters.push((row) => anyOf.some((match) => match(row)));
         } else if (column && typeof column === 'object') {
           filters.push((row) => Object.entries(column).every(([key, val]) => row[key] === val));
-        } else if (op === '>') {
-          filters.push((row) => sortable(row[column]) > sortable(value));
+        } else if (op === '>' || op === '>=') {
+          filters.push((row) => op === '>'
+            ? sortable(row[column]) > sortable(value)
+            : sortable(row[column]) >= sortable(value));
         } else {
           throw new Error(`memoryConn: unsupported where(${column}, ${op})`);
         }
         return b;
       },
       whereIn(column, values) { filters.push((row) => values.includes(row[column])); return b; },
+      whereNotNull(column) { filters.push((row) => row[column] != null); return b; },
       orderBy(column, direction) { order = [column, direction]; return b; },
       limit(n) { cap = n; return b; },
       rows() {
@@ -62,7 +89,8 @@ function memoryConn(rows) {
 // The second visit of a quarterly pest plan: open, nobody on the way, a child of the series root.
 const planVisit = (over = {}) => ({
   id: 'visit-2', status: 'pending', track_state: 'scheduled', is_recurring: true, recurring_parent_id: 'visit-1',
-  is_callback: false, followup_included: false, scheduled_date: '2027-03-20', recurring_pattern: 'quarterly', ...over,
+  is_callback: false, followup_included: false, scheduled_date: '2027-03-20', recurring_pattern: 'quarterly',
+  service_id: 'pest-service', property_id: 'house-1', window_start: '09:00:00', ...over,
 });
 const office = (conn = memoryConn([])) => ({ conn, isAdmin: true, actorId: 'admin-1' });
 const bare = () => mockImpact.mockResolvedValue({ card_cancel_refusals: [] });
@@ -261,5 +289,115 @@ describe('skipPreview: what the cancel window shows', () => {
     await expect(skipPreview('visit-2', office(memoryConn(rows)))).resolves.toMatchObject({
       nextVisitDate: '2027-06-21', lawnRound: { round: 3, start: '2027-03-15', end: '2027-04-23' },
     });
+  });
+});
+
+describe('public next-visit date scope', () => {
+  beforeAll(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-11-18T17:00:00.000Z'));
+  });
+  afterAll(() => jest.useRealTimers());
+
+  test('requires durable service and property keys when used by a customer tracker', async () => {
+    const row = planVisit({ service_id: null });
+    await expect(nextPlanVisitDate(memoryConn([row]), row, '2027-03-20', { requireServiceAndProperty: true }))
+      .resolves.toBeNull();
+  });
+
+  test('does not name a later row from another service or house', async () => {
+    const row = planVisit();
+    const rows = [
+      planVisit({ id: 'wrong-service', scheduled_date: '2027-04-01', service_id: 'lawn-service' }),
+      planVisit({ id: 'wrong-house', scheduled_date: '2027-04-02', property_id: 'house-2' }),
+      planVisit({ id: 'same-service-house', scheduled_date: '2027-06-21' }),
+    ];
+    await expect(nextPlanVisitDate(memoryConn(rows), row, '2027-03-20', { requireServiceAndProperty: true }))
+      .resolves.toBe('2027-06-21');
+  });
+
+  test('does not name an overdue open occurrence as the public next visit', async () => {
+    const { addETDays, etDateString } = require('../utils/datetime-et');
+    const skippedDate = etDateString(addETDays(new Date(), -5));
+    const overdueDate = etDateString(addETDays(new Date(), -2));
+    const futureDate = etDateString(addETDays(new Date(), 5));
+    const row = planVisit({ scheduled_date: skippedDate });
+    const overdue = planVisit({ id: 'overdue', scheduled_date: overdueDate });
+    const upcoming = planVisit({ id: 'upcoming', scheduled_date: futureDate });
+
+    await expect(nextPlanVisitDate(memoryConn([overdue, upcoming]), row, skippedDate, {
+      requireServiceAndProperty: true,
+    })).resolves.toBe(futureDate);
+  });
+
+  test('filters both marked unplaced shapes before the bounded date scan', async () => {
+    const row = planVisit();
+    const parked = Array.from({ length: 12 }, (_, index) => planVisit({
+      id: `parked-${index}`,
+      scheduled_date: `2027-04-${String(index + 1).padStart(2, '0')}`,
+      customer_pick_by: index < 6 ? '2027-03-21T18:00:00.000Z' : null,
+      recurring_dispatch_due_date: index >= 6 ? `2027-04-${String(index + 1).padStart(2, '0')}` : null,
+      window_start: null,
+    }));
+    const booked = planVisit({ id: 'booked-next', scheduled_date: '2027-06-21', window_start: '09:00:00' });
+    await expect(nextPlanVisitDate(memoryConn([...parked, booked]), row, '2027-03-20', { requireServiceAndProperty: true }))
+      .resolves.toBe('2027-06-21');
+  });
+
+  test('preserves a markerless legacy windowless visit as the next date', async () => {
+    const row = planVisit();
+    const legacyDateOnly = planVisit({
+      id: 'legacy-date-only', scheduled_date: '2027-04-01', window_start: null,
+      customer_pick_by: null, recurring_dispatch_due_date: null,
+    });
+    await expect(nextPlanVisitDate(memoryConn([legacyDateOnly]), row, '2027-03-20', { requireServiceAndProperty: true }))
+      .resolves.toBe('2027-04-01');
+  });
+
+  test('filters unreviewed dispatch-owned bookings before the public scan limit', async () => {
+    const row = planVisit();
+    const sources = ['ai_call_pipeline_followup', 'ai_call_outbound_review', 'voice_agent'];
+    const hidden = Array.from({ length: 12 }, (_, index) => planVisit({
+      id: `unreviewed-${index}`,
+      scheduled_date: `2027-04-${String(index + 1).padStart(2, '0')}`,
+      source_action: sources[index % sources.length],
+      customer_confirmed: false,
+    }));
+    const visible = planVisit({ id: 'visible-next', scheduled_date: '2027-06-21' });
+    await expect(nextPlanVisitDate(memoryConn([...hidden, visible]), row, '2027-03-20', { requireServiceAndProperty: true }))
+      .resolves.toBe('2027-06-21');
+  });
+
+  test('returns no date conservatively when a bounded public batch contains only non-plan linked visits', async () => {
+    const row = planVisit();
+    const linked = Array.from({ length: 12 }, (_, index) => planVisit({
+      id: `booster-${index}`,
+      scheduled_date: `2027-04-${String(index + 1).padStart(2, '0')}`,
+      is_recurring: false,
+    }));
+    const visible = planVisit({ id: 'visible-next', scheduled_date: '2027-06-21' });
+    await expect(nextPlanVisitDate(memoryConn([...linked, visible]), row, '2027-03-20', { requireServiceAndProperty: true }))
+      .resolves.toBeNull();
+  });
+
+  test.each([
+    ['office-reviewed pending call booking', { status: 'pending', source_action: 'ai_call_outbound_review', customer_confirmed: true }],
+    ['confirmed outbound booking', { status: 'confirmed', source_action: 'ai_call_outbound_review', customer_confirmed: false }],
+  ])('keeps a %s visible like signed-in Schedule', async (_label, shape) => {
+    const row = planVisit();
+    const candidate = planVisit({ id: 'reviewed', scheduled_date: '2027-04-01', ...shape });
+    await expect(nextPlanVisitDate(memoryConn([candidate]), row, '2027-03-20', { requireServiceAndProperty: true }))
+      .resolves.toBe('2027-04-01');
+  });
+
+  test('hides the confirmed but unreviewed voice-agent move shape', async () => {
+    const row = planVisit();
+    const hidden = planVisit({
+      id: 'voice-moved', scheduled_date: '2027-04-01', status: 'confirmed',
+      source_action: 'voice_agent', customer_confirmed: false,
+    });
+    const visible = planVisit({ id: 'visible-next', scheduled_date: '2027-06-21' });
+    await expect(nextPlanVisitDate(memoryConn([hidden, visible]), row, '2027-03-20', { requireServiceAndProperty: true }))
+      .resolves.toBe('2027-06-21');
   });
 });

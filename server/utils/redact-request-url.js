@@ -13,8 +13,9 @@ function isSensitiveQueryKey(key) {
   // Free-text lookup parameters carry whatever the operator typed — street
   // addresses, phone numbers, names, emails (/api/admin/customers?search=,
   // the address-keyed lookups). PII in request logs is an AGENTS.md P1;
-  // the log keeps the path and every other parameter.
-  if (['search', 'q', 'query', 'address'].includes(normalized)) return true;
+  // the log keeps the path and every other parameter. `builder` is the contractor name the Builders list sends
+  // for job sites (/api/admin/prospects/builders/permits?builder=); a contractor can be a person.
+  if (['search', 'q', 'query', 'address', 'builder'].includes(normalized)) return true;
   // The click-to-call bridge hands Twilio the customer's number and name on
   // the /outbound-admin-prompt URL (services/call-bridge.js); Twilio's
   // callback lands in the request log with them (codex #4072 r2 P1).

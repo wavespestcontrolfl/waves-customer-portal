@@ -4,6 +4,54 @@
 // must use the same purchase evidence. Read the existing authored JSON pack
 // for its exact bullet instead of maintaining a second customer-facing string.
 const { warrantyBullet: PURCHASED_TRENCHING_WARRANTY_BULLET } = require('../server/services/estimate-one-time-copy.json').termite_trenching;
+const { reentryBullet: INCLUDED_REENTRY_GUARANTEE_BULLET, termsReentry: REENTRY_TERMS_TEMPLATE } = require('../server/services/estimate-one-time-copy.json').rodent_exclusion;
+
+// The service keys of the rodent exclusion (the copy key map's rodent_exclusion entries).
+const RODENT_EXCLUSION_SERVICES = ['rodent_exclusion', 'exclusion', 'exclusion_v2'];
+
+function isRodentExclusionRow(item = {}) {
+  if (!item || typeof item !== 'object') return false;
+  const value = [item.service, item.serviceKey, item.service_key, item.key]
+    .find((candidate) => candidate != null && String(candidate).trim() !== '');
+  return RODENT_EXCLUSION_SERVICES.includes(String(value || '').toLowerCase().trim());
+}
+
+// A whole-home rodent exclusion (GATE_EXCLUSION_WHOLE_HOME) includes a 1-year
+// re-entry guarantee in its price. THE one predicate for every consumer (row
+// projection, copy, Ask Waves, the page): a recognized rodent exclusion service
+// key AND the row's own flag. Text, labels and details never establish it, and
+// the flag on any other service's row means nothing (fail closed).
+function hasIncludedReentryGuarantee(item = {}) {
+  return isRodentExclusionRow(item) && item.includesReentryGuarantee === true;
+}
+
+// The terms line of a row that includes the guarantee, with its yearly renewal
+// price. Null without a positive saved price: the row then keeps its normal terms.
+function includedReentryTerms(item = {}) {
+  const renewal = hasIncludedReentryGuarantee(item) ? Number(item.guaranteeRenewalPrice) : 0;
+  return renewal > 0 ? REENTRY_TERMS_TEMPLATE.replace('{renewal}', String(renewal)) : null;
+}
+
+// What Ask Waves may say about a row that includes the guarantee: the bullet and the renewal clause
+// (the terms line without its payment sentence). [] without the row's own flag (fail closed).
+function includedReentryPurchasedTerms(item = {}) {
+  if (!hasIncludedReentryGuarantee(item)) return [];
+  const renewal = (includedReentryTerms(item) || '').replace(/^Pay on service day\.\s*/, '');
+  return [INCLUDED_REENTRY_GUARANTEE_BULLET, ...(renewal ? [renewal] : [])];
+}
+
+// The row keys that carry the included guarantee to the customer page: the
+// flag, its length in months and the yearly renewal price. {} unless the flag is true.
+function includedReentryGuaranteeFields(item = {}) {
+  if (!hasIncludedReentryGuarantee(item)) return {};
+  const months = Number(item.reentryGuaranteeMonths);
+  const renewal = Number(item.guaranteeRenewalPrice);
+  return {
+    includesReentryGuarantee: true,
+    reentryGuaranteeMonths: months > 0 ? months : null,
+    guaranteeRenewalPrice: renewal > 0 ? renewal : null,
+  };
+}
 
 function trenchingServiceIdentity(item = {}) {
   if (!item || typeof item !== 'object') return '';
@@ -335,6 +383,11 @@ module.exports = {
   preSlabWarrantyDecision,
   reconcilePricedPreSlabWarrantyEvidence,
   hasPurchasedTrenchingWarranty,
+  hasIncludedReentryGuarantee,
+  isRodentExclusionRow,
+  includedReentryGuaranteeFields,
+  includedReentryPurchasedTerms,
+  includedReentryTerms,
   matchingTrenchingWarrantyRow,
   rawOneTimeWarrantyEvidenceItems,
   reconcileTrenchingWarrantyEvidence,
@@ -342,4 +395,5 @@ module.exports = {
   trenchingServiceIdentity,
   trenchingWarrantyDecision,
   PURCHASED_TRENCHING_WARRANTY_BULLET,
+  INCLUDED_REENTRY_GUARANTEE_BULLET,
 };

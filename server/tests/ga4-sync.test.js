@@ -105,6 +105,17 @@ describe('GA4 daily sync', () => {
     process.env = { ...ORIGINAL_ENV };
   });
 
+  test('reports telephone taps and text taps as separate events', async () => {
+    runReport.mockResolvedValueOnce({ data: { rows: [
+      makeRow(['phone_click'], [2]), makeRow(['sms_click'], [3]),
+    ] } });
+    const GA4 = require('../services/analytics/google-analytics');
+    const result = await GA4.getConversions('2026-06-10', '2026-06-11');
+    const events = runReport.mock.calls[0][0].requestBody.dimensionFilter.filter.inListFilter.values;
+    expect(events).toEqual(expect.arrayContaining(['phone_click', 'sms_click', 'request_quote']));
+    expect(result.data).toEqual([{ event: 'phone_click', count: 2 }, { event: 'sms_click', count: 3 }]);
+  });
+
   test('syncDailyData writes per-day conversions, sources, devices, and landing pages', async () => {
     const GA4 = require('../services/analytics/google-analytics');
 

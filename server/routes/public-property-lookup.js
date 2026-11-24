@@ -6,10 +6,12 @@ const logger = require('../services/logger');
 const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict, contactPairLockKey, cleanVerdictCovers, cachedAuditSuperseded, auditEvidenceAt, samePremiseDisplay, countyRollAnswered } = require('../services/lead-address-unverified');
 const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
+const { firstSourceEvidenceObjectSql, sourceEvidenceFromAttribution } = require('../services/lead-source-evidence');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
 const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
-const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
+const { verifyLeadPrefillToken, verifyLeadAttachToken } = require('../utils/lead-prefill-token');
+const { applyQuizHandoffLeadPredicate } = require('../services/lead-statuses');
 const { verifyTurnstileToken } = require('../utils/turnstile');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
@@ -40,6 +42,14 @@ const prefillLimiter = rateLimit({
 });
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+const CALL_ATTACH_EXTRACTED_SQL = "COALESCE(extracted_data, '{}'::jsonb) || (?::jsonb - 'source_evidence')";
+const PROPERTY_FIRST_SOURCE_EVIDENCE_SQL = firstSourceEvidenceObjectSql({ incomingDataSql: 'source_stage.incoming' });
+const PROPERTY_COMPLETE_EXTRACTED_SQL = `(SELECT CASE
+  WHEN lead_type = 'quote_wizard'
+    THEN (source_stage.incoming - 'source_evidence') || ${PROPERTY_FIRST_SOURCE_EVIDENCE_SQL}
+  ELSE COALESCE(extracted_data, '{}'::jsonb) || (source_stage.incoming - 'source_evidence')
+END FROM (SELECT ?::jsonb AS incoming) AS source_stage)`;
 
 // PII responses on a public token route are never cached, indexed, or leaked
 // via referrer — same contract as prep-public.js / lawn-diagnostic.
@@ -125,7 +135,10 @@ function publicEnrichedProfile(enriched) {
   // lead snapshot, and a story count the permit filled (storiesSource
   // 'permit') goes back to the default so no permit-derived figure reaches
   // the public payload.
-  const { subdivisionMedian, permitBuildingFacts, addressVerdict, suiteSize: _suiteSize, suiteBuildingTotalSqFt: _suiteBuildingTotalSqFt, unitScopedLookup: _unitScopedLookup, ...rest } = enriched;
+  // countyRoofRaw / roofStyleHint / roofTileStyle (the county's own roof
+  // words and the barrel-vs-flat tile reads, owner 2026-11-19) are staff
+  // evidence for a later price: stripped like permitBuildingFacts.
+  const { subdivisionMedian, permitBuildingFacts, addressVerdict, suiteSize: _suiteSize, suiteBuildingTotalSqFt: _suiteBuildingTotalSqFt, unitScopedLookup: _unitScopedLookup, countyRoofRaw: _countyRoofRaw, roofStyleHint: _roofStyleHint, roofTileStyle: _roofTileStyle, ...rest } = enriched;
   const permitStories = rest.storiesSource === 'permit';
   if (permitStories) { rest.stories = 1; rest.storiesSource = 'default'; }
   if ((!subdivisionMedian && !permitBuildingFacts) || !Array.isArray(rest.fieldVerifyFlags)) return rest;
@@ -367,6 +380,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     // (like the click ids above) so later extracted_data rewrites can't drop it.
     const anonId = sanitizeAnonUnitId(attr?.anon_id);
     const sourceMeta = await resolveLeadSource(attr);
+    const sourceEvidence = sourceEvidenceFromAttribution(attr);
     const serviceInterest = normalizeServiceInterest(req.body || {});
     // Declared "when do you want this handled?" (quote-form tile). Persisted
     // verbatim in extracted_data and mapped onto leads.urgency; null when the
@@ -386,6 +400,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
       referrer: attr?.referrer || null,
       landing_url: attr?.landing_url || null,
+      ...(sourceEvidence ? { source_evidence: sourceEvidence } : {}),
       address: normalizedAddress,
       ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
     };
@@ -400,17 +415,38 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     // the text-back one-shot stamp survive the wizard stages. Terminal or
     // converted leads never re-attach — a re-entry after the lead closed is a
     // fresh lead like any other visitor.
+    //
+    // The quiz pages' hand-off rides the same two fields with an ATTACH token
+    // (minted by the lead webhook for the lead a quiz submission just created,
+    // and only when that quiz ends on the price page): the same UPDATE, so the
+    // quiz lead keeps its form_submission type, its source and its quiz
+    // answers, and the visitor makes one lead, not two. An attach token is
+    // not a prefill token: /lead-prefill above refuses it. Its guards are
+    // narrower than the voicemail path's, which reopens an unresponsive call
+    // lead on purpose: the quiz lead must pass the hand-off's rule
+    // (applyQuizHandoffLeadPredicate: open, not deleted, not commercial). A
+    // lead the office closed, removed or flagged as a business inside the
+    // token's two hours is not continued; that visitor files a fresh
+    // quote_wizard lead. The price calculation keeps the same rule on its own
+    // write (routes/public-quote.js).
     let lead = null;
     let attachedToExistingLead = false;
     const prefillLeadId = firstNonEmpty(req.body.prefill_lead_id, req.body.prefillLeadId);
     const prefillToken = firstNonEmpty(req.body.prefill_token, req.body.prefillToken);
-    if (prefillLeadId && prefillToken && UUID_RE.test(prefillLeadId)
-      && verifyLeadPrefillToken(prefillLeadId, prefillToken)) {
+    const tokenPair = !!(prefillLeadId && prefillToken && UUID_RE.test(prefillLeadId));
+    const voicemailAttach = tokenPair && verifyLeadPrefillToken(prefillLeadId, prefillToken);
+    const quizAttach = tokenPair && !voicemailAttach && verifyLeadAttachToken(prefillLeadId, prefillToken);
+    if (voicemailAttach || quizAttach) {
       try {
         const updated = await db('leads')
           .where({ id: prefillLeadId })
-          .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'handled'])
-          .whereNull('converted_at')
+          .modify((attachable) => {
+            if (quizAttach) {
+              applyQuizHandoffLeadPredicate(attachable);
+            } else {
+              attachable.whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'handled']).whereNull('converted_at');
+            }
+          })
           .update({
             first_name: firstName,
             last_name: lastName,
@@ -419,7 +455,14 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             address: lookupAddress,
             city: normalizedAddress.city || zipToCity(normalizedAddress.zip) || null,
             zip: normalizedAddress.zip || null,
-            ...(serviceInterest ? { service_interest: serviceInterest } : {}),
+            // A keyed lead's label is its catalog name: the price calculation
+            // writes the two together. A lookup that arrives again on the same
+            // token leaves that label alone, so key and label never disagree.
+            // (The site's price page drops the token after one lookup; this
+            // holds for any other client too.)
+            ...(serviceInterest
+              ? { service_interest: db.raw('CASE WHEN service_key IS NULL THEN ? ELSE service_interest END', [serviceInterest]) }
+              : {}),
             ...(declaredUrgency ? { urgency: declaredUrgency } : {}),
             ...(anonId ? { anon_id: anonId } : {}),
             // Fills an EMPTY answer only; a recorded one is never replaced.
@@ -429,7 +472,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             // re-engaged prospect stays hidden. Other statuses are untouched.
             status: db.raw("CASE WHEN status = 'unresponsive' THEN 'new' ELSE status END"),
             extracted_data: db.raw(
-              "COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb",
+              CALL_ATTACH_EXTRACTED_SQL,
               [JSON.stringify(startedStage)]
             ),
             updated_at: new Date(),
@@ -437,7 +480,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         if (updated) {
           lead = { id: prefillLeadId };
           attachedToExistingLead = true;
-          logger.info(`[public-property-lookup] wizard attached to existing lead ${prefillLeadId} via prefill token`);
+          logger.info(`[public-property-lookup] wizard attached to existing lead ${prefillLeadId} via ${quizAttach ? 'quiz hand-off' : 'prefill'} token`);
         }
       } catch (attachErr) {
         logger.warn(`[public-property-lookup] prefill attach failed — falling back to new lead: ${attachErr.message}`);
@@ -568,6 +611,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
         referrer: attr?.referrer || null,
         landing_url: attr?.landing_url || null,
+        ...(sourceEvidence ? { source_evidence: sourceEvidence } : {}),
         address: normalizedAddress,
         ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
         // County roll could not vouch for the typed house number (see
@@ -575,10 +619,17 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         // abandoned row already carries the callback ask; /calculate
         // re-derives it (or recovers this one when its cache read misses).
       };
+      // The attach above decided whether this run continues an existing
+      // lead. This write and the verdict write below are the same request's:
+      // they merge keys into extracted_data and write no column an office
+      // action writes, so a lead the office closes while the lookup runs
+      // ends as it would had the lookup finished first. The price
+      // calculation re-checks the lead on its own write.
       await db('leads').where({ id: lead.id }).update({
-        extracted_data: attachedToExistingLead
-          ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(completeStage)])
-          : JSON.stringify(completeStage),
+        // Call-led token attaches never acquire browser evidence. A genuine
+        // quote-wizard row keeps its first valid evidence, or fills it once
+        // when a later stage is the first one that can prove a source.
+        extracted_data: db.raw(PROPERTY_COMPLETE_EXTRACTED_SQL, [JSON.stringify(completeStage)]),
         updated_at: new Date(),
       });
     } catch (e) {
@@ -767,4 +818,6 @@ module.exports._test = {
   publicEnrichedProfile,
   normalizeServiceInterest,
   formatServiceInterestForFrequency,
+  CALL_ATTACH_EXTRACTED_SQL,
+  PROPERTY_COMPLETE_EXTRACTED_SQL,
 };

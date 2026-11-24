@@ -79,3 +79,28 @@ test('onDelivered is told as each device accepts, never for a failed or skipped 
   expect(seen).toEqual(['b', 'c']);
   expect(out).toMatchObject({ sent: 2 });
 });
+
+test('each device\'s payload is read after its own check: a change made there reaches that device and every later one', async () => {
+  // tech-visit-notifications relies on this: a recheck error drops the
+  // push's second line (the visit's details) before the device gets it.
+  primeSubs([IOS('a'), IOS('b'), IOS('c')]);
+  const push = { title: 'x', body: 'detail' };
+  const bodies = [];
+  mockApnsSend.mockImplementation(async (_token, n) => { bodies.push(n.body); return { ok: true }; });
+  const steps = [() => true, () => { push.body = ''; return true; }, () => true];
+  await Push.sendToAdminUser('tech-1', push, { beforeHandoff: jest.fn(async () => steps.shift()()) });
+  expect(bodies).toEqual(['detail', '', '']);
+});
+
+test('the per-device form gets each device row, so a caller can word a push for each platform', async () => {
+  // tech-visit-notifications relies on this: a browser gets the first line only.
+  primeSubs([IOS('a'), { id: 'w', admin_user_id: 'tech-1', platform: null, device_token: null, subscription_data: '{}' }]);
+  const platforms = [];
+  const forDevice = jest.fn((_id, sub) => {
+    platforms.push(sub.platform);
+    return { title: 'x', body: sub.platform === 'ios' ? 'detail' : '' };
+  });
+  await Push.sendToAdminUser('tech-1', forDevice);
+  expect(platforms).toEqual(['ios', null]);
+  expect(mockApnsSend).toHaveBeenCalledWith('t-a', { title: 'x', body: 'detail' });
+});

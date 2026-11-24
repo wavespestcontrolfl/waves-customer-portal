@@ -419,6 +419,8 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   // The idempotent-replay lookup's answer (null = no earlier booking at this start), and the live visit behind it,
   // linked to another estimate: a replay check that filters by source_estimate_id finds nothing for this one.
   let replayExisting = null;
+  // The raw predicates the booking-row lookups were given (the replay lookup closes itself with `false`).
+  let bookingRawPredicates = [];
 
   function trxTable(table) {
     if (table === 'self_booked_appointments') {
@@ -430,7 +432,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         where: () => b,
         whereNot: () => b,
         // Effective-date day-cap predicate (SELF_BOOKING_EFFECTIVE_DATE_SQL)
-        whereRaw: () => b,
+        whereRaw: (sql) => { bookingRawPredicates.push(sql); return b; },
         whereExists: () => { boundToEstimate = true; return b; },
         modify(fn) { fn(b); return b; },
         count: () => { counting = true; return b; },
@@ -616,6 +618,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     capturedScheduledInsert = undefined;
     returnScheduledInsert = false;
     replayExisting = null;
+    bookingRawPredicates = [];
     fencedCustomer = { ...CUST };
     loadedCustomer = { ...CUST };
     mockOwnershipTables();
@@ -765,6 +768,198 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       await expect(createSelfBooking(firstVisitPayload({ estimateGuard: { estimateId: EST_ID } })))
         .resolves.toMatchObject({ ok: false, status: 409, code: 'ESTIMATE_CHANGED' });
       expect(capturedScheduledInsert).toBeUndefined();
+    });
+  });
+
+  // The lead assessment link's per-truck re-check (owner rule B, GATE_MULTI_TECH_CONFIRM): callbackVisit.slotGuard
+  // runs on the booking transaction itself, after its date lock and the idempotent replay, before the insert, given
+  // the zone the visit is stamped with (the customer's city). Two commits that rebuilt the same new far-south day are
+  // serialized by that lock; the second reads the first's stop.
+  describe('slot guard (callbackVisit.slotGuard)', () => {
+    const { occupancyLockKey } = require('../services/scheduling/occupancy')._internals;
+    const CITY_ZONE = { id: 'zone-1', zone_name: 'Sarasota / Central', cities: ['Osprey', CUST.city] };
+    beforeEach(() => {
+      const tables = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'service_zones' ? { select: () => Promise.resolve([CITY_ZONE]) } : tables(table)));
+    });
+    const assessment = (slotGuard) => callbackPayload({
+      source: 'inspection_link',
+      callbackVisit: {
+        serviceKey: 'lawn_inspection', serviceId: null, serviceType: 'Waves Assessment', durationMinutes: 60,
+        isCallback: false, dedupeLane: false, slotGuard,
+      },
+    });
+    function captureTrx() {
+      const seen = { trx: null, raws: [] };
+      const runTransaction = db.transaction.getMockImplementation();
+      db.transaction.mockImplementation((fn) => runTransaction((trx) => {
+        seen.trx = trx;
+        const raw = trx.raw;
+        trx.raw = jest.fn((...args) => { seen.raws.push(args); return raw(...args); });
+        return fn(trx);
+      }));
+      return seen;
+    }
+
+    test('false refuses as a taken slot before the insert, read on the booking transaction after its date lock', async () => {
+      const seen = captureTrx();
+      let dateLockedFirst = false;
+      const slotGuard = jest.fn(async () => {
+        dateLockedFirst = seen.raws.some(([sql, bindings]) => /pg_advisory_xact_lock/.test(sql) && bindings?.[1] === occupancyLockKey(SLOT_DATE));
+        return false;
+      });
+      await expect(createSelfBooking(assessment(slotGuard))).resolves.toMatchObject({ ok: false, status: 409, code: 'SLOT_TAKEN' });
+      expect(slotGuard).toHaveBeenCalledTimes(1);
+      expect(slotGuard.mock.calls[0]).toEqual([seen.trx, { zone: CITY_ZONE }]);
+      expect(dateLockedFirst).toBe(true);
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('true books as before, the visit stamped with the zone the guard was given', async () => {
+      const slotGuard = jest.fn().mockResolvedValue(true);
+      await expect(createSelfBooking(assessment(slotGuard))).rejects.toThrow(SENTINEL);
+      expect(slotGuard).toHaveBeenCalledTimes(1);
+      expect(slotGuard.mock.calls[0][1]).toEqual({ zone: CITY_ZONE });
+      expect(capturedScheduledInsert).toMatchObject({ zone: 'sarasota' });
+    });
+
+    // payload.commitGuard (internal callers: the new-home postcard page): the caller's re-check on the booking transaction,
+    // after the replay and the conflict checks, before the insert. A refusal answers 409 COMMIT_GUARD_REFUSED (never a
+    // thrown error: the mail route would answer 500).
+    test('commitGuard false refuses 409 COMMIT_GUARD_REFUSED before the insert, run on the booking transaction', async () => {
+      const seen = captureTrx();
+      const commitGuard = jest.fn().mockResolvedValue(false);
+      await expect(createSelfBooking({ ...assessment(jest.fn().mockResolvedValue(true)), commitGuard }))
+        .resolves.toMatchObject({ ok: false, status: 409, code: 'COMMIT_GUARD_REFUSED' });
+      expect(commitGuard).toHaveBeenCalledTimes(1);
+      // It is given what the booking is about to stamp (the pay-at-visit block's results), so the caller can check them.
+      expect(commitGuard.mock.calls[0]).toEqual([seen.trx, {
+        custId: expect.anything(), visitPrice: null, followUpVisitPrice: null, paymentPref: null, sourceEstimateId: null,
+      }]);
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('a commitGuard caller replays only a live visit of its own estimate: with no estimate linked the replay lookup is closed', async () => {
+      replayExisting = { id: 'sb-1', confirmation_code: 'WAV-1' };
+      await expect(createSelfBooking({ ...assessment(jest.fn().mockResolvedValue(true)), commitGuard: jest.fn().mockResolvedValue(true) }))
+        .resolves.toBeDefined();
+      expect(bookingRawPredicates).toContain('false');
+      // Without commitGuard the replay lookup is not closed (the /book funnel is unchanged).
+      bookingRawPredicates = [];
+      await createSelfBooking(assessment(jest.fn().mockResolvedValue(true)));
+      expect(bookingRawPredicates).not.toContain('false');
+    });
+
+    test('commitGuard true books as before; an idempotent replay skips it', async () => {
+      const commitGuard = jest.fn().mockResolvedValue(true);
+      await expect(createSelfBooking({ ...assessment(jest.fn().mockResolvedValue(true)), commitGuard })).rejects.toThrow(SENTINEL);
+      expect(commitGuard).toHaveBeenCalledTimes(1);
+      replayExisting = { id: 'sb-1', confirmation_code: 'WAV-1' };
+      commitGuard.mockClear();
+      await expect(createSelfBooking({ ...assessment(jest.fn().mockResolvedValue(true)), commitGuard }))
+        .resolves.toMatchObject({ ok: true, body: { replayed: true } });
+      expect(commitGuard).not.toHaveBeenCalled();
+    });
+
+    test('an idempotent replay returns the first booking without the re-check', async () => {
+      replayExisting = { id: 'sb-1', confirmation_code: 'WAV-1' };
+      const slotGuard = jest.fn().mockResolvedValue(false);
+      await expect(createSelfBooking(assessment(slotGuard))).resolves.toMatchObject({ ok: true, body: { replayed: true } });
+      expect(slotGuard).not.toHaveBeenCalled();
+    });
+
+    // callbackVisit.zoneAddress(customer) (the lead link), with the far-south funnel on (GATE_SOUTH_ZONE_DAY_FUNNEL):
+    // the zone resolves from the booking address as the link's list resolved it: its city alone decides (the zone that
+    // lists it, else the zone whose city its name contains), so the guard checks, and the visit is stamped with, the
+    // zone the list offered under. An address that resolves to no zone takes the customer's city, as a visit with no
+    // zone stamp is read later (pre-push P1s on 3e6fd14320 and 3b494d3581); this customer's city is Sarasota's. The
+    // link's function is given this booking's own customer row (pre-push P1 on 5fc5e4d648).
+    const { gates } = require('../config/feature-gates');
+    async function bookWithZoneAddress(zoneAddress, funnel) {
+      const VENICE_ZONE = { id: 'zone-2', zone_name: 'Venice / North Port', cities: ['Venice', 'North Port'] };
+      const tables = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'service_zones' ? { select: () => Promise.resolve([CITY_ZONE, VENICE_ZONE]) } : tables(table)));
+      const slotGuard = jest.fn().mockResolvedValue(true);
+      const payload = assessment(slotGuard);
+      const zoneAddressFor = jest.fn(typeof zoneAddress === 'function' ? zoneAddress : () => zoneAddress);
+      payload.callbackVisit.zoneAddress = zoneAddressFor;
+      const funnelGate = gates.southZoneDayFunnel;
+      gates.southZoneDayFunnel = funnel;
+      try {
+        await expect(createSelfBooking(payload)).rejects.toThrow(SENTINEL);
+      } finally {
+        gates.southZoneDayFunnel = funnelGate;
+      }
+      return { slotGuard, VENICE_ZONE, zoneAddressFor };
+    }
+    const NORTH_VENICE = { address: '9 Osprey Way, North Venice, FL, 34275', city: 'North Venice' };
+
+    test.each([
+      ['a city no zone lists: the zone city its name contains', NORTH_VENICE, 'venice'],
+      ['a listed city decides over the text', { address: '100 Venice Ave, Osprey, FL, 34229', city: 'Osprey' }, 'sarasota'],
+      ['a city no zone lists on a street named for one: the customer\'s city decides', { address: '100 Venice Ave, Wimauma, FL, 33598', city: 'Wimauma' }, 'sarasota'],
+    ])('zoneAddress, %s', async (_label, zoneAddress, stamped) => {
+      const { slotGuard, VENICE_ZONE, zoneAddressFor } = await bookWithZoneAddress(zoneAddress, true);
+      const zone = { venice: VENICE_ZONE, sarasota: CITY_ZONE }[stamped] || null;
+      expect(slotGuard.mock.calls[0][1]).toEqual({ zone });
+      expect(capturedScheduledInsert).toMatchObject({ zone: stamped });
+      expect(zoneAddressFor).toHaveBeenCalledWith(expect.objectContaining({ id: CUST.id, city: CUST.city }));
+    });
+
+    // The profile's own address (the link's function reads the row it is given): the booking's own customer row,
+    // which its lock fences, decides, never a copy the link read before (pre-push P1 on 5fc5e4d648).
+    test('zoneAddress from the booking\'s own row: that row\'s city decides', async () => {
+      loadedCustomer = { ...CUST, city: 'North Venice' };
+      fencedCustomer = { ...loadedCustomer };
+      const fromRow = (cust) => ({ address: `${cust.address_line1}, ${cust.city}, FL, ${cust.zip}`, city: cust.city });
+      const { slotGuard, VENICE_ZONE } = await bookWithZoneAddress(fromRow, true);
+      expect(slotGuard.mock.calls[0][1]).toEqual({ zone: VENICE_ZONE });
+      expect(capturedScheduledInsert).toMatchObject({ zone: 'venice' });
+    });
+
+    // Pre-push P1 on da74da7dc7: with the funnel off no list resolved a zone, so the booking keeps today's zone (the
+    // customer's city), and turning the funnel off restores the whole far-south change.
+    test('zoneAddress with the funnel off: not read, the customer\'s city decides the zone as before', async () => {
+      const { slotGuard, zoneAddressFor } = await bookWithZoneAddress(NORTH_VENICE, false);
+      expect(slotGuard.mock.calls[0][1]).toEqual({ zone: CITY_ZONE });
+      expect(capturedScheduledInsert).toMatchObject({ zone: 'sarasota' });
+      expect(zoneAddressFor).not.toHaveBeenCalled();
+    });
+
+    // Pre-push P1s on 7cdf34198a and 5fc5e4d648: the zone reads the customer's row (its city; for the lead link its
+    // whole address) before the fence's snapshot, so an edit between the two reads leaves the snapshot and the locked
+    // row agreeing, and the fingerprint passes. With the funnel on the locked row's address must be the one the zone
+    // read: the booking refuses as a changed account before the guard and the insert. With the funnel off the zone is
+    // only its stamp, and the booking goes on as before.
+    const REFUSED = expect.objectContaining({ ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY' });
+    test.each([
+      ['a city edit, the funnel on: refused as a changed account', { city: 'Venice' }, true, REFUSED, 0, undefined],
+      ['a street edit, the funnel on: refused as a changed account', { address_line1: '9 Osprey Way' }, true, REFUSED, 0, undefined],
+      ['a city edit, the funnel off: booked as before', { city: 'Venice' }, false, SENTINEL, 1, 'sarasota'],
+    ])('an address edit after the zone read (%s)', async (_label, edit, funnel, outcome, guardCalls, stamped) => {
+      const EDITED = { ...CUST, ...edit };
+      fencedCustomer = EDITED;
+      const tables = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const builder = tables(table);
+        if (table !== 'customers') return builder;
+        const first = builder.first;
+        // The pre-fence snapshot names its columns; the zone's read (the whole row) still sees the old city.
+        builder.first = jest.fn((...cols) => (cols.length ? Promise.resolve(EDITED) : first()));
+        return builder;
+      });
+      const slotGuard = jest.fn().mockResolvedValue(true);
+      const funnelGate = gates.southZoneDayFunnel;
+      gates.southZoneDayFunnel = funnel;
+      let result;
+      try {
+        result = await createSelfBooking(assessment(slotGuard)).catch((err) => err.message);
+      } finally {
+        gates.southZoneDayFunnel = funnelGate;
+      }
+      expect(result).toEqual(outcome);
+      expect(slotGuard).toHaveBeenCalledTimes(guardCalls);
+      expect(capturedScheduledInsert?.zone).toBe(stamped);
     });
   });
 
@@ -1382,6 +1577,57 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   // capacity proof, when every clash is a previous-side buffer against an
   // assigned committed stop — and verifyArrivalCapacity then enforces the
   // offer's own grace. The offer-side twin is book-arrival-grace-parity.test.js.
+  // GATE_TECH_SHIFT_HOURS at the commit: the visit's own block against the technician's shift
+  // (assertAssignableTechnician `hours`, on the booking transaction). The availability builder offers
+  // only hours inside the shift; the office may change the hours between the offer and the confirm.
+  // The offered visit is 09:00 to 10:00.
+  describe('technician shift hours at the commit', () => {
+    afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+    // The booking transaction, with the technician's set hours and no clock-in today.
+    function setShift(shift_start, shift_end) {
+      const reads = (rows) => {
+        const b = { then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject) };
+        for (const m of ['where', 'whereNot', 'whereNotNull', 'whereIn', 'whereRaw', 'groupBy', 'select', 'min', 'forShare']) b[m] = jest.fn(() => b);
+        return b;
+      };
+      const hours = reads([{ id: TECH_ID, shift_start, shift_end }]);
+      hours.first = jest.fn(async () => ({ id: TECH_ID, name: 'Tech One', employment_status: 'active', field_dispatchable: true }));
+      const clockIns = reads([]);
+      db.transaction = jest.fn(async (fn) => fn(Object.assign(
+        (table) => (table === 'technicians' ? hours : table === 'time_entries' ? clockIns : trxTable(table)),
+        { raw: jest.fn().mockResolvedValue(undefined), fn: { now: () => new Date() }, schema: { hasColumn: jest.fn().mockResolvedValue(true) } },
+      )));
+      return { hours, clockIns };
+    }
+    const confirm = () => createSelfBooking(confirmPayload(mintSlotOfferField(offerPayload())));
+
+    test('a visit inside the shift reaches the insert, at the shift start and the shift end', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const { hours } = setShift('09:00', '10:00');
+      await expect(confirm()).rejects.toThrow(SENTINEL);
+      expect(capturedScheduledInsert).toMatchObject({ technician_id: TECH_ID, window_start: '09:00', window_end: '10:00' });
+      expect(hours.whereIn).toHaveBeenCalledWith('id', [TECH_ID]);
+    });
+
+    test.each([
+      ['starts before the shift', '09:01', '18:00'],
+      ['ends after the shift end', '08:00', '09:59'],
+    ])('a visit that %s is refused as SLOT_TAKEN and nothing is written', async (_case, start, end) => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      setShift(start, end);
+      await expect(confirm()).resolves.toMatchObject({ ok: false, status: 409, code: 'SLOT_TAKEN', error: expect.stringMatching(/no longer available/i) });
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('gate off: the same visit reaches the insert and the hours are not read', async () => {
+      const { hours, clockIns } = setShift('09:01', '18:00');
+      await expect(confirm()).rejects.toThrow(SENTINEL);
+      expect(capturedScheduledInsert).toBeDefined();
+      expect(hours.whereNotNull).not.toHaveBeenCalled();
+      expect(clockIns.where).not.toHaveBeenCalled();
+    });
+  });
+
   describe('GATE_BOOK_ARRIVAL_GRACE commit gate', () => {
     const {
       BOOK_ARRIVAL_GRACE_OFFER_POLICY,

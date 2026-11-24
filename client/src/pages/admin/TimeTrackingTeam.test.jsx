@@ -149,6 +149,30 @@ describe('TimeTrackingPage pay-growth deep-link resolution', () => {
   });
 });
 
+describe('TimeTrackingPage protocol-audit deep-link resolution', () => {
+  it('opens for an admin and sends a technician (or no role) to Dashboard: it is an office-only tab', () => {
+    expect(resolveStaffTab('protocol-audit', null, 'admin')).toBe('protocol-audit');
+    expect(resolveStaffTab('protocol-audit', true, 'technician')).toBe('dashboard');
+    expect(resolveStaffTab('protocol-audit', true, null)).toBe('dashboard');
+  });
+});
+
+describe('TimeTrackingPage scoreboard deep-link resolution (GATE_TECH_REWARDS_SCOREBOARD)', () => {
+  it('opens only while the gate answers, waits while it is pending, and falls back when off', () => {
+    expect(resolveStaffTab('scoreboard', false, 'technician', false, 'off', 'ready')).toBe('scoreboard');
+    expect(resolveStaffTab('scoreboard', false, 'technician', false, 'off', 'loading')).toBeNull();
+    expect(resolveStaffTab('scoreboard', false, 'technician', false, 'off', 'off')).toBe('dashboard');
+    expect(resolveStaffTab('scoreboard', false, 'technician', false, 'off', 'error')).toBe('dashboard');
+    expect(resolveStaffTab('scoreboard', false, 'admin', false, 'off', 'off')).toBe('timesheet');
+    expect(resolveStaffTab('scoreboard', false, 'technician')).toBe('dashboard');
+  });
+
+  it('the admin preview is an office-only tab that does not depend on the gate', () => {
+    expect(resolveStaffTab('scoreboard-preview', null, 'admin', false, 'off', 'off')).toBe('scoreboard-preview');
+    expect(resolveStaffTab('scoreboard-preview', true, 'technician', false, 'off', 'ready')).toBe('dashboard');
+  });
+});
+
 describe('TimeTrackingPage payroll deep-link resolution', () => {
   it('withholds the payroll tab while the admin status probe is pending, then resolves it', () => {
     expect(resolveStaffTab('payroll', false, 'admin', null)).toBeNull();

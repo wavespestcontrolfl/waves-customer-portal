@@ -112,7 +112,7 @@ const AUTO_PRIMARY_COLUMNS = new Set([
 // The automatic neighborhood lookup (neighborhood-access.js) stamps these
 // with source 'county'; any other source is an office entry.
 const AUTO_NEIGHBORHOOD_COLUMNS = ['neighborhood_id', 'neighborhood_source', 'county_subdivision', 'neighborhood_checked_at', 'neighborhood_naming'];
-// The county meter job (reclaimed-water-meters.js, GATE_LAWN_RECLAIMED_HALF_N) stamps these when it matches the property to a reclaimed meter.
+// The county meter job (reclaimed-water-meters.js) stamps these when it matches the property to a reclaimed meter.
 // Derived like the neighborhood stamp: while the source is 'county_meter', or NULL (the job's check time on a property at no meter). An office or
 // customer answer is a person's entry, real history.
 const AUTO_RECLAIMED_COLUMNS = ['reclaimed_water', 'reclaimed_water_source', 'reclaimed_water_checked_at'];
@@ -297,10 +297,15 @@ async function customerSelfReferenceColumns(conn) {
   return selfRefCache;
 }
 
-// nonFkMergeRewrites keys that are a premise about the two ADDRESSES, not a
-// row the loser holds (the sprinkler "home changed" stamp lands on the
-// winner). Everything else it names is history.
-const NON_HISTORY_REWRITE_KEYS = new Set(['property_preferences.irrigation_home_changed_at']);
+// nonFkMergeRewrites keys that describe the WINNER's own row, not a row the
+// loser holds: the sprinkler "home changed" stamp (a premise about the two
+// addresses), and the winner's own sprinkler timer that a merge would clear
+// because the address backfill changes its home. Deleting the duplicate
+// instead touches neither. Everything else it names is history.
+const NON_HISTORY_REWRITE_KEYS = new Set([
+  'property_preferences.irrigation_home_changed_at',
+  'property_preferences.kept_customer_sprinkler_timer_cleared',
+]);
 
 async function readAccountMembers(loser, conn) {
   if (!loser.account_id || loser.is_primary_profile !== true) return [];

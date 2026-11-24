@@ -224,6 +224,70 @@ function smsOrigin(threadKey) {
   };
 }
 
+// Who texted, for the owed-quote bell: the sender's name when one is on file,
+// else the last four digits. The name comes from the codebase's own helper
+// (admin-alert-names nameOnFileForPhone, the way the inbound-text bell names a
+// texter, owner 2026-11-04): customers by their own phone only (a match on a
+// service-contact number would name the account holder, not the texter), then
+// estimates, then leads; null when two people share the number. The link is the triggering
+// text's Twilio SID alone (CommunicationsPageV2 opens the thread that holds
+// that message): never a phone number or a customer id, which access logs and
+// referrers would carry. Fail-soft and bounded: the Twilio webhook awaits this,
+// so every failure returns the fallback, each lookup has its own deadline (a
+// slow name only changes the label, a slow SID only drops the anchor), and a
+// log line never carries err.message (a knex message echoes the bound phone).
+const SENDER_LOOKUP_TIMEOUT_MS = 1000;
+const errorCode = (err) => (err && (err.code || err.name)) || 'error';
+
+async function triggerTextSid(triggerSmsLogId) {
+  if (!triggerSmsLogId) return null;
+  try {
+    const db = require('../../models/db');
+    const row = await db('sms_log')
+      .where({ id: triggerSmsLogId })
+      .select('twilio_sid')
+      .timeout(SENDER_LOOKUP_TIMEOUT_MS, { cancel: true })
+      .first();
+    return row?.twilio_sid ? String(row.twilio_sid) : null;
+  } catch (err) {
+    logger.warn(`[estimator-sms] trigger text lookup failed (link without anchor): ${errorCode(err)}`);
+    return null;
+  }
+}
+
+async function senderNameOnFile(phone) {
+  try {
+    const db = require('../../models/db');
+    const { nameOnFileForPhone } = require('../admin-alert-names');
+    const name = await nameOnFileForPhone((table) => db(table).timeout(SENDER_LOOKUP_TIMEOUT_MS, { cancel: true }), phone);
+    return typeof name === 'string' && name.trim() ? name.trim() : null;
+  } catch (err) {
+    logger.warn(`[estimator-sms] sender name lookup failed (using phone label): ${errorCode(err)}`);
+    return null;
+  }
+}
+
+// Each lookup gets its OWN deadline (the knex timeouts bound the queries; this
+// also bounds a stuck pool wait). The timer is always cleared.
+function withDeadline(promise, fallback) {
+  let timer;
+  const guard = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(fallback), SENDER_LOOKUP_TIMEOUT_MS + 500);
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
+
+async function threadSenderInfo(phone, digits, triggerSmsLogId) {
+  const [name, sid] = await Promise.all([
+    withDeadline(senderNameOnFile(phone), null),
+    withDeadline(triggerTextSid(triggerSmsLogId), null),
+  ]);
+  return {
+    label: name || `Texter …${digits.slice(-4)}`,
+    link: sid ? `/admin/communications?message=${encodeURIComponent(sid)}` : '/admin/communications',
+  };
+}
+
 // The heavy detached phase: context build → shared pipeline. Non-throwing.
 // groundedCustomerId (scope guards only, else null): the customer the triage
 // grounding matched by address/sender when it matched exactly one — rides
@@ -471,6 +535,7 @@ async function startSmsThreadDraft({
       // failed insert means NO durable artifact exists: report not-started
       // so callers keep their own fallback (lead-intake keeps the shell).
       const { notify } = require('./index');
+      const sender = await threadSenderInfo(phone, digits, triggerSmsLogId);
       const belled = await notify({
         call: null,
         context: null,
@@ -478,7 +543,8 @@ async function startSmsThreadDraft({
         quotePromised: true,
         threadKey: origin.threadKey,
         title: origin.strings.redTitle,
-        body: 'A customer text is asking for a quote. The estimator engine is drafting now — if no draft notification follows, review the thread and send the estimate manually.',
+        body: `${sender.label} asked for a quote by text. The estimator engine is drafting now — if no draft notification follows, review the thread and send the estimate manually.`,
+        link: sender.link,
       });
       if (!belled) {
         result.skipped = 'durable_bell_failed';

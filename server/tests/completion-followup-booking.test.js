@@ -24,6 +24,7 @@ jest.mock('../services/scheduling/window-rules', () => ({
   // The real validator — the on-the-hour invariant is what's under test.
   assertAdminAppointmentWindow: jest.requireActual('../services/scheduling/window-rules').assertAdminAppointmentWindow,
   slotOverlapWarning: (date) => `overlap on ${date}`,
+  rowBlockMinutes: jest.requireActual('../services/scheduling/window-rules').rowBlockMinutes,
   ADMIN_OCCUPANCY_EXCLUDE_STATUSES: ['cancelled', 'completed', 'skipped', 'no_show'],
 }));
 jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn(async () => []) }));
@@ -161,13 +162,15 @@ test('the write goes through the booking contract with the caller\'s source, the
 test('an inherited technician is checked with workDays (an off day lands the follow-up unassigned); an admin override is not', async () => {
   install();
   await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, dryRun: true, isAdmin: true });
-  expect(assertAssignableTechnician).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ workDays: true }));
+  // `hours` (GATE_TECH_SHIFT_HOURS) follows workDays: the follow-up's own block, 09:00 to 10:00.
+  expect(assertAssignableTechnician).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ workDays: true, hours: { startMin: 540, endMin: 600 } }));
   assertAssignableTechnician.mockRejectedValueOnce(Object.assign(new Error('off day'), { code: 'TECH_NOT_ASSIGNABLE', offDay: true }));
   const out = await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, dryRun: true, isAdmin: true });
   expect(out.body.wouldBook.technicianId).toBeNull();
 
   await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, dryRun: true, isAdmin: true, technicianId: 'tech-9' });
   expect(assertAssignableTechnician).toHaveBeenLastCalledWith('tech-9', expect.objectContaining({ workDays: false }));
+  expect(assertAssignableTechnician.mock.calls.at(-1)[1].hours).toBeUndefined();
 });
 
 test('the write checks an inherited technician with workDays, and an off day books the follow-up unassigned', async () => {
@@ -175,8 +178,21 @@ test('the write checks an inherited technician with workDays, and an off day boo
   assertAssignableTechnician.mockRejectedValueOnce(Object.assign(new Error('off day'), { code: 'TECH_NOT_ASSIGNABLE', offDay: true }));
   const out = await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, isAdmin: false });
   expect(out.status).toBe(200);
-  expect(assertAssignableTechnician).toHaveBeenCalledWith('tech-1', expect.objectContaining({ workDays: true }));
+  expect(assertAssignableTechnician).toHaveBeenCalledWith('tech-1', expect.objectContaining({ workDays: true, hours: { startMin: 540, endMin: 600 } }));
   expect(writes[0].row.technician_id).toBeNull();
+});
+
+test('GATE_TECH_SHIFT_HOURS: a shift that does not hold the follow-up books it unassigned; an admin override is not checked on the write', async () => {
+  const { writes } = install();
+  assertAssignableTechnician.mockRejectedValueOnce(Object.assign(new Error('outside the shift'), { code: 'TECH_NOT_ASSIGNABLE', outsideShift: true }));
+  const out = await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, isAdmin: false });
+  expect(out.status).toBe(200);
+  expect(writes[0].row.technician_id).toBeNull();
+
+  assertAssignableTechnician.mockClear();
+  await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, isAdmin: true, technicianId: 'tech-9' });
+  expect(assertAssignableTechnician.mock.calls.at(-1)).toEqual(['tech-9', expect.objectContaining({ workDays: false })]);
+  expect(assertAssignableTechnician.mock.calls.at(-1)[1].hours).toBeUndefined();
 });
 
 test('expectedTechnicianId refuses when the technician resolved under the lock differs from the approval', async () => {

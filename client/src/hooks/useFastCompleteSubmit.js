@@ -148,6 +148,10 @@ export default function useFastCompleteSubmit({
   const [done, setDone] = useState(null);
   const [prompt, setPrompt] = useState(null);
   const [storageWarning, setStorageWarning] = useState('');
+  // A correctable rejection whose saved copy this device could not clear: the
+  // copy still stands until a send or a discard removes it. A sheet with no
+  // form to fix (Today's off-route saved attempt) offers Discard for it.
+  const [rejectedCopy, setRejectedCopy] = useState(false);
   // Bumped by Try again on an unreadable saved attempt: the read runs again.
   const [readTick, setReadTick] = useState(0);
 
@@ -172,6 +176,7 @@ export default function useFastCompleteSubmit({
     setDone(null);
     setPrompt(null);
     setStorageWarning('');
+    setRejectedCopy(false);
 
     if (!scope.serviceId || !scope.operatorId) {
       // Existing callers opt into durable recovery by supplying both IDs.
@@ -313,6 +318,7 @@ export default function useFastCompleteSubmit({
     if (!sameScope(scopeRef.current, scope)) return;
     if (outcome === 'correctable' && !removed && persistedBodyRef.current) {
       rejectedBodyRef.current = persistedBodyRef.current;
+      setRejectedCopy(true);
     }
     // A request refused for good whose saved copy still stands stays in hand:
     // the saved-attempt view says so and offers Discard, so a later scan never
@@ -383,6 +389,7 @@ export default function useFastCompleteSubmit({
         }
         rejectedBodyRef.current = null;
         persistedBodyRef.current = null;
+        setRejectedCopy(false);
       }
       // Persist the exact held body, including photos, before network.
       const persistence = await persistPrepared(scope, body, heldSummary);
@@ -450,7 +457,9 @@ export default function useFastCompleteSubmit({
       pendingSummaryRef.current = '';
       keyRef.current = genIdempotencyKey();
       persistedBodyRef.current = null;
+      rejectedBodyRef.current = null;
       reloadedRefusalRef.current = false;
+      setRejectedCopy(false);
       setRestored(false);
       setStorageWarning((warning) => (warning === KEPT_COPY_NOTICE ? '' : warning));
       if (!refused) {
@@ -467,7 +476,7 @@ export default function useFastCompleteSubmit({
   }, [clearStored, failure]);
 
   return {
-    recovering, restored, submitting, error, errorCode, failure, done, prompt, storageWarning,
+    recovering, restored, submitting, error, errorCode, failure, done, prompt, storageWarning, rejectedCopy,
     submit, retry, confirm, discard, dismissPrompt: discard,
     recheck: () => setReadTick((tick) => tick + 1),
     pendingSummary: pendingSummaryRef.current,

@@ -1,6 +1,6 @@
-// GATE_MISSED_CALL_ALERT_DETAIL: the missed-call bell/push body names the
-// line, the call length and a customer's next visit. Off = today's sentence,
-// byte for byte, in both the payload and the copy. Admin copy only.
+// The missed-call bell/push body names the line, the call length and a
+// customer's next visit; a call with none of them keeps today's sentence.
+// Admin copy only.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
@@ -8,7 +8,6 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 jest.mock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn() }));
 
 const db = require('../models/db');
-const { isEnabled } = require('../config/feature-gates');
 const {
   detailPayload, formatMissedCallBody, shortLineLabel, visitDayLabel, nextVisitDate,
 } = require('../services/missed-call-alert-detail');
@@ -26,7 +25,6 @@ function visitQuery(result) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  isEnabled.mockImplementation(() => false);
 });
 
 describe('copy', () => {
@@ -83,13 +81,7 @@ describe('copy', () => {
 describe('payload', () => {
   const row = { id: 'call-1', customer_id: 'cust-1', duration_seconds: 12, metadata: { location: 'Parrish (Pest)' } };
 
-  test('gate off adds nothing and runs no query', async () => {
-    expect(await detailPayload(row)).toEqual({});
-    expect(db).not.toHaveBeenCalled();
-  });
-
-  test('gate on adds line, seconds and the next visit', async () => {
-    isEnabled.mockImplementation((g) => g === 'missedCallAlertDetail');
+  test('adds line, seconds and the next visit', async () => {
     const chain = visitQuery({ scheduled_date: new Date('2026-10-22T00:00:00Z') });
     expect(await detailPayload(row, new Date('2026-10-20T15:00:00Z'))).toEqual({
       line: 'Parrish (Pest)', durationSeconds: 12, nextVisitDate: '2026-10-22',
@@ -102,14 +94,12 @@ describe('payload', () => {
   });
 
   test('an unknown caller has no visit lookup', async () => {
-    isEnabled.mockImplementation((g) => g === 'missedCallAlertDetail');
     expect(await detailPayload({ id: 'c', customer_id: null, duration_seconds: 20, metadata: { location: 'unknown' } }))
       .toEqual({ durationSeconds: 20 });
     expect(db).not.toHaveBeenCalled();
   });
 
   test('a failed or empty visit lookup leaves the visit out and does not throw', async () => {
-    isEnabled.mockImplementation((g) => g === 'missedCallAlertDetail');
     visitQuery(new Error('db down'));
     expect(await nextVisitDate('cust-1')).toBeNull();
     visitQuery(undefined);
@@ -117,7 +107,6 @@ describe('payload', () => {
   });
 
   test('a stored 0 or unknown duration is left out; a recording length fills in', async () => {
-    isEnabled.mockImplementation((g) => g === 'missedCallAlertDetail');
     expect(await detailPayload({ customer_id: null, duration_seconds: 0, metadata: {} })).toEqual({});
     expect(await detailPayload({ customer_id: null, duration_seconds: null, metadata: {} })).toEqual({});
     expect(await detailPayload({ customer_id: null, duration_seconds: 0, recording_duration_seconds: 9, metadata: {} }))
@@ -125,7 +114,6 @@ describe('payload', () => {
   });
 
   test('metadata may arrive as a JSON string', async () => {
-    isEnabled.mockImplementation((g) => g === 'missedCallAlertDetail');
     expect(await detailPayload({ customer_id: null, duration_seconds: null, metadata: '{"location":"GBP — Venice"}' }))
       .toEqual({ line: 'Venice' });
   });

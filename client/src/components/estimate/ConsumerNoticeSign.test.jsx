@@ -97,6 +97,28 @@ describe('ConsumerNoticeSign', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Read and sign the notice' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('We couldn’t prepare the notice online. Please call us and we will finish it with you.');
   });
+
+  it('a refused plan quote\'s 409 goes to the page (onRefusal), and the card steps aside with no error (codex pre-push P1)', async () => {
+    const refused = { error: 'This estimate changed since it was created — please go back to your portal for a current price.', code: 'PLAN_START_STATE_CHANGED' };
+    vi.stubGlobal('fetch', vi.fn(async () => json(refused, 409)));
+    const onRefusal = vi.fn(() => true);
+    render(<ConsumerNoticeSign token="t1" consumerNotice={{ state: 'none', canSign: true }} onRefusal={onRefusal} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Read and sign the notice' }));
+    await waitFor(() => expect(onRefusal).toHaveBeenCalledWith(409, refused));
+    await waitFor(() => expect(screen.queryByTestId('consumer-notice-sign')).not.toBeInTheDocument());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it('a 409 the page does not take keeps the card and its own wording', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'Your consumer notice is already signed. Please reload the page.', code: 'already_signed' }, 409)));
+    const onRefusal = vi.fn(() => false);
+    render(<ConsumerNoticeSign token="t1" consumerNotice={{ state: 'none', canSign: true }} onRefusal={onRefusal} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Read and sign the notice' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Your consumer notice is already signed. Please reload the page.');
+    expect(onRefusal).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Read and sign the notice' })).toBeEnabled();
+  });
 });
 
 describe('ConsumerNoticeHint', () => {

@@ -58,7 +58,7 @@ postgres('moving: apply on accept (live Postgres)', () => {
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
-    for (const key of ['GATE_MOVING_FLOW', 'GATE_MOVING_ESTIMATE', 'GATE_MOVING_APPLY', 'GATE_MOVING_AUTO_APPLY', 'GATE_CUSTOMER_PROPERTIES']) OLD_ENV[key] = process.env[key];
+    for (const key of ['GATE_MOVING_ESTIMATE', 'GATE_MOVING_AUTO_APPLY', 'GATE_CUSTOMER_PROPERTIES']) OLD_ENV[key] = process.env[key];
     // Three connections: the test's transaction, the job's move fence, and a rival fence holder.
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 3 } });
     Moves = require('../services/customer-moves');
@@ -120,9 +120,7 @@ postgres('moving: apply on accept (live Postgres)', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_MOVING_FLOW = 'true';
     process.env.GATE_MOVING_ESTIMATE = 'true';
-    process.env.GATE_MOVING_APPLY = 'true';
     process.env.GATE_MOVING_AUTO_APPLY = 'true';
     process.env.GATE_CUSTOMER_PROPERTIES = 'true';
     trx = await database.transaction();
@@ -142,12 +140,9 @@ postgres('moving: apply on accept (live Postgres)', () => {
   const moveRow = (id) => trx('customer_moves').where({ id }).first();
   const autoApplyAlerts = () => Notifications.notifyAdmin.mock.calls.filter(([, , , opts]) => opts?.metadata?.kind === 'moving_auto_apply');
 
-  test('off unless GATE_MOVING_AUTO_APPLY and GATE_MOVING_APPLY are both on', async () => {
+  test('off unless GATE_MOVING_AUTO_APPLY is on', async () => {
     const s = await seed();
     delete process.env.GATE_MOVING_AUTO_APPLY;
-    expect(await Moves.autoApplyAcceptedMoves()).toEqual({ skipped: true });
-    process.env.GATE_MOVING_AUTO_APPLY = 'true';
-    process.env.GATE_MOVING_APPLY = 'false';
     expect(await Moves.autoApplyAcceptedMoves()).toEqual({ skipped: true });
     expect((await moveRow(s.move.id)).status).toBe('submitted');
     expect(await statusOf(s.pestAfter)).toBe('pending');

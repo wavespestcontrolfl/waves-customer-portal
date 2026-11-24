@@ -24,7 +24,8 @@ const lines = (grass, month) => visit(grass, month).secondary.split('\n');
 const lineOf = (grass, month, name) => lines(grass, month).find((l) => l.startsWith(`${name} — `));
 
 const ACELEPRYN_LINE = 'Acelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application';
-const TALAK_LINE = 'Atticus Talak 7.9 F — bifenthrin for caterpillars, second product if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours';
+// The recipe names the house bifenthrin LESCO Crosscheck Plus since owner ruling 2026-11-18; the staged rows (N.TAL) are relinked by migration 20261119010000.
+const TALAK_LINE = 'LESCO Crosscheck Plus — bifenthrin for caterpillars, second product if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours';
 const DISPATCH_LINE = 'Dispatch Sprayable Wetting Agent — dry spots only, no water-in needed';
 const CELSIUS_LINE = 'Celsius WG — weed spots, 0.085 oz per 1,000 sq ft, alone: no Certainty and no surfactant (summer), mornings, watered turf only';
 
@@ -49,11 +50,11 @@ describe('spot lines: the recipe', () => {
 
   test.each(TRACKS)('%s: Talak for caterpillars in October and November (no chinch wording), and July keeps its own chinch line', (grass) => {
     for (const month of ['Oct', 'Nov']) {
-      expect(lineOf(grass, month, 'Atticus Talak 7.9 F')).toBe(TALAK_LINE);
+      expect(lineOf(grass, month, 'LESCO Crosscheck Plus')).toBe(TALAK_LINE);
       expect(TALAK_LINE).not.toMatch(/chinch|Arena/i);
     }
-    expect(lineOf(grass, 'Jul', 'Atticus Talak 7.9 F')).toBe('Atticus Talak 7.9 F — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours');
-    for (const month of ['Aug', 'Sep', 'Dec', 'Jan']) expect(lineOf(grass, month, 'Atticus Talak 7.9 F')).toBeUndefined();
+    expect(lineOf(grass, 'Jul', 'LESCO Crosscheck Plus')).toBe('LESCO Crosscheck Plus — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours');
+    for (const month of ['Aug', 'Sep', 'Dec', 'Jan']) expect(lineOf(grass, month, 'LESCO Crosscheck Plus')).toBeUndefined();
   });
 
   test.each(TRACKS)('%s: dry spots March through October, the Dispatch line word for word as the May line', (grass) => {

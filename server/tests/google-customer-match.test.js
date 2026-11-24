@@ -20,14 +20,20 @@ mockDb.fn = { now: () => 'NOW()' };
 
 const mockCollectCustomers = jest.fn();
 const mockCollectLeads = jest.fn();
+const mockStaleLeads = jest.fn();
+const mockStaleCustomers = jest.fn();
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: (_n, fn) => fn() }));
+// The sync collects with partition: true; an array a test returns stands for the kept members.
+const mockAsPartition = (opts, out) => (opts && opts.partition && Array.isArray(out) ? { kept: out, dropped: [], testKeys: [] } : out);
 jest.mock('../services/ads/meta-audiences', () => ({
   _private: {
-    collectCustomerMembers: (...a) => mockCollectCustomers(...a),
-    collectUnbookedLeadMembers: (...a) => mockCollectLeads(...a),
+    collectCustomerMembers: async (...a) => mockAsPartition(a[0], await mockCollectCustomers(...a)),
+    collectUnbookedLeadMembers: async (...a) => mockAsPartition(a[0], await mockCollectLeads(...a)),
+    staleLeadLeavingKeys: (...a) => mockStaleLeads(...a),
+    staleCustomerLeavingKeys: (...a) => mockStaleCustomers(...a),
   },
 }));
 // Faithful Google-formatting helpers so the hashing assertions are meaningful:
@@ -64,6 +70,8 @@ beforeEach(() => {
   inserts.length = 0;
   mockCollectCustomers.mockReset();
   mockCollectLeads.mockReset();
+  mockStaleLeads.mockReset().mockResolvedValue({ testKeys: [], optOutKeys: [] });
+  mockStaleCustomers.mockReset().mockResolvedValue({ testKeys: [], optOutKeys: [] });
   process.env = { ...ENV };
   for (const k of ['GOOGLE_ADS_DATA_MANAGER_SERVICE_ACCOUNT_JSON', 'GOOGLE_SERVICE_ACCOUNT_JSON',
     'GOOGLE_ADS_DATA_MANAGER_CUSTOMER_ID', 'GOOGLE_ADS_CUSTOMER_ID', 'GOOGLE_ADS_DATA_MANAGER_LOGIN_CUSTOMER_ID',
@@ -451,5 +459,263 @@ describe('consent (r2)', () => {
     const r = await GCM.syncAudience('unbooked_leads', {});
     expect(r.consentRemovals).toBe(1);
     expect(r.toRemove).toBe(1);
+  });
+
+  test('a lead opted out through its linked customer leaves even beside a current member', async () => {
+    configure();
+    // The collector names l1 in optOutKeys: its customer opted out. l2 shares its phone.
+    mockCollectLeads.mockResolvedValue({
+      kept: [{ key: 'lead:l2', email: 'house@x.com', phone: '9415550123' }], dropped: [], testKeys: [], optOutKeys: ['lead:l1'],
+    });
+    stateRow = { member_keys: [
+      { k: 'lead:l1', d: ['h:lead@x.com', 'h:+19415550123'], a: 'h:jo|h:lee|US|34202' },
+      { k: 'lead:l2', d: ['h:house@x.com', 'h:+19415550123'] },
+    ] };
+    const r = await GCM.syncAudience('unbooked_leads', {});
+    expect(r).toMatchObject({ toRemove: 1, retained: 0, consentRemovals: 1, testRemovals: 0, deferredReAdds: 1 });
+  });
+
+  test('a stored lead no longer collected leaves on its linked customer opt-out too, even beside a current member', async () => {
+    configure();
+    // l1 closed or aged out, so the collector no longer sees it; its customer opted out.
+    mockCollectLeads.mockResolvedValue({
+      kept: [{ key: 'lead:l2', email: 'house@x.com', phone: '9415550123' }], dropped: [], testKeys: [], optOutKeys: [],
+    });
+    mockStaleLeads.mockResolvedValue({ testKeys: [], optOutKeys: ['lead:l1'] });
+    const l1 = { k: 'lead:l1', d: ['h:lead@x.com', 'h:+19415550123'], a: 'h:jo|h:lee|US|34202' };
+    stateRow = { member_keys: [l1, { k: 'lead:l2', d: ['h:house@x.com', 'h:+19415550123'] }] };
+    const r = await GCM.syncAudience('unbooked_leads', {});
+    expect(r).toMatchObject({ toRemove: 1, retained: 0, consentRemovals: 1, testRemovals: 0, deferredReAdds: 1 });
+    // The hook reads the stored rows and the current members.
+    const [priorArg, membersArg] = mockStaleLeads.mock.calls[0];
+    expect(priorArg.map((e) => e.k)).toEqual(['lead:l1', 'lead:l2']);
+    expect(membersArg.map((m) => m.key)).toEqual(['lead:l2']);
+    expect(mockStaleCustomers).not.toHaveBeenCalled();
+  });
+
+  test('a stored test customer no longer collected leaves the customers list as a test record, even beside a current member', async () => {
+    configure();
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'real@x.com', phone: '9415550140' }]);
+    mockStaleCustomers.mockResolvedValue({ testKeys: ['customer:c9'], optOutKeys: [] });
+    stateRow = { member_keys: [
+      { k: 'customer:c9', d: ['h:tester@x.com', 'h:+19415550140'] },
+      { k: 'customer:c1', d: ['h:real@x.com', 'h:+19415550140'] },
+    ] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r).toMatchObject({ toRemove: 1, retained: 0, testRemovals: 1, consentRemovals: 0, deferredReAdds: 1 });
+    expect(mockStaleCustomers.mock.calls[0][1].map((m) => m.key)).toEqual(['customer:c1']);
+    expect(mockStaleLeads).not.toHaveBeenCalled();
+  });
+});
+
+describe('name + ZIP address on the Google list (2b)', () => {
+  const NAMED = { key: 'customer:c1', email: 'c1@x.com', phone: '9412975749', firstName: 'Pat', lastName: "O'Neil", zip: '34219-1234' };
+  const ADDR = { givenName: 'h:pat', familyName: 'h:oneil', regionCode: 'US', postalCode: '34219' };
+  const SIG = 'h:pat|h:oneil|US|34219';
+
+  test('toUserData rebuilds the address from the stored signature; no signature, no address', () => {
+    expect(GCM._private.addressSig(ADDR)).toBe(SIG);
+    expect(toUserData(['h:e', 'h:p'], SIG).userIdentifiers).toEqual([{ emailAddress: 'h:e' }, { phoneNumber: 'h:p' }, { address: ADDR }]);
+    expect(toUserData(['h:e', 'h:p']).userIdentifiers).toHaveLength(2);
+  });
+
+  test('addressFor: hashed names + plain regionCode/postalCode; null without both names and a 5-digit ZIP', () => {
+    const { addressFor } = GCM._private;
+    expect(addressFor(NAMED)).toEqual(ADDR);
+    expect(addressFor({ ...NAMED, lastName: null })).toBeNull();
+    expect(addressFor({ ...NAMED, firstName: '' })).toBeNull();
+    expect(addressFor({ ...NAMED, zip: '342' })).toBeNull();
+    expect(addressFor({ email: 'a@x.com' })).toBeNull();
+  });
+
+  test('live ingest carries addressInfo for a named member and omits it for an unnamed one', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ requestId: 'req-add' });
+    mockCollectCustomers.mockResolvedValue([NAMED, { key: 'customer:c2', email: 'c2@x.com', phone: null }]);
+    await GCM.syncAudience('customers', {});
+    const call = global.fetch.mock.calls.find((c) => /audienceMembers:ingest$/.test(c[0]));
+    const members = JSON.parse(call[1].body).audienceMembers;
+    expect(members[0].userData.userIdentifiers).toContainEqual({ address: ADDR });
+    expect(members[1].userData.userIdentifiers.some((u) => u.address)).toBe(false);
+    // state and the pending op keep only the signature, never a plaintext name
+    const saved = inserts.find((i) => i.table === 'ad_audience_syncs');
+    expect(JSON.parse(saved.row.member_keys)[0].a).toBe(SIG);
+    expect(JSON.parse(saved.row.pending)[0].members[0].a).toBe(SIG);
+    expect(JSON.stringify(saved.row)).not.toMatch(/Pat|O'Neil/);
+  });
+
+  test('one-time upgrade: a member stored without an address is re-ingested once, not removed', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ requestId: 'req-up' });
+    mockCollectCustomers.mockResolvedValue([NAMED]);
+    stateRow = { member_keys: [{ k: 'customer:c1', d: ['h:c1@x.com', 'h:+19412975749'] }] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toEnrich).toBe(1);
+    expect(r.toAdd).toBe(0);
+    expect(r.toRemove).toBe(0);
+    expect(global.fetch.mock.calls.some((c) => /audienceMembers:remove$/.test(c[0]))).toBe(false);
+  });
+
+  test('already-upgraded member is not re-sent', async () => {
+    configure();
+    mockCollectCustomers.mockResolvedValue([NAMED]);
+    stateRow = { member_keys: [{ k: 'customer:c1', d: ['h:c1@x.com', 'h:+19412975749'], a: SIG }] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toAdd + r.toEnrich + r.toRemove).toBe(0);
+  });
+
+  test('a sent address stays the row\'s: an edited or cleared name is not re-sent, the stored one is kept', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({});
+    mockCollectCustomers.mockResolvedValue([
+      { ...NAMED, lastName: 'Smith' },                                      // name edited since the upload
+      { key: 'customer:c2', email: 'c2@x.com', phone: null, firstName: null }, // name cleared since
+    ]);
+    stateRow = { member_keys: [
+      { k: 'customer:c1', d: ['h:c1@x.com', 'h:+19412975749'], a: SIG },
+      { k: 'customer:c2', d: ['h:c2@x.com', ''], a: 'h:sam|h:lee|US|34202' },
+    ] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toAdd + r.toEnrich + r.toRemove).toBe(0);
+    const persisted = JSON.parse(inserts.find((i) => i.table === 'ad_audience_syncs').row.member_keys);
+    expect(persisted.map((e) => e.a)).toEqual([SIG, 'h:sam|h:lee|US|34202']);
+  });
+
+  test('a removal carries the address the row was added with; a row stored before addresses by email/phone only', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ requestId: 'req-rm' });
+    mockCollectCustomers.mockResolvedValue([]);
+    stateRow = { member_keys: [
+      { k: 'customer:gone', d: ['h:gone@x.com', ''], a: SIG },
+      { k: 'customer:old', d: ['h:old@x.com', ''] },
+    ] };
+    await GCM.syncAudience('customers', {});
+    const call = global.fetch.mock.calls.find((c) => /audienceMembers:remove$/.test(c[0]));
+    expect(JSON.parse(call[1].body).audienceMembers.map((m) => m.userData.userIdentifiers)).toEqual([
+      [{ emailAddress: 'h:gone@x.com' }, { address: ADDR }],
+      [{ emailAddress: 'h:old@x.com' }],
+    ]);
+  });
+
+  test('a failed enrichment keeps the row, so a later opt-out still removes it with the address it sent', async () => {
+    configure({ allow: true });
+    tableData = { email_suppressions: [{ email: 'l1@x.com' }] };
+    mockCollectLeads.mockResolvedValue([]); // opted out: no longer collected
+    const row = { k: 'lead:l1', d: ['h:l1@x.com', ''], a: SIG };
+    stateRow = { member_keys: [row], pending: [{ requestId: 'req-e', op: 'ingest', at: recentIso(), members: [row] }] };
+    global.fetch = routedFetch({
+      'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'FAILED' }] },
+      'audienceMembers:remove': { requestId: 'req-rm' },
+    });
+    try {
+      const r = await GCM.syncAudience('unbooked_leads', {});
+      expect(r.consentRemovals).toBe(1);
+      expect(r.removed).toBe(1);
+      const call = global.fetch.mock.calls.find((c) => /audienceMembers:remove$/.test(c[0]));
+      expect(JSON.parse(call[1].body).audienceMembers[0].userData.userIdentifiers)
+        .toEqual([{ emailAddress: 'h:l1@x.com' }, { address: ADDR }]);
+    } finally { tableData = {}; }
+  });
+
+  test('a failed ingest of a current member is re-sent with the keys it stored, then stored without the flag', async () => {
+    configure({ allow: true });
+    mockCollectCustomers.mockResolvedValue([{ ...NAMED, lastName: 'Smith' }]); // edited since the failed send
+    const row = { k: 'customer:c1', d: ['h:c1@x.com', 'h:+19412975749'], a: SIG };
+    stateRow = { member_keys: [row], pending: [{ requestId: 'req-e', op: 'ingest', at: recentIso(), members: [row] }] };
+    global.fetch = routedFetch({
+      'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'PARTIAL_SUCCESS' }] },
+      'audienceMembers:ingest': { requestId: 'req-2' },
+    });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.added).toBe(1);
+    const call = global.fetch.mock.calls.find((c) => /audienceMembers:ingest$/.test(c[0]));
+    expect(JSON.parse(call[1].body).audienceMembers[0].userData.userIdentifiers).toContainEqual({ address: ADDR });
+    const persisted = JSON.parse(inserts.find((i) => i.table === 'ad_audience_syncs').row.member_keys);
+    expect(persisted).toEqual([row]);
+  });
+
+  test('an address is a shared key like email or phone: a leaving row keeps it while a member holds it', async () => {
+    configure();
+    // Same name + ZIP, different email and phone: a remove sending this address could drop the member.
+    mockCollectCustomers.mockResolvedValue([NAMED]);
+    stateRow = { member_keys: [
+      { k: 'customer:c1', d: ['h:c1@x.com', 'h:+19412975749'], a: SIG },
+      { k: 'lead:dup', d: ['h:other@x.com', ''], a: SIG },
+    ] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toRemove).toBe(0);
+    expect(r.retained).toBe(1);
+  });
+
+  test('an address is a shared key for the in-flight holds too: an add waits for a remove that sends it', async () => {
+    configure({ allow: true });
+    mockCollectCustomers.mockResolvedValue([NAMED]);
+    stateRow = { member_keys: [], pending: [{ requestId: 'req-r', op: 'remove', at: recentIso(), members: [{ k: 'lead:dup', d: ['h:other@x.com', ''], a: SIG }] }] };
+    global.fetch = routedFetch({ 'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'PROCESSING' }] } });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.heldAdds).toBe(1);
+    expect(global.fetch.mock.calls.some((c) => /audienceMembers:ingest$/.test(c[0]))).toBe(false);
+  });
+
+  test('an address the member never sent holds back no removal', async () => {
+    configure();
+    // c1 was sent with ZIP 34219 and has moved to 34202 since; its stored address stays.
+    mockCollectCustomers.mockResolvedValue([{ ...NAMED, zip: '34202' }]);
+    stateRow = { member_keys: [
+      { k: 'customer:c1', d: ['h:c1@x.com', 'h:+19412975749'], a: SIG },
+      // Another person with the same name, in 34202, who has left the list.
+      { k: 'lead:gone', d: ['h:gone@x.com', ''], a: 'h:pat|h:oneil|US|34202' },
+    ] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r).toMatchObject({ toRemove: 1, retained: 0 });
+  });
+
+  test('an uploaded test record goes even when it shares a phone with a current member; that member re-adds next run', async () => {
+    configure();
+    // The collector drops the test record and names it in testKeys.
+    mockCollectCustomers.mockResolvedValue({
+      kept: [{ key: 'customer:real1', email: 'real1@x.com', phone: '9415550140' }], dropped: [], testKeys: ['customer:t1'],
+    });
+    stateRow = { member_keys: [
+      { k: 'customer:real1', d: ['h:real1@x.com', 'h:+19415550140'] },
+      { k: 'customer:t1', d: ['h:tester@x.com', 'h:+19415550140'] },
+    ] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r).toMatchObject({ toRemove: 1, retained: 0, testRemovals: 1, deferredReAdds: 1 });
+    expect(mockCollectCustomers).toHaveBeenCalledWith(expect.objectContaining({ partition: true }));
+  });
+
+  test('an uploaded test record goes even when a member has its exact email and phone; the member is sent once the remove settles, with its own address', async () => {
+    configure({ allow: true });
+    mockCollectCustomers.mockResolvedValue({ kept: [{ ...NAMED, key: 'customer:real1' }], dropped: [], testKeys: ['customer:t1'] });
+    const testSig = 'h:shakedown|h:test|US|34202';
+    stateRow = { member_keys: [{ k: 'customer:t1', d: ['h:c1@x.com', 'h:+19412975749'], a: testSig }] };
+    const run = async (status) => {
+      global.fetch = routedFetch({
+        'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: status }] },
+        'audienceMembers:ingest': { requestId: 'req-add' },
+        'audienceMembers:remove': { requestId: 'req-rm' },
+      });
+      const r = await GCM.syncAudience('customers', {});
+      const saved = inserts.filter((i) => i.table === 'ad_audience_syncs').pop().row;
+      stateRow = { member_keys: JSON.parse(saved.member_keys), pending: JSON.parse(saved.pending) };
+      return r;
+    };
+    const sent = (op) => global.fetch.mock.calls.filter((c) => c[0].endsWith(`audienceMembers:${op}`))
+      .map((c) => JSON.parse(c[1].body).audienceMembers.map((m) => m.userData.userIdentifiers));
+    const contact = [{ emailAddress: 'h:c1@x.com' }, { phoneNumber: 'h:+19412975749' }];
+
+    // Only the remove goes: Google may apply an ingest before a remove sent beside
+    // it, and the member, left out of state, would then never be removed.
+    expect(await run('SUCCESS')).toMatchObject({ toAdd: 0, heldAdds: 1, toRemove: 1, testRemovals: 1 });
+    expect(sent('ingest')).toEqual([]);
+    expect(sent('remove')).toEqual([[[...contact, { address: { givenName: 'h:shakedown', familyName: 'h:test', regionCode: 'US', postalCode: '34202' } }]]]);
+    expect(stateRow.member_keys).toEqual([]);
+    // While the remove is in flight the member still waits.
+    expect(await run('PROCESSING')).toMatchObject({ toAdd: 0, heldAdds: 1, toRemove: 0 });
+    expect(sent('ingest')).toEqual([]);
+    // Once it applied, the member is sent with its own address, never the test record's.
+    expect(await run('SUCCESS')).toMatchObject({ toAdd: 1, heldAdds: 0, toRemove: 0 });
+    expect(sent('ingest')).toEqual([[[...contact, { address: ADDR }]]]);
   });
 });

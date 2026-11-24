@@ -98,7 +98,8 @@ import DocumentActionBar from '../components/DocumentActionBar';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
 import PayPromoCode from '../components/billing/PayPromoCode';
-import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
+import PayPlanChoice from '../components/billing/PayPlanChoice';
+import { groupInvoiceLinesByProperty, invoiceDiscountRows } from '@waves/invoice-property-groups';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE, CARD_SURCHARGE_NOTICE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
 import { microdepositDetailFromNextAction, microdepositGuidance, microdepositSavedPhrases } from '../lib/microdeposit';
@@ -2714,6 +2715,7 @@ export default function PayPageV2() {
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   // Multi-property invoice (lines at 2+ saved properties): grouped rows; else null.
   const propertyGroups = groupInvoiceLinesByProperty(invoice.lineItems);
+  const discountRows = invoiceDiscountRows(invoice.lineItems, invoice.discountAmount, invoice.discountLabel);
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
   const invoiceAttachments = invoice.attachments || [];
   const annualPrepay = invoice.annualPrepay || null;
@@ -3044,9 +3046,9 @@ export default function PayPageV2() {
               return (
             <div data-glass="soft" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
               <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
-              {invoice.discountAmount > 0 && (
-                <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
-              )}
+              {discountRows.map((row) => (
+                <SummaryRow key={row.label} label={row.label} value={`− ${fmtCurrency(row.amount)}`} />
+              ))}
               {invoice.taxAmount > 0 && customer?.isCommercial && (
                 <SummaryRow label={`Tax (${(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)`} value={fmtCurrency(invoice.taxAmount)} />
               )}
@@ -3119,6 +3121,25 @@ export default function PayPageV2() {
             </div>
               );
             })()}
+
+            {/* Pay per application or prepay the year (GATE_PAY_PLAN_CHOICE):
+                the server sends the block only on the first invoice of an
+                accepted plan. A pick goes to the prepay invoice's own pay
+                page; this invoice stays payable. */}
+            <PayPlanChoice
+              planChoice={data.planChoice}
+              panelStyle={subtlePanel}
+              onChosen={(payUrl) => window.location.assign(payUrl)}
+              choosePrepay={async () => {
+                const response = await fetch(`${API_BASE}/pay/${token}/plan-choice`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ plan: 'prepay_annual' }),
+                });
+                const result = await response.json().catch(() => ({}));
+                return response.ok ? { ok: true, payUrl: result.payUrl } : { ok: false };
+              }}
+            />
 
             {/* Promo code (GATE_PAY_PROMO_CODE): the server sends the block
                 only where a code can be entered or is already on the invoice.

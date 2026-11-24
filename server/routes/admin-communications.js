@@ -4,6 +4,7 @@ const db = require('../models/db');
 const ClickGuard = require('../services/review-click-guard');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { websiteLineRefusal } = require('../services/website-line-contact');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -404,7 +405,7 @@ async function sendSmsHandler(req, res, next) {
   let statementLinkIds = null;
   // Verified composer prep links — a real send writes the tagger's dedupe marker.
   let prepLinkSends = null;
-  // Verified moving links (GATE_MOVING_FLOW) — a real send is the link's delivery.
+  // Verified moving links — a real send is the link's delivery.
   let movingLinkMoveIds = null;
   // Composer-carried contract signing links: a prepared link is ACTIVATED
   // (delivered state stamped, windowed from the send) before the provider
@@ -568,6 +569,9 @@ async function sendSmsHandler(req, res, next) {
     // A technician texts from an office line or its own tech line only; any
     // other line is ignored and the default office line is used.
     const fromNumber = technicianAllowedFromNumber(req, requestedFromNumber);
+    // A website-only line texts only someone who already called or texted it.
+    const websiteLineBlock = await websiteLineRefusal(fromNumber, to);
+    if (websiteLineBlock) return res.status(400).json({ error: websiteLineBlock, code: 'WEBSITE_LINE_FIRST_CONTACT' });
     let trustedCustomerId;
     if (customerId) {
       const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
@@ -1967,6 +1971,100 @@ router.post('/send-prep', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/communications/send-howto — a Quick Links how-to guide
+// emailed to a customer picked by name (owner 2026-11-20). Email only.
+const HOW_TO_REFUSAL_COPY = {
+  customer_not_found: 'That customer could not be found.',
+  no_email: 'This customer has no email on file — put the steps in your message instead.',
+  email_blocked: "This customer's email address is blocked or unsubscribed — the guide was not sent.",
+  email_opted_out: 'This customer turned off email — put the steps in your message instead.',
+  prefs_unavailable: "Couldn't confirm this customer's email preference — try again.",
+  unsupported_guide: 'That guide is not available.',
+};
+router.post('/send-howto', async (req, res, next) => {
+  try {
+    const { customerId, guideKey } = req.body || {};
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    if (!(await technicianCustomerGuard(req, res, customerId))) return undefined;
+    const { sendHowToGuideToCustomer, isSupportedGuide } = require('../services/how-to-guide-sender');
+    if (!isSupportedGuide(guideKey)) return res.status(400).json({ error: HOW_TO_REFUSAL_COPY.unsupported_guide });
+    const result = await sendHowToGuideToCustomer({ customerId, guideKey, actorId: req.technicianId || null });
+    if (!result.ok) {
+      const error = result.emailUncertain
+        ? "The guide email may or may not have gone out — check the customer's email log before sending it again."
+        : HOW_TO_REFUSAL_COPY[result.reason] || "Couldn't send the guide — check the customer's email address and try again.";
+      return res.status(result.reason === 'customer_not_found' ? 404 : 400).json({ error, result });
+    }
+    return res.json({ success: true, message: `${result.label} guide emailed to ${result.emailAddress}.`, result });
+  } catch (err) { return next(err); }
+});
+
+// POST /api/admin/communications/send-welcome — the welcome email again, from
+// Quick Links (owner 2026-11-21). The welcome sender keeps its own checks: the
+// email opt-out, the suppression list and the template's on/off switch.
+router.post('/send-welcome', async (req, res, next) => {
+  try {
+    const { customerId } = req.body || {};
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    if (!(await technicianCustomerGuard(req, res, customerId))) return undefined;
+    const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+    if (!customer) return res.status(404).json({ error: 'That customer could not be found.' });
+    if (!String(customer.email || '').trim()) return res.status(400).json({ error: 'This customer has no email on file.' });
+    let outcome;
+    try {
+      ({ outcome } = await require('../services/new-recurring-welcome-sms').sendWelcomeEmail(customer, { resend: true }));
+    } catch (err) {
+      // Provider errors can echo the address: log the error name only.
+      logger.error(`[communications] welcome email resend failed for customer ${customer.id} (${err?.name || 'Error'})`);
+      return res.status(400).json({ error: "The welcome email may or may not have gone out — check the customer's email log before sending it again." });
+    }
+    if (outcome !== 'sent') {
+      return res.status(400).json({
+        error: outcome === 'skipped'
+          ? 'The welcome email was not sent — this customer turned off email, or the address is blocked.'
+          : "Couldn't send the welcome email — try again.",
+      });
+    }
+    await db('customer_interactions').insert({
+      customer_id: customer.id,
+      interaction_type: 'email_outbound',
+      admin_user_id: req.technicianId || null,
+      subject: 'Welcome email sent again (manual)',
+      body: `Welcome email sent again from Quick Links to ${String(customer.email).trim()}.`,
+    }).catch((err) => logger.warn(`[communications] welcome resend interaction log failed for customer ${customer.id}: ${err.name}`));
+    return res.json({ success: true, message: `Welcome email sent to ${String(customer.email).trim()}.` });
+  } catch (err) { return next(err); }
+});
+
+// POST /api/admin/communications/send-latest-receipt — the receipt for the
+// customer's newest paid invoice, emailed again from Quick Links (owner
+// 2026-11-21). The send is sendInvoiceReceipt, the one writer behind the
+// Invoices page "Resend receipt" button: its lock, recipient, opt-out and
+// closeout rules apply unchanged. A payer-billed invoice is left out, since
+// its receipt goes to the payer and not to the customer picked here.
+router.post('/send-latest-receipt', requireAdmin, async (req, res, next) => {
+  try {
+    const { customerId } = req.body || {};
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    const invoice = await db('invoices')
+      .where({ customer_id: customerId, status: 'paid' })
+      .whereNull('payer_id')
+      .whereNull('archived_at')
+      .orderByRaw('paid_at DESC NULLS LAST, id DESC')
+      .first('id', 'invoice_number');
+    if (!invoice) return res.status(400).json({ error: 'This customer has no paid invoice to send a receipt for.' });
+    const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
+    const { status, body, delivery } = await sendInvoiceReceipt(invoice.id, { via: 'email', actorTechnicianId: req.technicianId || null });
+    if (status === 200 && body?.email?.ok) {
+      return res.json({ success: true, message: `Receipt for invoice ${invoice.invoice_number} emailed.` });
+    }
+    const error = delivery?.email === 'unknown'
+      ? `The receipt email for invoice ${invoice.invoice_number} may or may not have gone out — check the customer's email log before sending it again.`
+      : `The receipt for invoice ${invoice.invoice_number} was not sent: ${body?.error || body?.email?.error || 'the email could not be delivered'}.`;
+    return res.status(status === 200 ? 400 : status).json({ error });
+  } catch (err) { return next(err); }
+});
+
 // GET /api/admin/communications/sender?phone=&customerId= — the line a
 // staff text to this person leaves from (home-line PR 3): the line they
 // texted within 30 days, else their home line, else main. GATE_HOME_LINE off
@@ -2616,19 +2714,58 @@ router.post('/messages/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// A technician's Messages badge: the same needs-a-reply count, over texts from the customers on its own route
-// only. A text from a number that matches no customer is office work and never counts.
+const READ_BEFORE_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/;
+
+// POST /api/admin/communications/messages/read-all — the inbox's Mark all read (owner 2026-11-19), and with
+// contactPhone a row's Mark read (that sender only): every unread inbound text the inbox can show up to readBefore
+// (the newest text the caller's list showed), through the one read writer. Internal admin-phone traffic stays out,
+// as in /log. Office roles only: a technician reads one thread at a time through /messages/read, which checks each
+// text against its own customers.
+router.post('/messages/read-all', async (req, res, next) => {
+  try {
+    if (isTechnicianRequest(req)) return res.status(403).json({ error: 'Mark all read is for the office' });
+    // An ISO instant with Z or an offset: a bare wall-clock time would be read in the server's zone.
+    const rawBefore = req.body?.readBefore;
+    const readBefore = typeof rawBefore === 'string' && READ_BEFORE_INSTANT_RE.test(rawBefore) ? new Date(rawBefore) : null;
+    if (!readBefore || Number.isNaN(readBefore.getTime())) return res.status(400).json({ error: 'readBefore required (an ISO time with Z or an offset)' });
+    // contactPhone: one inbox row's Mark read (that sender's texts only). Only a request without the field reads the
+    // whole inbox; a present but empty or invalid phone is refused, never widened.
+    const hasSender = Object.prototype.hasOwnProperty.call(req.body || {}, 'contactPhone');
+    const contactPhone = hasSender ? req.body.contactPhone : null;
+    if (hasSender && (typeof contactPhone !== 'string' || !phoneIdentityKey(contactPhone))) {
+      return res.status(400).json({ error: 'contactPhone must be a phone number' });
+    }
+    const { markAllInboundSmsRead } = require('../services/inbound-sms-read');
+    const { updated, notificationsCleared } = await markAllInboundSmsRead({
+      readBefore,
+      adminUserId: req.technicianId || null,
+      role: req.techRole,
+      excludePhones: ADMIN_PHONES,
+      contactPhone,
+    });
+    res.json({ success: true, updated, notificationsCleared });
+  } catch (err) { next(err); }
+});
+
+// A technician's Messages badge: the same unread needs-a-reply count, over the texts its inbox shows: threads whose
+// conversation belongs to a customer on its own route (as /log scopes it), so Mark all read can clear every one. A
+// text in a thread with no customer is office work and never counts.
 async function technicianUnreadCount(req, customerId) {
   const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
-  const owned = new Set((await technicianCustomerIdsSubquery(req, db)).map((row) => row.customer_id));
-  const rows = (await loadPendingSmsConversations({
-    excludePhones: ADMIN_PHONES, customerId, since: NEEDS_REPLY_SINCE,
-  })).filter((row) => row.customer_id && owned.has(row.customer_id));
+  const pending = await loadPendingSmsConversations({ excludePhones: ADMIN_PHONES, customerId, since: NEEDS_REPLY_SINCE });
+  const ids = pending.map((row) => row.id).filter(Boolean);
+  const visible = new Set(ids.length ? await db('messages as m')
+    .join('conversations as c', 'c.id', 'm.conversation_id')
+    .whereIn('m.id', ids)
+    .whereIn('c.customer_id', technicianCustomerIdsSubquery(req, db))
+    .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
+    .pluck('m.id') : []);
+  const rows = pending.filter((row) => visible.has(row.id));
   return { conversations: new Set(rows.map((row) => row.peer)).size, messages: rows.length };
 }
 
-// Shared inbox count; Customer 360 may scope it to the selected customer. A technician gets the count for its own
-// customers only (Messages badge).
+// Shared inbox count: needs-a-reply texts nobody has read (owner 2026-11-19); Customer 360 may scope it to the
+// selected customer. A technician gets the count for its own customers only (Messages badge).
 router.get('/unread-count', async (req, res, next) => {
   try {
     const { customerId } = req.query;
@@ -2641,7 +2778,7 @@ router.get('/unread-count', async (req, res, next) => {
     }
     const { countUnreadInboundSms } = require('../services/inbound-sms-read');
     return res.json(await countUnreadInboundSms({
-      excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE,
+      excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE, unreadOnly: true,
     }));
   } catch (err) { return next(err); }
 });
@@ -3307,18 +3444,15 @@ async function reserviceLinkHandler(req, res) {
 router.post('/reservice-link', requireAdmin, (req, res) => reserviceLinkHandler(req, res));
 
 // POST /api/admin/communications/moving-link  { customerId?, phone }
-// Composer helper (owner 2026-11-02, dark behind GATE_MOVING_FLOW): the
+// Composer helper (owner 2026-11-02): the
 // customer's /moving/:token short link for insertion into the SMS body. With a
 // selected customer, the full 10-digit phone must match it (as /reservice-link).
 // Without one (a new text opened from Customer 360 by phone), the number must
 // belong to exactly one customer profile; the composer adopts that customer.
 // Opens the customer's move if there is none; sends nothing (the operator's
-// own send is the only text). 404 while the gate is dark.
+// own send is the only text).
 async function movingLinkHandler(req, res) {
   try {
-    if (!require('../config/feature-gates').movingFlowLive()) {
-      return res.status(404).json({ error: 'Moving links are not enabled' });
-    }
     const last10 = fullPhoneLast10(req.body?.phone);
     if (!last10) {
       return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
@@ -3933,8 +4067,6 @@ router.get('/link-library', async (req, res) => {
       // Codex #4709 r3 P1: the composer omits "Free consultation" while
       // GATE_LEAD_INSPECTION_LINK is dark.
       consultationLinksEnabled: featureGates.leadInspectionLinkLive(),
-      // GATE_MOVING_FLOW: the composer omits "Moving link" while it is dark.
-      movingLinksEnabled: featureGates.movingFlowLive(),
     });
   } catch (err) {
     logger.error(`link-library list failed: ${err.message}`);

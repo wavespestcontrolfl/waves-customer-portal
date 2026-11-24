@@ -103,6 +103,8 @@ const PRODUCT_CLASS_ENTRIES = [
   // Dimension 0.21% 18-0-10 is a pre-emergent AND a slow-release feed (0.73 lb N): it reads both approved
   // rows (greening builds gradually; success is the weeds that never sprout), like a visit with two products.
   ['LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer', FAMILY.PRE_EMERGENT, { alsoFamilies: [FAMILY.GRANULAR_N] }],
+  // LESCO Stonewall 0.37% 18-0-10 (prodiamine, the October spreader step since 2026-11-21) is the same kind of bag: the same two rows.
+  ['LESCO Stonewall 0.37% 18-0-10', FAMILY.PRE_EMERGENT, { alsoFamilies: [FAMILY.GRANULAR_N] }],
 
   // Granular slow-release nitrogen
   ['LESCO 24-0-11', FAMILY.GRANULAR_N],
@@ -162,6 +164,8 @@ const PRODUCT_CLASS_ENTRIES = [
   ['Atticus Talak', FAMILY.INSECTICIDE],
   ['Atticus Talak 7.9 F', FAMILY.INSECTICIDE],
   ['Talak 7.9 F', FAMILY.INSECTICIDE],
+  // Owner ruling 2026-11-18: LESCO Crosscheck Plus (bifenthrin) is the house bifenthrin now; the Talak names above stay for old records.
+  ['LESCO Crosscheck Plus', FAMILY.INSECTICIDE],
   // "Talstar P" is the office's name for Talak (bifenthrin, 96 oz); 9 confirmed
   // lawn visits in the 10-02 P13 replay carried it unmapped.
   ['Talstar P', FAMILY.INSECTICIDE],

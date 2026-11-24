@@ -23,7 +23,9 @@ const { payrollPayLinesLive, payrollReviewBonusImportLive } = require('../config
 const { STAFF_TIME_ZONE, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 // Only the sources the Reviews page shows and pays ('google_review'); legacy review_request
 // payouts stay out of payroll as they stay out of the Reviews page's mark-paid.
-const { PAYOUT_ELIGIBLE_SOURCES } = require('./review-incentives');
+const {
+  PAYOUT_ELIGIBLE_SOURCES, getPolicyForPayment, overCapPayoutIds, lockPayoutRows, lockTechnicianCap,
+} = require('./review-incentives');
 
 const SOURCE_TYPE = 'review_incentive_payout';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -37,36 +39,27 @@ const importOn = () => typeof payrollReviewBonusImportLive === 'function' && pay
 const earnedOnSql = (conn) => conn.raw("to_char((p.earned_at AT TIME ZONE ?)::date, 'YYYY-MM-DD') as earned_on", [STAFF_TIME_ZONE]);
 const PAYOUT_COLUMNS = ['p.id', 'p.technician_id', 'p.amount_cents', 'p.status', 'p.source'];
 
-/**
- * Deletes the open imported lines whose payout no longer matches them (paid, gone,
- * moved to another technician, other amount or week), or every open imported line
- * with dropAll (the import gate is off: payroll stops paying review bonuses and they
- * wait on the Reviews page again). Returns the payout ids dropped.
- */
-async function dropStaleLines(trx, { lock, dropAll }) {
-  const linesQuery = trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open' })
+/** The open imported lines, locked FOR UPDATE when `lock` is set. */
+async function readOpenLines(trx, lock) {
+  const query = trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open' })
     .select('id', 'technician_id', 'amount_cents', 'source_id', trx.raw("to_char(earned_week_start, 'YYYY-MM-DD') as earned_week_start"));
-  if (lock) linesQuery.forUpdate();
-  const lines = await linesQuery;
-  if (!lines.length) return [];
-  const payoutQuery = trx('review_incentive_payouts as p')
-    .whereIn('p.id', lines.map((line) => line.source_id).filter((id) => UUID_RE.test(id)))
-    .select([...PAYOUT_COLUMNS, earnedOnSql(trx)]);
-  if (lock) payoutQuery.forUpdate('p');
-  const payouts = new Map((await payoutQuery).map((row) => [row.id, row]));
-  const stale = dropAll ? lines : lines.filter((line) => {
-    const payout = payouts.get(line.source_id);
-    return !payout || payout.status !== 'earned' || !PAYOUT_ELIGIBLE_SOURCES.includes(payout.source)
-      || payout.technician_id !== line.technician_id
-      || Number(payout.amount_cents) !== Number(line.amount_cents)
-      || staffWeekStartForWorkDate(payout.earned_on) !== line.earned_week_start;
-  });
-  if (stale.length) await trx('payroll_pay_lines').whereIn('id', stale.map((line) => line.id)).del();
-  return stale.map((line) => line.source_id);
+  if (lock) query.forUpdate();
+  return query;
 }
 
-/** Inserts a line for every earned payout of a W-2 technician up to weekEnd that has none. */
-async function addMissingLines(trx, weekEnd, { lock }) {
+const lineIds = (lines) => lines.map((line) => line.source_id).filter((id) => UUID_RE.test(id));
+
+/** The payouts the open lines point at, keyed by id. Lock them first (lockPayoutRows) when it matters. */
+async function readLinePayouts(trx, lines) {
+  if (!lines.length) return new Map();
+  const query = trx('review_incentive_payouts as p')
+    .whereIn('p.id', lineIds(lines))
+    .select([...PAYOUT_COLUMNS, earnedOnSql(trx)]);
+  return new Map((await query).map((row) => [row.id, row]));
+}
+
+/** Every earned payout of a W-2 technician up to weekEnd. Lock them first (lockPayoutRows) when it matters. */
+async function readCandidates(trx, weekEnd) {
   const query = trx('review_incentive_payouts as p')
     .join('technicians as t', 't.id', 'p.technician_id')
     .where('p.status', 'earned')
@@ -76,8 +69,51 @@ async function addMissingLines(trx, weekEnd, { lock }) {
     .whereRaw('(p.earned_at AT TIME ZONE ?)::date <= ?::date', [STAFF_TIME_ZONE, weekEnd])
     .orderBy([{ column: 'p.earned_at' }, { column: 'p.id' }])
     .select([...PAYOUT_COLUMNS, earnedOnSql(trx)]);
-  if (lock) query.forUpdate('p');
-  const payouts = await query;
+  return query;
+}
+
+/**
+ * The payout ids over the monthly cap, decided ONCE per sync (owner 2026-11-20 D4), after the rows
+ * are locked and under the cap lock of every technician the sync touches. The removal and the
+ * insertion below both use this one set, so a payout that lands mid-sync cannot make payroll keep
+ * the old winner and add the new one: it is not in the snapshot, and waits for the next sync.
+ */
+async function decideOverCap(trx, cap, { lines, linePayouts, candidates }) {
+  if (!cap) return new Set();
+  const technicianIds = [...new Set([
+    ...lines.map((line) => line.technician_id),
+    ...[...linePayouts.values()].map((payout) => payout.technician_id),
+    ...candidates.map((payout) => payout.technician_id),
+  ].filter(Boolean))];
+  await lockTechnicianCap(trx, technicianIds);
+  return overCapPayoutIds(trx, { cap, technicianIds });
+}
+
+/**
+ * Deletes the open imported lines whose payout no longer matches them (paid, gone,
+ * moved to another technician, other amount or week, or in the over-cap set: owner 2026-11-20
+ * D4), or every open imported line with dropAll (the import gate is off: payroll stops paying
+ * review bonuses and they wait on the Reviews page again). Returns the payout ids dropped.
+ */
+async function dropStaleLines(trx, { lines, payouts, dropAll, overCap }) {
+  if (!lines.length) return [];
+  const stale = dropAll ? lines : lines.filter((line) => {
+    const payout = payouts.get(line.source_id);
+    return !payout || payout.status !== 'earned' || !PAYOUT_ELIGIBLE_SOURCES.includes(payout.source)
+      || payout.technician_id !== line.technician_id || overCap.has(line.source_id)
+      || Number(payout.amount_cents) !== Number(line.amount_cents)
+      || staffWeekStartForWorkDate(payout.earned_on) !== line.earned_week_start;
+  });
+  if (stale.length) await trx('payroll_pay_lines').whereIn('id', stale.map((line) => line.id)).del();
+  return stale.map((line) => line.source_id);
+}
+
+/**
+ * Inserts a line for every candidate payout (the sync's snapshot) that has none, except a payout in
+ * the over-cap set (owner 2026-11-20 D4).
+ */
+async function addMissingLines(trx, candidates, overCap) {
+  const payouts = candidates.filter((payout) => !overCap.has(payout.id));
   if (!payouts.length) return [];
   const inserted = await trx('payroll_pay_lines')
     .insert(payouts.map((payout) => ({
@@ -107,8 +143,27 @@ async function addMissingLines(trx, weekEnd, { lock }) {
 async function syncReviewBonusLines(trx, { weekEnd, lock = false, actorId = null } = {}) {
   if (!payLinesOn()) return { removed: 0, added: 0 };
   const importing = importOn();
-  const removedIds = await dropStaleLines(trx, { lock, dropAll: !importing });
-  const addedIds = importing ? await addMissingLines(trx, weekEnd, { lock }) : [];
+  // Lock order everywhere (owner 2026-11-20 D4): the settings lock with the strict policy read first,
+  // then the pay lines and payout rows, then the technician locks. The cap policy is read only when
+  // this sync can add lines (with the import off payroll never reads it); a failed read stops the sync,
+  // it must never read as "no cap".
+  const cap = importing ? (await getPolicyForPayment(trx)).monthlyCapCount : null;
+  const lines = await readOpenLines(trx, lock);
+  // The full id set (the lines' payouts and the candidates), locked in ONE statement ordered by id,
+  // before any technician lock. A candidate that lands after this read is not in the snapshot and
+  // waits for the next sync.
+  let snapshotIds = null;
+  if (lock) {
+    const seen = importing ? await readCandidates(trx, weekEnd) : [];
+    snapshotIds = new Set((await lockPayoutRows(trx, [...lineIds(lines), ...seen.map((payout) => payout.id)])).map((row) => row.id));
+  }
+  const linePayouts = await readLinePayouts(trx, lines);
+  const candidates = importing
+    ? (await readCandidates(trx, weekEnd)).filter((payout) => !snapshotIds || snapshotIds.has(payout.id))
+    : [];
+  const overCap = importing ? await decideOverCap(trx, cap, { lines, linePayouts, candidates }) : new Set();
+  const removedIds = await dropStaleLines(trx, { lines, payouts: linePayouts, dropAll: !importing, overCap });
+  const addedIds = importing ? await addMissingLines(trx, candidates, overCap) : [];
   if (removedIds.length || addedIds.length) {
     await recordAuditEvent({
       trx, critical: true, actor_type: 'admin', actor_id: actorId,
@@ -120,6 +175,19 @@ async function syncReviewBonusLines(trx, { weekEnd, lock = false, actorId = null
     });
   }
   return { removed: removedIds.length, added: addedIds.length };
+}
+
+/**
+ * Finalize's pay step shares the manual mark-paid's cap lock (owner 2026-11-20 D4): lock the payout
+ * rows, then each technician's cap lock, and refuse the finalize if one of the payouts is over the cap.
+ */
+async function guardMonthlyCap(trx, ids, technicianIds, changedError) {
+  const { monthlyCapCount: cap } = await getPolicyForPayment(trx);
+  await lockPayoutRows(trx, ids);
+  if (!cap) return;
+  await lockTechnicianCap(trx, technicianIds);
+  const overCap = await overCapPayoutIds(trx, { cap, technicianIds });
+  if (ids.some((id) => overCap.has(id))) throw changedError;
 }
 
 /**
@@ -135,8 +203,10 @@ async function markPayoutsPaid(trx, runId, actorId) {
   const byTech = new Map();
   for (const line of lines) byTech.set(line.technician_id, [...(byTech.get(line.technician_id) || []), line.source_id]);
   const changedError = new PayrollError(409, 'A review bonus changed while the run was finalized. Review the new numbers.');
+  const allIds = lines.map((line) => line.source_id);
+  if (!allIds.every((id) => UUID_RE.test(id))) throw changedError;
+  if (allIds.length) await guardMonthlyCap(trx, allIds, [...byTech.keys()], changedError);
   for (const [technicianId, ids] of byTech) {
-    if (!ids.every((id) => UUID_RE.test(id))) throw changedError;
     const changed = await trx('review_incentive_payouts')
       .whereIn('id', ids).where({ technician_id: technicianId, status: 'earned' }).whereIn('source', PAYOUT_ELIGIBLE_SOURCES)
       .update({ status: 'paid', paid_at: trx.fn.now(), paid_by: actorId || null, updated_at: trx.fn.now() });

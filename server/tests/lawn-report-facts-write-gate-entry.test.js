@@ -231,6 +231,31 @@ describe('GATE_LAWN_REPORT_POLISH: the one-label-line decision rides the same fr
     expect(facts.precautionForCard(drops, { id: 'sp-1' }, SPRAY_CATALOG[0].customer_precaution_summary)).toBeNull();
   });
 
+  test("stored notes that cannot be read reach the report build as stored, so it reads them as the live report does", async () => {
+    live();
+    process.env.GATE_LAWN_REPORT_POLISH = 'true';
+    const { buildReportV1Data } = require('../services/service-report/report-data');
+    const { carriesReportNote } = require('../services/service-report/technician-report-copy');
+    for (const unreadable of ['[{"reportNote":{"v":1}}]', '7', '{"reportNote":']) {
+      buildReportV1Data.mockClear();
+      loadServiceRecordForPdf.mockResolvedValue({ id: 'sr-1', customer_id: 'c-1', service_line: 'lawn', structured_notes: unreadable });
+      const { knex } = store({ service_products: [sprayRow], products_catalog: SPRAY_CATALOG, lawn_assessments: [], lawn_assessment_runs: [], lawn_protocol_products: [] });
+      const out = await finalizeLawnReportSynthesis({ service: { id: 'sr-1', service_line: 'lawn' }, knex });
+      // The facts froze; the build still got the stored value, which counts as a note.
+      expect(out.reportFactsFreeze.labelLines).toBeTruthy();
+      const built = buildReportV1Data.mock.calls[0][0];
+      expect(built.structured_notes).toBe(unreadable);
+      expect(carriesReportNote(built.structured_notes)).toBe(true);
+    }
+    // Readable notes take the frozen block in memory, as before.
+    buildReportV1Data.mockClear();
+    loadServiceRecordForPdf.mockResolvedValue({ id: 'sr-1', customer_id: 'c-1', service_line: 'lawn', structured_notes: '{}' });
+    const { knex } = store({ service_products: [sprayRow], products_catalog: SPRAY_CATALOG, lawn_assessments: [], lawn_assessment_runs: [], lawn_protocol_products: [] });
+    await finalizeLawnReportSynthesis({ service: { id: 'sr-1', service_line: 'lawn' }, knex });
+    delete process.env.GATE_LAWN_REPORT_POLISH;
+    expect(buildReportV1Data.mock.calls[0][0].structured_notes).toHaveProperty('lawnReportFacts');
+  });
+
   test('polish live but the facts gate dark: nothing is frozen at all (the dependency is on the facts gate)', async () => {
     process.env.GATE_LAWN_REPORT_POLISH = 'true';
     delete process.env.GATE_LAWN_REPORT_FACTS;

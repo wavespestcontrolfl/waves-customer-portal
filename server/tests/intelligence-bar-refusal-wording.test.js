@@ -24,6 +24,7 @@ const FILES = [
   'schedule-tools.js',
   'tools.js',
   'estimate-accept-tools.js',
+  'estimate-send-tools.js',
   'customer-link-tools.js',
   'comms-tools.js',
   'billing-mode-change.js',

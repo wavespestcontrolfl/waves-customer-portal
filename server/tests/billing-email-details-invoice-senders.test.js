@@ -296,6 +296,167 @@ describe('invoice.receipt', () => {
   });
 });
 
+// GATE_DOC_CROSS_SELL_EMAIL (#8262): the receipt email's one add-a-service
+// line is a pitch inside an operational email, so it follows the customer's
+// marketing email choice (email-division's embeddedLineConsent). The choice
+// is read ONCE, AFTER the cards are composed and right before the send, so a
+// choice changed while the offer was priced decides (pre-push audit P1
+// 2026-11-22). Its links open the Waves app with no token (owner
+// 2026-11-22), and it rides the account holder's own copy only. The receipt
+// itself always sends.
+describe('invoice.receipt: the add-a-service line follows the marketing email choice', () => {
+  const CARDS = {
+    crossSell: { label: 'Lawn Care', relationship: 'add', perApplication: 62 },
+    referral: { headline: 'Know someone?', cta: 'Send My Referral Link' },
+  };
+  const YES = { pitch: true, referralAsk: true };
+  const OFFER_ONLY = { pitch: true, referralAsk: false };
+  const NO = { pitch: false, referralAsk: false };
+  let consentSpy;
+  let cardsSpy;
+  const sendPaidReceipt = async () => {
+    mockTables({
+      ...baseTables(invoiceRow({ status: 'paid', paid_at: new Date('2026-09-29T14:00:00Z'), receipt_sent_at: null })),
+      payments: null,
+    });
+    const result = await sendReceiptEmail('inv-1');
+    return { result, args: EmailTemplates.sendTemplate.mock.calls.at(-1)?.[0] };
+  };
+
+  beforeEach(() => {
+    process.env.GATE_DOC_CROSS_SELL_EMAIL = 'true';
+    consentSpy = jest.spyOn(require('../services/email-division/eligibility'), 'embeddedLineConsent').mockResolvedValue(YES);
+    cardsSpy = jest.spyOn(require('../services/receipt-cards'), 'receiptCardsForInvoiceId').mockResolvedValue(CARDS);
+  });
+  afterEach(() => {
+    delete process.env.GATE_DOC_CROSS_SELL_EMAIL;
+    consentSpy.mockRestore();
+    cardsSpy.mockRestore();
+  });
+
+  test('a customer who takes marketing email gets the line, asked once for the receipt\'s own address', async () => {
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(consentSpy).toHaveBeenCalledTimes(1);
+    expect(consentSpy).toHaveBeenCalledWith({ customerId: 'cust-1', email: 'customer@example.com' });
+    // One link for each card, each to its own tab of the app and naming
+    // this customer's profile (the app opens that one, not the profile the
+    // holder last used); no receipt token and no price in the line.
+    expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing&notificationProperty=cust-1\nTo refer a friend, get your referral link: https?:\/\/[^\s/]+\/\?tab=refer&notificationProperty=cust-1$/);
+    expect(`${args.bodyAppend.text}${args.bodyAppend.html}`).not.toMatch(/\/receipt\/|\$|62/);
+    // In the HTML part the link's `&` is escaped.
+    expect(args.bodyAppend.html).toContain('/?tab=billing&amp;notificationProperty=cust-1"');
+    expect(args.bodyAppend.html).toContain('/?tab=refer&amp;notificationProperty=cust-1"');
+  });
+
+  // The choice is read after the cards are composed: the read that decides
+  // the line is the last read before the send.
+  test('the choice is read after the cards are composed, and before the send', async () => {
+    const order = [];
+    cardsSpy.mockImplementation(async () => { order.push('cards'); return CARDS; });
+    consentSpy.mockImplementation(async () => { order.push('choice'); return YES; });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async () => { order.push('send'); return { sent: true, message: { provider_message_id: 'fixture-message' } }; });
+    await sendPaidReceipt();
+    expect(order).toEqual(['cards', 'choice', 'send']);
+  });
+
+  // A customer who turns offers off, or unsubscribes, WHILE the offer is
+  // priced gets the receipt without the line: nothing decided before the
+  // cards were built is kept.
+  test('the customer opts out while the cards are composed: no line', async () => {
+    cardsSpy.mockImplementation(async () => { consentSpy.mockResolvedValue(NO); return CARDS; });
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.templateKey).toBe('invoice.receipt');
+    expect(args.bodyAppend?.text || '').not.toMatch(/lawn care|refer|Waves app/i);
+  });
+
+  test('the customer turns referral asks off while the cards are composed: the offer part alone', async () => {
+    cardsSpy.mockImplementation(async () => { consentSpy.mockResolvedValue(OFFER_ONLY); return CARDS; });
+    const { args } = await sendPaidReceipt();
+    expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan in the Waves app: /);
+    expect(`${args.bodyAppend.text}${args.bodyAppend.html}`).not.toMatch(/refer|tab=refer/i);
+  });
+
+  // The referral part is a referral ask by email: a customer who turned
+  // referral nudges off, or takes them by text only, gets the service offer
+  // without it (pre-push audit P1 2026-11-22).
+  test('the referral email choice says no: the line keeps the offer and drops the referral part', async () => {
+    consentSpy.mockResolvedValue(OFFER_ONLY);
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing&notificationProperty=cust-1$/);
+    expect(`${args.bodyAppend.text}${args.bodyAppend.html}`).not.toMatch(/refer|tab=refer/i);
+  });
+
+  test('the referral email choice says no and the receipt shows no offer: no line', async () => {
+    consentSpy.mockResolvedValue(OFFER_ONLY);
+    cardsSpy.mockResolvedValue({ referral: CARDS.referral });
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.bodyAppend?.text || '').not.toMatch(/lawn care|refer|Waves app/i);
+  });
+
+  // The receipt's card is quote-only (no per-application price): the app lets
+  // the customer ask for a quote, so the line must not say "Add".
+  test('a quote-only offer on the receipt: the line asks for a quote', async () => {
+    cardsSpy.mockResolvedValue({ crossSell: { label: 'Lawn Care', relationship: 'add' } });
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.bodyAppend.text).toMatch(/^Get a quote for lawn care in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing&notificationProperty=cust-1$/);
+    expect(`${args.bodyAppend.text}${args.bodyAppend.html}`).not.toMatch(/Add |Start |see your offer/);
+  });
+
+  test('a receipt that shows no card never reads the choice', async () => {
+    cardsSpy.mockResolvedValue({});
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(consentSpy).not.toHaveBeenCalled();
+    expect(args.bodyAppend?.text || '').not.toMatch(/lawn care|refer|Waves app/i);
+  });
+
+  // The receipt can go to an address that is not the account holder's (a
+  // billing contact, a routed billing address). That copy never carries the
+  // homeowner's offer, whatever its marketing choice reads as.
+  test('a receipt that goes to another address than the account holder\'s gets no line', async () => {
+    const contact = require('../services/customer-contact');
+    contact.getReceiptEmailRecipients.mockReturnValueOnce([{ email: 'books@example.com', name: 'Books', role: 'billing_contact' }]);
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.to).toBe('books@example.com');
+    expect(args.bodyAppend?.text || '').not.toMatch(/lawn care|refer a friend/i);
+    expect(consentSpy).not.toHaveBeenCalled();
+    expect(cardsSpy).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['says no', () => consentSpy.mockResolvedValue(NO)],
+    ['cannot be read', () => consentSpy.mockRejectedValue(new Error('db blip'))],
+  ])('the marketing email choice %s: the receipt still sends, with no line', async (_label, arrange) => {
+    arrange();
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.templateKey).toBe('invoice.receipt');
+    expect(args.bodyAppend?.text || '').not.toMatch(/lawn care|refer a friend/i);
+  });
+
+  test('the cards cannot be read: the receipt still sends, with no line', async () => {
+    cardsSpy.mockRejectedValue(new Error('db blip'));
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.bodyAppend?.text || '').not.toMatch(/lawn care|refer a friend/i);
+    expect(consentSpy).not.toHaveBeenCalled();
+  });
+
+  test('gate off: nothing is composed and the choice is never read', async () => {
+    delete process.env.GATE_DOC_CROSS_SELL_EMAIL;
+    const { result } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(consentSpy).not.toHaveBeenCalled();
+    expect(cardsSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('detail lookups are additive', () => {
   test('gate on: a throwing lookup still sends invoice.sent and the receipt, without the extra variables', async () => {
     process.env.GATE_BILLING_EMAIL_DETAILS = 'true';

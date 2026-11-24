@@ -9,6 +9,7 @@ const { isInServiceAreaBox, zipFromAddressText } = require('../services/service-
 const {
   isDesotoLocality, isDesotoZip,
   isPuntaGordaLocality, isPuntaGordaZip, isExcludedLocality, isExcludedZip,
+  isPuntaGordaSharedZip, isNotYetServedLocality, isNotYetServedZip, NOT_YET_SERVED_LOCALITIES, NOT_YET_SERVED_ZIPS,
 } = require('../services/excluded-localities');
 
 describe('DeSoto locality list', () => {
@@ -23,6 +24,14 @@ describe('DeSoto locality list', () => {
       expect(isDesotoLocality(city)).toBe(false);
     },
   );
+
+  test('a city with a state / ZIP tail still reads as its town (Punta Gorda, DeSoto)', () => {
+    expect(isPuntaGordaLocality('Punta Gorda FL 33982')).toBe(true);
+    expect(isPuntaGordaLocality('Punta Gorda, FL 33983-1234')).toBe(true);
+    expect(isDesotoLocality('Arcadia FL 34266')).toBe(true);
+    expect(isExcludedLocality('Punta Gorda FL 33982')).toBe(true);
+    expect(isPuntaGordaLocality('Port Charlotte FL 33983')).toBe(false);
+  });
 
   test('DeSoto ZIPs, ZIP+4 included', () => {
     expect(isDesotoZip('34266')).toBe(true);
@@ -42,8 +51,12 @@ describe('Punta Gorda excluded locality', () => {
   );
 
   test.each(['Port Charlotte', 'Englewood', 'Rotonda West', 'North Port', 'Placida', 'Charlotte Harbor', '', null])(
-    '%s is not Punta Gorda and stays served', (city) => {
+    '%s is not Punta Gorda itself', (city) => {
       expect(isPuntaGordaLocality(city)).toBe(false);
+    },
+  );
+  test.each(['North Port', 'Venice', 'Sarasota', 'Bradenton', 'Parrish', 'Riverview', '', null])(
+    '%s stays served', (city) => {
       expect(isExcludedLocality(city)).toBe(false);
     },
   );
@@ -74,6 +87,52 @@ describe('Punta Gorda excluded locality', () => {
   });
 });
 
+// Owner ruling 2026-11-23 held eight places until a second technician was hired; the hold ended with the hire. The
+// not-yet-served lists stay (empty) so a future hold is a one-line change, and North Port was never on them.
+describe('not-yet-served localities (empty since the second technician was hired)', () => {
+  test('both lists are empty', () => {
+    expect(NOT_YET_SERVED_ZIPS.size).toBe(0);
+    expect(NOT_YET_SERVED_LOCALITIES.size).toBe(0);
+  });
+
+  test.each([
+    'Rotonda', 'Rotonda West', 'rotonda  west', 'Rotunda West', 'Placida', 'Boca Grande',
+    'Charlotte Harbor', 'Gulf Cove', 'El Jobean', 'Deep Creek', 'Babcock Ranch',
+    'Englewood', 'ENGLEWOOD', 'Port Charlotte', 'port charlotte.', 'North Port', 'Venice',
+  ])('%s is served', (city) => {
+    expect(isNotYetServedLocality(city)).toBe(false);
+    expect(isExcludedLocality(city)).toBe(false);
+  });
+
+  test.each([
+    '33947', '33946', '33927', '33921', '33981', '33980', '33983', '33982',
+    '34223', '34224', '34295', '33938', '33948', '33949', '33952', '33953', '33954', '33947-1234', '34286', '34287',
+  ])('ZIP %s is served (not on any exclusion list unless it is a Punta Gorda-only ZIP)', (zip) => {
+    expect(isNotYetServedZip(zip)).toBe(false);
+    expect(isExcludedZip(zip)).toBe(false);
+  });
+
+  test('the ZIPs Punta Gorda shares with a served town (33980, 33982, 33983) are served by ZIP alone; the city decides', () => {
+    for (const zip of ['33980', '33982', '33983']) {
+      expect(isPuntaGordaSharedZip(zip)).toBe(true);
+      expect(isPuntaGordaZip(zip)).toBe(false);
+      expect(isExcludedZip(zip)).toBe(false);
+    }
+    expect(isPuntaGordaSharedZip('33950')).toBe(false);
+    expect(isExcludedLocality('Punta Gorda')).toBe(true);
+    expect(isExcludedZip('33950')).toBe(true);
+  });
+
+  test('only DeSoto and Punta Gorda ZIPs of the served map are excluded', () => {
+    const { ZIP_TO_CITY } = require('../utils/zip-to-city');
+    for (const zip of Object.keys(ZIP_TO_CITY)) {
+      const city = ZIP_TO_CITY[zip].toLowerCase();
+      if (isExcludedZip(zip)) expect(['punta gorda', 'arcadia']).toContain(city);
+      else expect(isExcludedLocality(city)).toBe(false);
+    }
+  });
+});
+
 describe('zipFromAddressText (Codex r5 P2)', () => {
   test.each([
     ['100 Example St, Sarasota, FL 34240, USA', '34240'],
@@ -95,7 +154,7 @@ describe('property-lookup cache hit passes area evidence', () => {
 
   test('buildSatelliteUrlSet forwards its evidence to isInServiceAreaBox', () => {
     expect(source).toMatch(/function buildSatelliteUrlSet\(lat, lng, areaEvidence = \{\}\)/);
-    expect(source).toMatch(/inServiceArea: isInServiceAreaBox\(lat, lng, areaEvidence\)/);
+    expect(source).toMatch(/inServiceArea: serviceAreaVerdict\(isInServiceAreaBox\(lat, lng, areaEvidence\), areaEvidence\)/);
   });
 
   test('the cache-hit result passes the stored county and ZIP', () => {

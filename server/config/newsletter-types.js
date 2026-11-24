@@ -78,25 +78,29 @@ const NEWSLETTER_TYPES = {
     key: 'pest-insider-monthly',
     label: 'Pest Insider (Monthly)',
     flagship: false,
-    cadence: 'monthly',
-    // Auto-drafts the first Tuesday of the month at 7am ET (scheduler.js).
-    defaultSendDay: 'Tuesday',
+    // Twice a month: the 1st and 3rd Thursday at 7:00 AM ET. The planner
+    // (services/pest-insider/schedule.js) builds each issue the Wednesday before.
+    cadence: 'twice-monthly',
+    defaultSendDay: 'Thursday',
     voiceProfile: 'waves_phase_3_local',
     coverage: null,
     // The humor-sandwich structure from the shipped Beehiiv "Pest Watch"
     // issues (see docs/design/newsletter-fresh-this-week-style-guide.md):
     // ~60% edutainment facts → ONE sincere pitch section → voice-y close.
     requiredSections: ['seasonal_hook', 'pest_facts', 'featured_service', 'cta_close'],
-    // AI-generated like the flagship → same hallucinated-claim hard-block
-    // at the send gates (the prompt forbids prices/efficacy claims; this
-    // is the defense when the model slips anyway).
+    // Every send of this type gets the claim hard-block at the send gates,
+    // like the flagship: the last check on the body (built from reviewed
+    // facts by services/pest-insider) before it reaches a reader.
     claimValidation: true,
     sourceRequirements: null,
+    // With GATE_PEST_INSIDER_AUTO_SEND on, a planned issue sends itself after
+    // an FYI copy to the owner (a HOLD reply skips it). With it off, an issue
+    // still waits for an APPROVED reply.
     autonomy: {
       aiDraftAllowed: true,
       autoScheduleAllowed: true,
-      autoSendAllowed: false,
-      humanApprovalRequired: true,
+      autoSendAllowed: true,
+      humanApprovalRequired: false,
     },
   },
 

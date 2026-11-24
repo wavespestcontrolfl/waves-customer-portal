@@ -430,7 +430,222 @@ async function runPredicate(key, knex = db) {
   return { count, ids, truncated: count > ids.length, detail: { sampleCap: SAMPLE } };
 }
 
+// ---------------------------------------------------------------------------
+// Delivery evidence for a set of completed records (the on-time reader of the
+// Tech Rewards score, tech-rewards-scores.js). ONE place that says, per record,
+// whether the customer's report / notice is owed at all and which confirmed
+// sends exist, with the SAME decisions the detectors above use: the canonical
+// sibling, OWES_CUSTOMER_ARTIFACT, the frozen closeout snapshot with the
+// legacy catalog fallback (CANONICAL_NOT_OWED), the project-backed exclusion,
+// and the confirmed-send rules (terminal completion text, sent report row,
+// provider-confirmed pest-recap text, video recap). It adds the two send
+// records the detectors never needed a time from: the report-ready email row
+// and the combined-visit summary effect. Read only; the detectors are unchanged.
+
+// A send may land a little before the visit's completion stamp (the stamp is written after the completion
+// commits): a closeout's window starts this long before its completion. Shared with the on-time read.
+const CLOSEOUT_SLACK_MS = 60 * 60000;
+
+const TEXT_TS_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})$/;
+
+// A stored text timestamp as a Date, or null when absent or not a real instant
+// (a calendar date that does not exist, an hour over 23, no zone).
+function readableTimestamp(raw) {
+  const m = typeof raw === 'string' ? TEXT_TS_RE.exec(raw) : null;
+  if (!m) return null;
+  const [year, month, day, hour, minute, second] = m.slice(1, 7).map(Number);
+  const calendar = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  const real = calendar.getUTCFullYear() === year && calendar.getUTCMonth() === month - 1 && calendar.getUTCDate() === day
+    && hour <= 23 && minute <= 59 && second <= 59;
+  const ms = real ? Date.parse(raw) : NaN;
+  return Number.isFinite(ms) ? new Date(ms) : null;
+}
+
+// Per record: is the visit exempt from a customer report (project-backed, the canonical sibling does
+// not owe one, or the frozen / catalog rule waives BOTH the report and the notice)? A record with no
+// visit link is judged on its own notes. `ss` is the visit row the shared fragments correlate on.
+const OWN_SNAPSHOT_WAIVES = (requirements) => `EXISTS (
+                       SELECT 1 FROM (SELECT r.structured_notes->'closeoutRequirements' AS snap) canonical
+                        WHERE ${FROZEN_SNAPSHOT_VALID}
+                          AND ${requirements.map((key) => `canonical.snap->>'${key}' = 'false'`).join(' AND ')})`;
+const EVIDENCE_EXEMPT_SQL = `
+  SELECT r.id AS record_id, r.scheduled_service_id,
+         (${internalTestVisitSql('r')}) OR CASE WHEN ss.id IS NULL THEN
+                NOT (r.status = 'completed'
+                     AND COALESCE(r.structured_notes->>'backfill', 'false') <> 'true'
+                     AND COALESCE(r.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
+                     AND COALESCE(r.structured_notes->>'internalOnlyCompletion', 'false') <> 'true'
+                     AND r.completion_source IS DISTINCT FROM 'project_completion')
+                OR ${OWN_SNAPSHOT_WAIVES(['requiresServiceReport', 'requiresCustomerNotice'])}
+              ELSE
+                NOT (${VISIT_NOT_PROJECT_BACKED})
+                OR NOT EXISTS (SELECT 1 FROM (${CANONICAL_SIBLING}) canonical
+                                WHERE ${OWES_CUSTOMER_ARTIFACT}
+                                  AND COALESCE(canonical.structured_notes->>'internalOnlyCompletion', 'false') <> 'true')
+                OR EXISTS (SELECT 1 FROM (${CANONICAL_SIBLING}) canonical
+                            WHERE (${CANONICAL_NOT_OWED('requiresServiceReport')}) IS TRUE
+                              AND (${CANONICAL_NOT_OWED('requiresCustomerNotice')}) IS TRUE)
+         END AS exempt,
+         -- the REPORT obligation alone is waived (frozen snapshot, else the catalog): a consent-blocked text
+         -- then leaves nothing owed, but a required report email still is
+         CASE WHEN ss.id IS NULL THEN ${OWN_SNAPSHOT_WAIVES(['requiresServiceReport'])}
+              ELSE EXISTS (SELECT 1 FROM (${CANONICAL_SIBLING}) canonical
+                            WHERE (${CANONICAL_NOT_OWED('requiresServiceReport')}) IS TRUE)
+         END AS report_waived,
+         -- when the visit last became complete (COMPLETED_MARKER_AT: a reused record keeps its old created_at)
+         CASE WHEN ss.id IS NULL THEN GREATEST(r.created_at, COALESCE(r.recap_sms_sent_at, r.created_at))
+              ELSE (SELECT ${COMPLETED_MARKER_AT} FROM (${CANONICAL_SIBLING}) canonical)
+         END AS completed_at
+    FROM service_records r
+    LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id
+   WHERE r.id = ANY(string_to_array(?, ',')::uuid[])`;
+
+// Per record: every confirmed send on the record or a sibling of its visit (kind, time or NULL when the
+// send is confirmed but its time was not stored; text_at = the completion text's stored time string).
+const EVIDENCE_SENDS_SQL = `
+  WITH tgt AS (
+    SELECT r.id AS record_id, r.scheduled_service_id FROM service_records r WHERE r.id = ANY(string_to_array(?, ',')::uuid[])
+  ),
+  sib AS (
+    SELECT t.record_id, s.id AS sib_id, s.report_view_token, s.structured_notes
+      FROM tgt t JOIN service_records s
+        ON s.id = t.record_id OR (t.scheduled_service_id IS NOT NULL AND s.scheduled_service_id = t.scheduled_service_id)
+  )
+  SELECT record_id, 'report_row' AS kind, d.sent_at AS at, NULL::text AS text_at, NULL::timestamptz AS queued_at
+    FROM sib JOIN service_report_deliveries d ON d.service_record_id = sib.sib_id
+   WHERE sib.report_view_token IS NOT NULL AND d.status = 'sent'
+  UNION ALL
+  -- ONE scan of the report-ready email rows: a stored send time is an exact-time send; a delivered email whose
+  -- send time was never stored (the sender lost its response before writing sent_at; the delivery webhook still
+  -- landed) is a send somewhere between the moment the row was queued and the delivery: the two bounds, not one time
+  SELECT record_id, CASE WHEN m.sent_at IS NOT NULL THEN 'email' ELSE 'email_delivered_only' END,
+         COALESCE(m.sent_at, m.delivered_at), NULL, CASE WHEN m.sent_at IS NULL THEN COALESCE(m.queued_at, m.created_at) END
+    FROM sib JOIN email_messages m ON m.idempotency_key LIKE 'service_report_ready:%'
+                                 AND split_part(m.idempotency_key, ':', 2) = sib.sib_id::text
+   WHERE m.sent_at IS NOT NULL OR m.delivered_at IS NOT NULL
+  UNION ALL
+  SELECT record_id, 'pest_recap_text', a.sent_at, NULL, NULL
+    FROM sib JOIN messaging_audit_log a ON a.metadata->>'service_record_id' = sib.sib_id::text
+   WHERE a.audience = 'customer' AND a.purpose = 'service_completion' AND a.channel = 'sms'
+     AND a.metadata->>'original_message_type' = 'pest_recap'
+     AND a.sent_at IS NOT NULL AND a.blocked_code IS NULL
+     AND (a.provider_message_id ~ '^(SM|MM)' OR a.provider = 'push')
+  UNION ALL
+  SELECT t.record_id, 'video_recap', rc.sent_at, NULL, NULL
+    FROM tgt t JOIN service_recaps rc ON rc.scheduled_service_id = t.scheduled_service_id
+   WHERE rc.sent_at IS NOT NULL
+  UNION ALL
+  SELECT sib.record_id, 'summary', e.sent_at, NULL, NULL
+    FROM sib
+    JOIN visit_completion_packet_items i ON i.service_record_id = sib.sib_id AND i.status = 'done'
+    JOIN visit_completion_packets p ON p.id = i.packet_id AND p.status IN ('processing', 'done')
+    JOIN visit_effects e ON e.visit_id = p.visit_id AND e.effect_type IN ('completion_sms', 'completion_email')
+   WHERE e.status = 'sent'
+  UNION ALL
+  -- the combined visit's summary pair (text + email) both suppressed: closeout-status reads that as
+  -- not required (visitSummaryDeliveryFact), so no delivery is owed through it
+  SELECT sib.record_id, 'summary_suppressed', NULL::timestamptz, NULL, NULL
+    FROM sib
+    JOIN visit_completion_packet_items i ON i.service_record_id = sib.sib_id AND i.status = 'done'
+    JOIN visit_completion_packets p ON p.id = i.packet_id AND p.status IN ('processing', 'done')
+    JOIN visit_effects e ON e.visit_id = p.visit_id AND e.effect_type IN ('completion_sms', 'completion_email')
+   GROUP BY sib.record_id, p.visit_id
+  HAVING COUNT(*) = 2 AND COUNT(*) FILTER (WHERE e.status = 'suppressed') = 2
+  UNION ALL
+  SELECT record_id, 'completion_text', NULL::timestamptz,
+         COALESCE(structured_notes->>'completionSmsDeferredDeliveredAt', structured_notes->>'sentSmsAt'), NULL
+    FROM sib WHERE structured_notes->>'completionSmsStatus' = 'sent'
+  UNION ALL
+  -- a recap text already sent: confirmed, time carried by its own audit row when one exists
+  SELECT record_id, 'recap_text_skipped', NULL::timestamptz, NULL, NULL
+    FROM sib WHERE structured_notes->>'completionSmsStatus' = 'skipped_recap_sms_already_sent'
+  UNION ALL
+  -- consent-blocked: no text could go out (closeout-status reads it as not required)
+  SELECT record_id, 'consent_blocked', NULL::timestamptz, NULL, NULL
+    FROM sib WHERE structured_notes->>'completionSmsStatus' = 'blocked'`;
+
+// The send time of one evidence row as a Date, or null when it has none readable.
+function evidenceSendTime(row) {
+  if (row.kind === 'completion_text') return readableTimestamp(row.text_at);
+  return row.at ? new Date(row.at) : null;
+}
+
+// Fold the send rows into the per-record entries; returns the id sets the exemption rules need.
+function foldSendRows(rows, out) {
+  const sets = { blocked: new Set(), summaryPair: new Set(), confirmed: new Set() };
+  const pestRecapTexts = new Set(rows.filter((row) => row.kind === 'pest_recap_text').map((row) => String(row.record_id).toLowerCase()));
+  for (const row of rows) {
+    const id = String(row.record_id).toLowerCase();
+    const entry = out.get(id);
+    if (row.kind === 'consent_blocked') { sets.blocked.add(id); continue; }
+    if (row.kind === 'summary_suppressed') { sets.summaryPair.add(id); continue; }
+    if (row.kind === 'email_delivered_only') {
+      const interval = { from: new Date(row.queued_at), to: new Date(row.at) };
+      entry.deliveredIntervals.push(interval);
+      // a confirmed send of THIS closeout (so it blocks the exemptions) whose time is the queued..delivered interval;
+      // one delivered wholly before this closeout's window belongs to an earlier closeout of a reused record
+      if (!entry.completedAt || interval.to.getTime() >= entry.completedAt.getTime() - CLOSEOUT_SLACK_MS) sets.confirmed.add(id);
+      continue;
+    }
+    sets.confirmed.add(id);
+    if (row.kind === 'recap_text_skipped') {
+      // its time is its audit row's; with no audit row it is a confirmed send of unknown time
+      if (!pestRecapTexts.has(id)) entry.confirmedWithoutTime = true;
+      continue;
+    }
+    const at = evidenceSendTime(row);
+    if (!at) entry.confirmedWithoutTime = true;
+    if (at) {
+      entry.sendTimes.push(at);
+      if (!entry.firstConfirmedSendAt || at < entry.firstConfirmedSendAt) entry.firstConfirmedSendAt = at;
+    }
+  }
+  return sets;
+}
+
+/**
+ * Delivery evidence for completed service_records ids. Returns a Map of record id (lowercase) to
+ *   { exempt, firstConfirmedSendAt, confirmedWithoutTime }
+ *   exempt                 no customer report is owed (see above, internal test customers included), or the
+ *                          only outcome is a suppressed summary pair (closeout-status: not required), or a consent-blocked text
+ *                          on a visit whose report is waived too (a required report email is still owed)
+ *   firstConfirmedSendAt   the earliest readable time of any confirmed send (Date) or null
+ *   confirmedWithoutTime   some confirmed send has no readable time (stored time missing or malformed)
+ *   sendTimes              every readable confirmed send time (a delivered-only email has none: it is in deliveredIntervals)
+ *   deliveredIntervals     report emails delivered with no stored send time, as { from: queued, to: delivered }: the
+ *                          send fell somewhere in between, so the reader must use both bounds. Such an email is a
+ *                          confirmed send of this closeout (unless delivered wholly before the closeout window,
+ *                          completedAt - CLOSEOUT_SLACK_MS): it keeps a suppressed summary pair or a consent-blocked
+ *                          text from marking the record exempt
+ *   completedAt            when the visit last became complete (COMPLETED_MARKER_AT, the detectors' own anchor)
+ * A record with no evidence at all is { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false }.
+ */
+async function deliveryEvidenceForRecords(recordIds, knex = db) {
+  const ids = [...new Set((recordIds || []).map((id) => String(id).toLowerCase()))];
+  const out = new Map(ids.map((id) => [id, { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false, completedAt: null, sendTimes: [], deliveredIntervals: [] }]));
+  if (!ids.length) return out;
+  const [exempt, sends] = await Promise.all([
+    knex.raw(EVIDENCE_EXEMPT_SQL, [ids.join(',')]),
+    knex.raw(EVIDENCE_SENDS_SQL, [ids.join(',')]),
+  ]);
+  const reportWaived = new Set();
+  for (const row of exempt.rows) {
+    const id = String(row.record_id).toLowerCase();
+    out.get(id).exempt = row.exempt === true;
+    out.get(id).completedAt = row.completed_at ? new Date(row.completed_at) : null;
+    if (row.report_waived === true) reportWaived.add(id);
+  }
+  const { blocked, summaryPair, confirmed } = foldSendRows(sends.rows, out);
+  // A suppressed summary pair stands in for the report and the notice (closeout-status: not required). A
+  // consent-blocked text waives only the NOTICE: the record is exempt only if the report is waived too.
+  for (const id of summaryPair) if (!confirmed.has(id)) out.get(id).exempt = true;
+  for (const id of blocked) if (!confirmed.has(id) && reportWaived.has(id)) out.get(id).exempt = true;
+  return out;
+}
+
 module.exports = {
+  deliveryEvidenceForRecords,
+  CLOSEOUT_SLACK_MS,
   PREDICATES,
   PREDICATE_KEYS,
   runPredicate,
@@ -441,6 +656,6 @@ module.exports = {
     SAMPLE, RECORD_FK_SINCE, TRACKING_STAMP_SINCE, REPORT_TOKEN_SINCE, COMMS_MARKER_SINCE, BEFORE_TODAY_ET, COMPLETED_TRANSITION_SINCE, TRACKER_STAMP_GRACE,
     OWES_CUSTOMER_ARTIFACT, VISIT_NOT_PROJECT_BACKED, TERMINAL_SMS_STATUSES, CANONICAL_NOT_OWED, FROZEN_SNAPSHOT_VALID, CATALOG_NOT_OWED,
     COMPLETED_MARKER_AT, INCOMPLETE_FOLLOWUP_GRACE_DAYS, aggregate,
-    internalTestVisitSql, NOT_INTERNAL_TEST_VISIT,
+    internalTestVisitSql, NOT_INTERNAL_TEST_VISIT, readableTimestamp,
   },
 };
