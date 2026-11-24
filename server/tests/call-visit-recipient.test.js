@@ -31,6 +31,7 @@ jest.mock('../services/customer-contact', () => ({
   isServiceContactRole: jest.fn((role) => String(role || '').startsWith('service_contact')),
   getPrimaryContact: jest.fn(() => ({ phone: null })),
   prefsUnavailable: jest.fn(() => false),
+  PREFS_UNAVAILABLE: Object.freeze({ __prefsUnavailable: true }),
   firstNameFrom: jest.fn((name) => String(name || '').trim().split(/\s+/)[0] || null),
 }));
 jest.mock('../services/recipient-optin', () => ({
@@ -207,18 +208,20 @@ describe('gateLive', () => {
 
 describe('deliverAppointmentNotice dispatches the visit-only leg once per notice, whatever channel the holder chose', () => {
   const db = require('../models/db');
-  const { deliverAppointmentNotice } = AppointmentReminders._test;
+  const { deliverAppointmentNotice, deliverConfirmationByChannel } = AppointmentReminders._test;
   const notice = (over = {}) => deliverAppointmentNotice({
     channel: 'sms', kind: 'confirmation', customerId: 'cust-1', scheduledServiceId: 'ss-1',
     apptTime: new Date('2026-12-01T14:00:00.000Z'), serviceLabel: 'Pest Control',
-    smsAttempt: jest.fn(async () => true), dayState: { dayOnly: false }, ...over,
+    smsAttempt: jest.fn(async () => true), smsOutcome: { servedPhones: [HOLDER] }, dayState: { dayOnly: false }, ...over,
   });
+  let prefsRow;
 
   beforeEach(() => {
+    prefsRow = {};
     db.mockImplementation((table) => {
       const q = {};
       ['where', 'whereRaw', 'whereNotNull', 'whereIn', 'orderBy', 'select', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
-      q.first = jest.fn(async () => (table === 'customers' ? CUSTOMER : table === 'notification_prefs' ? {} : null));
+      q.first = jest.fn(async () => (table === 'customers' ? CUSTOMER : table === 'notification_prefs' ? prefsRow : null));
       q.insert = jest.fn(async () => {});
       return q;
     });
@@ -233,11 +236,11 @@ describe('deliverAppointmentNotice dispatches the visit-only leg once per notice
     ['confirmation', 'confirmation'],
     ['72h', 'reminder_72h'],
     ['24h', 'reminder_24h'],
-  ])('gate ON: a %s notice hands the visit to the one recipient sender with the numbers the notice already texts', async (kind, recipientKind) => {
+  ])('gate ON: a %s notice hands the visit to the one recipient sender with the numbers it really texted', async (kind, recipientKind) => {
     process.env[GATE] = 'true';
     await notice({ kind });
     expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledTimes(1);
-    expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledWith({
+    expect(VisitRecipient.notifyVisitRecipients.mock.calls[0][0]).toMatchObject({
       scheduledServiceId: 'ss-1', kind: recipientKind, excludePhones: [HOLDER], dayOnly: false,
     });
   });
@@ -251,26 +254,57 @@ describe('deliverAppointmentNotice dispatches the visit-only leg once per notice
     expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledTimes(1);
   });
 
+  test('gate ON: a holder whose email-only notice texted nobody excludes nobody, even a number that is an allowed contact', async () => {
+    process.env[GATE] = 'true';
+    getAppointmentContacts.mockReturnValue([PRIMARY, { phone: BOB, role: 'service_contact', name: 'Bob Roe' }]);
+    await notice({ channel: 'email', smsOutcome: {} });
+    expect(VisitRecipient.notifyVisitRecipients.mock.calls[0][0].excludePhones).toEqual([]);
+  });
+
+  test('gate ON: only a number the notice really texted is excluded (a confirmed contact the fan-out texted)', async () => {
+    process.env[GATE] = 'true';
+    getAppointmentContacts.mockReturnValue([PRIMARY, { phone: BOB, role: 'service_contact', name: 'Bob Roe' }]);
+    await notice({ smsOutcome: { servedPhones: [HOLDER, BOB] } });
+    expect(VisitRecipient.notifyVisitRecipients.mock.calls[0][0].excludePhones).toEqual([HOLDER, BOB]);
+    await notice({ smsOutcome: { servedPhones: [HOLDER] } });
+    expect(VisitRecipient.notifyVisitRecipients.mock.calls[1][0].excludePhones).toEqual([HOLDER]);
+  });
+
+  test('gate ON: a confirmation another sender already logged to the number is skipped by the per-recipient gate; reminders have no such gate', async () => {
+    process.env[GATE] = 'true';
+    const logSpy = jest.spyOn(AppointmentReminders, 'confirmationLoggedForVisitPhone');
+    await notice();
+    const { gate } = VisitRecipient.notifyVisitRecipients.mock.calls[0][0];
+    expect(typeof gate).toBe('function');
+    await expect(gate({ phone: BOB })).resolves.toBe('send');
+    logSpy.mockRestore();
+    await notice({ kind: '72h' });
+    expect(VisitRecipient.notifyVisitRecipients.mock.calls[1][0].gate).toBeUndefined();
+  });
+
+  test('gate ON: a customer with NO preferences row is on the defaults, so the person is still texted; an unreadable row holds', async () => {
+    process.env[GATE] = 'true';
+    prefsRow = undefined;
+    await notice();
+    expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledTimes(1);
+    db.mockImplementation((table) => {
+      const q = {};
+      ['where', 'whereRaw', 'whereNotNull', 'whereIn', 'orderBy', 'select', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => {
+        if (table === 'notification_prefs') throw new Error('prefs read failed');
+        return table === 'customers' ? CUSTOMER : null;
+      });
+      return q;
+    });
+    VisitRecipient.notifyVisitRecipients.mockClear();
+    await notice();
+    expect(VisitRecipient.notifyVisitRecipients).not.toHaveBeenCalled();
+  });
+
   test('gate ON: the holder day-only promise rides along, so both people get the same promise', async () => {
     process.env[GATE] = 'true';
     await notice({ dayState: { dayOnly: true } });
     expect(VisitRecipient.notifyVisitRecipients.mock.calls[0][0].dayOnly).toBe(true);
-  });
-
-  test('gate ON: a number the notice already texts (a confirmed contact) is excluded', async () => {
-    process.env[GATE] = 'true';
-    getAppointmentContacts.mockReturnValue([PRIMARY, { phone: BOB, role: 'service_contact', name: 'Bob Roe' }]);
-    await notice();
-    expect(VisitRecipient.notifyVisitRecipients.mock.calls[0][0].excludePhones).toEqual([HOLDER, BOB]);
-  });
-
-  test('gate ON: a held (pending Reply-YES) contact is NOT excluded: that is the permission that does not wait for the YES', async () => {
-    process.env[GATE] = 'true';
-    getAppointmentContacts.mockReturnValue([PRIMARY, { phone: BOB, role: 'service_contact', name: 'Bob Roe' }]);
-    const optin = require('../services/recipient-optin');
-    optin.filterRecipientsByOptin.mockImplementationOnce(async (contacts) => contacts.filter((c) => c.role === 'primary'));
-    await notice();
-    expect(VisitRecipient.notifyVisitRecipients.mock.calls[0][0].excludePhones).toEqual([HOLDER]);
   });
 
   test.each(['en_route', 'rescheduled', 'cancelled', 'tech_arrived'])('gate ON: a %s notice never reaches the recipient', async (kind) => {
@@ -296,6 +330,20 @@ describe('deliverAppointmentNotice dispatches the visit-only leg once per notice
     await expect(notice({ smsAttempt: jest.fn(async () => false), channel: 'sms' })).resolves.toBe(false);
     VisitRecipient.notifyVisitRecipients.mockRejectedValueOnce(new Error('boom'));
     await expect(notice({ smsAttempt: jest.fn(async () => true) })).resolves.toBe(true);
+  });
+
+  test('gate ON: the default-channel booking confirmation (the call pipeline\'s path, which skips deliverAppointmentNotice) also dispatches, once, after the holder\'s send', async () => {
+    process.env[GATE] = 'true';
+    const smsAttempt = jest.fn(async () => true);
+    await expect(deliverConfirmationByChannel({ customerId: 'cust-1', scheduledServiceId: 'ss-1', serviceLabel: 'Pest Control', smsAttempt })).resolves.toBe(true);
+    expect(smsAttempt).toHaveBeenCalledTimes(1);
+    expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledTimes(1);
+    expect(VisitRecipient.notifyVisitRecipients.mock.calls[0][0]).toMatchObject({ scheduledServiceId: 'ss-1', kind: 'confirmation', dayOnly: false });
+    // Gate off: nothing.
+    delete process.env[GATE];
+    VisitRecipient.notifyVisitRecipients.mockClear();
+    await deliverConfirmationByChannel({ customerId: 'cust-1', scheduledServiceId: 'ss-1', serviceLabel: 'Pest Control', smsAttempt });
+    expect(VisitRecipient.notifyVisitRecipients).not.toHaveBeenCalled();
   });
 });
 

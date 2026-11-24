@@ -188,13 +188,16 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(await VisitRecipient.contactsForVisit(otherVisitId, 'en_route')).toEqual([]);
     });
 
-    test('a cancelled, skipped, completed, no-show or on-site visit sends nothing; a rescheduled visit keeps the recipient', async () => {
+    test('a cancelled, skipped, completed, no-show or on-site visit sends nothing; a visit waiting to be rebooked announces nothing, keeps the recipient, and resumes on its new slot', async () => {
       await record();
       for (const status of ['cancelled', 'skipped', 'completed', 'no_show', 'on_site']) {
         await db('scheduled_services').where({ id: visitId }).update({ status });
         expect(await VisitRecipient.contactsForVisit(visitId, 'reminder_24h')).toEqual([]);
       }
-      await db('scheduled_services').where({ id: visitId }).update({ status: 'rescheduled', scheduled_date: MOVED_DATE, window_start: '13:00' });
+      // The pending-rebook placeholder keeps the OBSOLETE slot: nothing is announced until the replacement slot is live.
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'rescheduled' });
+      expect(await VisitRecipient.contactsForVisit(visitId, 'reminder_24h')).toEqual([]);
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'confirmed', scheduled_date: MOVED_DATE, window_start: '13:00' });
       const [moved] = await VisitRecipient.contactsForVisit(visitId, 'reminder_24h');
       expect(moved.claimKey).toBe(`reminder_24h:${MOVED_DATE}T13:00`);
     });
@@ -253,7 +256,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       const send = jest.fn(async () => ({ sent: true }));
       const [first] = await VisitRecipient.contactsForVisit(visitId, 'reminder_24h');
       await VisitRecipient.sendOnce(first, send);
-      await db('scheduled_services').where({ id: visitId }).update({ status: 'rescheduled', scheduled_date: MOVED_DATE });
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'confirmed', scheduled_date: MOVED_DATE });
       const [moved] = await VisitRecipient.contactsForVisit(visitId, 'reminder_24h');
       await VisitRecipient.sendOnce(moved, send);
       await VisitRecipient.sendOnce(moved, send);
@@ -447,6 +450,60 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       const shared = String(start || '11:00').slice(0, 5);
       expect(input.body).toContain(spokenArrivalWindow(shared));
       expect(input.renderedSlotMs).toBe(parseETDateTime(`${VISIT_DATE}T${shared}`).getTime());
+    });
+
+    test('the send carries a provider-handoff recheck of the permission: it passes now, and fails once the person declines, the gate goes off or the visit is on a callback-number hold', async () => {
+      await notify('confirmation');
+      const input = sendCustomerMessage.mock.calls[0][0];
+      expect(typeof input.providerPreSendCheck).toBe('function');
+      expect(await input.providerPreSendCheck({ channel: 'sms' })).toEqual({ ok: true });
+      await db('recipient_optin').insert({ customer_id: customerId, phone_key: BOB.slice(-10), phone_e164: BOB, status: 'declined' });
+      expect(await input.providerPreSendCheck({ channel: 'sms' })).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_NOT_OWED' });
+      await db('recipient_optin').where({ customer_id: customerId }).del();
+      await suppress(BOB);
+      expect(await input.providerPreSendCheck({ channel: 'sms' })).toMatchObject({ ok: false });
+      await db('messaging_suppression').where({ phone: BOB }).del();
+      expect(await input.providerPreSendCheck({ channel: 'sms' })).toEqual({ ok: true });
+      // The visit-wide hold: the caller\'s number on the account was disclaimed (a hold on THAT number, not on Bob\'s).
+      await db('disclaimed_number_holds').insert({ phone_e164: HOLDER, customer_id: customerId, source_call_log_id: callLogId, held_at: new Date() });
+      expect(await input.providerPreSendCheck({ channel: 'sms' })).toMatchObject({ ok: false, code: 'CALLBACK_NUMBER_HOLD' });
+      await db('disclaimed_number_holds').where({ source_call_log_id: callLogId }).del();
+      delete process.env[GATE];
+      expect(await input.providerPreSendCheck({ channel: 'sms' })).toMatchObject({ ok: false, code: 'VISIT_TEXT_GATE_OFF' });
+    });
+
+    test('a queued window text is pinned to the arrival it quoted AND the slot; a same-day time change keeps a still-valid day-only text', async () => {
+      const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [windowRow] = await queued();
+      expect(windowRow.metadata.arrival_start).toBe('09:00');
+      const windowMeta = { ...windowRow.metadata, to_phone: BOB, customer_id: customerId };
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', windowMeta)).toEqual({ eligible: true });
+      // The shared arrival moves while this member\'s own start stays fixed: the queued window is no longer true.
+      expect(await VisitRecipient.recipientStillOwed({ ...windowRow.metadata, arrival_start: '10:30' })).toMatchObject({ ok: false, code: 'VISIT_ARRIVAL_MOVED' });
+      // A same-day time change drops a window text, but not a day-only one on the same date.
+      await db('scheduled_services').where({ id: visitId }).update({ window_start: '13:00' });
+      expect(await VisitRecipient.recipientStillOwed(windowMeta)).toMatchObject({ ok: false, code: 'VISIT_SLOT_MOVED' });
+      expect(await VisitRecipient.recipientStillOwed({ ...windowMeta, promise_level: 'day', arrival_start: undefined })).toEqual({ ok: true });
+      // A different DATE drops the day-only one too.
+      await db('scheduled_services').where({ id: visitId }).update({ scheduled_date: MOVED_DATE });
+      expect(await VisitRecipient.recipientStillOwed({ ...windowMeta, promise_level: 'day', arrival_start: undefined })).toMatchObject({ ok: false, code: 'VISIT_SLOT_MOVED' });
+    });
+
+    test('a replay honors a callback-number hold put on the visit overnight, and its provider handoff rechecks it too', async () => {
+      const { recheckDeferredReplay, deferredProviderPreSendCheck } = require('../services/messaging/deferred-replay-registry');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [row] = await queued();
+      const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
+      await db('disclaimed_number_holds').insert({ phone_e164: HOLDER, customer_id: customerId, source_call_log_id: callLogId, held_at: new Date() });
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toMatchObject({ eligible: false });
+      const check = deferredProviderPreSendCheck('visit_text_recipient_deferred', meta);
+      expect(typeof check).toBe('function');
+      expect(await check({ channel: 'sms' })).toMatchObject({ ok: false, code: 'CALLBACK_NUMBER_HOLD' });
+      await db('disclaimed_number_holds').where({ source_call_log_id: callLogId }).del();
+      expect(await check({ channel: 'sms' })).toEqual({ ok: true });
     });
 
     test('with the gate off nothing is read or sent', async () => {

@@ -54,8 +54,10 @@ const KINDS = {
   en_route: { purpose: 'tech_en_route', messageType: 'tech_en_route', notice: null, deferrable: false, dayOnlyOk: false },
 };
 
-// A recipient gets no text about a visit that is over or cancelled.
-const LIVE_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route'];
+// A recipient gets no text about a visit that is over or cancelled, or that waits to be rebooked: 'rescheduled' is the pending-rebook
+// placeholder, which keeps the OBSOLETE date and window, so nothing is announced until the replacement slot is live again
+// (the recipient row stays through the move).
+const LIVE_STATUSES = ['pending', 'confirmed', 'en_route'];
 
 const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
 
@@ -316,7 +318,7 @@ function releaseClaim(visitRecipientId, claimKey, conn = db) {
  * Persist a text the send window held, to replay it later (deferred-replay-registry visit_text_recipient_deferred).
  * The row belongs to the recipient's own number and is frozen to the visit slot it describes. Returns true when queued.
  */
-async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, conn = db }) {
+async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, recheckMeta = {}, conn = db }) {
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
   const row = {
     customer_id: contact.visit.customerId,
@@ -336,6 +338,7 @@ async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, co
       appointment_contact_role: ROLE,
       original_block_code: 'QUIET_HOURS_HOLD',
       ...promiseMeta,
+      ...(recheckMeta.arrival_start ? { arrival_start: recheckMeta.arrival_start } : {}),
       replay_purpose: KINDS[kind].purpose,
       slot_scheduled_date: contact.visit.scheduledDate,
       ...(contact.visit.windowStart ? { slot_window_start: contact.visit.windowStart } : {}),
@@ -396,7 +399,7 @@ async function arrivalSnapshot(visit, conn) {
 // The copy and the slot the send is guarded on. null = nothing sendable.
 async function buildMessage(contact, kind, context, dayOnly, conn) {
   const firstName = String(contact.name || '').trim().split(/\s+/)[0] || null;
-  if (kind === 'en_route') return { body: informationalBody(kind, firstName, context), slotMs: null };
+  if (kind === 'en_route') return { body: informationalBody(kind, firstName, context), slotMs: null, arrivalStart: null };
   const { buildServiceLabel } = require('./appointment-reminders');
   const { parseETDateTime, formatETDay, formatETDate } = require('../utils/datetime-et');
   const arrival = await arrivalSnapshot(contact.visit, conn);
@@ -409,18 +412,27 @@ async function buildMessage(contact, kind, context, dayOnly, conn) {
     window: arrival.window,
     dayOnly,
   });
-  return { body, slotMs: arrival.hhmm ? at.getTime() : null };
+  return { body, slotMs: arrival.hhmm ? at.getTime() : null, arrivalStart: arrival.hhmm || null };
 }
 
 async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
   const message = await buildMessage(contact, kind, context, dayOnly, conn);
   if (!message) return;
-  const { body, slotMs } = message;
+  const { body, slotMs, arrivalStart } = message;
   const { sendCustomerMessage } = require('./messaging/send-customer-message');
   // A day promise carries the same marker the holder's day text records, so the visit's promise history stays one story.
   const promiseMeta = dayOnly
     ? { ...require('./time-promise').DAY_PROMISE_META, ...(slotMs ? { guard_slot_ms: slotMs } : {}), promised_date: contact.visit.scheduledDate }
     : {};
+  // What the text said, for the handoff recheck and the replay: the person, the slot, the day promise and the arrival quoted.
+  const recheckMeta = {
+    scheduled_service_id: contact.visit.id,
+    kind,
+    visit_recipient_id: contact.visitRecipientId,
+    claim_key: contact.claimKey,
+    ...(dayOnly ? { promise_level: 'day' } : {}),
+    ...(arrivalStart && !dayOnly ? { arrival_start: arrivalStart } : {}),
+  };
   const outcome = await sendOnce(contact, async () => {
     // No customerInitiated: this text goes to someone who did not call, so the send window applies.
     const result = await sendCustomerMessage({
@@ -434,11 +446,13 @@ async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
       ...(slotMs ? { renderedSlotMs: slotMs } : {}),
       ...(dayOnly ? { promisedWindowUnknown: true } : {}),
       identityTrustLevel: 'phone_matches_customer',
+      // The permission is re-read at the provider handoff: the contact-login check does not apply to this recipient.
+      providerPreSendCheck: () => providerCheck(recheckMeta, { conn }),
       // scheduled_service_id + the role are how a bounce is recognised as the recipient's, never the holder's (appointment-reminders.js handleUndeliveredSms).
       metadata: { original_message_type: KINDS[kind].messageType, appointment_contact_role: ROLE, scheduled_service_id: contact.visit.id, ...promiseMeta },
     });
     if (!result.sent && result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt && KINDS[kind].deferrable) {
-      if (await queueDeferred({ contact, kind, body, result, promiseMeta, conn })) return { ...result, visitRecipientQueued: true };
+      if (await queueDeferred({ contact, kind, body, result, promiseMeta, recheckMeta, conn })) return { ...result, visitRecipientQueued: true };
     }
     return result;
   }, { conn });
@@ -447,15 +461,45 @@ async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
   else if (!deliveryAccepted(outcome.result)) logger.warn(`[call-visit-recipient] ${kind} not sent for visit ${contact.visit.id}: ${outcome.result.code || outcome.result.reason || 'unknown'}`);
 }
 
+/** The slot date of a claim key (`kind:YYYY-MM-DDThh:mm`). */
+const claimDate = (claimKey) => String(claimKey || '').slice(String(claimKey || '').indexOf(':') + 1).slice(0, 10);
+
 /**
- * The replay's fresh check, before a queued text goes out: the gate is on, the visit is live, the recipient
- * is still on it, owed this slot's text, and has not declined since. Throws on an unreadable answer (the
- * replay holds the row and retries); true / false otherwise.
+ * Is this recipient STILL owed this text, right now? Read fresh by the replay and again at the provider handoff of every
+ * send: the gate is on, the visit has no callback-number hold (visit-wide: a hold on the caller's number does not
+ * protect this other number), the visit is live, the person is still on it and has not declined, and the text still
+ * describes the visit: the same slot (a day-only text only needs the same DATE: its promise ignores the hour), and for a
+ * text that quoted an arrival, the shared arrival is the one it quoted. Returns { ok, code?, reason? }; throws on an
+ * unreadable answer (the caller holds and retries).
  */
-async function recipientStillOwedDeferred(meta, { conn = db } = {}) {
-  if (!gateLive()) return false;
+async function recipientStillOwed(meta, { conn = db } = {}) {
+  const no = (code, reason) => ({ ok: false, code, reason });
+  if (!gateLive()) return no('VISIT_TEXT_GATE_OFF', 'gate-off');
+  if (await require('./appointment-reminders').callbackNumberHoldActiveForVisit({ scheduledServiceId: meta.scheduled_service_id })) {
+    return no('CALLBACK_NUMBER_HOLD', 'callback-number-hold');
+  }
   const contacts = await contactsForVisit(meta.scheduled_service_id, meta.kind, { conn, throwOnError: true });
-  return contacts.some((contact) => contact.visitRecipientId === meta.visit_recipient_id && contact.claimKey === meta.claim_key);
+  const mine = contacts.find((contact) => contact.visitRecipientId === meta.visit_recipient_id);
+  if (!mine) return no('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
+  const sameSlot = meta.promise_level === 'day' ? claimDate(mine.claimKey) === claimDate(meta.claim_key) : mine.claimKey === meta.claim_key;
+  if (!sameSlot) return no('VISIT_SLOT_MOVED', 'slot-moved');
+  if (meta.arrival_start && (await arrivalSnapshot(mine.visit, conn)).hhmm !== meta.arrival_start) return no('VISIT_ARRIVAL_MOVED', 'arrival-moved');
+  return { ok: true };
+}
+
+/** The provider-boundary predicate of a visit-only send (immediate and replayed): the verdict the send layer expects. */
+async function providerCheck(meta, { conn = db } = {}) {
+  try {
+    return await recipientStillOwed(meta, { conn });
+  } catch (err) {
+    logger.warn(`[call-visit-recipient] handoff recheck unreadable for visit ${meta.scheduled_service_id}: ${err.code || err.name || 'error'}`);
+    return { ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', reason: 'recheck-failed', retryable: true };
+  }
+}
+
+/** The replay's fresh check, before a queued text goes out. True when still owed; throws on an unreadable answer. */
+async function recipientStillOwedDeferred(meta, { conn = db } = {}) {
+  return (await recipientStillOwed(meta, { conn })).ok === true;
 }
 
 /** A replay that ended without sending gives the claim back, so a later sender can still owe the text. */
@@ -484,6 +528,8 @@ module.exports = {
   notifyVisitRecipients,
   sendOnce,
   deliveryAccepted,
+  recipientStillOwed,
   recipientStillOwedDeferred,
+  providerCheck,
   releaseDeferredClaim,
 };

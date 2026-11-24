@@ -1742,6 +1742,10 @@ const REGISTRY = {
     dispatch(meta, defaultDispatch) {
       return defaultDispatch();
     },
+    // The same fresh read at the true provider boundary (the permission, the callback-number hold, the slot and the quoted arrival).
+    providerPreSendCheck(meta) {
+      return () => require('../call-visit-recipient').providerCheck(meta);
+    },
     async onTerminal(meta) {
       await require('../call-visit-recipient').releaseDeferredClaim(meta);
     },

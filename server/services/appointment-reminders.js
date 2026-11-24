@@ -850,24 +850,29 @@ function cancellationNoticeReport(noticeSent, emailed) {
 // call-visit-recipient.js decides who is owed the text, writes its informational copy (no reschedule or tracker link,
 // the same day-only promise as the holder's), honors their existing declines and the send window, and persists a held
 // text; no customer, slot, consent stamp or opt-in row is written. Never throws.
-async function dispatchVisitOnlyLeg({ kind, customerId, scheduledServiceId, dayOnly, stillOwnsClaim }) {
+async function dispatchVisitOnlyLeg({ kind, customerId, scheduledServiceId, dayOnly, stillOwnsClaim, servedPhones = [] }) {
   const visitRecipients = require('./call-visit-recipient');
   const recipientKind = visitRecipients.gateLive() && scheduledServiceId ? visitRecipients.kindForNotice(kind) : null;
   if (!recipientKind) return;
   try {
     if (stillOwnsClaim && !(await stillOwnsClaim())) return;
     const { customer } = await getCustomerAndTech(customerId, null);
-    const prefs = await visitPrefsRow(customerId, scheduledServiceId);
-    if (!customer || !prefs || prefs.__prefsUnavailable === true) return;
+    // A customer with no preferences row is on the defaults, as for every other transactional sender; only an UNREADABLE row holds.
+    const prefs = (await visitPrefsRow(customerId, scheduledServiceId)) ?? {};
+    if (!customer || prefs === PREFS_UNAVAILABLE || prefs.__prefsUnavailable === true) return;
     if (await callbackNumberHoldActiveForVisit({ scheduledServiceId })) return;
-    const purpose = visitRecipients.purposeFor(recipientKind);
-    const { contacts, allowedContacts } = await resolveNoticeContacts(customer, prefs, visitRecipients.messageTypeFor(recipientKind), purpose);
+    const { contacts } = await resolveNoticeContacts(customer, prefs, visitRecipients.messageTypeFor(recipientKind), visitRecipients.purposeFor(recipientKind));
     if (!contacts.length) return;
     await visitRecipients.notifyVisitRecipients({
       scheduledServiceId,
       kind: recipientKind,
-      excludePhones: allowedContacts.map((contact) => contact.phone),
+      // Only the numbers the notice really TEXTED: a holder on email, or a contact whose text was held or failed, is not covered.
+      excludePhones: servedPhones,
       dayOnly: dayOnly === true,
+      // A confirmation another sender already logged to this number (the call pipeline's own contact fan-out) is not sent twice.
+      ...(recipientKind === 'confirmation'
+        ? { gate: async (contact) => ((await confirmationLoggedForVisitPhone({ scheduledServiceId, phone: contact.phone }).catch(() => false)) ? 'skip' : 'send') }
+        : {}),
     });
   } catch (err) {
     logger.warn(`[appt-remind] visit-only ${kind} for visit ${scheduledServiceId} skipped: ${err.code || err.name || 'error'}`);
@@ -882,6 +887,7 @@ async function deliverAppointmentNotice(args) {
     scheduledServiceId: args.scheduledServiceId,
     dayOnly: args.dayState?.dayOnly,
     stillOwnsClaim: args.stillOwnsClaim,
+    servedPhones: args.smsOutcome?.servedPhones,
   });
   return reached;
 }
@@ -1168,6 +1174,10 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   if (channel === 'sms' || channel === 'push' || !confirmationOn) {
     if (!(await visitStillLive())) return false;
     const smsOk = await smsAttempt();
+    // The default-channel booking confirmation (the call pipeline's) does not pass deliverAppointmentNotice: the
+    // visit-only leg is dispatched here, once, after the holder's own send. The call pipeline's own texts to the
+    // account contacts are not tracked here, so the confirmation log (dispatchVisitOnlyLeg) keeps it from a repeat.
+    await dispatchVisitOnlyLeg({ kind: 'confirmation', customerId, scheduledServiceId, dayOnly: false, stillOwnsClaim });
     if (smsOk || !smsPermanentlyBlocked || !confirmationOn || !prefsKnown) return smsOk;
     // Consent-blocked text on the default channel: reach them by email.
     // deliverAppointmentEmailFallback raises the no-channel human alert
@@ -2593,6 +2603,8 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // a caller that finalizes on acceptance (handleCancellation) reads it to report a partial delivery. Contacts held
   // for a later send (quiet hours queue, move-hold office hand-off) have their own rail and are not listed.
   sharedOutcome.failedRecipients = [];
+  // The numbers this fan-out really texted (accepted by the provider): the visit-only leg skips exactly these.
+  sharedOutcome.servedPhones = [];
   // Only the holder can use App. Resolve that leg before accepting any
   // contact text, so a pending push can leave the whole reminder open.
   const primaryPhone = lastTenDigits(customer.phone);
@@ -2645,6 +2657,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       continue;
     }
     recordFailedRecipient(sharedOutcome, contact, sent, { heldIsFailure: sendOptions.noDeferredQueue === true });
+    if (sent) sharedOutcome.servedPhones.push(contact.phone);
     sentAny = sentAny || sent;
   }
   if (sentAny && moveHeldRoles.length) {

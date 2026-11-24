@@ -2117,6 +2117,8 @@ const TwilioService = {
     const cachedPrimaryLandline = customer.line_type === "landline" && !!primaryDigits;
     let attemptedSms = false;
     let landlineSkipped = false;
+    // The numbers this notice really texted: the visit-only leg skips exactly these.
+    const servedPhones = [];
     const attemptSms = async () => {
       for (const contact of contacts) {
         // callback_number_needed hold — never text the disclaimed ANI (or
@@ -2151,8 +2153,7 @@ const TwilioService = {
           continue;
         }
         attemptedSms = true;
-        results.push(
-          await sendCustomerMessage({
+        const enRouteResult = await sendCustomerMessage({
             to: contact.phone,
             body,
             channel: "sms",
@@ -2174,8 +2175,9 @@ const TwilioService = {
             // never set it (validators/send-window.js).
             ...(operatorInitiated ? { operatorInitiated: true } : {}),
             metadata: { original_message_type: "tech_en_route", useCustomerChannel: true, notificationEventKey, templateKey: "tech_en_route" },
-          }),
-        );
+          });
+        results.push(enRouteResult);
+        if (enRouteResult?.sent) servedPhones.push(contact.phone);
       }
       return results.some((r) => r?.sent);
     };
@@ -2215,18 +2217,10 @@ const TwilioService = {
       }
     };
 
-    // The visit-only leg (above), dispatched ONCE here, whatever channel the account holder chose: a holder on
-    // email still has the named person texted. Its own entry checks and its own outcome: `results` and the
-    // return value below are the account holder's alone.
-    if (visitRecipients) {
-      await visitRecipients.notifyVisitRecipients({
-        scheduledServiceId,
-        kind: "en_route",
-        excludePhones: contacts.map((c) => c.phone),
-        context: { techName: customerTechName, etaMinutes },
-      });
-    }
-
+    // The visit-only leg (see above): dispatched ONCE, after the account holder's own delivery and whatever channel the
+    // holder chose (a holder on email still has the named person texted). Its own entry checks, its own outcome:
+    // `results` and the return value are the account holder's alone. notifyVisitRecipients never throws.
+    try {
     // email — email only; when no usable email exists (none on file /
     // suppressed / provider error) fall back to SMS so the customer still
     // learns the tech is coming (mirrors deliverAppointmentNotice).
@@ -2276,6 +2270,16 @@ const TwilioService = {
     // landline/no-contacts email-fallback cases keep their prior (push-only)
     // success semantics, unchanged.
     return { success: delivered || (channel === 'push' && emailFallbackAccepted) || (callbackNumberHoldActive && emailFallbackAccepted), results, emailSent: emailFallbackAccepted };
+    } finally {
+      if (visitRecipients) {
+        await visitRecipients.notifyVisitRecipients({
+          scheduledServiceId,
+          kind: "en_route",
+          excludePhones: servedPhones,
+          context: { techName: customerTechName, etaMinutes },
+        });
+      }
+    }
   },
 
   /**
