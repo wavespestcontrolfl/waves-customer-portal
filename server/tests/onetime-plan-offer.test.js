@@ -2023,8 +2023,8 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       ['email turned off for the customer', 'EMAIL_SWITCH_OFF'],
       ['a suppression of the address', 'EMAIL_SUPPRESSED_GLOBAL'],
     ])('the email division says %s: the instruction is withdrawn', async (_name, reason) => {
+      // The item's job still qualifies (the run also holds it today, by the same verdict).
       const deps = liveWorld({
-        jobs: [],
         tables: { notifications: [item('open', { lastDay: '2030-04-04', jobId: 'job-1' })], estimates: [] },
         ...emailVerdict(reason),
       });
@@ -2090,6 +2090,45 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(closeKeys).toHaveBeenCalledTimes(closes);
       const read = deps.db.queriesOf('scheduled_services as s').find((query) => called(query, 'where', 's.id', 'job-1'));
       expect(read).toBeDefined();
+    });
+
+    test('an item that stays open with a moved offer day is rewritten with the current terms, quietly', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'has_plan' })),
+        tables: { notifications: [item('job-1', { lastDay: '2030-03-20', jobId: 'job-1', reason: 'not_priced' })], estimates: [] },
+      });
+      await run(deps);
+      expect(closeKeys).not.toHaveBeenCalled();
+      expect(deps.raiseOfficeItem).toHaveBeenCalledWith({
+        job: { id: 'job-1' }, customer: expect.objectContaining({ id: 'cust-1', first_name: 'Jordan' }), offerDay: '2030-03-05', reason: 'not_priced',
+      });
+    });
+
+    test('an item whose terms are current is not rewritten', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'has_plan' })),
+        tables: { notifications: [item('job-1', { lastDay: '2030-04-04', jobId: 'job-1' })], estimates: [] },
+      });
+      await run(deps);
+      expect(deps.raiseOfficeItem).not.toHaveBeenCalled();
+    });
+
+    test('the job no longer qualifies for this customer: the item is withdrawn', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        tables: {
+          'scheduled_services as s': (query) => (called(query, 'where', 's.id', 'job-1') ? [] : [JOB]),
+          notifications: [item('job-1', { lastDay: '2030-04-04', jobId: 'job-1' })],
+          estimates: [],
+        },
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys, , opts]) => [keys, opts.resolution]))
+        .toEqual([[[_test.officeItemKey('job-1')], 'The one-time job no longer qualifies for the offer']]);
+      const read = deps.db.queriesOf('scheduled_services as s').find((query) => called(query, 'where', 's.id', 'job-1'));
+      expect(called(read, 'where', 's.customer_id', 'cust-1')).toBe(true);
     });
 
     test('off reads nothing', async () => {
