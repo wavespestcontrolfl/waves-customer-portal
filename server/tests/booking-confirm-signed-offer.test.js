@@ -820,6 +820,30 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(capturedScheduledInsert).toMatchObject({ zone: 'sarasota' });
     });
 
+    // payload.commitGuard (internal callers: the new-home postcard page): the caller's re-check on the booking transaction,
+    // after the replay and the conflict checks, before the insert. A refusal answers 409 COMMIT_GUARD_REFUSED (never a
+    // thrown error: the mail route would answer 500).
+    test('commitGuard false refuses 409 COMMIT_GUARD_REFUSED before the insert, run on the booking transaction', async () => {
+      const seen = captureTrx();
+      const commitGuard = jest.fn().mockResolvedValue(false);
+      await expect(createSelfBooking({ ...assessment(jest.fn().mockResolvedValue(true)), commitGuard }))
+        .resolves.toMatchObject({ ok: false, status: 409, code: 'COMMIT_GUARD_REFUSED' });
+      expect(commitGuard).toHaveBeenCalledTimes(1);
+      expect(commitGuard.mock.calls[0]).toEqual([seen.trx]);
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('commitGuard true books as before; an idempotent replay skips it', async () => {
+      const commitGuard = jest.fn().mockResolvedValue(true);
+      await expect(createSelfBooking({ ...assessment(jest.fn().mockResolvedValue(true)), commitGuard })).rejects.toThrow(SENTINEL);
+      expect(commitGuard).toHaveBeenCalledTimes(1);
+      replayExisting = { id: 'sb-1', confirmation_code: 'WAV-1' };
+      commitGuard.mockClear();
+      await expect(createSelfBooking({ ...assessment(jest.fn().mockResolvedValue(true)), commitGuard }))
+        .resolves.toMatchObject({ ok: true, body: { replayed: true } });
+      expect(commitGuard).not.toHaveBeenCalled();
+    });
+
     test('an idempotent replay returns the first booking without the re-check', async () => {
       replayExisting = { id: 'sb-1', confirmation_code: 'WAV-1' };
       const slotGuard = jest.fn().mockResolvedValue(false);

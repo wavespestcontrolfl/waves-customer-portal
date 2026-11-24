@@ -4522,7 +4522,7 @@ async function createSelfBooking(payload = {}) {
       // re-check on THIS transaction, after the replay and the conflict checks and before the visit is inserted, of what
       // it decided before it started (its gate, the prospect row it share-locks until commit, the price). A false verdict
       // refuses the booking. It is a function, so a request body (JSON) can never carry one.
-      if (typeof commitGuard === 'function' && !callbackVisit && !(await commitGuard(trx))) {
+      if (typeof commitGuard === 'function' && !(await commitGuard(trx))) {
         throw Object.assign(new Error('This offer just changed. Please reload the page.'), {
           statusCode: 409,
           isOperational: true,
@@ -4877,7 +4877,7 @@ async function createSelfBooking(payload = {}) {
       // customer's CURRENT address" outcome the consultation page's
       // sendBookingFailure answers the same way it answers a slot race
       // (409, refreshed availability), never the global error handler.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN' || txErr.code === 'ESTIMATE_CHANGED') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN' || txErr.code === 'ESTIMATE_CHANGED' || txErr.code === 'COMMIT_GUARD_REFUSED') {
         if (txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
           // No message may follow this refusal: retire the recovery intent the
           // wizard's capture-intent staged for this contact.

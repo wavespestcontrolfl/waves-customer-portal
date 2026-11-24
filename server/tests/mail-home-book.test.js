@@ -17,12 +17,13 @@ const mockDb = jest.fn(() => {
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../routes/admin-customers', () => ({ ensureCustomerAccount: jest.fn() }));
+jest.mock('../services/customer-default-rows', () => ({ createDefaultCustomerRows: jest.fn(async () => {}) }));
 
 const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
 const realQuote = require('../services/mail/home-quote');
 const {
-  getHomeTimes, bookHome, draftIdFor, validContact, validOffer, offersOf, findOwnCustomer: findOwnCustomerReal, mintCustomer: mintCustomerReal,
-  findCommittedBookingCustomer: findCommittedBookingCustomerReal,
+  getHomeTimes, bookHome, draftIdFor, validContact, validOffer, validShownPrice, offersOf, findOwnCustomer: findOwnCustomerReal, mintCustomer: mintCustomerReal,
+  findCommittedBookingCustomer: findCommittedBookingCustomerReal, commitGuardFor,
 } = require('../services/mail/home-book');
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
@@ -38,6 +39,7 @@ const offer = (date, start, sig = `sig-${date}-${start}`) => ({
 });
 const slot = (start, sig) => ({ start_time: start, end_time: `${String(Number(start.slice(0, 2)) + 1).padStart(2, '0')}:00`, start_label: start, end_label: '', technician_id: TECH, slot_sig: sig });
 
+const SHOWN = { annualCents: 62700, setupCents: 0 };
 const INPUT = () => ({
   offer: offer('2026-12-02', '09:00'), name: 'Sample Person', phone: '(941) 555-0142', email: 'Sample@Example.com',
   price: { annual: 627, setupFee: 0 },
@@ -388,30 +390,50 @@ describe('bookHome', () => {
     await bookHome(TOKEN, INPUT(), deps);
     const { commitGuard } = booking.createSelfBooking.mock.calls[0][0];
     expect(typeof commitGuard).toBe('function');
-    const trxFor = (found) => {
-      const q = {};
-      q.where = jest.fn(() => q);
-      q.forShare = jest.fn(() => q);
-      q.first = jest.fn(async () => found);
-      return Object.assign(jest.fn(() => q), { q });
+    const trxFor = (found, liveRows = []) => {
+      const prospect = {};
+      prospect.where = jest.fn(() => prospect);
+      prospect.forShare = jest.fn(() => prospect);
+      prospect.first = jest.fn(async () => found);
+      const live = {};
+      for (const m of ['join', 'where', 'whereNot', 'whereRaw', 'limit']) live[m] = jest.fn(() => live);
+      live.select = jest.fn(async () => liveRows);
+      const trx = jest.fn((table) => (table === 'mail_prospects' ? prospect : live));
+      trx.raw = jest.fn(async () => ({}));
+      return Object.assign(trx, { prospect, live });
     };
-    const live = trxFor({ price_annual: '627.00', price_setup_fee: '0.00' });
-    expect(await commitGuard(live)).toBe(true);
-    expect(live).toHaveBeenCalledWith('mail_prospects');
-    expect(live.q.where).toHaveBeenCalledWith({ id: 'prospect-1', list_key: 'new_home', status: 'eligible', price_status: 'priced' });
-    expect(live.q.forShare).toHaveBeenCalled();
+    const ok = { price_annual: '627.00', price_setup_fee: '0.00' };
+    const liveTrx = trxFor(ok);
+    expect(await commitGuard(liveTrx)).toBe(true);
+    // The first-booking claim: an advisory lock on this prospect, taken before the row and the bookings are read.
+    expect(liveTrx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['mail-home-first-booking', 'prospect-1']);
+    expect(liveTrx.raw.mock.invocationCallOrder[0]).toBeLessThan(liveTrx.prospect.first.mock.invocationCallOrder[0]);
+    expect(liveTrx).toHaveBeenCalledWith('mail_prospects');
+    expect(liveTrx.prospect.where).toHaveBeenCalledWith({ id: 'prospect-1', list_key: 'new_home', status: 'eligible', price_status: 'priced' });
+    expect(liveTrx.prospect.forShare).toHaveBeenCalled();
+    expect(liveTrx.live.where).toHaveBeenCalledWith('sba.source', 'mail_new_home');
+    expect(liveTrx.live.whereNot).toHaveBeenCalledWith('sba.status', 'cancelled');
     // The prospect held back, repriced (annual or setup fee) or gone since the check: refused.
     expect(await commitGuard(trxFor(undefined))).toBe(false);
     expect(await commitGuard(trxFor({ price_annual: '641.50', price_setup_fee: '0.00' }))).toBe(false);
     expect(await commitGuard(trxFor({ price_annual: '627.00', price_setup_fee: '99.00' }))).toBe(false);
-    // The mail gate or /book turned off since: refused before the row is read.
+    // Another household member's first booking of this home is live: refused (the second of two simultaneous bookings,
+    // once the first has committed under the lock). A booking at another address is not.
+    booking.addressMatchesCustomer.mockImplementation((c) => c.id === 'other-member');
+    expect(await commitGuard(trxFor(ok, [{ id: 'other-member', address_line1: '101 Example Trl', zip: '34212' }]))).toBe(false);
+    expect(await commitGuard(trxFor(ok, [{ id: 'elsewhere', address_line1: '101 Example Ct', zip: '34212' }]))).toBe(true);
+    // A home with no house number or zip cannot be matched: fail closed.
+    const blankGuard = commitGuardFor({ row: row({ address_line1: 'LOT 4' }) }, SHOWN, deps);
+    expect(await blankGuard(trxFor(ok))).toBe(false);
+    // The mail gate or /book turned off since: refused before the lock or the row is touched.
     gates.mailHomePageLive.mockReturnValue(false);
-    const off = trxFor({ price_annual: '627.00', price_setup_fee: '0.00' });
+    const off = trxFor(ok);
     expect(await commitGuard(off)).toBe(false);
     expect(off).not.toHaveBeenCalled();
+    expect(off.raw).not.toHaveBeenCalled();
     gates.mailHomePageLive.mockReturnValue(true);
     gates.isEnabled.mockImplementation((name) => name !== 'selfBooking');
-    expect(await commitGuard(trxFor({ price_annual: '627.00', price_setup_fee: '0.00' }))).toBe(false);
+    expect(await commitGuard(trxFor(ok))).toBe(false);
   });
 
   test('an identical retry of a booking that committed (the customer has moved past the pre-customer stage) goes to createSelfBooking for its replay', async () => {
@@ -420,7 +442,7 @@ describe('bookHome', () => {
     findExistingCustomer.mockResolvedValue({ id: 'cust-1' }); // and the matcher finds it as a customer
     quote.priceHome.mockResolvedValue({ status: 'not_clean', reason: 'member_address' }); // a member at the address now
     const res = await bookHome(TOKEN, INPUT(), deps);
-    expect(res).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '10:00' } } });
+    expect(res).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '11:00' } } });
     expect(findCommittedBookingCustomer).toHaveBeenCalledWith(expect.objectContaining({ row: mockRow }), expect.objectContaining({ phone10: '9415550142' }), expect.objectContaining({ date: '2026-12-02', start: '09:00' }), deps);
     expect(findOwnCustomer).not.toHaveBeenCalled();
     expect(findExistingCustomer).not.toHaveBeenCalled();
@@ -428,7 +450,7 @@ describe('bookHome', () => {
     expect(mintCustomer).not.toHaveBeenCalled();
     expect(saveEstimate).not.toHaveBeenCalled();
     const payload = booking.createSelfBooking.mock.calls[0][0];
-    expect(payload).toMatchObject({ customer_id: 'cust-1', pricing_estimate_id: draftIdFor('prospect-1', validContact(INPUT())), slot_date: '2026-12-02', slot_start: '09:00' });
+    expect(payload).toMatchObject({ customer_id: 'cust-1', pricing_estimate_id: draftIdFor('prospect-1', validContact(INPUT()), SHOWN), slot_date: '2026-12-02', slot_start: '09:00' });
     expect(verifyEstimateHandoffToken(payload.pricing_estimate_id, payload.estimate_token)).toBe(true);
     // The signed offer was still checked first.
     expect(verifySlotOfferField).toHaveBeenCalled();
@@ -466,6 +488,65 @@ describe('bookHome', () => {
     expect(await findCommittedBookingCustomerReal({ row: mockRow }, validContact(INPUT()), { date: '2026-12-02', start: '09:00' }, { db: conn, booking: { addressMatchesCustomer: matches } })).toBeNull();
   });
 
+  test('the phone sent to createSelfBooking has the digits the minted row stores, so its customer_id phone match resolves the same row', async () => {
+    const { applyContactNormalization } = require('../utils/intake-normalize');
+    const contact = validContact(INPUT());
+    const storedPhone = applyContactNormalization({ phone: contact.phone10 }).phone; // what insertCustomer writes
+    await bookHome(TOKEN, INPUT(), deps);
+    const sent = booking.createSelfBooking.mock.calls[0][0].new_customer.phone;
+    expect(sent.replace(/\D/g, '')).toBe(storedPhone.replace(/\D/g, ''));
+    expect(sent.replace(/\D/g, '')).toHaveLength(11);
+  });
+
+  test('the new customer is seeded with the default notification and property rows, inside the mint transaction', async () => {
+    const admin = require('../routes/admin-customers');
+    const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+    createDefaultCustomerRows.mockClear();
+    admin.ensureCustomerAccount.mockReset().mockResolvedValue({ accountId: 'acct-1', existingCustomer: null, created: true });
+    const { conn, trx } = txConn();
+    await mintCustomerReal({ row: mockRow }, validContact(INPUT()), { lat: 27.5, lng: -82.5 }, { db: conn, findExistingCustomer });
+    expect(createDefaultCustomerRows).toHaveBeenCalledWith(trx, 'cust-9');
+    // A refused mint seeds nothing.
+    createDefaultCustomerRows.mockClear();
+    findExistingCustomer.mockResolvedValue({ id: 'x' });
+    await expect(mintCustomerReal({ row: mockRow }, validContact(INPUT()), { lat: 27.5, lng: -82.5 }, { db: txConn().conn, findExistingCustomer })).rejects.toMatchObject({ code: 'CONTACT_ON_FILE' });
+    expect(createDefaultCustomerRows).not.toHaveBeenCalled();
+  });
+
+  test('the disclosed price must be both fields, as JSON numbers in whole cents: a missing fee, a boolean, a string or an array is 400 invalid_price', async () => {
+    expect(validShownPrice({ annual: 627, setupFee: 0 })).toEqual({ annualCents: 62700, setupCents: 0 });
+    expect(validShownPrice({ annual: 52.25, setupFee: 99.5 })).toEqual({ annualCents: 5225, setupCents: 9950 });
+    for (const price of [
+      { annual: 627 }, { annual: 627, setupFee: null }, { annual: 627, setupFee: false }, { annual: 627, setupFee: true },
+      { annual: 627, setupFee: [0] }, { annual: 627, setupFee: '0' }, { annual: '627', setupFee: 0 }, { annual: [627], setupFee: 0 },
+      { annual: true, setupFee: 0 }, { annual: 627.001, setupFee: 0 }, { annual: 627, setupFee: 0.005 }, { annual: 627, setupFee: -1 }, { annual: 0, setupFee: 0 },
+    ]) {
+      expect(validShownPrice(price)).toBeNull();
+      expect(await bookHome(TOKEN, { ...INPUT(), price }, deps)).toEqual({ status: 400, body: { error: 'invalid_price' } });
+    }
+    expect(saveEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a repriced home gets a fresh draft id, so a draft a slot conflict left behind never pins the old price', async () => {
+    mockRow = row({ price_annual: '641.50' });
+    quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 641.5, priceSetupFee: 0, priceDigest: 'd' });
+    quote.judge.mockReturnValue({ price: { annual: 641.5, setupFee: 0, digest: 'd' } });
+    await bookHome(TOKEN, { ...INPUT(), price: { annual: 641.5, setupFee: 0 } }, deps);
+    const repricedId = saveEstimate.mock.calls[0][0].clientDraftId;
+    expect(repricedId).not.toBe(draftIdFor('prospect-1', validContact(INPUT()), SHOWN));
+    expect(repricedId).toBe(draftIdFor('prospect-1', validContact(INPUT()), { annualCents: 64150, setupCents: 0 }));
+    // The same price and contact still reach the same draft (a repeat tap).
+    expect(draftIdFor('prospect-1', validContact(INPUT()), SHOWN)).toBe(draftIdFor('prospect-1', validContact(INPUT()), { ...SHOWN }));
+  });
+
+  test('the success window is the customer arrival window from the committed start, whatever end the caller sent', async () => {
+    const noEnd = { ...INPUT(), offer: { ...offer('2026-12-02', '09:00'), end_time: undefined } };
+    expect(await bookHome(TOKEN, noEnd, deps)).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '11:00' } } });
+    // The committed booking's own start wins over the offer's.
+    booking.createSelfBooking.mockResolvedValue({ ok: true, body: { booking: { start_time: '13:00:00' } } });
+    expect((await bookHome(TOKEN, INPUT(), deps)).body.window).toEqual({ start: '13:00', end: '15:00' });
+  });
+
   test('/book off is not_available', async () => {
     gates.isEnabled.mockImplementation((name) => name !== 'selfBooking');
     expect(await bookHome(TOKEN, INPUT(), deps)).toEqual({ status: 503, body: { error: 'not_available' } });
@@ -474,7 +555,7 @@ describe('bookHome', () => {
 
   test('saves the estimate (not a dry run) from the stored facts plus the contact, then books through createSelfBooking with a valid handoff token', async () => {
     const res = await bookHome(TOKEN, INPUT(), deps);
-    expect(res).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '10:00' } } });
+    expect(res).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '11:00' } } });
 
     // The price is checked with the stored row and its facts first.
     expect(quote.priceHome).toHaveBeenCalledWith(mockRow, { homeSqft: 2400, homeSqftSource: 'parcel_map', stories: 1, lotSqft: 9000 }, {});
@@ -487,7 +568,7 @@ describe('bookHome', () => {
       customerName: 'Sample Person',
       customerPhone: '+19415550142',
       customerEmail: 'sample@example.com',
-      clientDraftId: draftIdFor('prospect-1', validContact(INPUT())),
+      clientDraftId: draftIdFor('prospect-1', validContact(INPUT()), SHOWN),
       billByInvoice: false,
       showOneTimeOption: false,
     });
@@ -508,7 +589,7 @@ describe('bookHome', () => {
       service_id: 'pest_control', service_type: 'Pest Control', recurring_pattern: 'quarterly', source: 'mail_new_home',
       customer_id: 'cust-1', payAtVisit: true, customersOnly: true, authedCustomer: null, callbackVisit: null,
       new_customer: {
-        first_name: 'Sample', last_name: 'Person', phone: '9415550142', email: 'sample@example.com',
+        first_name: 'Sample', last_name: 'Person', phone: '+19415550142', email: 'sample@example.com',
         address_line1: '101 EXAMPLE TRL', city: 'SAMPLETON', state: 'FL', zip: '34212', lat: 27.5, lng: -82.5,
       },
     });
