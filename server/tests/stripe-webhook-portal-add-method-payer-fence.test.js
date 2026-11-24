@@ -154,11 +154,16 @@ describe('portal-add-method webhook save-only form', () => {
   });
 
   test('an intent minted under any other text version (the Auto Pay authorization, an older save-only text, none) is neither recorded nor given the default role', async () => {
+    // No local row yet (the browser never saved it): the stale stamp must stop the webhook before it persists one.
+    db.mockImplementation(() => ({ where: () => ({ first: async () => undefined }) }));
+    const StripeService = require('../services/stripe');
     for (const stamp of [SETUP_INTENT.metadata.consent_text_version, 'save_only_2020-01-01', undefined]) {
       await handleSetupIntentSucceeded({ ...SETUP_INTENT, metadata: { ...SETUP_INTENT.metadata, enroll_autopay: 'false', consent_text_version: stamp } });
     }
     expect(finishSaveOnlyAdd).not.toHaveBeenCalled();
     expect(enrollConsentedMethod).not.toHaveBeenCalled();
     expect(ConsentService.recordConsent).not.toHaveBeenCalled();
+    // Nothing is persisted before the stamp check: with no local row, the webhook never saves the method.
+    expect(StripeService.savePaymentMethod).not.toHaveBeenCalled();
   });
 });

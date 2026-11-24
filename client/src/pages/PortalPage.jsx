@@ -6816,6 +6816,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
           try {
             clearReturnedSetupIntent();
             if (err.saveOnly === true) {
+              // The visible Add payment button retries in the same mode until the refresh.
+              setSaveOnlyAdd(true);
               const url = new URL(window.location.href);
               url.searchParams.set('add_card', '1');
               window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);

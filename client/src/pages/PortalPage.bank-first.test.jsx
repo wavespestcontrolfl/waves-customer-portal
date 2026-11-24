@@ -229,6 +229,12 @@ describe('Billing tab Add Payment Method modal — save-only form from the remin
     expect(params.get('stripe_setup_flow')).toBeNull();
     expect(params.get('tab')).toBe('billing');
     expect(params.get('add_card')).toBe(linkBack ? '1' : null);
+    // An immediate retry on the visible button keeps the mode: save-only mints enrollAutopay:false, the usual form never does.
+    api.createSetupIntent.mockResolvedValue({ publishableKey: 'pk_test_1', clientSecret: 'seti_secret', paymentMethodTypes: ['card'] });
+    getStripe.mockResolvedValue(fakeStripe());
+    fireEvent.click(await screen.findByRole('button', { name: 'Add payment' }, SETTLE));
+    await screen.findByRole('dialog', { name: 'Add payment method' }, SETTLE);
+    expect(api.createSetupIntent).toHaveBeenLastCalledWith(...(saveOnly ? ['card', { enrollAutopay: false }] : ['card_or_bank']));
   });
 
   it('a failed start keeps the link and the save-only mode: the retry button mints save-only again, never the Auto Pay form', async () => {
