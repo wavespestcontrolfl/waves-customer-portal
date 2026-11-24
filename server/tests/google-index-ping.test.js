@@ -34,14 +34,21 @@ function sitemapXml(entries) {
   return `<urlset>${entries.map(([loc, mod]) => `<url><loc>${loc}</loc>${mod ? `<lastmod>${mod}</lastmod>` : ''}</url>`).join('')}</urlset>`;
 }
 
-// pages: { url: html }; entries: [[loc, lastmod]]
-function makeFetch({ entries, pages = {}, failUrl = null }) {
+// pages: { url: html | { status, html, headers } }; unknown URLs answer 404.
+function response(status, text = '', headers = {}) {
+  return { status, ok: status >= 200 && status < 300, text: async () => text, headers: { get: (k) => headers[k.toLowerCase()] || null } };
+}
+function makeFetch({ entries, pages = {}, failUrl = null, sitemaps = null }) {
+  const docs = sitemaps || { [`${ORIGIN}/sitemap-0.xml`]: sitemapXml(entries) };
   return jest.fn(async (url) => {
-    if (url === failUrl) return { ok: false, status: 500, text: async () => '' };
-    if (url === `${ORIGIN}/sitemap-index.xml`) return { ok: true, text: async () => `<sitemapindex><sitemap><loc>${ORIGIN}/sitemap-0.xml</loc></sitemap></sitemapindex>` };
-    if (url === `${ORIGIN}/sitemap-0.xml`) return { ok: true, text: async () => sitemapXml(entries) };
-    if (url in pages) return { ok: true, text: async () => pages[url] };
-    return { ok: false, status: 404, text: async () => '' };
+    if (url === failUrl) return response(500);
+    if (url === `${ORIGIN}/sitemap-index.xml`) return response(200, `<sitemapindex>${Object.keys(docs).map((d) => `<sitemap><loc>${d}</loc></sitemap>`).join('')}</sitemapindex>`);
+    if (url in docs) return response(200, docs[url]);
+    if (url in pages) {
+      const p = pages[url];
+      return typeof p === 'string' ? response(200, p) : response(p.status || 200, p.html || '', p.headers || {});
+    }
+    return response(404);
   });
 }
 
@@ -119,11 +126,114 @@ test('a job URL that left the sitemap gets URL_DELETED once', async () => {
   expect(indexing.urlNotifications.publish).toHaveBeenCalledTimes(1);
 });
 
-test('a job page that lost its JobPosting is sent URL_DELETED', async () => {
-  await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01']], pages: { [JOB]: JOB_LD } }) });
+test('URL_DELETED needs evidence: 404, 410 or noindex send it; a live page or a redirect drops the URL quietly', async () => {
+  const cases = [
+    ['404', { status: 404 }, true],
+    ['410', { status: 410 }, true],
+    ['noindex meta', { html: '<meta name="robots" content="noindex, follow">' }, true],
+    ['X-Robots-Tag', { html: ORG_LD, headers: { 'x-robots-tag': 'noindex' } }, true],
+    ['live page without JobPosting', { html: ORG_LD }, false],
+    ['301 elsewhere', { status: 301 }, false],
+  ];
+  for (const [name, page, sent] of cases) {
+    mockState = undefined;
+    indexing.urlNotifications.publish.mockClear();
+    await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01']], pages: { [JOB]: JOB_LD } }) });
+    indexing.urlNotifications.publish.mockClear();
+    // Lost its JobPosting while still in the sitemap.
+    await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-05']], pages: { [JOB]: page } }) });
+    expect([name, published(indexing)]).toEqual([name, sent ? [['URL_DELETED', JOB]] : []]);
+    expect(JSON.parse(mockState).jobs).toEqual({});
+  }
+});
+
+test('a job URL that left the sitemap but is still live is dropped without a notification', async () => {
+  await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01'], [`${ORIGIN}/`, null]], pages: { [JOB]: JOB_LD } }) });
   indexing.urlNotifications.publish.mockClear();
-  await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-05']], pages: { [JOB]: ORG_LD } }) });
-  expect(published(indexing)).toEqual([['URL_DELETED', JOB]]);
+  await run({ fetchFn: makeFetch({ entries: [[`${ORIGIN}/`, null]], pages: { [JOB]: JOB_LD } }) });
+  expect(indexing.urlNotifications.publish).not.toHaveBeenCalled();
+  expect(JSON.parse(mockState).jobs).toEqual({});
+});
+
+test('a job URL that errors (5xx) when checked keeps its state and retries', async () => {
+  await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01'], [`${ORIGIN}/`, null]], pages: { [JOB]: JOB_LD } }) });
+  indexing.urlNotifications.publish.mockClear();
+  await run({ fetchFn: makeFetch({ entries: [[`${ORIGIN}/`, null]], pages: { [JOB]: { status: 503 } } }) });
+  expect(indexing.urlNotifications.publish).not.toHaveBeenCalled();
+  expect(Object.keys(JSON.parse(mockState).jobs)).toEqual([JOB]);
+});
+
+test('sitemap fetches stay on the https hub host and never follow redirects', async () => {
+  const fetchFn = makeFetch({ entries: [[JOB, '2026-11-01']], pages: { [JOB]: JOB_LD } });
+  await run({ fetchFn });
+  for (const [url, init] of fetchFn.mock.calls) {
+    expect(url.startsWith(`${ORIGIN}/`)).toBe(true);
+    expect(init.redirect).toBe('manual');
+  }
+});
+
+test('an off-host child sitemap, a redirect or a non-hub scheme aborts the run before any Google call', async () => {
+  for (const loc of ['https://evil.example/sitemap.xml', 'http://www.wavespestcontrol.com/sitemap-0.xml', 'https://wavespestcontrol.com/sitemap-0.xml']) {
+    const fetchFn = makeFetch({ sitemaps: { [loc]: sitemapXml([[JOB, '2026-11-01']]) } });
+    const out = await run({ fetchFn });
+    expect(out.errors).toBe(1);
+    expect(fetchFn.mock.calls.map(([u]) => u)).toEqual([`${ORIGIN}/sitemap-index.xml`]);
+  }
+  const redirected = jest.fn(async () => response(301, '', { location: 'https://evil.example/' }));
+  await expect(run({ fetchFn: redirected })).resolves.toMatchObject({ errors: 1 });
+  expect(SearchConsole.submitSitemap).not.toHaveBeenCalled();
+  expect(indexing.urlNotifications.publish).not.toHaveBeenCalled();
+});
+
+test('an incomplete sitemap read aborts the run and keeps prior state', async () => {
+  await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01']], pages: { [JOB]: JOB_LD } }) });
+  const before = mockState;
+  SearchConsole.submitSitemap.mockClear();
+  indexing.urlNotifications.publish.mockClear();
+  const good = `${ORIGIN}/sitemap-0.xml`;
+  const bad = `${ORIGIN}/sitemap-1.xml`;
+  const many = Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`${ORIGIN}/sitemap-${i}.xml`, sitemapXml([[`${ORIGIN}/p${i}/`, null]])]));
+  const broken = [
+    { [good]: sitemapXml([[`${ORIGIN}/`, null]]), [bad]: '<html><body>200 but not a sitemap</body></html>' },
+    { [good]: sitemapXml([[`${ORIGIN}/`, null]]), [bad]: '<urlset></urlset>' },
+    many,
+  ];
+  for (const sitemaps of broken) {
+    await expect(run({ fetchFn: makeFetch({ sitemaps }) })).resolves.toMatchObject({ errors: 1, updated: 0, deleted: 0 });
+  }
+  expect(mockState).toBe(before);
+  expect(SearchConsole.submitSitemap).not.toHaveBeenCalled();
+  expect(indexing.urlNotifications.publish).not.toHaveBeenCalled();
+});
+
+test('an sc-domain property still reads and guards the www hub origin', async () => {
+  SearchConsole.resolveAccessibleProperty.mockResolvedValue({ siteUrl: 'sc-domain:wavespestcontrol.com' });
+  const out = await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01']], pages: { [JOB]: JOB_LD } }) });
+  expect(out).toMatchObject({ sitemapSubmitted: true, updated: 1, errors: 0 });
+  expect(SearchConsole.submitSitemap).toHaveBeenCalledWith('sc-domain:wavespestcontrol.com', `${ORIGIN}/sitemap-index.xml`);
+  expect(published(indexing)).toEqual([['URL_UPDATED', JOB]]);
+});
+
+test('an undated careers page is rechecked at most once per 24 h and pinged only when its JobPosting changes', async () => {
+  const T0 = Date.parse('2026-11-23T12:00:00Z');
+  const H = 60 * 60 * 1000;
+  const entries = [[JOB, null]];
+  const fetchFn = makeFetch({ entries, pages: { [JOB]: JOB_LD } });
+  await run({ fetchFn, now: T0 });
+  expect(indexing.urlNotifications.publish).toHaveBeenCalledTimes(1);
+  // Within 24 h: not even fetched.
+  fetchFn.mockClear();
+  await run({ fetchFn, now: T0 + 23 * H });
+  expect(fetchFn).not.toHaveBeenCalledWith(JOB, expect.anything());
+  // After 24 h, same content: fetched, no duplicate notification, check time moves.
+  await run({ fetchFn, now: T0 + 25 * H });
+  expect(fetchFn).toHaveBeenCalledWith(JOB, expect.anything());
+  expect(indexing.urlNotifications.publish).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(mockState).jobs[JOB].checkedAt).toBe(new Date(T0 + 25 * H).toISOString());
+  // After another 24 h with changed content: URL_UPDATED.
+  const changed = JOB_LD.replace('"Tech"', '"Senior Tech"');
+  await run({ fetchFn: makeFetch({ entries, pages: { [JOB]: changed } }), now: T0 + 50 * H });
+  expect(indexing.urlNotifications.publish).toHaveBeenCalledTimes(2);
 });
 
 test('a Google error warns, leaves state alone, never throws, and the next run retries', async () => {
@@ -162,10 +272,12 @@ test('unconfigured service account skips quietly', async () => {
 });
 
 test('guards: assertJobUrl refuses anything outside hub /careers/; JSON-LD detection', () => {
-  expect(() => assertJobUrl(JOB, ORIGIN)).not.toThrow();
-  expect(() => assertJobUrl(`${ORIGIN}/blog/x/`, ORIGIN)).toThrow(/non-job/);
-  expect(() => assertJobUrl('https://example.com/careers/x/', ORIGIN)).toThrow(/non-job/);
-  expect(() => assertJobUrl('nope', ORIGIN)).toThrow();
+  expect(() => assertJobUrl(JOB)).not.toThrow();
+  expect(() => assertJobUrl(`${ORIGIN}/blog/x/`)).toThrow(/non-job/);
+  expect(() => assertJobUrl('https://example.com/careers/x/')).toThrow(/non-job/);
+  expect(() => assertJobUrl('nope')).toThrow();
+  expect(() => assertJobUrl('http://www.wavespestcontrol.com/careers/x/')).toThrow(/non-job/);
+  expect(() => assertJobUrl('https://wavespestcontrol.com/careers/x/')).toThrow(/non-job/);
   expect(htmlHasJobPosting(JOB_LD)).toBe(true);
   expect(htmlHasJobPosting('<script type="application/ld+json">{"@type":["Thing","JobPosting"]}</script>')).toBe(true);
   expect(htmlHasJobPosting(ORG_LD)).toBe(false);
