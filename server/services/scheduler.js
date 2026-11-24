@@ -6754,11 +6754,14 @@ function initScheduledJobs() {
               try {
                 // Scoped to drafts that recorded an escalation (Codex r5):
                 // wording alone never blocks a scheduled reply.
-                const { followupPromiseBlockReason, slaDraftedAt } = require('./sms-followup-sla');
+                const { followupPromiseBlockReason, slaDraftedAt, replyPromisesFollowup, loadFollowupClosedDates } = require('./sms-followup-sla');
+                // the phrase can name the next open day when Waves is closed: read the closed days only for a body that carries one
+                const slaClosedDates = replyPromisesFollowup(msg.message_body) ? await loadFollowupClosedDates(new Date()) : null;
                 const slaDecision = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
                   .first('input_snapshot', 'prompt_version', 'suggested_message', 'created_at');
                 if (followupPromiseBlockReason({
+                  closedDates: slaClosedDates,
                   inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version,
                   originalBody: slaDecision?.suggested_message ?? null, body: msg.message_body,
                   // Codex #5194 P2: the drafter's own facts-generated instant

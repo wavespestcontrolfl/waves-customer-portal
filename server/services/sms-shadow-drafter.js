@@ -37,7 +37,7 @@ const portalCancelFact = require('./sms-portal-cancel-fact');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
 const promptPatch = require('./sms-prompt-patch');
 const { TURF_INSECT_NOUN_SOURCES, specialtyLedLabel } = require('./covered-pests');
-const { etParts } = require('../utils/datetime-et');
+const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 // The canonical "how we accept payment" source — the SAME env-driven reader
 // the public /pay page's off-Stripe options block uses (Codex/owner: never a
 // hardcoded Zelle contact). ZELLE_RECIPIENT unset ⇒ null, and the PAYMENT
@@ -426,10 +426,52 @@ NO FALSE PROMISES (these override the house voice examples above):
 // (buildFactsBlock's "FOLLOW-UP SLA RIGHT NOW" line, gate-on only), which is
 // NEVER pinned/hashed — the system prompt only ever describes the STABLE
 // RULE ("use the exact wording from the facts"), never the live value.
-function followupSlaPhrase(now = new Date()) {
+//
+// Closed days (owner 2026-11-24): `closedDates` (any Set of YYYY-MM-DD from the shared closed-day reader, loaded by the async caller,
+// sms-followup-sla loadFollowupClosedDates) makes the promise honest on a day Waves is closed. When today is closed, or the next 9 AM
+// falls on a closed day, it names the next OPEN day ("by 9 AM Friday"). With no closed dates (none given, none in the window, or the
+// read failed) every branch below is the old one, byte for byte.
+function etWeekdayName(dateStr) {
+  return followupSla.WEEKDAY_NAMES[new Date(`${dateStr}T12:00:00Z`).getUTCDay()];
+}
+function followupSlaPhrase(now = new Date(), closedDates = null) {
   const { hour } = etParts(now);
+  const closed = closedDates && closedDates.size ? closedDates : null;
+  if (closed) {
+    const nextOpenFrom = (dateStr) => {
+      for (let ahead = 1; ahead <= 30; ahead += 1) {
+        const candidate = etDateString(addETDays(new Date(`${dateStr}T12:00:00Z`), ahead));
+        if (!closed.has(candidate)) return candidate;
+      }
+      return null; // nothing open inside the window: keep the plain phrase
+    };
+    const today = etDateString(now);
+    if (closed.has(today)) {
+      const open = nextOpenFrom(today);
+      if (open) return `by 9 AM ${etWeekdayName(open)}`;
+    } else if (hour >= 20) {
+      const tomorrow = etDateString(addETDays(now, 1));
+      if (closed.has(tomorrow)) {
+        const open = nextOpenFrom(tomorrow);
+        if (open) return `by 9 AM ${etWeekdayName(open)}`;
+      }
+    }
+  }
   if (hour >= 8 && hour < 20) return 'within the hour';
   return hour < 8 ? 'by 9 AM this morning' : 'by 9 AM tomorrow morning';
+}
+/**
+ * Does the reply quote the follow-up timing THESE facts state, and no other? Only the exact phrase on the facts block's
+ * FOLLOW-UP SLA RIGHT NOW line passes ("by 9 AM tomorrow morning" under a "by 9 AM Friday" fact fails). A frozen block with no
+ * such line falls back to the clock (slaPhraseStatus).
+ */
+function quotesFactsSlaTiming(reply, factsBlock) {
+  const lower = String(reply || '').toLowerCase();
+  const slaLine = (String(factsBlock || '').split('\n').find((l) => l.startsWith('FOLLOW-UP SLA RIGHT NOW:')) || '').toLowerCase();
+  const stated = followupSla.SLA_PHRASES.filter((p) => slaLine.includes(p.toLowerCase()));
+  if (!stated.length) return followupSla.slaPhraseStatus(reply) === 'current';
+  return stated.some((p) => lower.includes(p.toLowerCase()))
+    && !followupSla.SLA_PHRASES.some((p) => !stated.includes(p) && lower.includes(p.toLowerCase()));
 }
 // SLA_PHRASES / replyPromisesFollowup / slaPhraseStatus live in
 // ./sms-followup-sla (Codex r3) and are re-exported below.
@@ -1888,7 +1930,7 @@ function reserviceStateReplyFault({ reply, factsBlock, inboundMessage, context, 
     if (!refersToIt) return `the customer reported a ${booked.join(' and ')} issue and their free re-service for it is ALREADY BOOKED — the reply must refer to the appointment already on the schedule (say it is already scheduled, or name its day), not a generic acknowledgement`;
   }
   const down = reported.filter((lane) => linkDownReserviceLanes(factsBlock).includes(lane));
-  if (down.length && !(actions.some((a) => a && a.type === 'escalate') && followupSla.slaPhraseStatus(text) === 'current')) {
+  if (down.length && !(actions.some((a) => a && a.type === 'escalate') && quotesFactsSlaTiming(text, factsBlock))) {
     return `the customer reported a ${down.join(' and ')} issue and is COVERED, but the free re-service booking link is unavailable — the reply must hand it to the office: add {"type":"escalate","note":"<what they need>"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW`;
   }
   return null;
@@ -5295,7 +5337,7 @@ function buildFactsBlock(context, extras = {}) {
     ? `${RESERVICE_OPENINGS_HEADER}${extras.reserviceOpeningsBlock}\n`
     : '';
   const slaSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
-    ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now)}\n`
+    ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now, extras.closedDates)}\n`
     : '';
   // Free re-service eligibility (Codex r6 P1; decoupled from the complaints
   // gate 2026-09-29 — see fetchReserviceFactState's comment) — renders whenever
@@ -6187,7 +6229,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // asOf (a late draft): the instant of the customer's text, so the SLA phrase is the one a draft
   // written then would have quoted.
   const factsAt = presetFactsBlock ? null : (asOf instanceof Date ? asOf : new Date());
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { portalCancelAvailable, openTimesBlock, reserviceOpeningsBlock: reserviceOpenings.block, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, ...paymentFactsExtras, labelFacts, now: factsAt });
+  // Closed days (owner 2026-11-24): the follow-up phrase names the next open day when Waves is closed, so the closed dates are read
+  // once, here, and ride into the facts block. Only the facts block carries the phrase (never the system prompt). A failed read
+  // keeps the plain phrase and logs a warning (sms-followup-sla loadFollowupClosedDates).
+  const closedDates = presetFactsBlock || !gateEnvValue('GATE_SMS_REAL_ANSWERS') ? null : await followupSla.loadFollowupClosedDates(factsAt);
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { portalCancelAvailable, closedDates, openTimesBlock, reserviceOpeningsBlock: reserviceOpenings.block, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, ...paymentFactsExtras, labelFacts, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -7013,6 +7059,7 @@ module.exports = {
   EXEMPLAR_INJECTION_RE,
   REAL_ANSWERS_HANDOFF_CATEGORIES,
   followupSlaPhrase,
+  quotesFactsSlaTiming,
   fetchOpenTimesBlock,
   fetchOpenTimesData,
   validateOfferedTimes,
