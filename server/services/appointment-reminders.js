@@ -1429,16 +1429,18 @@ function promiseSupersedesNotice(promise, notice) {
  *  `notice` ({ at, visitDate }) is given by a MOVE notice's recovery: an hour promise only counts when it supersedes that
  *  notice (promiseSupersedesNotice). One that does not (the old date's confirmation, which the bounced move text had
  *  replaced) is set aside, and notice.setAsideOld is set so the day decision ignores that old level too. */
-async function delayedSendIsStale(scheduledServiceId, notice = null) {
+async function delayedSendIsStale(scheduledServiceId, notice = null, { sameDateOnly = false } = {}) {
   if (!scheduledServiceId) return false;
   try {
     const timePromise = require('./time-promise');
-    // The RAW rule (sameDateOnly false), for both reads (told-visits loadPromiseFacts header): a delayed body was written
-    // for its own date, so an hour for any date still suppresses it, exactly as before the other-date rule.
-    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date(), { sameDateOnly: false });
+    // The RAW rule by default, for both reads (told-visits loadPromiseFacts header): a delayed body was written for its own
+    // date, so an hour for any date still suppresses it, exactly as before the other-date rule. `sameDateOnly` only for a
+    // bounce whose own occurrence date was just proved to be the visit's current date (recoverBouncedNotice): there an
+    // old date's hour must not suppress the new date's recovery (pre-push Codex P1, 2026-11-24).
+    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date(), { sameDateOnly });
     if (levels.get(scheduledServiceId) !== 'hour') return false;
     if (!notice) return true;
-    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date())).get(scheduledServiceId);
+    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date(), sameDateOnly ? { sameDateOnly: true } : undefined)).get(scheduledServiceId);
     if (promiseSupersedesNotice(promise, notice)) return true;
     notice.setAsideOld = true;
     return false;
@@ -1463,29 +1465,29 @@ async function delayedSendIsStale(scheduledServiceId, notice = null) {
  * made AFTER that notice, for that notice's date, supersedes it. Every delayed move recovery (a bounced text, a queued contact
  * text, a stored move email) passes it; a non-move send passes neither and keeps the plain rule. The old date's confirmation does not: the move replaced it, and its level is ignored.
  */
-async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt, noticeDate }) {
+async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt, noticeDate, sameDateOnly = false }) {
   const noticeTime = noticeAt ? new Date(noticeAt) : null;
   const visitDate = noticeDate || (apptTime ? etDateString(new Date(apptTime)) : null);
   const notice = noticeTime && !Number.isNaN(noticeTime.getTime()) && visitDate
     ? { at: noticeTime, visitDate, setAsideOld: false } : null;
-  if (await delayedSendIsStale(scheduledServiceId, notice)) return 'suppress';
+  if (await delayedSendIsStale(scheduledServiceId, notice, { sameDateOnly })) return 'suppress';
   const startAt = apptTime || (scheduledServiceId ? await scheduledServiceApptTime(scheduledServiceId) : null);
   return (await dayOnlyNow({ customerId, scheduledServiceId, apptTime: startAt, ignoreLevel: notice?.setAsideOld === true })) ? 'day' : 'window';
 }
 
-/** Did the visit move off the date a bounced text was about? True when the text names an occurrence date
- *  (bouncedOccurrenceDate) and the visit's current date differs, or cannot be read (fail closed). False when the text
- *  names no date (a legacy send: today's rules) or there is no visit id. */
-async function bouncedDateMoved(metadata, scheduledServiceId) {
+/** Did the visit move off the date a bounced text was about? (bouncedOccurrenceDate vs the visit's current date.) */
+/** 'moved' (the visit's date differs from the bounced text's occurrence date, or cannot be read: fail closed), 'same'
+ *  (proved: the text was about the visit's current date), or 'undated' (no occurrence date, or no visit id). */
+async function bouncedOccurrenceState(metadata, scheduledServiceId) {
   const textedDate = bouncedOccurrenceDate(metadata);
-  if (!textedDate || !scheduledServiceId) return false;
+  if (!textedDate || !scheduledServiceId) return 'undated';
   try {
     const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
     const value = row ? row.scheduled_date : null;
     const current = value instanceof Date ? value.toISOString().slice(0, 10) : (value ? String(value).slice(0, 10) : null);
-    return !current || current !== textedDate;
+    return !current || current !== textedDate ? 'moved' : 'same';
   } catch {
-    return true;
+    return 'moved';
   }
 }
 
@@ -1498,11 +1500,14 @@ async function recoverBouncedNotice({ audit, kind, customerId, scheduledServiceI
     // ONE occurrence check for every day-only bounce (confirmation, 72h, 24h; grouped or not), fail closed (pre-push Codex
     // P1, 2026-11-24): the date the bounced text was about must still be the visit's date, or the re-armed sends own the
     // new date. Before the other-date promise rule the old date's hour blocked these by accident in delayedSendIsStale.
-    if (await bouncedDateMoved(audit.metadata, scheduledServiceId)) {
+    const occurrence = await bouncedOccurrenceState(audit.metadata, scheduledServiceId);
+    if (occurrence === 'moved') {
       logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: the visit moved since the text (or its date cannot be read) - recovery email suppressed as stale`);
       return;
     }
-    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime });
+    // A text proved to be about the current date is judged by the other-date rule: an older date's hour does not stand
+    // for it. An undated legacy send keeps the raw rule.
+    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, sameDateOnly: occurrence === 'same' });
     if (verdict === 'suppress') {
       logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
       return;

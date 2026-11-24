@@ -206,7 +206,7 @@ describe('a delayed bounce of a day-only text is revalidated before it recovers 
   test('still early with nothing newer: the day-only email, as before', async () => {
     groupedWorld({ metadata: DAY_META });
     await bounce('SM_early');
-    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: false });
+    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: true });
     expect(AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0]).toMatchObject({ dayOnly: true });
   });
 
@@ -272,6 +272,22 @@ describe('a delayed bounce of a day-only text is revalidated before it recovers 
     confirmationWorld('2026-06-22');
     await bounce('SM_conf_same');
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('a bounce proved to be about the current date: an older date\'s hour does not suppress it (codex P1)', async () => {
+    // The raw rule would see the old date's hour; the date rule (the bounce matches the visit's date) does not.
+    timePromise.loadPromiseLevels.mockImplementation(async (_conn, ids, _now, opts = {}) => new Map(ids.map((id) => [id, opts.sameDateOnly ? 'none' : 'hour'])));
+    groupedWorld({ metadata: DAY_META, ungrouped: true });
+    await bounce('SM_day_new_date');
+    expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0]).toMatchObject({ dayOnly: true });
+  });
+
+  test('an undated legacy day-only bounce keeps the raw rule: an hour for any date suppresses it', async () => {
+    timePromise.loadPromiseLevels.mockImplementation(async (_conn, ids, _now, opts = {}) => new Map(ids.map((id) => [id, opts.sameDateOnly ? 'none' : 'hour'])));
+    groupedWorld({ metadata: { promise_level: 'day', window_unknown: true }, ungrouped: true });
+    await bounce('SM_day_undated');
+    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
   });
 
   test('the visit date cannot be read: no recovery email (fail closed)', async () => {
