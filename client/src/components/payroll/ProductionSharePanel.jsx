@@ -135,6 +135,8 @@ function StopCreditForm({ call, technicianId, weekStart, stop, generation, onCha
   const [error, setError] = useState('');
   const cents = dollarsToCents(credit);
   const body = { technicianId, visitId: stop.visitId, weekStart };
+  // A clear names the credit the page is showing: the server refuses it when that credit changed meanwhile.
+  const clearBody = { ...body, revision: stop.overrideRevision };
 
   async function run(method, payload) {
     setBusy(true); setError('');
@@ -150,14 +152,25 @@ function StopCreditForm({ call, technicianId, weekStart, stop, generation, onCha
     return <>
       <VisitReference stop={stop} />
       <div className="mt-1 flex flex-wrap items-center gap-2">
-        <Button type="button" variant="secondary" disabled={busy} onClick={() => run('DELETE', body)}>
+        <Button type="button" variant="secondary" disabled={busy} onClick={() => run('DELETE', clearBody)}>
           {stop.kind === 'owner_set' ? 'Clear the credit I set' : 'Clear the old credit'}
         </Button>
         {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
       </div>
     </>;
   }
-  if (!stop.needsReview || NOT_BY_HAND.has(stop.kind)) return null;
+  if (!stop.needsReview) return null;
+  // A stop that cannot be credited by hand says what to do instead.
+  if (NOT_BY_HAND.has(stop.kind)) {
+    const week = /week of (\d{4}-\d{2}-\d{2})/.exec(stop.reason || '');
+    const words = stop.kind === 'already_paid'
+      ? `Already paid in the week of ${week ? dayLabel(week[1]) : 'an earlier pay run'}. Its credit cannot change here.`
+      : 'Fix the closeout first: this stop has no confirmed closeout. Reload the week once it is done.';
+    return <>
+      <VisitReference stop={stop} />
+      <p className="m-0 mt-1 text-ui-caption text-ink-secondary">{words}</p>
+    </>;
+  }
   return <>
     <VisitReference stop={stop} />
     <form className="mt-1 flex flex-wrap items-end gap-2" aria-label="Set the credit of this stop"

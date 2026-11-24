@@ -236,13 +236,13 @@ describe('Production share preview', () => {
 
     it('a reassigned stop shows Clear the old credit; a stop with no closeout record shows no form', async () => {
       const call = await forms([
-        { visitId: 'v5', workDate: '2026-09-15', serviceType: 'Pest Control', kind: 'owner_override_reassigned', creditCents: 0, reason: 'reassigned', needsReview: true, refundCents: 0 },
+        { visitId: 'v5', workDate: '2026-09-15', overrideRevision: 'rev-5', serviceType: 'Pest Control', kind: 'owner_override_reassigned', creditCents: 0, reason: 'reassigned', needsReview: true, refundCents: 0 },
         { visitId: 'v6', workDate: '2026-09-16', serviceType: 'Pest Control', kind: 'unverified', creditCents: 0, reason: 'No closeout', needsReview: true, refundCents: 0 },
       ])();
       expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
       fireEvent.click(screen.getByRole('button', { name: 'Clear the old credit' }));
       await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
-        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v5', weekStart: '2026-09-14' },
+        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v5', weekStart: '2026-09-14', revision: 'rev-5' },
       }));
     });
 
@@ -255,6 +255,19 @@ describe('Production share preview', () => {
       expect(reference).toHaveTextContent('Visit 3fa85f64 · 2:15 PM · 123 Example St 34202');
       expect(within(reference).getByRole('link', { name: 'Open the day' })).toHaveAttribute('href', '/admin/schedule?date=2026-09-14');
       expect(reference.compareDocumentPosition(screen.getByRole('form', { name: 'Set the credit of this stop' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('AUDIT :160: an unconfirmed or already-paid review row shows its visit and says what to do instead of a form', async () => {
+      await forms([
+        { visitId: 'v9', workDate: '2026-09-15', scheduledDate: '2026-09-15', address: '9 Example Rd 34202', serviceType: 'Pest Control', kind: 'unverified', creditCents: 0, reason: 'No closeout record', needsReview: true, refundCents: 0 },
+        { visitId: 'v10', workDate: '2026-09-16', scheduledDate: '2026-09-16', serviceType: 'Pest Control', kind: 'already_paid', creditCents: 0, reason: 'Already paid in the week of 2026-09-07: a pay run already credited this visit.', needsReview: true, refundCents: 0 },
+      ])();
+      expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
+      const references = screen.getAllByLabelText('Visit reference');
+      expect(references).toHaveLength(2);
+      expect(references[0]).toHaveTextContent('Visit v9 · 9 Example Rd 34202');
+      expect(screen.getByText(/Fix the closeout first/)).toBeInTheDocument();
+      expect(screen.getByText(/Already paid in the week of Sep 7, 2026\. Its credit cannot change here\./)).toBeInTheDocument();
     });
 
     it('AUDIT :126: a row with no scheduled day offers no Open the day link (the pay work date is not the schedule day)', async () => {
@@ -288,24 +301,24 @@ describe('Production share preview', () => {
 
     it('a stop whose closeout changed since the owner set its credit shows Clear and sends DELETE', async () => {
       const call = await forms([
-        { visitId: 'v7', workDate: '2026-09-15', serviceType: 'Pest Control', kind: 'owner_override_closeout_changed', creditCents: 0, reason: 'The closeout of this stop changed', needsReview: true, refundCents: 0 },
+        { visitId: 'v7', workDate: '2026-09-15', overrideRevision: 'rev-7', serviceType: 'Pest Control', kind: 'owner_override_closeout_changed', creditCents: 0, reason: 'The closeout of this stop changed', needsReview: true, refundCents: 0 },
       ])();
       expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
       fireEvent.click(screen.getByRole('button', { name: 'Clear the old credit' }));
       await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
-        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v7', weekStart: '2026-09-14' },
+        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v7', weekStart: '2026-09-14', revision: 'rev-7' },
       }));
     });
 
     it('a stop the owner set shows Clear; a stop a pay run already paid shows no form', async () => {
       const call = await forms([
-        { visitId: 'v3', workDate: '2026-09-15', serviceType: 'Pest Control', kind: 'owner_set', creditCents: 4550, reason: 'Set by the owner: checked', needsReview: false, refundCents: 0 },
+        { visitId: 'v3', workDate: '2026-09-15', overrideRevision: 'rev-3', serviceType: 'Pest Control', kind: 'owner_set', creditCents: 4550, reason: 'Set by the owner: checked', needsReview: false, refundCents: 0 },
         { visitId: 'v4', workDate: '2026-09-16', serviceType: 'Pest Control', kind: 'already_paid', creditCents: 0, reason: 'Already paid in the week of 2026-09-07', needsReview: true, refundCents: 0 },
       ])();
       expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
       fireEvent.click(screen.getByRole('button', { name: 'Clear the credit I set' }));
       await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
-        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v3', weekStart: '2026-09-14' },
+        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v3', weekStart: '2026-09-14', revision: 'rev-3' },
       }));
     });
   });

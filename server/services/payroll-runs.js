@@ -1264,12 +1264,15 @@ async function readShareInputsOfRun(conn, runId) {
 }
 
 // The share inputs finalize works from, under the payroll lock: the ones read before the lock when a read made now agrees with
-// them, else the read made now. null when the gate is off or nothing was read before. The read of now runs on the finalize
-// transaction itself (readInputsUnderLock): no second connection is taken while the payroll lock is held, and its consistency
-// comes from listing every technician's stops in ONE statement. It also sees every commit made before the lock was taken.
+// them, else the read made now. The gate is judged NOW: off at the lock = no shares at all (whatever was read before is discarded,
+// as the gate may have been turned off meanwhile); on at the lock with nothing read before (the gate was turned on meanwhile) = the
+// read of now. The read of now runs on the finalize transaction itself (readInputsUnderLock, no per-technician retry): no second
+// connection is taken while the payroll lock is held, and its consistency comes from listing every technician's stops in ONE
+// statement. It also sees every commit made before the lock was taken.
 async function shareInputsUnderLock(trx, run, earlier) {
-  if (!earlier || !productionSharePay.shareOn()) return earlier;
+  if (!productionSharePay.shareOn()) return new Map();
   const now = await productionSharePay.readInputsUnderLock(trx, run.week_start);
+  if (!earlier) return now;
   return productionSharePay.revisionOf(now) === productionSharePay.revisionOf(earlier) ? earlier : now;
 }
 

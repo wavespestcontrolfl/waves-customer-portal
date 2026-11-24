@@ -332,6 +332,9 @@ postgres('production share pay line', () => {
 
   describe('the credit the owner sets for a stop (stop override)', () => {
     const override = (body) => api('PUT', '/production-share/stop-override', { body });
+    // The revision of the credit stored for a stop and week (what the preview shows as the stop's overrideRevision).
+    const revisionOf = async (visitId, week = W1) => (await productionShare.overridesOf(trx, week)).get(visitId).revision;
+    const clear = async (key, patch = {}) => api('DELETE', '/production-share/stop-override', { body: { ...key, revision: await revisionOf(key.visitId, key.weekStart), ...patch } });
     const world = async () => {
       const id = await tech('Sample Alpha');
       await settings(id);
@@ -365,15 +368,15 @@ postgres('production share pay line', () => {
       expect(snapshot.stops.find((row) => row.visitId === unpriced)).toMatchObject({ kind: 'owner_set', creditCents: 126000, needsReview: false });
       expect((await finalize(created.id)).body.run.status).toBe('finalized');
       // the week is paid: neither a change nor a clear is accepted
-      expect((await override({ ...key, creditCents: 1, reason: 'late' })).status).toBe(409);
-      expect((await api('DELETE', '/production-share/stop-override', { body: key })).status).toBe(409);
+      expect((await override({ ...key, creditCents: 1, reason: 'late', revision: await revisionOf(key.visitId) })).status).toBe(409);
+      expect((await clear(key)).status).toBe(409);
       expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced }).first('credit_cents')).toMatchObject({ credit_cents: '126000' });
     });
 
     it('a cleared credit sends the stop back to the rules; overtime follows the share the credit makes', async () => {
       const { key } = await world();
       await override({ ...key, creditCents: 126000, reason: 'Checked' });
-      expect((await api('DELETE', '/production-share/stop-override', { body: key })).status).toBe(200);
+      expect((await clear(key)).status).toBe(200);
       expect(await trx('audit_log').where({ action: 'payroll.production_share_stop_override_cleared' })).toHaveLength(1);
       expect((await api('DELETE', `/production-share/stop-override?${new URLSearchParams(key)}`)).status).toBe(404); // nothing left to clear
       const back = byName((await draft(W1)).body.run, 'Sample Alpha');
@@ -405,7 +408,7 @@ postgres('production share pay line', () => {
       await trx('scheduled_services').where({ id: unpriced }).update({ estimated_price: null });
       expect((await override({ ...key, creditCents: 5000, reason: 'first' })).status).toBe(200);
       await trx('scheduled_services').where({ id: unpriced }).update({ estimated_price: '1260.00' });
-      expect((await override({ ...key, creditCents: 6000, reason: 'second' })).status).toBe(200);
+      expect((await override({ ...key, creditCents: 6000, reason: 'second', revision: await revisionOf(unpriced) })).status).toBe(200);
       expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced }).first('credit_cents')).toMatchObject({ credit_cents: '6000' });
     });
 
@@ -460,6 +463,67 @@ postgres('production share pay line', () => {
       expect(await stopRow(removed)).toMatchObject({ kind: 'owner_override_closeout_changed', creditCents: 0, needsReview: true });
     });
 
+    it('AUDIT :1172: a stored credit is cleared or replaced only by the page that saw it (its revision)', async () => {
+      const { unpriced, key } = await world();
+      expect((await override({ ...key, creditCents: 126000, reason: 'Checked' })).status).toBe(200);
+      const first = await revisionOf(unpriced);
+      // the preview shows it on the stop
+      const shown = await api('GET', `/production-share/preview?technicianId=${key.technicianId}&weekStart=${W1}`);
+      expect(shown.body.stops.find((row) => row.visitId === unpriced)).toMatchObject({ kind: 'owner_set', overrideRevision: first });
+      // a clear or a replace with no revision, or with another one, is refused and changes nothing
+      expect((await api('DELETE', '/production-share/stop-override', { body: key })).status).toBe(409);
+      expect((await api('DELETE', '/production-share/stop-override', { body: { ...key, revision: 'stale' } })).status).toBe(409);
+      expect((await override({ ...key, creditCents: 5, reason: 'blind replace' })).status).toBe(409);
+      expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced })).toHaveLength(1);
+      // another session replaces the credit: the first page's revision is now old
+      expect((await override({ ...key, creditCents: 130000, reason: 'Second look', revision: first })).status).toBe(200);
+      const second = await revisionOf(unpriced);
+      expect(second).not.toBe(first);
+      expect((await api('DELETE', '/production-share/stop-override', { body: { ...key, revision: first } })).status).toBe(409);
+      expect((await api('DELETE', '/production-share/stop-override', { body: { ...key, revision: second } })).status).toBe(200);
+    });
+
+    it('AUDIT :1271: finalize judges the gate under the lock: off discards the earlier read, on without one reads under the lock', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id);
+      await worked(id, W1, 40);
+      await threeShifts(id);
+      // the gate is turned OFF after finalize read its inputs and before it took the lock: no share is frozen
+      const created = (await draft(W1)).body.run;
+      expect(byName(created, 'Sample Alpha').productionShareCents).toBe(16200);
+      const shownToken = (await api('GET', `/runs/${created.id}`)).body.run.token;
+      const real = productionSharePay.readInputs;
+      jest.spyOn(productionSharePay, 'readInputs').mockImplementation(async (...args) => {
+        const inputs = await real(...args);
+        process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'false';
+        return inputs;
+      });
+      const refusal = await finalize(created.id, shownToken);
+      jest.restoreAllMocks();
+      process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'true';
+      expect(refusal.status).toBe(409); // the share is gone from the numbers: the draft's token is stale
+      expect((await trx('payroll_checks').where({ run_id: created.id }).first('production_share_cents')).production_share_cents).toBeNull();
+      expect((await api('GET', `/runs/${created.id}`)).body.run.status).toBe('draft');
+    });
+
+    it('AUDIT :1271: the gate turned ON after the early read finalizes from a read under the lock, with no retry', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id);
+      await worked(id, W1, 40);
+      await threeShifts(id);
+      const created = (await draft(W1)).body.run;
+      expect(id).toBeTruthy();
+      const shown = (await api('GET', `/runs/${created.id}`)).body.run;
+      // the early read answers nothing (the gate was off then); the lock-time read must produce the share itself
+      const early = jest.spyOn(productionSharePay, 'readInputs').mockImplementation(async () => null);
+      const under = jest.spyOn(productionSharePay, 'readInputsUnderLock');
+      const done = await finalize(created.id, shown.token);
+      expect(done.status).toBe(200);
+      expect(byName(done.body.run, 'Sample Alpha').productionShareCents).toBe(16200);
+      expect(under).toHaveBeenCalledTimes(1);
+      expect(early).toHaveBeenCalledTimes(1); // only the early read: nothing read apart under the lock
+    });
+
     it('AUDIT :1007: a credit belongs to the technician who held the stop: after a reassignment the stop is review, and clearing works for the new holder', async () => {
       const { unpriced, key } = await world();
       const other = await tech('Sample Bravo');
@@ -476,7 +540,7 @@ postgres('production share pay line', () => {
       // Alpha no longer holds it: her two priced stops are all she is credited, and the owner's credit is paid to nobody
       expect(byName(created, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 252000, needsReviewCount: 0 });
       // the new holder cannot reuse the old credit as a new one (the stop does not need review by the rules), but can clear it
-      expect((await api('DELETE', '/production-share/stop-override', { body: { ...key, technicianId: other } })).status).toBe(200);
+      expect((await clear({ ...key, technicianId: other })).status).toBe(200);
       expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced })).toEqual([]);
     });
 
@@ -486,7 +550,7 @@ postgres('production share pay line', () => {
       expect((await override({ ...key, creditCents: 126000, reason: 'Checked' })).status).toBe(200);
       await finalize((await draft(W1)).body.run.id); // Alpha's week is paid with the credit
       await trx('scheduled_services').where({ id: unpriced }).update({ technician_id: other });
-      const refusal = await api('DELETE', '/production-share/stop-override', { body: { ...key, technicianId: other } });
+      const refusal = await clear({ ...key, technicianId: other });
       expect(refusal.status).toBe(409);
       expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced })).toHaveLength(1);
       // an unknown stop is a 404 whoever is named

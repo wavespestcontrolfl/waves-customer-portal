@@ -924,12 +924,12 @@ function applyLedger(rows, paid, overrides = new Map()) {
   // An override belongs to the technician who held the stop when the owner set it, and to a stop whose work is still confirmed.
   function withOverride(row, set) {
     if (set.technicianId !== row.technicianId) {
-      return review(row, 'owner_override_reassigned', 'This stop was reassigned since the owner set its credit: clear that credit, then set it again in the production share preview.');
+      return { ...review(row, 'owner_override_reassigned', 'This stop was reassigned since the owner set its credit: clear that credit, then set it again in the production share preview.'), overrideRevision: set.revision };
     }
     if (MANUAL_CREDIT_INELIGIBLE.has(row.kind)) {
-      return review(row, 'owner_override_closeout_changed', 'The closeout of this stop changed since the owner set its credit (its work is no longer confirmed): clear that credit in the production share preview.');
+      return { ...review(row, 'owner_override_closeout_changed', 'The closeout of this stop changed since the owner set its credit (its work is no longer confirmed): clear that credit in the production share preview.'), overrideRevision: set.revision };
     }
-    return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: slotBasis(row) };
+    return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: slotBasis(row), overrideRevision: set.revision };
   }
 
   // A package visit credited by the owner still consumes its slot of the package: a job basis with the package root and the slot, and the
@@ -1086,10 +1086,17 @@ async function creditsOfWeek(conn, technicianId, weekStart, settings, opts = {})
 
 // ---------------------------------------------------------------- stop credit overrides
 
-/** The owner's credits for the stops of a pay week: Map of visit id -> { technicianId, creditCents, reason }. */
+// What identifies one stored credit: the page sends it back with a clear or a replace, and the server refuses (409) when the stored
+// credit is no longer the one the owner saw (another session changed or replaced it meanwhile).
+const overrideRevision = (row) => require('node:crypto').createHash('sha1')
+  .update(JSON.stringify([canonicalId(row.technician_id), Number(row.credit_cents), row.reason, new Date(row.created_at).toISOString()])).digest('hex').slice(0, 16);
+
+/** The owner's credits for the stops of a pay week: Map of visit id -> { technicianId, creditCents, reason, revision }. */
 async function overridesOf(conn, weekStart) {
-  const rows = await conn('production_share_stop_overrides').where({ week_start: weekStart }).select('visit_id', 'technician_id', 'credit_cents', 'reason');
-  return new Map(rows.map((row) => [canonicalId(row.visit_id), { technicianId: canonicalId(row.technician_id), creditCents: Number(row.credit_cents), reason: row.reason }]));
+  const rows = await conn('production_share_stop_overrides').where({ week_start: weekStart }).select('visit_id', 'technician_id', 'credit_cents', 'reason', 'created_at');
+  return new Map(rows.map((row) => [canonicalId(row.visit_id), {
+    technicianId: canonicalId(row.technician_id), creditCents: Number(row.credit_cents), reason: row.reason, revision: overrideRevision(row),
+  }]));
 }
 
 const overrideSchema = Joi.object({
@@ -1098,8 +1105,17 @@ const overrideSchema = Joi.object({
   weekStart: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required().error(new Error('The week must be a date, YYYY-MM-DD')),
   creditCents: Joi.number().integer().min(0).max(MAX_CENTS).required().error(new Error('Enter the credit as whole cents, $0 or more')),
   reason: Joi.string().trim().min(1).max(500).required().error(new Error('Say why (up to 500 characters)')),
+  // The revision of the stored credit the page was showing (its stop's `overrideRevision`): required to replace or clear one.
+  revision: Joi.string().max(64).error(new Error('The revision must be text')),
 });
 const overrideKeySchema = overrideSchema.fork(['technicianId', 'creditCents', 'reason'], (field) => field.optional());
+
+// A stored credit is replaced or cleared only by the page that saw it: no revision, or another one, is refused.
+function requireSameRevision(stored, revision) {
+  if (!stored) return;
+  if (!revision) throw new PayrollError(409, 'This stop already has a credit. Reload the week to see it.');
+  if (revision !== overrideRevision(stored)) throw new PayrollError(409, 'This credit changed since you loaded the week. Reload the week and try again.');
+}
 
 async function guardOverride(trx, input) {
   requireWeek(input.weekStart);
@@ -1127,7 +1143,8 @@ async function setStopOverride(input, actor, conn = db) {
     await lockPayrollMutations(trx);
     const technicianId = await guardOverride(trx, v);
     const visitId = canonicalId(v.visitId);
-    const before = await trx('production_share_stop_overrides').where({ visit_id: visitId, week_start: v.weekStart }).first('technician_id', 'credit_cents', 'reason');
+    const before = await trx('production_share_stop_overrides').where({ visit_id: visitId, week_start: v.weekStart }).first('technician_id', 'credit_cents', 'reason', 'created_at');
+    requireSameRevision(before, v.revision);
     // Replacing a credit set for another technician (the stop was reassigned): that technician's paid week is guarded too.
     const owned = Boolean(before) && canonicalId(before.technician_id) === technicianId;
     if (before && !owned) await guardOverride(trx, { weekStart: v.weekStart, technicianId: before.technician_id });
@@ -1166,8 +1183,9 @@ async function clearStopOverride(input, actor, conn = db) {
     requireWeek(v.weekStart);
     const visitId = canonicalId(v.visitId);
     // The stored row decides whose paid week this is: the technician who held the stop when the credit was set, whatever the caller sent.
-    const before = await trx('production_share_stop_overrides').where({ visit_id: visitId, week_start: v.weekStart }).first('technician_id', 'credit_cents', 'reason');
+    const before = await trx('production_share_stop_overrides').where({ visit_id: visitId, week_start: v.weekStart }).first('technician_id', 'credit_cents', 'reason', 'created_at');
     if (!before) throw new PayrollError(404, 'No credit was set for that stop.');
+    requireSameRevision(before, v.revision);
     const technicianId = await guardOverride(trx, { weekStart: v.weekStart, technicianId: before.technician_id });
     await trx('production_share_stop_overrides').where({ visit_id: visitId, week_start: v.weekStart }).del();
     await recordAuditEvent({
