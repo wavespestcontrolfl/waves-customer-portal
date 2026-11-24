@@ -142,6 +142,9 @@ const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'lead_call_text_followup',
   'lead_response_auto_reply',
   'lead_webhook_auto_reply',
+  // Owner 2026-11-23: the answer to a text of a new-home postcard ("Text 101 EXAMPLE to ...") goes out at once, at
+  // any hour: the person just texted us (mail/home-text-to-book.js).
+  'mail_home_text_to_book',
   // Owner ruling 2026-09-28: a caller reaching out to us — a missed call or
   // a voicemail — is a customer action just like a form submit (the same
   // idea as the 2026-08-29 ruling above). Both automated first-touch texts

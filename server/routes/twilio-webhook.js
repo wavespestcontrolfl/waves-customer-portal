@@ -1219,6 +1219,21 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
+    // New-home postcard (GATE_MAIL_HOME_TEXT_BOOK + GATE_MAIL_HOME_PAGE, owner 2026-11-23, mailer step 2d-3): "Text
+    // 101 EXAMPLE to (941) 297-2817". A text to an office location line whose body is a live new home's address
+    // gets one reply with the home's page link (services/mail/home-text-to-book.js). Runs after STOP/HELP/START and
+    // the lead-intake machine, never for the AI line, a tech line or a tracking line (the service checks the line is
+    // an office location line), a staff sender, a reaction, a media text or a reschedule ask. A reply that went out
+    // consumes the text (no AI auto-reply on top); every other outcome falls through untouched.
+    if (Body && inboundMedia.length === 0 && !smsReaction && !staffSender && !complianceCommand && !rescheduleAsk
+      && !pendingTimeAnswer && numberConfig.type === 'location' && !isAiNumber && !TWILIO_NUMBERS.isTechLine(To)) {
+      const homeText = await require('../services/mail/home-text-to-book').handleHomeTextToBook({ from: From, to: To, body: Body });
+      if (homeText.handled) {
+        await retypeConsumedInbound(smsLogEntry.id, 'mail_home_text_to_book', 'mail-home-text-to-book');
+        return res.type('text/xml').send('<Response></Response>');
+      }
+    }
+
     // Lead call-reply ring (owner 2026-10-24): a lead's bare CALL in
     // answer to our lead text rings Adam's cell with the press-1 bridge,
     // 8 AM-8 PM ET. Keyed on our sent text, not lead_intake_status, so a lead

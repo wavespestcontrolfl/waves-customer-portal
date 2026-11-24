@@ -215,6 +215,7 @@ describe('checkSendWindow validator', () => {
       'estimate_deposit_receipt',
       'lead_response_auto_reply',
       'lead_webhook_auto_reply',
+      'mail_home_text_to_book',
       'promotions_upsell_interest',
       'public_estimate_add_service_request',
       'public_estimate_extension_request',
