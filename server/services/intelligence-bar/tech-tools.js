@@ -19,6 +19,7 @@ const { TECHNICIAN_KNOWLEDGE_CATEGORIES, technicianText } = require('../knowledg
 const { openInvoiceFacts } = require('../visit-context/balance');
 const { baseQuantityUnit, normalizeInventoryUnit } = require('../inventory-units');
 const { loadActiveAliasRows, activeProductsForAlias } = require('../purchase-receipts/product-matcher');
+const { loadServiceRecordFacts, SERVICE_RECORD_COLUMNS } = require('./service-record-facts');
 
 const TECH_TOOLS = [
   {
@@ -300,7 +301,8 @@ async function getStopDetails(input, techId = null, technician = false) {
   const history = await db('service_records')
     .where({ customer_id: customer.id, status: 'completed' })
     .orderBy('service_date', 'desc').limit(3)
-    .select('service_date', 'service_type', 'notes', 'products_used', 'technician_name');
+    .select(SERVICE_RECORD_COLUMNS);
+  const historyFacts = await loadServiceRecordFacts(history);
 
   // Today's scheduled service — tech callers see only THEIR visit for this
   // customer (the same-day row can belong to another technician); admin/
@@ -403,9 +405,9 @@ async function getStopDetails(input, techId = null, technician = false) {
     recent_history: history.map(h => ({
       date: h.service_date,
       type: h.service_type,
-      notes: h.notes,
-      products: typeof h.products_used === 'string' ? JSON.parse(h.products_used || '[]') : (h.products_used || []),
-      tech: h.technician_name,
+      notes: historyFacts.notesFor(h),
+      products: historyFacts.productsFor(h),
+      tech: historyFacts.technicianFor(h),
     })),
   };
 }
@@ -423,16 +425,17 @@ async function getServiceHistory(input, techId = null) {
 
   if (service_type) query = query.whereILike('service_type', `%${service_type}%`);
 
-  const records = await query;
+  const records = await query.select(SERVICE_RECORD_COLUMNS);
+  const facts = await loadServiceRecordFacts(records);
 
   return {
     customer: `${customer.first_name} ${customer.last_name}`,
     services: records.map(r => ({
       date: r.service_date,
       type: r.service_type,
-      tech: r.technician_name,
-      notes: r.notes,
-      products: typeof r.products_used === 'string' ? JSON.parse(r.products_used || '[]') : (r.products_used || []),
+      tech: facts.technicianFor(r),
+      notes: facts.notesFor(r),
+      products: facts.productsFor(r),
       duration: r.labor_hours ? `${(parseFloat(r.labor_hours) * 60).toFixed(0)} min` : null,
     })),
     total_records: records.length,

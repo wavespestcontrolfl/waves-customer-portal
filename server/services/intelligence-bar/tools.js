@@ -27,6 +27,7 @@ const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-r
 const { whereCompletedCall } = require('../missed-call-text-back');
 const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 const { resolveCloseCatalogService } = require('./booking-service-match');
+const { loadServiceRecordFacts } = require('./service-record-facts');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
 const { discountStackingLive } = require('../../config/feature-gates');
@@ -1066,6 +1067,7 @@ async function getCustomerDetail(customerId) {
     .where('customer_id', customerId)
     .orderBy('service_date', 'desc')
     .limit(10);
+  const serviceFacts = await loadServiceRecordFacts(services);
 
   const upcoming = await db('scheduled_services')
     .where({ customer_id: customerId })
@@ -1152,8 +1154,9 @@ async function getCustomerDetail(customerId) {
       id: s.id,
       date: s.service_date,
       type: s.service_type,
-      technician: s.technician_name,
-      notes: s.notes,
+      technician: serviceFacts.technicianFor(s),
+      notes: serviceFacts.notesFor(s),
+      products: serviceFacts.productsFor(s).map((p) => p.name),
       status: s.status,
     })),
     upcoming_services: upcoming.map(s => ({
