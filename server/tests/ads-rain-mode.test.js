@@ -197,12 +197,14 @@ describe('recordRun', () => {
     expect(days['2026-11-18'].score_tried_at).toBe(AFTER_TWO.toISOString());
   });
 
-  test('a future day with only open areas fails the tick and keeps nothing new', async () => {
+  test('a future day with only open areas fails the tick and keeps only the unknown cutoff', async () => {
     const conn = fakeConn({ campaigns });
     const oneHour = jest.fn(async () => hours('2026-11-25', 0).slice(0, 1)); // one dry hour per area: all open
     await expect(rainMode.recordRainMode({ now: AFTER_TWO, conn, read: oneHour, fetchRain: jest.fn() }))
       .rejects.toThrow(/forecast unsettled for 2026-11-25: 0 settled, 6 of 6 areas read/);
-    expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25']).toBeUndefined();
+    const row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25'];
+    expect(row.call).toBeUndefined();
+    expect(row.cutoff_call).toBe('unknown');
   });
 
   test('the 2 PM call is kept beside later calls, and the score grades both', async () => {
@@ -236,6 +238,18 @@ describe('recordRun', () => {
     await rainMode.recordRainMode({ now: at(14), conn, read: open, fetchRain: jest.fn() }).catch(() => {});
     await rainMode.recordRun({ now: at(16), conn, read: readerFor('2026-11-30', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn() });
     expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-30']).toMatchObject({ call: 'dry', cutoff_call: 'rain', cutoff_at: at(14).toISOString() });
+  });
+
+  test('an unknown 2 PM call with nothing before it is kept as the cutoff, and graded as no call', async () => {
+    const conn = fakeConn({ campaigns });
+    const at = (h) => new Date(`2026-11-24T${String(h + 5).padStart(2, '0')}:00:00Z`); // Tuesday, sells Wed from 2 PM
+    const open = jest.fn(async () => hours('2026-11-25', 0).slice(0, 1));
+    await rainMode.recordRainMode({ now: at(14), conn, read: open, fetchRain: jest.fn() }).catch(() => {});
+    await rainMode.recordRun({ now: at(16), conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn() });
+    const row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25'];
+    expect(row).toMatchObject({ call: 'dry', cutoff_call: 'unknown', cutoff_at: at(14).toISOString() });
+    const dry = jest.fn(async ({ start }) => ({ days: [{ date: start, inches: 0 }] }));
+    expect(await rainMode.scoreDay(row, { fetchRain: dry, now: new Date('2026-11-26T20:00:00Z') })).toMatchObject({ hit: true, cutoff_hit: null });
   });
 });
 

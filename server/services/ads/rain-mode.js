@@ -159,7 +159,7 @@ async function scoreDay(row, { fetchRain = fetchMrmsDailyRain, now = new Date() 
     wet_areas: wetAreas,
     wet_day: wetDay,
     hit: row.call === 'unknown' ? null : (row.call === 'rain') === wetDay,
-    cutoff_hit: row.cutoff_call ? (row.cutoff_call === 'rain') === wetDay : null,
+    cutoff_hit: ['rain', 'dry'].includes(row.cutoff_call) ? (row.cutoff_call === 'rain') === wetDay : null,
   };
 }
 
@@ -187,6 +187,21 @@ async function saveRun(conn, run, days, now) {
 }
 
 /**
+ * The day's row after a run, or null when there is still nothing to keep. The latest call moves only when the
+ * forecast settles. The cutoff is taken once, at the first run from 2 PM the day before (`cutoffRun`; a Sunday run
+ * sells Monday all day, only its 2 PM and later runs count): the call in force then, kept or settled, or 'unknown'
+ * when there was none. cutoff_at marks it taken, so a later call never replaces it.
+ */
+function nextDayRow(prior, { day, forecast, call, cutoffRun, at }) {
+  const next = { ...(prior || {}), day };
+  if (forecast.call !== 'unknown') {
+    Object.assign(next, { call: forecast.call, at, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) });
+  }
+  if (!next.cutoff_at && cutoffRun) Object.assign(next, { cutoff_call: call, cutoff_at: at });
+  return next.call || next.cutoff_at ? next : null;
+}
+
+/**
  * Scores up to SCORE_MAX past, unscored days (in place), least recently tried first, so a day waiting on radar gaps
  * never blocks the days after it. Returns the days scored.
  */
@@ -194,7 +209,7 @@ async function scorePastDays(days, now, opts) {
   const today = etDateString(now);
   const tried = (d) => days[d].score_tried_at || '';
   const due = Object.keys(days)
-    .filter((d) => d < today && !days[d].score)
+    .filter((d) => d < today && !days[d].score && days[d].call)
     .sort((a, b) => tried(a).localeCompare(tried(b)) || a.localeCompare(b))
     .slice(0, SCORE_MAX);
   const scored = [];
@@ -244,18 +259,8 @@ async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) 
   try {
     // The day's latest settled call stands. A call already scored is never rewritten.
     if (!days[day]?.score) {
-      const next = { ...(days[day] || {}), day };
-      // The latest call moves only when the forecast settles.
-      if (forecast.call !== 'unknown') {
-        Object.assign(next, { call: forecast.call, at: run.at, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) });
-      }
-      // The cutoff call is the call in force at the first run from 2 PM the day before (a Sunday run sells Monday all
-      // day; only its 2 PM and later runs count), kept or settled: the one the ads act on. It is never rewritten, and
-      // the score grades it beside the latest call.
-      if (!next.cutoff_call && future && etParts(now).hour >= 14 && call !== 'unknown') {
-        Object.assign(next, { cutoff_call: call, cutoff_at: run.at });
-      }
-      if (next.call) days[day] = next;
+      const next = nextDayRow(days[day], { day, forecast, call, cutoffRun: future && etParts(now).hour >= 14, at: run.at });
+      if (next) days[day] = next;
     }
     scored = await scorePastDays(days, now, { fetchRain });
     await saveRun(conn, run, days, now);
@@ -288,6 +293,7 @@ module.exports = {
   forecastDay,
   decideCampaign,
   scoreDay,
+  nextDayRow,
   recordRun,
   recordRainMode,
 };
