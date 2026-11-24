@@ -91,6 +91,7 @@ const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { getClosedHolidays, getBlackoutDates, lockClosureState } = require('./scheduling/blackout-dates');
 const { HOLIDAYS, holidayDays } = require('./scheduling/holidays');
 const { normalizeWorkDays, dayOfWeekOfDate } = require('./technician-eligibility');
+const { shiftDateStr } = require('./auto-dispatch/dates');
 
 const HORIZON_DAYS = 120;
 const ABSENCE_REASON = 'other';
@@ -128,8 +129,6 @@ function birthdayDatesBetween(dob, fromStr, toStr) {
   return out;
 }
 
-const DAY_MS = 86400000;
-const shiftDate = (dateStr, n) => new Date(Date.parse(`${dateStr}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
 
 /**
  * The day a technician takes ONE closed holiday that falls on `ownDate` (YYYY-MM-DD), or null: see HOLIDAY TAKEN DAYS in
@@ -140,10 +139,10 @@ function holidayTakenDay(days, ownDate) {
   if (dow === null || !Array.isArray(days) || !days.length || days.includes(dow)) return null;
   if (dow === 0) {
     const next = days.find((d) => d >= 1 && d <= 6);
-    return next === undefined ? null : shiftDate(ownDate, next);
+    return next === undefined ? null : shiftDateStr(ownDate, next);
   }
   for (let d = dow - 1; d >= 1; d -= 1) {
-    if (days.includes(d)) return shiftDate(ownDate, d - dow);
+    if (days.includes(d)) return shiftDateStr(ownDate, d - dow);
   }
   return null;
 }
@@ -252,6 +251,9 @@ async function clearOwnRow(conn, row, { today, horizon, result }) {
     const tech = require('./tech-out');
     const cleared = await conn.transaction(async (trx) => {
       await lockTechDays(trx, [{ techId: row.technician_id, date: row.date }]);
+      // Closure state SHARED after the fence (the insert recheck's order): a closure edit takes it exclusive, so a holiday closed again
+      // between the settings read and this clear cannot be missed by the recheck below.
+      await lockClosureState(trx);
       // Read again under the fence: the office may have cleared it meanwhile.
       const live = await trx('technician_absences').where({ id: row.id, source: SOURCE }).whereNull('cleared_at').forUpdate().first('id');
       if (!live) return false;

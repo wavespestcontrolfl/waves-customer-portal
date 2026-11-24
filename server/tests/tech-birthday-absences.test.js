@@ -686,4 +686,19 @@ describe('syncTechDaysOff: holiday taken days (knex double)', () => {
     expect(logged).toMatch(/\[tech-days-off\].*t1.*57014/);
     expect(logged).not.toMatch(/2026|2027|secret|holiday|birth/i);
   });
+
+  test('the clear takes the closure state shared after the tech-day fence, and a holiday re-closed before it keeps the row', async () => {
+    getClosedHolidays.mockReset().mockResolvedValueOnce(new Set()).mockResolvedValue(BIG6);
+    getBlackoutDates.mockReset().mockResolvedValue(CLOSED_DATES);
+    const { conn, absences } = makeConn({
+      techs: [{ id: 't1', dob: null, work_days: MON_THU }],
+      absences: [own('2026-12-24')],
+      owned: [joinedRow('2026-12-24')],
+      liveTech: LIVE,
+    });
+    expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ cleared: 0, failed: 0 });
+    expect(absences[0].cleared_at).toBeNull();
+    expect(lockClosureState).toHaveBeenCalledWith(conn);
+    expect(lockTechDays.mock.invocationCallOrder[0]).toBeLessThan(lockClosureState.mock.invocationCallOrder[0]);
+  });
 });
