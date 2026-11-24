@@ -30,6 +30,7 @@
 const { parseETDateTime, etDateString } = require('../utils/datetime-et');
 const { addStaffWorkDays, staffWeekStartForWorkDate, staffWorkDateSql, STAFF_WORK_DATE_SQL } = require('../utils/staff-time-work-date');
 const { UNPAID_MEAL_MIN_BREAK_MINUTES } = require('../constants/staff-time');
+const { payrollUnits } = require('../utils/payroll-units');
 
 const HUNDREDTHS_PER_MS = 1 / 600; // 1 ms = 1/60000 minute = 1/600 hundredth
 
@@ -43,9 +44,9 @@ function dayBounds(day) {
   };
 }
 
-const fullHundredths = (entry) => (entry.duration_minutes == null
-  ? Math.round((new Date(entry.clock_out).getTime() - new Date(entry.clock_in).getTime()) * HUNDREDTHS_PER_MS)
-  : hundredths(entry.duration_minutes));
+// The stored paid hundredths of an entry, exactly as time tracking counts them (payroll-units.js payrollUnits over
+// duration_minutes: a null duration is 0). No fallback to the clock interval: the pay pays the stored figure.
+const fullHundredths = (entry) => Number(payrollUnits(entry.duration_minutes));
 
 const msOf = (value) => new Date(value).getTime();
 // The milliseconds of [from, to) that fall inside the day `bounds`.
@@ -169,13 +170,17 @@ function holidayWorkForWeek({ dates, shifts, breaks = [], daily, holidays }) {
     }
     if (!group.length) continue;
     const meal = row ? hundredths(row.unpaid_meal_minutes) : 0;
-    // The recorded meals of THIS work date's deduction. A break counts in the deduction of the work date of its own clock-in
-    // (time-tracking.js computeDailySummaryInTransaction groups breaks by that date, and dayUnpaidMealUnits reads only that
-    // group), so only breaks of this date are read, clipped to this date's shifts. A break of ANOTHER work date (a 1 AM meal in
-    // a shift that started the evening before) is in that other date's deduction, never in this one: so a break edited in
-    // another pay week can never change this shift's premium or a check that is already final, and no lock on break edits is
-    // needed. The deduction is then split by splitWorkDate, one exact procedure in whole hundredths.
-    const split = splitWorkDate({ shifts: group, breaks: breaks.filter((b) => b.work_date === date), held, meal });
+    // The recorded meals that count for this date's shifts: a break that overlaps a shift (clipped to it, recordedMealPieces) and
+    // whose own work date is in the SAME PAY WEEK as this shift's work date. Both are then on the same check, so a break
+    // edited later cannot change a check that is final without the shift's own week being final too, and no cross-check
+    // protection is needed. A break in ANOTHER pay week is ignored and the deduction is shared by what each part has left. The
+    // placement stays capped at this date's own deduction (the day summary's unpaid_meal_minutes), which is what the pay took.
+    // THE LIMIT, on purpose: only a shift that crosses Sunday into Monday with its meal after midnight is prorated (that meal
+    // is in the next week). No lock exists for that case: an earlier lock on break edits made Monday's meal immutable once
+    // Sunday was final and blocked Monday's approval. The office can see the limit: the premium of that one shift is the
+    // prorated share of the deduction, not the clock placement.
+    const weekOfDate = staffWeekStartForWorkDate(date);
+    const split = splitWorkDate({ shifts: group, breaks: breaks.filter((b) => staffWeekStartForWorkDate(b.work_date) === weekOfDate), held, meal });
     for (const part of split.parts) if (part.holiday) add(part.holiday, part.premium);
   }
   return [...totals.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([workDate, units]) => ({ workDate, minutes: units / 100 }));

@@ -24,7 +24,7 @@
  * that setting turns a bank on or off, and a finalize must read one answer.
  *
  * A holiday also decides the holiday work premium of any shift that runs into its date, and a shift that started the night
- * before is paid by the check of ITS week. So a holiday is also refused (added, changed or removed) once a final check of the
+ * before is paid by the check of ITS week. So a holiday is also refused (added, removed, or changed to or from paid time off) once a final check of the
  * technician for another pay week holds a shift that overlaps the date (refuseWhenShiftPaid). A holiday with no such shift
  * is not refused by it.
  *
@@ -415,7 +415,8 @@ async function updateTimeOff(id, input, actor, conn = db) {
       .first('o.technician_id', 'o.illness', 'o.kind', trx.raw("to_char(o.work_date, 'YYYY-MM-DD') as work_date"));
     if (!row) throw new PayrollError(404, 'Time off entry not found.');
     await refuseWhenPaid(trx, row.work_date);
-    if (row.kind === 'holiday' || v.kind === 'holiday') await refuseWhenShiftPaid(trx, row.technician_id, row.work_date);
+    // Only a change that adds or takes off holiday status moves a premium: hours or a note on a holiday that stays one do not.
+    if ((row.kind === 'holiday') !== (v.kind === 'holiday')) await refuseWhenShiftPaid(trx, row.technician_id, row.work_date);
     // With no illness field sent, a paid time off day keeps its mark. A holiday has none.
     const illness = v.kind === 'pto' ? (v.illness ?? row.illness) : false;
     await trx('payroll_time_off').where({ id }).update({

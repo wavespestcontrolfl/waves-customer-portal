@@ -350,6 +350,21 @@ postgres('payroll holiday work premium', () => {
       expect(await trx('payroll_time_off').where({ id: entry.id })).toHaveLength(1);
     });
 
+    it('allows an edit that keeps the holiday a holiday (hours, note) after the Sunday check is final', async () => {
+      const id = await tech('Sample Alpha');
+      await approved(id, W0, 4);
+      await shift(id, `${addDays(W0, 6)}T22:00`, `${W1}T02:00`);
+      const entry = (await post(id, W1)).body.entry;
+      await finalize((await draft(W0)).body.run.id);
+      // Monday's holiday goes from 10 to 8 hours: it stays a holiday, so no premium moves and the edit is allowed
+      const changed = await api('PUT', `/time-off/${entry.id}`, { body: { kind: 'holiday', hours: 8, note: 'shorter day' } });
+      expect([changed.status, changed.body.error]).toEqual([200, undefined]);
+      expect(await trx('payroll_time_off').where({ id: entry.id }).first('minutes', 'note')).toMatchObject({ minutes: '480.00', note: 'shorter day' });
+      // turning it into paid time off still changes the premium: refused
+      const toPto = await api('PUT', `/time-off/${entry.id}`, { body: { kind: 'pto', hours: 8 } });
+      expect(toPto.status).toBe(409);
+    });
+
     it('does not refuse a holiday with no such shift, or a pto day, or a holiday the final week\'s shift does not reach', async () => {
       const id = await tech('Sample Alpha');
       await approved(id, W0, 10);
