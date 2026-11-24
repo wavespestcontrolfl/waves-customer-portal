@@ -30,6 +30,7 @@ jest.mock('../services/stripe', () => ({
   finalizeInvoicePayment: jest.fn(async () => ({ status: 'succeeded' })),
   confirmInvoicePayment: jest.fn(),
   retrievePaymentIntent: jest.fn(),
+  retrieveSetupIntent: jest.fn(),
 }));
 jest.mock('../services/payment-method-consents', () => ({
   recordConsent: jest.fn(async () => ({ id: 'consent-1', consent_text_version: 'v12_2026-09-30' })),
@@ -44,6 +45,7 @@ const db = require('../models/db');
 const StripeService = require('../services/stripe');
 const ConsentService = require('../services/payment-method-consents');
 const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+const { enrollConsentedMethod } = require('../services/autopay-enrollment');
 const router = require('../routes/pay-v2');
 
 const TOKEN = 'public-token-0123456789';
@@ -211,5 +213,27 @@ describe('POST /consent records only under the PaymentIntent’s own current sta
       expect(await res.json()).toEqual({ success: false, skipped: true, reason: 'not_opted_in' });
     });
     expect(ConsentService.recordConsent).not.toHaveBeenCalled();
+  });
+});
+
+// A card saved from the add-a-card email's save-only form is never enrolled in Auto Pay: its SetupIntent is stamped
+// enroll_autopay=false, and this route (which records the pay-page consent and enrolls) refuses it.
+describe('/setup-complete refuses a save-only SetupIntent', () => {
+  const setupIntent = (metadata) => ({
+    id: 'si_1', status: 'succeeded', payment_method: { id: 'pm_stripe_1', type: 'card' },
+    metadata: { waves_customer_id: 'cust-1', consent_text_version: CONSENT_VERSION, ...metadata },
+  });
+
+  test('a stamped intent is refused before any save, consent or enrollment', async () => {
+    requireSave = true;
+    StripeService.retrieveSetupIntent.mockResolvedValueOnce(setupIntent({ enroll_autopay: 'false' }));
+    await withServer(async (baseUrl) => {
+      const refused = await post(baseUrl, 'setup-complete', { setupIntentId: 'si_1' });
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toEqual({ error: 'Setup does not belong to this invoice' });
+    });
+    expect(StripeService.savePaymentMethod).not.toHaveBeenCalled();
+    expect(ConsentService.recordConsent).not.toHaveBeenCalled();
+    expect(enrollConsentedMethod).not.toHaveBeenCalled();
   });
 });

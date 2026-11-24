@@ -1915,6 +1915,11 @@ router.post('/:token/setup-complete', async (req, res) => {
         microdepositPending: setupIntent?.next_action?.type === 'verify_with_microdeposits',
       });
     }
+    // A card saved from the add-a-card email's save-only form is never enrolled in Auto Pay: this route records the
+    // pay-page consent and enrolls, so it refuses that intent (services/portal-save-only-card.js).
+    if (require('../services/portal-save-only-card').setupIntentSavesOnly(setupIntent)) {
+      return res.status(409).json({ error: 'Setup does not belong to this invoice' });
+    }
     if (setupIntent.metadata?.waves_customer_id !== String(invoice.customer_id)) {
       logger.warn(`[pay-v2] setup-complete customer mismatch: SI ${setupIntentId} meta=${setupIntent.metadata?.waves_customer_id} invoice customer=${invoice.customer_id}`);
       return res.status(409).json({ error: 'Setup does not belong to this invoice' });

@@ -137,8 +137,13 @@ describe('portal-add-method webhook save-only form', () => {
   const ConsentService = require('../services/payment-method-consents');
 
   test('a stamped SetupIntent is saved without a consent row, never enrolled, and the payer is not even consulted', async () => {
-    const saveOnly = { ...SETUP_INTENT, metadata: { ...SETUP_INTENT.metadata, enroll_autopay: 'false' } };
+    const saveOnly = {
+      ...SETUP_INTENT,
+      metadata: { ...SETUP_INTENT.metadata, enroll_autopay: 'false', consent_text_version: 'v12_2026-09-30', save_only_ip: '203.0.113.9', save_only_ua: 'test-agent' },
+    };
     await handleSetupIntentSucceeded(saveOnly);
+    // Webhook first: the evidence the mint kept travels with the intent.
+    expect(finishSaveOnlyAdd).toHaveBeenCalledWith(expect.objectContaining({ ip: '203.0.113.9', userAgent: 'test-agent', consentTextVersion: 'v12_2026-09-30' }));
     // No consent row, and the helper settles the audit record and the default role.
     expect(finishSaveOnlyAdd).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', method: expect.objectContaining({ id: 'pm-row-1' }), via: 'portal_add_method_webhook' }));
     expect(ConsentService.recordConsent).not.toHaveBeenCalled();

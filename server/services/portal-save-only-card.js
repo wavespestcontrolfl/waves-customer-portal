@@ -26,6 +26,25 @@ function setupIntentSavesOnly(setupIntent) {
   return setupIntent?.metadata?.[SAVE_ONLY_METADATA_KEY] === 'false';
 }
 
+// The SetupIntent metadata the mint stamps: the save-only mark, and the address and agent of the request that showed
+// the form, so whichever completion lands first (the browser save or the webhook) records the same evidence.
+function saveOnlyMetadata({ ip, userAgent } = {}) {
+  const metadata = { [SAVE_ONLY_METADATA_KEY]: 'false' };
+  if (ip) metadata.save_only_ip = String(ip).slice(0, 64);
+  if (userAgent) metadata.save_only_ua = String(userAgent).slice(0, 200);
+  return metadata;
+}
+
+// What finishSaveOnlyAdd records from a stamped SetupIntent.
+function saveOnlyEvidence(setupIntent) {
+  const metadata = setupIntent?.metadata || {};
+  return {
+    ip: metadata.save_only_ip || null,
+    userAgent: metadata.save_only_ua || null,
+    consentTextVersion: metadata.consent_text_version || null,
+  };
+}
+
 // The browser save and the webhook both complete this form and either can insert the row first (the browser's
 // makeDefault is "no autopay default", the webhook's is false), and no enrollment follows to settle it. One rule
 // settles it either way, under the customer row lock: a card is the default when the customer has no other usable
@@ -89,4 +108,6 @@ async function finishSaveOnlyAdd({ customerId, method, consentTextVersion = null
   return settled;
 }
 
-module.exports = { SAVE_ONLY_METADATA_KEY, SAVE_ONLY_AUDIT_ACTION, setupIntentSavesOnly, finishSaveOnlyAdd };
+module.exports = {
+  SAVE_ONLY_METADATA_KEY, SAVE_ONLY_AUDIT_ACTION, setupIntentSavesOnly, saveOnlyMetadata, saveOnlyEvidence, finishSaveOnlyAdd,
+};

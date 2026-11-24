@@ -5655,7 +5655,7 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
         await SaveOnlyCard.finishSaveOnlyAdd({
           customerId: wavesCustomerId,
           method: saved,
-          consentTextVersion: setupIntent.metadata?.consent_text_version,
+          ...SaveOnlyCard.saveOnlyEvidence(setupIntent),
           via: 'portal_add_method_webhook',
         });
         return;

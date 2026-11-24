@@ -10,7 +10,7 @@ const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
 const { isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { SAVE_ONLY_METADATA_KEY, setupIntentSavesOnly, finishSaveOnlyAdd } = require('../services/portal-save-only-card');
+const { saveOnlyMetadata, saveOnlyEvidence, setupIntentSavesOnly, finishSaveOnlyAdd } = require('../services/portal-save-only-card');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral } = require('../services/failed-payments');
 const { isEnabled } = require('../config/feature-gates');
@@ -262,7 +262,7 @@ router.post('/cards/setup-intent', async (req, res, next) => {
       metadata: {
         purpose: 'portal_add_method',
         [CONSENT_VERSION_METADATA_KEY]: consentTextVersion,
-        ...(enrollAutopay ? {} : { [SAVE_ONLY_METADATA_KEY]: 'false' }),
+        ...(enrollAutopay ? {} : saveOnlyMetadata({ ip: req.ip, userAgent: req.get?.('user-agent') })),
       },
     });
 
@@ -496,9 +496,7 @@ router.post('/cards', async (req, res, next) => {
       const settled = await finishSaveOnlyAdd({
         customerId: req.customerId,
         method: card,
-        consentTextVersion: setupIntent.metadata?.[CONSENT_VERSION_METADATA_KEY],
-        ip: req.ip,
-        userAgent: req.get('user-agent') || null,
+        ...saveOnlyEvidence(setupIntent),
         via: 'portal_add_card',
       });
       if (!settled) return res.status(409).json({ code: 'payment_method_removed', error: 'That payment method was just removed. Add it again.' });

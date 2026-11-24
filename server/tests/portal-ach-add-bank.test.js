@@ -163,7 +163,8 @@ describe('POST /cards/setup-intent — gate-authoritative method types', () => {
     mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs', setupIntentId: 'si_1', paymentMethodTypes: ['card'] });
     await invoke(handler(), { body: { paymentMethodType: 'card_or_bank', enrollAutopay: false, ...ATTEST } });
     expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({
-      metadata: { purpose: 'portal_add_method', ...STAMP, enroll_autopay: 'false' },
+      // The mint also keeps the request's address and agent, so either completion can record the same evidence.
+      metadata: { purpose: 'portal_add_method', ...STAMP, enroll_autopay: 'false', save_only_ip: '1.2.3.4', save_only_ua: 'jest-agent' },
     }));
   });
 
