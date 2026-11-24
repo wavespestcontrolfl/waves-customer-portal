@@ -5,7 +5,7 @@
 // billed, and posts the bell "Completed first visit needs manual billing — setup fee was never invoiced". The owner's
 // 09-30 ruling says bill it. That bell rang 5 times in 60 days and staff billed by hand each time. No sweep noticed.
 //
-// What it reads (read only): admin bell rows (notifications, recipient_type 'admin') from the last 30 days.
+// What it reads (read only): admin bell rows (notifications, recipient_type 'admin') from the last 60 days.
 //   1. A HOLD bell is one that says the system held or skipped an action for a person to do. HOLD_MATCHERS is the one
 //      list that decides it; extend that list, nothing else.
 //   2. Left out: the digest feed (category ops_digest), system rows (category system: job and reminder failures, the
@@ -13,10 +13,12 @@
 //      own bells (key prefix rule-check:).
 //   3. Rows are grouped by a normalized title (normalizeTitle): text after a colon, digits, money and names are removed,
 //      so "Completed first visit needs manual billing" for two customers is one group.
-//   4. A group is flagged at 3 or more bells in the window with at least two thirds closed by a PERSON. A person's close
-//      is `done_by` an admin or technician id, or 'claude' acting for one (NotificationService isPersonDoneBy, the same
-//      reading the Reopen button uses). A system close ('episodes', 'relevance', 'retention', 'quiet-72h', ...) and an
-//      open row are not a person's close. A row with only read_at set cannot name who read it, so it is not counted.
+//   4. A group is flagged at 3 or more bells in the window with at least half HANDLED. A bell is handled when done_at is
+//      set and `done_by` is not one of NON_RESOLUTION_CLOSERS, the generic fall-off closers that clear a bell without
+//      anyone doing the work (quiet-72h, relevance, retention, episodes, supersede, promise-age-out). So a person, 'claude'
+//      acting for one, or a subject closer (for example 'setup-fee-alert', which clears the first-visit billing bell once
+//      staff bill by hand) counts: on a hold bell the system itself held the work, so a close that is not a fall-off means
+//      a person did it. An open row and a row with done_by NULL do not count; a bare read_at cannot name who read it.
 //
 // What it writes: ONE admin bell per ISO week, only when a group is flagged (dedupeKey rule-check:<ISO week>); nothing
 // when the week is clean. Sends nothing to a customer, calls no paid API, locks no visit or invoice row. No GATE_*
@@ -32,12 +34,9 @@ const KEY_PREFIX = 'rule-check:';
 const CATEGORY = 'system';
 const SUBJECT_ID = 'stale-rule-check';
 const AREA = 'System';
-const WINDOW_DAYS = 30;
+const WINDOW_DAYS = 60;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MIN_GROUP = 3;
-// "Most": at least two thirds of a group's bells closed by a person (staff * 3 >= count * 2).
-const STAFF_NUM = 2;
-const STAFF_DEN = 3;
 const ROW_LIMIT = 20000;
 const GROUPS_SHOWN = 10;
 const TITLE_CHARS = 80;
@@ -61,11 +60,15 @@ const EXCLUDED_TITLES = Object.freeze([
 ]);
 const EXCLUDED_CATEGORIES = Object.freeze(['ops_digest', 'system']);
 
+// The generic closers that clear a bell with nobody doing the work. Any other done_by (a person id, 'claude', or a
+// subject closer such as 'setup-fee-alert') means the held work was done.
+const NON_RESOLUTION_CLOSERS = Object.freeze(['quiet-72h', 'relevance', 'retention', 'episodes', 'supersede', 'promise-age-out']);
+
 const plural = (n, one, many) => (n === 1 ? one : many);
 
-// A person's close, read with the notification service's own rule.
-function closedByPerson(row) {
-  return Boolean(row.done_at) && require('./notification-service')._private.isPersonDoneBy(row.done_by);
+// The held work was done: closed, by someone other than a generic fall-off closer.
+function isHandled(row) {
+  return Boolean(row.done_at) && Boolean(row.done_by) && !NON_RESOLUTION_CLOSERS.includes(row.done_by);
 }
 
 // The words that make two bells "the same bell": lower case, text after a colon, money, digits and names removed.
@@ -92,7 +95,7 @@ function isHoldBell(row) {
 
 /**
  * Pure: bell rows -> flagged groups, most overridden first.
- * Group { key, title, count, staff, firstAt, lastAt }; `title` is the newest bell's own title.
+ * Group { key, title, count, handled, firstAt, lastAt }; `title` is the newest bell's own title.
  */
 function flagGroups(rows) {
   const groups = new Map();
@@ -102,16 +105,16 @@ function flagGroups(rows) {
     if (!key) continue;
     const at = new Date(row.created_at);
     if (Number.isNaN(at.getTime())) continue;
-    const g = groups.get(key) || { key, title: row.title, count: 0, staff: 0, firstAt: at, lastAt: at };
+    const g = groups.get(key) || { key, title: row.title, count: 0, handled: 0, firstAt: at, lastAt: at };
     g.count += 1;
-    if (closedByPerson(row)) g.staff += 1;
+    if (isHandled(row)) g.handled += 1;
     if (at < g.firstAt) g.firstAt = at;
     if (at >= g.lastAt) { g.lastAt = at; g.title = row.title; }
     groups.set(key, g);
   }
   return [...groups.values()]
-    .filter((g) => g.count >= MIN_GROUP && g.staff * STAFF_DEN >= g.count * STAFF_NUM)
-    .sort((a, b) => b.staff - a.staff || b.count - a.count || a.key.localeCompare(b.key));
+    .filter((g) => g.count >= MIN_GROUP && g.handled * 2 >= g.count)
+    .sort((a, b) => b.handled - a.handled || b.count - a.count || a.key.localeCompare(b.key));
 }
 
 // The last WINDOW_DAYS of admin bells, read only.
@@ -142,12 +145,12 @@ function isoWeekKey(now) {
 // The composeAdminAlert spec and detail text for the flagged groups.
 function composeRuleCheck(groups) {
   const n = groups.length;
-  const staff = groups.reduce((sum, g) => sum + g.staff, 0);
+  const handled = groups.reduce((sum, g) => sum + g.handled, 0);
   const shown = groups.slice(0, GROUPS_SHOWN);
-  const lines = shown.map((g, i) => `${i + 1}. "${cutAtWord(g.title, TITLE_CHARS)}": ${g.count} ${plural(g.count, 'bell', 'bells')}, ${g.staff} closed by staff, first ${shortDateET(g.firstAt)}, last ${shortDateET(g.lastAt)}.`);
+  const lines = shown.map((g, i) => `${i + 1}. "${cutAtWord(g.title, TITLE_CHARS)}": ${g.count} ${plural(g.count, 'bell', 'bells')}, ${g.handled} handled, first ${shortDateET(g.firstAt)}, last ${shortDateET(g.lastAt)}.`);
   const more = n > shown.length ? [`${n - shown.length} more not listed.`] : [];
   const detail = [
-    `${n} held ${plural(n, 'action', 'actions')} in the last ${WINDOW_DAYS} days that staff did by hand again and again. The system held each one for a person.`,
+    `${n} held ${plural(n, 'action', 'actions')} in the last ${WINDOW_DAYS} days that were done by hand again and again. The system held each one for a person.`,
     ...lines, ...more,
     "Check this rule against the owner's later rulings.",
   ].join('\n');
@@ -155,7 +158,7 @@ function composeRuleCheck(groups) {
     spec: {
       area: AREA,
       action: `check the rule behind ${n} held ${plural(n, 'action', 'actions')}`,
-      why: `Staff did ${staff === 1 ? 'one held action' : `${staff} held actions`} by hand this month; the rule may be out of date.`,
+      why: `${handled === 1 ? 'One held action was' : `${handled} held actions were`} done by hand in ${WINDOW_DAYS} days; the rule may be out of date.`,
       severity: 'needs-you',
       link: '/admin/dashboard',
       subject: { type: 'check', id: SUBJECT_ID },
@@ -181,7 +184,7 @@ async function runStaleRuleCheck({ now = new Date(), database = db, loadRows = l
     // GATE_ADMIN_BELL_POLICY drops an admin row that does not ask to ring.
     bell: true,
     detail,
-    metadata: { ruleCheck: true, week, groups: groups.slice(0, GROUPS_SHOWN).map((g) => ({ title: g.title, count: g.count, staff: g.staff })) },
+    metadata: { ruleCheck: true, week, groups: groups.slice(0, GROUPS_SHOWN).map((g) => ({ title: g.title, count: g.count, handled: g.handled })) },
   });
   if (!result) throw new Error('stale rule check bell was not written');
   let outcome = 'raised';
@@ -194,10 +197,11 @@ async function runStaleRuleCheck({ now = new Date(), database = db, loadRows = l
 module.exports = {
   runStaleRuleCheck,
   HOLD_MATCHERS,
+  NON_RESOLUTION_CLOSERS,
   EXCLUDED_TITLES,
   EXCLUDED_CATEGORIES,
   KEY_PREFIX,
   MIN_GROUP,
   WINDOW_DAYS,
-  _private: { normalizeTitle, isHoldBell, flagGroups, loadBells, isoWeekKey, composeRuleCheck, closedByPerson },
+  _private: { normalizeTitle, isHoldBell, flagGroups, loadBells, isoWeekKey, composeRuleCheck, isHandled },
 };

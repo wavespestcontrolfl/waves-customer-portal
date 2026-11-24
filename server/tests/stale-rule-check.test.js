@@ -1,5 +1,5 @@
 /**
- * Stale-rule check (server/services/stale-rule-check.js): hold bells staff keep closing by hand flag a rule that may be out
+ * Stale-rule check (server/services/stale-rule-check.js): hold bells that keep being handled by hand flag a rule that may be out
  * of date. Pure grouping and the weekly run against a fake loader; the bell write is the composer plus a mocked
  * NotificationService.notifyAdmin, so the dedupe key and the copy rules are what is under test.
  */
@@ -64,10 +64,10 @@ describe('isHoldBell', () => {
 });
 
 describe('flagGroups', () => {
-  test('flags a group of 3+ closed by staff, across customers', () => {
+  test('flags a group of 3+ handled by a person, across customers', () => {
     const groups = flagGroups([...many(5), ...many(2, { title: 'Billing — a different held thing' })]);
     expect(groups).toHaveLength(1);
-    expect(groups[0]).toMatchObject({ count: 5, staff: 5, title: HOLD });
+    expect(groups[0]).toMatchObject({ count: 5, handled: 5, title: HOLD });
     expect(groups[0].firstAt.getTime()).toBeLessThanOrEqual(groups[0].lastAt.getTime());
   });
 
@@ -75,19 +75,28 @@ describe('flagGroups', () => {
     expect(flagGroups(many(2))).toEqual([]);
   });
 
-  test('system closes and open rows are not a person\'s close', () => {
-    const system = ['episodes', 'relevance', 'retention', 'quiet-72h', null].map((done_by) => bell({ done_by }));
-    expect(flagGroups(system)).toEqual([]);
+  test('generic fall-off closers, open rows and a NULL closer are not handled', () => {
+    const fallOff = check.NON_RESOLUTION_CLOSERS.map((done_by) => bell({ done_by }));
+    expect(fallOff).toHaveLength(6);
+    expect(flagGroups(fallOff)).toEqual([]);
+    expect(flagGroups(many(4, { done_by: 'quiet-72h' }))).toEqual([]);
+    expect(flagGroups(many(4, { done_by: null }))).toEqual([]);
     expect(flagGroups(many(4, { done_at: null, done_by: null }))).toEqual([]);
     expect(flagGroups(many(3, { done_at: null, done_by: PERSON }))).toEqual([]);
   });
 
-  test('two thirds is the line: 2 of 3 flags, 1 of 3 does not', () => {
-    expect(flagGroups([...many(2), bell({ done_by: 'episodes' })])).toHaveLength(1);
+  test('a subject closer such as setup-fee-alert counts as handled (the first-visit billing bell)', () => {
+    const groups = flagGroups(many(5, { done_by: 'setup-fee-alert' }));
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ count: 5, handled: 5, title: HOLD });
+  });
+
+  test('half is the line: 2 of 4 flags, 1 of 3 does not', () => {
+    expect(flagGroups([...many(2), ...many(2, { done_by: 'quiet-72h' })])).toHaveLength(1);
     expect(flagGroups([bell(), ...many(2, { done_by: 'episodes' })])).toEqual([]);
   });
 
-  test('a legacy numeric id and claude count as a person', () => {
+  test('a person id, a legacy numeric id and claude count as handled', () => {
     expect(flagGroups([bell({ done_by: '12' }), bell({ done_by: 'claude' }), bell()])).toHaveLength(1);
   });
 
@@ -110,7 +119,7 @@ describe('composeRuleCheck', () => {
     const groups = flagGroups(many(5));
     const { spec, detail } = composeRuleCheck(groups);
     expect(() => composeAdminAlert(spec)).not.toThrow();
-    expect(detail).toContain(`"${HOLD}": 5 bells, 5 closed by staff, first `);
+    expect(detail).toContain(`"${HOLD}": 5 bells, 5 handled, first `);
     expect(detail).toContain("Check this rule against the owner's later rulings.");
   });
 });
@@ -133,7 +142,7 @@ describe('runStaleRuleCheck', () => {
     const [category, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(category).toBe('system');
     expect(title).toBe('System — check the rule behind 1 held action');
-    expect(why).toBe('Staff did 5 held actions by hand this month; the rule may be out of date.');
+    expect(why).toBe('5 held actions were done by hand in 60 days; the rule may be out of date.');
     expect(opts).toMatchObject({ bell: true, dedupeKey: 'rule-check:2026-W48', metadata: { week: '2026-W48', severity: 'needs-you' } });
     expect(opts.detail).toContain('1. "Completed first visit');
   });
@@ -155,7 +164,7 @@ describe('runStaleRuleCheck', () => {
 });
 
 describe('loadBells', () => {
-  test('reads admin bells of the last 30 days, never writes', async () => {
+  test('reads admin bells of the last 60 days, never writes', async () => {
     const calls = [];
     const q = new Proxy({}, { get: (_t, prop) => (prop === 'then' ? (res) => res([]) : (...args) => { calls.push([prop, args]); return q; }) });
     const database = Object.assign(() => q, { raw: (s) => s });
@@ -164,6 +173,6 @@ describe('loadBells', () => {
     expect(names).toEqual(expect.arrayContaining(['where', 'whereNotIn', 'select']));
     expect(names).not.toEqual(expect.arrayContaining(['update', 'insert', 'del', 'forUpdate']));
     const since = calls.find(([p, a]) => p === 'where' && a[0] === 'created_at')[1][2];
-    expect(new Date('2026-11-24T14:40:00Z').getTime() - since.getTime()).toBe(30 * 24 * 60 * 60 * 1000);
+    expect(new Date('2026-11-24T14:40:00Z').getTime() - since.getTime()).toBe(60 * 24 * 60 * 60 * 1000);
   });
 });
