@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
 import { Field } from '../ui/Field';
@@ -108,18 +108,35 @@ export default function ProductionSharePanel({ call, technicians }) {
   const [open, setOpen] = useState(false);
   const [technicianId, setTechnicianId] = useState('');
   const [weekStart, setWeekStart] = useState(() => lastFinishedWeekStart(etDateString(new Date())));
-  const [preview, setPreview] = useState(null);
+  const [loaded, setLoaded] = useState(null);
+  // Only the newest request may write, and a change of employee or week drops the answer on screen and any request on its way.
+  const newest = useRef(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   async function load(id = technicianId, week = weekStart) {
     if (!id || !week) return;
+    newest.current += 1;
+    const mine = newest.current;
     setBusy(true); setError('');
     try {
-      setPreview(await call(`/production-share/preview?technicianId=${encodeURIComponent(id)}&weekStart=${encodeURIComponent(week)}`));
-    } catch (failure) { setPreview(null); setError(failure.message); }
-    setBusy(false);
+      const answer = await call(`/production-share/preview?technicianId=${encodeURIComponent(id)}&weekStart=${encodeURIComponent(week)}`);
+      if (mine === newest.current) setLoaded(answer);
+    } catch (failure) {
+      if (mine === newest.current) { setLoaded(null); setError(failure.message); }
+    }
+    if (mine === newest.current) setBusy(false);
   }
+
+  // Any change of the selection starts over: nothing shown or saved belongs to a different employee or week.
+  function select(change) {
+    newest.current += 1;
+    setLoaded(null); setError(''); setBusy(false);
+    if (change.technicianId !== undefined) setTechnicianId(change.technicianId);
+    if (change.weekStart !== undefined) setWeekStart(change.weekStart);
+  }
+  // The answer is shown, and its settings form saves, only for the employee and week it was loaded for.
+  const preview = loaded && loaded.technician.id === technicianId && loaded.weekStart === weekStart ? loaded : null;
 
   const options = (technicians || []).filter(tech => !tech.notW2);
   return <Card>
@@ -134,16 +151,16 @@ export default function ProductionSharePanel({ call, technicians }) {
       {open && <>
       <form className="flex flex-wrap items-end gap-3" onSubmit={event => { event.preventDefault(); load(); }}>
         <Field label="Employee">
-          <Select value={technicianId} onChange={event => { setTechnicianId(event.target.value); setPreview(null); }}>
+          <Select value={technicianId} onChange={event => select({ technicianId: event.target.value })}>
             <option value="">Choose an employee</option>
             {options.map(tech => <option key={tech.id} value={tech.id}>{tech.name}</option>)}
           </Select>
         </Field>
         <Field label="Week starting (Monday)">
-          <Input type="date" value={weekStart} onChange={event => { setWeekStart(event.target.value); setPreview(null); }} />
+          <Input type="date" value={weekStart} onChange={event => select({ weekStart: event.target.value })} />
         </Field>
         <Button type="button" variant="secondary" disabled={busy || !technicianId || !weekStart}
-          onClick={() => setWeekStart(addStaffCalendarDays(weekStart, -7))}>Week before</Button>
+          onClick={() => select({ weekStart: addStaffCalendarDays(weekStart, -7) })}>Week before</Button>
         <Button type="submit" disabled={busy || !technicianId || !weekStart}>Show the week</Button>
       </form>
       {error && <p role="alert" className="m-0 text-ui-caption text-alert-fg">{error}</p>}
@@ -180,9 +197,9 @@ export default function ProductionSharePanel({ call, technicians }) {
             </TBody>
           </Table>}
         <SettingsForm
-          key={`${technicianId}:${weekStart}:${preview.settings ? preview.settings.id : 'none'}`}
-          call={call} technicians={technicians} technicianId={technicianId} weekStart={weekStart}
-          current={preview.settings} onSaved={() => load()}
+          key={`${preview.technician.id}:${preview.weekStart}:${preview.settings ? preview.settings.id : 'none'}`}
+          call={call} technicians={technicians} technicianId={preview.technician.id} weekStart={preview.weekStart}
+          current={preview.settings} onSaved={() => load(preview.technician.id, preview.weekStart)}
         />
       </div>}
       </>}

@@ -3,7 +3,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { shareForWeek, jobPartCents, shiftDays } = require('../services/production-share');
+const { shareForWeek, jobPartCents, shiftDays, allocateCents } = require('../services/production-share');
 
 const perShift = { rateBps: 1500, barType: 'per_shift', barCents: 90000 };
 const weekly = { rateBps: 1500, barType: 'weekly', barCents: 270000 };
@@ -72,5 +72,27 @@ describe('jobPartCents', () => {
 describe('shiftDays', () => {
   it('counts each work date once, whatever the number of stops', () => {
     expect(shiftDays([{ workDate: '2026-11-17' }, { workDate: '2026-11-16' }, { workDate: '2026-11-17' }])).toEqual(['2026-11-16', '2026-11-17']);
+  });
+});
+
+describe('allocateCents', () => {
+  it('splits a total by weight with the cents settled exactly and the same answer each time', () => {
+    const members = [{ id: 'c', weight: 2000 }, { id: 'a', weight: 6000 }, { id: 'b', weight: 4000 }];
+    const parts = allocateCents(12001, members);
+    expect([...parts.values()].reduce((x, y) => x + y, 0)).toBe(12001);
+    expect(parts.get('a')).toBe(6001); // the odd cent: the largest remainder, the lowest id on a tie
+    expect([...allocateCents(12001, [...members].reverse())]).toEqual([...allocateCents(12001, members)].reverse());
+  });
+
+  it('gives a thirds split to the lowest ids and never loses a cent', () => {
+    const parts = allocateCents(1000, [{ id: '1', weight: 3333 }, { id: '2', weight: 3333 }, { id: '3', weight: 3334 }]);
+    expect([...parts.values()]).toEqual([333, 333, 334]);
+    expect([...allocateCents(1, [{ id: 'x', weight: 1 }, { id: 'y', weight: 1 }]).values()]).toEqual([1, 0]);
+  });
+
+  it('is null when a weight is missing, so the split is never guessed', () => {
+    expect(allocateCents(100, [{ id: 'a', weight: 5 }, { id: 'b', weight: null }])).toBeNull();
+    expect(allocateCents(100, [{ id: 'a', weight: 0 }])).toBeNull();
+    expect(allocateCents(100, [])).toBeNull();
   });
 });

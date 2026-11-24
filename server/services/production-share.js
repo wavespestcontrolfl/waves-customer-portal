@@ -13,8 +13,12 @@
  *
  * Credit of a completed stop (the technician the visit is assigned to; the work date is the ET date it was completed):
  *   Review map (CLAUDE.md rule 22), where each rule this module needs lives:
- *   - What a visit is priced at         completionInvoiceAmount + hasAuthoritativeZeroPrice (billing-lane.js). The Terms
- *     credit the PRICE CHARGED, before sales tax, not what settled: an unpaid invoice still credits. The settled-cash
+ *   - What a visit was billed          the pre-tax amount of the invoice linked to the visit (billedByVisit), whether or not it
+ *     is paid, by the links the rate review reads (rate-review.js VISIT_INVOICE_LINK_SQL: direct, service record,
+ *     first-application, completion packet); a shared invoice is split across its visits by visit price, to the cent. A fee
+ *     change later never moves a credit already earned.
+ *   - What a visit is priced at         with no invoice: completionInvoiceAmount + hasAuthoritativeZeroPrice (billing-lane.js).
+ *     The Terms credit the PRICE CHARGED, before sales tax, not what settled: an unpaid invoice still credits. The settled-cash
  *     helpers of rate-review.js (visitRevenueCents, duesPerVisitCents: paid invoices, settled prepay, settled dues) are
  *     NOT used on purpose. completionInvoiceAmount is called with monthlyRate 0: its fallback to the customer's whole
  *     MONTHLY dues is a billing fallback (a month's dues is not the value of one visit); a dues-covered plan visit with no
@@ -25,25 +29,29 @@
  *   - A multi-visit one-time job        the SOURCE visit's price split across the planned visits of the job: the source and
  *     the included follow-ups (followup_included, followup_source_service_id; call-booking-catalog.js
  *     callFollowUpBillingShape: the follow-up is a $0 "included" visit). Each completed visit gets its part; the parts add
- *     up to the price to the cent. A follow-up that was cancelled, skipped or a no-show is not a planned visit.
+ *     up to the price to the cent. A follow-up that was cancelled, skipped or a no-show is not a planned visit; a rescheduled one is.
+ *     The job price is what the first visit was billed (its invoice), else its own price.
  *   - A callback                        is_callback or a re-service type (re-service.js isReService). The code does not
- *     store which work a callback follows, so the original is the customer's latest earlier completed, non-callback
- *     visit of the same line (rate-review.js LINE_SQL) at the same property. Original by the SAME technician within 30
+ *     store which work a callback follows, so the original is the customer's latest completed visit of the same line
+ *     (rate-review.js LINE_SQL) at the same property (equal property ids, else equal addresses on file) that came BEFORE it
+ *     by completion time. The callback test (flag, catalog key, name, type) is the same for both, so a re-service is never an
+ *     original. A same-day pair with no readable order, or work whose property cannot be verified, goes to review. Original by the SAME technician within 30
  *     days = $0. Original by ANOTHER technician = the route's average value for one stop (setting). Original not found,
  *     with no technician, or by the same technician over 30 days ago (the Terms say nothing) = $0 and "needs review":
  *     pay is never guessed up.
  *   - $0                                a free assessment (no-cost-visit-types.js isConsultationServiceType with no
  *     price of its own) and the always-free visit types (isAlwaysFreeServiceType).
  *   - A refund                          takes back the credit of that stop; PR 3 does it. PR 1 only exposes the stop's
- *     refund total (refundCents): refunds on the payments of the visit's own invoices, or, for a prepaid plan visit, its
- *     share of the refunds on the term's prepay invoice.
+ *     refund total (refundCents): refunds on the payments of the visit's linked invoices (the same links and the same split
+ *     as the amount), plus, for a prepaid plan visit, its share of the refunds on the term's prepay invoice, spread over the
+ *     term's stamped visits so the shares add up to the term refund. The term invoice is counted once, in the term share.
  */
 const Joi = require('joi');
 const db = require('../models/db');
 const { roundDiv } = require('./payroll-calc');
 const { PayrollError } = require('./payroll-w4');
 const { completionInvoiceAmount, hasAuthoritativeZeroPrice, resolveBillingLane } = require('./billing-lane');
-const { isReService, RE_SERVICE_SERVICE_KEYS } = require('./re-service');
+const { isReService } = require('./re-service');
 const {
   isAlwaysFreeServiceType, isConsultationServiceType,
   ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX,
@@ -54,8 +62,11 @@ const { etDateString } = require('../utils/datetime-et');
 const BAR_TYPES = ['per_shift', 'weekly'];
 const OWN_CALLBACK_DAYS = 30;
 const MAX_CENTS = 100000000; // $1,000,000: a typo guard, not a business limit
-// A follow-up in one of these states is not a planned visit of its job.
-const UNPLANNED_STATUSES = ['cancelled', 'skipped', 'no_show', 'rescheduled'];
+// A follow-up in one of these states is not a planned visit of its job. A 'rescheduled' follow-up still is one: the package
+// booking code (package-followup-booking.js, uq_scheduled_services_followup_source_open) counts it as live.
+const UNPLANNED_STATUSES = ['cancelled', 'skipped', 'no_show'];
+// An invoice in one of these states is no charge to the customer.
+const NOT_CHARGED_INVOICE_STATUSES = ['draft', 'void', 'canceled', 'cancelled'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const WORK_DATE_SQL = `COALESCE(${staffWorkDateSql('s.completed_at')}, s.scheduled_date)`;
@@ -252,52 +263,181 @@ async function jobOf(conn, stop, hasFollowUp, cache) {
   return job;
 }
 
+// The same test for a callback everywhere: the flag, or a re-service catalog key, name or type (re-service.js).
+const isCallbackVisit = (visit) => visit.is_callback === true || isReService({
+  serviceKey: visit.service_key || visit.service_key_snapshot || null, serviceName: visit.service_name, serviceType: visit.service_type,
+});
+
+const normalizedText = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+// A visit's address as text: its own, else its property's. null = no address on file.
+function addressKey(visit) {
+  const line = normalizedText(visit.service_address_line1 || visit.prop_line1);
+  const zip = normalizedText(visit.service_address_zip || visit.prop_zip);
+  return line && zip ? `${line}|${zip}` : null;
+}
+// Same property: equal property ids, else equal addresses on file. 'unknown' when neither can say (a missing id with no address).
+function sameProperty(a, b) {
+  if (a.property_id && b.property_id) return a.property_id === b.property_id ? 'yes' : 'no';
+  const keys = [addressKey(a), addressKey(b)];
+  if (!keys[0] || !keys[1]) return 'unknown';
+  return keys[0] === keys[1] ? 'yes' : 'no';
+}
+
+const NEW_ORIGINAL_LIMIT = 80;
+// The work a callback follows: the customer's latest completed, non-callback visit of the same line at the same property that
+// came BEFORE it (by completion time; a same-day pair whose order cannot be read is never guessed). Returns
+// { original } or { review: reason }; { original: null } when there is none.
 async function originalWork(conn, callback) {
-  const row = await conn('scheduled_services as s')
+  const candidates = await conn('scheduled_services as s')
     .leftJoin('services as sv', 'sv.id', 's.service_id')
+    .leftJoin('customer_properties as cp', 'cp.id', 's.property_id')
     .where({ 's.customer_id': callback.customer_id, 's.status': 'completed' })
     .whereNot('s.id', callback.id)
-    .whereRaw('COALESCE(s.is_callback, false) = false')
-    .whereRaw('COALESCE(sv.service_key, s.service_key_snapshot, \'\') NOT IN (' + [...RE_SERVICE_SERVICE_KEYS].map(() => '?').join(', ') + ')', [...RE_SERVICE_SERVICE_KEYS])
     .whereRaw(`${require('./rate-review').PLAN_LINE_SQL.LINE_SQL} = ?`, [callback.line])
-    .whereRaw('(s.property_id IS NULL OR ?::uuid IS NULL OR s.property_id = ?::uuid)', [callback.property_id || null, callback.property_id || null])
     .whereRaw('s.service_type !~* ? AND s.service_type !~* ?', [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX])
     .whereRaw(`${WORK_DATE_SQL} <= ?`, [callback.work_date])
     .orderByRaw(`${WORK_DATE_SQL} DESC, s.completed_at DESC NULLS LAST, s.id`)
-    .first('s.id', 's.technician_id', conn.raw(`to_char(${WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
-  return row || null;
+    .limit(NEW_ORIGINAL_LIMIT)
+    .select('s.id', 's.technician_id', 's.property_id', 's.service_type', 's.service_key_snapshot', 's.is_callback', 's.completed_at',
+      's.service_address_line1', 's.service_address_zip', 'sv.service_key', 'sv.name as service_name',
+      'cp.address_line1 as prop_line1', 'cp.zip as prop_zip',
+      conn.raw(`to_char(${WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
+  let original = null;
+  for (const candidate of candidates) {
+    if (isCallbackVisit(candidate)) continue; // a re-service is never the original work
+    const where = sameProperty(callback, candidate);
+    if (where === 'no') continue;
+    let earlier = candidate.work_date < callback.work_date;
+    if (candidate.work_date === callback.work_date) {
+      // Same day: only completion times can say which came first.
+      const [then, now] = [candidate.completed_at, callback.completed_at].map((at) => (at ? new Date(at).getTime() : null));
+      if (then == null || now == null || then === now) {
+        return { review: 'A visit of the same line the same day as this callback, and the order of the two cannot be read.' };
+      }
+      earlier = then < now;
+    }
+    if (!earlier) continue;
+    if (where === 'unknown') return { review: 'Earlier work of the same line, but it cannot be tied to this property (no property or address on file).' };
+    original = candidate;
+    break;
+  }
+  return { original };
 }
 
-// Refund totals (dollars as cents) by visit: payments refunded on the visit's own invoices, and for a prepaid plan
-// visit its share of the refunds on the term's prepay invoice. Exposed only; PR 3 takes them back.
-async function refundsByVisit(conn, stops) {
+// How much of a total each member gets, in whole cents, split in proportion to its weight: the floors, then the remaining
+// cents one each to the largest remainders (ties by id), so the parts add up to the total exactly. null when a weight is
+// missing or not positive (the split cannot be known).
+function allocateCents(totalCents, members) {
+  if (!members.length || members.some((m) => !(m.weight > 0))) return null;
+  const total = BigInt(totalCents);
+  const sum = members.reduce((acc, m) => acc + BigInt(m.weight), 0n);
+  const parts = members.map((m) => ({ id: m.id, floor: (total * BigInt(m.weight)) / sum, rest: (total * BigInt(m.weight)) % sum }));
+  let left = total - parts.reduce((acc, part) => acc + part.floor, 0n);
+  [...parts].sort((a, b) => (a.rest === b.rest ? String(a.id).localeCompare(String(b.id)) : (a.rest > b.rest ? -1 : 1)))
+    .forEach((part) => { if (left > 0n) { part.floor += 1n; left -= 1n; } });
+  return new Map(parts.map((part) => [part.id, Number(part.floor)]));
+}
+
+/**
+ * What each visit was BILLED, before sales tax, and what was refunded on it, from the invoices linked to the visit by the
+ * links the rate review reads (rate-review.js VISIT_INVOICE_LINK_SQL: direct, through the service record, the combined
+ * first-application invoice, a completion packet). An unpaid invoice counts: the credit is the price charged, and a later
+ * fee change never moves it. An invoice shared by several visits is split across ALL of them in proportion to their visit
+ * prices, with the cents settled exactly; when a member has no price the split is unknowable and that invoice is left out
+ * (the visit then falls back to its own price). Draft and void invoices are no charge. The prepay invoice of an annual term
+ * is never attributed here: its refunds go to the term's visits (termRefunds).
+ * Returns Map visitId -> { billedCents: number|null, refundCents }.
+ */
+async function billedByVisit(conn, visitIds) {
   const out = new Map();
-  if (!stops.length) return out;
-  const { REFUND_BASE_SQL } = require('./rate-review');
-  const linked = (alias) => `(SELECT sum(${REFUND_BASE_SQL}) FROM payments p
+  if (!visitIds.length) return out;
+  const rr = require('./rate-review');
+  const { REFUND_BASE_SQL } = rr;
+  const refundOf = `(SELECT COALESCE(sum(${REFUND_BASE_SQL}), 0) FROM payments p
     WHERE COALESCE(p.refund_amount, 0) > 0
-      AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = ${alias}.stripe_payment_intent_id)
-        OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = ${alias}.stripe_charge_id)
-        OR p.metadata::jsonb ->> 'invoice_id' = ${alias}.id::text))`;
-  const own = await conn.raw(`
-    SELECT i.scheduled_service_id AS visit_id, COALESCE(sum(${linked('i')}), 0) AS refunded
+      AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = i.stripe_payment_intent_id)
+        OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = i.stripe_charge_id)
+        OR p.metadata::jsonb ->> 'invoice_id' = i.id::text))`;
+  const links = await conn.raw(`
+    SELECT s.id AS visit_id, i.id AS invoice_id,
+      CASE WHEN ${rr.COMBINED_SETUP_INVOICE_SQL} THEN ${rr.APPLICATION_LINES_SQL}
+           WHEN COALESCE(i.subtotal, 0) > 0 THEN i.subtotal - COALESCE(i.discount_amount, 0)
+           ELSE i.total - COALESCE(i.tax_amount, 0) + ${rr.depositCreditSql('i')} END AS pretax,
+      ${refundOf} AS refunded
+    FROM scheduled_services s
+    LEFT JOIN LATERAL (SELECT id AS service_record_id FROM service_records WHERE scheduled_service_id = s.id ORDER BY created_at DESC LIMIT 1) sr ON true
+    JOIN invoices i ON ${rr.VISIT_INVOICE_LINK_SQL}
+    WHERE s.id = ANY(?::uuid[]) AND i.archived_at IS NULL AND i.annual_prepay_term_id IS NULL
+      AND i.status <> ALL(?::text[])
+      AND NOT EXISTS (SELECT 1 FROM annual_prepay_terms t WHERE t.prepay_invoice_id = i.id)`,
+  [visitIds, NOT_CHARGED_INVOICE_STATUSES]);
+  if (!links.rows.length) return out;
+  const invoiceIds = [...new Set(links.rows.map((row) => row.invoice_id))];
+  const members = await conn.raw(`
+    SELECT i.id AS invoice_id, m.id AS visit_id, COALESCE(m.estimated_price, m.primary_line_price) AS weight
     FROM invoices i
-    WHERE i.scheduled_service_id = ANY(?::uuid[]) AND i.archived_at IS NULL AND i.status <> 'void'
-    GROUP BY i.scheduled_service_id`, [stops.map((stop) => stop.id)]);
-  for (const row of own.rows) out.set(row.visit_id, cents(row.refunded) || 0);
-  const termIds = [...new Set(stops.filter((stop) => stop.annual_prepay_term_id).map((stop) => stop.annual_prepay_term_id))];
-  if (termIds.length) {
-    const terms = await conn.raw(`
-      SELECT apt.id, apt.prepay_amount, COALESCE(${linked('pi')}, 0) AS refunded
-      FROM annual_prepay_terms apt JOIN invoices pi ON pi.id = apt.prepay_invoice_id
-      WHERE apt.id = ANY(?::uuid[])`, [termIds]);
-    const byTerm = new Map(terms.rows.map((row) => [row.id, row]));
-    for (const stop of stops) {
-      const term = stop.annual_prepay_term_id && byTerm.get(stop.annual_prepay_term_id);
-      if (!term || !(Number(term.prepay_amount) > 0) || !(Number(stop.prepaid_amount) > 0)) continue;
-      const share = Math.round((cents(term.refunded) * Number(stop.prepaid_amount)) / Number(term.prepay_amount));
-      if (share > 0) out.set(stop.id, (out.get(stop.id) || 0) + share);
+    JOIN LATERAL (
+      ${rr.INVOICE_MEMBER_IDS_SQL}
+      UNION SELECT i.scheduled_service_id WHERE i.scheduled_service_id IS NOT NULL
+      UNION SELECT sr2.scheduled_service_id FROM service_records sr2 WHERE sr2.id = i.service_record_id AND sr2.scheduled_service_id IS NOT NULL
+    ) mem ON true
+    JOIN scheduled_services m ON m.id = mem.id
+    WHERE i.id = ANY(?::uuid[])`, [invoiceIds]);
+  const byInvoice = new Map();
+  for (const row of members.rows) {
+    if (!byInvoice.has(row.invoice_id)) byInvoice.set(row.invoice_id, []);
+    byInvoice.get(row.invoice_id).push({ id: row.visit_id, weight: cents(row.weight) });
+  }
+  const shares = new Map(); // invoice id -> { billed: Map, refunded: Map } by visit
+  for (const row of links.rows) {
+    if (shares.has(row.invoice_id)) continue;
+    const list = byInvoice.get(row.invoice_id) || [];
+    const billed = Math.max(0, cents(row.pretax) || 0);
+    const refunded = cents(row.refunded) || 0;
+    if (list.length <= 1) {
+      shares.set(row.invoice_id, { billed: new Map([[row.visit_id, billed]]), refunded: new Map([[row.visit_id, refunded]]) });
+    } else {
+      const billedParts = allocateCents(billed, list);
+      shares.set(row.invoice_id, billedParts ? { billed: billedParts, refunded: allocateCents(refunded, list) } : null);
     }
+  }
+  for (const row of links.rows) {
+    const share = shares.get(row.invoice_id);
+    if (!share || !share.billed.has(row.visit_id)) continue;
+    const entry = out.get(row.visit_id) || { billedCents: 0, refundCents: 0 };
+    entry.billedCents += share.billed.get(row.visit_id);
+    entry.refundCents += (share.refunded && share.refunded.get(row.visit_id)) || 0;
+    out.set(row.visit_id, entry);
+  }
+  return out;
+}
+
+/**
+ * The refunds on an annual prepay term's prepay invoice, spread over the term's stamped visits in proportion to their
+ * prepaid slices, the cents settled exactly so the shares add up to the term's refund. Counted once: the term invoice is
+ * left out of billedByVisit. Returns Map visitId -> cents for the visits in `stops`.
+ */
+async function termRefunds(conn, stops) {
+  const out = new Map();
+  const termIds = [...new Set(stops.filter((stop) => stop.annual_prepay_term_id).map((stop) => stop.annual_prepay_term_id))];
+  if (!termIds.length) return out;
+  const { REFUND_BASE_SQL } = require('./rate-review');
+  const terms = await conn.raw(`
+    SELECT apt.id, COALESCE((SELECT sum(${REFUND_BASE_SQL}) FROM payments p
+      WHERE COALESCE(p.refund_amount, 0) > 0
+        AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = pi.stripe_payment_intent_id)
+          OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = pi.stripe_charge_id)
+          OR p.metadata::jsonb ->> 'invoice_id' = pi.id::text)), 0) AS refunded
+    FROM annual_prepay_terms apt JOIN invoices pi ON pi.id = apt.prepay_invoice_id
+    WHERE apt.id = ANY(?::uuid[])`, [termIds]);
+  for (const term of terms.rows) {
+    const refunded = cents(term.refunded) || 0;
+    if (!(refunded > 0)) continue;
+    const stamped = await conn('scheduled_services').where({ annual_prepay_term_id: term.id }).where('prepaid_amount', '>', 0)
+      .select('id', 'prepaid_amount');
+    const parts = allocateCents(refunded, stamped.map((row) => ({ id: row.id, weight: cents(row.prepaid_amount) })));
+    if (!parts) continue;
+    for (const stop of stops) if (parts.has(stop.id)) out.set(stop.id, parts.get(stop.id));
   }
   return out;
 }
@@ -307,9 +447,11 @@ async function refundsByVisit(conn, stops) {
 const credited = (kind, creditCents, reason) => ({ kind, creditCents, reason, needsReview: false });
 const toReview = (kind, reason) => ({ kind, creditCents: 0, reason, needsReview: true });
 
-function jobCredit(stop, job) {
+// The job price is what the first visit was billed (its invoice, before tax), else its own price.
+function jobCredit(stop, job, billed) {
   if (job.broken) return toReview('multi_visit_job', 'An included follow-up whose first visit cannot be found. Link it to its job.');
-  const price = cents(job.root.estimated_price);
+  const invoiced = billed.get(job.root.id);
+  const price = invoiced ? invoiced.billedCents : cents(job.root.estimated_price);
   const nth = job.planned.indexOf(stop.id) + 1;
   if (!(price > 0)) return toReview('multi_visit_job', "The job's first visit has no price on file.");
   if (nth < 1) return toReview('multi_visit_job', "This visit is not among the job's planned visits.");
@@ -318,7 +460,9 @@ function jobCredit(stop, job) {
 
 async function callbackCredit(conn, stop, technicianId, inForce) {
   if (stop.line === 'other') return toReview('callback_review', 'A callback whose service line is unknown, so its original work cannot be found.');
-  const original = await originalWork(conn, stop);
+  const found = await originalWork(conn, stop);
+  if (found.review) return toReview('callback_review', found.review);
+  const original = found.original;
   if (!original) return toReview('callback_review', 'No earlier completed work of the same line at this property.');
   if (!original.technician_id) return toReview('callback_review', 'The original work has no technician on file.');
   if (original.technician_id === technicianId) {
@@ -331,10 +475,17 @@ async function callbackCredit(conn, stop, technicianId, inForce) {
   return credited('callback_other', inForce.callbackStopValueCents, "Callback on another technician's work");
 }
 
-function ownPriceCredit(stop) {
+function ownPriceCredit(stop, invoiced) {
   if (isAlwaysFreeServiceType(stop.service_type)) return credited('free_visit', 0, 'A visit type that is always free');
   if (Number(stop.prepaid_amount) > 0 && stop.annual_prepay_term_id) {
     return credited('prepaid_plan', cents(stop.prepaid_amount), "The prepaid plan's value for one visit");
+  }
+  // What the visit's invoice charged, before tax, whether or not it is paid; a fee change later never moves it.
+  if (invoiced) {
+    if (invoiced.billedCents > 0) return credited('priced', invoiced.billedCents, "Pre-tax amount of the visit's invoice");
+    return isConsultationServiceType(stop.service_type)
+      ? credited('free_assessment', 0, 'A free assessment')
+      : credited('free_visit', 0, "The visit's invoice charges $0");
   }
   const lane = resolveBillingLane({ billing_mode: stop.billing_mode, waveguard_tier: stop.waveguard_tier, monthly_rate: stop.monthly_rate });
   const amount = cents(completionInvoiceAmount({
@@ -367,11 +518,13 @@ async function weekCredits(conn, technicianId, weekStart, { settings } = {}) {
   const stops = await conn('scheduled_services as s')
     .leftJoin('services as sv', 'sv.id', 's.service_id')
     .leftJoin('customers as c', 'c.id', 's.customer_id')
+    .leftJoin('customer_properties as cp', 'cp.id', 's.property_id')
     .where({ 's.technician_id': technicianId, 's.status': 'completed' })
     .whereRaw(`${WORK_DATE_SQL} BETWEEN ? AND ?`, [weekStart, weekEnd])
     .select('s.id', 's.customer_id', 's.property_id', 's.service_type', 's.estimated_price', 's.primary_line_price',
       's.is_callback', 's.followup_included', 's.followup_source_service_id', 's.annual_prepay_term_id', 's.prepaid_amount',
-      's.service_key_snapshot', 'sv.service_key', 'sv.name as service_name',
+      's.service_key_snapshot', 's.completed_at', 's.service_address_line1', 's.service_address_zip',
+      'sv.service_key', 'sv.name as service_name', 'cp.address_line1 as prop_line1', 'cp.zip as prop_zip',
       'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.per_application_fee',
       conn.raw(`to_char(${WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`), conn.raw(`${LINE_SQL} AS line`))
     .orderByRaw(`${WORK_DATE_SQL}, s.completed_at NULLS LAST, s.id`);
@@ -381,22 +534,25 @@ async function weekCredits(conn, technicianId, weekStart, { settings } = {}) {
     : [];
   const hasFollowUp = new Set(withFollowUp);
   const jobCache = new Map();
-  const refunds = await refundsByVisit(conn, stops);
+  const jobs = new Map();
+  for (const stop of stops) jobs.set(stop.id, await jobOf(conn, stop, hasFollowUp, jobCache));
+  const billed = await billedByVisit(conn, [...new Set([...stops.map((stop) => stop.id),
+    ...[...jobs.values()].filter((job) => job && job.root).map((job) => job.root.id)])]);
+  const prepaidRefunds = await termRefunds(conn, stops);
 
   const rows = [];
   for (const stop of stops) {
-    const callback = stop.is_callback === true || isReService({
-      serviceKey: stop.service_key || stop.service_key_snapshot || null, serviceName: stop.service_name, serviceType: stop.service_type,
-    });
-    const job = await jobOf(conn, stop, hasFollowUp, jobCache);
+    const callback = isCallbackVisit(stop);
+    const job = jobs.get(stop.id);
     let credit;
     // An included follow-up (even of a re-service type) and the first visit of a job are parts of the job; any other callback is
     // judged by the work it follows.
-    if (job && (stop.followup_included || !callback)) credit = jobCredit(stop, job);
+    if (job && (stop.followup_included || !callback)) credit = jobCredit(stop, job, billed);
     else if (callback) credit = await callbackCredit(conn, stop, technicianId, inForce);
-    else credit = ownPriceCredit(stop);
+    else credit = ownPriceCredit(stop, billed.get(stop.id));
     rows.push({
-      visitId: stop.id, workDate: stop.work_date, serviceType: stop.service_type, ...credit, refundCents: refunds.get(stop.id) || 0,
+      visitId: stop.id, workDate: stop.work_date, serviceType: stop.service_type, ...credit,
+      refundCents: ((billed.get(stop.id) || {}).refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
     });
   }
   return rows;
@@ -430,6 +586,6 @@ async function previewWeek(technicianId, weekStart, conn = db) {
 }
 
 module.exports = {
-  BAR_TYPES, OWN_CALLBACK_DAYS, shareForWeek, jobPartCents, shiftDays, settingsFor, settingsHistory, saveSettings, weekCredits,
+  allocateCents, BAR_TYPES, OWN_CALLBACK_DAYS, shareForWeek, jobPartCents, shiftDays, settingsFor, settingsHistory, saveSettings, weekCredits,
   previewWeek,
 };
