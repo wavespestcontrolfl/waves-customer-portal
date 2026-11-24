@@ -16,6 +16,11 @@ function Sub({ children }) {
   return <div className="u-nums whitespace-nowrap text-ui-caption text-ink-secondary">{children}</div>;
 }
 
+// Wins that came in another way (an expired offer the customer booked later).
+function BookedOtherWay({ count }) {
+  return count > 0 ? <Sub>incl. {fmtInt(count)} booked another way</Sub> : null;
+}
+
 function LineRow({ line }) {
   const resolved = line.resolved ?? 0;
   const ret = line.ret90;
@@ -31,7 +36,7 @@ function LineRow({ line }) {
         {line.accepted != null && (
           <Sub>{fmtInt(line.accepted)}/{fmtInt(resolved)} resolved</Sub>
         )}
-        {line.booked_other_way > 0 && <Sub>incl. {fmtInt(line.booked_other_way)} booked another way</Sub>}
+        <BookedOtherWay count={line.booked_other_way} />
         {line.accepted != null && resolved > 0 && <SampleBadge n={resolved} />}
       </TD>
       <TD align="right" nums className="whitespace-nowrap text-ink-secondary">

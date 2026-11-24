@@ -8,7 +8,7 @@ import {
   ShieldCheck,
   Trees,
 } from "lucide-react";
-import { classifyEstimateForPipeline } from "./EstimatePage";
+import { classifyEstimateForPipeline, isWonEstimate } from "./EstimatePage";
 import { Button, Card } from "../../components/ui";
 import { etParts } from "../../lib/timezone";
 // The "Call today" rule lives in shared/estimate-call-today.cjs so the 9 AM push counts the same list.
@@ -213,11 +213,7 @@ export function aggregateServiceLineRows(estimates) {
         });
       const b = buckets.get(line);
       b.sent += 1;
-      if (
-        e.status === "accepted" ||
-        (e.status === "expired" && e.disposition === "converted_other_path")
-      )
-        b.won += 1;
+      if (isWonEstimate(e)) b.won += 1;
       if (entry.amount > 0) {
         if (entry.basis === "one_time") {
           b.oneTimeSum += entry.amount;
