@@ -8,6 +8,8 @@
 // and the server's markEstimateManuallyAccepted path; nothing here sends,
 // charges or changes a price.
 
+import { formatETDate } from '../../lib/timezone';
+
 export const OPEN_ESTIMATE_LINK_WINDOW_DAYS = 60;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -42,7 +44,9 @@ export function recentOpenEstimates(estimates = [], customerId, nowMs = Date.now
 
 function shortDate(estimate) {
   const ms = sentMs(estimate);
-  return ms == null ? '' : new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  // Eastern, like every office-facing date (AGENTS.md), and the same
+  // sent-or-created stamp the picker label reads.
+  return ms == null ? '' : formatETDate(ms, { month: 'short', day: 'numeric' });
 }
 
 // The words staff see under the Estimate source picker. Null when there is
