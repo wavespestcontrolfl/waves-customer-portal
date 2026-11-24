@@ -12,7 +12,16 @@ export function ScanStrip({ items, selectedKey, onSelect, ariaLabel, className }
   const listRef = useRef(null);
   const selectedIndex = items.findIndex((item) => item.key === selectedKey);
 
-  const scrollIntoView = (el) => el?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  // Scroll only the strip, never the page: element.scrollIntoView would also
+  // scroll every ancestor, so set the strip's own scrollLeft instead.
+  const scrollIntoView = (el) => {
+    const strip = listRef.current;
+    if (!el || !strip) return;
+    const left = el.offsetLeft; // the strip is `relative`, so this is strip-local
+    const right = left + el.offsetWidth;
+    if (left < strip.scrollLeft) strip.scrollLeft = left;
+    else if (right > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = right - strip.clientWidth;
+  };
 
   // Keep the selected tile in view when the selection changes (tap, arrow key,
   // or a parent reset).
@@ -42,7 +51,7 @@ export function ScanStrip({ items, selectedKey, onSelect, ariaLabel, className }
       ref={listRef}
       onKeyDown={handleKeyDown}
       className={cn(
-        'flex gap-1.5 overflow-x-auto px-1 pt-0.5 pb-1.5 snap-x snap-proximity overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
+        'relative flex gap-1.5 overflow-x-auto px-1 pt-0.5 pb-1.5 snap-x snap-proximity overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
         className,
       )}
       role="listbox"

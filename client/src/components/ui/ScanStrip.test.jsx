@@ -58,4 +58,17 @@ describe('ui/ScanStrip', () => {
     fireEvent.keyDown(selected(), { key: 'Home' });
     expect(selected()).toHaveTextContent('Lawn');
   });
+
+  it('scrolls only the strip, never the page', () => {
+    const pageScroll = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = pageScroll;
+    try {
+      render(<Harness />);
+      fireEvent.keyDown(screen.getByRole('option', { selected: true }), { key: 'End' });
+      expect(pageScroll).not.toHaveBeenCalled();
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
 });

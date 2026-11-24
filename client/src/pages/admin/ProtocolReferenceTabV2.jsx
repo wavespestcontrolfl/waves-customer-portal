@@ -1039,7 +1039,6 @@ export default function ProtocolReferenceTabV2() {
     setTrackData(null);
     setTrackError(null);
     setShowFullCalendar(false);
-    setSelectedVisitIdx(null);
     const param = lawnTrackKeys.includes(key)
       ? `track=${key}`
       : `program=${key}`;
@@ -1051,11 +1050,12 @@ export default function ProtocolReferenceTabV2() {
       setTrackData(data);
       setTrackViewerRole(d.viewerRole || null);
       setSelectedConditionalIds([]);
+      // Reset the treatment pick only on a successful load, so a failed
+      // switch restores the visit the user was reading.
+      setSelectedVisitIdx(null);
     } catch (e) {
       if (!isCurrent()) return;
-      // Restore the previous selection so the controlled Select (phones)
-      // can re-emit a change for the failed key — re-picking the already
-      // selected option fires nothing — and offer a direct retry.
+      // Restore the previous selection and offer a direct retry.
       setSelectedTrack(lastLoadedRef.current.key);
       setTrackData(lastLoadedRef.current.data);
       setTrackError({ key, message: e?.message || "Request failed" });

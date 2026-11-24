@@ -106,3 +106,22 @@ it('lists programs without the word Protocol and lets a Treatment tile pick the 
   fireEvent.click(screen.getByRole('option', { name: 'Visit 1, Jan' }));
   expect(screen.getByText(/Aprehend alpha/)).toBeInTheDocument();
 });
+
+it('keeps the picked Treatment tile when a switch to another program fails', async () => {
+  catalogFails = false;
+  const visit = (n, month, primary) => ({ visit: n, month, primary, secondary: '', notes: '', tiers: [] });
+  fetch.mockImplementation(async url => {
+    if (url === '/api/admin/protocols/programs') return ok({ lawn: { tracks: [] }, programs: [{ key: 'bed_bug', name: 'Bed Bug Control Protocol', visits: 2 }, { key: 'flea', name: 'Flea Control Protocol', visits: 1 }] });
+    if (url.includes('program=bed_bug')) return ok({ program: { name: 'Bed Bug Control Protocol', visits: [visit(1, 'Jan', 'Aprehend alpha'), visit(2, 'Feb', 'Temprid beta')] } });
+    if (url.includes('program=flea')) return fail();
+    return ok({ calibrations: [] });
+  });
+  render(<ProtocolReferenceTabV2 />);
+  fireEvent.click(await screen.findByRole('option', { name: 'Bed Bug, 2 templates' }));
+  await screen.findByText(/VISIT \d/);
+  fireEvent.click(screen.getByRole('option', { name: 'Visit 2, Feb' }));
+  fireEvent.click(screen.getByRole('option', { name: /^Flea/ }));
+  await screen.findByRole('button', { name: /Retry/i });
+  expect(screen.getByRole('option', { name: 'Visit 2, Feb' })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByText(/Temprid beta/)).toBeInTheDocument();
+});
