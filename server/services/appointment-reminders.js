@@ -1436,7 +1436,9 @@ async function delayedSendIsStale(scheduledServiceId, notice = null) {
     const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date());
     if (levels.get(scheduledServiceId) !== 'hour') return false;
     if (!notice) return true;
-    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date())).get(scheduledServiceId);
+    // The same other-date rule as the level above (told-visits sameDateOnly, pre-push Codex P1 2026-11-24): both checks
+    // must judge the same standing promise, or an earlier-date sibling slot could set aside a current-date hour.
+    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date(), { sameDateOnly: true })).get(scheduledServiceId);
     if (promiseSupersedesNotice(promise, notice)) return true;
     notice.setAsideOld = true;
     return false;

@@ -259,6 +259,16 @@ describe('loadPromiseFacts', () => {
       expect((await facts(fakeConn({ messages: [grouped], members: sameDay }), ['s2'])).s2).toEqual({ level: 'hour', start: new Date(SLOT) });
     });
 
+    test('a pick hand-off still stands when its sibling holds only an old-date hour (codex P1)', async () => {
+      const members = [
+        { id: 's1', visit_id: 'v1', status: 'pending', scheduled_date: '2026-11-20' },
+        { id: 's2', visit_id: 'v1', status: 'pending', scheduled_date: '2026-11-20' },
+      ];
+      const handoff = msg('s1', { id: 5, purpose: 'appointment', metadata: { rendered_slot_ms: undefined, original_message_type: 'rain_out_customer_pick_v1' }, row: { sent_at: '2026-11-09T18:00:00Z' } });
+      const out = await facts(fakeConn({ messages: [handoff, msg('s2')], members }), ['s2']);
+      expect(out.s2).toEqual({ level: 'hour', start: null });
+    });
+
     test('loadToldVisitIds (the night freeze) is unchanged: the old-date hour still freezes', async () => {
       const told = await loadToldVisitIds(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }), ['s1'], NOW);
       expect([...told]).toEqual(['s1']);
