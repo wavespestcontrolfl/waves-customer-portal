@@ -8,6 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { previewCloseoutBill, _private: preview } = require('../services/closeout-bill-preview');
 const AnnualPrepay = require('../services/annual-prepay-renewals');
+const ChargeVerdict = require('../services/completion-charge-verdict');
 const registry = require('../services/intelligence-bar/action-registry');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 
@@ -47,11 +48,13 @@ function facts(visitOverrides = {}, rest = {}) {
     setup: { obligation: null, parkedElsewhere: false, claim: null, detectorError: false, ...(rest.setup || {}) },
     profile: { known: true, billingType: '', ...(rest.profile || {}) },
     addonsOwed: rest.addonsOwed === true,
+    billByInvoiceReadable: rest.billByInvoiceReadable !== false,
   };
 }
 
-function run(f, lineItems = null) {
+function run(f, lineItems = null, extraDeps = {}) {
   return previewCloseoutBill(SERVICE_ID, {
+    ...extraDeps,
     gather: async () => f,
     buildLines: async (v, amount) => lineItems || [{ description: v.service_type, amount }],
     previewTax: async (v, net) => ({ tax_rate: 0, tax_amount: 0, total: net }),
@@ -244,6 +247,43 @@ describe('get_closeout_bill_preview: the covered-visit and claim reads', () => {
     expect(await preview.loadQueuedSetupClaim(claimDb(99), visit({ is_recurring: true }))).toEqual({ amount: 99, state: 'queued' });
     expect(await preview.loadQueuedSetupClaim(claimDb(-99), visit({ is_recurring: true }))).toEqual({ amount: 99, state: 'orphaned' });
     expect(await preview.loadQueuedSetupClaim(claimDb(null), visit({ is_recurring: true }))).toBeNull();
+  });
+});
+
+describe('get_closeout_bill_preview: how the invoice is collected', () => {
+  afterEach(() => jest.restoreAllMocks());
+  const autopayVisit = { estimated_price: 60, cust_billing_mode: 'per_application', is_recurring: true };
+  const autopay = { billing: { autopay_active: true } };
+
+  test('an Auto Pay customer on an ordinary visit: invoice, with the card charge only eligible, never promised', async () => {
+    jest.spyOn(ChargeVerdict, 'billByInvoiceDemotedPrediction').mockImplementation(async (p) => p);
+    const out = await run(facts(autopayVisit, autopay));
+    expect(out.collection).toBe('auto_charge_eligible');
+    expect(out.reason).toMatch(/charged only if the completion's Auto Pay guards pass/);
+    expect(out.reason).not.toMatch(/and charges the saved card/);
+  });
+
+  test('a visit from a won Bill-by-invoice proposal is demoted by the completion helper: collection invoice, no card charge', async () => {
+    const demote = jest.spyOn(ChargeVerdict, 'billByInvoiceDemotedPrediction').mockImplementation(async (p) => ({ ...p, kind: 'invoice' }));
+    const out = await run(facts(autopayVisit, autopay));
+    expect(demote).toHaveBeenCalledWith(expect.objectContaining({ kind: 'auto_charge' }), expect.objectContaining({ id: SERVICE_ID }), expect.anything());
+    expect(out.will_invoice).toBe(true);
+    expect(out.collection).toBe('invoice');
+    expect(out.reason).not.toMatch(/saved card/);
+  });
+
+  test('an unreadable Bill-by-invoice check: collection uncertain, the invoice itself still stated', async () => {
+    const out = await run(facts(autopayVisit, { ...autopay, billByInvoiceReadable: false }));
+    expect(out.will_invoice).toBe(true);
+    expect(out.collection).toBe('uncertain');
+    expect(out.reason).toMatch(/could not be checked/);
+  });
+
+  test('a customer without Auto Pay: plain invoice, no demotion read', async () => {
+    const demote = jest.spyOn(ChargeVerdict, 'billByInvoiceDemotedPrediction');
+    const out = await run(facts(autopayVisit));
+    expect(out.collection).toBe('invoice');
+    expect(demote).not.toHaveBeenCalled();
   });
 });
 

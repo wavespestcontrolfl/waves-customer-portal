@@ -210,7 +210,16 @@ async function gatherFacts(serviceId, database = db) {
     const { annualPrepayAddonRows } = require('./annual-prepay-addon-billing');
     try { addonsOwed = (await annualPrepayAddonRows(visit, database)).owed; } catch { addonsOwed = true; }
   }
-  return { visit, flags, billing, invoices, coverage, setup, profile, addonsOwed };
+  // Auto Pay never collects a visit from a won Bill-by-invoice proposal: read it strictly, so an unreadable check says so.
+  let billByInvoiceReadable = true;
+  try {
+    const { billByInvoiceClosesLane } = require('./completion-charge-verdict');
+    await billByInvoiceClosesLane({ svc: visit, conn: database, strict: true, lane: 'closeout-preview' });
+  } catch (err) {
+    billByInvoiceReadable = false;
+    logger.warn(`[closeout-bill-preview] Bill-by-invoice check unavailable for ${visit.id}: ${err.message}`);
+  }
+  return { visit, flags, billing, invoices, coverage, setup, profile, addonsOwed, billByInvoiceReadable };
 }
 
 function invoiceRef(inv) {
@@ -478,6 +487,28 @@ function offPathStates(f, ctx) {
   return [...invoiceStates(f), ...setupAndPaymentStates(f, ctx)];
 }
 
+// How the invoice is collected, from the completion's own helpers. The sheet prediction says auto_charge for an Auto Pay
+// customer; billByInvoiceDemotedPrediction (the schedule sheet's own demotion) turns that into an invoice for a visit
+// from a won Bill-by-invoice proposal. An unreadable check is 'uncertain'. 'auto_charge_eligible' is NOT a promise: the
+// completion still charges the card only when its Auto Pay guards pass (agreed-price cap, usable card, no hold).
+async function collectionOf(f, prediction, deps, database) {
+  if (prediction.kind !== 'auto_charge') return prediction.kind;
+  if (f.billByInvoiceReadable === false) return 'uncertain';
+  const demote = deps.demote || require('./completion-charge-verdict').billByInvoiceDemotedPrediction;
+  const demoted = await demote(prediction, f.visit, database);
+  return demoted.kind === 'auto_charge' ? 'auto_charge_eligible' : demoted.kind;
+}
+
+function collectionReason(collection) {
+  if (collection === 'auto_charge_eligible') {
+    return 'the completion cuts an invoice for this visit; the saved card is charged only if the completion\'s Auto Pay guards pass (agreed-price cap, usable card, no hold)';
+  }
+  if (collection === 'uncertain') {
+    return 'the completion cuts an invoice for this visit; whether the saved card is charged could not be checked';
+  }
+  return 'the completion cuts an invoice for this visit';
+}
+
 async function invoicePayload(f, ctx, deps, database) {
   const price = await priceBlock(f, ctx.invoiceAmount, {
     buildLines: deps.buildLines || defaultBuildLines, previewTax: deps.previewTax || defaultPreviewTax,
@@ -486,10 +517,8 @@ async function invoicePayload(f, ctx, deps, database) {
   return {
     will_invoice: true,
     reason_code: 'invoice_minted',
-    reason: ctx.prediction.kind === 'auto_charge'
-      ? 'the completion cuts an invoice and charges the saved card on file (Auto Pay)'
-      : 'the completion cuts an invoice for this visit',
-    collection: ctx.prediction.kind,
+    reason: collectionReason(ctx.collection),
+    collection: ctx.collection,
     lines: price.lines,
     discounts: price.discounts,
     subtotal: price.subtotal,
@@ -572,6 +601,7 @@ async function previewCloseoutBill(serviceId, deps = {}) {
     willMint,
     prepaidCovered,
     prediction: sheetPrediction(f, autopayCoversVisit),
+    collection: null,
     cover: { autopayCoversVisit, annualPrepayCovered, prepaidCovered },
     setup_fee: setupFeeSummary(f, holdWanted && wouldMintWithoutHold, gates),
     notes: previewNotes(f, { gates, obligation }),
@@ -585,6 +615,7 @@ async function previewCloseoutBill(serviceId, deps = {}) {
   };
   const states = offPathStates(f, ctx);
   if (states.length) return { ...base, prediction: 'uncertain', ...(await uncertainPayload(f, ctx, states, deps, database)) };
+  if (willMint) ctx.collection = await collectionOf(f, ctx.prediction, deps, database);
   const body = willMint ? await invoicePayload(f, ctx, deps, database) : noInvoicePayload(f, ctx);
   return { ...base, prediction: 'confident', ...body };
 }
