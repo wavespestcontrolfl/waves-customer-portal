@@ -212,6 +212,10 @@ async function buildSignupEmail({ customerId, estimateId, appointment, email, si
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
+// GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the customer approved with preferred days and no booked visit, so the visit line
+// promises no date or time: the office confirms one.
+const FIRST_VISIT_PENDING_LINE = 'We will contact you to confirm your first visit, using the days you gave us.';
+
 // scheduled_services rows carry scheduled_date (DATE) + window_start (TIME).
 // Compose the customer-facing line; null when the pieces aren't usable.
 function appointmentLineFor(appointment) {
@@ -340,7 +344,7 @@ async function sendOnboardingTemplate(ctx, variant) {
     payload: {
       first_name: ctx.recipient.firstName,
       service_type: clean(ctx.serviceLabel) || 'service',
-      appointment_line: appointmentLineFor(ctx.appointment),
+      appointment_line: appointmentLineFor(ctx.appointment) || (ctx.firstVisitPending ? FIRST_VISIT_PENDING_LINE : ''),
       acceptance_note: ctx.acceptanceNote,
       customer_portal_url: portalUrl('/login'),
       company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
