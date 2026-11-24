@@ -110,14 +110,18 @@ const BACKUP_ONLY_POLICIES = new Set(['callExtractionV1Backup']);
 //   imageScreen     blog hero-image screen (lane image_screen)
 //   visionAnalysis  hero-image alt text (hero_alt) + visit photo reads
 //   callExtraction  call transcript extraction, one run per recorded call
+//   callResearch    nightly call-research miner (03:05 ET), one run per new
+//                   recorded inbound call of the day before
 // The two image lanes run only on a day the content pipeline makes a hero
 // image. Prod 10-22, 10-31 and 11-06 had none: each alarmed "made ZERO calls
 // yesterday", and both lanes ran again the next day. callExtraction runs
 // only when a recorded call arrives: Sun 2026-11-22 had 0 inbound calls at
 // Twilio (Twilio = call_log in the weekly call audit) and alarmed the same
 // way. A recorded call that is never processed is the call stall watchdog's
-// alarm, not this one.
-const EVENT_DRIVEN_POLICIES = new Set(['imageScreen', 'visionAnalysis', 'callExtraction']);
+// alarm, not this one. callResearch mines the day before's new calls each
+// night: on 11-23 ET its 03:05 run (job_health success) had the 0 calls of
+// 11-22 to mine and alarmed "ZERO calls yesterday"; 11-24 made 10 calls.
+const EVENT_DRIVEN_POLICIES = new Set(['imageScreen', 'visionAnalysis', 'callExtraction', 'callResearch']);
 
 // Silence is expected for both lists above; absence detection reads them as
 // one set.
