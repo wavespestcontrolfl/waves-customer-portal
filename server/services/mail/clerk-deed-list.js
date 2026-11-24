@@ -363,7 +363,7 @@ async function fetchDayList(isoDate, { fetchImpl = fetch, timeoutMs = DEFAULT_TI
     // declared length over the limit). After a complete read this does nothing.
     controller.abort();
   }
-  if (status !== 200) throw new ClerkPageError('http_status', `Clerk day list answered HTTP ${status}`);
+  if (status !== 200) throw Object.assign(new ClerkPageError('http_status', `Clerk day list answered HTTP ${status}`), { status });
   return parseDayList(body, isoDate);
 }
 

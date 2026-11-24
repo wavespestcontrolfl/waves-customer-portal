@@ -1812,7 +1812,8 @@ function initScheduledJobs() {
   };
   cron.schedule('31 21 * * *', () => runMailNewHomeListTick('night'), { timezone: 'America/New_York' });
   cron.schedule('31 12 * * 1-5', () => runMailNewHomeListTick('noon'), { timezone: 'America/New_York' });
-  registerDeployKillRetry('mail-new-home-list', () => runMailNewHomeListTick('night'));
+  // Mode retry: the wider noon window, so a cut-short noon or night run is read in full.
+  registerDeployKillRetry('mail-new-home-list', () => runMailNewHomeListTick('retry'));
 
   // =========================================================================
   // 9:51 PM ET daily + 12:51 PM ET weekdays — New-home mail list: each card
