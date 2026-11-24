@@ -30,6 +30,8 @@ module.exports = {
     assert.ok(hoursAway > 25 && hoursAway < 72, `The visit sits in the 72-hour reminder band (${hoursAway.toFixed(1)} hours away)`);
     const expectedWhen = `${formatETDay(apptTime)}, ${formatETDate(apptTime)}, ${spokenArrivalWindow(String(visit.window_start).slice(0, 5))}`;
 
+    // The sweep runs over the whole (private, per-run) QA database. Any reminder it sends for another visit fails the
+    // exact counts below, so a stray visit can only fail this journey, never let it pass.
     // 1. The first pass registers the visit's reminder and texts it.
     const first = await runJob('appointment-reminders');
     assert.equal(first.errors, 0);
@@ -42,7 +44,9 @@ module.exports = {
     assert.equal(logged.length, 1, 'The reminder is logged once');
     assert.equal(logged[0].customer_id, fixture.customerId, 'The app records the reminder against this customer');
     assert.ok(text.body.includes(expectedWhen), `The text names the visit's day, date and arrival window: ${expectedWhen} in ${JSON.stringify(text.body)}`);
-    assert.ok(text.body.includes(visit.service_type), 'The text names the service');
+    // The reminder drops a trailing cadence label such as "(Quarterly)" from the catalog name; the rest must appear.
+    const serviceLabel = String(visit.service_type).replace(/\s*\([^)]*\)\s*$/, '');
+    assert.ok(serviceLabel.length > 0 && text.body.includes(serviceLabel), `The text names the service: ${serviceLabel}`);
     const sent = await reminderRow();
     assert.equal(sent.reminder_72h_sent, true);
     assert.ok(sent.reminder_72h_sent_at, 'The sent stamp is committed');
