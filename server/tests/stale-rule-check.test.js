@@ -58,6 +58,7 @@ describe('isHoldBell', () => {
     ['a payment failure', { category: 'billing', title: 'Billing — payment failed, held for review' }],
     ['a reminder job failure', { category: 'alert', title: 'Reminder job failed so it was skipped' }],
     ['the nightly auto-dispatch summary', { category: 'appointment', title: 'Auto-dispatch: 0 moves, 1 held', body: 'No move was worth making last night. Nothing needs you.' }],
+    ['the auto-dispatch summary, other wording', { category: 'appointment', title: 'Auto-dispatch: 4 moves: 3 days, 1 hour', body: 'One visit was held.' }],
     ['its own bell', { category: 'alert', title: HOLD, dedupe_key: 'rule-check:2026-W48' }],
   ])('excludes %s', (_n, row) => {
     expect(isHoldBell(row)).toBe(false);
