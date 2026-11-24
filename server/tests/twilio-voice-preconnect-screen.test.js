@@ -203,7 +203,9 @@ describe('screenCandidate (who the screen may challenge)', () => {
       expect(replay).toBeLessThan(handler.indexOf('findCustomerPhoneMatches(db, From)'));
       expect(handler).toMatch(/replayedTrialChallenge \? \[\] : await findCustomerPhoneMatches/);
       expect(handler).toMatch(/let allUnknownTrigger = Boolean\(replayedTrialChallenge\);/);
-      expect(handler).toMatch(/const replayedTrialChallenge = !firstDelivery && !screenReentry && !langReentry/);
+      // Only the owned dedupe claim makes a fresh decision (processable is also true when the claim write failed).
+      expect(handler).toMatch(/const replayedTrialChallenge = !voiceClaim\.owned && Boolean\(CallSid\) && !screenReentry && !langReentry/);
+      expect(handler).toMatch(/screenCandidate\(From, req\.body\.StirVerstat, \{ redelivery: !voiceClaim\.owned \}\)/);
     });
 
     test('a failed customer-slot lookup logs no phone number', async () => {

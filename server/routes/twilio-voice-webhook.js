@@ -1469,11 +1469,12 @@ router.post('/voice', async (req, res) => {
     const langReentry = req.query.lang === 'menu';
     const spanishChosen = langReentry && spanishSelected(req.body);
 
-    // A Twilio redelivery of the first request replays the first delivery's
-    // all-unknown trial challenge before any other read (the customer match
-    // included), so one call never gets two answers. No stored challenge, or
-    // a failed read: no replay (fail open).
-    const replayedTrialChallenge = !firstDelivery && !screenReentry && !langReentry
+    // Only the delivery that owns the dedupe claim makes a fresh trial
+    // decision. Any other (a Twilio redelivery, or a claim that could not be
+    // written) replays the stored trial challenge before any other read (the
+    // customer match included), so one call never gets two answers. No
+    // stored challenge, or a failed read: no replay (fail open).
+    const replayedTrialChallenge = !voiceClaim.owned && Boolean(CallSid) && !screenReentry && !langReentry
       && isEnabled('callPreconnectScreen') && require('../config/feature-gates').callScreenAllUnknownLive()
       && await press1ScreenAllUnknown.storedTrialDecision(CallSid);
 
@@ -1492,7 +1493,7 @@ router.post('/voice', async (req, res) => {
     let exchangeTrigger = false;
     let allUnknownTrigger = Boolean(replayedTrialChallenge);
     if (!knownCaller && !allUnknownTrigger && !screenReentry && !langReentry) {
-      ({ knownCaller, exchangeTrigger, allUnknownTrigger } = await screenCandidate(From, req.body.StirVerstat, { redelivery: !firstDelivery }));
+      ({ knownCaller, exchangeTrigger, allUnknownTrigger } = await screenCandidate(From, req.body.StirVerstat, { redelivery: !voiceClaim.owned }));
     }
     const screenDecision = (screenReentry || langReentry) ? 'none' : preconnectScreenDecision({
       knownCaller,
