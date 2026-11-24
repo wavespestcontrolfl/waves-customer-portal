@@ -164,10 +164,13 @@ function whereConversionEligibilitySignal(query, narrowing = {}) {
     const cond = signalTimeCondition(timeSql, narrowing);
     return cond ? builder.whereRaw(...cond) : builder;
   };
+  // The reclaim's window needs a real payment time: a paid invoice with no paid_at never
+  // falls back to its created_at there (the sweeps, with no window, keep the fallback).
+  const invoiceTimeSql = narrowing.during ? "invoices.paid_at" : PAID_INVOICE_TIME_SQL;
   return query.where((q) =>
     q
       .whereExists(function () {
-        narrow(paidInvoiceSignal(this.select(db.raw("1")).from("invoices")), PAID_INVOICE_TIME_SQL);
+        narrow(paidInvoiceSignal(this.select(db.raw("1")).from("invoices")), invoiceTimeSql);
       })
       .orWhereExists(function () {
         narrow(
@@ -383,7 +386,7 @@ const deliveredAtSql = (alias) => firstDeliveryEvidenceSql(alias);
 // customer, as a correlated subquery over the same two signal sources.
 function earliestConversionSignal() {
   const paid = paidInvoiceSignal(
-    db("invoices").select(db.raw(`MIN(${PAID_INVOICE_TIME_SQL})`)),
+    db("invoices").select(db.raw("MIN(invoices.paid_at)")),
   );
   const visit = completedVisitSignal(
     db("scheduled_services").select(db.raw(`MIN(${COMPLETED_VISIT_TIME_SQL})`)),

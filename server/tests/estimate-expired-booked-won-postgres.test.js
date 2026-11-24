@@ -36,8 +36,11 @@ const daysAgo = (n) => new Date(Date.now() - n * DAY);
 const dateOnly = (d) => d.toISOString().slice(0, 10);
 
 // The estimate went out 150 days ago and expired 143 days ago.
-const SENT_DAYS_AGO = 150;
-const sentPlus = (n) => daysAgo(SENT_DAYS_AGO - n);
+// Fixed dates, so the suite never changes with Date.now(): day 0 is BEFORE the delivery-stamp cutoff
+// (2026-08-15; a legacy row, where sent_at is delivery evidence). Recent-row cases use their own
+// stamps (tests (i) and (t)).
+const SENT_BASE_MS = Date.parse('2026-06-27T12:00:00Z');
+const sentPlus = (n) => new Date(SENT_BASE_MS + n * DAY);
 
 postgres('expired estimate reclaim — booked after expiry counts as won', () => {
   let db;
@@ -87,12 +90,12 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
       annual_total: 0,
       onetime_total: 0,
       estimate_data: JSON.stringify({}),
-      sent_at: daysAgo(SENT_DAYS_AGO),
-      created_at: daysAgo(SENT_DAYS_AGO),
-      expires_at: daysAgo(SENT_DAYS_AGO - 7),
+      sent_at: sentPlus(0),
+      created_at: sentPlus(0),
+      expires_at: sentPlus(7),
       disposition: 'expired_viewed',
       disposition_source: 'system',
-      disposition_at: daysAgo(SENT_DAYS_AGO - 7),
+      disposition_at: sentPlus(7),
       ...overrides,
     });
     return id;
@@ -176,7 +179,7 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
   test('(d) a customer who converted BEFORE the estimate is left alone', async () => {
     const cust = await customer(mockTransaction);
     const id = await expiredEstimate(mockTransaction, cust);
-    await paidInvoice(mockTransaction, cust, { paidAt: daysAgo(SENT_DAYS_AGO + 40) });
+    await paidInvoice(mockTransaction, cust, { paidAt: sentPlus(-40) });
     await paidInvoice(mockTransaction, cust, { paidAt: sentPlus(20) });
 
     await guard.reclaimExpiredConvertedEstimates();
@@ -211,12 +214,12 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
 
   test('(g) the FIRST signal must land after delivery: a payment between creation and delivery blocks it', async () => {
     const early = await customer(mockTransaction);
-    const earlyId = await expiredEstimate(mockTransaction, early, { sent_at: daysAgo(SENT_DAYS_AGO - 10) });
-    await paidInvoice(mockTransaction, early, { paidAt: daysAgo(SENT_DAYS_AGO - 5) });
+    const earlyId = await expiredEstimate(mockTransaction, early, { sent_at: sentPlus(10) });
+    await paidInvoice(mockTransaction, early, { paidAt: sentPlus(5) });
     // Control: the same shape with the payment after delivery is reclaimed.
     const ok = await customer(mockTransaction);
-    const okId = await expiredEstimate(mockTransaction, ok, { sent_at: daysAgo(SENT_DAYS_AGO - 10) });
-    await paidInvoice(mockTransaction, ok, { paidAt: daysAgo(SENT_DAYS_AGO - 20) });
+    const okId = await expiredEstimate(mockTransaction, ok, { sent_at: sentPlus(10) });
+    await paidInvoice(mockTransaction, ok, { paidAt: sentPlus(20) });
 
     await guard.reclaimExpiredConvertedEstimates();
 
@@ -225,7 +228,7 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
   });
 
   test('(h) self-serve quotes: undelivered never qualifies; delivered is windowed from firstDeliveredAt, not the mint stamp', async () => {
-    const mint = daysAgo(SENT_DAYS_AGO);
+    const mint = sentPlus(0);
     const delivered = (daysFromMint) => JSON.stringify({ deliveryState: { firstDeliveredAt: sentPlus(daysFromMint).toISOString() } });
 
     const undeliveredCust = await customer(mockTransaction);
@@ -518,6 +521,44 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
 
     expect((await row(earlyId)).disposition).toBe('expired_viewed');
     expect((await row(lateId)).disposition).toBe('converted_other_path');
+  });
+
+  test('(w) the legacy sent_at fallback needs NO delivery tracking at all: a pre-cutoff draft with a post-rollout suppressed send (deliveryState, no stamp) is not delivered', async () => {
+    const legacy = await customer(mockTransaction);
+    const legacyId = await expiredEstimate(mockTransaction, legacy); // pre-cutoff, estimate_data {}
+    await paidInvoice(mockTransaction, legacy, { paidAt: sentPlus(30) });
+
+    const suppressed = await customer(mockTransaction);
+    const suppressedId = await expiredEstimate(mockTransaction, suppressed, {
+      sent_at: new Date('2026-10-05T12:00:00Z'),
+      estimate_data: JSON.stringify({ deliveryState: { attemptedAt: '2026-10-05T12:00:00.000Z', sentChannels: [], failedChannels: [], channels: {} } }),
+    });
+    await paidInvoice(mockTransaction, suppressed, { paidAt: new Date('2026-10-25T12:00:00Z') });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(legacyId)).disposition).toBe('converted_other_path');
+    expect((await row(suppressedId)).disposition).toBe('expired_viewed');
+  });
+
+  test('(x) a paid invoice needs a real paid_at inside the window: created day 10 / paid day 120, or paid with no paid_at, is not reclaimed', async () => {
+    const lateCust = await customer(mockTransaction);
+    const lateId = await expiredEstimate(mockTransaction, lateCust);
+    await paidInvoice(mockTransaction, lateCust, { paidAt: sentPlus(120), createdAt: sentPlus(10) });
+
+    const nullCust = await customer(mockTransaction);
+    const nullId = await expiredEstimate(mockTransaction, nullCust);
+    await paidInvoice(mockTransaction, nullCust, { paidAt: null, createdAt: sentPlus(10) });
+
+    const okCust = await customer(mockTransaction);
+    const okId = await expiredEstimate(mockTransaction, okCust);
+    await paidInvoice(mockTransaction, okCust, { paidAt: sentPlus(30), createdAt: sentPlus(25) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(lateId)).disposition).toBe('expired_viewed');
+    expect((await row(nullId)).disposition).toBe('expired_viewed');
+    expect((await row(okId)).disposition).toBe('converted_other_path');
   });
 
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {
