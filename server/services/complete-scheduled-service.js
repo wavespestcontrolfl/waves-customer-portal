@@ -73,7 +73,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
+const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, completionLaneFlags, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolvePerApplicationCharge, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
@@ -5623,10 +5623,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // never fall back to the monthly rate, and per-application precedence is
     // explicit visit price → acceptance fee → nothing (see
     // completionInvoiceAmount in billing-lane.js).
-    const perApplicationBilling = svc.cust_billing_mode === 'per_application';
-    const annualPrepayBilling = svc.cust_billing_mode === 'annual_prepay';
-    const explicitMembershipLane = svc.cust_billing_mode === 'monthly_membership';
-    const explicitPerVisitLane = ['per_visit', 'one_time'].includes(svc.cust_billing_mode);
+    const {
+      perApplicationBilling, annualPrepayBilling, explicitMembershipLane, explicitPerVisitLane,
+    } = completionLaneFlags(svc.cust_billing_mode);
     const invoiceAmount = reviewedVisitPrice ? reviewedPriceAmount : completionInvoiceAmount({
       estimatedPrice: svc.estimated_price,
       isCallback: svc.is_callback,

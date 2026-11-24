@@ -382,7 +382,7 @@ const SCOPE_SNAPSHOT = {
   record: [
     // reads: a customer or record selector confines the rows to one customer
     'check_customer_status', 'compute_estimate', 'draft_review_reply', 'list_agent_review_drafts', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',
-    'get_call_log', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_customer_text_status', 'get_estimate_detail',
+    'get_call_log', 'get_closeout_bill_preview', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_customer_text_status', 'get_estimate_detail',
     'get_open_commitments', 'get_service_history',
     // billing readers (W9): one customer's invoices / one invoice, by customer or invoice selector
     'get_customer_invoices', 'get_invoice_detail',

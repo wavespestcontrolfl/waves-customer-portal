@@ -73,6 +73,19 @@ const MEMBERSHIP_TIER_SQL = `
    AND regexp_replace(lower(coalesce(waveguard_tier, '')), '[^a-z0-9]+', '', 'g')
      NOT IN ('none', 'onetime', 'na', 'no', 'notset', 'commercial'))`;
 
+// The four billing-lane booleans the completion mint decision reads off the
+// customer's billing_mode (complete-scheduled-service.js shouldAutoInvoiceCompletion
+// inputs). One derivation shared by the completion route and the read-only
+// close-out bill preview (IB get_closeout_bill_preview) so neither can drift.
+function completionLaneFlags(billingMode) {
+  return {
+    perApplicationBilling: billingMode === 'per_application',
+    annualPrepayBilling: billingMode === 'annual_prepay',
+    explicitMembershipLane: billingMode === 'monthly_membership',
+    explicitPerVisitLane: ['per_visit', 'one_time'].includes(billingMode),
+  };
+}
+
 // Explicit mode wins; NULL infers the legacy split: a REAL WaveGuard tier +
 // a positive monthly rate has always meant "the 8AM cron bills the dues and
 // visits are covered" — everything else bills per visit at completion.
@@ -1911,6 +1924,7 @@ module.exports = {
   isMembershipTier,
   impliedMonthlyStampForWrite,
   resolveBillingLane,
+  completionLaneFlags,
   membershipDuesCoverVisit,
   completionInvoiceAmount,
   completionInvoiceIsMembershipDues,
