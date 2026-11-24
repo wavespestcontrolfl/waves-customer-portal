@@ -7,8 +7,10 @@
  * system_settings rows (schedule.rain_record.*): no scheduled_services row or other visit table, no text, no email and
  * no admin notification. It is not behind a gate for that reason: it can reach no customer, move no visit, spend no
  * money. Both weather reads are free: the NWS hourly forecast (getNwsHourlyRain, never the paid Open-Meteo backup the
- * booking pages fall back to) and the MRMS radar relay (fetchMrmsDailyRain, the free IEM service). The day-move finder
- * (rebooker findRescheduleOptions, called with no caller) prices drives by estimate only, never Google.
+ * booking pages fall back to) and the MRMS radar relay (fetchMrmsDailyRain, the free IEM service). Nothing here
+ * geocodes, asks for a road time or calls Google or any map service: a visit's point is the one stored on the visit
+ * (rain-pass loadPoints), and a day move is planned from the occupancy snapshot alone, with no drive estimate. Travel
+ * time between proposed moves is not checked (record only).
  *
  * What it reuses, and does not rewrite:
  *   - auto-dispatch/rain-pass.js planRainPass: the live outdoor visits of the day, each one's hourly rain over its work
@@ -18,7 +20,8 @@
  *   - ads/rain-mode.js: the whole-day-wet rule (countWetHours: RAIN_HOURS or more work hours at 70% or more), the radar
  *     wet threshold (WET_INCHES), the score give-up days, and the pattern: 'last' / 'history' / 'days' settings keys, a
  *     decision frozen at the 2 PM cutoff, a later run that rechecks beside it.
- *   - rebooker.js findRescheduleOptions: the read-only finder of open days, for a day move.
+ *   - rain-out.js loadOccupancy / conflictsForTarget (one snapshot, read-only) and scheduling/blackout-dates.js
+ *     getBlackoutDates (strict: a failed read stops the run), for a day move.
  *
  * One run (cron 'schedule-rain-record', 6:06, 14:06 and 15:06 ET):
  *   1. picks the target day: from 2 PM ET the next work day (Monday to Saturday); before 2 PM today. The 14:06 run is
@@ -29,10 +32,12 @@
  *   2. for each outdoor visit of that day, in order of start then id, proposes the first that applies:
  *        reorder   a same-day re-time to the nearest dry open hour rain-pass found (or the next one, if taken).
  *        day_move  only when no dry open hour exists AND the whole day is wet (4 or more work hours at 70% or more at
- *                  the visit's point): the first day in the finder's list with a dry hour for the visit's span in the
- *                  forecast. One visit, one date, `series: false`: a plan series is never shifted.
- *        none      a wet visit with no dry hour on a day that is not wholly wet, no dry day found, or a visit whose
- *                  forecast or point could not be read. The reason is kept. Unread is never dry.
+ *                  the visit's point): the first later work day inside the forecast (Monday to Saturday, not a closure
+ *                  day) with a start where its technician is free for the visit's own length and the span reads
+ *                  below DRY_PCT. One visit, one date, `series: false`: a plan series is never shifted.
+ *        none      a wet visit with no dry hour on a day that is not wholly wet, no dry day found (unread_forecast when
+ *                  no day qualified and an hour of one could not be read), or a visit whose forecast or point could
+ *                  not be read. The reason is kept. Unread is never dry.
  *      At most MAX_PROPOSALS (10) reorders and day moves per target day, one per physical stop. A visit past the cap
  *      is recorded as `cap` with what it would have been.
  *   3. freezes the cutoff proposals on the day's row. The recheck is kept beside them and never replaces them.
@@ -48,7 +53,8 @@ const { getNwsHourlyRain } = require('../weather-forecast');
 const { fetchMrmsDailyRain } = require('../mrms-qpe');
 const rainPass = require('../auto-dispatch/rain-pass');
 const rainMode = require('../ads/rain-mode');
-const { inRainHorizon } = require('./rain-fit');
+const { inRainHorizon, withCatalogKeys } = require('./rain-fit');
+const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const LAST_KEY = 'schedule.rain_record.last';
@@ -116,38 +122,44 @@ const clashes = (taken, tech, date, start, end) => {
 };
 
 /**
- * The first of the finder's later days whose hours for this visit's span read dry and are not already taken by a move
- * accepted for this technician, or null. Unread is never dry. A one-off move goes to a later work day only (Monday to
- * Saturday, as the target day): never the planned date, an earlier one or a Sunday.
+ * The first later work day with a free, dry span for this visit, from free read-only data only. Candidate dates: after
+ * the planned date, inside the rain horizon, Monday to Saturday, not a closure day (the strict blackout reader: a
+ * failed read throws, never fails open). On each date the earliest start (on the hour, inside DAY_OPEN to DAY_CLOSE)
+ * where the visit's own length is free for its technician (the occupancy snapshot, with the same technician scoping as
+ * the probe) and not held by a target accepted earlier, and whose span plus the drying hours reads fully below
+ * DRY_PCT at the visit's stored point. { target, unread }: `unread` is true when no date qualified and a free span
+ * could not be judged for want of an hour's reading. Travel time between proposed moves is not checked.
  */
-async function dryDayFor(row, hourly, { day, today, dayOptions, taken }) {
+async function dryDayFor(row, hourly, ctx) {
+  const { day, today, taken, occupied } = ctx;
   const length = row.visit.reach.endMin - row.visit.reach.startMin;
-  // The finder probes the stop's own length, the span the weather check reads.
-  let options;
+  const dates = [];
+  for (let date = plusDays(day, 1); inRainHorizon(date, today); date = plusDays(date, 1)) {
+    if (dayOfWeek(date) !== 0) dates.push(date);
+  }
+  if (!dates.length) return { target: null, unread: false };
+  let closed;
   try {
-    options = await dayOptions(row.visit.id, length);
+    closed = await ctx.blackouts(dates[0], dates[dates.length - 1]);
   } catch (err) {
-    // The finder could not check the days (its occupancy probe failed, strict): no move can be named. That is the run's
-    // problem, not this visit's: nothing is frozen and the retry decides again.
+    // An unreadable closure list stops the move, never lets one onto a closed day: the run's problem, so nothing
+    // freezes and the retry decides again.
     err.planning = true;
     throw err;
   }
-  for (const option of options || []) {
-    const startMin = toMin(option?.suggestedWindow?.start);
-    if (!option?.date || startMin == null || option.date <= day || dayOfWeek(option.date) === 0 || !inRainHorizon(option.date, today)) continue;
-    const rain = rainPass.spanRain(hourly, option.date, startMin, startMin + length);
-    if (!rain.complete || rain.peak >= DRY_PCT) continue;
-    if (clashes(taken, techOf(row), option.date, startMin, startMin + length)) continue;
-    return { date: option.date, start: toHHMM(startMin), end: startMin + length, startMin };
+  let unread = false;
+  for (const date of dates) {
+    if (closed.has(date)) continue;
+    for (let start = DAY_OPEN; start + length <= DAY_CLOSE; start += 60) {
+      if (occupied(row.visit, date, start, start + length) || clashes(taken, techOf(row), date, start, start + length)) continue;
+      const rain = rainPass.spanRain(hourly, date, start, start + length);
+      if (rain.complete && rain.peak < DRY_PCT) return { target: { date, start: toHHMM(start), end: start + length, startMin: start }, unread: false };
+      // A reading at or above DRY_PCT settles the hour as not dry; only a missing hour leaves it undecided.
+      if (!rain.complete && !(rain.peak >= DRY_PCT)) unread = true;
+    }
   }
-  return null;
+  return { target: null, unread };
 }
-
-// The finder is read-only. No caller: estimates only, never a paid road time. 'admin': a move by the office is not held
-// to the technician's shift, as the dispatch board's rain-out sheet.
-const defaultDayOptions = (serviceId, probeSpanMinutes) => require('../rebooker').findRescheduleOptions(serviceId, 'weather_rain', {
-  probeSpanMinutes, travelGap: true, caller: null, initiatedBy: 'admin', strict: true,
-});
 
 /**
  * The same-day hour this reorder takes: rain-pass's nearest dry open hour, or, when an earlier proposal for the same
@@ -205,8 +217,8 @@ async function proposeFor(row, ctx) {
   // A day whose unread hours could still make it wholly wet is not settled (the ads rain rule's open area): unread, not dry.
   if (wet < rainMode.RAIN_HOURS && wet + missing >= rainMode.RAIN_HOURS) return { ...base, decision: 'none', reason: 'unread_forecast' };
   if (wet < rainMode.RAIN_HOURS) return { ...base, decision: 'none', reason: 'no_dry_hour' };
-  const target = await dryDayFor(row, hourly, ctx);
-  if (!target) return { ...base, decision: 'none', reason: 'no_dry_day' };
+  const { target, unread } = await dryDayFor(row, hourly, ctx);
+  if (!target) return { ...base, decision: 'none', reason: unread ? 'unread_forecast' : 'no_dry_day' };
   if (!open) return { ...base, decision: 'cap', would: 'day_move', to_date: target.date, to_start: target.start };
   taken.push({ tech: techOf(row), date: target.date, start: target.startMin, end: target.end });
   return { ...base, decision: 'day_move', to_date: target.date, to_start: target.start, series: false };
@@ -240,6 +252,20 @@ async function decideDay(rows, ctx) {
   return { proposals, checked: outdoor.length, dry: outdoor.filter((row) => row.reason === 'not_wet' && row.dry === true).length };
 }
 
+/** The closure days in a range, read once per range, strictly (a failed read throws). Free: three settings/table reads. */
+function closedDays(conn, deps) {
+  const memo = new Map();
+  return (from, to) => {
+    const key = `${from}|${to}`;
+    if (!memo.has(key)) {
+      memo.set(key, Promise.resolve().then(() => (deps.blackoutDates
+        ? deps.blackoutDates(from, to)
+        : require('./blackout-dates').getBlackoutDates(from, to, conn, { strict: true }))));
+    }
+    return memo.get(key);
+  };
+}
+
 /** The target day's plan: rain-pass's read-only verdicts for that date, then this record's decisions. */
 async function planDay({ now, conn, day, today, read, deps }) {
   const readHourly = nwsReader(read);
@@ -251,12 +277,23 @@ async function planDay({ now, conn, day, today, read, deps }) {
     loadOccupancy: async (args) => { snapshot = await RainOut.loadOccupancy(args); return snapshot; },
     conflictsForTarget: (...args) => RainOut.conflictsForTarget(...args),
   };
-  // Every service is classed by the catalog (catalogGate null), not by name while the rain-pass gate is off.
+  // Every service is classed by the catalog (catalogGate null), not by name while the rain-pass gate is off, and a
+  // catalog read that fails is the run's problem (strict), never a silent fall back to the name rules.
+  let catalogFailure = null;
+  const catalogKeys = async (items, dbh, opts) => {
+    try {
+      return await (deps.withCatalogKeys || withCatalogKeys)(items, dbh, { ...opts, strict: true });
+    } catch (err) {
+      catalogFailure = err;
+      throw err;
+    }
+  };
   // No notice to lead here: a stop that starts within 2 hours (a 6 AM recheck of an 8 AM visit) still has its rain read.
   const rows = (await rainPass.planRainPass({
     now, db: conn,
-    deps: { ...deps, rainOut, leadMinutes: 0, catalogGate: null, loadStops: stopsFor, hourlyRain: (lat, lng) => readHourly(lat, lng) },
+    deps: { ...deps, rainOut, leadMinutes: 0, catalogGate: null, withCatalogKeys: catalogKeys, loadStops: stopsFor, hourlyRain: (lat, lng) => readHourly(lat, lng) },
   })).filter((row) => row.date === day);
+  if (catalogFailure) throw catalogFailure;
   // rain-pass reads a failed occupancy snapshot as "every hour is taken": a day decided on it would freeze a move while a
   // dry hour was open. No snapshot is a planning problem, so nothing freezes and the 15:06 run tries again.
   if (!snapshot) return { proposals: [], checked: 0, dry: 0, problem: `occupancy unread for ${day}` };
@@ -266,7 +303,7 @@ async function planDay({ now, conn, day, today, read, deps }) {
     { excludeServiceIds: visit.memberIds, technicianId: visit.technician_id },
   ).length > 0;
   const decided = await decideDay(rows, {
-    day, today, read: readHourly, dayOptions: deps.dayOptions || defaultDayOptions, occupied,
+    day, today, read: readHourly, occupied, blackouts: closedDays(conn, deps),
     dayHours: rainPass.serviceDay(deps),
     earliestMin: day === today ? parts.hour * 60 + parts.minute : 0,
   });
