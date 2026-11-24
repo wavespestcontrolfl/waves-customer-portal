@@ -26,6 +26,20 @@
 
 const MAX_AMOUNT = 1e8; // the price columns hold up to numeric(10,2)
 
+// 'exact' when a member of Waves is at the address, 'near' when a member's address on file has the same house digits and
+// zip but the comparator cannot call it the same (cannot tell), else null. Strict: a failed lookup throws, it never reads as
+// no member. `conn` is a knex handle or a transaction (the booking's, when the check is made inside it).
+function memberAtAddressOn(conn) {
+  return async (address, zip) => {
+    const { findCustomersAtAddress } = require('../customer-address-match');
+    const { isMembershipCustomerRow } = require('../waveguard-existing-services');
+    const members = (await findCustomersAtAddress(conn, address, { strict: true, zip, membersOnly: true }))
+      .filter(isMembershipCustomerRow);
+    if (members.some((r) => r.exactMatch)) return 'exact';
+    return members.length ? 'near' : null;
+  };
+}
+
 // The real call for each outside dependency a test did not inject, loaded one by one.
 const REAL = {
   buildEngineInput: () => require('../estimator-engine/draft-builder').buildEngineInput,
@@ -34,17 +48,7 @@ const REAL = {
   dryRunEstimate: () => (body) => require('../admin-estimate-persistence').createOrReuseAdminEstimate({
     database: require('../../models/db'), body, technicianId: null, technician: null, dryRun: true, requireLivePricing: true,
   }),
-  // 'exact' when a member of Waves is at the address, 'near' when a member's address on file has the same house
-  // digits and zip but the comparator cannot call it the same (cannot tell), else null. Strict: a failed lookup
-  // throws, it never reads as no member.
-  memberAtAddress: () => async (address, zip) => {
-    const { findCustomersAtAddress } = require('../customer-address-match');
-    const { isMembershipCustomerRow } = require('../waveguard-existing-services');
-    const members = (await findCustomersAtAddress(require('../../models/db'), address, { strict: true, zip, membersOnly: true }))
-      .filter(isMembershipCustomerRow);
-    if (members.some((r) => r.exactMatch)) return 'exact';
-    return members.length ? 'near' : null;
-  },
+  memberAtAddress: () => memberAtAddressOn(require('../../models/db')),
   // The names the list counts as one place in a zip (prospect-store SAME_PLACE_CITY_NAMES), or the city alone.
   cityNamesOf: () => require('./prospect-store').cityNamesOf,
 };
@@ -155,6 +159,22 @@ function judge(prepared) {
 }
 
 /**
+ * 'exact' | 'near' | null: whether a member of Waves is at the home (under each name of its place). Throws when the check
+ * cannot finish. `memberAtAddress` defaults to the shared handle's; the booking passes its transaction's
+ * (memberAtAddressOn(trx)), so the same check runs inside the booking.
+ */
+async function memberStatusOf(row, memberAtAddress = memberAtAddressOn(require('../../models/db')), cityNamesOf = REAL.cityNamesOf()) {
+  let member = null;
+  const zip = upperLine(row.zip).slice(0, 5);
+  for (const address of memberCheckAddresses(row, cityNamesOf)) {
+    const found = await memberAtAddress(address, zip);
+    if (found === 'exact') return 'exact';
+    if (found === 'near') member = 'near';
+  }
+  return member;
+}
+
+/**
  * The result to save for a home with every fact (`facts`: homeSqft, homeSqftSource, stories, lotSqft):
  *   { status: 'priced', ...facts, priceAnnual, priceSetupFee, priceDigest }
  *   { status: 'not_clean', reason, ...facts }     reason: not_server_price | member_address | not_one_line |
@@ -176,12 +196,7 @@ async function priceHome(row, facts, deps = {}) {
   // A near member (same house digits and zip, a spelling the comparator cannot read) cannot be told apart: no price.
   let member = null;
   try {
-    const zip = upperLine(row.zip).slice(0, 5);
-    for (const address of memberCheckAddresses(row, cityNamesOf)) {
-      const found = await memberAtAddress(address, zip);
-      if (found === 'exact') { member = 'exact'; break; }
-      if (found === 'near') member = 'near';
-    }
+    member = await memberStatusOf(row, memberAtAddress, cityNamesOf);
   } catch (err) {
     const { ADDRESS_UNCHECKABLE } = require('../customer-address-match');
     if (err?.code === ADDRESS_UNCHECKABLE) return { status: 'not_clean', reason: 'member_unchecked', ...known };
@@ -205,4 +220,4 @@ async function priceHome(row, facts, deps = {}) {
   };
 }
 
-module.exports = { priceHome, judge, estimateBody, engineInputFor };
+module.exports = { priceHome, judge, estimateBody, engineInputFor, memberStatusOf, memberAtAddressOn };

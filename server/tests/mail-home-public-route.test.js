@@ -1,7 +1,8 @@
 /**
- * GET /api/public/home/:token (routes/mail-home-public.js): the gate, the token format, the 404 that is the same for
- * every miss, the exact payload keys, the privacy headers on every outcome, and when a view is counted. The service is
- * mocked here; services/mail/home-page.js has its own test (mail-home-page.test.js) and a PostgreSQL suite.
+ * GET /api/public/home/:token, GET /:token/times and POST /:token/book (routes/mail-home-public.js): the gate, the token
+ * format, the 404 that is the same for every miss, the exact payload keys, the privacy headers on every outcome, when a
+ * view is counted, which paths and methods the guard lets through and the limiters. The services are mocked here;
+ * services/mail/home-page.js and home-book.js have their own tests (mail-home-page.test.js, mail-home-book.test.js).
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'home-page-test-secret';
@@ -10,10 +11,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config/feature-gates', () => ({ mailHomePageLive: jest.fn(() => true) }));
 jest.mock('../services/mail/home-page', () => ({ getHomePage: jest.fn() }));
+jest.mock('../services/mail/home-book', () => ({ getHomeTimes: jest.fn(), bookHome: jest.fn() }));
 
 const express = require('express');
 const { mailHomePageLive } = require('../config/feature-gates');
 const { getHomePage } = require('../services/mail/home-page');
+const { getHomeTimes, bookHome } = require('../services/mail/home-book');
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
 const PAGE = {
@@ -27,6 +30,9 @@ let base;
 
 beforeAll((done) => {
   const app = express();
+  // The times and book tests give each test its own client address (x-forwarded-for), so one test's requests never
+  // use another's limiter bucket. A request without the header keeps the socket address.
+  app.set('trust proxy', true);
   const route = require('../routes/mail-home-public');
   // As in server/index.js: one mount, the guard first, then the router (its own limiter and the route).
   app.use('/api/public/home', route.preLimiterGuard, route);
@@ -43,6 +49,8 @@ afterAll((done) => { server.close(done); });
 beforeEach(() => {
   mailHomePageLive.mockReset().mockReturnValue(true);
   getHomePage.mockReset().mockResolvedValue(PAGE);
+  getHomeTimes.mockReset();
+  bookHome.mockReset();
 });
 
 const get = (path, headers) => fetch(`${base}${path}`, { headers });
@@ -50,6 +58,167 @@ const expectPrivate = (res) => {
   expect(res.headers.get('cache-control')).toBe('private, no-store');
   expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
 };
+
+let clientSeq = 0;
+const freshIp = () => { clientSeq += 1; return `10.9.${Math.floor(clientSeq / 250)}.${clientSeq % 250}`; };
+const OFFERS = [
+  { date: '2026-12-02', start_time: '09:00', end_time: '10:00', start_label: '9:00 AM', end_label: '10:00 AM', technician_id: null, slot_sig: 'sig-1' },
+];
+const BOOK_BODY = { offer: OFFERS[0], name: 'Sample Person', phone: '(941) 555-0142', email: 'sample@example.com' };
+const post = (path, body, headers = {}) => fetch(`${base}${path}`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', ...headers },
+  body: typeof body === 'string' ? body : JSON.stringify(body),
+});
+
+describe('GET /:token/times and POST /:token/book', () => {
+  test('gate off: all three answer the 404 an unknown token gets, before any service or limiter', async () => {
+    mailHomePageLive.mockReturnValue(false);
+    const ip = { 'x-forwarded-for': freshIp() };
+    const bodies = [];
+    for (const res of [
+      await get(`/api/public/home/${TOKEN}`, ip),
+      await get(`/api/public/home/${TOKEN}/times`, ip),
+      await post(`/api/public/home/${TOKEN}/book`, BOOK_BODY, ip),
+    ]) {
+      expect(res.status).toBe(404);
+      expectPrivate(res);
+      bodies.push(await res.json());
+    }
+    expect(bodies).toEqual([{ error: 'Not found' }, { error: 'Not found' }, { error: 'Not found' }]);
+    expect(getHomePage).not.toHaveBeenCalled();
+    expect(getHomeTimes).not.toHaveBeenCalled();
+    expect(bookHome).not.toHaveBeenCalled();
+  });
+
+  test('a malformed token, another path or another method never reaches a service', async () => {
+    const ip = { 'x-forwarded-for': freshIp() };
+    const attempts = [
+      get('/api/public/home/short/times', ip),
+      get(`/api/public/home/${TOKEN.toUpperCase()}/times`, ip),
+      post('/api/public/home/short/book', BOOK_BODY, ip),
+      post(`/api/public/home/${TOKEN}0/book`, BOOK_BODY, ip),
+      post(`/api/public/home/${TOKEN}/times`, BOOK_BODY, ip),
+      get(`/api/public/home/${TOKEN}/book`, ip),
+      fetch(`${base}/api/public/home/${TOKEN}/book`, { method: 'PUT', headers: ip }),
+      fetch(`${base}/api/public/home/${TOKEN}/book`, { method: 'DELETE', headers: ip }),
+      fetch(`${base}/api/public/home/${TOKEN}/times`, { method: 'HEAD', headers: ip }),
+      get(`/api/public/home/${TOKEN}/book/extra`, ip),
+      get(`/api/public/home/${TOKEN}/other`, ip),
+    ];
+    for (const res of await Promise.all(attempts)) {
+      expect(res.status).toBe(404);
+      expectPrivate(res);
+    }
+    expect(getHomeTimes).not.toHaveBeenCalled();
+    expect(bookHome).not.toHaveBeenCalled();
+  });
+
+  test('an unknown token (or a home with no price) is the same 404 on times and on book', async () => {
+    getHomeTimes.mockResolvedValue(null);
+    bookHome.mockResolvedValue(null);
+    const ip = { 'x-forwarded-for': freshIp() };
+    const times = await get(`/api/public/home/${TOKEN}/times`, ip);
+    const book = await post(`/api/public/home/${TOKEN}/book`, BOOK_BODY, ip);
+    for (const res of [times, book]) {
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Not found' });
+      expectPrivate(res);
+    }
+  });
+
+  test('times answers the offers the service gives, in its order, with private headers', async () => {
+    const later = { ...OFFERS[0], date: '2026-12-03', slot_sig: 'sig-2' };
+    getHomeTimes.mockResolvedValue({ offers: [OFFERS[0], later] });
+    const res = await get(`/api/public/home/${TOKEN}/times`, { 'x-forwarded-for': freshIp() });
+    expect(res.status).toBe(200);
+    expectPrivate(res);
+    expect(await res.json()).toEqual({ offers: [OFFERS[0], later] });
+    expect(getHomeTimes).toHaveBeenCalledWith(TOKEN);
+  });
+
+  test('times answers 503 not_available when /book is off or the address has no pin', async () => {
+    getHomeTimes.mockResolvedValue({ error: 'not_available' });
+    const res = await get(`/api/public/home/${TOKEN}/times`, { 'x-forwarded-for': freshIp() });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'not_available' });
+    expectPrivate(res);
+  });
+
+  test('book passes the parsed JSON body and answers the service status and body', async () => {
+    bookHome.mockResolvedValue({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '10:00' } } });
+    const ip = { 'x-forwarded-for': freshIp() };
+    const ok = await post(`/api/public/home/${TOKEN}/book`, BOOK_BODY, ip);
+    expect(ok.status).toBe(200);
+    expectPrivate(ok);
+    expect(await ok.json()).toEqual({ booked: true, date: '2026-12-02', window: { start: '09:00', end: '10:00' } });
+    expect(bookHome).toHaveBeenCalledWith(TOKEN, BOOK_BODY);
+
+    bookHome.mockResolvedValue({ status: 409, body: { error: 'slot_taken', offers: OFFERS } });
+    const taken = await post(`/api/public/home/${TOKEN}/book`, BOOK_BODY, ip);
+    expect(taken.status).toBe(409);
+    expect(await taken.json()).toEqual({ error: 'slot_taken', offers: OFFERS });
+  });
+
+  test('book: a body that is not JSON or is too large is invalid_contact; a non-JSON type reads as an empty body', async () => {
+    const ip = { 'x-forwarded-for': freshIp() };
+    const broken = await post(`/api/public/home/${TOKEN}/book`, '{"name": ', ip);
+    expect(broken.status).toBe(400);
+    expect(await broken.json()).toEqual({ error: 'invalid_contact' });
+    expectPrivate(broken);
+    const big = await post(`/api/public/home/${TOKEN}/book`, { ...BOOK_BODY, name: 'x'.repeat(5000) }, ip);
+    expect(big.status).toBe(400);
+    expect(await big.json()).toEqual({ error: 'invalid_contact' });
+    expect(bookHome).not.toHaveBeenCalled();
+
+    bookHome.mockResolvedValue({ status: 400, body: { error: 'invalid_contact', field: 'name' } });
+    const text = await fetch(`${base}/api/public/home/${TOKEN}/book`, {
+      method: 'POST', headers: { 'content-type': 'text/plain', ...ip }, body: JSON.stringify(BOOK_BODY),
+    });
+    expect(text.status).toBe(400);
+    expect(bookHome).toHaveBeenCalledWith(TOKEN, {});
+  });
+
+  test('a book or times error answers 500 itself and logs only the error code', async () => {
+    const logger = require('../services/logger');
+    logger.error.mockClear();
+    const ip = { 'x-forwarded-for': freshIp() };
+    bookHome.mockRejectedValue(Object.assign(new Error(`insert into customers (phone) values ('9415550142') ${TOKEN}`), { code: '23505' }));
+    const book = await post(`/api/public/home/${TOKEN}/book`, BOOK_BODY, ip);
+    expect(book.status).toBe(500);
+    expectPrivate(book);
+    getHomeTimes.mockRejectedValue(Object.assign(new Error('Geocode failed: sample@example.com'), { code: 'ECONNRESET' }));
+    const times = await get(`/api/public/home/${TOKEN}/times`, ip);
+    expect(times.status).toBe(500);
+    expect(JSON.stringify([await book.json(), await times.json()])).not.toContain('customers');
+    expect(logger.error).toHaveBeenCalledWith('[mail-home-public] booking failed (code=23505)');
+    expect(logger.error).toHaveBeenCalledWith('[mail-home-public] times read failed (code=ECONNRESET)');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/9415550142|example\.com|0123456789abcdef/);
+  });
+
+  test('book is limited to 5 a minute for one client (the 6th is a 429 with private headers); another client is not', async () => {
+    bookHome.mockResolvedValue({ status: 400, body: { error: 'invalid_contact', field: 'name' } });
+    const ip = { 'x-forwarded-for': freshIp() };
+    for (let i = 0; i < 5; i += 1) expect((await post(`/api/public/home/${TOKEN}/book`, BOOK_BODY, ip)).status).toBe(400);
+    const sixth = await post(`/api/public/home/${TOKEN}/book`, BOOK_BODY, ip);
+    expect(sixth.status).toBe(429);
+    expectPrivate(sixth);
+    expect(bookHome).toHaveBeenCalledTimes(5);
+    expect((await post(`/api/public/home/${TOKEN}/book`, BOOK_BODY, { 'x-forwarded-for': freshIp() })).status).toBe(400);
+    // The page read is still open to the limited client.
+    expect((await get(`/api/public/home/${TOKEN}`, ip)).status).toBe(200);
+  });
+
+  test('times is limited to 15 a minute for one client', async () => {
+    getHomeTimes.mockResolvedValue({ offers: OFFERS });
+    const ip = { 'x-forwarded-for': freshIp() };
+    for (let i = 0; i < 15; i += 1) expect((await get(`/api/public/home/${TOKEN}/times`, ip)).status).toBe(200);
+    const last = await get(`/api/public/home/${TOKEN}/times`, ip);
+    expect(last.status).toBe(429);
+    expectPrivate(last);
+    expect(getHomeTimes).toHaveBeenCalledTimes(15);
+  });
+});
 
 describe('GET /api/public/home/:token', () => {
   test('gate off: the 404 an unknown token gets, no lookup, private headers', async () => {
