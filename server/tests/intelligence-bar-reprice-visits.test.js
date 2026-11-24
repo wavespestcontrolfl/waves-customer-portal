@@ -500,3 +500,77 @@ describe('registration', () => {
     expect(previewFingerprint(card)).not.toBe(previewFingerprint({ ...card, _version: 'other' }));
   });
 });
+
+// Gaps #25 + #26 (2026-11-22): an account with two units of a duplex needed
+// each unit's visits at its own price, and one visit changed on its own.
+describe('one property, one visit', () => {
+  const UNIT_A = '00000000-0000-0000-0000-0000000000a1';
+  const UNIT_B = '00000000-0000-0000-0000-0000000000b1';
+
+  beforeEach(() => {
+    tables.customer_properties = [
+      { id: UNIT_A, customer_id: CUSTOMER_ID, label: 'Unit A', address_line1: '101 Example Ave', city: 'Sampletown' },
+      { id: UNIT_B, customer_id: CUSTOMER_ID, label: 'Unit B', address_line1: '103 Example Ave', city: 'Sampletown' },
+    ];
+    tables.scheduled_services = [
+      visit('a-1', '2099-03-10', { property_id: UNIT_A, estimated_price: '95.04' }),
+      visit('a-2', '2099-05-10', { property_id: UNIT_A, estimated_price: '95.04' }),
+      visit('b-1', '2099-03-10', { property_id: UNIT_B, estimated_price: '76.56' }),
+      visit('b-2', '2099-05-10', { property_id: UNIT_B, estimated_price: '76.56' }),
+    ];
+  });
+
+  test("property_id changes only that property's visits and names the property on the card", async () => {
+    const card = await preview({ property_id: UNIT_B, new_price: 68.9 });
+    expect(card.preview).toBe(true);
+    expect(card.visits.map((v) => [v.id, v.old_price, v.new_price])).toEqual([['b-1', '$76.56', '$68.90'], ['b-2', '$76.56', '$68.90']]);
+    expect(card.property_label).toBe('103 Example Ave');
+    expect(cardLines(card)[0].text).toBe("Only visits booked for 103 Example Ave. The customer's other properties keep their prices.");
+    const contract = buildContract({ toolName: 'reprice_future_visits', params: ask({ property_id: UNIT_B }), displayParams: {}, preview: card });
+    expect(contract.effects.map((e) => e.label)).toContain("Only visits booked for 103 Example Ave. The customer's other properties keep their prices.");
+  });
+
+  test('the confirmed run saves only the listed property visits', async () => {
+    const input = ask({ property_id: UNIT_A, new_price: 85.54 });
+    const card = await preview({ property_id: UNIT_A, new_price: 85.54 });
+    const res = await confirm(input, card._version);
+    expect(res.success).toBe(true);
+    expect(Schedule.updateVisitDetails.mock.calls.map((c) => c[0].id)).toEqual(['a-1', 'a-2']);
+    expect(Schedule.updateVisitDetails.mock.calls[0][0].body).toEqual({ estimatedPrice: 85.54, expectedTotal: 85.54 });
+  });
+
+  test('from_date = through_date changes one visit', async () => {
+    const card = await preview({ property_id: UNIT_A, from_date: '2099-05-10', through_date: '2099-05-10', new_price: 85.54 });
+    expect(card.visits.map((v) => v.id)).toEqual(['a-2']);
+  });
+
+  test('a visit with no saved property is left alone, never guessed onto the property', async () => {
+    tables.scheduled_services.push(visit('n-1', '2099-04-10', { property_id: null }));
+    const card = await preview({ property_id: UNIT_A, new_price: 85.54 });
+    expect(card.visits.map((v) => v.id)).toEqual(['a-1', 'a-2']);
+    expect(card.left_alone).toEqual([expect.objectContaining({ id: 'n-1', reason: expect.stringMatching(/no saved property/) })]);
+  });
+
+  test('another customer\'s property, a bad id, a past from_date or a reversed range is refused', async () => {
+    tables.customer_properties[1].customer_id = '00000000-0000-0000-0000-0000000000c2';
+    expect(await preview({ property_id: UNIT_B })).toMatchObject({ code: 'invalid_input', error: expect.stringMatching(/not one of Robin Sample's saved properties/) });
+    expect((await preview({ property_id: 'unit-b' })).code).toBe('invalid_input');
+    expect((await preview({ from_date: '2099-02-01' })).error).toMatch(/from_date is in the past/);
+    expect((await preview({ from_date: '2099-05-10', through_date: '2099-03-10' })).error).toMatch(/from_date is after through_date/);
+    expect(Schedule.updateVisitDetails).not.toHaveBeenCalled();
+  });
+
+  test('a property with no visits of that service in range says so', async () => {
+    const res = await preview({ property_id: UNIT_A, from_date: '2099-06-01' });
+    expect(res.error).toBeTruthy();
+    tables.scheduled_services = tables.scheduled_services.filter((r) => r.property_id !== UNIT_A).concat(visit('n-1', '2099-04-10', { property_id: null }));
+    expect(await preview({ property_id: UNIT_A })).toMatchObject({ code: 'nothing_to_reprice', error: expect.stringMatching(/no upcoming .* visits booked for 101 Example Ave/) });
+  });
+
+  test('the version binds the property and range', async () => {
+    const a = await preview({ property_id: UNIT_A, from_date: '2099-03-10', through_date: '2099-03-10' });
+    const b = await preview({ property_id: UNIT_A, from_date: '2099-03-10', through_date: '2099-03-11' });
+    expect(a.visits.map((v) => v.id)).toEqual(b.visits.map((v) => v.id));
+    expect(a._version).not.toBe(b._version);
+  });
+});
