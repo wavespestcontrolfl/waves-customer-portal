@@ -8574,6 +8574,14 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Ad route-fill record failed: ${err.message}`);
     }
+    // Rain-day ads (record only, $0; owner 2026-11-23): what the rain rule would set for each campaign on the day the
+    // ads sell (decided from 2 PM the day before), and the next days' score against measured radar rain. Its own try
+    // and job_health row; NWS only, no Google call, no budget change. See ads/rain-mode.js.
+    try {
+      await runExclusive('ads-rain-mode', () => require('./ads/rain-mode').recordRainMode());
+    } catch (err) {
+      logger.error(`Ad rain-mode record failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
