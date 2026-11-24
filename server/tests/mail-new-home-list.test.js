@@ -190,9 +190,9 @@ describe('daysToRead', () => {
     // Sun 2026-11-01 11:00 PM EST is Monday in UTC; still the weekend, so Friday is the newest day.
     expect(daysToRead('night', Date.UTC(2026, 10, 2, 4, 0))[0]).toBe('2026-10-30');
   });
-  test('noon mode is today and yesterday', () => {
-    expect(daysToRead('noon', Date.UTC(2026, 10, 17, 17, 31))).toEqual(['2026-11-17', '2026-11-16']);
-    expect(daysToRead('noon', Date.UTC(2026, 10, 16, 17, 31))).toEqual(['2026-11-16']); // Sunday and Saturday drop out
+  test('noon mode reads the same days as a night run, so a day the night run could not read is read again', () => {
+    expect(daysToRead('noon', Date.UTC(2026, 10, 17, 17, 31))).toEqual(['2026-11-17', '2026-11-16', '2026-11-13', '2026-11-12']);
+    expect(daysToRead('noon', Date.UTC(2026, 10, 17, 17, 31))).toEqual(daysToRead('night', Date.UTC(2026, 10, 17, 17, 31)));
   });
 });
 
@@ -709,9 +709,18 @@ describe('runNewHomeList', () => {
     expect(line).toContain('"mapQueries":1');
   });
 
-  test('the noon mode reads two days', async () => {
+  test('the noon mode reads the night days, so a day the night run could not read is read again', async () => {
     const deps = makeDeps();
     await run(deps, 'noon');
-    expect(deps.fetchDayList.mock.calls.map((c) => c[0])).toEqual(['2026-11-17', '2026-11-16']);
+    expect(deps.fetchDayList.mock.calls.map((c) => c[0])).toEqual(['2026-11-17', '2026-11-16', '2026-11-13', '2026-11-12']);
+  });
+
+  test('a refused day names its HTTP status number in the failure, never the page', async () => {
+    const deps = makeDeps();
+    deps.fetchDayList.mockImplementation(async (day) => {
+      if (day === '2026-11-16') throw Object.assign(new Error('Clerk day list answered HTTP 403'), { reason: 'http_status', status: 403 });
+      return { rows: [] };
+    });
+    await expect(run(deps)).rejects.toThrow(/1 of 4 days failed \(2026-11-16: http_status 403\)/);
   });
 });

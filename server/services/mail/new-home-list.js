@@ -29,7 +29,9 @@ const LIST_KEY = 'new_home';
 const SOURCE = 'manatee_clerk_deed';
 const MIN_PRICE = 150000;
 const NIGHT_DAYS = 6;
-const NOON_DAYS = 2;
+// The noon run reads the same days as the night run, so a day the night run could not read (the Clerk site sits behind
+// Cloudflare and refused every night day on 11-22) is read again at noon, not lost.
+const NOON_DAYS = NIGHT_DAYS;
 const RETRY_AFTER_MS = 20 * 60 * 60 * 1000;
 const DAY_PAUSE_MS = 4000; // the Clerk site sits behind Cloudflare: one page at a time, slowly
 const PARCEL_PAUSE_MS = 600;
@@ -204,6 +206,13 @@ function daysToRead(mode, now = Date.now()) {
   return days;
 }
 
+// A day is on its last read when the next run no longer reads it: after a noon run, tonight's night run; after a night
+// run, tomorrow's noon run (both read the same days as a night run).
+function daysTheNextRunReads(mode, nowMs) {
+  const nextRunAt = mode === 'noon' ? new Date(nowMs) : addETDays(new Date(nowMs), 1);
+  return new Set(daysToRead('night', nextRunAt));
+}
+
 const sleepFor = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 function resolveDeps(deps = {}) {
@@ -251,7 +260,9 @@ async function readDays(days, d, summary) {
       summary.daysRead += 1;
     } catch (err) {
       summary.daysFailed += 1;
-      failures.push(`${days[i]}: ${errorCode(err)}`);
+      // The HTTP status number too (a number only, never the page): it tells a Cloudflare refusal from an outage.
+      const status = Number.isInteger(err?.status) ? ` ${err.status}` : '';
+      failures.push(`${days[i]}: ${errorCode(err)}${status}`);
     }
   }
   return { rows, failures };
@@ -353,8 +364,7 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
     mode, days: days.length, daysRead: 0, daysFailed: 0, deeds: 0, skipped: {}, saved: {}, savedByReason: {}, errors: {},
     keptAnswers: 0, mapQueries: 0, mapFailuresInARow: 0, leftOnLastDay: {}, unfilledOnLastDay: {},
   };
-  // A day is on its last read when tomorrow's night run no longer reads it (the noon run reads less).
-  const readTomorrow = new Set(daysToRead('night', addETDays(new Date(nowMs), 1)));
+  const readTomorrow = daysTheNextRunReads(mode, nowMs);
   const { rows, failures } = await readDays(days, d, summary);
   const candidates = collectCandidates(rows, summary, readTomorrow);
   let existingRows = [];
