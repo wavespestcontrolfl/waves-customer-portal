@@ -883,7 +883,7 @@ async function exchangeTriggerHit(from) {
 // screen; checked only when it could change the outcome, so the extra query
 // never runs on ordinary calls. A check failure fails OPEN — never challenge
 // a caller because Postgres hiccupped.
-async function screenCandidate(from, stirVerstat) {
+async function screenCandidate(from, stirVerstat, { redeliveryOf = null } = {}) {
   const attestationB = /-B$/.test(String(stirVerstat || ''));
   const exchangeHit = !attestationB && await exchangeTriggerHit(from);
   const gates = require('../config/feature-gates');
@@ -897,7 +897,7 @@ async function screenCandidate(from, stirVerstat) {
     // With the trial on, this read sits in front of most unknown calls, so it
     // gets the trial's time limit (a timeout counts as known: no challenge).
     knownCaller = trialOn
-      ? await press1ScreenAllUnknown.withinLimit(knownCallerPhoneExists(db, from, press1ScreenAllUnknown.READ_TIMEOUT_MS), true)
+      ? await press1ScreenAllUnknown.knownCallerWithinLimit(from)
       : await knownCallerPhoneExists(db, from);
   } catch (err) {
     // A code only: a Knex error echoes the bound values, here the caller's number.
@@ -908,8 +908,14 @@ async function screenCandidate(from, stirVerstat) {
   // already challenge (an exchange hit with its gate off is only a shadow, so
   // the trial still screens it); screenAllUnknownHit fails open inside.
   const exchangeGates = exchangeHit && gates.isEnabled('callScreenExchangeHistory');
-  const allUnknownTrigger = trialOn && !knownCaller && !attestationB && !exchangeGates
-    && await press1ScreenAllUnknown.screenAllUnknownHit(from);
+  const trialApplies = trialOn && !knownCaller && !attestationB && !exchangeGates;
+  // A redelivery of the first request repeats the first delivery's decision.
+  let allUnknownTrigger = false;
+  if (trialApplies) {
+    allUnknownTrigger = redeliveryOf
+      ? await press1ScreenAllUnknown.storedTrialDecision(redeliveryOf)
+      : await press1ScreenAllUnknown.screenAllUnknownHit(from);
+  }
   return { knownCaller, exchangeTrigger: Boolean(exchangeHit) && !knownCaller, allUnknownTrigger };
 }
 
@@ -1474,7 +1480,7 @@ router.post('/voice', async (req, res) => {
     let exchangeTrigger = false;
     let allUnknownTrigger = false;
     if (!knownCaller && !screenReentry && !langReentry) {
-      ({ knownCaller, exchangeTrigger, allUnknownTrigger } = await screenCandidate(From, req.body.StirVerstat));
+      ({ knownCaller, exchangeTrigger, allUnknownTrigger } = await screenCandidate(From, req.body.StirVerstat, { redeliveryOf: firstDelivery ? null : CallSid }));
     }
     const screenDecision = (screenReentry || langReentry) ? 'none' : preconnectScreenDecision({
       knownCaller,

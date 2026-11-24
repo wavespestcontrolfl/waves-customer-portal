@@ -164,6 +164,8 @@ describe('screenCandidate (who the screen may challenge)', () => {
     const gatesOn = (on) => {
       jest.spyOn(gates, 'isEnabled').mockImplementation((name) => on.includes(name));
       jest.spyOn(gates, 'callScreenAllUnknownLive').mockImplementation(() => on.includes('callScreenAllUnknown'));
+      // The bounded customer read runs the same identity query (on the mocked db).
+      jest.spyOn(allUnknown, 'knownCallerWithinLimit').mockImplementation((from) => knownCallerPhoneExists(db, from));
     };
 
     test('the trial reads its gate at call time (unset = instant off)', () => {
@@ -175,22 +177,24 @@ describe('screenCandidate (who the screen may challenge)', () => {
       if (before !== undefined) process.env.GATE_CALL_SCREEN_ALL_UNKNOWN = before;
     });
 
-    test('with the trial on, a customer-slot lookup that hangs counts as known (no challenge)', async () => {
-      jest.useFakeTimers();
-      try {
-        gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
-        jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
-        const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
-        const builder = { select: () => builder, whereNull: () => builder, whereRaw: () => builder, timeout: jest.fn(() => builder), limit: () => new Promise(() => {}) };
-        db.mockImplementation(() => builder);
-        const pending = screenCandidate('+19412360303', A);
-        await jest.advanceTimersByTimeAsync(1600);
-        await expect(pending).resolves.toEqual({ knownCaller: true, exchangeTrigger: false, allUnknownTrigger: false });
-        expect(hit).not.toHaveBeenCalled();
-        expect(builder.timeout).toHaveBeenCalledWith(1500, { cancel: true });
-      } finally {
-        jest.useRealTimers();
-      }
+    test('with the trial on, the customer read goes through the bounded read', async () => {
+      gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
+      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
+      jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(false);
+      slotRows([]);
+      await screenCandidate('+19412360303', A);
+      expect(allUnknown.knownCallerWithinLimit).toHaveBeenCalledWith('+19412360303');
+    });
+
+    test('a Twilio redelivery repeats the stored trial decision and reads nothing else', async () => {
+      gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
+      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
+      const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(false);
+      const stored = jest.spyOn(allUnknown, 'storedTrialDecision').mockResolvedValue(true);
+      slotRows([]);
+      await expect(screenCandidate('+19412360303', A, { redeliveryOf: 'CA123' })).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: true });
+      expect(stored).toHaveBeenCalledWith('CA123');
+      expect(hit).not.toHaveBeenCalled();
     });
 
     test('a failed customer-slot lookup logs no phone number', async () => {

@@ -15,7 +15,7 @@ jest.mock('../models/db', () => {
 const db = require('../models/db');
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { screenAllUnknownHit, withinLimit, callerKey } = require('../services/press1-screen-all-unknown');
+const { screenAllUnknownHit, knownCallerWithinLimit, storedTrialDecision, withinLimit, callerKey } = require('../services/press1-screen-all-unknown');
 
 // Fake: the three subquery builders record their SQL; the outer select answers
 // `first()` with the given row (or a promise, or rejects with an Error).
@@ -136,11 +136,10 @@ describe('the remembered-caller proof', () => {
     expect(seen.sql.some((q) => q.includes("forward_acceptance'->>'accepted_at'") && q.includes("(metadata->>'ended_at')::timestamptz"))).toBe(true);
   });
 
-  test('an outbound call counts when its customer leg connected 30 s, or an older bridge recorded 30 s', () => {
-    expect(seen.sql).toContain("metadata->'customer_leg'->>'status' = 'completed'");
-    expect(seen.sql.some((q) => q.includes("customer_leg'->>'duration_seconds')::numeric >= ?"))).toBe(true);
-    expect(seen.sql).toContain("metadata->'customer_leg' IS NULL");
+  test('only inbound history counts (a callback caller is on a lead already)', () => {
+    expect(seen.sql.some((q) => q.includes('to_phone'))).toBe(false);
   });
+
 });
 
 test('withinLimit answers the fallback once the read runs past 1.5 s', async () => {
@@ -199,4 +198,48 @@ test('the inbound history read uses the indexed last-10 expression', async () =>
   await screenAllUnknownHit(CALLER);
   expect(seen.sql).toContain("right(regexp_replace(from_phone, '\\D', '', 'g'), 10) = ?");
   expect(seen.bindings).toContain('9415550101');
+});
+
+describe('knownCallerWithinLimit and storedTrialDecision (bounded reads)', () => {
+  function builderAnswering(answer) {
+    const b = {};
+    for (const m of ['select', 'whereNull', 'whereRaw', 'where', 'connection', 'timeout']) b[m] = jest.fn(() => b);
+    b.limit = jest.fn(() => Promise.resolve(answer));
+    b.first = jest.fn(() => Promise.resolve(answer));
+    return b;
+  }
+
+  test('the customer read runs on the bounded connection with the time left', async () => {
+    fakePool();
+    const b = builderAnswering([{ id: 'c1' }]);
+    db.mockImplementation(() => b);
+    await expect(knownCallerWithinLimit(CALLER)).resolves.toBe(true);
+    expect(b.connection).toHaveBeenCalledWith('conn-1');
+    expect(b.timeout).toHaveBeenCalledWith(expect.any(Number), { cancel: true });
+  });
+
+  test('a customer read past the limit counts as known (no challenge)', async () => {
+    jest.useFakeTimers();
+    try {
+      fakePool();
+      const b = builderAnswering([]);
+      b.limit = jest.fn(() => new Promise(() => {}));
+      db.mockImplementation(() => b);
+      const pending = knownCallerWithinLimit(CALLER);
+      await jest.advanceTimersByTimeAsync(1600);
+      await expect(pending).resolves.toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test.each([
+    [{ decision: 'gated' }, true],
+    [{ decision: null }, false],
+    [undefined, false],
+  ])('stored decision %p -> challenge %p', async (row, expected) => {
+    fakePool();
+    db.mockImplementation(() => builderAnswering(row));
+    await expect(storedTrialDecision('CA123')).resolves.toBe(expected);
+  });
 });
