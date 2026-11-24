@@ -417,6 +417,18 @@ describe('reschedule — shared occupancy conflict gate', () => {
         expect(trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
       });
 
+      // The unit's move may hand the member to another technician after this call, so the shift is not this call's to state.
+      test('gate on, the office\'s own move of a visit group\'s member is not told the shift here, and the hours are not read', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const { trx } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
+        const result = await SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true },
+        );
+        expect(result.success).toBe(true);
+        expect(result.warnings).toBeUndefined();
+        expect(reads(trx, 'time_entries')).toBe(false);
+      });
+
       test('gate off: a non-admin move outside the set hours commits as before, an hours-only move reads nothing, and neither pins more', async () => {
         const dated = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
         expect(await SmartRebooker.reschedule(

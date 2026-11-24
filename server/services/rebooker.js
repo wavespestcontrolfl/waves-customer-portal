@@ -18,7 +18,9 @@ const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gate
 // to `warnings` (a Set the caller reads) and the move proceeds. The same line
 // reader also says when that technician's shift does not hold `landed`, the row
 // as the office's move leaves it (GATE_TECH_SHIFT_HOURS, D4 part 3c;
-// technician-eligibility.dayWarningFor): told, never refused.
+// technician-eligibility.dayWarningFor): told, never refused. Not for a grouped
+// stop's member (`unitMember`): the unit's move may hand it to another technician
+// after this call, so its shift is not this call's to state.
 //
 // Shift hours (GATE_TECH_SHIFT_HOURS, D4): `block` is the visit as the move will
 // leave it: its window and its stored length. The caller passes it only for a
@@ -36,7 +38,7 @@ const slotNoLongerAvailable = () => Object.assign(new Error('That time slot is n
 // Is this a move that obeys the shift hours (GATE_TECH_SHIFT_HOURS)? An automatic
 // one: the office's own move does not, the office decides.
 const automaticShiftLive = (initiatedBy) => initiatedBy !== 'admin' && techShiftHoursLive();
-async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null, shiftOnly = false, landed = null } = {}) {
+async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null, shiftOnly = false, landed = null, unitMember } = {}) {
   const staffMove = initiatedBy === 'admin';
   try {
     const hours = block ? require('./scheduling/window-rules').shiftBlockMinutes(block) : undefined;
@@ -51,7 +53,7 @@ async function assertAssignableSlotTechnician(technicianId, trx, date, { initiat
     }
     await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: !staffMove, hours });
     if (staffMove && warnings) {
-      const line = await require('./technician-eligibility').dayWarningFor(technicianId, String(date).slice(0, 10), { conn: trx, block: landed });
+      const line = await require('./technician-eligibility').dayWarningFor(technicianId, String(date).slice(0, 10), { conn: trx, block: unitMember ? null : landed });
       if (line) warnings.add(line);
     }
   } catch (err) {
@@ -2489,7 +2491,8 @@ class SmartRebooker {
       // day and the technician are the same, but the new hours may be outside
       // the shift.
       const techChangeForEligibility = Object.prototype.hasOwnProperty.call(updates, 'technician_id');
-      const shiftLive = options.skipVisitSeam !== true && automaticShiftLive(initiatedBy);
+      const unitMember = options.skipVisitSeam === true;
+      const shiftLive = !unitMember && automaticShiftLive(initiatedBy);
       const hoursMoveForShift = shiftLive && hoursChangedBy(updates, service);
       const dayOrTechMove = techChangeForEligibility || !sameDayTarget;
       const eligibilityChecked = dayOrTechMove || hoursMoveForShift;
@@ -2497,10 +2500,11 @@ class SmartRebooker {
         // An hours-only move is judged on the shift alone (shiftOnly): the day's
         // other rules were not asked of it before, and are not asked now.
         // `landed`: the row as this move leaves it. An automatic move is judged on it
-        // (`block`); the office's own move is told when the shift does not hold it.
+        // (`block`); the office's own move is told when the shift does not hold it,
+        // but not for a grouped stop's member (`unitMember`, see the header).
         const landed = { window_start: updates.window_start, window_end: updates.window_end, estimated_duration_minutes: service.estimated_duration_minutes };
         await assertAssignableSlotTechnician(keptTechId, trx, newDateStr, { initiatedBy, warnings: offDayWarnings, shiftOnly: !dayOrTechMove,
-          block: shiftLive ? landed : null, landed });
+          block: shiftLive ? landed : null, landed, unitMember });
       }
       // The shift check judged the technician and the length of the unlocked
       // pre-read. The write below pins both (shiftJudged), so a reassignment or

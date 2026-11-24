@@ -42,13 +42,13 @@ const calls = [];
 let placeSpy;
 let trx;
 
-function buildTrx() {
+function buildTrx(written = UPDATED) {
   const chain = {};
   for (const name of ['where', 'whereNotIn', 'whereRaw', 'modify', 'whereNull', 'update']) chain[name] = jest.fn(() => chain);
   // first(raw): the day read inside the assign; first(): the job read (when a caller hands in its trx).
   chain.first = jest.fn(async (...args) => (args.length ? { day: DAY } : JOB));
   chain.select = jest.fn(async () => []);
-  chain.returning = jest.fn(async () => [UPDATED]);
+  chain.returning = jest.fn(async () => [written]);
   const t = jest.fn(() => chain);
   t.isTransaction = true;
   t.raw = jest.fn(() => 'raw');
@@ -189,9 +189,11 @@ describe('assignDispatchJob shiftHours option', () => {
 describe('assignDispatchJob day line: what the assign asks', () => {
   const TIMED = { ...JOB, window_start: '10:00:00', window_end: '12:00:00', estimated_duration_minutes: 90 };
   const LINE = "Tech Two's shift is 8:00 AM to 11:00 AM. This visit is outside those hours.";
-  const withJob = (job) => {
+  // `job`: the row as the assign first reads it. `written`: the row its write returns.
+  const withJob = (job, written = { ...job, technician_id: 't-new', route_order: null }) => {
     const jobChain = { where: jest.fn(() => jobChain), first: jest.fn(async () => job) };
     db.mockImplementation(() => jobChain);
+    trx = buildTrx(written);
   };
 
   test('a new technician: asked for that technician on the visit\'s day with the row\'s own hours and length; the line leads the warnings', async () => {
@@ -222,6 +224,16 @@ describe('assignDispatchJob day line: what the assign asks', () => {
     await assign({ noticeSnapshot: { windowStart: null, windowEnd: null } });
     expect(dayWarningFor).toHaveBeenCalledWith('t-new', DAY, {
       conn: db, block: { window_start: null, window_end: null, estimated_duration_minutes: 90 },
+    });
+  });
+
+  test('the line is about the row the write returned: a change of day, hours or length that landed after the first read is in it', async () => {
+    const later = etDateString(addETDays(new Date(), 33));
+    withJob(TIMED, { ...TIMED, technician_id: 't-new', scheduled_date: later, window_start: '10:30:00', window_end: '13:00:00', estimated_duration_minutes: 150 });
+    await assign();
+    expect(dayWarningFor).toHaveBeenCalledTimes(1);
+    expect(dayWarningFor).toHaveBeenCalledWith('t-new', later, {
+      conn: db, block: { window_start: '10:30:00', window_end: '13:00:00', estimated_duration_minutes: 150 },
     });
   });
 
