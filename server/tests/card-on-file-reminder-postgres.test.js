@@ -281,6 +281,13 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     expect(await run(cascaded, { now: EXPIRY_NOW })).toMatchObject({ shadow: 1 });
     const [row] = await ledger(cascaded);
     expect(row).toMatchObject({ trigger_kind: 'expired', outcome: 'shadow' });
+
+    // Staff turning it off (the Intelligence Bar, the office) is a person's choice too.
+    const staff = await customer({ autopay_enabled: false });
+    await visit(staff, '2026-12-12');
+    await card(staff, { exp_month: 11, exp_year: 2026 });
+    await db('autopay_log').insert({ customer_id: staff, event_type: 'autopay_disabled', details: JSON.stringify({ source: 'intelligence_bar' }) });
+    expect(await run(staff, { now: EXPIRY_NOW })).toMatchObject({ shadow: 0, skipped: { autopay_off_on_purpose: 1 } });
   });
 
   test('expiry trigger: a card is good through the end of its expiry month, and the email is due 3 days after it lapsed', async () => {

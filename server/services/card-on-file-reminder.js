@@ -141,8 +141,12 @@ async function collectEvents(today, now, customerIds = null) {
   return due;
 }
 
-// Customer turned Auto Pay off with the toggle (an autopay_disabled event with no removal or card-swap source), and
-// nothing turned it back on.
+// Auto Pay went off BY ITSELF when a method was removed or detached, the default card was swapped, or a contract was
+// cancelled. Every other autopay_disabled event is a person's choice: the customer's toggle (no source), or staff through
+// the office or the Intelligence Bar (a source of their own).
+const AUTOMATIC_DISABLE_SOURCES = new Set(['payment_method_removed', 'payment_method_detached', 'set_default_card']);
+
+// Customer or staff turned Auto Pay off on purpose, and nothing turned it back on.
 async function autopayTurnedOffOnPurpose(customer) {
   if (customer.autopay_enabled !== false) return false;
   const last = await db('autopay_log')
@@ -150,7 +154,9 @@ async function autopayTurnedOffOnPurpose(customer) {
     .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
     .orderBy('created_at', 'desc')
     .first('event_type', 'details');
-  return last?.event_type === 'autopay_disabled' && !asObject(last.details).source;
+  if (last?.event_type !== 'autopay_disabled') return false;
+  const details = asObject(last.details);
+  return !AUTOMATIC_DISABLE_SOURCES.has(details.source) && details.reason !== 'contract_cancelled';
 }
 
 // Upcoming visits are read in pages, in a stable order, until one bills the customer or they run out. A customer with

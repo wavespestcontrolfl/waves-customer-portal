@@ -952,7 +952,13 @@ same 409 otherwise (the payment itself already settled; only the saved-method
 authorization is withheld), and the `payment_intent.succeeded` save mirror and
 the `covered_capture` webhook apply the identical rule: a stale or absent
 stamp keeps the method saved but unconsented and unenrolled and parks one
-Billing bell per intent for the office to re-collect the authorization. A
+Billing bell per intent for the office to re-collect the authorization.
+`/setup-complete` also refuses a SetupIntent stamped `enroll_autopay=false` with
+`409 { error: 'Setup does not belong to this invoice' }` before any save,
+consent or enrollment (owner 2026-11-24, GATE_CARD_ON_FILE_REMINDER): that
+stamp marks a card saved from the portal's save-only add form (the "add a card"
+reminder email link), which must never turn Auto Pay on, and this route records
+the pay-page consent and enrolls. A
 plain one-off payment (no save) attests nothing and is unchanged. Existing
 rows are untouched — the enrollment floor (v8+) does not move, so no existing
 customer is re-asked),
