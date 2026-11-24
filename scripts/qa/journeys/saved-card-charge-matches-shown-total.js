@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { computeChargeAmount } = require('../../../server/services/stripe-pricing');
+const { computeChargeAmount, SURCHARGE_API_VERSION } = require('../../../server/services/stripe-pricing');
 
 const cents = (shown) => Math.round(Number(String(shown).replace(/[^0-9.]/g, '')) * 100);
 const dollars = (amountCents) => `$${(amountCents / 100).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
@@ -71,6 +71,7 @@ module.exports = {
     assert.equal(call.off_session, true);
     assert.equal(call.confirm, true);
     assert.equal(call.amount_details.surcharge.amount, expected.surchargeCents);
+    assert.equal(call.apiVersion, SURCHARGE_API_VERSION, 'A surcharge must be sent on the surcharge API version');
     assert.equal(call.metadata.waves_invoice_id, fixture.cardInvoiceId);
     assert.ok(call.idempotencyKey, 'Stripe must receive an idempotency key');
 
@@ -135,6 +136,17 @@ module.exports = {
     const settledInvoice = await db('invoices').where({ id: fixture.cardInvoiceId }).first();
     assert.equal(settledInvoice.status, 'paid');
     assert.equal(Math.round(Number(settledInvoice.total) * 100), call.amount);
+    // The webhook schedules its own receipt drain after a short delay. Let that drain run and finish before counting,
+    // so a second send it would make is seen: still one receipt job for the invoice, and still one text.
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    let jobs = [];
+    for (let attempt = 0; attempt < 50; attempt++) {
+      jobs = await db('receipt_delivery_jobs').where({ invoice_id: fixture.cardInvoiceId });
+      if (!jobs.some((row) => row.status === 'running')) break;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    assert.equal(jobs.length, 1, 'The webhook must not queue a second receipt');
+    assert.notEqual(jobs[0].status, 'running', 'The receipt job must settle');
     assert.equal(captured().slice(before).filter((entry) => entry.kind === 'sms' && entry.body?.includes(dollars(call.amount))).length, 1);
     assert.equal(creates().length, 1, 'The webhook must not create a second charge');
 

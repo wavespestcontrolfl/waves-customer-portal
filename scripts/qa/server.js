@@ -89,6 +89,7 @@ RequestClient.prototype.request = async function (options) {
 // method throws, as the Twilio transport does, so a new provider call shows up as a failure.
 const Stripe = require('stripe');
 const crypto = require('node:crypto');
+const { SURCHARGE_API_VERSION } = require('../../server/services/stripe-pricing');
 const paymentIntents = new Map();
 const byIdempotencyKey = new Map();
 const unitCents = (value) => Number.isInteger(value) ? value : Number(value);
@@ -110,6 +111,10 @@ const stripeStubs = {
     create: async (params, options = {}) => {
       if (params.customer !== fixture.stripeCustomerId || params.payment_method !== fixture.stripePaymentMethodId) {
         throw new Error('QA fake Stripe only charges the synthetic saved card');
+      }
+      // Stripe accepts amount_details.surcharge only on the preview API version; the default client version refuses it.
+      if (params.amount_details?.surcharge && options.apiVersion !== SURCHARGE_API_VERSION) {
+        throw new Error(`QA fake Stripe: a surcharge needs apiVersion ${SURCHARGE_API_VERSION}, got ${options.apiVersion}`);
       }
       const call = { method: 'paymentIntents.create', amount: params.amount, currency: params.currency, customer: params.customer,
         payment_method: params.payment_method, payment_method_types: params.payment_method_types, off_session: params.off_session,
