@@ -141,6 +141,23 @@ describe('eligibleEntries: one rule, judged on the V2 entry alone', () => {
 describe('informationalBody: no link of any kind, no management or tracker token', () => {
   const facts = { label: 'Pest Control', day: 'Tuesday', date: 'December 1', window: 'between 9:00 AM and 11:00 AM' };
 
+  test('the sender is "Waves", never "Waves Pest Control"', () => {
+    for (const kind of ['confirmation', 'reminder_72h', 'reminder_24h', 'en_route']) {
+      const body = VisitRecipient.informationalBody(kind, 'Bob', facts);
+      expect(body).toMatch(/\bWaves\b/);
+      expect(body).not.toContain('Waves Pest Control');
+    }
+  });
+
+  test('a day-only promise names the day and no arrival window, the same as the holder text', () => {
+    for (const kind of ['confirmation', 'reminder_72h']) {
+      const body = VisitRecipient.informationalBody(kind, 'Bob', { ...facts, dayOnly: true });
+      expect(body).toContain('Pest Control is scheduled for Tuesday, December 1.');
+      expect(body).toContain('We will text you the arrival window the day before');
+      expect(body).not.toMatch(/arriving|between|AM|PM/);
+    }
+  });
+
   test.each(['confirmation', 'reminder_72h', 'reminder_24h'])('%s names the visit and carries no link', (kind) => {
     const body = VisitRecipient.informationalBody(kind, 'Bob', facts);
     expect(body).toContain('Hi Bob');
@@ -157,24 +174,17 @@ describe('informationalBody: no link of any kind, no management or tracker token
   });
 });
 
-describe('kindForSend: only the confirmation and the two reminders are on the list', () => {
-  test('the three texts map to a kind', () => {
-    expect(VisitRecipient.kindForSend('confirmation', 'appointment_confirmation')).toBe('confirmation');
-    expect(VisitRecipient.kindForSend('reminder_72h', 'appointment_reminder_72h')).toBe('reminder_72h');
-    expect(VisitRecipient.kindForSend('appointment_reminder', 'appointment_reminder_24h')).toBe('reminder_24h');
+describe('kindForNotice: only the confirmation and the two reminders are on the list', () => {
+  test('the three notices map to a kind', () => {
+    expect(VisitRecipient.kindForNotice('confirmation')).toBe('confirmation');
+    expect(VisitRecipient.kindForNotice('72h')).toBe('reminder_72h');
+    expect(VisitRecipient.kindForNotice('24h')).toBe('reminder_24h');
   });
 
-  test('a reschedule, cancellation, no-show, series cancel, arrival, completion or review send maps to nothing', () => {
-    expect(VisitRecipient.kindForSend('appointment_rescheduled', 'appointment_confirmation')).toBeNull();
-    expect(VisitRecipient.kindForSend('appointment_cancelled', 'appointment_cancellation')).toBeNull();
-    expect(VisitRecipient.kindForSend('appointment_no_show', 'appointment_cancellation')).toBeNull();
-    expect(VisitRecipient.kindForSend('appointment_series_cancelled', 'appointment_cancellation')).toBeNull();
-    expect(VisitRecipient.kindForSend('tech_arrived', 'tech_arrived')).toBeNull();
-    expect(VisitRecipient.kindForSend('service_completion', 'service_completion')).toBeNull();
-    expect(VisitRecipient.kindForSend('review_request', 'review_request')).toBeNull();
-    expect(VisitRecipient.kindForSend('tech_en_route', 'tech_en_route')).toBeNull();
-    // A matching type with the wrong policy purpose is not the text either.
-    expect(VisitRecipient.kindForSend('confirmation', 'appointment_cancellation')).toBeNull();
+  test('a reschedule, cancellation, no-show, arrival, en-route or any other notice maps to nothing', () => {
+    for (const notice of ['rescheduled', 'cancelled', 'no_show', 'series_cancelled', 'tech_arrived', 'en_route', 'service_completion', 'review_request', '', null, undefined]) {
+      expect(VisitRecipient.kindForNotice(notice)).toBeNull();
+    }
   });
 });
 
@@ -195,80 +205,97 @@ describe('gateLive', () => {
 
 // --- safeSendAppointment: the confirmation and the reminders --------------------------------------------
 
-describe('safeSendAppointment hands the confirmation and the reminders to the visit-only recipients', () => {
-  const send = (messageType, purpose, sendOptions = {}) => AppointmentReminders.safeSendAppointment(
-    CUSTOMER, {}, async (contact) => `Hi ${contact.name || 'there'}`, messageType, purpose,
-    { scheduled_service_id: 'ss-1' }, sendOptions,
-  );
-  const sentTo = () => sendCustomerMessage.mock.calls.map(([input]) => input.to);
+describe('deliverAppointmentNotice dispatches the visit-only leg once per notice, whatever channel the holder chose', () => {
+  const db = require('../models/db');
+  const { deliverAppointmentNotice } = AppointmentReminders._test;
+  const notice = (over = {}) => deliverAppointmentNotice({
+    channel: 'sms', kind: 'confirmation', customerId: 'cust-1', scheduledServiceId: 'ss-1',
+    apptTime: new Date('2026-12-01T14:00:00.000Z'), serviceLabel: 'Pest Control',
+    smsAttempt: jest.fn(async () => true), dayState: { dayOnly: false }, ...over,
+  });
 
-  test('gate OFF: the recipient module is never asked and only the account contact is texted', async () => {
-    await send('confirmation', 'appointment_confirmation');
+  beforeEach(() => {
+    db.mockImplementation((table) => {
+      const q = {};
+      ['where', 'whereRaw', 'whereNotNull', 'whereIn', 'orderBy', 'select', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => (table === 'customers' ? CUSTOMER : table === 'notification_prefs' ? {} : null));
+      q.insert = jest.fn(async () => {});
+      return q;
+    });
+  });
+
+  test('gate OFF: the recipient module is never asked', async () => {
+    await notice();
     expect(VisitRecipient.notifyVisitRecipients).not.toHaveBeenCalled();
-    expect(sentTo()).toEqual([HOLDER]);
   });
 
   test.each([
-    ['confirmation', 'appointment_confirmation', 'confirmation'],
-    ['reminder_72h', 'appointment_reminder_72h', 'reminder_72h'],
-    ['appointment_reminder', 'appointment_reminder_24h', 'reminder_24h'],
-  ])('gate ON: %s is handed to the one recipient sender with the visit, the kind and the numbers already texted', async (messageType, purpose, kind) => {
+    ['confirmation', 'confirmation'],
+    ['72h', 'reminder_72h'],
+    ['24h', 'reminder_24h'],
+  ])('gate ON: a %s notice hands the visit to the one recipient sender with the numbers the notice already texts', async (kind, recipientKind) => {
     process.env[GATE] = 'true';
-    const sent = await send(messageType, purpose);
-    expect(sent).toBe(true);
-    expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledWith({ scheduledServiceId: 'ss-1', kind, excludePhones: [HOLDER] });
-    // The holder is the only text this module sends itself: the recipient's copy is built by the recipient module.
-    expect(sentTo()).toEqual([HOLDER]);
+    await notice({ kind });
+    expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledTimes(1);
+    expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledWith({
+      scheduledServiceId: 'ss-1', kind: recipientKind, excludePhones: [HOLDER], dayOnly: false,
+    });
   });
 
-  test('gate ON: a reschedule, a cancellation and a no-show never reach the recipient', async () => {
+  test.each(['sms', 'email', 'both'])('gate ON: a holder on %s still has the person texted, once', async (channel) => {
     process.env[GATE] = 'true';
-    await send('appointment_rescheduled', 'appointment_confirmation');
-    await send('appointment_cancelled', 'appointment_cancellation');
-    await send('appointment_no_show', 'appointment_cancellation');
-    await send('appointment_series_cancelled', 'appointment_cancellation');
-    expect(VisitRecipient.notifyVisitRecipients).not.toHaveBeenCalled();
-  });
-
-  test('gate ON: a notice with no scheduled_service_id never reaches the recipient (no visit, no permission)', async () => {
-    process.env[GATE] = 'true';
-    await AppointmentReminders.safeSendAppointment(CUSTOMER, {}, async () => 'Hi', 'confirmation', 'appointment_confirmation', {}, {});
-    expect(VisitRecipient.notifyVisitRecipients).not.toHaveBeenCalled();
-  });
-
-  test('gate ON: a number the notice already texts is excluded (no double send to the holder or a confirmed contact)', async () => {
-    process.env[GATE] = 'true';
-    getAppointmentContacts.mockReturnValue([PRIMARY, { phone: BOB, role: 'service_contact', name: 'Bob Roe' }]);
-    await send('confirmation', 'appointment_confirmation');
-    expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledWith({ scheduledServiceId: 'ss-1', kind: 'confirmation', excludePhones: [HOLDER, BOB] });
-  });
-
-  test('gate ON: the holder outcome is the holder only (holder blocked = not sent, whatever the recipient sender does)', async () => {
-    process.env[GATE] = 'true';
-    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'NO_CONSENT_RECORD' });
-    const outcome = {};
-    const sent = await send('confirmation', 'appointment_confirmation', { sendOutcome: outcome });
-    expect(sent).toBe(false);
-    expect(outcome.providerAccepted).toBeUndefined();
-    expect(outcome.failedRecipients).toEqual(['account holder']);
+    const AppointmentEmail = require('../services/appointment-email');
+    AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValue({ ok: true });
+    AppointmentEmail.sendAppointmentReminderEmail.mockResolvedValue({ ok: true });
+    await notice({ channel });
     expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledTimes(1);
   });
 
-  test('gate ON: a callback-number hold on the visit keeps the recipient out too', async () => {
+  test('gate ON: the holder day-only promise rides along, so both people get the same promise', async () => {
     process.env[GATE] = 'true';
-    const holds = require('../services/disclaimed-number-holds');
-    holds.disclaimedNumberHeldForVisit.mockResolvedValueOnce(true);
-    const sent = await send('confirmation', 'appointment_confirmation');
-    expect(sent).toBe(false);
-    expect(VisitRecipient.notifyVisitRecipients).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    await notice({ dayState: { dayOnly: true } });
+    expect(VisitRecipient.notifyVisitRecipients.mock.calls[0][0].dayOnly).toBe(true);
   });
 
-  test('gate ON: a notice with no account contact at all sends no visit-only text either', async () => {
+  test('gate ON: a number the notice already texts (a confirmed contact) is excluded', async () => {
     process.env[GATE] = 'true';
-    getAppointmentContacts.mockReturnValue([]);
-    await expect(send('confirmation', 'appointment_confirmation')).resolves.toBe(false);
+    getAppointmentContacts.mockReturnValue([PRIMARY, { phone: BOB, role: 'service_contact', name: 'Bob Roe' }]);
+    await notice();
+    expect(VisitRecipient.notifyVisitRecipients.mock.calls[0][0].excludePhones).toEqual([HOLDER, BOB]);
+  });
+
+  test('gate ON: a held (pending Reply-YES) contact is NOT excluded: that is the permission that does not wait for the YES', async () => {
+    process.env[GATE] = 'true';
+    getAppointmentContacts.mockReturnValue([PRIMARY, { phone: BOB, role: 'service_contact', name: 'Bob Roe' }]);
+    const optin = require('../services/recipient-optin');
+    optin.filterRecipientsByOptin.mockImplementationOnce(async (contacts) => contacts.filter((c) => c.role === 'primary'));
+    await notice();
+    expect(VisitRecipient.notifyVisitRecipients.mock.calls[0][0].excludePhones).toEqual([HOLDER]);
+  });
+
+  test.each(['en_route', 'rescheduled', 'cancelled', 'tech_arrived'])('gate ON: a %s notice never reaches the recipient', async (kind) => {
+    process.env[GATE] = 'true';
+    await notice({ kind });
     expect(VisitRecipient.notifyVisitRecipients).not.toHaveBeenCalled();
+  });
+
+  test('gate ON: no visit, a callback-number hold, no account contact, or a lost claim sends nothing', async () => {
+    process.env[GATE] = 'true';
+    await notice({ scheduledServiceId: null });
+    require('../services/disclaimed-number-holds').disclaimedNumberHeldForVisit.mockResolvedValueOnce(true);
+    await notice();
+    getAppointmentContacts.mockReturnValueOnce([]);
+    await notice();
+    await notice({ stillOwnsClaim: async () => false });
+    expect(VisitRecipient.notifyVisitRecipients).not.toHaveBeenCalled();
+  });
+
+  test('gate ON: the holder result is the holder only, whatever the recipient sender does', async () => {
+    process.env[GATE] = 'true';
+    await expect(notice({ smsAttempt: jest.fn(async () => true) })).resolves.toBe(true);
+    await expect(notice({ smsAttempt: jest.fn(async () => false), channel: 'sms' })).resolves.toBe(false);
+    VisitRecipient.notifyVisitRecipients.mockRejectedValueOnce(new Error('boom'));
+    await expect(notice({ smsAttempt: jest.fn(async () => true) })).resolves.toBe(true);
   });
 });
 
@@ -363,6 +390,7 @@ describe('the permission stays on the visit row', () => {
 
   test('the senders ask one helper, and the gate stays off by default (read at call time)', () => {
     expect(code('services/appointment-reminders.js')).toContain('notifyVisitRecipients');
+    expect(code('services/appointment-reminders.js')).toContain("audit.metadata?.appointment_contact_role === require('./call-visit-recipient').ROLE");
     expect(code('services/twilio.js')).toContain('notifyVisitRecipients');
     const gatesSource = read('config/feature-gates.js');
     expect(gatesSource).toContain("return process.env.GATE_CALL_GIVEN_VISIT_TEXTS === 'true';");

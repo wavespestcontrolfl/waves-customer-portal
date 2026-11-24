@@ -1,7 +1,8 @@
-// The call pipeline's two uses of the visit-only recipient (GATE_CALL_GIVEN_VISIT_TEXTS, owner 2026-11-24
-// "yes, visit only"): the same-call booking confirmation (sendVisitOnlyConfirmations) and recording the
-// number on the booked visit (recordForCall, which the booking step calls). The recipient's own SQL runs on
-// real PostgreSQL in call-visit-recipient-postgres.test.js.
+// The call pipeline's use of the visit-only recipient (GATE_CALL_GIVEN_VISIT_TEXTS, owner 2026-11-24
+// "yes, visit only"): recording the number on the booked visit (recordForCall, which the booking step calls).
+// Its confirmation is NOT sent here: it reaches the person through deliverAppointmentNotice like every other
+// confirmation (call-visit-recipient.test.js). The recipient's own SQL runs on real PostgreSQL in
+// call-visit-recipient-postgres.test.js.
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -11,72 +12,15 @@ jest.mock('../config/twilio-numbers', () => ({
   findByNumber: jest.fn(() => null),
   getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
 }));
-jest.mock('../services/appointment-reminders', () => ({
-  confirmationLoggedForVisitPhone: jest.fn(async () => false),
-}));
-jest.mock('../services/call-visit-recipient', () => {
-  const actual = jest.requireActual('../services/call-visit-recipient');
-  return { ...actual, notifyVisitRecipients: jest.fn(async () => true) };
-});
-
-const Reminders = require('../services/appointment-reminders');
 const VisitRecipient = require('../services/call-visit-recipient');
 const { _test } = require('../services/call-recording-processor');
 
-const { sendVisitOnlyConfirmations } = _test;
 const GATE = 'GATE_CALL_GIVEN_VISIT_TEXTS';
 const gateBefore = process.env[GATE];
 afterAll(() => { if (gateBefore === undefined) delete process.env[GATE]; else process.env[GATE] = gateBefore; });
+beforeEach(() => { jest.clearAllMocks(); delete process.env[GATE]; });
 
 const BOB = '+19415550002';
-const base = (over = {}) => ({
-  scheduledServiceId: 'ss-1',
-  excludePhones: ['+19415550001', '+19415550001'],
-  blocked: false,
-  claimStillOwned: jest.fn(async () => true),
-  ...over,
-});
-
-beforeEach(() => {
-  jest.clearAllMocks();
-  delete process.env[GATE];
-});
-
-describe('sendVisitOnlyConfirmations', () => {
-  test('a blocked call (SMS blocked, do-not-contact, or the re-armed sweep owns the confirmation) hands nothing over', async () => {
-    process.env[GATE] = 'true';
-    await expect(sendVisitOnlyConfirmations(base({ blocked: true }))).resolves.toBe(true);
-    expect(VisitRecipient.notifyVisitRecipients).not.toHaveBeenCalled();
-  });
-
-  test('the confirmation goes to the one recipient sender: this visit, the confirmation kind, the numbers already texted', async () => {
-    process.env[GATE] = 'true';
-    await expect(sendVisitOnlyConfirmations(base())).resolves.toBe(true);
-    expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledWith({
-      scheduledServiceId: 'ss-1', kind: 'confirmation', excludePhones: ['+19415550001', '+19415550001'], gate: expect.any(Function),
-    });
-  });
-
-  test('the per-recipient gate sends, skips a number that already holds this visit\'s confirmation, and aborts when the pass lost its claim', async () => {
-    const gateFor = async (over, held = false) => {
-      Reminders.confirmationLoggedForVisitPhone.mockResolvedValueOnce(held);
-      await sendVisitOnlyConfirmations(base(over));
-      return VisitRecipient.notifyVisitRecipients.mock.calls.at(-1)[0].gate({ phone: BOB });
-    };
-    process.env[GATE] = 'true';
-    await expect(gateFor({})).resolves.toBe('send');
-    expect(Reminders.confirmationLoggedForVisitPhone).toHaveBeenCalledWith({ scheduledServiceId: 'ss-1', phone: BOB });
-    await expect(gateFor({}, true)).resolves.toBe('skip');
-    await expect(gateFor({ claimStillOwned: jest.fn(async () => false) })).resolves.toBe('abort');
-  });
-
-  test('a pass that lost its claim tells the caller to abandon', async () => {
-    process.env[GATE] = 'true';
-    VisitRecipient.notifyVisitRecipients.mockResolvedValueOnce(false);
-    await expect(sendVisitOnlyConfirmations(base())).resolves.toBe(false);
-  });
-});
-
 describe('recordForCall (the booking step)', () => {
   const db = require('../models/db');
   const inserts = [];
@@ -158,14 +102,10 @@ describe('the booking step wiring', () => {
     expect(block).toContain('blocked: v2SmsBlocked || v2DoNotContact || callbackNumberNeededHoldActive');
   });
 
-  test('the same-call confirmation runs after the slot fan-out and before the primary result returns, skipped when the sweep owns it', () => {
-    const fanOutAt = source.indexOf('secondary confirmation fan-out skipped');
-    const callAt = source.indexOf('await sendVisitOnlyConfirmations({', fanOutAt);
-    const returnAt = source.indexOf('return primaryOk;', callAt);
-    expect(fanOutAt).toBeGreaterThan(0);
-    expect(callAt).toBeGreaterThan(fanOutAt);
-    expect(returnAt).toBeGreaterThan(callAt);
-    expect(source.slice(callAt, returnAt)).toContain('blocked: confirmationRearmed || v2SmsBlocked || v2DoNotContact');
+  test('the pipeline sends the visit-only confirmation itself nowhere: it goes through deliverAppointmentNotice', () => {
+    expect(source).not.toContain('sendVisitOnlyConfirmations');
+    expect(source).not.toContain('notifyVisitRecipients');
+    expect(_test.sendVisitOnlyConfirmations).toBeUndefined();
   });
 
   test('the slot path is unchanged: a held on-site phone still keeps the account consent stamp', () => {

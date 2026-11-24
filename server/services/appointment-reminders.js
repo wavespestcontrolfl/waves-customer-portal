@@ -842,7 +842,51 @@ function cancellationNoticeReport(noticeSent, emailed) {
 // blockedCode and leave their row unmarked so the next cron tick re-decides
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null, dayState }) {
+// GATE_CALL_GIVEN_VISIT_TEXTS (owner 2026-11-24, "yes, visit only"): a person the caller named on the call that booked THIS
+// visit gets this visit's confirmation and 72 h / 24 h reminders, and nothing else, whatever channel the account holder
+// chose (a holder on email still has the person texted). Dispatched ONCE per notice from here, after the holder's own
+// delivery, with its own entry checks and its own outcome: the holder's result below is never changed by it. Entry rule
+// as for the account contacts: no account contact at all, or a callback-number hold on the visit, sends nothing.
+// call-visit-recipient.js decides who is owed the text, writes its informational copy (no reschedule or tracker link,
+// the same day-only promise as the holder's), honors their existing declines and the send window, and persists a held
+// text; no customer, slot, consent stamp or opt-in row is written. Never throws.
+async function dispatchVisitOnlyLeg({ kind, customerId, scheduledServiceId, dayOnly, stillOwnsClaim }) {
+  const visitRecipients = require('./call-visit-recipient');
+  const recipientKind = visitRecipients.gateLive() && scheduledServiceId ? visitRecipients.kindForNotice(kind) : null;
+  if (!recipientKind) return;
+  try {
+    if (stillOwnsClaim && !(await stillOwnsClaim())) return;
+    const { customer } = await getCustomerAndTech(customerId, null);
+    const prefs = await visitPrefsRow(customerId, scheduledServiceId);
+    if (!customer || !prefs || prefs.__prefsUnavailable === true) return;
+    if (await callbackNumberHoldActiveForVisit({ scheduledServiceId })) return;
+    const purpose = visitRecipients.purposeFor(recipientKind);
+    const { contacts, allowedContacts } = await resolveNoticeContacts(customer, prefs, visitRecipients.messageTypeFor(recipientKind), purpose);
+    if (!contacts.length) return;
+    await visitRecipients.notifyVisitRecipients({
+      scheduledServiceId,
+      kind: recipientKind,
+      excludePhones: allowedContacts.map((contact) => contact.phone),
+      dayOnly: dayOnly === true,
+    });
+  } catch (err) {
+    logger.warn(`[appt-remind] visit-only ${kind} for visit ${scheduledServiceId} skipped: ${err.code || err.name || 'error'}`);
+  }
+}
+
+async function deliverAppointmentNotice(args) {
+  const reached = await deliverHolderNotice(args);
+  await dispatchVisitOnlyLeg({
+    kind: args.kind,
+    customerId: args.customerId,
+    scheduledServiceId: args.scheduledServiceId,
+    dayOnly: args.dayState?.dayOnly,
+    stillOwnsClaim: args.stillOwnsClaim,
+  });
+  return reached;
+}
+
+async function deliverHolderNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null, dayState }) {
   // LAST-moment unit-move hold check, at the one chokepoint every
   // confirmation/72h/24h leg passes — inline creation confirmations
   // included (codex #3609 r30 P1): a grouped move stamped after a caller's
@@ -2443,22 +2487,6 @@ function recordFailedRecipient(sharedOutcome, contact, sent, { heldIsFailure = f
   sharedOutcome.failedRecipients.push(isServiceContactRole(contact.role) ? 'service contact' : 'account holder');
 }
 
-// GATE_CALL_GIVEN_VISIT_TEXTS (owner 2026-11-24, "yes, visit only"): a person the caller named on the call that booked THIS
-// visit gets this visit's confirmation and 72 h / 24 h reminders, and nothing else. call-visit-recipient.js decides who is
-// owed the text, writes its informational copy (no reschedule or tracker link), honors their existing declines and the
-// send window, and persists a held text; no customer, slot, consent stamp or opt-in row is written. Runs AFTER the account
-// contacts and never touches their outcome. Never throws into the holder's send.
-async function sendToVisitOnlyRecipients({ messageType, purpose, metaExtra, allowedContacts }) {
-  const visitRecipients = require('./call-visit-recipient');
-  const kind = visitRecipients.gateLive() && metaExtra?.scheduled_service_id ? visitRecipients.kindForSend(messageType, purpose) : null;
-  if (!kind) return;
-  await visitRecipients.notifyVisitRecipients({
-    scheduledServiceId: metaExtra.scheduled_service_id,
-    kind,
-    excludePhones: allowedContacts.map((contact) => contact.phone),
-  });
-}
-
 async function safeSendAppointment(customer, prefs, renderBody, messageType = 'appointment_reminder', purpose = 'appointment', metaExtra = {}, sendOptions = {}) {
   // An UNREADABLE preferences row (a failed notification_prefs read, or a
   // saved property whose toggles could not be read under
@@ -2634,9 +2662,6 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // here too would double-text — rows are queued only on partial success.
   if (sentAny && heldContacts.length) {
     await queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra });
-  }
-  if (!callbackHeldAppLegOnly) {
-    await sendToVisitOnlyRecipients({ messageType, purpose, metaExtra, allowedContacts });
   }
   return sentAny;
 }
@@ -5604,6 +5629,9 @@ const AppointmentReminders = {
       if (!customer) return;
 
       const scheduledServiceId = audit.metadata?.scheduled_service_id || null;
+      // A bounce of a visit-only recipient's text (call-visit-recipient.js) is that person's, never the holder's: no
+      // landline cache, no account email, no alert.
+      if (audit.metadata?.appointment_contact_role === require('./call-visit-recipient').ROLE) return;
       const primaryDigits = lastTenDigits(customer.phone);
       const targetDigits = lastTenDigits(to);
 

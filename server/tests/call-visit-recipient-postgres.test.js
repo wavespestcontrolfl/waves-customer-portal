@@ -32,6 +32,14 @@ const GATE = 'GATE_CALL_GIVEN_VISIT_TEXTS';
 // Ten digits unique to this run: area code 941, five random digits, then a two-digit index.
 const run = String(Math.floor(10000 + Math.random() * 89999));
 const phone = (n) => `+1941${run}${String(100 + n).slice(-2)}`;
+// Visit dates relative to today (ET), so the replay's "visit is upcoming" check never ages out of the fixture.
+const { etDateString, parseETDateTime, formatETDate } = require('../utils/datetime-et');
+const daysAhead = (n) => etDateString(new Date(Date.now() + n * 24 * 60 * 60 * 1000));
+const VISIT_DATE = daysAhead(30);
+const MOVED_DATE = daysAhead(38);
+const NEXT_DATE = daysAhead(31);
+const OTHER_DATE = daysAhead(90);
+const VISIT_DATE_TEXT = formatETDate(parseETDateTime(`${VISIT_DATE}T09:00`));
 const HOLDER = phone(1);
 const BOB = phone(2);
 const ANI = phone(10);
@@ -83,10 +91,10 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
   beforeEach(async () => {
     [{ id: customerId }] = await db('customers').insert({ first_name: 'Phyllis', last_name: 'Roe', phone: HOLDER }).returning('id');
     [{ id: visitId }] = await db('scheduled_services').insert({
-      customer_id: customerId, scheduled_date: '2026-12-01', window_start: '09:00', service_type: 'Pest Control', status: 'confirmed',
+      customer_id: customerId, scheduled_date: VISIT_DATE, window_start: '09:00', service_type: 'Pest Control', status: 'confirmed',
     }).returning('id');
     [{ id: otherVisitId }] = await db('scheduled_services').insert({
-      customer_id: customerId, scheduled_date: '2027-03-02', window_start: '09:00', service_type: 'Pest Control', status: 'confirmed',
+      customer_id: customerId, scheduled_date: OTHER_DATE, window_start: '09:00', service_type: 'Pest Control', status: 'confirmed',
     }).returning('id');
     [{ id: callLogId }] = await db('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE }).returning('id');
   });
@@ -134,7 +142,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       await VisitRecipient.sendOnce(contact, async () => ({ sent: true }));
       await record();
       const [{ deliveries }] = await rows();
-      expect(Object.keys(deliveries)).toEqual(['confirmation:2026-12-01T09:00']);
+      expect(Object.keys(deliveries)).toEqual([`confirmation:${VISIT_DATE}T09:00`]);
     });
 
     test('nothing is recorded for a call leg, the caller, the account holder, a disclaimed or a suppressed number', async () => {
@@ -169,7 +177,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       const contacts = await VisitRecipient.contactsForVisit(visitId, 'reminder_24h');
       expect(contacts).toHaveLength(1);
       expect(contacts[0]).toMatchObject({
-        phone: BOB, name: 'Bob Roe', role: 'visit_text_recipient', claimKey: 'reminder_24h:2026-12-01T09:00',
+        phone: BOB, name: 'Bob Roe', role: 'visit_text_recipient', claimKey: `reminder_24h:${VISIT_DATE}T09:00`,
       });
       expect(contacts[0].role.startsWith('service_contact')).toBe(false);
     });
@@ -186,9 +194,9 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         await db('scheduled_services').where({ id: visitId }).update({ status });
         expect(await VisitRecipient.contactsForVisit(visitId, 'reminder_24h')).toEqual([]);
       }
-      await db('scheduled_services').where({ id: visitId }).update({ status: 'rescheduled', scheduled_date: '2026-12-09', window_start: '13:00' });
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'rescheduled', scheduled_date: MOVED_DATE, window_start: '13:00' });
       const [moved] = await VisitRecipient.contactsForVisit(visitId, 'reminder_24h');
-      expect(moved.claimKey).toBe('reminder_24h:2026-12-09T13:00');
+      expect(moved.claimKey).toBe(`reminder_24h:${MOVED_DATE}T13:00`);
     });
 
     test('a number the sender already texts, or the account holder number, is not listed again', async () => {
@@ -245,12 +253,12 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       const send = jest.fn(async () => ({ sent: true }));
       const [first] = await VisitRecipient.contactsForVisit(visitId, 'reminder_24h');
       await VisitRecipient.sendOnce(first, send);
-      await db('scheduled_services').where({ id: visitId }).update({ status: 'rescheduled', scheduled_date: '2026-12-09' });
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'rescheduled', scheduled_date: MOVED_DATE });
       const [moved] = await VisitRecipient.contactsForVisit(visitId, 'reminder_24h');
       await VisitRecipient.sendOnce(moved, send);
       await VisitRecipient.sendOnce(moved, send);
       expect(send).toHaveBeenCalledTimes(2);
-      expect(Object.keys((await rows())[0].deliveries).sort()).toEqual(['reminder_24h:2026-12-01T09:00', 'reminder_24h:2026-12-09T09:00']);
+      expect(Object.keys((await rows())[0].deliveries).sort()).toEqual([`reminder_24h:${VISIT_DATE}T09:00`, `reminder_24h:${MOVED_DATE}T09:00`].sort());
     });
   });
 
@@ -258,7 +266,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     let sendCustomerMessage;
     let contactPhoneDeclinesText;
     const HELD = {
-      sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, retryable: true, nextAllowedAt: '2026-12-01T12:00:00.000Z',
+      sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, retryable: true, nextAllowedAt: `${VISIT_DATE}T12:00:00.000Z`,
     };
     const notify = (kind, extra = {}) => VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind, excludePhones: [HOLDER], ...extra });
     const sentTo = () => sendCustomerMessage.mock.calls.map(([input]) => input.to);
@@ -286,7 +294,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(input.customerInitiated).toBeUndefined();
       expect(input.metadata.useCustomerChannel).toBeUndefined();
       expect(input.body).toContain('Hi Bob,');
-      expect(input.body).toContain('December 1');
+      expect(input.body).toContain(VISIT_DATE_TEXT);
       expect(input.body).not.toMatch(/https?:|www\.|reschedule|track/i);
     });
 
@@ -348,14 +356,14 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(row.message_body).toContain('Hi Bob,');
       expect(row.metadata).toMatchObject({
         entry_point: 'visit_text_recipient_deferred', scheduled_service_id: visitId, kind: 'confirmation',
-        replay_purpose: 'appointment_confirmation', requires_registered_dispatch: true, slot_scheduled_date: '2026-12-01', slot_window_start: '09:00',
+        replay_purpose: 'appointment_confirmation', requires_registered_dispatch: true, slot_scheduled_date: VISIT_DATE, slot_window_start: '09:00',
       });
       expect(row.metadata.refresh_customer_phone).toBeUndefined();
       // The replay's fresh check: owed now; gate off, a moved slot, a decline or a cancelled visit each suppress it.
       const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
       const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
       expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toEqual({ eligible: true });
-      expect(await recheckDeferredReplay('visit_text_recipient_deferred', { ...meta, slot_scheduled_date: '2026-12-02' })).toMatchObject({ eligible: false });
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', { ...meta, slot_scheduled_date: NEXT_DATE })).toMatchObject({ eligible: false });
       await db('recipient_optin').insert({ customer_id: customerId, phone_key: BOB.slice(-10), phone_e164: BOB, status: 'declined' });
       expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toMatchObject({ eligible: false, reason: 'recipient-not-owed' });
       await db('recipient_optin').where({ customer_id: customerId }).del();
@@ -394,6 +402,51 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       await expect(notify('confirmation', { gate: async () => 'abort' })).resolves.toBe(false);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('every send names the visit and the role in its metadata (a bounce is recognised as the recipient\'s), and the sender is "Waves"', async () => {
+      for (const kind of ['confirmation', 'reminder_72h', 'reminder_24h']) await notify(kind);
+      await notify('en_route', { context: { techName: 'Pat' } });
+      for (const [input] of sendCustomerMessage.mock.calls) {
+        expect(input.metadata).toMatchObject({ appointment_contact_role: 'visit_text_recipient', scheduled_service_id: visitId });
+        expect(input.body).toMatch(/\bWaves\b/);
+        expect(input.body).not.toContain('Waves Pest Control');
+      }
+    });
+
+    test('a day-only notice gives the person the same day promise: day copy, the day marker, no arrival window', async () => {
+      await notify('confirmation', { dayOnly: true });
+      const input = sendCustomerMessage.mock.calls[0][0];
+      expect(input.body).toContain(`scheduled for`);
+      expect(input.body).toContain('We will text you the arrival window the day before');
+      expect(input.body).not.toMatch(/arriving|between/);
+      expect(input.promisedWindowUnknown).toBe(true);
+      expect(input.metadata).toMatchObject({ promise_level: 'day', window_unknown: true, promised_date: VISIT_DATE });
+      // A 24 h reminder is always the window copy, whatever the holder's notice promised.
+      await notify('reminder_24h', { dayOnly: true });
+      expect(sendCustomerMessage.mock.calls[1][0].body).toMatch(/arriving/);
+      expect(sendCustomerMessage.mock.calls[1][0].metadata.promise_level).toBeUndefined();
+    });
+
+    test('a held day-only text is queued with its day promise, so the replay records a day promise and rechecks it', async () => {
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('reminder_72h', { dayOnly: true });
+      const [row] = await queued();
+      expect(row.metadata).toMatchObject({ promise_level: 'day', window_unknown: true, promised_date: VISIT_DATE, appointment_contact_role: 'visit_text_recipient' });
+      expect(row.message_body).not.toMatch(/arriving/);
+      const entry = require('../services/messaging/deferred-replay-registry')._registry.visit_text_recipient_deferred;
+      expect(entry.recheck.toString()).toContain('dayPromiseStillValid');
+    });
+
+    test('the copy and the move guard come from ONE arrival: a later service in a combined reservation quotes and guards the shared start', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ window_start: '11:00', reservation_service_mix: JSON.stringify({ allocatedServiceIds: [visitId] }) });
+      const { rows: [{ start }] } = await db.raw('SELECT reservation_arrival_start(?) AS start', [visitId]);
+      await notify('confirmation');
+      const input = sendCustomerMessage.mock.calls[0][0];
+      const { spokenArrivalWindow } = require('../utils/sms-time-format');
+      const shared = String(start || '11:00').slice(0, 5);
+      expect(input.body).toContain(spokenArrivalWindow(shared));
+      expect(input.renderedSlotMs).toBe(parseETDateTime(`${VISIT_DATE}T${shared}`).getTime());
     });
 
     test('with the gate off nothing is read or sent', async () => {

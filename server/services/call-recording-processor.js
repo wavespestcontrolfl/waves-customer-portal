@@ -4263,29 +4263,6 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
   }
 }
 
-// The same-call booking confirmation for the people the caller named for THIS visit (GATE_CALL_GIVEN_VISIT_TEXTS,
-// owner 2026-11-24 "yes, visit only"). call-visit-recipient.js decides who is owed it, writes its informational copy
-// (no appointment-page or tracker link), honors the person's existing declines and the send window (no
-// customer-initiated exemption: the person did not call), and persists a text the window held. A number that already
-// holds this visit's confirmation (the slot fan-out, an earlier pass) is skipped. Never throws. Returns false only
-// when this pass lost its claim.
-async function sendVisitOnlyConfirmations({ scheduledServiceId, excludePhones, blocked, claimStillOwned }) {
-  const visitRecipients = require('./call-visit-recipient');
-  if (blocked) return true;
-  const AppointmentReminders = require('./appointment-reminders');
-  return visitRecipients.notifyVisitRecipients({
-    scheduledServiceId,
-    kind: 'confirmation',
-    excludePhones,
-    gate: async (contact) => {
-      if (!(await claimStillOwned())) return 'abort';
-      const asked = { scheduledServiceId, phone: contact.phone };
-      const alreadyHeld = await AppointmentReminders.confirmationLoggedForVisitPhone(asked).catch(() => false);
-      return alreadyHeld ? 'skip' : 'send';
-    },
-  });
-}
-
 // Persist a call's secondary contact into the customer's first EMPTY
 // service-contact slot so the existing appointment fan-out
 // (customer-contact.js getAppointmentContacts: confirmation, en-route,
@@ -24556,17 +24533,6 @@ const CallRecordingProcessor = {
                       logger.warn(`[call-proc] secondary confirmation fan-out skipped for customer ${customerId}: ${fanErr.code || fanErr.name || 'error'}`);
                     }
                   }
-                  // GATE_CALL_GIVEN_VISIT_TEXTS (owner 2026-11-24, "yes, visit only"): a person the caller named on
-                  // THIS call for THIS visit gets its booking confirmation, from the visit's own row. Independent
-                  // of the secondary-contact gate above and of the account's slots and consent. Not sent when the
-                  // call's SMS is blocked or do-not-contact, or when the re-armed sweep owns the confirmation (its
-                  // canonical send reaches the recipient through safeSendAppointment).
-                  if (!(await sendVisitOnlyConfirmations({
-                    scheduledServiceId,
-                    excludePhones: [smsPhone, smsRecipient],
-                    blocked: confirmationRearmed || v2SmsBlocked || v2DoNotContact,
-                    claimStillOwned,
-                  }))) return false;
                   return primaryOk;
                 },
               });
@@ -27209,7 +27175,6 @@ CallRecordingProcessor._test = {
   shouldWarnOwnershipLost,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
-  sendVisitOnlyConfirmations,
   onSiteOptinAskTrigger,
   decideOnSiteOptinAsk,
   resolveCallBookingPropertyLinkage,

@@ -1728,14 +1728,16 @@ const REGISTRY = {
   // delivery claim back. The marker keeps a worker that predates this entry from sending the frozen body unchecked.
   visit_text_recipient_deferred: {
     async recheck(meta) {
-      const visit = await visitStillUpcoming(meta.scheduled_service_id, 'visit-recipient', meta);
+      const visit = await visitStillUpcoming(meta.scheduled_service_id, 'visit-recipient', slotPinFor(meta));
       if (visit.eligible === false) return visit;
       try {
         const owed = await require('../call-visit-recipient').recipientStillOwedDeferred(meta);
-        return owed ? { eligible: true } : { eligible: false, reason: 'recipient-not-owed' };
+        if (!owed) return { eligible: false, reason: 'recipient-not-owed' };
       } catch (err) {
         return failClosed('visit-recipient', meta.scheduled_service_id, err);
       }
+      // A queued day-only body is only true while the day promise still stands (the same recheck as the holder's).
+      return meta.promise_level === 'day' ? dayPromiseStillValid(meta) : { eligible: true };
     },
     dispatch(meta, defaultDispatch) {
       return defaultDispatch();

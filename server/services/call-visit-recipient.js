@@ -14,9 +14,10 @@
  *
  * This is the ONE place that decides who is eligible, who is owed a text, what the text says and
  * how it is sent. Every sender asks it:
- *   - the call pipeline records the number when it books the visit (recordForCall) and sends the
- *     same-call confirmation (notifyVisitRecipients);
- *   - appointment-reminders.js safeSendAppointment, for the confirmation and the 72 h / 24 h reminders;
+ *   - the call pipeline records the number when it books the visit (recordForCall); its confirmation
+ *     reaches the person through deliverAppointmentNotice like any other;
+ *   - appointment-reminders.js deliverAppointmentNotice, for the confirmation (the call pipeline's included)
+ *     and the 72 h / 24 h reminders, once per notice and whatever channel the account holder chose;
  *   - twilio.js sendTechEnRoute.
  *
  * What the person receives is informational copy built here, never the holder's template: no
@@ -40,17 +41,17 @@ const TABLE = 'visit_text_recipients';
 const DEFERRED_ENTRY_POINT = 'visit_text_recipient_deferred';
 
 // The only texts a visit-only recipient gets. `purpose` is the send layer's policy purpose (it also
-// names the person's own text choice for that purpose); `byMessageType` is how safeSendAppointment names
+// names the person's own text choice for that purpose); `notice` is how deliverAppointmentNotice names
 // the same notice. A reschedule, cancellation, no-show, arrival, completion, review or any other text
 // is not here, so it never reaches the recipient. A reschedule keeps the same visit row, so the
 // recipient stays; the reminders the new slot arms reach the recipient again. `deferrable`: a text held
 // for the send window is worth sending the next morning (a 24 h reminder would land on the visit day
 // and an en-route text would be stale, so those are dropped, as for the account contacts).
 const KINDS = {
-  confirmation: { purpose: 'appointment_confirmation', messageType: 'confirmation', byMessageType: 'confirmation', deferrable: true },
-  reminder_72h: { purpose: 'appointment_reminder_72h', messageType: 'reminder_72h', byMessageType: 'reminder_72h', deferrable: true },
-  reminder_24h: { purpose: 'appointment_reminder_24h', messageType: 'appointment_reminder', byMessageType: 'appointment_reminder', deferrable: false },
-  en_route: { purpose: 'tech_en_route', messageType: 'tech_en_route', byMessageType: null, deferrable: false },
+  confirmation: { purpose: 'appointment_confirmation', messageType: 'confirmation', notice: 'confirmation', deferrable: true, dayOnlyOk: true },
+  reminder_72h: { purpose: 'appointment_reminder_72h', messageType: 'reminder_72h', notice: '72h', deferrable: true, dayOnlyOk: true },
+  reminder_24h: { purpose: 'appointment_reminder_24h', messageType: 'appointment_reminder', notice: '24h', deferrable: false, dayOnlyOk: false },
+  en_route: { purpose: 'tech_en_route', messageType: 'tech_en_route', notice: null, deferrable: false, dayOnlyOk: false },
 };
 
 // A recipient gets no text about a visit that is over or cancelled.
@@ -64,10 +65,12 @@ function gateLive() {
   return typeof gates.callGivenVisitTextsLive === 'function' && gates.callGivenVisitTextsLive() === true;
 }
 
-/** The kind of text safeSendAppointment is about to send, or null when a visit-only recipient is owed none. */
-function kindForSend(messageType, purpose) {
-  return Object.keys(KINDS).find((kind) => KINDS[kind].byMessageType === messageType && KINDS[kind].purpose === purpose) || null;
+/** The visit-only kind for a holder notice ('confirmation', '72h', '24h' in deliverAppointmentNotice), or null. */
+function kindForNotice(notice) {
+  return notice ? Object.keys(KINDS).find((kind) => KINDS[kind].notice === notice) || null : null;
 }
+const purposeFor = (kind) => KINDS[kind].purpose;
+const messageTypeFor = (kind) => KINDS[kind].messageType;
 
 /**
  * The V2 extraction's own entries, each judged ALONE: the phone and the request must sit on the same
@@ -237,18 +240,28 @@ async function ownedContact(row, visit, kind, conn) {
 
 /**
  * The text itself: informational, with no link of any kind (see the header). Pure.
- * `facts`: { label, day, date, window } for a visit text; { techName, etaMinutes } for en route.
+ * `facts`: { label, day, date, window, dayOnly } for a visit text; { techName, etaMinutes } for en route.
+ * `dayOnly`: the holder's notice promised only the day (GATE_DAY_ONLY_PROMISE), so this one does too.
  */
 function informationalBody(kind, firstName, facts = {}) {
   const hi = `Hi ${firstName || 'there'},`;
-  const visit = `${facts.label || 'Your service'} is scheduled for ${facts.day}, ${facts.date}, arriving ${facts.window}.`;
+  const label = facts.label || 'Your service';
+  const visit = facts.dayOnly
+    ? `${label} is scheduled for ${facts.day}, ${facts.date}.`
+    : `${label} is scheduled for ${facts.day}, ${facts.date}, arriving ${facts.window}.`;
   const stop = 'Reply STOP to opt out.';
-  if (kind === 'confirmation') return `${hi} Waves Pest Control here. ${visit} We will text you a reminder before the visit and again when the technician is on the way. ${stop}`;
+  if (kind === 'confirmation') {
+    const next = facts.dayOnly
+      ? 'We will text you the arrival window the day before, and again when the technician is on the way.'
+      : 'We will text you a reminder before the visit and again when the technician is on the way.';
+    return `${hi} Waves here. ${visit} ${next} ${stop}`;
+  }
   if (kind === 'en_route') {
     const eta = facts.etaMinutes ? `, about ${facts.etaMinutes} minutes away` : '';
-    return `${hi} Waves Pest Control here. ${facts.techName || 'Your technician'} is on the way${eta}. ${stop}`;
+    return `${hi} Waves here. ${facts.techName || 'Your technician'} is on the way${eta}. ${stop}`;
   }
-  return `${hi} a reminder from Waves Pest Control. ${visit} ${stop}`;
+  const next = facts.dayOnly ? ' We will text you the arrival window the day before.' : '';
+  return `${hi} a reminder from Waves. ${visit}${next} ${stop}`;
 }
 
 /** A send that was accepted, or reached the provider with an unknown fate, or is queued for the replay: the claim stays. */
@@ -303,7 +316,7 @@ function releaseClaim(visitRecipientId, claimKey, conn = db) {
  * Persist a text the send window held, to replay it later (deferred-replay-registry visit_text_recipient_deferred).
  * The row belongs to the recipient's own number and is frozen to the visit slot it describes. Returns true when queued.
  */
-async function queueDeferred({ contact, kind, body, result, conn = db }) {
+async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, conn = db }) {
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
   const row = {
     customer_id: contact.visit.customerId,
@@ -322,6 +335,7 @@ async function queueDeferred({ contact, kind, body, result, conn = db }) {
       kind,
       appointment_contact_role: ROLE,
       original_block_code: 'QUIET_HOURS_HOLD',
+      ...promiseMeta,
       replay_purpose: KINDS[kind].purpose,
       slot_scheduled_date: contact.visit.scheduledDate,
       ...(contact.visit.windowStart ? { slot_window_start: contact.visit.windowStart } : {}),
@@ -344,10 +358,11 @@ async function queueDeferred({ contact, kind, body, result, conn = db }) {
 /**
  * Text the visit-only recipients of this visit for one kind of notice: the ONE function every sender calls.
  * `excludePhones`: the numbers the sender already texts. `context`: en route only, { techName, etaMinutes }.
+ * `dayOnly`: the holder's confirmation or 72 h reminder promised only the day, so this one does too.
  * `gate(contact)`: optional per-recipient check by the sender, 'send' (default), 'skip' or 'abort'
  * (the pipeline lost its claim). Never throws into the sender. Returns false only when a gate aborted.
  */
-async function notifyVisitRecipients({ scheduledServiceId, kind, excludePhones = [], context = {}, gate = null, conn = db }) {
+async function notifyVisitRecipients({ scheduledServiceId, kind, excludePhones = [], context = {}, dayOnly = false, gate = null, conn = db }) {
   if (!gateLive() || !KINDS[kind] || !scheduledServiceId) return true;
   try {
     const contacts = await contactsForVisit(scheduledServiceId, kind, { excludePhones, conn });
@@ -355,7 +370,7 @@ async function notifyVisitRecipients({ scheduledServiceId, kind, excludePhones =
       const verdict = gate ? await gate(contact) : 'send';
       if (verdict === 'abort') return false;
       if (verdict === 'skip') continue;
-      await sendToRecipient({ contact, kind, context, conn });
+      await sendToRecipient({ contact, kind, context, dayOnly: dayOnly === true && KINDS[kind].dayOnlyOk, conn });
     }
   } catch (err) {
     logger.warn(`[call-visit-recipient] ${kind} for visit ${scheduledServiceId} skipped: ${err.code || err.name || 'error'}`);
@@ -363,27 +378,49 @@ async function notifyVisitRecipients({ scheduledServiceId, kind, excludePhones =
   return true;
 }
 
-async function buildBody(contact, kind, context) {
+// The arrival the copy quotes AND the move guard compares, from one read: a later service in a combined reservation
+// arrives with the shared start, not its own window_start.
+async function arrivalSnapshot(visit, conn) {
+  const { spokenArrivalWindow } = require('../utils/sms-time-format');
+  let start = visit.windowStart;
+  try {
+    const row = await conn('scheduled_services').where({ id: visit.id }).first('id', 'reservation_service_mix', 'window_start');
+    if (row) start = await require('./reservation-arrival').arrivalStartForService(conn, row);
+  } catch (err) {
+    logger.warn(`[call-visit-recipient] arrival unreadable for visit ${visit.id}: ${err.code || err.name || 'error'}`);
+  }
+  const hhmm = String(start || '').slice(0, 5);
+  return { hhmm, window: spokenArrivalWindow(hhmm) };
+}
+
+// The copy and the slot the send is guarded on. null = nothing sendable.
+async function buildMessage(contact, kind, context, dayOnly, conn) {
   const firstName = String(contact.name || '').trim().split(/\s+/)[0] || null;
-  if (kind === 'en_route') return informationalBody(kind, firstName, context);
-  const { buildServiceLabel, confirmationArrivalWindow } = require('./appointment-reminders');
+  if (kind === 'en_route') return { body: informationalBody(kind, firstName, context), slotMs: null };
+  const { buildServiceLabel } = require('./appointment-reminders');
   const { parseETDateTime, formatETDay, formatETDate } = require('../utils/datetime-et');
-  const at = parseETDateTime(`${contact.visit.scheduledDate}T${contact.visit.windowStart || '12:00'}`);
+  const arrival = await arrivalSnapshot(contact.visit, conn);
+  const at = parseETDateTime(`${contact.visit.scheduledDate}T${arrival.hhmm || '12:00'}`);
   if (!at || Number.isNaN(at.getTime())) return null;
-  return informationalBody(kind, firstName, {
+  const body = informationalBody(kind, firstName, {
     label: await buildServiceLabel(contact.visit.id, contact.visit.serviceType),
     day: formatETDay(at),
     date: formatETDate(at),
-    window: await confirmationArrivalWindow({ scheduledServiceId: contact.visit.id }),
+    window: arrival.window,
+    dayOnly,
   });
+  return { body, slotMs: arrival.hhmm ? at.getTime() : null };
 }
 
-async function sendToRecipient({ contact, kind, context, conn }) {
-  const body = await buildBody(contact, kind, context);
-  if (!body) return;
+async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
+  const message = await buildMessage(contact, kind, context, dayOnly, conn);
+  if (!message) return;
+  const { body, slotMs } = message;
   const { sendCustomerMessage } = require('./messaging/send-customer-message');
-  const { parseETDateTime } = require('../utils/datetime-et');
-  const slotAt = kind === 'en_route' ? null : parseETDateTime(`${contact.visit.scheduledDate}T${contact.visit.windowStart || '08:00'}`);
+  // A day promise carries the same marker the holder's day text records, so the visit's promise history stays one story.
+  const promiseMeta = dayOnly
+    ? { ...require('./time-promise').DAY_PROMISE_META, ...(slotMs ? { guard_slot_ms: slotMs } : {}), promised_date: contact.visit.scheduledDate }
+    : {};
   const outcome = await sendOnce(contact, async () => {
     // No customerInitiated: this text goes to someone who did not call, so the send window applies.
     const result = await sendCustomerMessage({
@@ -394,12 +431,14 @@ async function sendToRecipient({ contact, kind, context, conn }) {
       purpose: KINDS[kind].purpose,
       customerId: contact.visit.customerId,
       appointmentId: contact.visit.id,
-      ...(slotAt && !Number.isNaN(slotAt.getTime()) ? { renderedSlotMs: slotAt.getTime() } : {}),
+      ...(slotMs ? { renderedSlotMs: slotMs } : {}),
+      ...(dayOnly ? { promisedWindowUnknown: true } : {}),
       identityTrustLevel: 'phone_matches_customer',
-      metadata: { original_message_type: KINDS[kind].messageType, appointment_contact_role: ROLE },
+      // scheduled_service_id + the role are how a bounce is recognised as the recipient's, never the holder's (appointment-reminders.js handleUndeliveredSms).
+      metadata: { original_message_type: KINDS[kind].messageType, appointment_contact_role: ROLE, scheduled_service_id: contact.visit.id, ...promiseMeta },
     });
     if (!result.sent && result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt && KINDS[kind].deferrable) {
-      if (await queueDeferred({ contact, kind, body, result, conn })) return { ...result, visitRecipientQueued: true };
+      if (await queueDeferred({ contact, kind, body, result, promiseMeta, conn })) return { ...result, visitRecipientQueued: true };
     }
     return result;
   }, { conn });
@@ -432,7 +471,9 @@ module.exports = {
   ROLE,
   DEFERRED_ENTRY_POINT,
   LIVE_STATUSES,
-  kindForSend,
+  kindForNotice,
+  purposeFor,
+  messageTypeFor,
   eligibleEntries,
   callerNumbers,
   recordForVisit,

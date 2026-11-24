@@ -2081,10 +2081,10 @@ const TwilioService = {
 
     // GATE_CALL_GIVEN_VISIT_TEXTS (owner 2026-11-24, "yes, visit only"): a person the caller named on the
     // call that booked THIS visit also gets this visit's en-route text (informational, no tracker link),
-    // sent by call-visit-recipient.js after the account contacts and kept out of `results`, so it never
-    // decides whether the notice counts as delivered for the account holder. Same entry rule as
-    // safeSendAppointment: a notice with no account contact at all sends no visit-only text either, and a
-    // callback-number hold keeps every other contact out.
+    // sent by call-visit-recipient.js from the dispatch below and kept out of `results`, so it never
+    // decides whether the notice counts as delivered for the account holder. Same entry rule as the
+    // confirmation and reminders: a notice with no account contact at all sends no visit-only text either,
+    // and a callback-number hold keeps every other contact out.
     const visitRecipients = scheduledServiceId && enRouteUnfiltered.length && !callbackNumberHoldActive
       && require("./call-visit-recipient").gateLive()
       ? require("./call-visit-recipient")
@@ -2177,14 +2177,6 @@ const TwilioService = {
           }),
         );
       }
-      if (visitRecipients) {
-        await visitRecipients.notifyVisitRecipients({
-          scheduledServiceId,
-          kind: "en_route",
-          excludePhones: contacts.map((c) => c.phone),
-          context: { techName: customerTechName, etaMinutes },
-        });
-      }
       return results.some((r) => r?.sent);
     };
     const sendEnRouteEmail = async () => {
@@ -2222,6 +2214,18 @@ const TwilioService = {
         logger.warn(`[twilio] en-route no-channel alert failed for customer ${customerId}: ${e.message}`);
       }
     };
+
+    // The visit-only leg (above), dispatched ONCE here, whatever channel the account holder chose: a holder on
+    // email still has the named person texted. Its own entry checks and its own outcome: `results` and the
+    // return value below are the account holder's alone.
+    if (visitRecipients) {
+      await visitRecipients.notifyVisitRecipients({
+        scheduledServiceId,
+        kind: "en_route",
+        excludePhones: contacts.map((c) => c.phone),
+        context: { techName: customerTechName, etaMinutes },
+      });
+    }
 
     // email — email only; when no usable email exists (none on file /
     // suppressed / provider error) fall back to SMS so the customer still
