@@ -93,7 +93,40 @@ const { SURCHARGE_API_VERSION } = require('../../server/services/stripe-pricing'
 const paymentIntents = new Map();
 const byIdempotencyKey = new Map();
 const unitCents = (value) => Number.isInteger(value) ? value : Number(value);
+// A refund of a QA intent, keyed by idempotency key like Stripe's own layer. Only an intent this fake created can be refunded.
+const refundsByIntent = new Map();
+const refundsByIdempotencyKey = new Map();
+const refundedCents = (intentId) => (refundsByIntent.get(intentId) || []).reduce((sum, refund) => sum + refund.amount, 0);
 const stripeStubs = {
+  Refunds: {
+    create: async (params, options = {}) => {
+      const intent = paymentIntents.get(params.payment_intent);
+      if (!intent) throw new Error('QA fake Stripe only refunds a payment intent it created');
+      const remaining = unitCents(intent.amount) - refundedCents(intent.id);
+      const requested = params.amount === undefined ? remaining : unitCents(params.amount);
+      capture('stripe', { method: 'refunds.create', payment_intent: params.payment_intent, amount: params.amount,
+        reason: params.reason, idempotencyKey: options.idempotencyKey });
+      // A repeated idempotency key returns the first refund, and refuses different parameters, as Stripe does.
+      const replay = refundsByIdempotencyKey.get(options.idempotencyKey);
+      if (replay) {
+        if (replay.params.payment_intent !== params.payment_intent || replay.params.amount !== params.amount) {
+          throw new Stripe.errors.StripeIdempotencyError({ message: 'Keys for idempotent requests can only be used with the same parameters they were first used with.', type: 'idempotency_error' });
+        }
+        capture('stripe-refund-result', { refundId: replay.refund.id, replayed: true });
+        return replay.refund;
+      }
+      if (!Number.isInteger(requested) || requested <= 0 || requested > remaining) {
+        throw new Stripe.errors.StripeInvalidRequestError({ message: `Refund amount ($${(requested / 100).toFixed(2)}) is greater than unrefunded amount on charge ($${(remaining / 100).toFixed(2)})`, type: 'invalid_request_error' });
+      }
+      const refund = { id: `re_qa_${crypto.randomBytes(12).toString('hex')}`, object: 'refund', amount: requested, currency: intent.currency,
+        charge: intent.latest_charge, payment_intent: intent.id, status: 'succeeded', reason: params.reason || null,
+        created: Math.floor(Date.now() / 1000), metadata: { ...params.metadata } };
+      refundsByIntent.set(intent.id, [...(refundsByIntent.get(intent.id) || []), refund]);
+      if (options.idempotencyKey) refundsByIdempotencyKey.set(options.idempotencyKey, { params, refund });
+      capture('stripe-refund-result', { refundId: refund.id, replayed: false });
+      return refund;
+    },
+  },
   Charges: {
     retrieve: async (id) => {
       capture('stripe', { method: 'charges.retrieve', id });
@@ -102,7 +135,9 @@ const stripeStubs = {
       }
       const intent = paymentIntents.get(String(id).replace(/^ch_/, ''));
       if (!intent) throw new Error('Unknown QA charge');
+      const refunded = refundedCents(intent.id);
       return { id, object: 'charge', payment_intent: intent.id, amount: intent.amount, currency: intent.currency, status: 'succeeded',
+        amount_refunded: refunded, refunded: refunded >= intent.amount,
         payment_method_details: { type: 'card', card: { brand: fixture.cardBrand, last4: fixture.cardLastFour, funding: 'credit' } } };
     },
   },
