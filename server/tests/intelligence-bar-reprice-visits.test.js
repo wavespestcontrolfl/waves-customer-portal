@@ -559,7 +559,7 @@ describe('one property, one visit', () => {
   });
 
   test('a supplied blank selector is refused, never read as no narrowing', async () => {
-    for (const field of ['appointment_id', 'property_id', 'from_date']) {
+    for (const field of ['appointment_id', 'property_id', 'from_date', 'through_date']) {
       for (const blank of ['', '   ', null]) {
         expect(await preview({ [field]: blank })).toMatchObject({ code: 'invalid_input', error: expect.stringMatching(new RegExp(`^${field} is empty`)) });
       }
@@ -590,6 +590,17 @@ describe('one property, one visit', () => {
     expect(await check({ appointment_id: MINE, property_id: UNIT_B })).toMatchObject({ code: 'target_relationship_mismatch' });
     tables.customer_properties[1].customer_id = OTHER;
     expect(await check({ property_id: UNIT_B })).toMatchObject({ code: 'target_relationship_mismatch' });
+  });
+
+  test('two visits whose lines read the same both stay on the contract card, each with its id', async () => {
+    tables.scheduled_services = [visit('s-1', '2099-03-10'), visit('s-2', '2099-03-10')];
+    const card = await preview();
+    const contract = buildContract({ toolName: 'reprice_future_visits', params: ask(), displayParams: {}, preview: card });
+    const billing = contract.effects.filter((e) => e.kind === 'billing').map((e) => e.label);
+    expect(billing).toEqual([
+      'Visit 2099-03-10 (Tue) · Quarterly Pest Control: $55.00 → $49.00 (visit s-1)',
+      'Visit 2099-03-10 (Tue) · Quarterly Pest Control: $55.00 → $49.00 (visit s-2)',
+    ]);
   });
 
   test('two units on one street show their unit line', async () => {

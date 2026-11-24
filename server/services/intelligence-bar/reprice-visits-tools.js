@@ -172,7 +172,8 @@ function parseInput(input) {
   }
   if (Math.abs(price * 100 - Math.round(price * 100)) > 1e-6) return { error: 'Give the new price in whole cents.', code: 'invalid_input' };
   if (price > 10000) return { error: 'That price is above $10,000 a visit. Check the amount.', code: 'invalid_input' };
-  const through = input.through_date == null || input.through_date === '' ? null : String(input.through_date).trim();
+  const through = optionalText(input.through_date);
+  if (through?.blank) return blankRefusal('through_date');
   if (through && !validCalendarDate(through)) return { error: 'through_date must be a real calendar date (YYYY-MM-DD).', code: 'invalid_input' };
   const scope = parseScope(input, through);
   if (scope.error) return scope;
@@ -527,18 +528,24 @@ async function buildPlan(input) {
 
 // Card lines (authorization-contract.js reads these for the curated card):
 // one line per visit, in date order, then what is left alone.
+// The contract card drops a repeated label, so two visits whose lines read the
+// same (same day, service, place and prices) each carry their visit id.
+function distinctLines(entries) {
+  const seen = new Map();
+  for (const e of entries) seen.set(e.text, (seen.get(e.text) || 0) + 1);
+  return entries.map((e) => (seen.get(e.text) > 1 ? { kind: e.kind, text: `${e.text} (visit ${e.id})` } : { kind: e.kind, text: e.text }));
+}
+
 function cardLines(preview) {
   const lines = [];
   if (preview.property_label) lines.push({ kind: 'operational', text: `Only visits booked for ${preview.property_label}. The customer's other properties keep their prices.` });
-  for (const v of preview.visits || []) {
-    lines.push({ kind: 'billing', text: `Visit ${weekdayDate(v.date)} · ${v.service}${v.at ? ` at ${v.at}` : ''}: ${v.old_price} → ${v.new_price}${v.discount_note ? ` (${v.discount_note})` : ''}` });
-  }
-  for (const v of preview.left_alone || []) {
-    lines.push({ kind: 'operational', text: `Left alone: ${weekdayDate(v.date)} · ${v.service}${v.at ? ` at ${v.at}` : ''} — ${v.reason}` });
-  }
-  for (const v of preview.already_at_price || []) {
-    lines.push({ kind: 'operational', text: `Already ${v.price}: ${weekdayDate(v.date)} · ${v.service}${v.at ? ` at ${v.at}` : ''}` });
-  }
+  const at = (v) => (v.at ? ` at ${v.at}` : '');
+  const entries = [
+    ...(preview.visits || []).map((v) => ({ id: v.id, kind: 'billing', text: `Visit ${weekdayDate(v.date)} · ${v.service}${at(v)}: ${v.old_price} → ${v.new_price}${v.discount_note ? ` (${v.discount_note})` : ''}` })),
+    ...(preview.left_alone || []).map((v) => ({ id: v.id, kind: 'operational', text: `Left alone: ${weekdayDate(v.date)} · ${v.service}${at(v)} — ${v.reason}` })),
+    ...(preview.already_at_price || []).map((v) => ({ id: v.id, kind: 'operational', text: `Already ${v.price}: ${weekdayDate(v.date)} · ${v.service}${at(v)}` })),
+  ];
+  lines.push(...distinctLines(entries));
   lines.push({ kind: 'operational', text: `Each visit is saved the way the Schedule screen saves a price edit. Only the listed visits change; visits the plan adds later are not repriced by this card.` });
   lines.push({ kind: 'operational', text: NO_MESSAGE });
   return lines;
