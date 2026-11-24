@@ -20,6 +20,7 @@
 const path = require('path');
 
 const EXECUTE = process.argv.includes('--execute');
+const PREVIEW_LIMIT = 1000;
 const server = (p) => path.join(__dirname, '..', '..', 'server', p);
 
 async function main() {
@@ -38,7 +39,10 @@ async function main() {
       .whereIn('status', ['eligible', 'held_back'])
       .whereNull('page_slug')
       .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+      // The preview reads a bounded sample, like each write batch (the list is small today, but never unbounded).
+      .limit(PREVIEW_LIMIT)
       .select('id', 'address_line1', 'zip');
+    if (rows.length === PREVIEW_LIMIT) console.log(`(preview reads the oldest ${PREVIEW_LIMIT}; counts below cover those only)`);
     const withCandidate = rows.filter((r) => slugCandidates({ addressLine1: r.address_line1, zip: r.zip }).length);
     console.log(`Homes with no slug: ${rows.length} (${withCandidate.length} have an address that gives one)`);
     // Prospect ids and counts only: a slug is the house number, street and ZIP, so it is never printed.
