@@ -468,13 +468,57 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       }
     });
 
-    test('the office\'s own move of the stop lands outside the shift: it is not checked here', async () => {
+    // D4 part 3c: the office's own move of the stop is not checked. The office is told once for the stop, from the
+    // rows the move leaves, about the technician each service then has.
+    test('the office\'s own move of the stop lands outside the shift: it is not refused, and the office is told the shift once', async () => {
       const stop = await seedStop();
-      expect((await moveStop(stop, { start: '11:00', end: '12:00' }, 'admin')).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+      // The first service ends with the shift; the second lands at 12:00 to 13:00.
+      const out = await moveStop(stop, { start: '11:00', end: '12:00' }, 'admin');
+      expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+      expect(shiftLines(out)).toEqual([OFFICE_LINE]);
       expect(await stopOf(stop)).toMatchObject([
         { day: nextDay, window_start: '11:00:00', window_end: '12:00:00' },
         { day: nextDay, window_start: '12:00:00', window_end: '13:00:00' },
       ]);
+      // Both services outside the shift: still one line. Both inside it: none.
+      const fresh = async () => { await f.db('scheduled_services').del(); await f.db('service_visits').del(); return seedStop(); };
+      const late = await fresh();
+      const both = await moveStop(late, { start: '13:00', end: '14:00' }, 'admin');
+      expect(both.visitMove).toMatchObject({ moved: [late.a, late.b], failed: [] });
+      expect(shiftLines(both)).toEqual([OFFICE_LINE]);
+      const early = await fresh();
+      const inside = await moveStop(early, { start: '10:00', end: '11:00' }, 'admin');
+      expect(inside.visitMove).toMatchObject({ moved: [early.a, early.b], failed: [] });
+      expect(shiftLines(inside)).toEqual([]);
+    });
+
+    test('the office is told for a service whose stored length runs past the shift end, though its hours end inside it', async () => {
+      // The second service lands at 10:00 to 11:00 and is stored as 180 minutes: it ends at 13:00.
+      const stop = await seedStop({ estimated_duration_minutes: 180 });
+      const out = await moveStop(stop, { start: '09:00', end: '10:00' }, 'admin');
+      expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+      expect(shiftLines(out)).toEqual([OFFICE_LINE]);
+    });
+
+    test('the office\'s own move of the stop on its day (new hours alone) is told the shift alone; on a day the technician does not work, no line', async () => {
+      const stop = await seedStop();
+      const out = await move(stop.a, f.date, { start: '11:00', end: '12:00' }, 'admin', { overlapAdvisory: true });
+      expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+      expect(shiftLines(out)).toEqual([OFFICE_LINE]);
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      const dow = new Date(`${f.date}T12:00:00Z`).getUTCDay();
+      await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== dow) });
+      try {
+        await f.db('scheduled_services').del();
+        await f.db('service_visits').del();
+        const off = await seedStop();
+        const dayOff = await move(off.a, f.date, { start: '13:00', end: '14:00' }, 'admin', { overlapAdvisory: true });
+        expect(dayOff.visitMove).toMatchObject({ moved: [off.a, off.b], failed: [] });
+        expect((dayOff.warnings || []).filter((w) => /shift is|does not work/.test(w))).toEqual([]);
+      } finally {
+        delete process.env.GATE_TECH_WORK_DAYS;
+        await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: null });
+      }
     });
 
     // The tech app's rain-out sheet lists days through findRescheduleOptions. Route check off: the
@@ -519,6 +563,25 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
         expect(out.visitMove.moved).toEqual([stop.a]);
         expect(out.visitMove.failed.map((x) => x.id)).toEqual([stop.b]);
         expect(await rowOf(stop.b)).toMatchObject(whereSeeded[1]);
+      });
+
+      // The office's own move is not stopped by such an edit, as before. The unit reads each moved row after every
+      // write (unitOfficeLines), so the office is told about the length the row has.
+      test('the office\'s own move: a service made longer after the plan moves, and the office is told about the length it has', async () => {
+        // Both services fit for 60 minutes (10:00 and 11:00). The first, at 240 minutes, ends at 14:00.
+        const first = await seedStop();
+        const out = await move(first.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', lengthen(first.a));
+        expect(out.visitMove).toMatchObject({ moved: [first.a, first.b], failed: [] });
+        expect(shiftLines(out)).toEqual([OFFICE_LINE]);
+        expect(await rowOf(first.a)).toMatchObject({ day: nextDay, window_start: '10:00:00' });
+        // The second, at 240 minutes, ends at 15:00.
+        await f.db('scheduled_services').del();
+        await f.db('service_visits').del();
+        const second = await seedStop();
+        const late = await move(second.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', lengthen(second.b));
+        expect(late.visitMove).toMatchObject({ moved: [second.a, second.b], failed: [] });
+        expect(shiftLines(late)).toEqual([OFFICE_LINE]);
+        expect(await rowOf(second.b)).toMatchObject({ day: nextDay, window_start: '11:00:00' });
       });
 
       // A caller's own fence drops the plan's fence of the first service. A move of the day alone carries the
@@ -662,12 +725,132 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
           expect((await stopOf(second)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
         });
 
-        test('the office\'s own move is not judged at the assignment', async () => {
+        // Both fixture technicians have one name: the shift's hours, and who has a day off, show whose line it is.
+        describe('the office\'s own move of the stop: whose day off, whose shift', () => {
+          const dayLines = (out) => (out.warnings || []).filter((w) => /shift is|does not work/.test(w));
+          const offOn = (id, day) => f.db('technicians').where({ id })
+            .update({ work_days: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== new Date(`${day}T12:00:00Z`).getUTCDay()) });
+          const offNextDay = (id) => offOn(id, nextDay);
+          const officeToOtherTech = (stop) => move(stop.a, nextDay, { start: '09:00', end: '10:00' }, 'admin', { overlapAdvisory: true, technicianId: f.ids.otherTech });
+          beforeEach(() => { process.env.GATE_TECH_WORK_DAYS = 'true'; });
+          afterEach(async () => {
+            delete process.env.GATE_TECH_WORK_DAYS;
+            await f.db('technicians').whereIn('id', [f.ids.technician, f.ids.otherTech]).update({ work_days: null });
+          });
+
+          test('the office is told the shift of the technician who gets the stop, and no day off of the one who had it', async () => {
+            // The technician who has the stop does not work that day. The one who gets it works 08:00 to 10:30.
+            await offNextDay(f.ids.technician);
+            await f.db('technicians').where({ id: f.ids.otherTech }).update({ shift_start: '08:00', shift_end: '10:30' });
+            const stop = await seedStop();
+            const out = await officeToOtherTech(stop);
+            expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+            // The second service lands at 10:00 to 11:00.
+            expect(dayLines(out)).toEqual(["Fixture technician's shift is 8:00 AM to 10:30 AM. This visit is outside those hours."]);
+            expect((await stopOf(stop)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
+          });
+
+          test('the technician who gets the stop does not work that day: the day-off line, once', async () => {
+            await offNextDay(f.ids.otherTech);
+            const stop = await seedStop();
+            const out = await officeToOtherTech(stop);
+            expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+            expect(dayLines(out)).toEqual([expect.stringMatching(/^Fixture technician does not work on /)]);
+          });
+
+          test('the stop keeps its technician and moves to a day that technician does not work: the day-off line, once', async () => {
+            await offNextDay(f.ids.technician);
+            const stop = await seedStop();
+            const out = await move(stop.a, nextDay, { start: '09:00', end: '10:00' }, 'admin', { overlapAdvisory: true });
+            expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+            expect(dayLines(out)).toEqual([expect.stringMatching(/^Fixture technician does not work on /)]);
+          });
+
+          test('new hours on the stop\'s own day, to a technician who does not work that day: the day-off line, once', async () => {
+            await offOn(f.ids.otherTech, f.date);
+            const stop = await seedStop();
+            const out = await move(stop.a, f.date, { start: '10:00', end: '11:00' }, 'admin', { overlapAdvisory: true, technicianId: f.ids.otherTech });
+            expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+            expect(dayLines(out)).toEqual([expect.stringMatching(/^Fixture technician does not work on /)]);
+            expect((await stopOf(stop)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
+          });
+
+          // The named technician is marked out that day: each service moves, its assignment is refused, and it
+          // stays on the technician who had it. The rows the move leaves are on that technician.
+          test('the assignment is refused: the office is told about the technician who keeps each service, once, and the move reports the services', async () => {
+            await f.db('technicians').where({ id: f.ids.otherTech }).update({ shift_start: '08:00', shift_end: '10:30' });
+            await f.db('technician_absences').insert({ technician_id: f.ids.otherTech, absence_date: nextDay, reason: 'synthetic' });
+            try {
+              const stop = await seedStop();
+              // 11:00 and 12:00: the second service ends after its own technician's 12:00 shift end.
+              const out = await move(stop.a, nextDay, { start: '11:00', end: '12:00' }, 'admin', { overlapAdvisory: true, technicianId: f.ids.otherTech });
+              expect(out.visitMove.failed.map((x) => x.id).sort()).toEqual([stop.a, stop.b].sort());
+              expect(await stopOf(stop)).toMatchObject([
+                { day: nextDay, window_start: '11:00:00', technician_id: f.ids.technician },
+                { day: nextDay, window_start: '12:00:00', technician_id: f.ids.technician },
+              ]);
+              expect(dayLines(out)).toEqual([OFFICE_LINE]);
+            } finally {
+              await f.db('technician_absences').del();
+            }
+          });
+
+          // The office names another technician for the stop where it is, and that technician is marked out. Each
+          // service keeps its day, its hours and its technician: the move changed nothing a line is about. (The second
+          // service, stored as 240 minutes, ends after its technician's shift, as it did before the move.)
+          test('the assignment is refused and the stop keeps its day and its hours: no line', async () => {
+            await f.db('technician_absences').insert({ technician_id: f.ids.otherTech, absence_date: f.date, reason: 'synthetic' });
+            try {
+              const stop = await seedStop({ estimated_duration_minutes: 240 });
+              const out = await move(stop.a, f.date, { start: '09:00', end: '10:00' }, 'admin', { overlapAdvisory: true, technicianId: f.ids.otherTech });
+              expect(out.visitMove.failed.map((x) => x.id).sort()).toEqual([stop.a, stop.b].sort());
+              expect(await stopOf(stop)).toMatchObject(whereSeeded.map((row) => ({ ...row, technician_id: f.ids.technician })));
+              expect(dayLines(out)).toEqual([]);
+            } finally {
+              await f.db('technician_absences').del();
+            }
+          });
+
+          // The same stop, and the named technician can take it: the rows change technician, and the office is told
+          // about the one who gets them (the second service ends after that technician's 12:00 shift end too).
+          test('another technician for the stop where it is: the office is told about the technician who gets it', async () => {
+            const stop = await seedStop({ estimated_duration_minutes: 240 });
+            const out = await move(stop.a, f.date, { start: '09:00', end: '10:00' }, 'admin', { overlapAdvisory: true, technicianId: f.ids.otherTech });
+            expect(out.visitMove.failed).toEqual([]);
+            expect((await stopOf(stop)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
+            expect(dayLines(out)).toEqual([OFFICE_LINE]);
+          });
+
+          test('gate off: the services\' own moves state the day off of the technician they leave, and none of the one who gets the stop, as before', async () => {
+            delete process.env.GATE_TECH_SHIFT_HOURS;
+            await offNextDay(f.ids.technician);
+            const stop = await seedStop();
+            const out = await officeToOtherTech(stop);
+            expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+            const lines = dayLines(out);
+            expect(lines.length).toBeGreaterThan(0);
+            expect(lines.every((w) => /does not work on/.test(w))).toBe(true);
+            // Only the technician who gets the stop has that day off: no line.
+            await f.db('scheduled_services').del();
+            await f.db('service_visits').del();
+            await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: null });
+            await offNextDay(f.ids.otherTech);
+            const second = await seedStop();
+            const quiet = await officeToOtherTech(second);
+            expect(quiet.visitMove).toMatchObject({ moved: [second.a, second.b], failed: [] });
+            expect(dayLines(quiet)).toEqual([]);
+          });
+        });
+
+        test('the office\'s own move is not judged at the assignment: the office is told about the row as the move leaves it', async () => {
           const stop = await seedStop();
+          // Both services fit the named technician's shift as planned. The first is made 240 minutes long after its
+          // move and before its assignment: 10:00 to 14:00, after the 12:00 shift end.
           lengthenAtAssignment(stop.a);
           const out = await move(stop.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', { overlapAdvisory: true, technicianId: f.ids.otherTech });
           expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
           expect((await stopOf(stop)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
+          expect(shiftLines(out)).toEqual([OFFICE_LINE]);
         });
       });
 
