@@ -45,10 +45,17 @@ function attachPlannedBlocks(services) {
   // A stop without a pin rides the simulation with no leg (advanceSim) so its
   // work still moves the clock, but it is never drawn at a planned time.
   const seq = rows.map((s) => ({ ...simRow(s), lat: s.lat, lng: s.lng }));
-  const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, seq, {
-    startMin: 0,
-    reportLate: true,
-  });
+  // Display only: a model error must never fail the day feed, so the rows
+  // keep null fields and draw as before.
+  let sim = null;
+  try {
+    sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, seq, {
+      startMin: 0,
+      reportLate: true,
+    });
+  } catch {
+    sim = null;
+  }
   if (!sim) return;
   const byId = new Map(sim.arrivals.map((a) => [a.id, a]));
   for (const s of rows) {

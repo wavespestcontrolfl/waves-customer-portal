@@ -91,3 +91,18 @@ describe('attachPlannedBlocks', () => {
     expect(() => attachPlannedBlocks(undefined)).not.toThrow();
   });
 });
+
+describe('attachPlannedBlocks — a model error never fails the day feed', () => {
+  it('leaves null fields when the simulation throws', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../services/route-reorder-window-fit', () => ({
+        ...jest.requireActual('../services/route-reorder-window-fit'),
+        simulateArrivalRoute: () => { throw new Error('boom'); },
+      }));
+      const { attachPlannedBlocks: attach } = require('../services/scheduling/planned-blocks');
+      const rows = [{ id: 'x1', status: 'pending', windowStart: '08:00', windowEnd: '09:00', lat: 27.1, lng: -82.4, serviceType: 'Quarterly Pest Control' }];
+      expect(() => attach(rows)).not.toThrow();
+      expect(rows[0]).toMatchObject({ plannedArrivalMin: null, plannedMinutes: null });
+    });
+  });
+});
