@@ -191,8 +191,9 @@ describe('buildCheck with a share', () => {
     expect(uncovered.qualified_overtime_cents).toBe(0); // 0, not NULL
     expect(uncovered).toHaveProperty('qualified_overtime_cents', 0);
     expect(covered.gross_cents).toBe(uncovered.gross_cents);
-    // coverage not set and a $0 share: nothing is guessed, the check is as it was (a positive share would block)
-    expect(build({ production_share: under, flsa_overtime_covered: null, ...overtime }).check).not.toHaveProperty('qualified_overtime_cents');
+    // coverage not set: with overtime hours (or a share above $0) the check waits for it; with neither, nothing is guessed and the check is as it was
+    expect(build({ production_share: under, flsa_overtime_covered: null, ...overtime }).blocked).toContain('Set the overtime coverage first');
+    expect(build({ production_share: under, flsa_overtime_covered: null }).check).not.toHaveProperty('qualified_overtime_cents');
     // no settings in force (no share): untouched
     expect(build({ flsa_overtime_covered: true, ...overtime }).check).not.toHaveProperty('qualified_overtime_cents');
   });
@@ -322,11 +323,14 @@ describe('the credit rules (applyLedger)', () => {
   });
   // what finalized pay runs paid: visits {visitId: week | [week, package root]}, invoices {invoiceId: week | [week, package root]},
   // jobs {rootId: [total, sold, [slots]]}. A bare week is a row paid on its own (no package basis).
-  const asRow = (value) => (Array.isArray(value) ? { weekStart: value[0], root: value[1] } : { weekStart: value, root: null });
+  const asRow = (value) => (Array.isArray(value) ? { weekStart: value[0], root: value[1], runId: `run-${value[0]}` } : { weekStart: value, root: null, runId: `run-${value}` });
   const paidOf = ({ visits = {}, invoices = {}, jobs = {} } = {}) => ({
     visits: new Map(Object.entries(visits).map(([id, value]) => [id, asRow(value)])),
     invoices: new Map(Object.entries(invoices).map(([id, value]) => [id, [asRow(value)]])),
-    jobs: new Map(Object.entries(jobs).map(([root, [totalCents, sold, slots]]) => [root, { totalCents, sold, weekStart: '2026-09-14', slots: new Map(slots.map((slot) => [slot, `v${slot}`])) }])),
+    jobs: new Map(Object.entries(jobs).map(([root, [totalCents, sold, slots]]) => [root, {
+      totalCents, sold, weekStart: '2026-09-14', slots: new Map(slots.map((slot) => [slot, `v${slot}`])),
+      slotRuns: new Map(slots.map((slot) => [slot, 'run-2026-09-14'])), totalRunId: totalCents == null ? null : 'run-2026-09-14',
+    }])),
     // every paid stop row, whole (what the conflict state hashes)
     rows: [
       ...Object.entries(visits).map(([id, value]) => ({ runId: `run-${asRow(value).weekStart}`, weekStart: asRow(value).weekStart, visitId: id, invoices: [],
@@ -541,16 +545,25 @@ describe('the credit rules (applyLedger)', () => {
     expect(revision(base, [{ runId: 'run-1', weekStart: '2026-09-14', visitId: 'visit-1', invoices: ['inv-1'], bases: [] }])).not.toBe(revision(base));
   });
 
-  test('AUDIT :861: a credit row lists the runs of the paid rows it was worked out against, and the snapshot, revision and token carry them', () => {
+  test('AUDIT :861: dependsOnRuns names only the runs whose paid row DETERMINED the credit; the snapshot, revision and token carry them', () => {
     const row = plain('visit-2', ['inv-1']);
-    const paidRows = [
-      { runId: 'run-b', weekStart: '2026-09-21', visitId: 'visit-3', invoices: ['inv-1'], bases: [] },
-      { runId: 'run-a', weekStart: '2026-09-14', visitId: 'visit-1', invoices: [], bases: [] },
-      { runId: 'run-a', weekStart: '2026-09-14', visitId: 'visit-9', invoices: ['inv-77'], bases: [] },
-    ];
-    const out = productionShare.applyLedger([row], { visits: new Map(), invoices: new Map(), jobs: new Map(), rows: paidRows })[0];
-    expect(out.dependsOnRuns).toEqual(['run-a', 'run-b']); // unrelated paid rows (inv-77) are not dependencies
+    // an invoice of the stop recorded by a paid row, and a visit of that invoice already paid: those paid rows decided it
+    const elsewhere = paidOf({ invoices: { 'inv-1': '2026-09-21' }, visits: { 'visit-1': '2026-09-14' } });
+    expect(productionShare.applyLedger([row], elsewhere)[0]).toMatchObject({ kind: 'invoice_paid_elsewhere', dependsOnRuns: ['run-2026-09-14', 'run-2026-09-21'] });
+    // already paid: the run that paid the visit
+    expect(productionShare.applyLedger([row], paidOf({ visits: { 'visit-2': '2026-09-14' } }))[0]).toMatchObject({ kind: 'already_paid', dependsOnRuns: ['run-2026-09-14'] });
+    // a package follow-up credited from the total a run fixed; a slot that run paid is exhausted
+    const fixed = paidOf({ jobs: { root: [200000, 2, [1]] } });
+    expect(productionShare.applyLedger([job('followup', 2)], fixed)[0]).toMatchObject({ kind: 'multi_visit_job', creditCents: 100000, dependsOnRuns: ['run-2026-09-14'] });
+    expect(productionShare.applyLedger([job('replacement', 1)], fixed)[0]).toMatchObject({ kind: 'basis_exhausted', dependsOnRuns: ['run-2026-09-14'] });
+    // no paid row decided it: none, even when a paid row TOUCHES the stop (a prepaid or own-price stop whose related ids include a paid invoice)
+    const own = { visitId: 'visit-2', workDate: '2026-09-21', kind: 'prepaid_plan', creditCents: 40000, needsReview: false, ledger: null, linkedInvoices: ['inv-1'], related: ['visit-2', 'inv-1'] };
+    expect(productionShare.applyLedger([own], elsewhere)[0]).toMatchObject({ kind: 'prepaid_plan', creditCents: 40000, dependsOnRuns: [] });
+    expect(productionShare.applyLedger([own], elsewhere)[0].conflictTuples.length).toBeGreaterThan(0); // touched, but it did not decide
     expect(productionShare.applyLedger([row], paidOf())[0].dependsOnRuns).toEqual([]);
+    // an owner credit depends on the paid rows that touch it (the conflict tuples)
+    const credit = new Map([['visit-2', { creditCents: 100, reason: 'x', conflictTuples: productionShare.applyLedger([own], elsewhere)[0].conflictTuples }]]);
+    expect(productionShare.applyLedger([own], elsewhere, credit)[0]).toMatchObject({ kind: 'owner_set', dependsOnRuns: ['run-2026-09-21'] }); // the paid rows that touch IT
     const input = (dependsOnRuns) => new Map([['tech-a', { settings: SETTINGS, stops: [{ ...stops([['v1', '2026-09-14', 100000]])[0], dependsOnRuns }] }]]);
     const snap = (dependsOnRuns) => share.sharesFor(input(dependsOnRuns), ['tech-a'], WEEK).get('tech-a').snapshot;
     expect(snap(['run-b', 'run-a']).stops[0].dependsOnRuns).toEqual(['run-a', 'run-b']);
@@ -626,7 +639,7 @@ describe('the credit rules (applyLedger)', () => {
     // a visit that is no package visit records nothing
     expect(productionShare.applyLedger([{ ...review, packageSlot: null }], paidOf(), set)[0].bases).toEqual([]);
     // what later weeks read: a paid slot with no total. The same slot again is exhausted; another slot credits from the live price
-    const slotOnly = { totalCents: null, sold: null, weekStart: '2026-09-14', slots: new Map([[2, 'followup']]) };
+    const slotOnly = { totalCents: null, sold: null, weekStart: '2026-09-14', slots: new Map([[2, 'followup']]), slotRuns: new Map([[2, 'run-1']]), totalRunId: null };
     const paid = { ...paidOf(), jobs: new Map([['root', slotOnly]]) };
     expect(one(job('replacement', 2), paid).kind).toBe('basis_exhausted');
     expect(one(job('first', 1), paid)).toMatchObject({ kind: 'multi_visit_job', creditCents: 100000, bases: [{ totalCents: 200000, slot: 1 }] });

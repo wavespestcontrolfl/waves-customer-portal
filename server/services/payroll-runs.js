@@ -287,9 +287,11 @@ const electionOrIrsDefault = (election, payDate) => election || {
   id: null, formYear: Number(String(payDate).slice(0, 4)), filingStatus: 'single', step2Checkbox: false, exempt: false,
 };
 
-// A share is overtime-qualified only for an employee federal overtime law covers; with the coverage not set the premium would be
-// stored as zero qualified overtime without a word, so the check waits for the owner to set it (Payroll settings, overtime coverage).
-const shareCoverageProblem = (tech, shareCents) => (shareCents > 0 && tech.flsa_overtime_covered == null
+// With the production share on, an employee who has share settings in force needs the overtime coverage set when the check holds a share
+// above $0 or any overtime hours: the qualified overtime (a covered employee's half-time premium and the share's) would otherwise be stored
+// as zero or left empty without a word, so the check waits for the owner to set it (Payroll settings, overtime coverage).
+const shareCoverageProblem = (tech, share, shareCents) => (share && tech.flsa_overtime_covered == null
+  && (shareCents > 0 || Number(tech.overtime_minutes || 0) > 0)
   ? 'Set the overtime coverage first: the production share needs to know whether federal overtime law covers this employee.' : null);
 
 /**
@@ -311,7 +313,7 @@ function buildCheck({
   // With the share gate on, EVERY check of an employee who has share settings and a set overtime coverage is a pay line check (a week at or
   // under the bar too): the qualified overtime is stored as a figure, 0 for an uncovered employee, never left empty.
   const withLines = payLinesOn() || shareCents > 0 || (share !== null && tech.flsa_overtime_covered != null);
-  const coverageProblem = shareCoverageProblem(tech, shareCents);
+  const coverageProblem = shareCoverageProblem(tech, share, shareCents);
   if (coverageProblem) return { blocked: coverageProblem };
   const ptoMinutes = tech.pto_minutes || 0;
   const holidayMinutes = tech.holiday_minutes || 0;

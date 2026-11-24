@@ -465,6 +465,20 @@ function splitInvoiceLines(lines) {
 
 // How one invoice (a links row) is shared: { billed, refunded } Maps by visit, { skipped } (it names no visit price),
 // or { unallocated: its whole refund, reason } (its split across the visits, or what a discount took off, cannot be established).
+// What an invoice's price rests on, as plain sorted data: its amounts, the lines that count and the ones left out (dues, a setup fee), the
+// discounts and what each one is tied to, and the visits on it with their weights. A change to any of them changes a stop's revision.
+function invoiceLineFacts(row, list) {
+  let lines = row.line_items;
+  if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = null; } }
+  const { charges, discounts } = Array.isArray(lines) ? splitInvoiceLines(lines) : { charges: [], discounts: [] };
+  const sort = (rows) => rows.sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1));
+  return [
+    cents(row.subtotal), cents(row.discount_amount), cents(row.total), cents(row.tax_amount), cents(row.deposit_credit), row.not_charged ? 1 : 0,
+    sort(charges.map((charge) => [charge.id, charge.amount, charge.left ? 1 : 0])), sort(discounts.map((discount) => [discount.target, discount.amount])),
+    sort((list || []).map((member) => [String(member.id), member.weight == null ? null : Number(member.weight)])),
+  ];
+}
+
 function invoiceShare(row, members) {
   const priced = visitPreTaxCents(row);
   const refunded = cents(row.refunded) || 0;
@@ -545,11 +559,13 @@ async function billedByVisit(conn, visitIds) {
     shares.set(row.invoice_id, invoiceShare(row, list));
   }
   for (const row of links.rows) {
-    const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [], shares: [], invoiceIds: [], invoiceMembers: new Map() };
+    const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [], shares: [], invoiceIds: [], invoiceMembers: new Map(), invoiceFacts: [] };
     // Every invoice linked to the visit, whatever it names (a pay run records them with a paid stop: see the INVOICE and PACKAGE rules).
     if (!entry.invoiceIds.includes(row.invoice_id)) entry.invoiceIds.push(row.invoice_id);
     // The visits of that invoice, charged or not (the stop's related ids: see relatedIdsOf).
     entry.invoiceMembers.set(row.invoice_id, (byInvoice.get(row.invoice_id) || []).map((member) => member.id));
+    // The lines, discounts, amounts and member weights of every linked invoice, split or not, charged or not (the stop's revision).
+    entry.invoiceFacts.push([row.invoice_id, invoiceLineFacts(row, byInvoice.get(row.invoice_id))]);
     out.set(row.visit_id, entry);
     if (row.not_charged) continue;
     const share = shares.get(row.invoice_id);
@@ -786,6 +802,7 @@ function billedFactsOf(entry) {
     entry.billedCents, entry.refundCents,
     (entry.shares || []).map((one) => [one.invoiceId, one.totalCents, one.shareCents, members(one.members)]).sort((a, b) => (a[0] < b[0] ? -1 : 1)),
     (entry.unallocated || []).map((one) => [one.invoiceId, one.totalCents == null ? null : one.totalCents, one.refundCents, members(one.members)]).sort((a, b) => (a[0] < b[0] ? -1 : 1)),
+    [...(entry.invoiceFacts || [])].sort((a, b) => (a[0] < b[0] ? -1 : 1)),
   ];
 }
 
@@ -914,18 +931,19 @@ async function paidLedger(conn, visitIds, invoiceIds, rootIds, weekStart) {
     ledger.rows.push({ runId: row.run_id, weekStart: row.week_start, visitId: row.visit_id, invoices: row.invoices, bases: row.bases });
     // The package a paid row belonged to (null: it was paid on its own, with no package basis).
     const root = (row.bases.find((basis) => basis.basisType === 'job') || {}).basisId || null;
-    if (wanted.has(row.visit_id) && !ledger.visits.has(row.visit_id)) ledger.visits.set(row.visit_id, { weekStart: row.week_start, root });
+    if (wanted.has(row.visit_id) && !ledger.visits.has(row.visit_id)) ledger.visits.set(row.visit_id, { weekStart: row.week_start, root, runId: row.run_id });
     for (const id of row.invoices) {
       if (!ledger.invoices.has(id)) ledger.invoices.set(id, []);
-      ledger.invoices.get(id).push({ weekStart: row.week_start, visitId: row.visit_id, root });
+      ledger.invoices.get(id).push({ weekStart: row.week_start, visitId: row.visit_id, root, runId: row.run_id });
     }
     for (const basis of row.bases) {
       if (basis.basisType !== 'job' || !roots.has(basis.basisId)) continue;
-      const job = ledger.jobs.get(basis.basisId) || { totalCents: null, sold: null, weekStart: row.week_start, slots: new Map() };
+      const job = ledger.jobs.get(basis.basisId) || { totalCents: null, sold: null, weekStart: row.week_start, slots: new Map(), slotRuns: new Map(), totalRunId: null };
       // The total and sold count are fixed by the first row that knows them (an owner-set credit may record a slot with neither).
-      if (job.totalCents == null && basis.totalCents != null) { job.totalCents = Number(basis.totalCents); job.sold = basis.sold == null ? job.sold : Number(basis.sold); }
+      if (job.totalCents == null && basis.totalCents != null) { job.totalCents = Number(basis.totalCents); job.sold = basis.sold == null ? job.sold : Number(basis.sold); job.totalRunId = row.run_id; }
       if (job.sold == null && basis.sold != null) job.sold = Number(basis.sold);
       job.slots.set(Number(basis.slot), row.visit_id);
+      job.slotRuns.set(Number(basis.slot), row.run_id);
       ledger.jobs.set(basis.basisId, job);
     }
   }
@@ -938,6 +956,8 @@ const MANUAL_CREDIT_INELIGIBLE = new Set(['not_performed', 'unverified', 'alread
 
 const alreadyPaid = (row, week) => ({ ...row, ...toReview('already_paid', `Already paid in the week of ${week}: a pay run already credited this visit.`) });
 const review = (row, kind, reason) => ({ ...row, ...toReview(kind, reason) });
+// A review row that also names the runs whose paid rows decided it (dependsOnRuns).
+const reviewFrom = (row, kind, reason, runs) => ({ ...review(row, kind, reason), dependsOnRuns: [...new Set(runs.filter(Boolean))].sort() });
 
 /**
  * The credit rows of a pay week through the rules (CREDIT RULES above). `paid` = paidLedger. Pure. Every row comes back with `invoices`
@@ -956,7 +976,7 @@ function applyLedger(rows, paid, overrides = new Map()) {
       ...done,
       // What the page is shown of a stop, for the owner's credit to be checked against under the lock: the conflict tuples, and a revision
       // of the stop as the RULES see it (their kind, never the owner's credit).
-      conflictTuples: tuples, stopRevision: stopRevisionOf(row, base.kind, tuples), dependsOnRuns: dependsOnRunsOf(row),
+      conflictTuples: tuples, stopRevision: stopRevisionOf(row, base.kind, tuples), dependsOnRuns: done.dependsOnRuns || [],
       invoices: done.creditCents > 0 ? done.linkedInvoices || [] : [], bases: done.bases || [],
     };
     delete clean.ledger;
@@ -970,11 +990,14 @@ function applyLedger(rows, paid, overrides = new Map()) {
 
   // The stop as the rules see it (no override): already paid, a package or invoice conflict, or the credit the rules computed.
   function settle(row) {
-    if (paid.visits.has(row.visitId)) return alreadyPaid(row, paid.visits.get(row.visitId).weekStart);
+    if (paid.visits.has(row.visitId)) {
+      const was = paid.visits.get(row.visitId);
+      return { ...alreadyPaid(row, was.weekStart), dependsOnRuns: [was.runId].filter(Boolean) };
+    }
     const { ledger } = row;
     // A visit that was the first visit of a package a pay run fixed is that package's: credited on its own it would be paid twice.
     if (paid.jobs.has(row.visitId) && !(ledger && ledger.job && ledger.job.rootId === row.visitId) && !row.needsReview && row.creditCents > 0) {
-      return review(row, 'package_paid_elsewhere', 'This visit was the first visit of a package a pay run already credited: set its credit in the production share preview.');
+      return reviewFrom(row, 'package_paid_elsewhere', 'This visit was the first visit of a package a pay run already credited: set its credit in the production share preview.', [...paid.jobs.get(row.visitId).slotRuns.values()]);
     }
     if (!ledger) return row;
     if (ledger.invoices) return settleInvoice(row, ledger);
@@ -991,9 +1014,9 @@ function applyLedger(rows, paid, overrides = new Map()) {
     }
     // A NEW conflict (an invoice or package of the stop paid elsewhere since the owner set the credit) is checked before the credit is used.
     if (tuples.some((tuple) => !(set.conflictTuples || []).includes(tuple))) {
-      return { ...review(row, 'owner_override_conflict_changed', 'This stop, its invoice or its package was paid elsewhere since the owner set its credit: clear that credit and look at the stop again in the production share preview.'), overrideRevision: set.revision };
+      return { ...review(row, 'owner_override_conflict_changed', 'This stop, its invoice or its package was paid elsewhere since the owner set its credit: clear that credit and look at the stop again in the production share preview.'), overrideRevision: set.revision, dependsOnRuns: dependsOnRunsOf(row) };
     }
-    return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: slotBasis(row), overrideRevision: set.revision };
+    return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: slotBasis(row), overrideRevision: set.revision, dependsOnRuns: dependsOnRunsOf(row) };
   }
 
   // The conflict state of a stop, ONE rule: EVERY paid stop row (finalized, non-void, a share above $0, another week) that touches what
@@ -1039,14 +1062,19 @@ function applyLedger(rows, paid, overrides = new Map()) {
   }
 
   function settleInvoice(row, ledger) {
-    const weeks = ledger.invoices.flatMap((inv) => [
-      ...(paid.invoices.get(inv.invoiceId) || []).map((one) => one.weekStart),
-      ...inv.members.map((member) => (paid.visits.get(member.id) || {}).weekStart),
-    ]).filter(Boolean).sort();
-    if (weeks.length) return review(row, 'invoice_paid_elsewhere', `This invoice also covers a visit paid in the week of ${weeks[0]}: set its credit in the production share preview.`);
+    // The paid rows the verdict rests on: a row that recorded one of the invoices, or a member visit of them already paid.
+    const entries = ledger.invoices.flatMap((inv) => [
+      ...(paid.invoices.get(inv.invoiceId) || []),
+      ...inv.members.map((member) => paid.visits.get(member.id)),
+    ]).filter(Boolean);
+    const weeks = entries.map((one) => one.weekStart).sort();
+    if (weeks.length) return reviewFrom(row, 'invoice_paid_elsewhere', `This invoice also covers a visit paid in the week of ${weeks[0]}: set its credit in the production share preview.`, entries.map((one) => one.runId));
     // A visit of the invoice that was the first visit of a package a pay run fixed: the invoice is that package's, shared with this stop.
-    const packageWeek = ledger.invoices.flatMap((inv) => inv.members.map((member) => paid.jobs.get(member.id))).filter(Boolean).map((one) => one.weekStart).sort()[0];
-    if (packageWeek) return review(row, 'package_paid_elsewhere', `This invoice also covers the first visit of a package credited in the week of ${packageWeek}: set its credit in the production share preview.`);
+    const packages = ledger.invoices.flatMap((inv) => inv.members.map((member) => paid.jobs.get(member.id))).filter(Boolean);
+    if (packages.length) {
+      const packageWeek = packages.map((one) => one.weekStart).sort()[0];
+      return reviewFrom(row, 'package_paid_elsewhere', `This invoice also covers the first visit of a package credited in the week of ${packageWeek}: set its credit in the production share preview.`, packages.flatMap((one) => [...one.slotRuns.values()]));
+    }
     return row;
   }
 
@@ -1054,11 +1082,12 @@ function applyLedger(rows, paid, overrides = new Map()) {
     // A package that was, or whose invoice was, credited OUTSIDE it is not credited again: a visit of it paid on its own (no package
     // basis, or another package's), or an invoice linked to it that a paid row of another package or of no package recorded. Reusing the
     // invoice is only for a remaining slot of THIS package (the same root basis).
-    const outside = [
+    const outsides = [
       ...job.visits.map((id) => paid.visits.get(id)),
       ...(row.linkedInvoices || []).flatMap((id) => paid.invoices.get(id) || []),
-    ].filter((one) => one && one.root !== job.rootId).sort((a, b) => (a.weekStart < b.weekStart ? -1 : 1))[0];
-    if (outside) return review(row, 'package_paid_elsewhere', `This package, or its invoice, was already credited outside the package in the week of ${outside.weekStart}: set its credit in the production share preview.`);
+    ].filter((one) => one && one.root !== job.rootId);
+    const outside = [...outsides].sort((a, b) => (a.weekStart < b.weekStart ? -1 : 1))[0];
+    if (outside) return reviewFrom(row, 'package_paid_elsewhere', `This package, or its invoice, was already credited outside the package in the week of ${outside.weekStart}: set its credit in the production share preview.`, outsides.map((one) => one.runId));
     const was = paid.jobs.get(job.rootId);
     if (!was) {
       if (!(job.price > 0)) return review(row, 'multi_visit_job', "The job's first visit has no price on file.");
@@ -1067,14 +1096,15 @@ function applyLedger(rows, paid, overrides = new Map()) {
     if (was.totalCents == null) {
       // Only slots were recorded so far (an owner-set credit): no total is fixed yet, so this visit credits from the live price and the
       // sold count, and the slots already taken still cannot be taken again.
-      if (was.slots.has(job.nth) || job.nth > job.sold) return review(row, 'basis_exhausted', 'This package slot was already credited, or is past the visits the package was sold with: set its credit in the production share preview.');
+      if (was.slots.has(job.nth) || job.nth > job.sold) return reviewFrom(row, 'basis_exhausted', 'This package slot was already credited, or is past the visits the package was sold with: set its credit in the production share preview.', [was.slotRuns.get(job.nth)]);
       if (!(job.price > 0)) return review(row, 'multi_visit_job', "The job's first visit has no price on file.");
       return { ...row, creditCents: jobPartCents(job.price, job.sold, job.nth), bases: [{ basisType: 'job', basisId: job.rootId, totalCents: job.price, sold: job.sold, slot: job.nth }] };
     }
     if (job.nth > was.sold || was.slots.has(job.nth)) {
-      return review(row, 'basis_exhausted', 'This package slot was already credited, or is past the visits the package was sold with: set its credit in the production share preview.');
+      return reviewFrom(row, 'basis_exhausted', 'This package slot was already credited, or is past the visits the package was sold with: set its credit in the production share preview.', [was.slotRuns.get(job.nth), was.totalRunId]);
     }
-    return { ...row, creditCents: jobPartCents(was.totalCents, was.sold, job.nth), bases: [{ basisType: 'job', basisId: job.rootId, totalCents: was.totalCents, sold: was.sold, slot: job.nth }] };
+    // Credited from the total a pay run FIXED for the package: that run's row determined this credit.
+    return { ...row, creditCents: jobPartCents(was.totalCents, was.sold, job.nth), bases: [{ basisType: 'job', basisId: job.rootId, totalCents: was.totalCents, sold: was.sold, slot: job.nth }], dependsOnRuns: [was.totalRunId].filter(Boolean) };
   }
 }
 

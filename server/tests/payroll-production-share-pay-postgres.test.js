@@ -561,6 +561,21 @@ postgres('production share pay line', () => {
       expect((await api('DELETE', '/production-share/stop-override', { body: { technicianId: id, visitId: unpriced, weekStart: weeks[1], revision: showing.overrideRevision } })).status).toBe(200);
     });
 
+    it('AUDIT :313: overtime hours with the coverage not set block the check whatever the share; once set, the qualified overtime is stored', async () => {
+      const id = await tech('Sample Alpha', { flsa_overtime_covered: null });
+      await settings(id);
+      await worked(id, W1, 40, 5);
+      await stop(id, W1, '100.00'); // far under the bar: a $0 share
+      const blocked = (await draft(W1)).body.run;
+      expect(JSON.stringify(blocked.blocked)).toContain('Set the overtime coverage first');
+      expect((await api('PUT', `/technicians/${id}/flsa-coverage`, { body: { covered: true } })).status).toBe(200);
+      const fresh = (await api('POST', `/runs/${blocked.id}/recompute`)).body.run;
+      expect(fresh.blocked).toEqual([]);
+      const stored = await trx('payroll_checks').where({ run_id: blocked.id }).first('qualified_overtime_cents', 'production_share_cents');
+      expect(stored.production_share_cents).toBe('0');
+      expect(Number(stored.qualified_overtime_cents)).toBeGreaterThan(0); // the half-time premium of the 5 overtime hours
+    });
+
     it('AUDIT :306: the overtime coverage editor opens with only the production share gate on, and a share waits until it is set', async () => {
       process.env.GATE_PAYROLL_PAY_LINES = 'false';
       const id = await tech('Sample Alpha', { flsa_overtime_covered: null });
@@ -764,6 +779,64 @@ postgres('production share pay line', () => {
       // a member's weight (its price) is edited: another revision
       await trx('scheduled_services').where({ id: other }).update({ estimated_price: '1500.00' });
       expect(await shownBasis(key)).not.toBe(afterTotal);
+    });
+
+    it('AUDIT P1 :788: for an invoice that cannot be split the revision follows its lines, setup fee, discount and member weights', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      await worked(id, W1, 40);
+      const customerId = await customer();
+      const mine = await stop(id, W1, '1000.00', customerId);
+      const lines = (setup, discount) => JSON.stringify([
+        { description: 'General pest control', amount: 100 },
+        { description: 'Setup fee', amount: setup },
+        { description: 'Courtesy discount', amount: -discount },
+      ]);
+      // a discount tied to no line beside a setup fee line: what it took off the visit cannot be established (review)
+      const invoiceId = (await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: '150.00', discount_amount: '0.00', tax_amount: '0.00', total: '130.00', scheduled_service_id: mine, line_items: lines(50, 20),
+      }).returning('id'))[0].id;
+      const key = { technicianId: id, visitId: mine, weekStart: W1 };
+      const shown = await api('GET', `/production-share/preview?technicianId=${id}&weekStart=${W1}`);
+      expect(shown.body.stops.find((row) => row.visitId === mine)).toMatchObject({ needsReview: true });
+      const opened = await shownBasis(key);
+      const edit = (update) => trx('invoices').where({ id: invoiceId }).update(update);
+      await edit({ line_items: lines(60, 20) }); // the setup fee line changes
+      const afterFee = await shownBasis(key);
+      expect(afterFee).not.toBe(opened);
+      await edit({ line_items: lines(60, 30), total: '130.00' }); // the discount changes
+      const afterDiscount = await shownBasis(key);
+      expect(afterDiscount).not.toBe(afterFee);
+      await edit({ line_items: lines(60, 30), tax_amount: '5.00' }); // the amounts around the lines change
+      expect(await shownBasis(key)).not.toBe(afterDiscount);
+    });
+
+    it('AUDIT P1 :1012: a stop priced on its own that only TOUCHES a paid invoice depends on no run', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const first = await stop(id, W1, '1000.00', customerId);
+      const invoiceId = (await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: '1000.00', discount_amount: '0.00', tax_amount: '0.00', total: '1000.00', scheduled_service_id: first,
+      }).returning('id'))[0].id;
+      const runA = (await draft(W1)).body.run;
+      await finalize(runA.id); // week 1 pays the first visit and records the invoice
+      // a second visit of week 2 is priced on its own, with a DRAFT invoice (no charge) that is the same invoice's id family: link it to the paid invoice's visit set
+      const second = await stop(id, weeks[1], '1000.00', customerId);
+      await trx('invoices').where({ id: invoiceId }).update({ status: 'draft', scheduled_service_id: second });
+      const runB = (await draft(weeks[1])).body.run;
+      const row = (await trx('payroll_checks').where({ run_id: runB.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops.find((r) => r.visitId === second);
+      // credited from its own price; the paid row of run A touches it (the invoice) but did not decide its credit
+      expect(row).toMatchObject({ kind: 'priced', creditCents: 100000 });
+      expect(row).not.toHaveProperty('dependsOnRuns');
+      expect((await finalize(runB.id)).body.run.status).toBe('finalized');
+      // so voiding run A is not held up by this stop (the later-run rule of the same technician still applies, so void B first)
+      expect((await api('POST', `/runs/${runB.id}/void`, { body: { reason: 'sample' } })).status).toBe(200);
+      expect((await api('POST', `/runs/${runA.id}/void`, { body: { reason: 'sample' } })).status).toBe(200);
     });
 
     it('AUDIT :1115: a revision with no stored credit is refused; a credit is created only with neither', async () => {
@@ -1330,7 +1403,7 @@ postgres('production share pay line', () => {
       expect(byInvoice.invoices.get(world.inv)).toEqual([expect.objectContaining({ weekStart: W1, visitId: world.v1, root: null })]);
       expect(byInvoice.visits.size).toBe(0);
       const byVisit = await productionShare.paidLedger(trx, [world.v1], [], [], world.W2);
-      expect(byVisit.visits.get(world.v1)).toEqual({ weekStart: W1, root: null });
+      expect(byVisit.visits.get(world.v1)).toEqual({ weekStart: W1, root: null, runId: expect.any(String) });
       expect(byVisit.invoices.get(world.inv)).toEqual([expect.objectContaining({ weekStart: W1 })]);
       // the week itself is never counted
       const own = await productionShare.paidLedger(trx, [world.v1], [world.inv], [], W1);
