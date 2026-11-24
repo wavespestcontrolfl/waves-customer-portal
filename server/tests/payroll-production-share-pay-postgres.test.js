@@ -259,6 +259,29 @@ postgres('production share pay line', () => {
     expect(re.totals).not.toHaveProperty('productionShareCents');
   });
 
+  it('a week at or under the bar still shows the breakdown on the stub and a $0 row on the statement; no earning row', async () => {
+    const id = await tech('Sample Alpha');
+    const plain = await tech('Sample Bravo');
+    await settings(id);
+    await worked(id, W1, 40);
+    await worked(plain, W1, 40);
+    await stop(id, W1, '500.00');
+    const created = (await draft(W1)).body.run;
+    const done = (await finalize(created.id)).body.run;
+    const stub = (await api('GET', `/checks/${byName(done, 'Sample Alpha').id}/stub`)).body.stub;
+    expect(stub.earnings).not.toHaveProperty('productionShareCents');
+    expect(stub.earnings.productionShare).toEqual({
+      creditedCents: 50000, barCents: 90000, aboveBarCents: 0, rateBps: 1500, barType: 'per_shift', shifts: 1, shareCents: 0,
+    });
+    // no settings: no breakdown either
+    const bravo = (await api('GET', `/checks/${byName(done, 'Sample Bravo').id}/stub`)).body.stub;
+    expect(bravo.earnings).not.toHaveProperty('productionShare');
+    const now = new Date('2026-12-01T12:00:00Z');
+    expect((await getYearStatement(id, '2026', { now })).pay).toHaveProperty('productionShareCents', 0);
+    // the year of a technician whose checks stored no share keeps its earlier keys
+    expect((await getYearStatement(plain, '2026', { now })).pay).not.toHaveProperty('productionShareCents');
+  });
+
   it('a stop that needs review pays $0, is named on the draft, and does not block the run', async () => {
     const id = await tech('Sample Alpha');
     await settings(id);

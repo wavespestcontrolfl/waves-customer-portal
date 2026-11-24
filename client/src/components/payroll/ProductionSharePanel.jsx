@@ -10,8 +10,9 @@ import { addStaffCalendarDays } from '../../lib/staffTimeDate';
 import { centsToDollars, dayLabel, lastFinishedWeekStart } from './payrollFormat';
 import { dollarsToCents } from './PayLinesPanel';
 
-// Production share, preview (Technician Terms v3, owner 2026-11-23). PR 1 of the share: the weekly CREDIT and the
-// numbers it is computed with. Nothing here is paid: no pay line, no money on any check. The owner account saves the
+// Production share, preview (Technician Terms v3, owner 2026-11-23): the weekly CREDIT and the numbers it is computed
+// with. The preview itself pays nothing. When GATE_PAYROLL_PRODUCTION_SHARE is on, a pay run pays the share from these
+// numbers (PR 2); the page is not told the gate state, so its words are neutral. The owner account saves the
 // numbers; the preview shows each completed stop's credit, the shifts, the bar and the share the week would give.
 
 const KIND_WORDS = {
@@ -60,7 +61,7 @@ function SettingsForm({ call, technicians, technicianId, weekStart, current, gen
           rateBps, barType, barCents, callbackStopValueCents: callbackCents,
         },
       });
-      setMessage('Saved. It pays nothing yet.');
+      setMessage('Saved. A pay run uses these numbers for the weeks they apply to, when the production share is turned on for pay runs.');
       onSaved(startedUnder);
     } catch (failure) { setError(failure.message); }
     setBusy(false);
@@ -162,7 +163,7 @@ export default function ProductionSharePanel({ call, technicians }) {
       <header>
         <h2 className="m-0 text-18 font-medium text-zinc-900">Production share preview</h2>
         <p className="m-0 mt-1 text-ui-caption text-ink-secondary">
-          The credit each employee earned in a pay week and the share it would give. Nothing is paid from this yet.
+          This is an estimate: the credit each employee earned in a pay week and the share it would give. The preview pays nothing. When the production share is turned on for pay runs, a pay run pays the share from these numbers.
         </p>
       </header>
       {!open && <div><Button variant="secondary" onClick={() => setOpen(true)}>Open the production share preview</Button></div>}
@@ -188,7 +189,7 @@ export default function ProductionSharePanel({ call, technicians }) {
           <div><dt className="text-ui-caption text-ink-secondary">Credited production</dt><dd className="m-0 text-zinc-900">{centsToDollars(preview.creditedCents)}</dd></div>
           <div><dt className="text-ui-caption text-ink-secondary">Bar</dt><dd className="m-0 text-zinc-900">{preview.configured ? centsToDollars(preview.barCents) : 'Not set'}</dd></div>
           <div><dt className="text-ui-caption text-ink-secondary">Above the bar</dt><dd className="m-0 text-zinc-900">{centsToDollars(preview.aboveBarCents)}</dd></div>
-          <div><dt className="text-ui-caption text-ink-secondary">Share (not paid)</dt><dd className="m-0 text-zinc-900">{centsToDollars(preview.shareCents)}</dd></div>
+          <div><dt className="text-ui-caption text-ink-secondary">Share (estimate)</dt><dd className="m-0 text-zinc-900">{centsToDollars(preview.shareCents)}</dd></div>
         </dl>
         <PreviewNotes preview={preview} />
         {preview.stops.length === 0

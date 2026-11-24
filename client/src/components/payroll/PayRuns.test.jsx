@@ -382,6 +382,28 @@ describe('Finalized run', () => {
     expect(plain).not.toHaveTextContent('Production share');
   });
 
+  it('shows the breakdown on a stub with a $0 share (under the bar) and no earning row', async () => {
+    const saved = { ...STUB };
+    STUB.earnings = {
+      ...STUB.earnings,
+      productionShare: { creditedCents: 50000, barCents: 90000, aboveBarCents: 0, rateBps: 1500, barType: 'per_shift', shifts: 1, shareCents: 0 },
+    };
+    try {
+      const detail = await openFinal();
+      fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+      const stub = await within(await screen.findByRole('dialog')).findByLabelText('Pay stub');
+      const table = within(stub).getByRole('table', { name: 'Pay stub amounts' });
+      expect(within(table).queryByText('Production share')).toBeNull();
+      const breakdown = within(stub).getByLabelText('Production share breakdown');
+      expect(breakdown).toHaveTextContent('Credited production$500.00');
+      expect(breakdown).toHaveTextContent('Bar (1 shift)$900.00');
+      expect(breakdown).toHaveTextContent('Production share$0.00');
+    } finally {
+      for (const key of Object.keys(STUB)) delete STUB[key];
+      Object.assign(STUB, saved);
+    }
+  });
+
   it('adds a production share column and run total only when a check paid one, and lists the stops to review on a draft', async () => {
     const detail = await startRun({
       checks: [check({ productionShareCents: 16200, productionShare: { needsReviewCount: 2 } }), check({ id: 'check-b', name: 'Sample Beta' })],

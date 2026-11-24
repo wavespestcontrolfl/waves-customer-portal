@@ -61,6 +61,11 @@ describe('Production share preview', () => {
     await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/settings', expect.objectContaining({ method: 'PUT' })));
     const put = call.mock.calls.find(([path]) => path === '/production-share/settings')[1];
     expect(put.body).toEqual({ technicianId: 'tech-a', rateBps: 1600, barType: 'per_shift', barCents: 42550, callbackStopValueCents: 9500 });
+    // the words no longer say a pay run pays nothing: the preview is an estimate, and a pay run uses these numbers when it is on
+    expect(await screen.findByText(/Saved\. A pay run uses these numbers/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/pays nothing yet|Nothing is paid|not paid/i);
+    expect(screen.getByText(/This is an estimate/)).toBeInTheDocument();
+    expect(screen.getByText('Share (estimate)')).toBeInTheDocument();
   });
 
   it('shows refunds on shared invoices that could not be split', async () => {

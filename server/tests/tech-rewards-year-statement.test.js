@@ -45,6 +45,14 @@ describe('composeStatement', () => {
     });
   });
 
+  test('the production share row is there only when a check of the year stored a share figure (a stored 0 shows 0)', () => {
+    const { productionShare, ...none } = SUMS;
+    expect(compose(none, REWARDS).pay).not.toHaveProperty('productionShareCents');
+    expect(compose({ ...none, productionShare: null }, REWARDS).pay).not.toHaveProperty('productionShareCents');
+    expect(compose({ ...none, productionShare: '0' }, REWARDS).pay).toHaveProperty('productionShareCents', 0);
+    expect(compose(SUMS, REWARDS).pay.productionShareCents).toBe(16200);
+  });
+
   test('gross less the taxes and the savings is net pay, as payroll-calc.js works a paycheck out', () => {
     const s = compose(SUMS, REWARDS);
     expect(s.pay.grossCents - s.withheld.totalCents - s.simpleSavingsCents).toBe(s.netCents);

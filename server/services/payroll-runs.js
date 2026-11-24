@@ -1546,8 +1546,10 @@ async function getStub(checkId, conn = db) {
       overtimePayCents: c.overtimePayCents,
       ...(timeOffOn() ? { ptoPayCents: c.ptoPayCents, holidayPayCents: c.holidayPayCents } : {}),
       ...(c.minimumWeekPayCents === undefined ? {} : { minimumWeekPayCents: c.minimumWeekPayCents }),
-      // The production share and how it was worked out (credited, bar, above the bar, rate); only on a check that paid one.
-      ...(c.productionShareCents > 0 ? { productionShareCents: c.productionShareCents, productionShare: stubShare(c.productionShare, c.productionShareCents) } : {}),
+      // The production share and how it was worked out (credited, bar, above the bar, rate): the earning row only above $0, the
+      // breakdown on any check that stored a share figure, a $0 week too, so the technician sees credited production against the bar.
+      ...(c.productionShareCents > 0 ? { productionShareCents: c.productionShareCents } : {}),
+      ...(c.productionShare ? { productionShare: stubShare(c.productionShare, c.productionShareCents) } : {}),
       ...(withLines ? {
         reviewBonusCents: c.reviewBonusCents,
         commissionCents: c.commissionCents,
