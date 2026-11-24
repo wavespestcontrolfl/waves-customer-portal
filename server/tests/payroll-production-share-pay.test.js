@@ -294,6 +294,42 @@ describe('the read under the payroll lock', () => {
   });
 });
 
+describe('a shared invoice frozen with its week', () => {
+  const productionShare = require('../services/production-share');
+  const live = (a, b) => ({ invoiceId: 'inv-1', allocation: { 'visit-1': a, 'visit-2': b } });
+  const row = (a, b) => ({ visitId: 'visit-2', workDate: '2026-09-21', kind: 'priced', creditCents: b, needsReview: false, invoices: [live(a, b)] });
+  const frozen = new Map([['inv-1', { weekStart: '2026-09-14', allocation: { 'visit-1': 10000, 'visit-2': 10000 } }]]);
+
+  test('the same split changes nothing; a split moved either way is $0 and names the week it was paid in', () => {
+    expect(productionShare.markSharedChanged([row(10000, 10000)], frozen)[0]).toMatchObject({ kind: 'priced', creditCents: 10000, needsReview: false });
+    for (const [a, b] of [[15000, 5000], [5000, 15000]]) {
+      expect(productionShare.markSharedChanged([row(a, b)], frozen)[0]).toMatchObject({
+        kind: 'shared_invoice_changed', creditCents: 0, needsReview: true,
+        reason: expect.stringContaining('The shared invoice changed after the week of 2026-09-14 was paid'),
+      });
+    }
+    // a visit that joined the invoice later is a changed split too
+    const joined = { ...row(10000, 10000), invoices: [{ invoiceId: 'inv-1', allocation: { 'visit-1': 10000, 'visit-2': 5000, 'visit-3': 5000 } }] };
+    expect(productionShare.markSharedChanged([joined], frozen)[0].kind).toBe('shared_invoice_changed');
+  });
+
+  test('no frozen split, a row with no shared invoice, or a row already under review is left alone', () => {
+    expect(productionShare.markSharedChanged([row(15000, 5000)], new Map())[0].kind).toBe('priced');
+    const plain = { visitId: 'v', creditCents: 100, needsReview: false };
+    expect(productionShare.markSharedChanged([plain], frozen)[0]).toBe(plain);
+    const review = { ...row(15000, 5000), needsReview: true, kind: 'unpriced', creditCents: 0 };
+    expect(productionShare.markSharedChanged([review], frozen)[0].kind).toBe('unpriced');
+  });
+
+  test('the snapshot freezes the invoice split on the stop, and only on a stop that has one', () => {
+    const rows = [{ visitId: 'v1', workDate: '2026-09-14', kind: 'priced', creditCents: 100, needsReview: false, invoices: [live(1, 2)] },
+      { visitId: 'v2', workDate: '2026-09-15', kind: 'priced', creditCents: 100, needsReview: false, invoices: [] }];
+    const made = share.snapshotOf({ weekStart: WEEK, settings: SETTINGS, result: shareForWeek({ credits: rows, shifts: 2, settings: SETTINGS }), stops: rows });
+    expect(made.stops[0].invoices).toEqual([live(1, 2)]);
+    expect(made.stops[1]).not.toHaveProperty('invoices');
+  });
+});
+
 describe('the run CSV header of the overtime column', () => {
   const rowOf = (made) => {
     const { check } = build(made ? { production_share: made } : {});

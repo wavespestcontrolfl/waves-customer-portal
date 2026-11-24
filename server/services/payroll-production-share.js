@@ -24,7 +24,7 @@
  *
  * What the check freezes (calc_snapshot.productionShare, with payroll_checks.production_share_cents): the credited
  * production, the bar, the amount above it, the rate, the bar type, the shifts and one row per stop { visitId, workDate,
- * kind, creditCents, needsReview }. No customer name, address or price detail is copied. A stop that needs review credits
+ * kind, creditCents, needsReview, invoices? }. No customer name, address or price detail is copied. A stop that needs review credits
  * $0 (production-share.js) and the draft says how many; it never blocks the run. The review token takes the share and a
  * signature of those rows, so a credit that changes after drafting makes the draft stale.
  */
@@ -53,6 +53,9 @@ function snapshotOf({ weekStart, settings, result, stops }) {
     shareCents: result.shareCents,
     stops: stops.map((stop) => ({
       visitId: stop.visitId, workDate: stop.workDate, kind: stop.kind, creditCents: stop.creditCents, needsReview: Boolean(stop.needsReview),
+      // The shared invoices the credit came from, with their full split (visit id -> cents) as it was when this week was paid: a
+      // later week of another visit of the same invoice is checked against it (production-share.js markSharedChanged).
+      ...(stop.invoices && stop.invoices.length ? { invoices: stop.invoices } : {}),
     })),
   };
 }

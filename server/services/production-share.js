@@ -476,7 +476,8 @@ function invoiceShare(row, members) {
  * prices, with the cents settled exactly; when a member has no price the split is unknowable: the visit is flagged with that
  * invoice (`unallocated`, with the invoice's whole refund kept visible) and never priced from the visit instead. Draft and void invoices are no charge. The prepay invoice of an annual term
  * is never attributed here: its refunds go to the term's visits (termRefunds).
- * Returns Map visitId -> { billedCents (null = no invoice named the visit's price), refundCents, unallocated: [{ invoiceId, refundCents }] }.
+ * Returns Map visitId -> { billedCents (null = no invoice named the visit's price), refundCents, unallocated: [{ invoiceId, refundCents }],
+ * shared: [{ invoiceId, allocation: { visitId: cents } }] for each invoice split across several visits }.
  */
 async function billedByVisit(conn, visitIds) {
   const out = new Map();
@@ -528,11 +529,14 @@ async function billedByVisit(conn, visitIds) {
   for (const row of links.rows) {
     const share = shares.get(row.invoice_id);
     if (share.skipped) continue;
-    const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [] };
+    const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [], shared: [] };
     if (share.unallocated !== undefined) entry.unallocated.push({ invoiceId: row.invoice_id, refundCents: share.unallocated, reason: share.reason });
     else if (share.billed.has(row.visit_id)) {
       entry.billedCents = (entry.billedCents || 0) + share.billed.get(row.visit_id);
       entry.refundCents += (share.refunded && share.refunded.get(row.visit_id)) || 0;
+      // The invoice's FULL allocation (visit id -> cents) when several visits share it: a pay run freezes it on the stop, so a later
+      // pay week of another visit of the same invoice can tell that the split changed (see markSharedChanged).
+      if (share.billed.size > 1) entry.shared.push({ invoiceId: row.invoice_id, allocation: Object.fromEntries(share.billed) });
     }
     out.set(row.visit_id, entry);
   }
@@ -674,6 +678,13 @@ async function weekStops(conn, technicianIds, weekStart) {
     .orderByRaw(`${WORK_DATE_SQL}, s.completed_at NULLS LAST, s.id`);
 }
 
+// The shared-invoice allocations of the given billedByVisit entries, once per invoice.
+function sharedInvoices(entries) {
+  const seen = new Map();
+  for (const entry of entries) for (const one of (entry && entry.shared) || []) if (!seen.has(one.invoiceId)) seen.set(one.invoiceId, one);
+  return [...seen.values()];
+}
+
 /**
  * The credit rows of ONE technician's stops (weekStops rows): { visitId, workDate, kind, creditCents, reason, needsReview,
  * refundCents, serviceType } in the stops' order. Every read after the stop list is keyed by visit id, not by technician.
@@ -713,6 +724,8 @@ async function creditsOfStops(conn, technicianId, stops, inForce) {
       refundCents: (invoiced.refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
       // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
       unallocatedRefunds: invoiced.unallocated || [],
+      // The shared invoices this credit came from, with their full allocation (the visit's own and the job's first visit).
+      invoices: sharedInvoices([invoiced, job && job.root ? billed.get(job.root.id) : null]),
     });
   }
   return rows;
@@ -721,7 +734,8 @@ async function creditsOfStops(conn, technicianId, stops, inForce) {
 /**
  * Visits a FINALIZED pay run already paid a production share credit for, in a week other than `weekStart`: Map of visit id ->
  * the pay week (Monday) of that check. One query. Read from the frozen snapshots (calc_snapshot.productionShare.stops, rows with
- * a credit above $0) of finalized checks of finalized runs, whoever the technician was; voiding that run takes its checks out of
+ * a credit above $0) of finalized checks of finalized runs that PAID a share above $0 (a week at or under the bar paid nothing for
+ * its visits: moved into another week they earn there, or their production would never be paid at all), whoever the technician was; voiding that run takes its checks out of
  * the query, so the visit is free again. A time-on-site correction can move a visit's completed_at into another pay week; without
  * this the visit would be credited twice.
  */
@@ -734,12 +748,62 @@ async function paidElsewhere(conn, visitIds, weekStart) {
     CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(c.calc_snapshot->'productionShare'->'stops') = 'array'
       THEN c.calc_snapshot->'productionShare'->'stops' ELSE '[]'::jsonb END) AS stop(value)
     WHERE c.status = 'finalized' AND r.status = 'finalized' AND c.week_start <> ?::date
+      AND COALESCE(c.production_share_cents, 0) > 0
       AND stop.value->>'visitId' = ANY(?::text[])
       AND COALESCE((stop.value->>'creditCents')::bigint, 0) > 0
     GROUP BY stop.value->>'visitId'`, [weekStart, visitIds]);
   for (const row of rows.rows) paid.set(row.visit_id, row.week_start);
   return paid;
 }
+
+/**
+ * The allocation each shared invoice was frozen with when a finalized run first paid it, for the invoices in `invoiceIds`, in a
+ * week other than `weekStart`: Map of invoice id -> { weekStart, allocation: { visitId: cents } }. One query; the earliest paid
+ * week wins. Only checks that paid a share above $0 count, as in paidElsewhere; voiding the run takes its checks out.
+ */
+async function frozenAllocations(conn, invoiceIds, weekStart) {
+  const frozen = new Map();
+  if (!invoiceIds.length) return frozen;
+  const rows = await conn.raw(`SELECT inv.value->>'invoiceId' AS invoice_id, to_char(c.week_start, 'YYYY-MM-DD') AS week_start,
+      inv.value->'allocation' AS allocation
+    FROM payroll_checks c
+    JOIN payroll_runs r ON r.id = c.run_id
+    CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(c.calc_snapshot->'productionShare'->'stops') = 'array'
+      THEN c.calc_snapshot->'productionShare'->'stops' ELSE '[]'::jsonb END) AS stop(value)
+    CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(stop.value->'invoices') = 'array'
+      THEN stop.value->'invoices' ELSE '[]'::jsonb END) AS inv(value)
+    WHERE c.status = 'finalized' AND r.status = 'finalized' AND c.week_start <> ?::date
+      AND COALESCE(c.production_share_cents, 0) > 0
+      AND inv.value->>'invoiceId' = ANY(?::text[])
+    ORDER BY c.week_start, c.id`, [weekStart, invoiceIds]);
+  for (const row of rows.rows) {
+    if (!frozen.has(row.invoice_id)) frozen.set(row.invoice_id, { weekStart: row.week_start, allocation: row.allocation || {} });
+  }
+  return frozen;
+}
+
+const sameAllocation = (a, b) => {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && Number(a[key]) === Number(b[key]));
+};
+
+/**
+ * A stop of a shared invoice whose split no longer matches the split a finalized run froze (another visit of the invoice was
+ * paid in another week) is $0 and needs review: crediting it from the live split could pay more or less than the invoice's price
+ * across the two weeks. A split that still matches changes nothing (this visit's frozen cents are its live cents). A row that is
+ * already $0 for another reason keeps that reason. Pure.
+ */
+function markSharedChanged(rows, frozen) {
+  if (!frozen.size) return rows;
+  return rows.map((row) => {
+    if (row.needsReview || !(row.invoices || []).length) return row;
+    const changed = row.invoices.map((one) => ({ one, was: frozen.get(one.invoiceId) })).find(({ one, was }) => was && !sameAllocation(one.allocation, was.allocation));
+    return changed
+      ? { ...row, ...toReview('shared_invoice_changed', `The shared invoice changed after the week of ${changed.was.weekStart} was paid: its split between the visits is not the one that week was paid with.`) }
+      : row;
+  });
+}
+const invoiceIdsOf = (rows) => [...new Set(rows.filter((row) => row.creditCents > 0).flatMap((row) => (row.invoices || []).map((one) => one.invoiceId)))];
 
 // The rows with every visit in `paid` (visit id -> its pay week) turned into $0 "needs review" rows.
 const markPaid = (rows, paid) => (paid.size ? rows.map((row) => (paid.has(row.visitId)
@@ -760,7 +824,8 @@ async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
   const inForce = settings === undefined ? await settingsFor(conn, technicianId, weekStart) : settings;
   const stops = await weekStops(conn, [technicianId], weekStart);
   const rows = await creditsOfStops(conn, technicianId, stops, inForce);
-  return markPaid(rows, await paidElsewhere(conn, creditedIds(rows), weekStart));
+  const unpaid = markPaid(rows, await paidElsewhere(conn, creditedIds(rows), weekStart));
+  return markSharedChanged(unpaid, await frozenAllocations(conn, invoiceIdsOf(unpaid), weekStart));
 }
 
 /**
@@ -786,6 +851,8 @@ async function weekCreditsFor(conn, settingsById, weekStart) {
   }
   const paid = await paidElsewhere(conn, [...credits.values()].flatMap((one) => (one.rows ? creditedIds(one.rows) : [])), weekStart);
   for (const [id, one] of credits) if (one.rows) credits.set(id, { rows: markPaid(one.rows, paid) });
+  const frozen = await frozenAllocations(conn, [...credits.values()].flatMap((one) => (one.rows ? invoiceIdsOf(one.rows) : [])), weekStart);
+  for (const [id, one] of credits) if (one.rows) credits.set(id, { rows: markSharedChanged(one.rows, frozen) });
   return credits;
 }
 
@@ -822,6 +889,6 @@ async function previewWeek(technicianId, weekStart, conn = db) {
 }
 
 module.exports = {
-  allocateCents, BAR_TYPES, OWN_CALLBACK_DAYS, shareForWeek, jobPartCents, shiftDays, settingsFor, settingsHistory, saveSettings, weekCredits, weekCreditsFor, weekStops, creditsOfStops, paidElsewhere,
+  allocateCents, BAR_TYPES, OWN_CALLBACK_DAYS, shareForWeek, jobPartCents, shiftDays, settingsFor, settingsHistory, saveSettings, weekCredits, weekCreditsFor, weekStops, creditsOfStops, paidElsewhere, markSharedChanged,
   previewWeek,
 };
