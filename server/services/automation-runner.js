@@ -316,15 +316,15 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     const stop = await estimateSentStop(enrollment, step);
     if (stop) return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
   }
-  if (isNewLeadDripStep(template.key, step)) return newLeadDripBlock({ enrollment, sendId });
+  if (isNewLeadDripStep(template.key, step)) return newLeadDripBlock({ enrollment, sendId, recipient });
   if (template.key === 'referral_nudge') return referralNudgeBlock({ enrollment, sendId, nudge });
   return null;
 }
 
 // The new_lead drip's later steps (GATE_NEW_LEAD_DRIP_STEPS), read at delivery: a stop ends the enrollment with nothing sent; a
 // doubt (a read failed) leaves the step due for a later tick and never sends.
-async function newLeadDripBlock({ enrollment, sendId }) {
-  const stop = await newLeadDripStop(enrollment);
+async function newLeadDripBlock({ enrollment, sendId, recipient }) {
+  const stop = await newLeadDripStop(enrollment, recipient);
   if (!stop) return null;
   if (stop.defer) return deferPaymentFailedForHold({ enrollment, sendId, reason: stop.reason });
   return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });

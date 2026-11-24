@@ -104,6 +104,7 @@ function queues({ steps, reads = {}, enrollment: overrides = {}, passed = [], le
   const sendUpdate = chain();
   const stepsChain = chain({ result: steps });
   const estimateRead = answer(reads.estimate);
+  const newsletterRead = answer(reads.unsubscribed);
   const noLock = !enrollment.customer_id;
   const noCustomer = noLock && !reads.lead?.customer_id;
   setDbQueues({
@@ -120,10 +121,10 @@ function queues({ steps, reads = {}, enrollment: overrides = {}, passed = [], le
     invoices: noCustomer ? [] : [answer(reads.invoice)],
     customers: noCustomer ? [] : [answer(reads.customerStage ?? { pipeline_stage: 'new_lead' }), answer({ phone: '+19415550100' })],
     // reads.lead = null is a lead row that is gone.
-    newsletter_subscribers: [answer(reads.unsubscribed)],
+    newsletter_subscribers: [newsletterRead],
     leads: leadId ? [answer(reads.lead === null ? undefined : { phone: null, converted_at: null, estimate_id: null, status: 'new', deleted_at: null, ...reads.lead })] : [],
   });
-  return { enrollmentUpdate, sendUpdate, stepsChain, estimateRead };
+  return { enrollmentUpdate, sendUpdate, stepsChain, estimateRead, newsletterRead };
 }
 
 const tableReads = (table) => db.mock.calls.filter(([t]) => t === table).length;
@@ -321,6 +322,23 @@ describe('gate on: stops at step 1 and step 2', () => {
     const { enrollmentUpdate } = queues({ steps: STEPS, passed: [STEP_0], leadId: 'lead-1', reads: { lead: { status } } });
     await sendOk();
     notCancelled(enrollmentUpdate);
+  });
+
+  test('a commercial inquiry (leads.is_commercial) cancels as new_lead_commercial: the price email is residential', async () => {
+    const { enrollmentUpdate } = queues({ steps: STEPS, passed: [STEP_0], leadId: 'lead-1', reads: { lead: { is_commercial: true } } });
+    await stopped('The lead is a commercial inquiry');
+    cancelledWith(enrollmentUpdate, 'new_lead_commercial');
+  });
+
+  test('the newsletter opt-out is read for the address the step is delivered to, not only the enrollment address', async () => {
+    const { enrollmentUpdate, newsletterRead } = queues({
+      steps: STEPS, passed: [STEP_0], reads: { unsubscribed: { id: 'sub-2' } },
+    });
+    // The contact who turned email off is rerouted to the account holder's address.
+    require('../services/contact-notification-prefs').rerouteForContactEmailOptOut.mockResolvedValueOnce({ rerouted: true, email: 'Holder@Example.com' });
+    await stopped('The lead unsubscribed from the newsletter');
+    cancelledWith(enrollmentUpdate, 'new_lead_unsubscribed');
+    expect(newsletterRead.whereRaw).toHaveBeenCalledWith('lower(email) = ANY(?)', [['pat@example.com', 'holder@example.com']]);
   });
 
   test('a lead enrolled with no customer id is checked for a text reply by the lead phone', async () => {

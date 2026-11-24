@@ -9,8 +9,9 @@
  *   2. a visit is booked (any scheduled service that is not cancelled, rescheduled, skipped or a no-show),
  *   3. the lead is a paying customer (a paid invoice, a customer pipeline stage) or the lead row is converted,
  *   4. the enrolling lead row is closed (not an open status), removed or missing,
- *   5. the address unsubscribed through the portal's newsletter unsubscribe page,
- *   6. the lead replied by text or email since the enrollment (the engine's two reply arms, estimate-follow-up.hasRepliedSince).
+ *   5. the lead is a commercial inquiry (the price email is residential),
+ *   6. the address unsubscribed through the portal's newsletter unsubscribe page,
+ *   7. the lead replied by text or email since the enrollment (the engine's two reply arms, estimate-follow-up.hasRepliedSince).
  * The existing suppression and email-off checks run before this in automation-runner.js.
  *
  * Any doubt defers, never sends: a failed read returns { defer: true } and the runner leaves the step due for a later tick.
@@ -83,9 +84,10 @@ async function isPayingCustomer(customerId, lead) {
 
 // The portal's own newsletter unsubscribe (public-newsletter.js) sets newsletter_subscribers.status. new_lead goes out under the
 // newsletter unsubscribe group, so a lead who unsubscribed there after the first email gets no more of the drip.
-async function newsletterUnsubscribed(email) {
-  if (!email) return false;
-  const row = await db('newsletter_subscribers').whereRaw('lower(email) = ?', [email]).where({ status: 'unsubscribed' }).first('id');
+// Checked for the enrollment's address AND the address the step is actually delivered to (a contact who turned email off reroutes it).
+async function newsletterUnsubscribed(emails) {
+  if (!emails.length) return false;
+  const row = await db('newsletter_subscribers').whereRaw('lower(email) = ANY(?)', [emails]).where({ status: 'unsubscribed' }).first('id');
   return !!row;
 }
 
@@ -99,16 +101,18 @@ async function repliedSince(enrollment, email, lead) {
   return require('./estimate-follow-up').hasRepliedSince(asker, new Date(enrollment.enrolled_at), { throwOnError: true });
 }
 
-// The stops, in the order they are read. Each one reads what it needs from { who, email, leadId, lead }.
+// The stops, in the order they are read. Each one reads what it needs from { who, email, emails, leadId, lead }.
 const leadGone = ({ leadId, lead }) => !!leadId && (!lead || !!lead.deleted_at || !isOpenLeadRow(lead));
 const STOPS = [
   { cancelReason: 'new_lead_estimate', reason: 'The lead has an estimate since enrolling',
     hit: async (c) => await estimateSince(c.who, c.email) || leadHasEstimate(c.leadId, c.lead) },
   { cancelReason: 'new_lead_booked', reason: 'The lead has a booked visit', hit: (c) => visitBooked(c.who.customer_id) },
   { cancelReason: 'new_lead_customer', reason: 'The lead is a customer', hit: (c) => isPayingCustomer(c.who.customer_id, c.lead) },
+  // The price email states a residential price and residential terms: a commercial inquiry waits for an office quote.
+  { cancelReason: 'new_lead_commercial', reason: 'The lead is a commercial inquiry', hit: ({ lead }) => lead?.is_commercial === true },
   // The office closed, marked spam or lost, or removed the enrolling lead (or the row is gone): no more emails.
   { cancelReason: 'new_lead_lead_closed', reason: 'The enrolling lead is closed or removed', hit: leadGone },
-  { cancelReason: 'new_lead_unsubscribed', reason: 'The lead unsubscribed from the newsletter', hit: (c) => newsletterUnsubscribed(c.email) },
+  { cancelReason: 'new_lead_unsubscribed', reason: 'The lead unsubscribed from the newsletter', hit: (c) => newsletterUnsubscribed(c.emails) },
   { cancelReason: 'new_lead_replied', reason: 'The lead replied since enrolling', hit: (c) => repliedSince(c.who, c.email, c.lead) },
 ];
 
@@ -116,18 +120,19 @@ const STOPS = [
  * @returns {Promise<null | { reason: string, cancelReason: string } | { defer: true, reason: string }>}
  *   null = no stop, send. A stop ends the enrollment. defer = read failed or enrollment time unreadable, try again later.
  */
-async function newLeadDripStop(enrollment) {
+async function newLeadDripStop(enrollment, recipient = null) {
   const enrolledMs = enrollment.enrolled_at ? new Date(enrollment.enrolled_at).getTime() : NaN;
   if (!Number.isFinite(enrolledMs)) return { defer: true, reason: 'The new lead enrollment time is unreadable; email deferred' };
   const leadId = enrollmentMeta(enrollment).lead_id || null;
   try {
-    const lead = leadId ? (await db('leads').where({ id: leadId }).first('phone', 'converted_at', 'estimate_id', 'customer_id', 'status', 'deleted_at')) || null : null;
+    const lead = leadId ? (await db('leads').where({ id: leadId }).first('phone', 'converted_at', 'estimate_id', 'customer_id', 'status', 'deleted_at', 'is_commercial')) || null : null;
     // The lead webhook can enroll a lead with no customer id, and booking an assessment later links the lead to a customer
     // without converting it: the lead's current customer id stands in for the enrollment's missing one in every read.
     const context = {
       leadId,
       lead,
       email: String(enrollment.email || '').trim().toLowerCase(),
+      emails: [...new Set([enrollment.email, recipient].map((a) => String(a || '').trim().toLowerCase()).filter(Boolean))],
       who: { ...enrollment, customer_id: enrollment.customer_id || lead?.customer_id || null },
     };
     for (const stop of STOPS) {
