@@ -25,6 +25,7 @@ const {
   storedShift,
   shiftBounds,
   shiftExcluding,
+  shiftLostByDayChange,
 } = require('../services/technician-eligibility');
 const logger = require('../services/logger');
 
@@ -858,15 +859,71 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
       }
     });
 
-    // The movers judge a time they cannot read as a block one minute longer than a day (rebooker.js shiftBlockMinutes).
-    test('shiftExcluding: a shift that is the whole day holds the whole day, and no shift holds a block longer than a day', async () => {
+    // A visit that changes its day only: a later visit of a plan, a follow-up that moves with its parent.
+    describe('shiftLostByDayChange: the shift a visit loses by a change of day alone', () => {
+      // Set hours 08:00 to 18:00. Today (2031-03-04) the technician clocked in at 06:00: today's shift is 06:00 to 16:00.
+      const clockRows = [{ technician_id: 'tech-1', clock_in: new Date('2031-03-04T11:00:00Z') }];
+      const visit = (start, end, more = {}) => ({ window_start: start, window_end: end, estimated_duration_minutes: 60, ...more });
+      const lost = (row, fromDate, toDate, options = { clockRows }) => {
+        const made = commitConn(options);
+        return shiftLostByDayChange(made.conn, 'tech-1', row, fromDate, toDate).then((answer) => ({ answer, calls: made.calls, conn: made.conn }));
+      };
+      const SET_HOURS = { startMin: 480, endMin: 1080, source: 'roster' };
+      const TODAYS = { startMin: 360, endMin: 960, source: 'clock_in' };
+      beforeEach(() => {
+        gateOn();
+        jest.useFakeTimers({ now: NOW });
+      });
+
+      test('a visit the old day\'s shift held and the new day\'s does not: the new day\'s shift; one read of the hours judges both days', async () => {
+        // 06:30 to 07:30 leaves today for the set hours; 16:30 to 17:30 lands on today, after today's shift.
+        const leaves = await lost(visit('06:30', '07:30'), TODAY, TOMORROW);
+        expect(leaves.answer).toEqual(SET_HOURS);
+        expect(hoursReads(leaves.calls)).toHaveLength(1);
+        expect((await lost(visit('16:30', '17:30'), TOMORROW, TODAY)).answer).toEqual(TODAYS);
+        // The block is the later of the stored end and the start plus the stored length: 09:00 for eight hours ends at 17:00.
+        expect((await lost(visit('09:00', '10:00', { estimated_duration_minutes: 480 }), TOMORROW, TODAY)).answer).toEqual(TODAYS);
+      });
+
+      test('null for a visit both days\' shifts hold, and for one the shift did not hold where it was (the office\'s placement)', async () => {
+        expect((await lost(visit('09:00', '10:00'), TODAY, TOMORROW)).answer).toBeNull();
+        // 16:30 to 17:30 is after today's shift; 19:00 to 20:00 is outside both shifts.
+        expect((await lost(visit('16:30', '17:30'), TODAY, TOMORROW)).answer).toBeNull();
+        expect((await lost(visit('19:00', '20:00'), TODAY, TOMORROW)).answer).toBeNull();
+        // Two days with the same hours never differ.
+        expect((await lost(visit('06:30', '07:30'), TOMORROW, '2031-03-06')).answer).toBeNull();
+      });
+
+      test('a stored time the movers cannot read exactly is one no shift holds on the new day, unless the shift did not hold its minutes where it was', async () => {
+        // 09:00:30 to 10:00:30: its minutes are inside both shifts.
+        expect((await lost(visit('09:00:30', '10:00:30'), TODAY, TOMORROW)).answer).toEqual(SET_HOURS);
+        expect((await lost(visit('16:30:30', '17:30:30'), TODAY, TOMORROW)).answer).toBeNull();
+      });
+
+      test('nothing to judge: no technician, no window, no set hours, or the gate off (no read)', async () => {
+        const made = commitConn({ clockRows });
+        expect(await shiftLostByDayChange(made.conn, null, visit('06:30', '07:30'), TODAY, TOMORROW)).toBeNull();
+        expect(made.conn).not.toHaveBeenCalled();
+        expect((await lost({ window_start: null, window_end: null, estimated_duration_minutes: 60 }, TODAY, TOMORROW)).conn).not.toHaveBeenCalled();
+        expect((await lost(visit('06:30', '07:30'), TODAY, TOMORROW, { shiftRows: [] })).answer).toBeNull();
+        delete process.env.GATE_TECH_SHIFT_HOURS;
+        const off = await lost(visit('06:30', '07:30'), TODAY, TOMORROW);
+        expect(off.answer).toBeNull();
+        expect(off.conn).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a shift that is the whole day holds the whole day, and not a time the movers cannot read exactly (shiftBlockMinutes: one minute longer than a day)', async () => {
       gateOn();
       // 2031-03-09 is the March clock change: a clock-in at midnight with 23 set hours ends at the next midnight.
       jest.useFakeTimers({ now: new Date('2031-03-09T06:00:00Z') });
       const wholeDay = { shiftRows: [{ id: 'tech-1', shift_start: '00:00:00', shift_end: '23:00:00' }], clockRows: [{ technician_id: 'tech-1', clock_in: new Date('2031-03-09T05:00:00Z') }] };
       const at = (hours) => shiftExcluding(commitConn(wholeDay).conn, 'tech-1', '2031-03-09', hours);
+      const { shiftBlockMinutes } = require('../services/scheduling/window-rules');
       expect(await at({ startMin: 0, endMin: 1440 })).toBeNull();
-      expect(await at({ startMin: 0, endMin: 1441 })).toEqual({ startMin: 0, endMin: 1440, source: 'clock_in' });
+      expect(await at(shiftBlockMinutes({ window_start: '00:00', window_end: '24:00' }))).toBeNull();
+      expect(await at(shiftBlockMinutes({ window_start: '4:05 PM', window_end: '5:05 PM' }))).toEqual({ startMin: 0, endMin: 1440, source: 'clock_in' });
+      expect(await at(shiftBlockMinutes({ window_start: '10:00', window_end: '11:00:30' }))).toEqual({ startMin: 0, endMin: 1440, source: 'clock_in' });
     });
   });
 });

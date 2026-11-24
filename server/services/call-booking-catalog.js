@@ -840,11 +840,12 @@ function followUpProbeEnd(windowStart, windowEnd, estimatedDurationMinutes) {
 // office's own move does not): a child keeps its hours and its technician and
 // changes its day only, so the move does not place it. It is skipped like a
 // booked slot (it keeps its date and is reported, reason 'shift') only when
-// the change of day takes it out of its technician's shift: the shift held
-// its block on its day and does not hold it on the new one. A technician's
-// set hours are the same every day and only today's follow a clock-in, so
-// that is a child that leaves today or lands on it. A block the shift did not
-// hold where it was is the office's placement and moves as before.
+// the change of day takes it out of its technician's shift
+// (shiftLostByDayChange, the series mover's rule for a later stop): the shift
+// held it on its day and does not hold it on the new one. A technician's set
+// hours are the same every day and only today's follow a clock-in, so that is
+// a child that leaves today or lands on it. A child the shift did not hold
+// where it was is the office's placement and moves as before.
 async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate, occupancyHeld = false, plan = null, report = null, shiftLive = false, noticeActorId = null, suppressTechNotice = false }) {
   const fromStr = callBookingDateOnly(fromDate);
   const toStr = callBookingDateOnly(toDate);
@@ -904,13 +905,9 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
         skipped.push({ id: planned.id, day: planned.day, newDay: planned.new_day, reason: 'changed' });
         continue;
       }
-      if (shiftLive) {
-        const { shiftExcluding } = require('./technician-eligibility');
-        const hours = require('./scheduling/window-rules').rowBlockMinutes(k);
-        if (!(await shiftExcluding(trx, k.technician_id, k.day, hours)) && await shiftExcluding(trx, k.technician_id, k.new_day, hours)) {
-          skipped.push({ id: k.id, day: k.day, newDay: k.new_day, reason: 'shift' });
-          continue;
-        }
+      if (shiftLive && await require('./technician-eligibility').shiftLostByDayChange(trx, k.technician_id, k, k.day, k.new_day)) {
+        skipped.push({ id: k.id, day: k.day, newDay: k.new_day, reason: 'shift' });
+        continue;
       }
       // Canonical occupancy check on the destination block (a windowless
       // child occupies nothing and is not probed): a clash — or a block

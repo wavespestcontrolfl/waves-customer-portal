@@ -21,26 +21,22 @@ const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gate
 // leave it: its window and its stored length. The caller passes it only for a
 // move that must obey the hours (reschedule: `shiftLive`). A kept technician
 // whose shift that day does not hold the block is refused the same way.
-//
-// shiftBlockMinutes: the block a shift judges, in minutes. A start or an end
-// that is there but is no clock time the check reads exactly (unreadableBound,
-// the unit mover's rule) gives no block to trust, and the write can still
-// store it: PostgreSQL reads "4:05 PM" as 16:05 and keeps the seconds of
-// "12:00:30". Such a row is judged as a block no shift holds: one minute
-// longer than a day (a shift can be the whole day: a midnight clock-in on the
-// March clock-change Sunday with 23 set hours).
-const NO_SHIFT_HOLDS = { startMin: 0, endMin: 24 * 60 + 1 };
-function shiftBlockMinutes(block) {
-  const { rowBlockMinutes, unreadableBound } = require('./scheduling/window-rules');
-  return unreadableBound(block.window_start) || unreadableBound(block.window_end, true) ? NO_SHIFT_HOLDS : rowBlockMinutes(block);
-}
+// The block is judged through shiftBlockMinutes (window-rules.js): PostgreSQL
+// reads "4:05 PM" as 16:05 and keeps the seconds of "12:00:30", so a time the
+// check cannot read exactly is a block no shift holds.
+const slotNoLongerAvailable = () => Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
+  statusCode: 409,
+  status: 409,
+  isOperational: true,
+  code: 'SLOT_TAKEN',
+});
 // Is this a move that obeys the shift hours (GATE_TECH_SHIFT_HOURS)? An automatic
 // one: the office's own move does not, the office decides.
 const automaticShiftLive = (initiatedBy) => initiatedBy !== 'admin' && techShiftHoursLive();
 async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null, shiftOnly = false } = {}) {
   const staffMove = initiatedBy === 'admin';
   try {
-    const hours = block ? shiftBlockMinutes(block) : undefined;
+    const hours = block ? require('./scheduling/window-rules').shiftBlockMinutes(block) : undefined;
     // shiftOnly: a move that changes only the hours. It keeps the day and the
     // technician dispatch gave the visit, so it is judged on the shift alone
     // (shiftExcluding), not on the day's other rules, and refused the same way.
@@ -57,12 +53,7 @@ async function assertAssignableSlotTechnician(technicianId, trx, date, { initiat
     }
   } catch (err) {
     if (err.code !== NOT_ASSIGNABLE) throw err;
-    throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
-      statusCode: 409,
-      status: 409,
-      isOperational: true,
-      code: 'SLOT_TAKEN',
-    });
+    throw slotNoLongerAvailable();
   }
 }
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
@@ -177,10 +168,8 @@ function hoursChangedBy(update, row) {
 //     hold its block (its hours and its stored length).
 //   - A later stop keeps its hours and changes its day only. It is refused only when the move takes
 //     it from inside the shift to outside it: a block the shift did not hold on the day it leaves is
-//     the office's placement, and stays the office's.
-//     That needs evidence: the block's own minutes (rowBlockMinutes), outside the shift of the day it
-//     leaves. A stored time the check cannot read exactly gets no exemption from the block that
-//     stands in for it (shiftBlockMinutes), which every shift excludes.
+//     the office's placement, and stays the office's (shiftLostByDayChange, the rule a call-booked
+//     follow-up that moves with its visit is judged by too).
 // Judged on the shift alone (shiftOnly): the day's other rules are asked where they were. A landing
 // with no window has no hours to judge, and a time that is no clock time is refused wherever the
 // technician has a shift (shiftBlockMinutes).
@@ -189,10 +178,8 @@ async function assertSeriesRowInsideShift(trx, { live, tapped, row, update, date
   const landed = { ...row, ...update };
   const technicianId = landed.technician_id || null;
   if (!dayChanges && !hoursChangedBy(update, row) && technicianId === (row.technician_id || null)) return;
-  const leftDay = dateOnlyString(row.scheduled_date);
-  const { rowBlockMinutes } = require('./scheduling/window-rules');
-  if (!tapped && await require('./technician-eligibility').shiftExcluding(trx, technicianId, leftDay, rowBlockMinutes(landed))) return;
-  await assertAssignableSlotTechnician(technicianId, trx, dateStr, { initiatedBy, shiftOnly: true, block: landed });
+  if (tapped) return assertAssignableSlotTechnician(technicianId, trx, dateStr, { initiatedBy, shiftOnly: true, block: landed });
+  if (await require('./technician-eligibility').shiftLostByDayChange(trx, technicianId, landed, dateOnlyString(row.scheduled_date), dateStr)) throw slotNoLongerAvailable();
 }
 
 // Did this single move change the slot (the date or the window start)? Only then does it record an intent (moveIntentColumns).

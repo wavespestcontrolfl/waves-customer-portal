@@ -1797,36 +1797,34 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
   });
 
   // GATE_TECH_SHIFT_HOURS (D4): an automatic move passes shiftLive; the office's own move does not.
-  test('shiftLive: a child keeps its date only when its technician\'s shift held its block on its day and does not hold it on the new one; without the option the shift is not read', async () => {
+  test('shiftLive: a child the change of day takes out of its technician\'s shift keeps its date, reason "shift"; without the option the shift is not read', async () => {
     const eligibility = require('../services/technician-eligibility');
     const { notifyAdmin } = require('../services/notification-service');
     const kid = { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 };
-    const outside = { startMin: 600, endMin: 1200 };
-    const shift = jest.spyOn(eligibility, 'shiftExcluding');
-    const run = (answers, options = { shiftLive: true }) => {
-      shift.mockReset().mockImplementation(async (_conn, _technicianId, date) => answers[date] || null);
+    const lost = jest.spyOn(eligibility, 'shiftLostByDayChange');
+    const run = (answer, options = { shiftLive: true }) => {
+      lost.mockReset().mockResolvedValue(answer);
       const { conn } = fakeConn({ kids: [kid] });
       const report = {};
-      return shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', report, ...options }).then((shifted) => ({ shifted, report }));
+      return shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', report, ...options })
+        .then((shifted) => ({ shifted, report }));
     };
     try {
       notifyAdmin.mockClear();
-      const kept = await run({ '2026-07-19': outside });
+      const kept = await run({ startMin: 600, endMin: 1200 });
       expect(kept).toEqual({ shifted: 0, report: { skipped: [{ id: 'kid-1', day: '2026-07-16', newDay: '2026-07-19', reason: 'shift' }] } });
-      // The child's own block (09:00 for its hour), on its own technician, on each of its two days.
-      expect(shift.mock.calls.map((call) => call.slice(1))).toEqual([['t1', '2026-07-16', { startMin: 540, endMin: 600 }], ['t1', '2026-07-19', { startMin: 540, endMin: 600 }]]);
+      // The rule is asked of the child's own row and technician, from its day to its new day.
+      expect(lost.mock.calls.map((call) => call.slice(1))).toEqual([['t1', kid, '2026-07-16', '2026-07-19']]);
       expect(occupancy.findConflictingVisits).not.toHaveBeenCalled();
       expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining("(2026-07-16 → 2026-07-19 — outside the technician's shift)"), expect.objectContaining({
         link: '/admin/dispatch?tab=schedule&date=2026-07-16&appointment=kid-1',
       }));
-      // Outside the shift where it was (the office's placement), or inside it on both days: it moves.
-      for (const answers of [{ '2026-07-16': outside, '2026-07-19': outside }, { '2026-07-16': outside }, {}]) {
-        expect((await run(answers)).shifted).toBe(1);
-      }
-      expect((await run({ '2026-07-19': outside }, {})).shifted).toBe(1);
-      expect(shift).not.toHaveBeenCalled();
+      // The shift holds it on the new day, or did not hold it where it was: it moves.
+      expect((await run(null)).shifted).toBe(1);
+      expect((await run({ startMin: 600, endMin: 1200 }, {})).shifted).toBe(1);
+      expect(lost).not.toHaveBeenCalled();
     } finally {
-      shift.mockRestore();
+      lost.mockRestore();
     }
   });
 

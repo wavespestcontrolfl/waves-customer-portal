@@ -628,8 +628,8 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
 
     test('one that leaves today moves when today\'s shift does not hold it (the office\'s placement), and when the set hours hold it too', async () => {
       // 13:00 to 14:00 ends after today's shift; 21:00 to 22:00 is outside both shifts; 09:00 to 10:00 is inside both.
-      // 07:00 to 08:00 with six stored hours of work ends at 13:00, after today's shift: the block is the visit's length.
-      for (const [start, end, more] of [['13:00', '14:00'], ['21:00', '22:00'], ['09:00', '10:00'], ['07:00', '08:00', { estimated_duration_minutes: 360 }]]) {
+      // 07:00 to 08:00 with seven stored hours of work ends at 14:00, after today's shift: the block is the visit's length.
+      for (const [start, end, more] of [['13:00', '14:00'], ['21:00', '22:00'], ['09:00', '10:00'], ['07:00', '08:00', { estimated_duration_minutes: 420 }]]) {
         const parent = await seed();
         const child = await seedFollowUp(parent, today, { window_start: start, window_end: end, ...more });
         expect(await move(parent, nextDay, to)).toMatchObject({ success: true });
@@ -637,6 +637,17 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
         await f.db('scheduled_services').del();
       }
       expect(card).not.toHaveBeenCalledWith(...KEPT_CARD, expect.anything(), expect.anything());
+    });
+
+    // A stored time with seconds is one the check does not read exactly (no screen writes one).
+    test('one whose stored time has seconds keeps its date where the shift held its minutes, and moves where it did not (the office\'s placement)', async () => {
+      const parent = await seed();
+      // 09:00:30 to 10:00:30: its minutes are inside both shifts. 13:00:30 to 14:00:30 ends after today's shift.
+      const kept = await seedFollowUp(parent, today, { window_start: '09:00:30', window_end: '10:00:30' });
+      const placed = await seedFollowUp(parent, today, { window_start: '13:00:30', window_end: '14:00:30' });
+      expect(await move(parent, nextDay, to)).toMatchObject({ success: true });
+      expect(await rowOf(kept)).toMatchObject({ day: today, window_start: '09:00:30' });
+      expect(await rowOf(placed)).toMatchObject({ day: dayAfter(today), window_start: '13:00:30', window_end: '14:00:30' });
     });
 
     test('one that lands on today is judged the same way: it keeps its date when the set hours hold it and today\'s shift does not', async () => {
