@@ -437,7 +437,6 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
       const firstPaidVisit = await paidEstimateVisitsQuery(trx, {
         estimateId,
         customerId: estimate.customer_id,
-        lock: true,
       }).first('scheduled_services.scheduled_date');
       const overlapTermStart = dateOnlyString(firstPaidVisit?.scheduled_date)
         || dateOnlyString(acceptContext.annualPrepayTermStart)
