@@ -394,3 +394,23 @@ describe('accept refuses a no-booking reshape on the adopted-hold path', () => {
     expect(src.indexOf('const adoptedIsHold')).toBeLessThan(src.indexOf('const existingAppointmentRow = existingAppointmentId'));
   });
 });
+
+describe('accept rechecks staff bookings under the date lock', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
+
+  test('a hold graduated by the accept probes its signed coordinates after the date lock', () => {
+    const lockAt = src.indexOf('if (acceptPreLockedDate) await acquireOccupancyLock(trx, acceptPreLockedDate);');
+    const probeAt = src.indexOf('if (reservationRow && heldSlotCoordinates) {', lockAt);
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(probeAt).toBeGreaterThan(lockAt);
+    const probe = src.slice(probeAt, probeAt + 500);
+    expect(probe).toContain('bookedAtSubmittedSlot(');
+    expect(probe).toContain("code: 'RESERVATION_EXPIRED'");
+  });
+
+  test('an adopted appointment keeps the booked owner the preflight saw', () => {
+    expect(src).toContain('const lockedOwnerChanged = !!lockedAdoptRow && existingAppointmentRow.customer_id != null');
+    expect(src).toContain('if (!lockedAdoptRow || lockedOwnerChanged ||');
+    expect(src).toContain("if (existingAppointmentRow.customer_id != null) builder.where('customer_id', existingAppointmentRow.customer_id);");
+  });
+});

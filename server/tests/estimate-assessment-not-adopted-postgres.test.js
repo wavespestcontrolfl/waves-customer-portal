@@ -458,6 +458,17 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect((await mockTransaction('scheduled_services').where({ id }).first()).customer_id).toBe(other.customerId);
   });
 
+  test('a paid visit labelled Pre-Service is still offered while a free re-service is not', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Pre-Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId },
+    });
+    const acceptance = await getAcceptance(token);
+    expect(acceptance.mode).toBe('existing_appointment');
+    expect(acceptance.appointment.id).toBe(id);
+  });
+
   test('locked recovery refuses a booking whose customer owner is cleared before its row lock', async () => {
     await mockTransaction.rollback();
     mockTransaction = null;

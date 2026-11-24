@@ -10814,6 +10814,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     const acceptAdoptableStatuses = adoptableAppointmentStatuses();
     let bookedSlotMatch = null;
     let bookedSlotCoordinates = null;
+    // The signed coordinates of an unclaimed hold this request graduates. The
+    // accept transaction probes them again under the date lock.
+    let heldSlotCoordinates = null;
     let recoveredAppointment = null;
     let reservationRow = null;
     if (slotId) {
@@ -10853,6 +10856,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           .orderBy('reservation_expires_at', 'desc')
           .first();
 
+        if (reservationRow && !reservationRow._beyond_grace) heldSlotCoordinates = bookedCoordinates;
         if (!reservationRow || reservationRow._beyond_grace) {
           // Re-read through the strict booked identity in case staff claimed
           // the row between the linked-row probe and this hold query.
@@ -12265,6 +12269,18 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
             .first('scheduled_date', 'technician_id');
           acceptPreLockedDate = holdDateRow ? (dateOnly(holdDateRow.scheduled_date) || null) : null;
           if (acceptPreLockedDate) await acquireOccupancyLock(trx, acceptPreLockedDate);
+          // Staff can book the same estimate's hour as a separate visit after
+          // the preflight read found only this hold. Probe the signed
+          // coordinates once more under the date lock: a booking that
+          // appeared sends the customer back to the picker, which shows it.
+          if (reservationRow && heldSlotCoordinates) {
+            const claimedSinceLookup = await bookedAtSubmittedSlot(
+              trx, estimate, estData, heldSlotCoordinates, acceptAdoptableStatuses,
+            );
+            if (claimedSinceLookup.claimed) {
+              throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
+            }
+          }
           acceptPreLockedTechId = holdDateRow?.technician_id || null;
           if (preparedReservationCapacity) await require('../services/scheduling/tech-day-lock').lockTechDays(trx,
             [{ techId: acceptPreLockedTechId, date: acceptPreLockedDate }, { techId: null, date: acceptPreLockedDate }]);
@@ -13544,7 +13560,12 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
               && String(lockedAdoptRow.source_estimate_id) === String(estimate.id));
           const lockedPropertyOk = lockedRowExplicitlyLinked
             || await makeAdoptionPropertyScope(trx, estimate)(lockedAdoptRow);
-          if (!lockedAdoptRow || lockedAdoptRow.is_callback === true || !lockedFamilyOk || !lockedPropertyOk) {
+          // A booked appointment keeps the owner the preflight saw. Staff who
+          // cleared or changed it after the read must not have it restored
+          // here, past commitReservation's grace and conflict checks.
+          const lockedOwnerChanged = !!lockedAdoptRow && existingAppointmentRow.customer_id != null
+            && String(lockedAdoptRow.customer_id || '') !== String(existingAppointmentRow.customer_id);
+          if (!lockedAdoptRow || lockedOwnerChanged || lockedAdoptRow.is_callback === true || !lockedFamilyOk || !lockedPropertyOk) {
             assertExistingAppointmentUpdateApplied(0);
           }
           const updates = {
@@ -13600,7 +13621,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
             .whereIn('status', acceptAdoptableStatuses)
             .where('scheduled_date', '>=', etDateString())
             .where((builder) => {
-              builder.whereNull('customer_id').orWhere('customer_id', customerId);
+              if (existingAppointmentRow.customer_id != null) builder.where('customer_id', existingAppointmentRow.customer_id);
+              else builder.whereNull('customer_id').orWhere('customer_id', customerId);
             })
             .where((builder) => {
               builder.whereNull('source_estimate_id').orWhere('source_estimate_id', estimate.id);

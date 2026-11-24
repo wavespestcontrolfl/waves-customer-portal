@@ -4,7 +4,7 @@
  * rodent_trapping_followup is a callback under the Standard-only trapping
  * plan (unlimited included callbacks, owner 2026-08-26).
  */
-const { isReService, RE_SERVICE_SERVICE_KEYS } = require('../services/re-service');
+const { isReService, excludeReServices, RE_SERVICE_SERVICE_KEYS } = require('../services/re-service');
 
 describe('re-service callback keys', () => {
   test('rodent_trapping_followup classifies as a callback by key', () => {
@@ -17,6 +17,26 @@ describe('re-service callback keys', () => {
     expect(isReService({ serviceKey: 'lawn_re_service' })).toBe(true);
     expect(isReService({ serviceType: 'Pest Re-Service' })).toBe(true);
     expect(isReService({ serviceKey: 'rodent_trapping', serviceName: 'Rodent Trapping Service' })).toBe(false);
+  });
+});
+
+describe('excludeReServices uses the same word boundaries as isReService', () => {
+  test('the SQL label test binds a word-boundary pattern, never a substring', () => {
+    const calls = [];
+    const query = { whereRaw: (sql, bindings) => { calls.push({ sql, bindings }); return query; } };
+    excludeReServices(query);
+    const labels = calls.filter(call => /!~\*/.test(call.sql));
+    expect(labels.map(call => call.bindings[0])).toEqual(['services.name', 'scheduled_services.service_type']);
+    for (const call of labels) {
+      const pattern = call.bindings[1];
+      expect(pattern).toBe('\\mre-?service\\M');
+      // PostgreSQL \m / \M are the word-start / word-end of JavaScript \b here.
+      const js = new RegExp(pattern.replace('\\m', '\\b').replace('\\M', '\\b'), 'i');
+      expect(js.test('Pest Re-Service')).toBe(true);
+      expect(js.test('Lawn Reservice Visit')).toBe(true);
+      expect(js.test('Pre-Service Inspection')).toBe(false);
+    }
+    expect(calls.some(call => call.sql.includes('NOT IN'))).toBe(true);
   });
 });
 

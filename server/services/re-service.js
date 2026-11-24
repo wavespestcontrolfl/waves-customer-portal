@@ -36,16 +36,18 @@ function isReService({ serviceKey, serviceName, serviceType } = {}) {
 // SQL twin of isReService for a scheduled_services query joined to services.
 // The label checks intentionally mirror annual-prepay-renewals' legacy-row
 // predicate: completed callbacks pre-dating is_callback can have only their
-// catalog key or re-service text left as evidence.
+// catalog key or re-service text left as evidence. The label test is the same
+// word-boundary rule as RE_SERVICE_NAME_RE (PostgreSQL \m and \M), so a paid
+// "Pre-Service" label stays eligible.
+const RE_SERVICE_NAME_SQL = '\\mre-?service\\M';
+
 function excludeReServices(query, bookingAlias = 'scheduled_services', serviceAlias = 'services') {
   return query
     .whereRaw(`COALESCE(??, '') NOT IN (${Array.from(RE_SERVICE_SERVICE_KEYS).map(() => '?').join(', ')})`, [
       `${serviceAlias}.service_key`, ...RE_SERVICE_SERVICE_KEYS,
     ])
-    .whereRaw("COALESCE(??, '') NOT ILIKE ?", [`${serviceAlias}.name`, '%re-service%'])
-    .whereRaw("COALESCE(??, '') NOT ILIKE ?", [`${serviceAlias}.name`, '%reservice%'])
-    .whereRaw("COALESCE(??, '') NOT ILIKE ?", [`${bookingAlias}.service_type`, '%re-service%'])
-    .whereRaw("COALESCE(??, '') NOT ILIKE ?", [`${bookingAlias}.service_type`, '%reservice%']);
+    .whereRaw("COALESCE(??, '') !~* ?", [`${serviceAlias}.name`, RE_SERVICE_NAME_SQL])
+    .whereRaw("COALESCE(??, '') !~* ?", [`${bookingAlias}.service_type`, RE_SERVICE_NAME_SQL]);
 }
 
 module.exports = { RE_SERVICE_SERVICE_KEYS, isReService, excludeReServices };

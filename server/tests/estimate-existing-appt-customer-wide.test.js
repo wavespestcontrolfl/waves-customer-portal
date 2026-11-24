@@ -352,8 +352,8 @@ describe('findLinkedUpcomingAppointment — a Waves Assessment is never adopted'
     const row = await findLinkedUpcomingAppointment(LAWN_ESTIMATE, null, { database: conn });
     expect(row).toEqual(LAWN_ROW);
     const raw = clauseArgs(conn.queries[0], 'whereRaw');
-    // The assessment exclusion, then the five free re-service label checks.
-    expect(raw).toHaveLength(6);
+    // The assessment exclusion, then the free re-service catalog key and label checks.
+    expect(raw).toHaveLength(4);
     expect(raw[0][0]).toMatch(/^NOT \(CASE WHEN/);
     expect(raw[0][1]).toEqual(expect.arrayContaining(['services.id', 'lawn_inspection', 'scheduled_services.service_type']));
   });
