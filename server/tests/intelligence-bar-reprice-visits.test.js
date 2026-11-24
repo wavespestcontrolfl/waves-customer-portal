@@ -549,7 +549,7 @@ describe('one property, one visit', () => {
     Object.assign(tables.scheduled_services.find((r) => r.id === 'b-1'), { id, service_address_line1: '103 Example Ave' });
     const card = await preview({ appointment_id: id, new_price: 68.9 });
     expect(card.visits.map((v) => [v.id, v.at])).toEqual([[id, '103 Example Ave']]);
-    expect(cardLines(card)[0].text).toBe('Visit 2099-03-10 (Tue) · Quarterly Pest Control at 103 Example Ave: $76.56 → $68.90');
+    expect(cardLines(card)[0].text).toBe(`Visit 2099-03-10 (Tue) · Quarterly Pest Control at 103 Example Ave (visit ${id}): $76.56 → $68.90`);
     // Uppercase input matches the lowercase stored id.
     expect((await preview({ appointment_id: id.toUpperCase(), new_price: 68.9 })).visits.map((v) => v.id)).toEqual([id]);
     expect((await preview({ appointment_id: '00000000-0000-0000-0000-0000000000d9' })).code).toBe('visit_not_found');
@@ -601,6 +601,12 @@ describe('one property, one visit', () => {
       'Visit 2099-03-10 (Tue) · Quarterly Pest Control: $55.00 → $49.00 (visit s-1)',
       'Visit 2099-03-10 (Tue) · Quarterly Pest Control: $55.00 → $49.00 (visit s-2)',
     ]);
+  });
+
+  test('two saved properties that render the same street still name each visit place, with the city', async () => {
+    tables.scheduled_services.forEach((r) => Object.assign(r, { service_address_line1: '101 Example Ave', service_address_city: r.property_id === UNIT_A ? 'Sampletown' : 'Otherville' }));
+    const card = await preview({ new_price: 70 });
+    expect(card.visits.map((v) => v.at)).toEqual(['101 Example Ave, Sampletown', '101 Example Ave, Otherville', '101 Example Ave, Sampletown', '101 Example Ave, Otherville']);
   });
 
   test('two units on one street show their unit line', async () => {
