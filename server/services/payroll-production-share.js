@@ -91,12 +91,36 @@ async function readInputs(conn, weekStart) {
 }
 
 /**
- * The connection the read under the payroll lock (payroll-runs.js shareInputsUnderLock) runs on: the pool, so the read is a
- * separate connection with its own REPEATABLE READ snapshot that starts after the lock is held. A function of its own only as a
- * seam for the test harness, whose whole database is one connection (a second transaction on it waits for the open one):
- * the pay run tests give back the finalize transaction here. Production always answers the pool.
+ * The same inputs as readInputs, read on the connection the pay run already holds UNDER THE PAYROLL LOCK (finalize), which is READ
+ * COMMITTED and cannot open a second connection (the pool can be small, and a waiting payroll write would stall). Consistency
+ * comes from the shape of the reads instead: the week's stops of ALL W-2 technicians with settings are listed in ONE statement
+ * (production-share.js weekCreditsFor), so a stop reassigned after that statement is credited to whoever held it at that
+ * statement, never to both and never to neither; the reads after it are keyed by visit. Each technician's reads are in a
+ * savepoint, so a failed read marks that technician and does not abort the pay run's transaction.
  */
-const lockReadConnection = (pool) => pool;
+async function readInputsUnderLock(trx, weekStart) {
+  const inputs = new Map();
+  if (!shareOn()) return inputs;
+  const ids = await trx('technicians').where({ employment_type: 'w2' }).orderBy('id').pluck('id');
+  const settingsById = new Map();
+  for (const id of ids) {
+    try {
+      await trx.transaction(async (sp) => {
+        const settings = await productionShare.settingsFor(sp, id, weekStart);
+        if (settings) settingsById.set(id, settings);
+      });
+    } catch (err) {
+      inputs.set(id, { error: `The production share could not be worked out: ${(err && err.message) || 'unknown problem'}` });
+    }
+  }
+  const credits = await productionShare.weekCreditsFor(trx, settingsById, weekStart);
+  for (const [id, one] of credits) {
+    inputs.set(id, one.rows
+      ? { settings: settingsById.get(id), stops: one.rows }
+      : { error: `The production share could not be worked out: ${one.error}` });
+  }
+  return inputs;
+}
 
 /**
  * A revision of what readInputs returned: the same string for the same settings and the same credit rows (visit, date, kind,
@@ -199,4 +223,4 @@ function reviewNote(name, count) {
   return `${name}: ${count} ${count === 1 ? 'stop needs' : 'stops need'} review for the production share. ${count === 1 ? 'It pays' : 'They pay'} $0 in the share until fixed. Open the production share preview for the week, fix ${count === 1 ? 'it' : 'them'}, then recompute.`;
 }
 
-module.exports = { KIND, shareOn, readInputs, lockReadConnection, revisionOf, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };
+module.exports = { KIND, shareOn, readInputs, readInputsUnderLock, revisionOf, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };

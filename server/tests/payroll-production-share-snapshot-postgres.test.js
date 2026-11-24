@@ -109,6 +109,35 @@ postgres('production share credit snapshot (two real connections)', () => {
     expect(idsIn(inputs)).toContain(world.moving);
   });
 
+  it('under the payroll lock (READ COMMITTED, one connection): one statement lists every technician\'s stops, so a stop moved right after it is credited once', async () => {
+    const world = await setup();
+    const real = productionShare.weekCreditsFor;
+    const trx = await database.transaction(); // READ COMMITTED, as the pay run's transaction
+    try {
+      jest.spyOn(productionShare, 'weekCreditsFor').mockImplementation((conn, settingsById, week) => {
+        // the move is committed (another connection) right after the list statement, before each technician's credits are worked out
+        let moved = false;
+        const wrapped = new Proxy(conn, {
+          get(target, key) {
+            if (key !== 'transaction') return Reflect.get(target, key);
+            return async (handler) => {
+              if (!moved) { moved = true; await database('scheduled_services').where({ id: world.moving }).update({ technician_id: world.first }); }
+              return target.transaction(handler);
+            };
+          },
+        });
+        return real(wrapped, settingsById, week);
+      });
+      const inputs = await productionSharePay.readInputsUnderLock(trx, W);
+      const mine = [world.first, world.second];
+      const owners = mine.filter((id) => inputs.get(id).stops.some((row) => row.visitId === world.moving));
+      expect(owners).toEqual([world.second]);
+      expect(inputs.get(world.first).stops).toHaveLength(1);
+    } finally {
+      await trx.rollback();
+    }
+  });
+
   it('CONTROL: the same move seen by plain READ COMMITTED reads is missed by both technicians', async () => {
     const world = await setup();
     moveAfterFirstRead(world);

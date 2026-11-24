@@ -1216,17 +1216,13 @@ async function readShareInputsOfRun(conn, runId) {
   return run ? productionSharePay.readInputs(conn, run.week_start) : null;
 }
 
-// The share inputs finalize works from, under the payroll lock: the ones read before the lock when an authoritative read made now
-// agrees with them, else the read made now. null when the gate is off or nothing was read before.
-// The authoritative read is made on a SEPARATE pool connection, in its own REPEATABLE READ read-only transaction (readInputs on
-// the pool), not on the finalize transaction: that one is READ COMMITTED, so each technician's query would see its own snapshot and
-// a stop moved from one technician to another between two reads would be missed by both. The snapshot of the separate transaction
-// starts after the payroll lock is held, so it sees every commit made before this finalize took the lock. A plain read never waits
-// on the payroll advisory lock or on a row lock in PostgreSQL, so it cannot wait on this transaction. (It does need a free pool
-// connection; the payroll lock lets one pay run write at a time, so this is one extra connection for the run.)
+// The share inputs finalize works from, under the payroll lock: the ones read before the lock when a read made now agrees with
+// them, else the read made now. null when the gate is off or nothing was read before. The read of now runs on the finalize
+// transaction itself (readInputsUnderLock): no second connection is taken while the payroll lock is held, and its consistency
+// comes from listing every technician's stops in ONE statement. It also sees every commit made before the lock was taken.
 async function shareInputsUnderLock(trx, run, earlier) {
   if (!earlier || !productionSharePay.shareOn()) return earlier;
-  const now = await productionSharePay.readInputs(productionSharePay.lockReadConnection(db, trx), run.week_start);
+  const now = await productionSharePay.readInputsUnderLock(trx, run.week_start);
   return productionSharePay.revisionOf(now) === productionSharePay.revisionOf(earlier) ? earlier : now;
 }
 

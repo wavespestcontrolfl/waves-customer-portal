@@ -648,25 +648,23 @@ function ownPriceCredit(stop, invoiced) {
 }
 
 /**
- * The credit of every route stop the technician completed in a pay week (Monday `weekStart` to Sunday), one row per
- * stop in work-date order: { visitId, workDate, kind, creditCents, reason, needsReview, refundCents, serviceType }.
- * Stops that earn $0 are rows too, because they still make their day a shift. `settings` (optional) are the settings in
- * force for the week; read here when not passed (the callback value comes from them).
+ * The completed route stops of the technicians in `technicianIds` in a pay week (Monday `weekStart` to Sunday), in ONE statement,
+ * so a single snapshot decides who holds each stop (a stop reassigned between two statements can never be missed by both
+ * technicians or counted by both). Rows carry technician_id; work-date order.
  */
-async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
-  const technicianId = canonicalId(technicianIdIn);
+async function weekStops(conn, technicianIds, weekStart) {
   requireWeek(weekStart);
   const weekEnd = addStaffWorkDays(weekStart, 6);
-  const inForce = settings === undefined ? await settingsFor(conn, technicianId, weekStart) : settings;
   const { LINE_SQL } = require('./rate-review').PLAN_LINE_SQL;
-  const stops = await conn('scheduled_services as s')
+  if (!technicianIds.length) return [];
+  return conn('scheduled_services as s')
     .leftJoin('services as sv', 'sv.id', 's.service_id')
     .leftJoin('customers as c', 'c.id', 's.customer_id')
     .leftJoin('customer_properties as cp', 'cp.id', 's.property_id')
     .joinRaw(RECORD_JOIN_SQL)
-    .where({ 's.technician_id': technicianId, 's.status': 'completed' })
+    .whereIn('s.technician_id', technicianIds).where({ 's.status': 'completed' })
     .whereRaw(`${WORK_DATE_SQL} BETWEEN ? AND ?`, [weekStart, weekEnd])
-    .select('s.id', 's.customer_id', 's.property_id', 's.service_type', 's.estimated_price', 's.primary_line_price',
+    .select('s.id', 's.technician_id', 's.customer_id', 's.property_id', 's.service_type', 's.estimated_price', 's.primary_line_price',
       's.is_callback', 's.followup_included', 's.followup_source_service_id', 's.annual_prepay_term_id', 's.prepaid_amount',
       's.prepaid_method', 's.service_key_snapshot', 's.completed_at', 's.service_address_line1', 's.service_address_line2',
       's.service_address_zip', 'sv.service_key', 'sv.name as service_name', 'cp.address_line1 as prop_line1',
@@ -674,6 +672,14 @@ async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
       'c.billing_mode',
       conn.raw(`to_char(${WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`), conn.raw(`${LINE_SQL} AS line`))
     .orderByRaw(`${WORK_DATE_SQL}, s.completed_at NULLS LAST, s.id`);
+}
+
+/**
+ * The credit rows of ONE technician's stops (weekStops rows): { visitId, workDate, kind, creditCents, reason, needsReview,
+ * refundCents, serviceType } in the stops' order. Every read after the stop list is keyed by visit id, not by technician.
+ * `inForce` = the settings in force for the week (the callback value comes from them).
+ */
+async function creditsOfStops(conn, technicianId, stops, inForce) {
   const withFollowUp = stops.length
     ? await conn('scheduled_services').whereIn('followup_source_service_id', stops.map((stop) => stop.id))
       .where({ followup_included: true }).whereNotIn('status', UNPLANNED_STATUSES).pluck('followup_source_service_id')
@@ -713,6 +719,77 @@ async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
 }
 
 /**
+ * Visits a FINALIZED pay run already paid a production share credit for, in a week other than `weekStart`: Map of visit id ->
+ * the pay week (Monday) of that check. One query. Read from the frozen snapshots (calc_snapshot.productionShare.stops, rows with
+ * a credit above $0) of finalized checks of finalized runs, whoever the technician was; voiding that run takes its checks out of
+ * the query, so the visit is free again. A time-on-site correction can move a visit's completed_at into another pay week; without
+ * this the visit would be credited twice.
+ */
+async function paidElsewhere(conn, visitIds, weekStart) {
+  const paid = new Map();
+  if (!visitIds.length) return paid;
+  const rows = await conn.raw(`SELECT stop.value->>'visitId' AS visit_id, to_char(MIN(c.week_start), 'YYYY-MM-DD') AS week_start
+    FROM payroll_checks c
+    JOIN payroll_runs r ON r.id = c.run_id
+    CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(c.calc_snapshot->'productionShare'->'stops') = 'array'
+      THEN c.calc_snapshot->'productionShare'->'stops' ELSE '[]'::jsonb END) AS stop(value)
+    WHERE c.status = 'finalized' AND r.status = 'finalized' AND c.week_start <> ?::date
+      AND stop.value->>'visitId' = ANY(?::text[])
+      AND COALESCE((stop.value->>'creditCents')::bigint, 0) > 0
+    GROUP BY stop.value->>'visitId'`, [weekStart, visitIds]);
+  for (const row of rows.rows) paid.set(row.visit_id, row.week_start);
+  return paid;
+}
+
+// The rows with every visit in `paid` (visit id -> its pay week) turned into $0 "needs review" rows.
+const markPaid = (rows, paid) => (paid.size ? rows.map((row) => (paid.has(row.visitId)
+  ? { ...row, ...toReview('already_paid', `Already paid in the week of ${paid.get(row.visitId)}: a pay run already credited this visit.`) }
+  : row)) : rows);
+const creditedIds = (rows) => rows.filter((row) => row.creditCents > 0).map((row) => row.visitId);
+
+/**
+ * The credit of every route stop the technician completed in a pay week (Monday `weekStart` to Sunday), one row per
+ * stop in work-date order: { visitId, workDate, kind, creditCents, reason, needsReview, refundCents, serviceType }.
+ * Stops that earn $0 are rows too, because they still make their day a shift. A visit a finalized pay run already paid in
+ * another week credits $0 and needs review (paidElsewhere). `settings` (optional) are the settings in force for the week; read
+ * here when not passed (the callback value comes from them).
+ */
+async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
+  const technicianId = canonicalId(technicianIdIn);
+  requireWeek(weekStart);
+  const inForce = settings === undefined ? await settingsFor(conn, technicianId, weekStart) : settings;
+  const stops = await weekStops(conn, [technicianId], weekStart);
+  const rows = await creditsOfStops(conn, technicianId, stops, inForce);
+  return markPaid(rows, await paidElsewhere(conn, creditedIds(rows), weekStart));
+}
+
+/**
+ * The credit rows of SEVERAL technicians for one pay week: Map of technician id -> { rows } (an id with no stop has an empty
+ * list) or { error } for one whose reads failed. `settingsById`: Map of technician id -> the settings in force. The week's stops
+ * of all of them are listed in ONE statement (weekStops), so one snapshot decides who holds each stop even on a READ COMMITTED
+ * connection; every later read is keyed by visit id. Each technician's reads run in a savepoint (a failed read ends there, not the
+ * caller's transaction). The visits a finalized run already paid are found in one query for all of them.
+ */
+async function weekCreditsFor(conn, settingsById, weekStart) {
+  requireWeek(weekStart);
+  const ids = [...settingsById.keys()].map(canonicalId);
+  const stops = await weekStops(conn, ids, weekStart);
+  const byTech = new Map(ids.map((id) => [id, []]));
+  for (const stop of stops) byTech.get(canonicalId(stop.technician_id)).push(stop);
+  const credits = new Map();
+  for (const id of ids) {
+    try {
+      credits.set(id, { rows: await conn.transaction((sp) => creditsOfStops(sp, id, byTech.get(id), settingsById.get(id))) });
+    } catch (err) {
+      credits.set(id, { error: (err && err.message) || 'unknown problem' });
+    }
+  }
+  const paid = await paidElsewhere(conn, [...credits.values()].flatMap((one) => (one.rows ? creditedIds(one.rows) : [])), weekStart);
+  for (const [id, one] of credits) if (one.rows) credits.set(id, { rows: markPaid(one.rows, paid) });
+  return credits;
+}
+
+/**
  * Everything the preview shows for one technician and week: the credit rows, the shifts, the settings in force, the
  * share it would be, the stops to review and the refund total. A preview only: nothing is stored or paid.
  */
@@ -745,6 +822,6 @@ async function previewWeek(technicianId, weekStart, conn = db) {
 }
 
 module.exports = {
-  allocateCents, BAR_TYPES, OWN_CALLBACK_DAYS, shareForWeek, jobPartCents, shiftDays, settingsFor, settingsHistory, saveSettings, weekCredits,
+  allocateCents, BAR_TYPES, OWN_CALLBACK_DAYS, shareForWeek, jobPartCents, shiftDays, settingsFor, settingsHistory, saveSettings, weekCredits, weekCreditsFor, weekStops, creditsOfStops, paidElsewhere,
   previewWeek,
 };

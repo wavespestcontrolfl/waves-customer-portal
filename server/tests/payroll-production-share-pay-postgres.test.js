@@ -140,9 +140,6 @@ postgres('production share pay line', () => {
     for (const name of GATES) OLD[name] = process.env[name];
     process.env.GATE_PAYROLL = 'true';
     process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'true';
-    // This harness is ONE connection, where a second transaction waits for the open finalize one: the read under the payroll lock
-    // is given the finalize transaction here. In production it is the pool (a separate connection); see the unit test.
-    jest.spyOn(productionSharePay, 'lockReadConnection').mockImplementation((_pool, finalizeTrx) => finalizeTrx);
     delete process.env.GATE_PAYROLL_PAY_LINES;
     delete process.env.GATE_PAYROLL_TIME_OFF;
     trx = await database.transaction();
@@ -384,18 +381,18 @@ postgres('production share pay line', () => {
     expect(byName(created, 'Sample Alpha').productionShareCents).toBe(16200);
     const shown = (await api('GET', `/runs/${created.id}`)).body.run;
     // The first read (before the lock) is the real one; the credit is edited, committed, before the read under the lock.
-    const real = productionSharePay.readInputs;
+    const real = productionSharePay.readInputsUnderLock;
     let reads = 0;
-    const spy = jest.spyOn(productionSharePay, 'readInputs').mockImplementation(async (conn, week) => {
+    const spy = jest.spyOn(productionSharePay, 'readInputsUnderLock').mockImplementation(async (conn, week) => {
       reads += 1;
-      if (reads === 2) await trx('scheduled_services').where({ technician_id: id }).update({ estimated_price: '1360.00' });
+      await trx('scheduled_services').where({ technician_id: id }).update({ estimated_price: '1360.00' });
       return real(conn, week);
     });
     let refused409;
     try {
       refused409 = await api('POST', `/runs/${created.id}/finalize`, { body: { token: shown.token } });
     } finally { spy.mockRestore(); }
-    expect(reads).toBe(2);
+    expect(reads).toBe(1);
     expect(refused409.status).toBe(409);
     const fresh = (await api('GET', `/runs/${created.id}`)).body.run;
     expect(fresh.status).toBe('draft');
@@ -403,6 +400,37 @@ postgres('production share pay line', () => {
     expect(byName(fresh, 'Sample Alpha').productionShareCents).toBe(20700);
     expect(fresh.stale).toBe(false);
     expect((await finalize(created.id)).body.run.status).toBe('finalized');
+  });
+
+  it('a visit a finalized run already paid is not credited again when its completion moves into another week; voiding that run frees it', async () => {
+    const id = await tech('Sample Alpha');
+    await settings(id);
+    await worked(id, W1, 40);
+    await threeShifts(id);
+    const week1 = (await draft(W1)).body.run;
+    expect((await finalize(week1.id)).body.run.status).toBe('finalized');
+    // a time-on-site correction moves one visit's completion a week later
+    const W2 = addDays(W1, 7);
+    const [moved] = await trx('scheduled_services').where({ technician_id: id }).orderBy('scheduled_date').select('id');
+    await trx('scheduled_services').where({ id: moved.id }).update({ completed_at: `${W2}T16:00:00Z`, scheduled_date: W2 });
+    await worked(id, W2, 40);
+    await stop(id, addDays(W2, 1), '300.00');
+    const week2 = (await draft(W2)).body.run;
+    const check = byName(week2, 'Sample Alpha');
+    // the moved visit pays $0 and is named; only the $300.00 stop is credited (1 shift of the 2: bar $1,800 -> no share)
+    expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 30000, stopCount: 2 });
+    expect(check.productionShare.needsReview).toEqual([{ visitId: moved.id, workDate: W2 }]);
+    expect(week2.productionShareNotes).toEqual([expect.stringContaining('1 stop needs review')]);
+    const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+    expect(snapshot.stops.find((row) => row.visitId === moved.id)).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true });
+    // the read under the lock sees the same
+    const locked = await productionSharePay.readInputsUnderLock(trx, W2);
+    expect(locked.get(id).stops.find((row) => row.visitId === moved.id)).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true });
+    expect(locked.get(id).stops.find((row) => row.visitId === moved.id).reason).toContain(`Already paid in the week of ${W1}`);
+    // voiding the run that paid it releases the visit: the next recompute credits it
+    expect((await api('POST', `/runs/${week1.id}/void`, { body: { reason: 'sample' } })).status).toBe(200);
+    const again = byName((await api('POST', `/runs/${week2.id}/recompute`)).body.run, 'Sample Alpha');
+    expect(again.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 156000 });
   });
 
   it('a credit that did not change under the lock finalizes with the snapshot it read first', async () => {

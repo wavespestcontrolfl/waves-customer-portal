@@ -266,10 +266,31 @@ describe('the revision of the inputs', () => {
 });
 
 describe('the read under the payroll lock', () => {
-  test('runs on the pool, a separate connection with its own REPEATABLE READ snapshot, never on the finalize transaction', () => {
-    const pool = { name: 'pool' };
-    const finalizeTrx = { name: 'finalize transaction' };
-    expect(share.lockReadConnection(pool, finalizeTrx)).toBe(pool);
+  const productionShare = require('../services/production-share');
+  afterEach(() => { jest.restoreAllMocks(); delete process.env.GATE_PAYROLL_PRODUCTION_SHARE; });
+
+  test('runs on the connection it is given (the finalize transaction), lists every technician at once, and opens no other connection', async () => {
+    process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'true';
+    const calls = [];
+    const trx = () => ({ where: () => ({ orderBy: () => ({ pluck: async () => ['tech-a', 'tech-b', 'tech-c'] }) }) });
+    trx.transaction = jest.fn(async (handler) => handler(Object.assign(() => {}, { parent: trx })));
+    jest.spyOn(productionShare, 'settingsFor').mockImplementation(async (_c, id) => (id === 'tech-c' ? null : SETTINGS));
+    jest.spyOn(productionShare, 'weekCreditsFor').mockImplementation(async (conn, settingsById, week) => {
+      calls.push([conn, [...settingsById.keys()], week]);
+      return new Map([['tech-a', { rows: WEEK_STOPS }], ['tech-b', { error: 'boom' }]]);
+    });
+    const inputs = await share.readInputsUnderLock(trx, WEEK);
+    // ONE call of the list-all-technicians read, on the trx itself, for the technicians that have settings
+    expect(calls).toEqual([[trx, ['tech-a', 'tech-b'], WEEK]]);
+    expect(inputs.get('tech-a').stops).toBe(WEEK_STOPS);
+    expect(inputs.get('tech-b')).toEqual({ error: 'The production share could not be worked out: boom' });
+    expect(inputs.has('tech-c')).toBe(false);
+  });
+
+  test('the gate off reads nothing', async () => {
+    const trx = jest.fn(() => { throw new Error('read'); });
+    expect((await share.readInputsUnderLock(trx, WEEK)).size).toBe(0);
+    expect(trx).not.toHaveBeenCalled();
   });
 });
 
