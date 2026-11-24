@@ -387,10 +387,11 @@ function earliestConversionSignal() {
 }
 
 // One conversion must not win several offers. The customer's other estimates
-// that make this one ambiguous: any accepted one or one already marked
-// converted another way (the sale is spoken for), and any estimate delivered
-// after this one but no later than the first signal (that one is the offer
-// the customer converted on). Ambiguous stays lost.
+// that make this one ambiguous: one accepted at or before the first signal
+// (an upsell accepted months after the conversion does not count) or already
+// marked converted another way (the sale is spoken for), and any estimate
+// delivered after this one but no later than the first signal (that one is
+// the offer the customer converted on). Ambiguous stays lost.
 function whereNoCompetingEstimate(query) {
   return query
     .whereNotExists(function () {
@@ -399,7 +400,13 @@ function whereNoCompetingEstimate(query) {
         .whereRaw("other.customer_id = estimates.customer_id")
         .whereRaw("other.id <> estimates.id")
         .where((q) =>
-          q.where("other.status", "accepted").orWhere("other.disposition", "converted_other_path"),
+          q.where("other.disposition", "converted_other_path").orWhere((accepted) =>
+            accepted
+              .where("other.status", "accepted")
+              .where((at) =>
+                at.whereNull("other.accepted_at").orWhereRaw("other.accepted_at <= (?)", [earliestConversionSignal()]),
+              ),
+          ),
         );
     })
     .whereNotExists(function () {
@@ -428,7 +435,9 @@ function expiredConvertedEstimatesQuery() {
     .where("status", "expired")
     .whereNull("archived_at")
     .whereNotNull("customer_id")
-    .whereNotNull("sent_at")
+    // Delivery evidence, not sent_at alone: a viewed-only or stamp-only row
+    // was still delivered (an unreadable anchor never qualifies).
+    .whereRaw(`${delivered} IS NOT NULL`)
     .where(whereNotUndeliveredSelfServe("estimates"))
     .where((q) =>
       q.whereNull("disposition").orWhereIn("disposition", ["expired_viewed", "expired_unviewed"]),
@@ -449,7 +458,8 @@ function expiredConvertedEstimatesQuery() {
  * reports count it as won (group 'won_elsewhere'). Stamps the disposition
  * only: status, archived_at, expires_at and deposits stay untouched, and
  * nothing is sent to the customer. disposition_at is the customer's
- * earliest conversion signal (cohort timing reads it); updated_at is now.
+ * earliest conversion signal (cohort timing reads it). updated_at is NOT
+ * touched, so a row with no expires_at keeps its resolution date.
  * One set-based UPDATE on estimates; it never row-locks visits or invoices.
  */
 async function reclaimExpiredConvertedEstimates() {
@@ -459,7 +469,6 @@ async function reclaimExpiredConvertedEstimates() {
       disposition: "converted_other_path",
       disposition_source: "system",
       disposition_at: db.raw("COALESCE((?), ?)", [earliestConversionSignal(), now]),
-      updated_at: now,
     })
     .returning(["id"]);
   const reclaimed = Array.isArray(rows) ? rows : [];

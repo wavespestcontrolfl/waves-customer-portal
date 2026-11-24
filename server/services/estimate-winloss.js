@@ -148,15 +148,23 @@ function effectiveDisposition(row) {
 
 // Rows that are not real demand (invalid/duplicate/out-of-area) must not
 // sit in a win-RATE denominator. A customer who converted another way is
-// NOT excluded: that row is a win (isBookedOtherWay).
+// NOT excluded here: an unarchived such row (an expired offer the daily
+// reclaim stamped) is a win (isBookedOtherWay).
 function excludedFromRates(disposition) {
   return dispositionGroup(disposition) === 'dead';
 }
 
-// The customer bought some other way (booked or paid after the estimate went
-// out, sometimes after it expired): counts as WON in every win rate.
+// The customer bought some other way after the offer expired: counts as WON
+// in every win rate.
 function isBookedOtherWay(disposition) {
   return dispositionGroup(disposition) === 'won_elsewhere';
+}
+
+// The open sweep ARCHIVES the live offers of customers who converted another
+// way. Those rows stay out of every rate and cohort exactly as before (the
+// archive-symmetric rule): only an unarchived one counts as won.
+function isArchivedBookedOtherWay(row, disposition) {
+  return Boolean(row.archived_at) && isBookedOtherWay(disposition);
 }
 
 function median(values) {
@@ -190,14 +198,14 @@ function lostAtMs(row, sentAt, archivedLoss) {
 }
 
 // When a row was won and/or lost, for the cohort funnel. Booked another way
-// is won when the system classified it (the daily sweep runs within a day of
-// the conversion). An expired row keeps its expiry as lostAt, so a cohort
+// is won when the system classified it (disposition_at, the customer's
+// earliest conversion signal). An expired row keeps its expiry as lostAt, so a cohort
 // mature before the booking still reads lost and one mature after it reads
 // won. Only an accept or a decline counts as a "decision" for timing.
 function outcomeTimes(row, disposition, sentAt) {
   const acceptedAt = row.status === 'accepted' ? (ms(row.accepted_at) ?? sentAt) : null;
   const bookedAt = isBookedOtherWay(disposition)
-    ? (ms(row.disposition_at) ?? ms(row.archived_at) ?? ms(row.expires_at) ?? sentAt)
+    ? (ms(row.disposition_at) ?? ms(row.expires_at) ?? sentAt)
     : null;
   const archivedLoss = Boolean(row.archived_at && disposition) && bookedAt == null;
   const lostAt = lostAtMs(row, sentAt, archivedLoss);
@@ -230,7 +238,7 @@ function sentCohorts(rows, { days, nowMs }) {
     const sentAt = sentAnchorMs(row);
     if (sentAt == null) continue;
     const disposition = effectiveDisposition(row);
-    if (excludedFromRates(disposition)) continue;
+    if (excludedFromRates(disposition) || isArchivedBookedOtherWay(row, disposition)) continue;
     // Archived rows KEEP their historical outcome — dropping them re-wrote
     // past cohort rates every time a row was tidied away (codex pre-push
     // P1, survivorship bias). Only an archived live row with no
@@ -427,6 +435,7 @@ async function winLossSlices({ days = 90 } = {}) {
   const byLeadSource = new Map();
   const byWaveguardTier = new Map();
   let wonBookedOtherWay = 0;
+  let archivedBookedOtherWayCount = 0;
 
   for (const row of rows) {
     // This card reports RATES, so archived rows drop symmetrically —
@@ -440,24 +449,25 @@ async function winLossSlices({ days = 90 } = {}) {
     const estimateData = parseEstimateData(row.estimate_data);
 
     const disposition = accepted ? null : effectiveDisposition(row);
-    const bookedOtherWay = isBookedOtherWay(disposition);
+    const archivedWin = isArchivedBookedOtherWay(row, disposition);
+    if (archivedWin) archivedBookedOtherWayCount += 1;
+    const bookedOtherWay = isBookedOtherWay(disposition) && !archivedWin;
     const isWon = accepted || bookedOtherWay;
     if (disposition) byDispositionCount.set(disposition, (byDispositionCount.get(disposition) || 0) + 1);
     if (stillDecidingIds.has(String(row.id))) {
       stillDeciding.signaled += 1;
-      // Only a REAL loss counts as lost — booked-another-way is a win and
-      // dead dispositions leave every loss metric (GH codex r3 P2).
+      // Only a REAL loss counts as lost — a reclaimed booked-another-way row
+      // is a win; dead and archived converted rows leave every loss metric
+      // (GH codex r3 P2).
       if (isWon) stillDeciding.wonAfter += 1;
-      else if (disposition && !excludedFromRates(disposition)) stillDeciding.lostAfter += 1;
+      else if (disposition && !excludedFromRates(disposition) && !archivedWin) stillDeciding.lostAfter += 1;
       if (disposition === 'expired_viewed') stillDeciding.expiredViewedAfter += 1;
     }
     // Archived rows still drop from every RATE symmetrically (archived
     // losses and wins leave together — same reasoning as PipelineAnalytics'
     // activeRows), but their classification above stays in "why we lose":
     // archiving no longer erases a loss from the story (codex pre-push P1).
-    // The one archived row that stays: a customer who converted another way
-    // (the sweep archives them) is a resolved win, dated by resolutionDateMs.
-    if (row.archived_at && !bookedOtherWay) continue;
+    if (row.archived_at) continue;
     // Dead rows are counted in "why we lose" above but leave every RATE
     // denominator — they were never a winnable offer.
     if (disposition && excludedFromRates(disposition)) continue;
@@ -534,8 +544,10 @@ async function winLossSlices({ days = 90 } = {}) {
   // not dilute pctOfLosses (codex pre-push P1).
   // The never-winnable count is derived from the disposition counts so
   // ARCHIVED dead rows are counted too (GH codex P2); the archived-row skip
-  // above runs first. Booked-another-way rows are wins, not excluded.
-  const excludedFromRatesCount = DISPOSITIONS
+  // above runs first. It also counts the archived converted-another-way rows
+  // (the open sweep's output), still out of every rate as before; a reclaimed
+  // unarchived one is a win, not excluded.
+  const excludedFromRatesCount = archivedBookedOtherWayCount + DISPOSITIONS
     .filter((d) => d.group === 'dead')
     .reduce((sum, d) => sum + (byDispositionCount.get(d.code) || 0), 0);
   const lossTotal = DISPOSITIONS

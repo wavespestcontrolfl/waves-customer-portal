@@ -143,6 +143,8 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     // Lifecycle fields are untouched: it stays expired, un-archived.
     expect(after.status).toBe('expired');
     expect(after.archived_at).toBeNull();
+    // updated_at stays (a NULL-expires_at row would resolve by it).
+    expect(new Date(after.updated_at).getTime()).toBe(new Date(before.updated_at).getTime());
     expect(new Date(after.expires_at).getTime()).toBe(new Date(before.expires_at).getTime());
     expect(after.sent_at.getTime()).toBe(before.sent_at.getTime());
   });
@@ -330,6 +332,38 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect((await row(expiredId)).disposition).toBe('expired_viewed');
     expect((await row(earlierId)).disposition).toBe('expired_viewed');
     expect((await row(firstId)).disposition).toBe('converted_other_path');
+  });
+
+  test('(m) delivery evidence is enough: a viewed-only row (no sent_at) paid inside the window is reclaimed', async () => {
+    const cust = await customer(mockTransaction);
+    const id = await expiredEstimate(mockTransaction, cust, { sent_at: null, viewed_at: sentPlus(5) });
+    await paidInvoice(mockTransaction, cust, { paidAt: sentPlus(30) });
+    // Nothing delivered at all (no sent_at, no view, no stamp): never reclaimed.
+    const undelivered = await customer(mockTransaction);
+    const undeliveredId = await expiredEstimate(mockTransaction, undelivered, { sent_at: null });
+    await paidInvoice(mockTransaction, undelivered, { paidAt: sentPlus(30) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(id)).disposition).toBe('converted_other_path');
+    expect((await row(undeliveredId)).disposition).toBe('expired_viewed');
+  });
+
+  test('(n) an offer accepted months AFTER the payment does not block; one accepted at or before it does', async () => {
+    const upsellCust = await customer(mockTransaction);
+    const upsellQuoteId = await expiredEstimate(mockTransaction, upsellCust);
+    await expiredEstimate(mockTransaction, upsellCust, { status: 'accepted', accepted_at: sentPlus(150), disposition: null, disposition_source: null, disposition_at: null, sent_at: sentPlus(140), created_at: sentPlus(140) });
+    await paidInvoice(mockTransaction, upsellCust, { paidAt: sentPlus(50) });
+
+    const earlyCust = await customer(mockTransaction);
+    const earlyQuoteId = await expiredEstimate(mockTransaction, earlyCust);
+    await expiredEstimate(mockTransaction, earlyCust, { status: 'accepted', accepted_at: sentPlus(40), disposition: null, disposition_source: null, disposition_at: null, sent_at: sentPlus(30), created_at: sentPlus(30) });
+    await paidInvoice(mockTransaction, earlyCust, { paidAt: sentPlus(50) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(upsellQuoteId)).disposition).toBe('converted_other_path');
+    expect((await row(earlyQuoteId)).disposition).toBe('expired_viewed');
   });
 
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {

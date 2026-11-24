@@ -265,18 +265,16 @@ describe('winLossSlices — audit slices', () => {
       // Quote-wizard shape: tier persisted ONLY at engineResult.waveGuard.
       row({ id: 'wiz', status: 'expired', accepted_at: null, expires_at: daysAgo(1), estimate_data: wizardData, view_count: 1 }),
       // Archived converted row (the conversion sweep's shape): listed in
-      // "why we lose". Since 2026-11-24 it is a resolved WIN: it counts in
-      // the rates (the one archived row that does) and is not "excluded".
+      // "why we lose", COUNTED in excludedFromRates even though archived
+      // (GH codex P2), out of every rate as on main.
       row({ id: 'conv', status: 'sent', accepted_at: null, archived_at: daysAgo(3), disposition: 'converted_other_path', disposition_at: daysAgo(3) }),
     ]);
 
     const result = await winLossSlices({ days: 90 });
 
-    // Was resolved 5 / won 1 / winRate 20 / excluded 2 before booked-another-way
-    // became a win: the archived converted row now counts as won (6 / 2 / 33.3)
-    // and only the dead lead is excluded. The archived_unresolved row ('parked')
-    // is unchanged: still out of the rates.
-    expect(result).toMatchObject({ resolved: 6, won: 2, lost: 4, winRatePct: 33.3, excludedFromRates: 1, wonBookedOtherWay: 1 });
+    // Unchanged from main: the archived converted row ('conv') stays excluded
+    // with the dead lead (2); only an UNARCHIVED reclaimed row counts as won.
+    expect(result).toMatchObject({ resolved: 5, won: 1, lost: 4, winRatePct: 20, excludedFromRates: 2, wonBookedOtherWay: 0 });
     // pctOfLosses denominator = group 'lost' only (4 here); the dead lead
     // is listed for visibility with a null percentage.
     expect(result.byDisposition).toEqual([
@@ -300,7 +298,7 @@ describe('winLossSlices — audit slices', () => {
     // Column wins; falls back to the persisted recurring.tier; else "none".
     expect(result.byWaveguardTier.find((t) => t.key === 'silver')).toMatchObject({ label: 'Silver', won: 1, lost: 1, total: 2 });
     expect(result.byWaveguardTier.find((t) => t.key === 'gold')).toMatchObject({ label: 'Gold', lost: 1 });
-    expect(result.byWaveguardTier.find((t) => t.key === 'none')).toMatchObject({ label: 'No bundle', total: 3 }); // y, wiz + the archived converted win
+    expect(result.byWaveguardTier.find((t) => t.key === 'none')).toMatchObject({ label: 'No bundle', total: 2 });
   });
 
   test('an expired estimate reclaimed as booked another way counts as won in both numerator and denominator; dead stays out', async () => {
@@ -322,20 +320,20 @@ describe('winLossSlices — audit slices', () => {
     expect(result.byDisposition.find((d) => d.code === 'converted_other_path')).toMatchObject({ count: 1, pctOfLosses: null });
   });
 
-  test('an archived converted_other_path row is a resolved win dated by its classification; every other archived row stays out', async () => {
+  test('an ARCHIVED converted_other_path row stays out of every rate and cohort exactly as before; only a reclaimed unarchived one wins', async () => {
+    const archivedConv = row({ id: 'conv', status: 'viewed', accepted_at: null, archived_at: daysAgo(3), disposition: 'converted_other_path', disposition_at: daysAgo(3) });
     mockDbHandler = estimatesTable([
       row({ id: 'lost', status: 'expired', accepted_at: null, expires_at: daysAgo(3), disposition: 'expired_viewed' }),
-      row({ id: 'conv', status: 'viewed', accepted_at: null, archived_at: daysAgo(3), disposition: 'converted_other_path', disposition_at: daysAgo(3) }),
-      // Resolved by classification OUTSIDE the window: dropped as before.
-      row({ id: 'conv-old', status: 'viewed', accepted_at: null, created_at: daysAgo(200), updated_at: daysAgo(100), archived_at: daysAgo(100), disposition: 'converted_other_path', disposition_at: daysAgo(100) }),
+      archivedConv,
       row({ id: 'parked', status: 'viewed', accepted_at: null, archived_at: daysAgo(4), disposition: 'archived_unresolved', disposition_at: daysAgo(4) }),
-      row({ id: 'arch-won', archived_at: daysAgo(1) }),
-      row({ id: 'arch-lost', status: 'declined', accepted_at: null, declined_at: daysAgo(2), archived_at: daysAgo(1) }),
+      row({ id: 'late', status: 'expired', accepted_at: null, expires_at: daysAgo(30), disposition: 'converted_other_path', disposition_at: daysAgo(1) }),
     ]);
 
     const result = await winLossSlices({ days: 90 });
 
-    expect(result).toMatchObject({ resolved: 2, won: 1, lost: 1, winRatePct: 50, wonBookedOtherWay: 1 });
+    expect(result).toMatchObject({ resolved: 2, won: 1, lost: 1, winRatePct: 50, wonBookedOtherWay: 1, excludedFromRates: 1 });
+    const cohorts = _private.sentCohorts([archivedConv], { days: 30, nowMs: NOW }).cohorts;
+    expect(cohorts.every((c) => c.sent === 0)).toBe(true);
   });
 
   test('a reclaimed expired row resolves at its expiry, so the window it counts in never moves', () => {
@@ -548,8 +546,7 @@ describe('still-deciding signal (soft exit)', () => {
     };
     const out = await winLossSlices({ days: 30 });
     expect(activityCalls).toBe(1);
-    // wonAfter was 1 before booked-another-way became a win (e-elsewhere).
-    expect(out.stillDeciding).toEqual({ signaled: 3, wonAfter: 2, lostAfter: 1, expiredViewedAfter: 1 });
+    expect(out.stillDeciding).toEqual({ signaled: 3, wonAfter: 1, lostAfter: 1, expiredViewedAfter: 1 });
     // The disposition vocabulary is untouched — the signal is a side channel.
     expect(out.byDisposition.find((d) => d.code === 'expired_viewed').count).toBe(2);
   });

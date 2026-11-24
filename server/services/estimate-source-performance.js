@@ -72,9 +72,6 @@ function resolutionDateMs(row) {
   if (row.status === 'accepted') return pick(row.accepted_at, row.created_at);
   if (row.status === 'declined') return pick(row.declined_at, row.updated_at, row.created_at);
   if (row.status === 'expired') return pick(row.expires_at, row.updated_at, row.created_at);
-  // An archived live row classified converted_other_path resolved when it was
-  // classified (same branch as estimate-winloss.js).
-  if (row.disposition && row.archived_at) return pick(row.disposition_at, row.archived_at, row.updated_at, row.created_at);
   return null;
 }
 
@@ -186,24 +183,18 @@ async function sourcePerformance({ days = 90 } = {}) {
   // Win/loss: resolved in the window, winloss-style superset prefilter then
   // precise resolution-date trim (declined_at can be stamped without
   // touching updated_at, so no single column bounds the window).
-  // Resolved + un-archived rows, PLUS the one archived row that stays: a
-  // customer who converted another way (the sweep archives those sent/viewed
-  // rows) is a resolved win, dated by resolutionDateMs.
   const resolved = await db('estimates')
-    .where((q) => q
-      .where((r) => r.whereIn('status', RESOLVED_STATUSES).whereNull('archived_at'))
-      .orWhere((r) => r.where('disposition', 'converted_other_path').whereNotNull('archived_at')))
+    .whereIn('status', RESOLVED_STATUSES)
+    .whereNull('archived_at')
     .where((q) => q
       .where('accepted_at', '>=', cutoff)
       .orWhere('declined_at', '>=', cutoff)
       .orWhere('expires_at', '>=', cutoff)
-      .orWhere('disposition_at', '>=', cutoff)
-      .orWhere('archived_at', '>=', cutoff)
       .orWhere('updated_at', '>=', cutoff)
       .orWhere('created_at', '>=', cutoff))
     .select(
       'id', 'source', 'status', 'accepted_at', 'declined_at', 'expires_at',
-      'created_at', 'updated_at', 'archived_at', 'disposition', 'disposition_at', 'decline_reason',
+      'created_at', 'updated_at', 'disposition', 'decline_reason',
     );
   const { effectiveDisposition, excludedFromRates, isBookedOtherWay } = require('./estimate-winloss');
   for (const row of resolved) {
@@ -212,8 +203,8 @@ async function sourcePerformance({ days = 90 } = {}) {
     // One denominator rule across the page's cards (GH codex P1):
     // invalid/duplicate leads were never winnable offers — win-loss-slices
     // already drops them, so this card must too, or a source with more junk
-    // traffic looks artificially bad. A customer who converted another way
-    // is a WIN, same as win-loss-slices.
+    // traffic looks artificially bad. An expired offer whose customer converted
+    // another way (reclaimed, un-archived) is a WIN, same as win-loss-slices.
     const disposition = effectiveDisposition(row);
     if (excludedFromRates(disposition)) continue;
     const bucket = buckets.get(sourceKey(row.source));

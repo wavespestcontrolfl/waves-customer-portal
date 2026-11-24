@@ -510,8 +510,11 @@ describe('reclaimExpiredConvertedEstimates', () => {
       expect.arrayContaining(['archived_at', 'disposition', 'disposition_source']),
     );
     expect(est('whereNotNull').map((c) => c.args[0])).toEqual(
-      expect.arrayContaining(['customer_id', 'sent_at']),
+      expect.arrayContaining(['customer_id']),
     );
+    // No sent_at prerequisite: the delivery anchor (viewed-only rows too) must exist.
+    expect(est('whereNotNull').map((c) => c.args[0])).not.toContain('sent_at');
+    expect(calls.some((c) => c.m === 'whereRaw' && /LEAST\(.*\) IS NOT NULL$/s.test(c.args[0]))).toBe(true);
     // Only the system's own expiry classification may be replaced.
     expect(est('orWhereIn')[0].args).toEqual(['disposition', ['expired_viewed', 'expired_unviewed']]);
     expect(est('orWhere').find((c) => c.args[0] === 'disposition_source').args).toEqual(['disposition_source', 'system']);
@@ -541,10 +544,10 @@ describe('reclaimExpiredConvertedEstimates', () => {
     expect(calls.filter((c) => c.m === 'whereNotExists').length).toBeGreaterThanOrEqual(7);
     expect(calls.filter((c) => c.m === 'from' && c.args[0] === 'estimates as other')).toHaveLength(2);
 
-    // Disposition + updated_at ONLY: status, archived_at, expires_at stay.
+    // Disposition columns ONLY: status, archived_at, expires_at and updated_at stay.
     const update = calls.find((c) => c.m === 'update');
     expect(Object.keys(update.args[0]).sort()).toEqual([
-      'disposition', 'disposition_at', 'disposition_source', 'updated_at',
+      'disposition', 'disposition_at', 'disposition_source',
     ]);
     expect(update.args[0]).toMatchObject({ disposition: 'converted_other_path', disposition_source: 'system' });
     // disposition_at is the customer's EARLIEST conversion signal (a subquery

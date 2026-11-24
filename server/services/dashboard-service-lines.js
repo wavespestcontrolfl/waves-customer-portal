@@ -87,14 +87,13 @@ function tallyDelivery(row, keys, cell, win, agingCutoff) {
 }
 
 // 'accepted' | 'booked' | 'lost' for a row resolved inside the window, else
-// null. Dead rows leave the math. An archived row counts only when the
-// customer converted another way (the sweep archives those): a resolved win.
+// null. Dead rows leave the math; an expired offer whose customer converted
+// another way (reclaimed) is a win.
 function closeOutcome(row, win) {
+  if (!RESOLVED_STATUSES.includes(row.status)) return null;
   const disposition = effectiveDisposition(row);
   if (excludedFromRates(disposition)) return null;
   const booked = isBookedOtherWay(disposition);
-  const eligible = row.archived_at ? booked : RESOLVED_STATUSES.includes(row.status);
-  if (!eligible) return null;
   const at = resolutionDateMs(row);
   if (at == null || at < win.fromMs || at >= win.toMs) return null;
   if (row.status === 'accepted') return 'accepted';
@@ -111,10 +110,9 @@ function buildCloseStats(rows, win, nowMs) {
   };
   const agingCutoff = nowMs - 7 * DAY_MS;
   for (const row of rows) {
+    if (row.archived_at) continue;
     const keys = estimateLineKeys(row);
-    // Archived rows leave sent/open/aging, as before; only an archived
-    // booked-another-way win reaches the close math below.
-    if (!row.archived_at) tallyDelivery(row, keys, cell, win, agingCutoff);
+    tallyDelivery(row, keys, cell, win, agingCutoff);
     const outcome = closeOutcome(row, win);
     if (!outcome) continue;
     for (const k of keys) {
@@ -286,9 +284,7 @@ async function fetchEstimateRows(win, nowMs) {
   const agingTs = new Date(nowMs - 7 * DAY_MS).toISOString();
   const qb = db({ e: 'estimates' })
     .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-    // Un-archived rows, plus archived rows a customer converted another way
-    // (the sweep archives those; they are resolved wins).
-    .where((q) => q.whereNull('e.archived_at').orWhere('e.disposition', 'converted_other_path'))
+    .whereNull('e.archived_at')
     .where(function coarseWindow() {
       // Sent/open/aging anchor on the first delivery evidence (sentAnchorMs):
       // superset prefilter on sent_at, viewed_at, accepted_at and the durable
@@ -300,15 +296,11 @@ async function fetchEstimateRows(win, nowMs) {
           `(e.status IN ('accepted','declined','expired') AND (${RESOLVED_AT_SQL}) >= ${ET_TS} AND (${RESOLVED_AT_SQL}) < ${ET_TS})`,
           [fromTs, toTs],
         )
-        .orWhereRaw(
-          `(e.archived_at IS NOT NULL AND (COALESCE(e.disposition_at, e.archived_at)) >= ${ET_TS} AND (COALESCE(e.disposition_at, e.archived_at)) < ${ET_TS})`,
-          [fromTs, toTs],
-        )
         .orWhereRaw(`(e.status IN ('sent','viewed') AND (e.sent_at < ? OR e.viewed_at < ? OR ${FIRST_DELIVERED_SQL} < ?))`, [agingTs, agingTs, agingTs]);
     });
   return excludeInternalEstimateRows(qb).select(
     'e.id', 'e.status', 'e.sent_at', 'e.accepted_at', 'e.declined_at', 'e.expires_at',
-    'e.created_at', 'e.updated_at', 'e.archived_at', 'e.disposition', 'e.disposition_at', 'e.decline_reason',
+    'e.created_at', 'e.updated_at', 'e.archived_at', 'e.disposition', 'e.decline_reason',
     'e.viewed_at', 'e.view_count', 'e.last_viewed_at', 'e.source',
     'e.estimate_data', 'e.service_interest', 'e.notes',
   );
