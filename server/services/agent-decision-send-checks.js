@@ -171,9 +171,11 @@ async function labelFactsBlock({ decision, outgoingBody }) {
 // (Prod 2026-10-22: 107 such drafts pending review, 1 ever accepted.)
 // SERVICE AREA HELD (owner ruling 2026-11-23): the same refusal now reaches prompts 25 to 28, whose COMPANY FACTS still said
 // Charlotte County is served. A pending or scheduled unedited draft from them could offer service in Port Charlotte, Englewood,
-// Rotonda, Placida, Boca Grande or Babcock Ranch, so it is refused the same way; a person rewrites it. Drafts from 29_n on
-// (sms-shadow-drafter.js) are not affected.
-const COMPANY_FACTS_CURRENT_PROMPT_NUMBER = 29;
+// Rotonda, Placida, Boca Grande or Babcock Ranch, so it is refused the same way; a person rewrites it.
+// SERVICE AREA REOPENED (owner "ok do this", 2026-11-23, hours later): Englewood and Port Charlotte are served again, so prompts
+// 29 to 32 (the six-place hold) said "we are not taking new customers" there. An unedited draft from them could turn a customer
+// away who is now served, so the refusal reaches them too. Drafts from 33_n on (sms-shadow-drafter.js) are not affected.
+const COMPANY_FACTS_CURRENT_PROMPT_NUMBER = 33;
 function draftedBeforeAnswerBook(decision) {
   const m = /^house_voice_v12_real_answers(\d*)/.exec(String(decision?.prompt_version || ''));
   return !!m && (!m[1] || Number(m[1]) < COMPANY_FACTS_CURRENT_PROMPT_NUMBER);
