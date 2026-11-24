@@ -108,7 +108,6 @@
       "tests/annual-prepay-end-at-term-coverage-postgres.test.js": 2.8,
       "tests/annual-prepay-invoice-routes-postgres.test.js": 2.9,
       "tests/annual-prepay-notice-catchup-postgres.test.js": 0.2,
-      "tests/app-first-stale-notice-check-postgres.test.js": 0.1,
       "tests/app-onboarding-postgres.test.js": 0.2,
       "tests/app-rating-prompt-postgres.test.js": 0.1,
       "tests/area-addon-visit-rows-postgres.test.js": 0.6,
