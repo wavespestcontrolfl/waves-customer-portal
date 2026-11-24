@@ -145,7 +145,7 @@ function world({ tables = {}, jobs = [JOB], reminderJobs = [], ...deps } = {}) {
     raiseOfficeItem: jest.fn(async () => ({ id: 'n-office' })),
     planStartAcceptRefusal: jest.fn(async () => null),
     assertPlanStartAcceptEligible: jest.fn(async () => undefined),
-    hasPlanNow: jest.fn(async () => false),
+    planStartBlocker: jest.fn(async () => null),
     ...deps,
   };
 }
@@ -2110,7 +2110,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
       const deps = liveWorld({
         buildStartOffer: jest.fn(async () => ({ option: null, reason: 'has_plan' })),
-        hasPlanNow: jest.fn(async () => true),
+        planStartBlocker: jest.fn(async () => 'has_plan'),
         tables: { notifications: [item('job-1', { lastDay: '2030-03-20', jobId: 'job-1', reason: 'not_priced' })], estimates: [] },
       });
       await run(deps);
@@ -2118,20 +2118,45 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(deps.raiseOfficeItem).not.toHaveBeenCalled();
     });
 
-    test('the plan check is the mint\'s own: a plan rate on the row, or a live recurring service', async () => {
-      const restart = require('../services/cancellation-resolution/restart');
-      const owns = jest.spyOn(restart, 'ownsAnyRecurringService');
+    test.each([
+      ['commercial', 'The account reads as commercial'],
+      ['not_live', 'The customer is no longer active'],
+    ])('the pricer\'s account proof answers %s: the item is withdrawn', async (blocker, resolution) => {
+      const deps = liveWorld({
+        planStartBlocker: jest.fn(async () => blocker),
+        tables: { notifications: [item('job-1', { lastDay: '2030-04-04', jobId: 'job-1' })], estimates: [] },
+      });
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, , , opts]) => opts.resolution)).toEqual([resolution]);
+      expect(deps.planStartBlocker).toHaveBeenCalledWith(deps.db, 'cust-1');
+    });
+
+    test('the default proof is the pricer\'s own planStartBlocker', async () => {
+      const eligibility = require('../services/plan-start-eligibility');
+      const spy = jest.spyOn(eligibility, 'planStartBlocker').mockResolvedValue('has_plan');
       try {
-        owns.mockResolvedValue(false);
-        const { hasPlanNow } = _test.defaultDeps();
-        expect(await hasPlanNow('db', { ...CUSTOMER, monthly_rate: 35 })).toBe(true);
-        expect(await hasPlanNow('db', { ...CUSTOMER })).toBe(false);
-        owns.mockResolvedValue(true);
-        expect(await hasPlanNow('db', { ...CUSTOMER })).toBe(true);
-        expect(owns).toHaveBeenLastCalledWith('db', 'cust-1');
+        expect(await _test.defaultDeps().planStartBlocker('db', 'cust-1')).toBe('has_plan');
+        expect(spy).toHaveBeenCalledWith('db', 'cust-1');
       } finally {
-        owns.mockRestore();
+        spy.mockRestore();
       }
+    });
+
+    test('one item that fails never stops the others', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        planStartBlocker: jest.fn(async (_db, customerId) => {
+          if (customerId === 'cust-bad') throw new Error('db');
+          return 'has_plan';
+        }),
+        tables: {
+          notifications: [item('bad', { lastDay: '2030-04-04', customerId: 'cust-bad' }), item('good', { lastDay: '2030-04-04' })],
+          estimates: [],
+        },
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys]) => keys)).toEqual([[_test.officeItemKey('good')]]);
     });
 
     test('an item whose terms are current is not rewritten', async () => {

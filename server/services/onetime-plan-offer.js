@@ -167,12 +167,9 @@ function defaultDeps() {
     closePriceSettingsAlert,
     raiseOfficeItem,
     planStartAcceptRefusal,
-    // The plan-start mint's own bar (restart.js): a plan tier, rate or billing lane on the row, or any live recurring
-    // service or prepaid term, means the customer has a plan and no plan offer stands.
-    hasPlanNow: async (database, customer) => {
-      const restart = require('./cancellation-resolution/restart');
-      return !restart.planStartAccountOpen(customer) || restart.ownsAnyRecurringService(database, customer.id);
-    },
+    // The offer pricer's own account proof (plan-start-eligibility.js, which buildStartOffer asks): 'has_plan',
+    // 'commercial' or 'not_live', or null for an account that may start a plan.
+    planStartBlocker: (...args) => require('./plan-start-eligibility').planStartBlocker(...args),
     assertPlanStartAcceptEligible: (...args) => require('./cancellation-resolution/restart').assertPlanStartAcceptEligible(...args),
   };
 }
@@ -1167,12 +1164,17 @@ const WITHDRAWN_VERDICTS = Object.freeze([
   EMAIL_VERDICT.EMAIL_SUPPRESSED_GLOBAL, EMAIL_VERDICT.EMAIL_SUPPRESSED_GROUP, EMAIL_VERDICT.EMAIL_SWITCH_OFF,
   EMAIL_VERDICT.STREAM_FLAG_OFF, EMAIL_VERDICT.STREAM_CHANNEL_NOT_EMAIL,
 ]);
+const BLOCKER_WORDS = Object.freeze({
+  has_plan: 'The customer has a plan now',
+  commercial: 'The account reads as commercial',
+  not_live: 'The customer is no longer active',
+});
 async function officeItemWithdrawn({ customerId, jobId }, { now, deps }) {
   const account = () => deps.db('customers').where({ id: customerId });
-  // The whole row: the plan check reads the tier, rate and billing fields.
-  const customer = await account().whereNull('deleted_at').first();
+  const customer = await account().whereNull('deleted_at').first('id', 'email', 'active');
   if (!customer || customer.active === false || !(await whereLiveCustomer(account()).first('id'))) return 'The customer is no longer active';
-  if (await deps.hasPlanNow(deps.db, customer)) return 'The customer has a plan now';
+  const blocker = await deps.planStartBlocker(deps.db, customerId);
+  if (blocker) return BLOCKER_WORDS[blocker] || 'The account may not start a plan';
   if (await optOutReason(deps.db, { customerId, email: customer.email, deps })) return 'The customer turned off offers';
   // The division's own contact checks, as the job's emailAllowed asks them. A failed read keeps the item open.
   const verdict = await deps.eligibleForEmail({
@@ -1206,24 +1208,33 @@ async function closeOfficeItems({ now, deps }) {
     .select('id', 'created_at', 'metadata');
   const episodes = require('./admin-alert-episodes');
   for (const row of rows) {
-    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-    let done = null;
-    const offer = await currentOffer(deps.db, meta);
-    if (offer.gone) done = 'The one-time job no longer qualifies for the offer';
-    else if (offer.lastDay && today > offer.lastDay) done = 'The plan offer ended';
-    else if (meta.customerId) {
-      const quoted = await deps.db('estimates').where({ customer_id: meta.customerId })
-        .where('created_at', '>', row.created_at).first('id');
-      if (quoted) done = 'The customer has a new estimate';
-      else done = await officeItemWithdrawn(meta, { now, deps });
+    // One item's failure never stops the sweep: it is logged, and the next run reads it again.
+    try {
+      await closeOrRefreshOfficeItem(row, { today, now, deps, episodes });
+    } catch (err) {
+      logger.warn(`[onetime-plan-offer] office item ${row.id} check failed (code=${err?.code || 'none'})`);
     }
-    if (done) await episodes.closeAdminAlertKeys(deps.db, [meta.dedupeKey], 'plan_offer_quoted', { now, resolution: done });
-    // An item that stays open shows the offer's current terms: a moved offer day rewrites its text and last day
-    // quietly (raiseOfficeItem's refresh), so staff never read an older deadline than the one the close uses.
-    else if (offer.offerDay && offer.lastDay !== meta.lastDay) {
-      const customer = await deps.db('customers').where({ id: meta.customerId }).first('id', 'first_name', 'last_name');
-      if (customer) await deps.raiseOfficeItem({ job: { id: meta.jobId }, customer, offerDay: offer.offerDay, reason: meta.reason });
-    }
+  }
+}
+
+async function closeOrRefreshOfficeItem(row, { today, now, deps, episodes }) {
+  const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+  let done = null;
+  const offer = await currentOffer(deps.db, meta);
+  if (offer.gone) done = 'The one-time job no longer qualifies for the offer';
+  else if (offer.lastDay && today > offer.lastDay) done = 'The plan offer ended';
+  else if (meta.customerId) {
+    const quoted = await deps.db('estimates').where({ customer_id: meta.customerId })
+      .where('created_at', '>', row.created_at).first('id');
+    if (quoted) done = 'The customer has a new estimate';
+    else done = await officeItemWithdrawn(meta, { now, deps });
+  }
+  if (done) await episodes.closeAdminAlertKeys(deps.db, [meta.dedupeKey], 'plan_offer_quoted', { now, resolution: done });
+  // An item that stays open shows the offer's current terms: a moved offer day rewrites its text and last day
+  // quietly (raiseOfficeItem's refresh), so staff never read an older deadline than the one the close uses.
+  else if (offer.offerDay && offer.lastDay !== meta.lastDay) {
+    const customer = await deps.db('customers').where({ id: meta.customerId }).first('id', 'first_name', 'last_name');
+    if (customer) await deps.raiseOfficeItem({ job: { id: meta.jobId }, customer, offerDay: offer.offerDay, reason: meta.reason });
   }
 }
 
