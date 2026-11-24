@@ -7850,7 +7850,7 @@ photo, window, lat/lng and town (no street, zip or names), service name, live
 vehicle and ETA, arrival time, `visitChange` only as `{ kind: 'pending_rebook' }`.
 It never returns `summary`, the report, invoice, prep or review tokens, photos,
 the offer and referral cards, `customer`, `cancellation`, stops count or route
-progress, and the cards and summary reads do not run. Its stops-ahead POST
+progress, and the cards and summary reads do not run. The recipient path is strictly read-only (no geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the send's own permission check (`recipientPermission`) passes. Its stops-ahead POST
 answers nulls and its view POST records nothing. Gate off, a deleted row, a
 declined person, an unknown token, an expired visit link or a visit with no expiry on record answer the same 404. A customer-pick visit awaiting the holder shows `{ kind: 'pending_rebook' }`.
 A

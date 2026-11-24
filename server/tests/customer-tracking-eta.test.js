@@ -128,4 +128,23 @@ describe('customer tracking ETA helper', () => {
       techUpdatedAt: '2026-05-05T11:59:00.000Z',
     });
   });
+
+  test('allowProvider:false never asks the provider (a paid call) and returns the straight-line estimate', async () => {
+    const bouncie = { calculateETAFromCoords: jest.fn() };
+    const eta = await calculateBoundedTrackingEta({
+      techLat: '27.1',
+      techLng: '-82.2',
+      customerLat: '27.2',
+      customerLng: '-82.3',
+      techUpdatedAt: '2026-05-05T11:59:00.000Z',
+      bouncieService: bouncie,
+      allowProvider: false,
+    });
+    expect(bouncie.calculateETAFromCoords).not.toHaveBeenCalled();
+    expect(eta).toEqual({ minutes: 26, distanceMiles: 12.9, source: 'haversine', techUpdatedAt: '2026-05-05T11:59:00.000Z' });
+    // a stale fix still yields no ETA
+    expect(await calculateBoundedTrackingEta({
+      techLat: 27.1, techLng: -82.2, customerLat: 27.2, customerLng: -82.3, techUpdatedAt: '2026-05-05T11:00:00.000Z', allowProvider: false,
+    })).toBeNull();
+  });
 });

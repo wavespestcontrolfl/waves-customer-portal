@@ -206,11 +206,12 @@ const KINDS_BY_PURPOSE = {
  * texts, anything in `excludePhones`, and anyone who has declined (declinedByRecipient). Fails closed: a
  * read error answers nobody (`throwOnError` re-throws it for the replay, which retries instead).
  */
-async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], conn = db, throwOnError = false } = {}) {
+async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], conn = db, throwOnError = false, anyVisitStatus = false } = {}) {
   if (!scheduledServiceId || !KINDS[kind]) return [];
   try {
     const visit = await conn('scheduled_services').where({ id: scheduledServiceId }).first('id', 'status', 'scheduled_date', 'window_start', 'customer_id', 'service_type');
-    if (!visit || !LIVE_STATUSES.includes(String(visit.status || ''))) return [];
+    // `anyVisitStatus`: the tracker link keeps showing a visit that is on site, done or cancelled; a send never does.
+    if (!visit || (!anyVisitStatus && !LIVE_STATUSES.includes(String(visit.status || '')))) return [];
     const rows = await conn(TABLE).where({ scheduled_service_id: scheduledServiceId }).orderBy('created_at', 'asc');
     if (!rows.length) return [];
     const holder = await conn('customers').where({ id: visit.customer_id }).first('phone');
@@ -444,16 +445,19 @@ const TRACK_TOKEN_RE = /^[a-f0-9]{64}$/;
 
 /**
  * The visit a recipient's tracker token opens, or null. The link works only while the gate is on, the row still exists
- * (it goes with the visit), and the person has not declined en-route texts, and the visit's own link has a live expiry on record (a null
+ * (it goes with the visit), and the person is still owed the en-route text by the SAME check the send makes at the provider handoff (recipientPermission: no callback-number hold,
+ * no decline, STOP, suppression or do-not-contact), and the visit's own link has a live expiry on record (a null
  * expiry is refused). The caller serves the reduced, map-only view. Throws on an unreadable answer (the route answers an error, never an open view).
  */
 async function visitForTrackToken(token, { conn = db } = {}) {
   if (!gateLive() || !TRACK_TOKEN_RE.test(token || '')) return null;
-  const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id', 'phone_key', 'phone_e164');
+  const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id');
   if (!row) return null;
-  const visit = await conn('scheduled_services').where({ id: row.scheduled_service_id }).first('id', 'customer_id', 'track_token_expires_at');
+  // The same permission check the en-route send makes at the provider handoff, read fresh on every request.
+  const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id }, { conn, anyVisitStatus: true });
+  if (!permission.ok) return null;
+  const visit = await conn('scheduled_services').where({ id: row.scheduled_service_id }).first('id', 'track_token_expires_at');
   if (!visit || !isTrackTokenLiveWithExpiry(visit.track_token_expires_at)) return null;
-  if (await declinedByRecipient({ customerId: visit.customer_id, phoneKey: row.phone_key, phoneE164: row.phone_e164, purpose: KINDS.en_route.purpose, conn })) return null;
   return { visitId: visit.id, recipientId: row.id };
 }
 
@@ -536,16 +540,32 @@ const claimDate = (claimKey) => String(claimKey || '').slice(String(claimKey || 
  * text that quoted an arrival, the shared arrival is the one it quoted. Returns { ok, code?, reason? }; throws on an
  * unreadable answer (the caller holds and retries).
  */
-async function recipientStillOwed(meta, { conn = db } = {}) {
-  const no = (code, reason) => ({ ok: false, code, reason });
-  if (!gateLive()) return no('VISIT_TEXT_GATE_OFF', 'gate-off');
+const noVerdict = (code, reason) => ({ ok: false, code, reason });
+
+/**
+ * The permission half of "still owed": the gate is on, the visit has no callback-number hold, and the person is still on
+ * the visit and has declined nothing (own text choices, opt-in decline, STOP, any active suppression or do-not-contact).
+ * ONE function for the send's handoff recheck (recipientStillOwed, below, adds the slot checks), the replay and the
+ * tracker link (visitForTrackToken), so no door opens that another keeps shut. Returns { ok:true, mine } or a verdict.
+ * `anyVisitStatus`: the tracker link also serves a visit that is on site, done or cancelled. Throws on an unreadable answer.
+ */
+async function recipientPermission(meta, { conn = db, anyVisitStatus = false } = {}) {
+  if (!gateLive()) return noVerdict('VISIT_TEXT_GATE_OFF', 'gate-off');
   // The raw reader THROWS on a failed read (the boolean wrapper turns it into "held"): a failed read retries, never drops the text.
   if (await require('./disclaimed-number-holds').disclaimedNumberHeldForVisit({ scheduledServiceId: meta.scheduled_service_id }, conn)) {
-    return no('CALLBACK_NUMBER_HOLD', 'callback-number-hold');
+    return noVerdict('CALLBACK_NUMBER_HOLD', 'callback-number-hold');
   }
-  const contacts = await contactsForVisit(meta.scheduled_service_id, meta.kind, { conn, throwOnError: true });
+  const contacts = await contactsForVisit(meta.scheduled_service_id, meta.kind, { conn, throwOnError: true, anyVisitStatus });
   const mine = contacts.find((contact) => contact.visitRecipientId === meta.visit_recipient_id);
-  if (!mine) return no('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
+  if (!mine) return noVerdict('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
+  return { ok: true, mine };
+}
+
+async function recipientStillOwed(meta, { conn = db } = {}) {
+  const no = noVerdict;
+  const permission = await recipientPermission(meta, { conn });
+  if (!permission.ok) return permission;
+  const { mine } = permission;
   const sameSlot = meta.promise_level === 'day' ? claimDate(mine.claimKey) === claimDate(meta.claim_key) : mine.claimKey === meta.claim_key;
   if (!sameSlot) return no('VISIT_SLOT_MOVED', 'slot-moved');
   if (meta.arrival_start && (await arrivalSnapshot(mine.visit, conn)).hhmm !== meta.arrival_start) return no('VISIT_ARRIVAL_MOVED', 'arrival-moved');

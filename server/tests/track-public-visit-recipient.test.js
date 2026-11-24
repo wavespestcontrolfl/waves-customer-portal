@@ -21,10 +21,17 @@ jest.mock('../services/customer-tracking-eta', () => ({
   calculateBoundedTrackingEta: jest.fn(async () => ({ minutes: 9, source: 'matrix' })),
 }));
 const mockCompute = jest.fn();
+const mockIsToday = jest.fn(() => false);
 jest.mock('../services/stops-ahead', () => ({
   ...jest.requireActual('../services/stops-ahead'),
   computeStopsAhead: mockCompute,
+  isServiceDateToday: (...a) => mockIsToday(...a),
 }));
+jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(), createShortCode: jest.fn() }));
+const { ensureCustomerGeocoded: mockGeocode } = require('../services/geocoder');
+const { resolveFreshTechPosition: mockResolvePosition } = require('../services/tracking-vehicle-location');
+const { calculateBoundedTrackingEta: mockEta } = require('../services/customer-tracking-eta');
+const mockShorten = require('../services/short-url');
 const mockRecordPageView = require('../services/customer-page-views').recordPageView;
 
 const trackPublicRouter = require('../routes/track-public');
@@ -55,6 +62,7 @@ function visitRow(over = {}) {
 }
 
 // db: the holder lookup (by track_view_token) misses; the by-id read returns the visit; every other table is recorded.
+const writes = [];
 function install(row, { holderRow = null } = {}) {
   const tablesRead = [];
   mockDb.raw = jest.fn((sql) => sql);
@@ -62,6 +70,8 @@ function install(row, { holderRow = null } = {}) {
     tablesRead.push(table);
     let byToken = false;
     const q = {};
+    // Any write through the handle is recorded: a recipient GET must make none.
+    for (const m of ['update', 'insert', 'del', 'delete', 'upsert', 'increment']) q[m] = jest.fn(() => { writes.push(`${table}.${m}`); return q; });
     q.where = jest.fn((arg, val) => { if ((arg && arg['s.track_view_token']) || (arg === 's.track_view_token' && val)) byToken = true; return q; });
     for (const m of ['leftJoin', 'whereNotNull', 'orderBy', 'whereRaw', 'select', 'limit']) q[m] = jest.fn(() => q);
     q.first = jest.fn(async () => {
@@ -86,6 +96,8 @@ const ALLOWED_KEYS = ['arrivedAt', 'meta', 'property', 'scope', 'service', 'stat
 beforeEach(() => {
   jest.clearAllMocks();
   mockDb.mockReset();
+  writes.length = 0;
+  mockIsToday.mockReturnValue(false);
   mockVisitForTrackToken.mockResolvedValue({ visitId: 'visit-1', recipientId: 'r-1' });
 });
 
@@ -114,6 +126,45 @@ describe('GET /:token with a visit text recipient\'s token', () => {
     expect(mockCompute).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['scheduled', {}],
+    ['en route with a stored pin', { track_state: 'en_route', status: 'en_route' }],
+    ['en route with NO stored pin', { track_state: 'en_route', status: 'en_route', latitude: null, longitude: null }],
+    ['on property', { track_state: 'on_property', arrived_at: '2026-12-01T14:00:00.000Z' }],
+    ['complete', { status: 'completed', track_state: 'complete', completed_at: '2026-12-01T15:00:00.000Z' }],
+    ['cancelled', { status: 'cancelled', track_state: 'cancelled' }],
+    ['rebooking', { status: 'rescheduled' }],
+  ])('read-only: %s makes no write, no geocoder call, no Bouncie fetch, no paid ETA, no short link, no page view', async (_label, over) => {
+    install(visitRow(over));
+    const res = await get();
+    expect(res.statusCode).toBe(200);
+    expect(writes).toEqual([]);
+    expect(mockGeocode).not.toHaveBeenCalled();
+    expect(mockShorten.shortenOrPassthrough).not.toHaveBeenCalled();
+    expect(mockShorten.createShortCode).not.toHaveBeenCalled();
+    expect(mockRecordPageView).not.toHaveBeenCalled();
+    expect(mockCompute).not.toHaveBeenCalled();
+    // When the live position is read at all, it is the cached one (no fetch that writes) and the ETA is the local estimate.
+    for (const [arg] of mockResolvePosition.mock.calls) expect(arg.allowBouncieFallback).toBe(false);
+    for (const [arg] of mockEta.mock.calls) expect(arg.allowProvider).toBe(false);
+  });
+
+  test('en route with no stored pin: no map (vehicle null), never a geocode', async () => {
+    install(visitRow({ track_state: 'en_route', status: 'en_route', latitude: null, longitude: null }));
+    const { body } = await get();
+    expect(body.state).toBe('en_route');
+    expect(body.vehicle).toBeNull();
+    expect(body.property).toEqual({ lat: null, lng: null, city: 'Parrish' });
+    expect(mockGeocode).not.toHaveBeenCalled();
+  });
+
+  test('the holder\'s own en-route GET still geocodes, fetches and asks the provider (unchanged)', async () => {
+    install(visitRow({ track_state: 'en_route', status: 'en_route', latitude: null, longitude: null }), { holderRow: visitRow({ track_state: 'en_route', status: 'en_route', latitude: null, longitude: null }) });
+    mockGeocode.mockResolvedValue(null);
+    await get(HOLDER_TOKEN);
+    expect(mockGeocode).toHaveBeenCalled();
+  });
+
   test('the property is the pin and the town, never the street, unit or zip', async () => {
     install(visitRow());
     const { body } = await get();
@@ -128,6 +179,19 @@ describe('GET /:token with a visit text recipient\'s token', () => {
     expect(enRoute.state).toBe('en_route');
     expect(Object.keys(enRoute.vehicle).sort()).toEqual(['etaMinutes', 'etaSource', 'lastReportedAt', 'lat', 'lng', 'stale']);
     expect(enRoute.meta).toEqual({ pollIntervalSeconds: 30 });
+    install(visitRow());
+    expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 0 });
+  });
+
+  test('scheduled on the visit\'s own day polls slowly (120 s), so a visit that goes en route (again) refreshes; other days and end states do not', async () => {
+    mockIsToday.mockReturnValue(true);
+    install(visitRow());
+    expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 120 });
+    install(visitRow({ status: 'completed', track_state: 'complete' }));
+    expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 0 });
+    install(visitRow({ status: 'cancelled', track_state: 'cancelled' }));
+    expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 0 });
+    mockIsToday.mockReturnValue(false);
     install(visitRow());
     expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 0 });
   });

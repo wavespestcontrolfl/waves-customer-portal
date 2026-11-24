@@ -427,7 +427,9 @@ async function buildApproxVehicle(row) {
   }
 }
 
-async function buildVehicle(service) {
+// `readOnly` (a visit text recipient's link): no write and no paid call. The tracker's own cached position only (no
+// Bouncie fetch, which writes tech_status), and the straight-line ETA (no Distance Matrix).
+async function buildVehicle(service, { readOnly = false } = {}) {
   // Phase 2: live tech location + ETA from tech_status. Returns null
   // if either the tech's last GPS ping is missing or the property
   // doesn't have a geocode — TrackPage falls back to a no-map en-route
@@ -443,6 +445,7 @@ async function buildVehicle(service) {
     // OLD vehicle's, so the text and the tracking page never show different vehicles.
     cachedNotBefore: techMappingCutoff(service.tech_mapping_changed_at),
     logPrefix: 'track-public',
+    ...(readOnly ? { allowBouncieFallback: false } : {}),
   });
   if (!position) return null;
 
@@ -453,6 +456,7 @@ async function buildVehicle(service) {
     customerLng: service.longitude,
     techUpdatedAt: position.lastReportedAt,
     logPrefix: 'track-public',
+    ...(readOnly ? { allowProvider: false } : {}),
   });
 
   return {
@@ -670,7 +674,13 @@ function recipientVisitChange(visitChange) {
   return RECIPIENT_VISIT_CHANGE_KINDS.has(visitChange.kind) ? { kind: visitChange.kind } : null;
 }
 
-function recipientTrackPayload(full) {
+const RECIPIENT_SCHEDULED_POLL_SECONDS = 120;
+function recipientPollSeconds(state, visitIsToday) {
+  if (state === 'en_route' || state === 'on_property') return EN_ROUTE_POLL_SECONDS;
+  return state === 'scheduled' && visitIsToday === true ? RECIPIENT_SCHEDULED_POLL_SECONDS : 0;
+}
+
+function recipientTrackPayload(full, { visitIsToday = false } = {}) {
   const state = full.state;
   const property = full.property || {};
   return {
@@ -696,8 +706,9 @@ function recipientTrackPayload(full) {
     // The visit's own kind only when the office is rebooking it; no reason, no action, no other visit.
     visitChange: recipientVisitChange(full.visitChange),
     meta: {
-      // The page's poll is the only live update this link has (no socket): keep it while the tech is on the way or on site.
-      pollIntervalSeconds: state === 'en_route' || state === 'on_property' ? EN_ROUTE_POLL_SECONDS : 0,
+      // The page's poll is the only live update this link has (no socket). Quick while the tech is on the way or on site;
+      // a slow, bounded one on the visit's own day while scheduled, so a visit that goes en route (again) refreshes.
+      pollIntervalSeconds: recipientPollSeconds(state, visitIsToday),
     },
   };
 }
@@ -806,7 +817,8 @@ router.get('/:token', async (req, res, next) => {
     const officeRebooking = row.status === 'rescheduled';
     const unplacedCustomerPick = isUnplacedCustomerPick(row);
     const customerState = publicTrackState(row);
-    if (!officeRebooking && !unplacedCustomerPick) row = await ensureEnRouteDestinationGeocoded(row);
+    // A recipient's link never writes or calls a geocoder: it uses the stored pin, or the page's no-map fallback.
+    if (!officeRebooking && !unplacedCustomerPick && !recipientScope) row = await ensureEnRouteDestinationGeocoded(row);
 
     // Presign the tech's photo (if S3-managed) inside this trusted
     // track-token boundary. Falls back to row.tech_photo_url for
@@ -881,7 +893,7 @@ router.get('/:token', async (req, res, next) => {
       // leaves track_state='en_route', and keying off it here would keep
       // streaming fresh tech GPS coords and polling until token expiry
       // even though the customer is shown a terminal missed-visit card.
-      vehicle: customerState === 'en_route' ? await buildVehicle(row) : null,
+      vehicle: customerState === 'en_route' ? await buildVehicle(row, { readOnly: recipientScope }) : null,
       stopsAhead: stopsReady ? stopsReady.stopsAhead : null,
       // True when a count exists but is not yet the durable clamp floor —
       // the page must POST /:token/stops-ahead (the explicit write path)
@@ -953,7 +965,7 @@ router.get('/:token', async (req, res, next) => {
         || null;
     }
 
-    res.json(recipientScope ? recipientTrackPayload(response) : response);
+    res.json(recipientScope ? recipientTrackPayload(response, { visitIsToday: isServiceDateToday(row.scheduled_date) }) : response);
   } catch (err) {
     next(err);
   }

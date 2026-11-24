@@ -666,6 +666,23 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       await expect(db('visit_text_recipients').where({ id: other.id }).update({ track_token: token })).rejects.toMatchObject({ code: '23505' });
     });
 
+    test('a callback-number hold added after the text was sent closes the link (the same check as the send)', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      await db('disclaimed_number_holds').insert({ phone_e164: HOLDER, customer_id: customerId, source_call_log_id: callLogId, held_at: new Date() });
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      await db('disclaimed_number_holds').where({ source_call_log_id: callLogId }).del();
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+    });
+
+    test('a completed or on-site visit still opens the link', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'completed' });
+      const [{ id }] = await rows();
+      expect(await VisitRecipient.visitForTrackToken(await VisitRecipient.ensureTrackToken(id))).not.toBeNull();
+    });
+
     test('404 cases: gate off, a wrong token, a declined person, the visit gone, no live expiry', async () => {
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       const [{ id }] = await rows();

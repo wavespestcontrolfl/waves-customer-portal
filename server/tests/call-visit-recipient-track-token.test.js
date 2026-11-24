@@ -12,6 +12,7 @@ jest.mock('../models/db', () => {
     const calls = (mockTables[table] = mockTables[table] || { reads: [], rows: [], updates: [] });
     ['where', 'whereRaw', 'whereNotNull', 'orderBy'].forEach((m) => { q[m] = jest.fn((...a) => { calls.reads.push([m, ...a]); return q; }); });
     q.first = jest.fn(async () => (typeof calls.first === 'function' ? calls.first() : (calls.first ?? null)));
+    q.then = (resolve, reject) => Promise.resolve(calls.list ?? []).then(resolve, reject);
     q.update = jest.fn((patch) => { calls.updates.push(patch); return q; });
     q.returning = jest.fn(async () => calls.returning ?? []);
     q.insert = jest.fn(async () => {});
@@ -24,6 +25,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/contact-notification-prefs', () => ({ contactPhoneDeclinesText: jest.fn(async () => false) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
 jest.mock('../services/disclaimed-number-holds', () => ({ disclaimedNumberHeldForVisit: jest.fn(async () => false) }));
+const { disclaimedNumberHeldForVisit } = require('../services/disclaimed-number-holds');
 
 const { contactPhoneDeclinesText } = require('../services/contact-notification-prefs');
 const VisitRecipient = require('../services/call-visit-recipient');
@@ -31,22 +33,24 @@ const VisitRecipient = require('../services/call-visit-recipient');
 const GATE = 'GATE_CALL_GIVEN_VISIT_TEXTS';
 const gateBefore = process.env[GATE];
 const TOKEN = 'b'.repeat(64);
-const ROW = { id: 'r-1', scheduled_service_id: 'ss-1', phone_key: '9415550002', phone_e164: '+19415550002' };
+const ROW = { id: 'r-1', scheduled_service_id: 'ss-1', phone_key: '9415550002', phone_e164: '+19415550002', first_name: 'Bob', last_name: 'Roe' };
 const LIVE = new Date(Date.now() + 86400000).toISOString();
-const VISIT = { id: 'ss-1', customer_id: 'cust-1', track_token_expires_at: LIVE };
+const VISIT = { id: 'ss-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-12-01', window_start: '09:00:00', service_type: 'Pest Control', track_token_expires_at: LIVE };
 
 beforeEach(() => {
   jest.clearAllMocks();
   for (const k of Object.keys(mockTables)) delete mockTables[k];
   process.env[GATE] = 'true';
   contactPhoneDeclinesText.mockResolvedValue(false);
+  disclaimedNumberHeldForVisit.mockResolvedValue(false);
 });
 afterAll(() => { if (gateBefore === undefined) delete process.env[GATE]; else process.env[GATE] = gateBefore; });
 
 function seed({ row = ROW, visit = VISIT, optin = null, suppressed = null } = {}) {
   const require_ = require('../models/db');
   require_.mockClear();
-  mockTables.visit_text_recipients = { reads: [], rows: [], updates: [], first: row };
+  mockTables.visit_text_recipients = { reads: [], rows: [], updates: [], first: row, list: row ? [row] : [] };
+  mockTables.customers = { reads: [], rows: [], updates: [], first: { phone: '+19415550001' } };
   mockTables.scheduled_services = { reads: [], rows: [], updates: [], first: visit };
   mockTables.recipient_optin = { reads: [], rows: [], updates: [], first: optin };
   mockTables.messaging_suppression = { reads: [], rows: [], updates: [], first: suppressed };
@@ -88,6 +92,26 @@ describe('visitForTrackToken: who a recipient link opens', () => {
   ])('a visit whose own link expiry is %s resolves nothing (a missing expiry is refused, unlike the holder\'s legacy link)', async (_label, expiry) => {
     seed({ visit: { ...VISIT, track_token_expires_at: expiry } });
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+  });
+
+  test('the SAME permission check as the send: a callback-number hold added after the text was sent closes the link', async () => {
+    seed();
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).not.toBeNull();
+    disclaimedNumberHeldForVisit.mockResolvedValue(true);
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+    // and the send's handoff check reads the same hold
+    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALLBACK_NUMBER_HOLD');
+  });
+
+  test('a person no longer on the visit (row not listed for it) resolves nothing', async () => {
+    seed();
+    mockTables.visit_text_recipients.list = [];
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+  });
+
+  test.each(['on_site', 'completed', 'cancelled'])('a %s visit still opens the link (the page says what happened), where a send would not', async (status) => {
+    seed({ visit: { ...VISIT, status } });
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toEqual({ visitId: 'ss-1', recipientId: 'r-1' });
   });
 
   test('a row whose visit is gone resolves nothing', async () => {
