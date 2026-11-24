@@ -308,6 +308,102 @@ describe('saved-card charge claim', () => {
 });
 
 describe('saved-card attempt state updates', () => {
+  test('records the worker PaymentIntent once, with the create-returned PaymentIntent', async () => {
+    const updates = [];
+    const query = {};
+    query.where = jest.fn(() => query);
+    query.whereIn = jest.fn(() => query);
+    query.whereNull = jest.fn(() => query);
+    query.update = jest.fn(async (payload) => {
+      updates.push(payload);
+      return 1;
+    });
+    const database = jest.fn(() => query);
+
+    await markInvoiceSavedCardChargeAttempt(
+      'attempt-worker',
+      { status: 'ambiguous', stripe_payment_intent_id: 'pi-worker', resolved_at: null },
+      database,
+    );
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toEqual(expect.objectContaining({ status: 'ambiguous', stripe_payment_intent_id: 'pi-worker' }));
+    // Record once: an ID already on the row is never replaced.
+    expect(updates[0].worker_payment_intent_id.sql).toBe('COALESCE(worker_payment_intent_id, ?)');
+    expect(updates[0].worker_payment_intent_id.bindings).toEqual(['pi-worker']);
+    expect(updates[0]).not.toHaveProperty('stripe_payment_intent_bound_at');
+  });
+
+  test('writes no worker PaymentIntent when the update names none', async () => {
+    const updates = [];
+    const query = {};
+    query.where = jest.fn(() => query);
+    query.whereIn = jest.fn(() => query);
+    query.whereNull = jest.fn(() => query);
+    query.update = jest.fn(async (payload) => {
+      updates.push(payload);
+      return 1;
+    });
+
+    await markInvoiceSavedCardChargeAttempt('attempt-none', { status: 'ambiguous', resolved_at: null }, jest.fn(() => query));
+
+    expect(updates[0]).not.toHaveProperty('worker_payment_intent_id');
+  });
+
+  test('adds only worker provenance when an exact failure webhook wins the ordering race', async () => {
+    const queries = [];
+    const updateResults = [0, 1];
+    const database = jest.fn(() => {
+      const query = {};
+      ['where', 'whereIn', 'whereNull', 'whereNotNull'].forEach((method) => {
+        query[method] = jest.fn(() => query);
+      });
+      query.update = jest.fn(async (payload) => {
+        query.payload = payload;
+        return updateResults.shift();
+      });
+      queries.push(query);
+      return query;
+    });
+
+    await expect(markInvoiceSavedCardChargeAttempt(
+      'attempt-webhook-first',
+      { status: 'ambiguous', stripe_payment_intent_id: 'pi-failed-first', resolved_at: null },
+      database,
+    )).resolves.toBeUndefined();
+
+    expect(queries).toHaveLength(2);
+    expect(queries[1].where).toHaveBeenCalledWith({
+      id: 'attempt-webhook-first', stripe_payment_intent_id: 'pi-failed-first',
+    });
+    expect(queries[1].whereNotNull).toHaveBeenCalledWith('resolved_at');
+    expect(Object.keys(queries[1].payload).sort()).toEqual(['updated_at', 'worker_payment_intent_id']);
+    expect(queries[1].payload.worker_payment_intent_id.bindings).toEqual(['pi-failed-first']);
+  });
+
+  test('a webhook that attached a different PaymentIntent still fails the fence and gains no worker ID', async () => {
+    const queries = [];
+    const database = jest.fn(() => {
+      const query = {};
+      ['where', 'whereIn', 'whereNull', 'whereNotNull'].forEach((method) => {
+        query[method] = jest.fn(() => query);
+      });
+      query.update = jest.fn(async () => 0);
+      queries.push(query);
+      return query;
+    });
+
+    await expect(markInvoiceSavedCardChargeAttempt(
+      'attempt-other-pi',
+      { status: 'ambiguous', stripe_payment_intent_id: 'pi_worker_returned', resolved_at: null },
+      database,
+    )).rejects.toMatchObject({ code: 'STRIPE_CHARGE_ATTEMPT_FENCE_LOST' });
+
+    // The second write is scoped to the same PaymentIntent the worker returned.
+    expect(queries).toHaveLength(2);
+    expect(queries[1].where).toHaveBeenCalledWith({ id: 'attempt-other-pi', stripe_payment_intent_id: 'pi_worker_returned' });
+  });
+
   test('guards bookkeeping writes so a final webhook cannot be reopened', async () => {
     const query = {};
     query.where = jest.fn(() => query);
@@ -345,6 +441,7 @@ describe('saved-card attempt state updates', () => {
       amount: 42.5,
       creditAppliedDelta: 10,
       creditAppliedTotal: 10,
+      canceledCheckoutPaymentIntentId: 'pi_checkout_old',
       database,
     });
 
@@ -353,6 +450,7 @@ describe('saved-card attempt state updates', () => {
       amount: 42.5,
       credit_applied_delta: 10,
       credit_applied_total: 10,
+      canceled_checkout_payment_intent_id: 'pi_checkout_old',
       submitted_at: expect.any(Date),
     }));
   });
@@ -552,7 +650,7 @@ function preChargeFailureDb({ attemptStatus = 'ambiguous', paymentIntentId = nul
   };
   const trx = jest.fn((table) => {
     const query = {};
-    ['where', 'whereIn', 'whereNull', 'forUpdate'].forEach((method) => {
+    ['where', 'whereIn', 'whereNull', 'whereNotNull', 'forUpdate'].forEach((method) => {
       query[method] = jest.fn(() => query);
     });
     query.first = jest.fn(async () => (
@@ -561,7 +659,7 @@ function preChargeFailureDb({ attemptStatus = 'ambiguous', paymentIntentId = nul
     query.update = jest.fn(async (payload) => {
       state.updates.push({ table, payload });
       if (table === 'invoices') Object.assign(state.invoice, payload);
-      if (table === 'stripe_invoice_charge_attempts') Object.assign(state.attempt, payload);
+      if (table === 'stripe_invoice_charge_attempts' && state.attempt) Object.assign(state.attempt, payload);
       return 1;
     });
     return query;
@@ -573,6 +671,49 @@ function preChargeFailureDb({ attemptStatus = 'ambiguous', paymentIntentId = nul
 }
 
 describe('saved-card pre-charge failure release', () => {
+  test('records the charge worker PaymentIntent on an authentication-required decline', async () => {
+    const { database, state } = preChargeFailureDb({ attemptStatus: 'claimed' });
+    await expect(resolveNoFundsSavedCardChargeAttempt({
+      attemptId: 'attempt-1',
+      invoiceId: 'inv-1',
+      failureMessage: 'authentication required',
+      declineCode: 'authentication_required',
+      authenticationIntentId: 'pi_authentication',
+      database,
+    })).resolves.toEqual({ resolved: true, reopened: false });
+    const written = state.updates.find((entry) => entry.table === 'stripe_invoice_charge_attempts').payload;
+    expect(written).toEqual(expect.objectContaining({ status: 'failed', decline_code: 'authentication_required' }));
+    expect(written.worker_payment_intent_id.bindings).toEqual(['pi_authentication']);
+    expect(written.stripe_payment_intent_id.bindings).toEqual(['pi_authentication']);
+    expect(written).not.toHaveProperty('stripe_payment_intent_bound_at');
+  });
+
+  test('a decline with no PaymentIntent writes neither ID', async () => {
+    const { database, state } = preChargeFailureDb({ attemptStatus: 'claimed' });
+    await resolveNoFundsSavedCardChargeAttempt({
+      attemptId: 'attempt-1', invoiceId: 'inv-1', failureMessage: 'declined', declineCode: 'card_declined', database,
+    });
+    const written = state.updates.find((entry) => entry.table === 'stripe_invoice_charge_attempts').payload;
+    expect(written).not.toHaveProperty('worker_payment_intent_id');
+    expect(written).not.toHaveProperty('stripe_payment_intent_id');
+  });
+
+  test('adds the worker PaymentIntent to an authentication decline a webhook already closed', async () => {
+    const { database, state } = preChargeFailureDb();
+    state.attempt = null; // the active-attempt read finds nothing: the webhook resolved it first
+    await expect(resolveNoFundsSavedCardChargeAttempt({
+      attemptId: 'attempt-1',
+      invoiceId: 'inv-1',
+      failureMessage: 'authentication required',
+      declineCode: 'authentication_required',
+      authenticationIntentId: 'pi_authentication',
+      database,
+    })).resolves.toBe(false);
+    const written = state.updates.find((entry) => entry.table === 'stripe_invoice_charge_attempts').payload;
+    expect(written.worker_payment_intent_id.bindings).toEqual(['pi_authentication']);
+    expect(Object.keys(written).sort()).toEqual(['stripe_payment_intent_id', 'updated_at', 'worker_payment_intent_id']);
+  });
+
   test('reopens a parked invoice when the stale ambiguous owner proves no charge was submitted', async () => {
     const { database, state } = preChargeFailureDb();
     await expect(resolveNoFundsSavedCardChargeAttempt({

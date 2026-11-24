@@ -349,12 +349,33 @@ async function claimInvoiceSavedCardCharge({
   }
 }
 
+// worker_payment_intent_id belongs to the worker that called Stripe: it is the
+// PaymentIntent that worker's own create response returned. Webhook resolvers
+// write stripe_payment_intent_id through their own paths and never this column.
+// Record it once. A later write never replaces an ID that is already there.
+function workerIntentBinding(intentId) {
+  if (!intentId) return {};
+  return { worker_payment_intent_id: db.raw('COALESCE(worker_payment_intent_id, ?)', [intentId]) };
+}
+
 async function markInvoiceSavedCardChargeAttempt(attemptId, updates, database = db) {
+  const workerPaymentIntentId = updates.stripe_payment_intent_id || null;
+  const updatedAt = new Date();
   const updated = await database('stripe_invoice_charge_attempts')
     .where({ id: attemptId })
     .whereIn('status', ['claimed', 'ambiguous'])
     .whereNull('resolved_at')
-    .update({ ...updates, updated_at: new Date() });
+    .update({ ...updates, ...workerIntentBinding(workerPaymentIntentId), updated_at: updatedAt });
+  if (!updated && workerPaymentIntentId) {
+    // A final cancellation or failure webhook can win after create returns but
+    // before this worker records its response. Keep that outcome and add the
+    // worker's ID only when the webhook attached the exact same PaymentIntent.
+    const stamped = await database('stripe_invoice_charge_attempts')
+      .where({ id: attemptId, stripe_payment_intent_id: workerPaymentIntentId })
+      .whereNotNull('resolved_at')
+      .update({ ...workerIntentBinding(workerPaymentIntentId), updated_at: updatedAt });
+    if (stamped) return;
+  }
   if (!updated) {
     const err = new Error(`Saved-card charge attempt ${attemptId} could not be updated`);
     err.code = 'STRIPE_CHARGE_ATTEMPT_FENCE_LOST';
@@ -367,6 +388,7 @@ async function commitInvoiceSavedCardChargeSubmission({
   amount,
   creditAppliedDelta,
   creditAppliedTotal,
+  canceledCheckoutPaymentIntentId = null,
   database = db,
 }) {
   // This transaction deliberately uses the root database handle, not the
@@ -378,6 +400,7 @@ async function commitInvoiceSavedCardChargeSubmission({
       amount,
       credit_applied_delta: creditAppliedDelta,
       credit_applied_total: creditAppliedTotal,
+      canceled_checkout_payment_intent_id: canceledCheckoutPaymentIntentId,
       submitted_at: new Date(),
     }, submissionTrx);
   });
@@ -484,6 +507,9 @@ async function resolveNoFundsSavedCardChargeAttempt({
   // has. Optional; every other caller of this function omits it and the
   // column stays null, unaffected.
   declineCode = null,
+  // The PaymentIntent the charge worker's own create response named for an
+  // authentication_required decline. Recorded as evidence; it changes no outcome.
+  authenticationIntentId = null,
   database = db,
 }) {
   if (!attemptId || !invoiceId) return false;
@@ -497,7 +523,22 @@ async function resolveNoFundsSavedCardChargeAttempt({
       .whereNull('resolved_at')
       .forUpdate()
       .first('id', 'status');
-    if (!attempt) return false;
+    if (!attempt) {
+      // A signed failure webhook can resolve this claim while the create request
+      // is still returning. Only this worker has the response's PaymentIntent, so
+      // add it to that closed decline. A webhook's own ID is never replaced.
+      if (declineCode === 'authentication_required' && authenticationIntentId) {
+        await trx('stripe_invoice_charge_attempts')
+          .where({ id: attemptId, invoice_id: invoiceId, status: 'failed' })
+          .whereNotNull('resolved_at')
+          .update({
+            ...workerIntentBinding(authenticationIntentId),
+            stripe_payment_intent_id: db.raw('COALESCE(stripe_payment_intent_id, ?)', [authenticationIntentId]),
+            updated_at: new Date(),
+          });
+      }
+      return false;
+    }
 
     // A second request can promote a five-minute claim and park the invoice
     // while the original is still blocked in Stripe. Once that owner proves no
@@ -525,6 +566,10 @@ async function resolveNoFundsSavedCardChargeAttempt({
         status: 'failed',
         error_message: String(failureMessage || 'Pre-charge setup failed').slice(0, 1000),
         decline_code: declineCode,
+        ...(authenticationIntentId ? {
+          stripe_payment_intent_id: db.raw('COALESCE(stripe_payment_intent_id, ?)', [authenticationIntentId]),
+          ...workerIntentBinding(authenticationIntentId),
+        } : {}),
         resolved_at: new Date(),
         updated_at: new Date(),
       });
@@ -2737,6 +2782,10 @@ const StripeService = {
         chargeOriginalCreditApplied = Number(lockedInvoice.credit_applied) || 0;
         chargeCreditAppliedTotal = chargeOriginalCreditApplied;
         let stalePaymentIntentToCancel = null;
+        // The invoice's earlier checkout PaymentIntent, once it is known to be
+        // canceled. Recorded on the attempt so a later success can tell this
+        // intentional handoff from an unrelated change to the invoice pointer.
+        let canceledCheckoutPaymentIntentId = null;
         if (lockedInvoice.stripe_payment_intent_id) {
           const activePayment = await trx('payments')
             .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
@@ -2751,7 +2800,9 @@ const StripeService = {
             if (!cancellableStatuses.includes(activeIntent.status)) {
               throw new Error('Invoice has a different active payment');
             }
-            if (activeIntent.status !== 'canceled') {
+            if (activeIntent.status === 'canceled') {
+              canceledCheckoutPaymentIntentId = String(lockedInvoice.stripe_payment_intent_id);
+            } else {
               // Do not mutate Stripe yet. Account-credit application below can
               // change the quoted total (including fully covering it), and a
               // stale expectedTotal must fail while this existing pay-session
@@ -2799,6 +2850,7 @@ const StripeService = {
             }
             if (stalePaymentIntentToCancel) {
               await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
+              canceledCheckoutPaymentIntentId = String(stalePaymentIntentToCancel.id);
               // A combined PI is stamped on its siblings — unbind them from
               // the canceled intent (codex #3427 r19 P2).
               await require('./pay-combined').clearPaymentIntentStamps(trx, stalePaymentIntentToCancel.id, { keepInvoiceIds: [String(lockedInvoice.id)] });
@@ -2849,6 +2901,7 @@ const StripeService = {
         }
         if (stalePaymentIntentToCancel) {
           await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
+          canceledCheckoutPaymentIntentId = String(stalePaymentIntentToCancel.id);
           // Unbind combined siblings from the canceled intent (codex #3427
           // r19 P2) — the saved-card charge replaces only THIS invoice's
           // session; the other allocation rows must not stay bound to a
@@ -2917,6 +2970,7 @@ const StripeService = {
           amount: total,
           creditAppliedDelta: chargeAppliedCreditDelta,
           creditAppliedTotal: chargeCreditAppliedTotal,
+          canceledCheckoutPaymentIntentId,
           // Explicitly use the root handle: this small independent transaction
           // must commit before Stripe is called, even though the invoice work
           // around it is still inside `trx`.
@@ -3068,6 +3122,7 @@ const StripeService = {
           if (creditReservationReady) {
             await markInvoiceSavedCardChargeAttempt(chargeAttempt.id, {
               status: 'ambiguous',
+              worker_create_timed_out_at: new Date(),
               error_message: String(err.message).slice(0, 1000),
               resolved_at: null,
             }).catch((attemptErr) => {
@@ -3155,11 +3210,14 @@ const StripeService = {
         const customerDecline = err.type === 'StripeCardError' || err.code === 'card_declined' || Boolean(err.decline_code);
         const rawCode = err.decline_code || err.raw?.decline_code || err.code || null;
         const declineCode = customerDecline ? rawCode : null;
+        const failedIntent = err.payment_intent || err.raw?.payment_intent;
+        const failedIntentId = typeof failedIntent === 'string' ? failedIntent : failedIntent?.id || null;
         await resolveNoFundsSavedCardChargeAttempt({
           attemptId: chargeAttempt.id,
           invoiceId,
           failureMessage: `${err.message || 'Card charge failed'}${!customerDecline && rawCode ? ` (${rawCode})` : ''}`,
           declineCode,
+          authenticationIntentId: declineCode === 'authentication_required' ? failedIntentId : null,
         }).catch((attemptErr) => {
           logger.error(`[stripe] charge-attempt release failed after deterministic decline ${chargeAttempt.id}; claim remains blocking: ${attemptErr.message}`);
         });

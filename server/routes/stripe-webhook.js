@@ -8,6 +8,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { insertHealthAlert, lockAlertCustomers } = require('../services/health-alert-insert');
 const { isBankMethodType } = require('../services/autopay-eligibility');
+const { recordAuthenticationCancellation } = require('../services/invoice-payment-authentication');
 const stripeConfig = require('../config/stripe-config');
 const {
   classifyExistingWebhookEvent,
@@ -7074,6 +7075,9 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
 async function handlePaymentIntentCanceled(paymentIntent) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent canceled: ${piId}`);
+  // Record Stripe's signed cancellation of a saved-card charge on its attempt.
+  // Evidence only: nothing here releases a hold or reopens an invoice.
+  await recordAuthenticationCancellation(paymentIntent, db);
   if (paymentIntent.metadata?.waves_statement_id) {
     await handleStatementPaymentIntentEvent(paymentIntent, 'canceled');
     return;
