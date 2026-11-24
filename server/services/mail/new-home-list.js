@@ -196,7 +196,8 @@ async function evaluate(candidate, deps) {
 /** Calendar days in America/New_York ending today, weekends removed, newest first (YYYY-MM-DD). */
 function daysToRead(mode, now = Date.now()) {
   const at = new Date(typeof now === 'function' ? now() : now);
-  const count = mode === 'noon' ? NOON_DAYS : NIGHT_DAYS;
+  // 'retry' (a run a deploy cut short) reads the wider noon window, so it never reads less than the run it replaces.
+  const count = mode === 'noon' || mode === 'retry' ? NOON_DAYS : NIGHT_DAYS;
   const days = [];
   for (let back = 0; back < count; back += 1) {
     const day = addETDays(at, -back); // noon UTC on that ET calendar day: clear of the daylight-time seam
@@ -207,10 +208,14 @@ function daysToRead(mode, now = Date.now()) {
 }
 
 // A day is on its last read when the next run no longer reads it: after a noon run, tonight's night run; after a night
-// run, tomorrow's noon run, which reads every day tonight's run read.
+// run, tomorrow's noon run (it reads every day tonight's run read), or tomorrow's night run on a weekend.
+// The noon run is weekdays only (scheduler.js), so after a Friday or Saturday night run the next run is the next night.
+// A 'retry' counts as a night run here: it may run after tonight's run, so it never counts on one more read today.
 function daysTheNextRunReads(mode, nowMs) {
   if (mode === 'noon') return new Set(daysToRead('night', nowMs));
-  return new Set(daysToRead('noon', addETDays(new Date(nowMs), 1)));
+  const tomorrow = addETDays(new Date(nowMs), 1);
+  const dow = etParts(tomorrow).dayOfWeek;
+  return new Set(daysToRead(dow === 0 || dow === 6 ? 'night' : 'noon', tomorrow));
 }
 
 const sleepFor = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });

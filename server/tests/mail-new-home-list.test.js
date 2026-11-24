@@ -720,6 +720,20 @@ describe('runNewHomeList', () => {
     expect(deps.fetchDayList.mock.calls.map((c) => c[0])).toEqual(['2026-11-17', '2026-11-16', '2026-11-13', '2026-11-12', '2026-11-11']);
   });
 
+  test('after a Saturday night run the next run is Sunday night (no weekend noon), so that run is the last read of its oldest day', async () => {
+    // Sat 11-21 9:31 PM ET reads 11-21 back to 11-16 (weekdays 20, 19, 18, 17, 16). Sunday night reads 22 back to 17.
+    const deps = makeDeps({ rowsByDay: { '2026-11-16': [person(1, { date: '2026-11-16' })] } });
+    deps.queryParcels.mockImplementation(async () => { throw new Error('busy'); });
+    await expect(runNewHomeList({ mode: 'night', now: () => Date.UTC(2026, 10, 22, 2, 31), deps }))
+      .rejects.toThrow('1 deeds were not judged on the last day a run reads them (2026-11-16: 1)');
+  });
+
+  test('a retry reads the noon window', async () => {
+    const deps = makeDeps();
+    await runNewHomeList({ mode: 'retry', now: () => NOW, deps });
+    expect(deps.fetchDayList.mock.calls.map((c) => c[0])).toEqual(daysToRead('noon', NOW));
+  });
+
   test('a refused day names its HTTP status number in the failure, never the page', async () => {
     const deps = makeDeps();
     deps.fetchDayList.mockImplementation(async (day) => {
