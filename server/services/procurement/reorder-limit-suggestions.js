@@ -292,7 +292,9 @@ function pickPriceRow(rows, product) {
 // entered days later must not make a false peak week); others on their ET
 // entry date. Rows outside the window are dropped before anything is counted.
 function usageDay(m) {
-  return dateOnlyString(m.visit_date) || etDateString(new Date(m.created_at));
+  // Same order as inventory-count-guard: service record date, then the
+  // scheduled date, then the ET entry date.
+  return dateOnlyString(m.service_date) || dateOnlyString(m.visit_date) || etDateString(new Date(m.created_at));
 }
 
 function usageHistory(rows, unit, day, historyDays) {
@@ -336,6 +338,17 @@ function packFor({ row, vendorName, vendor }, unit) {
   return { vendorName, pack: row ? packInInventoryUnit(row.quantity, unit) : null, countOrder: false };
 }
 
+// The dispatcher parks an order with no eligible price row or no vendor SKU
+// (no_price). For a configured vendor, flag that so the suggestion is read as
+// a manual order, not one the dispatcher can place.
+function applyDispatchPriceCheck(suggestion, configured) {
+  if (!configured || suggestion.suggestedReorder == null) return;
+  const missing = !configured.row ? `no current price row from ${configured.name}` : (!configured.row.vendor_sku ? `the ${configured.name} price row has no vendor SKU` : null);
+  if (!missing) return;
+  if (suggestion.status === 'ok') suggestion.status = 'no_price';
+  suggestion.note = [suggestion.note, `Dispatch cannot order it: ${missing}; order by hand or fix the price row.`].filter(Boolean).join(' ');
+}
+
 async function readLawnForecast(conn, o, forecast) {
   if (forecast !== undefined) return { rows: forecast || [], warning: null };
   try {
@@ -344,11 +357,13 @@ async function readLawnForecast(conn, o, forecast) {
     // ask for forecastDays - 1 to get exactly forecastDays dates.
     const result = await buildWaveGuardInventoryForecast({ days: o.forecastDays - 1, limit: FORECAST_VISIT_LIMIT, knex: conn });
     const warnings = [];
-    if ((result.serviceCount || 0) >= FORECAST_VISIT_LIMIT) warnings.push(`lawn forecast stopped at ${FORECAST_VISIT_LIMIT} visits, so lawn demand may read low`);
+    const truncated = (result.serviceCount || 0) >= FORECAST_VISIT_LIMIT;
+    if (truncated) warnings.push(`lawn forecast stopped at ${FORECAST_VISIT_LIMIT} visits, so lawn demand may read low`);
     if ((result.errors || []).length) warnings.push(`${result.errors.length} lawn visits could not be planned`);
-    return { rows: result.products || [], warning: warnings.join('; ') || null };
+    return { rows: result.products || [], warning: warnings.join('; ') || null, incomplete: truncated };
   } catch (err) {
-    return { rows: [], warning: `lawn forecast failed: ${err.message}` };
+    // No rows: no product's scheduled demand is known.
+    return { rows: [], warning: `lawn forecast failed: ${err.message}`, incomplete: true };
   }
 }
 
@@ -383,15 +398,16 @@ async function buildReorderLimitSuggestions({ knex, options = {}, forecast } = {
   const movements = ids.length
     ? await conn('product_inventory_movements as pim')
       .leftJoin('scheduled_services as ss', 'ss.id', 'pim.scheduled_service_id')
+      .leftJoin('service_records as sr', 'sr.id', 'pim.service_record_id')
       .whereIn('pim.product_id', ids)
       .where('pim.movement_type', 'usage')
       .where('pim.created_at', '>=', since)
-      .select('pim.product_id', 'pim.quantity', 'pim.unit', 'pim.created_at', 'ss.scheduled_date as visit_date')
+      .select('pim.product_id', 'pim.quantity', 'pim.unit', 'pim.created_at', 'ss.scheduled_date as visit_date', 'sr.service_date')
     : [];
   const pricing = ids.length
     ? await eligibleVendorPricing(
       conn('vendor_pricing').leftJoin('vendors as pv', 'pv.id', 'vendor_pricing.vendor_id').whereIn('vendor_pricing.product_id', ids),
-    ).select('vendor_pricing.product_id', 'vendor_pricing.vendor_id', 'vendor_pricing.quantity', 'vendor_pricing.is_best_price', 'pv.name as vendor_name', 'pv.code as vendor_code')
+    ).select('vendor_pricing.product_id', 'vendor_pricing.vendor_id', 'vendor_pricing.quantity', 'vendor_pricing.is_best_price', 'vendor_pricing.vendor_sku', 'pv.name as vendor_name', 'pv.code as vendor_code')
     : [];
 
   const lawn = await readLawnForecast(conn, o, forecast);
@@ -406,7 +422,9 @@ async function buildReorderLimitSuggestions({ knex, options = {}, forecast } = {
     const usage = history.usage;
     const usageRecords = history.records;
     const forecastDemand = lawnDemand.demand;
-    const { vendorName, pack, countOrder } = packFor(pickPriceRow(pricing.filter((r) => r.product_id === p.id), p), unit);
+    const picked = pickPriceRow(pricing.filter((r) => r.product_id === p.id), p);
+    const pickedVendor = p.auto_reorder_vendor_id ? { name: p.vendor_name, row: picked.row } : null;
+    const { vendorName, pack, countOrder } = packFor(picked, unit);
     const suggestion = suggestLimitsForProduct({
       product: {
         id: p.id,
@@ -429,6 +447,13 @@ async function buildReorderLimitSuggestions({ knex, options = {}, forecast } = {
     });
     suggestion.usageRecords = usageRecords + (f ? 1 : 0);
     if (f && lawn.warning) suggestion.note = [suggestion.note, `Lawn schedule incomplete: ${lawn.warning}.`].filter(Boolean).join(' ');
+    // Failed or cut-off forecast: "none scheduled" is not known, so the row
+    // stays visible as unknown demand instead of hiding as no use.
+    if (lawn.incomplete && suggestion.status === 'no_usage') {
+      suggestion.status = 'demand_unknown';
+      suggestion.note = `No use in ${o.historyDays / 7} weeks; scheduled lawn demand unknown (${lawn.warning}).`;
+    }
+    applyDispatchPriceCheck(suggestion, pickedVendor);
     return suggestion;
   });
 
@@ -445,5 +470,6 @@ module.exports = {
   weeklyTotals,
   suggestLimitsForProduct,
   pickPriceRow,
+  applyDispatchPriceCheck,
   buildReorderLimitSuggestions,
 };
