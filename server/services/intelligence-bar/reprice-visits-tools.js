@@ -24,7 +24,8 @@
  * #26, 2026-11-22: an account with several units needed one unit's visits at
  * its own price): property_id keeps only the visits booked for that saved
  * property, and from_date / through_date bound the dates, so one visit is
- * from_date = through_date = its date, or visit_id names it. With property_id, an upcoming visit of
+ * from_date = through_date = its date, or appointment_id names it (the bar's
+ * task check proves it is the task customer's visit, as for every appointment_id). With property_id, an upcoming visit of
  * the service that has no saved property is listed as left alone, never
  * guessed onto the property. Never a visit that is completed,
  * in progress (en_route / on_site), invoiced (any invoice row), prepaid, covered
@@ -79,7 +80,7 @@ const REPRICE_FUTURE_VISITS_TOOL = {
   name: 'reprice_future_visits',
   description: `Change the per-visit price of ONE customer's upcoming visits for ONE service (e.g. "she is Gold now, make her future pest visits $49"). The first call returns a PREVIEW and changes nothing: each visit that changes (date, service, old price → new price), each visit left alone and why, and that no customer message is sent. The operator approves on the confirmation card. Each visit is then saved exactly as the Schedule screen's Edit appointment price edit saves it.
 Never changes a visit that is completed, in progress, invoiced, prepaid, covered by an annual prepay term, a free re-service or $0 visit, a visit with add-on lines, a plan's first (template) visit, or one holding money — those are listed on the card as left alone. At most ${MAX_VISITS} visits per card: pass through_date to split a longer schedule.
-Optional inputs narrow the card to one unit of a multi-unit customer, a date range, or one visit (visit_id).
+Optional inputs narrow the card to one unit of a multi-unit customer, a date range, or one visit (appointment_id).
 Refused for a customer with an annual prepay term (the bar can't reprice those from here yet). Refused for a customer billed by monthly membership: dues cover those visits and the price is the monthly rate — use update_customer / rate_service for that instead.
 new_price is the new price of each visit in dollars (the full visit price after any discount). A percentage is not accepted: ask the operator for the dollar price. Changing a WaveGuard tier never reprices visits by itself — use this tool when the operator wants the visits repriced.
 Admin-only.`,
@@ -91,7 +92,7 @@ Admin-only.`,
       new_price: { type: 'number', description: 'The new price of EACH visit in dollars, above 0' },
       property_id: { type: 'string', format: 'uuid', description: 'Optional saved property id: only visits booked for this property change' },
       from_date: { type: 'string', format: 'date', description: 'Optional first visit date to include (YYYY-MM-DD); default today' },
-      visit_id: { type: 'string', format: 'uuid', description: 'Optional: change only this one upcoming visit (its id from get_schedule_view)' },
+      appointment_id: { type: 'string', format: 'uuid', description: 'Optional: change only this one upcoming visit (its id from get_schedule_view)' },
       through_date: { type: 'string', format: 'date', description: 'Optional last visit date to include (YYYY-MM-DD)' },
     },
     required: ['customer_id', 'service', 'new_price'],
@@ -175,20 +176,32 @@ function parseInput(input) {
   return { service, newPrice: Math.round(price * 100) / 100, through, ...scope };
 }
 
+// An omitted selector is null; a supplied blank one is refused, never read
+// as "no narrowing" (it would widen the card).
 function optionalText(value) {
-  return value == null || value === '' ? null : String(value).trim();
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text === '' ? { blank: true } : text;
+}
+
+function blankRefusal(field) {
+  return { error: `${field} is blank. Leave it out, or give a real value. Nothing was changed.`, code: 'invalid_input' };
 }
 
 // The optional narrowing (gaps #25 + #26): a first date and one saved property.
 function parseScope(input, through) {
   const from = optionalText(input.from_date);
+  if (from?.blank) return blankRefusal('from_date');
   if (from && !validCalendarDate(from)) return { error: 'from_date must be a real calendar date (YYYY-MM-DD).', code: 'invalid_input' };
   if (from && through && from > through) return { error: 'from_date is after through_date. Nothing was changed.', code: 'invalid_input' };
   const propertyId = optionalText(input.property_id);
+  if (propertyId?.blank) return blankRefusal('property_id');
   if (propertyId && !UUID_RE.test(propertyId)) return { error: 'property_id must be a saved property id from the customer record.', code: 'invalid_input' };
-  const visitId = optionalText(input.visit_id);
-  if (visitId && !UUID_RE.test(visitId)) return { error: "visit_id must be the visit's id. Look the visit up first.", code: 'invalid_input' };
-  return { from, propertyId, visitId };
+  const visitId = optionalText(input.appointment_id);
+  if (visitId?.blank) return blankRefusal('appointment_id');
+  if (visitId && !UUID_RE.test(visitId)) return { error: "appointment_id must be the visit's id. Look the visit up first.", code: 'invalid_input' };
+  // Postgres returns lowercase UUIDs; compare the same way.
+  return { from, propertyId: propertyId && propertyId.toLowerCase(), visitId: visitId && visitId.toLowerCase() };
 }
 
 // One service family: appointment-tagger's tag for the operator's words, or the
@@ -257,7 +270,7 @@ async function scopedVisits({ customer, customerName, propertyId, visitId, from,
   const rows = (await loadUpcomingVisits(customer.id, from || today, through))
     .filter((r) => !GONE_STATUSES.has(String(r.status || '').toLowerCase()))
     .filter((r) => !property || r.property_id == null || String(r.property_id) === String(property.id))
-    .filter((r) => !visitId || String(r.id) === visitId);
+    .filter((r) => !visitId || String(r.id).toLowerCase() === visitId);
   if (visitId && !rows.length) {
     return { error: "That visit is not an upcoming visit of this customer in that range (it may be past, cancelled, at another property or someone else's). Nothing was changed.", code: 'visit_not_found' };
   }
@@ -369,6 +382,22 @@ function allExcludedRefusal({ label, customerName, newPrice, excluded, excludedO
   };
 }
 
+// Where a visit is booked: its address stamp, else its saved property.
+function visitPlace(row) {
+  return String(row.service_address_line1 || '').trim() || (row.property_id ? `property ${String(row.property_id).slice(0, 8)}` : 'the customer address');
+}
+
+// Two units can share a service, date and price: then each card line names
+// its place, so the operator can see which visit changes.
+function visitsAtSeveralPlaces(rows) {
+  return new Set(rows.map(visitPlace)).size > 1;
+}
+
+// A property card names its place once; a one-visit card names the visit's.
+function placeShown(property, visitId, rows) {
+  return !property && (Boolean(visitId) || visitsAtSeveralPlaces(rows));
+}
+
 // The service family inside the narrowed scope; with a property, at least one
 // visit of it must be booked for that property.
 async function pickScopedFamily({ customer, customerName, service, propertyId, visitId, from, through }) {
@@ -442,7 +471,11 @@ async function buildPlan(input) {
     return !reason;
   });
 
-  const line = (row) => ({ id: String(row.id), date: dateOnly(row.scheduled_date), service: row.service_type || family.label });
+  const showPlace = placeShown(property, visitId, family.rows);
+  const line = (row) => ({
+    id: String(row.id), date: dateOnly(row.scheduled_date), service: row.service_type || family.label,
+    ...(showPlace ? { at: visitPlace(row) } : {}),
+  });
   const excludedOut = excluded.map(({ row, reason }) => ({ ...line(row), reason }));
   const unchangedOut = unchanged.map((row) => ({ ...line(row), price: money(newPrice) }));
   if (!candidates.length) {
@@ -494,13 +527,13 @@ function cardLines(preview) {
   const lines = [];
   if (preview.property_label) lines.push({ kind: 'operational', text: `Only visits booked for ${preview.property_label}. The customer's other properties keep their prices.` });
   for (const v of preview.visits || []) {
-    lines.push({ kind: 'billing', text: `Visit ${weekdayDate(v.date)} · ${v.service}: ${v.old_price} → ${v.new_price}${v.discount_note ? ` (${v.discount_note})` : ''}` });
+    lines.push({ kind: 'billing', text: `Visit ${weekdayDate(v.date)} · ${v.service}${v.at ? ` at ${v.at}` : ''}: ${v.old_price} → ${v.new_price}${v.discount_note ? ` (${v.discount_note})` : ''}` });
   }
   for (const v of preview.left_alone || []) {
-    lines.push({ kind: 'operational', text: `Left alone: ${weekdayDate(v.date)} · ${v.service} — ${v.reason}` });
+    lines.push({ kind: 'operational', text: `Left alone: ${weekdayDate(v.date)} · ${v.service}${v.at ? ` at ${v.at}` : ''} — ${v.reason}` });
   }
   for (const v of preview.already_at_price || []) {
-    lines.push({ kind: 'operational', text: `Already ${v.price}: ${weekdayDate(v.date)} · ${v.service}` });
+    lines.push({ kind: 'operational', text: `Already ${v.price}: ${weekdayDate(v.date)} · ${v.service}${v.at ? ` at ${v.at}` : ''}` });
   }
   lines.push({ kind: 'operational', text: `Each visit is saved the way the Schedule screen saves a price edit. Only the listed visits change; visits the plan adds later are not repriced by this card.` });
   lines.push({ kind: 'operational', text: NO_MESSAGE });

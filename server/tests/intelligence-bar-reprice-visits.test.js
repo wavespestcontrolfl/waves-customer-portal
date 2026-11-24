@@ -544,16 +544,52 @@ describe('one property, one visit', () => {
     expect(card.visits.map((v) => v.id)).toEqual(['a-2']);
   });
 
-  test('visit_id changes that one visit, even with another unit on the same day', async () => {
+  test('appointment_id changes that one visit, even with another unit on the same day, and the card names its place', async () => {
     const id = '00000000-0000-0000-0000-0000000000d1';
-    tables.scheduled_services.find((r) => r.id === 'b-1').id = id;
-    const card = await preview({ visit_id: id, new_price: 68.9 });
-    expect(card.visits.map((v) => v.id)).toEqual([id]);
-    const missing = await preview({ visit_id: '00000000-0000-0000-0000-0000000000d9' });
-    expect(missing.code).toBe('visit_not_found');
-    expect((await preview({ visit_id: 'b-1' })).code).toBe('invalid_input');
+    Object.assign(tables.scheduled_services.find((r) => r.id === 'b-1'), { id, service_address_line1: '103 Example Ave' });
+    const card = await preview({ appointment_id: id, new_price: 68.9 });
+    expect(card.visits.map((v) => [v.id, v.at])).toEqual([[id, '103 Example Ave']]);
+    expect(cardLines(card)[0].text).toBe('Visit 2099-03-10 (Tue) · Quarterly Pest Control at 103 Example Ave: $76.56 → $68.90');
+    // Uppercase input matches the lowercase stored id.
+    expect((await preview({ appointment_id: id.toUpperCase(), new_price: 68.9 })).visits.map((v) => v.id)).toEqual([id]);
+    expect((await preview({ appointment_id: '00000000-0000-0000-0000-0000000000d9' })).code).toBe('visit_not_found');
+    expect((await preview({ appointment_id: 'b-1' })).code).toBe('invalid_input');
     // Another unit's visit under property_id is not found.
-    expect((await preview({ visit_id: id, property_id: UNIT_A })).code).toBe('visit_not_found');
+    expect((await preview({ appointment_id: id, property_id: UNIT_A })).code).toBe('visit_not_found');
+  });
+
+  test('a supplied blank selector is refused, never read as no narrowing', async () => {
+    for (const field of ['appointment_id', 'property_id', 'from_date']) {
+      for (const blank of ['', '   ']) {
+        expect(await preview({ [field]: blank })).toMatchObject({ code: 'invalid_input', error: expect.stringMatching(new RegExp(`^${field} is blank`)) });
+      }
+    }
+  });
+
+  test('a card spanning two units names each visit place; a one-place card does not', async () => {
+    tables.scheduled_services.forEach((r) => { r.service_address_line1 = r.property_id === UNIT_A ? '101 Example Ave' : '103 Example Ave'; });
+    const card = await preview({ new_price: 70 });
+    expect(card.visits.map((v) => v.at)).toEqual(['101 Example Ave', '103 Example Ave', '101 Example Ave', '103 Example Ave']);
+    const one = await preview({ property_id: UNIT_A, new_price: 70 });
+    expect(one.visits.every((v) => v.at === undefined)).toBe(true);
+  });
+
+  test("appointment_id and property_id are references the bar's task check binds to the named customer", async () => {
+    const { validateRecordTarget } = require('../services/intelligence-bar/task-context');
+    const OTHER = '00000000-0000-0000-0000-0000000000c2';
+    const OTHER_VISIT = '00000000-0000-0000-0000-0000000000e1';
+    const MINE = '00000000-0000-0000-0000-0000000000e2';
+    tables.customers.push({ id: OTHER, first_name: 'Casey', last_name: 'Other', billing_mode: 'per_visit', deleted_at: null });
+    tables.scheduled_services.push(
+      visit(OTHER_VISIT, '2099-03-10', { customer_id: OTHER, property_id: null }),
+      visit(MINE, '2099-03-10', { property_id: UNIT_A }),
+    );
+    const check = (params) => validateRecordTarget({ customer_id: CUSTOMER_ID, ...params }, {}, { toolName: 'reprice_future_visits' });
+    expect(await check({ appointment_id: OTHER_VISIT })).toMatchObject({ code: 'target_relationship_mismatch' });
+    // A visit at the other unit than the property named in the same call.
+    expect(await check({ appointment_id: MINE, property_id: UNIT_B })).toMatchObject({ code: 'target_relationship_mismatch' });
+    tables.customer_properties[1].customer_id = OTHER;
+    expect(await check({ property_id: UNIT_B })).toMatchObject({ code: 'target_relationship_mismatch' });
   });
 
   test('a visit moved to another unit between saves is not saved at the old unit price', async () => {
