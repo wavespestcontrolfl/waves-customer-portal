@@ -291,14 +291,15 @@ async function backfillPageSlugs({ limit = 500, after = null } = {}, conn = db) 
     .whereIn('status', SLUG_STATUSES)
     .whereNull('page_slug');
   if (after) {
-    query = query.whereRaw('(created_at, id) > (?, ?)', [after.createdAt, after.id]);
+    query = query.whereRaw('(created_at, id) > (?::timestamptz, ?)', [after.createdAt, after.id]);
   }
   const rows = await query
     .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
     .limit(limit)
-    .select('id', 'created_at');
+    // created_at as text keeps Postgres's microseconds (a JS Date keeps milliseconds, and the cursor would re-read rows).
+    .select('id', conn.raw('created_at::text AS created_at_text'));
   const last = rows[rows.length - 1];
-  const summary = { tried: 0, assigned: 0, withoutSlug: 0, next: rows.length === limit && last ? { createdAt: last.created_at, id: last.id } : null };
+  const summary = { tried: 0, assigned: 0, withoutSlug: 0, next: rows.length === limit && last ? { createdAt: last.created_at_text, id: last.id } : null };
   for (const { id } of rows) {
     summary.tried += 1;
     if (await assignPageSlug(id, conn)) summary.assigned += 1;

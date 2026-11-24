@@ -36,6 +36,8 @@ exports.down = async function down(knex) {
   // A slug is printed on mailed postcards and must never move to another home. Once any is assigned, refuse the
   // rollback: dropping the column would free every slug for reassignment. Roll back only before the first assignment.
   if (await knex.schema.hasColumn(TABLE, SLUG)) {
+    // Block writers until the drop commits (knex runs a migration in a transaction), so no slug lands after the check.
+    await knex.raw('LOCK TABLE ?? IN SHARE ROW EXCLUSIVE MODE', [TABLE]);
     const assigned = await knex(TABLE).whereNotNull(SLUG).first(SLUG);
     if (assigned) throw new Error('mail_prospects.page_slug has assigned slugs (printed on postcards); refusing to drop it');
   }

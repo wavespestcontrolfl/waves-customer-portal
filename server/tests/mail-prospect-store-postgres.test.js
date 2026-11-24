@@ -324,6 +324,7 @@ postgres('mail prospect store on PostgreSQL', () => {
       await conn('mail_prospects').where({ source_ref: '202699000001' }).update({ page_slug: '101-example' });
       await expect(conn('mail_prospects').where({ source_ref: '202699000002' }).update({ page_slug: '101-example' })).rejects.toMatchObject({ code: '23505' });
       await slugMigration.up(conn); // second run: no-op
+      await conn('mail_prospects').update({ page_slug: null }); // a clean rollback: no slug assigned yet
       await slugMigration.down(conn);
       expect(await conn.schema.hasColumn('mail_prospects', 'page_slug')).toBe(false);
       await slugMigration.down(conn); // down twice: no-op
