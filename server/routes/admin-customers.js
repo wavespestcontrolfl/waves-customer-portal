@@ -3231,25 +3231,6 @@ async function reminder24hField(customerId) {
   }
 }
 
-// Property-unlinked quotes can still carry a street for one of the customer's saved addresses. For each, the active
-// saved properties that street matches (the estimate-vs-property matcher the accept path uses), so the booking form
-// offers the link only for the address the booking will use. The primary row is ensured first, exactly as GET
-// /:id/properties does: the form loads both at once, and a customer with no saved primary yet would otherwise match
-// against zero rows. Fail-soft: unknown = no match, so no estimate is offered. Map of estimate id -> property ids.
-async function quotedAddressMatchesForEstimates(customerId, estimates) {
-  const matches = new Map();
-  if (!estimates.some((e) => !e.property_id && String(e.address || '').trim())) return matches;
-  try {
-    await require('../services/customer-properties').ensurePrimaryProperty(customerId).catch(() => {});
-    const propertyRows = await db('customer_properties')
-      .where({ customer_id: customerId, active: true })
-      .select('id', 'address_line1', 'address_line2', 'city', 'zip');
-    const { quotedAddressPropertyIds } = require('../services/estimate-staff-booking-eligibility');
-    for (const e of estimates) matches.set(e.id, quotedAddressPropertyIds(e, propertyRows));
-  } catch { /* unknown: no estimate gets a match, so none is offered */ }
-  return matches;
-}
-
 // GET /api/admin/customers/:id/schedule-estimates — bookable estimates
 // formatted for the New Appointment modal. Surfaces accepted estimates plus
 // still-open quotes the customer has been sent (sent / viewed) so a phone
@@ -3341,11 +3322,6 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
       }
     }
 
-    // Property-unlinked quotes can still carry a street for one of the customer's saved addresses. For each, the
-    // active saved properties that address matches (the estimate-vs-property matcher the accept path uses), so the
-    // booking form can offer the link only for the address the booking will use. Fail-soft: unknown = no match.
-    const quotedAddressPropertyIds = await quotedAddressMatchesForEstimates(customer.id, estimates);
-
     const serviceIndex = indexServicesForSchedule(serviceRows);
     const { summarizeEstimateDeposit } = require('../services/estimate-deposits');
     const out = await Promise.all(estimates.map(async (estimate) => {
@@ -3418,11 +3394,9 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         // /admin/schedule (plan-start, unwon bill-by-invoice proposal, gated or
         // dropped add-ons, retired T&S cadence). An accepted row runs the helper's accepted branch; a quote with no schedulable line (quote-required-only items) is not bookable.
         bookable: require('../services/estimate-staff-booking-eligibility').estimateBookableByStaff(estimate, { schedulableLineCount: lines.length }),
-        // null = the quote carries no address of its own (or is tied to a property); otherwise the saved property
-        // ids its address matches, [] when none or unknown.
-        quotedAddressPropertyIds: (!estimate.property_id && String(estimate.address || '').trim())
-          ? (quotedAddressPropertyIds.get(estimate.id) || [])
-          : null,
+        // Whether the quote carries a street of its own (the text itself is not sent). A quote tied to no property
+        // that carries one may be for another address, so the booking form offers no link for it.
+        hasQuotedAddress: !!String(estimate.address || '').trim(),
         monthlyTotal,
         annualTotal,
         onetimeTotal,
@@ -7290,4 +7264,3 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verify
 }
 module.exports.setCustomerBillToFromBar = setCustomerBillToFromBar;
 module.exports.reminder24hField = reminder24hField;
-module.exports.quotedAddressMatchesForEstimates = quotedAddressMatchesForEstimates;

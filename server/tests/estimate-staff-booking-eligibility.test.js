@@ -4,14 +4,13 @@
  * row refusals POST /admin/schedule applies before it creates any rows. The two heavy modules are mocked so this is a
  * pure wiring test; the bill-by-invoice predicate is real.
  */
-jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 // The real accept-on-book predicates (estimate-manual-acceptance) run here. Only the 33k-line public estimate router is
 // replaced, for its retired tree-and-shrub cadence check.
 const mockRetired = jest.fn();
 jest.mock('../routes/estimate-public', () => ({ recurringTreeShrubRowAtRetiredCadence: (...a) => mockRetired(...a) }));
 
-const { estimateBookableByStaff, staffBookingRefusalForOpenEstimate, quotedAddressPropertyIds } = require('../services/estimate-staff-booking-eligibility');
+const { estimateBookableByStaff, staffBookingRefusalForOpenEstimate } = require('../services/estimate-staff-booking-eligibility');
 
 const PROPOSAL = {
   enabled: true,
@@ -118,29 +117,5 @@ describe('estimateBookableByStaff (real accept-on-book predicates)', () => {
     expect(estimateBookableByStaff(null)).toBe(false);
     mockRetired.mockImplementation(() => { throw new Error('boom'); });
     expect(estimateBookableByStaff(open())).toBe(false);
-  });
-});
-
-describe('quotedAddressPropertyIds (a property-unlinked quote that carries a street)', () => {
-  const props = [
-    { id: 'prop-home', address_line1: '12 Test Lane', address_line2: null, city: 'Bradenton', zip: '34205' },
-    { id: 'prop-rental', address_line1: '99 Sample Ave', address_line2: null, city: 'Sarasota', zip: '34236' },
-  ];
-
-  test('names the saved properties the quoted street matches, with the real address matcher', () => {
-    expect(quotedAddressPropertyIds(open({ address: '12 Test Lane, Bradenton, FL 34205, USA' }), props)).toEqual(['prop-home']);
-    expect(quotedAddressPropertyIds(open({ address: '99 Sample Ave, Sarasota, FL 34236' }), props)).toEqual(['prop-rental']);
-  });
-
-  test('a street that matches none of them (a former address) gives an empty list', () => {
-    expect(quotedAddressPropertyIds(open({ address: '500 Old Road, Bradenton, FL 34205' }), props)).toEqual([]);
-    expect(quotedAddressPropertyIds(open({ address: '12 Test Lane, Venice, FL 34285' }), props)).toEqual([]);
-  });
-
-  test('null when the quote is tied to a property or carries no address, and unknown properties match nothing', () => {
-    expect(quotedAddressPropertyIds(open({ property_id: 'prop-home', address: '500 Old Road, Bradenton, FL 34205' }), props)).toBeNull();
-    expect(quotedAddressPropertyIds(open({ address: '  ' }), props)).toBeNull();
-    expect(quotedAddressPropertyIds(open({ address: null }), props)).toBeNull();
-    expect(quotedAddressPropertyIds(open({ address: '12 Test Lane, Bradenton, FL 34205' }), [])).toEqual([]);
   });
 });

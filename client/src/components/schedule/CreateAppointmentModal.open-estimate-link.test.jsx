@@ -62,16 +62,15 @@ describe('pickAutoScheduleEstimate never auto-links an open estimate', () => {
 });
 
 describe('openEstimateLinkNotice', () => {
-  it('one open estimate: says to link it and names the estimate the button picks', () => {
+  it('exactly one qualifying estimate: says to link it and names the estimate the button picks', () => {
     const e = est({ sentAt: '2026-11-13T15:00:00Z' });
     expect(openEstimateLinkNotice({ estimates: [e], customerId: 'cust-1', nowMs: NOW }))
       .toEqual({ text: 'This customer has an open estimate from Nov 13. Link it so this booking counts as won.', estimateId: 'est-1' });
   });
 
-  it('two or more: asks staff to pick one above and offers no button', () => {
+  it('two or more qualifying estimates: no notice at all', () => {
     const list = [est({ sentAt: '2026-11-13T15:00:00Z' }), est({ id: 'est-2', sentAt: '2026-11-01T15:00:00Z' })];
-    expect(openEstimateLinkNotice({ estimates: list, customerId: 'cust-1', nowMs: NOW }))
-      .toEqual({ text: 'This customer has 2 open estimates (newest from Nov 13). Pick the one they said yes to above so this booking counts as won.', estimateId: null });
+    expect(openEstimateLinkNotice({ estimates: list, customerId: 'cust-1', nowMs: NOW })).toBeNull();
     expect(recentOpenEstimates(list, 'cust-1', NOW)[0].id).toBe('est-1');
   });
 
@@ -205,14 +204,6 @@ describe('the New Appointment form for a customer with an open estimate', () => 
     expect(posts(fetcher)[0].serviceId).toBe('svc-pest');
   });
 
-  it('two open estimates: the notice says to pick one above and has no button', async () => {
-    installFetch({ estimates: [quote(), quote({ id: 'est-2' })] });
-    mount();
-    expect(await screen.findByText(/has 2 open estimates/)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Link it' })).toBeNull();
-    expect(pickerValue()).toBe('');
-  });
-
   it('shows no notice for a plan-start or unwon invoice-proposal quote (the server marks it not bookable)', async () => {
     installFetch({ estimates: [quote({ bookable: false })] });
     mount();
@@ -261,72 +252,34 @@ describe('the New Appointment form for a customer with an open estimate', () => 
     expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
   });
 
-  it('a quote with no property but a street of its own: offered only where the server matched that street to the booking address', async () => {
-    // The street belongs to a former address (no saved property matches it): no notice.
-    installFetch({ estimates: [quote({ propertyId: null, quotedAddressPropertyIds: [] })], properties: [propertyRow('prop-1', true)] });
+  it('a quote tied to no property that carries a street of its own gets no notice (it may be for another address)', async () => {
+    installFetch({ estimates: [quote({ propertyId: null, hasQuotedAddress: true })], properties: [propertyRow('prop-1', true)] });
     mount();
     await waitFor(() => expect(document.querySelector('option[value="est-1"]')).not.toBeNull());
     await waitFor(() => expect(screen.queryByText('Loading estimates...')).toBeNull());
     expect(screen.queryByTestId('open-estimate-link-notice')).toBeNull();
     cleanup();
-    // The street matches another saved property, not this one: no notice.
-    installFetch({ estimates: [quote({ propertyId: null, quotedAddressPropertyIds: ['prop-9'] })], properties: [propertyRow('prop-1', true)] });
+    installFetch({ estimates: [quote({ propertyId: null, hasQuotedAddress: false })], properties: [propertyRow('prop-1', true)] });
+    mount();
+    expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
+  });
+
+  it('two estimates that qualify give no notice at all', async () => {
+    installFetch({ estimates: [quote(), quote({ id: 'est-2' })] });
     mount();
     await waitFor(() => expect(document.querySelector('option[value="est-1"]')).not.toBeNull());
+    await waitFor(() => expect(screen.queryByText('Loading estimates...')).toBeNull());
     expect(screen.queryByTestId('open-estimate-link-notice')).toBeNull();
-    cleanup();
-    // The street matches this property: notice.
-    installFetch({ estimates: [quote({ propertyId: null, quotedAddressPropertyIds: ['prop-1'] })], properties: [propertyRow('prop-1', true)] });
-    mount();
-    expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
+    expect(screen.queryByText(/open estimates/)).toBeNull();
   });
 
-  it('with the address picker on, a street-matched quote follows the chosen address', async () => {
+  it('one qualifying estimate among others that do not (another address, a street of its own) still gets the notice', async () => {
     installFetch({
-      estimates: [quote({ propertyId: null, quotedAddressPropertyIds: ['prop-2'] })],
-      properties: [propertyRow('prop-1', true), propertyRow('prop-2', false)],
+      estimates: [quote({ id: 'est-1' }), quote({ id: 'est-2', propertyId: 'old-address' }), quote({ id: 'est-3', hasQuotedAddress: true })],
+      properties: [propertyRow('prop-1', true)],
     });
     mount();
-    await waitFor(() => expect(document.querySelector('option[value="est-1"]')).not.toBeNull());
-    const radio = (id) => document.querySelector(`input[name="booking-property"][value="${id}"]`);
-    await waitFor(() => expect(radio('prop-2')).not.toBeNull());
-    expect(screen.queryByRole('button', { name: 'Link it' })).toBeNull();
-    fireEvent.click(radio('prop-2'));
     expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
-    fireEvent.click(radio('prop-1'));
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Link it' })).toBeNull());
-  });
-
-  it('after Link it on a street-matched quote, switching to an address it does not match unlinks it and its lines', async () => {
-    installFetch({
-      estimates: [quote({ propertyId: null, quotedAddressPropertyIds: ['prop-1'] })],
-      properties: [propertyRow('prop-1', true), propertyRow('prop-2', false)],
-    });
-    mount();
-    const radio = (id) => document.querySelector(`input[name="booking-property"][value="${id}"]`);
-    fireEvent.click(await screen.findByRole('button', { name: 'Link it' }));
-    await waitFor(() => expect(pickerValue()).toBe('est-1'));
-    expect(screen.getAllByText('Quarterly Lawn Care').length).toBeGreaterThan(0);
-    fireEvent.click(radio('prop-2'));
-    await waitFor(() => expect(pickerValue()).toBe(''));
-    expect(screen.queryByText('Quarterly Lawn Care')).toBeNull();
-    expect(screen.queryByText(/saving marks it accepted and links it/)).toBeNull();
-    // Back at the matched address the notice offers it again.
-    fireEvent.click(radio('prop-1'));
-    expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
-  });
-
-  it('a street-matched quote that matches both addresses stays linked across the switch', async () => {
-    installFetch({
-      estimates: [quote({ propertyId: null, quotedAddressPropertyIds: ['prop-1', 'prop-2'] })],
-      properties: [propertyRow('prop-1', true), propertyRow('prop-2', false)],
-    });
-    mount();
-    fireEvent.click(await screen.findByRole('button', { name: 'Link it' }));
-    await waitFor(() => expect(pickerValue()).toBe('est-1'));
-    fireEvent.click(document.querySelector('input[name="booking-property"][value="prop-2"]'));
-    await waitFor(() => expect(document.querySelector('input[name="booking-property"][value="prop-2"]').checked).toBe(true));
-    expect(pickerValue()).toBe('est-1');
   });
 
   it('is hidden while the appointment is saving', async () => {

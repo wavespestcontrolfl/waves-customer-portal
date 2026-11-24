@@ -57,20 +57,14 @@ function shortDate(estimate) {
   return ms == null ? '' : formatETDate(ms, { month: 'short', day: 'numeric' });
 }
 
-// The words staff see under the Estimate source picker, and the estimate the
-// "Link it" button picks (null when staff must choose among several). Null
-// when there is nothing to say.
+// The words staff see under the Estimate source picker, and the estimate the "Link it" button picks. Only when
+// exactly ONE quote qualifies: with two or more there is no safe default, so staff pick in the picker as before.
+// Null when there is nothing to say.
 export function openEstimateLinkNotice({ estimates = [], customerId, nowMs = Date.now() } = {}) {
   const open = recentOpenEstimates(estimates, customerId, nowMs);
-  if (open.length === 0) return null;
-  if (open.length === 1) {
-    return {
-      text: `This customer has an open estimate from ${shortDate(open[0])}. Link it so this booking counts as won.`,
-      estimateId: open[0].id,
-    };
-  }
+  if (open.length !== 1) return null;
   return {
-    text: `This customer has ${open.length} open estimates (newest from ${shortDate(open[0])}). Pick the one they said yes to above so this booking counts as won.`,
-    estimateId: null,
+    text: `This customer has an open estimate from ${shortDate(open[0])}. Link it so this booking counts as won.`,
+    estimateId: open[0].id,
   };
 }

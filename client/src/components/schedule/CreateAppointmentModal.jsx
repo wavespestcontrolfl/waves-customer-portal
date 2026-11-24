@@ -2013,20 +2013,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // link AND the lines it filled (they carry sourceEstimateId), otherwise
     // the submit would book the other property at the quote's prices as a
     // manual appointment and skip the server's mismatch check.
-    // A property-unlinked quote linked through its street matched certain saved
-    // addresses only: leaving them drops the link and the lines it filled too.
-    const streetBoundElsewhere = !!linkedEstimate && !linkedEstimate.propertyId
-      && Array.isArray(linkedEstimate.quotedAddressPropertyIds)
-      && !linkedEstimate.quotedAddressPropertyIds.includes(String(propertyId));
-    if (streetBoundElsewhere || (linkedEstimate?.propertyId && String(linkedEstimate.propertyId) !== String(propertyId))) {
+    if (linkedEstimate?.propertyId && String(linkedEstimate.propertyId) !== String(propertyId)) {
       setLinkedEstimate(null);
     }
     // Lines keep their sourcePropertyId after "No estimate" unlinks the quote,
     // so lines priced for another property go regardless of the link state;
     // address-agnostic quote lines and manual lines stay.
-    const unlinkedId = streetBoundElsewhere ? String(linkedEstimate.id) : null;
-    setServices((arr) => arr.filter((line) => (!line.sourcePropertyId || String(line.sourcePropertyId) === String(propertyId))
-      && !(unlinkedId && String(line.sourceEstimateId ?? '') === unlinkedId)));
+    setServices((arr) => arr.filter((line) => !line.sourcePropertyId || String(line.sourcePropertyId) === String(propertyId)));
   };
 
   // Property list failed to load: a property-scoped quote (or its lines) can
@@ -5959,11 +5952,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     // quotes, so keep a quote for that property or an address-free one.
                     const activeId = propertyPickerActive ? String(selectedPropertyId || '')
                       : (bookingProperties.length === 1 ? String(bookingProperties[0].id) : '');
-                    // A quote with no property but a street of its own counts only when the
-                    // server matched that street to this address; unknown = no notice.
+                    // A quote tied to a property counts only for that property; one tied to
+                    // none counts only when it carries no street of its own (it may be for
+                    // another address). Anything else gets no notice.
                     const forThisAddress = visibleScheduleEstimates.filter((e) => (e.propertyId
                       ? String(e.propertyId) === activeId
-                      : !Array.isArray(e.quotedAddressPropertyIds) || (!!activeId && e.quotedAddressPropertyIds.includes(activeId))));
+                      : !e.hasQuotedAddress));
                     const notice = openEstimateLinkNotice({ estimates: forThisAddress, customerId: selectedCustomer?.id });
                     if (!notice) return null;
                     return (

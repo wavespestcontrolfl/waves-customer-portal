@@ -63,17 +63,4 @@ function estimateBookableByStaff(estimate, { schedulableLineCount } = {}) {
   }
 }
 
-// For a quote tied to no property but carrying a street of its own: the ids of the saved properties that street
-// matches (the estimate-vs-property matcher the accept path uses). null when the quote is tied to a property or has no
-// address (nothing to contradict); [] when it matches none, or the match cannot be read (unknown = not offered).
-function quotedAddressPropertyIds(estimate, propertyRows) {
-  if (!estimate || estimate.property_id || !String(estimate.address || '').trim()) return null;
-  try {
-    const { estimateQuotesCustomerAddress } = require('./estimate-property-linkage');
-    return (propertyRows || []).filter((row) => estimateQuotesCustomerAddress(estimate.address, row)).map((row) => String(row.id));
-  } catch {
-    return [];
-  }
-}
-
-module.exports = { staffBookingRefusalForOpenEstimate, estimateBookableByStaff, quotedAddressPropertyIds };
+module.exports = { staffBookingRefusalForOpenEstimate, estimateBookableByStaff };
