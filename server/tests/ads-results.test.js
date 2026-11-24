@@ -8,8 +8,14 @@ const { adResults, NO_CAMPAIGN } = require('../services/ads/ad-results');
 
 // Each table is a canned row list; the SQL filters are not simulated (the date window, the status and the
 // customer filters belong to the queries), so every rule the service applies in JS is what these tests drive.
-function fakeConn(tables) {
-  return jest.fn((name) => {
+// Money in (netCollections reads payments and estimate_deposits). With no payments fixture, each paid invoice is
+// one payment of its total on its paid_at, so a test about invoice dates reads the same money.
+function fakeConn(given) {
+  const tables = {
+    ...given,
+    payments: given.payments || (given.invoices || []).map((i) => ({ customer_id: i.customer_id, at: i.paid_at, net: i.total })),
+  };
+  const conn = jest.fn((name) => {
     const rows = (tables[String(name).split(' ')[0]] || []).slice();
     const builder = new Proxy({}, {
       get: (_t, prop) => {
@@ -20,6 +26,8 @@ function fakeConn(tables) {
     });
     return builder;
   });
+  conn.raw = (sql) => sql;
+  return conn;
 }
 
 const CAMP = 'camp-a';
@@ -190,20 +198,31 @@ describe('adResults', () => {
     expect(row.paid_customers).toBe(30);
     expect(row.customers).toHaveLength(25);
   });
-  test('a partial refund comes off the 90-day paid money', async () => {
-    const inv = invoice('c1', '2026-10-03T15:00:00Z', 100, { stripe_payment_intent_id: 'pi_one' });
+  test('money paid counts what came in, not the invoice face', async () => {
+    // A 100 invoice settled by 30 of account credit and a 70 payment; a deposit of 15 counts too.
     const conn = fakeConn({
       ad_service_attribution: [lead({ customer_id: 'c1' })],
       customers: [customer('c1')],
-      invoices: [inv],
+      invoices: [invoice('c1', '2026-10-03T15:00:00Z', 100)],
+      payments: [{ customer_id: 'c1', at: new Date('2026-10-03T15:00:00Z'), net: 70 }],
+      estimate_deposits: [{ customer_id: 'c1', at: new Date('2026-10-02T15:00:00Z'), net: 15 }],
+    });
+    const out = await adResults({ ...WINDOW, conn });
+    expect(out.totals).toMatchObject({ paid_customers: 1, paid90: 85 });
+  });
+
+  test('a payment before the lead day is not money from the ad', async () => {
+    const conn = fakeConn({
+      ad_service_attribution: [lead({ customer_id: 'c1', lead_date: '2026-10-05' })],
+      customers: [customer('c1')],
+      invoices: [invoice('c1', '2026-10-06T15:00:00Z', 100)],
       payments: [
-        { stripe_payment_intent_id: 'pi_one', refund_amount: 40 },
-        { stripe_payment_intent_id: 'pi_other', refund_amount: 99 },
+        { customer_id: 'c1', at: new Date('2026-10-04T15:00:00Z'), net: 40 },
+        { customer_id: 'c1', at: new Date('2026-10-06T15:00:00Z'), net: 60 },
       ],
     });
     const out = await adResults({ ...WINDOW, conn });
-    expect(out.totals.paid90).toBe(60);
-    expect(out.totals.paid_customers).toBe(1);
+    expect(out.totals).toMatchObject({ paid_customers: 1, paid90: 60 });
   });
 
   test('two leads on one day: the earlier-created lead gets the paid credit', async () => {

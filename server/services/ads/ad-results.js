@@ -8,12 +8,10 @@
  *     ad_service_attribution.ad_cost (that is the month's cost split evenly across leads).
  *   - Plan or one-time: isMembershipCustomerRow (server/services/waveguard-existing-services.js). It reads the
  *     customer's tier first and monthly_rate only as the legacy fallback. This file never reads monthly_rate alone.
- *   - Paid invoice revenue: NO shared "paid revenue" rule exists. billing-lane.js (completionInvoiceAmount, dues
- *     coverage, sibling coverage) predicts what a visit WILL bill. open-balance.js (applyOpenSelfPayPredicates) is
- *     what a customer still OWES. payer.js (resolveForInvoice) is who a new invoice bills. None of the three says what
- *     was collected, so paid90 is the one rule written here: invoices.total of status 'paid' invoices with a paid_at,
- *     counted by the customer who owns the invoice whoever settled it. A refunded or void invoice has another status
- *     and never counts.
+ *   - Paid customer: a status 'paid' invoice with paid_at on or after the lead day (its service_type names the
+ *     service). Money paid (paid90): netCollections in customer-lifetime-revenue.js, the same payments and deposits
+ *     net of refunds as the customer's lifetime revenue, dated when the money came in, summed for day 0 to 90.
+ *     billing-lane.js, open-balance.js and payer.js predict, owe and route bills; none says what was collected.
  *   - Churn: the customer's CURRENT pipeline_stage = 'churned' (waves-db skill: never churned_at, which is sparse and
  *     survives a reactivation). customer-stages.js has no churn predicate to call; past_customer and dormant are
  *     archival labels, not churn (owner ruling 2026-08-07).
@@ -21,7 +19,7 @@
  *   - Rain day: system_settings 'ads.rain_mode.days', written by ads/rain-mode.js (read here, never imported: that
  *     module pulls in the Google Ads client).
  *
- * A customer is credited to ONE row: the row of their first lead in the window (earliest lead_date, then id). So the
+ * A customer is credited to ONE row: the row of their first lead in the window (earliest lead_date, then created_at, then id). So the
  * paid, plan, cancel and paid90 numbers add up across rows and campaigns without counting a customer twice. Their
  * leads still count in every row they came in on.
  */
@@ -30,6 +28,7 @@ const { etDateString, addETDays, parseETDateTime } = require('../../utils/dateti
 const { dateOnlyString } = require('../../utils/date-only');
 const { isMembershipCustomerRow } = require('../waveguard-existing-services');
 const { isInternalTestContact } = require('../internal-test-customers');
+const { netCollections } = require('../customer-lifetime-revenue');
 
 const RAIN_DAYS_KEY = 'ads.rain_mode.days';
 const PAID90_DAYS = 90;
@@ -131,28 +130,8 @@ async function loadPaidInvoices(conn, ids, from) {
       .where('status', 'paid')
       .whereNotNull('paid_at')
       .where('paid_at', '>=', from)
-      .select('id', 'customer_id', 'total', 'paid_at', 'service_type', 'title', 'stripe_payment_intent_id');
+      .select('id', 'customer_id', 'total', 'paid_at', 'service_type', 'title');
     out.push(...rows);
-  }
-  return out;
-}
-
-// Refunds recorded on the payments of these invoices, by Stripe payment intent (payments has no invoice id). A
-// partial refund leaves the invoice 'paid', so paid90 takes the refund off (the same net-of-refunds rule as
-// customer-lifetime-revenue.js: amount minus refund_amount). A cash or check invoice has no intent and no refund row.
-async function loadRefunds(conn, intentIds) {
-  const wanted = new Set(intentIds.filter(Boolean).map(String));
-  const out = new Map();
-  for (const part of chunks([...wanted], ID_CHUNK)) {
-    const rows = await conn('payments')
-      .whereIn('stripe_payment_intent_id', part)
-      .where('status', 'paid')
-      .select('stripe_payment_intent_id', 'refund_amount');
-    for (const r of rows) {
-      const key = String(r.stripe_payment_intent_id);
-      if (!wanted.has(key)) continue;
-      out.set(key, (out.get(key) || 0) + (Number(r.refund_amount) || 0));
-    }
   }
   return out;
 }
@@ -199,10 +178,15 @@ function sumTotals(out) {
  */
 async function creditPaid(conn, rows, firstLead, customers) {
   const earliest = [...firstLead.values()].map((l) => dateOnlyString(l.lead_date)).sort()[0];
-  const invoices = await loadPaidInvoices(conn, [...firstLead.keys()], parseETDateTime(`${earliest}T00:00`));
-  const refunds = invoices.length ? await loadRefunds(conn, invoices.map((inv) => inv.stripe_payment_intent_id)) : new Map();
-  const netOf = (inv) => Math.max((Number(inv.total) || 0)
-    - (inv.stripe_payment_intent_id ? refunds.get(String(inv.stripe_payment_intent_id)) || 0 : 0), 0);
+  const from = parseETDateTime(`${earliest}T00:00`);
+  const invoices = await loadPaidInvoices(conn, [...firstLead.keys()], from);
+  // paid90 is money that came in (payments and deposits, net of refunds), dated when it came in.
+  const collected = new Map();
+  for (const c of await netCollections(conn, [...firstLead.keys()], from)) {
+    const key = String(c.customer_id);
+    if (!collected.has(key)) collected.set(key, []);
+    collected.get(key).push({ day: etDateString(new Date(c.at)), net: Number(c.net) || 0 });
+  }
   const byCustomer = new Map();
   for (const inv of invoices) {
     const key = String(inv.customer_id);
@@ -225,7 +209,9 @@ async function creditPaid(conn, rows, firstLead, customers) {
     const plan = isMembershipCustomerRow(customer || {});
     const churned = customer?.pipeline_stage === 'churned';
     const lastDay = daysAfter(leadDay, PAID90_DAYS);
-    const paid90 = cents(paid.filter((inv) => inv.day <= lastDay).reduce((sum, inv) => sum + netOf(inv), 0));
+    const paid90 = cents((collected.get(customerId) || [])
+      .filter((c) => c.day >= leadDay && c.day <= lastDay)
+      .reduce((sum, c) => sum + c.net, 0));
     row.paid_customers += 1;
     if (plan) row.plan_customers += 1; else row.one_time_customers += 1;
     if (churned) row.cancels += 1;

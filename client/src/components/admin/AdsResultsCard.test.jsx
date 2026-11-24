@@ -61,6 +61,23 @@ describe('AdsResultsCard', () => {
     expect(screen.getByText('Called rain, it rained')).toBeInTheDocument();
   });
 
+  it('a slow old reply never replaces the newer period', async () => {
+    let finishOld;
+    const oldBody = new Promise((resolve) => { finishOld = resolve; });
+    const newRows = [{ ...zero, date: '2026-10-01', campaign_id: 'n', campaign: 'Newer Campaign', platform: 'google_ads' }];
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => oldBody })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ rows: newRows, totals: zero }) });
+    render(<AdsResultsCard />);
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: '30 days' }));
+    await screen.findByText('Newer Campaign');
+    finishOld({ rows, totals: zero });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText('Test Campaign A')).toBeNull();
+    expect(screen.getByText('Newer Campaign')).toBeInTheDocument();
+  });
+
   it('asks again when the period changes', async () => {
     reply({ period: '90d', since: 'x', until: 'y', rows, totals: zero });
     render(<AdsResultsCard />);

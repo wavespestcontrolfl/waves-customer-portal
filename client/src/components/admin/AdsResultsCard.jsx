@@ -136,6 +136,7 @@ export default function AdsResultsCard() {
         if (cancelled) return;
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = await res.json();
+        if (cancelled) return;
         if (!body || !Array.isArray(body.rows) || !body.totals) throw new Error("Unexpected reply");
         setData(body);
         setState("ready");
@@ -175,7 +176,8 @@ export default function AdsResultsCard() {
       </div>
       <div className="text-ui-body text-ink-secondary [margin:4px_0_12px]">
         Leads from paid ads and what they paid. Paid means a paid invoice on or after the lead day. Plan / one-time
-        is the customer today. Each customer counts once, on their first lead.
+        is the customer today. Each customer counts once, on their first lead. Leads are tracked funnel leads: an LSA message or call with no
+        funnel record is not counted here.
       </div>
       {state === "loading" && <div className="text-ui-body text-ink-secondary">Loading.</div>}
       {state === "error" && <div className="text-ui-body text-ink-secondary">Ad results could not load: {message}</div>}
