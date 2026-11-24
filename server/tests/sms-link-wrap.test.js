@@ -79,16 +79,16 @@ describe('link recognition (ownedPortalLinkSpans)', () => {
     expect(ownedPortalLinkSpans(body)).toEqual([]);
   });
 
-  describe('with only aliases configured (the real URL helpers)', () => {
+  describe('the hosts each environment owns (the real URL helpers)', () => {
     const RAILWAY = 'waves-portal-production.up.railway.app';
-    const NAMES = ['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'SHORTLINK_BASE_URL'];
+    const PREVIEW = 'waves-portal-pr-8400.up.railway.app';
+    const NAMES = ['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'SHORTLINK_BASE_URL', 'RAILWAY_ENVIRONMENT_NAME', 'RAILWAY_ENVIRONMENT'];
+    const { ownedPortalHosts, wrappedOwnedLinkIn } = require('../services/composer-customer-links');
+    const prep = (host) => `https://${host}/prep/${TOKEN}`;
     let saved;
     beforeEach(() => {
       saved = Object.fromEntries(NAMES.map((name) => [name, process.env[name]]));
       for (const name of NAMES) delete process.env[name];
-      // publicPortalUrl() then reads the raw Railway host, and the short links have a domain of their own.
-      process.env.CLIENT_URL = `https://${RAILWAY}`;
-      process.env.SHORTLINK_BASE_URL = 'https://wvs.example';
     });
     afterEach(() => {
       for (const name of NAMES) {
@@ -97,13 +97,36 @@ describe('link recognition (ownedPortalLinkSpans)', () => {
       }
     });
 
-    test('the branded portal stays owned next to both aliases: its links are found and judged, not treated as foreign', () => {
-      const { ownedPortalHosts, wrappedOwnedLinkIn } = require('../services/composer-customer-links');
+    test('production owns the branded portal even when its env values name only aliases: its links are found and judged', () => {
+      // publicPortalUrl() then reads the raw Railway host, and the short links have a domain of their own.
+      process.env.RAILWAY_ENVIRONMENT_NAME = 'production';
+      process.env.CLIENT_URL = `https://${RAILWAY}`;
+      process.env.SHORTLINK_BASE_URL = 'https://wvs.example';
       expect(ownedPortalHosts()).toEqual(['wvs.example', RAILWAY, HOST]);
-      const body = `Prep: https://${HOST}/prep/${TOKEN} or https://${RAILWAY}/prep/${TOKEN}`;
-      expect(ownedPortalLinkSpans(body).map((s) => s.url)).toEqual([`https://${HOST}/prep/${TOKEN}`, `https://${RAILWAY}/prep/${TOKEN}`]);
+      expect(ownedPortalLinkSpans(`Prep: ${prep(HOST)} or ${prep(RAILWAY)}`).map((s) => s.url)).toEqual([prep(HOST), prep(RAILWAY)]);
       // A branded bearer link inside a foreign URL is refused (fail closed), as on the configured portal origin.
-      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=https://${HOST}/prep/${TOKEN}`)).toBe(true);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(HOST)}`)).toBe(true);
+    });
+
+    test('a preview owns only its own hosts: a production link is not judged against its rows, so it is left alone', () => {
+      process.env.RAILWAY_ENVIRONMENT_NAME = 'waves-customer-portal-pr-8400';
+      process.env.PUBLIC_PORTAL_URL = `https://${PREVIEW}`;
+      process.env.RAILWAY_PUBLIC_DOMAIN = PREVIEW;
+      process.env.SHORTLINK_BASE_URL = 'https://wvs-preview.example';
+      expect(ownedPortalHosts()).toEqual(['wvs-preview.example', PREVIEW]);
+      expect(ownedPortalLinkSpans(`Prep: ${prep(HOST)} or ${prep(PREVIEW)}`).map((s) => s.url)).toEqual([prep(PREVIEW)]);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(HOST)}`)).toBe(false);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(PREVIEW)}`)).toBe(true);
+    });
+
+    test('a host configured with a trailing DNS dot is owned in both spellings, like an incoming FQDN link', () => {
+      process.env.CLIENT_URL = `https://${RAILWAY}.`;
+      process.env.RAILWAY_PUBLIC_DOMAIN = `${RAILWAY}.`;
+      expect(ownedPortalHosts()).toEqual([HOST, RAILWAY]);
+      expect(ownedPortalLinkSpans(`Prep: ${prep(RAILWAY)} or https://${RAILWAY}./prep/${TOKEN}`).map((s) => s.url))
+        .toEqual([prep(RAILWAY), `https://${RAILWAY}./prep/${TOKEN}`]);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(RAILWAY)}`)).toBe(true);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=https://${RAILWAY}./prep/${TOKEN}`)).toBe(true);
     });
   });
 });

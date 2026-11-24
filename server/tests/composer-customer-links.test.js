@@ -3571,7 +3571,7 @@ describe('ownedPortalHosts: every host the portal answers on', () => {
   const { ownedPortalHosts, ownedPortalLinkSpans } = require('../services/composer-customer-links');
   const RAILWAY = 'waves-portal-production.up.railway.app';
   const PREP = `https://${RAILWAY}/prep/${'a'.repeat(32)}`;
-  const NAMES = ['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN'];
+  const NAMES = ['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_ENVIRONMENT_NAME', 'RAILWAY_ENVIRONMENT'];
   let saved;
   beforeEach(() => {
     saved = Object.fromEntries(NAMES.map((name) => [name, process.env[name]]));
