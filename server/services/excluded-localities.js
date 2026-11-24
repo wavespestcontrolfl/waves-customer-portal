@@ -85,8 +85,15 @@ function isPuntaGordaSharedZip(zip) {
 // city is not one. `trustInferred: false` (a stored address, or a reader with no lookup to place the pin) also refuses a
 // city that is just what the ZIP maps to: the lead webhook fills a cityless submission from the ZIP, so that city proves
 // nothing about which town the address is in.
+// The town an address parse's "city" really names, with a state, a ZIP or ZIP+4 tail and a leading unit ("Apt 4") removed:
+// "Punta Gorda Fl 33982" -> "punta gorda", "Fl 33982-1234" -> "".
 function townNamed(city) {
-  return normalizeLocality(city).replace(/\b(?:fl|florida)\b/g, '').replace(/\b\d{5}(?: \d{4})?\b/g, '').replace(/\s+/g, ' ').trim();
+  return normalizeLocality(city)
+    .replace(/\b\d{5}(?:[-\s]\d{4})?\b/g, ' ')
+    .replace(/\b(?:fl|florida)\b/g, ' ')
+    .replace(/^(?:(?:apt|apartment|unit|ste|suite|bldg|building|lot|spc|rm|room)\b\s*\S*|#\s*\S*)\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 function sharedZipNeedsCity(city, zip, { trustInferred = true } = {}) {
   if (!isPuntaGordaSharedZip(zip)) return false;

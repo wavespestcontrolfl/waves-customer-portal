@@ -77,15 +77,17 @@ function zipFromAddressText(text) {
  * ("123 Main St, Port Charlotte, FL 33948") and by its ZIP. The public property lookup's verdict reads it beside the coordinate box, for fresh and cached results.
  */
 function namesExcludedPlace({ city = null, zip = null, text = null, places = null } = {}) {
-  if (isExcludedLocality(city) || isExcludedZip(zip)) return true;
+  if (isExcludedLocality(city) || isExcludedLocality(townNamed(city)) || isExcludedZip(zip)) return true;
   // More geocoded or stored { city, zip } pairs, each read on its own.
-  if ((places || []).some((p) => isExcludedLocality(p?.city) || isExcludedZip(p?.zip))) return true;
+  if ((places || []).some((p) => isExcludedLocality(p?.city) || isExcludedLocality(townNamed(p?.city)) || isExcludedZip(p?.zip))) return true;
   // Each address text is read on its own, so a served ZIP in one can never mask a held place in another. The parsed
   // city covers "Babcock Ranch FL" (a city sharing its comma part with the state); the parts cover the rest.
   return (Array.isArray(text) ? text : [text]).some((one) => {
     const raw = String(one || '');
     if (!raw) return false;
-    return isExcludedZip(zipFromAddressText(raw)) || isExcludedLocality(parseRawAddress(raw)?.city)
+    const parsedCity = parseRawAddress(raw)?.city;
+    // the parse can leave a state / ZIP tail on the city ("Punta Gorda Fl 33982"): read the town it really names too
+    return isExcludedZip(zipFromAddressText(raw)) || isExcludedLocality(parsedCity) || isExcludedLocality(townNamed(parsedCity))
       || raw.split(',').some((part) => isExcludedLocality(normalizeLocality(part)));
   });
 }

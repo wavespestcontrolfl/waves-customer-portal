@@ -52,6 +52,10 @@ describe('buildSatelliteUrlSet verdict', () => {
 describe('namesExcludedPlace', () => {
   test('reads the city, the ZIP and each comma part of the text', () => {
     expect(namesExcludedPlace({ city: 'Punta Gorda' })).toBe(true);
+    // the parse can leave a state / ZIP tail on the city
+    expect(namesExcludedPlace({ text: '9 Sample Rd, Apt 4, Punta Gorda FL 33982' })).toBe(true);
+    expect(namesExcludedPlace({ city: 'Punta Gorda FL 33982' })).toBe(true);
+    expect(namesExcludedPlace({ places: [{ city: 'Punta Gorda, FL 33983-1234' }] })).toBe(true);
     expect(namesExcludedPlace({ zip: '33950-1234' })).toBe(true);
     expect(namesExcludedPlace({ text: '9 Sample Rd, Punta Gorda, FL 33950' })).toBe(true);
     expect(namesExcludedPlace({ text: '9 Sample Rd Punta Gorda FL' })).toBe(true); // no commas at all
@@ -89,6 +93,9 @@ describe('a ZIP Punta Gorda shares, with no city anywhere, is unknown (null), ne
     // a state / ZIP tail an address parse takes for a city (a unit address) is not a city
     expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, Apt 4, FL 33982' })).toBe(true);
     expect(namesSharedZipWithoutCity({ city: 'FL 33982', zip: '33982' })).toBe(true);
+    expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, Apt 4, FL 33982-1234' })).toBe(true); // a ZIP+4 tail is not a city
+    expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, Unit 4, FL 33982' })).toBe(true);
+    expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, Apt 4, Babcock Ranch FL 33982' })).toBe(false);
     expect(namesSharedZipWithoutCity({ zip: '33948' })).toBe(false);
     expect(namesSharedZipWithoutCity({})).toBe(false);
     expect(namesSharedZipWithoutCity()).toBe(false);
@@ -98,6 +105,8 @@ describe('a ZIP Punta Gorda shares, with no city anywhere, is unknown (null), ne
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982' }).inServiceArea).toBeNull();
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', places: [{ city: null, zip: '33983' }], text: ['1 Sample Way'] }).inServiceArea).toBeNull();
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', text: ['9 Sample Rd, Apt 4, FL 33982'] }).inServiceArea).toBeNull();
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', text: ['9 Sample Rd, Apt 4, FL 33982-1234'] }).inServiceArea).toBeNull();
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', text: ['9 Sample Rd, Apt 4, Punta Gorda FL 33982'] }).inServiceArea).toBe(false);
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', city: 'Babcock Ranch' }).inServiceArea).toBe(true);
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33983', text: '1 Sample Way, Port Charlotte, FL 33983' }).inServiceArea).toBe(true);
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', city: 'Punta Gorda' }).inServiceArea).toBe(false);
