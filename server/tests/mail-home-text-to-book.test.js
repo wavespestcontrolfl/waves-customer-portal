@@ -61,6 +61,8 @@ jest.mock('../utils/known-caller-phone', () => ({
   findOnlyKnownCallerCustomer: (...a) => mockFindOnly(...a),
   KNOWN_CALLER_PHONE_COLS: ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', 'secondary_phone'],
 }));
+const mockTrust = jest.fn();
+jest.mock('../services/contact-notification-prefs', () => ({ contactPhoneSmsTrust: (...a) => mockTrust(...a) }));
 const mockSend = jest.fn();
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSend(...a) }));
 
@@ -83,6 +85,7 @@ beforeEach(() => {
   mockGates.mailHomeTextBookLive.mockReturnValue(true);
   Object.assign(mockState, { homes: [{ ...HOME }], claims: [], deleted: [], prospectQueries: 0, claimTxns: 0, lock: Promise.resolve() });
   mockFindOnly.mockResolvedValue(null);
+  mockTrust.mockResolvedValue('phone_matches_customer');
   mockSend.mockResolvedValue({ ...SENT });
 });
 
@@ -156,6 +159,7 @@ describe('streetTypeAgrees', () => {
     ['101 EXAMPLE TRL', '101 EXAMPLE TRL', true],
     ['101 EXAMPLE TRAIL', '101 EXAMPLE TRL', true], // any USPS spelling of the same type
     ['101 EXAMPLE TRL', '101 EXAMPLE', true], // the county line has no street type
+    ['3 CAFE DEL MAR DR', '3 CAF\u00c9 DEL MAR DR', true], // the slug builder's accent folding
     ['88 LAKE VIEW', '88 LAKE ST', false], // VIEW is not ST: another street
     ['101 EXAMPLE DR', '101 EXAMPLE TRL', false], // another street type: another street
     ['88 LAKE VIEW BLVD', '88 LAKE VIEW BLVD UNIT 3', true], // the unit part is not typed
@@ -301,6 +305,34 @@ describe('handleHomeTextToBook', () => {
     await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: SENDER }, knownContact: true });
     expect(mockFindOnly).not.toHaveBeenCalled();
     expect(mockSend.mock.calls[0][0].customerId).toBe('cust-1');
+  });
+
+  test('a service contact\'s number is sent as service_contact_authorized, so that contact\'s own SMS choice is re-read', async () => {
+    mockTrust.mockResolvedValue('service_contact_authorized');
+    expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: SENDER } })).handled).toBe(true);
+    expect(mockTrust).toHaveBeenCalledWith('cust-1', SENDER);
+    expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-1', identityTrustLevel: 'service_contact_authorized' });
+  });
+
+  test('no matched customer: the trust lookup is never made', async () => {
+    await text('101 EXAMPLE');
+    expect(mockTrust).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable trust lookup fails closed: no claim, no reply', async () => {
+    mockTrust.mockRejectedValue(new Error('db down'));
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: SENDER } })).toEqual({ handled: false });
+    expect(mockState.claimTxns).toBe(0);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('the full lookup: "3 CAFE DEL MAR DR" finds a stored "3 CAF\u00c9 DEL MAR DR" (accents folded like the slug)', async () => {
+    mockState.homes = [{ ...HOME, id: 'p-cafe', page_slug: '3-cafe-del-mar', address_line1: '3 CAF\u00c9 DEL MAR DR' }];
+    for (const typed of ['3 CAFE DEL MAR DR', '3 Cafe del Mar Dr.', '3 CAF\u00c9 DEL MAR', '3 cafe del mar']) {
+      mockState.claims = [];
+      mockSend.mockClear();
+      expect(await text(typed)).toEqual({ handled: true, prospectId: 'p-cafe' });
+    }
   });
 
   test('every office location line answers from itself', async () => {

@@ -35,10 +35,11 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { mailHomePageLive, mailHomeTextBookLive } = require('../../config/feature-gates');
-const { buildBaseSlug, hasUnitPart, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES } = require('./home-slug');
+const { buildBaseSlug, hasUnitPart, streetWords, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES } = require('./home-slug');
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
 const { findOnlyKnownCallerCustomer, KNOWN_CALLER_PHONE_COLS } = require('../../utils/known-caller-phone');
 const { phoneIdentityKey } = require('../../utils/phone');
+const { contactPhoneSmsTrust } = require('../contact-notification-prefs');
 const { publicPortalUrl } = require('../../utils/portal-url');
 
 const LIST_KEY = 'new_home'; // services/mail/new-home-list.js LIST_KEY
@@ -57,8 +58,6 @@ const MAX_BODY_LENGTH = 120;
 // ten international digits as a +1 number.
 const NANP_SENDER = /^\+1[2-9]\d{2}[2-9]\d{6}$/;
 const DIRECTIONALS = new Set(['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW']);
-// Where a county address line's unit part starts (home-slug.js UNIT_WORDS).
-const UNIT_WORDS = new Set(['UNIT', 'APT', 'APTS', 'APARTMENT', 'STE', 'SUITE', 'BLDG', 'LOT', 'SPC', 'TRLR', 'RM', 'FLOOR']);
 
 const errCode = (err) => String((err && (err.code || err.name)) || 'error').slice(0, 32);
 const zip5Of = (zip) => (String(zip == null ? '' : zip).match(/\d{5}/) || [null])[0];
@@ -121,18 +120,17 @@ const sameWords = (a, b) => a.length === b.length && a.every((word, i) => word =
 /**
  * The type-stripped slug of a text only counts when the text agrees with the home's own address line: the same words, a
  * street type spelled any USPS way, or a county line that has no street type. "88 LAKE VIEW" typed for a home on
- * "88 LAKE ST" does not (VIEW is not ST). A line this cannot read (a directional, a unit) is not matched: no reply.
+ * "88 LAKE ST" does not (VIEW is not ST). Both lines are read with the slug builder's own word rules (streetWords: accents
+ * folded, punctuation and the unit part gone), so "3 CAFE DEL MAR DR" agrees with a stored "3 CAF\u00c9 DEL MAR DR".
+ * A line this cannot read (a directional it cannot place) is not matched: no reply.
  */
 function streetTypeAgrees(street, addressLine1) {
-  const typed = street.split(' ').map((w) => w.replace(/[,.]/g, '')).filter(Boolean).map(canonWord);
-  let row = String(addressLine1 || '').toUpperCase().replace(/[,.]/g, ' ').split(/\s+/).filter(Boolean);
-  const unitAt = row.findIndex((word, i) => word.startsWith('#') || (i >= 2 && UNIT_WORDS.has(word)));
-  if (unitAt >= 0) row = row.slice(0, unitAt);
-  row = row.map(canonWord);
+  const typed = streetWords(street).map(canonWord);
+  const row = streetWords(addressLine1).map(canonWord);
   if (sameWords(typed, row)) return true;
   const n = typed.length;
   const typeAt = n > 2 && DIRECTIONALS.has(typed[n - 1]) && STREET_SUFFIXES.has(typed[n - 2]) ? n - 2 : n - 1;
-  return sameWords(typed.filter((_, i) => i !== typeAt), row);
+  return sameWords(typed.filter((_, k) => k !== typeAt), row);
 }
 
 async function findLiveHome({ candidates, zip, street, fallback }) {
@@ -226,6 +224,12 @@ async function handleHomeTextToBook({ from, to, body, customer, knownContact, st
     // question waiting on its answer comes first, and a known contact must resolve to one customer whose consent is read.
     const customerId = await senderCustomerId(from, customer, knownContact);
     if (customerId === false || await standAside()) return { handled: false };
+    // A known customer's SMS opt-out and consent are checked as for every other known-customer auto-reply; no match is a
+    // lead. A number in a service-contact slot is 'service_contact_authorized' (contactPhoneSmsTrust), so the sender re-reads
+    // THAT contact's own SMS choice at the provider handoff, not only the holder's.
+    const who = customerId
+      ? { customerId, identityTrustLevel: await contactPhoneSmsTrust(customerId, from) }
+      : { identityTrustLevel: 'phone_provided_unverified' };
 
     const claim = await claimReply({ from, to, prospectId: home.id });
     if (!claim.claimId) {
@@ -235,10 +239,6 @@ async function handleHomeTextToBook({ from, to, body, customer, knownContact, st
 
     const { sendCustomerMessage } = require('../messaging/send-customer-message');
     const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../sms-auto-send');
-    // A known customer's SMS opt-out and consent are checked as for every other known-customer auto-reply; no match is a lead.
-    const who = customerId
-      ? { customerId, identityTrustLevel: 'phone_matches_customer' }
-      : { identityTrustLevel: 'phone_provided_unverified' };
     let result;
     try {
       result = await sendCustomerMessage({
