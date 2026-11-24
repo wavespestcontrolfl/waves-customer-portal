@@ -61,6 +61,8 @@ describe('ui/ScanStrip', () => {
     fireEvent.keyDown(focused(), { key: 'Home' });
     expect(focused()).toHaveTextContent('Lawn');
     expect(onSelect).not.toHaveBeenCalled();
+    expect(focused()).toHaveAttribute('tabindex', '0');
+    expect(screen.getAllByRole('option').filter((o) => o.tabIndex === 0)).toHaveLength(1);
     fireEvent.keyDown(focused(), { key: 'ArrowRight' });
     fireEvent.click(focused()); // Enter / Space on a <button> fire click
     expect(onSelect).toHaveBeenCalledWith('b');

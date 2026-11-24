@@ -3,7 +3,7 @@
 // short list (programs, months, visits). Tiles size to their content; the
 // strip scrolls inside its own box and never widens the page.
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { cn } from './cn';
 
 const KEY_STEP = { ArrowRight: 1, ArrowLeft: -1 };
@@ -11,6 +11,9 @@ const KEY_STEP = { ArrowRight: 1, ArrowLeft: -1 };
 export function ScanStrip({ items, selectedKey, onSelect, ariaLabel, className }) {
   const listRef = useRef(null);
   const selectedIndex = items.findIndex((item) => item.key === selectedKey);
+  // The tab stop: the tile last focused by an arrow key, else the selected one.
+  const [focusIndex, setFocusIndex] = useState(null);
+  const tabStop = focusIndex ?? Math.max(selectedIndex, 0);
 
   // Scroll only the strip, never the page: element.scrollIntoView would also
   // scroll every ancestor, so set the strip's own scrollLeft instead.
@@ -26,10 +29,11 @@ export function ScanStrip({ items, selectedKey, onSelect, ariaLabel, className }
   // Keep the selected tile in view when the selection changes (tap, arrow key,
   // or a parent reset).
   useEffect(() => {
+    setFocusIndex(null);
     scrollIntoView(listRef.current?.children[selectedIndex]);
   }, [selectedIndex]);
 
-  // Roving focus: only the selected tile sits in the tab order. Arrows, Home
+  // Roving focus: one tile sits in the tab order (see tabStop). Arrows, Home
   // and End move focus only; Enter, Space or a tap picks the focused tile.
   // Picking on focus would load every program the user arrows past, and a
   // pick the parent rolls back (a failed load) would trap the arrows.
@@ -44,6 +48,7 @@ export function ScanStrip({ items, selectedKey, onSelect, ariaLabel, className }
     else if (KEY_STEP[e.key]) to = Math.min(Math.max(from + KEY_STEP[e.key], 0), items.length - 1);
     else return;
     e.preventDefault();
+    setFocusIndex(to);
     tiles[to]?.focus();
     scrollIntoView(tiles[to]);
   };
@@ -67,7 +72,7 @@ export function ScanStrip({ items, selectedKey, onSelect, ariaLabel, className }
             type="button"
             role="option"
             aria-selected={selected}
-            tabIndex={selected || (selectedIndex < 0 && i === 0) ? 0 : -1}
+            tabIndex={i === tabStop ? 0 : -1}
             aria-label={item.ariaLabel}
             onClick={() => onSelect(item.key)}
             className={cn(
@@ -81,7 +86,7 @@ export function ScanStrip({ items, selectedKey, onSelect, ariaLabel, className }
               <span
                 className={cn(
                   'text-14 uppercase tracking-label font-medium leading-none whitespace-nowrap',
-                  selected ? 'text-white' : 'text-zinc-400',
+                  selected ? 'text-white' : 'text-zinc-600',
                 )}
               >
                 {item.label}
