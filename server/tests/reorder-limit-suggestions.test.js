@@ -2,6 +2,7 @@ const {
   packInInventoryUnit,
   pickPriceRow,
   usageHistory,
+  applyDispatchPriceCheck,
   isBlackoutFertilizer,
   blackoutWindow,
   weeklyTotals,
@@ -215,6 +216,11 @@ describe('script output', () => {
 });
 
 describe('usageHistory', () => {
+  test('the service record date wins over the scheduled date', () => {
+    const rows = [{ quantity: 4, unit: 'fl_oz', created_at: '2026-11-24T15:00:00Z', visit_date: '2026-11-10', service_date: '2026-11-12' }];
+    expect(usageHistory(rows, 'fl_oz', '2026-11-24', 56).usage[0].daysAgo).toBe(12);
+  });
+
   test('a late close-out counts on the visit date, not the entry date', () => {
     const rows = [{ quantity: 4, unit: 'fl_oz', created_at: '2026-11-24T15:00:00Z', visit_date: '2026-11-10' }];
     expect(usageHistory(rows, 'fl_oz', '2026-11-24', 56).usage).toEqual([{ daysAgo: 14, qty: 4 }]);
@@ -228,5 +234,21 @@ describe('usageHistory', () => {
   test('rows outside the window are not counted, even as unit mismatches', () => {
     const rows = [{ quantity: 1, unit: 'lb', created_at: '2026-11-24T15:00:00Z', visit_date: '2026-09-01' }];
     expect(usageHistory(rows, 'gal', '2026-11-24', 56)).toEqual({ usage: [], unconverted: 0, records: 0 });
+  });
+});
+
+describe('applyDispatchPriceCheck', () => {
+  const ok = () => ({ status: 'ok', suggestedReorder: 2, note: null });
+  test('configured vendor with no price row or no SKU: flagged no_price, amount kept', () => {
+    const a = ok(); applyDispatchPriceCheck(a, { name: 'SiteOne', row: null });
+    expect(a.status).toBe('no_price');
+    expect(a.suggestedReorder).toBe(2);
+    const b = ok(); applyDispatchPriceCheck(b, { name: 'SiteOne', row: { vendor_sku: null } });
+    expect(b.note).toMatch(/no vendor SKU/);
+  });
+  test('a usable row or no configured vendor changes nothing', () => {
+    const a = ok(); applyDispatchPriceCheck(a, { name: 'SiteOne', row: { vendor_sku: 'D1' } });
+    const b = ok(); applyDispatchPriceCheck(b, null);
+    expect([a.status, b.status]).toEqual(['ok', 'ok']);
   });
 });
