@@ -2122,9 +2122,12 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       const customer = await seedCustomer({ building_use: 'nonresidential' });
       await seedJob({ customer });
       const summary = await run({});
-      expect(summary).toMatchObject({ sent: 0, office: 1, failed: 0 });
+      // The pricer answers premises, and the account proof says commercial: held, and no office item (homes only).
+      expect(summary).toMatchObject({ sent: 0, office: 0, held: 1, failed: 0 });
+      expect(summary.reasons).toEqual({ commercial: 1 });
       expect(await estimatesOf(customer)).toEqual([]);
       expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(await trx('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'onetime-plan-offer:office:%'").first('id')).toBeUndefined();
     });
 
     test('the customer changed their email after the quote was made: the ledger refuses the send, and the old address gets nothing', async () => {
