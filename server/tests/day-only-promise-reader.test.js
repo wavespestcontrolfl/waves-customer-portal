@@ -240,6 +240,25 @@ describe('loadPromiseFacts', () => {
       expect(onlyOld).toEqual({ s1: { level: 'none', start: null }, s2: { level: 'none', start: null } });
     });
 
+    test('a newer off-date notice still replaces an older on-date one: nothing revives (codex P1)', async () => {
+      // Told Nov 12 at 9 on Nov 9, then Nov 13 at 11 on Nov 9 later; the visit was then moved back to Nov 12 with no text.
+      const later = msg('s1', { id: 4, metadata: { rendered_slot_ms: Date.parse('2026-11-13T16:00:00Z') }, row: { sent_at: '2026-11-09T18:00:00Z' } });
+      const out = await facts(fakeConn({ messages: [msg('s1'), later], members: [row('2026-11-12')] }));
+      expect(out.s1).toEqual({ level: 'none', start: null });
+    });
+
+    test('a grouped reminder on a cancelled member is judged by the live member\'s date (codex P1)', async () => {
+      const members = [
+        { id: 's1', visit_id: 'v1', status: 'cancelled', scheduled_date: '2026-11-12' },
+        { id: 's2', visit_id: 'v1', status: 'pending', scheduled_date: '2026-11-20' },
+      ];
+      const grouped = msg('s1', { metadata: { notificationEventKey: 'appointment_reminder_24h:visit:v1' } });
+      const out = await facts(fakeConn({ messages: [grouped], members }), ['s2']);
+      expect(out.s2).toEqual({ level: 'none', start: null });
+      const sameDay = members.map((m) => ({ ...m, scheduled_date: '2026-11-12' }));
+      expect((await facts(fakeConn({ messages: [grouped], members: sameDay }), ['s2'])).s2).toEqual({ level: 'hour', start: new Date(SLOT) });
+    });
+
     test('loadToldVisitIds (the night freeze) is unchanged: the old-date hour still freezes', async () => {
       const told = await loadToldVisitIds(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }), ['s1'], NOW);
       expect([...told]).toEqual(['s1']);

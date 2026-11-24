@@ -66,31 +66,36 @@ function slotDateOf(start) {
   }
 }
 
-/** Is this promise event about the date its visit now holds? A known slot whose ET date differs from that visit's own date
- *  is not (owner 2026-11-24, "fix"). An unknown window, an unknown visit date or an unreadable slot keeps the event. */
-function onVisitDate(event, dateOf) {
-  if (!event || event.start_at == null) return true;
-  const visitDate = dateOf.get(String(event.visit_id)) || null;
-  const at = new Date(event.start_at);
+/** Is this promise about `visitDate` (the REQUESTED visit's own date)? A known slot on another ET date is not (owner
+ *  2026-11-24, "fix"). An unknown window, an unknown visit date or an unreadable slot keeps the promise (fail closed). */
+function onVisitDate(promise, visitDate) {
+  if (!promise || promise.start_at == null || !visitDate) return true;
+  const at = new Date(promise.start_at);
   const slotDate = Number.isNaN(at.getTime()) ? null : slotDateOf(at);
-  return !visitDate || !slotDate || visitDate === slotDate;
+  return !slotDate || visitDate === slotDate;
 }
 
 /** The stop-wide resolved promise for each requested id: Map<id, promise|null>. One stop-members read and one
- *  loadPromiseEvents read, however many ids. Throws when a read fails. With `sameDateOnly` (loadPromiseFacts only), every
- *  event whose slot is for another date than its own visit's date is set aside BEFORE the latest and stop-wide choice, so
- *  an old-date slot never hides a sibling's current hour. */
+ *  loadPromiseEvents read, however many ids. Throws when a read fails. With `sameDateOnly` (loadPromiseFacts only), a
+ *  promise whose slot is on another date than the REQUESTED visit's date does not stand: it is dropped AFTER every
+ *  supersession rule (a newer notice still replaces an older one, even when the newer one is the off-date one), so
+ *  nothing it replaced comes back. A single visit's off-date latest reads null; in a stop, stopPromise's `keep` test
+ *  drops off-date candidates before its newest/earliest choice, so a sibling's current hour still stands. */
 async function resolvePromises(conn, ids, now, { sameDateOnly = false } = {}) {
   const detector = require('../no-show-detector');
   const wanted = ids.map(String);
   const { stopOf, memberIds, dateOf } = await loadStopMembers(conn, wanted);
-  const loaded = await detector.loadPromiseEvents(conn, [...new Set([...wanted, ...memberIds])], { now });
-  const events = sameDateOnly ? loaded.filter((event) => onVisitDate(event, dateOf)) : loaded;
+  const events = await detector.loadPromiseEvents(conn, [...new Set([...wanted, ...memberIds])], { now });
   const latest = detector.latestPromises(events, now);
   const eventsByVisit = detector.byVisit(events);
   return new Map(ids.map((id) => {
     const stop = stopOf.get(String(id)) || [];
-    const promise = stop.length > 1 ? detector.stopPromise(stop, eventsByVisit, now) : latest.get(String(id));
+    const visitDate = sameDateOnly ? dateOf.get(String(id)) || null : null;
+    const keep = sameDateOnly ? (promise) => onVisitDate(promise, visitDate) : null;
+    const promise = stop.length > 1
+      ? detector.stopPromise(stop, eventsByVisit, now, keep ? { keep } : undefined)
+      : latest.get(String(id));
+    if (promise && keep && !keep(promise)) return [id, null];
     return [id, promise || null];
   }));
 }
@@ -123,9 +128,9 @@ function promiseLevelOf(promise) {
  *  (`start`, a Date; null otherwise, and for a withdrawn promise). ONE promise read gives both facts, so they always
  *  agree (the day re-plan's 2-hour told shift, owner 2026-11-24). Throws when a read fails; every caller must fail closed.
  *
- *  An hour told for ANOTHER date is not an hour for this visit (owner 2026-11-24, "fix"): every promise event whose known
- *  slot is on another ET date than its own visit's date is set aside before the choice (resolvePromises
- *  sameDateOnly), so a visit whose only hour was for an older date reads 'none', and in a grouped stop a sibling's
+ *  An hour told for ANOTHER date is not an hour for this visit (owner 2026-11-24, "fix"): a standing promise whose known
+ *  slot is on another ET date than the requested visit's date is dropped after supersession (resolvePromises
+ *  sameDateOnly), so a visit whose latest hour was for another date reads 'none', and in a grouped stop a sibling's
  *  current hour still stands. Seen live after a no-show: the 24-hour text said Nov 14 9-11, the office moved the visit to
  *  Nov 23 with no text, and the 3-day text still quoted an hour. An unknown visit date or slot date keeps the event (fail
  *  closed); so does an unknown window. resolvePromises, the night freeze and the office's told badge are unchanged. */

@@ -1113,7 +1113,9 @@ function byVisit(events = []) {
 // linked to whichever member won the claim for that tier — a sibling has no
 // evidence of its own, and reading its id alone would fall back to an older
 // promise or none at all.
-function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) {
+// `keep` (optional, told-visits sameDateOnly): a test on each still-standing candidate, run AFTER every supersession
+// rule below and before the newest/earliest choice, so a dropped candidate never revives an older promise it replaced.
+function stopPromise(members = [], eventsByVisit = new Map(), now = new Date(), { keep = null } = {}) {
   // The full event list per member, not just each member's latest: a grouped
   // send stops being anyone's latest as soon as one member gets a later
   // per-service notice, and the supersession below would then be invisible —
@@ -1159,7 +1161,8 @@ function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) 
     ? latestHeld.filter((promise) => instant(promise.communicated_at) > instant(newestGrouped.communicated_at)) : [];
   const replaced = new Set(after.map((promise) => String(promise.visit_id)));
   const stillHolding = newestGrouped && awaited.some((member) => !replaced.has(String(member.id)));
-  const own = newestGrouped ? withoutWithdrawn([...(stillHolding ? [newestGrouped] : []), ...after]) : held;
+  const standing = newestGrouped ? withoutWithdrawn([...(stillHolding ? [newestGrouped] : []), ...after]) : held;
+  const own = keep ? standing.filter(keep) : standing;
   if (!own.length) return null;
   // An UNKNOWN window still wins when it is the newest thing the customer
   // heard: that is the legacy move-notice rule — coverage became unknown and
