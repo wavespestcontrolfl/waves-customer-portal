@@ -26,6 +26,8 @@
  * spaces, "ft"/"ft." -> "fort", single spaces).
  */
 
+const { zipToCity } = require('../utils/zip-to-city');
+
 const DESOTO_LOCALITIES = Object.freeze(new Set([
   'arcadia', 'southeast arcadia', 'se arcadia', 'nocatee', 'fort ogden',
   'lake suzy', 'brownville', 'pine level', 'hull', 'fort winder', 'owens',
@@ -79,8 +81,17 @@ function isPuntaGordaSharedZip(zip) {
 // A ZIP Punta Gorda shares with a served town cannot say which town an address is in: with no city beside it the area is
 // UNKNOWN, never served. EVERY service-area reader answers an unknown / recoverable verdict for it through this one
 // predicate (address validation, inspection booking, call veto and triage flag, public property lookup, prospect list).
-function sharedZipNeedsCity(city, zip) {
-  return isPuntaGordaSharedZip(zip) && !normalizeLocality(city);
+// A city counts as evidence only when it names a town: a state / ZIP tail ("FL 33982") that an address parse took for a
+// city is not one. `trustInferred: false` (a stored address, or a reader with no lookup to place the pin) also refuses a
+// city that is just what the ZIP maps to: the lead webhook fills a cityless submission from the ZIP, so that city proves
+// nothing about which town the address is in.
+function townNamed(city) {
+  return normalizeLocality(city).replace(/\b(?:fl|florida)\b/g, '').replace(/\b\d{5}(?: \d{4})?\b/g, '').replace(/\s+/g, ' ').trim();
+}
+function sharedZipNeedsCity(city, zip, { trustInferred = true } = {}) {
+  if (!isPuntaGordaSharedZip(zip)) return false;
+  const named = townNamed(city);
+  return !named || (!trustInferred && named === normalizeLocality(zipToCity(zip)));
 }
 function isNotYetServedLocality(city) {
   return NOT_YET_SERVED_LOCALITIES.has(normalizeLocality(city));
@@ -101,7 +112,7 @@ module.exports = {
   DESOTO_LOCALITIES, DESOTO_ZIPS, PUNTA_GORDA_LOCALITIES, PUNTA_GORDA_ZIPS, PUNTA_GORDA_SHARED_ZIPS,
   NOT_YET_SERVED_LOCALITIES, NOT_YET_SERVED_ZIPS,
   normalizeLocality,
-  isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isPuntaGordaSharedZip, sharedZipNeedsCity,
+  isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isPuntaGordaSharedZip, sharedZipNeedsCity, townNamed,
   isNotYetServedLocality, isNotYetServedZip,
   isExcludedLocality, isExcludedZip,
 };

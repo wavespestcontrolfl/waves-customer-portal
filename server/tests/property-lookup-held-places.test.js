@@ -86,6 +86,9 @@ describe('a ZIP Punta Gorda shares, with no city anywhere, is unknown (null), ne
     expect(namesSharedZipWithoutCity({ zip: '33982', city: 'Babcock Ranch' })).toBe(false);
     expect(namesSharedZipWithoutCity({ zip: '33983', places: [{ city: 'Port Charlotte' }] })).toBe(false);
     expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, Babcock Ranch, FL 33982' })).toBe(false);
+    // a state / ZIP tail an address parse takes for a city (a unit address) is not a city
+    expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, Apt 4, FL 33982' })).toBe(true);
+    expect(namesSharedZipWithoutCity({ city: 'FL 33982', zip: '33982' })).toBe(true);
     expect(namesSharedZipWithoutCity({ zip: '33948' })).toBe(false);
     expect(namesSharedZipWithoutCity({})).toBe(false);
     expect(namesSharedZipWithoutCity()).toBe(false);
@@ -94,6 +97,7 @@ describe('a ZIP Punta Gorda shares, with no city anywhere, is unknown (null), ne
   test('buildSatelliteUrlSet (fresh and cached share it): null with no city, true with a served city, false for Punta Gorda or outside the box', () => {
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982' }).inServiceArea).toBeNull();
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', places: [{ city: null, zip: '33983' }], text: ['1 Sample Way'] }).inServiceArea).toBeNull();
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', text: ['9 Sample Rd, Apt 4, FL 33982'] }).inServiceArea).toBeNull();
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', city: 'Babcock Ranch' }).inServiceArea).toBe(true);
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33983', text: '1 Sample Way, Port Charlotte, FL 33983' }).inServiceArea).toBe(true);
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', city: 'Punta Gorda' }).inServiceArea).toBe(false);

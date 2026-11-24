@@ -269,7 +269,12 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
     // a served city on the shared ZIP clears it, on every source
     expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { city: 'Port Charlotte', zip: '33983' } })).toBeNull();
     expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { city: 'Babcock Ranch', zip: '33982' } })).toBeNull();
-    expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Port Charlotte', zip: '33983' } })).toBeNull();
+    expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Deep Creek', zip: '33983' } })).toBeNull();
+    // a stored city that is only what the ZIP maps to (the lead webhook fills it in for a cityless submission) is not evidence
+    expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Port Charlotte', zip: '33983' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Babcock Ranch', zip: '33982' } })).toEqual(unknown);
+    // a state / ZIP tail an address parse took for a city is not a city either
+    expect(legacyGeographicVeto({ extracted: { city: 'FL 33982', zip: '33982' } })).toEqual(unknown);
     // a failed on-file read adds no shared-ZIP evidence (its own fail-closed rule applies)
     expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { lookupFailed: true, zip: '33983' } })).toBeNull();
     // Punta Gorda on a shared ZIP is still vetoed as Punta Gorda

@@ -23,7 +23,7 @@
 
 const { isInServiceAreaCounty } = require('./call-triage-flags');
 const { zipToCity } = require('../utils/zip-to-city');
-const { isExcludedLocality, isExcludedZip, normalizeLocality, isPuntaGordaSharedZip } = require('./excluded-localities');
+const { isExcludedLocality, isExcludedZip, normalizeLocality, isPuntaGordaSharedZip, townNamed } = require('./excluded-localities');
 const { parseRawAddress } = require('../utils/address-normalizer');
 
 const SERVICE_AREA_BOUNDS = Object.freeze({
@@ -100,8 +100,9 @@ function namesSharedZipWithoutCity({ city = null, zip = null, text = null, place
   const texts = (Array.isArray(text) ? text : [text]).map((t) => String(t || '')).filter(Boolean);
   const zips = [zip, ...(places || []).map((p) => p?.zip), ...texts.map(zipFromAddressText)];
   if (!zips.some(isPuntaGordaSharedZip)) return false;
+  // A city is evidence only when it names a town: a state / ZIP tail the parse took for one ("FL 33982") is not.
   const cities = [city, ...(places || []).map((p) => p?.city), ...texts.map((t) => parseRawAddress(t)?.city)];
-  return !cities.some((c) => normalizeLocality(c));
+  return !cities.some((c) => townNamed(c));
 }
 
 function isInDesotoExclusion(lat, lng) {

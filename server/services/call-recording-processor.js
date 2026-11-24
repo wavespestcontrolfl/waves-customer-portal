@@ -2243,9 +2243,10 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   // evidence is bound to its own source: V1, V2, address validation and the stored address (the booking can keep any of them).
   const sources = [
     [extracted?.city, extracted?.zip], [svc?.city, svc?.postal_code], [av?.normalized?.city, av?.normalized?.postal_code],
-    ...(onFile && !onFile.lookupFailed ? [[onFile.city, onFile.zip]] : []),
   ];
-  if (sources.some(([city, zip]) => sharedZipNeedsCity(city, zip))) {
+  // The stored address's city may be only the one the lead webhook inferred from its ZIP, so it must differ from the ZIP's own city.
+  if (sources.some(([city, zip]) => sharedZipNeedsCity(city, zip))
+    || (onFile && !onFile.lookupFailed && sharedZipNeedsCity(onFile.city, onFile.zip, { trustInferred: false }))) {
     return { reason: 'shared_zip_city_unknown', county: null };
   }
   if (av && av.inServiceArea === true) return null;
