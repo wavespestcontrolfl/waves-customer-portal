@@ -123,7 +123,7 @@ const readInputsUnderLock = (trx, weekStart) => (shareOn() ? collectInputs(trx, 
 // drafting makes the draft stale even when the credits do not move.
 function basesSignature(bases, invoices) {
   return [
-    (Array.isArray(bases) ? bases : []).map((one) => [one.basisType, one.basisId, Number(one.totalCents), Number(one.sold), Number(one.slot)])
+    (Array.isArray(bases) ? bases : []).map((one) => [one.basisType, one.basisId, one.totalCents == null ? null : Number(one.totalCents), one.sold == null ? null : Number(one.sold), Number(one.slot)])
       .sort((a, b) => (`${a[0]}:${a[1]}` < `${b[0]}:${b[1]}` ? -1 : 1)),
     (Array.isArray(invoices) ? [...invoices].map(String).sort() : []),
   ];

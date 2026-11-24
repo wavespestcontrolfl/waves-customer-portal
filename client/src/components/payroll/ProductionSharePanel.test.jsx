@@ -246,6 +246,17 @@ describe('Production share preview', () => {
       }));
     });
 
+    it('a stop whose closeout changed since the owner set its credit shows Clear and sends DELETE', async () => {
+      const call = await forms([
+        { visitId: 'v7', workDate: '2026-09-15', serviceType: 'Pest Control', kind: 'owner_override_closeout_changed', creditCents: 0, reason: 'The closeout of this stop changed', needsReview: true, refundCents: 0 },
+      ])();
+      expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Clear the old credit' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
+        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v7', weekStart: '2026-09-14' },
+      }));
+    });
+
     it('a stop the owner set shows Clear; a stop a pay run already paid shows no form', async () => {
       const call = await forms([
         { visitId: 'v3', workDate: '2026-09-15', serviceType: 'Pest Control', kind: 'owner_set', creditCents: 4550, reason: 'Set by the owner: checked', needsReview: false, refundCents: 0 },

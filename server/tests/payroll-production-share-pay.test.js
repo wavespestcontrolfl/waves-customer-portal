@@ -466,6 +466,26 @@ describe('the credit rules (applyLedger)', () => {
     expect(one(plain('visit-2', ['inv-1']), paidOf({ jobs: { 'visit-9': [200000, 2, [2]] } }))).toMatchObject({ kind: 'priced', creditCents: 100000 });
   });
 
+  test('AUDIT :902 STOP OVERRIDE: an owner-set credit on a package visit keeps a job basis with the root and the slot, so the slot cannot be taken again', () => {
+    const set = new Map([['followup', { creditCents: 100000, reason: 'Checked' }]]);
+    // a package visit that needed review (no total known): the basis has the slot and no total
+    const review = { visitId: 'followup', workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: 0, needsReview: true, ledger: null, linkedInvoices: [],
+      packageSlot: { rootId: 'root', slot: 2, sold: 2, price: null } };
+    const out = productionShare.applyLedger([review], paidOf(), set)[0];
+    expect(out).toMatchObject({ kind: 'owner_set', creditCents: 100000, bases: [{ basisType: 'job', basisId: 'root', totalCents: null, sold: 2, slot: 2 }] });
+    expect(out).not.toHaveProperty('packageSlot');
+    // a fixed package total is kept when one exists
+    expect(productionShare.applyLedger([review], paidOf({ jobs: { root: [200000, 2, [1]] } }), set)[0].bases)
+      .toEqual([{ basisType: 'job', basisId: 'root', totalCents: 200000, sold: 2, slot: 2 }]);
+    // a visit that is no package visit records nothing
+    expect(productionShare.applyLedger([{ ...review, packageSlot: null }], paidOf(), set)[0].bases).toEqual([]);
+    // what later weeks read: a paid slot with no total. The same slot again is exhausted; another slot credits from the live price
+    const slotOnly = { totalCents: null, sold: null, weekStart: '2026-09-14', slots: new Map([[2, 'followup']]) };
+    const paid = { ...paidOf(), jobs: new Map([['root', slotOnly]]) };
+    expect(one(job('replacement', 2), paid).kind).toBe('basis_exhausted');
+    expect(one(job('first', 1), paid)).toMatchObject({ kind: 'multi_visit_job', creditCents: 100000, bases: [{ totalCents: 200000, slot: 1 }] });
+  });
+
   test('STOP OVERRIDE: the revision and the review token change with the credit the owner set, and with its kind alone', () => {
     const base = (stop) => share.revisionOf(new Map([['tech-a', { settings: SETTINGS, stops: [{ ...stops([['v1', '2026-09-14', 100000]])[0], ...stop }] }]]));
     expect(base({})).not.toBe(base({ kind: 'owner_set' }));

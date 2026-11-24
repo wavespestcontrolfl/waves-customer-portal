@@ -421,6 +421,29 @@ postgres('production share pay line', () => {
       expect(refusal.body.error).toContain('cannot be credited by hand');
     });
 
+    it('AUDIT :902: a package follow-up the owner credits keeps its slot: a replacement follow-up cannot take it again', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7), addDays(W1, 14)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+      // a package priced on nothing (no root price): its visits need review
+      const root = await stop(id, W1, null, customerId, pkg);
+      const followUp = await stop(id, weeks[1], '0.00', customerId, { ...pkg, followup_included: true, followup_source_service_id: root });
+      expect((await override({ technicianId: id, visitId: followUp, weekStart: weeks[1], creditCents: 100000, reason: 'Checked' })).status).toBe(200);
+      const week2 = (await draft(weeks[1])).body.run;
+      const row = (await trx('payroll_checks').where({ run_id: week2.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops.find((r) => r.visitId === followUp);
+      expect(row).toMatchObject({ kind: 'owner_set', creditCents: 100000, bases: [{ basisType: 'job', basisId: root, totalCents: null, sold: 2, slot: 2 }] });
+      await finalize(week2.id);
+      // the follow-up is cancelled and replaced: the slot is taken
+      await trx('scheduled_services').where({ id: followUp }).update({ status: 'cancelled' });
+      const replacement = await stop(id, weeks[2], '0.00', customerId, { ...pkg, followup_included: true, followup_source_service_id: root });
+      const check = byName((await draft(weeks[2])).body.run, 'Sample Alpha');
+      const stops = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops;
+      expect(stops.find((r) => r.visitId === replacement)).toMatchObject({ kind: 'basis_exhausted', creditCents: 0, needsReview: true });
+    });
+
     it('AUDIT :884: a credit the owner set is ignored once the stop closeout is declined or removed', async () => {
       const { unpriced, key } = await world();
       expect((await override({ ...key, creditCents: 126000, reason: 'Checked' })).status).toBe(200);
@@ -536,6 +559,19 @@ postgres('production share pay line', () => {
       const shown = await api('GET', `/production-share/preview?technicianId=${id}&weekStart=${W1}`);
       expect(shown.status).toBe(200);
       expect(shown.body).toMatchObject({ creditedCents: 378000, shareCents: 16200 });
+    });
+
+    it('AUDIT :992: when the shared facts cannot be read, only the technician whose own facts fail is an error; the others keep their rows', async () => {
+      const id = await world();
+      const bravo = (await trx('technicians').where({ name: 'Sample Bravo' }).first('id')).id;
+      await stop(bravo, addDays(W1, 1), '500.00');
+      const have = new Map([[id, await productionShare.settingsFor(trx, id, W1)], [bravo, await productionShare.settingsFor(trx, bravo, W1)]]);
+      failing('loadCreditFacts', 2); // the grouped read, then the first technician's own read
+      const credits = await productionShare.weekCreditsFor(mockConnection, have, W1);
+      const states = [...credits.values()].map((one) => (one.error ? 'error' : 'rows')).sort();
+      expect(states).toEqual(['error', 'rows']);
+      const rows = [...credits.values()].find((one) => one.rows).rows;
+      expect(rows.length).toBeGreaterThan(0);
     });
 
     it('facts that cannot be read for everyone fall back to the selected employee alone, instead of failing the preview', async () => {
@@ -991,6 +1027,24 @@ postgres('production share pay line', () => {
       await finalize(week1.id);
       expect((await snapshotStops(week1.id))[0].invoices).toEqual([invoiceId]);
       await trx('invoices').where({ id: invoiceId }).update({ status: 'sent', scheduled_service_id: second });
+      expect(byName((await draft(weeks[1])).body.run, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+    });
+
+    it('AUDIT :507: an archived invoice linked to a paid stop is in its invoice history and never in its dollars', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const first = await stop(id, W1, '1000.00', customerId);
+      const second = await stop(id, weeks[1], '1000.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '300.00', { scheduled_service_id: first });
+      await trx('invoices').where({ id: invoiceId }).update({ archived_at: trx.fn.now() });
+      const week1 = (await draft(W1)).body.run;
+      expect(byName(week1, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 100000 });
+      await finalize(week1.id);
+      expect((await snapshotStops(week1.id))[0].invoices).toEqual([invoiceId]);
+      await trx('invoices').where({ id: invoiceId }).update({ archived_at: null, scheduled_service_id: second });
       expect(byName((await draft(weeks[1])).body.run, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
     });
 

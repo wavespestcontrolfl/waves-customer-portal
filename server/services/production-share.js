@@ -497,18 +497,18 @@ async function billedByVisit(conn, visitIds) {
   // the latest. One row per visit and invoice.
   const links = await conn.raw(`
     SELECT DISTINCT s.id AS visit_id, i.id AS invoice_id, i.line_items, i.subtotal, i.discount_amount, i.total, i.tax_amount,
-      COALESCE(i.status = ANY(?::text[]), true) AS not_charged,
+      (COALESCE(i.status = ANY(?::text[]), true) OR i.archived_at IS NOT NULL) AS not_charged,
       ${rr.depositCreditSql('i')} AS deposit_credit,
       ${refundOf} AS refunded
     FROM scheduled_services s
     LEFT JOIN (SELECT scheduled_service_id, id AS service_record_id FROM service_records WHERE scheduled_service_id = ANY(?::uuid[])) sr
       ON sr.scheduled_service_id = s.id
     JOIN invoices i ON ${rr.VISIT_INVOICE_LINK_SQL}
-    WHERE s.id = ANY(?::uuid[]) AND i.archived_at IS NULL AND i.annual_prepay_term_id IS NULL
+    WHERE s.id = ANY(?::uuid[]) AND i.annual_prepay_term_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM annual_prepay_terms t WHERE t.prepay_invoice_id = i.id)`,
   [NOT_CHARGED_INVOICE_STATUSES, visitIds, visitIds]);
   if (!links.rows.length) return out;
-  // A draft or void invoice is no charge (never in an amount), but it is still LINKED: it goes in the invoice history a paid stop records,
+  // A draft, void or archived invoice is no charge (never in an amount), but it is still LINKED: it goes in the invoice history a paid stop records,
   // so the invoice cannot later be issued and credit another visit unseen.
   const invoiceIds = [...new Set(links.rows.filter((row) => !row.not_charged).map((row) => row.invoice_id))];
   const members = await conn.raw(`
@@ -760,6 +760,16 @@ async function loadCreditFacts(conn, stops) {
   return { jobs, billed, prepaidRefunds: await termRefunds(conn, stops) };
 }
 
+// The package slot of a package visit, review rows too: an owner-set credit keeps it as a job basis (applyLedger, slotBasis). null for a
+// visit that is not in a package, or that is no longer one of its planned visits.
+function packageSlotOf(stop, job, callback, credit) {
+  if (!(job && job.root && job.planned && job.planned.includes(stop.id) && (stop.followup_included || !callback))) return null;
+  return {
+    rootId: job.root.id, slot: job.planned.indexOf(stop.id) + 1,
+    sold: TWO_TREATMENT_PACKAGE_KEYS.has(job.root.service_key) ? 2 : null, price: credit.job ? credit.job.price : null,
+  };
+}
+
 /**
  * The credit rows of ONE technician's stops (weekStops rows): { visitId, workDate, kind, creditCents, reason, needsReview,
  * refundCents, serviceType, bases } in the stops' order. `inForce` = the settings in force for the week (the callback value comes
@@ -784,6 +794,8 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
     else if (callback) credit = await callbackCredit(conn, stop, technicianId, inForce);
     else credit = ownPriceCredit(stop, billed.get(stop.id));
     const invoiced = billed.get(stop.id) || {};
+    // The package slot of a package visit, review rows too: an owner-set credit keeps it as a job basis (applyLedger, withOverride).
+    const packageSlot = packageSlotOf(stop, job, callback, credit);
     const shown = { ...credit };
     delete shown.job;
     delete shown.invoiceBased;
@@ -793,6 +805,7 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
       // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
       unallocatedRefunds: invoiced.unallocated || [],
       ledger: ledgerOf(credit, invoiced),
+      packageSlot,
       linkedInvoices: linkedInvoicesOf(invoiced, job, billed),
     });
   }
@@ -845,8 +858,10 @@ async function paidLedger(conn, visitIds, invoiceIds, rootIds, weekStart) {
     }
     for (const basis of row.bases) {
       if (basis.basisType !== 'job' || !roots.has(basis.basisId)) continue;
-      const job = ledger.jobs.get(basis.basisId)
-        || { totalCents: Number(basis.totalCents), sold: Number(basis.sold), weekStart: row.week_start, slots: new Map() };
+      const job = ledger.jobs.get(basis.basisId) || { totalCents: null, sold: null, weekStart: row.week_start, slots: new Map() };
+      // The total and sold count are fixed by the first row that knows them (an owner-set credit may record a slot with neither).
+      if (job.totalCents == null && basis.totalCents != null) { job.totalCents = Number(basis.totalCents); job.sold = basis.sold == null ? job.sold : Number(basis.sold); }
+      if (job.sold == null && basis.sold != null) job.sold = Number(basis.sold);
       job.slots.set(Number(basis.slot), row.visit_id);
       ledger.jobs.set(basis.basisId, job);
     }
@@ -873,6 +888,7 @@ function applyLedger(rows, paid, overrides = new Map()) {
     delete clean.ledger;
     delete clean.linkedInvoices;
     delete clean.technicianId;
+    delete clean.packageSlot;
     return clean;
   });
 
@@ -899,7 +915,17 @@ function applyLedger(rows, paid, overrides = new Map()) {
     if (MANUAL_CREDIT_INELIGIBLE.has(row.kind)) {
       return review(row, 'owner_override_closeout_changed', 'The closeout of this stop changed since the owner set its credit (its work is no longer confirmed): clear that credit in the production share preview.');
     }
-    return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: [] };
+    return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: slotBasis(row) };
+  }
+
+  // A package visit credited by the owner still consumes its slot of the package: a job basis with the package root and the slot, and the
+  // total only when a pay run or the live price fixed one (null = unknown), so a replacement follow-up cannot take the slot again.
+  function slotBasis(row) {
+    const at = row.packageSlot;
+    if (!at || !(at.slot >= 1)) return [];
+    const was = paid.jobs.get(at.rootId);
+    const total = was && was.totalCents != null ? was.totalCents : (at.price > 0 ? at.price : null);
+    return [{ basisType: 'job', basisId: at.rootId, totalCents: total, sold: was && was.sold != null ? was.sold : at.sold, slot: at.slot }];
   }
 
   function settleInvoice(row, ledger) {
@@ -925,6 +951,13 @@ function applyLedger(rows, paid, overrides = new Map()) {
     if (outside) return review(row, 'package_paid_elsewhere', `This package, or its invoice, was already credited outside the package in the week of ${outside.weekStart}: set its credit in the production share preview.`);
     const was = paid.jobs.get(job.rootId);
     if (!was) {
+      if (!(job.price > 0)) return review(row, 'multi_visit_job', "The job's first visit has no price on file.");
+      return { ...row, creditCents: jobPartCents(job.price, job.sold, job.nth), bases: [{ basisType: 'job', basisId: job.rootId, totalCents: job.price, sold: job.sold, slot: job.nth }] };
+    }
+    if (was.totalCents == null) {
+      // Only slots were recorded so far (an owner-set credit): no total is fixed yet, so this visit credits from the live price and the
+      // sold count, and the slots already taken still cannot be taken again.
+      if (was.slots.has(job.nth) || job.nth > job.sold) return review(row, 'basis_exhausted', 'This package slot was already credited, or is past the visits the package was sold with: set its credit in the production share preview.');
       if (!(job.price > 0)) return review(row, 'multi_visit_job', "The job's first visit has no price on file.");
       return { ...row, creditCents: jobPartCents(job.price, job.sold, job.nth), bases: [{ basisType: 'job', basisId: job.rootId, totalCents: job.price, sold: job.sold, slot: job.nth }] };
     }
@@ -985,19 +1018,21 @@ async function weekCreditsFor(conn, settingsById, weekStart, { skipOverrides = f
   const byTech = new Map(ids.map((id) => [id, []]));
   for (const stop of stops) byTech.get(canonicalId(stop.technician_id)).push(stop);
   const credits = new Map();
-  let facts = null;
+  const message = (err) => (err && err.message) || 'unknown problem';
+  // The facts behind everyone's stops are read once, together. When that read fails, each technician with stops retries on his own, in
+  // a savepoint of the same transaction: only the ones whose own facts cannot be read are errors, and an employee with no stops (or
+  // none in the run) never blocks another.
+  let shared = null;
   try {
-    facts = await conn.transaction((sp) => loadCreditFacts(sp, stops));
-  } catch (err) {
-    for (const id of ids) credits.set(id, { error: (err && err.message) || 'unknown problem' });
-  }
-  if (facts) {
-    for (const id of ids) {
-      try {
-        credits.set(id, { rows: await conn.transaction((sp) => creditsOfStops(sp, id, byTech.get(id), settingsById.get(id), facts)) });
-      } catch (err) {
-        credits.set(id, { error: (err && err.message) || 'unknown problem' });
-      }
+    shared = await conn.transaction((sp) => loadCreditFacts(sp, stops));
+  } catch { shared = null; }
+  for (const id of ids) {
+    const own = byTech.get(id);
+    try {
+      const facts = shared || await conn.transaction((sp) => loadCreditFacts(sp, own));
+      credits.set(id, { rows: await conn.transaction((sp) => creditsOfStops(sp, id, own, settingsById.get(id), facts)) });
+    } catch (err) {
+      credits.set(id, { error: message(err) });
     }
   }
   const all = [...credits.values()].flatMap((one) => one.rows || []);
@@ -1022,10 +1057,7 @@ async function creditsOfWeek(conn, technicianId, weekStart, settings, opts = {})
     } catch { /* not the selected employee: the run reports it */ }
   }
   settingsById.set(technicianId, settings);
-  let one = (await weekCreditsFor(conn, settingsById, weekStart, opts)).get(technicianId);
-  // The shared facts are read for everyone together, so one unrelated employee's stop can fail them all. The selected employee is then
-  // read alone, as the pay run reads a week after fixing that employee's problem; a shared invoice across employees is split by the run.
-  if (one.error && settingsById.size > 1) one = (await weekCreditsFor(conn, new Map([[technicianId, settings]]), weekStart, opts)).get(technicianId);
+  const one = (await weekCreditsFor(conn, settingsById, weekStart, opts)).get(technicianId);
   if (one.error) throw new PayrollError(500, `The production share could not be worked out: ${one.error}`);
   return one.rows;
 }
