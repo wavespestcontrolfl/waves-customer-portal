@@ -37,6 +37,19 @@ describe('rollUp', () => {
 });
 
 describe('AdsResultsCard', () => {
+  it('counts a rain date once in the total, and names the source of an unlinked line', async () => {
+    const twoCampaigns = [
+      ...rows,
+      { ...zero, date: '2026-10-01', campaign_id: 'b', campaign: 'Test Campaign B', platform: 'google_ads', spend: 1, rain_day: { call: 'rain', wet_day: true } },
+    ];
+    reply({ period: '90d', since: 'x', until: 'y', rows: twoCampaigns, totals: zero });
+    render(<AdsResultsCard />);
+    await screen.findByText('Test Campaign B');
+    expect(screen.getByRole('button', { name: 'Show days for (no campaign) · Google LSA' })).toBeInTheDocument();
+    const totalRow = screen.getAllByRole('row').at(-1);
+    expect(totalRow.textContent).toContain('1 called, 1 of 1 wet');
+  });
+
   it('shows campaign lines and opens the per-day view', async () => {
     reply({ period: '90d', since: '2026-10-01', until: '2026-12-29', rows, totals: { ...zero, spend: 15, leads: 6 } });
     render(<AdsResultsCard />);

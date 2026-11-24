@@ -746,7 +746,8 @@ router.get('/health', async (req, res, next) => {
 const RESULTS_PERIOD_DAYS = { '30d': 30, '90d': 90, '180d': 180 };
 router.get('/results', async (req, res, next) => {
   try {
-    const days = RESULTS_PERIOD_DAYS[req.query.period || '90d'];
+    const period = req.query.period === undefined ? '90d' : req.query.period;
+    const days = typeof period === 'string' && Object.hasOwn(RESULTS_PERIOD_DAYS, period) ? RESULTS_PERIOD_DAYS[period] : 0;
     if (!days) return res.status(400).json({ error: 'period must be 30d, 90d or 180d' });
     const now = new Date();
     const out = await require('../services/ads/ad-results').adResults({

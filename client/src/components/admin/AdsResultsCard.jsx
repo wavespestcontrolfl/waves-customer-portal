@@ -25,13 +25,18 @@ function authHeaders() {
 const money = (n) => `$${Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const count = (n) => Number(n || 0).toLocaleString("en-US");
 
+// One rain call per date: every campaign row of a date carries the same call, so count each date once.
 function rainText(rows) {
-  const called = rows.filter((r) => r.rain_day?.call === "rain");
+  const byDate = new Map();
+  for (const r of rows) if (r.rain_day && !byDate.has(r.date)) byDate.set(r.date, r);
+  const called = [...byDate.values()].filter((r) => r.rain_day.call === "rain");
   if (!called.length) return "0";
   const measured = called.filter((r) => r.rain_day.wet_day !== null && r.rain_day.wet_day !== undefined);
   const wet = measured.filter((r) => r.rain_day.wet_day).length;
   return `${called.length} called, ${wet} of ${measured.length} wet`;
 }
+
+const PLATFORM_NAMES = { google_ads: "Google Ads", google_lsa: "Google LSA", facebook: "Facebook" };
 
 function rainDayText(rain) {
   if (!rain || !rain.call) return "";
@@ -46,7 +51,7 @@ export function rollUp(rows) {
   for (const row of rows) {
     const key = row.campaign_id || `none:${row.platform || ""}`;
     if (!groups.has(key)) {
-      groups.set(key, { key, campaign: row.campaign, platform: row.platform, days: [], total: Object.fromEntries(SUM_KEYS.map((k) => [k, 0])) });
+      groups.set(key, { key, campaign_id: row.campaign_id, campaign: row.campaign, platform: row.platform, days: [], total: Object.fromEntries(SUM_KEYS.map((k) => [k, 0])) });
     }
     const g = groups.get(key);
     g.days.push(row);
@@ -78,7 +83,8 @@ function Cells({ data, rain }) {
 
 function CampaignRows({ group }) {
   const [open, setOpen] = useState(false);
-  const label = `${open ? "Hide" : "Show"} days for ${group.campaign}`;
+  const name = group.campaign_id ? group.campaign : `${group.campaign} · ${PLATFORM_NAMES[group.platform] || group.platform || "unknown"}`;
+  const label = `${open ? "Hide" : "Show"} days for ${name}`;
   return (
     <Fragment>
       <TR>
@@ -91,7 +97,7 @@ function CampaignRows({ group }) {
             className="inline-flex min-h-[44px] items-center gap-2 text-left font-medium text-zinc-900 sm:min-h-0"
           >
             <span aria-hidden="true">{open ? "−" : "+"}</span>
-            {group.campaign}
+            {name}
           </button>
         </TD>
         <Cells data={group.total} rain={rainText(group.days)} />

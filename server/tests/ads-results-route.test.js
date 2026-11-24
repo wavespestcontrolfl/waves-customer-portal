@@ -60,6 +60,12 @@ test('an unknown period is a 400 and reads nothing', async () => {
   expect(mockAdResults).not.toHaveBeenCalled();
 });
 
+test.each(['constructor', 'toString', '__proto__'])('an inherited key (%s) is a 400, not a 500', async (period) => {
+  const { status } = await get(`?period=${period}`);
+  expect(status).toBe(400);
+  expect(mockAdResults).not.toHaveBeenCalled();
+});
+
 test('a service failure goes to the error handler', async () => {
   mockAdResults.mockRejectedValueOnce(new Error('boom'));
   const { status, body } = await get('?period=30d');

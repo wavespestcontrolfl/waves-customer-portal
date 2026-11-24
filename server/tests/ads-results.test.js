@@ -172,7 +172,7 @@ describe('adResults', () => {
   test('the owner test account is left out', async () => {
     const conn = fakeConn({
       ad_service_attribution: [lead({ customer_id: 'c1' })],
-      customers: [{ ...customer('c1'), first_name: 'Adam', last_name: 'Martinez' }],
+      customers: [{ ...customer('c1'), first_name: 'Shakedown', last_name: 'Test' }],
       invoices: [invoice('c1', '2026-10-03T15:00:00Z', 10)],
     });
     const out = await adResults({ ...WINDOW, conn });
@@ -189,5 +189,44 @@ describe('adResults', () => {
     const row = rowOf(await adResults({ ...WINDOW, conn }), CAMP, '2026-10-01');
     expect(row.paid_customers).toBe(30);
     expect(row.customers).toHaveLength(25);
+  });
+  test('a partial refund comes off the 90-day paid money', async () => {
+    const inv = invoice('c1', '2026-10-03T15:00:00Z', 100, { stripe_payment_intent_id: 'pi_one' });
+    const conn = fakeConn({
+      ad_service_attribution: [lead({ customer_id: 'c1' })],
+      customers: [customer('c1')],
+      invoices: [inv],
+      payments: [
+        { stripe_payment_intent_id: 'pi_one', refund_amount: 40 },
+        { stripe_payment_intent_id: 'pi_other', refund_amount: 99 },
+      ],
+    });
+    const out = await adResults({ ...WINDOW, conn });
+    expect(out.totals.paid90).toBe(60);
+    expect(out.totals.paid_customers).toBe(1);
+  });
+
+  test('two leads on one day: the earlier-created lead gets the paid credit', async () => {
+    const conn = fakeConn({
+      ad_service_attribution: [
+        lead({ id: 'l1', campaign_id: 'camp-b', customer_id: 'c1', created_at: '2026-10-01T18:00:00Z' }),
+        lead({ id: 'l2', customer_id: 'c1', created_at: '2026-10-01T13:00:00Z' }),
+      ],
+      customers: [customer('c1')],
+      invoices: [invoice('c1', '2026-10-03T15:00:00Z', 10)],
+    });
+    const out = await adResults({ ...WINDOW, conn });
+    expect(rowOf(out, CAMP, '2026-10-01').paid_customers).toBe(1);
+    expect(rowOf(out, 'camp-b', '2026-10-01').paid_customers).toBe(0);
+  });
+
+  test('a test lead linked to a customer with another name is still left out', async () => {
+    const conn = fakeConn({
+      ad_service_attribution: [lead({ customer_id: 'c1', lead_first_name: 'Shakedown', lead_last_name: 'Test' })],
+      customers: [customer('c1')],
+      invoices: [invoice('c1', '2026-10-03T15:00:00Z', 10)],
+    });
+    const out = await adResults({ ...WINDOW, conn });
+    expect(out.totals).toMatchObject({ leads: 0, paid_customers: 0 });
   });
 });
