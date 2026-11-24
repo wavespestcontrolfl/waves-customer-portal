@@ -35,7 +35,7 @@ const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks'
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { isInDesotoExclusion, isServedSouthHillsboroughTown } = require('./service-area');
-const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip } = require('./excluded-localities');
+const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip, isPortCharlotteLocality, hasUsableZip } = require('./excluded-localities');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -1024,7 +1024,7 @@ const CONFIRM_REASON_TEXT = {
   missing_unit_number: 'address is a multi-unit building (condo/townhome) given without a unit — ask which unit number before dispatch',
   address_recovered: 'street name was garbled in transcription — matched to a single validated address; read it back to the caller',
   out_of_service_area: 'address resolves outside the service area — verify the county',
-  service_area_unverified: 'the address on file could not be read to check the service area — confirm the address and county before booking',
+  service_area_unverified: 'the service area could not be confirmed (the address on file could not be read, or a Port Charlotte address has no ZIP) — confirm the address, ZIP and county before booking',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
   missing_first_name: "no first name on file for this customer — get the account holder's first name",
@@ -2181,6 +2181,11 @@ function agreedOneTimeJobCardPrice(v2Extraction, bookedService) {
 //      on-file read FAILED (onFile.lookupFailed), the booking fails closed to
 //      review (reason on_file_address_unavailable) instead of passing on no
 //      evidence.
+// The skip reason a geographic veto files under: an unreadable on-file address, or a Port Charlotte address with no ZIP
+// tied to it, is UNVERIFIED (staff confirm the address and ZIP); every other veto is out of area.
+const geoVetoSkipReason = (veto) => (veto?.reason === 'on_file_address_unavailable' || veto?.reason === 'port_charlotte_zip_unknown'
+  ? 'service_area_unverified'
+  : 'out_of_service_area');
 function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, extracted = null, onFile = null } = {}) {
   const av = addressValidation || null;
   const svc = v2Extraction?.property?.service_address || null;
@@ -2227,11 +2232,37 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
     || onFileCities.some(isPuntaGordaLocality) || onFileZips.some(isPuntaGordaZip)) {
     return { reason: 'punta_gorda_locality', county: 'Charlotte' };
   }
-  // The six places held until a second technician is hired (owner ruling 2026-11-23: Rotonda, Englewood, Placida,
-  // Boca Grande, Port Charlotte, Babcock Ranch) veto the same way. Englewood straddles two counties, so no county is named.
+  // The places held until a second technician is hired (owner ruling 2026-11-23: Rotonda, Placida, Boca Grande,
+  // Babcock Ranch, Gulf Cove, El Jobean, Charlotte Harbor, Deep Creek) veto the same way. No county is named.
+  // Englewood and Port Charlotte were held for a few hours and are served again.
   if (cities.some(isNotYetServedLocality) || zips.some(isNotYetServedZip)
     || onFileCities.some(isNotYetServedLocality) || onFileZips.some(isNotYetServedZip)) {
     return { reason: 'not_yet_served_locality', county: null };
+  }
+  // Port Charlotte is served, but ZIPs 33980 / 33981 / 33983 hold by ZIP and carry the name too: a Port Charlotte address with
+  // no ZIP tied to it cannot be told from a held one, so it is UNVERIFIED (staff review, never out of area, never auto-booked).
+  // Only a ZIP of the address the visit will use clears it, never a ZIP on the call for another property:
+  //  - the call names Port Charlotte: every extraction that names it carries its own ZIP, or else the on-file address
+  //    (which the booking keeps) is a Port Charlotte one with its own ZIP;
+  //  - the call names no Port Charlotte but the stored address does (the booking can retain it): that stored ZIP must exist,
+  //    whatever the call said about another town.
+  // A ZIP counts only when it is five digits or ZIP+4: a fragment on file ("3398") clears nothing.
+  // ZIP evidence is bound to its own source: each extraction (V1, V2, address validation) that names Port Charlotte must
+  // carry its own usable ZIP. A ZIP from another extraction never clears it, because the legacy branch can book V1's
+  // address while V2 or address validation describes a different street (Codex #8402).
+  const statedPortCharlotteSources = [
+    [extracted?.city, extracted?.zip],
+    [svc?.city, svc?.postal_code],
+    [av?.normalized?.city, av?.normalized?.postal_code],
+  ].filter(([city]) => isPortCharlotteLocality(lower(city)));
+  const statedPortCharlotte = statedPortCharlotteSources.length > 0;
+  const onFilePortCharlotte = onFileCities.some(isPortCharlotteLocality);
+  const statedZipMissing = statedPortCharlotteSources.some(([, zip]) => !hasUsableZip(zip));
+  const onFileUsableZip = !!onFile && !onFile.lookupFailed && hasUsableZip(onFile.zip);
+  if (statedPortCharlotte
+    ? (statedZipMissing && !(onFilePortCharlotte && onFileUsableZip))
+    : (onFilePortCharlotte && !onFileUsableZip)) {
+    return { reason: 'port_charlotte_zip_unknown', county: null };
   }
   if (av && av.inServiceArea === true) return null;
   if (countyKey === 'desoto') {
@@ -20486,9 +20517,7 @@ const CallRecordingProcessor = {
       // kept; only the visit is withheld, and the call is left for human review.
       // An unreadable on-file address is held under its own reason, not
       // mislabelled as out of area.
-      const geoSkipReason = legacyGeoVeto.reason === 'on_file_address_unavailable'
-        ? 'service_area_unverified'
-        : 'out_of_service_area';
+      const geoSkipReason = geoVetoSkipReason(legacyGeoVeto);
       appointmentResult = {
         service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
         dateTime: extracted.preferred_date_time,
@@ -23702,9 +23731,7 @@ const CallRecordingProcessor = {
             // reason, confirm reason, and in legacy/shadow routing the
             // skipped-booking card (enforce mode files its own card).
             if (schedErr.fencedGeoVeto) {
-              const fencedSkipReason = schedErr.fencedGeoVeto.reason === 'on_file_address_unavailable'
-                ? 'service_area_unverified'
-                : 'out_of_service_area';
+              const fencedSkipReason = geoVetoSkipReason(schedErr.fencedGeoVeto);
               appointmentResult = { ...appointmentResult, scheduleCreated: false, skippedReason: fencedSkipReason };
               if (!bridgeNeedsConfirmation.includes(fencedSkipReason)) bridgeNeedsConfirmation.push(fencedSkipReason);
               if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
@@ -26978,6 +27005,7 @@ CallRecordingProcessor._test = {
   pendingClaimWriteCount: () => pendingClaimWrites.size,
   reclaimableClaimSql: reclaimableClaim,
   legacyGeographicVeto,
+  geoVetoSkipReason,
   isOutboundCall,
   outboundImpliedConsentEligible,
   hasRealTwoWayConversation,

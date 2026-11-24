@@ -649,6 +649,8 @@ app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
 app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
 // Commercial first visit picker (GATE_COMMERCIAL_FIRST_VISIT): same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.commercialFirstVisitPreGuard);
+// First-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME): same reason, same shape.
+app.use('/api/estimates', estimatePublicRoutes.firstVisitRequestPreGuard);
 
 app.use('/api/', limiter);
 

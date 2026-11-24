@@ -1479,6 +1479,30 @@ function depositCreditSql(alias) {
           ), 0)`;
 }
 
+// A combined setup/initial + application invoice (`i`) contributes its APPLICATION lines only: the amount of its line items
+// that are not setup, initial or the deposit credit. Shared with the production share (production-share.js).
+const COMBINED_SETUP_INVOICE_SQL = `(COALESCE(i.title, '') ILIKE '%setup%' OR COALESCE(i.title, '') ILIKE '%initial%'
+                     OR COALESCE(i.line_items::text, '') ILIKE '%setup%' OR COALESCE(i.line_items::text, '') ILIKE '%initial%')`;
+const APPLICATION_LINES_SQL = `CASE WHEN jsonb_typeof(COALESCE(i.line_items::jsonb, 'null'::jsonb)) = 'array'
+                         THEN (SELECT COALESCE(sum(NULLIF(regexp_replace(li ->> 'amount', '[^0-9.-]', '', 'g'), '')::numeric), 0)
+                               FROM jsonb_array_elements(i.line_items::jsonb) li
+                               WHERE NOT (COALESCE(li ->> 'name', li ->> 'description', '') ILIKE '%setup%'
+                                          OR COALESCE(li ->> 'name', li ->> 'description', '') ILIKE '%initial%')
+                                 AND COALESCE(li ->> 'category', '') <> 'deposit_credit')
+                         ELSE 0 END`;
+
+// How an invoice belongs to a visit `s` (with `sr.service_record_id`, the visit's latest service record) and which visits an
+// invoice `i` covers: directly, through its service record, as a combined first-application invoice, or as a completion-packet
+// member. One definition for the rate review and the production share (production-share.js), so both read the same links.
+const VISIT_INVOICE_LINK_SQL = `(i.scheduled_service_id = s.id
+               -- an invoice linked only through its service record (invoice.js linkedScheduledServiceId)
+               OR (i.service_record_id IS NOT NULL AND i.service_record_id = sr.service_record_id)
+               OR s.first_application_invoice_id = i.id
+               OR EXISTS (SELECT 1 FROM visit_completion_packet_items pm2 WHERE pm2.invoice_id = i.id AND pm2.scheduled_service_id = s.id))`;
+const INVOICE_MEMBER_IDS_SQL = `SELECT pm.scheduled_service_id AS id FROM visit_completion_packet_items pm WHERE pm.invoice_id = i.id
+            UNION
+            SELECT b.id FROM scheduled_services b WHERE b.first_application_invoice_id = i.id`;
+
 async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
   if (!customerIds.length) return [];
   const notSettled = INVOICE_UNCOLLECTIBLE_STATUSES.filter((st) => st !== 'paid' && st !== 'prepaid');
@@ -1528,15 +1552,7 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
                 OR p.metadata::jsonb ->> 'invoice_id' = i.id::text)
           ), 0) + ${depositCreditSql('i')},
           -- a combined setup/initial + application invoice contributes its APPLICATION lines only
-          CASE WHEN (COALESCE(i.title, '') ILIKE '%setup%' OR COALESCE(i.title, '') ILIKE '%initial%'
-                     OR COALESCE(i.line_items::text, '') ILIKE '%setup%' OR COALESCE(i.line_items::text, '') ILIKE '%initial%')
-               THEN CASE WHEN jsonb_typeof(COALESCE(i.line_items::jsonb, 'null'::jsonb)) = 'array'
-                         THEN (SELECT COALESCE(sum(NULLIF(regexp_replace(li ->> 'amount', '[^0-9.-]', '', 'g'), '')::numeric), 0)
-                               FROM jsonb_array_elements(i.line_items::jsonb) li
-                               WHERE NOT (COALESCE(li ->> 'name', li ->> 'description', '') ILIKE '%setup%'
-                                          OR COALESCE(li ->> 'name', li ->> 'description', '') ILIKE '%initial%')
-                                 AND COALESCE(li ->> 'category', '') <> 'deposit_credit')
-                         ELSE 0 END
+          CASE WHEN ${COMBINED_SETUP_INVOICE_SQL} THEN ${APPLICATION_LINES_SQL}
                ELSE i.total + ${depositCreditSql('i')} END
         ) * COALESCE(share.fraction, 1))
         FROM invoices i
@@ -1555,18 +1571,12 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
                 THEN COALESCE(s.estimated_price, s.primary_line_price, 0) / sum(COALESCE(m.estimated_price, m.primary_line_price))
               ELSE 0 END AS fraction
           FROM (
-            SELECT pm.scheduled_service_id AS id FROM visit_completion_packet_items pm WHERE pm.invoice_id = i.id
-            UNION
-            SELECT b.id FROM scheduled_services b WHERE b.first_application_invoice_id = i.id
+            ${INVOICE_MEMBER_IDS_SQL}
           ) mem
           JOIN scheduled_services m ON m.id = mem.id
           HAVING count(*) > 1
         ) share ON true
-        WHERE (i.scheduled_service_id = s.id
-               -- an invoice linked only through its service record (invoice.js linkedScheduledServiceId)
-               OR (i.service_record_id IS NOT NULL AND i.service_record_id = sr.service_record_id)
-               OR s.first_application_invoice_id = i.id
-               OR EXISTS (SELECT 1 FROM visit_completion_packet_items pm2 WHERE pm2.invoice_id = i.id AND pm2.scheduled_service_id = s.id))
+        WHERE ${VISIT_INVOICE_LINK_SQL}
           AND i.archived_at IS NULL AND i.annual_prepay_term_id IS NULL
           AND (i.paid_at IS NOT NULL OR i.status IN ('paid', 'prepaid'))
           AND i.status NOT IN (${notSettled.map(() => '?').join(', ')})
@@ -3230,6 +3240,12 @@ module.exports = {
   // (services/rate-review-apply.js) so a notice targets exactly the visits
   // this ranking priced.
   PLAN_LINE_SQL: { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL, DATING_ROW_SQL },
+  // The refund a payment takes off an invoice's revenue (the card surcharge it returned is not revenue); the production
+  // share exposes refunds per stop with it.
+  REFUND_BASE_SQL,
+  VISIT_INVOICE_LINK_SQL,
+  INVOICE_MEMBER_IDS_SQL,
+  depositCreditSql,
   lockBatch,
   LEDGER_FAMILIES_FOR_LINE,
   anniversaryInWindow,

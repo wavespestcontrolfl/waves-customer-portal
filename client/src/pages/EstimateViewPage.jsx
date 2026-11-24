@@ -54,6 +54,7 @@ import { approveSlotLabel, firstVisitDayAndWindow } from '../lib/estimate-glass-
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
+import FirstVisitRequest from '../components/estimate/FirstVisitRequest';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
 import WhatYouPayBox, { whatYouPayForSelection } from '../components/estimate/WhatYouPayBox';
@@ -6341,6 +6342,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
   const [selectedSlotId, setSelectedSlotId] = useState(null);
+  // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the first-visit request this tab just sent ({ days, window }). Nothing is stored, so a
+  // reopened link shows the normal picker and the request link again.
+  const [sentFirstVisitRequest, setSentFirstVisitRequest] = useState(null);
   // Website flow: counts customer time picks. The payment choices mount under
   // the slot list, far below a phone screen, so a pick scrolls to them. A
   // selection restored at mount or after a review cancel never bumps it.
@@ -6738,6 +6742,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // commercial-manual list), so the accept CTA renders WITHOUT a slot pick —
   // the team schedules after approval.
   const manualScheduleAccept = acceptance.mode === 'commercial_site_confirmation';
+  const firstVisitRequestOffered = acceptance.preferredTime?.offered === true && !restartQuote;
+  const pendingFirstVisitRequest = sentFirstVisitRequest;
   const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(data?.pricing, services, selected), [data?.pricing, services, selected]);
   // Per-service cadence (bundles): the precomputed combo matching every section's
   // independent selection, plus the non-pest selection map sent on accept.
@@ -11013,6 +11019,14 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   // A refused plan quote from a slot read (codex pre-push P1): the same banner.
                   onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)}
                 />
+                {firstVisitRequestOffered && serviceMode !== 'one_time' && !selectedSlotId && !existingAppointment ? (
+                  <FirstVisitRequest
+                    token={token}
+                    pending={pendingFirstVisitRequest}
+                    disabled={readOnlyPreview || ctaPhase === 'submitting'}
+                    onSent={setSentFirstVisitRequest}
+                  />
+                ) : null}
               </div>
             ) : (
               <AcceptanceModeCard acceptance={acceptance} />

@@ -24,6 +24,7 @@ const journeys = [
   require('./journeys/completed-photo-concurrent-retry'),
   require('./journeys/completion-invoice-lineage'),
   require('./journeys/payment-webhook-settles-once'),
+  require('./journeys/saved-card-charge-matches-shown-total'),
   require('./journeys/prepayment-and-series-cancellation-race'),
 ];
 
@@ -76,7 +77,8 @@ async function main() {
     fs.mkdirSync(objectDir, { recursive: true, mode: 0o700 });
     const localEnv = { ...env, NODE_ENV: 'production', QA_FIXTURE_FILE: fixtureFile, QA_CAPTURE_FILE: captureFile,
       QA_OBJECT_DIR: objectDir, S3_BUCKET: 'waves-qa-fixture', AWS_REGION: 'us-east-1',
-      GATE_TWILIO_SMS: 'true', TWILIO_SIGNATURE_VALIDATION: 'enforce',
+      // The 8 AM-8 PM ET text window stays off, so a run at any hour sends receipts at once (journeys wait seconds).
+      GATE_TWILIO_SMS: 'true', GATE_SMS_SEND_WINDOW: 'false', TWILIO_SIGNATURE_VALIDATION: 'enforce',
       TWILIO_ACCOUNT_SID: `AC${'0'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'qa-fixture-auth-token',
       AWS_ACCESS_KEY_ID: 'qa-fixture', AWS_SECRET_ACCESS_KEY: 'qa-fixture-secret',
       CLIENT_URL: baseUrl, STRIPE_SECRET_KEY: 'sk_test_qa_fixture', STRIPE_WEBHOOK_SECRET: webhookSecret };
