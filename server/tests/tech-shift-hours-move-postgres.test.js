@@ -773,6 +773,26 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
             expect((await stopOf(stop)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
           });
 
+          // The named technician is marked out that day: each service moves, its assignment is refused, and it
+          // stays on the technician who had it. Its own move stated no line, because it was to be handed over.
+          test('the assignment is refused: the office is told about the technician who keeps each service, once, and the move reports the services', async () => {
+            await f.db('technicians').where({ id: f.ids.otherTech }).update({ shift_start: '08:00', shift_end: '10:30' });
+            await f.db('technician_absences').insert({ technician_id: f.ids.otherTech, absence_date: nextDay, reason: 'synthetic' });
+            try {
+              const stop = await seedStop();
+              // 11:00 and 12:00: the second service ends after its own technician's 12:00 shift end.
+              const out = await move(stop.a, nextDay, { start: '11:00', end: '12:00' }, 'admin', { overlapAdvisory: true, technicianId: f.ids.otherTech });
+              expect(out.visitMove.failed.map((x) => x.id).sort()).toEqual([stop.a, stop.b].sort());
+              expect(await stopOf(stop)).toMatchObject([
+                { day: nextDay, window_start: '11:00:00', technician_id: f.ids.technician },
+                { day: nextDay, window_start: '12:00:00', technician_id: f.ids.technician },
+              ]);
+              expect(dayLines(out)).toEqual([OFFICE_LINE]);
+            } finally {
+              await f.db('technician_absences').del();
+            }
+          });
+
           test('gate off: the services\' own moves state the day off of the technician they leave, and none of the one who gets the stop, as before', async () => {
             delete process.env.GATE_TECH_SHIFT_HOURS;
             await offNextDay(f.ids.technician);

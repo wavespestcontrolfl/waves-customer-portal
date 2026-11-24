@@ -1793,13 +1793,39 @@ function memberOutsideShift(shiftOf, date, landings, judged = {}) {
  * writes themselves: a member that keeps its technician by its own move (the
  * rebooker's office line, in `warnings` with that move's other lines), a
  * member the unit hands to another technician by that assignment
- * (`assignmentLines`, alignMemberTechnician). Two members can state the same
- * line, so each line is returned once. Gate off, or a move the office did not
+ * (`assignmentLines`, alignMemberTechnician; when that assignment is refused,
+ * keptTechnicianLine). Two members can state the same line, so each line is
+ * returned once. Gate off, or a move the office did not
  * start: `warnings` as it is, as before (the assignments' lines are dropped).
  */
 function unitWarnings(warnings, assignmentLines, initiatedBy) {
   if (initiatedBy !== 'admin' || !require('../config/feature-gates').techShiftHoursLive()) return warnings;
   return [...new Set([...warnings, ...assignmentLines])].filter(Boolean);
+}
+
+// Does a unit move hand this member to another technician than the plan read
+// on it? Then moveVisitAsUnit re-points it after its own move (alignMember),
+// and that assignment answers for its shift (shiftAskedByUnit).
+const handsOver = (options, target) => options.technicianId !== undefined
+  && String(target.expect.technician_id || '') !== String(options.technicianId || '');
+
+/**
+ * GATE_TECH_SHIFT_HOURS (D4 part 3c): a member moved, and its assignment to
+ * the technician the office named was refused. It stays on the technician who
+ * had it, and its own move stated no line (shiftAskedByUnit). So the office is
+ * told here, about the row as it now is and the technician on it: the day-off
+ * line, or the shift line; a move that kept the day is asked the shift alone,
+ * as the member's own move is. Gate off, or a move the office did not start:
+ * no read (the member's own move stated its line, as before).
+ */
+async function keptTechnicianLine(target, initiatedBy) {
+  if (initiatedBy !== 'admin' || !require('../config/feature-gates').techShiftHoursLive()) return undefined;
+  const row = await db('scheduled_services').where({ id: target.id })
+    .first('technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes').catch(() => null);
+  if (!row || !row.technician_id) return undefined;
+  return require('./technician-eligibility').dayWarningFor(row.technician_id, dateOnly(row.scheduled_date), {
+    block: row, shiftOnly: dateOnly(target.expect.scheduled_date) === dateOnly(row.scheduled_date),
+  });
 }
 
 /**
@@ -2664,13 +2690,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // GATE_TECH_SHIFT_HOURS, shiftAskedByUnit: the member's own move reads no
     // shift and states no line, because the unit answers for it. An automatic
     // move: always (the plan's verdict above). The office's own move (told,
-    // D4 part 3c): only for a member the unit hands to another technician,
-    // where the assignment that follows tells the office about the row it
-    // writes (alignMember). A member that keeps its technician is told by its
-    // own move, as one visit's office move is.
-    const noticeOpts = unitTechChanges
-      ? { suppressTechNotice: true, shiftAskedByUnit: true }
-      : { shiftAskedByUnit: initiatedBy !== 'admin' };
+    // D4 part 3c): only for a member the unit hands to another technician
+    // (`handedOver`, the test alignMember re-points on), where the assignment
+    // that follows tells the office about the row it writes. A member that
+    // keeps its technician is told by its own move, as one visit's office
+    // move is.
+    const handedOver = handsOver(options, target);
+    const noticeOpts = {
+      ...(unitTechChanges ? { suppressTechNotice: true } : {}),
+      shiftAskedByUnit: initiatedBy !== 'admin' || handedOver,
+    };
     // Second technician: a member's rebooker probe is scoped to the row's
     // CURRENT technician when the move keeps it, but a unit move that names a
     // technician strips it from the member calls and re-points the row after
@@ -2699,8 +2728,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // technician — reported as a failed member (the detach seam separates
     // it from the re-pointed parent), never silently split-tech.
     const alignMember = async () => {
-      if (options.technicianId === undefined) return;
-      if (String(target.expect.technician_id || '') === String(options.technicianId || '')) return;
+      if (!handedOver) return;
       let lastErr = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
@@ -2831,6 +2859,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           snapshot,
         });
       }
+      // The member's own move stated no line, because it was to be handed
+      // over: the office is told now about the technician who keeps it.
+      assignmentLines.add(await keptTechnicianLine(target, initiatedBy));
       await failSibling(target, { code: lastErr.code || 'ASSIGNMENT_FAILED' }, `moved but its technician reassignment failed: ${lastErr.message}`, { movedButUnassigned: true });
     };
     const syncSiblingReminder = async () => {
