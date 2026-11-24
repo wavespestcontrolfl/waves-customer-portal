@@ -262,6 +262,7 @@ function plannedWindow(svc, plannedStart) {
       range: windowSpanText(recorded.start, recorded.end),
       outside: plannedStart < recorded.start || plannedStart > recorded.end,
       side: plannedStart < recorded.start ? 'before' : 'after',
+      at: plannedStart,
       source: 'told',
     };
   }
@@ -271,7 +272,12 @@ function plannedWindow(svc, plannedStart) {
     label: `window ${windowHour(ws)}–${windowHour(ws + ARRIVAL_WINDOW_MIN)}`,
     range: windowSpanText(ws, ws + ARRIVAL_WINDOW_MIN),
     outside: false,
+    at: plannedStart,
     source: 'booked',
+    // Why no promise is held against: nothing on this feed (no `told`: the
+    // technician's feed, a day past the 14-day read, a gate off), none made,
+    // a promise whose time cannot be read, or one made for another date.
+    reason: !told ? 'not-shown' : told.level !== 'hour' ? 'none' : !recorded ? 'unreadable' : 'other-date',
   };
 }
 
@@ -286,7 +292,7 @@ function offGridPlannedStart(svc) {
 // Tooltip line for a block drawn at its booked spot with a planned time off the grid.
 function offGridTitleLine(at, promise) {
   if (promise?.outside) {
-    return `\nPlanned ${clockWithAp(at)}, ${promise.side} the ${promise.range} promise`;
+    return `\nPlanned ${clockWithAp(promise.at)}, ${promise.side} the ${promise.range} promise`;
   }
   return `\nPlanned ${clockWithAp(at)} (off the grid)`;
 }
@@ -499,9 +505,25 @@ function blockPromise(service, planned) {
   return { promise: plannedWindow(service, at), offGridAt };
 }
 
+// The window chip's tooltip: what the window is, and when it is not a promise, why.
+const BOOKED_WINDOW_WHY = {
+  'none': 'no promise on record',
+  'not-shown': 'promise not shown on this feed',
+  'unreadable': 'promise time not readable',
+  'other-date': 'promise was for another date',
+};
+function promiseChipTitle(promise) {
+  if (promise?.source === 'told') return 'Promised arrival window';
+  return `Booked arrival window (${BOOKED_WINDOW_WHY[promise?.reason] || BOOKED_WINDOW_WHY.none})`;
+}
+
 // Tooltip line for a planned block.
 function plannedTitleLine(planned, promise) {
-  const outside = promise?.outside ? ` — outside the ${promise.label}` : '';
+  // The alert is judged at the stop arrival: quote that time, not a later
+  // service's own start.
+  const outside = promise?.outside
+    ? ` — outside the ${promise.label} (stop reached ${plannedClock(promise.at)})`
+    : '';
   return `\nPlanned arrival ${plannedClock(planned.start)} · ${planned.minutes} min${outside}`;
 }
 
@@ -568,7 +590,7 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
   // later service starts after earlier ones, still inside the same promise).
   const { promise, offGridAt } = blockPromise(service, planned);
   const outsideWindow = promise?.outside === true;
-  const promiseTitle = promise?.source === 'told' ? 'Promised arrival window' : 'Booked arrival window (no promise on record)';
+  const promiseTitle = promiseChipTitle(promise);
   const oneLine = planned != null && compact;
   // A 15-minute stop is drawn at its real 16px: one text line, small buttons.
   const tiny = planned != null && effectiveHeight < SLOT_HEIGHT - 2;
@@ -608,9 +630,11 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
         const baseMin = Number.isFinite(durationMin) && durationMin > 0
           ? durationMin
           : (startHeight / SLOT_HEIGHT) * SLOT_MIN;
-        const nextMin = Math.max(SLOT_MIN, baseMin + slots * SLOT_MIN);
-        // Dragged up on a 30-minute booking the clamp lands back on the same
-        // length: nothing changed, so nothing is sent.
+        // The 30-minute floor must never lengthen a shorter booking: an
+        // up-drag only ever shortens, and where the floor would raise the
+        // length (a 15-minute or 30-minute booking) nothing is sent.
+        const floored = Math.max(SLOT_MIN, baseMin + slots * SLOT_MIN);
+        const nextMin = slots < 0 ? Math.min(baseMin, floored) : floored;
         if (nextMin !== baseMin) onResize(service, nextMin);
       }
     };
@@ -2003,3 +2027,11 @@ export default function TimeGridDay({
     </div>
   );
 }
+
+// Shared with the Route list (RouteListDay.jsx): one rule for a stop's window,
+// promise alert, status look and wording on both layouts.
+export {
+  blockPromise, plannedTitleLine, promiseChipTitle, plannedClock, clockWithAp,
+  OUTSIDE_WINDOW_EDGE, statusBlockClasses, statusBlockFill, serviceDisplayName,
+  parseHHMM, CloseoutOwedChip,
+};

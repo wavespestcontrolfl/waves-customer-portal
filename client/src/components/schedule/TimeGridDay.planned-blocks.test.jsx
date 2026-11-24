@@ -343,13 +343,30 @@ describe('TimeGridDay planned blocks', () => {
     expect(el.getAttribute('title')).toMatch(/Planned 8:15 PM, after the 5–7 PM promise/);
   });
 
-  it('labels the window chip by its source: promised, or booked with no promise on record', () => {
+  it('labels the window chip by its source, and says exactly why a booked window is not a promise', () => {
+    const base = { plannedMinutes: 35, scheduledDate: '2026-11-25' };
     renderDay([
-      visit('a', 'Told Tom', '10:00', { plannedArrivalMin: 10 * 60 + 30, plannedMinutes: 35, scheduledDate: '2026-11-25', told: toldAt('10:00 AM - 12:00 PM') }),
-      visit('b', 'Bare Bo', '14:00', { plannedArrivalMin: 14 * 60 + 30, plannedMinutes: 35 }),
+      visit('a', 'Told Tom', '10:00', { ...base, plannedArrivalMin: 10 * 60 + 30, told: toldAt('10:00 AM - 12:00 PM') }),
+      visit('b', 'None Nan', '12:00', { ...base, plannedArrivalMin: 12 * 60 + 30, told: { level: 'none', dayOnly: false, date: null, window: null } }),
+      visit('c', 'Bare Bo', '14:00', { ...base, plannedArrivalMin: 14 * 60 + 30 }),
+      visit('d', 'Blank Bea', '16:00', { ...base, plannedArrivalMin: 16 * 60 + 30, told: { level: 'hour', dayOnly: false, date: null, window: null } }),
+      visit('e', 'Other Ola', '08:00', { ...base, plannedArrivalMin: 8 * 60 + 30, told: { level: 'hour', dayOnly: false, date: '2026-11-20', window: '8:00 AM - 10:00 AM' } }),
     ]);
     expect(screen.getByText('window 10–12')).toHaveAttribute('title', 'Promised arrival window');
-    expect(screen.getByText('window 2–4')).toHaveAttribute('title', 'Booked arrival window (no promise on record)');
+    expect(screen.getByText('window 12–2')).toHaveAttribute('title', 'Booked arrival window (no promise on record)');
+    expect(screen.getByText('window 2–4')).toHaveAttribute('title', 'Booked arrival window (promise not shown on this feed)');
+    expect(screen.getByText('window 4–6')).toHaveAttribute('title', 'Booked arrival window (promise time not readable)');
+    expect(screen.getByText('window 8–10')).toHaveAttribute('title', 'Booked arrival window (promise was for another date)');
+  });
+
+  it('quotes the stop arrival, not the later service\'s own start, in a group\'s late alert', () => {
+    const told = { level: 'hour', dayOnly: false, date: '2026-11-25', window: '9:00 AM - 11:00 AM' };
+    renderDay([visit('g2', 'Second Si', '09:00', {
+      visitId: 'v1', told, scheduledDate: '2026-11-25', plannedArrivalMin: 12 * 60 + 5, plannedMinutes: 35, plannedStopArrivalMin: 11 * 60 + 30,
+    })]);
+    const title = block('Second Si').getAttribute('title');
+    expect(title).toMatch(/outside the window 9–11 \(stop reached 11:30\)/);
+    expect(title).not.toMatch(/stop reached 12:05/);
   });
 
   it('drops a 09:00-10:30 booking carrying the feed\'s 60-minute estimate at 13:00 as 13:00-14:30', () => {
@@ -381,6 +398,16 @@ describe('TimeGridDay planned blocks', () => {
     fireEvent(window, new MouseEvent('pointerup', { clientY: 232 }));
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     expect(JSON.parse(fetch.mock.calls[0][1].body).newWindow).toBe('09:00-11:00');
+  });
+
+  it('never lengthens a 15-minute booking dragged up (the 30-minute floor sends nothing)', async () => {
+    renderDay([visit('a', 'Quarter Quin', '10:00', { windowEnd: '10:15' })]);
+    const handle = screen.getByTitle('Drag to resize');
+    fireEvent.pointerDown(handle, { clientY: 200 });
+    fireEvent(window, new MouseEvent('pointermove', { clientY: 168 }));
+    fireEvent(window, new MouseEvent('pointerup', { clientY: 168 }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('sends nothing when an up-drag on a 30-minute booking clamps back to 30 minutes', async () => {
