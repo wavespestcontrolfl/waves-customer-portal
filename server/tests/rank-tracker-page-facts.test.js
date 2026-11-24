@@ -31,8 +31,8 @@ describe('pageFacts', () => {
   test('counts item types, organic results and repaired results, and keeps the first five domains', () => {
     const items = [
       { type: 'people_also_ask' },
-      { type: 'organic', domain: 'WWW.Example-One.com', rank_absolute: 2, checks: ['from_web'] },
-      { type: 'organic', domain: 'example-two.com', rank_absolute: 3 },
+      { type: 'organic', domain: 'WWW.Example-One.com', url: 'https://WWW.Example-One.com/pest', rank_absolute: 2, checks: ['from_web'] },
+      { type: 'organic', domain: 'google.com', url: 'https://www.google.com/url?q=https://example-two.com/a&sa=U', rank_absolute: 3 },
       { type: 'local_pack' },
       { type: 'local_pack' },
       { type: 'organic', domain: 'example-three.com', rank_absolute: 6, checks: { from_web: true } },
@@ -45,17 +45,30 @@ describe('pageFacts', () => {
       types: { people_also_ask: 1, organic: 6, local_pack: 2 },
       organic: 6,
       repaired: 2,
-      top_domains: ['www.example-one.com', 'example-two.com', 'example-three.com', 'example-four.com', 'example-five.com'],
+      top_domains: ['www.example-one.com', 'google.com', 'example-three.com', 'example-four.com', 'example-five.com'],
+      top_hosts: ['www.example-one.com', 'www.google.com>example-two.com', '', '', ''],
     });
+  });
+
+  test('the result host reads the URL, follows a Google redirect link to its target, and never throws', () => {
+    const { resultHost } = tracker._private;
+    expect(resultHost('https://Example-Rival.com/pests')).toBe('example-rival.com');
+    expect(resultHost('https://www.google.com/url?url=https://www.example-site.com/x')).toBe('www.google.com>www.example-site.com');
+    expect(resultHost('https://www.google.com/search?q=pest+control')).toBe('www.google.com');
+    expect(resultHost('https://www.google.com/search?q=https://example-site.com')).toBe('www.google.com');
+    expect(resultHost('https://google.example-site.com/url?q=https://other-site.com')).toBe('google.example-site.com');
+    expect(resultHost('https://www.google.co.uk/url?q=https://example-site.com')).toBe('www.google.co.uk>example-site.com');
+    expect(resultHost('not a url')).toBe('');
+    expect(resultHost(undefined)).toBe('');
   });
 
   test('a page with no organic result, a missing list and a broken item all give counts, never a throw', () => {
     expect(pageFacts([{ type: 'ai_overview' }, { type: 'people_also_ask' }])).toEqual({
-      items: 2, types: { ai_overview: 1, people_also_ask: 1 }, organic: 0, repaired: 0, top_domains: [],
+      items: 2, types: { ai_overview: 1, people_also_ask: 1 }, organic: 0, repaired: 0, top_domains: [], top_hosts: [],
     });
-    expect(pageFacts(undefined)).toEqual({ items: 0, types: {}, organic: 0, repaired: 0, top_domains: [] });
+    expect(pageFacts(undefined)).toEqual({ items: 0, types: {}, organic: 0, repaired: 0, top_domains: [], top_hosts: [] });
     expect(pageFacts([null, {}, { type: 'organic' }])).toEqual({
-      items: 2, types: { unknown: 1, organic: 1 }, organic: 1, repaired: 0, top_domains: [''],
+      items: 2, types: { unknown: 1, organic: 1 }, organic: 1, repaired: 0, top_domains: [''], top_hosts: [''],
     });
   });
 });
@@ -82,6 +95,7 @@ describe('checkKeyword', () => {
       organic: 2,
       repaired: 1,
       top_domains: ['www.orkin.com', 'www.wavespestcontrol.com'],
+      top_hosts: ['', ''],
     });
   });
 
@@ -96,7 +110,7 @@ describe('checkKeyword', () => {
     expect(mockInserted[0].organic_position).toBeNull();
     expect(JSON.parse(mockInserted[0].competitor_positions)).toEqual([]);
     expect(JSON.parse(mockInserted[0].serp_features).page).toEqual({
-      items: 2, types: { organic: 2 }, organic: 2, repaired: 0, top_domains: ['unrelated-example.net', 'another-example.org'],
+      items: 2, types: { organic: 2 }, organic: 2, repaired: 0, top_domains: ['unrelated-example.net', 'another-example.org'], top_hosts: ['', ''],
     });
   });
 

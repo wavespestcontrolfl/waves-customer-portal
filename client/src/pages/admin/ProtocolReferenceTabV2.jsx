@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Button, Badge, Card, Input, Select } from "../../components/ui";
+import { Button, Badge, Card, Input, ScanStrip, Select } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
 import ProtocolTankSheet from "./ProtocolTankSheet";
 import TreeShrubFieldGuide from "../../components/admin/TreeShrubFieldGuide";
@@ -29,6 +29,11 @@ const FALLBACK_SERVICE_PROGRAMS = [
   { key: "bed_bug", name: "Bed Bug Control Protocol", visits: 3 },
   { key: "termite", name: "Termite Control Protocol", visits: 6 },
 ];
+
+// The picker shows "Bed Bug", not "Bed Bug Control Protocol".
+function programDisplayName(name) {
+  return String(name).replace(/ (Control )?Protocol$/, "");
+}
 
 function adminFetch(path, options = {}) {
   const token = localStorage.getItem("waves_admin_token");
@@ -282,7 +287,7 @@ function CalendarLine({ line, muted }) {
   );
 }
 
-function CurrentVisitCardV2({ visit, trackName, isLawnTrack, pricingRestricted, descriptions }) {
+function CurrentVisitCardV2({ visit, isLawnTrack, pricingRestricted, descriptions }) {
   if (!visit) return null;
   const primaryProducts = parseProductLines(visit.primary, descriptions);
   const secondaryProducts = parseProductLines(visit.secondary, descriptions);
@@ -333,9 +338,6 @@ function CurrentVisitCardV2({ visit, trackName, isLawnTrack, pricingRestricted, 
           {" "}
           <div className="text-14 font-medium tracking-label uppercase text-ink-primary">
             VISIT {visit.visit} — {visit.month?.toUpperCase()}
-          </div>{" "}
-          <div className="text-11 text-ink-tertiary mt-1 u-label">
-            {trackName}
           </div>{" "}
         </div>{" "}
         <TierDotsV2
@@ -691,9 +693,6 @@ export function ProtocolMixCard({
             <div className="text-14 font-medium tracking-label uppercase text-ink-primary">
               VISIT {plan.visit?.visit} — {plan.month?.toUpperCase()}
             </div>{" "}
-            <div className="text-11 text-ink-tertiary mt-1 u-label">
-              {plan.track?.name}
-            </div>{" "}
           </div>{" "}
           <div className="flex gap-2 flex-wrap">
             {" "}
@@ -1011,6 +1010,9 @@ export default function ProtocolReferenceTabV2() {
   const [showFullCalendar, setShowFullCalendar] = useState(false);
   const [showDetailedMix, setShowDetailedMix] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(() => Number(new Intl.DateTimeFormat("en-US", { month: "numeric", timeZone: "America/New_York" }).format(new Date())));
+  // Service-program visit picked from the Treatment strip; null = the
+  // month-matched visit.
+  const [selectedVisitIdx, setSelectedVisitIdx] = useState(null);
   const [equipmentOptions, setEquipmentOptions] = useState([]);
   const [equipmentSystemId, setEquipmentSystemId] = useState("");
   const [lawnSqft, setLawnSqft] = useState(10000);
@@ -1048,11 +1050,12 @@ export default function ProtocolReferenceTabV2() {
       setTrackData(data);
       setTrackViewerRole(d.viewerRole || null);
       setSelectedConditionalIds([]);
+      // Reset the treatment pick only on a successful load, so a failed
+      // switch restores the visit the user was reading.
+      setSelectedVisitIdx(null);
     } catch (e) {
       if (!isCurrent()) return;
-      // Restore the previous selection so the controlled Select (phones)
-      // can re-emit a change for the failed key — re-picking the already
-      // selected option fires nothing — and offer a direct retry.
+      // Restore the previous selection and offer a direct retry.
       setSelectedTrack(lastLoadedRef.current.key);
       setTrackData(lastLoadedRef.current.data);
       setTrackError({ key, message: e?.message || "Request failed" });
@@ -1187,9 +1190,21 @@ export default function ProtocolReferenceTabV2() {
   }
 
   const currentMonthAbbr = MONTH_NAMES[selectedMonth - 1];
-  const currentVisit =
-    trackData?.visits?.find((v) => v.month === currentMonthAbbr) ||
-    (isServiceProgram ? trackData?.visits?.[0] : null);
+  const visits = trackData?.visits || [];
+  const matchedVisitIdx = Math.max(0, visits.findIndex((v) => v.month === currentMonthAbbr));
+  const treatmentIdx = selectedVisitIdx ?? matchedVisitIdx;
+  const currentVisit = selectedVisitIdx != null
+    ? visits[selectedVisitIdx]
+    : visits.find((v) => v.month === currentMonthAbbr) ||
+      (isServiceProgram ? visits[0] : null);
+  const programItems = [
+    ...lawnTracks.map((t) => ({ ...t, meta: `${t.visits} visits` })),
+    ...servicePrograms.map((p) => ({ ...p, meta: `${p.visits} templates` })),
+  ].map((t) => {
+    const value = programDisplayName(t.name || t.key);
+    return { key: t.key, label: t.meta, value, ariaLabel: `${value}, ${t.meta}` };
+  });
+  const monthItems = MONTH_NAMES.map((m, i) => ({ key: i + 1, value: m }));
   // A lawn track whose catalog payload carries its own safety_rules (the v13
   // program, GATE_LAWN_V13) shows those; every other lawn track keeps the
   // static list.
@@ -1198,66 +1213,20 @@ export default function ProtocolReferenceTabV2() {
     : trackData?.safety_rules || [];
 
   return (
-    <div className={cn("gap-4", trackData?.fieldGuideEnabled ? "grid md:grid-cols-[200px_minmax(0,1fr)] items-start" : "flex flex-col")}>
-      {/* Protocol picker. Phones: one Select (the wrapping tile row ran to
-          four ragged lines). md+: a uniform grid so every tile is the same
-          width — lawn tracks first, then the service programs. */}
+    <div className="flex flex-col gap-4">
+      {/* Program picker: one scan strip (lawn tracks, then the service
+          programs). It scrolls inside its own box at any width, so the
+          field-guide layout needs no side column for it. */}
       <div>
-        <label htmlFor="protocol-track-select" className="sr-only">
-          Protocol
-        </label>
-        <Select
-          id="protocol-track-select"
-          className="md:hidden"
-          value={selectedTrack || ""}
-          onChange={(e) => loadTrack(e.target.value)}
-        >
-          {!selectedTrack && <option value="">Choose a protocol…</option>}
-          {lawnTracks.map((t) => (
-            <option key={t.key} value={t.key}>
-              {t.name || t.key} — {t.visits} visits/year
-            </option>
-          ))}
-          {servicePrograms.map((program) => (
-            <option key={program.key} value={program.key}>
-              {program.name || program.key} — {program.visits} templates
-            </option>
-          ))}
-        </Select>
-        <div className={cn("hidden md:grid gap-2", !trackData?.fieldGuideEnabled && "md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4")}>
-          {[
-            ...lawnTracks.map((t) => ({ ...t, meta: `${t.visits} visits/year` })),
-            ...servicePrograms.map((p) => ({ ...p, meta: `${p.visits} templates` })),
-          ].map((t) => {
-            const active = selectedTrack === t.key;
-            return (
-              <button
-                key={t.key}
-                type="button"
-                onClick={() => loadTrack(t.key)}
-                aria-pressed={active}
-                className={cn(
-                  "min-w-0 px-4 py-2.5 rounded-md u-focus-ring text-left transition-colors border-hairline",
-                  active
-                    ? "bg-zinc-900 border-zinc-900 text-white"
-                    : "bg-white border-zinc-200 text-ink-primary hover:bg-zinc-50",
-                )}
-              >
-                <div className="text-13 font-medium leading-snug">
-                  {t.name || t.key}
-                </div>
-                <div
-                  className={cn(
-                    "text-11 mt-0.5 u-label",
-                    active ? "text-white/70" : "text-ink-tertiary",
-                  )}
-                >
-                  {t.meta}
-                </div>
-              </button>
-            );
-          })}
+        <div className="px-1 pb-1.5 text-14 uppercase tracking-label font-medium text-zinc-900">
+          Program
         </div>
+        <ScanStrip
+          items={programItems}
+          selectedKey={selectedTrack}
+          onSelect={(key) => key !== selectedTrack && loadTrack(key)}
+          ariaLabel="Program"
+        />
         {trackError && (
           <div
             role="alert"
@@ -1275,11 +1244,13 @@ export default function ProtocolReferenceTabV2() {
         )}
       </div>
       {trackData?.fieldGuideEnabled && <Card className="p-4 md:p-6">
-        <div className="flex flex-wrap gap-1 mb-5 border-b border-hairline border-zinc-200" role="group" aria-label="Treatment month">
-          {MONTH_NAMES.map((month, i) => <button key={month} type="button" aria-pressed={selectedMonth === i + 1}
-            onClick={() => setSelectedMonth(i + 1)}
-            className={cn('appearance-none bg-transparent min-h-11 px-3 text-14 border-0 border-b-2 border-solid u-focus-ring', selectedMonth === i + 1 ? 'border-zinc-900 text-ink-primary' : 'border-transparent text-ink-secondary')}>{month}</button>)}
-        </div>
+        <ScanStrip
+          className="mb-5"
+          items={monthItems}
+          selectedKey={selectedMonth}
+          onSelect={setSelectedMonth}
+          ariaLabel="Treatment month"
+        />
         {currentVisit?.fieldGuide && <TreeShrubFieldGuide key={currentVisit.month} guide={currentVisit.fieldGuide} safetyRules={safetyRules} />}
         {trackData.notes?.length > 0 && <details className="mt-4 text-14 text-ink-secondary">
           <summary className="min-h-11 flex items-center cursor-pointer text-ink-primary">Program notes</summary>
@@ -1293,24 +1264,18 @@ export default function ProtocolReferenceTabV2() {
           {isLawnTrack && (
           <Card className="overflow-hidden">
             <div className="px-4 py-3 flex flex-col gap-3">
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                  {" "}
-                  <div>
-                    {" "}
-                    <label className="u-label text-ink-tertiary block mb-1">
-                      Month
-                    </label>{" "}
-                    <Select
-                      value={selectedMonth}
-                      onChange={(e) => setSelectedMonth(Number(e.target.value))}
-                    >
-                      {MONTH_NAMES.map((m, i) => (
-                        <option key={m} value={i + 1}>
-                          {m}
-                        </option>
-                      ))}
-                    </Select>{" "}
-                  </div>{" "}
+                <div>
+                  <div className="px-1 pb-1.5 text-14 uppercase tracking-label font-medium text-zinc-900">
+                    Month
+                  </div>
+                  <ScanStrip
+                    items={monthItems}
+                    selectedKey={selectedMonth}
+                    onSelect={setSelectedMonth}
+                    ariaLabel="Month"
+                  />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div>
                     {" "}
                     <label className="u-label text-ink-tertiary block mb-1">
@@ -1391,10 +1356,27 @@ export default function ProtocolReferenceTabV2() {
                 />}
               </>
             ))}
+          {isServiceProgram && trackData.visits?.length > 1 && (
+            <div>
+              <div className="px-1 pb-1.5 text-14 uppercase tracking-label font-medium text-zinc-900">
+                Treatment
+              </div>
+              <ScanStrip
+                items={trackData.visits.map((v, i) => ({
+                  key: i,
+                  label: v.month || "Any",
+                  value: `V${v.visit ?? i + 1}`,
+                  ariaLabel: `Visit ${v.visit ?? i + 1}${v.month ? `, ${v.month}` : ""}`,
+                }))}
+                selectedKey={treatmentIdx}
+                onSelect={setSelectedVisitIdx}
+                ariaLabel="Treatment"
+              />
+            </div>
+          )}
           {isServiceProgram && currentVisit && (
             <CurrentVisitCardV2
               visit={currentVisit}
-              trackName={trackData.name}
               isLawnTrack={isLawnTrack}
               pricingRestricted={pricingRestricted}
               descriptions={productDescriptionsFor(trackData)}

@@ -38,7 +38,7 @@ function mockDb(table) {
 mockDb.raw = (sql) => ({ sql });
 jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: (key) => key === 'webhooks', gateEnvValue: () => false, smsCourtesyAfterTemplateLive: () => false,
+  isEnabled: (key) => key === 'webhooks', gateEnvValue: () => false,
 }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));

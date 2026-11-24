@@ -37,7 +37,8 @@ describeWithPostgres('pending estimates in the appointment picker (PostgreSQL)',
         service_interest text, estimate_data jsonb, estimate_slug text,
         monthly_total numeric, annual_total numeric, onetime_total numeric,
         waveguard_tier text, bill_by_invoice boolean, show_one_time_option boolean,
-        created_at timestamptz, accepted_at timestamptz, property_id uuid
+        created_at timestamptz, accepted_at timestamptz, property_id uuid,
+        sent_at timestamptz, source text, pricing_authority text, price_locked_at timestamptz, category text, address text
       );
       CREATE TEMP TABLE services (
         id uuid, service_key text, name text, short_name text, category text,

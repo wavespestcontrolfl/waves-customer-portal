@@ -1972,8 +1972,7 @@ router.get('/programs', async (req, res, next) => {
 
     if (program && PROGRAM_KEYS.includes(program) && protocols[program]) {
       const data = protocols[program];
-      const fieldGuideEnabled = program === 'tree_shrub' && gateEnvValue('GATE_TREE_SHRUB_FIELD_GUIDE');
-      return res.json(protocolCatalogForViewer(req, { program: fieldGuideEnabled ? {
+      return res.json(protocolCatalogForViewer(req, { program: program === 'tree_shrub' ? {
         ...data, fieldGuideEnabled: true,
         visits: data.visits.map(visit => ({ ...visit, fieldGuide: treeShrubFieldGuide(visit) })),
       } : data }));

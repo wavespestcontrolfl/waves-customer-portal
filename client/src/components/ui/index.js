@@ -17,3 +17,4 @@ export { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from './D
 export { Sheet, SheetHeader, SheetBody, SheetFooter } from './Sheet';
 export { Tabs, TabList, Tab, TabPanel } from './Tabs';
 export { cn } from './cn';
+export { ScanStrip } from './ScanStrip';

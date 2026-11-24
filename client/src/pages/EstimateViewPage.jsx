@@ -57,6 +57,7 @@ import SlotPicker from '../components/estimate/SlotPicker';
 import FirstVisitRequest from '../components/estimate/FirstVisitRequest';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
+import WhatYouPayBox, { whatYouPayForSelection } from '../components/estimate/WhatYouPayBox';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, firstVisitTotalPreview, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
@@ -9865,6 +9866,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       ? averageModel.services[0].perApplication
       : null,
   });
+  // "What you pay" under the price (owner 2026-11-23): the server's own figures (/data whatYouPay), printed as
+  // given while the customer is on the selection the server priced. Hidden for the same reasons the first-visit
+  // line hides: a one-time pick, the annual prepay choice (the Reserve your spot box owns it), and a credit, code
+  // or deposit the server cannot see per selection.
+  const whatYouPay = invoiceOnlyAccept || serviceMode !== 'recurring' || paymentPreference === 'prepay_annual' || firstBillCreditApplies
+    ? null
+    : whatYouPayForSelection(data?.whatYouPay, { frequency: selectedFrequency, serviceCadences });
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link
@@ -11218,6 +11226,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
           <div id={PRICE_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {renderQuoteDetailCards()}
+            <WhatYouPayBox box={whatYouPay} />
             <PriceFollowUps
               firstVisit={firstVisitLine}
               // The link exists only where this layout renders the Ask bar at its end.

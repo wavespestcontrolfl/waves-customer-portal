@@ -4,21 +4,10 @@ const logger = require('./logger');
 const apns = require('./apns');
 const fcm = require('./fcm');
 const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled } = require('./account-properties');
-const { gateEnvValue, appFirstStaleTextLive } = require('../config/feature-gates');
+const { gateEnvValue } = require('../config/feature-gates');
 const { qualifyNotificationLink } = require('./notification-links');
 
 const PUSH_HEARTBEAT_HOURS = 72;
-
-// GATE_APP_FIRST_STALE_TEXT (owner 2026-11-18): with it on, a phone app counts as
-// reachable (customerStatus withReachable) only if it checked in within this many
-// days (push_subscriptions.updated_at, bumped on every app launch). Fixed, not the
-// refresh-token life. One floor for every reader: routing, the settings page and
-// make-room. Null while the gate is off (or a suite mocks feature-gates without it).
-const APP_FIRST_STALE_DAYS = 30;
-function appFirstStaleFloor() {
-  if (typeof appFirstStaleTextLive !== 'function' || !appFirstStaleTextLive()) return null;
-  return new Date(Date.now() - APP_FIRST_STALE_DAYS * 24 * 3600 * 1000);
-}
 
 async function customerPushContext(customerId, database = db) {
   const customer = await database('customers').where({ id: customerId }).first('id', 'account_id', 'active', 'deleted_at');
@@ -225,31 +214,19 @@ async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
 class PushNotificationService {
   // opts.contactKey: a contact session's own status — only that contact's
   // devices count; a holder's status never counts a contact device.
-  // opts.withReachable: routing only also reads
-  // `reachable`; the customer-facing status routes keep their exact shape.
-  // `reachable` also needs a check-in within APP_FIRST_STALE_DAYS while
-  // GATE_APP_FIRST_STALE_TEXT is on (appFirstStaleFloor), so every reader follows it.
-  async customerStatus(customerId, database = db, { contactKey = null, withReachable = false } = {}) {
+  async customerStatus(customerId, database = db, { contactKey = null } = {}) {
     const context = await customerPushContext(customerId, database);
-    if (!context) return { enabled: false, registered: false, fresh: false, ...(withReachable ? { reachable: false, appStale: false } : {}) };
+    if (!context) return { enabled: false, registered: false, fresh: false };
     const rows = (await database('push_subscriptions')
       .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
       .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at', 'contact_phone_key'))
       .filter((row) => (contactKey ? String(row.contact_phone_key || '') === String(contactKey) : !row.contact_phone_key));
     const cutoff = Date.now() - PUSH_HEARTBEAT_HOURS * 3600000;
     const providers = { ios: apns.status().configured, android: fcm.status().configured };
-    const reachableSince = withReachable ? appFirstStaleFloor() : null;
-    const deliverable = rows.filter((row) => providers[row.platform]);
-    const reachable = deliverable.some((row) => !reachableSince || new Date(row.updated_at).getTime() >= reachableSince.getTime());
     return {
       enabled: context.enabled,
       registered: rows.length > 0,
       fresh: rows.some((row) => providers[row.platform] && new Date(row.updated_at).getTime() >= cutoff),
-      // Any active holder device whose provider is configured, however long
-      // ago the app last checked in.
-      // appStale: the 30-day floor alone kept a holder phone app from counting (routing then
-      // sends the text AND the app alert, GATE_APP_FIRST_STALE_TEXT).
-      ...(withReachable ? { reachable, appStale: Boolean(reachableSince) && !reachable && deliverable.length > 0 } : {}),
     };
   }
 
@@ -391,7 +368,7 @@ class PushNotificationService {
       }
       const result = await sendSubscription(sub, notification, { shouldContinue: compositeShouldContinue })
         .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
-      results.push({ ...result, ...legMeta(sub, opts) });
+      results.push({ ...result, ...legMeta(sub) });
       if (claimLost) break;
       if (acceptedHolderLeg(sub, result) && opts.notificationId) {
         // Persist the first acceptance before walking another device, so a
@@ -535,31 +512,17 @@ function acceptedHolderLeg(sub, result) {
 // a contact device's accepted push never stands in for a holder whose own
 // device failed. Contact legs are accounted apart, under `contactDevices`,
 // present only when a contact device was in the fan-out.
-// What each fan-out leg carries for summarizeFanOut. opts.holderMinUpdatedAt (GATE_APP_FIRST_STALE_TEXT,
-// push-channel-routing fanOutReach): every holder phone still gets the push, but a holder leg last
-// checked in below this floor is marked belowHolderFloor, so its acceptance never counts as the
-// holder's delivery (and never suppresses the text). Unset = NaN = no floor.
-function legMeta(sub, opts) {
-  const contactDevice = Boolean(sub.contact_phone_key);
-  const belowHolderFloor = !contactDevice && new Date(sub.updated_at).getTime() < new Date(opts.holderMinUpdatedAt).getTime();
-  return { contactDevice, checkedInAt: sub.updated_at, belowHolderFloor };
+// What each fan-out leg carries for summarizeFanOut.
+function legMeta(sub) {
+  return { contactDevice: Boolean(sub.contact_phone_key) };
 }
 
 function summarizeFanOut(results) {
-  const stale = results.filter((r) => r.belowHolderFloor);
-  const holder = results.filter((r) => !r.contactDevice && !r.belowHolderFloor);
+  const holder = results.filter((r) => !r.contactDevice);
   const contact = results.filter((r) => r.contactDevice);
   const stats = summarize(holder, holder.length);
-  if (stale.length) stats.staleHolderDevices = summarize(stale, stale.length);
-  // The newest check-in among the ACCEPTED holder legs (null when none): the phone that took the push.
-  stats.acceptedCheckedInAt = newestCheckIn(holder.filter((r) => r.sent));
   if (contact.length) stats.contactDevices = summarize(contact, contact.length);
   return stats;
-}
-
-function newestCheckIn(legs) {
-  const times = legs.filter((r) => r.checkedInAt).map((r) => new Date(r.checkedInAt).getTime()).filter(Number.isFinite);
-  return times.length ? new Date(Math.max(...times)) : null;
 }
 
 function summarize(results, subscriptions) {
@@ -578,8 +541,6 @@ function summarize(results, subscriptions) {
 
 const service = new PushNotificationService();
 service.PUSH_HEARTBEAT_HOURS = PUSH_HEARTBEAT_HOURS;
-service.APP_FIRST_STALE_DAYS = APP_FIRST_STALE_DAYS;
-service.appFirstStaleFloor = appFirstStaleFloor;
 // Whose devices a customer's pushes may reach, and whether the customer has app pushes on: the one answer
 // the Lock Screen card's registration route (routes/push.js) shares with the fan-out above.
 service.customerPushContext = customerPushContext;

@@ -245,7 +245,8 @@ test('programs?program=: the same projection covers a service program (costing_a
   for (const text of strings) expect(text).not.toMatch(dollarDigit);
   expect(tech.program.visits[0].primary).toBe('Arbor-Jet');
   const admin = await callAsTechnician('/programs', { program: 'tree_shrub' }, { techRole: 'admin', technicianId: 'admin-1' });
-  expect(admin.program).toEqual(PRICED_PROGRAM);
+  // The Tree & Shrub program always carries the field-guide projection (null for a fixture visit with no guide).
+  expect(admin.program).toEqual({ ...PRICED_PROGRAM, fieldGuideEnabled: true, visits: PRICED_PROGRAM.visits.map((visit) => ({ ...visit, fieldGuide: null })) });
 });
 
 test('programs/:track/visit/:num: the per-visit route is projected the same way', async () => {

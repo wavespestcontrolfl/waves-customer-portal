@@ -4,10 +4,11 @@
  * Per v3.1 plan: this module ONLY reads. It does not submit URLs to
  * Google. (URL Inspection's `urlInspection.index.inspect` endpoint
  * returns the indexed/indexable status of an already-known URL —
- * it's not a submission endpoint. The actual Indexing API
+ * it's not a submission endpoint. The Indexing API
  * `urlNotifications.publish` is policy-restricted to JobPosting /
- * BroadcastEvent and explicitly out of scope; submission is handled
- * by indexnow-submit.js instead.)
+ * BroadcastEvent, so it is used ONLY for the hub's /careers/ job pages,
+ * by google-index-ping.js; every other URL goes through
+ * indexnow-submit.js.)
  *
  * Use cases:
  *   - 24h post-publish: did Google index the new URL?
