@@ -2996,6 +2996,17 @@ router.get('/stats', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /reorder-suggestions — suggested low-stock threshold + reorder amount
+// for every active product (procurement/reorder-limit-suggestions.js). Read
+// only; the Limits tab saves an accepted pair through PUT /:id like any
+// hand edit. Owner-only (not in STAFF_INVENTORY_REQUEST).
+router.get('/reorder-suggestions', async (req, res, next) => {
+  try {
+    const { buildReorderLimitSuggestions } = require('../services/procurement/reorder-limit-suggestions');
+    res.json(await buildReorderLimitSuggestions());
+  } catch (err) { next(err); }
+});
+
 // GET /waveguard-forecast — projected WaveGuard product demand from upcoming lawn appointments.
 router.get('/waveguard-forecast', async (req, res, next) => {
   try {
