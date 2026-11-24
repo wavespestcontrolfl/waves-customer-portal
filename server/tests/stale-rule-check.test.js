@@ -78,12 +78,20 @@ describe('flagGroups', () => {
 
   test('generic fall-off closers, open rows and a NULL closer are not handled', () => {
     const fallOff = check.NON_RESOLUTION_CLOSERS.map((done_by) => bell({ done_by }));
-    expect(fallOff).toHaveLength(6);
+    expect(fallOff).toHaveLength(5);
     expect(flagGroups(fallOff)).toEqual([]);
     expect(flagGroups(many(4, { done_by: 'quiet-72h' }))).toEqual([]);
     expect(flagGroups(many(4, { done_by: null }))).toEqual([]);
     expect(flagGroups(many(4, { done_at: null, done_by: null }))).toEqual([]);
     expect(flagGroups(many(3, { done_at: null, done_by: PERSON }))).toEqual([]);
+  });
+
+  test('a relevance close (subject moved on) counts as handled', () => {
+    expect(flagGroups(many(3, { done_by: 'relevance' }))).toHaveLength(1);
+  });
+
+  test('hold words only in the full detail (brevity guard moved them) still match', () => {
+    expect(isHoldBell({ category: 'billing', title: 'Billing — termite renewal', body: 'The renewal was paid after the parent plan ended.', detail: 'The renewal was paid after the parent plan ended. Refund or re-bill it by hand.' })).toBe(true);
   });
 
   test('a subject closer such as setup-fee-alert counts as handled (the first-visit billing bell)', () => {

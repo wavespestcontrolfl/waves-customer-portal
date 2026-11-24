@@ -15,7 +15,9 @@
 //      so "Completed first visit needs manual billing" for two customers is one group.
 //   4. A group is flagged at 3 or more bells in the window with at least half HANDLED. A bell is handled when done_at is
 //      set and `done_by` is not one of NON_RESOLUTION_CLOSERS, the generic fall-off closers that clear a bell without
-//      anyone doing the work (quiet-72h, relevance, retention, episodes, supersede, promise-age-out). So a person, 'claude'
+//      anyone doing the work (quiet-72h, retention, episodes, supersede, promise-age-out). 'relevance' counts as handled: it
+//      closes a bell once its subject moved on (an estimate reached the caller, an invoice now exists) and takes over a
+//      person's close, so it is evidence the held work was done, not a fall-off. So a person, 'claude'
 //      acting for one, or a subject closer (for example 'setup-fee-alert', which clears the first-visit billing bell once
 //      staff bill by hand) counts: on a hold bell the system itself held the work, so a close that is not a fall-off means
 //      a person did it. An open row and a row with done_by NULL do not count; a bare read_at cannot name who read it.
@@ -64,7 +66,8 @@ const EXCLUDED_CATEGORIES = Object.freeze(['ops_digest', 'system']);
 
 // The generic closers that clear a bell with nobody doing the work. Any other done_by (a person id, 'claude', or a
 // subject closer such as 'setup-fee-alert') means the held work was done.
-const NON_RESOLUTION_CLOSERS = Object.freeze(['quiet-72h', 'relevance', 'retention', 'episodes', 'supersede', 'promise-age-out']);
+// 'relevance' is not here: it closes a bell when its subject moved on and takes over a person's close.
+const NON_RESOLUTION_CLOSERS = Object.freeze(['quiet-72h', 'retention', 'episodes', 'supersede', 'promise-age-out']);
 
 const plural = (n, one, many) => (n === 1 ? one : many);
 
@@ -91,7 +94,8 @@ function isHoldBell(row) {
   if (String(row.dedupe_key || '').startsWith(KEY_PREFIX)) return false;
   const title = String(row.title || '');
   if (EXCLUDED_TITLES.some((re) => re.test(title))) return false;
-  const text = `${title} ${row.body || ''}`;
+  // The brevity guard moves a long body's full text into `detail`; match it too.
+  const text = `${title} ${row.body || ''} ${row.detail || ''}`;
   return HOLD_MATCHERS.some((re) => re.test(text));
 }
 
@@ -128,7 +132,7 @@ async function loadBells({ now = new Date(), database = db, limit = ROW_LIMIT } 
     .whereNotIn('category', EXCLUDED_CATEGORIES)
     .whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'")
     .orderBy('created_at', 'desc').limit(limit)
-    .select('id', 'category', 'title', 'body', 'created_at', 'done_at', 'done_by', database.raw("metadata->>'dedupeKey' AS dedupe_key"));
+    .select('id', 'category', 'title', 'body', 'detail', 'created_at', 'done_at', 'done_by', database.raw("metadata->>'dedupeKey' AS dedupe_key"));
   if (rows.length >= limit) logger.warn(`[stale-rule-check] scan stopped at ${limit} rows; older bells in the window were not read`);
   return rows;
 }
