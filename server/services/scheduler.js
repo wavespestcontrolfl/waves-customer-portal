@@ -6060,6 +6060,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // TUESDAYS 9:40AM — Stale-rule check (owner request 2026-11-24). Reads the last 30 days of admin
+  // bells that say the system held an action for a person, and rings ONE bell a week (key = ISO week)
+  // when a held action was closed by hand 3+ times: the rule behind it may be out of date. No bell
+  // when nothing is flagged. Read-only: sends nothing to a customer, writes one admin notification
+  // row. No GATE_* (owner rule 2026-11-05).
+  // =========================================================================
+  cron.schedule('40 9 * * 2', async () => {
+    try {
+      await runExclusive('stale-rule-check', async () => {
+        const result = await require('./stale-rule-check').runStaleRuleCheck();
+        logger.info(`Stale-rule check: ${result.flagged} group(s) flagged (${result.outcome})`);
+      });
+    } catch (err) {
+      logger.error(`Stale-rule check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEDNESDAYS 7:00AM + 1:00PM — Waves Pest Insider planner. Issues go out on the 1st and 3rd
   // Thursday of the month; the day before, this plans and builds the issue with the real builder
   // and records it in pest_insider_issues. Any other Wednesday it does nothing.
