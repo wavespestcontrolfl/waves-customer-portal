@@ -255,7 +255,9 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     // Sent 35 days ago, expired at day 6; paid at day 10; reclaimed today (day 35).
     const sent = daysAgo(35);
     const id = await expiredEstimate(mockTransaction, cust, {
+      // Recent row: delivery is the stamp (sent_at alone is not delivery after #3391).
       sent_at: sent, created_at: daysAgo(36), expires_at: daysAgo(29), disposition_at: daysAgo(29),
+      estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: sent.toISOString() } }),
     });
     await paidInvoice(mockTransaction, cust, { paidAt: daysAgo(25) });
     // A later payment must not move the date.
@@ -458,6 +460,64 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
 
     expect((await row(blockedId)).disposition).toBe('expired_viewed');
     expect((await row(mintOk)).disposition).toBe('converted_other_path');
+  });
+
+  test('(t) sent_at alone is not delivery: a quote created after the stamp existed with only suppressed sends (no firstDeliveredAt, no view) is not reclaimed; a sibling like that does not block', async () => {
+    const created = new Date('2026-10-01T12:00:00Z');
+    const base = { created_at: created, sent_at: created, expires_at: new Date('2026-10-08T12:00:00Z') };
+    const pay = new Date('2026-10-31T12:00:00Z');
+    const stamp = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString() } });
+    const mk = async (extra = {}, payAt = pay) => {
+      const cust = await customer(mockTransaction);
+      const id = await expiredEstimate(mockTransaction, cust, { ...base, ...extra });
+      await paidInvoice(mockTransaction, cust, { paidAt: payAt });
+      return { cust, id };
+    };
+    const suppressed = await mk();
+    const stamped = await mk({ estimate_data: stamp(created) });
+    const viewed = await mk({ viewed_at: new Date('2026-10-03T12:00:00Z') });
+    // A sibling whose sends were all suppressed never reached the customer: it is no competitor.
+    const withSibling = await mk({ estimate_data: stamp(created) });
+    const siblingAt = new Date('2026-10-10T12:00:00Z');
+    await expiredEstimate(mockTransaction, withSibling.cust, { created_at: siblingAt, sent_at: siblingAt });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(suppressed.id)).disposition).toBe('expired_viewed');
+    expect((await row(stamped.id)).disposition).toBe('converted_other_path');
+    expect((await row(viewed.id)).disposition).toBe('converted_other_path');
+    expect((await row(withSibling.id)).disposition).toBe('converted_other_path');
+  });
+
+  test('(u) a self-serve quote whose firstDeliveredAt is present but unreadable has no anchor (no sent_at fallback): not reclaimed', async () => {
+    const cust = await customer(mockTransaction);
+    const id = await expiredEstimate(mockTransaction, cust, {
+      source: 'plan_start', sent_at: sentPlus(0), estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: 'not a date' } }),
+    });
+    await paidInvoice(mockTransaction, cust, { paidAt: sentPlus(30) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(id)).disposition).toBe('expired_viewed');
+  });
+
+  test('(v) an unanchored sibling (unreadable stamp) blocks only if created at or before the first signal', async () => {
+    const unzoned = (n) => sentPlus(n).toISOString().replace('T', ' ').replace('Z', '');
+    const stamp = (n) => JSON.stringify({ deliveryState: { firstDeliveredAt: unzoned(n) } });
+    const earlyCust = await customer(mockTransaction);
+    const earlyId = await expiredEstimate(mockTransaction, earlyCust);
+    await expiredEstimate(mockTransaction, earlyCust, { created_at: sentPlus(40), sent_at: sentPlus(40), estimate_data: stamp(40) });
+    await paidInvoice(mockTransaction, earlyCust, { paidAt: sentPlus(50) });
+
+    const lateCust = await customer(mockTransaction);
+    const lateId = await expiredEstimate(mockTransaction, lateCust);
+    await expiredEstimate(mockTransaction, lateCust, { created_at: sentPlus(60), sent_at: sentPlus(60), estimate_data: stamp(60) });
+    await paidInvoice(mockTransaction, lateCust, { paidAt: sentPlus(50) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(earlyId)).disposition).toBe('expired_viewed');
+    expect((await row(lateId)).disposition).toBe('converted_other_path');
   });
 
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {

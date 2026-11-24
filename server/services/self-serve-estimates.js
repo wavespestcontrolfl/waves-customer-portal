@@ -138,22 +138,31 @@ function sentAtSql(alias) {
 }
 
 // The earliest durable delivery evidence of a row, in SQL: the twin of
-// estimate-winloss.js sentAnchorMs. A self-serve row reads its delivery
-// instant (deliveredAtSql); any other row takes the earliest of its
-// firstDeliveredAt (the first real handoff, which a resend never moves), its
-// sent_at (every resend rewrites it), its first view and its acceptance.
-// The firstDeliveredAt read is the lenient one (deliveryInstantSql: any
-// zoned stamp, e.g. '2026-10-01 12:00:00+00' with a space and a short offset),
-// as sentAnchorMs reads a staff row's stamp; an unzoned stamp reads NULL in
-// SQL so the answer never depends on the session zone.
+// estimate-winloss.js sentAnchorMs, stricter where "delivered" is at stake.
+// firstDeliveredAt is the only marker that a send really reached the customer:
+// sendEstimateNow stamps it only when a channel really delivered, while a
+// suppressed send still rewrites sent_at. So:
+//  - a self-serve row reads firstDeliveredAt alone (strict ISO); present but
+//    unreadable, or absent, is NULL (its sent_at is only the mint stamp);
+//  - any other row takes the earliest of its firstDeliveredAt (lenient:
+//    deliveryInstantSql, any zoned stamp such as '2026-10-01 12:00:00.000+00'),
+//    its first view and its acceptance. sent_at counts only on a row created
+//    before #3391 began stamping firstDeliveredAt (2026-08-13; the same cutoff
+//    lead-reach-stats uses), where it is the only witness there is;
+//  - a staff row whose stamp is PRESENT but unreadable in SQL (unzoned) is NULL,
+//    never a fallback, so the reclaim fails closed on it.
+const FIRST_DELIVERY_STAMP_SINCE = '2026-08-15T00:00:00-04:00';
 function firstDeliveryEvidenceSql(alias) {
-  // A staff quote whose firstDeliveredAt is PRESENT but unreadable in SQL (an unzoned stamp)
-  // has no usable anchor: NULL, never a fallback to sent_at (a resend rewrites it), so the
-  // reclaim fails closed on it.
-  const unreadableStaffStamp = `(${presentStampSql(alias)} IS NOT NULL AND ${deliveryInstantSql(alias, 'firstDeliveredAt')} IS NULL)`;
-  return selfServeOr(alias, deliveredAtSql(alias),
-    `CASE WHEN ${unreadableStaffStamp} THEN NULL ELSE LEAST(${deliveryInstantSql(alias, 'firstDeliveredAt')}, ${alias}.sent_at, ${alias}.viewed_at, ${alias}.accepted_at) END`);
+  const staffStamp = deliveryInstantSql(alias, 'firstDeliveredAt');
+  const unreadableStaffStamp = `(${presentStampSql(alias)} IS NOT NULL AND ${staffStamp} IS NULL)`;
+  const legacySentAt = `CASE WHEN ${alias}.created_at < '${FIRST_DELIVERY_STAMP_SINCE}'::timestamptz THEN ${alias}.sent_at END`;
+  return selfServeOr(alias, firstDeliveredAtSql(alias),
+    `CASE WHEN ${unreadableStaffStamp} THEN NULL ELSE LEAST(${staffStamp}, ${legacySentAt}, ${alias}.viewed_at, ${alias}.accepted_at) END`);
 }
+
+// A delivery stamp is present (firstDeliveredAt, not empty or JSON null): the
+// row WAS delivered even when the stamp is unreadable in SQL.
+const deliveryStampPresentSql = (alias) => `(${presentStampSql(alias)} IS NOT NULL)`;
 
 // The instant a row counts as viewed. A self-serve quote is opened in the
 // portal before any send, so a later staff send must not turn that look into
@@ -175,6 +184,6 @@ function countableViewAtSql(alias) {
 
 
 module.exports = {
-  SELF_SERVE_ESTIMATE_SOURCES, firstDeliveryEvidenceSql, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, undeliveredSelfServeSql,
+  SELF_SERVE_ESTIMATE_SOURCES, firstDeliveryEvidenceSql, deliveryStampPresentSql, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, undeliveredSelfServeSql,
   sentAtSql, countableViewAtSql, isoInstantSql, deliveryInstantSql, firstDeliveredAtMs,
 };

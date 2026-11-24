@@ -41,7 +41,7 @@ const db = require("../models/db");
 const logger = require("./logger");
 const { CUSTOMER_STAGES } = require("./customer-stages");
 const { excludeAssessmentBookings } = require("./assessment-booking");
-const { firstDeliveryEvidenceSql, whereNotUndeliveredSelfServe } = require("./self-serve-estimates");
+const { firstDeliveryEvidenceSql, deliveryStampPresentSql, whereNotUndeliveredSelfServe } = require("./self-serve-estimates");
 
 // Appointment rows that leave NO live booking behind — the repo's terminal
 // convention (waveguard-existing-services TERMINAL_STATUSES) minus
@@ -429,13 +429,14 @@ function whereNoCompetingEstimate(query) {
           .where((known) => known
             .whereRaw(`${other} >= ${mine}`)
             .whereRaw(`${other} <= (?)`, [earliestConversionSignal()]))
-          // No readable anchor but real send evidence: when it went out is unknown, so it may be
-          // the offer the customer converted on. Ambiguous stays lost. (An undelivered self-serve
-          // mint is not a send.)
+          // A delivery stamp is PRESENT but unreadable: it was delivered, when is unknown, so it may be
+          // the offer the customer converted on. Ambiguous stays lost, but only for a sibling created
+          // at or before the first signal. (A send with no stamp and no view, e.g. every send
+          // suppressed, was never delivered; an undelivered self-serve mint has no stamp.)
           .orWhere((unknown) => unknown
             .whereRaw(`${other} IS NULL`)
-            .where((evidence) => evidence.whereNotNull('other.sent_at').orWhereNotNull('other.viewed_at'))
-            .where(whereNotUndeliveredSelfServe('other'))));
+            .whereRaw(deliveryStampPresentSql('other'))
+            .whereRaw('other.created_at <= (?)', [earliestConversionSignal()])));
     });
 }
 
