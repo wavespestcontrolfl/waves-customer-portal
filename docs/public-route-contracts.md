@@ -850,7 +850,8 @@ key is ABSENT; status, headers and every other payload field are unchanged
 Exhaustively, every condition it applies: the invoice is not payer-owned (the ownership step above), is collectible, not
 withdrawn from the customer (a Bill-To move to a payer after the homeowner
 already held this link, see THIRD-PARTY BILL-TO WITHDRAWAL below), not
-saved-method-required, not fully covered by account credit, not riding a
+fully covered by account credit (a saved-method-required invoice is NOT
+withheld: owner ruling 2026-11-24, recurring customers see Zelle too), not riding a
 combined-balance session — this arm ALSO denies Zelle the instant a live
 payer resolves while probing for a sibling balance, even when that probe
 finds no sibling itself (`payerOwnedLive`: a payer discovered live during
@@ -874,7 +875,7 @@ keeps every control disabled until a fresh read succeeds; no pre-filled
 transfer link exists for Zelle, so nothing on the page constructs a
 payment URL from the payload. FAQ flag (2026-09-03): with
 GATE_PAY_PAGE_FAQ=true the GET payload carries `payFaq: true` — a display
-flag for the copy-only "Common questions" accordion under the Pay button;
+flag for the copy-only "Payment questions" accordion under the Pay button;
 no other field changes, no customer or invoice data rides it, and gate off
 ⇒ key absent, payload byte-identical — unset the gate to kill it. THIRD-PARTY
 BILL-TO WITHDRAWAL (2026-09-12): a combined-visit invoice whose Bill-To moved
