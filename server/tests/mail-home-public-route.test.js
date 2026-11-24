@@ -23,6 +23,7 @@ const PAGE = {
   address: { line1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212' },
   price: { monthly: 52.25, annual: 627, setupFee: 0, pricedAt: '2026-11-22T22:00:00.000Z' },
   plan: 'pest_quarterly',
+  heldUntil: null, // no hold date until booking honors the printed price
 };
 
 let server;
@@ -260,12 +261,12 @@ describe('GET /api/public/home/:token', () => {
     expectPrivate(res);
   });
 
-  test('a found home answers with exactly address, price and plan, and private headers', async () => {
+  test('a found home answers with exactly address, price, plan and heldUntil, and private headers', async () => {
     const res = await get(`/api/public/home/${TOKEN}`, { 'user-agent': 'Mozilla/5.0 (iPhone) Safari' });
     expect(res.status).toBe(200);
     expectPrivate(res);
     const body = await res.json();
-    expect(Object.keys(body).sort()).toEqual(['address', 'plan', 'price']);
+    expect(Object.keys(body).sort()).toEqual(['address', 'heldUntil', 'plan', 'price']);
     expect(Object.keys(body.address).sort()).toEqual(['city', 'line1', 'zip']);
     expect(Object.keys(body.price).sort()).toEqual(['annual', 'monthly', 'pricedAt', 'setupFee']);
     expect(body).toEqual(PAGE);

@@ -63,6 +63,9 @@ function toRow(row) {
     city: row.city || null,
     zip: row.zip || null,
     pageSlug: row.page_slug || null,
+    mailedAt: iso(row.mailed_at),
+    mailBatch: row.mail_batch || null,
+    typedViews: Number(row.page_typed_views) || 0,
     subdivision: row.subdivision || null,
     matchBasis: row.match_basis || null,
     coDate: row.co_day || null,
@@ -100,7 +103,7 @@ async function listMailProspects({ view = VIEWS[0] } = {}) {
       .whereIn('status', VIEW_STATUSES[view])
       .orderBy([{ column: 'recorded_date', order: 'desc' }, { column: 'address_line1', order: 'asc' }, { column: 'id', order: 'asc' }])
       .limit(ROW_LIMIT + 1)
-      .select('id', 'status', 'reason', 'recipient_names', 'address_line1', 'city', 'zip', 'page_slug', 'subdivision', 'match_basis',
+      .select('id', 'status', 'reason', 'recipient_names', 'address_line1', 'city', 'zip', 'page_slug', 'mailed_at', 'mail_batch', 'page_typed_views', 'subdivision', 'match_basis',
         'living_sqft', 'legal_description', 'price_status', 'price_reason', 'price_annual', 'price_setup_fee', 'home_sqft',
         'home_sqft_source', 'home_stories', 'lot_sqft', 'priced_at', 'price_checked_at',
         trx.raw(`${DAY('recorded_date')} AS recorded_day`), trx.raw(`${DAY('co_date')} AS co_day`)),

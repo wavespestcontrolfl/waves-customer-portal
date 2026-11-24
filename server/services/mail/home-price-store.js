@@ -154,6 +154,7 @@ async function savePriceResult(row, result, conn = db) {
   };
   const updated = await conn('mail_prospects')
     .where({ id, list_key: LIST_KEY, status: 'eligible' })
+    .whereNull('mailed_at') // a mailed home's price is on a card in a mailbox: never written again (the table refuses it too)
     .where((b) => b.whereNull('price_status').orWhereIn('price_status', RETRY_STATUSES))
     .where({ price_attempts: row.price_version })
     .update(changes)

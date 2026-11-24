@@ -127,6 +127,7 @@ describeDb('New-home page (PostgreSQL)', () => {
       address: { line1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212' },
       price: { monthly: 52.25, annual: 627.01, setupFee: 0, pricedAt: '2026-11-22T22:00:00.000Z' },
       plan: 'pest_quarterly',
+      heldUntil: null,
     });
   });
 
@@ -198,7 +199,7 @@ describeDb('New-home page (PostgreSQL)', () => {
       'SAMPLE BUILDER', '412345', 'LOT 12', 'REF-', 'new_home', 'manatee_clerk_deeds', row.id, row.page_token]) {
       expect(json).not.toContain(secret);
     }
-    expect(Object.keys(page).sort()).toEqual(['address', 'plan', 'price']);
+    expect(Object.keys(page).sort()).toEqual(['address', 'heldUntil', 'plan', 'price']);
     expect(Object.keys(page.price).sort()).toEqual(['annual', 'monthly', 'pricedAt', 'setupFee']);
   });
 });
