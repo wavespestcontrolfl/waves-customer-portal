@@ -182,6 +182,7 @@ actual auth, signature verification, settlement and database code execute.
 Provider credentials are excluded and unexpected HTTP/fetch calls are blocked.
 This does not verify real provider delivery, checkout or device hardware.
 
+Each journey is one file in `scripts/qa/journeys/`; `scripts/qa/e2e.js` runs them in a fixed order.
 Screenshots, trace, server log and a commit/step report live in `.tmp/qa/e2e`.
 Credentials and captured OTPs are private files there; never commit or attach
 them. Traces can contain short-lived synthetic session tokens. CI retains only
