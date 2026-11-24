@@ -10,7 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const fs = require('fs');
 const { buildSatelliteUrlSet } = require('../routes/property-lookup-v2');
-const { namesExcludedPlace } = require('../services/service-area');
+const { namesExcludedPlace, namesSharedZipWithoutCity } = require('../services/service-area');
 
 const PORT_CHARLOTTE = [26.9759, -82.0909];
 const VENICE = [27.0998, -82.4543];
@@ -19,8 +19,6 @@ describe('buildSatelliteUrlSet verdict', () => {
   test.each([
     [{ county: 'Charlotte', city: 'Gulf Cove', zip: '33981' }],
     [{ county: 'Charlotte', zip: '33981' }],
-    [{ county: 'Charlotte', zip: '33983' }],
-    [{ county: 'Charlotte', zip: '33980' }],
     [{ county: 'Charlotte', city: 'Port Charlotte', zip: '33980' }],
     [{ county: 'Charlotte', city: 'Port Charlotte', zip: '33948' }],
     [{ city: 'Deep Creek' }],
@@ -79,6 +77,30 @@ describe('namesExcludedPlace', () => {
   });
 });
 
+describe('a ZIP Punta Gorda shares, with no city anywhere, is unknown (null), never true', () => {
+  test('namesSharedZipWithoutCity reads the zip, the places and the text; a city anywhere resolves it', () => {
+    for (const zip of ['33980', '33982', '33983', '33982-1234']) expect(namesSharedZipWithoutCity({ zip })).toBe(true);
+    expect(namesSharedZipWithoutCity({ places: [{ city: '', zip: '33983' }] })).toBe(true);
+    expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, FL 33982' })).toBe(true);
+    expect(namesSharedZipWithoutCity({ text: ['1 Sample Way', '9 Sample Rd, FL 33980'] })).toBe(true);
+    expect(namesSharedZipWithoutCity({ zip: '33982', city: 'Babcock Ranch' })).toBe(false);
+    expect(namesSharedZipWithoutCity({ zip: '33983', places: [{ city: 'Port Charlotte' }] })).toBe(false);
+    expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, Babcock Ranch, FL 33982' })).toBe(false);
+    expect(namesSharedZipWithoutCity({ zip: '33948' })).toBe(false);
+    expect(namesSharedZipWithoutCity({})).toBe(false);
+    expect(namesSharedZipWithoutCity()).toBe(false);
+  });
+
+  test('buildSatelliteUrlSet (fresh and cached share it): null with no city, true with a served city, false for Punta Gorda or outside the box', () => {
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982' }).inServiceArea).toBeNull();
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', places: [{ city: null, zip: '33983' }], text: ['1 Sample Way'] }).inServiceArea).toBeNull();
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', city: 'Babcock Ranch' }).inServiceArea).toBe(true);
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33983', text: '1 Sample Way, Port Charlotte, FL 33983' }).inServiceArea).toBe(true);
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', city: 'Punta Gorda' }).inServiceArea).toBe(false);
+    expect(buildSatelliteUrlSet(40.7, -74.0, { zip: '33982' }).inServiceArea).toBe(false);
+  });
+});
+
 describe('the fresh lookup uses the same rule', () => {
   test('the geocoded city and ZIP ride on the cached record, so a cache hit reaches the same verdict', () => {
     const source = fs.readFileSync(require.resolve('../routes/property-lookup-v2'), 'utf8');
@@ -92,8 +114,8 @@ describe('the fresh lookup uses the same rule', () => {
 
   test('the geocoded verdict is the box AND no excluded place', () => {
     const source = fs.readFileSync(require.resolve('../routes/property-lookup-v2'), 'utf8');
-    expect(source).toContain('inServiceArea: isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip })');
-    expect(source).toContain('inServiceArea: isInServiceAreaBox(lat, lng, areaEvidence) && !namesExcludedPlace(areaEvidence),');
+    expect(source).toContain('inServiceArea: serviceAreaVerdict(isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip }), {');
+    expect(source).toContain('inServiceArea: serviceAreaVerdict(isInServiceAreaBox(lat, lng, areaEvidence), areaEvidence),');
     expect(source).toContain('places: [{ city: result.propertyRecord?.city, zip: result.propertyRecord?.zipCode }],');
     expect(source).toContain('text: [geo.formattedAddress, result.propertyRecord?.formattedAddress, address],');
     expect(source).toMatch(/city: record\?\.city \|\| null,/);

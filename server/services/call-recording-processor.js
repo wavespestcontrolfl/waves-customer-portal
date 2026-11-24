@@ -35,7 +35,7 @@ const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks'
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { isInDesotoExclusion, isServedSouthHillsboroughTown } = require('./service-area');
-const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip } = require('./excluded-localities');
+const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip, sharedZipNeedsCity } = require('./excluded-localities');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -1024,7 +1024,7 @@ const CONFIRM_REASON_TEXT = {
   missing_unit_number: 'address is a multi-unit building (condo/townhome) given without a unit — ask which unit number before dispatch',
   address_recovered: 'street name was garbled in transcription — matched to a single validated address; read it back to the caller',
   out_of_service_area: 'address resolves outside the service area — verify the county',
-  service_area_unverified: 'the address on file could not be read to check the service area — confirm the address and county before booking',
+  service_area_unverified: 'the service area could not be confirmed (the address on file could not be read, or a ZIP shared with Punta Gorda has no city) — confirm the address, city and county before booking',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
   missing_first_name: "no first name on file for this customer — get the account holder's first name",
@@ -2181,6 +2181,11 @@ function agreedOneTimeJobCardPrice(v2Extraction, bookedService) {
 //      on-file read FAILED (onFile.lookupFailed), the booking fails closed to
 //      review (reason on_file_address_unavailable) instead of passing on no
 //      evidence.
+// The skip reason a geographic veto files under: an unreadable on-file address, or a shared ZIP with no city, is UNVERIFIED
+// (staff confirm the address); every other veto is out of area.
+const geoVetoSkipReason = (veto) => (veto?.reason === 'on_file_address_unavailable' || veto?.reason === 'shared_zip_city_unknown'
+  ? 'service_area_unverified'
+  : 'out_of_service_area');
 function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, extracted = null, onFile = null } = {}) {
   const av = addressValidation || null;
   const svc = v2Extraction?.property?.service_address || null;
@@ -2232,6 +2237,16 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   if (cities.some(isNotYetServedLocality) || zips.some(isNotYetServedZip)
     || onFileCities.some(isNotYetServedLocality) || onFileZips.some(isNotYetServedZip)) {
     return { reason: 'not_yet_served_locality', county: null };
+  }
+  // A ZIP Punta Gorda shares with a served town (33980 / 33982 / 33983) with no city beside it cannot be told from Punta Gorda,
+  // so it is UNVERIFIED (staff review, never out of area, never auto-booked) and a positive AV verdict cannot clear it. ZIP
+  // evidence is bound to its own source: V1, V2, address validation and the stored address (the booking can keep any of them).
+  const sources = [
+    [extracted?.city, extracted?.zip], [svc?.city, svc?.postal_code], [av?.normalized?.city, av?.normalized?.postal_code],
+    ...(onFile && !onFile.lookupFailed ? [[onFile.city, onFile.zip]] : []),
+  ];
+  if (sources.some(([city, zip]) => sharedZipNeedsCity(city, zip))) {
+    return { reason: 'shared_zip_city_unknown', county: null };
   }
   if (av && av.inServiceArea === true) return null;
   if (countyKey === 'desoto') {
@@ -20486,9 +20501,7 @@ const CallRecordingProcessor = {
       // kept; only the visit is withheld, and the call is left for human review.
       // An unreadable on-file address is held under its own reason, not
       // mislabelled as out of area.
-      const geoSkipReason = legacyGeoVeto.reason === 'on_file_address_unavailable'
-        ? 'service_area_unverified'
-        : 'out_of_service_area';
+      const geoSkipReason = geoVetoSkipReason(legacyGeoVeto);
       appointmentResult = {
         service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
         dateTime: extracted.preferred_date_time,
@@ -23702,9 +23715,7 @@ const CallRecordingProcessor = {
             // reason, confirm reason, and in legacy/shadow routing the
             // skipped-booking card (enforce mode files its own card).
             if (schedErr.fencedGeoVeto) {
-              const fencedSkipReason = schedErr.fencedGeoVeto.reason === 'on_file_address_unavailable'
-                ? 'service_area_unverified'
-                : 'out_of_service_area';
+              const fencedSkipReason = geoVetoSkipReason(schedErr.fencedGeoVeto);
               appointmentResult = { ...appointmentResult, scheduleCreated: false, skippedReason: fencedSkipReason };
               if (!bridgeNeedsConfirmation.includes(fencedSkipReason)) bridgeNeedsConfirmation.push(fencedSkipReason);
               if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
@@ -26978,6 +26989,7 @@ CallRecordingProcessor._test = {
   pendingClaimWriteCount: () => pendingClaimWrites.size,
   reclaimableClaimSql: reclaimableClaim,
   legacyGeographicVeto,
+  geoVetoSkipReason,
   isOutboundCall,
   outboundImpliedConsentEligible,
   hasRealTwoWayConversation,

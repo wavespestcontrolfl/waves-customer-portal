@@ -224,7 +224,7 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
   // The 2026-11-23 hold ended when the second technician was hired: every place on it is served again, exactly as
   // before the hold. No Port Charlotte-without-ZIP review remains either (it existed only for the held shared ZIPs).
   test.each([
-    [{ city: 'Port Charlotte', zip: '33980' }], [{ city: 'Port Charlotte', zip: '33981' }], [{ zip: '33983' }],
+    [{ city: 'Port Charlotte', zip: '33980' }], [{ city: 'Port Charlotte', zip: '33981' }], [{ city: 'Deep Creek', zip: '33983' }],
     [{ city: 'Charlotte Harbor' }], [{ city: 'Gulf Cove' }], [{ city: 'El Jobean' }], [{ city: 'Deep Creek' }],
     [{ city: 'Rotonda West' }], [{ zip: '33947' }], [{ zip: '33927' }],
     [{ city: 'Placida' }], [{ city: 'Boca Grande' }], [{ city: 'Babcock Ranch', zip: '33982' }],
@@ -250,6 +250,39 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
     expect(source).toContain('cities.some(isNotYetServedLocality) || zips.some(isNotYetServedZip)');
     expect(source).toMatch(/const makeupGateOn = isEnabled\('callMakeupMove'\) && !v2RoutingBlocked && !legacyGeoVeto/);
     expect(source).toContain('&& legacyGeoVeto) {');
+  });
+
+  // A ZIP Punta Gorda shares (33980 / 33982 / 33983) with no city beside it is UNVERIFIED (staff review), whatever address
+  // validation said about another street: ZIP evidence is bound to its own source (call V1, V2, address validation, stored address).
+  test('a shared ZIP with no city is held for review; a served city on it clears it; Punta Gorda is still vetoed', () => {
+    const av = { status: 'validated_accept', inServiceArea: true, county: 'Charlotte County', normalized: { city: 'Port Charlotte', postal_code: '33948' } };
+    const unknown = { reason: 'shared_zip_city_unknown', county: null };
+    for (const zip of ['33980', '33982', '33983']) {
+      expect(legacyGeographicVeto({ extracted: { zip } })).toEqual(unknown);
+      expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { zip } })).toEqual(unknown);
+      // the stored address keeps a street + shared ZIP and no city while AV validated a different street: still unverified
+      expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Port Charlotte', zip: '33948' }, onFile: { city: '', zip } })).toEqual(unknown);
+      expect(legacyGeographicVeto({ addressValidation: av, extracted: {}, onFile: { zip } })).toEqual(unknown);
+      expect(legacyGeographicVeto({ v2Extraction: { property: { service_address: { postal_code: zip } } }, extracted: { city: 'Venice', zip: '34285' } })).toEqual(unknown);
+      expect(legacyGeographicVeto({ addressValidation: { ...av, normalized: { postal_code: zip } }, extracted: { city: 'Port Charlotte', zip } })).toEqual(unknown);
+    }
+    // a served city on the shared ZIP clears it, on every source
+    expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { city: 'Port Charlotte', zip: '33983' } })).toBeNull();
+    expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { city: 'Babcock Ranch', zip: '33982' } })).toBeNull();
+    expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Port Charlotte', zip: '33983' } })).toBeNull();
+    // a failed on-file read adds no shared-ZIP evidence (its own fail-closed rule applies)
+    expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { lookupFailed: true, zip: '33983' } })).toBeNull();
+    // Punta Gorda on a shared ZIP is still vetoed as Punta Gorda
+    expect(legacyGeographicVeto({ extracted: { city: 'Punta Gorda', zip: '33982' } })).toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
+  });
+
+  test('the shared-ZIP review is filed as service_area_unverified, every other veto as out_of_service_area, in both handlers', () => {
+    const { geoVetoSkipReason } = CallRecordingProcessor._test;
+    expect(geoVetoSkipReason({ reason: 'shared_zip_city_unknown' })).toBe('service_area_unverified');
+    expect(geoVetoSkipReason({ reason: 'on_file_address_unavailable' })).toBe('service_area_unverified');
+    for (const reason of ['not_yet_served_locality', 'punta_gorda_locality', 'desoto_locality']) expect(geoVetoSkipReason({ reason })).toBe('out_of_service_area');
+    expect(source).toContain('const geoSkipReason = geoVetoSkipReason(legacyGeoVeto);');
+    expect(source).toContain('const fencedSkipReason = geoVetoSkipReason(schedErr.fencedGeoVeto);');
   });
 
   test('North Port and Venice are served', () => {
@@ -316,9 +349,10 @@ describe('legacy booking branch wiring', () => {
     expect(branchHead).toContain('canCreateAppointmentFromCall');
     expect(branchHead).not.toMatch(/CALL_EXTRACTION_V2_(ENABLED|DRIVES_ROUTING)/);
     const branch = source.slice(vetoAt, bookAt);
-    expect(branch).toContain("legacyGeoVeto.reason === 'on_file_address_unavailable'");
-    expect(branch).toContain("? 'service_area_unverified'");
-    expect(branch).toContain(": 'out_of_service_area'");
+    // on_file_address_unavailable and shared_zip_city_unknown file as service_area_unverified (geoVetoSkipReason)
+    expect(branch).toContain('geoVetoSkipReason(legacyGeoVeto)');
+    expect(source).toContain("? 'service_area_unverified'");
+    expect(source).toContain(": 'out_of_service_area'");
     expect(branch).toContain('skippedReason: geoSkipReason');
     expect(branch).toContain('bridgeNeedsConfirmation.push(geoSkipReason)');
     expect(branch).toContain('await fileSkippedBookingCard({');

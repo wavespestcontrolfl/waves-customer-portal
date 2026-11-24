@@ -2,7 +2,7 @@ const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-cor
 const { toE164, isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { sameGmailInbox } = require('../utils/email-equivalence');
-const { isExcludedLocality, isExcludedZip } = require('./excluded-localities');
+const { isExcludedLocality, isExcludedZip, sharedZipNeedsCity } = require('./excluded-localities');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
 // Owner ruling 2026-09-30: DeSoto County (Arcadia) is NOT served; owner ruling
@@ -588,6 +588,9 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
       // Punta Gorda (owner ruling 2026-10-22) and any place held until a second technician is hired
       // (excluded-localities.js; none is held now) sit inside served counties, so the county check alone passes them.
       flags.push('out_of_service_area');
+    } else if (sharedZipNeedsCity(addr.city, addr.postal_code)) {
+      // A ZIP Punta Gorda shares with a served town, with no city: the area is unknown, so hold the address for review.
+      flags.push('address_unverified');
     }
     // Validation was attempted with a real address but the API was unreachable.
     // Don't silently auto-route an address we couldn't verify — hold for review.

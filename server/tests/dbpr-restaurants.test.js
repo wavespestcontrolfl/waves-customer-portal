@@ -112,12 +112,15 @@ describe('parseInspectionRows', () => {
       inspRow({ visit: '9008', county: 'Charlotte', city: '', zip: '33950' }),
       // A NUL inside the city is cleaned before the check, as it is before storing: 33983 alone does not exclude.
       inspRow({ visit: '9011', county: 'Charlotte', city: 'PUNTA\0GORDA', zip: '33983' }),
+      // A ZIP Punta Gorda shares with a served town: no city is unknowable (left out of the prospect list), a served city is kept.
+      inspRow({ visit: '9012', county: 'Charlotte', city: '', zip: '33982' }),
+      inspRow({ visit: '9013', county: 'Charlotte', city: 'PORT CHARLOTTE', zip: '33983' }),
       // The shared county test (call-triage-flags.js): any case, with or without the word County.
       inspRow({ visit: '9009', county: 'SARASOTA COUNTY' }),
       inspRow({ visit: '9010', county: 'Lee County' }),
     ]));
     const out = svc.parseInspectionRows(rows);
-    expect(out.map((r) => r.source_key)).toEqual(['9001', '9002', '9003', '9009']);
+    expect(out.map((r) => r.source_key)).toEqual(['9001', '9002', '9003', '9013', '9009']);
     expect(out[0]).toMatchObject({
       kind: 'inspection', license_id: '5001', license_number: 'SEA0000001', license_type_code: '2010', business_name: 'SAMPLE DINER',
       address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-11-16',

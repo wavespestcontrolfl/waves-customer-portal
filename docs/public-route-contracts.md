@@ -5929,7 +5929,10 @@ renders `closeUrl` as a plain `<img src>`, which is why the URL is absolute.
 address part naming DeSoto, Punta Gorda or a place held until a second technician is hired (the
 `NOT_YET_SERVED_*` lists, empty since the hire: Rotonda West, Placida, Boca Grande, Babcock Ranch, Gulf Cove /
 El Jobean, Charlotte Harbor and Deep Creek are served), `namesExcludedPlace` over
-`services/excluded-localities.js`, is `false`, for a fresh lookup and a cached one alike.
+`services/excluded-localities.js`, is `false`, for a fresh lookup and a cached one alike. A property whose only locality
+evidence is a ZIP Punta Gorda shares with a served town (33980 / 33982 / 33983), with no city in the geocode, the record or
+any address text, is `null`, unknown (`namesSharedZipWithoutCity`), fresh and cached alike; the quote wizard and the
+call lookup treat only `true` as served.
 `/api/public/map-image/:token` (GET/HEAD, read-only signed satellite image
 proxy; the ONLY way the public lookup, the customer service report
 (`treatmentMap.satellite.live.url`, `stationMap.image.url`) and the customer
@@ -8803,7 +8806,10 @@ ZIP Google places on the coordinate: an excluded locality or Punta Gorda-only
 ZIP is out even when the submitted address names none, and a failed or empty
 lookup, or no locality on a shared ZIP 33980 / 33982 / 33983, is 503
 `{ error: 'service_area_unavailable' }`, recoverable), else the explicit
-no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
+no-key fallback: outside the coarse box is out; an address with a blank city on a
+ZIP Punta Gorda shares with a served town (33980 / 33982 / 33983) cannot be told from Punta Gorda with no lookup to
+place the pin, so it is 503 `{ error: 'service_area_unavailable' }`, recoverable (`sharedZipNeedsCity` in
+`services/excluded-localities.js`, the same answer the keyed path gives for that ZIP); inside the DeSoto exclusion
 rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
 is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no
 DeSoto ZIP); elsewhere in the box is in. Out of area 422s

@@ -76,6 +76,12 @@ function isPuntaGordaZip(zip) {
 function isPuntaGordaSharedZip(zip) {
   return PUNTA_GORDA_SHARED_ZIPS.has(zip5(zip));
 }
+// A ZIP Punta Gorda shares with a served town cannot say which town an address is in: with no city beside it the area is
+// UNKNOWN, never served. EVERY service-area reader answers an unknown / recoverable verdict for it through this one
+// predicate (address validation, inspection booking, call veto and triage flag, public property lookup, prospect list).
+function sharedZipNeedsCity(city, zip) {
+  return isPuntaGordaSharedZip(zip) && !normalizeLocality(city);
+}
 function isNotYetServedLocality(city) {
   return NOT_YET_SERVED_LOCALITIES.has(normalizeLocality(city));
 }
@@ -95,7 +101,7 @@ module.exports = {
   DESOTO_LOCALITIES, DESOTO_ZIPS, PUNTA_GORDA_LOCALITIES, PUNTA_GORDA_ZIPS, PUNTA_GORDA_SHARED_ZIPS,
   NOT_YET_SERVED_LOCALITIES, NOT_YET_SERVED_ZIPS,
   normalizeLocality,
-  isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isPuntaGordaSharedZip,
+  isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isPuntaGordaSharedZip, sharedZipNeedsCity,
   isNotYetServedLocality, isNotYetServedZip,
   isExcludedLocality, isExcludedZip,
 };

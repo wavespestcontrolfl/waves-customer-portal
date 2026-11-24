@@ -146,7 +146,7 @@ describe('property-lookup cache hit passes area evidence', () => {
 
   test('buildSatelliteUrlSet forwards its evidence to isInServiceAreaBox', () => {
     expect(source).toMatch(/function buildSatelliteUrlSet\(lat, lng, areaEvidence = \{\}\)/);
-    expect(source).toMatch(/inServiceArea: isInServiceAreaBox\(lat, lng, areaEvidence\) && !namesExcludedPlace\(areaEvidence\)/);
+    expect(source).toMatch(/inServiceArea: serviceAreaVerdict\(isInServiceAreaBox\(lat, lng, areaEvidence\), areaEvidence\)/);
   });
 
   test('the cache-hit result passes the stored county and ZIP', () => {

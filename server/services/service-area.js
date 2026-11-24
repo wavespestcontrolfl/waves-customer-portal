@@ -23,7 +23,7 @@
 
 const { isInServiceAreaCounty } = require('./call-triage-flags');
 const { zipToCity } = require('../utils/zip-to-city');
-const { isExcludedLocality, isExcludedZip, normalizeLocality } = require('./excluded-localities');
+const { isExcludedLocality, isExcludedZip, normalizeLocality, isPuntaGordaSharedZip } = require('./excluded-localities');
 const { parseRawAddress } = require('../utils/address-normalizer');
 
 const SERVICE_AREA_BOUNDS = Object.freeze({
@@ -88,6 +88,20 @@ function namesExcludedPlace({ city = null, zip = null, text = null, places = nul
     return isExcludedZip(zipFromAddressText(raw)) || isExcludedLocality(parseRawAddress(raw)?.city)
       || raw.split(',').some((part) => isExcludedLocality(normalizeLocality(part)));
   });
+}
+
+/**
+ * True when the evidence carries a ZIP Punta Gorda shares with a served town (33980 / 33982 / 33983) and NO city anywhere
+ * (the city, a place, or an address text): the ZIP alone cannot tell the served town from Punta Gorda, so the area is
+ * UNKNOWN. The public property lookup answers `inServiceArea: null` for it, fresh and cached alike. Same evidence shape
+ * as namesExcludedPlace.
+ */
+function namesSharedZipWithoutCity({ city = null, zip = null, text = null, places = null } = {}) {
+  const texts = (Array.isArray(text) ? text : [text]).map((t) => String(t || '')).filter(Boolean);
+  const zips = [zip, ...(places || []).map((p) => p?.zip), ...texts.map(zipFromAddressText)];
+  if (!zips.some(isPuntaGordaSharedZip)) return false;
+  const cities = [city, ...(places || []).map((p) => p?.city), ...texts.map((t) => parseRawAddress(t)?.city)];
+  return !cities.some((c) => normalizeLocality(c));
 }
 
 function isInDesotoExclusion(lat, lng) {
@@ -162,7 +176,7 @@ function servedSouthHillsborough(county, address) {
 module.exports = {
   isServedSouthHillsboroughTown, servedSouthHillsborough,
   SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION,
-  namesExcludedPlace,
+  namesExcludedPlace, namesSharedZipWithoutCity,
   isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion,
   zipFromAddressText,
 };

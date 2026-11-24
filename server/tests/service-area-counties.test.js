@@ -58,6 +58,18 @@ describe('Punta Gorda triage flag', () => {
     expect(flagsFor(sa)).not.toContain('out_of_service_area');
   });
 
+  test('a ZIP Punta Gorda shares (33980 / 33982 / 33983) with no city is unverified, not served; a served city on it is not flagged', () => {
+    for (const postal_code of ['33980', '33982', '33983']) {
+      const flags = flagsFor({ county: 'Charlotte', postal_code });
+      expect(flags).toContain('address_unverified');
+      expect(flags).not.toContain('out_of_service_area');
+      expect(flagsFor({ county: 'Charlotte', city: '  ', postal_code })).toContain('address_unverified');
+      expect(flagsFor({ county: 'Charlotte', city: 'Port Charlotte', postal_code })).not.toContain('address_unverified');
+      expect(flagsFor({ county: 'Charlotte', city: 'Punta Gorda', postal_code })).toContain('out_of_service_area');
+    }
+    expect(flagsFor({ county: 'Charlotte', postal_code: '33948' })).not.toContain('address_unverified');
+  });
+
   test('North Port and Venice stay unflagged', () => {
     expect(flagsFor({ city: 'North Port', county: 'Sarasota', postal_code: '34287' })).not.toContain('out_of_service_area');
     expect(flagsFor({ city: 'Venice', county: 'Sarasota', postal_code: '34285' })).not.toContain('out_of_service_area');

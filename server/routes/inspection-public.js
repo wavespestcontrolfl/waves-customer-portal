@@ -207,7 +207,7 @@ const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty, reverseGeocodeLocality } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
 const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough, isServedSouthHillsboroughTown } = require('../services/service-area');
-const { isExcludedLocality, isExcludedZip, isPuntaGordaSharedZip } = require('../services/excluded-localities');
+const { isExcludedLocality, isExcludedZip, sharedZipNeedsCity } = require('../services/excluded-localities');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { isOpenLeadRow } = require('../services/lead-statuses');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
@@ -810,7 +810,7 @@ async function checkServiceArea(location, address = null) {
   if (!key) {
     // No lookup can place the pin, so a ZIP Punta Gorda shares with a served town, with no submitted city, is unknowable:
     // unavailable (recoverable), the same answer the keyed path gives for it, never served.
-    if (!String(address?.city || '').trim() && isPuntaGordaSharedZip(address?.zip)) return { ok: false, county: null, unavailable: true };
+    if (sharedZipNeedsCity(address?.city, address?.zip)) return { ok: false, county: null, unavailable: true };
     return { ok: isInServiceAreaBox(location.lat, location.lng, { zip: address?.zip }), county: null };
   }
   let county = null;
@@ -835,7 +835,7 @@ async function checkServiceArea(location, address = null) {
       if (!place) return { ok: false, county: null, unavailable: true };
       if (isExcludedLocality(place.city) || isExcludedZip(place.zip)) return { ok: false, county: null };
       // No locality on a ZIP Punta Gorda shares with a served town: unknowable.
-      if (!place.city && isPuntaGordaSharedZip(place.zip)) return { ok: false, county: null, unavailable: true };
+      if (sharedZipNeedsCity(place.city, place.zip)) return { ok: false, county: null, unavailable: true };
     }
     return { ok: true, county };
   }
