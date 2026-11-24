@@ -41,6 +41,7 @@ const db = require("../models/db");
 const logger = require("./logger");
 const { CUSTOMER_STAGES } = require("./customer-stages");
 const { excludeAssessmentBookings } = require("./assessment-booking");
+const { NON_CHARGEABLE_CLOSEOUT_OUTCOMES } = require("./visit-outcomes");
 const { firstDeliveryEvidenceSql, deliveryStampPresentSql, whereNotUndeliveredSelfServe } = require("./self-serve-estimates");
 
 // Appointment rows that leave NO live booking behind — the repo's terminal
@@ -124,13 +125,36 @@ function paidInvoiceSignal(query) {
 // whereNoConversionBeforeEstimate stays deliberately broad and still counts an
 // assessment that PREDATES the estimate: that fails toward KEEPING the
 // estimate, never toward archiving it.
+//
+// A completed visit whose LATEST closeout (its newest linked service_records row, by
+// created_at then id) performed nothing is not a sale either: status 'incomplete', or a
+// completed record whose visitOutcome is customer_declined, inspection_only or incomplete
+// (visit-outcomes.js NON_CHARGEABLE_CLOSEOUT_OUTCOMES; the outcome lives in the record's
+// structured_notes). Only the latest counts: a later performed re-closeout overrides an
+// earlier declined one. Shared by the open sweep and the archive route: a declined visit
+// must not archive an open estimate as converted, any more than an assessment does.
+// (The none-before side stays broad.)
 function completedVisitSignal(query) {
   return excludeAssessmentBookings(
     query
       .leftJoin("services", "services.id", "scheduled_services.service_id")
       .whereRaw("scheduled_services.customer_id = estimates.customer_id")
       .where("scheduled_services.status", "completed"),
-  );
+  ).whereNotExists(function () {
+    this.select(db.raw("1"))
+      .from("service_records as closeout")
+      .whereRaw(
+        "closeout.id = (SELECT latest.id FROM service_records latest WHERE latest.scheduled_service_id = scheduled_services.id ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)",
+      )
+      .where((q) =>
+        q.where("closeout.status", "incomplete").orWhere((done) =>
+          done.where("closeout.status", "completed").whereRaw(
+            `COALESCE(closeout.structured_notes->>'visitOutcome', '') IN (${NON_CHARGEABLE_CLOSEOUT_OUTCOMES.map(() => "?").join(", ")})`,
+            NON_CHARGEABLE_CLOSEOUT_OUTCOMES,
+          ),
+        ),
+      );
+  });
 }
 
 // Raw time condition on a signal's own time, or null for no narrowing.

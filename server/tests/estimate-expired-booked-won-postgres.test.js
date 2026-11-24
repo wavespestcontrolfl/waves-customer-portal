@@ -114,8 +114,9 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
 
   async function completedVisit(trx, customerId, completedAt, createdAt = completedAt) {
     const paid = await trx('services').whereNot({ service_key: 'lawn_inspection' }).first('id');
+    const visitId = randomUUID();
     await trx('scheduled_services').insert({
-      id: randomUUID(),
+      id: visitId,
       customer_id: customerId,
       service_id: paid.id,
       service_type: 'Lawn Care',
@@ -126,6 +127,7 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
       completed_at: completedAt,
       created_at: createdAt,
     });
+    return visitId;
   }
 
   const row = (id) => mockTransaction('estimates').where({ id }).first();
@@ -559,6 +561,143 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect((await row(lateId)).disposition).toBe('expired_viewed');
     expect((await row(nullId)).disposition).toBe('expired_viewed');
     expect((await row(okId)).disposition).toBe('converted_other_path');
+  });
+
+  test('(y) a completed visit whose closeout says nothing was performed (customer_declined) is not a conversion signal, for the reclaim or the open sweep', async () => {
+    // closeouts: [[status, visitOutcome, createdDay], ...] linked to one completed visit.
+    const closeouts = async (cust, list) => {
+      const visitId = await completedVisit(mockTransaction, cust, sentPlus(30), sentPlus(20));
+      for (const [status, outcome, day] of list) {
+        await mockTransaction('service_records').insert({
+          id: randomUUID(), customer_id: cust, scheduled_service_id: visitId, service_date: dateOnly(sentPlus(30)), service_type: 'Pest Control',
+          status, structured_notes: JSON.stringify({ visitOutcome: outcome }), created_at: sentPlus(day),
+        });
+      }
+    };
+    const declinedVisit = (cust, outcome) => closeouts(cust, [['completed', outcome, 30]]);
+    const declined = await customer(mockTransaction);
+    const declinedId = await expiredEstimate(mockTransaction, declined);
+    await declinedVisit(declined, 'customer_declined');
+    const performed = await customer(mockTransaction);
+    const performedId = await expiredEstimate(mockTransaction, performed);
+    await declinedVisit(performed, 'completed');
+
+    // The open sweep shares the signal: a declined visit does not archive a live estimate as converted.
+    const liveDeclined = await customer(mockTransaction);
+    const liveDeclinedId = await expiredEstimate(mockTransaction, liveDeclined, { status: 'viewed', expires_at: null, disposition: null, disposition_source: null, disposition_at: null });
+    await declinedVisit(liveDeclined, 'inspection_only');
+    const livePerformed = await customer(mockTransaction);
+    const livePerformedId = await expiredEstimate(mockTransaction, livePerformed, { status: 'viewed', expires_at: null, disposition: null, disposition_source: null, disposition_at: null });
+    await declinedVisit(livePerformed, 'completed');
+
+    // Only the LATEST closeout counts: a performed re-closeout overrides an earlier decline; a later
+    // decline or an 'incomplete' record overrides an earlier performed closeout.
+    const overridden = await customer(mockTransaction);
+    const overriddenId = await expiredEstimate(mockTransaction, overridden);
+    await closeouts(overridden, [['completed', 'customer_declined', 28], ['completed', 'completed', 31]]);
+    const laterDeclined = await customer(mockTransaction);
+    const laterDeclinedId = await expiredEstimate(mockTransaction, laterDeclined);
+    await closeouts(laterDeclined, [['completed', 'completed', 28], ['completed', 'customer_declined', 31]]);
+    const incomplete = await customer(mockTransaction);
+    const incompleteId = await expiredEstimate(mockTransaction, incomplete);
+    await closeouts(incomplete, [['incomplete', 'completed', 31]]);
+
+    await guard.reclaimExpiredConvertedEstimates();
+    await guard.archiveConvertedOpenEstimates();
+
+    expect((await row(overriddenId)).disposition).toBe('converted_other_path');
+    expect((await row(laterDeclinedId)).disposition).toBe('expired_viewed');
+    expect((await row(incompleteId)).disposition).toBe('expired_viewed');
+    expect((await row(declinedId)).disposition).toBe('expired_viewed');
+    expect((await row(performedId)).disposition).toBe('converted_other_path');
+    expect((await row(liveDeclinedId)).archived_at).toBeNull();
+    expect((await row(livePerformedId)).archived_at).not.toBeNull();
+  });
+
+  test('(z) a website quote whose link text was ACCEPTED and carried the link has its delivery anchor (estimate_data.websiteLinkText.at); suppressed, link-less or never-texted ones have none', async () => {
+    const { recordWebsiteLinkTexted } = require('../services/website-quote-publication');
+    const published = new Date('2026-10-01T12:00:00Z');
+    const mk = async () => {
+      const cust = await customer(mockTransaction);
+      const id = await expiredEstimate(mockTransaction, cust, {
+        source: 'quote_wizard', created_at: published, sent_at: published, expires_at: new Date('2026-10-08T12:00:00Z'),
+      });
+      await paidInvoice(mockTransaction, cust, { paidAt: new Date('2026-10-20T12:00:00Z') });
+      return id;
+    };
+    const url = 'https://portal.example.test/estimate/tok?website=1';
+    // What sendCustomerMessage returns after the pipeline: sentBody has the scheme stripped.
+    const accepted = { sent: true, deliveryOutcome: 'accepted', sentAt: '2026-10-01T12:01:00.000Z', sentBody: `Your quote: ${url.replace(/^https?:\/\//, '')}` };
+    const texted = await mk();
+    const suppressed = await mk();
+    const noLink = await mk();
+    const uncertain = await mk();
+    const never = await mk();
+    const textedAt = new Date('2026-10-01T12:01:00Z');
+    expect(await recordWebsiteLinkTexted(texted, { result: accepted, url, conn: mockTransaction })).toBe(true);
+    // A second text keeps the first time (atomic: the write only fires while the key is absent).
+    expect(await recordWebsiteLinkTexted(texted, { result: { ...accepted, sentAt: '2026-10-02T12:00:00.000Z' }, url, conn: mockTransaction })).toBe(false);
+    // The link must be COMPLETE in the sent text: embedded in another URL's path or query, or extended, is not it.
+    const bare = url.replace(/^https?:\/\//, '');
+    const embedded = await mk();
+    const extended = await mk();
+    const whole = await mk();
+    const sentWith = (sentBody) => ({ sent: true, deliveryOutcome: 'accepted', sentAt: '2026-10-01T12:01:00.000Z', sentBody });
+    expect(await recordWebsiteLinkTexted(embedded, { result: sentWith(`See evil.example/go?u=${bare} now`), url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(embedded, { result: sentWith(`See https://evil.example/${bare}/x`), url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(extended, { result: sentWith(`See ${bare}&extra=1 now`), url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(extended, { result: sentWith(`See ${bare}.pdf`), url, conn: mockTransaction })).toBe(false);
+    // A redirect wrapper carrying the link in parentheses is another URL's path, not the link.
+    expect(await recordWebsiteLinkTexted(embedded, { result: sentWith(`See redirect.example/go/(${bare}) now`), url, conn: mockTransaction })).toBe(false);
+    // No provider handoff time, nothing recorded (an invalid one too).
+    expect(await recordWebsiteLinkTexted(whole, { result: { sent: true, deliveryOutcome: 'accepted', sentBody: `Your quote: ${bare}` }, url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(whole, { result: { ...sentWith(`Your quote: ${bare}`), sentAt: 'not a date' }, url, conn: mockTransaction })).toBe(false);
+    // Whole: a token, optionally in parentheses and/or ending in sentence punctuation.
+    expect(await recordWebsiteLinkTexted(whole, { result: sentWith(`Your quote (${bare}).`), url, conn: mockTransaction })).toBe(true);
+    // Suppressed / blocked, a text without the link, and an uncertain handoff record nothing.
+    expect(await recordWebsiteLinkTexted(suppressed, { result: { sent: false, blocked: true, deliveryOutcome: 'not_sent', sentBody: accepted.sentBody }, url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(noLink, { result: { ...accepted, sentBody: 'Thanks for your quote request!' }, url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(uncertain, { result: { ...accepted, deliveryOutcome: 'uncertain' }, url, conn: mockTransaction })).toBe(false);
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    const stored = await row(texted);
+    expect(stored.estimate_data.websiteLinkText).toEqual({ at: textedAt.toISOString() });
+    expect(stored.disposition).toBe('converted_other_path');
+    for (const id of [suppressed, noLink, uncertain, never]) {
+      expect((await row(id)).estimate_data.websiteLinkText).toBeUndefined();
+      expect((await row(id)).disposition).toBe('expired_viewed');
+    }
+    // The lead-reach stamp and deliveryState are untouched: this is not a person's handoff.
+    expect(stored.estimate_data.deliveryState?.firstDeliveredAt).toBeUndefined();
+  });
+
+  test('(aa) texted in Oct, resent in Nov: a staff send merges top-level and never touches the receipt; only the reclaim reads it (cohort reporting stays as on main)', async () => {
+    const { recordWebsiteLinkTexted } = require('../services/website-quote-publication');
+    const { _private } = require('../services/estimate-winloss');
+    const oct = new Date('2026-10-01T12:00:00Z');
+    const nov = new Date('2026-11-05T12:00:00Z');
+    const url = 'https://portal.example.test/estimate/tok?website=1';
+    const cust = await customer(mockTransaction);
+    const id = await expiredEstimate(mockTransaction, cust, {
+      source: 'quote_wizard', created_at: oct, sent_at: oct, expires_at: new Date('2026-10-08T12:00:00Z'),
+    });
+    await recordWebsiteLinkTexted(id, { result: { sent: true, deliveryOutcome: 'accepted', sentAt: '2026-10-01T12:01:00.000Z', sentBody: `Your quote: ${url.slice(8)}` }, url, conn: mockTransaction });
+    // What sendEstimateNow writes on a Nov resend: sent_at rewritten, deliveryState replaced wholesale, merged top-level.
+    const patch = { deliveryState: { attemptedAt: nov.toISOString(), sentChannels: [], channels: {}, firstDeliveredAt: nov.toISOString() } };
+    await mockTransaction('estimates').where({ id }).update({
+      sent_at: nov,
+      estimate_data: mockTransaction.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]),
+    });
+    await paidInvoice(mockTransaction, cust, { paidAt: new Date('2026-10-20T12:00:00Z') });
+
+    const after = await row(id);
+    expect(after.estimate_data.websiteLinkText.at).toBe('2026-10-01T12:01:00.000Z');
+    // Cohort reporting is unchanged from main: the Nov resend still anchors it.
+    expect(_private.sentAnchorMs(after)).toBe(nov.getTime());
+    // The reclaim's SQL anchor reads the receipt: a payment 19 days after the Oct text is inside its window.
+    await guard.reclaimExpiredConvertedEstimates();
+    expect((await row(id)).disposition).toBe('converted_other_path');
   });
 
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {

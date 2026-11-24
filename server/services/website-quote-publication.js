@@ -8,6 +8,7 @@ const { estimateExpiresAt } = require('./admin-estimate-persistence');
 const { moneyCents } = require('./estimate-pricing-bundle-utils');
 const { recordAuditEvent } = require('./audit-log');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 
 // Called only with THIS /calculate run's server result, after its existing
 // self-bookability checks. The website may request publication; it never
@@ -120,4 +121,45 @@ async function publishInTransaction(trx, { estimateId, leadId, engineInput, engi
   return { token };
 }
 
-module.exports = { publishWebsiteQuote };
+// The text that carries a website quote's link went out: the customer was reached,
+// which is the delivery evidence the booked-win reclaim and the cohorts anchor on
+// (estimate-conversion-guard.js, estimate-winloss.js sentAnchorMs). Recorded only on
+// REAL provider acceptance (sent, deliveryOutcome 'accepted', not deduped) AND when the
+// body the provider was handed (`sentBody`, after every pipeline transform) contains the
+// link (scheme-stripped, as SMS links are); a suppressed or blocked send, a template
+// without the link, or a link the pipeline rewrote or wrapped records nothing (fails
+// closed). Stored as its OWN top-level key, never deliveryState (a staff send rebuilds
+// that) and never firstDeliveredAt (lead-reach and the watchers read it as a person's
+// handoff). One atomic write that only fires while the key is absent: first text wins.
+// Returns whether it recorded.
+// The link as a WHOLE whitespace-delimited token of the sent text (one leading '(' and one
+// trailing sentence punctuation and/or ')' removed), equal to the URL with or without its
+// scheme. Never a part of another URL, a path segment or a query.
+// (GATE_SMS_LINK_WRAP is dark; a link the pipeline wrapped no longer matches, so no receipt: fail closed, no win.)
+function carriesLinkWhole(body, url) {
+  const bare = stripSmsUrlScheme(String(url || ''));
+  return String(body || '').split(/\s+/).some((raw) => {
+    const token = raw.replace(/^\(/, '').replace(/[.,!?]$/, '').replace(/\)$/, '');
+    return token !== '' && (token === url || token === bare);
+  });
+}
+
+async function recordWebsiteLinkTexted(estimateId, { result, url, conn = db } = {}) {
+  const accepted = result?.sent === true && result.deliveryOutcome === 'accepted' && result.deduped !== true;
+  // The receipt's time is the provider handoff (result.sentAt); without it, nothing is recorded.
+  const at = result?.sentAt ? new Date(result.sentAt) : null;
+  if (!accepted || !url || !at || Number.isNaN(at.getTime()) || !carriesLinkWhole(result.sentBody, url)) return false;
+  // No receipt on any error path (a thrown write included): the quote then has no anchor, which fails closed.
+  const updated = await conn('estimates')
+    .where({ id: estimateId })
+    .whereRaw("(estimate_data -> 'websiteLinkText') IS NULL")
+    .update({
+      estimate_data: conn.raw(
+        "COALESCE(estimate_data, '{}'::jsonb) || jsonb_build_object('websiteLinkText', jsonb_build_object('at', ?::text))",
+        [at.toISOString()],
+      ),
+    });
+  return updated > 0;
+}
+
+module.exports = { publishWebsiteQuote, recordWebsiteLinkTexted };
