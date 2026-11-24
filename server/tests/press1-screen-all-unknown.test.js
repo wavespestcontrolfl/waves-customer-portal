@@ -136,6 +136,11 @@ describe('the remembered-caller proof', () => {
     expect(seen.sql.some((q) => q.includes("jsonb_exists(metadata, 'relay_transfer_ring_at')"))).toBe(true);
   });
 
+  test('staff talk needs no answered_by (empty when the caller hangs up first)', () => {
+    expect(seen.whereIn.some(([col]) => col === 'answered_by')).toBe(true); // the message branch only
+    expect(seen.sql.some((q) => q.includes("forward_acceptance'->>'accepted_at' IS NULL OR"))).toBe(true);
+  });
+
   test('staff talk time runs from the staff press 1 to the recorded end', () => {
     expect(seen.sql.some((q) => q.includes("forward_acceptance'->>'accepted_at'") && q.includes("(metadata->>'ended_at')::timestamptz"))).toBe(true);
   });

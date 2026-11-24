@@ -92,8 +92,9 @@ function rememberedRows(key) {
       // to the call's end (metadata.ended_at, Twilio's own end time; the status
       // callback writes it). created_at + duration_seconds is not the end, so a
       // call with no ended_at proves nothing here.
+      // The acceptance and end stamps prove the talk on their own: answered_by
+      // can stay empty when the caller hangs up first.
       .where((talked) => talked
-        .where('answered_by', 'human')
         .whereRaw(`CASE WHEN metadata->'forward_acceptance'->>'accepted_at' IS NULL OR metadata->>'ended_at' IS NULL THEN FALSE
           ELSE (metadata->>'ended_at')::timestamptz
             - (metadata->'forward_acceptance'->>'accepted_at')::timestamptz >= make_interval(secs => ?) END`, [TALK_SECONDS]))
