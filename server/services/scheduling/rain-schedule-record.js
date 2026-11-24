@@ -22,9 +22,12 @@
  *
  * One run (cron 'schedule-rain-record', 6:06, 14:06 and 15:06 ET):
  *   1. picks the target day: from 2 PM ET the next work day (Monday to Saturday); before 2 PM today. The 14:06 run is
- *      the CUTOFF; the 15:06 run only retries a cutoff that failed. The 6:06 run on the day itself is a RECHECK.
+ *      the CUTOFF, and only for the calendar day before the target (Saturday's run does not cut off Monday; Sunday's
+ *      does); the 15:06 run only retries a cutoff that failed. The 6:06 run on the day itself is a RECHECK.
+ *      Stops are judged in order, and a target hour or day taken by an earlier proposal for the same technician is not
+ *      offered again. A stop that starts soon is judged too: the 2-hour lead of rain-pass is about its notices.
  *   2. for each outdoor visit of that day, in order of start then id, proposes the first that applies:
- *        reorder   a same-day re-time to the nearest dry open hour rain-pass found.
+ *        reorder   a same-day re-time to the nearest dry open hour rain-pass found (or the next one, if taken).
  *        day_move  only when no dry open hour exists AND the whole day is wet (4 or more work hours at 70% or more at
  *                  the visit's point): the first day in the finder's list with a dry hour for the visit's span in the
  *                  forecast. One visit, one date, `series: false`: a plan series is never shifted.
@@ -76,8 +79,9 @@ function parseJson(v, fallback) {
 
 /**
  * The day this run is about and what the run is: { day, kind }. From 2 PM ET the next work day, else today; a Sunday
- * is no work day, so it moves to Monday. kind: 'cutoff' (from 2 PM, a day ahead), 'recheck' (the day itself), or
- * 'none' (a Sunday morning that looks ahead to Monday: nothing is decided yet, the run only scores).
+ * is no work day, so it moves to Monday. kind: 'cutoff' (from 2 PM, and only the calendar day before the target: the
+ * 2 PM Saturday run is not Monday's cutoff, the Sunday one is), 'recheck' (the day itself), or 'none' (a run that
+ * looks further ahead: nothing is decided yet, the run only scores).
  */
 function targetDay(now) {
   const today = etDateString(now);
@@ -86,7 +90,7 @@ function targetDay(now) {
   if (dayOfWeek(day) === 0) day = plusDays(day, 1);
   let kind = 'none';
   if (day === today) kind = 'recheck';
-  else if (hour >= CUTOFF_HOUR) kind = 'cutoff';
+  else if (hour >= CUTOFF_HOUR && day === plusDays(today, 1)) kind = 'cutoff';
   return { day, kind, today };
 }
 
@@ -98,43 +102,87 @@ function nwsReader(read) {
   return async (lat, lng) => (await once(lat, lng)) || (await once(lat, lng));
 }
 
-/** The first of the finder's days whose hours for this visit's span read dry, or null. Unread is never dry. */
-async function dryDayFor(row, hourly, { today, dayOptions }) {
-  const options = await dayOptions(row.visit.id);
+const overlaps = (a, b) => a.start < b.end && b.start < a.end;
+const techOf = (row) => (row.visit.technician_id == null ? null : String(row.visit.technician_id));
+
+/** True when a target already accepted for this day's proposals holds the technician at that time. */
+const clashes = (taken, tech, date, start, end) => taken.some((t) => t.date === date
+  && (t.tech == null || tech == null || t.tech === tech) && overlaps(t, { start, end }));
+
+/**
+ * The first of the finder's later days whose hours for this visit's span read dry and are not already taken by a move
+ * accepted for this technician, or null. Unread is never dry. A one-off move goes to a later date only: the planned
+ * date itself (and any earlier one) is never a target.
+ */
+async function dryDayFor(row, hourly, { day, today, dayOptions, taken }) {
   const length = row.visit.reach.endMin - row.visit.reach.startMin;
+  // The finder probes the stop's own length, the span the weather check reads.
+  const options = await dayOptions(row.visit.id, length);
   for (const option of options || []) {
     const startMin = toMin(option?.suggestedWindow?.start);
-    if (!option?.date || startMin == null || !inRainHorizon(option.date, today)) continue;
+    if (!option?.date || startMin == null || option.date <= day || !inRainHorizon(option.date, today)) continue;
     const rain = rainPass.spanRain(hourly, option.date, startMin, startMin + length);
-    if (rain.complete && rain.peak < DRY_PCT) return { date: option.date, start: toHHMM(startMin), peak: rain.peak };
+    if (!rain.complete || rain.peak >= DRY_PCT) continue;
+    if (clashes(taken, techOf(row), option.date, startMin, startMin + length)) continue;
+    return { date: option.date, start: toHHMM(startMin), end: startMin + length, startMin };
   }
   return null;
 }
 
 // The finder is read-only. No caller: estimates only, never a paid road time. 'admin': a move by the office is not held
 // to the technician's shift, as the dispatch board's rain-out sheet.
-const defaultDayOptions = (serviceId) => require('../rebooker').findRescheduleOptions(serviceId, 'weather_rain', {
-  probeSpanMinutes: 60, travelGap: true, caller: null, initiatedBy: 'admin',
+const defaultDayOptions = (serviceId, probeSpanMinutes) => require('../rebooker').findRescheduleOptions(serviceId, 'weather_rain', {
+  probeSpanMinutes, travelGap: true, caller: null, initiatedBy: 'admin',
 });
+
+/**
+ * The same-day hour this reorder takes: rain-pass's nearest dry open hour, or, when an earlier proposal for the same
+ * technician already holds it, the nearest one that is dry, open and not held. null when none is left.
+ */
+async function reorderStart(row, ctx) {
+  const { day, read, taken } = ctx;
+  const { reach } = row.visit;
+  const length = reach.endMin - reach.startMin;
+  const before = reach.ownStartMin - reach.startMin;
+  const fits = (own) => !clashes(taken, techOf(row), day, own - before, own - before + length);
+  if (row.proposal && fits(toMin(row.proposal))) return toMin(row.proposal);
+  if (!row.proposal) return null;
+  const hourly = await read(row.visit.point.lat, row.visit.point.lng);
+  if (!Array.isArray(hourly)) return null;
+  const { startMin, endMin } = ctx.dayHours;
+  return rainPass.dryStart({
+    hourly, date: day, reach, earliestMin: ctx.earliestMin, dayStartMin: startMin, dayEndMin: endMin,
+    isFree: (start, end) => !ctx.occupied(row.visit, day, start, end) && !clashes(taken, techOf(row), day, start, end),
+  });
+}
 
 /**
  * One visit's proposal (a dry visit is none/forecast_dry), or null when it is not outdoor. `open` is false once the day's cap is used.
  */
 async function proposeFor(row, ctx) {
-  const { day, read, open } = ctx;
+  const { day, read, open, taken } = ctx;
   const base = { id: String(row.visit.id), start: row.start };
   if (row.visit.memberIds?.length > 1) base.stop_ids = row.visit.memberIds;
   if (['no_point', 'no_forecast', 'error'].includes(row.reason)) {
     return { ...base, decision: 'none', reason: row.reason === 'no_forecast' ? 'unread_forecast' : row.reason };
   }
-  // A visit the forecast reads dry is stored too, as none/forecast_dry: a rain the forecast missed scores as a miss.
-  if (!row.wet) return { ...base, decision: 'none', reason: 'forecast_dry' };
-  base.peak = row.peak;
-  if (row.proposal) {
-    return open ? { ...base, decision: 'reorder', to_start: row.proposal } : { ...base, decision: 'cap', would: 'reorder', to_start: row.proposal };
+  if (!row.wet) {
+    // A visit the forecast reads dry is stored too, as none/forecast_dry: a rain the forecast missed scores as a miss.
+    // Only a span read in full is dry; an hour with no reading is unread.
+    return { ...base, decision: 'none', reason: row.dry === true ? 'forecast_dry' : 'unread_forecast' };
   }
-  // No dry open hour on the day. Only a wholly wet day moves to another one: the point's own hours, read again (the
-  // NWS read is cached by grid cell).
+  base.peak = row.peak;
+  const { reach } = row.visit;
+  const length = reach.endMin - reach.startMin;
+  if (!open && row.proposal) return { ...base, decision: 'cap', would: 'reorder', to_start: row.proposal };
+  const own = await reorderStart(row, ctx);
+  if (own != null) {
+    const start = own - (reach.ownStartMin - reach.startMin);
+    taken.push({ tech: techOf(row), date: day, start, end: start + length });
+    return { ...base, decision: 'reorder', to_start: toHHMM(own) };
+  }
+  // No dry open hour left on the day. Only a wholly wet day moves to another one: the point's own hours, read again
+  // (the NWS read is cached by grid cell).
   const hourly = await read(row.visit.point.lat, row.visit.point.lng);
   if (!Array.isArray(hourly)) return { ...base, decision: 'none', reason: 'unread_forecast' };
   const { wet } = rainMode.countWetHours(hourly, day);
@@ -142,6 +190,7 @@ async function proposeFor(row, ctx) {
   if (!open) return { ...base, decision: 'cap', would: 'day_move' };
   const target = await dryDayFor(row, hourly, ctx);
   if (!target) return { ...base, decision: 'none', reason: 'no_dry_day' };
+  taken.push({ tech: techOf(row), date: target.date, start: target.startMin, end: target.end });
   return { ...base, decision: 'day_move', to_date: target.date, to_start: target.start, series: false };
 }
 
@@ -152,13 +201,15 @@ async function decideDay(rows, ctx) {
     || (String(a.visit.id) < String(b.visit.id) ? -1 : String(a.visit.id) > String(b.visit.id) ? 1 : 0));
   const proposals = [];
   const seen = new Set();
+  // Targets accepted so far, so two stops of one technician never take the same hour.
+  const taken = [];
   let used = 0;
   for (const row of ordered) {
     if (seen.has(String(row.visit.id))) continue;
     seen.add(String(row.visit.id));
     let proposal;
     try {
-      proposal = await proposeFor(row, { ...ctx, open: used < MAX_PROPOSALS });
+      proposal = await proposeFor(row, { ...ctx, taken, open: used < MAX_PROPOSALS });
     } catch (err) {
       logger.warn(`[schedule-rain-record] visit ${row.visit.id} proposal failed: ${err.message}`);
       proposal = { id: String(row.visit.id), start: row.start, decision: 'none', reason: 'error' };
@@ -167,21 +218,40 @@ async function decideDay(rows, ctx) {
     if (ACTIONS.has(proposal.decision)) used += 1;
     proposals.push(proposal);
   }
-  return { proposals, checked: outdoor.length, dry: outdoor.filter((row) => row.reason === 'not_wet').length };
+  return { proposals, checked: outdoor.length, dry: outdoor.filter((row) => row.reason === 'not_wet' && row.dry === true).length };
 }
 
 /** The target day's plan: rain-pass's read-only verdicts for that date, then this record's decisions. */
 async function planDay({ now, conn, day, today, read, deps }) {
   const readHourly = nwsReader(read);
   const stopsFor = deps.loadStops || ((c) => rainPass.loadStops(c, day, day));
+  // The occupancy snapshot rain-pass reads is kept, so a re-picked hour is judged against the same stops.
+  const RainOut = deps.rainOut || require('../rain-out');
+  let snapshot = null;
+  const rainOut = {
+    loadOccupancy: async (args) => { snapshot = await RainOut.loadOccupancy(args); return snapshot; },
+    conflictsForTarget: (...args) => RainOut.conflictsForTarget(...args),
+  };
+  // No notice to lead here: a stop that starts within 2 hours (a 6 AM recheck of an 8 AM visit) still has its rain read.
   const rows = (await rainPass.planRainPass({
     now, db: conn,
-    deps: { ...deps, loadStops: stopsFor, hourlyRain: (lat, lng) => readHourly(lat, lng) },
+    deps: { ...deps, rainOut, leadMinutes: 0, loadStops: stopsFor, hourlyRain: (lat, lng) => readHourly(lat, lng) },
   })).filter((row) => row.date === day);
-  const decided = await decideDay(rows, { day, today, read: readHourly, dayOptions: deps.dayOptions || defaultDayOptions });
-  // Every outdoor visit unread, none read: the forecast is down, not dry.
+  const parts = etParts(now);
+  const occupied = (visit, date, start, end) => !snapshot || RainOut.conflictsForTarget(
+    snapshot, visit.id, date, { start: toHHMM(start), end: toHHMM(end) },
+    { excludeServiceIds: visit.memberIds, technicianId: visit.technician_id },
+  ).length > 0;
+  const decided = await decideDay(rows, {
+    day, today, read: readHourly, dayOptions: deps.dayOptions || defaultDayOptions, occupied,
+    dayHours: rainPass.serviceDay(deps),
+    earliestMin: day === today ? parts.hour * 60 + parts.minute : 0,
+  });
+  // Every visit that could be read gave no reading: the forecast is down, not dry. A visit with no point is not one
+  // that could be read.
+  const eligible = decided.proposals.filter((p) => p.reason !== 'no_point').length;
   const unread = decided.proposals.filter((p) => p.reason === 'unread_forecast').length;
-  const problem = decided.checked > 0 && unread === decided.checked ? `forecast unread for all ${unread} outdoor visit(s) on ${day}` : null;
+  const problem = eligible > 0 && unread === eligible ? `forecast unread for all ${unread} outdoor visit(s) on ${day}` : null;
   return { ...decided, problem };
 }
 

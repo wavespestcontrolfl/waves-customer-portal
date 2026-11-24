@@ -81,8 +81,9 @@ describe('targetDay', () => {
   test('from 2 PM the next work day (the cutoff), before 2 PM today (a recheck), never a Sunday', () => {
     expect(record.targetDay(TUE_CUTOFF)).toMatchObject({ day: WED, kind: 'cutoff' });
     expect(record.targetDay(WED_RECHECK)).toMatchObject({ day: WED, kind: 'recheck' });
-    // Saturday 2 PM looks at Monday; Sunday 2 PM too; a Sunday morning decides nothing yet.
-    expect(record.targetDay(parseETDateTime('2026-11-28T14:06'))).toMatchObject({ day: '2026-11-30', kind: 'cutoff' });
+    // Sunday is no work day; a Sunday morning decides nothing yet.
+    // The cutoff is the calendar day before the target: Saturday 2 PM is not Monday's cutoff, Sunday 2 PM is.
+    expect(record.targetDay(parseETDateTime('2026-11-28T14:06'))).toMatchObject({ day: '2026-11-30', kind: 'none' });
     expect(record.targetDay(parseETDateTime('2026-11-29T14:06'))).toMatchObject({ day: '2026-11-30', kind: 'cutoff' });
     expect(record.targetDay(parseETDateTime('2026-11-29T06:06'))).toMatchObject({ day: '2026-11-30', kind: 'none' });
   });
@@ -110,7 +111,7 @@ describe('proposals', () => {
     expect(out.proposals).toEqual([{
       id: 'v01', start: '14:00', peak: 80, decision: 'day_move', to_date: THU, to_start: '09:00', series: false,
     }]);
-    expect(d.dayOptions).toHaveBeenCalledWith('v01');
+    expect(d.dayOptions).toHaveBeenCalledWith('v01', 60);
   });
 
   test('a day move needs a dry day in the forecast: none with the reason when every listed day is wet or past it', async () => {
@@ -341,6 +342,95 @@ describe('it changes nothing', () => {
   test('the module has no way to text, email, notify or write a visit', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/scheduling/rain-schedule-record.js'), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-    expect(source).not.toMatch(/notifyAdmin|raiseAdminAlert|sendSMS|sendSms|twilio|sendgrid|resend|\.commit\(|scheduled_services|rain-out|\.update\(|\.del\(|\.delete\(/i);
+    expect(source).not.toMatch(/notifyAdmin|raiseAdminAlert|sendSMS|sendSms|twilio|sendgrid|resend|\.commit\(|handOffToCustomer|scheduled_services|\.update\(|\.del\(|\.delete\(/i);
+  });
+});
+
+// Fixes from the pre-push audit.
+describe('audit fixes', () => {
+  const hoursOn = (date, wet = []) => Array.from({ length: 24 }, (_, h) => ({
+    startTime: `${date}T${String(h).padStart(2, '0')}:00:00-05:00`, rainChance: wet.includes(h) ? 80 : 10,
+  }));
+
+  test('two wet stops of one technician never take the same dry hour; two technicians may', async () => {
+    const same = [stop({ technician_id: 'tx' }), stop({ technician_id: 'tx' })];
+    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(same), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    expect(out.proposals.map((p) => [p.id, p.decision, p.to_start])).toEqual([['v01', 'reorder', '10:00'], ['v02', 'reorder', '09:00']]);
+    n = 0;
+    const two = [stop({ technician_id: 'tx' }), stop({ technician_id: 'ty' })];
+    const apart = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(two), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    expect(apart.proposals.map((p) => p.to_start)).toEqual(['10:00', '10:00']);
+  });
+
+  test('two day moves of one technician never take the same hour on the target day', async () => {
+    const rows = [stop({ technician_id: 'tx' }), stop({ technician_id: 'tx' })];
+    const d = deps(rows, { dayOptions: jest.fn(async () => [{ date: THU, suggestedWindow: { start: '09:00' } }, { date: THU, suggestedWindow: { start: '11:00' } }]) });
+    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hoursFor(ALL_DAY)) });
+    expect(out.proposals.map((p) => [p.decision, p.to_date, p.to_start])).toEqual([['day_move', THU, '09:00'], ['day_move', THU, '11:00']]);
+  });
+
+  test('a day move probes the stop\'s own length, not an hour', async () => {
+    const row = stop({ window_end: '16:30:00', estimated_duration_minutes: 150 });
+    const length = (({ reach }) => reach.endMin - reach.startMin)(rainPass._test.groupStops([row])[0]);
+    expect(length).toBeGreaterThan(60);
+    n = 0;
+    const d = deps([stop({ window_end: '16:30:00', estimated_duration_minutes: 150 })], { dayOptions: jest.fn(async () => [{ date: THU, suggestedWindow: { start: '09:00' } }]) });
+    await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hoursFor(ALL_DAY)) });
+    expect(d.dayOptions).toHaveBeenCalledWith('v01', length);
+  });
+
+  test('a span with an hour the forecast did not read is unread, not dry', async () => {
+    const conn = fakeConn();
+    // 14:00 reads 10%; 15:00 and 16:00 (the rest of the visit and its drying time) have no reading.
+    const hours = hoursFor({}).filter((h) => !(h.startTime.startsWith(`${WED}T15`) || h.startTime.startsWith(`${WED}T16`)));
+    const out = await run({ now: TUE_CUTOFF, conn, deps: deps([stop()]), read: jest.fn(async () => hours) });
+    expect(out.proposals).toEqual([{ id: 'v01', start: '14:00', decision: 'none', reason: 'unread_forecast' }]);
+    expect(daysOf(conn)[WED]).toBeUndefined(); // the only visit is unread: no forecast, nothing frozen
+    const read = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()]), read: jest.fn(async () => hoursFor({})) });
+    expect(read.proposals[0]).toMatchObject({ decision: 'none', reason: 'forecast_dry' });
+  });
+
+  test('one visit with no point and one whose forecast failed is an unread day: nothing is frozen', async () => {
+    const conn = fakeConn();
+    const out = await run({ now: TUE_CUTOFF, conn, deps: deps([stop({ point: null }), stop()]), read: jest.fn(async () => null) });
+    expect(out.problems[0]).toMatch(/forecast unread for all 1 outdoor visit/);
+    expect(daysOf(conn)[WED]).toBeUndefined();
+    // Only no-point visits: nothing could be read, and that is not a forecast failure.
+    n = 0;
+    const alone = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop({ point: null })]), read: jest.fn(async () => null) });
+    expect(alone.problems).toEqual([]);
+  });
+
+  test('at 6 AM a stop that starts within two hours still has its rain judged', async () => {
+    const row = stop({ window_start: '08:00:00', window_end: '09:00:00' });
+    const out = await run({ now: WED_RECHECK, conn: fakeConn(), deps: deps([row]), read: jest.fn(async () => hoursOn(WED, [8, 9, 10])) });
+    expect(out.proposals).toEqual([{ id: 'v01', start: '08:00', peak: 80, decision: 'reorder', to_start: '11:00' }]);
+  });
+
+  test('the Saturday 2 PM run does not freeze Monday; the Sunday 2 PM run does', async () => {
+    const MON = '2026-11-30';
+    const monday = () => deps([stop({ scheduled_date: MON })]);
+    const read = jest.fn(async () => hoursOn(MON, [13, 14, 15, 16, 17]));
+    const conn = fakeConn();
+    const sat = monday();
+    await run({ now: parseETDateTime('2026-11-28T14:06'), conn, deps: sat, read });
+    expect(sat.loadStops).not.toHaveBeenCalled();
+    expect(daysOf(conn)[MON]).toBeUndefined();
+    n = 0;
+    await run({ now: parseETDateTime('2026-11-29T14:06'), conn, deps: monday(), read });
+    expect(daysOf(conn)[MON].cutoff.proposals[0]).toMatchObject({ decision: 'reorder' });
+  });
+
+  test('a day move goes to a later date only: never the planned date or an earlier one', async () => {
+    const d = deps([stop()], {
+      dayOptions: jest.fn(async () => [
+        { date: '2026-11-24', suggestedWindow: { start: '09:00' } }, // earlier, and dry
+        { date: WED, suggestedWindow: { start: '09:00' } }, // the planned date
+        { date: THU, suggestedWindow: { start: '09:00' } },
+      ]),
+    });
+    // Tuesday is dry in this forecast; only the order of dates keeps it from being picked.
+    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hoursFor(ALL_DAY)) });
+    expect(out.proposals[0]).toMatchObject({ decision: 'day_move', to_date: THU });
   });
 });

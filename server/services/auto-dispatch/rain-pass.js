@@ -222,7 +222,8 @@ async function judgeStop(visit, ctx) {
   const outdoor = services.find((service) => rainClassOf(service) === 'outdoor');
   const work = String((outdoor && outdoor.name) ?? outdoor ?? visit.service_type ?? 'visit');
   const { reach } = visit;
-  const earliestMin = date === today ? nowMin + LEAD_MINUTES : 0;
+  // `deps.leadMinutes` is for the schedule rain record, which judges rain for every visit and has no notice to lead.
+  const earliestMin = date === today ? nowMin + (deps.leadMinutes ?? LEAD_MINUTES) : 0;
   if (reach.ownStartMin < earliestMin) return { wet: false, reason: 'too_soon' };
   const point = areaPoint(visit.point);
   if (!point) return { wet: false, reason: 'no_point' };
@@ -427,5 +428,5 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
   }
 }
 
-// loadStops, loadPoints and spanRain are read-only; the schedule rain record (scheduling/rain-schedule-record.js) reuses them.
-module.exports = { runRainPass, planRainPass, loadStops, loadPoints, spanRain, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, pickPoint, VISIT_COLUMNS } };
+// loadStops, loadPoints, spanRain, dryStart and serviceDay are read-only; the schedule rain record (scheduling/rain-schedule-record.js) reuses them.
+module.exports = { runRainPass, planRainPass, loadStops, loadPoints, spanRain, dryStart, serviceDay, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, pickPoint, VISIT_COLUMNS } };
