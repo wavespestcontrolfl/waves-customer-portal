@@ -198,6 +198,26 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
     expect(line).not.toMatch(/Black Friday|Christmas Eve|Eve\b|Easter|Presidents|Martin Luther/);
     expect(hasBannedCustomerCopy(line)).toBeFalsy();
   });
+  test('the holidays line states the observed-weekday rule, and holidays.js closes exactly those days (Christmas 2027 is a Saturday)', () => {
+    const { holidaysBetween } = require('../services/scheduling/holidays');
+    const line = COMPANY_FACTS[6];
+    expect(line).toContain('falls on a Saturday, we are also closed the Friday before');
+    expect(line).toContain('falls on a Sunday, we are also closed the Monday after');
+    // only the three fixed-date holidays can fall on a weekend; the line names exactly those
+    for (const fixed of ["New Year's Day", 'the 4th of July', 'Christmas']) expect(line.split('falls on a Saturday')[0]).toContain(fixed);
+    const big6 = ['new_years_day', 'memorial_day', 'independence_day', 'labor_day', 'thanksgiving', 'christmas'];
+    const closed = (from, to) => holidaysBetween(from, to, big6).map((d) => d.date);
+    // Christmas 2027 is Saturday 12-25: Friday 12-24 is closed too
+    expect(closed('2027-12-20', '2027-12-30')).toEqual(['2027-12-24', '2027-12-25']);
+    // Christmas 2022 is a Sunday: Monday 12-26 is closed too
+    expect(closed('2022-12-20', '2022-12-30')).toEqual(['2022-12-25', '2022-12-26']);
+    // New Year's Day 2028 is a Saturday: Friday 2027-12-31 is closed
+    expect(closed('2027-12-28', '2028-01-04')).toEqual(['2027-12-31', '2028-01-01']);
+    // Black Friday, Christmas Eve on a weekday (2026-12-24) and New Year's Eve stay open
+    expect(closed('2026-11-27', '2026-11-27')).toEqual([]);
+    expect(closed('2026-12-24', '2026-12-24')).toEqual([]);
+    expect(closed('2026-12-31', '2026-12-31')).toEqual([]);
+  });
   test('the service-area line serves Charlotte County except Punta Gorda again (second technician hired)', () => {
     const line = COMPANY_FACTS[22];
     for (const place of ['Manatee', 'Sarasota', 'Charlotte County except Punta Gorda', 'Ruskin', 'Riverview']) expect(line).toContain(place);
@@ -226,7 +246,7 @@ describe('fact lines pass the drafter\'s own compliance screens', () => {
   });
   test('plain restatements of the facts are not banned copy', () => {
     for (const reply of [
-      'We are closed on New Year\'s Day, Memorial Day, the 4th of July, Labor Day, Thanksgiving and Christmas. We work Sundays and all other holidays.',
+      'We are closed on New Year\'s Day, Memorial Day, the 4th of July, Labor Day, Thanksgiving and Christmas. When New Year\'s Day, the 4th of July or Christmas falls on a Saturday, we are also closed the Friday before. When one falls on a Sunday, we are also closed the Monday after. We work Sundays and all other holidays.',
       'Rain is fine once the treatment has dried and bonded to surfaces; after that it holds up to weather.',
       'You can pay by the card on file, or by check or cash through the office, or mail a check to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.',
       'You and the friend you refer each get a $25 credit.',
@@ -685,6 +705,21 @@ describe('rebaseCompanyFactsToCurrent (sealed-eval freezer)', () => {
     }
     expect(heldPlaceInConversationContext('CUSTOMER: synthetic\nADDRESS: 1 Sample Way, Port Charlotte, FL 33952\n')).toBe(true);
     expect(heldPlaceInConversationContext(null)).toBe(false);
+  });
+  test('the earlier conversation: a frozen block that names a holiday keeps the exchange out; the static section never counts (owner 2026-11-24)', () => {
+    const { holidayInConversationContext } = cf;
+    const withThread = (company, thread) => `UPCOMING SERVICES:\n- Sunday 2026-11-29 Quarterly Pest\n${company}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n${thread}`;
+    for (const company of knownCompanyFactsRenders()) {
+      // every known render names the six holidays; none of that counts
+      expect(holidayInConversationContext(withThread(company, '[CUSTOMER] Can I book my first visit?\n[STAFF] Yes, Tuesday works'))).toBe(false);
+      expect(holidayInConversationContext(withThread(company, '[CUSTOMER] Are you coming on Christmas?\n[CUSTOMER] Can I book?'))).toBe(true);
+      expect(holidayInConversationContext(withThread(company, '[CUSTOMER] we are away over the holidays'))).toBe(true);
+      expect(holidayInConversationContext(withThread(company, '[CUSTOMER] what about New Year\'s Day?'))).toBe(true);
+      expect(holidayInConversationContext(withThread(company, '[CUSTOMER] 4th of July weekend?'))).toBe(true);
+    }
+    // a visit date on a Sunday (or the word "closed") in the block's own sections is not a holiday reference
+    expect(holidayInConversationContext(withThread(renderCompanyFactsSection(), '[CUSTOMER] the gate was closed'))).toBe(false);
+    expect(holidayInConversationContext(null)).toBe(false);
   });
   test('the retired topics are those of the block\'s own render: the 26-line render keeps payment and inside-spray exchanges', () => {
     const block = (render) => `UPCOMING SERVICES:\n- none\n${render}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n`;

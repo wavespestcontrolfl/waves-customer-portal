@@ -23,8 +23,9 @@ const COMPANY_FACTS = Object.freeze([
   'We treat honeybees. Offer the soonest available time.',
   'Wildlife: we do rodent trapping only. Snakes, raccoons, squirrels and other wildlife are referred to a wildlife company.',
   // Owner 2026-11-24: Waves is closed on the Big 6 holidays (scheduling/holidays.js keys new_years_day,
-  // memorial_day, independence_day, labor_day, thanksgiving, christmas); every other day works.
-  'We are closed on New Year\'s Day, Memorial Day, the 4th of July, Labor Day, Thanksgiving and Christmas. We work Sundays and all other holidays.',
+  // memorial_day, independence_day, labor_day, thanksgiving, christmas); every other day works. The three fixed-date ones
+  // (New Year's Day, 4th of July, Christmas) also close the observed weekday when they fall on a weekend (holidays.js).
+  'We are closed on New Year\'s Day, Memorial Day, the 4th of July, Labor Day, Thanksgiving and Christmas. When New Year\'s Day, the 4th of July or Christmas falls on a Saturday, we are also closed the Friday before. When one falls on a Sunday, we are also closed the Monday after. We work Sundays and all other holidays.',
   'Rain: a treatment needs to dry and bond to surfaces; after that it holds up to weather.',
   'Lawn program: fertilizer, weed control and insect control only. No mowing. Treatments follow a seasonal rotation. Never name product brands.',
   'Watering advice you may give: follow the county\'s watering days, water early in the morning, and water deeply and less often.',
@@ -294,6 +295,18 @@ function heldPlaceInConversationContext(factsBlock) {
   return HELD_PLACE_CONTEXT_RE.test(rest);
 }
 
+// The holidays topic in the earlier conversation (owner 2026-11-24): a reply such as "Yes, we will be there" answers a question
+// about Christmas asked three messages up, and every earlier render told the model Waves works every holiday, so that exchange must
+// not become a reference answer either. The static COMPANY FACTS section is removed first (every known render, today's included:
+// the holidays line names the six holidays in every block). Only holiday names and the word "holiday" count here: day names such as
+// "Sunday" and the word "closed" sit in the facts block's own visit dates and notes, and would skip nearly every exchange.
+const HOLIDAY_CONTEXT_RE = /\b(?:holidays?|christmas|thanksgiving|new year(?:'?s)?(?: day)?|memorial day|labor day|independence day|(?:4th|fourth) of july|july (?:4|4th|fourth))\b/i;
+function holidayInConversationContext(factsBlock) {
+  let rest = String(factsBlock || '');
+  for (const render of knownCompanyFactsRenders()) rest = rest.split(render.replace(/\n$/, '')).join('');
+  return HOLIDAY_CONTEXT_RE.test(rest);
+}
+
 // The booking location a frozen OPEN TIMES lookup used (message_drafts.intended_actions.open_times_snapshot.lookup: the city and
 // ZIP the openings were fetched for). The facts block does not render it, so an exchange like "Can I book?" / "Tuesday works" from
 // a lead whose lookup city is Port Charlotte shows no held place anywhere else. The lookup is read whole, as text.
@@ -313,6 +326,7 @@ module.exports = {
   HOLIDAY_TOPIC_RE,
   heldPlaceInOpenTimesLookup,
   heldPlaceInConversationContext,
+  holidayInConversationContext,
   HELD_PLACE_CONTEXT_RE,
   rebaseCompanyFactsToCurrent,
   RETIRED_COMPANY_FACT_TOPIC_RE,

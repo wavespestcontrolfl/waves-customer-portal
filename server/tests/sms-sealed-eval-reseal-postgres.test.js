@@ -67,20 +67,30 @@ jest.setTimeout(180000);
     { ...ctx, visitLoops: { missedVisit: { logId: 'rl-1', type: 'Pest Control', date: '2026-10-18', windowStart: '09:00:00', windowDisplay: '9-11am' } } },
     { now: new Date('2026-10-20T15:00:00Z') },
   );
+  // An earlier render is picked by its recorded sha256 (sms-company-facts.js PRIOR_COMPANY_FACTS_RENDERS), never by its place in
+  // knownCompanyFactsRenders(): a newer render shifts every index (the holidays change of 2026-11-24 did).
+  const SHA_SEVEN_PLACE_HOLD = '73b8adba115c4c1eb3bd8c306a37b8ba3609f39cda15ac6aeb99e64080c9aa69'; // prompts 33 to 36
+  const SHA_SIX_PLACE_HOLD = '468057aeb7bdddbca9bb3c796decc7f34f86800e6957c00a0c2e7b435356891e'; // prompts 29 to 32
+  const SHA_NINETEEN_LINE = '3a72b3d4acb47ca8f95cfe6ddb9aedf65c696f6cc3f60efb5999725bf7880577'; // live 2026-10-09 to 2026-10-22
+  const renderBySha = (sha256) => {
+    const render = companyFacts.knownCompanyFactsRenders().find((r) => require('crypto').createHash('sha256').update(r).digest('hex') === sha256);
+    expect(render).toBeTruthy();
+    return render;
+  };
   // the block an earlier identity drafted: the same day-of facts, the earlier static company section
-  // (the seven-place hold render of 2026-11-23, prompts 33 to 36, is the newest earlier render)
+  // (the seven-place hold render of 2026-11-23, prompts 33 to 36: its service-area topics are the ones the cases below skip)
   const priorRenderBlock = () => {
     const now = currentBlock();
     const section = companyFacts.renderCompanyFactsSection();
     expect(now).toContain(section);
-    return now.replace(section, companyFacts.knownCompanyFactsRenders()[1]);
+    return now.replace(section, renderBySha(SHA_SEVEN_PLACE_HOLD));
   };
   // the six-place hold render of 2026-11-23 (prompts 29 to 32): the render before it (Charlotte County served except Punta Gorda,
   // prompts 25 to 28) is today's render again, so it needs no rebase
-  const sixPlaceHoldRenderBlock = () => currentBlock().replace(companyFacts.renderCompanyFactsSection(), companyFacts.knownCompanyFactsRenders()[2]);
+  const sixPlaceHoldRenderBlock = () => currentBlock().replace(companyFacts.renderCompanyFactsSection(), renderBySha(SHA_SIX_PLACE_HOLD));
   // frozen before the PORTAL SELF-CANCEL line existed (2026-10-09): not recoverable
   // a block drafted under the 19-line render (live 2026-10-09 to 2026-10-22), whose payment and inside-spray lines were reworded since
-  const nineteenLineBlock = () => currentBlock().replace(companyFacts.renderCompanyFactsSection(), companyFacts.knownCompanyFactsRenders()[3]);
+  const nineteenLineBlock = () => currentBlock().replace(companyFacts.renderCompanyFactsSection(), renderBySha(SHA_NINETEEN_LINE));
   const prePortalBlock = () => currentBlock().replace(/^PORTAL SELF-CANCEL:.*\n/m, '');
 
   const addDraft = async ({
@@ -153,6 +163,8 @@ jest.setTimeout(180000);
       facts: priorRenderBlock(), inbound: 'Can I book?', reply: 'Tuesday works.',
       intendedActions: { actions: [], open_times_snapshot: { lookup: { source: 'website_engine', city: 'Port Charlotte' } } },
     });
+    // a holiday named only earlier in the thread (owner 2026-11-24): every earlier render said Waves works every holiday
+    await addDraft({ facts: `${priorRenderBlock()}\nRECENT SMS THREAD:\n[CUSTOMER] Are you coming on Christmas?\n`, inbound: 'Can I book?', reply: 'Tuesday works.' });
 
     const out = await sealedEval.sealEvalItems({ target: 100, dbi: database });
 

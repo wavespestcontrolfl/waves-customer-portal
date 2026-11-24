@@ -42,7 +42,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const {
   COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactStructureRegexSource, hasExactCompanyFacts, hasExactLabelFacts,
-  rebaseCompanyFactsToCurrent, retiredTopicReForBlock, heldPlaceInConversationContext, heldPlaceInOpenTimesLookup,
+  rebaseCompanyFactsToCurrent, retiredTopicReForBlock, heldPlaceInConversationContext, holidayInConversationContext, heldPlaceInOpenTimesLookup,
 } = require('./sms-company-facts');
 const { LABEL_FACTS_MARKER, LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
 const { MISSED_VISIT_SCOPE_LINE } = require('./visit-loops-facts');
@@ -526,7 +526,7 @@ async function sealEvalItems(opts) {
     const onto = rebaseCompanyFactsToCurrent(c.facts_block);
     if (!onto) { candidates.push(c); continue; }
     if (!itemCompatibleWith(onto, sealVersion)) continue;
-    if (retiredTopicReForBlock(c.facts_block)?.test(`${c.inbound_message}\n${c.human_reply_text}`) || heldPlaceInConversationContext(c.facts_block)
+    if (retiredTopicReForBlock(c.facts_block)?.test(`${c.inbound_message}\n${c.human_reply_text}`) || heldPlaceInConversationContext(c.facts_block) || holidayInConversationContext(c.facts_block)
       || heldPlaceInOpenTimesLookup(c.intended_actions)) { skippedRetiredTopic += 1; continue; }
     candidates.push({ ...c, facts_block: onto, rebased: true });
   }

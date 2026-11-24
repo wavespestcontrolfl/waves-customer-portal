@@ -190,6 +190,8 @@ describe('technician eligibility', () => {
   describe('absentTechDays (slot-discovery counterpart to the date-scoped assert, codex #4678 pre-push auditor P1)', () => {
     function connAbsenceRows(rows) {
       const chain = {
+        // technicians (the birthday read) answers from the same chain: its rows carry no dob, so no birthday applies
+        where: jest.fn(() => chain),
         whereBetween: jest.fn(() => chain),
         whereNull: jest.fn(() => chain),
         whereIn: jest.fn(() => chain),
@@ -352,17 +354,18 @@ describe('technician eligibility', () => {
     test('absentTechDays: gate off reads no technicians row (byte-identical); gate on adds off days beside absences', async () => {
       const args = { dateFrom: '2026-10-26', dateTo: '2026-11-01', technicianIds: ['t1'] };
       const off = connAbsencesAndWorkDays([{ technician_id: 't1', absence_date: '2026-10-27' }], [{ id: 't1', work_days: MON_THU }]);
-      expect(await absentTechDays(off.conn, args)).toEqual(new Set(['t1:2026-10-27']));
+      // includeBirthdays: false keeps this a pure work-days pin (the birthday read selects technicians too)
+      expect(await absentTechDays(off.conn, { ...args, includeBirthdays: false })).toEqual(new Set(['t1:2026-10-27']));
       expect(off.techs.select).not.toHaveBeenCalled();
       gateOn();
       const on = connAbsencesAndWorkDays([{ technician_id: 't1', absence_date: '2026-10-27' }], [{ id: 't1', work_days: MON_THU }]);
-      expect(await absentTechDays(on.conn, args)).toEqual(new Set(['t1:2026-10-27', 't1:2026-10-30', 't1:2026-10-31', 't1:2026-11-01']));
+      expect(await absentTechDays(on.conn, { ...args, includeBirthdays: false })).toEqual(new Set(['t1:2026-10-27', 't1:2026-10-30', 't1:2026-10-31', 't1:2026-11-01']));
     });
 
     test('absentTechDays: includeOffDays false (the open-visit nudge) returns absences only, even with the gate on', async () => {
       gateOn();
       const { conn, techs } = connAbsencesAndWorkDays([], [{ id: 't1', work_days: MON_THU }]);
-      const days = await absentTechDays(conn, { dateFrom: '2026-10-26', dateTo: '2026-11-01', technicianIds: ['t1'], includeOffDays: false });
+      const days = await absentTechDays(conn, { dateFrom: '2026-10-26', dateTo: '2026-11-01', technicianIds: ['t1'], includeOffDays: false, includeBirthdays: false });
       expect(days).toEqual(new Set());
       expect(techs.select).not.toHaveBeenCalled();
     });

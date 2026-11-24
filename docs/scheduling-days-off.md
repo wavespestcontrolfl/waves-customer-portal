@@ -43,8 +43,9 @@ The owner closed the **Big 6** on 2026-11-24. The setting is written in producti
 | `thanksgiving` | Thanksgiving |
 | `christmas` | Christmas |
 
-A fixed-date holiday on a weekend also closes the observed weekday: Saturday closes the
-Friday before, Sunday closes the Monday after. Every other holiday in the file stays open:
+A fixed-date holiday (New Year's Day, 4th of July, Christmas) on a weekend also closes the
+observed weekday: Saturday closes the Friday before, Sunday closes the Monday after. Christmas
+2027 is a Saturday, so Friday 2027-12-24 is closed too. The customer-facing line says this. Every other holiday in the file stays open:
 Black Friday, Christmas Eve, New Year's Eve, Martin Luther King Jr. Day, Presidents' Day,
 Easter and the rest are normal work days.
 
@@ -61,6 +62,10 @@ Each technician gets their own birthday off, one paid day (benefits ruling E6, 2
 - It counts exactly like an absence. `absentTechDays` (the shared seam) adds
   `<technicianId>:<date>` for the birthday, and `assertAssignableTechnician` refuses the
   technician on that date with "has their birthday off on <date>".
+- A failed read of `technicians.dob` throws, like a failed `technician_absences` read, so each
+  caller applies its own policy. Booking surfaces fail as they do on an absence read error. The
+  recurring seeder and the annual-prepay seeder read in a savepoint and, on a failure, seed the
+  visits with no technician for auto-dispatch to place.
 - Payroll is unchanged. Whether the day pays is a payroll matter and lives in the payroll
   code (`payroll-time-off.js`), not here.
 

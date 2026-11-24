@@ -77,8 +77,6 @@ describe('birthdayTechDays', () => {
   function connRows(rows) {
     const chain = {
       where: jest.fn(() => chain),
-      whereNotNull: jest.fn(() => chain),
-      whereIn: jest.fn(() => chain),
       select: jest.fn(async () => rows),
     };
     const conn = jest.fn(() => chain);
@@ -95,19 +93,21 @@ describe('birthdayTechDays', () => {
     expect(days).toEqual(new Set(['t1:2026-07-14', 't2:2026-07-16']));
   });
 
-  test('reads only active technicians with a dob, narrowed to the caller\'s list', async () => {
-    const { conn, chain } = connRows([]);
-    await birthdayTechDays(conn, { dateFrom: '2026-07-10', dateTo: '2026-07-20', technicianIds: ['t1', 't2'] });
+  test('reads active technicians only, and narrows to the caller\'s technician list', async () => {
+    const rows = [{ id: 't1', dob: '1990-07-14' }, { id: 't2', dob: '1985-07-14' }, { id: 't3', dob: '1979-07-14' }];
+    const { conn, chain } = connRows(rows);
+    const narrowed = await birthdayTechDays(conn, { dateFrom: '2026-07-10', dateTo: '2026-07-20', technicianIds: ['t1', 't3'] });
     expect(conn).toHaveBeenCalledWith('technicians');
     expect(chain.where).toHaveBeenCalledWith('employment_status', 'active');
-    expect(chain.whereNotNull).toHaveBeenCalledWith('dob');
-    expect(chain.whereIn).toHaveBeenCalledWith('id', ['t1', 't2']);
+    expect(narrowed).toEqual(new Set(['t1:2026-07-14', 't3:2026-07-14']));
+    // no list (or an empty one) = every active technician
+    expect((await birthdayTechDays(conn, { dateFrom: '2026-07-10', dateTo: '2026-07-20', technicianIds: [] })).size).toBe(3);
+    expect((await birthdayTechDays(conn, { dateFrom: '2026-07-10', dateTo: '2026-07-20' })).size).toBe(3);
   });
 
-  test('no technician list reads every active technician', async () => {
-    const { conn, chain } = connRows([]);
-    await birthdayTechDays(conn, { dateFrom: '2026-07-10', dateTo: '2026-07-20' });
-    expect(chain.whereIn).not.toHaveBeenCalled();
+  test('a technician with a NULL dob adds nothing', async () => {
+    const { conn } = connRows([{ id: 't1', dob: null }, { id: 't2', dob: undefined }]);
+    expect(await birthdayTechDays(conn, { dateFrom: '2026-01-01', dateTo: '2026-12-31' })).toEqual(new Set());
   });
 
   test('nobody with a birthday in range gives an empty Set', async () => {
@@ -115,10 +115,24 @@ describe('birthdayTechDays', () => {
     expect(await birthdayTechDays(conn, { dateFrom: '2026-07-10', dateTo: '2026-07-20' })).toEqual(new Set());
   });
 
-  test('a failed read applies no birthdays and warns, never throws', async () => {
+  test('a failed read throws, as a failed technician_absences read does: no silent "no birthdays"', async () => {
     const conn = jest.fn(() => { throw new Error('boom'); });
-    await expect(birthdayTechDays(conn, { dateFrom: '2026-07-10', dateTo: '2026-07-20' })).resolves.toEqual(new Set());
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('birthday read failed'));
+    await expect(birthdayTechDays(conn, { dateFrom: '2026-07-10', dateTo: '2026-07-20' })).rejects.toThrow('boom');
+    const asyncFail = jest.fn(() => ({
+      where: () => ({ select: async () => { throw new Error('read refused'); } }),
+    }));
+    await expect(birthdayTechDays(asyncFail, { dateFrom: '2026-07-10', dateTo: '2026-07-20' })).rejects.toThrow('read refused');
+  });
+  test('inside a transaction a failed read rolls back to its savepoint and the transaction stays usable', async () => {
+    const raw = jest.fn(async () => {});
+    const trx = jest.fn(() => { throw new Error('boom'); });
+    trx.isTransaction = true;
+    trx.raw = raw;
+    await expect(birthdayTechDays(trx, { dateFrom: '2026-07-10', dateTo: '2026-07-20' })).rejects.toThrow('boom');
+    const sql = raw.mock.calls.map(([q]) => q);
+    expect(sql.some((q) => /^SAVEPOINT /.test(q))).toBe(true);
+    expect(sql.some((q) => /^ROLLBACK TO SAVEPOINT /.test(q))).toBe(true);
+    expect(sql.some((q) => /^RELEASE SAVEPOINT /.test(q))).toBe(true);
   });
 });
 
@@ -133,8 +147,6 @@ describe('absentTechDays carries birthdays through the shared seam', () => {
     };
     const techChain = {
       where: jest.fn(() => techChain),
-      whereNotNull: jest.fn(() => techChain),
-      whereIn: jest.fn(() => techChain),
       select: jest.fn(async () => techs),
     };
     const conn = jest.fn((table) => (table === 'technician_absences' ? absenceChain : techChain));
@@ -155,6 +167,20 @@ describe('absentTechDays carries birthdays through the shared seam', () => {
     const days = await absentTechDays(conn, { dateFrom: '2026-07-10', dateTo: '2026-07-20', includeBirthdays: false });
     expect(days).toEqual(new Set());
     expect(techChain.select).not.toHaveBeenCalled();
+  });
+
+  test('a failed birthday read fails absentTechDays too, so each caller applies its own failure policy', async () => {
+    const absenceChain = {
+      whereBetween: jest.fn(() => absenceChain), whereNull: jest.fn(() => absenceChain), whereIn: jest.fn(() => absenceChain),
+      select: jest.fn(async () => []),
+    };
+    const conn = jest.fn((table) => {
+      if (table === 'technician_absences') return absenceChain;
+      throw new Error('dob read refused');
+    });
+    await expect(absentTechDays(conn, { dateFrom: '2026-07-10', dateTo: '2026-07-20' })).rejects.toThrow('dob read refused');
+    // the owner can still opt out of the birthday read
+    await expect(absentTechDays(conn, { dateFrom: '2026-07-10', dateTo: '2026-07-20', includeBirthdays: false })).resolves.toEqual(new Set());
   });
 
   test('a technician with no dob adds nothing', async () => {

@@ -152,6 +152,27 @@ describe('seriesSlotAbsentDays', () => {
   });
 });
 
+describe('seriesSlotAbsentDays: a failed birthday read (technicians.dob)', () => {
+  test('leaves every seed unassigned, like a failed absence read', async () => {
+    const { conn } = makeConn({ throwOn: 'technicians' });
+    const days = await seriesSlotAbsentDays(conn, { technicianId: 'tech-1' }, ['2026-12-15', '2027-01-15']);
+    expect(days).toEqual(new Set(['tech-1:2026-12-15', 'tech-1:2027-01-15']));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('boom technicians'));
+  });
+
+  test('a technician on their birthday is away that day only', async () => {
+    const { conn } = makeConn({});
+    const q = conn.getMockImplementation();
+    conn.mockImplementation((table) => {
+      const query = q(table);
+      if (table === 'technicians') query.select = jest.fn(async () => [{ id: 'tech-1', dob: '1990-12-15' }]);
+      return query;
+    });
+    const days = await seriesSlotAbsentDays(conn, { technicianId: 'tech-1' }, ['2026-12-15', '2027-01-15']);
+    expect(days).toEqual(new Set(['tech-1:2026-12-15']));
+  });
+});
+
 describe('seriesSlotPatch', () => {
   const slot = { technicianId: 'tech-1', windowStart: '09:00' };
 

@@ -403,23 +403,20 @@ function birthdayDatesInRange(dob, dateFrom, dateTo) {
  * that is an ACTIVE technician's birthday off, as a Set of `${technicianId}:${date}`
  * keys, the same shape absentTechDays returns. `technicianIds` narrows the read
  * as it does there. No gate. One read of technicians; empty when no technician
- * in scope has a dob. A failed read is isolated in a savepoint and reads as "no
- * birthdays", so a bad read never takes scheduling down with it.
+ * in scope has a dob. A failed read THROWS, as a failed technician_absences read does
+ * (it is isolated in a savepoint inside a transaction, so a caller that catches
+ * keeps its transaction): each caller applies its own failure policy, never "no
+ * birthdays" by default.
  */
 async function birthdayTechDays(conn, { dateFrom, dateTo, technicianIds = null } = {}) {
   const days = new Set();
   if (!dateFrom || !dateTo) return days;
-  try {
-    const rows = await savepointRead(conn, (q) => {
-      let query = q('technicians').where('employment_status', 'active').whereNotNull('dob');
-      if (Array.isArray(technicianIds) && technicianIds.length) query = query.whereIn('id', technicianIds);
-      return query.select('id', 'dob');
-    });
-    for (const row of Array.isArray(rows) ? rows : []) {
-      for (const d of birthdayDatesInRange(row.dob, dateFrom, dateTo)) days.add(`${row.id}:${d}`);
-    }
-  } catch (err) {
-    logger.warn(`[technician-eligibility] birthday read failed (no birthdays applied): ${err.message}`);
+  // Active technicians are a handful of rows, so a NULL dob and the caller's technician list are applied below, not in SQL.
+  const rows = await savepointRead(conn, (q) => q('technicians').where('employment_status', 'active').select('id', 'dob'));
+  const wanted = Array.isArray(technicianIds) && technicianIds.length ? new Set(technicianIds.map(String)) : null;
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (wanted && !wanted.has(String(row.id))) continue;
+    for (const d of birthdayDatesInRange(row.dob, dateFrom, dateTo)) days.add(`${row.id}:${d}`);
   }
   return days;
 }
