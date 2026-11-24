@@ -22,6 +22,7 @@ const { getActiveLawnProtocol } = require('../services/lawn-protocol-operating-l
 const protocolReader = require('../services/protocol-reader');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
+const stonewallMigration = require('../models/migrations/20261122120000_lawn_v13_october_stonewall');
 const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const aprilPolymerMigration = require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3');
 // August and September hose visits: the liquid potassium (20261029170000), one more whole-lawn tool beside Nutra-TECH.
@@ -32,6 +33,13 @@ const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 const V13_GRASSES = ['st_augustine', 'bermuda', 'zoysia'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
+
+// The program the readers get carries the reclaimed-water wording in two sentences of each track (lawn-program.js); compare the rest.
+const withoutReclaimedWording = (programs) => Object.fromEntries(Object.entries(programs).map(([track, program]) => [track, {
+  ...program,
+  notes: program.notes.filter((line) => !/Reclaimed-water lawns \(purple pipes/.test(line)),
+  safety_rules: program.safety_rules.filter((line) => !/reclaimed-water lawns/.test(line)),
+}]));
 
 function withGate(value, fn) {
   const saved = process.env.GATE_LAWN_V13;
@@ -67,7 +75,7 @@ describe('gate and loader', () => {
     expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
     // Gate on, bermuda removal gate off and the December swap gate off: v13 without the per-visit addOns and swaps blocks.
     const stripped = Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(({ addOns, swaps, ...visit }) => visit) }]));
-    expect(withGate('true', () => lawnProtocols())).toEqual(stripped);
+    expect(withoutReclaimedWording(withGate('true', () => lawnProtocols()))).toEqual(withoutReclaimedWording(stripped));
     expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
     expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('"swaps":');
   });
@@ -88,12 +96,12 @@ describe('gate and loader', () => {
     }
   });
 
-  test('the December swaps block reaches the shared reader only while GATE_LAWN_DEC_LARGE_PATCH_K (and the trouble-area gates it needs) is on; both blocks on gives v13 itself', () => {
+  test('the December swaps block reaches the shared reader only while GATE_LAWN_DEC_LARGE_PATCH_K (and the trouble-area gates it needs) is on; both blocks on gives v13 itself (but for the reclaimed-water wording)', () => {
     const names = ['GATE_LAWN_BERMUDA_REMOVAL', 'GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET'];
     const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     try {
       for (const name of names) process.env[name] = 'true';
-      expect(withGate('true', () => lawnProtocols())).toBe(v13);
+      expect(withoutReclaimedWording(withGate('true', () => lawnProtocols()))).toEqual(withoutReclaimedWording(v13));
       expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('largePatchPotassium');
       // The swap gate off, or one gate it needs off: no swaps, and the bermuda add-ons are unaffected.
       for (const name of ['GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET']) {
@@ -186,7 +194,7 @@ describe('gate off is byte-identical for the readers', () => {
         expect(got.visit.primary).toContain('LESCO 24-0-11 with PolyPlus OPTI');
         expect(got.track.name).toContain('v13');
       }
-      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toEqual({ ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, swaps, ...visit }) => visit) });
+      expect(withoutReclaimedWording({ zoysia: protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol }).zoysia).toEqual(withoutReclaimedWording({ zoysia: { ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, swaps, ...visit }) => visit) } }).zoysia);
     });
   });
 
@@ -256,8 +264,20 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
         const got = engine.selectProtocolVisit({ grass_type: grass }, date, null, { requireKnownGrass });
         expect(got.trackKey).toBe(LAWN_V13_ANY_GRASS_TRACK);
         expect(got.visit).toBe(v13[LAWN_V13_ANY_GRASS_TRACK].visits.find((v) => v.month === 'Oct'));
+        expect(got.herbicideTurfHold).toBe(true);
       }
     });
+  });
+
+  test('a mixed or unidentified treated patch holds herbicides but leaves non-herbicide work available', () => {
+    expect(engine.unresolvedTreatedTurf({ treatedTurfSpecies: 'unidentified' })).toBe(true);
+    expect(engine.unresolvedTreatedTurf({ conditionFlags: ['mixed turf treated patch'] })).toBe(true);
+    expect(engine.unresolvedTreatedTurf({ treatedTurfSpecies: 'zoysia' })).toBe(false);
+    const herbicide = { product: { id: 'h', name: 'Celsius WG', category: 'herbicide' }, selected: true };
+    const nutrition = { product: { id: 'n', name: 'Iron Plus', category: 'micronutrient' }, selected: true };
+    const held = engine.holdUnresolvedTurfHerbicides([herbicide, nutrition], new Map(), true);
+    expect(held[0]).toMatchObject({ selected: false, fieldHold: 'turf_species_herbicide_hold' });
+    expect(held[1]).toBe(nutrition);
   });
 
   test.each(['mixed', 'unknown', 'centipede'])('gate off: recorded %s still has no track', (grass) => {
@@ -292,9 +312,11 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
 // ── Every line resolves to the intended catalog row ──────────────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-// October's whole-lawn bag is the Dimension 0.21% 18-0-10 row (20261007120500 swaps it in for
-// the staged Stonewall 15-0-15 line).
+// The Dimension 0.21% 18-0-10 row: the 9x April step still names it (20261007120500 swapped it into October
+// for the staged Stonewall 15-0-15 line; 20261122120000 moved October on to Stonewall 0.37% 18-0-10).
 const DIMENSION_18 = octoberMigration.NEW_NAME;
+// October's whole-lawn bag since owner ruling 2026-11-21: the same 4.04 lb per 1,000 sq ft, prodiamine instead of dithiopyr.
+const STONEWALL_18 = stonewallMigration.NEW_NAME;
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
 // June and July mole cricket nymph spots: the Advion Insect Granule catalog row (20261023140000).
@@ -303,7 +325,9 @@ const advionMigration = require('../models/migrations/20261023140000_lawn_v13_ad
 const F10_22 = decemberMigration.NEW_NAME;
 // April's 12x whole-lawn bag is the LESCO 44-0-0 polymer row (20261022195000 swaps it in for the staged 24-0-11 line).
 const F44_0_0 = aprilPolymerMigration.NEW_NAME;
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, potassiumMigration.NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME];
+// The house bifenthrin since owner ruling 2026-11-18 (migration 20261119010000 links the staged Talak rows to it); Talak stays a catalog row.
+const HOUSE_BIFENTHRIN = 'LESCO Crosscheck Plus';
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, STONEWALL_18, F10_22, F44_0_0, potassiumMigration.NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME, HOUSE_BIFENTHRIN];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -490,12 +514,12 @@ describe('completion defaults with the v13 protocol resolved', () => {
     2: [migration.NAMES.F24],
     3: [migration.NAMES.DIM, migration.NAMES.NT],
     4: [F44_0_0],
-    5: [migration.NAMES.TET],
+    5: [],
     6: [migration.NAMES.NT, migration.NAMES.DIM],
     7: [],
     8: [migration.NAMES.NT, potassiumMigration.NAME],
     9: [migration.NAMES.NT, potassiumMigration.NAME],
-    10: [DIMENSION_18],
+    10: [STONEWALL_18],
     11: [migration.NAMES.F24],
     12: [F10_22],
   };
@@ -509,9 +533,9 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const parsed = [...engine.parseProtocolLines(visit.primary, 'base', { exactName }), ...engine.parseProtocolLines(visit.secondary, 'conditional', { exactName })];
     const resolved = engine.resolveProtocolItems(parsed, catalog, {}, {});
     const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
-    // The staged rows as 20261007120500 leaves them: October's bag is Dimension 18-0-10 at 4.04 lb.
+    // The staged rows as 20261007120500 and 20261122120000 leave them: October's bag is Stonewall 0.37% 18-0-10 at 4.04 lb.
     const swapped = (spec) => (spec[0] === octoberMigration.OLD_NAME
-      ? [DIMENSION_18, spec[1], spec[2], octoberMigration.OCT_RATE, spec[4], spec[5], spec[6], { ...spec[7], ...octoberMigration.NEW_GATES }]
+      ? [STONEWALL_18, spec[1], spec[2], stonewallMigration.OCT_RATE, spec[4], spec[5], spec[6], { ...spec[7], ...stonewallMigration.NEW_GATES }]
       : spec);
     // 20261008130000 swaps December's 24-0-11 row for the 10-0-22 (still a lb_n row; the target is 0.45 lb N).
     const decSwapped = (spec) => (spec[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW
@@ -764,14 +788,14 @@ describe('plan engine reads the matched v13 protocol row', () => {
   });
 
   test('sunnyTurfOnly narrows a whole-lawn line by the profile sun exposure; no flag, no change', () => {
-    const [tetrino] = engine.parseProtocolLines(visitFor(5).primary, 'base', { exactName: true });
-    expect(tetrino.scope).toBe('BROADCAST_FULL');
-    const flagged = { ...tetrino, sunnyTurfOnly: true };
+    const [tetrino] = engine.parseProtocolLines(visitFor(5).secondary, 'conditional', { exactName: true });
+    expect(tetrino.scope).toBe('CONDITIONAL_RESCUE');
+    const flagged = { ...tetrino, sunnyTurfOnly: true, selected: true };
     expect(engine.effectiveAreaFactor(flagged, { sunExposure: 'full_sun' })).toBe(1);
     expect(engine.effectiveAreaFactor(flagged, { sunExposure: 'partial_shade' })).toBe(0.5);
     expect(engine.effectiveAreaFactor(flagged, { sunExposure: 'heavy_shade' })).toBe(0);
     expect(engine.effectiveAreaFactor(flagged, {})).toBe(0.5);
-    expect(engine.effectiveAreaFactor(tetrino, { sunExposure: 'heavy_shade' })).toBe(1);
+    expect(engine.effectiveAreaFactor(tetrino, { sunExposure: 'heavy_shade' })).toBe(0);
     // Only the Tetrino row asks for it.
     const asking = migration.PRODUCTS.filter(([, s]) => s[7]?.sunnyTurfOnly).map(([, s]) => s[0]);
     expect(asking).toEqual([migration.NAMES.TET]);
@@ -849,11 +873,10 @@ describe('the material-cost audit reads the gate-aware program', () => {
       expect(itemOf(analyze(2), N.F24).mix.ratePer1000).toBe(4.2);
     });
 
-    test('sunnyTurfOnly narrows the Tetrino line to the half the audit has no profile for', () => {
+    test('the optional Tetrino line is not costed before a scouting decision selects it', () => {
       const rows = rowsFor(5, { tet: { ratePer1000: 0.367, rateUnit: 'fl oz', gates: { sunnyTurfOnly: true } } });
-      const narrowed = itemOf(analyze(5, rows), N.TET).mix;
-      const whole = itemOf(analyze(5), N.TET).mix;
-      expect(narrowed.amount).toBeCloseTo(whole.amount / 2, 3);
+      expect(itemOf(analyze(5, rows), N.TET).mix).toMatchObject({ amount: null, treatedSqft: null, areaFactor: 0 });
+      expect(itemOf(analyze(5), N.TET).mix).toMatchObject({ amount: null, treatedSqft: null, areaFactor: 0 });
     });
 
     test('a spot row is not priced: no amount, as in the plan; the whole-lawn rows around it still are', () => {
@@ -861,7 +884,7 @@ describe('the material-cost audit reads the gate-aware program', () => {
       const rows = new Map([['bermuda|May', new Map([['are', { applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: {} }], ['tet', { applicationMode: 'broadcast', ratePer1000: 0.367, rateUnit: 'fl oz', gates: {} }]])]]);
       const result = auditScript.analyzeVisit({ trackKey: 'bermuda', track: v13.bermuda, visit: visitFor(5), products: withArena, options, v13Rows: rows });
       expect(itemOf(result, matrixMigration.ARENA_OLD).mix).toBeNull();
-      expect(itemOf(result, N.TET).mix.amount).toBeGreaterThan(0);
+      expect(itemOf(result, N.TET).mix).toMatchObject({ amount: null, treatedSqft: null, areaFactor: 0 });
     });
 
     test('with the gate off the loader returns an empty row set for every track and month', async () => {
@@ -917,19 +940,29 @@ describe('lb_n nutrition rows derive from the visit target (v13)', () => {
     expect(amountFor(f10, 12, { ratePer1000: null, rateUnit: null })).toMatchObject({ amount: 4.5 });
   });
 
-  test('October Dimension 18-0-10 is its stated 4.04 lb (0.73 lb N, 0.40 lb K2O, the commercial Coastal South rate)', () => {
-    const row = { ratePer1000: octoberMigration.OCT_RATE, rateUnit: 'lb' };
-    const result = amountFor(dim18, 10, row);
+  test('October Stonewall 0.37% 18-0-10 is its stated 4.04 lb (0.73 lb N, 0.40 lb K2O)', () => {
+    const stonewall18 = { ...dim18, id: 's18', name: STONEWALL_18 };
+    const row = { ratePer1000: stonewallMigration.OCT_RATE, rateUnit: 'lb' };
+    const result = amountFor(stonewall18, 10, row);
     expect(result).toMatchObject({ rateSource: 'protocol_rate', amount: 4.04 });
     expect(result.amount * 0.18).toBeCloseTo(0.7272, 4);
     expect(result.amount * 0.10).toBeCloseTo(0.404, 4);
-    // 4.04 lb x 0.21% = 0.0085 lb ai per 1,000 sq ft = 0.37 lb ai per acre, under the 5.46 lb per-application maximum.
-    expect((result.amount * 0.0021) * 43.56).toBeCloseTo(0.37, 2);
-    expect(result.amount).toBeLessThan(octoberMigration.MAX_LABEL);
+    // 4.04 lb x 0.37% = 0.0149 lb ai per 1,000 sq ft = 0.65 lb prodiamine per acre; with January 4FL (0.68) the year is 1.33, under 1.5.
+    expect((result.amount * 0.0037) * 43.56).toBeCloseTo(0.65, 2);
+    expect(0.68 + (result.amount * 0.0037) * 43.56).toBeLessThan(1.5);
     // The recipe's own October notes and primary line state the same figures.
     const targets = engine.parseVisitNutrientTargets(visitFor(10).notes);
     expect(targets).toMatchObject({ targetNPer1000: 0.73, targetKPer1000: 0.4 });
     expect(visitFor(10).primary).toContain('4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O)');
+  });
+
+  test('both combination bags are pre-emergent bags that keep their rate on reclaimed water: the Dimension granular by its name, Stonewall 0.37% 18-0-10 by its own', () => {
+    expect(engine.isPreEmergentBag(DIMENSION_18)).toBe(true);
+    expect(engine.isPreEmergentBag(STONEWALL_18)).toBe(true);
+    expect(engine.isPreEmergentBag(visitFor(10).primary)).toBe(true);
+    // Stonewall 4FL (the January liquid) and the plain nitrogen bags are not.
+    expect(engine.isPreEmergentBag('LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide')).toBe(false);
+    expect(engine.isPreEmergentBag(migration.NAMES.F24)).toBe(false);
   });
 
   test('without a v13 row (gate off or no match) the catalog default still applies, unchanged', () => {
@@ -1054,7 +1087,8 @@ describe('nematode lab note (owner 2026-11-01, YouTube lawn-problems read, chang
     expect(soil).toBeGreaterThan(-1);
     expect(notes.indexOf(NEMATODE)).toBe(soil + 1);
     // The soil-test rule (owner 2026-10-31) still orders the labs: soil test first, one lab sample at a time.
-    expect(notes[soil]).toContain('A soil test comes before a UF plant lab sample, never both at once.');
+    expect(notes[soil]).toContain('do not delay an urgent disease or virus diagnosis');
+    expect(notes[soil]).toContain('Never collect both samples at once.');
   });
 
   test.each(V13_GRASSES)('%s: the soil-test note keeps the free trigger tests and adds the paid test (owner 2026-11-02)', (grass) => {

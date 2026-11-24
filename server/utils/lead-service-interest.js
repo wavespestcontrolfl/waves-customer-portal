@@ -230,6 +230,30 @@ function familiesIn(text) {
     .map((hit) => hit.fam);
 }
 
+// A caller's request text, cleaned for the family scan: a service compared away or negated is not a request, a
+// pest's location is context ("ants in the lawn"), turf pests are lawn, an exterminator is pest control.
+const requestScanText = (requested) => normalizeExterminator(normalizePalmInjection(normalizeLawnPests(
+  stripLocationPhrases(stripNegatedClauses(stripComparedAway(requested))),
+)));
+
+// The families a free-text request ASKS for (familiesIn after requestScanText), in the order said.
+function requestedFamiliesIn(text) {
+  const requested = cleanText(text);
+  return requested ? familiesIn(requestScanText(requested)) : [];
+}
+
+// The parts of a request ("a + b", "a, b", "a and b"), after the same clean-up, that name NO family this composer
+// knows: a stored catalog label with no family word ("Roof-Entry Cover / Bird Box Service", "Core Aeration"). A
+// caller that routes by the request reads these as service NAMES (line-technician assessmentLineForInterest).
+const REQUEST_PART_SPLIT_RE = /\s*(?:\+|,|;|&|\band\b)\s*/i;
+function unnamedRequestParts(text) {
+  const requested = cleanText(text);
+  if (!requested) return [];
+  return requestScanText(requested).split(REQUEST_PART_SPLIT_RE)
+    .map((part) => part.trim())
+    .filter((part) => part && !familiesIn(part).length);
+}
+
 // V2 service categories → words this composer can scan. Deliberately NOT
 // mapServiceCategoryToLegacy: that legacy-routing map collapses
 // palm_injection into "Tree & Shrub Care" and hard-labels termite as
@@ -310,9 +334,7 @@ function composeServiceInterest(extracted = {}, opts = {}) {
   }
 
   const requested = cleanText(extracted.requested_service);
-  const scanText = requested
-    ? normalizeExterminator(normalizePalmInjection(normalizeLawnPests(stripLocationPhrases(stripNegatedClauses(stripComparedAway(requested))))))
-    : null;
+  const scanText = requested ? requestScanText(requested) : null;
   // Order-independent wdo↔termite: whether the WDO shows up in the match OR
   // anywhere in the request, non-treatment termite wording is the same lane
   // (the lender's "termite inspection" IS the WDO) — suppress it regardless
@@ -406,10 +428,7 @@ const V2_INEXPRESSIBLE_FAMILY_KEYS = new Set(['tree_shrub', 'wildlife', 'flea'])
 function v2InexpressibleFamilyWords(callerText) {
   const requested = cleanText(callerText);
   if (!requested) return null;
-  const scan = normalizeExterminator(normalizePalmInjection(normalizeLawnPests(
-    stripLocationPhrases(stripNegatedClauses(stripComparedAway(requested))),
-  )));
-  const words = familiesIn(scan)
+  const words = familiesIn(requestScanText(requested))
     .filter((fam) => V2_INEXPRESSIBLE_FAMILY_KEYS.has(fam.key))
     .map((fam) => fam.label);
   return words.length ? words.join(' and ') : null;
@@ -417,6 +436,8 @@ function v2InexpressibleFamilyWords(callerText) {
 
 module.exports = {
   familiesIn,
+  requestedFamiliesIn,
+  unnamedRequestParts,
   composeServiceInterest,
   composeWordsForV2Category,
   v2PrimaryLabelForCategory,

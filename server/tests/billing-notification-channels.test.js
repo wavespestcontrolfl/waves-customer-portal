@@ -401,7 +401,7 @@ describe('notifications route mapping for the billing channels', () => {
     }, {})).toEqual({
       billing_channel: 'email',
       payment_receipt_channel: 'both',
-      // A changed receipt channel is the customer's choice (GATE_APP_FIRST_ANY_DEVICE).
+      // A changed receipt channel is the customer's choice (app first on any device).
       payment_receipt_channel_explicit: true,
     });
 

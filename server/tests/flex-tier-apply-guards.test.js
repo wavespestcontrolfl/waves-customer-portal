@@ -188,6 +188,69 @@ describe('checkFlexOwnBounds (the tapped row, inside makeMoveGuard)', () => {
   });
 });
 
+describe('the band at apply time is the FRESH row\'s own: ±7 for a plan of 2 months or longer, else ±5', () => {
+  const rowOf = (pattern, extra = {}) => ({
+    id: 's1', scheduled_date: dayOffset(9), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1', recurring_pattern: pattern, ...extra,
+  });
+  // The trx's series read is the fresh one: `fresh` is what the database holds now.
+  const trxFor = (fresh) => seriesTrx({ p1: [{ ...fresh }] });
+
+  test('a quarterly visit may move 7 days; 8 days is refused with the ±7 text', async () => {
+    const row = rowOf('quarterly');
+    await expect(checkFlexOwnBounds(trxFor(row), row, { date: dayOffset(16) }, 'flex', refuseFactory())).resolves.toBeUndefined();
+    await expect(checkFlexOwnBounds(trxFor(row), row, { date: dayOffset(17) }, 'flex', refuseFactory()))
+      .rejects.toMatchObject({ id: 's1', why: expect.stringContaining('±7-day flex window') });
+  });
+
+  test('a monthly visit is refused at 6 days with the ±5 text, and may move 5', async () => {
+    const row = rowOf('monthly');
+    await expect(checkFlexOwnBounds(trxFor(row), row, { date: dayOffset(14) }, 'flex', refuseFactory())).resolves.toBeUndefined();
+    await expect(checkFlexOwnBounds(trxFor(row), row, { date: dayOffset(15) }, 'flex', refuseFactory()))
+      .rejects.toMatchObject({ id: 's1', why: expect.stringContaining('±5-day flex window') });
+  });
+
+  test('a row whose pattern changed to monthly after pass 1 is refused at 6 and at 7 days', async () => {
+    const stale = rowOf('quarterly'); // what pass 1 (and the unlocked pre-read) saw
+    const fresh = rowOf('monthly'); // what the locked read sees now
+    for (const days of [15, 16]) {
+      await expect(checkFlexOwnBounds(trxFor(fresh), stale, { date: dayOffset(days) }, 'flex', refuseFactory()))
+        .rejects.toMatchObject({ id: 's1', why: expect.stringContaining('±5-day flex window') });
+    }
+  });
+
+  test('the radius comes from the fresh read, never from the row passed in (a monthly pre-read, a quarterly row now, may move 7)', async () => {
+    const stale = rowOf('monthly');
+    const fresh = rowOf('quarterly');
+    await expect(checkFlexOwnBounds(trxFor(fresh), stale, { date: dayOffset(16) }, 'flex', refuseFactory())).resolves.toBeUndefined();
+  });
+
+  test('a fresh row with no pattern reads the narrow band', async () => {
+    const row = rowOf(undefined);
+    await expect(checkFlexOwnBounds(trxFor(row), row, { date: dayOffset(15) }, 'flex', refuseFactory()))
+      .rejects.toMatchObject({ id: 's1', why: expect.stringContaining('±5-day flex window') });
+  });
+
+  test('the series read asks for the cadence columns, row-locked', async () => {
+    const row = rowOf('quarterly');
+    const trx = trxFor(row);
+    await checkFlexOwnBounds(trx, row, { date: dayOffset(11) }, 'flex', refuseFactory());
+    expect(trx.locks).toEqual(['forShare', 'noWait']);
+  });
+
+  test('grouped siblings: each member is held to its own fresh band', async () => {
+    const quarterly = { id: 's2', scheduled_date: dayOffset(9), window_start: '09:00', recurring_parent_id: 'p1', recurring_pattern: 'quarterly' };
+    const monthly = { id: 's3', scheduled_date: dayOffset(9), window_start: '09:00', recurring_parent_id: 'p2', recurring_pattern: 'monthly' };
+    const run = async (rows, date) => {
+      routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+      const trx = seriesTrx({ p1: [quarterly], p2: [monthly] });
+      return checkFlexSiblingBounds(trx, rows, rows, { date }, TODAY, refuseFactory(), targetsOf(rows));
+    };
+    await expect(run([quarterly], dayOffset(16))).resolves.toBeUndefined();
+    await expect(run([monthly], dayOffset(15))).rejects.toMatchObject({ id: 's3', why: expect.stringContaining('±5-day flex window') });
+    await expect(run([quarterly, monthly], dayOffset(15))).rejects.toMatchObject({ id: 's3' });
+  });
+});
+
 describe('fenceFlexSeries — series writers are serialized, not just re-read', () => {
   const row = {
     id: 's1', scheduled_date: dayOffset(9), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',

@@ -35,6 +35,9 @@ const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slot
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
 const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { tsPestCheckLive } = require('./tree-shrub-pest-check');
+const {
+  isNutriRootName, nutriRootPickerEvidence,
+} = require('./tree-shrub-fertilizer-evidence');
 const { tsNeonicCapLive, buildNeonicCapContext } = require('./tree-shrub-neonic-ledger');
 const PEST_CHECK_TYPES = require('../../shared/tree-shrub-pest-check.json').insectTypes;
 
@@ -73,10 +76,15 @@ const daysBetween = (laterDay, earlierDay) => Math.round(dayNumber(laterDay) - d
 // prompts can never disagree with the closeout's blocks.
 function treeShrubProductFlags(row, { serviceDate, zone }) {
   const ref = { catalog: row };
+  const nutriRoot = isNutriRootName(row?.name);
   return {
     insectFamily: isInsectFamilyProduct(ref),
     needsIracFrac: productNeedsIracFracLog(ref),
-    npBlackout: productHasNpFertilizer(ref) && isSummerBlackoutForZone(serviceDate, zone),
+    // NutriRoot has a separate evidence/review path: leave its tile tappable
+    // so an application that already happened can still be recorded.
+    npBlackout: !nutriRoot && productHasNpFertilizer(ref) && isSummerBlackoutForZone(serviceDate, zone),
+    nutriRoot,
+    ...(nutriRoot ? nutriRootPickerEvidence({ zone, serviceDate }) : {}),
     injection: isInjectionProduct(ref),
   };
 }
@@ -519,9 +527,9 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
   if (ineligibleReason) return { ok: true, eligible: false, reason: ineligibleReason, service };
 
   const visitDate = etCalendarDayOf(svc.scheduled_date);
-  // The ordinance zone comes from the visit's stamped address, falling back to the customer's city. /complete's
-  // typed check reads the same fields through the same function, so the sheet and the server cannot disagree.
-  const zone = inferTreeShrubOrdinanceZone({ ...svc, city: svc.cust_city });
+  const zone = inferTreeShrubOrdinanceZone({
+    ...svc, city: svc.cust_city, zip: svc.cust_zip, address_line1: svc.cust_address_line1,
+  });
   const catalog = await loadRecapCatalogProducts(knex, { extraColumns: CLASSIFIER_COLUMNS }).catch(() => []);
   // A failed read leaves no usable catalog. An empty catalog here would
   // let the sheet record a real application as "Inspection only" with none of
@@ -568,6 +576,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     eligible: true,
     reason: null,
     service,
+    ordinanceZone: zone,
     products,
     monthProducts,
     bedSqft: await loadBedSqft(svc, knex),

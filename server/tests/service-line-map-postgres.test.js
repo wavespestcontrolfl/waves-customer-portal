@@ -124,8 +124,10 @@ describeDb('service-line map shadow on PostgreSQL', () => {
   });
 
   describe('table constraints', () => {
-    test('service_line_techs: only the five lines; a deleted technician clears the pointer instead of blocking', async () => {
+    test('service_line_techs: only the six lines; a deleted technician clears the pointer instead of blocking', async () => {
       await expect(db('service_line_techs').insert(lineRow('bogus', null, null))).rejects.toThrow(/service_line_techs_category_check/);
+      await db('service_line_techs').insert(lineRow('exclusion', ownerId, null));
+      expect(await db('service_line_techs').where({ service_category: 'exclusion' }).first()).toMatchObject({ home_technician_id: ownerId });
       const tempId = randomUUID();
       await db('technicians').insert(tech(tempId, `Temp ${run}`, 'active'));
       await db('service_line_techs').insert(lineRow('rodent', tempId, tempId));
@@ -135,17 +137,110 @@ describeDb('service-line map shadow on PostgreSQL', () => {
       await expect(db('service_line_techs').insert(lineRow('rodent', null, null))).rejects.toThrow(/duplicate key/);
     });
 
-    test('service_line_pick_shadow: the six sources and the two line_from values only; ids carry no foreign keys', async () => {
+    // Migration 20261121230000 (owner 2026-11-21: exclusion is its own line). DDL is transactional in
+    // PostgreSQL, so the whole case runs in one transaction that is rolled back.
+    test('the exclusion migration copies each rodent capability, changes nothing on a second run, and its down removes the line', async () => {
+      const migration = require('../models/migrations/20261121230000_exclusion_service_line');
+      const ROLLBACK = new Error('rollback');
+      const capsOf = (trx, id) => trx('technician_capabilities').where({ technician_id: id, service_category: 'exclusion' }).first();
+      await db.transaction(async (trx) => {
+        const three = [ownerId, hireId, futureId];
+        await trx('technician_capabilities').whereIn('technician_id', three).del();
+        await trx('technician_capabilities').insert([
+          { technician_id: ownerId, service_category: 'rodent', capability_level: 'qualified', active: true, verified_by: ownerId, verified_at: trx.fn.now() },
+          { technician_id: hireId, service_category: 'rodent', capability_level: 'review_required', active: false },
+          // An exclusion row that already exists is never overwritten by the copy.
+          { technician_id: futureId, service_category: 'rodent', capability_level: 'review_required', active: false },
+          { technician_id: futureId, service_category: 'exclusion', capability_level: 'qualified', active: true, notes: 'set by hand' },
+        ]);
+        await migration.up(trx);
+        expect(await capsOf(trx, ownerId)).toMatchObject({ capability_level: 'qualified', active: true, verified_by: ownerId, notes: expect.stringMatching(/Copied from the rodent row/) });
+        expect((await capsOf(trx, ownerId)).verified_at).not.toBeNull();
+        expect(await capsOf(trx, hireId)).toMatchObject({ capability_level: 'review_required', active: false, verified_by: null });
+        expect(await capsOf(trx, futureId)).toMatchObject({ capability_level: 'qualified', active: true, notes: 'set by hand' });
+        // goneId has no rodent row, so it gets no exclusion row.
+        expect(await capsOf(trx, goneId)).toBeUndefined();
+        const count = async () => Number((await trx('technician_capabilities').whereIn('technician_id', three).count({ n: '*' }).first()).n);
+        const before = await count();
+        await migration.up(trx);
+        expect(await count()).toBe(before);
+
+        await trx('service_line_techs').insert(lineRow('exclusion', ownerId, null));
+        await migration.down(trx);
+        expect(await capsOf(trx, ownerId)).toBeUndefined();
+        expect(await trx('service_line_techs').where({ service_category: 'exclusion' }).first()).toBeUndefined();
+        // A failed statement aborts a PostgreSQL transaction, so each refused insert rides a savepoint.
+        await expect(trx.transaction((sp) => sp('service_line_techs').insert(lineRow('exclusion', null, null))))
+          .rejects.toThrow(/service_line_techs_category_check/);
+        await expect(trx.transaction((sp) => sp('technician_capabilities').insert({ technician_id: ownerId, service_category: 'exclusion' })))
+          .rejects.toThrow(/technician_capabilities_category_check/);
+        // The rodent rows are untouched by the down.
+        expect(await trx('technician_capabilities').where({ technician_id: hireId, service_category: 'rodent' }).first()).toMatchObject({ active: false });
+        throw ROLLBACK;
+      }).catch((err) => { if (err !== ROLLBACK) throw err; });
+      // Rolled back: the migrated database still takes the exclusion line.
+      await db('service_line_techs').insert(lineRow('exclusion', null, null));
+    });
+
+    // Migration 20261121231000: a card that already places the rodent line keeps placing exclusion work
+    // the same way until staff split the two lines.
+    test('the card copy migration gives exclusion the rodent line\'s home and gap technician, and never overwrites a set row', async () => {
+      const copy = require('../models/migrations/20261121231000_exclusion_line_card_copy');
+      const exclusionRow = () => db('service_line_techs').where({ service_category: 'exclusion' }).first();
+      // An empty card (production on 2026-11-21): nothing is written.
+      await copy.up(db);
+      expect(await db('service_line_techs').count({ n: '*' }).first()).toMatchObject({ n: '0' });
+      // A rodent row: exclusion gets the same two technicians. A second run changes nothing.
+      await db('service_line_techs').insert(lineRow('rodent', hireId, ownerId));
+      await copy.up(db);
+      expect(await exclusionRow()).toMatchObject({ home_technician_id: hireId, gap_technician_id: ownerId });
+      await copy.up(db);
+      expect(await db('service_line_techs').count({ n: '*' }).first()).toMatchObject({ n: '2' });
+      // Staff split the lines; a later run keeps their choice.
+      await db('service_line_techs').where({ service_category: 'exclusion' }).update({ home_technician_id: ownerId, gap_technician_id: null });
+      await copy.up(db);
+      expect(await exclusionRow()).toMatchObject({ home_technician_id: ownerId, gap_technician_id: null });
+      // With the card copied, the map still restricts an exclusion job (the rule the rodent row gave it).
+      await db('service_line_techs').where({ service_category: 'exclusion' }).del();
+      await copy.up(db);
+      expect(await exclusionRow()).toMatchObject({ home_technician_id: hireId, gap_technician_id: ownerId });
+    });
+
+    test('service_line_pick_shadow: the six sources and the three line_from values only; ids carry no foreign keys', async () => {
       for (const source of ['book', 'phone_live', 'after_call', 'estimate_accept', 'office_auto', 'night_run']) {
         await db('service_line_pick_shadow').insert({ source, run_id: run });
       }
       await expect(db('service_line_pick_shadow').insert({ source: 'elsewhere', run_id: run })).rejects.toThrow(/service_line_pick_shadow_source_check/);
-      await expect(db('service_line_pick_shadow').insert({ source: 'book', line_from: 'guess', run_id: run })).rejects.toThrow(/service_line_pick_shadow_line_from_check/);
+      await expect(db('service_line_pick_shadow').insert({ source: 'book', line_from: 'elsewhere', run_id: run })).rejects.toThrow(/service_line_pick_shadow_line_from_check/);
       await db('service_line_pick_shadow').insert({
         source: 'book', run_id: run, line_from: 'catalog', scheduled_service_id: randomUUID(), customer_id: randomUUID(),
         actual_technician_id: randomUUID(), would_technician_id: randomUUID(), home_technician_id: randomUUID(),
       });
-      expect(await shadowRows()).toHaveLength(7);
+      // A Waves Assessment resolves by its lead (owner 2026-11-21): line_from 'lead'.
+      await db('service_line_pick_shadow').insert({ source: 'book', run_id: run, line_from: 'lead', service_line: 'lawn' });
+      expect(await shadowRows()).toHaveLength(8);
+    });
+
+    // Migration 20261121232000: line_from gains 'lead'. One rolled-back transaction, as the exclusion case above.
+    test('the line_from migration: a second up changes nothing, and its down sets lead rows to NULL before restoring the two values', async () => {
+      const migration = require('../models/migrations/20261121232000_line_pick_shadow_line_from_lead');
+      const ROLLBACK = new Error('rollback');
+      // A failed statement aborts a PostgreSQL transaction, so each refused insert rides a savepoint.
+      const refused = (trx, line_from) => expect(trx.transaction((sp) => sp('service_line_pick_shadow').insert({ source: 'book', run_id: run, line_from })))
+        .rejects.toThrow(/service_line_pick_shadow_line_from_check/);
+      await db.transaction(async (trx) => {
+        await migration.up(trx);
+        await migration.up(trx);
+        await trx('service_line_pick_shadow').insert({ source: 'book', run_id: run, line_from: 'lead' });
+        await refused(trx, 'elsewhere');
+        await migration.down(trx);
+        expect(await trx('service_line_pick_shadow').where({ run_id: run }).first()).toMatchObject({ line_from: null });
+        await refused(trx, 'lead');
+        await trx('service_line_pick_shadow').insert({ source: 'book', run_id: run, line_from: 'name' });
+        await migration.up(trx);
+        await trx('service_line_pick_shadow').insert({ source: 'book', run_id: run, line_from: 'lead' });
+        throw ROLLBACK;
+      }).catch((err) => { if (err !== ROLLBACK) throw err; });
     });
   });
 
@@ -164,12 +259,47 @@ describeDb('service-line map shadow on PostgreSQL', () => {
       await db('technician_absences').where({ technician_id: hireId }).del();
     });
 
+    // The lead read of a Waves Assessment (owner 2026-11-21): the raw blank-interest filter and the newest-first order on real rows.
+    test('a Waves Assessment reads the newest lead with a service interest, never a deleted one; the lead in hand decides alone; a customer with no lead reads lawn', async () => {
+      const customerId = randomUUID();
+      const blankLeadId = randomUUID();
+      const deletedLeadId = randomUUID();
+      const ROLLBACK = new Error('rollback');
+      await db.transaction(async (trx) => {
+        await trx('leads').insert([
+          { customer_id: customerId, service_interest: 'Lawn Care Service', created_at: '2026-10-01T12:00:00Z' },
+          { customer_id: customerId, service_interest: 'Pest Control Service', created_at: '2026-11-01T12:00:00Z' },
+          { id: blankLeadId, customer_id: customerId, service_interest: '  ', created_at: '2026-11-10T12:00:00Z' },
+          { customer_id: customerId, service_interest: null, created_at: '2026-11-15T12:00:00Z' },
+          // Entered by mistake and deleted: it is the newest, and it must not decide.
+          { id: deletedLeadId, customer_id: customerId, service_interest: 'Lawn Care Service', created_at: '2026-11-20T12:00:00Z', deleted_at: '2026-11-21T12:00:00Z' },
+        ]);
+        expect(await lineTech.assessmentLineFor(trx, { customerId })).toEqual({ line: 'general', lineFrom: 'lead' });
+        expect(await lineTech.assessmentLineFor(trx, { customerId: randomUUID() })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+        // The lead in hand with no service recorded is the owner's, whatever the customer's other leads say.
+        expect(await lineTech.assessmentLineFor(trx, { leadId: blankLeadId, customerId })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+        // A deleted lead in hand is no lead: the customer is read.
+        expect(await lineTech.assessmentLineFor(trx, { leadId: deletedLeadId, customerId })).toEqual({ line: 'general', lineFrom: 'lead' });
+        // strict (a booking transaction's re-check) holds the lead row it reads: FOR UPDATE on the lead in hand, and
+        // with ORDER BY + LIMIT on the newest-lead read. Same answers.
+        expect(await lineTech.assessmentLineFor(trx, { leadId: blankLeadId, customerId, strict: true })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+        expect(await lineTech.assessmentLineFor(trx, { customerId, strict: true })).toEqual({ line: 'general', lineFrom: 'lead' });
+        // The estimate page's re-check reads the estimate's link the same way: the pointing lead rows held.
+        const { linkedLeadIdFor } = require('../services/estimate-consultation-offer');
+        const estimateId = randomUUID();
+        await trx('leads').where({ id: blankLeadId }).update({ estimate_id: estimateId });
+        expect(await linkedLeadIdFor(estimateId, {}, trx, { lock: true })).toBe(blankLeadId);
+        expect(await linkedLeadIdFor(estimateId, {}, trx)).toBe(blankLeadId);
+        throw ROLLBACK;
+      }).catch((err) => { if (err !== ROLLBACK) throw err; });
+    });
+
     test('a prospective home tech is not assignable; capability Off reads gap_capability_off; an empty map reads no_map', async () => {
       await db('service_line_techs').insert([lineRow('mosquito', futureId, ownerId), lineRow('rodent', hireId, ownerId)]);
       expect(await lineTech.resolveLineTechnician(db, { serviceType: 'Mosquito Control', date: MONDAY }))
         .toMatchObject({ technicianId: ownerId, reason: 'gap_not_assignable' });
       await db('technician_capabilities').insert({ technician_id: hireId, service_category: 'rodent', active: false, capability_level: 'qualified' });
-      expect(await lineTech.resolveLineTechnician(db, { serviceType: 'Rodent Control', date: MONDAY }))
+      expect(await lineTech.resolveLineTechnician(db, { serviceType: 'Rodent Trapping Service', date: MONDAY }))
         .toMatchObject({ technicianId: ownerId, reason: 'gap_capability_off' });
       await db('technician_capabilities').where({ technician_id: hireId }).del();
       expect(await lineTech.resolveLineTechnician(db, { serviceType: 'Termite Inspection', date: MONDAY }))
@@ -525,10 +655,10 @@ describeDb('service-line map shadow on PostgreSQL', () => {
       }
     });
 
-    test('GET lists all five lines, empty until saved', async () => {
+    test('GET lists all six lines, empty until saved', async () => {
       process.env.GATE_SERVICE_LINE_MAP = 'shadow';
       const res = await call('get', '/service-lines');
-      expect(res.body.lines.map((l) => l.service_category)).toEqual(['general', 'mosquito', 'lawn', 'rodent', 'termite']);
+      expect(res.body.lines.map((l) => l.service_category)).toEqual(['general', 'mosquito', 'lawn', 'rodent', 'exclusion', 'termite']);
       expect(res.body.lines.every((l) => l.home_technician_id === null && l.gap_technician_id === null)).toBe(true);
     });
 

@@ -162,9 +162,9 @@ function makeApplyDeps(db, { now, blocks = [], over = {} } = {}) {
     isBlackoutDate: jest.fn(async () => false),
     findConflicts: fakeFindConflicts(db),
     loadBlocks: jest.fn(async () => blocks),
-    // The night told-lock's reads inside the move transaction: nobody was told anything, no person placed any visit.
-    loadToldIds: jest.fn(async () => new Set()),
+    // The night told-lock's reads inside the move transaction: nobody was told anything, no set time, no person placed any visit.
     loadPromiseLevels: jest.fn(async () => new Map()),
+    loadSetTime: jest.fn(async () => new Map()),
     isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
   };
   const liveRows = (dateStr) => db.rows.filter((r) => String(r.scheduled_date).slice(0, 10) === dateStr && !excludedStatuses.includes(r.status) && !r.reservation_expires_at);

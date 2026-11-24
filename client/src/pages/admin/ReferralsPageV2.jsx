@@ -14,6 +14,7 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { getAdminUser } from "../../lib/adminAuth";
 import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
+import { formatETDate } from "../../lib/timezone";
 
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: legacy color names remain to preserve the inline-style
@@ -382,18 +383,46 @@ function inboundEvidenceLine(evidence) {
 function inboundConfirmedMessage(result) {
   if (result.error === "convert_failed")
     return "Error: referral saved, but the conversion failed. Use Convert on it in the queue below.";
+  // result.step2: the amount varies (the yearly limit), so the words come from what posted.
   if (result.error === "credit_failed")
-    return "Referral confirmed, but the $25 credits did not post. They post at the next plan visit.";
+    return result.step2
+      ? "Referral confirmed, but the credits did not post. They post at the next plan visit."
+      : "Referral confirmed, but the $25 credits did not post. They post at the next plan visit.";
+  if (result.credited && result.step2) {
+    const { referrerDollars, refereeDollars, referrerReason } = result.credited;
+    const limit = referrerReason === "cap_reached" ? " The member is at the yearly limit." : "";
+    const cents = (n) => (Number.isInteger(Number(n)) ? `$${Number(n)}` : `$${Number(n).toFixed(2)}`);
+    return `Referral confirmed. ${cents(referrerDollars)} credited to the member and ${cents(refereeDollars)} to the friend.${limit}`;
+  }
   if (result.credited) return "Referral confirmed. $25 credited to both accounts.";
   if (!result.creditsNow)
-    return "Referral confirmed. The $25 credits post at the next completed plan visit.";
+    return result.step2
+      ? "Referral confirmed. The credits post at the next completed plan visit."
+      : "Referral confirmed. The $25 credits post at the next completed plan visit.";
   return "Referral confirmed. The credit step posted nothing; check the referral in the queue below.";
+}
+
+// The line under the Queue's inbound heading: the flat $25 words with Step 2 off, no amount with it on.
+const inboundIntro = (step2) => `Plan customers who came in through a referral link or named a referrer. Confirm the referrer to pay the ${step2 ? "" : "$25 "}rewards.`;
+
+// What a confirm does, in words. Gate off: the flat $25 words. Under Step 2 the rule comes from the card's terms, which
+// were computed for the suggested member: when staff picked someone else the standing is not known, so the line says the
+// limit may apply; a member at the yearly limit gets no credit, so no thank-you email follows.
+function inboundConfirmWords(item, step2, chosen, firstName) {
+  const when = item.creditsNow ? "now" : `at ${firstName}'s next completed plan visit`;
+  const mail = " The referrer gets one thank-you email at the next 9:00 AM ET, and no text.";
+  if (!step2) {
+    return `Both accounts get the $25 credit ${when}. The referrer ${item.creditsNow ? "" : "then "}gets one thank-you email at the next 9:00 AM ET, and no text.`;
+  }
+  const own = chosen && item.terms && String(item.terms.forCustomerId) === String(chosen.customerId);
+  const rule = own ? item.terms.text : item.terms?.conditional || "Credits follow the program settings";
+  return `${rule} ${when}.${own && item.terms.atCap ? "" : mail}`;
 }
 
 // One plan customer who came in through a
 // referral link or named a referrer. The office picks the referrer (a
 // suggestion or a search result), then confirms; or marks "not a referral".
-function InboundReferralCard({ item, onDone, flash }) {
+function InboundReferralCard({ item, step2, onDone, flash }) {
   const isMobile = useIsMobile();
   const [chosen, setChosen] = useState(null);
   const [search, setSearch] = useState(item.evidence.spokenName || "");
@@ -529,9 +558,7 @@ function InboundReferralCard({ item, onDone, flash }) {
         >
           <div style={{ fontSize: 14, color: D.heading }}>
             Confirm {chosen.name || "this customer"} as the referrer.{" "}
-            {item.creditsNow
-              ? "Both accounts get the $25 credit now. The referrer gets one thank-you email at the next 9:00 AM ET, and no text."
-              : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit. The referrer then gets one thank-you email at the next 9:00 AM ET, and no text.`}{" "}
+            {inboundConfirmWords(item, step2, chosen, firstName)}{" "}
             A referrer's 3rd, 5th or 10th referral also sends the usual milestone text.
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -631,6 +658,177 @@ function InboundReferralCard({ item, onDone, flash }) {
 }
 
 // A failed read is not an empty result: say so, and offer a retry.
+// Step 2: one handwritten thank-you note to the member for every friend who books. The card lists the member and
+// the mailing address only: the note never names the friend, so the friend is not on this card or in its data.
+// It reads its own list when the Queue opens and shows nothing when no note is owed.
+// One page of the list (200 notes, oldest first). `after` is the nextCursor of the page before; "": the first.
+const thankYouNotesPage = (after) => af(`/admin/referrals/thank-you-notes?after=${encodeURIComponent(after)}`);
+
+function ThankYouNotes({ flash }) {
+  const isMobile = useIsMobile();
+  // The card shows exactly one page, as the server last answered it: the rows, the count of every note owed and
+  // the position of the next page come from one statement. Nothing is kept from an earlier read and nothing is
+  // counted on this side, so two logins working the list cannot leave a written note or an old count on the card
+  // past the next read.
+  const [after, setAfter] = useState(""); // the position this page starts after; "": the oldest notes
+  const [page, setPage] = useState({ notes: [], total: 0, nextCursor: null });
+  const [failed, setFailed] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [busyId, setBusyId] = useState(null); // the note a mark is being saved for
+  const [loading, setLoading] = useState(true); // a page is being read
+  // One action at a time: a page read and a mark never overlap.
+  const idle = busyId === null && !loading;
+
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    thankYouNotesPage(after)
+      .then((answer) => {
+        if (!current) return;
+        const notes = answer.notes || [];
+        const total = Number(answer.total) || 0;
+        // Every note of a later page was written since it was read: back to the oldest notes still owed. The
+        // card stays in "reading" until that page answers.
+        if (notes.length === 0 && total > 0 && after) {
+          setAfter("");
+          return;
+        }
+        setPage({ notes, total, nextCursor: answer.nextCursor || null });
+        setFailed(false);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!current) return;
+        setFailed(true);
+        setLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [after, reloadKey]);
+
+  const goTo = (position) => {
+    if (!idle) return;
+    setLoading(true);
+    setAfter(position);
+  };
+
+  const markWritten = async (note) => {
+    if (!idle) return;
+    setBusyId(note.referralId);
+    try {
+      await adminPost(`/admin/referrals/thank-you-notes/${note.referralId}/written`);
+      flash(`Thank-you note for ${note.memberName || "the member"} marked written`);
+    } catch (e) {
+      flash("Error: " + e.message);
+    }
+    // Read this page again after every answer. A note that is no longer owed (written, or the referral was
+    // rejected, or the member archived) leaves the card; one that only failed to save stays for another try; the
+    // notes behind it move up.
+    setLoading(true);
+    setBusyId(null);
+    setReloadKey((k) => k + 1);
+  };
+
+  const { notes, total, nextCursor } = page;
+  if (failed) {
+    return <ErrorRow what="thank-you notes to write" onRetry={() => setReloadKey((k) => k + 1)} />;
+  }
+  if (total === 0) return null;
+  return (
+    <div
+      style={{
+        background: D.card,
+        borderRadius: 12,
+        padding: 20,
+        border: `1px solid ${D.border}`,
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+      }}
+    >
+      <div>
+        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+          Thank-you notes to write ({total})
+        </div>
+        <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+          Write one note by hand to each member below. Each row is one friend who booked. Do not name the friend in
+          the note. Open the member to correct an address.
+        </div>
+      </div>
+      {notes.map((note) => (
+        <div
+          key={note.referralId}
+          style={{
+            border: `1px solid ${D.border}`,
+            borderRadius: 10,
+            padding: 14,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            fontSize: 14,
+            color: D.text,
+          }}
+        >
+          <div>
+            <a
+              href={`/admin/customers?customerId=${encodeURIComponent(note.memberCustomerId)}`}
+              style={{ color: D.heading, fontWeight: 500 }}
+            >
+              {note.memberName || "(no name)"}
+            </a>
+            {note.addressLines.map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
+            {!note.addressComplete && (
+              <div style={{ color: D.heading, fontWeight: 500 }}>
+                {note.addressLines.length > 0 ? "Mailing address is not complete" : "No mailing address on file"}
+              </div>
+            )}
+            <div style={{ color: D.muted }}>
+              Owed since {formatETDate(note.owedSince, { month: "short", day: "numeric", year: "numeric" })}
+            </div>
+          </div>
+          <button
+            onClick={() => markWritten(note)}
+            disabled={!idle}
+            style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
+          >
+            {busyId === note.referralId ? "Saving..." : "Mark written"}
+          </button>
+        </div>
+      ))}
+      {(nextCursor || after) && (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, fontSize: 14, color: D.text }}>
+          <span>
+            Showing {after ? "the next" : "the oldest"} {notes.length} of {total}.
+          </span>
+          {after && (
+            <button
+              onClick={() => goTo("")}
+              disabled={!idle}
+              style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
+            >
+              First page
+            </button>
+          )}
+          {nextCursor && (
+            <button
+              onClick={() => goTo(nextCursor)}
+              disabled={!idle}
+              style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
+            >
+              Next page
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ErrorRow({ what, onRetry }) {
   return (
     <div
@@ -776,7 +974,7 @@ export default function ReferralsPageV2() {
       searchSeen.current = "";
       setQueue(q === FAILED ? [] : q.referrals || []);
       setPayouts(pay === FAILED ? [] : pay.payouts || []);
-      setInbound({ items: inb === FAILED ? [] : inb.items || [] });
+      setInbound({ items: inb === FAILED ? [] : inb.items || [], step2: inb.step2 === true });
       setLoading(false);
     });
   }, []);
@@ -827,10 +1025,14 @@ export default function ReferralsPageV2() {
 
   const [settingsError, setSettingsError] = useState(false);
   const [analyticsError, setAnalyticsError] = useState(false);
+  const [settingsStep2, setSettingsStep2] = useState(false);
   const loadSettings = useCallback(() => {
     setSettingsError(false);
     af("/admin/referrals/settings")
-      .then((r) => setSettings(r.settings))
+      .then((r) => {
+        setSettings(r.settings);
+        setSettingsStep2(r.step2 === true);
+      })
       .catch(() => setSettingsError(true));
   }, []);
   const loadAnalytics = useCallback(() => {
@@ -1307,20 +1509,21 @@ export default function ReferralsPageV2() {
                   Needs confirmation ({inbound.items.length})
                 </div>
                 <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
-                  Plan customers who came in through a referral link or named
-                  a referrer. Confirm the referrer to pay the $25 rewards.
+                  {inboundIntro(inbound.step2)}
                 </div>
               </div>
               {inbound.items.map((item) => (
                 <InboundReferralCard
                   key={item.customerId}
                   item={item}
+                  step2={inbound.step2}
                   onDone={load}
                   flash={flash}
                 />
               ))}
             </div>
           )}
+          <ThankYouNotes flash={flash} />
           {/* Submit form */}
           <div
             style={{
@@ -1834,7 +2037,9 @@ export default function ReferralsPageV2() {
               items: [
                 {
                   key: "referrer_reward_cents",
-                  label: "Referrer Reward (cents)",
+                  label: settingsStep2
+                    ? "Referrer Reward (cents), used only while Step 2 is off"
+                    : "Referrer Reward (cents)",
                   type: "number",
                 },
                 {
@@ -1844,6 +2049,17 @@ export default function ReferralsPageV2() {
                 },
               ],
             },
+            ...(settingsStep2
+              ? [
+                  {
+                    section: "Step 2 member credit",
+                    items: [
+                      { key: "step2_referrer_reward_cents", label: "Member credit (cents)", type: "number" },
+                      { key: "step2_annual_credit_cap", label: "Member credits per year", type: "number" },
+                    ],
+                  },
+                ]
+              : []),
             {
               section: "Tier Bonuses",
               items: [

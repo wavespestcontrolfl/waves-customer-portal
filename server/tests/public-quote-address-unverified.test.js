@@ -204,6 +204,89 @@ describe('samePremiseDisplay', () => {
   });
 });
 
+// Six name words that also stand inside street names (Point, Glen, Grove,
+// Beach, Vista, Shores) fold in the SHARED street key while
+// GATE_WIZARD_SUPERSEDES_FORM_DRAFT is on. In the key, not in one caller:
+// the wizard's web-form-draft rule and the county-roll hold must read one
+// street (codex #8314 r1 P1: a fold in the rule alone hid a warning stored
+// under the other spelling from the hold).
+describe('street key: six name words inside a street name (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
+  const { streetKeyNoUnit } = require('../services/lead-address-unverified');
+  const GATE = 'GATE_WIZARD_SUPERSEDES_FORM_DRAFT';
+  const TOWN = ', Parrish, FL 34219';
+  const short = `1260 Example Pt Dr${TOWN}`;
+  const full = `1260 Example Point Dr${TOWN}`;
+  const premise = (line1) => ({ line1, city: 'Parrish', state: 'FL', zip: '34219' });
+  let gateBefore;
+
+  beforeEach(() => {
+    gateBefore = process.env[GATE];
+    process.env[GATE] = 'true';
+  });
+
+  afterEach(() => {
+    if (gateBefore === undefined) delete process.env[GATE];
+    else process.env[GATE] = gateBefore;
+  });
+
+  test.each([
+    ['unset', undefined],
+    ['"1", not exactly "true"', '1'],
+    ['"false"', 'false'],
+  ])('gate %s: the key is as before, the two spellings are two streets', (_label, value) => {
+    if (value === undefined) delete process.env[GATE];
+    else process.env[GATE] = value;
+
+    expect(streetKeyNoUnit('1260 Example Point Dr')).toBe('1260 example point dr');
+    expect(samePremiseDisplay(short, full)).toBe(false);
+    expect(samePremiseDisplay(short, full, { requireLocality: true })).toBe(false);
+    expect(flagCoversAddress({ address_line1: '1260 Example Pt Dr', city: 'Parrish', state: 'FL', zip: '34219' }, premise('1260 Example Point Dr'))).toBe(false);
+  });
+
+  test.each([
+    ['Point', 'Pt'], ['Glen', 'Gln'], ['Grove', 'Grv'], ['Beach', 'Bch'], ['Vista', 'Vis'], ['Shores', 'Shrs'],
+  ])('gate on: %s and %s inside the street name are one word', (word, shortWord) => {
+    expect(streetKeyNoUnit(`1260 Example ${word} Dr`)).toBe(streetKeyNoUnit(`1260 Example ${shortWord} Dr`));
+    expect(samePremiseDisplay(`1260 Example ${word} Dr${TOWN}`, `1260 Example ${shortWord} Dr${TOWN}`, { requireLocality: true })).toBe(true);
+  });
+
+  test('gate on: every check on the key reads the two spellings as one street', () => {
+    // A county-roll warning stored under one spelling covers a run in the other...
+    const warning = { source: 'county_roll', reason: 'house number not on the county roll', address_line1: '1260 Example Pt Dr', city: 'Parrish', state: 'FL', zip: '34219' };
+    expect(flagCoversAddress(warning, premise('1260 Example Point Dr'))).toBe(true);
+    expect(flagCoversAddress(warning, premise('1260 Example Point Dr Apt 4'))).toBe(true);
+    // ...and so does a lookup-stage snapshot.
+    expect(snapshotCoversAddress({ address: premise('1260 Example Pt Dr') }, premise('1260 Example Point Dr'))).toBe(true);
+    // The word that ends the street folds as before.
+    expect(samePremiseDisplay(`1260 Example Pt St${TOWN}`, `1260 Example Point Street${TOWN}`, { requireLocality: true })).toBe(true);
+    // A word that is also a property of every object is a street word like any other.
+    expect(samePremiseDisplay(`1260 Constructor Pt Dr${TOWN}`, `1260 Constructor Point Dr${TOWN}`, { requireLocality: true })).toBe(true);
+  });
+
+  // The list is short on purpose: a word with another reading, or one that
+  // the records carry in one spelling only, stays as typed inside a name.
+  test.each([
+    ['St, which is also Saint', '1260 St Example Dr', '1260 Street Example Dr'],
+    ['St after another word', '1260 Port St Example Blvd', '1260 Port Street Example Blvd'],
+    ['Dr, which is also Doctor', '1260 Dr Example Blvd', '1260 Drive Example Blvd'],
+    ['Island, which shortens to the word "Is"', '1260 This Is Example Dr', '1260 This Island Example Dr'],
+    ['Road', '1260 State Rd 64', '1260 State Road 64'],
+    ['Lake', '1260 Lk Example Dr', '1260 Lake Example Dr'],
+    ['Court', '1260 Example Ct Dr', '1260 Example Court Dr'],
+    ['Avenue', '1260 Ave Example Blvd', '1260 Avenue Example Blvd'],
+  ])('gate on: no fold for %s', (_word, a, b) => {
+    expect(samePremiseDisplay(`${a}${TOWN}`, `${b}${TOWN}`, { requireLocality: true })).toBe(false);
+  });
+
+  test('gate on: another word, house number, town or ZIP is another premise', () => {
+    expect(samePremiseDisplay(short, `1260 Example Port Dr${TOWN}`, { requireLocality: true })).toBe(false);
+    expect(samePremiseDisplay(short, `1250 Example Point Dr${TOWN}`, { requireLocality: true })).toBe(false);
+    expect(samePremiseDisplay(short, '1260 Example Point Dr, Bradenton, FL 34219', { requireLocality: true })).toBe(false);
+    expect(samePremiseDisplay(short, '1260 Example Point Dr, Parrish, FL 34221', { requireLocality: true })).toBe(false);
+    expect(samePremiseDisplay(short, '1260 Example Point Dr', { requireLocality: true })).toBe(false);
+  });
+});
+
 describe('address verdict', () => {
   const address = { line1: '1260 Example St', city: 'Parrish', state: 'FL', zip: '34219' };
 

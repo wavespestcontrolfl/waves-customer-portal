@@ -1,7 +1,7 @@
 /**
- * Missed-tick catch-up for four admin/report jobs in server/services/scheduler.js:
- * the SiteOne deals digest, the LLM dispatch digest, the booking-link weekly check and
- * the KPI daily snapshot. Each catch-up tick does nothing when its period already ran,
+ * Missed-tick catch-up for five admin/report jobs in server/services/scheduler.js:
+ * the SiteOne deals digest, the LLM dispatch digest, the booking-link weekly check, the
+ * near-stops weekly check and the KPI daily snapshot. Each catch-up tick does nothing when its period already ran,
  * runs the same job under the same runExclusive lock when it did not, and the original
  * tick is unchanged. The service modules are faked here; their own catch-up decisions
  * are tested beside each service.
@@ -49,6 +49,10 @@ jest.mock('../services/call-booking-link-weekly-check', () => ({
   weekIsMissing: jest.fn(),
   runCallBookingLinkWeeklyCheck: jest.fn().mockResolvedValue({ sent: true }),
 }));
+jest.mock('../services/near-stops-weekly-check', () => ({
+  weekIsMissing: jest.fn(),
+  runNearStopsWeeklyCheck: jest.fn().mockResolvedValue({ sent: true, outcome: 'raised', pairs: 1 }),
+}));
 jest.mock('../services/kpi-snapshot', () => ({
   snapshotMissing: jest.fn(),
   recordKpiSnapshotIfMissing: jest.fn().mockResolvedValue({ snapshot_date: '2026-11-05', metrics: 16 }),
@@ -62,6 +66,7 @@ const logger = require('../services/logger');
 const siteone = require('../services/procurement/siteone-deals-digest');
 const llm = require('../services/llm-dispatch-metrics');
 const booking = require('../services/call-booking-link-weekly-check');
+const nearStops = require('../services/near-stops-weekly-check');
 const kpi = require('../services/kpi-snapshot');
 const { initScheduledJobs } = require('../services/scheduler');
 const { etDateString } = require('../utils/datetime-et');
@@ -112,11 +117,11 @@ describe('SiteOne deals digest catch-up (Mon + Tue 10:52)', () => {
     expect(logger.error).toHaveBeenCalledWith('Weekly SiteOne deals digest catch-up failed: boom');
   });
 
-  test('the Monday 8:00 tick is unchanged: plain run, no pre-check', async () => {
+  test('the Monday 8:00 tick: no pre-check, and it alone asks for AI end dates', async () => {
     await tick('0 8 * * 1')();
     expect(siteone.weekIsMissing).not.toHaveBeenCalled();
     expect(runExclusive).toHaveBeenCalledWith('siteone-deals-digest', expect.any(Function));
-    expect(siteone.runSiteOneDealsDigest).toHaveBeenCalledWith();
+    expect(siteone.runSiteOneDealsDigest).toHaveBeenCalledWith({ aiEndDates: true });
   });
 });
 
@@ -150,6 +155,44 @@ describe('booking-link weekly check catch-up (Mon + Tue 10:44)', () => {
     expect(booking.weekIsMissing).not.toHaveBeenCalled();
     expect(runExclusive).toHaveBeenCalledWith('call-booking-link-weekly', expect.any(Function));
     expect(booking.runCallBookingLinkWeeklyCheck).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('near-stops weekly check (Mon 6:17, catch-up Mon + Tue 11:17)', () => {
+  const catchUp = () => tick('17 11 * * 1,2')();
+
+  test('the Monday 6:17 tick runs the check under its lock with no pre-check', async () => {
+    await tick('17 6 * * 1')();
+    expect(nearStops.weekIsMissing).not.toHaveBeenCalled();
+    expect(runExclusive).toHaveBeenCalledWith('near-stops-weekly', expect.any(Function));
+    expect(nearStops.runNearStopsWeeklyCheck).toHaveBeenCalledTimes(1);
+  });
+
+  test('a check that could not read its data is logged as failed, never thrown out of the tick', async () => {
+    nearStops.runNearStopsWeeklyCheck.mockResolvedValueOnce({ skipped: 'query_failed' });
+    await expect(tick('17 6 * * 1')()).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith('Weekly near-stops check failed: near-stops weekly check did not complete (query_failed)');
+  });
+
+  test('this week already ran: the catch-up takes no lock and runs nothing', async () => {
+    nearStops.weekIsMissing.mockResolvedValue(false);
+    await catchUp();
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(nearStops.runNearStopsWeeklyCheck).not.toHaveBeenCalled();
+  });
+
+  test('this week missed: the catch-up runs the same check under the same lock', async () => {
+    nearStops.weekIsMissing.mockResolvedValue(true);
+    await catchUp();
+    expect(runExclusive).toHaveBeenCalledWith('near-stops-weekly', expect.any(Function));
+    expect(nearStops.runNearStopsWeeklyCheck).toHaveBeenCalledTimes(1);
+  });
+
+  test('a lock skipped for a lost connection is recorded as a missed tick', async () => {
+    nearStops.weekIsMissing.mockResolvedValue(true);
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'no_connection' });
+    await catchUp();
+    expect(recordMissedTick).toHaveBeenCalledWith('near-stops-weekly', expect.any(Number), 'tick skipped: no_connection');
   });
 });
 

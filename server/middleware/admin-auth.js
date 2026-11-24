@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
 const { installStaffCallRecordingPrivacy } = require('./staff-call-recording-privacy');
+const { stampPortalBuild } = require('./portal-build-header');
 const { enforceTechnicianScope } = require('./technician-scope');
 const { sessionMfaBlock } = require('../services/staff-mfa');
 
@@ -75,6 +76,10 @@ async function adminAuthenticate(req, res, next) {
     req.techRole = tech.role;
     req.staffToken = decoded;
     installStaffCallRecordingPrivacy(res);
+    // Names the live client build on every signed-in staff answer, so an open
+    // staff tab knows when its code is out of date. Public routes never come
+    // through here, so their answers stay as documented.
+    stampPortalBuild(res);
     // Technician reach is an allow-list (GATE_STAFF_DEFAULT_DENY, owner
     // 2026-10-02). Runs here, at the one chokepoint every staff route shares,
     // so a router that forgot requireAdmin is still closed. Admins pass.

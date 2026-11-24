@@ -112,7 +112,7 @@ describe('AppointmentPage upcoming visit', () => {
     expect(screen.queryByText(/no waiting on a whole morning/)).not.toBeInTheDocument();
   });
 
-  it('day-only (GATE_DAY_ONLY_PROMISE): shows the date and "Arrival window: texted the day before", no hour, and the confirm still posts', async () => {
+  it('day-only: shows the date and "Arrival window: texted the day before", no hour, and the confirm still posts', async () => {
     const fetchMock = stubFetch({
       get: jsonResponse(upcomingPayload({
         appointment: {

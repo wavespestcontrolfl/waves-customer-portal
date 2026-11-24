@@ -38,9 +38,11 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 const mockRequestCard = jest.fn();
 const mockLaneReady = jest.fn(async () => true);
+const mockClosedReason = jest.fn(() => null);
 jest.mock('../services/appointment-card-request', () => ({
   requestCardForAppointment: (...args) => mockRequestCard(...args),
   isSecureCardLaneReady: (...args) => mockLaneReady(...args),
+  visitCardLinkClosedReason: (...args) => mockClosedReason(...args),
 }));
 const mockMarkTerms = jest.fn(async () => ({ marked: false }));
 jest.mock('../services/in-person-handoff', () => ({ markTermsRequired: (...args) => mockMarkTerms(...args) }));
@@ -55,6 +57,9 @@ const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-schedule');
 
+// Columns of the newest data read per table (the ownership probe excluded).
+const lastFirstCols = {};
+
 function stubTables(rows, { ownsVisit = true } = {}) {
   db.mockImplementation((table) => {
     const q = {};
@@ -63,11 +68,11 @@ function stubTables(rows, { ownsVisit = true } = {}) {
     // The tech-ownership probe selects exactly 'scheduled_services.id';
     // the data reads select plain column lists — distinguish so a test
     // can present a visit that EXISTS but is not the tech's.
-    q.first = jest.fn(async (...cols) => (
-      cols[0] === 'scheduled_services.id'
-        ? (ownsVisit ? { id: 'svc-1' } : undefined)
-        : rows[table]
-    ));
+    q.first = jest.fn(async (...cols) => {
+      if (cols[0] === 'scheduled_services.id') return ownsVisit ? { id: 'svc-1' } : undefined;
+      lastFirstCols[table] = cols;
+      return rows[table];
+    });
     return q;
   });
 }
@@ -92,6 +97,7 @@ describe('GET /admin/schedule/:id/card-request', () => {
     jest.clearAllMocks();
     mockLaneReady.mockResolvedValue(true);
     mockOnAutopay.mockResolvedValue(false);
+    mockClosedReason.mockReturnValue(null);
   });
 
   test('returns the rollup: request row + one-text stamp + live Auto Pay state', async () => {
@@ -109,6 +115,7 @@ describe('GET /admin/schedule/:id/card-request', () => {
         enabled: true,
         autopayActive: true,
         cardLinkSentAt: '2026-07-20T10:00:00Z',
+        closedReason: null,
         request: {
           status: 'completed',
           sentAt: '2026-07-20T10:00:05Z',
@@ -137,9 +144,28 @@ describe('GET /admin/schedule/:id/card-request', () => {
         enabled: false,
         autopayActive: false,
         cardLinkSentAt: null,
+        closedReason: null,
         request: null,
       });
     });
+  });
+
+  // Owner 2026-11-19: the panel offered "Text card / Auto Pay link" on an
+  // on-site visit and each tap was refused. The GET now says the visit's
+  // link is closed, from the same rule the funnel skips with.
+  test('closedReason comes from the funnel rule for this visit row', async () => {
+    const visitRow = { id: 'svc-1', customer_id: 'cust-1', card_link_sent_at: null, status: 'on_site', scheduled_date: '2026-11-11' };
+    stubTables({ scheduled_services: visitRow, appointment_card_requests: undefined, customers: { id: 'cust-1' } });
+    mockClosedReason.mockReturnValue('visit_not_live:on_site');
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request`);
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ closedReason: 'visit_not_live:on_site' });
+    });
+    expect(mockClosedReason).toHaveBeenCalledWith(visitRow);
+    // Without these two columns the rule reads every visit as closed.
+    expect(lastFirstCols.scheduled_services).toEqual(expect.arrayContaining(['status', 'scheduled_date']));
   });
 
   test('404 on an unknown visit', async () => {
@@ -231,6 +257,21 @@ describe('POST /admin/schedule/:id/card-request', () => {
 
     expect(mockRequestCard).toHaveBeenCalledTimes(1);
     expect(mockRequestCard).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', trigger: 'admin' });
+  });
+
+  // A skip writes no row, so the route logs the outcome — the code before
+  // ':' only, since an error or provider suffix is free text (pre-push P1).
+  test('logs the outcome code and never the free-text suffix', async () => {
+    const logger = require('../services/logger');
+    stubTables({ scheduled_services: { id: 'svc-1' } });
+    mockRequestCard.mockResolvedValue({ requested: false, action: 'skipped', reason: 'error:lookup failed for Pat Q. at 555-0100' });
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request`, { method: 'POST' });
+      expect(response.status).toBe(200);
+    });
+    expect(logger.info).toHaveBeenCalledWith('[schedule] office card-link tap for svc-1: skipped (error)');
+    expect(JSON.stringify(logger.info.mock.calls)).not.toMatch(/Pat Q|555-0100/);
   });
 
   test('skip outcomes pass through so the UI can say why nothing was sent', async () => {

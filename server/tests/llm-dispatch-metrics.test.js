@@ -360,6 +360,21 @@ describe('llm-dispatch-metrics', () => {
       expect(lowRate).toHaveLength(0);
     });
 
+    it('does not flag a single fallback on a low-volume policy, but flags two', () => {
+      const { detectExceptions, FALLBACK_MIN_COUNT } = load();
+      expect(FALLBACK_MIN_COUNT).toBe(2);
+      // 1 of 5 = 20%: one slow primary answer the fallback covered.
+      const one = detectExceptions([{ policy: 'estimateVision', total: 5, fallbacks: 1, failed: 0 }], []);
+      expect(one).toHaveLength(0);
+      const two = detectExceptions([{ policy: 'estimateVision', total: 7, fallbacks: 2, failed: 0 }], []);
+      expect(two).toHaveLength(1);
+      expect(two[0].kind).toBe('fallback_rate');
+      expect(two[0].detail).toMatch(/answered 2 of 7 calls/);
+      // The floor never hides a failure: a both-providers miss still reports.
+      const failed = detectExceptions([{ policy: 'estimateVision', total: 5, fallbacks: 1, failed: 1 }], []);
+      expect(failed.map((e) => e.kind)).toEqual(['all_providers_failed']);
+    });
+
     it('flags a previously busy policy that went silent, but not quiet ones', () => {
       const { detectExceptions, SILENT_MIN_WEEKLY } = load();
       // Yesterday must show SOME traffic: one policy going quiet is only
@@ -419,6 +434,23 @@ describe('llm-dispatch-metrics', () => {
       const out = detectExceptions(live, priorWeek, null, true, new Set(['report']));
       expect(out.map((e) => e.policy).sort()).toEqual(['imageScreen', 'visionAnalysis']);
       for (const e of out) expect(e.detail).toMatch(/silent for \d\+ days/);
+    });
+
+    it('gives callExtraction the quiet-days grace: a day with no recorded call is not an outage', () => {
+      // Sun 2026-11-22: Twilio had 0 inbound calls, so callExtraction (~9 a
+      // day) read "ZERO calls yesterday". It runs once per recorded call.
+      const { detectExceptions, EVENT_DRIVEN_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
+      expect(EVENT_DRIVEN_POLICIES.has('callExtraction')).toBe(true);
+      const live = [{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }];
+      const priorWeek = [
+        { policy: 'callExtraction', total: 66, activeDays: DAILY_CADENCE_MIN_DAYS + 1 },
+        { policy: 'report', total: 200, activeDays: 7 },
+      ];
+      expect(detectExceptions(live, priorWeek, null, true, new Set(['callExtraction', 'report']))).toEqual([]);
+      const out = detectExceptions(live, priorWeek, null, true, new Set(['report']));
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({ policy: 'callExtraction', kind: 'gone_silent' });
+      expect(out[0].detail).toMatch(/silent for \d\+ days/);
     });
 
     it('never flags a retired policy as gone silent — its provider call was removed on purpose', () => {

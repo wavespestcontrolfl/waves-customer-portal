@@ -1,4 +1,4 @@
-// Reclaimed water meters (GATE_LAWN_RECLAIMED_HALF_N): the county-layer download (paging, parser, user agent, 403), the local matcher (30 m),
+// Reclaimed water meters: the county-layer download (paging, parser, user agent, 403), the local matcher (30 m),
 // and the promise that no property data leaves the server. Fake fetch and fake knex; no network, no database.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());

@@ -26,9 +26,17 @@
 // best-effort (environments without the table skip it); the primary leg's
 // errors propagate so callers choose fail-soft or fail-loud.
 const logger = require('./logger');
-const { sameStreetAddress, addressPremiseKey, addressUnitKey, canonicalizeLeadingUnit } = require('./estimator-engine/address-compare');
+const { sameStreetAddress, addressPremiseKey, addressUnitKey, canonicalizeLeadingUnit, addressCompletesGatheredStreet } = require('./estimator-engine/address-compare');
 
 const PER_LEG_LIMIT = 50;
+// strict: a far higher cap, and a leg that fills it throws (the search did
+// not see every row, so "no match" would not be an answer).
+const STRICT_LEG_LIMIT = 10000;
+// strict: an address the search can never answer for (no readable house
+// number, a leg that fills its cap). Its code tells it from a database error,
+// which a caller may try again.
+const UNCHECKABLE = 'ADDRESS_UNCHECKABLE';
+const uncheckable = (why) => Object.assign(new Error(`customer-address-match: ${why}; the search is not complete`), { code: UNCHECKABLE });
 
 // The complete leading house-number token, read from the street-first form
 // the comparator uses. "123A Main St", "123-125 Main St", "123/2 Main St"
@@ -48,26 +56,136 @@ function candidateAddressString(row) {
 }
 
 /**
+ * `strict: true` throws when the property-address leg fails, instead of
+ *   returning the primary leg alone (the primary leg always throws), and
+ *   reads up to STRICT_LEG_LIMIT rows a leg, throwing when a leg fills it.
+ *   An address it can never answer for throws with code ADDRESS_UNCHECKABLE.
+ *   strict also keeps the NEAR rows: the same leading house digits (or no
+ *   house number it can read) and the same `zip` (a 5-digit option, or no
+ *   zip on file), but not the same street address to the
+ *   comparator. Each row then carries `exactMatch: true | false`. A caller
+ *   that must not miss a match treats a near row as "cannot tell": stored
+ *   spellings the comparator does not read (a compound number written
+ *   another way, a bare unit in line 2) land there instead of vanishing.
  * @returns {Promise<Array<object>>} customer rows (deduped by id) whose
  *   primary or property address is the same street address, each with
  *   `matchedVia: 'primary' | 'property'` and the matched address columns.
  */
-async function findCustomersAtAddress(database, address, { excludeCustomerId = null } = {}) {
+const zip5 = (value) => (String(value || '').match(/\d{5}/) || [''])[0];
+// Leading zeros dropped: "00123" is house 123.
+const digitsOf = (number) => number.match(/^\d+/)[0].replace(/^0+(?=\d)/, '');
+
+// The default search: lines that start with the house number and a space, 50 rows a leg, exact matches only.
+function defaultPlan(houseNumber) {
+  return {
+    strict: false,
+    legLimit: PER_LEG_LIMIT,
+    lineFilter: (line1) => (q) => q.where(line1, 'ilike', `${houseNumber} %`),
+    zipFilter: () => (q) => q,
+    mayMatch: () => true,
+    complete: (rows) => rows,
+    hasLine: (row) => !!row.address_line1,
+    isNear: () => false,
+  };
+}
+
+// The strict search. No address test in SQL at all, only a line on file and the zip: the comparator and the near
+// test read every row, so no stored spelling (a tab, a unit first, the number in line 2, "123/2" for "123-2", no
+// number) is dropped before them. Only rows whose zip column holds the home's 5-digit zip, or no zip: the comparator
+// rejects any other zip, and those rows would only fill the cap. A leg that fills the cap throws.
+// The first word of the home's street name after the house number that is not a direction ("123 N Palm Ave": palm).
+const DIRECTION_WORDS = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw', 'north', 'south', 'east', 'west',
+  'northeast', 'northwest', 'southeast', 'southwest']);
+function streetWordOf(address) {
+  const words = String(address).split(',')[0].trim().split(/\s+/).slice(1)
+    .map((w) => w.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  return words.find((w) => w.length >= 2 && !DIRECTION_WORDS.has(w)) || '';
+}
+
+// membersOnly: only customers who hold a plan (the shared SQL rule, before the cap), for a caller that asks only
+// "is a member here?".
+function strictPlan(address, houseNumber, zip, membersOnly) {
+  const nearZip = /^\d{5}$/.test(String(zip || '')) ? String(zip) : null;
+  if (!nearZip) throw uncheckable('strict needs the home\'s 5-digit zip');
+  const leadingDigits = digitsOf(houseNumber);
+  const streetWord = streetWordOf(address);
+  const streetWordRe = new RegExp(`(^|[^a-z0-9])${streetWord}([^a-z0-9]|$)`, 'i');
+  const ownDigits = (row) => {
+    const own = houseNumberOf(candidateAddressString(row));
+    return own ? digitsOf(own) : null;
+  };
+  return {
+    strict: true,
+    legLimit: STRICT_LEG_LIMIT,
+    lineFilter: (line1, line2, customersAlias) => (q) => {
+      q.whereRaw("btrim(concat_ws(' ', ??, ??)) <> ''", [line1, line2]);
+      if (membersOnly) q.whereRaw(`NOT ${require('./waveguard-existing-services').notMembershipCustomerSql(customersAlias)}`);
+    },
+    // A row whose readable house number is another number cannot be the same address: skip the full parse.
+    mayMatch: (row) => [null, leadingDigits].includes(ownDigits(row)),
+    zipFilter: (column) => (q) => q.whereRaw("coalesce(substring(?? from '[0-9]{5}'), '') in (?, '')", [column, nearZip]),
+    complete: (rows, leg) => {
+      if (rows.length >= STRICT_LEG_LIMIT) throw uncheckable(`the ${leg} leg filled its ${STRICT_LEG_LIMIT}-row cap`);
+      return rows;
+    },
+    // A row with the street only in line 2 is still compared.
+    hasLine: (row) => !!(row.address_line1 || row.address_line2),
+    // A near row names the same leading house digits (its zip the home's or none), or has no house number the
+    // search can read but has the home's zip on file and names the home's street (the shared completion test, or
+    // the street word in its street lines). A row with neither (a PO box) links nothing to this home: not near.
+    isNear: (row) => {
+      const own = ownDigits(row);
+      if (own) return own === leadingDigits && [nearZip, ''].includes(zip5(row.zip));
+      if (zip5(row.zip) !== nearZip) return false;
+      // The shared test first (it reads route spellings: "SR 64" for "State Road 64"), then the street word, read
+      // in the street lines only (a city named like the street proves nothing).
+      if (addressCompletesGatheredStreet(address, candidateAddressString(row))) return true;
+      const lines = [row.address_line1, row.address_line2].filter(Boolean).join(' ');
+      return streetWord !== '' && streetWordRe.test(lines);
+    },
+  };
+}
+
+// Exact rows first (strict marks them), then strict's near rows. Each customer once.
+function collectMatches(candidates, address, plan, excludeCustomerId) {
+  const seen = new Set();
+  const matches = [];
+  const usable = (row) => plan.hasLine(row) && !seen.has(String(row.id))
+    && !(excludeCustomerId != null && String(row.id) === String(excludeCustomerId));
+  for (const row of candidates) {
+    if (!usable(row) || !plan.mayMatch(row) || !sameStreetAddress(candidateAddressString(row), address)) continue;
+    seen.add(String(row.id));
+    matches.push(plan.strict ? { ...row, exactMatch: true } : row);
+  }
+  for (const row of candidates) {
+    if (!usable(row) || !plan.isNear(row)) continue;
+    seen.add(String(row.id));
+    matches.push({ ...row, exactMatch: false });
+  }
+  return matches;
+}
+
+async function findCustomersAtAddress(database, address, { excludeCustomerId = null, strict = false, zip = null, membersOnly = false } = {}) {
   const houseNumber = houseNumberOf(address);
-  if (!houseNumber) return [];
+  if (!houseNumber) {
+    if (strict) throw uncheckable('no house number the search can read');
+    return [];
+  }
+  const plan = strict ? strictPlan(address, houseNumber, zip, membersOnly) : defaultPlan(houseNumber);
 
   const primary = await database('customers')
     .where((q) => q.where('active', true).orWhereNull('active'))
     .whereNull('deleted_at')
-    .where('address_line1', 'ilike', `${houseNumber} %`)
+    .where(plan.lineFilter('address_line1', 'address_line2', 'customers'))
+    .where(plan.zipFilter('zip'))
     .orderBy('id')
-    .limit(PER_LEG_LIMIT)
+    .limit(plan.legLimit)
     .select(
       'id', 'account_id', 'first_name', 'last_name', 'phone', 'email',
       'address_line1', 'address_line2', 'city', 'state', 'zip',
       'waveguard_tier', 'monthly_rate', 'pipeline_stage',
     );
-  const candidates = primary.map((row) => ({ ...row, matchedVia: 'primary' }));
+  const candidates = plan.complete(primary, 'primary').map((row) => ({ ...row, matchedVia: 'primary' }));
 
   try {
     const property = await database('customer_properties as cp')
@@ -75,30 +193,23 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
       .where('cp.active', true)
       .where((q) => q.where('c.active', true).orWhereNull('c.active'))
       .whereNull('c.deleted_at')
-      .where('cp.address_line1', 'ilike', `${houseNumber} %`)
+      .where(plan.lineFilter('cp.address_line1', 'cp.address_line2', 'c'))
+      .where(plan.zipFilter('cp.zip'))
       .orderBy('cp.id')
-      .limit(PER_LEG_LIMIT)
+      .limit(plan.legLimit)
       .select(
         'c.id', 'c.account_id', 'c.first_name', 'c.last_name', 'c.phone', 'c.email',
         'c.waveguard_tier', 'c.monthly_rate', 'c.pipeline_stage',
         'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.state', 'cp.zip',
       );
-    candidates.push(...property.map((row) => ({ ...row, matchedVia: 'property' })));
+    candidates.push(...plan.complete(property, 'property-address').map((row) => ({ ...row, matchedVia: 'property' })));
   } catch (propErr) {
+    // strict: a caller that must not read a partial list as "nobody else is here" gets the error instead.
+    if (strict) throw propErr;
     logger.warn(`[customer-address-match] property-address leg skipped: ${propErr.message}`);
   }
 
-  const seen = new Set();
-  const matches = [];
-  for (const row of candidates) {
-    if (!row.address_line1) continue;
-    if (excludeCustomerId != null && String(row.id) === String(excludeCustomerId)) continue;
-    if (seen.has(String(row.id))) continue;
-    if (!sameStreetAddress(candidateAddressString(row), address)) continue;
-    seen.add(String(row.id));
-    matches.push(row);
-  }
-  return matches;
+  return collectMatches(candidates, address, plan, excludeCustomerId);
 }
 
 /**
@@ -186,4 +297,4 @@ function rankByContact(rows, { phone = null, email = null } = {}) {
   return [...tagged.filter((r) => r.contactMatch), ...tagged.filter((r) => !r.contactMatch)];
 }
 
-module.exports = { findCustomersAtAddress, rankByContact, pairCustomersAtSameAddress, _private: { houseNumberOf, candidateAddressString } };
+module.exports = { findCustomersAtAddress, rankByContact, pairCustomersAtSameAddress, ADDRESS_UNCHECKABLE: UNCHECKABLE, _private: { houseNumberOf, candidateAddressString } };

@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import TechIntelligenceBar from './TechIntelligenceBar';
+import { reloadHoldNames } from '../../lib/reloadHolds';
 
 function ok(body) {
   return { ok: true, json: async () => body };
@@ -246,4 +247,16 @@ describe('instant answers', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Last treatment' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('This answer could not be loaded');
   });
+});
+
+it('an unsent question holds the reload of an out-of-date tab until it is cleared or the bar unmounts', async () => {
+  const box = await mount();
+  expect(reloadHoldNames()).not.toContain('ask-draft');
+  fireEvent.change(box, { target: { value: "What's my next stop?" } });
+  expect(reloadHoldNames()).toContain('ask-draft');
+  fireEvent.change(box, { target: { value: '' } });
+  expect(reloadHoldNames()).not.toContain('ask-draft');
+  fireEvent.change(box, { target: { value: "What's my next stop?" } });
+  cleanup();
+  expect(reloadHoldNames()).not.toContain('ask-draft');
 });

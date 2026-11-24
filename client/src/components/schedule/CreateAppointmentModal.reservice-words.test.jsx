@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * "Customer's words" on a pest/lawn re-service (GATE_RESERVICE_OFFICE_REQUEST).
- * The section renders only for a re-service line AND a live gate (the
- * suggestion route's {enabled}); "Use this" fills the box; the POST carries
+ * "Customer's words" on a pest/lawn re-service.
+ * The section renders only for a re-service line whose suggestion probe
+ * answered; "Use this" fills the box; the POST carries
  * `customerRequest: { text, suggestionId, suggestionKind }` — never a source
  * (the server decides that) — and nothing when the box is empty.
  */
@@ -37,7 +37,7 @@ function futureDate(days = 30) {
   return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
 }
 
-function installFetch({ serviceKey = 'pest_re_service', serviceName = 'Pest Re-Service', services: catalog = null, probe = { enabled: true, suggestion: SUGGESTION }, probeFails = false } = {}) {
+function installFetch({ serviceKey = 'pest_re_service', serviceName = 'Pest Re-Service', services: catalog = null, probe = { suggestion: SUGGESTION }, probeFails = false } = {}) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.includes('/admin/triage?')) return Promise.resolve(json({ items: [] }));
@@ -52,7 +52,7 @@ function installFetch({ serviceKey = 'pest_re_service', serviceName = 'Pest Re-S
       return probeFails ? Promise.reject(new Error('boom')) : Promise.resolve(json(probe));
     }
     if (url.endsWith('/admin/schedule') && options.method === 'POST') return Promise.resolve(json({ id: 'appt-1' }));
-    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [], canChangeAppointmentAddress: false }));
+    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [] }));
     if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [] }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));
@@ -102,7 +102,7 @@ describe('Customer\'s words section', () => {
     expect(box.value).toBe('Ants are back in the kitchen');
   });
 
-  it('is absent when the gate is dark ({enabled:false})', async () => {
+  it('is absent when an older server answers {enabled:false}', async () => {
     installFetch({ probe: { enabled: false, suggestion: null } });
     await mountWithService();
     await waitFor(() => expect(screen.queryByText("Customer's words")).toBeNull());
@@ -125,7 +125,7 @@ describe('Customer\'s words section', () => {
   });
 
   it('shows the box with no suggestion card when there is nothing to suggest', async () => {
-    installFetch({ probe: { enabled: true, suggestion: null } });
+    installFetch({ probe: { suggestion: null } });
     await mountWithService();
     expect(await screen.findByText("Customer's words")).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Use this' })).toBeNull();
@@ -149,7 +149,7 @@ describe('Customer\'s words section', () => {
   });
 
   it('typed words post text only; an empty box posts no customerRequest', async () => {
-    const fetcher = installFetch({ probe: { enabled: true, suggestion: null } });
+    const fetcher = installFetch({ probe: { suggestion: null } });
     await mountWithService();
     const submit = screen.getByRole('button', { name: 'Schedule appointment' });
     await waitFor(() => expect(submit.disabled).toBe(false));

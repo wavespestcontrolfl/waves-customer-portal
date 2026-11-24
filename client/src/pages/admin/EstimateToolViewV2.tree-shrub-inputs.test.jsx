@@ -156,3 +156,40 @@ describe("sellableTreeShrubTier — what the builder submits", () => {
     expect(sellableTreeShrubTier("enhanced")).toBe("enhanced");
   });
 });
+
+describe("tree density box", () => {
+  it("shows only while a picked service reads it, and keeps its value while hidden", async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <EstimateToolViewV2 />
+      </MemoryRouter>,
+    );
+
+    let tsBox;
+    await waitFor(() => {
+      tsBox = findCheckboxByLabel(container, /^\s*Tree & Shrub\s*$/);
+      expect(tsBox).toBeTruthy();
+    });
+    expect(container.querySelector("#estimate-treeDensity")).toBeNull();
+
+    fireEvent.click(tsBox);
+    await waitFor(() => {
+      expect(container.querySelector("#estimate-treeDensity")).toBeTruthy();
+    });
+    fireEvent.change(container.querySelector("#estimate-treeDensity"), {
+      target: { value: "HEAVY" },
+    });
+
+    fireEvent.click(tsBox);
+    await waitFor(() => {
+      expect(container.querySelector("#estimate-treeDensity")).toBeNull();
+    });
+
+    // Hidden, not cleared: the value comes back with the service.
+    fireEvent.click(tsBox);
+    await waitFor(() => {
+      expect(container.querySelector("#estimate-treeDensity")).toBeTruthy();
+    });
+    expect(container.querySelector("#estimate-treeDensity").value).toBe("HEAVY");
+  });
+});

@@ -43,6 +43,7 @@ import {
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 import PhotoAssessmentDetailSheet from "./PhotoAssessmentDetailSheet";
+import { holdReloadWhileSending } from "../../lib/reloadHolds";
 
 const TYPE_LABELS = { lawn: "Lawn", pest: "Pest ID", tree_shrub: "Tree & Shrub" };
 // Deep-linkable types (?open=<type>:<id>) — a Set, so a prototype key like
@@ -172,7 +173,7 @@ function NewAssessmentDialog({ open, onClose, onCreated }) {
     }
   }, [open]);
 
-  const submit = async () => {
+  const runAnalysis = async () => {
     if (busy) return;
     if (!files.length) { setError("Add at least one photo."); return; }
     setBusy(true);
@@ -191,6 +192,10 @@ function NewAssessmentDialog({ open, onClose, onCreated }) {
       setBusy(false);
     }
   };
+  // Run analysis resizes the photos before its request starts, so no save is
+  // open yet: the send holds an out-of-date tab's reload until it settles
+  // (lib/reloadHolds.js).
+  const submit = () => holdReloadWhileSending("photo-assessment", runAnalysis);
 
   return (
     <Dialog open={open} onClose={busy ? undefined : onClose}>

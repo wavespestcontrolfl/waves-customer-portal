@@ -39,7 +39,7 @@
  *
  * Gates: GATE_ROUTE_REORDER (this pass) — separate from GATE_ROUTE_TIERS
  * (day-move eligibility inside auto-dispatch); both dark by default.
- * GATE_ROUTE_REORDER_REPAIR + GATE_DRIVE_TIME_CALIBRATION opt into a narrow
+ * GATE_ROUTE_REORDER_REPAIR opts into a narrow
  * near-term repair: insert null-position timed stops into an already
  * chronological route only when this restores all existing arrival promises.
  * It uses the same fenced writer, never moves a date/window, and needs no
@@ -397,25 +397,6 @@ function relaxElapsedWindows(sourceStops, startMin) {
   });
 }
 
-/** True only when the optimizer returned REAL road durations: a Google
- *  source, a non-empty leg list, and a finite duration on every leg. The
- *  nearest-neighbour and single_stop paths return model-derived legs, which
- *  are exactly what the calibration gate exists to distrust. */
-function hasLiveLegs(googleSource, legs, orderedStops, sourceById) {
-  if (!String(googleSource || '').startsWith('google')) return false;
-  if (!Array.isArray(legs) || legs.length === 0) return false;
-  // ENOUGH legs, not merely some: violatesWindowFeasibility refuses a list
-  // shorter than the geocoded stop count and silently falls back to the
-  // model, so a short list is not the live evidence it looks like (codex
-  // round 5 P1). Same count that guard computes.
-  const geocoded = orderedStops.filter((stop) => {
-    const row = (sourceById && sourceById.get(stop.id)) || stop;
-    return parseFloat(row.lat) && parseFloat(row.lng);
-  }).length;
-  if (legs.length < geocoded) return false;
-  return legs.slice(0, geocoded).every((leg) => Number.isFinite(leg?.durationMinutes));
-}
-
 /**
  * What the guard is actually allowed to reason about: the stops that will be
  * DRIVEN, and the travel numbers that describe them.
@@ -436,15 +417,6 @@ function driveableInputs({ rawGoogleOrder, rawSourceStops, rawLegs, origin }) {
   return { sourceStops, googleOrder, legs: aligned ? rawLegs : null };
 }
 
-/** Which gate stands the window-fit repair down, or null when both are on.
- *  WINDOW_FIT is reported first: it is the switch for the repair itself,
- *  while CALIBRATION is the model the repair's safety case rests on. */
-function gateOffReason() {
-  if (!gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT')) return 'WINDOW_FIT';
-  if (!gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) return 'CALIBRATION';
-  return null;
-}
-
 /**
  * Reasons a day cannot be certified at all — checked before any order is
  * accepted or repaired, because none of them are about the ORDER:
@@ -453,20 +425,16 @@ function gateOffReason() {
  *    same call arrival-route.js's own route check makes);
  *  - an ungeocoded stop's travel counts as zero in both the simulation and
  *    the distance model, so "feasible" is not knowable;
- *  - a pass without LIVE road durations rests on the in-house model, which
- *    the fallback's owner ruling requires to be calibrated.
  */
 /** Every reason uncertifiableReason can return — how a caller of
  *  chooseWindowSafeOrder tells "this day cannot be certified at all" apart
  *  from its post-conflict refusals (WINDOW_FIT_GATE_OFF /
  *  NO_FEASIBLE_IMPROVEMENT). Keep in sync with the function below. */
-const UNCERTIFIABLE_REASONS = new Set(['LIVE_STOP_IN_PROGRESS', 'COORDLESS_STOPS', 'MODEL_UNCALIBRATED']);
+const UNCERTIFIABLE_REASONS = new Set(['LIVE_STOP_IN_PROGRESS', 'COORDLESS_STOPS']);
 
-function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requireCalibratedModel, googleOrder, sourceById }) {
+function uncertifiableReason({ sourceStops, startMin }) {
   if (startMin != null && sourceStops.some(isLiveStop)) return 'LIVE_STOP_IN_PROGRESS';
   if (sourceStops.some((s) => !(parseFloat(s.lat) && parseFloat(s.lng)))) return 'COORDLESS_STOPS';
-  if (requireCalibratedModel && !hasLiveLegs(googleSource, legs, googleOrder, sourceById)
-    && !gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) return 'MODEL_UNCALIBRATED';
   return null;
 }
 
@@ -479,7 +447,7 @@ function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requir
  * preview of the admin buttons showed Google's order putting a 16:00-promised
  * stop FIRST and a 10:00 stop SIXTH — 5-19 mi WORSE than window order — while
  * the endpoint reported it as a "savings". This function is pure (no gates
- * read beyond GATE_ROUTE_REORDER_WINDOW_FIT / GATE_DRIVE_TIME_CALIBRATION,
+ * read beyond GATE_ROUTE_REORDER_WINDOW_FIT,
  * no db, no writes) so both callers — this pass's runRouteReorder below AND
  * the admin routes — stay on the SAME decision (codex GitHub round P1: an
  * earlier revision left runRouteReorder running its own parallel chronology
@@ -506,9 +474,8 @@ function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requir
  * Returns one of:
  *   { orderedStops, source, conflict: null }                    — write it
  *   { orderedStops: null, reason, conflict, beforeMeters }       — DO NOT WRITE
- * `reason` is 'WINDOW_FIT_GATE_OFF' (either gate is off — no repair was even
- * attempted; `gateOff` says which: 'WINDOW_FIT' or 'CALIBRATION' — nightly-only
- * bookkeeping, admin's response contract keeps using the combined `reason`),
+ * `reason` is 'WINDOW_FIT_GATE_OFF' (the window-fit gate is off — no repair was even
+ * attempted; `gateOff` is 'WINDOW_FIT' — nightly-only bookkeeping),
  * 'COORDLESS_STOPS' (a source stop lacks usable coordinates — both the
  * feasibility simulation and the distance model would treat its travel as
  * zero, so a fallback built on it is not trustworthy; fail closed before
@@ -526,7 +493,7 @@ function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requir
  */
 function chooseWindowSafeOrder({
   RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs: rawLegs = null,
-  startMin = null, origin = null, requireCalibratedModel = false, elapsedCutoffMin,
+  startMin = null, origin = null, elapsedCutoffMin,
   // Where this technician's day starts and ends (GATE_TECH_START_POINTS, a
   // staff route tool only). Absent = the office, byte-identical to before.
   // `origin` (the truck's live position on a day in progress) still wins for
@@ -576,7 +543,7 @@ function chooseWindowSafeOrder({
   const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, guardStops, legs, simStart, from);
   const conflict = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : (fitConflict ? 'WINDOW_FIT_CONFLICT' : null);
   // Reasons this day cannot be certified AT ALL, whatever the order says.
-  const blocked = uncertifiableReason({ sourceStops, startMin, googleSource, legs, requireCalibratedModel, googleOrder, sourceById });
+  const blocked = uncertifiableReason({ sourceStops, startMin });
   if (blocked) return { orderedStops: null, reason: blocked, conflict, beforeMeters };
   if (!chronoConflict && !fitConflict) {
     // Google's order is legal — still score it under the shared model (NOT
@@ -601,9 +568,8 @@ function chooseWindowSafeOrder({
       afterSeconds: sim ? Math.round(sim.travelMin * 60) : null,
     };
   }
-  const gatesOff = gateOffReason();
-  if (gatesOff) {
-    return { orderedStops: null, reason: 'WINDOW_FIT_GATE_OFF', conflict, beforeMeters, gateOff: gatesOff };
+  if (!gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT')) {
+    return { orderedStops: null, reason: 'WINDOW_FIT_GATE_OFF', conflict, beforeMeters, gateOff: 'WINDOW_FIT' };
   }
   const fallback = computeWindowFitOrder(RouteOptimizer, currentOrder(guardStops), {
     effectiveWindowStart, effectiveWindowRange: guardRange, violatesWindowChronology, violatesWindowFeasibility, modelDistanceMeters,
@@ -789,7 +755,7 @@ async function assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technic
  * than half-writing another tech's fine segment.
  */
 function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceStops, googleSource, legs = null,
-  startMin = null, techDayOrigins = null, requireCalibratedModel = true, elapsedCutoffMin,
+  startMin = null, techDayOrigins = null, elapsedCutoffMin,
   // Map<lowercase tech id, start point> (loadTechStartPoints). Absent, or a
   // tech not in it: that tech starts and ends at the office.
   techHomes = null }) {
@@ -821,7 +787,7 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
     const outcome = chooseWindowSafeOrder({
       RouteOptimizer, googleOrder: slice, sourceStops: techStops, googleSource, legs: legsAlign, startMin,
       origin: techDayOrigins ? techDayOrigins.origins.get(techId) || null : null,
-      requireCalibratedModel, elapsedCutoffMin, home: homeFromMap(techHomes, techId),
+      elapsedCutoffMin, home: homeFromMap(techHomes, techId),
     });
     if (!outcome.orderedStops) return { refusal: { technicianId: techId, ...outcome } };
     resolvedByTech.set(techId, outcome);
@@ -1459,7 +1425,7 @@ async function runRouteReorder(opts = {}, conn = db) {
   const config = getRouteReorderConfig(opts);
   const now = opts.now || new Date();
   const today = etDateString(now);
-  const repairGates = ['GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'];
+  const repairGates = ['GATE_ROUTE_REORDER_REPAIR'];
   // Change-triggered runs can only repair the explicitly affected dates.
   // They never fall through to Google's discretionary distance optimizer.
   if (opts.repairOnly) repairGates.push('GATE_ROUTE_REORDER');
@@ -1741,9 +1707,8 @@ async function runRouteReorder(opts = {}, conn = db) {
           // (codex GitHub round P1 — this used to be a second, independent
           // implementation of the same safety decision): Google's order
           // passes both guards ⇒ kept; it fails and GATE_ROUTE_REORDER_WINDOW_FIT
-          // + GATE_DRIVE_TIME_CALIBRATION are on ⇒ handed to the in-process
-          // window-fit fallback; either gate off ⇒ byte-for-byte the
-          // pre-fallback skip. `startMin` stays null (nightly never runs
+          // is on ⇒ handed to the in-process window-fit fallback; gate off ⇒
+          // byte-for-byte the pre-fallback skip. `startMin` stays null (nightly never runs
           // today — the band starts tomorrow — so every call starts at the
           // shared 08:00 day-open, unlike the admin "day in progress" case).
           let finalOrdered = result.orderedStops;
@@ -1772,10 +1737,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           // `!windowFitEnabled || (!chronoConflict && !fitConflict)`, where
           // `windowFitEnabled` read GATE_ROUTE_REORDER_WINDOW_FIT ALONE:
           // true when Google's order was legal (conflict null) regardless of
-          // the gates, or when that one flag is off. Calibration-off with a
-          // conflict deliberately does NOT short-circuit here — it falls
-          // through to the skip below so the ledger still records the
-          // conflict plus `fallback: 'CALIBRATION_OFF'`.
+          // the gates, or when that one flag is off.
           const gateStoodDown = guardOutcome.reason === 'WINDOW_FIT_GATE_OFF';
           // Waived floor still demands a strictly shorter order (1 m).
           const floorWaived = completeOrderEnabled && hasIncompleteStoredOrder(techStops);
@@ -1799,7 +1761,7 @@ async function runRouteReorder(opts = {}, conn = db) {
             // guardOutcome.conflict is always set here — orderedStops is only
             // null inside the shared decision's post-conflict branch.
             const tag = gateStoodDown
-              ? (guardOutcome.gateOff === 'CALIBRATION' ? { fallback: 'CALIBRATION_OFF' } : {})
+              ? {}
               // NO_FEASIBLE_IMPROVEMENT (or, in principle, COORDLESS_STOPS —
               // this pass's own earlier COORDLESS_STOPS day-skip already
               // guarantees every stop reaching here is geocoded, so that

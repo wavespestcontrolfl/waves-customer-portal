@@ -43,7 +43,7 @@
  */
 
 const logger = require('../logger');
-const { assertAssignableTechnician } = require('../technician-eligibility');
+const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('../technician-eligibility');
 
 const EARLIEST_START_MINUTES = 8 * 60; // house rule: no client appointments before 8am ET
 
@@ -209,14 +209,18 @@ async function revalidateSlot({ offer, durationMinutes = null, serviceLines }) {
   return slot ? { status: 'ok', slot } : { status: 'slot_gone' };
 }
 
+// The answer when the offered slot is not open at the re-check (or was checked for another line's technician).
+const SLOT_NOT_OPEN = 'That time is no longer open — nothing was booked. Call find_slots again for fresh times '
+  + 'and offer the caller a new option. Never promise a time the tools have not just confirmed.';
+
 // The booked service's line as `serviceLines` for the recheck: [line] while the
 // service-line map is LIVE and the catalog row has a line, else undefined (no read at
-// all with the gate off). A Waves Assessment has no line (liveServiceLine): today's recheck.
-async function bookingServiceLines(db, catalogRow) {
+// all with the gate off). A Waves Assessment takes the line its lead asked for (liveServiceLine).
+async function bookingServiceLines(db, catalogRow, customerId = null, leadId = null) {
   const { lineMapLive, liveServiceLine } = require('../scheduling/line-technician');
   if (!lineMapLive() || !catalogRow) return undefined;
   const line = await liveServiceLine(db, {
-    serviceId: catalogRow.id || null, serviceKey: catalogRow.service_key || null, serviceType: catalogRow.name || null,
+    serviceId: catalogRow.id || null, serviceKey: catalogRow.service_key || null, serviceType: catalogRow.name || null, customerId, leadId,
   });
   return line ? [line] : undefined;
 }
@@ -420,7 +424,10 @@ async function commitVoiceBooking({
       });
       if (clash.length) return { status: 'slot_taken' };
 
-      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx, date: dateStr, workDays: true });
+      // `hours` (GATE_TECH_SHIFT_HOURS): the visit's own block against the technician's shift, the rule the
+      // offer was held to (the /book engine). A refusal books nothing and answers slot_taken (the catch below).
+      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx, date: dateStr, workDays: true,
+        hours: visitBlock(windowStart, windowEnd, insertData.estimated_duration_minutes) });
       const [created] = await trx('scheduled_services').insert(insertRow).returning('*');
       // Surface the pending request in the existing admin confirm queue — the
       // same outbound_booking_review card the office already works. Only
@@ -510,6 +517,13 @@ async function commitVoiceBooking({
       );
       return { status: 'already_requested' };
     }
+    // Not a failure either: the technician's shift stopped holding this block after the engine's
+    // re-check (the hours changed, or today's clock-in arrived). Nothing was written, and the time
+    // is gone as a taken one is, so the agent looks for fresh times. Every other refusal stays an error.
+    if (err && err.code === NOT_ASSIGNABLE && err.outsideShift) {
+      logger.warn(`[voice-relay-booking] ${dateStr} ${windowStart} refused at the commit for customer ${customerId}: technician ${err.technicianId} outside_shift`);
+      return { status: 'slot_taken' };
+    }
     logger.error(`[voice-relay-booking] commit failed for customer ${customerId} on ${dateStr}: ${err.message}`);
     return { status: 'error' };
   }
@@ -528,6 +542,19 @@ function addMinutesToClock(value, minutes) {
 function clockToMinutes(value) {
   const m = String(value || '').match(/^(\d{1,2}):(\d{2})/);
   return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+}
+
+/**
+ * A visit's own block in minutes after midnight, for the shift check (technician-eligibility.js
+ * `hours`): its start, and the later of its window end and its start plus its length (60 minutes
+ * when none), the end commitVoiceBooking writes. Kept in minutes, so a long visit late in the day
+ * is not wrapped at midnight. A start that cannot be read is null: that check then leaves the
+ * visit to the others.
+ */
+function visitBlock(windowStart, windowEnd, minutes) {
+  const startMin = clockToMinutes(windowStart);
+  if (startMin === null) return { startMin: null, endMin: null };
+  return { startMin, endMin: Math.max(clockToMinutes(windowEnd) ?? 0, startMin + (Number(minutes) || 60)) };
 }
 
 /** The later of two 'HH:MM[:SS]' clocks; either may be null/unparseable. */
@@ -558,6 +585,7 @@ const REFUSE_NO_CUSTOMER =
  * time (the row is pending office review).
  */
 async function requestBookingText(input = {}, ctx = {}) {
+  const readSessionLeadId = () => (typeof ctx.leadId === 'function' ? ctx.leadId() : (ctx.leadId || null));
   // Double gate, fail closed (defense in depth vs. a stale registered tool list).
   if (!isBookingEnabled()) return REFUSE_GATE_OFF;
 
@@ -728,10 +756,13 @@ async function requestBookingText(input = {}, ctx = {}) {
   }
   // Never trust the model's memory of a slot: re-check the offered slot
   // through the same availability engine, right now, at the account's address.
+  // This call's own lead, when it has one: an assessment goes by the inquiry on the line now.
+  const lineLeadId = readSessionLeadId();
+  const serviceLines = await bookingServiceLines(db, catalogRow, customerId, lineLeadId);
   const recheck = await revalidateSlot({
     offer: { ...offer, lat: bookingCoords.lat, lng: bookingCoords.lng },
     durationMinutes: bookingDurationMinutes,
-    serviceLines: await bookingServiceLines(db, catalogRow),
+    serviceLines,
   });
   if (recheck.status === 'engine_unavailable') {
     return 'Live scheduling is not available right now, so no booking request can be placed. '
@@ -745,10 +776,7 @@ async function requestBookingText(input = {}, ctx = {}) {
     return 'That day is not open for booking any more — nothing was booked. Call find_slots again for '
       + 'fresh times and offer the caller a new option.';
   }
-  if (recheck.status !== 'ok') {
-    return 'That time is no longer open — nothing was booked. Call find_slots again for fresh times '
-      + 'and offer the caller a new option. Never promise a time the tools have not just confirmed.';
-  }
+  if (recheck.status !== 'ok') return SLOT_NOT_OPEN;
   const slot = recheck.slot;
 
   const { resolveCallBookingPrice, callBookingInvoiceOnComplete } = require('../call-booking-catalog');
@@ -915,8 +943,13 @@ async function requestBookingText(input = {}, ctx = {}) {
     } : {}),
   };
 
-  const readSessionLeadId = () => (typeof ctx.leadId === 'function' ? ctx.leadId() : (ctx.leadId || null));
   const leadIdAtCommit = readSessionLeadId();
+  // The call's lead arrived (or changed) after the slot re-check: the line is read again for the lead the booking
+  // is saved with. Another line means the slot was checked for another technician, so nothing is booked.
+  if (leadIdAtCommit !== lineLeadId
+    && String((await bookingServiceLines(db, catalogRow, customerId, leadIdAtCommit)) || '') !== String(serviceLines || '')) {
+    return SLOT_NOT_OPEN;
+  }
   const commit = await commitVoiceBooking({
     db, customerId, dateStr, windowStart, windowEnd: insertData.window_end,
     insertData, callLogId, catalogRow, slot, thirdParty, unverifiedNote,
@@ -959,7 +992,7 @@ async function requestBookingText(input = {}, ctx = {}) {
   void require('../scheduling/line-technician').recordLinePickShadow({
     source: 'phone_live', scheduledServiceId: commit.scheduledServiceId, customerId, date: dateStr, windowStart,
     windowEnd: insertData.window_end, serviceId: catalogRow.id, serviceType: catalogRow.name,
-    durationMinutes: bookingDurationMinutes, actualTechnicianId: insertData.technician_id,
+    durationMinutes: bookingDurationMinutes, actualTechnicianId: insertData.technician_id, leadId: leadIdAtCommit,
   });
   // THE OTHER HALF OF THE LEAD BACK-FILL, for the slow-commit race.
   //

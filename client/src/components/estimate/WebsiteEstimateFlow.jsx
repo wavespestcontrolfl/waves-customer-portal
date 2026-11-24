@@ -48,7 +48,7 @@ export function WebsiteEstimateFrame({ title, timer, stage = null, children }) {
 export default function WebsiteEstimateFlow({
   services, selected, onFrequencyChange, lockedSection, oneTime,
   oneTimeBreakdown, combinedFrequency, fees, bookingContent, reviewContent,
-  reviewing, busy, timer, phone, phoneHref, canBook, error, callbackContent,
+  reviewing, busy, timer, phone, phoneHref, canBook, error, callbackContent, quoteNotice,
 }) {
   const cadenceSections = oneTime ? [] : services.filter(section => (
     section.isRecurring && section.frequencies?.length > 1 && !lockedSection(section)
@@ -116,8 +116,9 @@ export default function WebsiteEstimateFlow({
                 {fee.waivedWithPrepay ? <span>Waived when you prepay for the year.</span> : null}
               </div>
             ))}
-            {canBook && fullyPriced ? <button className="website-primary" onClick={() => setStep(quoteStep + 1)}>Book My Service →</button>
-              : <p>Our team will contact you to arrange your service.</p>}
+            {/* A notice the page owns (a refused plan quote's banner) takes the place of booking and of the contact line. */}
+            {quoteNotice || (canBook && fullyPriced ? <button className="website-primary" onClick={() => setStep(quoteStep + 1)}>Book My Service →</button>
+              : <p>Our team will contact you to arrange your service.</p>)}
             <div className="website-contact-actions">
               {callbackContent}
               <a className="website-secondary" href={phoneHref} aria-label={`Call Waves at ${phone}`}>Call Waves</a>

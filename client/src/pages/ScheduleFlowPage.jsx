@@ -58,6 +58,26 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Returns the raw fetch Response alongside the parsed body so each caller
 // keeps its own status/error handling (the gate shows inline recovery UI;
 // the page-level refresh just needs the availability payload).
+// An inspection list answer (GET, or POST /availability, whose success has
+// no `state`) with no list though nothing else applies: not a terminal state,
+// not the address gate, and not the GET's own no-times answers
+// (`service_area_unavailable`, `booking_unavailable`), which replace the
+// calendar. Its slot build failed, so it refreshes nothing, and the caller
+// keeps or clears its own times (pre-push P1s on 4e9d76bcb1 and 6db4e39ca7).
+const listMissing = (body) => (body.state ?? 'ok') === 'ok' && !body.needs_address
+  && !body.service_area_unavailable && !body.booking_unavailable && !body.availability;
+
+// Inspection commit refusals that stay on the picker with an inline message,
+// never the raw error code or a generic failure line. address_unresolved: the
+// address didn't geocode at commit time (rare — usually caught earlier by the
+// address gate). service_area_unavailable: the service-area check itself
+// couldn't run — not a verdict, so they can retry rather than stop on the
+// out-of-area card.
+const INSPECTION_INLINE_REFUSALS = new Map([
+  ['address_unresolved', "We couldn't verify that address. Please text or call us and we'll get you booked."],
+  ['service_area_unavailable', "We couldn't confirm your service area just now. Please try again, or text or call us."],
+]);
+
 async function postInspectionAvailability(token, address, { signal } = {}) {
   const res = await fetch(`${API_BASE}/public/inspection/${token}/availability`, {
     method: 'POST',
@@ -307,25 +327,43 @@ function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, locationReviewRequ
 
 const ASK_PROMPTS = ['Tomorrow morning', 'This weekend', 'Next week', 'Saturday', 'Late afternoon'];
 
-function AskCard({ onSearch, aiFiltered, onShowAll }) {
+// The page's list request state when no search or reset runs (listRequest).
+const NO_LIST_REQUEST = { controller: null, reset: false };
+
+// busy: the page books a time. resetting: "Show all open times" runs; it
+// brings the address on file, so no search may cancel it.
+function AskCard({ onSearch, aiFiltered, onShowAll, closed, busy, resetting }) {
   const [question, setQuestion] = useState('');
   const [asking, setAsking] = useState(false);
   const [notice, setNotice] = useState(null); // { text, isError }
+  // No search starts while one runs, while the page books a time, or while
+  // a reset runs.
+  const off = asking || busy || resetting;
+  // "Show all open times" may cancel a search, never a booking or its own
+  // reset: a second tap would drop the first reset's answer, which may bring
+  // the address on file (pre-push P1 on b4fc39b372).
+  const showAllOff = busy || resetting;
 
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
-    if (!q || asking) return;
+    if (!q || off) return;
     setAsking(true);
     setNotice(null);
     try {
       const res = await onSearch(q);
       setNotice(res?.summary ? { text: res.summary, isError: false } : null);
-    } catch {
+    } catch (err) {
+      // A search the page cancelled (a change of address, a booking's
+      // answer) ends quietly: it did not fail (pre-push P1 on a488a185ee).
+      if (err?.name === 'AbortError') return;
       setNotice({ text: `I couldn't search right now. Text or call ${WAVES_SUPPORT_PHONE_DISPLAY} and we'll find a time.`, isError: true });
     } finally {
       setAsking(false);
     }
   };
+
+  // The page closed its search until a reload (see searchClosed).
+  if (closed) return null;
 
   return (
     <section data-glass="card" className="waves-ask-card" data-schedule-ask="" aria-label="Waves AI — search for a day or time" style={estimateCard({ display: 'grid', gap: 12 })}>
@@ -357,7 +395,7 @@ function AskCard({ onSearch, aiFiltered, onShowAll }) {
           data-glass-accent=""
           type="button"
           onClick={() => ask()}
-          disabled={asking || !question.trim()}
+          disabled={off || !question.trim()}
           style={{ minHeight: 48, padding: '0 20px', border: 0, borderRadius: 10, background: COLORS.yellow, color: S.text, font: 'inherit', fontSize: 16, fontWeight: 700, cursor: 'pointer' }}
         >
           {asking ? 'Checking…' : 'Search'}
@@ -371,13 +409,13 @@ function AskCard({ onSearch, aiFiltered, onShowAll }) {
               className="waves-ask-row"
               data-first={i === 0 ? '' : undefined}
               onClick={() => ask(prompt)}
-              disabled={asking}
+              disabled={off}
               style={{
                 display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', alignItems: 'center', gap: 12,
                 width: '100%', minHeight: 44, padding: '10px 0', border: 0,
                 borderTop: i === 0 ? 0 : '1px solid rgba(4, 57, 94, 0.12)', borderRadius: 0,
                 background: 'transparent', color: S.text, font: 'inherit', fontSize: 14, fontWeight: 500,
-                lineHeight: 1.35, textAlign: 'left', cursor: asking ? 'not-allowed' : 'pointer', opacity: asking ? 0.65 : 1,
+                lineHeight: 1.35, textAlign: 'left', cursor: off ? 'not-allowed' : 'pointer', opacity: off ? 0.65 : 1,
               }}
             >
               <span>{prompt}</span>
@@ -390,10 +428,14 @@ function AskCard({ onSearch, aiFiltered, onShowAll }) {
         <div role="status" data-glass="soft" style={{ ...SOFT_NOTE, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
           <span>{notice ? notice.text : 'Showing the times that match your search.'}</span>
           {aiFiltered ? (
+            // Off while a booking runs: the reset drops that booking's
+            // answer, and a reset that then failed would leave the refused
+            // time picked with no message (pre-push P1 on 6d7d98d317).
             <button
               type="button"
               onClick={onShowAll}
-              style={{ border: 0, background: 'transparent', color: COLORS.glassNavy, font: 'inherit', fontSize: 14, fontWeight: 700, textDecoration: 'underline', cursor: 'pointer', whiteSpace: 'nowrap', padding: 0 }}
+              disabled={showAllOff}
+              style={{ border: 0, background: 'transparent', color: COLORS.glassNavy, font: 'inherit', fontSize: 14, fontWeight: 700, textDecoration: 'underline', cursor: showAllOff ? 'not-allowed' : 'pointer', opacity: showAllOff ? 0.65 : 1, whiteSpace: 'nowrap', padding: 0 }}
             >
               Show all open times
             </button>
@@ -909,7 +951,8 @@ function AutoPlacedHero({ data }) {
 // tap to book; "you pick for me" books the best-ranked one; "See all open
 // times" reveals the Ask card and the full picker below. The page's confirm()
 // does every commit, so its errors and SLOT_TAKEN refresh apply unchanged.
-function CustomerPickTimesCard({ ranked, submitting, error, showError, onBook, onWePick, seeAllOpen, onSeeAll }) {
+// busy: a search or reset is running, so no time books until it lands.
+function CustomerPickTimesCard({ ranked, submitting, busy, error, showError, onBook, onWePick, seeAllOpen, onSeeAll }) {
   const [tapped, setTapped] = useState(null);
   const chips = ranked.slice(0, PICK_CHIP_LIMIT)
     .sort((a, b) => a.day.date.localeCompare(b.day.date) || String(a.s.start_time).localeCompare(String(b.s.start_time)));
@@ -935,9 +978,9 @@ function CustomerPickTimesCard({ ranked, submitting, error, showError, onBook, o
               className="wpk-best-chip"
               key={key}
               aria-label={`Book ${formatDateLabel(pick.day.date)}, arrival ${arrival}`}
-              disabled={submitting}
+              disabled={submitting || busy}
               onClick={() => book(key, pick, onBook)}
-              style={submitting ? BUSY : undefined}
+              style={submitting || busy ? BUSY : undefined}
             >
               <span>
                 <span className="wpk-best-when">{formatDateLabel(pick.day.date)}</span>
@@ -951,9 +994,9 @@ function CustomerPickTimesCard({ ranked, submitting, error, showError, onBook, o
       <button
         type="button"
         data-glass="chip"
-        disabled={submitting}
+        disabled={submitting || busy}
         onClick={() => book('we-pick', ranked[0], onWePick)}
-        style={submitting ? { ...WE_PICK_BUTTON, ...BUSY } : WE_PICK_BUTTON}
+        style={submitting || busy ? { ...WE_PICK_BUTTON, ...BUSY } : WE_PICK_BUTTON}
       >
         {busyLabel('we-pick', 'Any of these work — you pick for me')}
       </button>
@@ -1608,7 +1651,8 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
 // that emailed pick is still the selection; a commit error that cleared it
 // (SLOT_TAKEN) keeps the card up with the error, so the reason is never
 // rendered only at the bottom of the page.
-function EmailPickCard({ slot, movedNotice, error: submitError, showError, submitting, onBook, onPickAnother }) {
+// busy: a search or reset is running, so the emailed time books only after it lands.
+function EmailPickCard({ slot, movedNotice, error: submitError, showError, submitting, busy, onBook, onPickAnother }) {
   const error = showError ? submitError : null;
   if (!slot && !error) return null;
   return (
@@ -1625,7 +1669,7 @@ function EmailPickCard({ slot, movedNotice, error: submitError, showError, submi
             data-glass-size="primary"
             className="wpk-action-btn"
             onClick={onBook}
-            disabled={submitting}
+            disabled={submitting || busy}
             style={{ width: '100%', marginTop: 14 }}
           >
             {submitting ? 'Booking…' : `Book ${shortDayLabel(slot.date)} ${arrivalWindowLabel(slot.start_time)}`}
@@ -1667,9 +1711,11 @@ function InspectionHero({ data, details, onDetails, onChangeAddress, topCard = n
             Not you?
           </a>
         </div>
-        {lead.address_display ? (
+        {/* While the page knows no address (a refusal withdrew the typed one),
+            it shows none, and the change action stays (pre-push P1 on a8a0462d10). */}
+        {lead.address_display || onChangeAddress ? (
           <div style={{ marginTop: 10, fontSize: 14, color: S.body, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'baseline' }}>
-            <span>{lead.address_display}</span>
+            {lead.address_display ? <span>{lead.address_display}</span> : null}
             {onChangeAddress ? (
               <button
                 type="button"
@@ -1892,7 +1938,16 @@ FLOWS.assessment = {
   Success: ({ result }) => <InspectionSuccessCard result={result} serviceName={ASSESSMENT_NAME} />,
 };
 
-export default function ScheduleFlowPage({ flow }) {
+// One page per link: a link opened in place of another (another token, same
+// flow) remounts the page, so nothing from the old link carries over — a
+// typed address (the server books a supplied address first), a closed
+// search, a result or an out-of-area stop (pre-push P1 on 5ea559c939).
+export default function ScheduleFlowRoute(props) {
+  const { token } = useParams();
+  return <ScheduleFlowPage key={token} {...props} />;
+}
+
+function ScheduleFlowPage({ flow }) {
   const cfg = FLOWS[flow];
   // The estimate-token assessment page answers the inspection contract (terminal states, error codes, the service
   // area notice); only the lead-only address and emailed-time features stay inspection's own.
@@ -1909,7 +1964,16 @@ export default function ScheduleFlowPage({ flow }) {
   // refresh) — always falls back to the first day with openings.
   const [selectedDate, setSelectedDate] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  // The search or reset still running ({ controller, reset }; NO_LIST_REQUEST
+  // when none): no booking starts while one runs, and no search while a
+  // reset runs (listRequest).
+  const [listing, setListing] = useState(NO_LIST_REQUEST);
   const [submitError, setSubmitError] = useState(null);
+  // Inspection: a refusal's reload failed, so the page no longer knows which
+  // address its next commit books (confirm). The search stays closed until a
+  // newly typed address brings an address with its times, or the page opens
+  // again (another link remounts it: ScheduleFlowRoute).
+  const [searchClosed, setSearchClosed] = useState(false);
   const [result, setResult] = useState(null);
   // True while the calendar shows an AI search's results instead of the full
   // window — gates the "Show all open times" reset.
@@ -1995,23 +2059,66 @@ export default function ScheduleFlowPage({ flow }) {
     return () => loadAbortRef.current?.abort();
   }, [load]);
 
+  // Drops every search still running (AI search, "Show all open times"):
+  // each reads loadAbortRef's signal when it starts and ignores a late
+  // answer. Requests made after this take the fresh controller.
+  // The page's rule: each search, reset or change of address supersedes
+  // when it starts, so the latest one wins. A booking and a search or reset
+  // never overlap: while a booking runs, no search or reset starts (AskCard
+  // `busy`, pre-push P1 on 833e0337bd), and while a search or reset runs, no
+  // booking starts (`listing`). A reset can bring another address, and a
+  // booking from the calendar it replaces would book that address (pre-push
+  // P1 on 72a9851828). No search starts while a reset runs either: the reset
+  // brings the address on file now and a search only times, so a search
+  // must not cancel it (pre-push P1 on 2bb65f3c3a). A reset may cancel a
+  // search. A booking's success or terminal state always shows.
+  const supersedeSearches = () => {
+    loadAbortRef.current?.abort();
+    loadAbortRef.current = new AbortController();
+    setListing(NO_LIST_REQUEST);
+  };
+
+  // Runs a search or reset (`reset`) as the newest list request, with every
+  // Book off until it ends, and the search too for a reset. Only the request
+  // that set `listing` clears it, so one it superseded never turns them on early.
+  const listRequest = (reset, run) => async (...args) => {
+    supersedeSearches();
+    const controller = loadAbortRef.current;
+    setListing({ controller, reset });
+    try {
+      return await run(controller.signal, ...args);
+    } finally {
+      setListing((current) => (current.controller === controller ? NO_LIST_REQUEST : current));
+    }
+  };
+
   // Keep the pick across an availability swap (AI search, "Show all open
   // times", address merge) when that exact time is still offered — re-stamped
   // from the fresh row — and drop it only when it's gone. A search used to
   // clear the pick unconditionally, so a lead who searched for the very time
   // already picked had to find and tap it again.
   // The emailed pick (EmailPickCard) follows the same rule on its own.
+  // A list for another address keeps no pick, even at the same start: the
+  // customer picked it, and the email offered it, for the address shown
+  // before (pre-push P1 on 72a9851828). That address is the one the page
+  // shows (street, city and ZIP). A change of unit alone keeps it, and the
+  // pick with it: the commit books the unit on file, at a time it checks
+  // again, whether or not the page kept the pick (pre-push P1 on 2bb65f3c3a).
   const selectedSlotRef = useRef(null);
   selectedSlotRef.current = selectedSlot;
   const emailPickRef = useRef(null);
   emailPickRef.current = emailPick;
+  const shownAddressRef = useRef(null);
   useEffect(() => {
     const days = data?.availability?.days || [];
+    const address = data?.lead?.address_display ?? null;
+    const sameAddress = address === shownAddressRef.current;
+    shownAddressRef.current = address;
     const held = selectedSlotRef.current;
-    const kept = held ? findSlotInDays(days, held) : null;
+    const kept = held && sameAddress ? findSlotInDays(days, held) : null;
     if (held && !kept) setSelectedSlot(null);
     else if (kept) setSelectedSlot(kept);
-    if (emailPickRef.current) setEmailPick(findSlotInDays(days, emailPickRef.current));
+    if (emailPickRef.current) setEmailPick(sameAddress ? findSlotInDays(days, emailPickRef.current) : null);
     if (!days.length) {
       setSelectedDate(null);
       return;
@@ -2099,33 +2206,44 @@ export default function ScheduleFlowPage({ flow }) {
   // ignoreHeldAddress: the held address was just invalidated (an address
   // race — Codex #4737 r10 pre-push P1); this call's closure still holds
   // it, so the plain GET (the customer's current address) is used instead.
+  // Every answer is applied, and the call resolves to it (to nothing when
+  // superseded): only a refusal's reload (confirm) reads it, and takes no
+  // list (listMissing) as a failure. "Show all open times" shows the answer
+  // as it is, a changed address with no times included (pre-push P1 on
+  // 64c12c96f4).
   const refreshInspectionAvailability = useCallback(async ({ signal, ignoreHeldAddress = false } = {}) => {
     if (flow === 'inspection' && resolvedAddress && !ignoreHeldAddress) {
       const { res, body } = await postInspectionAvailability(token, resolvedAddress, { signal });
-      if (signal?.aborted) return;
+      if (signal.aborted) return;
+      // The held address is outside the service area now: the stop card the
+      // address form and the commit show, with its waitlist ticket (pre-push
+      // P1 on b91bb3768f). The answer is the GET's own out_of_area state.
+      if (res.status === 422 && body.error === 'out_of_area') {
+        setOutOfArea({ county: body.county || null, ticket: body.waitlist_ticket || null });
+        return { ...body, state: 'out_of_area' };
+      }
       if (!res.ok) throw new Error(body.error || 'availability refresh failed');
       // A terminal state (already_booked / converted / gone) replaces the
       // page, as the gate and the slot search do (Codex #4737 r11 pre-push P1).
-      if (body.state && body.state !== 'ok') {
-        setData(body);
-        return;
-      }
-      mergeData({ availability: body.availability, needs_address: false });
-      return;
+      if (body.state && body.state !== 'ok') setData(body);
+      else mergeData({ availability: body.availability, needs_address: false });
+      return body;
     }
     const res = await fetch(availabilityUrl, { signal });
-    if (signal?.aborted) return;
+    if (signal.aborted) return;
     if (!res.ok) throw new Error('availability refresh failed');
     const body = await res.json();
-    if (signal?.aborted) return;
+    if (signal.aborted) return;
     setData(body);
+    return body;
   }, [flow, resolvedAddress, token, availabilityUrl, mergeData]);
 
   // Waves AI date/time search — swaps in the matching window's availability
   // (same shape the GET returns) and hands the summary line back to the
   // card. Throwing lets the card show its own call-us fallback line.
-  const runAiSearch = async (query) => {
-    const signal = loadAbortRef.current?.signal;
+  // The newest list request: a reset or an older search still running
+  // must not land over this one (listRequest).
+  const runAiSearch = listRequest(false, async (signal, query) => {
     const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}/find-slots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2141,7 +2259,8 @@ export default function ScheduleFlowPage({ flow }) {
       signal,
     });
     const body = await res.json().catch(() => ({}));
-    if (signal?.aborted) throw new Error('search superseded');
+    // A superseded search fails as the browser's own abort does (AskCard).
+    if (signal.aborted) throw new DOMException('search superseded', 'AbortError');
     if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
       showReserviceLocationReview();
       return { summary: null };
@@ -2179,21 +2298,22 @@ export default function ScheduleFlowPage({ flow }) {
       setAiFiltered(true);
     }
     return { summary: body.summary };
-  };
+  });
 
   // Back to the full window after a search — quiet refetch (no skeleton
   // flash) so the calendar is fresh. aiFiltered only clears once the
   // full-window response is applied: on failure the filtered calendar is
   // still what's on screen, so the reset link must survive for another try.
-  const showAllTimes = async () => {
-    const signal = loadAbortRef.current?.signal;
+  // A refresh starts a new page view, and can change the address: a search
+  // still running belongs to the old view (pre-push P1 on b91bb3768f).
+  const showAllTimes = listRequest(true, async (signal) => {
     try {
       await refreshInspectionAvailability({ signal });
       if (signal?.aborted) return;
       setAiFiltered(false);
       setAiSession((n) => n + 1); // remount the card → clears its recap/query
     } catch { /* keep the filtered calendar + reset link */ }
-  };
+  });
 
   // The slot is explicit: the inline Book passes the selection, EmailPickCard
   // its own emailed time — still bookable after the customer browsed another
@@ -2201,10 +2321,15 @@ export default function ScheduleFlowPage({ flow }) {
   // resultMarks rides into the success result ({ wePicked: true } from the
   // customer-pick card's "you pick for me").
   const confirm = async (slotToBook, fromTop, resultMarks) => {
-    if (!slotToBook || submitting || !cfg.canConfirm({ lane: selectedLane, data, details })) return;
+    if (!slotToBook || submitting || listing.controller || !cfg.canConfirm({ lane: selectedLane, data, details })) return;
     setBookedFromTop(fromTop);
     setSubmitting(true);
     setSubmitError(null);
+    // The page's requests now. A change of address, a reload or a closed page
+    // (another link remounts it) aborts this controller while the booking
+    // runs (every replacement aborts the one it replaces): the page moved on,
+    // and this booking's refusal or failure belongs to the old page.
+    const pageRequests = loadAbortRef.current;
     const payload = cfg.payload({ slot: slotToBook, data, lane: selectedLane, details, pests: selectedPests, address: resolvedAddress });
     try {
       const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}`, {
@@ -2217,27 +2342,6 @@ export default function ScheduleFlowPage({ flow }) {
         setResult({ ...body, ...resultMarks });
         return;
       }
-      // Inspection only: the geocoded address falls outside the service
-      // area — STOP with the dedicated card instead of a generic error.
-      if (inspectionLike && body.error === 'out_of_area') {
-        setOutOfArea({ county: body.county || null, ticket: body.waitlist_ticket || null });
-        return;
-      }
-      // Inspection only: the address didn't geocode at commit time (rare —
-      // usually caught earlier by the address gate) — recoverable, stay on
-      // the picker with an inline message rather than showing the raw error
-      // code or a generic failure line.
-      if (inspectionLike && body.error === 'address_unresolved') {
-        setSubmitError("We couldn't verify that address. Please text or call us and we'll get you booked.");
-        return;
-      }
-      // Inspection only: the service-area check itself couldn't run — not a
-      // verdict, so stay on the picker and let them retry rather than
-      // stopping on the out-of-area card.
-      if (inspectionLike && body.error === 'service_area_unavailable') {
-        setSubmitError("We couldn't confirm your service area just now. Please try again, or text or call us.");
-        return;
-      }
       // Inspection only: the commit answers any of GET's own terminal
       // states (already_booked/converted/gone) when eligibility changed
       // since page load — idempotent replay, or a race with another
@@ -2246,10 +2350,30 @@ export default function ScheduleFlowPage({ flow }) {
       // shows the right card immediately, uniformly for every terminal
       // state — not just ALREADY_BOOKED, which previously left converted/
       // gone falling through to a generic "something went wrong" line
-      // (Codex pre-push P1, 2026-09-24).
+      // (Codex pre-push P1, 2026-09-24). The state is the link's, not an
+      // address's, so it applies even after the page moved on to another
+      // address (pre-push P1 on 0bef4d7e3c).
       if (inspectionLike && res.ok && body.state && body.state !== 'ok') {
         setSelectedSlot(null);
         setData(body);
+        return;
+      }
+      // A refusal that lands after the page moved on belongs to the old page:
+      // the new list is on screen, and this answer's times, address and
+      // message are not for it (pre-push P1s on 6db4e39ca7 and a8a0462d10).
+      // A booking above always shows.
+      if (pageRequests.signal.aborted) return;
+      // Inspection only: the geocoded address falls outside the service
+      // area — STOP with the dedicated card instead of a generic error.
+      if (inspectionLike && body.error === 'out_of_area') {
+        setOutOfArea({ county: body.county || null, ticket: body.waitlist_ticket || null });
+        return;
+      }
+      // Inspection only: an address that didn't geocode, or a service-area
+      // check that couldn't run, stays on the picker (INSPECTION_INLINE_REFUSALS).
+      const inlineRefusal = inspectionLike && INSPECTION_INLINE_REFUSALS.get(body.error);
+      if (inlineRefusal) {
+        setSubmitError(inlineRefusal);
         return;
       }
       if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
@@ -2269,9 +2393,12 @@ export default function ScheduleFlowPage({ flow }) {
         // race answers with the customer's CURRENT address (round-10 P2) —
         // drop the held supplied address so the next confirm doesn't
         // resubmit the stale one, and show the address actually on file.
+        // A refused booking that moved to the matched profile's address on
+        // file says so too, with no address: the page shows none until its
+        // reload brings that one (pre-push P1 on a8a0462d10).
         if (flow === 'inspection' && body.address_changed) {
           setResolvedAddress('');
-          if (body.lead) mergeData({ lead: body.lead });
+          setData((prev) => (prev ? { ...prev, lead: body.lead || { ...prev.lead, address_display: null } } : prev));
         }
         if (body.availability) {
           setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));
@@ -2280,10 +2407,46 @@ export default function ScheduleFlowPage({ flow }) {
           // to a client-side refresh through the SAME address-aware helper
           // showAllTimes uses, never the bare load()/GET below: an
           // addressless lead's held resolvedAddress must not be dropped
-          // here either (Codex pre-push P1, 2026-09-24).
-          try {
-            await refreshInspectionAvailability({ ignoreHeldAddress: Boolean(body.address_changed) });
-          } catch { /* keep the current calendar rather than blanking it */ }
+          // here either (Codex pre-push P1, 2026-09-24). When that refresh
+          // fails too, the page clears its times (the emailed pick follows
+          // the calendar) and asks for a reload: this answer carried no
+          // times, so nothing vouches for the old ones. The address behind
+          // them can have changed (`address_changed`, or phase one linked a
+          // profile at another address), and the next confirm books what
+          // the server resolves now (pre-push P1s on 979f0dbec9 and
+          // 8f40c19990). The search closes too (searchClosed): its times
+          // would come from the address the server resolves now, under the
+          // address the page still shows (pre-push P1s on dda1a52814 and
+          // 75054400e5). Main's #5450 test pins this state: the emailed card
+          // keeps its "just taken" alert, so it is not the load-error card.
+          // The reload runs under the current request controller, so a
+          // change of address meanwhile supersedes it: it applies no list,
+          // clears nothing and says nothing, as the new address's own list
+          // replaces the page (pre-push P1 on 4e9d76bcb1).
+          // The search is closed while the reload runs, and opens again only
+          // when the reload brings the page's list: a search finishing after
+          // a failed reload would put times back (pre-push P1 on 03ceaf92ec).
+          const { signal } = loadAbortRef.current;
+          setSearchClosed(true);
+          const done = await refreshInspectionAvailability({ signal, ignoreHeldAddress: Boolean(body.address_changed) })
+            .catch(() => null)
+            .then((answer) => {
+              if (signal.aborted) return true;
+              if (!answer || listMissing(answer)) {
+                mergeData({ availability: null });
+                setSubmitError('That time was just taken, and we couldn\'t load the latest open times. Please reload this page, or text us and we\'ll help.');
+                return true;
+              }
+              // A time picked from the old calendar while the reload ran is
+              // not one of these times (pre-push P1 on f49f71aa78).
+              setSelectedSlot(null);
+              setSearchClosed(false);
+              // An answer with no openings (a terminal state, the address
+              // form, booking_unavailable or service_area_unavailable) shows
+              // its own card: no "latest open times" (pre-push P1 on 0bef4d7e3c).
+              return !answer.availability;
+            });
+          if (done) return;
         } else {
           await load();
         }
@@ -2308,6 +2471,9 @@ export default function ScheduleFlowPage({ flow }) {
       }
       setSubmitError(body.error || 'Something went wrong. Please try again, or text us and we\'ll help.');
     } catch {
+      // A failure after the page moved on is the old page's, as a refusal is
+      // (pre-push P1 on f49f71aa78).
+      if (pageRequests.signal.aborted) return;
       setSubmitError('Something went wrong. Please try again, or text us and we\'ll help.');
     } finally {
       setSubmitting(false);
@@ -2361,6 +2527,7 @@ export default function ScheduleFlowPage({ flow }) {
             error={submitError}
             showError={bookedFromTop}
             submitting={submitting}
+            busy={Boolean(listing.controller)}
             onBook={() => confirm(emailPick, true)}
             onPickAnother={() => pickerRef.current?.scrollIntoView?.({ behavior: scrollBehavior(), block: 'start' })}
           />
@@ -2380,8 +2547,10 @@ export default function ScheduleFlowPage({ flow }) {
           // An in-flight search for the OLD address must never land after
           // the new one resolves (Codex #4737 r15 P2): abort it and start a
           // fresh controller for the requests that follow.
-          loadAbortRef.current?.abort();
-          loadAbortRef.current = new AbortController();
+          supersedeSearches();
+          setSearchClosed(false);
+          // A reload warning belongs to the old address (pre-push P1 on a488a185ee).
+          setSubmitError(null);
           setAiFiltered(false);
           setSelectedSlot(null);
           // The emailed time was offered for the old address.
@@ -2399,6 +2568,7 @@ export default function ScheduleFlowPage({ flow }) {
         view={pickView}
         cardProps={{
           submitting,
+          busy: Boolean(listing.controller),
           error: submitError,
           showError: bookedFromTop,
           onBook: (slot) => confirm(slot, true),
@@ -2412,7 +2582,7 @@ export default function ScheduleFlowPage({ flow }) {
       ) : (<>
         {flow === 'reservice' && data?.location_review_required
           ? null
-          : <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />}
+          : <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} closed={searchClosed} busy={submitting} resetting={listing.reset} />}
         <div ref={pickerRef} />
         <SchedulePicker
           availability={data?.availability}
@@ -2460,7 +2630,7 @@ export default function ScheduleFlowPage({ flow }) {
                 data-glass-size="primary"
                 className="wpk-action-btn"
                 onClick={() => confirm(selectedSlot, false)}
-                disabled={submitting || !cfg.canConfirm({ lane: selectedLane, data, details })}
+                disabled={submitting || Boolean(listing.controller) || !cfg.canConfirm({ lane: selectedLane, data, details })}
               >
                 {cfg.actionLabel({ submitting, lane: selectedLane, slot, data, details })}
               </button>

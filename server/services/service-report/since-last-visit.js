@@ -1,3 +1,4 @@
+const { provenFindingRows } = require('./finding-provenance');
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
@@ -72,9 +73,11 @@ async function buildSinceLastVisitContext({ record, currentPressureIndexOverride
     .orderBy('started_at', 'desc')
     .first('id', 'pressure_index', 'started_at', 'ended_at', 'service_date', 'created_at'), null);
 
-  const currentFindings = await soft(knex('service_findings')
+  // Only the rows a customer may see (finding-provenance.js): a bare title
+  // can be a line of the raw technician note.
+  const currentFindings = provenFindingRows(await soft(knex('service_findings')
     .where({ service_record_id: record.id })
-    .select('id', 'service_record_id', 'title', 'detail', 'recommendation', 'severity'), []);
+    .select('id', 'service_record_id', 'title', 'detail', 'recommendation', 'severity'), []), record.structured_notes);
   const currentPressure = pressureValue(currentPressureIndexOverride !== undefined ? currentPressureIndexOverride : record.pressure_index);
   const priorPressure = pressureValue(prior?.pressure_index);
   // #4741 (2026-09-24): a technician tap became the score directly while older

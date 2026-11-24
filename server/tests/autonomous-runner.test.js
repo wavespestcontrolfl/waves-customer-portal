@@ -1596,7 +1596,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
   // runNext stands in for the claim: the best pending row by score among the
   // ids the call may take (onlyIds), minus the excluded ones. A row with
   // `claimable: false` is held by a claim rule (deferred, fenced).
-  function queueRunner(rows, { written = [], held = [], reserved = 0 } = {}) {
+  function queueRunner(rows, { written = [], held = [], handoff, reserved = 0 } = {}) {
     const { AutonomousRunner } = require('../services/content/autonomous-runner');
     const runner = new AutonomousRunner();
     const pending = new Map(rows.map((r) => [r.id, r]));
@@ -1609,12 +1609,13 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       if (!best) return { outcome: 'skipped_no_opportunity' };
       pending.delete(best.id);
       order.push(best.id);
-      return { outcome: best.outcome, action_type: best.action_type, opportunity_id: best.id };
+      return { outcome: best.outcome, action_type: best.action_type, opportunity_id: best.id, skip_reason: best.skip_reason };
     });
     runner._appendToDailyDigest = jest.fn(async () => {});
     runner._withEngineLock = (label, fn) => fn();
     runner._claimableBackfillSlots = jest.fn(async () => reserved);
-    runner._terminalFirstIds = jest.fn(async () => ({ written, held }));
+    runner._terminalFirstIds = jest.fn(async () => ({ written, held, ...(handoff ? { handoff } : {}) }));
+    runner._recoverStaleClaimsSoft = jest.fn(async () => {});
     runner.settleTerminalWork = jest.fn(async () => {});
     runner._sendBlogDroughtSms = jest.fn(async () => {});
     return { runner, order };
@@ -1735,6 +1736,242 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     });
   });
 
+  describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)', () => {
+    const mac = ({ host = 'mac', runner } = {}) => {
+      for (const [k, v] of [['CONTENT_EDITORIAL_REVIEW_HOST', host], ['CONTENT_EDITORIAL_REVIEW_RUNNER', runner]]) {
+        if (v == null) delete process.env[k]; else process.env[k] = v;
+      }
+      process.env.GATE_AUTONOMOUS_CONTENT = 'true';
+      process.env.NODE_ENV = 'production'; // `railway run` sets it on the Mac
+      spies.push(jest.spyOn(require('../services/content/terminal-writer'), 'maxPlanAdapterCovers').mockReturnValue(true));
+    };
+    const rows = () => [
+      row('no_draft_90', 90), row('no_draft_70', 70),
+      row('written_a', 60, { outcome: 'completed_pending_review' }), row('written_b', 55, { outcome: 'completed_pending_review' }),
+      row('held_a', 40, { outcome: 'deferred_terminal_hold' }),
+    ];
+
+    test('the server (host mac, not the runner) skips both terminal passes and keeps written and held rows out of every claim', async () => {
+      mac();
+      const { runner, order } = queueRunner(rows(), { written: ['written_a', 'written_b'], held: ['held_a'] });
+      await runner.runDaily({ limit: 3 });
+      // Only the rows still waiting for a draft are claimed, by score; no scoped pass, no hold flag.
+      expect(order).toEqual(['no_draft_90', 'no_draft_70']);
+      const excluded = ['written_a', 'written_b', 'held_a'];
+      expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
+        { excludeIds: excluded }, { excludeIds: excluded }, { excludeIds: excluded },
+      ]);
+    });
+
+    test('with AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST=false the Mac job still takes its rows and the server still keeps them out of its claims', async () => {
+      process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST = 'false';
+      mac();
+      const server = queueRunner(rows(), { written: ['written_a'], held: ['held_a'] });
+      await server.runner._terminalClaimPlan('new_supporting_blog');
+      expect(server.runner._terminalFirstIds).toHaveBeenCalledWith('new_supporting_blog', { ignoreDraftsFirstSwitch: true, throwOnError: true });
+      await expect(server.runner._terminalClaimPlan(null)).resolves.toEqual({ terminalFirst: { written: [], held: [] }, macOwnedIds: ['written_a', 'held_a'] });
+      mac({ runner: 'mac' });
+      const job = queueRunner(rows(), { written: ['written_a'] });
+      job.runner._withEngineLock = (label, fn) => fn();
+      await job.runner.runTerminalDrafts();
+      expect(job.runner._terminalFirstIds).toHaveBeenCalledWith(null, { ignoreDraftsFirstSwitch: true, throwOnError: true });
+      // Mac mode off: the switch keeps its meaning and is not bypassed.
+      mac({ host: null });
+      const plain = queueRunner(rows(), { written: ['written_a'] });
+      await expect(plain.runner._terminalClaimPlan('new_supporting_blog')).resolves.toMatchObject({ macOwnedIds: [] });
+      expect(plain.runner._terminalFirstIds).toHaveBeenCalledWith('new_supporting_blog');
+    });
+
+    test('the server does not claim a row again in the same batch after it could only wait for the Mac', async () => {
+      mac();
+      const { runner, order } = queueRunner([
+        row('new_a', 90, { skip_reason: 'terminal_draft_awaits_mac' }), row('new_b', 80, { skip_reason: 'terminal_draft_awaits_mac' }),
+      ]);
+      await runner.runDaily({ limit: 3 });
+      expect(order).toEqual(['new_a', 'new_b']);
+      expect(runner.runNext.mock.calls.map(([args]) => args.excludeIds)).toEqual([[], ['new_a'], ['new_a', 'new_b']]);
+    });
+
+    test('a wait in Mac mode is rechecked in 30 minutes, not 3 hours, so the Mac job can take a draft written after the server looked', () => {
+      const tw = require('../services/content/terminal-writer');
+      mac({ host: null });
+      expect(tw.recheckMs()).toBe(tw.RECHECK_MS);
+      mac();
+      expect(tw.recheckMs()).toBe(30 * 60 * 1000);
+    });
+
+    test.each([
+      ['NODE_ENV is not production (gates would read the non-production way)', { NODE_ENV: 'development' }, 'skipped_not_production'],
+      ['NODE_ENV unset', { NODE_ENV: null }, 'skipped_not_production'],
+      ['GATE_AUTONOMOUS_CONTENT=false', { GATE_AUTONOMOUS_CONTENT: 'false' }, 'skipped_engine_off'],
+      ['GATE_AUTONOMOUS_CONTENT unset', { GATE_AUTONOMOUS_CONTENT: null }, 'skipped_engine_off'],
+      ['no Max-plan adapter for the review lanes', { adapter: false }, 'failed_max_plan_adapter'],
+    ])('the Mac job does nothing when %s: no lock, no listing, no claim, no settle', async (_label, env, outcome) => {
+      mac({ runner: 'mac' });
+      for (const k of ['NODE_ENV', 'GATE_AUTONOMOUS_CONTENT']) {
+        if (k in env) { if (env[k] == null) delete process.env[k]; else process.env[k] = env[k]; }
+      }
+      if (env.adapter === false) require('../services/content/terminal-writer').maxPlanAdapterCovers.mockReturnValue(false);
+      if (outcome === 'skipped_not_production') {
+        // The real gate config: off production it reads the master gate as on whatever the variable says.
+        jest.isolateModules(() => expect(require('../config/feature-gates').isEnabled('autonomousContentEngine')).toBe(true));
+      }
+      const { runner } = queueRunner(rows(), { written: ['written_a'] });
+      runner._withEngineLock = jest.fn((label, fn) => fn());
+      await expect(runner.runTerminalDrafts()).resolves.toMatchObject({ outcome, count: 0, runs: [] });
+      expect(runner._withEngineLock).not.toHaveBeenCalled();
+      expect(runner._terminalFirstIds).not.toHaveBeenCalled();
+      expect(runner.runNext).not.toHaveBeenCalled();
+      expect(runner.settleTerminalWork).not.toHaveBeenCalled();
+    });
+
+    test('a failed listing is not an empty one: the Mac job fails with no claim and no settle; the server retries once', async () => {
+      mac({ runner: 'mac' });
+      const job = queueRunner(rows(), { written: ['written_a'] });
+      job.runner._terminalFirstIds.mockRejectedValue(new Error('GitHub 502'));
+      await expect(job.runner.runTerminalDrafts()).resolves.toMatchObject({ outcome: 'failed_terminal_listing', reason: 'GitHub 502', count: 0, failures: 1, runs: [] });
+      expect(job.runner.runNext).not.toHaveBeenCalled();
+      expect(job.runner.settleTerminalWork).not.toHaveBeenCalled();
+
+      mac();
+      const server = queueRunner(rows(), { written: ['written_a'], held: ['held_a'] });
+      server.runner._terminalFirstIds.mockRejectedValueOnce(new Error('GitHub 502'));
+      await expect(server.runner._terminalClaimPlan(null)).resolves.toEqual({ terminalFirst: { written: [], held: [] }, macOwnedIds: ['written_a', 'held_a'] });
+      // The retry takes the listing's own fallback (logged; an empty list when it fails again).
+      expect(server.runner._terminalFirstIds.mock.calls).toEqual([
+        [null, { ignoreDraftsFirstSwitch: true, throwOnError: true }],
+        [null, { ignoreDraftsFirstSwitch: true }],
+      ]);
+    });
+
+    test('the blog catch-up keeps the same exclusion in its lane', async () => {
+      mac();
+      const blog = (id, score, over = {}) => row(id, score, { action_type: 'new_supporting_blog', ...over });
+      const { runner, order } = queueRunner([blog('no_draft_80', 80), blog('written_blog', 50)], { written: ['written_blog'] });
+      await runner._runDailyInner({ limit: 2, actionType: 'new_supporting_blog' });
+      expect(order).toEqual(['no_draft_80']);
+      expect(runner.runNext.mock.calls[0][0]).toEqual({ excludeIds: ['written_blog'], actionType: 'new_supporting_blog' });
+    });
+
+    test.each([
+      ['switches unset', { host: null }],
+      ['the Mac job itself', { runner: 'mac' }],
+      ['runner set without the host', { host: null, runner: 'mac' }],
+    ])('%s: the terminal-first passes run as before', async (_label, env) => {
+      mac(env);
+      const { runner, order } = queueRunner(rows(), { written: ['written_a'], held: ['held_a'] });
+      await runner.runDaily({ limit: 3 });
+      expect(order).toEqual(['written_a', 'held_a', 'no_draft_90', 'no_draft_70']);
+      expect(runner.runNext.mock.calls[0][0]).toEqual({ excludeIds: [], onlyIds: ['written_a'] });
+    });
+
+    test.each([
+      ['switches unset', { host: null }],
+      ['the host only (the server)', { host: 'mac' }],
+      ['the runner only', { host: null, runner: 'mac' }],
+      ['not exactly "mac"', { host: 'mac', runner: 'true' }],
+    ])('runTerminalDrafts refuses off the Mac and writes nothing: %s', async (_label, env) => {
+      mac(env);
+      const { runner } = queueRunner(rows(), { written: ['written_a'] });
+      runner._withEngineLock = jest.fn((label, fn) => fn());
+      await expect(runner.runTerminalDrafts()).resolves.toMatchObject({ outcome: 'skipped_not_mac', skipped: true, count: 0, runs: [] });
+      expect(runner._withEngineLock).not.toHaveBeenCalled();
+      expect(runner._terminalFirstIds).not.toHaveBeenCalled();
+      expect(runner.runNext).not.toHaveBeenCalled();
+      expect(runner.settleTerminalWork).not.toHaveBeenCalled();
+    });
+
+    test('runTerminalDrafts on the Mac takes only terminal rows (written, then held), sends no digest and settles the work', async () => {
+      mac({ runner: 'mac' });
+      const { runner, order } = queueRunner(rows(), { written: ['written_a', 'written_b'], held: ['held_a'] });
+      runner._withEngineLock = jest.fn((label, fn) => fn());
+      runner._sendDailyDigestSms = jest.fn(async () => {});
+      runner._reportBlogDrought = jest.fn(async () => {});
+      const result = await runner.runTerminalDrafts({ limit: 5 });
+      expect(runner._withEngineLock).toHaveBeenCalledWith('runTerminalDrafts', expect.any(Function));
+      // No score claim for no_draft_90 / no_draft_70; the hold gives its slot back.
+      expect(order).toEqual(['written_a', 'written_b', 'held_a']);
+      expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
+        { minScore: 0, excludeIds: [], onlyIds: ['written_a', 'written_b'] },
+        { minScore: 0, excludeIds: [], onlyIds: ['written_b'] },
+        { minScore: 0, excludeIds: [], onlyIds: ['held_a'], terminalHoldPass: true },
+      ]);
+      expect(runner._sendDailyDigestSms).not.toHaveBeenCalled();
+      expect(runner._reportBlogDrought).not.toHaveBeenCalled();
+      expect(runner._sendBlogDroughtSms).not.toHaveBeenCalled();
+      expect(runner._appendToDailyDigest).not.toHaveBeenCalled();
+      expect(runner.settleTerminalWork).toHaveBeenCalledWith(result.runs);
+      expect(result).toMatchObject({ outcome: 'deferred_terminal_hold', count: 3, limit: 5, failures: 0 });
+    });
+
+    test('the Mac pass takes a draft written after a handoff wait before its recheck time; other written rows keep theirs', async () => {
+      mac({ runner: 'mac' });
+      const { runner } = queueRunner(rows(), { written: ['written_a', 'written_b'], handoff: ['written_b'] });
+      runner._withEngineLock = jest.fn((label, fn) => fn());
+      await runner.runTerminalDrafts({ limit: 5 });
+      expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
+        { minScore: 0, excludeIds: [], onlyIds: ['written_a', 'written_b'], availableNowIds: ['written_b'] },
+        { minScore: 0, excludeIds: [], onlyIds: ['written_b'], availableNowIds: ['written_b'] },
+      ]);
+      // A hold pushed during the handoff wait is taken the same way.
+      const holds = queueRunner(rows(), { held: ['held_a'], handoff: ['held_a'] });
+      holds.runner._withEngineLock = jest.fn((label, fn) => fn());
+      await holds.runner.runTerminalDrafts({ limit: 5 });
+      expect(holds.runner.runNext.mock.calls.map(([args]) => args)).toEqual([
+        { minScore: 0, excludeIds: [], onlyIds: ['held_a'], terminalHoldPass: true, availableNowIds: ['held_a'] },
+      ]);
+    });
+
+    test('runTerminalDrafts with nothing written still settles and reports no opportunity; the limit and the failure stop hold', async () => {
+      mac({ runner: 'mac' });
+      const empty = queueRunner(rows());
+      empty.runner._withEngineLock = (label, fn) => fn();
+      await expect(empty.runner.runTerminalDrafts()).resolves.toMatchObject({ outcome: 'skipped_no_opportunity', count: 0 });
+      expect(empty.runner.runNext).not.toHaveBeenCalled();
+      expect(empty.runner.settleTerminalWork).toHaveBeenCalledWith([]);
+
+      const failing = ['f1', 'f2', 'f3'].map((id, i) => row(id, 90 - i, { outcome: 'failed' }));
+      const { runner, order } = queueRunner(failing, { written: ['f1', 'f2', 'f3'] });
+      runner._withEngineLock = (label, fn) => fn();
+      const result = await runner.runTerminalDrafts({ limit: 5 });
+      expect(order).toEqual(['f1', 'f2']); // two consecutive failures stop the pass
+      expect(result).toMatchObject({ count: 2, failures: 2 });
+    });
+
+    test('the Mac pass recovers stale claims before it lists its rows; a failed recovery does not stop it', async () => {
+      mac({ runner: 'mac' });
+      const { runner, order } = queueRunner(rows(), { written: ['written_a'] });
+      await runner.runTerminalDrafts();
+      expect(runner._recoverStaleClaimsSoft).toHaveBeenCalledWith('runTerminalDrafts');
+      expect(runner._recoverStaleClaimsSoft.mock.invocationCallOrder[0]).toBeLessThan(runner._terminalFirstIds.mock.invocationCallOrder[0]);
+      expect(order).toEqual(['written_a']);
+      // The real method: a failed recovery, or a queue without it, resolves.
+      let recover;
+      jest.isolateModules(() => {
+        recover = jest.fn().mockRejectedValue(new Error('lock timeout'));
+        jest.doMock('../services/content/opportunity-queue', () => ({ recoverStaleClaims: recover }));
+        const { AutonomousRunner } = require('../services/content/autonomous-runner');
+        runner.realRecover = AutonomousRunner.prototype._recoverStaleClaimsSoft.bind(new AutonomousRunner());
+      });
+      await expect(runner.realRecover('runTerminalDrafts')).resolves.toBe(false);
+      expect(recover).toHaveBeenCalledTimes(1);
+      jest.dontMock('../services/content/opportunity-queue');
+      // A failed recovery and nothing taken: the pass fails (the job's bell rings), it is not "nothing to take".
+      const stuck = queueRunner(rows());
+      stuck.runner._recoverStaleClaimsSoft = jest.fn(async () => false);
+      await expect(stuck.runner.runTerminalDrafts()).resolves.toMatchObject({ outcome: 'failed_stale_claim_recovery', count: 0, failures: 1 });
+    });
+
+    test.each(['terminal_plan_review_unavailable', 'terminal_review_unavailable', 'terminal_draft_unreadable'])('a reviewer or draft read that could not run (%s) counts as a Mac pass failure: the outage stops the pass and shows in failures', async (skipReason) => {
+      mac({ runner: 'mac' });
+      const outage = ['u1', 'u2', 'u3'].map((id, i) => row(id, 90 - i, { skip_reason: skipReason }));
+      const { runner, order } = queueRunner(outage, { written: ['u1', 'u2', 'u3'] });
+      const result = await runner.runTerminalDrafts({ limit: 5 });
+      expect(order).toEqual(['u1', 'u2']);
+      expect(result).toMatchObject({ count: 2, failures: 2, outcome: 'deferred_terminal_draft' });
+    });
+  });
+
   describe('_terminalFirstIds', () => {
     const spy = (s) => { spies.push(s); return s; };
     const tw = () => require('../services/content/terminal-writer');
@@ -1756,13 +1993,18 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
 
       listing.mockRejectedValueOnce(new Error('GitHub 502'));
       await expect(runnerFor()._terminalFirstIds()).resolves.toEqual(none);
+      // Mac mode asks for the error, so a failed read is not taken for an empty queue.
+      listing.mockRejectedValueOnce(new Error('GitHub 502'));
+      await expect(runnerFor()._terminalFirstIds(null, { throwOnError: true })).rejects.toThrow('GitHub 502');
 
       process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST = 'false';
       await expect(runnerFor()._terminalFirstIds()).resolves.toEqual(none);
+      // Mac mode lists the rows regardless of the priority-order switch.
+      await expect(runnerFor()._terminalFirstIds(null, { ignoreDraftsFirstSwitch: true })).resolves.toEqual({ written: ['w_hi', 'w_lo'], held: ['h_1'] });
       delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST;
       delete process.env.GATE_CONTENT_WRITER_TERMINAL;
       await expect(runnerFor()._terminalFirstIds()).resolves.toEqual(none);
-      expect(listing).toHaveBeenCalledTimes(4);
+      expect(listing).toHaveBeenCalledTimes(6);
     });
 
     test('a pushed draft whose brief is past its 7 days is not taken first (it is briefed again)', async () => {
@@ -5558,6 +5800,21 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(queue.release).not.toHaveBeenCalled();
   });
 
+  test('in Mac mode the wait is deferred 30 minutes, not 3 hours', async () => {
+    const saved = process.env.CONTENT_EDITORIAL_REVIEW_HOST;
+    process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+    try {
+      const { queue, runner } = setup({ source: { ...waiting, code: 'terminal_draft_awaits_mac', reason: 'the Mac job takes terminal drafts' } });
+      const before = Date.now();
+      await expect(runner.runNext()).resolves.toMatchObject({ outcome: 'deferred_terminal_draft', skip_reason: 'terminal_draft_awaits_mac' });
+      const wait = queue.defer.mock.calls[0][1].getTime() - before;
+      expect(wait).toBeGreaterThanOrEqual(30 * 60e3 - 1000);
+      expect(wait).toBeLessThan(60 * 60e3);
+    } finally {
+      if (saved === undefined) delete process.env.CONTENT_EDITORIAL_REVIEW_HOST; else process.env.CONTENT_EDITORIAL_REVIEW_HOST = saved;
+    }
+  });
+
   test('a later look with no draft yet keeps the brief the row was handed: nothing is composed', async () => {
     const { briefBuilder, runner, terminalWriter } = setup({ handed: city('brief_handed') });
     const result = await runner.runNext();
@@ -5576,6 +5833,95 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
     expect(briefBuilder.compose).not.toHaveBeenCalled();
     expect(onward.mock.calls[0][2]).toMatchObject({ brief_id: 'brief_handed', agent_id: 'terminal-writer', draft_payload: draft, terminal_draft_revision: 'sha_read' });
+  });
+
+  describe('the Mac job composes no brief and starts no agent session', () => {
+    const saved = { ...process.env };
+    afterEach(() => { process.env = { ...saved }; });
+    test('a row with no handed brief is deferred, with nothing composed and no agent', async () => {
+      process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+      process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+      const { queue, dispatcher, briefBuilder, runner, terminalWriter } = setup({ handed: null });
+      const result = await runner.runNext();
+      expect(result).toMatchObject({ outcome: 'skipped_mac_brief_missing', skip_reason: 'terminal_mac_brief_missing' });
+      expect(briefBuilder.compose).not.toHaveBeenCalled();
+      expect(terminalWriter.draftSourceFor).not.toHaveBeenCalled();
+      expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+      expect(queue.defer).toHaveBeenCalledWith('opp_tw', expect.any(Date), { claimToken: claimedAt });
+    });
+    test('a brief lookup that failed stores no run: the row keeps its wait, and the pass counts a failure', async () => {
+      process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+      process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+      const { queue, dispatcher, briefBuilder, runner, terminalWriter } = setup({ handed: city('brief_handed') });
+      terminalWriter.waitingBriefId.mockRejectedValue(new Error('connection terminated'));
+      const result = await runner.runNext();
+      expect(result).toMatchObject({ outcome: 'failed_terminal_brief_lookup', failure_message: 'connection terminated' });
+      const inserts = require('../models/db').mock.results.flatMap((call) => call.value?.insert?.mock.calls || []);
+      expect(inserts.filter(([row]) => row?.outcome === 'failed_terminal_brief_lookup')).toEqual([]);
+      expect(briefBuilder.compose).not.toHaveBeenCalled();
+      expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+      expect(queue.defer).toHaveBeenCalledWith('opp_tw', expect.any(Date), { claimToken: claimedAt });
+      // The server in Mac mode (a Run now) keeps the wait too: a new brief would orphan the pushed draft.
+      delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
+      const server = setup({ handed: city('brief_handed') });
+      server.terminalWriter.waitingBriefId.mockRejectedValue(new Error('connection terminated'));
+      await expect(server.runner.runNext()).resolves.toMatchObject({ outcome: 'failed_terminal_brief_lookup' });
+      expect(server.briefBuilder.compose).not.toHaveBeenCalled();
+      // Out of Mac mode the same failure still reads as "no handed brief" (compose), as before.
+      delete process.env.CONTENT_EDITORIAL_REVIEW_HOST;
+      const plain = setup({ handed: city('brief_handed') });
+      plain.terminalWriter.waitingBriefId.mockRejectedValue(new Error('connection terminated'));
+      await plain.runner.runNext();
+      expect(plain.briefBuilder.compose).toHaveBeenCalledTimes(1);
+    });
+
+    test('a handed brief the terminal does not write waits instead of starting the agent', async () => {
+      process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+      process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+      const { queue, dispatcher, runner } = setup({ source: null, handed: city('brief_handed') });
+      const result = await runner.runNext();
+      expect(result).toMatchObject({ outcome: 'deferred_terminal_draft', skip_reason: 'terminal_mac_no_agent', brief_id: 'brief_handed' });
+      expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+      expect(queue.defer).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('the Mac job: an editorial review that could not run is no verdict on the terminal draft', () => {
+    const saved = { ...process.env };
+    afterEach(() => { process.env = { ...saved }; });
+    const read = { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read', duration_ms: 5, agent_id: 'terminal-writer', session_id: null };
+    const reviewFails = (code, transient = code === 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE') => jest.doMock('../services/content/editorial-evidence', () => ({
+      prepareDraft: jest.fn().mockRejectedValue(Object.assign(new Error('claude -p timed out'), { code, transient, findings: [] })),
+      reviewError: jest.fn(),
+    }));
+
+    test('on the Mac: the draft is kept (no revision for the cleanup), the row waits on the same brief, the claim is deferred', async () => {
+      process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+      process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+      const { queue, runner } = setup({ source: read, handed: city('brief_handed') });
+      reviewFails('BLOG_EDITORIAL_REVIEW_UNAVAILABLE');
+      const retry = jest.spyOn(runner, '_gateFailRetryOrSkip');
+      const result = await runner.runNext();
+      expect(result).toMatchObject({ outcome: 'deferred_terminal_draft', skip_reason: 'terminal_review_unavailable', brief_id: 'brief_handed' });
+      expect(result.terminal_draft_revision).toBeUndefined();
+      expect(retry).not.toHaveBeenCalled();
+      expect(queue.defer).toHaveBeenCalledWith('opp_tw', expect.any(Date), { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['a review that failed on the Mac', { runner: 'mac', code: 'BLOG_EDITORIAL_REVIEW_FAILED' }],
+      ['an outage off the Mac', { runner: null, code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' }],
+      ['a document the review refuses as input, on the Mac', { runner: 'mac', code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: false }],
+    ])('%s still takes the bounded gate retry', async (_label, { runner: onMac, code, transient }) => {
+      process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+      if (onMac) process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = onMac; else delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
+      const { runner } = setup({ source: read, handed: city('brief_handed') });
+      reviewFails(code, transient);
+      const retry = jest.spyOn(runner, '_gateFailRetryOrSkip').mockResolvedValue({ outcome: 'gate_retry' });
+      await expect(runner.runNext()).resolves.toEqual({ outcome: 'gate_retry' });
+      expect(retry.mock.calls[0][5]).toMatchObject({ skipReason: 'editorial_review_failed' });
+    });
   });
 
   test('a draft that could not be read keeps the row waiting on the same brief', async () => {
@@ -5703,7 +6049,23 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     await runner._reportBlogDrought([], { haltBeforeBlog: null });
     expect(send).not.toHaveBeenCalled();
     terminalWriter.blogDraftRequested.mockResolvedValue(false);
+    // Mac mode: a blog draft or hold pushed and waiting for the Mac job is not a drought either.
+    terminalWriter.macHoldsBlogDraft = jest.fn().mockResolvedValue(true);
     await runner._reportBlogDrought([], { haltBeforeBlog: null });
-    expect(send).toHaveBeenCalledWith([], { haltBeforeBlog: null });
+    expect(send).not.toHaveBeenCalled();
+    terminalWriter.macHoldsBlogDraft.mockResolvedValue(false);
+    // Mac mode: a blog the Mac job already published today (outside this batch's runs) is not a drought.
+    terminalWriter.editorialReviewOnMac = () => true;
+    const started = jest.spyOn(runner, '_blogStartedToday').mockResolvedValue(true);
+    await runner._reportBlogDrought([], { haltBeforeBlog: null });
+    expect(send).not.toHaveBeenCalled();
+    started.mockRejectedValueOnce(new Error('db down')); // doubt keeps the alert
+    await runner._reportBlogDrought([], { haltBeforeBlog: null });
+    expect(send).toHaveBeenCalledTimes(1);
+    started.mockResolvedValue(false);
+    terminalWriter.editorialReviewOnMac = () => false;
+    await runner._reportBlogDrought([], { haltBeforeBlog: null });
+    expect(send).toHaveBeenLastCalledWith([], { haltBeforeBlog: null });
+    expect(started).toHaveBeenCalledTimes(2); // not read outside Mac mode
   });
 });

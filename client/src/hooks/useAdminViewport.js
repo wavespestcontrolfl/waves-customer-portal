@@ -22,13 +22,20 @@ export function syncAdminViewportVars() {
   if (typeof window === "undefined" || typeof document === "undefined") return;
   const root = document.documentElement;
   const vv = window.visualViewport;
-  const layoutH = window.innerHeight;
-  // Pinch zoom ALSO shrinks visualViewport.height (CSS px) while
-  // innerHeight stays the layout height, so the height delta only means
-  // "keyboard" at scale ≈ 1. When meaningfully zoomed, fall back to the
-  // layout viewport — otherwise the zoom delta reads as a phantom keyboard
-  // and shoves the fixed tab bar / action bars hundreds of px up the page.
-  const usable = vv && !(vv.scale > 1.01);
+  // Pinch zoom ALSO shrinks visualViewport.height (CSS px), so the height
+  // delta only means "keyboard" at scale ≈ 1. When meaningfully zoomed, fall
+  // back to the layout viewport — otherwise the zoom delta reads as a phantom
+  // keyboard and shoves the fixed tab bar / action bars hundreds of px up the
+  // page. iOS WebKit shrinks window.innerHeight with the zoom too (it reports
+  // the zoomed visible height), so while zoomed the layout height is the root
+  // element's clientHeight, which zoom never changes. Reading innerHeight
+  // there cut the shell to the zoomed height and left blank white below it
+  // (owner 2026-11-06, zooming the estimator's satellite photos in the app).
+  const zoomed = Boolean(vv && vv.scale > 1.01);
+  const layoutH = zoomed
+    ? Math.max(window.innerHeight, document.documentElement.clientHeight || 0)
+    : window.innerHeight;
+  const usable = vv && !zoomed;
   const height = usable ? vv.height : layoutH;
   const offsetTop = usable ? vv.offsetTop : 0;
   const keyboardInset = Math.max(0, layoutH - height - offsetTop);

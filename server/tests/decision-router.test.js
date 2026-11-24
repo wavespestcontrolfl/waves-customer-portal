@@ -222,6 +222,25 @@ describe('redundancy penalty for prior brief versions', () => {
     expect(r.human_review_required).toBe(true);
     expect(r.human_review_reason).toMatch(/loop/);
   });
+  test('briefs whose run wrote no draft do not count toward the loop review', () => {
+    // Four briefs, two of them from runs that waited for a publish cap: two tries, no loop.
+    const waited = route(opp(), { existing_brief_versions: 4, loop_brief_versions: 2 });
+    expect(waited.human_review_required).toBe(false);
+    expect(waited.human_review_reason).toBeNull();
+    // The score penalty still reads every brief.
+    expect(waited.score_breakdown.redundancy).toBe(route(opp(), { existing_brief_versions: 4 }).score_breakdown.redundancy);
+  });
+  test('three drafted briefs still trigger the loop review, and the reason gives that count', () => {
+    const r = route(opp(), { existing_brief_versions: 5, loop_brief_versions: 3 });
+    expect(r.human_review_required).toBe(true);
+    expect(r.human_review_reason).toBe('3 prior brief versions — likely loop');
+  });
+  test('the loop review does not need the total count: a failed total read (0) with three tries still flags', () => {
+    const r = route(opp(), { existing_brief_versions: 0, loop_brief_versions: 3 });
+    expect(r.human_review_required).toBe(true);
+    expect(r.human_review_reason).toMatch(/likely loop/);
+    expect(r.score_breakdown.redundancy).toBeUndefined();
+  });
 });
 
 // ── bucket-specific always-human-review ─────────────────────────────

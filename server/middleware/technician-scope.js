@@ -138,7 +138,7 @@ const TECHNICIAN_ALLOW_LIST = [
   // (owner 2026-11-04): their routes are requireAdmin, so a technician login
   // never reached them.
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|agent-draft)$/ },
-  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|send-prep|rewrite-sms|ai-draft|name-check)$/ },
+  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|send-prep|send-howto|send-welcome|rewrite-sms|ai-draft|name-check)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
   // Facebook Messenger threads: the router scopes a
   // technician to threads linked to a customer on their own route, like the SMS inbox.
@@ -171,6 +171,9 @@ const TECHNICIAN_ALLOW_LIST = [
   // A technician's own finalized pay stubs (GATE_TECH_PAY_STUBS, owner 2026-10-28; inside "pay and growth" of the
   // 2026-10-02 ruling). The router scopes both reads to req.technicianId. Pay runs, W-4s and tax forms stay admin-only.
   { bucket: 'pay-growth', methods: READ, pattern: /^\/api\/tech\/payroll\/checks(\/[^/]+\/stub)?$/ },
+  // A technician's own rewards scoreboard (GATE_TECH_REWARDS_SCOREBOARD, owner 2026-11-20, Tech Rewards Plan D5-4). The router
+  // reads only req.technicianId and refuses any other id with 403. Under the board, their own yearly pay statement (D5-6).
+  { bucket: 'pay-growth', methods: READ, pattern: /^\/api\/tech\/rewards-scoreboard(\/availability|\/year-statement)?$/ },
 
   // Knowledge base: read, and ask. Never write, verify, or run paid jobs.
   { bucket: 'knowledge-read', methods: READ, pattern: /^\/api\/admin\/kb(\/[^/]+)?$/ },

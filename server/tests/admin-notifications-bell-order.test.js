@@ -1,6 +1,6 @@
 /**
- * GATE_ALERT_BELL_ORDER (owner 2026-11-05, admin-bell plan D1): the route's cursor shapes, the `order` field, the
- * `areaChip` field and what it passes the service, gate on and off. The SQL order itself is proved against Postgres in
+ * Needs-you-first bell order (owner 2026-11-05, admin-bell plan D1): the route's cursor shapes, the `order` field, the
+ * `areaChip` field and what it passes the service. The SQL order itself is proved against Postgres in
  * admin-notifications-bell-order-postgres.test.js.
  */
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
@@ -31,12 +31,7 @@ async function list(query = {}, role = 'admin') {
   return res.status.mock.calls.length ? { status: res.status.mock.calls[0][0], body: res.json.mock.calls[0][0] } : res.json.mock.calls[0][0];
 }
 
-const GATE_BEFORE = process.env.GATE_ALERT_BELL_ORDER;
-afterAll(() => {
-  if (GATE_BEFORE === undefined) delete process.env.GATE_ALERT_BELL_ORDER; else process.env.GATE_ALERT_BELL_ORDER = GATE_BEFORE;
-});
 beforeEach(() => {
-  delete process.env.GATE_ALERT_BELL_ORDER;
   NotificationService.getAdminNotifications.mockReset();
 });
 
@@ -87,54 +82,11 @@ function rows(n, over = () => ({})) {
   }));
 }
 
-describe('gate off', () => {
-  test('the service gets the old options, rows have no areaChip, there is no order field and the cursor is two-part', async () => {
-    NotificationService.getAdminNotifications.mockResolvedValue(rows(3, () => ({ bell_rank: undefined, metadata: { area: 'Billing' } })));
-    const body = await list({ limit: '2' });
-    expect(NotificationService.getAdminNotifications).toHaveBeenCalledWith(3, 0, { role: 'admin', technicianId: 'tech-1', before: null, fullAccess: expect.any(Boolean) });
-    expect(body).not.toHaveProperty('order');
-    expect(body.notifications.every((n) => !('areaChip' in n))).toBe(true);
-    expect(body.next).toMatch(/^2026-11-05 14:00:00\.001000\+00~/);
-    expect(body.next.split('~')).toHaveLength(2);
-  });
-
-  test('a three-part (ranked) cursor belongs to the other order: page 1 of the chronological list, restart: true, no cursor passed on', async () => {
-    NotificationService.getAdminNotifications.mockResolvedValue(rows(3, () => ({ bell_rank: undefined })));
-    const body = await list({ before: `2~${AT}~${ID}`, page: '4', limit: '2' });
-    const [limit, offset, options] = NotificationService.getAdminNotifications.mock.calls[0];
-    expect([limit, offset]).toEqual([3, 0]);
-    expect(options.before).toBeNull();
-    expect(options).not.toHaveProperty('ranked');
-    expect(body.restart).toBe(true);
-    expect(body.page).toBe(1);
-    expect(body).not.toHaveProperty('order');
-    expect(body.next.split('~')).toHaveLength(2);
-  });
-
-  test('a two-part cursor with the gate off continues as before, with no restart', async () => {
-    NotificationService.getAdminNotifications.mockResolvedValue([]);
-    const body = await list({ before: `${AT}~${ID}` });
-    expect(NotificationService.getAdminNotifications.mock.calls[0][2].before).toEqual({ at: AT, id: ID });
-    expect(body).not.toHaveProperty('restart');
-  });
-
-  test('anything but exactly "true" reads as off', async () => {
-    NotificationService.getAdminNotifications.mockResolvedValue([]);
-    for (const value of ['TRUE', '1', 'yes', ' true', 'false']) {
-      process.env.GATE_ALERT_BELL_ORDER = value;
-      const body = await list({});
-      expect(body).not.toHaveProperty('order');
-    }
-  });
-});
-
-describe('gate on', () => {
-  beforeEach(() => { process.env.GATE_ALERT_BELL_ORDER = 'true'; });
-
+describe('the ranked list', () => {
   test('asks the service for the ranked order, says so, and serves a three-part next cursor', async () => {
     NotificationService.getAdminNotifications.mockResolvedValue(rows(3, (i) => ({ bell_rank: i === 1 ? 1 : 0 })));
     const body = await list({ limit: '2' });
-    expect(NotificationService.getAdminNotifications).toHaveBeenCalledWith(3, 0, expect.objectContaining({ ranked: true, before: null }));
+    expect(NotificationService.getAdminNotifications).toHaveBeenCalledWith(3, 0, expect.objectContaining({ before: null }));
     expect(body.order).toBe('needs-you-first');
     expect(body.hasMore).toBe(true);
     // the next cursor names the LAST row served (index 1, rank 1)
@@ -187,17 +139,16 @@ describe('gate on', () => {
     const [limit, offset, options] = NotificationService.getAdminNotifications.mock.calls[0];
     expect([limit, offset]).toEqual([3, 0]);
     expect(options.before).toBeNull();
-    expect(options.ranked).toBe(true);
     expect(body.restart).toBe(true);
     expect(body.order).toBe('needs-you-first');
     expect(body.page).toBe(1);
     expect(body.next.split('~')).toHaveLength(3);
   });
 
-  test('offset paging without a cursor keeps the offset and the ranked option', async () => {
+  test('offset paging without a cursor keeps the offset', async () => {
     NotificationService.getAdminNotifications.mockResolvedValue([]);
     await list({ page: '3', limit: '10' });
-    expect(NotificationService.getAdminNotifications).toHaveBeenCalledWith(11, 20, expect.objectContaining({ ranked: true, before: null }));
+    expect(NotificationService.getAdminNotifications).toHaveBeenCalledWith(11, 20, expect.objectContaining({ before: null }));
   });
 
   test('an invalid cursor is still a 400', async () => {
@@ -209,7 +160,7 @@ describe('gate on', () => {
   test('a technician list is ordered the same way and carries the same fields', async () => {
     NotificationService.getAdminNotifications.mockResolvedValue(rows(2, () => ({ metadata: { area: 'Schedule' } })));
     const body = await list({}, 'technician');
-    expect(NotificationService.getAdminNotifications.mock.calls[0][2]).toMatchObject({ role: 'technician', ranked: true });
+    expect(NotificationService.getAdminNotifications.mock.calls[0][2]).toMatchObject({ role: 'technician' });
     expect(body.order).toBe('needs-you-first');
   });
 
@@ -219,21 +170,5 @@ describe('gate on', () => {
     expect(body.next).toBeNull();
     expect(body.hasMore).toBe(false);
     expect(body.order).toBe('needs-you-first');
-  });
-});
-
-describe('a feature-gates mock without the reader', () => {
-  test('reads the gate as off', async () => {
-    jest.resetModules();
-    jest.doMock('../config/feature-gates', () => ({ gates: {} }));
-    process.env.GATE_ALERT_BELL_ORDER = 'true';
-    const mockedRouter = require('../routes/admin-notifications');
-    const NS = require('../services/notification-service');
-    NS.getAdminNotifications.mockResolvedValue([]);
-    const h = mockedRouter.stack.find((layer) => layer.route?.path === '/' && layer.route.methods.get).route.stack[0].handle;
-    const res = { json: jest.fn() };
-    await h({ query: {}, techRole: 'admin', technicianId: 't' }, res, (err) => { throw err; });
-    expect(res.json.mock.calls[0][0]).not.toHaveProperty('order');
-    jest.dontMock('../config/feature-gates');
   });
 });

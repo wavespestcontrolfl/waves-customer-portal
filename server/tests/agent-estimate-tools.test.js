@@ -120,10 +120,10 @@ const INPUT = {
   },
   protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 6 }],
   inventoryReview: [
-    { serviceKey: 'pest', productName: 'Talstar P', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'LESCO Crosscheck Plus', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Atticus Antapex WSG', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion WDG Granular', status: 'in_stock', onHand: 8 },
-    { serviceKey: 'pest', productName: 'Advion Cockroach Gel Bait', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Advion Evolution Cockroach Gel Bait', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Gentrol Complete EC3', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Ant Gel', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Contrac Blox', status: 'in_stock', onHand: 8 },
@@ -195,6 +195,51 @@ function makeDatabase({
   database.fn = mockDb.fn;
   return { database, writes };
 }
+
+describe('toggle_show_one_time_option on a customer\'s own plan quote (codex pre-push r29 on #8132)', () => {
+  const ESTIMATE_ID = '00000000-0000-4000-8000-000000000081';
+  const quote = (source, extra = {}) => ({
+    id: ESTIMATE_ID, token: 'synthetic-token', source, status: 'sent', show_one_time_option: false,
+    onetime_total: '0', monthly_total: '100', annual_total: '1200', estimate_data: '{}', ...extra,
+  });
+  // The toggle's guarded UPDATE runs .modify() callbacks (expected value, archive state).
+  const withModify = (database) => {
+    const wrapped = (table) => {
+      const builder = database(table);
+      builder.modify = (callback) => { callback(builder); return builder; };
+      builder.whereNotNull = () => builder;
+      return builder;
+    };
+    wrapped.fn = database.fn;
+    return wrapped;
+  };
+
+  test.each(['plan_restart', 'plan_start'])('a %s quote refuses the option ON with the revise refusal, before any write', async (source) => {
+    const { database, writes } = makeDatabase({ estimate: quote(source) });
+    mockDb.mockImplementation(withModify(database));
+    const result = await executeEstimateTool('toggle_show_one_time_option', { estimate_identifier: ESTIMATE_ID, enabled: true });
+    expect(result.error).toBe(require('../services/admin-estimate-persistence').selfServeMintEditRefusal({ source }));
+    expect(result.error).toMatch(/cannot be edited in place/);
+    expect(writes).toEqual([]);
+  });
+
+  // Turning it back OFF would make a quote the page already refused acceptable again (tenth pre-push audit).
+  test.each(['plan_restart', 'plan_start'])('a %s quote refuses the option OFF too, with no write', async (source) => {
+    const { database, writes } = makeDatabase({ estimate: quote(source, { show_one_time_option: true }) });
+    mockDb.mockImplementation(withModify(database));
+    const result = await executeEstimateTool('toggle_show_one_time_option', { estimate_identifier: ESTIMATE_ID, enabled: false });
+    expect(result.error).toBe(require('../services/admin-estimate-persistence').selfServeMintEditRefusal({ source }));
+    expect(writes).toEqual([]);
+  });
+
+  test('a staff estimate still turns the option OFF', async () => {
+    const { database, writes } = makeDatabase({ estimate: quote('admin', { show_one_time_option: true }) });
+    mockDb.mockImplementation(withModify(database));
+    const result = await executeEstimateTool('toggle_show_one_time_option', { estimate_identifier: ESTIMATE_ID, enabled: false });
+    expect(result.error).toBeUndefined();
+    expect(writes).toEqual([expect.objectContaining({ table: 'estimates', op: 'update', payload: expect.objectContaining({ show_one_time_option: false }) })]);
+  });
+});
 
 describe('Agent Estimate draft tool', () => {
   beforeEach(() => {

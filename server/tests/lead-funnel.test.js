@@ -136,4 +136,22 @@ describe('revenue and the other funnel views', () => {
     ], 'heard');
     expect(heard.map((g) => g.label)).toEqual(['No answer (not asked or skipped)', 'ChatGPT']);
   });
+
+  test('the quiz view names the two quiz pages; every other lead is one row', () => {
+    const quiz = buildFunnelBreakdown([
+      { group_key: 'pest_quiz', funnel_stage: 'lead', n: 3 },
+      { group_key: 'pest_quiz', funnel_stage: 'completed', n: 1, revenue: 120 },
+      { group_key: 'lawn_quiz', funnel_stage: 'lead', n: 1 },
+      { group_key: '(unknown)', funnel_stage: 'lead', n: 9 },
+    ], 'quiz');
+    expect(quiz.map((g) => [g.label, g.leads])).toEqual([['Not a quiz lead', 9], ['Pest Quiz', 4], ['Lawn Quiz', 1]]);
+    expect(quiz[1]).toMatchObject({ key: 'pest_quiz', completed: 1, revenue: 120 });
+  });
+
+  test('the quiz key groups in SQL without a knex binding', () => {
+    const { FUNNEL_BREAKDOWN_SQL } = require('../services/lead-funnel');
+    expect(Object.keys(FUNNEL_BREAKDOWN_SQL)).toEqual(['page', 'service', 'city', 'heard', 'quiz']);
+    expect(FUNNEL_BREAKDOWN_SQL.quiz).toContain("l.extracted_data->'quiz'->>'kind'");
+    expect(FUNNEL_BREAKDOWN_SQL.quiz).not.toContain('?');
+  });
 });

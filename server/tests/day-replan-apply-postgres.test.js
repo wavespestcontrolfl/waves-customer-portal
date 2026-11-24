@@ -178,6 +178,76 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
   }
   const changedColumns = (before, after) => Object.keys(after).filter((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k])).sort();
 
+  test('the recurring no-time office notice shows saved series context and leaves a live customer pick quiet', async () => {
+    const { flagUnplacedVisits } = require('../services/auto-dispatch/audit');
+    const compose = require('../services/admin-alert-compose');
+    const capture = jest.spyOn(compose, 'raiseAdminAlert').mockResolvedValue({ id: 'synthetic-notice' });
+    const [target, pending] = visits;
+    const children = await mockConn('scheduled_services').whereIn('id', [target.id, pending.id])
+      .select('id', 'customer_id', 'recurring_parent_id');
+    const started = '2097-03-11';
+    await mockConn('scheduled_services').insert(children.map((child) => ({
+      id: child.recurring_parent_id,
+      customer_id: child.customer_id,
+      technician_id: techId,
+      scheduled_date: started,
+      service_type: 'Quarterly Pest Control Service',
+      status: 'completed',
+      is_recurring: true,
+      recurring_pattern: 'custom',
+      recurring_interval_days: 42,
+      window_start: '09:00',
+      window_end: '10:00',
+    })));
+    await mockConn('scheduled_services').where({ id: target.id })
+      .update({ window_start: null, window_end: null, recurring_dispatch_due_date: null });
+    await mockConn('scheduled_services').where({ id: pending.id })
+      .update({ window_start: null, window_end: null, recurring_dispatch_due_date: null, customer_pick_by: '2097-06-10T23:00:00Z' });
+
+    await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
+
+    const fixtureIds = new Set([target.id, pending.id]);
+    const fixtureCalls = () => capture.mock.calls.filter(([, , opts]) => fixtureIds.has(opts?.metadata?.scheduledServiceId));
+    const calls = fixtureCalls();
+    expect(calls.map(([, , opts]) => opts.metadata.scheduledServiceId)).toEqual([target.id]);
+    const [, spec, opts] = calls[0];
+    expect(opts.detail).toBe(`Series started ${started} (every 42 days). The dispatch due date is missing.`);
+    expect(spec.link).toBe(`/admin/dispatch?tab=schedule&date=${DAY}&appointment=${target.id}`);
+
+    capture.mockClear();
+    const targetRoot = children.find(child => child.id === target.id).recurring_parent_id;
+    await mockConn('scheduled_services').where({ id: targetRoot }).update({
+      recurring_pattern: 'monthly_nth_weekday', recurring_nth: 3, recurring_weekday: 5,
+    });
+    await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
+    expect(fixtureCalls().map(([, , notice]) => notice.detail))
+      .toEqual([`Series started ${started} (third Friday of each month). The dispatch due date is missing.`]);
+
+    // The due date drives the alert words/key, while the locked appointment's
+    // actual calendar date drives the management link.
+    capture.mockClear();
+    await mockConn('scheduled_services').where({ id: target.id }).update({ recurring_dispatch_due_date: '2097-06-08' });
+    await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
+    const dueCalls = fixtureCalls();
+    expect(dueCalls.map(([, , alertOpts]) => [alertOpts.metadata.scheduledServiceId, alertOpts.metadata.dueDate]))
+      .toEqual([[target.id, '2097-06-08']]);
+    expect(dueCalls).toHaveLength(1);
+    expect(dueCalls[0][1].why).toContain('due Jun 8');
+    expect(dueCalls[0][1].link).toBe(`/admin/dispatch?tab=schedule&date=${DAY}&appointment=${target.id}`);
+
+    // Prove the optional context SELECT uses a savepoint: a real PostgreSQL
+    // statement error falls back, and the outer alert transaction remains
+    // usable for the notification write that follows it.
+    capture.mockClear();
+    await mockConn('scheduled_services').where({ id: target.id }).update({ recurring_dispatch_due_date: null });
+    await mockConn.raw('ALTER TABLE scheduled_services RENAME COLUMN recurring_pattern TO recurring_pattern_unavailable');
+    await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
+    const fallbackCalls = fixtureCalls();
+    expect(fallbackCalls.map(([, , alertOpts]) => alertOpts.metadata.scheduledServiceId)).toEqual([target.id]);
+    expect(fallbackCalls).toHaveLength(1);
+    expect(fallbackCalls[0][2].detail).toBe('The dispatch due date is missing.');
+  });
+
   test('writes the planned hours, the route order and the reminders in one go, silently, and says applied', async () => {
     const writes = await trackWindowWrites();
     const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });

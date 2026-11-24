@@ -394,10 +394,24 @@ async function loadPendingSmsConversations({
   return capped.map((row) => ({ ...row, total_count: String(totalCount) }));
 }
 
+// The Messages badge counts a needs-a-reply text only while nobody has read it
+// (owner 2026-11-19, "Mark Texts Read" option A): opening the thread or Mark
+// read takes it off the badge. The Unanswered filter and the unworked-comms
+// digest read loadPendingSmsConversations directly and keep every
+// needs-a-reply text, read or not. A row with no `messages` twin (legacy-only)
+// cannot be read from the inbox, so it stays.
+async function withoutReadRows(rows) {
+  const ids = rows.map((row) => row.id).filter(Boolean);
+  if (!ids.length) return rows;
+  const read = new Set(await db('messages').whereIn('id', ids).where({ is_read: true }).pluck('id'));
+  return rows.filter((row) => !read.has(row.id));
+}
+
 async function countPendingSmsConversations({
-  excludePhones = [], customerId = null, includePending = false, since = null,
+  excludePhones = [], customerId = null, includePending = false, since = null, unreadOnly = false,
 } = {}) {
-  const actionable = await loadPendingSmsConversations({ excludePhones, customerId, since });
+  const pending = await loadPendingSmsConversations({ excludePhones, customerId, since });
+  const actionable = unreadOnly ? await withoutReadRows(pending) : pending;
   const result = {
     conversations: new Set(actionable.map((row) => row.peer)).size,
     messages: actionable.length,

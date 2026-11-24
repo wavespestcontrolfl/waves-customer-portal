@@ -99,7 +99,7 @@ describe('notification trigger push tags', () => {
     expect(TRIGGER_REGISTRY.waiting_summary.techVisible).toBeUndefined();
   });
 
-  // GATE_OWNER_NUDGE_BANNER (owner 2026-11-04, "banner").
+  // Owner 2026-11-04, "banner".
   test('open_visits_nudge carries the text\'s words, opens the tech close-out page and has no bell-row rule beyond fyi', () => {
     const built = TRIGGER_REGISTRY.open_visits_nudge.build({
       headline: '3 visits from today are still open',
@@ -132,6 +132,31 @@ describe('notification trigger push tags', () => {
     expect(built.title).toBe('Bank payment error');
     expect(built.body).toBe('Invoice WPC-2026-0100 - Virginia Demo - Bank account during Stripe confirmation: Bank account could not be verified');
     expect(built.link).toBe('/admin/invoices?invoice=inv_123');
+  });
+
+  test('a quiz lead\'s bell names the quiz and its answers in place of the service line', () => {
+    const built = TRIGGER_REGISTRY.new_lead.build({
+      name: 'Pat Sample', source: 'Pest Quiz', zip: '34202', service: 'Cockroach Control',
+      quizAnswers: 'Roaches, condo, wants it today', quizNamesRequest: true, leadId: 'lead-9',
+    });
+    expect(built.title).toBe('New lead');
+    expect(built.body).toBe('Pat Sample via Pest Quiz (34202) - Roaches, condo, wants it today');
+    expect(built.link).toBe('/admin/leads?lead=lead-9');
+    // A "Not sure" or partly answered quiz does not say what the visitor
+    // wants, so the service line stays beside the answers.
+    const partial = (quizAnswers) => TRIGGER_REGISTRY.new_lead.build({
+      name: 'Pat Sample', source: 'Pest Quiz', zip: '34202', service: 'Pest Control', quizAnswers, quizNamesRequest: false, leadId: 'lead-9',
+    }).body;
+    expect(partial('Not sure, condo, wants it today')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - Not sure, condo, wants it today');
+    expect(partial('wants it today')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - wants it today');
+    // A named problem with no property or timing is partial too.
+    expect(partial('Ants')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - Ants');
+    // A caller that sends answers with no flag keeps the service line too.
+    expect(TRIGGER_REGISTRY.new_lead.build({ name: 'Pat Sample', source: 'Pest Quiz', service: 'Pest Control', quizAnswers: 'condo' }).body)
+      .toBe('Pat Sample via Pest Quiz - Wants Pest Control - condo');
+    // Every other lead keeps the service line.
+    expect(TRIGGER_REGISTRY.new_lead.build({ name: 'Pat Sample', source: 'Main site', zip: '34202', service: 'Pest Control', leadId: 'lead-9' }).body)
+      .toBe('Pat Sample via Main site (34202) - Wants Pest Control');
   });
 
   test('new lead trigger can carry tracking number context', () => {
@@ -246,6 +271,10 @@ describe('notification trigger push tags', () => {
     expect(blocked.link).toBe('/admin/newsletter?tab=history');
     expect(blocked.body).toMatch(/Nothing was sent\.$/);
     expect(blocked.body).not.toMatch(/composer/i);
+    // A planned issue's outcome (its settle step) is told in its own words: some readers may have got
+    // it, so never "did not pass the send gate" or "Nothing was sent".
+    const outcome = TRIGGER_REGISTRY.newsletter_proof_blocked.build({ sendId: 'send-7', subject: 'x', errors: ['Did not go out: its send failed after 40 of 85 readers got it'], outcome: true });
+    expect(outcome.body).toBe('"x": Did not go out: its send failed after 40 of 85 readers got it.');
     expect(TRIGGER_REGISTRY.newsletter_send_not_dispatched).toBeUndefined();
     expect(TRIGGER_REGISTRY.pest_insider_draft).toBeUndefined();
     for (const type of Object.keys(TRIGGER_REGISTRY).filter((t) => t.startsWith('newsletter_'))) {
@@ -475,6 +504,22 @@ describe('triggerNotification bell outcome', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  // A quiet missed call's bell row is titled likely robocall; its push goes only when no bell row
+  // was written (missed-call-bell.js pushGuard) and keeps the ordinary caller title (pre-push audit r23).
+  test('a missed-call push carries its push-only title while the bell row keeps its own', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    await triggerNotification('customer_missed_call', { customerId: null, name: 'likely robocall (GBP — Parrish)', pushName: 'unknown caller (GBP — Parrish)', phone: '+19415550100', callLogId: 'call-2' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('Missed call — likely robocall (GBP — Parrish)');
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1').title).toBe('Missed call — unknown caller (GBP — Parrish)');
+    // With no push name the push carries the bell's title, as before.
+    PushService.sendToAdminUsers.mockClear();
+    await triggerNotification('customer_missed_call', { customerId: null, name: 'unknown caller (GBP — Parrish)', phone: '+19415550100', callLogId: 'call-3' });
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1').title).toBe('Missed call — unknown caller (GBP — Parrish)');
+  });
+
   // A banner for a bell row its writer rang under bell: true keeps that authorization, so a type the
   // policy would otherwise silence (one with no customer declaration) still gets its banner.
   test.each(['dashboard_alert'])(
@@ -531,6 +576,47 @@ describe('triggerNotification bell outcome', () => {
     expect(quiet).not.toHaveProperty('sound');
   });
 
+  test('beforeHandoff reaches the push service\'s per-device check, and a fan-out it stopped part way keeps its count', async () => {
+    const PushService = require('../services/push-notifications');
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }])
+        : table === 'notification_preferences'
+          ? tableMock([{ admin_user_id: 'admin-1', trigger_key: 'lead_call_reminder', bell_enabled: true, push_enabled: true, sound_enabled: true }])
+          : tableMock([])));
+    // Two devices, as the push service runs them (push-notifications-before-handoff.test.js): the check before each
+    // handoff; a false answer stops that device and every later one.
+    PushService.sendToAdminUsers.mockClear();
+    PushService.sendToAdminUsers.mockImplementationOnce(async (_ids, _payload, opts) => {
+      const results = [];
+      for (let device = 0; device < 2; device += 1) {
+        if ((await opts.beforeHandoff()) === false) {
+          return { subscriptions: 2, sent: results.length, expired: 0, failed: 0, skipped: 2 - results.length, results, superseded: true };
+        }
+        results.push({ sent: true });
+      }
+      return { subscriptions: 2, sent: 2, expired: 0, failed: 0, skipped: 0, results };
+    });
+    const answers = [true, false];
+    const beforeHandoff = jest.fn(async () => answers.shift());
+    const expiresAt = '2026-11-09T23:00:00.000Z';
+    const stats = await triggerNotification('lead_call_reminder', { alertRowId: 'n-1', alertTitle: 'Leads — call Pat Sample back', alertBody: 'b', expiresAt },
+      { pushOnly: true, adminOnly: true, bellAuthorized: true, beforePush: async () => true, beforeHandoff });
+    // The reminder's expiry reaches every device's payload (web push TTL, apns-expiration, FCM ttl).
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1')).toMatchObject({ expiresAt });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(PushService.sendToAdminUsers.mock.calls[0][2].beforeHandoff).toBe(beforeHandoff);
+    expect(beforeHandoff).toHaveBeenCalledTimes(2);
+    // One device has the push: the count stays, it is not read as "stopped before the push".
+    expect(stats.push).toMatchObject({ sent: 1, superseded: true });
+  });
+
+  test('pushExpiryFor: the lead reminders\' push carries its own expiry; no other trigger reads one from its payload', () => {
+    expect(__private.pushExpiryFor('lead_call_reminder', { expiresAt: '2026-11-09T23:00:00.000Z' })).toEqual({ expiresAt: '2026-11-09T23:00:00.000Z' });
+    expect(__private.pushExpiryFor('lead_call_reminder', {})).toEqual({});
+    expect(__private.pushExpiryFor('lead_call_reminder', { expiresAt: 'not a time' })).toEqual({});
+    expect(__private.pushExpiryFor('new_lead', { expiresAt: '2026-11-09T23:00:00.000Z' })).toEqual({});
+  });
+
   test('portal_ask is a pushOnly page: it writes no bell row and pushes one banner tagged by the ask', async () => {
     const PushService = require('../services/push-notifications');
     PushService.sendToAdminUsers.mockClear();
@@ -573,6 +659,15 @@ describe('triggerNotification bell outcome', () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'committed-bell', deduped: true });
     expect(await triggerNotification('sms_reply', { twilioSid: 'SM-synthetic-replay' },
       { dedupeKey: 'sms-reply:SM-synthetic-replay' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  // A planned Waves Pest Insider issue's outcome alert is keyed per issue: a hit is the settle
+  // step's retry of an alert that landed before its row was marked told.
+  test('a keyed send-stop alert retry reuses its bell and does not push again', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'outcome-bell', deduped: true });
+    expect(await triggerNotification('newsletter_proof_blocked', { sendId: 'send-7', subject: 'x', errors: ['e'] },
+      { dedupeKey: 'pest-insider-outcome:issue-1' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
     expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
   });
 
@@ -1069,8 +1164,8 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     }
   });
 
-  // GATE_OWNER_NUDGE_BANNER: pushOnly + onlyUserIds reaches only the named admin, never a bell row, only while its gate is on.
-  test.each([['true', 1], [undefined, 0]])('GATE_OWNER_NUDGE_BANNER=%p: the pushOnly open_visits_nudge banner sends %p push(es) to the owner alone, never a bell row', async (gate, pushes) => {
+  // pushOnly + onlyUserIds reaches only the named admin, never a bell row.
+  test('the pushOnly open_visits_nudge banner sends one push to the owner alone, never a bell row', async () => {
     const PushService = require('../services/push-notifications');
     const bellPolicy = require('../services/notification-bell-policy');
     const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
@@ -1079,7 +1174,6 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     ));
     NotificationService.notifyAdmin.mockClear();
     PushService.sendToAdminUsers.mockClear();
-    if (gate) process.env.GATE_OWNER_NUDGE_BANNER = gate;
     try {
       const stats = await triggerNotification(
         'open_visits_nudge',
@@ -1087,11 +1181,8 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
         { pushOnly: true, adminOnly: true, onlyUserIds: ['owner-1'] },
       );
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-      expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(pushes);
-      if (!pushes) {
-        expect(stats.policySilenced).toBe(true);
-        return;
-      }
+      expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+      expect(stats.policySilenced).toBeFalsy();
       const [adminIds, payloadFor] = PushService.sendToAdminUsers.mock.calls[0];
       expect(adminIds).toEqual(['owner-1']);
       expect(payloadFor('owner-1')).toMatchObject({
@@ -1099,7 +1190,6 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
         tag: 'waves-open_visits_nudge-2026-11-04', sound: 'waves-reminder.caf', priority: 'normal',
       });
     } finally {
-      delete process.env.GATE_OWNER_NUDGE_BANNER;
       gateSpy.mockRestore();
     }
   });
@@ -1419,7 +1509,7 @@ describe('bell banner triggers', () => {
     expect(keys.indexOf('messenger_reply')).toBe(keys.indexOf('sms_reply') + 1);
   });
 
-  test('new_lead_email (GATE_RING_NEW_CONTACTS) builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
+  test('new_lead_email builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
     const lead = TRIGGER_REGISTRY.new_lead_email;
     expect(lead).toEqual(expect.objectContaining({ category: 'new_lead', priority: 'high', group: 'Leads & Sales', adminRoleOnly: true }));
     expect(lead.rule).toEqual({ area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 });
@@ -1429,6 +1519,18 @@ describe('bell banner triggers', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     const sent = PushService.sendToAdminUsers.mock.calls.at(-1)[1]('admin-1');
     expect(sent).toMatchObject({ title: bannerPayload.alertTitle, tag: 'waves-new_lead_email-n-42', sound: 'waves-lead.caf' });
+  });
+
+  test('new_lead_quote builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
+    const quote = TRIGGER_REGISTRY.new_lead_quote;
+    expect(quote).toEqual(expect.objectContaining({ label: 'New website quote banner', category: 'new_lead', priority: 'high', group: 'Leads & Sales', adminRoleOnly: true }));
+    expect(quote.rule).toEqual({ area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 });
+    expect(quote.build(bannerPayload)).toEqual({ title: bannerPayload.alertTitle, body: bannerPayload.alertBody, link: bannerPayload.alertLink });
+    expect(quote.build({})).toEqual({ title: 'New website quote', body: 'Open the lead to see the quote and call.', link: '/admin/leads' });
+    await triggerNotification('new_lead_quote', bannerPayload, { pushOnly: true, adminOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    const sent = PushService.sendToAdminUsers.mock.calls.at(-1)[1]('admin-1');
+    expect(sent).toMatchObject({ title: bannerPayload.alertTitle, tag: 'waves-new_lead_quote-n-42', sound: 'waves-lead.caf' });
   });
 
   test('the banner is tagged by its row, so a refresh ring replaces it, and a second row never does', () => {
@@ -1478,23 +1580,16 @@ describe('bell banner triggers', () => {
   });
 });
 
-// GATE_ALERT_REGISTRY_LABELS (owner 2026-11-05, admin-alert plan S1): the bell row a registry event writes also stores the
-// labels its rule declares. Gate off = the metadata of today.
-describe('registry labels on the bell row (GATE_ALERT_REGISTRY_LABELS)', () => {
-  const LABEL_KEYS = ['area', 'severity', 'who', 'doneWhen', 'contact', 'promise', 'subject'];
-
-  const ringMetadata = async (key, payload, { gate = 'true', opts = {} } = {}) => {
+// Registry labels (owner 2026-11-05, admin-alert plan S1): the bell row a registry event writes also stores the
+// labels its rule declares.
+describe('registry labels on the bell row', () => {
+  const ringMetadata = async (key, payload, { opts = {} } = {}) => {
     db.mockImplementation((table) => (
       table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([])
     ));
     NotificationService.notifyAdmin.mockClear();
     NotificationService.notifyAdmin.mockResolvedValue({ id: 'notif-1' });
-    if (gate) process.env.GATE_ALERT_REGISTRY_LABELS = gate; else delete process.env.GATE_ALERT_REGISTRY_LABELS;
-    try {
-      await triggerNotification(key, payload, opts);
-    } finally {
-      delete process.env.GATE_ALERT_REGISTRY_LABELS;
-    }
+    await triggerNotification(key, payload, opts);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     return NotificationService.notifyAdmin.mock.calls[0][3].metadata;
   };
@@ -1503,28 +1598,17 @@ describe('registry labels on the bell row (GATE_ALERT_REGISTRY_LABELS)', () => {
   // Spies are undone one by one: restoreAllMocks would also reset the module mocks above (notifyAdmin's return value).
   const spies = [];
   const spy = (obj, name) => { const s = jest.spyOn(obj, name); spies.push(s); return s; };
-  afterEach(() => { delete process.env.GATE_ALERT_REGISTRY_LABELS; while (spies.length) spies.pop().mockRestore(); });
+  afterEach(() => { while (spies.length) spies.pop().mockRestore(); });
 
-  test('gate off: the metadata carries no label, exactly as before', async () => {
-    const meta = await ringMetadata('customer_missed_call', missedCall, { gate: null });
-    expect(Object.keys(meta).filter((k) => LABEL_KEYS.includes(k))).toEqual([]);
-    expect(meta).toMatchObject({ triggerKey: 'customer_missed_call', priority: expect.any(String), payload: expect.any(Object) });
-    // Any value but the exact string 'true' is off.
-    const loose = await ringMetadata('customer_missed_call', missedCall, { gate: '1' });
-    expect(Object.keys(loose).filter((k) => LABEL_KEYS.includes(k))).toEqual([]);
-  });
-
-  test('gate on: a customer contact row stores area, severity, who, doneWhen and contact true, and no subject', async () => {
-    const off = await ringMetadata('customer_missed_call', missedCall, { gate: null });
+  test('a customer contact row stores area, severity, who, doneWhen and contact true, and no subject', async () => {
     const on = await ringMetadata('customer_missed_call', missedCall);
     expect(on).toMatchObject({ area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'caller_reached', contact: true });
     expect(on).not.toHaveProperty('promise');
     expect(on).not.toHaveProperty('subject');
-    // Only the labels are added: every key the gate-off row had keeps its value.
-    for (const [k, v] of Object.entries(off)) expect(on[k]).toEqual(v);
+    expect(on).toMatchObject({ triggerKey: 'customer_missed_call', priority: expect.any(String), payload: expect.any(Object) });
   });
 
-  test('gate on: a promise type stores promise true and never contact; an expiry type stores no doneWhen', async () => {
+  test('a promise type stores promise true and never contact; an expiry type stores no doneWhen', async () => {
     const promise = await ringMetadata('promise_chaser', { customerName: 'Pat Sample', phone: '+19415550100', callLogId: 'call-2' });
     expect(promise).toMatchObject({ area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', promise: true });
     expect(promise).not.toHaveProperty('contact');
@@ -1535,12 +1619,12 @@ describe('registry labels on the bell row (GATE_ALERT_REGISTRY_LABELS)', () => {
     expect(expiring).not.toHaveProperty('promise');
   });
 
-  test('gate on: an engineering type stores who claude and severity broken', async () => {
+  test('an engineering type stores who claude and severity broken', async () => {
     const meta = await ringMetadata('seo_sync_failed', { error: 'sync failed' });
     expect(meta).toMatchObject({ area: 'Content', severity: 'broken', who: 'claude' });
   });
 
-  test("gate on: the built alert's own fields win over the rule's", async () => {
+  test("the built alert's own fields win over the rule's", async () => {
     const original = TRIGGER_REGISTRY.customer_missed_call.build;
     spy(TRIGGER_REGISTRY.customer_missed_call, 'build').mockImplementation((p) => ({
       ...original(p), alert: { area: 'Schedule', doneWhen: 'own_done_when', who: 'either', extra: 'kept' },
@@ -1550,7 +1634,6 @@ describe('registry labels on the bell row (GATE_ALERT_REGISTRY_LABELS)', () => {
   });
 
   test('registryLabels drops every value the composer would refuse, and never invents a subject', () => {
-    process.env.GATE_ALERT_REGISTRY_LABELS = 'true';
     const { registryLabels } = __private;
     expect(registryLabels({ rule: { area: 'Nowhere', severity: 'urgent', who: 'robot', doneWhen: 'Not Valid', contact: 'yes', promise: 1 } })).toEqual({});
     expect(registryLabels({ rule: { area: 'Billing', severity: 'urgent', who: 'person', doneWhen: 'invoice_paid', contact: false } }))
@@ -1564,21 +1647,7 @@ describe('registry labels on the bell row (GATE_ALERT_REGISTRY_LABELS)', () => {
     expect(registryLabels({ rule: null })).toEqual({});
   });
 
-  test('a test that mocks feature-gates without the reader reads the gate as off', () => {
-    process.env.GATE_ALERT_REGISTRY_LABELS = 'true';
-    const gates = require('../config/feature-gates');
-    const reader = gates.alertRegistryLabelsLive;
-    expect(reader()).toBe(true);
-    delete gates.alertRegistryLabelsLive;
-    try {
-      expect(__private.registryLabels(TRIGGER_REGISTRY.new_lead)).toEqual({});
-    } finally {
-      gates.alertRegistryLabelsLive = reader;
-    }
-  });
-
-  test('every registry type: gate on stores exactly the labels its rule declares, no more', () => {
-    process.env.GATE_ALERT_REGISTRY_LABELS = 'true';
+  test('every registry type stores exactly the labels its rule declares, no more', () => {
     for (const [key, trigger] of Object.entries(TRIGGER_REGISTRY)) {
       const { area, severity, who, doneWhen, contact, promise } = trigger.rule;
       const expected = { area, severity, who, ...(doneWhen ? { doneWhen } : {}), ...(contact ? { contact: true } : {}), ...(promise ? { promise: true } : {}) };
@@ -1597,7 +1666,7 @@ describe('registry labels on the bell row (GATE_ALERT_REGISTRY_LABELS)', () => {
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
   });
 
-  test('GATE_ALERT_REGISTRY_LABELS on: a customer contact row still passes the policy, keeps bell: true and still pushes', async () => {
+  test('a customer contact row with registry labels still passes the policy, keeps bell: true and still pushes', async () => {
     const PushService = PushServiceHeld;
     const bellPolicy = require('../services/notification-bell-policy');
     bellPolicy.clearOverrideCache();
@@ -1606,22 +1675,14 @@ describe('registry labels on the bell row (GATE_ALERT_REGISTRY_LABELS)', () => {
     db.mockImplementation((table) => (
       table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([])
     ));
-    const rungWith = async (gate) => {
-      NotificationService.notifyAdmin.mockClear();
-      NotificationService.notifyAdmin.mockResolvedValue({ id: 'notif-1' });
-      PushService.sendToAdminUsers.mockClear();
-      if (gate) process.env.GATE_ALERT_REGISTRY_LABELS = gate; else delete process.env.GATE_ALERT_REGISTRY_LABELS;
-      try {
-        const stats = await triggerNotification('bundle_quote_requested', { customerName: 'Pat Bundle', customerId: 'cust-9' });
-        return { stats, options: NotificationService.notifyAdmin.mock.calls[0]?.[3], pushes: PushService.sendToAdminUsers.mock.calls.length };
-      } finally { delete process.env.GATE_ALERT_REGISTRY_LABELS; }
-    };
-    const off = await rungWith(null);
-    const on = await rungWith('true');
-    expect(on.options.bell).toBe(true);
-    expect(on.options.metadata).toMatchObject({ contact: true, severity: 'needs-you', who: 'person' });
-    expect(on.stats.policySilenced).toBeUndefined();
-    expect(on.pushes).toBe(off.pushes);
-    expect(on.pushes).toBe(1);
+    NotificationService.notifyAdmin.mockClear();
+    NotificationService.notifyAdmin.mockResolvedValue({ id: 'notif-1' });
+    PushService.sendToAdminUsers.mockClear();
+    const stats = await triggerNotification('bundle_quote_requested', { customerName: 'Pat Bundle', customerId: 'cust-9' });
+    const options = NotificationService.notifyAdmin.mock.calls[0]?.[3];
+    expect(options.bell).toBe(true);
+    expect(options.metadata).toMatchObject({ contact: true, severity: 'needs-you', who: 'person' });
+    expect(stats.policySilenced).toBeUndefined();
+    expect(PushService.sendToAdminUsers.mock.calls.length).toBe(1);
   });
 });

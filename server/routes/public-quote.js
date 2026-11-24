@@ -2,7 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+const { OPEN_LEAD_STATUSES, exceptClosedWebFormLead } = require('../services/lead-statuses');
 const { followDuplicateLink } = require('../services/lead-estimate-link');
 const { whereLiveCourtship } = require('../services/lead-courtship');
 const { heardAboutFromBody, heardAboutFillIfEmpty } = require('../services/heard-about');
@@ -10,6 +10,19 @@ const { stampLeadFunnelRow, bridgeLeadFunnelStage, LEAD_STATUS_TO_FUNNEL_STAGE }
 // A wizard re-run of the same inquiry inside this window lands as a
 // 'duplicate' of the prior open lead instead of a second 'new' one.
 const WIZARD_LEAD_REUSE_DAYS = 30;
+
+const { firstSourceEvidenceObjectSql, sourceEvidenceFromAttribution } = require('../services/lead-source-evidence');
+const QUOTE_FIRST_SOURCE_EVIDENCE_SQL = firstSourceEvidenceObjectSql({ incomingDataSql: 'source_stage.incoming' });
+const QUOTE_CARRIED_KEYS_SQL = "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict'))";
+const QUOTE_SNAPSHOT_CARRIED_KEYS_SQL = "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict'))";
+const QUOTE_UPDATE_EXTRACTED_SQL = `(SELECT CASE
+  WHEN lead_type = 'quote_wizard'
+    THEN ${QUOTE_CARRIED_KEYS_SQL} || (source_stage.incoming - 'source_evidence') || ${QUOTE_FIRST_SOURCE_EVIDENCE_SQL}
+  ELSE COALESCE(extracted_data, '{}'::jsonb) || (source_stage.incoming - 'source_evidence')
+END FROM (SELECT ?::jsonb AS incoming) AS source_stage)`;
+const QUOTE_SNAPSHOT_EXTRACTED_SQL = `(SELECT ${QUOTE_SNAPSHOT_CARRIED_KEYS_SQL}
+  || (source_stage.incoming - 'source_evidence') || ${QUOTE_FIRST_SOURCE_EVIDENCE_SQL}
+  FROM (SELECT ?::jsonb AS incoming) AS source_stage)`;
 
 // The most recent OPEN quote_wizard lead (inside the reuse window) whose
 // email, phone AND quoted address all equal what this run typed — i.e. the
@@ -144,6 +157,7 @@ const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContac
 const { isHoneypotTripped } = require('../utils/lead-abuse');
 const {
   blockIfAutomatedEstimateDuplicate,
+  onlyUntouchedWebFormShellsOpen,
   withAutomatedEstimatePhoneLock,
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
@@ -224,6 +238,82 @@ function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) 
   if (Number(t.homeSqFt) > 0) return perStory(t.homeSqFt);
   if (Number(t.livingAreaSqFt) > 0) return perStory(t.livingAreaSqFt);
   return null;
+}
+
+// Pool and pool-cage features for the website quote. GATE_CAGE_TWO_SIZES (owner
+// 2026-11-19, "hold"): a cage that today's four sizes call Large or Oversized keeps
+// its manual-quote hold. One invariant: the cage size and the hold come from the best
+// evidence under THIS request's gate state (the gate is read lazily, per request; a
+// whole-module mock without the reader reads as off). The size policy is
+// property-lookup/cage-sizes.js. `trusted` is the server's own cache-only re-read when
+// it decided the cage (YES or NO); it beats the client's profile, which only an API
+// caller can hand-build (the website forms echo the lookup unchanged).
+//  - Gate on: price the two-size answer; hold the four-size answer's Large and
+//    Oversized. A client with no decided poolCage (omitted, POSSIBLE, UNKNOWN) takes the
+//    re-read's cage answer, so it prices like an explicit answer; a YES or an explicit
+//    negative from the client stands.
+//  - Gate off: a profile with its own poolCageLegacySize key (a two-size profile from
+//    before a rollback) prices its four-size answer, the re-read first. Any other
+//    profile is today's code exactly.
+function websiteCageFeatures(ep, trustedTurf) {
+  const twoSizesOn = require('../config/feature-gates').cageTwoSizesLive?.() === true;
+  const clientCage = ep.poolCage === 'YES' || ep.poolCage === true;
+  const pool = ep.pool === 'YES' || ep.pool === true || ep.poolCage === 'YES';
+  return twoSizesOn
+    ? twoSizeCageFeatures(ep, decidedCage(trustedTurf), { pool, clientCage })
+    : fourSizeCageFeatures(ep, decidedCage(trustedTurf), { pool, clientCage });
+}
+
+// Gate off. A profile with its own poolCageLegacySize key is a two-size profile from
+// before a rollback: price its four-size answer, the re-read first, and inherit the
+// re-read's cage when the client has no decided answer. Any other profile is today's code exactly.
+function fourSizeCageFeatures(ep, trusted, { pool, clientCage }) {
+  const { fourSizeOf } = require('../services/property-lookup/cage-sizes');
+  if (Object.prototype.hasOwnProperty.call(ep, 'poolCageLegacySize')) {
+    const four = fourSizeOf(trusted) || fourSizeOf(ep);
+    // A client with no decided answer inherits the re-read's decided cage, as the gate-on path does.
+    const trustedCage = clientCageUndecided(ep, clientCage) && String(trusted?.poolCage).toUpperCase() === 'YES';
+    const poolCage = clientCage || trustedCage;
+    // No cage, no size: the engine reads a Large size as a hold even without a cage.
+    return { pool: pool || trustedCage, poolCage, poolCageSize: poolCage && four ? four.toLowerCase() : undefined };
+  }
+  const own = String(ep.poolCageSize || '').toLowerCase();
+  return {
+    pool,
+    poolCage: clientCage,
+    poolCageSize: ['small', 'medium', 'large', 'oversized'].includes(own) ? String(ep.poolCageSize).toLowerCase() : undefined,
+  };
+}
+
+// Gate on: price the two-size answer, hold the four-size answer's Large and
+// Oversized. A client with no decided poolCage takes the re-read's cage answer, so it
+// prices like an explicit YES (a held cage is held, a Medium one is charged); a YES or
+// an explicit negative from the client stands.
+function twoSizeCageFeatures(ep, trusted, { pool, clientCage }) {
+  const { fourSizeOf, twoSizeOf, isHeldFourSize } = require('../services/property-lookup/cage-sizes');
+  const four = fourSizeOf(trusted) || fourSizeOf(ep);
+  const trustedCage = clientCageUndecided(ep, clientCage) && String(trusted?.poolCage).toUpperCase() === 'YES';
+  const poolCage = clientCage || trustedCage;
+  const size = twoSizeOf(trusted) ?? twoSizeOf(ep);
+  return {
+    pool: pool || trustedCage,
+    poolCage,
+    // No cage, no size: the engine reads a Large size as a hold even without a cage.
+    poolCageSize: poolCage && size ? size.toLowerCase() : undefined,
+    ...(poolCage && isHeldFourSize(four) ? { poolCageReview: true } : {}),
+  };
+}
+
+// True when the client gave no decided cage answer: not a YES (clientCage) and not an
+// explicit negative (NO in any case, or false). Omitted, POSSIBLE, UNKNOWN or any other
+// value is undecided, so the server re-read's decided answer applies.
+function clientCageUndecided(ep, clientCage) {
+  return !clientCage && ep.poolCage !== false && String(ep.poolCage ?? '').trim().toUpperCase() !== 'NO';
+}
+
+// The server's re-read, only when it decided the cage (YES or NO).
+function decidedCage(trustedTurf) {
+  return ['YES', 'NO'].includes(String(trustedTurf?.poolCage).toUpperCase()) ? trustedTurf : null;
 }
 
 function isPublicCommercialQuote(body = {}, enriched = {}) {
@@ -706,6 +796,30 @@ function shouldRefreshWizardDraft(duplicateBlock) {
   return !!duplicateBlock
     && duplicateBlock.existingSource === 'quote_wizard'
     && duplicateBlock.existingStatus === 'draft';
+}
+
+// Owner 2026-11-21, "build" (GATE_WIZARD_SUPERSEDES_FORM_DRAFT, off unless
+// exactly 'true'): an old web-form draft with no price that nobody touched
+// must not cost a wizard visitor the booking link. When such drafts, of this
+// run's own contact and for this run's own property, are EVERY open estimate
+// of the phone, the block is dropped and the run writes its own estimate as
+// for a new visitor (onlyUntouchedWebFormShellsOpen holds the rule). The old
+// draft is only read, never changed. Any other open estimate still blocks.
+// The contact and property tests answer "is this run the same request as
+// the old form?". They are not proof of identity: this route has none. Once
+// the run wrote its draft, the phone is in the wizard's normal state, and a
+// later same-phone run refreshes that draft like every wizard draft (the
+// branch below, owner-hit 2026-06-12). This rule does not change that.
+// It has a gate because the unblocked run texts the person the booking link.
+async function withoutFormShellBlock(trx, duplicateBlock, { phone, address, customerId, email }) {
+  if (!duplicateBlock || shouldRefreshWizardDraft(duplicateBlock)) return duplicateBlock;
+  // Only a web-form draft can be a shell, and the block names the newest
+  // open estimate: any other newest estimate blocks without a read.
+  if (duplicateBlock.existingSource !== 'lead_webhook' || duplicateBlock.existingStatus !== 'draft') return duplicateBlock;
+  if (require('../config/feature-gates').wizardSupersedesFormDraftLive?.() !== true) return duplicateBlock;
+  if (!await onlyUntouchedWebFormShellsOpen(trx, { phone, address, customerId, email })) return duplicateBlock;
+  logger.info(`[public-quote] An untouched web-form draft (${duplicateBlock.existingEstimateId}) did not block the wizard estimate`);
+  return null;
 }
 
 function normalizePublicQuotePestFrequency(value) {
@@ -1698,11 +1812,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       isCommercial: commercialDetected,
       commercialSubtype: commercialSubtype || ep.commercialSubtype || null,
       features: {
-        pool: ep.pool === 'YES' || ep.pool === true || ep.poolCage === 'YES',
-        poolCage: ep.poolCage === 'YES' || ep.poolCage === true,
-        poolCageSize: ['small', 'medium', 'large', 'oversized'].includes(String(ep.poolCageSize || '').toLowerCase())
-          ? String(ep.poolCageSize).toLowerCase()
-          : undefined,
+        ...websiteCageFeatures(ep, trustedTurf),
         shrubs: (ep.shrubDensity || ep.shrubs || '').toString().toLowerCase() || undefined,
         trees: (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined,
         complexity: (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined,
@@ -2210,12 +2320,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // click ids so extracted_data replacement can't drop it.
     const anonId = sanitizeAnonUnitId(attr?.anon_id);
     const sourceMeta = await resolveLeadSource(attr);
+    const sourceEvidence = sourceEvidenceFromAttribution(attr);
     const entryChannel = resolveEntryChannel(attr);
 
     const isOneTimeOnly = !monthly && !annual && oneTimeTotal > 0;
     const leadMonthlyValue = quoteRequired ? null : (monthly || null);
 
-    const extractedData = JSON.stringify({
+    const extractedDataObject = {
       stage: 'quote_calculated',
       // When the visitor last submitted THIS stage — the token path re-types
       // a lookup-minted row in place, so created_at is the mint, not the
@@ -2242,6 +2353,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
       referrer: attr?.referrer || null,
       landing_url: attr?.landing_url || null,
+      ...(sourceEvidence ? { source_evidence: sourceEvidence } : {}),
       address: normalizedAddress,
       ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
       // Always present: on the merge path (a lead the wizard attached to)
@@ -2251,7 +2363,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // address_unverified / address_verdict are NOT written here: the
       // locked publication after the lead write owns them, so no verdict
       // ever commits outside the contact-pair lock (pre-push audit P1).
-    });
+    };
+    const extractedData = JSON.stringify(extractedDataObject);
 
     // If the property-lookup step already captured a lead row, update it
     // in place so we don't double-count leads for a single conversion.
@@ -2280,15 +2393,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const scopedToTypedIdentity = (qb) => qb
       .where({ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey, service_interest: serviceInterest })
       .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [observedExtraCount]);
-    // Repeat-run dedupe is DARK until GATE_WIZARD_LEAD_DEDUPE=true (read at
-    // call time). Off: no run is looked up as a repeat, so every run files
-    // as 'new' exactly as before this lane, and a row labelled while the
-    // gate was on keeps the marker it carries — the token path neither
-    // relabels nor re-validates it (the kill switch must not reopen the
-    // pipeline it labelled; pre-push P1). The conversion side of a repeat
-    // lands in its own PR; labelling ahead of it would leave accepted
-    // reruns crediting no lead.
-    const dedupeOn = require('../config/feature-gates').gateEnvValue('GATE_WIZARD_LEAD_DEDUPE');
+    // Repeat-run dedupe: a repeat run files as status 'duplicate' of the open
+    // lead it repeats, so the pipeline counts one prospect once.
     if (leadId) {
       // OWNERSHIP (atomic): leadId is a client-supplied id on a public,
       // PII-accepting write surface, so prove ownership the same way /upsell
@@ -2321,13 +2427,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // declared timeline captured at the property-lookup stage, a
         // won_estimate_id stamp, and the duplicate_of_lead_id marker a
         // repeat run stamped (codex #3834 r2 P1) — this merge write is the
-        // path that does NOT re-derive the label (gate off, or a lost
+        // path that does NOT re-derive the label (a lost
         // claim; the claimed write below derives its own marker)
         // (jsonb_strip_nulls drops a key the prior row never had); a value in
         // THIS stage's snapshot wins the merge.
         extracted_data: db.raw(
-          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
-          [extractedData, extractedData]
+          QUOTE_UPDATE_EXTRACTED_SQL,
+          [extractedData]
         ),
         updated_at: new Date(),
       });
@@ -2344,10 +2450,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // the answer and its prompt are judged on the same pre-write row.
       Object.assign(updateFields, heardAboutFillIfEmpty(db, wizardHeardAbout));
       const RETURNING = ['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at'];
+      // A web-form lead reaches this route only through the quiz hand-off,
+      // and keeps the hand-off's rule on this write too (still open, not
+      // commercial): the lead webhook returns its id before the property
+      // lookup has judged it. A refused lead matches zero rows, like a wrong
+      // id, and this run files its own quote_wizard lead below.
       const ownRow = () => db('leads')
         .where({ id: leadId })
         .whereNull('deleted_at')
-        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()]);
+        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
+        .modify(exceptClosedWebFormLead);
       // The normal wizard flow mints a 'new' row at the property-lookup
       // stage and hands its token here, so this is where a repeat through
       // the documented flow is first fully typed (codex #3834 r7 P1). And a
@@ -2368,11 +2480,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // keeps the stored marker) and the label stays the row's own. 0 rows
       // leaves `lead` null.
       const land = async (claim, label) => {
+        const snapshotData = JSON.stringify({
+          ...extractedDataObject,
+          ...(label ? { duplicate_of_lead_id: label } : {}),
+        });
         const relabel = label === undefined ? {} : {
           status: label ? 'duplicate' : 'new',
           extracted_data: db.raw(
-            "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict')) || ?::jsonb || ?::jsonb",
-            [extractedData, JSON.stringify(label ? { duplicate_of_lead_id: label } : {})],
+            QUOTE_SNAPSHOT_EXTRACTED_SQL,
+            [snapshotData],
           ),
         };
         const rows = await claim(ownRow()).update({ ...updateFields, ...relabel }).returning(RETURNING);
@@ -2391,10 +2507,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // this public retry claims 0 rows instead of regressing it (r9 P1);
       // on 0 rows the row is re-read and claimed once more — a concurrent
       // request on this token that moved the label — and a row still in
-      // play after that reopens as 'new' (below). Gate off: the stored
-      // marker is kept as is (no lookup, no relabel — the kill switch must
-      // not reopen the pipeline it labelled) through the merge write.
-      let prior = dedupeOn ? await ownRow().first(RETURNING) : null;
+      // play after that reopens as 'new' (below).
+      let prior = await ownRow().first(RETURNING);
       lead = null;
       for (let attempt = 0; !lead && relabelable(prior) && attempt < 2; attempt++) {
         const stored = prior.status === 'duplicate' ? duplicateOfFromExtracted(prior.extracted_data) : null;
@@ -2426,10 +2540,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // pre-dedupe outcome), never a mislabelled one. Still claimed on the
       // status being in play, so a staff transition wins here too.
       if (!lead && relabelable(prior)) await land((q) => q.whereIn('status', ['new', 'duplicate']), null);
-      // Gate off, or the row left play (a staff transition won): the fields
-      // land through the merge write and the label is the row's own — the
-      // stored marker when the gate is off; whatever the winning write left
-      // otherwise (nothing follows a marker on a row that is no longer
+      // The row left play (a staff transition won): the fields land through
+      // the merge write and the label is the row's own — whatever the winning
+      // write left (nothing follows a marker on a row that is no longer
       // 'duplicate').
       if (!lead) await land((q) => q);
       if (relabelable(lead)) {
@@ -2437,7 +2550,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // extra-property count as observed on the row) scopes every later
         // public write that moves the label (r13 P1).
         observedExtraCount = parseExtracted(lead.extracted_data)?.additional_properties?.length || 0;
-        if (dedupeOn && duplicateOfLeadId) {
+        if (duplicateOfLeadId) {
           // The row is filed as a repeat: a funnel row it carries at the
           // lead stage — its own earlier stamp, or a concurrent repeat's
           // root repair that picked it as root while this relabel was in
@@ -2461,7 +2574,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         }
       }
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
-        await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
+        // Fills an EMPTY source only, judged in the write itself: a source
+        // the office set since the ownership write above is kept.
+        await db('leads').where({ id: lead.id }).whereNull('lead_source_id').update({ lead_source_id: sourceMeta.leadSourceId });
       }
     }
     // Same inquiry submitted again without the lead token (a fresh browser
@@ -2475,7 +2590,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // a trusted-path job (the office merge). Two concurrent first runs can
     // still both land 'new' — the office merges those by hand, as before.
     if (!lead && !additionalProperties.length) {
-      duplicateOfLeadId = dedupeOn ? await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest }) : null;
+      duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest });
     }
     if (!lead) {
       const rows = await db('leads').insert({
@@ -2509,7 +2624,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
             : extractedData,
         }),
-      }).returning(['id']);
+      }).returning(['id', 'lead_type']); // lead_type: the new-lead bell below marks only the wizard's own row
       lead = rows[0];
     }
     // The label was computed from a read of the target; if the office closed
@@ -2520,7 +2635,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // declined / expired / archived estimate, identity), so the two cannot
     // drift — and reopen THIS row, scoped to the label it just received, so
     // a staff transition on this row in the meantime still wins.
-    if (dedupeOn && duplicateOfLeadId) {
+    if (duplicateOfLeadId) {
       const targetOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: duplicateOfLeadId });
       // A target that is no longer open because ITS OWN relabel landed in
       // flight (B picked A while A was filing as a repeat of O — the r10
@@ -2840,7 +2955,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
 
       if (customerId) {
-        await db('leads').where({ id: lead.id }).update({ customer_id: customerId });
+        // The office's convert or close also writes this column. A web-form
+        // lead (the quiz hand-off) it acted on since this run's ownership
+        // write keeps the customer that action gave it (0 rows here).
+        await db('leads').where({ id: lead.id }).modify(exceptClosedWebFormLead).update({ customer_id: customerId });
       }
     } catch (e) {
       logger.error(`[public-quote] Customer upsert failed: ${e.message}`);
@@ -3489,7 +3607,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         });
       } else {
         await withAutomatedEstimatePhoneLock(contactPhone, async (trx) => {
-          const duplicateBlock = await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx });
+          // An untouched web-form draft alone does not block (owner
+          // 2026-11-21; withoutFormShellBlock, dark behind its gate).
+          const duplicateBlock = await withoutFormShellBlock(
+            trx,
+            await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx }),
+            { phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail },
+          );
           if (duplicateBlock) {
             // A wizard re-run by the same phone lands here with a NEW lead
             // id (the lead_id-keyed lookup above only matches re-submits of
@@ -3642,7 +3766,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
             : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`}${duplicateOfLeadId ? ' · repeat of an open lead (filed as duplicate)' : ''}`,
-        { icon: '\u{1F4B0}', link: `/admin/leads?lead=${lead.id}`, metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : {}) } }
+        // createdLead: the lead is this wizard run's own row (lead_type quote_wizard: inserted above, or minted by its
+        // property-lookup stage), not a repeat filed as a duplicate, nor a voicemail or inbound-call lead the prefill
+        // token attached this form to. The new-lead re-alert (new-lead-reminder.js intakeMarked) then counts a person's
+        // contact from the lead's creation, not only from this bell, and only within 15 minutes of that creation.
+        // bannerKind: a row that rings also sends ONE phone banner, at any hour, like a web form lead (bell-banners.js
+        // kind new_lead_quote). The option is never stored, so the bell row is written exactly as without it.
+        { icon: '\u{1F4B0}', link: `/admin/leads?lead=${lead.id}`, bannerKind: 'new_lead_quote', metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : { createdLead: lead.lead_type === 'quote_wizard' }) } }
       );
     } catch (e) {
       logger.error(`[public-quote] Admin notify failed: ${e.message}`);
@@ -4326,14 +4456,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // widget can explain the per-application price instead of asserting one.
     // Absent whenever the quote has no priced lawn line — the widget then
     // falls back to its own estimate copy and makes no priced-basis claim.
-    // DARK until astro #464 deploys (local audit P1): emitting this field
-    // activates the deployed widget's source labels, which until #464
-    // include the banned verify-on-first-visit wording. The gate makes this
-    // push safe regardless of deploy order; flip GATE_PUBLIC_QUOTE_LAWN_AREA
-    // after #464 is live.
-    const lawnArea = require('../config/feature-gates').isEnabled('publicQuoteLawnArea')
-      ? deriveLawnArea(estimate)
-      : null;
+    const lawnArea = deriveLawnArea(estimate);
     if (lawnArea) {
       response.lawn_area = lawnArea;
     }
@@ -4420,11 +4543,14 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     }
 
     // leadId + email match = good-enough public auth (customer just typed the
-    // email in the same session). Avoids any-id-overwrite abuse.
+    // email in the same session). Avoids any-id-overwrite abuse. Never a
+    // web-form lead: its id reaches a visitor only through the quiz hand-off,
+    // and no page of the hand-off calls this route.
     const lead = await db('leads')
       .where({ id: leadId })
       .whereNull('deleted_at')
       .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
+      .whereRaw("lead_type IS DISTINCT FROM 'form_submission'")
       .first();
     if (!lead) return res.status(404).json({ error: 'Lead not found.' });
 
@@ -4538,6 +4664,7 @@ module.exports._internals = {
   derivePerApplication,
   derivePerApplicationBreakdown,
   deriveLawnArea,
+  withoutFormShellBlock,
   shouldRefreshWizardDraft,
   resolveRealLotSqFt,
   resolveEntryChannel,
@@ -4545,6 +4672,8 @@ module.exports._internals = {
   lotPricedServiceRequested,
   publicQuoteTreeShrubTierRejection,
   publicQuoteTreeShrubTierInput,
+  QUOTE_UPDATE_EXTRACTED_SQL,
+  QUOTE_SNAPSHOT_EXTRACTED_SQL,
 };
 module.exports.PUBLIC_QUOTE_SERVICE_KEYS = PUBLIC_QUOTE_SERVICE_KEYS;
 module.exports.KEYED_ONLY_SERVICE_KEYS = KEYED_ONLY_SERVICE_KEYS;

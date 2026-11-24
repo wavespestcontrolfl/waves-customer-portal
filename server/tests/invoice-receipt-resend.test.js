@@ -92,7 +92,8 @@ test('both legs: stamps receipt_sent_at with the trimmed, cut memo, writes the a
   expect(out.status).toBe(200);
   expect(out.body).toMatchObject({ ok: true, email: { ok: true }, sms: { ok: true }, invoice: { id: ID } });
   expect(sendReceiptEmail).toHaveBeenCalledWith(ID, { memo: 'x'.repeat(400), beforeProviderHandoff: expect.any(Function) });
-  expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: ID, trigger: 'paid', actorTechnicianId: 'admin-1' });
+  // recordHold: false (GATE_REPORT_AFTER_PAY): a resend retries a close and records no hold, so it does what its card previewed.
+  expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: ID, trigger: 'paid', actorTechnicianId: 'admin-1', recordHold: false });
   expect(InvoiceService.sendReceipt).toHaveBeenCalledWith(ID, { force: true, recordActivity: false, hasEmailLeg: true, operatorInitiated: true, beforeProviderHandoff: expect.any(Function) });
   expect(updates).toContainEqual({ table: 'invoices', patch: { receipt_sent_at: 'now()', receipt_memo: 'x'.repeat(400) } });
   expect(activity[0].row).toMatchObject({ action: 'invoice_receipt_sent', description: expect.stringMatching(/WPC-2026-0900 \(email \+ sms\) — memo: x{80}…/) });
@@ -242,12 +243,25 @@ describe('expect — the writer owns the final check, under the claim and ahead 
   });
 
   test('a linked visit the closeout just completed does not block the text leg', async () => {
-    const pinned = { ...approved, recipients_key: 'pinned', closeout_visit_id: 'visit-1' };
+    const pinned = { ...approved, recipients_key: 'pinned', closeout_visit: 'visit-1' };
     const rederive = jest.fn()
       .mockResolvedValueOnce({ ...pinned })
-      .mockResolvedValue({ ...pinned, closeout_visit_id: null });
+      .mockResolvedValue({ ...pinned, closeout_visit: null });
     const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved: pinned, rederive } });
     expect(out.delivery).toEqual({ email: 'sent', sms: 'sent' });
+  });
+
+  // Pre-push audit round 12 on #8239: the closeout resolves the linked visit again, after the final check. The writer hands it the
+  // visit the card named (the approved version's closeout_visit), or 'none', and the closeout leaves any other visit open. The
+  // route's writer (no card) names no target: the both-legs test above pins its exact arguments.
+  test.each([
+    ['a card that named a visit', 'visit-1', 'visit-1'],
+    ['a card that named no visit', null, 'none'],
+  ])('%s: the closeout may complete that visit only, and the target binds this run alone', async (_label, closeoutVisit, approvedTarget) => {
+    const pinned = { ...approved, closeout_visit: closeoutVisit };
+    const out = await sendInvoiceReceipt(ID, { via: 'email', actorTechnicianId: 'admin-1', expect: { approved: pinned, rederive: async () => ({ ...pinned }) } });
+    expect(out.status).toBe(200);
+    expect(closeOutVisitForIssuedInvoice.mock.calls).toEqual([[{ invoiceId: ID, trigger: 'paid', actorTechnicianId: 'admin-1', recordHold: false, approvedTarget, targetBindsRetries: false }]]);
   });
 
   test.each(['email', 'sms', 'both'])('recipients changing during the closeout (via %s): no leg sends, nothing is stamped', async (via) => {

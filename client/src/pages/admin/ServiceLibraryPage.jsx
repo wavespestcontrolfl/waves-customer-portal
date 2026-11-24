@@ -1,5 +1,4 @@
 import {
-  lazy,
   Suspense,
   useCallback,
   useEffect,
@@ -7,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { lazyPanel } from "../../components/LazyPanel";
 import { useSearchParams } from "react-router-dom";
 import { Library, Percent, Plus, Sprout } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -30,7 +30,7 @@ import { SERVICE_CATEGORIES as CATEGORIES } from "../../constants/serviceCategor
 import { omitUnchangedDurationFields } from "../../lib/serviceLibraryPayload";
 import { DiscountsSection } from "./DiscountsTabs";
 
-const LawnProtocolCommandCenterPage = lazy(
+const LawnProtocolCommandCenterPage = lazyPanel(
   () => import("./LawnProtocolCommandCenterPage"),
 );
 const API = import.meta.env.VITE_API_URL || "/api";

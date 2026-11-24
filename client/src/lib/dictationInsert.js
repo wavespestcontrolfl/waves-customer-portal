@@ -11,9 +11,14 @@ export const MIN_BOX_HEIGHT = 52;
  * (`data-own-mic`) or opts out (`data-no-dictation`). Single-line inputs never
  * qualify. Size is checked where the mic is placed (`boxFits`).
  */
+// Takes no typing now: disabled (its own attribute, or a disabled fieldset around it) or read-only.
+function locked(el) {
+  return el.disabled || el.readOnly || (typeof el.matches === "function" && el.matches(":disabled"));
+}
+
 export function isEligibleBox(el) {
   if (!el || el.tagName !== "TEXTAREA") return false;
-  if (el.disabled || el.readOnly) return false;
+  if (locked(el)) return false;
   if (el.closest("[data-own-mic], [data-no-dictation]")) return false;
   const style = typeof getComputedStyle === "function" ? getComputedStyle(el) : null;
   return !style || (style.display !== "none" && style.visibility !== "hidden");
@@ -38,9 +43,9 @@ function currentSelection(el, selection) {
   return document.activeElement === el ? readSelection(el) : { start: el.value.length, end: el.value.length };
 }
 
-// How many characters the box still takes (maxLength), or Infinity.
+// How many characters the box still takes (maxLength; -1 = none set, 0 = takes nothing), or Infinity.
 function roomFor(el, replacing) {
-  return el.maxLength > 0 ? el.maxLength - (el.value.length - replacing) : Infinity;
+  return el.maxLength >= 0 ? el.maxLength - (el.value.length - replacing) : Infinity;
 }
 
 function clampSelection(value, selection) {
@@ -73,13 +78,15 @@ function nativeSet(el, value) {
  */
 export function insertDictatedText(el, text, selection) {
   if (!el || !el.isConnected) return { ok: false, reason: "gone" };
-  if (el.disabled || el.readOnly) return { ok: false, reason: "locked" };
+  if (locked(el)) return { ok: false, reason: "locked" };
   const words = String(text || "").trim();
   if (!words) return { ok: true };
   const before = el.value;
   const { start, end } = clampSelection(before, currentSelection(el, selection));
   const lead = start > 0 && !/\s/.test(before[start - 1]) ? " " : "";
-  if (roomFor(el, end - start) <= 0) return { ok: false, reason: "full" };
+  const room = roomFor(el, end - start);
+  // No room for a word after the space put before it: a lone space would go in.
+  if (room <= lead.length) return { ok: false, reason: "full" };
   let payload = lead + words;
   try {
     el.focus({ preventScroll: true });
@@ -87,9 +94,11 @@ export function insertDictatedText(el, text, selection) {
   } catch {
     /* a box that cannot hold a selection still takes the value below */
   }
-  if (browserInsert(payload) && el.value !== before) return { ok: true };
+  // The browser's insert writes into whatever has focus: it runs only when that is this box (a
+  // modal's focus trap can keep focus on its own input); otherwise the value is set below.
+  if (document.activeElement === el && browserInsert(payload) && el.value !== before) return { ok: true };
   // The browser declined (or has no execCommand): set the value ourselves.
-  payload = payload.slice(0, roomFor(el, end - start));
+  payload = payload.slice(0, room);
   nativeSet(el, before.slice(0, start) + payload + before.slice(end));
   const caret = start + payload.length;
   try {

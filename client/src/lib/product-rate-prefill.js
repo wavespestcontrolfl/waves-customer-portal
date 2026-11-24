@@ -13,6 +13,7 @@
 // A product whose label rate is kept in mL takes none of these but the house
 // default: nothing on a completion is in mL (resolveRatePrefill).
 import { TSP_PER_FL_OZ, isMlUnit } from "./measure-units";
+import { PEST_DEFAULT_MIX } from "./pest-default-mix";
 
 // A "/"-suffixed display unit is a label rate in the label's own basis — mix
 // concentration ("fl_oz/gal", "fl_oz/100gal"), spot placement ("g/spot"),
@@ -289,7 +290,7 @@ export function defaultApplicationMethodForLine(
 /**
  * The label ceiling a prefilled rate is reviewed against, in that rate's own
  * unit: a per-basis band's upper bound, or the verified per-1,000 catalog
- * max. Neither applies to the 4-oz pest house default, whose "oz" is an
+ * max. Neither applies to the pest house default, whose "oz" is an
  * amount in the tank, not the label's basis: 4 oz is never "over" a 0.8 fl
  * oz per gallon label.
  */
@@ -299,6 +300,16 @@ export function prefillRateCeiling(resolved, product = {}) {
     ? resolved.labelMaxRate
     : parseFloat(String(product?.max_label_rate_per_1000 ?? ""));
   return Number.isFinite(raw) && raw > 0 ? raw : null;
+}
+
+// The pest perimeter house default's rate: a product in the house mix starts at
+// that mix's own amount (Taurus 1.6, Crosscheck 4) so its rate and total agree;
+// every other liquid pest product starts at 4.
+const PEST_HOUSE_RATE_DEFAULT = 4;
+function pestHouseRate(product) {
+  const name = String(product?.name || "").trim();
+  const entry = PEST_DEFAULT_MIX.find((e) => e.pattern.test(name));
+  return entry ? entry.totalAmount : PEST_HOUSE_RATE_DEFAULT;
 }
 
 // The rate-prefill decision. Returns everything the caller needs to build
@@ -316,7 +327,8 @@ export function resolveRatePrefill(product = {}, { applicationMethod = "", servi
   const catalogRate =
     product.defaultRatePer1000 ?? product.default_rate_per_1000 ?? product.ratePer1000 ?? "";
   // General-pest perimeter sprays: when the catalog carries no rate, start
-  // at the house default of 4 oz (rate/total units move together with it so
+  // at the house default (4 oz, or the house mix's own amount for a product
+  // in it: pestHouseRate; rate/total units move together with it so
   // a catalog unit like "oz/1000sf" can't pair with the fallback value).
   // Editable as before; catalog rates still win when present.
   const usePestSprayDefault =
@@ -333,7 +345,7 @@ export function resolveRatePrefill(product = {}, { applicationMethod = "", servi
   // is 4 oz, never the label's mL, so it still applies.
   if ([product.defaultUnit, product.default_unit, product.rateUnit, product.rate_unit].some(isMlUnit)) {
     return {
-      rate: usePestSprayDefault ? 4 : "",
+      rate: usePestSprayDefault ? pestHouseRate(product) : "",
       labelMaxRate: null,
       rateUnit: usePestSprayDefault ? "oz" : "",
       amountUnit: usePestSprayDefault ? "oz" : "fl_oz",
@@ -364,7 +376,7 @@ export function resolveRatePrefill(product = {}, { applicationMethod = "", servi
   // DB numerics arrive as strings with trailing zeros ("0.5000") — show the
   // tech a clean number.
   const rate = usePestSprayDefault
-    ? 4
+    ? pestHouseRate(product)
     : catalogRate !== "" && Number.isFinite(Number(catalogRate))
       ? Number(catalogRate)
       : Number.isFinite(labelDisplayRate)

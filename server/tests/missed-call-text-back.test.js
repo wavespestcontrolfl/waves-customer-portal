@@ -30,7 +30,7 @@ jest.mock('../services/missed-call-bell', () => ({
 
 const {
   GATE, MESSAGE_TYPE, CLAIM, MAX_CALL_AGE_MS, SEND_SLOT_MS, VOICEMAIL_GRACE_MS,
-  _private: { stampSpamShadow, textBackCoreEligible, emptyVoicemailOn, failedPreconnectScreen, SKIP_FAILED_SCREEN_GATE, EMPTY_VOICEMAIL_LANDING_MS, callEndedAt, sendSlotDeadline, tooOldToText, callbackClause, fromNumberForDialed, normalizePhoneE164 },
+  _private: { stampSpamShadow, textBackCoreEligible, emptyVoicemailOn, failedPreconnectScreen, EMPTY_VOICEMAIL_LANDING_MS, callEndedAt, sendSlotDeadline, tooOldToText, callbackClause, fromNumberForDialed, normalizePhoneE164 },
 } = require('../services/missed-call-text-back');
 const { isEnabled } = require('../config/feature-gates');
 const {
@@ -424,10 +424,11 @@ describe('missed-call bell lane is unchanged by the empty-voicemail widening', (
     expect(missedCallShapeEligible(call(), BELL_OPTS)).toBe(true);
   });
 
-  test('missedCallEligible (what ringMissedCallIfUnanswered calls) never rings an empty-voicemail call', () => {
+  test('missedCallEligible (what ringMissedCallIfUnanswered calls) never rings an unknown caller\'s empty-voicemail call', () => {
     expect(missedCallEligible(emptyVoicemailCall(), IN_WINDOW, BELL_OPTS)).toBe(false);
-    // A known customer with an empty recording: still the voicemail lane's.
-    expect(missedCallEligible(emptyVoicemailCall({ customer_id: 'cust-1' }), IN_WINDOW)).toBe(false);
+    // A known customer with an empty recording rings the bell (owner 2026-10-20); the text-back lane never offers a customer's call.
+    expect(missedCallEligible(emptyVoicemailCall({ customer_id: 'cust-1' }), IN_WINDOW)).toBe(true);
+    expect(textBackCoreEligible(emptyVoicemailCall({ customer_id: 'cust-1' }), { emptyVoicemail: true })).toBe(false);
   });
 
   test('isEmptyVoicemailRecording: needs a recording and a finished no-speech verdict', () => {
@@ -467,11 +468,7 @@ describe('robodialer spam shadow stamp (stampSpamShadow)', () => {
   });
 });
 
-describe('failed press-1 screen (failedPreconnectScreen, GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN)', () => {
-  test('reads the gate the feature-gates entry declares', () => {
-    expect(SKIP_FAILED_SCREEN_GATE).toBe('missedCallTextSkipFailedScreen');
-  });
-
+describe('failed press-1 screen (failedPreconnectScreen)', () => {
   test('only the explicit failed stamp counts, from an object or a JSON string', () => {
     expect(failedPreconnectScreen(call({ metadata: { preconnect_screen: 'failed' } }))).toBe(true);
     expect(failedPreconnectScreen(call({ metadata: JSON.stringify({ preconnect_screen: 'failed' }) }))).toBe(true);

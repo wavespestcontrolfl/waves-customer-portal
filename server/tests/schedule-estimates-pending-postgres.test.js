@@ -8,6 +8,12 @@ jest.mock('../models/db', () => {
 jest.mock('../services/estimate-deposits', () => ({ summarizeEstimateDeposit: async () => null }));
 jest.mock('../services/estimate-payment-context', () => ({ buildEstimatePaymentContext: async () => null }));
 jest.mock('../services/estimate-manual-acceptance', () => ({ prepayBookingEligibility: async () => ({ eligible: false }) }));
+// The reply also carries the 24-hour reminder answer (day-only promise). Its tables are not in this temp schema, and a failed
+// read inside the shared transaction would abort every later query, so the answer is stubbed here.
+jest.mock('../services/appointment-reminders', () => ({
+  ...jest.requireActual('../services/appointment-reminders'),
+  loadBookingReminder24hAnswers: async () => ({ customer: true, properties: {} }),
+}));
 
 const describeWithPostgres = process.env.TEST_SCHEDULE_DB_URL ? describe : describe.skip;
 describeWithPostgres('pending estimates in the appointment picker (PostgreSQL)', () => {
@@ -31,7 +37,8 @@ describeWithPostgres('pending estimates in the appointment picker (PostgreSQL)',
         service_interest text, estimate_data jsonb, estimate_slug text,
         monthly_total numeric, annual_total numeric, onetime_total numeric,
         waveguard_tier text, bill_by_invoice boolean, show_one_time_option boolean,
-        created_at timestamptz, accepted_at timestamptz, property_id uuid
+        created_at timestamptz, accepted_at timestamptz, property_id uuid,
+        sent_at timestamptz, source text, pricing_authority text, price_locked_at timestamptz, category text, address text
       );
       CREATE TEMP TABLE services (
         id uuid, service_key text, name text, short_name text, category text,

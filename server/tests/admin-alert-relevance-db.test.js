@@ -11,6 +11,10 @@
  * person booked, or a payment a person recorded) answering a text: the alert witness
  * and the Messages reader. The rules themselves are covered by admin-alert-relevance.test.js.
  */
+// The new-lead re-alert pass (new-lead-reminder.js) is not this suite's subject. It has no gate, so the sweep run here in
+// office hours would judge, stamp and push every open lead bell in the connected database. Its own suite
+// (new-lead-reminder-postgres.test.js) runs it inside rolled-back transactions with the push mocked.
+jest.mock('../services/new-lead-reminder', () => ({ runNewLeadReminder: jest.fn(async () => ({ skipped: true, reason: 'not_this_suite' })) }));
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 
@@ -335,7 +339,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     const sid = (prefix) => `${prefix}${String(Date.now()).slice(-8)}${String((n += 1)).padStart(6, '0')}`;
     const mins = (base, m) => new Date(base.getTime() + m * 60 * 1000);
     const sweep = (now = new Date()) => relevance.runAdminAlertRelevanceSweep({ now });
-    const wouldClose = (id) => db('audit_log').where({ action: 'notification.alert_relevance.would_close', resource_type: 'notification', resource_id: id });
     const customerWith = (phone, extra = {}) => insert('customers', { first_name: 'Contact', phone, ...extra });
     // An inbound text and the bell that rang for it (a known sender's shared thread row, or an unknown sender's per-text row).
     const text = async ({ customer = null, phone, at, body = 'Can you come out on Tuesday?', known = true }) => {
@@ -394,14 +397,13 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       for (const open of [d, e, f]) expect((await get(open.row.id)).done_at).toBeNull();
     });
 
-    test('a text from an unknown sender is never judged: whatever is sent to that number, its bell stays open and nothing is recorded', async () => {
+    test('a text from an unknown sender is never judged: whatever is sent to that number, its bell stays open', async () => {
       const t0 = mins(new Date(), -240);
       const phone = '+15555558009';
       const unknown = await text({ phone, at: t0, known: false });
       await staffText(null, phone, mins(t0, 10));
       await staffCall(null, phone, mins(t0, 12));
       await sweep();
-      expect(await wouldClose(unknown.row.id)).toHaveLength(0);
       expect((await get(unknown.row.id)).done_at).toBeNull();
     });
 

@@ -87,7 +87,7 @@ function makeRequest({ kind = 'regular', wrapUp = true, service, seeds = { exter
     const bare = path.split('?')[0];
     if (bare.endsWith('/pest-recap/context')) {
       const typed = { roach: 'cockroach', station: 'termite_bait_station' }[kind];
-      return { ok: true, eligible: kind === 'regular', reportFlow: true, lane: null, ...(typed ? { typedType: typed } : {}), service: visit, products: CATALOG, ...(wrapUp ? { wrapUp: true } : {}) };
+      return { ok: true, eligible: kind === 'regular', taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 }, reportFlow: true, lane: null, ...(typed ? { typedType: typed } : {}), service: visit, products: CATALOG, ...(wrapUp ? { wrapUp: true } : {}) };
     }
     if (bare.endsWith('/tech-rating-allowed')) return { allowed: true, firstVisit: false, scaleLabels: null };
     if (bare.endsWith('/tech-tips')) return { available: false };

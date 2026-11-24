@@ -50,7 +50,7 @@ function futureDate(days = 30) {
 }
 
 // `visits(params)` answers the notice's lookup (a function of its query).
-function installFetch({ visits = () => json(TWO_VISITS), properties = { properties: [], canChangeAppointmentAddress: false } } = {}) {
+function installFetch({ visits = () => json(TWO_VISITS), properties = { properties: [] } } = {}) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.includes('/admin/schedule/rodent-trapping-visits?')) {
@@ -146,7 +146,7 @@ describe('the rodent trapping notice', () => {
 
   it('asks for the picked address and asks again when the office picks another', async () => {
     const fetcher = installFetch({
-      properties: { properties: PROPERTIES, canChangeAppointmentAddress: true },
+      properties: { properties: PROPERTIES },
       visits: (params) => json(params.get('propertyId') === 'prop-rental' ? { windowDays: 60, count: 0, visits: [] } : TWO_VISITS),
     });
     mount();
@@ -167,7 +167,7 @@ describe('the rodent trapping notice', () => {
     await addService('Trapping Follow-Up', 'Rodent Trapping Follow-Up Visit Service');
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(lookups(fetcher)).toHaveLength(0);
-    release({ properties: PROPERTIES, canChangeAppointmentAddress: true });
+    release({ properties: PROPERTIES });
     await screen.findByTestId('rodent-trapping-notice');
     expect(lookups(fetcher).map((q) => q.propertyId)).toEqual(['prop-home']);
   });

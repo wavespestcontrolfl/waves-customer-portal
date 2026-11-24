@@ -68,6 +68,7 @@ describe('sameAsRejectReason', () => {
   test('hand-refused hosts (with subdomains) and pages are excluded, ignoring www, case and trailing slash', () => {
     expect(sameAsRejectReason('https://listings.adsly.io/waves-pest-control')).toBe('excluded');
     expect(sameAsRejectReason('https://www.KEVSBEST.com/listing/Waves-Pest-Control')).toBe('excluded');
+    expect(sameAsRejectReason('https://www.swflinc.com/business-directory/waves-pest-control/')).toBe('excluded');
     expect(sameAsRejectReason('https://notadsly.io/listing/waves-pest-control')).toBeNull();
   });
 

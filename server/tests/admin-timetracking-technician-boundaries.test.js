@@ -222,9 +222,10 @@ describe('admin timetracking technician data/auth boundaries', () => {
       body: { name: ' Casey Tech ', email: '  CASEY@Example.COM  ', payRate: '42.50' },
     });
     expect(created.statusCode).toBe(200);
+    // One mailbox, one staff row: the probe reads the staff email and the linked Google address of every row.
     expect(noConflict.whereRaw).toHaveBeenCalledWith(
-      'LOWER(BTRIM(email)) = ?',
-      ['casey@example.com'],
+      '(LOWER(BTRIM(email)) = ? OR LOWER(google_email) = ?)',
+      ['casey@example.com', 'casey@example.com'],
     );
     expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({
       name: 'Casey Tech',
@@ -313,6 +314,22 @@ describe('admin timetracking technician data/auth boundaries', () => {
       expect(result.statusCode).toBe(400);
       expect(result.body.error).toBe('Pay rate must be a number between 0 and 999999.99');
       expect(tx.trx).not.toHaveBeenCalled();
+    }
+  });
+
+  // PostgreSQL's date type takes '20261-01-12' and 'infinity'; the pay run cannot work an anniversary out from either.
+  test('POST and PUT refuse a hire date that is not a calendar date, before any write', async () => {
+    for (const hireDate of ['20261-01-12', 'infinity', '2026-02-30', '2026-01-12T00:00:00.000Z', 20260112]) {
+      for (const [handler, req] of [
+        [updateTechnician, { params: { id: 'tech-1' }, body: { hireDate } }],
+        [createTechnician, { body: { name: 'Sample Alpha', employmentStatus: 'prospective', hireDate } }],
+      ]) {
+        const tx = installTransaction([]);
+        const result = await invoke(handler, { ...req, technicianId: 'admin-1' });
+        expect(result.statusCode).toBe(400);
+        expect(result.body.error).toBe('Hire date must be a valid YYYY-MM-DD date');
+        expect(tx.trx).not.toHaveBeenCalled();
+      }
     }
   });
 
@@ -493,8 +510,8 @@ describe('admin timetracking technician data/auth boundaries', () => {
     expect(result.statusCode).toBe(409);
     expect(result.body).toEqual({ error: 'Email already in use' });
     expect(collision.whereRaw).toHaveBeenCalledWith(
-      'LOWER(BTRIM(email)) = ?',
-      ['other@example.com'],
+      '(LOWER(BTRIM(email)) = ? OR LOWER(google_email) = ?)',
+      ['other@example.com', 'other@example.com'],
     );
     expect(tx.remaining()).toHaveLength(0);
     expect(collision.update).not.toHaveBeenCalled();

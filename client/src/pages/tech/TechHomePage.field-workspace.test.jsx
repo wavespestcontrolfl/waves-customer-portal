@@ -43,6 +43,8 @@ vi.mock('../../components/admin/PushSettingsV2', () => ({ default: () => <div>Pu
 import TechHomePage from './TechHomePage';
 
 const row = (id, overrides = {}) => ({ id, technicianId: 'tech-fixture', customerName: `Fixture ${id}`, address: '100 Example Lane', serviceType: 'Lawn care', scheduledDate: '2099-01-01', status: 'confirmed', windowStart: '09:00:00', windowEnd: '10:00:00', ...overrides });
+// A visit that completes through a project: the Report button opens the project editor for it.
+const PROJECT_VISIT = { serviceType: 'WDO Inspection', completionProfile: { category: 'inspection', serviceKey: 'wdo_inspection', projectBacked: true, requiresProject: true } };
 let rows;
 let scheduleFails;
 let briefStatus;
@@ -329,7 +331,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
   });
 
   it('uses the navigation lock while the create report has unpersisted photos', async () => {
-    rows = [row('one')];
+    rows = [row('one', PROJECT_VISIT)];
     mount('/admin/today/tools');
     fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
     fireEvent.click(await screen.findByRole('button', { name: 'Queue report photo' }));
@@ -340,13 +342,13 @@ describe('Tech field workspace uses the existing route workflow', () => {
   });
 
   it('retains a partially created report and refreshes the route before it can be reopened', async () => {
-    rows = [row('one')];
+    rows = [row('one', PROJECT_VISIT)];
     mount('/admin/today/tools');
     const report = await screen.findByRole('button', { name: /Project Report/ });
     const scheduleReads = () => fetchMock.mock.calls.filter(([path]) => path.includes('/admin/schedule?')).length;
     const initialReads = scheduleReads();
     fireEvent.click(report);
-    rows = [row('one', { linkedProject: { id: 'created-report', status: 'draft' } })];
+    rows = [row('one', { ...PROJECT_VISIT, linkedProject: { id: 'created-report', status: 'draft' } })];
     fireEvent.click(await screen.findByRole('button', { name: 'Finish partial report' }));
 
     expect(await screen.findByTestId('project-detail')).toHaveAttribute('data-project-id', 'created-report');

@@ -16,6 +16,8 @@ jest.mock('../services/lead-attribution', () => ({
   logFirstResponse: jest.fn(async () => {}),
 }));
 jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest.fn(async () => {}) }));
+// The website-only line check (website-line-contact.js) has its own suites; here it answers per test.
+jest.mock('../services/website-line-contact', () => ({ websiteLineRefusal: jest.fn(async () => null) }));
 // Follow-up to codex #5018 r15 P2: the manual-send race guard's own
 // linkSentRecently read, lazily required inside withSmsHandoff — mocked so
 // its behavior (hit vs. no hit) is asserted directly rather than through a
@@ -375,6 +377,16 @@ describe('attachments and fromNumber reach the sender (same shape as /admin/comm
         })]),
       }),
     }));
+  });
+
+  test('a website-only line the lead never called or texted is refused before any send is attempted', async () => {
+    const { websiteLineRefusal } = require('../services/website-line-contact');
+    websiteLineRefusal.mockResolvedValueOnce('WEBSITE_LINE_REFUSAL');
+    const response = await send({ message: 'Synthetic outreach', to: '+19415550103', fromNumber: '+19415559999' });
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ error: 'WEBSITE_LINE_REFUSAL', code: 'WEBSITE_LINE_FIRST_CONTACT' });
+    expect(websiteLineRefusal).toHaveBeenCalledWith('+19415559999', '+19415550103');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('an unregistered fromNumber is refused before any send is attempted', async () => {

@@ -112,6 +112,42 @@ describe('MobileDispatchList closeout-owed badge', () => {
   });
 });
 
+describe('MobileDispatchList paid-report badge', () => {
+  it('flags an arrived stop that a payment holds open, and no other stop', () => {
+    fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    const invoice = { checkoutInvoiceId: 'inv-1', checkoutInvoiceTotal: 115, checkoutInvoiceStatus: 'paid', reportAfterPayHeld: true };
+    const paidOnSite = { ...SERVICE, ...invoice, id: 'svc-paid', status: 'on_site', technicianId: 'tech-1' };
+    // No payment holds it (an unpaid stop, or a payment made before the arrival): the server sends the hold flag false.
+    const unpaidOnSite = { ...SERVICE, ...invoice, id: 'svc-unpaid', customerName: 'Unpaid Customer', status: 'on_site', checkoutInvoiceStatus: 'sent', reportAfterPayHeld: false, technicianId: 'tech-1' };
+    const paidDone = { ...SERVICE, ...invoice, id: 'svc-done', customerName: 'Done Customer', status: 'completed', technicianId: 'tech-1' };
+    // Gate off, or a visit whose completion sends the customer no report: the server records no hold, so the hold flag is false.
+    const paidNoReport = { ...SERVICE, ...invoice, id: 'svc-no-report', customerName: 'No Report Customer', status: 'on_site', reportAfterPayHeld: false, technicianId: 'tech-1' };
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[paidOnSite, unpaidOnSite, paidDone, paidNoReport]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getAllByText('Paid, report not sent')).toHaveLength(1);
+  });
+
+  it('keeps the badge when the office adds a bill after the payment (the row\'s newest bill is then a draft)', () => {
+    fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    const heldWithDraft = { ...SERVICE, checkoutInvoiceId: 'inv-2', checkoutInvoiceTotal: 45, checkoutInvoiceStatus: 'draft', reportAfterPayHeld: true, id: 'svc-held', status: 'on_site', technicianId: 'tech-1' };
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[heldWithDraft]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getAllByText('Paid, report not sent')).toHaveLength(1);
+  });
+});
+
 describe('MobileDispatchList protocol opener', () => {
   it('focuses the trigger before opening the protocol panel', () => {
     let focusedAtOpen = null;
@@ -131,12 +167,25 @@ describe('MobileDispatchList protocol opener', () => {
     expect(onProtocol).toHaveBeenCalledWith(SERVICE);
     expect(focusedAtOpen).toBe(trigger);
   });
+
+  it('gives a lawn stop one Protocol button and no separate Plan button (the Plan lives in the panel)', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[{ ...SERVICE, serviceType: 'Lawn Care' }]}
+        onProtocol={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Protocol' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Treatment plan' })).not.toBeInTheDocument();
+  });
 });
 
 describe('MobileDispatchList tie-proximity display order', () => {
   it('shows the server displayOrder ahead of raw booking order for a same-tech tie', () => {
     fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
-    // Booked (array) order is Far-then-Near; GATE_SCHEDULE_TIE_PROXIMITY's
+    // Booked (array) order is Far-then-Near; the
     // server-computed displayOrder says Near is actually closer to the
     // previous stop, so it must render FIRST despite being booked second.
     const bookedFirstButFarther = {

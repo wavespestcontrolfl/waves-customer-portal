@@ -1,5 +1,4 @@
-// GATE_DAY_ONLY_PROMISE part E: GET /api/admin/feature-flags carries `day_only_promise` only while the gate is on (a stray
-// per-user row cannot show the office box with the gate off). Same harness as estimate-call-list.test.js.
+// GATE_DAY_ONLY_PROMISE part E: GET /api/admin/feature-flags carries `day_only_promise` always (the gate is gone; the key stays for browser tabs still on an older client build). Same harness as estimate-call-list.test.js.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
 jest.mock('../models/db', () => {
@@ -42,13 +41,17 @@ async function flags() {
   return res.json.mock.calls[0][0].flags;
 }
 
-afterEach(() => { delete process.env.GATE_DAY_ONLY_PROMISE; });
-
-test('gate on: the admin client sees the flag', async () => {
-  process.env.GATE_DAY_ONLY_PROMISE = 'true';
+test('the admin client always sees the flag (kept for tabs still on an older client build)', async () => {
   expect((await flags()).day_only_promise).toBe(true);
 });
 
-test('gate off: the flag is absent even if a stray per-user row says true', async () => {
-  expect(await flags()).not.toHaveProperty('day_only_promise');
+test('the flag is true even with no per-user row', async () => {
+  db.mockReset();
+  const q = {};
+  q.where = jest.fn(() => q);
+  q.select = jest.fn(async () => []);
+  db.mockImplementation(() => q);
+  const res = { json: jest.fn() };
+  await handler({ technicianId: 't1' }, res, jest.fn());
+  expect(res.json.mock.calls[0][0].flags.day_only_promise).toBe(true);
 });

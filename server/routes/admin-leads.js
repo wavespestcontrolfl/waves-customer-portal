@@ -20,7 +20,73 @@ const { leadAddressFields } = require('../utils/address-normalizer');
 const logger = require('../services/logger');
 const { nanpPhoneProblem } = require('../utils/phone');
 const { leadServiceDisplay, catalogNameIndex } = require('../utils/lead-service-display');
+const { sourceEvidenceLabelSql, withSourceEvidence } = require('../services/lead-source-evidence');
+const { projectRelatedVisits } = require('../services/related-visit-links');
 const { leadServiceDisplayLive } = require('../config/feature-gates');
+
+const RELATED_VISITS_LIMIT = 25;
+
+// Outcome evidence must name the record, not merely the person. A customer or
+// phone match can span multiple inquiries and is therefore never a visit link.
+function leadRelatedVisitQuery(conn, lead) {
+  const leadId = String(lead.id);
+  return conn('scheduled_services as ss')
+    .where(function confirmedLeadIdentity() {
+      this.whereExists(
+        conn('lead_activities as la')
+          .select(conn.raw('1'))
+          .where('la.lead_id', lead.id)
+          .where('la.activity_type', 'appointment_scheduled')
+          .whereRaw("la.metadata->>'appointmentId' = ss.id::text"),
+      ).orWhereExists(
+        conn('ad_service_attribution as asa')
+          .select(conn.raw('1'))
+          .where('asa.lead_id', lead.id)
+          .whereRaw('asa.self_booked_appointment_id = ss.self_booking_id'),
+      ).orWhereExists(
+        conn('estimates as e')
+          .select(conn.raw('1'))
+          .whereRaw('e.id = ss.source_estimate_id')
+          // The estimate's lead mirror wins over a stale leads.estimate_id.
+          .where(function exactEstimateOwner() {
+            this.whereRaw("e.estimate_data->>'lead_id' = ?", [leadId]);
+            if (lead.estimate_id) {
+              this.orWhere(function unmirroredLeadEstimate() {
+                this.whereRaw("e.estimate_data->>'lead_id' IS NULL")
+                  .where('e.id', lead.estimate_id);
+              });
+            }
+          })
+          // Nullable ownership is not disagreement. Two populated owners must
+          // agree, and a populated lead customer vetoes either dissenting row.
+          .whereRaw('(e.customer_id IS NULL OR ss.customer_id IS NULL OR e.customer_id = ss.customer_id)')
+          .modify((estimate) => {
+            if (!lead.customer_id) return;
+            estimate.where((owner) => owner.whereNull('e.customer_id').orWhere('e.customer_id', lead.customer_id));
+          }),
+      );
+    })
+    // Exact record linkage does not override a known owner conflict: showing
+    // another customer's invoice is worse than omitting a stale association.
+    // An unknown visit owner remains eligible for every exact linkage arm.
+    .modify((visits) => {
+      if (lead.customer_id) {
+        visits.where((owner) => owner.whereNull('ss.customer_id').orWhere('ss.customer_id', lead.customer_id));
+      }
+    })
+    .orderByRaw('ss.scheduled_date DESC NULLS LAST, ss.id DESC')
+    .limit(RELATED_VISITS_LIMIT + 1)
+    .select('ss.id', 'ss.status', 'ss.scheduled_date');
+}
+
+async function loadLeadRelatedVisits(conn, lead) {
+  const rows = await leadRelatedVisitQuery(conn, lead);
+  const hasMore = rows.length > RELATED_VISITS_LIMIT;
+  return {
+    items: await projectRelatedVisits(conn, rows.slice(0, RELATED_VISITS_LIMIT)),
+    hasMore,
+  };
+}
 
 // GATE_LEAD_SERVICE_DISPLAY: the Leads screen shows each lead's service the
 // way the booking catalog names it. Read-only: service_interest is untouched,
@@ -193,6 +259,7 @@ const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-star
 const { ensureCustomerAccount } = require('./admin-customers');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const { applyContactNormalization } = require('../utils/intake-normalize');
+const { loadLeadReachStats } = require('../services/lead-reach-stats');
 
 // Median of an array of numbers (minutes), or null when empty. Robust to the
 // multi-day response-time outliers that skew a mean.
@@ -281,6 +348,17 @@ router.get('/analytics/overview', async (req, res, next) => {
       : null;
     const medianResponseTime = medianMinutes(respondedMinutes);
 
+    // The median above only sees leads someone recorded a response for, so a lead nobody
+    // contacted drops out of it. Beside it, the same cohort judged by real person contact
+    // (services/lead-reach-stats.js). A secondary figure: a failure leaves it null and never
+    // fails the overview.
+    let leadReach = null;
+    try {
+      leadReach = await loadLeadReachStats(leads);
+    } catch (err) {
+      logger.warn('[leads] reach stats unavailable', { code: err?.code || 'unknown' });
+    }
+
     // Speed to Lead: how long leads still awaiting their first response have
     // been waiting, right now. Distinct from avgResponseTime (the historical
     // first-contact -> first-response gap on leads we DID respond to).
@@ -351,7 +429,7 @@ router.get('/analytics/overview', async (req, res, next) => {
     res.json({
       total, won, lost, active, conversionRate,
       avgResponseTime, medianResponseTime, recentMedianResponseTime,
-      avgSpeedToLead, openUnansweredCount,
+      avgSpeedToLead, openUnansweredCount, leadReach,
       speedToLeadSince: SPEED_TO_LEAD_FRESH_START ? SPEED_TO_LEAD_FRESH_START.toISOString() : null,
       costTotal: Math.round(costTotal * 100) / 100,
       revenue: Math.round(revenue * 100) / 100, cpa, roi,
@@ -767,12 +845,16 @@ router.get('/', async (req, res, next) => {
     let query = db('leads')
       .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
       .leftJoin('technicians', 'leads.assigned_to', 'technicians.id')
+      // The initiating call's dialed number, for the website-only-line rule in
+      // lead-source-evidence.js. twilio_call_sid is unique in call_log.
+      .leftJoin('call_log as lead_call', 'lead_call.twilio_call_sid', 'leads.twilio_call_sid')
       .leftJoin('estimates', 'leads.estimate_id', 'estimates.id')
       .select(
         'leads.*',
         'lead_sources.name as source_name',
         'lead_sources.source_type',
         'lead_sources.channel as source_channel',
+        'lead_call.to_phone as call_dialed_phone',
         'estimates.status as estimate_status',
         db.raw("technicians.name as assigned_name"),
       )
@@ -825,6 +907,9 @@ router.get('/', async (req, res, next) => {
 
     const validSorts = {
       first_contact_at: 'leads.first_contact_at',
+      received: 'leads.first_contact_at',
+      received_at: 'leads.first_contact_at',
+      source: sourceEvidenceLabelSql(db),
       name: 'leads.first_name',
       status: 'leads.status',
       response_time: 'leads.response_time_minutes',
@@ -879,12 +964,15 @@ router.get('/', async (req, res, next) => {
 
     const leads = await query
       .orderBy(sortCol, order === 'asc' ? 'asc' : 'desc')
+      // Source labels are often shared. Received time makes equal labels
+      // useful and stable before the UUID tie-breaker.
+      .modify((qb) => { if (sort === 'source') qb.orderBy('leads.first_contact_at', 'desc'); })
       .orderBy('leads.id', 'asc')
       .limit(lim)
       .offset((pg - 1) * lim);
 
     res.json({
-      leads: await withServiceDisplay(leads),
+      leads: withSourceEvidence(await withServiceDisplay(leads)),
       total: parseInt(count, 10),
       page: pg,
       limit: lim,
@@ -963,11 +1051,15 @@ router.get('/:id', async (req, res, next) => {
     const lead = await db('leads')
       .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
       .leftJoin('technicians', 'leads.assigned_to', 'technicians.id')
+      // The initiating call's dialed number, for the website-only-line rule in
+      // lead-source-evidence.js. twilio_call_sid is unique in call_log.
+      .leftJoin('call_log as lead_call', 'lead_call.twilio_call_sid', 'leads.twilio_call_sid')
       .select(
         'leads.*',
         'lead_sources.name as source_name',
         'lead_sources.source_type',
         'lead_sources.channel as source_channel',
+        'lead_call.to_phone as call_dialed_phone',
         db.raw("technicians.name as assigned_name"),
       )
       .where('leads.id', req.params.id)
@@ -979,6 +1071,13 @@ router.get('/:id', async (req, res, next) => {
     const activities = await db('lead_activities')
       .where('lead_id', req.params.id)
       .orderBy('created_at', 'desc');
+
+    const includeOutcomes = req.query.include_outcomes === '1';
+    const relatedVisitsPromise = includeOutcomes
+      ? loadLeadRelatedVisits(db, lead)
+        .then((value) => ({ ok: true, value }))
+        .catch((error) => ({ ok: false, error }))
+      : null;
 
     // Recent calls for this lead, so the expanded lead card can show what the
     // caller actually asked for (transcript + recording) — the AI summary alone
@@ -1115,7 +1214,22 @@ router.get('/:id', async (req, res, next) => {
       console.error('[leads] call_log lookup failed (non-blocking):', e.message);
     }
 
-    const response = { lead: (await withServiceDisplay([lead]))[0], activities, calls };
+    const response = { lead: withSourceEvidence(await withServiceDisplay([lead]))[0], activities, calls };
+    if (includeOutcomes) {
+      const outcome = await relatedVisitsPromise;
+      if (outcome.ok) {
+        const related = outcome.value;
+        response.related_visits = related.items;
+        response.related_visits_status = 'available';
+        response.related_visits_has_more = related.hasMore;
+      } else {
+        const err = outcome.error;
+        logger.warn('[leads] related visit outcomes unavailable', { leadId: lead.id, code: err?.code || 'unknown' });
+        response.related_visits = null;
+        response.related_visits_status = 'unavailable';
+        response.related_visits_has_more = null;
+      }
+    }
     if (req.query.leadReview === '1') {
       response.linkedHistory = await require('../services/lead-linked-history').readLinkedLeadHistory(db, lead);
       try {
@@ -1574,6 +1688,9 @@ router.post('/:id/send-sms', async (req, res, next) => {
     if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
+    // A website-only line texts only someone who already called or texted it.
+    const websiteLineBlock = await require('../services/website-line-contact').websiteLineRefusal(fromNumber, lead.phone);
+    if (websiteLineBlock) return res.status(400).json({ error: websiteLineBlock, code: 'WEBSITE_LINE_FIRST_CONTACT' });
 
     // A consultation link inserted here can go stale by the time the
     // operator actually sends (gate flipped off, the lead closed/converted,
@@ -2581,3 +2698,4 @@ function convertLeadFromBar({ leadId, body, expected = null }) {
   });
 }
 module.exports.convertLeadFromBar = convertLeadFromBar;
+module.exports._relatedVisits = { leadRelatedVisitQuery, loadLeadRelatedVisits, RELATED_VISITS_LIMIT };

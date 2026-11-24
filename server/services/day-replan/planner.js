@@ -27,6 +27,15 @@
  *   is added at the end. Hours held by FIXED stops are taken before the first stop (fixed stops may
  *   share an hour as booked); each movable stop takes one hour of its own.
  *
+ * THE ROUTE READS IN HOUR ORDER (owner 2026-11-22, "build": auto-dispatch audit, finding 2). In a route the app
+ * reads as a real plan, no stop is numbered ahead of a stop with an earlier arrival hour
+ * (route-reorder-window-fit.js staleOrderReasons, 'inversion'). The writer refuses a plan that breaks this
+ * (apply.js finalRoute, 'route_order_not_coherent'). The rule above let a movable stop take the hour BEFORE the
+ * van's arrival hour, so a stop reached at 09:45, after a fixed 09:00 stop, took 08:00: the plan was accepted and
+ * refused on three nights in a row. So an order is feasible only when its hours never go down: a movable stop takes
+ * no hour earlier than the hour of the stop before it, and a fixed stop may not follow a stop with a later hour.
+ * Two stops may share an hour only as booked (fixed stops).
+ *
  * The current plan is every stop at its current slot (all treated fixed), in slot order, with
  * lateness allowed and reported. The search never ends later than the current plan.
  *
@@ -180,15 +189,18 @@ function hourUsable(ctx, stop, hour, used) {
   return (used & hoursMask(hour, widthHours(stop))) === 0 && prefAllows(stop.pref, hour);
 }
 
-/** The arrival hour (minutes) a movable stop takes when the van gets there at t, or null. */
-function pickHour(ctx, stop, t, used) {
+/**
+ * The arrival hour (minutes) a movable stop takes when the van gets there at t, or null. `minSlot` is the hour of
+ * the stop before it in the order: the stop takes no earlier hour (the route reads in hour order, see the header).
+ */
+function pickHour(ctx, stop, t, used, minSlot) {
   const h0 = Math.floor(t / 60);
   // The service itself ([start, start + work)) may not run through a block.
   const clear = (hour) => !hitsBlock(ctx.blocks, Math.max(t, hour * 60), stop.workMin);
   for (const hour of [h0 - 1, h0]) {
-    if (hourUsable(ctx, stop, hour, used) && t >= hour * 60 && t - hour * 60 <= ctx.bound && clear(hour)) return hour * 60;
+    if (hour * 60 >= minSlot && hourUsable(ctx, stop, hour, used) && t >= hour * 60 && t - hour * 60 <= ctx.bound && clear(hour)) return hour * 60;
   }
-  for (let hour = Math.max(ctx.opts.firstHour, h0 + 1); hour <= lastStartHour(ctx, stop); hour += 1) {
+  for (let hour = Math.max(ctx.opts.firstHour, h0 + 1, Math.ceil(minSlot / 60)); hour <= lastStartHour(ctx, stop); hour += 1) {
     if (hourUsable(ctx, stop, hour, used) && clear(hour)) return hour * 60;
   }
   return null;
@@ -202,22 +214,24 @@ function step(ctx, state, idx) {
   let used = state.used;
   let slot;
   if (stop.movable) {
-    slot = pickHour(ctx, stop, t, used);
+    slot = pickHour(ctx, stop, t, used, state.lastSlot);
     if (slot == null) return null;
     used |= hoursMask(slot / 60, widthHours(stop));
   } else {
     slot = stop.slotStartMin;
+    // The route reads in hour order: a fixed stop may not follow a stop with a later hour.
+    if (slot < state.lastSlot) return null;
     if (t > slot + ctx.bound) return null;
     if (!fixedBlockOk(ctx, idx, Math.max(t, slot), stop.workMin)) return null;
   }
   if (t < slot) t = slot;
   t += stop.workMin;
   if (t > ctx.dayEndMin) return null;
-  return { t, prev: idx, drive: state.drive + d, used, slot };
+  return { t, prev: idx, drive: state.drive + d, used, slot, lastSlot: slot };
 }
 
 function startState(ctx) {
-  return { t: ctx.departureMin, prev: ctx.n, drive: 0, used: ctx.fixedMask, slot: null };
+  return { t: ctx.departureMin, prev: ctx.n, drive: 0, used: ctx.fixedMask, slot: null, lastSlot: -Infinity };
 }
 
 /** Full simulation of one order (array of stop indexes); null when infeasible. */

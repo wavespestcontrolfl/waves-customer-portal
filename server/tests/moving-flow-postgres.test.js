@@ -1,5 +1,5 @@
 /**
- * Moving flow against live Postgres (owner 2026-11-02, GATE_MOVING_FLOW): the
+ * Moving flow against live Postgres (owner 2026-11-02): the
  * customer_moves service and the public routes through the real tables.
  *
  * Only the paid Google check, the short-link service and the admin alert
@@ -83,7 +83,6 @@ maybeDescribe('moving flow (live Postgres)', () => {
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
-    process.env.GATE_MOVING_FLOW = 'true';
     db = require('../models/db');
     ({ validateAddress, STATUSES } = require('../services/address-validation'));
     ({ raiseAdminAlert } = require('../services/admin-alert-compose'));
@@ -94,7 +93,6 @@ maybeDescribe('moving flow (live Postgres)', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_MOVING_FLOW = 'true';
     const [customer] = await db('customers').insert({
       first_name: 'Pat', last_name: 'Synthetic', phone: `+1941555${String(Math.floor(1000 + Math.random() * 8999))}`,
     }).returning('id');
@@ -358,10 +356,6 @@ maybeDescribe('moving flow (live Postgres)', () => {
     expect(submit.status).toBe(200);
     expect(submit.body.receipt).toEqual(['Thanks, Pat. We have your move. We will price your new home and send it to you to review. Nothing changes until you approve it.']);
     expect(JSON.stringify(submit.body)).not.toMatch(/Old Street|Bradenton|555|\$/);
-
-    process.env.GATE_MOVING_FLOW = 'false';
-    expect((await request(app).get(`/api/public/moving/${move.token}`)).status).toBe(404);
-    expect((await request(app).post(`/api/public/moving/${move.token}/submit`).send({ moveOutDate: etDateString(addETDays(new Date(), 14)) })).status).toBe(404);
   });
 
   test('move dates keep their calendar day: a UTC-midnight DATE (Railway) and a page round trip', async () => {

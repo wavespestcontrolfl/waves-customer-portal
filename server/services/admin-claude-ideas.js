@@ -21,11 +21,6 @@ const ROUTE_RE = /^\/admin(\/[A-Za-z0-9_-]{1,64}){0,6}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SENT_MESSAGE = 'Sent to Claude. A Claude tab opens on the Mac within about 10 minutes.';
 
-// GATE_IB_ANSWER_SEND_TO_CLAUDE, read at call time; a missing or throwing reader reads as off.
-function answerSendLive() {
-  try { return require('../config/feature-gates').ibAnswerSendToClaudeLive?.() === true; } catch { return false; }
-}
-
 // The cleaned idea: { idea } or { error }. Required, 4,000 characters at most (code points).
 function cleanIdea(raw) {
   if (raw === undefined || raw === null || raw === '') return { error: 'idea_required' };
@@ -134,4 +129,4 @@ async function cancelClaudeIdea(id, { at, by, role, technicianId = null } = {}) 
   return { status: 200, body: { cancelled: true } };
 }
 
-module.exports = { sendIdeaToClaude, cancelClaudeIdea, cleanIdea, answerSendLive, ideaDedupeKey, cleanRecords, routeOrNull };
+module.exports = { sendIdeaToClaude, cancelClaudeIdea, cleanIdea, ideaDedupeKey, cleanRecords, routeOrNull };

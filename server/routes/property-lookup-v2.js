@@ -20,7 +20,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, condoUnitFolioEnabled, addressMayNameUnit, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
-const { isInServiceAreaBox, zipFromAddressText } = require('../services/service-area');
+const { isInServiceAreaBox, zipFromAddressText, namesExcludedPlace, namesSharedZipWithoutCity } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -51,6 +51,7 @@ const {
   applyVerifiedOverrides,
   getCachedLookup,
   getVerifiedOverrides,
+  verifiedOverridesOfRow,
   saveLookup,
   markLookupAttempt,
   saveVerifiedOverride,
@@ -74,6 +75,7 @@ const {
 } = require('../services/estimator-engine/property-facts-shadow');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
+const { hasStructuredCommercialAiSignal } = require('../services/property-lookup/commercial-ai-signal');
 const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
 const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
@@ -233,7 +235,8 @@ async function stampLookupAttempt(address, status, reason = null, attemptId) {
 // deliberately default-mode only: refresh must go live, cacheOnly must not
 // block on a live pipeline, and persist:false is a documented
 // write-nothing mode that must not adopt a persisting run's behavior (nor
-// donate its result to one). Joiners get a structuredClone so one caller's
+// donate its result to one). strictCacheReads is out for the same reason
+// (lookupCoalesceKey). Joiners get a structuredClone so one caller's
 // mutations never alias into another's result; a failure propagates to
 // every joiner — the same outcome each would have bought separately.
 // Fail-open: several suites mock lookup-cache without the addressKey
@@ -314,6 +317,10 @@ function suiteUnitKeyForProfile(address, profile) {
 
 function lookupCoalesceKey(address, options) {
   if (options.refresh || options.cacheOnly === true || options.persist === false) return null;
+  // A strict-read run throws where a default run answers "no corrections" or
+  // a miss, so the two never share a run: a strict caller must not adopt a
+  // default result, and a default caller must not inherit a strict failure.
+  if (options.strictCacheReads === true) return null;
   if (typeof cacheAddressKey !== 'function') return null;
   try {
     const hash = cacheAddressKey(address)?.hash;
@@ -475,9 +482,16 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
   // A verified-fresh row answers without re-running geocode/search/vision —
   // faster, free, and day-to-day consistent. options.refresh forces a live
   // lookup (still re-applying verified overrides and re-saving at the end).
-  const verifiedOverrides = await getVerifiedOverrides(address);
+  // options.strictCacheReads: a caller that prices with nobody watching (the
+  // plan start offer) must not read a failed cache or correction read as "no
+  // row" or "no corrections": a cached home served without its corrections
+  // prices on sizes staff already fixed. Both reads then throw
+  // LOOKUP_CACHE_READ_FAILED, and a hit applies the corrections of the row
+  // it serves (below). Every other caller keeps the null answer.
+  const strictCacheReads = options.strictCacheReads === true;
+  const verifiedOverrides = await getVerifiedOverrides(address, { strict: strictCacheReads });
   if (!options.refresh) {
-    let cached = await getCachedLookup(address);
+    let cached = await getCachedLookup(address, { strict: strictCacheReads });
     if (cached && cachedAggregateResolvesToOwnUnit(cached.property_record, address)) {
       // Cached before own-numbered units could be resolved out of a stacked
       // association: every unit in this aggregate carries its own street
@@ -652,7 +666,12 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
       // attempt stamps the row", and counting only live lookups
       // undercounts served traffic (codex r36 P1). Respects persist:false.
       if (persist) await stampLookupAttempt(address, 'cache_hit', null, attemptId);
-      return await buildResultFromCachedLookup(address, cached, verifiedOverrides, t0, options);
+      // A strict hit applies the corrections stored on the SAME row that
+      // passed the freshness check, never the earlier read. A correction and
+      // a refresh save that both land between the two reads would otherwise
+      // put the older correction on top of the refreshed record.
+      const hitOverrides = strictCacheReads ? verifiedOverridesOfRow(cached) : verifiedOverrides;
+      return await buildResultFromCachedLookup(address, cached, hitOverrides, t0, options);
     }
   }
 
@@ -907,6 +926,9 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
   if (geo) try {
     lat = geo.lat;
     lng = geo.lng;
+    // The geocoder's own city and ZIP ride on the cached record: an AI-only record carries neither, and a cache hit
+    // must reach the same held-place verdict as this lookup (owner ruling 2026-11-23).
+    if (result.propertyRecord && (geo.city || geo.zip || geo.formattedAddress)) result.propertyRecord._geoLocality = { city: geo.city || null, zip: geo.zip || null, formattedAddress: geo.formattedAddress || null };
 
     // Validate within SWFL service area
     if (!isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip })) {
@@ -959,7 +981,15 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
         superCloseUrl,
         closeUrl: closeUrlWithKey,
         wideUrl: wideUrlWithKey,
-        inServiceArea: isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip }),
+        // The box AND no excluded place: DeSoto, Punta Gorda and any place held until a second technician is
+        // hired (services/excluded-localities.js) sit inside served counties, so the coordinate alone cannot say no.
+        inServiceArea: serviceAreaVerdict(isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip }), {
+          city: geo.city,
+          zip: geo.zip,
+          // the same evidence a cache hit reads (record + stored geocode): a county record naming a held town counts here too
+          places: [{ city: result.propertyRecord?.city, zip: result.propertyRecord?.zipCode }],
+          text: [geo.formattedAddress, result.propertyRecord?.formattedAddress, address],
+        }),
         _microCloseB64: microCloseB64,
         _ultraCloseB64: ultraCloseB64,
         _superCloseB64: superCloseB64,
@@ -1317,9 +1347,14 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
     // changes the in-area verdict.
     satellite: buildSatelliteUrlSet(lat, lng, {
       county: record?._parcel?.county || record?.county || null,
+      city: record?.city || null,
+      places: [record?._geoLocality].filter(Boolean),
+      // The cached record's own address text names a held place the same way a fresh geocode does.
+      text: [record?.formattedAddress, record?._geoLocality?.formattedAddress, row?.normalized_address, address],
       // AI-only records carry zipCode '' — fall back to the formatted
       // address, the cache row's normalized address, then the typed one.
       zip: record?.zipCode
+        || record?._geoLocality?.zip
         || zipFromAddressText(record?.formattedAddress)
         || zipFromAddressText(row?.normalized_address)
         || zipFromAddressText(address)
@@ -1340,6 +1375,14 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
 
 // Client-facing satellite URL set (no vision base64s — cache hits skip the
 // vision pipeline entirely; the stored aiAnalysis already covers it).
+// The public lookup's area verdict: false outside the box or at an excluded place; null (unknown) when the only locality
+// evidence is a ZIP Punta Gorda shares with a served town (33980 / 33982 / 33983) with no city anywhere; true otherwise.
+// Staff readers treat only `false` as a stop and the call lookup uses only `true`.
+function serviceAreaVerdict(inBox, evidence) {
+  if (!inBox || namesExcludedPlace(evidence)) return false;
+  return namesSharedZipWithoutCity(evidence) ? null : true;
+}
+
 function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
@@ -1353,7 +1396,7 @@ function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
     superCloseUrl: urlAtZoom(20),
     closeUrl: urlAtZoom(19),
     wideUrl: urlAtZoom(18),
-    inServiceArea: isInServiceAreaBox(lat, lng, areaEvidence),
+    inServiceArea: serviceAreaVerdict(isInServiceAreaBox(lat, lng, areaEvidence), areaEvidence),
   };
 }
 
@@ -3079,6 +3122,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     ),
     foundationType: inferFoundation(rc, ai),
     roofType: mergeField(rc?.roofType, ai?.roofMaterial, 'UNKNOWN'),
+    // Roof-style evidence for a later barrel-vs-flat tile price (owner
+    // 2026-11-19). Read-only: the county's own words (roofType above folds
+    // them into TILE), the style hint derived from them, and the photo's
+    // style read (only meaningful beside a TILE read). Nothing prices off these.
+    ...roofStyleEvidence(rc, ai),
     garageType: rc?.garageType || '',
     garageSpaces: rc?.garageSpaces || 0,
     hasAttachedGarage: detectAttachedGarage(rc),
@@ -3104,6 +3152,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     poolCageSize: classifyPoolCageSize(rc?.poolCageSqft) || normalizePoolCageSize(ai?.poolCageSize, ai?.poolCage),
     poolCageSizeInferred: !rc?.poolCageSqft
       && ai?.poolCage === 'YES' && !['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(String(ai?.poolCageSize || '').toUpperCase()),
+    // GATE_CAGE_TWO_SIZES only: the four-size answer, for the website hold.
+    ...(cageTwoSizesLive() ? { poolCageLegacySize: poolCageLegacySize(rc, ai) } : {}),
     // County permit evidence (positive-only; _poolPermits rides the cached
     // record). A permit proves a pool/cage the annual roll hasn't caught up
     // to; absence proves nothing — open-permit layers, new-construction-only
@@ -3999,17 +4049,6 @@ function commercialSignalText(rc = {}, ai = {}) {
     .toLowerCase();
 }
 
-function hasStructuredCommercialAiSignal(ai = {}) {
-  const propertyUse = String(ai?.propertyUse || '').trim().toUpperCase();
-  const commercialUseType = String(ai?.commercialUseType || '').trim().toUpperCase();
-  const nonCommercialUseTypes = ['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'];
-  if (['COMMERCIAL', 'MIXED'].includes(propertyUse)) return true;
-  if (!commercialUseType || nonCommercialUseTypes.includes(commercialUseType)) {
-    return false;
-  }
-  return commercialUseType === 'OTHER' || normalizePricingPropertyType(commercialUseType) === 'commercial';
-}
-
 // propertyType sourceTypes that describe THIS parcel authoritatively (a county
 // roll, cadastral FDOR roll, permit, builder floorplan, or a tech-verified
 // read) — as opposed to a web/listing hit that can describe a NEIGHBORING
@@ -4263,6 +4302,14 @@ function classifyAge(yearBuilt) {
   return 'MODERN';
 }
 
+function roofStyleEvidence(rc, ai) {
+  return {
+    countyRoofRaw: rc?.countyRoofRaw || null,
+    roofStyleHint: rc?.roofStyleHint || null,
+    roofTileStyle: ai?.roofMaterial === 'TILE' ? (ai.roofTileStyle || null) : null,
+  };
+}
+
 function mergeField(rcValue, aiValue, fallback) {
   // Property records take priority if they have data; satellite AI fills gaps.
   if (rcValue && rcValue !== 'UNKNOWN') return rcValue;
@@ -4310,19 +4357,43 @@ function poolRecordContext(propertyRecord) {
 // sqft is on the tax roll, so the classification becomes deterministic.
 // Positive-only: no cage row never downgrades a vision-detected cage
 // (attached lanais are sometimes rolled into the building areas).
+//
+// GATE_CAGE_TWO_SIZES (owner 2026-11-19, "cage 1000"): two sizes, Medium up to
+// 1,000 sq ft and Large above. Read at call time; `?.()` so a whole-module
+// feature-gates mock without the reader reads as off. The engine still reads
+// all four sizes (saved estimates keep their price).
+const cageTwoSizesLive = () => require('../config/feature-gates').cageTwoSizesLive?.() === true;
+// The size policy lives in one module (property-lookup/cage-sizes.js).
+const {
+  fourBandCageSize, twoSizeFromArea, fourToTwo,
+} = require('../services/property-lookup/cage-sizes');
+
 function classifyPoolCageSize(sqft) {
-  if (!Number.isFinite(sqft) || sqft <= 0) return null;
-  if (sqft < 300) return 'SMALL';
-  if (sqft <= 600) return 'MEDIUM';
-  if (sqft <= 900) return 'LARGE';
-  return 'OVERSIZED';
+  return cageTwoSizesLive() ? twoSizeFromArea(sqft) : fourBandCageSize(sqft);
 }
 
-
-function normalizePoolCageSize(value, poolCage) {
+function normalizePoolCageSizeFourSizes(value, poolCage) {
   const raw = String(value || '').toUpperCase();
   if (['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(raw)) return raw;
   return poolCage === 'YES' ? 'MEDIUM' : 'NONE';
+}
+
+// The satellite answer. The AI prompt still answers four sizes; with two sizes
+// on, Small, Medium and Large read Medium (an old Large, 600 to 900 sq ft, is
+// now Medium) and only Oversized reads Large. This also covers a stored answer
+// rebuilt on a cache hit.
+function normalizePoolCageSize(value, poolCage) {
+  const size = normalizePoolCageSizeFourSizes(value, poolCage);
+  return cageTwoSizesLive() ? (fourToTwo(size) || size) : size;
+}
+
+// Two sizes on only: the four-size answer today's rule gives, so the website
+// quote can keep holding a cage the four sizes call Large or Oversized.
+// Undefined with the gate off (the key is then absent from the profile).
+function poolCageLegacySize(rc, ai) {
+  if (!cageTwoSizesLive()) return undefined;
+  return fourBandCageSize(rc?.poolCageSqft)
+    || normalizePoolCageSizeFourSizes(ai?.poolCageSize, ai?.poolCage);
 }
 
 function inferFoundation(rc, ai) {
@@ -5372,6 +5443,26 @@ function isAssociationCommercialJob({ commercialRiskType = null, commercialSubty
     || /^(?:hoa|multifamily)/.test(String(commercialSubtype || ''));
 }
 
+// The Seal scope pick of the admin estimate tool, as services.exclusion fields: {} without a Whole home
+// pick. The pick passes through; the estimate engine makes the one GATE_EXCLUSION_WHOLE_HOME decision.
+function wholeHomeSealFields(options, home) {
+  return options.exclSealScope === 'whole_home' ? { sealScope: 'whole_home', ...home } : {};
+}
+
+// The Roof style pick of the admin estimate tool, as services.exclusion fields: {} without a pick. The pick passes
+// through (the feet only with Barrel tile); the estimate engine makes the one GATE_EXCLUSION_ROOF_STYLE_PRICING decision.
+function roofStyleFields(options) {
+  // Only a missing, null or empty pick is "not confirmed"; any other value (a number, object, boolean) passes through
+  // so the engine's validation refuses it (EXCLUSION_ROOF_STYLE_INVALID) instead of the route silently dropping it.
+  const style = options.exclRoofStyle;
+  if (style === undefined || style === null || style === '') return {};
+  if (style !== 'barrel_tile') return { roofStyle: style };
+  const { parseBarrelEaveFt, invalidBarrelEaveFtError } = require('../services/estimate-roof-style-replay');
+  const barrelEaveFt = parseBarrelEaveFt(options.exclBarrelEaveFt);
+  if (barrelEaveFt === null) throw invalidBarrelEaveFtError();
+  return { roofStyle: style, barrelEaveFt };
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -5815,6 +5906,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       warrantyTier: o.trenchingWarrantyTier || o.warrantyTier || 'one_year_retreat',
       labelConfirmed: o.trenchingLabelConfirmed === true || o.labelConfirmed === true ||
         o.trenchingLabelConfirmed === 'true' || o.labelConfirmed === 'true',
+      // The bottle the label check was made for: the engine counts a bifenthrin check only with Crosscheck Plus (owner 2026-11-18).
+      labelBottle: o.bifenthrinLabelBottle,
       measurements: trenchingMeasurements,
       allowComputedPerimeterFromFootprint: !!o.trenchingEstimateFromFootprint,
     };
@@ -5838,6 +5931,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       includeWarrantyExtended: !!o.includePreSlabWarrantyExtended || o.preslabWarranty === 'EXTENDED',
       labelConfirmed: o.preslabLabelConfirmed === true || o.preSlabLabelConfirmed === true ||
         o.preslabLabelConfirmed === 'true' || o.preSlabLabelConfirmed === 'true',
+      // The bottle the label check was made for: the engine counts a bifenthrin check only with Crosscheck Plus (owner 2026-11-18).
+      labelBottle: o.bifenthrinLabelBottle,
     };
   }
   if (sel.has('FOAM')) {
@@ -5990,9 +6085,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     };
   }
   if (sel.has('EXCLUSION')) {
+    // Whole-home seal (GATE_EXCLUSION_WHOLE_HOME, dark): an all-zero count still prices the home-size
+    // minimum, so the pick alone selects the V2 shape. Gate off = the field is never read.
+    const wholeHomeSeal = wholeHomeSealFields(o, { homeSqFt, stories, roofType: p.roofType });
+    // Roof style (GATE_EXCLUSION_ROOF_STYLE_PRICING, dark). The pick is ALWAYS carried to the engine, on the legacy and the
+    // V2 shape alike (it makes the one gate decision and sets the effective guarantee roof type). The pick NEVER changes the
+    // shape: it is decided exactly as without a pick, by counts or a whole-home seal. No pick = the field is never read.
+    const roofStyle = roofStyleFields(o);
     const hasV2Fields = (o.exclStandardWireMesh || o.exclAdvancedWireMesh ||
       o.exclStandardBirdBox || o.exclTileHighBirdBox || o.exclCustomBirdBox ||
-      o.exclMeshSoftLF || o.exclMeshConcreteLF);
+      o.exclMeshSoftLF || o.exclMeshConcreteLF || wholeHomeSeal.sealScope);
     if (hasV2Fields) {
       services.exclusion = {
         pricingVersion: 'v2',
@@ -6005,6 +6107,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         meshConcreteLF: o.exclMeshConcreteLF || 0,
         waiveInspection: !!o.exclWaiveInspection,
         urgency, afterHours,
+        ...wholeHomeSeal,
+        ...roofStyle,
       };
     } else {
       services.exclusion = {
@@ -6013,11 +6117,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         advanced: o.exclAdvanced || 0,
         waiveInspection: !!o.exclWaiveInspection,
         urgency, afterHours,
+        ...roofStyle,
       };
     }
   }
-  // Annual rodent guarantee — gated. The engine drops the line unless all four
-  // eligibility flags are true, so the rep confirms each affirmatively; missing
+  // Annual rodent guarantee — gated. The engine drops the line unless all three
+  // eligibility flags are true (trapping, exclusion, no activity; sanitation is not required), so the rep confirms each affirmatively; missing
   // any → INELIGIBLE and no line item (fail closed). Pass the normalized
   // homeSqFt/stories/roofType so tiering (standard/complex/estate) keys off the
   // same authoritative inputs as the rest of the estimate — the engine's
@@ -6031,7 +6136,6 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       eligibility: {
         trappingCompleted: !!o.rgTrappingCompleted,
         exclusionCompleted: !!o.rgExclusionCompleted,
-        sanitationCompletedOrPhotoBaseline: !!o.rgSanitationBaseline,
         noActivityAfterFinalTrapCheck: !!o.rgNoActivityAfterFinalCheck,
       },
     };
@@ -6423,6 +6527,10 @@ router.post('/calculate-estimate', async (req, res) => {
         if (verdict.eligible) mapped.offerTiersAvailable = true;
       }
     } catch (_) { /* a convenience flag; the save decides */ }
+    // GATE_CAGE_TWO_SIZES: tell the tool its Pool Cage Size box offers two sizes
+    // even with no property lookup on this estimate. Present only while the gate
+    // is on, so gate-off shapes are unchanged. Never a price field.
+    if (cageTwoSizesLive()) mapped.poolCageTwoSizes = true;
     // The linked member's current services at the tier this quote moves
     // them to, for staff to tick (owner 2026-10-30 option B). Read-only; a
     // failure only leaves the list off.
@@ -6677,8 +6785,16 @@ function dropInvalidOptionalHedgeRead(normalized) {
   if (v != null && !(Number.isFinite(v) && v >= 0)) delete normalized.estimatedHedgeLinearFt;
 }
 
+// Optional, tile-only read (owner 2026-11-19): a missing answer stays missing,
+// any present value outside the enum becomes UNKNOWN.
+function normalizeRoofTileStyle(value) {
+  const text = String(value ?? '').trim().toUpperCase();
+  return ['BARREL', 'FLAT'].includes(text) ? text : 'UNKNOWN';
+}
+
 function normalizeSatelliteAnalysis(analysis = {}) {
   const normalized = { ...analysis };
+  if (normalized.roofTileStyle != null) normalized.roofTileStyle = normalizeRoofTileStyle(normalized.roofTileStyle);
   if (normalized.imperviousSurfacePercent == null && normalized.imperviosSurfacePercent != null) {
     normalized.imperviousSurfacePercent = normalized.imperviosSurfacePercent;
   }
@@ -6727,6 +6843,7 @@ Return ONLY valid JSON with these fields:
   "fenceType": "NONE" | "PRIVACY_WOOD" | "PRIVACY_VINYL" | "CHAIN_LINK" | "ALUMINUM" | "PARTIAL" | "UNKNOWN",
   "fenceNotes": "string",
   "roofMaterial": "TILE" | "SHINGLE" | "METAL" | "FLAT" | "UNKNOWN",
+  "roofTileStyle": "BARREL" | "FLAT" | "UNKNOWN" (ONLY when roofMaterial is TILE, otherwise omit it: BARREL = rounded S-shaped or half-pipe tile rows whose open ends show at the eave, FLAT = flat interlocking concrete tiles with a smooth, even surface),
   "roofNotes": "string",
   "constructionVisible": "CBS" | "WOOD_FRAME" | "METAL" | "BRICK" | "UNKNOWN",
   "shrubDensity": "LIGHT" | "MODERATE" | "HEAVY" (density of ornamental shrubs/hedges in the landscape beds: LIGHT = sparse foundation plantings with open mulch between them, MODERATE = typical SWFL foundation beds, HEAVY = packed hedges or mass plantings, or beds wrapping most of the home),
@@ -6771,6 +6888,7 @@ module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
 module.exports.resolveCalculateQualifyingEvidence = resolveCalculateQualifyingEvidence;
 module.exports.countyCeilingStillValid = countyCeilingStillValid;
 module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
+module.exports.buildSatelliteUrlSet = buildSatelliteUrlSet;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyCommercialSuiteSize,
@@ -6828,5 +6946,6 @@ module.exports._private = {
   // (ops/agents/satellite-vision-model-bakeoff.js) so a model is scored
   // against the same validator the lookup applies.
   normalizeSatelliteAnalysis,
+  normalizeRoofTileStyle,
   isValidSatelliteVisionAnalysis,
 };

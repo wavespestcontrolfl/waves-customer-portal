@@ -91,7 +91,6 @@ jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => gate === 'webhooks'),
   gateEnvValue: (gate) => process.env[gate] === 'true',
-  smsCourtesyAfterTemplateLive: () => process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
   smsBareYesReplyLive: () => process.env.GATE_SMS_BARE_YES_REPLY === 'true',
 }));
 // The bare-YES decision's own reads are covered in sms-bare-yes-reply.test.js.

@@ -222,6 +222,18 @@ describe('isEstimateExtensionRequestEligible (expired-page "Request an extension
     expect(isEstimateExtensionRequestEligible({ status: 'expired', sent_at: PAST, source: 'plan_restart' })).toBe(false);
   });
 
+  it('never extends a plan offer quote: the offer has its own end date and the customer\'s way back is the office (owner 2026-11-19)', () => {
+    const offer = { jobId: 'job-1', endsAt: '2026-12-22T17:38:16.650Z', firstVisitFrom: '2027-02-15' };
+    const estimate_data = { planStart: { serviceKey: 'pest_control', offer } };
+    for (const status of ['sent', 'viewed', 'expired']) {
+      const row = { status, sent_at: PAST, viewed_at: PAST, expires_at: PAST, source: 'plan_start' };
+      expect(isEstimateExtensionRequestEligible({ ...row, estimate_data })).toBe(false);
+      expect(isEstimateExtensionRequestEligible({ ...row, estimate_data: JSON.stringify(estimate_data) })).toBe(false);
+      // The same expired plan_start quote with no offer stamp extends as before.
+      expect(isEstimateExtensionRequestEligible({ ...row, estimate_data: { planStart: { serviceKey: 'pest_control' } } })).toBe(true);
+    }
+  });
+
   it('qualifies published (sent_at/viewed_at) estimates that died of expiry — by date or by the sweep', () => {
     expect(isEstimateExtensionRequestEligible({ status: 'sent', sent_at: PAST, expires_at: PAST })).toBe(true);
     expect(isEstimateExtensionRequestEligible({ status: 'viewed', sent_at: PAST, viewed_at: PAST, expires_at: PAST })).toBe(true);

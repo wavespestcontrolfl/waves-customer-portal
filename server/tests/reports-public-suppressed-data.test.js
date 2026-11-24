@@ -40,6 +40,9 @@ jest.mock('../services/pest-pressure/store', () => ({
 }));
 jest.mock('../services/service-report/report-data', () => ({
   buildReportV1Data: jest.fn(),
+  // The pdf / static modes strip live-only fields in place.
+  stripLiveOnlyScheduleFields: jest.fn(),
+  stripLiveOnlyReportProductCopy: jest.fn(),
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: jest.fn().mockResolvedValue({}),
@@ -92,8 +95,8 @@ const STAFF_JWT = jwt.sign({
   tokenVersion: 4,
 }, 'test-jwt-secret');
 
-function mockDb({ deliveryMode }) {
-  const structuredNotes = JSON.stringify({ typedReportDelivery: deliveryMode });
+function mockDb({ deliveryMode, notes = {} }) {
+  const structuredNotes = JSON.stringify({ typedReportDelivery: deliveryMode, ...notes });
   const fullRecord = {
     id: 'service-1',
     customer_id: 'customer-1',
@@ -228,6 +231,77 @@ describe('GET /reports/:token/data view tracking', () => {
       expect(res.status).toBe(200);
       expect(body.internalOnly).toBe(true);
       expect(body.staffViewer).toBe(true);
+    });
+  });
+});
+
+// The PDF payload names the writer-rules state it was built in: the report
+// page shows it on its root, and the PDF renderer prints only once it matches
+// the state the PDF key was computed under (pdf.js reportPdfReadySelector).
+describe('GET /reports/:token/data: the writer-rules state of a PDF payload', () => {
+  const gate = process.env.GATE_REPORT_WRITER_RULES;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    buildReportV1Data.mockResolvedValue({
+      typedReport: { headline: 'Rodent activity was high today.' },
+      pestPressure: null,
+      pdfUrl: `/api/reports/${VALID_TOKEN}`,
+    });
+  });
+  afterAll(() => {
+    if (gate === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
+    else process.env.GATE_REPORT_WRITER_RULES = gate;
+  });
+
+  test('a PDF payload names the state it was built in; a live payload names none', async () => {
+    for (const [value, state] of [['true', 'on'], ['false', 'off']]) {
+      process.env.GATE_REPORT_WRITER_RULES = value;
+      mockDb({ deliveryMode: 'auto_send' });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data?mode=pdf`);
+        expect(res.status).toBe(200);
+        expect((await res.json()).writerRules).toBe(state);
+      });
+    }
+    mockDb({ deliveryMode: 'auto_send' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).writerRules).toBeUndefined();
+    });
+  });
+
+  // The note state, the same way (technician-report-copy reportNoteRenderState).
+  test("a PDF payload names the record's note state ('none' without the technician's own note); a live payload names none", async () => {
+    const notes = { reportNote: { v: 1, text: 'I treated the perimeter.', source: 'cleaned' } };
+    const payload = { typedReport: null, pestPressure: null, pdfUrl: `/api/reports/${VALID_TOKEN}` };
+    const signed = 'I treated the perimeter. — Jordan';
+    const digest = require('crypto').createHash('sha256').update(signed).digest('hex').slice(0, 8);
+    for (const [built, state] of [[{ summaryIsOwnNote: true, summary: signed }, `shown:${digest}`], [{}, 'withheld']]) {
+      buildReportV1Data.mockResolvedValue({ ...payload, ...built });
+      mockDb({ deliveryMode: 'auto_send', notes });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data?mode=pdf`);
+        expect(res.status).toBe(200);
+        expect((await res.json()).reportNote).toBe(state);
+      });
+    }
+    buildReportV1Data.mockResolvedValue({ ...payload, summaryIsOwnNote: true });
+    mockDb({ deliveryMode: 'auto_send', notes });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).reportNote).toBeUndefined();
+    });
+    // Without a note, 'none': the PDF wait never accepts a page that shows
+    // no state (a page bundle from before the note reader; pre-push audit
+    // round 29).
+    buildReportV1Data.mockResolvedValue(payload);
+    mockDb({ deliveryMode: 'auto_send' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data?mode=pdf`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).reportNote).toBe('none');
     });
   });
 });

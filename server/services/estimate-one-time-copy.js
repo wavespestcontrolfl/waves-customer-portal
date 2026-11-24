@@ -26,7 +26,7 @@
 
 const PACK = require('./estimate-one-time-copy.json');
 const { areaAddOnConfig } = require('./pricing-engine/constants');
-const { hasPurchasedTrenchingWarranty, PURCHASED_TRENCHING_WARRANTY_BULLET } = require('../../shared/estimate-purchased-warranty.cjs');
+const { hasPurchasedTrenchingWarranty, PURCHASED_TRENCHING_WARRANTY_BULLET, hasIncludedReentryGuarantee, includedReentryTerms } = require('../../shared/estimate-purchased-warranty.cjs');
 const { GUARANTEE_COPY, copyAllowedInScope, serviceGuaranteeScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
 
 // The copy scope an option set asks for: an explicit guaranteeScope, else the
@@ -260,6 +260,14 @@ function fillTrapChecks(text, checks) {
     .replace('{checks}', `${word} trap check${n === 1 ? '' : 's'}`);
 }
 
+// A whole-home exclusion row (GATE_EXCLUSION_WHOLE_HOME) includes the 1-year re-entry guarantee in
+// its price. The bullet and the renewal terms ride ONLY a row whose own flag says so (fail closed);
+// like a purchased trenching warranty, they survive a guarantee scope.
+function includedReentryCopy(key, item, entry) {
+  if (key !== 'rodent_exclusion' || !hasIncludedReentryGuarantee(item)) return { lines: [], terms: null };
+  return { lines: [entry.reentryBullet], terms: includedReentryTerms(item) };
+}
+
 function resolveOneTimeServiceCopy(item = {}, options = {}) {
   const scope = copyScope(options);
   const key = oneTimeCopyKeyFor(item);
@@ -353,6 +361,9 @@ function resolveOneTimeServiceCopy(item = {}, options = {}) {
   if (key === 'rodent_exclusion' && item.includesScreening !== true) {
     lines = lines.filter((line) => line !== entry.screeningBullet);
   }
+  const reentry = includedReentryCopy(key, item, entry);
+  lines = [...lines, ...reentry.lines];
+  if (reentry.terms) terms = reentry.terms;
   // Trap-only: the monthly plan is a 12-month agreement — the terms must
   // say so (codex #3823 r8 P1); annual is prepaid; unknown keeps generic.
   if (key === 'trap_only') {
@@ -395,9 +406,9 @@ function resolveOneTimeServiceCopy(item = {}, options = {}) {
     if (scope === 'none' || !copyAllowedInScope(assurance, scope)) assurance = null;
     if (!copyAllowedInScope(outcome, scope)) outcome = entry.outcomeNoGuarantee || outcome;
     if (!copyAllowedInScope(outcome, scope)) outcome = 'Your service follows the written scope and terms in this estimate.';
-    lines = lines.filter((line) => (purchasedTrenchingWarranty && line === PURCHASED_TRENCHING_WARRANTY_BULLET)
-      || copyAllowedInScope(line, scope));
-    if (!copyAllowedInScope(terms, scope)) terms = withoutClaimsOutsideScope(terms, scope) || 'Your written service scope and terms apply.';
+    const retainedLines = [...(purchasedTrenchingWarranty ? [PURCHASED_TRENCHING_WARRANTY_BULLET] : []), ...reentry.lines];
+    lines = lines.filter((line) => retainedLines.includes(line) || copyAllowedInScope(line, scope));
+    if (!reentry.terms && !copyAllowedInScope(terms, scope)) terms = withoutClaimsOutsideScope(terms, scope) || 'Your written service scope and terms apply.';
   }
   return {
     key,

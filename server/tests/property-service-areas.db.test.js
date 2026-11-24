@@ -59,6 +59,36 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
   const save = (scope, version, changes, actor = admin) => areas.saveAreaMeasurements(scope, actor, { version, areas: changes }, { knex });
   const scope = () => ({ customerId, propertyId: primary.id });
 
+  test('both crews share one address-bound feeding map independently of imagery', async () => {
+    delete process.env.GATE_PROPERTY_SERVICE_AREAS;
+    const otherTech = { ...tech, technicianId: randomUUID() };
+    const lawnId = randomUUID();
+    await knex('scheduled_services').insert({ ...visit, id: lawnId, technician_id: otherTech.technicianId, service_type: 'Lawn Care' });
+    const initial = await areas.readFertilizerMap({ serviceId: visit.id }, tech, knex);
+    const input = { cells: 'LTX' + '.'.repeat(45), landmarks: 'Lawn to the sidewalk. Shrub bed inside the brick edge. Swale excluded.', version: initial.version };
+    const stored = await areas.saveFertilizerMap({ serviceId: visit.id }, tech, input, knex);
+    expect((await areas.readFertilizerMap({ serviceId: lawnId }, otherTech, knex)).map).toEqual(stored.map);
+    expect((await areas.readFertilizerMap({ customerId, propertyId: second.id }, admin, knex)).map).toBeNull();
+    await expect(areas.readFertilizerMap({ serviceId: lawnId }, tech, knex)).rejects.toMatchObject({ status: 404 });
+    await expect(areas.saveFertilizerMap({ serviceId: lawnId }, otherTech, input, knex)).rejects.toMatchObject({ status: 409 });
+    expect(lookup).not.toHaveBeenCalled();
+    expect(await knex('audit_log').where({ resource_id: primary.id, action: 'property_fertilizer_map_reviewed' })).toHaveLength(1);
+
+    process.env.GATE_PROPERTY_SERVICE_AREAS = 'true';
+    await save(scope(), (await read(scope())).version, { beds: { sqft: 240, source: 'field' } });
+    expect((await areas.readFertilizerMap(scope(), admin, knex)).map).toEqual(stored.map);
+    const newest = await areas.readFertilizerMap(scope(), admin, knex);
+    await areas.saveFertilizerMap(scope(), admin, { ...input, version: newest.version, cells: 'XL' + '.'.repeat(46) }, knex);
+    expect((await read(scope())).areas.beds.sqft).toBe(240);
+    await knex('customer_properties').where({ id: primary.id }).update({ address_line1: '300 New Street' });
+    expect((await areas.readFertilizerMap(scope(), admin, knex)).map).toBeNull();
+  });
+
+  test.each([['Q' + '.'.repeat(47), 'Street'], ['L.T', 'Street'], ['L' + '.'.repeat(47), '  ']])(
+    'rejects incomplete assignments or missing field landmarks', async (cells, landmarks) => {
+      await expect(areas.saveFertilizerMap(scope(), admin, { cells, landmarks }, knex)).rejects.toMatchObject({ status: 400 });
+    });
+
   test('works without an estimate; preserves estimate provenance and saves only reviewed areas', async () => {
     lookup.mockResolvedValue({ enriched: { estimatedBedAreaSf: 1200, estimatedTurfSf: 4000, turfSource: 'vision' } });
     const first = await read(scope());

@@ -333,3 +333,86 @@ describe('performPropertyLookup cacheOnly', () => {
     expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
   });
 });
+
+// strictCacheReads: the plan start offer prices a home with nobody watching.
+// The default reads answer a failure as "no corrections" or "no row"; under
+// this option both reads throw, so an outage never becomes a price on sizes
+// staff already corrected, and never a "this home has no saved lookup".
+describe('performPropertyLookup strictCacheReads', () => {
+  const STRICT = { cacheOnly: true, persist: false, strictCacheReads: true };
+  const DEFAULT = { cacheOnly: true, persist: false };
+  // A correction made BEFORE the data was cached: the row is still a hit.
+  const corrected = () => cachedRow({
+    verified_overrides: { lotSize: { value: 7200, verifiedAt: '2026-06-01T12:00:00Z', verifiedBy: 'tech' } },
+  });
+  // The correction read selects one column; the cache read selects the row.
+  // `overrideRow`: what the correction read sees, when it differs from the row the cache read serves.
+  const tableWith = ({ row, overrideRow = row, failOverrides = false, failCache = false }) => {
+    const builder = fakeTable({ row });
+    builder.first = async (...columns) => {
+      const overrideRead = columns.includes('verified_overrides');
+      if (overrideRead ? failOverrides : failCache) {
+        throw Object.assign(new Error(`connection lost near "${ADDRESS}"`), { code: '57P01' });
+      }
+      return overrideRead ? overrideRow : row;
+    };
+    return builder;
+  };
+
+  it('a healthy strict read serves the cached home with its corrections, as the default does', async () => {
+    mockDbHandler = () => tableWith({ row: corrected() });
+    const strict = await performPropertyLookup(ADDRESS, STRICT);
+    const normal = await performPropertyLookup(ADDRESS, DEFAULT);
+    expect(strict.meta.cache).toBe('hit');
+    expect(strict.enriched.lotSqFt).toBe(7200);
+    expect(normal.enriched.lotSqFt).toBe(7200);
+  });
+
+  it('a failed correction read followed by a cache hit: the default serves the UNCORRECTED home, strict throws', async () => {
+    mockDbHandler = () => tableWith({ row: corrected(), failOverrides: true });
+    // The gap this option closes: the stored lot is 10,043 and staff corrected it to 7,200.
+    const normal = await performPropertyLookup(ADDRESS, DEFAULT);
+    expect(normal.meta.cache).toBe('hit');
+    expect(normal.enriched.lotSqFt).toBe(10043);
+
+    const error = await performPropertyLookup(ADDRESS, STRICT).catch((err) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.code).toBe('LOOKUP_CACHE_READ_FAILED');
+    expect(error.message).not.toContain('Rock Creek');
+  });
+
+  it('a failed cache read: the default answers a miss, strict throws', async () => {
+    mockDbHandler = () => tableWith({ row: corrected(), failCache: true });
+    expect(await performPropertyLookup(ADDRESS, DEFAULT)).toBeNull();
+    await expect(performPropertyLookup(ADDRESS, STRICT)).rejects.toMatchObject({ code: 'LOOKUP_CACHE_READ_FAILED' });
+  });
+
+  it('the two reads disagree (a correction and a refresh landed between them): a strict hit applies the corrections of the row it serves', async () => {
+    // The first read saw the older correction (7,200). Then staff corrected the lot again (6,800) and a
+    // refresh saved the row: the row served as the hit carries the newer correction, folded into its record.
+    const earlier = cachedRow({ verified_overrides: { lotSize: { value: 7200, verifiedAt: '2026-06-01T12:00:00Z', verifiedBy: 'tech' } } });
+    const refreshed = cachedRow({ verified_overrides: { lotSize: { value: 6800, verifiedAt: '2026-06-10T12:00:00Z', verifiedBy: 'tech' } } });
+    refreshed.property_record.lotSize = 6800;
+    mockDbHandler = () => tableWith({ row: refreshed, overrideRow: earlier });
+
+    const strict = await performPropertyLookup(ADDRESS, STRICT);
+    expect(strict.meta.cache).toBe('hit');
+    expect(strict.enriched.lotSqFt).toBe(6800);
+    // The default path is not changed here: it still applies the earlier read.
+    const normal = await performPropertyLookup(ADDRESS, DEFAULT);
+    expect(normal.enriched.lotSqFt).toBe(7200);
+  });
+
+  it('a strict hit on a row with no corrections applies none, whatever the earlier read saw', async () => {
+    const earlier = cachedRow({ verified_overrides: { lotSize: { value: 7200, verifiedAt: '2026-06-01T12:00:00Z', verifiedBy: 'tech' } } });
+    mockDbHandler = () => tableWith({ row: cachedRow(), overrideRow: earlier });
+    expect((await performPropertyLookup(ADDRESS, STRICT)).enriched.lotSqFt).toBe(10043);
+  });
+
+  it('a strict miss is still null, and no live provider runs', async () => {
+    mockDbHandler = () => tableWith({ row: null });
+    expect(await performPropertyLookup(ADDRESS, STRICT)).toBeNull();
+    expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});

@@ -249,6 +249,69 @@ const SHAPES = {
     kept: { available: true, line: 'pest', 'groups.0.id': 'moisture', 'groups.0.tips.0.id': 'moisture_ac_drip', 'conditions.irrigation_on_file': true, 'yard.county': 'Manatee', 'previousRecommendations.0.serviceDate': '2026-09-01' },
     content: { 'groups.0.tips.0.copy': 'Where the line drips, the soil stays wet.' },
   },
+  // admin-ads.js GET /campaigns: { campaigns[] (ad_campaigns rows plus last7d and last30d from aggregate(), admin-ads.js:1485-1498), lsaSummary (lsa-summary.js:82-85, seven numbers; null when unreadable) }.
+  '/admin/ads/campaigns': {
+    body: {
+      campaigns: [{
+        id: UUID, platform: 'google_lsa', platform_campaign_id: 'PLACEHOLDER-CAMPAIGN-ID', campaign_name: 'Local Services', campaign_type: 'google_lsa', target_area: 'General', status: 'active',
+        service_category: 'recurring', target_services: ['pest_quarterly'], intent_type: 'emergency', is_branded: false, service_line: 'pest', budget_mode: 'base',
+        daily_budget_base: '50.00', daily_budget_current: '50.00', monthly_budget: '1500.00', created_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-20T00:00:00Z',
+        last7d: { spend: 120.5, conversionValue: 900, roas: 7.5, conversions: 3, clicks: 14, impressions: 220, cpa: 40.17, ctr: 6.36 },
+        last30d: { spend: 400, conversionValue: 2800, roas: 7, conversions: 9, clicks: 51, impressions: 800, cpa: 44.44, ctr: 6.38 },
+      }],
+      lsaSummary: { leads: 5, charged: 4, matched: 3, booked: 2, recurring: 1, spend: 400, costPerWon: null },
+    },
+    dropped: ['campaigns.0.platform_campaign_id', 'campaigns.0.target_services', 'campaigns.0.created_at', 'campaigns.0.updated_at', 'campaigns.0.metadata'],
+    kept: { 'campaigns.0.campaign_name': 'Local Services', 'campaigns.0.campaign_type': 'google_lsa', 'campaigns.0.last30d.spend': 400, 'campaigns.0.last7d.cpa': 40.17, 'lsaSummary.leads': 5, 'lsaSummary.booked': 2, 'lsaSummary.costPerWon': null },
+  },
+  // admin-prospects.js GET /mail -> services/prospects/mail-list.js:80-130 (listMailProspects) and toRow/toPrice (:43-70). The legal description is selected but not kept;
+  // sale price, sellers, parcel and permit numbers are never selected.
+  '/admin/prospects/mail': {
+    body: {
+      view: 'live',
+      counts: { eligible: 2, heldBack: 1, notEligible: 3, unmatched: 1 },
+      priceCounts: { priced: 1, notClean: 0, missingFact: 0, failed: 0, untried: 1 },
+      reasons: [{ status: 'not_eligible', reason: 'company_buyer', count: 3 }],
+      newestRecordedDate: '2026-11-20', lastCheckedAt: '2026-11-22T20:00:00.000Z',
+      rows: [{
+        id: UUID, recordedDate: '2026-11-20', status: 'eligible', reason: 'permit_found', recipientNames: ['Sample Person'], addressLine1: '1 Example Way', city: 'Sampleton', zip: '34200',
+        subdivision: 'Example Estates', matchBasis: 'parcel_exact', coDate: '2026-10-30', livingSqft: 1800, pageSlug: '1-example', legalDescription: 'LOT 1 EXAMPLE ESTATES PLACEHOLDER',
+        price: { status: 'priced', reason: null, annual: 960, monthly: 80, setupFee: 99, homeSqft: 1800, sizeSource: 'appraiser', stories: 1, lotSqft: 9000, pricedAt: '2026-11-21T01:00:00.000Z', checkedAt: '2026-11-22T01:00:00.000Z' },
+      }],
+      truncated: false,
+    },
+    dropped: ['rows.0.legalDescription'],
+    kept: { view: 'live', 'rows.0.addressLine1': '1 Example Way', 'rows.0.pageSlug': '1-example', 'rows.0.recipientNames': ['Sample Person'], 'rows.0.price.monthly': 80, 'counts.heldBack': 1, 'priceCounts.untried': 1 },
+    content: { 'rows.0.reason': 'permit_found', 'reasons.0.reason': 'company_buyer' },
+  },
+  // admin-timetracking.js GET /daily -> time-tracking.js:1521-1532 getDailySummaries: a TOP-LEVEL list of time_entry_daily_summary rows (select *, migrations 20260401000094,
+  // 20260711000002, 20261025181500) plus tech_name.
+  '/admin/timetracking/daily': {
+    body: [{
+      id: 7, technician_id: UUID, tech_name: 'Sample Tech', work_date: '2026-11-20', total_shift_minutes: '480.00', total_job_minutes: '300.00', total_drive_minutes: '90.00', total_break_minutes: '30.00',
+      total_admin_minutes: '20.00', unpaid_meal_minutes: '30.00', overtime_minutes: '0.00', job_count: 6, utilization_pct: '62.50', first_clock_in: '2026-11-20T12:00:00Z', last_clock_out: '2026-11-20T20:30:00Z',
+      no_lunch: false, status: 'pending', revenue_generated: '900.00', rpmh_actual: '112.50', approved_by: UUID, approved_at: '2026-11-21T00:00:00Z', created_at: '2026-11-20T21:00:00Z', updated_at: '2026-11-20T21:00:00Z',
+    }],
+    dropped: ['0.id', '0.revenue_generated', '0.rpmh_actual', '0.approved_by', '0.approved_at', '0.created_at', '0.updated_at'],
+    kept: { '0.tech_name': 'Sample Tech', '0.work_date': '2026-11-20', '0.total_shift_minutes': '480.00', '0.no_lunch': false, '0.status': 'pending' },
+  },
+  // admin-timetracking.js GET /entries -> time-tracking.js:1488-1516 getEntries: { entries (time_entries.* plus customer names, tech_name, job_service_type), total, limit, offset }.
+  '/admin/timetracking/entries': {
+    body: {
+      entries: [{
+        id: UUID, technician_id: UUID, entry_type: 'job', status: 'completed', clock_in: '2026-11-20T14:00:00Z', clock_out: '2026-11-20T14:45:00Z', duration_minutes: '45.00', job_id: UUID, customer_id: UUID,
+        clock_in_lat: '27.1000000', clock_in_lng: '-82.4000000', clock_out_lat: '27.1000100', clock_out_lng: '-82.4000100', clock_in_address: '1 Example Way', service_type: 'pest_control', pay_type: 'hourly',
+        edit_reason: LINK_NOTE, edited_by: UUID, edited_at: '2026-11-21T00:00:00Z', original_clock_in: '2026-11-20T14:01:00Z', original_clock_out: '2026-11-20T14:44:00Z', source: 'app',
+        approval_status: 'pending', approved_by: UUID, approved_at: '2026-11-21T00:00:00Z', approval_notes: PASSWORD_NOTE, auto_closed_at: '2026-11-20T23:59:00Z', auto_close_reason: PASSWORD_NOTE,
+        created_at: '2026-11-20T14:00:00Z', updated_at: '2026-11-20T14:45:00Z', tech_name: 'Sample Tech', customer_first_name: 'Sample', customer_last_name: 'Person', job_service_type: 'Quarterly Pest Control',
+      }],
+      total: 1, limit: 50, offset: 0,
+    },
+    dropped: ['entries.0.job_id', 'entries.0.customer_id', 'entries.0.clock_in_lat', 'entries.0.clock_in_lng', 'entries.0.clock_out_lat', 'entries.0.clock_out_lng', 'entries.0.clock_in_address', 'entries.0.pay_type',
+      'entries.0.edit_reason', 'entries.0.edited_by', 'entries.0.edited_at', 'entries.0.original_clock_in', 'entries.0.original_clock_out', 'entries.0.approved_by', 'entries.0.approved_at', 'entries.0.approval_notes',
+      'entries.0.auto_close_reason', 'entries.0.created_at', 'entries.0.updated_at'],
+    kept: { 'entries.0.tech_name': 'Sample Tech', 'entries.0.entry_type': 'job', 'entries.0.duration_minutes': '45.00', 'entries.0.customer_last_name': 'Person', total: 1, limit: 50 },
+  },
   // admin-discounts.js:190-195 selects id, name, discount_key, times_applied, total_discount_given, is_active.
   '/admin/discounts/stats': {
     body: { discounts: [{ id: 1, name: 'Spring offer', discount_key: 'spring', times_applied: 3, total_discount_given: '30.00', is_active: true }], totalApplied: 3, totalGiven: 30 },
@@ -639,7 +702,8 @@ MORE['/admin/leads'] = [...under('leads.0', [...LEAD_MORE, 'first_name', 'status
 MORE['/admin/leads/:id'] = [...under('lead', [...LEAD_MORE, 'id', 'source_channel', 'estimate_id']), ...under('activities.0', ['lead_id']), ...under('calls.0', ['id', 'recording_url'])];
 MORE['/admin/leads/analytics/by-source'] = [
   ...under('sources.0', ['costPerAcquisition', 'channelSpend', 'avgResponseTime', 'startDate', 'endDate']), ...under('sources.0.source', ['id'])];
-MORE['/admin/leads/analytics/overview'] = ['recentMedianResponseTime', 'speedToLeadSince', 'avgResponseTime'];
+MORE['/admin/leads/analytics/overview'] = ['recentMedianResponseTime', 'speedToLeadSince', 'avgResponseTime',
+  ...under('leadReach', ['cohort', 'reachedWithin', 'reachedLater', 'neverReached', 'notJudged', 'withinMinutes'])];
 MORE['/admin/schedule/list'] = under('services.0', ['customerId', 'serviceTypeRaw', 'windowEnd', 'estimatedDuration', 'estimatedPrice', 'serviceKey', 'primaryLinePrice', 'prepaidAmount', 'prepaidMethod', 'prepaidAt',
   'technicianId', 'zone', 'city', 'recurringPattern', 'recurringParentId', 'sourceEstimateId', 'payerId', 'poNumber', 'selfPayOverride', 'serviceAddons']);
 
@@ -764,7 +828,7 @@ describe('every catalog endpoint has a verified response fixture', () => {
 describe('the default withholds a name-matched key that no row declared', () => {
   const PHRASE = 'Vendor recovery phrase correct horse battery staple';
   const NO_DECLARATION = catalog.entries.find(entry => !entry.freeText && entry.params.length === 0 && entry.query.length === 0);
-  const CONTENT_ENTRY = catalog.entries.find(entry => entry.params.length === 0 && entry.query.length === 0 && Object.values(entry.freeText || {}).includes('content'));
+  const CONTENT_ENTRY = catalog.entries.find(entry => !entry.keep && entry.params.length === 0 && entry.query.length === 0 && Object.values(entry.freeText || {}).includes('content'));
   const contentKey = Object.keys(CONTENT_ENTRY.freeText).find(key => CONTENT_ENTRY.freeText[key] === 'content');
   const run = async (entry, body) => {
     global.fetch = jest.fn(async () => jsonResponse(body));
@@ -814,13 +878,14 @@ describe('the default withholds a name-matched key that no row declared', () => 
 });
 
 describe('keep mode: only the listed fields reach the model, and a new column never does', () => {
-  test('the 21 rows added with the core screens and leads, the two email-template rows, and the health, SMS template and tech tip rows, are in keep mode', () => {
+  test('the 21 rows added with the core screens and leads, the two email-template rows, the health, SMS template and tech tip rows, and the Ads campaigns, new-home mail list and time tracking rows, are in keep mode', () => {
     expect(KEEP_ENTRIES.map(entry => entry.endpoint).sort()).toEqual([
-      '/admin/customers', '/admin/customers/:id/cards', '/admin/customers/:id/collection-holds', '/admin/customers/:id/comms', '/admin/customers/:id/deposit-credit',
+      '/admin/ads/campaigns', '/admin/customers', '/admin/customers/:id/cards', '/admin/customers/:id/collection-holds', '/admin/customers/:id/comms', '/admin/customers/:id/deposit-credit',
       '/admin/customers/:id/estimates-summary', '/admin/customers/:id/latest-scheduled-service', '/admin/customers/:id/timeline',
       '/admin/dispatch/:serviceId/tech-tips', '/admin/dispatch/alerts', '/admin/dispatch/board', '/admin/dispatch/jobs/:id', '/admin/dispatch/techs/:id', '/admin/email-templates', '/admin/email-templates/automations', '/admin/estimates',
       '/admin/health/scores/:customerId', '/admin/invoices', '/admin/invoices/:id', '/admin/invoices/:id/recipients', '/admin/leads', '/admin/leads/:id',
-      '/admin/leads/analytics/by-source', '/admin/leads/analytics/overview', '/admin/schedule/list', '/admin/sms-templates',
+      '/admin/leads/analytics/by-source', '/admin/leads/analytics/overview', '/admin/prospects/mail', '/admin/schedule/list', '/admin/sms-templates',
+      '/admin/timetracking/daily', '/admin/timetracking/entries',
     ]);
   });
 

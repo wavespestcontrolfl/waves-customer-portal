@@ -4,8 +4,9 @@
 // guard parked it into a 1,700-item open triage backlog, and nobody was
 // scheduled. These tests pin the pure diff — confirmed-slot parsing (object
 // AND string-era extractions), the v2IsoToEtWallClock wall-clock contract,
-// call-linked clearing evidence, grace filter, unlinked-call handling — and
-// the gate-off no-op. All fixture identities are synthetic.
+// call-linked clearing evidence, grace filter (shorter for a visit the call
+// agent held, whose bell names why), unlinked-call handling — and the gate-off
+// no-op. All fixture identities are synthetic.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
@@ -16,8 +17,17 @@ const {
   extractConfirmedSlot,
   confirmedWallClockET,
   rowClearsSlot,
+  bookItAlert,
+  dateCheckAlert,
+  liveDecision,
+  decisionHoldReason,
   GRACE_MINUTES,
+  HELD_GRACE_MINUTES,
+  HOLD_REASONS,
+  HOLD_REASON_FALLBACK,
+  HOLD_REASONS_BY_ROUTING,
 } = require('../services/call-booking-miss-watchdog');
+const { composeAdminAlert } = require('../services/admin-alert-compose');
 
 const NOW = new Date('2026-07-30T16:00:00Z');
 const OLD_ENOUGH = new Date(NOW.getTime() - (GRACE_MINUTES + 30) * 60 * 1000).toISOString();
@@ -33,12 +43,14 @@ function extraction(over = {}) {
   };
 }
 
+
 function call(over = {}) {
   return {
     id: 'call-1', twilio_call_sid: 'CAsynthetic001', customer_id: 'cust-1',
     direction: 'outbound', created_at: OLD_ENOUGH,
     from_phone: '+19415550100', to_phone: '+19415550111',
     ai_extraction_enriched: extraction(),
+    processing_status: 'processed',
     ...over,
   };
 }
@@ -221,6 +233,186 @@ describe('computeBookingMisses — confirmed-slot vs schedule diff', () => {
       call({ id: 'no-extraction', ai_extraction_enriched: null }),
     ];
     expect(computeBookingMisses(rows, [], { now: NOW })).toHaveLength(0);
+  });
+});
+
+// Owner 2026-11-18 (option A of the call booking holds scope): a visit the call agent
+// itself held waited 90 minutes for its first bell, and the bell never said why. It now
+// rings after HELD_GRACE_MINUTES and names the reason.
+describe('a visit the call agent held', () => {
+  // The call agent's live decision on a call's last pass, as the scan reads it with the call
+  // row (LIVE_DECISION_SELECT: the newest route_decisions row in enforce mode for its recording).
+  const decision = (over = {}) => ({ final_action_taken: 'triage_review', blocked_reasons: ['address_unverified'], created_at: NOW.toISOString(), ...over });
+  const minutesAgo = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
+  const missesOf = (calls, booked = []) => computeBookingMisses(calls, booked, { now: NOW });
+  const heldMiss = (over = {}, held = decision()) => missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), live_decision: held, ...over })])[0];
+  // A held bell's last step: it asks for no call or text, so it fits every hold reason.
+  const HELD_STEP = 'Review the call before booking it.';
+
+  test('rings after HELD_GRACE_MINUTES with its reason; an unheld call of the same age still waits GRACE_MINUTES', () => {
+    const misses = missesOf([
+      call({ id: 'held', created_at: minutesAgo(HELD_GRACE_MINUTES + 1), live_decision: decision() }),
+      call({ id: 'booked-by-agent', created_at: minutesAgo(HELD_GRACE_MINUTES + 1), live_decision: decision({ final_action_taken: 'auto_route', blocked_reasons: [] }) }),
+      call({ id: 'no-decision', created_at: minutesAgo(HELD_GRACE_MINUTES + 1) }),
+      call({ id: 'held-too-recent', created_at: minutesAgo(HELD_GRACE_MINUTES - 1), live_decision: decision() }),
+    ]);
+    expect(misses.map((m) => [m.call.id, m.holdReason])).toEqual([['held', 'the address is not confirmed']]);
+    // A booking still clears a held call.
+    expect(missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), live_decision: decision() })], [bookedRow({ source_call_log_id: 'call-1' })])).toHaveLength(0);
+  });
+
+  // Pre-push P1s (2026-11-18): ai_validation is an audit rebuild that can differ from the live
+  // decision (an address recovery routes on the recovered address, the rebuild on the original),
+  // and a reprocess keeps the previous pass's decision until it writes its own.
+  test('the live decision counts only when the call\'s last pass wrote it', () => {
+    const claimed = call({ processing_started_at: minutesAgo(40) });
+    const current = decision({ created_at: minutesAgo(20) });
+    expect(liveDecision({ ...claimed, live_decision: current })).toEqual(current);
+    // node-pg returns row_to_json as an object; JSON text reads the same.
+    expect(liveDecision({ ...claimed, live_decision: JSON.stringify(current) })).toEqual(current);
+    // A decision from before the last claim belongs to an earlier pass: a reprocess has not decided yet.
+    expect(liveDecision({ ...claimed, processing_started_at: minutesAgo(15), live_decision: current })).toBeNull();
+    expect(liveDecision({ ...claimed, live_decision: null })).toBeNull();
+    expect(liveDecision({ ...claimed, live_decision: decision({ created_at: 'not a time' }) })).toBeNull();
+  });
+
+  test('a decision holds when routing blocked it or a later check skipped it; a booked one does not', () => {
+    expect(decisionHoldReason(decision())).toBe('the address is not confirmed');
+    expect(decisionHoldReason(decision({ final_action_taken: 'auto_route_skipped', blocked_reasons: [] }))).toBe(HOLD_REASON_FALLBACK);
+    expect(decisionHoldReason(decision({ final_action_taken: 'auto_route', blocked_reasons: [] }))).toBeNull();
+    expect(decisionHoldReason(null)).toBeNull();
+    // blocked_reasons stored as JSON text reads the same; unreadable text still holds, with no named reason.
+    expect(decisionHoldReason(decision({ blocked_reasons: JSON.stringify(['caller_not_authorized']) }))).toBe('the caller is not the account holder');
+    expect(decisionHoldReason(decision({ blocked_reasons: '{not json' }))).toBe(HOLD_REASON_FALLBACK);
+  });
+
+  test('the reason is the routing reason first, then the first blocking flag in HOLD_REASONS order, else the fallback', () => {
+    const reasonOf = (reasons) => decisionHoldReason(decision({ blocked_reasons: reasons }));
+    expect(reasonOf(['address_unverified', 'commercial_requires_quote'])).toBe('a commercial job needs a quote first');
+    expect(reasonOf(['address_unverifiable', 'address_unverified'])).toBe('the address is not confirmed');
+    expect(reasonOf(['off_hour_start'])).toBe('the start time is not on the hour');
+    expect(reasonOf(['address_not_validated'])).toBe('the address is not confirmed');
+    expect(reasonOf(['low_confidence'])).toBe('the call details are unclear');
+    expect(reasonOf(['v1_only_new_address', 'address_unverified'])).toBe('the address is not the one on file');
+    expect(reasonOf(['a_flag_with_no_phrase'])).toBe(HOLD_REASON_FALLBACK);
+    expect(reasonOf([])).toBe(HOLD_REASON_FALLBACK);
+  });
+
+  // Pre-push P1s (2026-11-18): the processor writes the live decision before its hard-veto exit
+  // (spam, out of area, an opt-out), and a booking a later check held stores 'auto_route_skipped'.
+  test('a hard-veto exit and a booking held after approval ring fast too', () => {
+    expect(heldMiss({}, decision({ blocked_reasons: ['out_of_service_area'] })).holdReason).toBe('the address is outside our area');
+    expect(heldMiss({}, decision({ blocked_reasons: ['do_not_contact_requested'] })).holdReason).toBe('the caller asked not to be contacted');
+    expect(heldMiss({}, decision({ final_action_taken: 'auto_route_skipped', blocked_reasons: [] })).holdReason).toBe(HOLD_REASON_FALLBACK);
+    // A 'spam' row keeps the plain wait.
+    expect(missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), processing_status: 'spam', live_decision: decision({ blocked_reasons: ['spam_or_wrong_number'] }) })])).toHaveLength(0);
+  });
+
+  // Pre-push P1s (2026-11-18): an 'extraction_failed' pass can still be retried and book the visit.
+  test('a hold needs a finished pass; a pass that can still be retried waits GRACE_MINUTES and names no reason', () => {
+    for (const status of ['extraction_failed', 'voicemail']) {
+      expect([status, missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), processing_status: status, live_decision: decision() })])]).toEqual([status, []]);
+      expect([status, missesOf([call({ processing_status: status, live_decision: decision() })]).map((m) => m.holdReason)]).toEqual([status, [null]]);
+    }
+  });
+
+  // Pre-push P1 (2026-11-18): the /voice webhook inserts the row when the call begins, so a
+  // long call would ring while the office is still booking it right after hanging up.
+  test('a held call waits from the end of the call, not from its start', () => {
+    const ended = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
+    const calls = [
+      // Inserted at pickup, 12 minutes long: ended 3 minutes ago, still waiting.
+      call({ id: 'long-call', created_at: minutesAgo(15), duration_seconds: 12 * 60 }),
+      // The same call 8 minutes later: ended 11 minutes ago.
+      call({ id: 'long-call-done', created_at: minutesAgo(23), duration_seconds: 12 * 60 }),
+      // A post-call row: created_at is already after the call.
+      call({ id: 'post-call-row', created_at: minutesAgo(11), duration_seconds: 12 * 60, metadata: { source: 'status_callback' } }),
+      // Twilio's end stamp wins over created_at + length: ended 5 minutes ago.
+      call({ id: 'end-stamped', created_at: minutesAgo(30), duration_seconds: 60, metadata: { ended_at: ended(5) } }),
+      // Pre-push P1 (2026-11-18): an outbound bridge's customer-leg receipt wins over the row's
+      // length, which can count the staff leg's ringing: the customer hung up 5, then 11, minutes ago.
+      call({ id: 'bridge-leg', created_at: minutesAgo(30), duration_seconds: 60, metadata: { customer_leg: { ended_at: ended(5) } } }),
+      call({ id: 'bridge-leg-done', created_at: minutesAgo(30), duration_seconds: 60, metadata: { customer_leg: { ended_at: ended(11) } } }),
+      // Pre-push P1 (2026-11-18): an admin bridge with no end receipt ends at bridged_at + length,
+      // not created_at + length (created_at can precede the staff answer): 9, then 11, minutes ago.
+      call({ id: 'bridged', created_at: minutesAgo(30), bridged_at: minutesAgo(14), duration_seconds: 5 * 60 }),
+      call({ id: 'bridged-done', created_at: minutesAgo(30), bridged_at: minutesAgo(16), duration_seconds: 5 * 60 }),
+      // Pre-push P1 (2026-11-18): a row recording recovery inserted 2 minutes ago, for a call
+      // Twilio stamped as ended 30 minutes ago: the receipt wins over the late created_at.
+      call({ id: 'recovered-row', created_at: minutesAgo(2), duration_seconds: 5 * 60, metadata: { source: 'twilio_recording_status_recovered', ended_at: ended(30) } }),
+      // The same row with no receipt: its created_at is the only end it gives.
+      call({ id: 'recovered-no-receipt', created_at: minutesAgo(2), duration_seconds: 5 * 60, metadata: { source: 'twilio_recording_status_recovered' } }),
+    ];
+    const misses = missesOf(calls.map((c) => ({ ...c, live_decision: decision() })));
+    expect(misses.map((m) => m.call.id)).toEqual(['long-call-done', 'post-call-row', 'bridge-leg-done', 'bridged-done', 'recovered-row']);
+    // An unheld call keeps its wait from created_at.
+    expect(missesOf([call({ duration_seconds: 120 * 60 })])).toHaveLength(1);
+  });
+
+  // Pre-push P1s (2026-11-18): a held visit may not be one to book as agreed (a cancel request, a
+  // visit already on file), so its bell says review and asks staff to review the call first. The
+  // step names no Dispatch control (rounds 12 to 15: Done, the held row's Dismiss and the call's
+  // cards each had a state where it was the wrong one).
+  test('a held bell says review and why, and asks to check the call; an unheld miss keeps "book" and "nothing is on the calendar"', () => {
+    const text = bookItAlert(heldMiss(), false);
+    expect(text.action).toBe("review Pat Sample's Waves Assessment");
+    expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the address is not confirmed.');
+    expect(text.detail).toContain('The call agent held this visit and did not book it, because the address is not confirmed.');
+    expect(text.detail.endsWith(HELD_STEP)).toBe(true);
+    expect(text.detail).not.toContain('Book it in dispatch');
+    const cancel = bookItAlert(heldMiss({}, decision({ blocked_reasons: ['cancellation_request'] })), false);
+    expect(cancel.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the caller asked to cancel.');
+    expect(cancel.detail.endsWith(HELD_STEP)).toBe(true);
+    const [plain] = missesOf([call()]);
+    expect(bookItAlert(plain, false).action).toBe("book Pat Sample's Waves Assessment");
+    expect(bookItAlert(plain, false).why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; nothing is on the calendar.');
+    expect(bookItAlert(plain, false).detail).toContain('Book it in dispatch or call back to reset expectations.');
+  });
+
+  // Pre-push P1s (2026-11-18): a bell that names an opt-out or a missing number must not ask
+  // staff to call back.
+  test('a hold that limits contact names it first, and the held step never asks for a call', () => {
+    for (const [flag, reason] of [['do_not_contact_requested', 'the caller asked not to be contacted'], ['caller_phone_missing', 'the call has no callback number']]) {
+      const text = bookItAlert(heldMiss({}, decision({ blocked_reasons: ['address_unverified', flag] })), false);
+      expect(text.why).toBe(`Confirmed Sat Aug 1 at 12:00 PM on a call; held because ${reason}.`);
+      expect(text.detail.endsWith(HELD_STEP)).toBe(true);
+      expect(text.detail).not.toContain('call back');
+    }
+    // The routing-reason form of the opt-out reads the same as the flag.
+    expect(decisionHoldReason(decision({ blocked_reasons: ['do_not_contact'] }))).toBe('the caller asked not to be contacted');
+  });
+
+  // Pre-push P1s (2026-11-18): a held call's visit on another day can be on a namesake's
+  // account, or the caller can have opted out, so its date check asks staff to check the call
+  // before they move the visit or contact anyone. An unheld date check keeps main's text.
+  test('a held call\'s date check says why and asks to check the call first', () => {
+    const slot = { dateET: '2026-08-01', minutes: 12 * 60 };
+    const mismatch = { visit_id: 'visit-9', date: '2026-08-03', time: '09:00' };
+    const check = (holdReason) => dateCheckAlert({ name: 'Pat Sample', slot, call: call(), mismatch, service: 'Waves Assessment', holdReason });
+    const held = check('the caller asked not to be contacted');
+    expect(held.why).toBe('Booked Mon Aug 3 at 9:00 AM; the call agreed Sat Aug 1 at 12:00 PM.');
+    expect(held.detail).toMatch(/The visit on the calendar is Mon Aug 3 at 9:00 AM\. The call agent held this visit and did not book it, because the caller asked not to be contacted\. Review the call before you move the visit or contact the caller\.$/);
+    expect(held.detail).not.toContain('confirm the new day with the customer');
+    expect(check(null).detail).toMatch(/The visit on the calendar is Mon Aug 3 at 9:00 AM\. Move it to the agreed day, or confirm the new day with the customer, then tap Done\.$/);
+  });
+
+  test('every blocking triage flag has a phrase', () => {
+    const { BLOCKING_TRIAGE_FLAGS } = require('../services/call-triage-flags');
+    const phrased = new Set(HOLD_REASONS.map(([flag]) => flag));
+    expect([...BLOCKING_TRIAGE_FLAGS].filter((flag) => !phrased.has(flag))).toEqual([]);
+  });
+
+  test('every reason fits the why rules behind the longest prefix and slot', () => {
+    const slot = { dateET: '2026-09-30', minutes: 12 * 60, name: 'Pat Sample', service: 'Waves Assessment' };
+    for (const holdReason of [...HOLD_REASONS.map(([, phrase]) => phrase), ...HOLD_REASONS_BY_ROUTING.values(), HOLD_REASON_FALLBACK]) {
+      for (const repeat of [false, true]) {
+        const text = bookItAlert({ call: call(), slot, holdReason }, repeat);
+        expect(() => composeAdminAlert({
+          area: 'Schedule', action: text.action, why: text.why, severity: 'needs-you', link: text.link,
+          subject: { type: 'call', id: 'call-1' }, doneWhen: 'visit_booked', who: 'person',
+        })).not.toThrow();
+      }
+    }
   });
 });
 

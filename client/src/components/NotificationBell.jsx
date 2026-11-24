@@ -113,8 +113,8 @@ function digestKindChip(n) {
   return null;
 }
 
-// GATE_ALERT_BELL_ORDER: the server names a row's Area (`areaChip`, one of the nine Areas) only while the list is
-// ranked. One small neutral chip, so it never competes with the Needs you / Broken chip beside it.
+// The server names a row's Area (`areaChip`, one of the nine Areas) only on the admin list, which it ranks.
+// One small neutral chip, so it never competes with the Needs you / Broken chip beside it.
 function areaChipLabel(n) {
   return n && typeof n.areaChip === 'string' && n.areaChip ? n.areaChip : null;
 }
@@ -384,7 +384,7 @@ function FullText({ text, color, marginTop }) {
   );
 }
 
-// The customer an admin row is about (GATE_ALERT_EXPLAINER, or GATE_ALERT_CUSTOMER_LINE alone; the server reads it from the
+// The customer an admin row is about (the server reads it from the
 // record behind the alert). Only `explainable` turns on "What to do", so a row with a customer and no `explainable` keeps
 // "Show full text".
 // Shown under the title unless the title already carries the whole name.
@@ -837,7 +837,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
       // New alerts can shift offset pages between requests. Keep each row
       // once while preserving the read state already confirmed in this panel.
       if (d.restart === true) {
-        // GATE_ALERT_BELL_ORDER flipped under this panel: the cursor belonged to the other order, so the server served
+        // The cursor belonged to the other order (a panel left open across a deploy), so the server served
         // page 1 of the current one. Replace the list (an append would leave rows the panel never got) and take the
         // layout from the answer.
         setNotifications(d.notifications || []);

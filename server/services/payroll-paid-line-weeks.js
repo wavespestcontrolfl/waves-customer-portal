@@ -11,6 +11,9 @@
  *
  * Not behind the gate: a paid line keeps its weeks closed if the gate is turned off
  * later. No requires, so time tracking does not load the pay run code.
+ *
+ * The same guards ask finalRunClosesWeeks: no shift hours enter or change in a week
+ * that has a finalized pay run, also for a W-2 employee who has no check on it.
  */
 
 /**
@@ -34,4 +37,23 @@ async function paidLineCoveringWeeks(trx, technicianId, weekStarts) {
     .first('id');
 }
 
-module.exports = { paidLineCoveringWeeks };
+/**
+ * True when a finalized pay run exists for any of the weeks (Monday dates) and the
+ * technician is a W-2 employee. One pay run pays a week, so W-2 hours that enter the
+ * week after its run is final can never be paid: the run is voided first. The
+ * technician needs no check on the run. A run can close a week with no paycheck at
+ * all (time off a time-off bank did not pay), or with none for this technician. A
+ * contractor's hours are not paid by a pay run and stay open. Time tracking asks for
+ * the week the result of a change is a shift in; the timesheet unlock asks for its week.
+ */
+async function finalRunClosesWeeks(trx, technicianId, weekStarts) {
+  if (!weekStarts.length) return false;
+  const found = await trx('payroll_runs as r')
+    .where('r.status', 'finalized')
+    .whereIn('r.week_start', weekStarts)
+    .whereRaw('EXISTS (SELECT 1 FROM technicians AS t WHERE t.id = ? AND t.employment_type = ?)', [technicianId, 'w2'])
+    .first('r.id');
+  return Boolean(found);
+}
+
+module.exports = { paidLineCoveringWeeks, finalRunClosesWeeks };

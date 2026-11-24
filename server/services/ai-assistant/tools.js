@@ -15,7 +15,6 @@ const { listPortalServiceHistory } = require('../portal-service-history');
 const portalOpen = require('./portal-open');
 const threadLane = require('./thread-lane');
 const { DAY_ONLY_ARRIVAL_NOTE, loadDayOnlyCheck } = require('../day-only-ai-context');
-const { dayOnlyPromiseOn } = require('../time-promise');
 const runQuery = (query, turn, stage) => turn ? turn.query(query, stage) : query;
 
 // Tool definitions in Anthropic format
@@ -305,7 +304,6 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
 // closing query then rejects. So a non-cancellation failure is caught HERE, outside the transaction, and answers day-only
 // for every row (the same wording loadDayOnlyCheck gives a failed read). A cancellation still propagates.
 async function dayOnlyCheck(rows, turn) {
-  if (!dayOnlyPromiseOn()) return () => false; // gate off: no transaction, no read
   if (!turn) return loadDayOnlyCheck(db, rows);
   try {
     return await turn.transaction('day-only promise', (database) => loadDayOnlyCheck(database, rows));
@@ -328,7 +326,7 @@ async function getUpcomingServices(customerId, turn) {
     .limit(5);
   const services = await runQuery(query, turn, 'upcoming services');
   // GATE_DAY_ONLY_PROMISE (part D): one bulk read; a visit whose customer was told only the day gets the date and a plain
-  // instruction instead of an hour. Gate off: no read, today's result.
+  // instruction instead of an hour.
   const isDayOnly = await dayOnlyCheck(services, turn);
 
   return {
@@ -615,7 +613,7 @@ async function bookedReserviceMove(customerId, booked, database = db) {
   // The reschedule route's own token format: any other token is a 404 there.
   const token = /^\/reschedule\/([^/]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
   const { TOKEN_RE: RESCHEDULE_TOKEN_RE } = require('../../routes/reschedule-public')._internals;
-  // Without a readable visit id the gate-on answer is the day only (nothing to judge the hour by).
+  // Without a readable visit id the answer is the day only (nothing to judge the hour by).
   if (token && !RESCHEDULE_TOKEN_RE.test(token)) return { movable: false, visit: null };
   // The button is optional: a failed lookup keeps the booked visit's facts.
   const row = token && await database('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id');
@@ -626,7 +624,7 @@ async function bookedReserviceMove(customerId, booked, database = db) {
 async function bookedReserviceResult(customerId, line, booked, turn) {
   const read = (database) => bookedReserviceMove(customerId, booked, database);
   const { movable, visit } = turn ? await turn.transaction('booked re-service move', read) : await read();
-  const dayOnly = visit ? (await dayOnlyCheck([visit], turn))(visit) : dayOnlyPromiseOn();
+  const dayOnly = visit ? (await dayOnlyCheck([visit], turn))(visit) : true;
   return {
     result: bookedReserviceFacts(line, booked, movable, dayOnly),
     action: movable ? {
@@ -717,7 +715,7 @@ async function offerReservice(customerId, input, actions, { secondaryProperty = 
     } catch (err) {
       if (isToolCancellation(err)) throw err;
       logger.warn(`[ai-assistant] booked re-service move read failed, no button: ${err.message}`);
-      decision = { result: bookedReserviceFacts(line, decision.booked, false, dayOnlyPromiseOn()) };
+      decision = { result: bookedReserviceFacts(line, decision.booked, false, true) };
     }
   }
   if (decision.action) {

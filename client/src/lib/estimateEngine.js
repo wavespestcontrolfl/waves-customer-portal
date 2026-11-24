@@ -733,6 +733,38 @@ export function rodentBaitWaveguardFlags() {
   return { tierQualifier: RODENT_BAIT.tierQualifier, excludeFromPctDiscount: RODENT_BAIT.excludeFromPctDiscount };
 }
 
+// True when a service picked on the estimate form CAN read Tree density. The
+// estimate tool shows the Tree density box only then; the form value itself
+// always flows unchanged (hidden, never cleared).
+//
+// Service-level on purpose. Whether a picked service reads the density for
+// THIS estimate also depends on other inputs (a tree count, a measured lawn
+// area, the exterior flea area, a commercial property). The form does not
+// mirror those engine rules: one missed case would hide a control that
+// changes a price. So the box may show where it changes nothing, as it did on
+// every estimate before, and it hides only when no picked service has any
+// read of it. Add a service's flag here when its pricer starts to read
+// tree density.
+//
+// Readers (server pricing-engine): Tree & Shrub (the no-count tree estimate),
+// recurring mosquito (tree pressure, monthly recommendation), the lawn family
+// priced from lawn area (the fallback lawn estimate's complexity score and
+// the "heavy tree canopy" turf review; commercial lawn too), and the flea
+// exterior spray (its tree-density adjustment). Non-readers: recurring and
+// one-time pest (owner directive 2026-07-30), one-time mosquito, misting,
+// palm injection, plugging, termite, rodent and the other specialty services.
+export function pickedServiceCanReadTreeDensity(form = {}) {
+  return !!(
+    form.svcTs ||
+    form.svcMosquito ||
+    form.svcLawn ||
+    form.svcOnetimeLawn ||
+    form.svcDethatch ||
+    form.svcTopdress ||
+    form.svcFleaExterior
+  );
+}
+
 // Estimator panel note for the rodent bait row, derived from the EMITTED
 // result (row-level tier/discount posture + whether the setup line fired)
 // and the live setup fee — never the migration-default literals (codex
@@ -1382,28 +1414,28 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     warning: 'Value fipronil non-repellent pre-slab treatment. Confirm label rate and product configuration.',
   },
   bifen_it: {
-    label: 'Talak 7.9 F - Bifenthrin',
-    shortLabel: 'Talak 7.9 F',
+    label: 'Crosscheck Plus - Bifenthrin',
+    shortLabel: 'Crosscheck Plus',
     activeIngredient: 'bifenthrin',
     chemistryType: 'repellent_pyrethroid',
     positioning: 'standard_repellent',
-    containerCost: 41.57,
-    containerOz: 96,
+    containerCost: 30.90,
+    containerOz: 128,
     productOzPer10SqFt: 1.0,
     marginDivisor: 0.5294,
-    warning: 'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.',
+    warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Confirm the Crosscheck Plus label supports pre-construction subterranean termite treatment.',
   },
   talstar_p: {
-    label: 'Talak 7.9 F - Bifenthrin',
-    shortLabel: 'Talak 7.9 F',
+    label: 'Crosscheck Plus - Bifenthrin',
+    shortLabel: 'Crosscheck Plus',
     activeIngredient: 'bifenthrin',
     chemistryType: 'repellent_pyrethroid',
     positioning: 'standard_repellent',
-    containerCost: 41.57,
-    containerOz: 96,
+    containerCost: 30.90,
+    containerOz: 128,
     productOzPer10SqFt: 1.0,
     marginDivisor: 0.5294,
-    warning: 'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.',
+    warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Confirm the Crosscheck Plus label supports pre-construction subterranean termite treatment.',
   },
 };
 
@@ -1473,32 +1505,35 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
     warning: 'Value fipronil non-repellent trench treatment. Good default option for standard trenching when a fipronil barrier is desired.',
   },
   bifen_it: {
-    label: 'Talak 7.9 F - Bifenthrin',
-    shortLabel: 'Talak 7.9 F',
+    label: 'Crosscheck Plus - Bifenthrin',
+    shortLabel: 'Crosscheck Plus',
     activeIngredient: 'bifenthrin',
     chemistryType: 'repellent_pyrethroid',
     positioning: 'standard_repellent',
-    containerCost: 41.57,
-    containerOz: 96,
+    containerCost: 30.90,
+    containerOz: 128,
     standardOzPerGal: 1.0,
     highOzPerGal: 2.0,
-    warning: 'Bifenthrin repellent barrier (Atticus Talak 7.9 F). Do not attach long repair-and-retreat warranty without admin approval.',
+    labelHalfVolumeOzPerGal: 2.0, // mirrors SPECIALTY.trenching: the label's 0.12% (2 fl oz a gallon) only at half the 0.06% volume
+    warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Do not attach long repair-and-retreat warranty without admin approval.',
   },
   talstar_p: {
-    label: 'Talak 7.9 F - Bifenthrin',
-    shortLabel: 'Talak 7.9 F',
+    label: 'Crosscheck Plus - Bifenthrin',
+    shortLabel: 'Crosscheck Plus',
     activeIngredient: 'bifenthrin',
     chemistryType: 'repellent_pyrethroid',
     positioning: 'standard_repellent',
-    containerCost: 41.57,
-    containerOz: 96,
+    containerCost: 30.90,
+    containerOz: 128,
     standardOzPerGal: 1.0,
     highOzPerGal: 2.0,
-    warning: 'Bifenthrin repellent barrier (Atticus Talak 7.9 F). Do not attach long repair-and-retreat warranty without admin approval.',
+    labelHalfVolumeOzPerGal: 2.0, // mirrors SPECIALTY.trenching: the label's 0.12% (2 fl oz a gallon) only at half the 0.06% volume
+    warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Do not attach long repair-and-retreat warranty without admin approval.',
   },
 };
 
-function normalizeTrenchingProductKey(value) {
+// fallback: what an unrecognized value resolves to (the engine's default product; null tells a caller the value is unknown).
+export function normalizeTrenchingProductKey(value, { fallback = 'taurus_sc' } = {}) {
   const raw = String(value || 'taurus_sc')
     .trim()
     .toLowerCase()
@@ -1521,14 +1556,30 @@ function normalizeTrenchingProductKey(value) {
     talstar_professional: 'talstar_p',
     talak: 'talstar_p',
     atticus_talak: 'talstar_p',
+    crosscheck: 'talstar_p',
+    crosscheck_plus: 'talstar_p',
+    lesco_crosscheck_plus: 'talstar_p',
+    cross_check: 'talstar_p',
+    cross_check_plus: 'talstar_p',
+    lesco_cross_check_plus: 'talstar_p',
   };
-  return aliases[raw] || 'taurus_sc';
+  // Own entries only: an inherited key such as "constructor" is no alias (pre-push audit at the thirteenth push).
+  return Object.hasOwn(aliases, raw) ? aliases[raw] : fallback;
 }
 
-function normalizeTrenchingRate(value) {
-  const raw = String(value || 'standard').trim().toLowerCase().replace(/[%\s.-]+/g, '_').replace(/_+/g, '_');
-  if (['high', 'high_rate', '0_125', '0_12', 'problem_soil', 'active_subterranean', 'formosan', 'asian_subterranean'].includes(raw)) return 'high';
-  return 'standard';
+// The server's rate aliases and token rules (normalizeTrenchingApplicationRate in service-pricing.js), so "0.125%" is the high rate
+// here as there. The estimate tool canonicalizes a saved alias with it, so the picker, the label box and the server agree (pre-push
+// audit 31).
+const TRENCHING_RATE_ALIASES = {
+  standard: 'standard', regular: 'standard', '0_06': 'standard', standard_0_06: 'standard',
+  high: 'high', high_rate: 'high', '0_125': 'high', '0_12': 'high', problem_soil: 'high',
+  active_subterranean: 'high', formosan: 'high', asian_subterranean: 'high',
+};
+export function normalizeTrenchingRate(value, { fallback = 'standard' } = {}) {
+  const raw = String(value || 'standard').trim().toLowerCase().replace(/[\s-]+/g, '_')
+    .replace(/%/g, '').replace(/\./g, '_').replace(/_+/g, '_');
+  // Own entries only: an inherited key such as "constructor" is no alias (pre-push audit at the thirteenth push).
+  return Object.hasOwn(TRENCHING_RATE_ALIASES, raw) ? TRENCHING_RATE_ALIASES[raw] : fallback;
 }
 
 function normalizeTrenchingWarranty(value, product) {
@@ -1549,7 +1600,7 @@ function normalizeTrenchingWarranty(value, product) {
   return aliases[raw] || (product.chemistryType === 'repellent_pyrethroid' ? 'none' : 'one_year_retreat');
 }
 
-function normalizePreSlabProductKey(value) {
+export function normalizePreSlabProductKey(value, { fallback = 'termidor_sc' } = {}) {
   const raw = String(value || 'termidor_sc')
     .trim()
     .toLowerCase()
@@ -1570,8 +1621,15 @@ function normalizePreSlabProductKey(value) {
     talstar_professional: 'talstar_p',
     talak: 'talstar_p',
     atticus_talak: 'talstar_p',
+    crosscheck: 'talstar_p',
+    crosscheck_plus: 'talstar_p',
+    lesco_crosscheck_plus: 'talstar_p',
+    cross_check: 'talstar_p',
+    cross_check_plus: 'talstar_p',
+    lesco_cross_check_plus: 'talstar_p',
   };
-  return aliases[raw] || 'termidor_sc';
+  // Own entries only: an inherited key such as "constructor" is no alias (pre-push audit at the thirteenth push).
+  return Object.hasOwn(aliases, raw) ? aliases[raw] : fallback;
 }
 
 function normalizePreSlabVolume(value) {
@@ -3135,14 +3193,22 @@ export function calculateEstimate(inputs) {
       const applicationRate = normalizeTrenchingRate(trenchingApplicationRate);
       const depth = toPositiveNumber(trenchingDepthFt) || 0.5;
       const concretePad = 0.20;
-      const dirtFinishedGallons = dl * 0.4 * depth;
-      const concreteFinishedGallons = cl * 0.4 * depth * (1 + concretePad);
+      const labeledDirtGallons = dl * 0.4 * depth;
+      const labeledConcreteGallons = cl * 0.4 * depth * (1 + concretePad);
+      // Mirrors server priceTrenching: a label that allows a stronger dilution only at a reduced volume (the bifenthrin
+      // bottles) charts one adjustment, its 0.12% dilution (labelHalfVolumeOzPerGal) at half the volume; any other dilution
+      // keeps the full volume. The included chemistry stays the labeled volume.
+      const labelHalfVolume = applicationRate === 'high' && product.labelHalfVolumeOzPerGal > 0
+        && Math.abs(product.highOzPerGal - product.labelHalfVolumeOzPerGal) < 1e-9;
+      const volumeFactor = labelHalfVolume ? 0.5 : 1;
+      const dirtFinishedGallons = labeledDirtGallons * volumeFactor;
+      const concreteFinishedGallons = labeledConcreteGallons * volumeFactor;
       const finishedGallons = dirtFinishedGallons + concreteFinishedGallons;
       const productOzPerFinishedGallon = applicationRate === 'high' ? product.highOzPerGal : product.standardOzPerGal;
       const productOz = finishedGallons * productOzPerFinishedGallon;
       const allocatedChemicalCost = productOz * (product.containerCost / product.containerOz);
       const included = TRENCHING_TERMITICIDE_PRODUCTS.taurus_sc;
-      const includedChemicalCost = finishedGallons * included.standardOzPerGal * (included.containerCost / included.containerOz);
+      const includedChemicalCost = (labeledDirtGallons + labeledConcreteGallons) * included.standardOzPerGal * (included.containerCost / included.containerOz);
       const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);
       const productSurcharge = Math.round(chemicalPremiumCost * 1.45);
       // Depth + high-rate install premiums (mirror of server SPECIALTY.trenching:

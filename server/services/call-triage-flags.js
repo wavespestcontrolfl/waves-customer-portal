@@ -2,11 +2,12 @@ const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-cor
 const { toE164, isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { sameGmailInbox } = require('../utils/email-equivalence');
-const { isPuntaGordaLocality, isPuntaGordaZip } = require('./excluded-localities');
+const { isExcludedLocality, isExcludedZip, sharedZipNeedsCity } = require('./excluded-localities');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
 // Owner ruling 2026-09-30: DeSoto County (Arcadia) is NOT served; owner ruling
-// 2026-10-22: the city of Punta Gorda (inside Charlotte County) is NOT served
+// 2026-10-22: the city of Punta Gorda (inside Charlotte County) is NOT served, and
+// a place can be held until a second technician is hired
 // (services/excluded-localities.js). The three
 // served counties plus the south-Hillsborough towns (config/locations.js
 // SOUTH_HILLSBOROUGH_CITIES, city-keyed, not county-keyed) are the footprint.
@@ -583,10 +584,13 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     }
     if (addr.county && !isInServiceAreaCounty(addr.county)) {
       flags.push('out_of_service_area');
-    } else if (isPuntaGordaLocality(addr.city) || isPuntaGordaZip(addr.postal_code)) {
-      // Punta Gorda is inside served Charlotte County but is not served
-      // (owner ruling 2026-10-22), so the county check alone passes it.
+    } else if (isExcludedLocality(addr.city) || isExcludedZip(addr.postal_code)) {
+      // Punta Gorda (owner ruling 2026-10-22) and any place held until a second technician is hired
+      // (excluded-localities.js; none is held now) sit inside served counties, so the county check alone passes them.
       flags.push('out_of_service_area');
+    } else if (sharedZipNeedsCity(addr.city, addr.postal_code)) {
+      // A ZIP Punta Gorda shares with a served town, with no city: the area is unknown, so hold the address for review.
+      flags.push('address_unverified');
     }
     // Validation was attempted with a real address but the API was unreachable.
     // Don't silently auto-route an address we couldn't verify — hold for review.
@@ -3252,8 +3256,7 @@ function applyEmailDisagreementHold(extracted, dictationEmailPayload) {
 }
 
 /**
- * Spelled letters settle a V1/V2 email disagreement (owner 2026-11-04, "A",
- * GATE_CALL_SPELLED_EMAIL_SETTLES). The hold above exists because neither
+ * Spelled letters settle a V1/V2 email disagreement (owner 2026-11-04, "A"). The hold above exists because neither
  * extractor's guess is trusted over the other. The transcript dictation
  * decoder is a third reading of the letters the caller spelled: when it heard
  * exactly ONE spelling, its own adopt (past its ownership gate) already put
@@ -3626,6 +3629,8 @@ module.exports = {
   sameHouseNumberStreet,
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,
+  // Shared with call-phone-yes-word.js: a price the caller said no to is no yes.
+  callerDeclinedThePrice,
   isAuthorizedWdoArrangerBooking,
   isAuthorizedFamilyMemberBooking,
   isWdoInspectionRequest,
@@ -3639,6 +3644,8 @@ module.exports = {
   applyWholeStructureUnitWaiver,
   applyBusinessWholeBuildingUnitWaiver,
   orientTranscriptForOutbound,
+  // Shared with call-phone-yes-word.js: an outbound call's roles are known only when staff introduce themselves.
+  STAFF_INTRO_RE,
   BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
   waiverCarriesToCandidate,
   reconstructWaivedAddressValidation,

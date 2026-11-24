@@ -22,6 +22,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { DISPOSITIONS, dispositionGroup, dispositionFromDeclineReason, expiredDispositionFor } = require('./estimate-disposition');
 const { inferEstimateServiceLines, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
+const {
+  SELF_SERVE_ESTIMATE_SOURCES, isUndeliveredSelfServe, countableViewAtSql, firstDeliveredAtMs,
+} = require('./self-serve-estimates');
 
 const RESOLVED_STATUSES = ['accepted', 'declined', 'expired'];
 
@@ -201,9 +204,16 @@ function sentCohorts(rows, { days, nowMs }) {
     // signals BEFORE any real delivery — for that source only a view at or
     // after the delivery anchor counts as an opened send (GH codex P2).
     // plan_restart shares the publish-without-delivery shape (C4): its
-    // self-serve redirect stamps view signals at mint too.
-    const isCtaMint = ['service_report_cta', 'plan_restart'].includes(String(row.source || ''));
-    const viewCandidates = [ms(row.viewed_at), ms(row.last_viewed_at)]
+    // self-serve redirect stamps view signals at mint too. So does plan_start
+    // (portal pricing card, GATE_PORTAL_PLAN_START). countable_view_at
+    // (countableViewAtSql) is the earliest open since delivery in the open log
+    // or the row, so a later reopen never stands in for their first view
+    // (codex pre-push P1). It is their only view stamp: SQL bounds it by the
+    // delivery at full precision, while a raw viewed_at or last_viewed_at
+    // can sit in the delivery's own millisecond (codex pre-push P1). Every
+    // other row keeps main's view stamps.
+    const isCtaMint = SELF_SERVE_ESTIMATE_SOURCES.includes(String(row.source || ''));
+    const viewCandidates = (isCtaMint ? [ms(row.countable_view_at)] : [ms(row.viewed_at), ms(row.last_viewed_at)])
       .filter((ts) => ts != null && (!isCtaMint || ts >= sentAt));
     const firstView = viewCandidates.length ? Math.min(...viewCandidates) : null;
     if (inBaseWindow) {
@@ -259,9 +269,17 @@ function sentAnchorMs(row) {
   // sendEstimateNow persists the FIRST handoff durably at
   // deliveryState.firstDeliveredAt — the one witness a resend can't move
   // (GH codex P1: an unopened resend must keep its original cohort age).
-  const firstDelivered = ms(data?.deliveryState?.firstDeliveredAt);
-  if (['service_report_cta', 'plan_restart'].includes(String(row.source || ''))) return firstDelivered;
-  const candidates = [firstDelivered, ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
+  // A self-serve mint anchors where the Intelligence Bar dates its send
+  // (self-serve-estimates.js deliveredAtSql, codex pre-push P1): its first
+  // delivery read by the shared strict rule, sent_at when the stamp is
+  // there but unreadable, none while undelivered.
+  if (SELF_SERVE_ESTIMATE_SOURCES.includes(String(row.source || ''))) {
+    return isUndeliveredSelfServe(row.source, data) ? null : (firstDeliveredAtMs(data) ?? ms(row.sent_at));
+  }
+  // Every other source keeps main's lenient read of the stamp (codex
+  // pre-push P1): the strict rule exists for the self-serve report anchor
+  // only, and must not move a staff quote to another cohort.
+  const candidates = [ms(data?.deliveryState?.firstDeliveredAt), ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
     .filter((ts) => ts != null);
   return candidates.length ? Math.min(...candidates) : null;
 }
@@ -340,7 +358,7 @@ async function winLossSlices({ days = 90 } = {}) {
       .orWhere('accepted_at', '>=', cohortWindowStart)
       .orWhere('updated_at', '>=', cohortWindowStart)
       .orWhere('created_at', '>=', cohortWindowStart))
-    .select(...SLICE_COLUMNS);
+    .select(...SLICE_COLUMNS, db.raw(`${countableViewAtSql('estimates')} AS countable_view_at`));
 
   const totals = emptyCell();
   const byFlagPresence = {

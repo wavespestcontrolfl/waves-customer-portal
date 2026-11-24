@@ -15,7 +15,7 @@ const {
 } = require('../constants/staff-time');
 const { PAYROLL_SCALE, payrollUnits } = require('../utils/payroll-units');
 const { lockPayrollMutationsShared } = require('./payroll-lock');
-const { paidLineCoveringWeeks } = require('./payroll-paid-line-weeks');
+const { paidLineCoveringWeeks, finalRunClosesWeeks } = require('./payroll-paid-line-weeks');
 const { unpaidMealUnits } = require('../utils/unpaid-meal');
 const { autoLunchLive, shiftCloseReviewLive } = require('../config/feature-gates');
 const { recordAuditEvent } = require('./audit-log');
@@ -619,7 +619,7 @@ async function adminEditEntry(entryId, {
     await assertEntryMutable(trx, entry, 'edit', [
       staffWorkDate(entry.clock_in),
       requestedWorkDate,
-    ]);
+    ], (entry_type || entry.entry_type) === 'shift' ? requestedWorkDate : null);
     // Optimistic version check (codex P2 #3152 round 22): an automated
     // caller (the time-on-site linked-timer sync) states the updated_at it
     // observed — if a payroll admin edited the entry between that snapshot
@@ -802,13 +802,17 @@ async function adminAddEntry({
 
   const created = await db.transaction(async (trx) => {
     await lockStaffWeeks(trx, technician_id, [staffWeekStartForWorkDate(workDate)]);
+    // The payroll lock comes before the technician row. A finalize holds that lock and then locks
+    // technician rows (a pay rate step that is due, a time-off bank), so the other order can deadlock.
+    // assertEntryMutable takes it again, which changes nothing.
+    await lockPayrollMutationsShared(trx);
     await lockTechnicianForAddedShift(trx, technician_id);
     await assertEntryMutable(trx, {
       technician_id,
       clock_in: interval.clockIn,
       status: 'completed',
       approval_status: 'pending',
-    }, 'add', [workDate]);
+    }, 'add', [workDate], workDate);
     await assertNoShiftOverlap(trx, technician_id, interval.clockIn, interval.clockOut);
 
     const now = new Date();
@@ -918,7 +922,9 @@ function assertEntryStillInLockedWeek(entry, technicianId, weekStart) {
   }
 }
 
-async function assertEntryMutable(trx, entry, action, affectedWorkDates) {
+// `shiftWorkDate` is the work date the result of the change is a shift on (a new shift, a shift an edit
+// keeps or moves there, an entry an edit turns into a shift), or null (a void, an entry that is not a shift).
+async function assertEntryMutable(trx, entry, action, affectedWorkDates, shiftWorkDate = null) {
   if (!entry) throw staffTimeHttpError(404, 'Entry not found.');
   if (entry.status === 'active') {
     throw staffTimeHttpError(409, `End or clock out the active timer before ${action}ing it.`);
@@ -935,7 +941,8 @@ async function assertEntryMutable(trx, entry, action, affectedWorkDates) {
   // each other (edits do not block one another), so hours cannot move into a week
   // while it is being paid. Lock order: staff-week locks and the entry row (the
   // callers), then this lock, then the summary rows. Finalize takes this lock and
-  // then weekly rows only.
+  // then weekly rows and technician rows, so a caller that locks a technician row
+  // (adminAddEntry) takes this lock before that row.
   await lockPayrollMutationsShared(trx);
 
   const workDates = [...new Set(
@@ -966,6 +973,16 @@ async function assertEntryMutable(trx, entry, action, affectedWorkDates) {
   // when the week had no check of its own. Not behind the gate, like the check above.
   if (await paidLineCoveringWeeks(trx, entry.technician_id, weekStarts)) {
     throw staffTimeHttpError(409, 'A paid pay line took its overtime from this week. Void the pay run that paid it before changing its entries.');
+  }
+  // Shift hours cannot enter or change in a week that a final pay run closed, also for a W-2 employee with
+  // no check on that run (the run paid nobody, or not this technician): one run pays a week, so they could
+  // never be paid. That is every change whose result is a shift in the week: a new shift, a shift moved in,
+  // an entry turned into a shift, a shift's times. A void, and a change of an entry that is not a shift,
+  // add no payable hours and stay open to a technician the run did not pay, as before. Not behind a gate,
+  // like the checks above.
+  const shiftWeeks = shiftWorkDate ? [staffWeekStartForWorkDate(validateWorkDate(shiftWorkDate))] : [];
+  if (await finalRunClosesWeeks(trx, entry.technician_id, shiftWeeks)) {
+    throw staffTimeHttpError(409, "This week's pay run is final. Void it before changing its entries.");
   }
   for (const weekStart of weekStarts) {
     const weekly = await trx('time_weekly_summary')

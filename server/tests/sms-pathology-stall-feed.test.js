@@ -89,7 +89,7 @@ const candidate = (id, over = {}) => ({
   inbound_message: 'when are you coming?',
   draft_response: 'Let me confirm and get back to you.',
   facts_block: 'UPCOMING SERVICES: Quarterly Pest Control, Tuesday, window 2-4 PM',
-  prompt_version: 'house_voice_v12_real_answers26_n',
+  prompt_version: 'house_voice_v12_real_answers38_n',
   ...over,
 });
 
@@ -151,7 +151,7 @@ describe('classifyStallFeed — selection and rows (gate on)', () => {
     expect(out.byCell).toEqual({ 'prompt_discipline/stalled_deferred': 1, 'facts_block_gap/knew_more': 1, 'other/other': 1 });
     expect(dbi.inserts[0]).toMatchObject({
       evidence_type: 'judgment_stall', evidence_id: 'j1', surface: 'prompt_discipline', failure_mode: 'stalled_deferred',
-      prompt_version: 'house_voice_v12_real_answers26_n', verifier_missed: false,
+      prompt_version: 'house_voice_v12_real_answers38_n', verifier_missed: false,
     });
     expect(dbi.inserts[1]).toMatchObject({ surface: 'facts_block_gap', failure_mode: 'knew_more' });
     expect(dbi.inserts[2]).toMatchObject({ surface: 'other', failure_mode: 'other' }); // unknown -> other

@@ -474,8 +474,10 @@ describe('self-booking plan sync helpers', () => {
     // the classifier with the joined catalog fields. 6 since #4207
     // (GATE_APP_PROPERTY_SCOPE): the per-property next-visit read and the
     // all-properties coverage projection run the same resolver on their
-    // own rows, so each carries the joined field as well.
-    expect((schedule.match(/catalog_billing_type: s\.catalog_billing_type,/g) || []).length).toBe(6);
+    // own rows, so each carries the joined field as well. 7 since the
+    // plan-coverage read's planFamilies (owner 2026-11-22, "fix box"): it
+    // runs the classifier on the same rows, with the joined field.
+    expect((schedule.match(/catalog_billing_type: s\.catalog_billing_type,/g) || []).length).toBe(7);
     expect(read('routes', 'admin-schedule.js')).toMatch(/catalog_billing_type: serviceRecord\?\.billing_type,/);
   });
 

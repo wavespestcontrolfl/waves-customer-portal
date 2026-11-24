@@ -80,6 +80,17 @@ test('list_commercial_proposals is found for its own searches and never pushes t
   expect(ids('customer estimate')).not.toContain('list_commercial_proposals');
 });
 
+test('get_sprinkler_timer_counts leads its own searches and stays out of unrelated customer searches', () => {
+  const scope = { role: 'admin', context: 'dashboard', fullAccess: true };
+  const ids = (query) => registry.discover({ query }, scope).result.capabilities.map((c) => c.id);
+  for (const query of ['sprinkler timer counts', 'how many customers have a Hunter X2', 'how many use the Hydrawise app']) {
+    expect(ids(query)[0]).toBe('get_sprinkler_timer_counts');
+  }
+  for (const query of ['add customer property', 'customer estimate', 'call log', 'why is a customer not getting texts']) {
+    expect(ids(query)).not.toContain('get_sprinkler_timer_counts');
+  }
+});
+
 test('get_customer_text_status leads the search the bar ran before gap #23 and stays out of unrelated customer searches', () => {
   const scope = { role: 'admin', context: 'dashboard', fullAccess: true };
   const ids = (query) => registry.discover({ query }, scope).result.capabilities.map((c) => c.id);
@@ -371,7 +382,7 @@ const SCOPE_SNAPSHOT = {
   record: [
     // reads: a customer or record selector confines the rows to one customer
     'check_customer_status', 'compute_estimate', 'draft_review_reply', 'list_agent_review_drafts', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',
-    'get_call_log', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_customer_text_status', 'get_estimate_detail',
+    'get_call_log', 'get_closeout_bill_preview', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_customer_text_status', 'get_estimate_detail',
     'get_open_commitments', 'get_service_history',
     // billing readers (W9): one customer's invoices / one invoice, by customer or invoice selector
     'get_customer_invoices', 'get_invoice_detail',
@@ -389,6 +400,8 @@ const SCOPE_SNAPSHOT = {
     // reads both); correct_invoice_address's invoice_number is resolved to invoice_id by the route before validation.
     // accept_estimate carries estimate_id + customer_id (validateRecordTarget binds the estimate to that customer).
     'repair_closeout', 'resend_receipt', 'cancel_queued_message', 'remove_saved_payment_method', 'correct_invoice_address', 'accept_estimate',
+    // send_estimate carries estimate_id (+ optional customer_id): validateRecordTarget binds the estimate to the named customer.
+    'send_estimate',
     // create_customer_link carries customer_id: the link is that customer's own.
     'create_customer_link', 'send_autopay_setup_link',
     // send_invoice carries invoice_id (or invoice_number, bound like resend_receipt's).

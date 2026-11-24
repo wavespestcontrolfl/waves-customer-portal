@@ -134,6 +134,7 @@ function followupReplayIsVerification(meta) {
 // P2) or by a token that changed since this row was queued.
 function checkRecruitingStageSupersession(meta, app, stage) {
   if (stage === 'application_received') return checkReceiptSupersession(meta, app);
+  if (stage === 'offer_sent') return checkOfferSupersession(meta, app);
   if (stage !== 'interview_invite' && stage !== 'interview_confirmation') return null;
   const status = String(app.status || '');
   if (status !== 'interview') return { eligible: false, reason: `application-${status}` };
@@ -163,6 +164,44 @@ function checkRecruitingStageSupersession(meta, app, stage) {
     return { eligible: false, reason: 'interview-token-changed' };
   }
   return null;
+}
+
+// A queued job-offer text (GATE_JOB_OFFERS): the application must still sit at 'offer', and no newer attempt of
+// this stage may be live in the ledger. The offer row itself is checked by checkRecruitingOfferOpen.
+function checkOfferSupersession(meta, app) {
+  const status = String(app.status || '');
+  if (status !== 'offer') return { eligible: false, reason: `application-${status}` };
+  const history = Array.isArray(app.comms_history) ? app.comms_history : [];
+  const mineIdx = history.findIndex((e) => e && e.id === meta.ledger_entry_id);
+  const newer = mineIdx >= 0 && history.slice(mineIdx + 1).some((e) => e && e.channel === 'sms' && e.stage === 'offer_sent'
+    && ['pending', 'handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome));
+  return newer ? { eligible: false, reason: 'superseded-by-newer-attempt' } : null;
+}
+
+// The real links of offer links pasted into another held text (an owner reply), in order, read from their offer rows
+// now (recruiting-comms pinPastedOfferLinks pinned them at queue time). The owner's words go out as written, so the
+// offer's status does not matter here; a row that is gone or whose link changed refuses the text.
+async function pastedOfferLinkTokens(refs, conn) {
+  const ids = [...new Set(refs.map((r) => r && r.job_offer_id).filter(Boolean))];
+  const rows = ids.length ? await conn('job_offers').whereIn('id', ids).select('id', 'token') : [];
+  const tokenOf = new Map(rows.map((r) => [r.id, r.token]));
+  const tokens = refs.map((r) => tokenOf.get(r && r.job_offer_id) || null);
+  const intact = tokens.every((t, i) => t && require('crypto').createHash('sha256').update(String(t)).digest('hex') === refs[i].token_hash);
+  return intact ? tokens : null;
+}
+
+// The offer a held text pins must still be the sent, unexpired one with the same link. Returns a refusal, or
+// { ok: true, token } for an offer that is still open.
+async function checkRecruitingOfferOpen(meta, conn, lock) {
+  if (!meta.job_offer_id || !meta.offer_token_hash) return { eligible: false, reason: 'offer-missing' };
+  let query = conn('job_offers').where({ id: meta.job_offer_id });
+  if (lock) query = query.forUpdate();
+  const offer = await query.first('status', 'token', 'expires_at');
+  if (!offer) return { eligible: false, reason: 'offer-missing' };
+  if (offer.status !== 'sent') return { eligible: false, reason: `offer-${offer.status}` };
+  if (require('crypto').createHash('sha256').update(String(offer.token || '')).digest('hex') !== meta.offer_token_hash) return { eligible: false, reason: 'offer-token-changed' };
+  if (offer.expires_at && Date.now() > new Date(offer.expires_at).getTime()) return { eligible: false, reason: 'offer-expired' };
+  return { ok: true, token: offer.token };
 }
 
 // A queued application receipt ("we received your application")
@@ -342,10 +381,26 @@ const REGISTRY = {
     },
   },
   estimate_follow_up_deferred: {
+    // The follow-up always queues its estimate id (estimate-follow-up.js). A row
+    // without one has nothing to check acceptance, expiry or checkout against,
+    // so it never sends: a final no in both hooks.
     async recheck(meta) {
-      if (!meta.estimate_id) return { eligible: true };
+      if (!meta.estimate_id) return { eligible: false, reason: 'estimate-missing' };
       const { deferredFollowupStillEligible } = require('../estimate-follow-up');
-      return deferredFollowupStillEligible(meta.estimate_id);
+      return deferredFollowupStillEligible(meta.estimate_id, { stage: meta.followup_stage, quotedExpiresAt: meta.quoted_expires_at });
+    },
+    // The final check again at the true provider boundary: the customer can
+    // accept or reach the card step after the recheck passed, while the
+    // executor and the pipeline do their own work. Checkout in progress is a
+    // timed wait (nextAllowedAt): the executor refunds the attempt and waits
+    // (scheduler.js TIMED_WAIT_HOLDS). An accepted, closed or
+    // opened-unopened-reminder estimate is a terminal refusal.
+    providerPreSendCheck(meta) {
+      return async () => {
+        if (!meta.estimate_id) return { ok: false, code: 'ESTIMATE_NOT_SENDABLE', reason: 'estimate-missing' };
+        const { followupTextProviderCheck } = require('../estimate-follow-up');
+        return followupTextProviderCheck(meta.estimate_id, { stage: meta.followup_stage, quotedExpiresAt: meta.quoted_expires_at });
+      };
     },
   },
 
@@ -1157,18 +1212,34 @@ const REGISTRY = {
   recruiting_comms_deferred: {
     async recheck(meta, { conn = db, lock = false } = {}) {
       try {
-        if (!require('../../config/feature-gates').isEnabled('recruitingComms')) {
+        const stage = String(meta.stage || '');
+        // The job-offer stage answers to GATE_JOB_OFFERS alone; every other recruiting stage to recruitingComms.
+        if (stage === 'offer_sent') {
+          if (!require('../../config/feature-gates').isEnabled('jobOffers')) return { eligible: false, reason: 'job-offers-gate-off' };
+        } else if (!require('../../config/feature-gates').isEnabled('recruitingComms')) {
           return { eligible: false, reason: 'recruiting-gate-off' };
         }
         const { app, refusal } = await checkRecruitingApplicationEligibility(meta, conn, lock);
         if (refusal) return refusal;
 
-        const stage = String(meta.stage || '');
         const supersessionRefusal = checkRecruitingStageSupersession(meta, app, stage);
         if (supersessionRefusal) return supersessionRefusal;
 
         const bookingRefusal = checkRecruitingBookingVersion(meta, app, stage);
         if (bookingRefusal) return bookingRefusal;
+
+        if (stage === 'offer_sent') {
+          const open = await checkRecruitingOfferOpen(meta, conn, lock);
+          if (open.eligible === false) return open;
+          // The queued row stores the text with the link token hidden; the replay sends the real link, read from the offer
+          // row now (replayBodyFor), never from the stored body.
+          return { eligible: true, offerToken: open.token };
+        }
+        if (Array.isArray(meta.offer_links) && meta.offer_links.length) {
+          const offerTokens = await pastedOfferLinkTokens(meta.offer_links, conn);
+          if (!offerTokens) return { eligible: false, reason: 'offer-link-missing' };
+          return { eligible: true, offerTokens };
+        }
 
         return { eligible: true };
       } catch (err) {
@@ -1861,7 +1932,7 @@ function slotPinFor(meta) {
 // A queued DAY-ONLY body (GATE_DAY_ONLY_PROMISE, queueHeldNoticeContacts stores promise_level 'day' with it) is
 // revalidated at replay time through the same chokepoint a bounce recovery uses (appointment-reminders.js
 // revalidateDelayedDaySend): a promise newer than the original send (the 24-hour text delivered the window) supersedes it,
-// and a gate rolled back, a 24-hour reminder switched off or a visit inside the cutoff means the day-only body is no longer
+// and a 24-hour reminder switched off or a visit inside the cutoff means the day-only body is no longer
 // true to say. This replay holds only the FROZEN body of one contact, with no template variables to re-render window copy
 // from, so both cases SUPPRESS it (logged by the scheduler as stale_replay). That is safe: the 24-hour reminder still gives
 // the window to every customer who will get it, and a customer who switched it off chose that. A read failure holds the row
@@ -2437,8 +2508,27 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
   .filter(([, entry]) => entry.durableFinalize === true && typeof entry.finalize === 'function')
   .map(([key]) => key);
 
+// The text a held message really sends. Almost every entry replays its stored body as it is. A held recruiting text
+// that carries offer links is stored with each token hidden (utils/offer-link-redaction.js), so its replay puts back
+// the tokens read from the job_offers rows by the recheck that just passed, never ones kept in a stored body: the offer
+// text's one offer (`offerToken`, every hidden link), or an owner reply's pasted links in order (`offerTokens`, one per
+// hidden link). Returns null when a hidden link has no token: the caller must not send that text.
+const { OFFER_LINK_HIDDEN } = require('../../utils/offer-link-redaction');
+const HIDDEN_OFFER_PATH = `/careers/offer/${OFFER_LINK_HIDDEN}`;
+const isOfferToken = (t) => /^[0-9a-f]{64}$/.test(String(t || ''));
+function replayBodyFor(entryPoint, recheck, storedBody) {
+  if (entryPoint !== 'recruiting_comms_deferred' || typeof storedBody !== 'string' || !storedBody.includes(HIDDEN_OFFER_PATH)) return storedBody;
+  const parts = storedBody.split(HIDDEN_OFFER_PATH);
+  const tokens = Array.isArray(recheck && recheck.offerTokens)
+    ? recheck.offerTokens
+    : parts.slice(1).map(() => recheck && recheck.offerToken);
+  if (tokens.length !== parts.length - 1 || !tokens.every(isOfferToken)) return null;
+  return parts.reduce((text, part, i) => `${text}/careers/offer/${tokens[i - 1]}${part}`);
+}
+
 module.exports = {
   invoiceStillCollectible,
+  replayBodyFor,
   recheckDeferredReplay,
   dispatchDeferredReplay,
   replaysWithoutPhone,

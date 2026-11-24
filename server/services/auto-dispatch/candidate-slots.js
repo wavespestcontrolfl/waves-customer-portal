@@ -859,10 +859,11 @@ async function movingUnitIds(service, ctx) {
 //   preferred_day, preferred_time: explicit portal preferences override
 //     route efficiency. Route may only optimize among slots on the
 //     customer's preferred day + time window.
-//   mowing_day (GATE_AUTO_DISPATCH_MOWING_DAYS='true', mowing-days.js): a
+//   mowing_day (mowing-days.js): a
 //     Lawn Care Service unit never lands on or next to a mowing day.
 //   south_day_kept (GATE_SOUTH_ZONE_DAY_FUNNEL, south-day-kept.js): a visit outside the
-//     funneled far-south zones never moves onto another DATE that holds a far-south stop.
+//     funneled far-south zones never moves onto another DATE that holds a far-south stop
+//     (with GATE_MULTI_TECH_CONFIRM, for a single visit: a stop of the slot's technician, or an unassigned one).
 //   other_tech (GATE_AUTO_DISPATCH_KEEP_TECH, ctx.keepTech): a visit that has
 //     a technician stays with that technician. An unassigned visit is not
 //     filtered.
@@ -882,8 +883,8 @@ const HARD_FILTERS = [
   ['weekend', (slot, h) => h.service.skip_weekends === true && isWeekendDay(slot.date)],
   ['preferred_day', (slot, h) => violatesPreferredDay(slot.date, h.prefs)],
   ['preferred_time', (slot, h) => violatesPreferredTime(slot.start_time, h.prefs)],
-  ['mowing_day', (slot, h) => mowingDays.blocksLive(slot.date, h.mowing)],
-  ['south_day_kept', (slot, h) => southDayKept.blocks(slot.date, h.south)],
+  ['mowing_day', (slot, h) => mowingDays.blocksDay(slot.date, h.mowing)],
+  ['south_day_kept', (slot, h) => southDayKept.blocks(slot.date, h.south, slotTechId(slot))],
   ['other_tech', (slot, h) => h.ctx.keepTech === true && !!h.service.technician_id && String(slotTechId(slot)) !== String(h.service.technician_id)],
   ['other_territory', (slot, h) => !!h.territoryTechId && !isTerritoryHolder(slotTechId(slot), h)],
 ];
@@ -1125,8 +1126,9 @@ function searchSummary(dateFrom, dateTo, slots, searchedDates) {
  * an UNASSIGNED pest, mosquito, rodent or termite visit's ZIP, or null: gate off, a visit
  * with a technician, a lawn visit, a Waves Assessment, a ZIP with no territory technician,
  * or an unreadable territory (logged). The line is the line map's own catalog-first read
- * (line-technician liveServiceLine: "Top Dress" is lawn by its catalog row, an assessment
- * has no line), never the name-only scheduling category. The place is the visit's service
+ * (line-technician liveServiceLine: "Top Dress" is lawn by its catalog row; a Waves Assessment
+ * has no line until GATE_SERVICE_LINE_MAP is live, then the line its lead asked for), never the
+ * name-only scheduling category. The place is the visit's service
  * ZIP, else its map position, else the customer row. Gates are read off the module at call
  * time: a partial feature-gates mock reads off.
  */
@@ -1138,6 +1140,7 @@ async function territoryOfVisit(service, geo) {
     const { liveServiceLine } = require('../scheduling/line-technician');
     const line = await liveServiceLine(null, {
       serviceId: service.service_id || null, serviceKey: service.service_key_snapshot || null, serviceType: service.service_type || null,
+      customerId: service.customer_id || null,
     });
     if (!territory.TERRITORY_LINES.includes(line)) return null;
     const techId = await territory.territoryTechnicianFor(null, {
@@ -1232,8 +1235,8 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     territoryTechId: unitTerritoryOf.techId,
     territoryCoverId: unitTerritoryOf.coverId,
   };
-  // GATE_AUTO_DISPATCH_MOWING_DAYS: the unit's mowing rule (shadow or true),
-  // or null — gate off, nothing is read.
+  // The unit's mowing rule (mowing-days.js), or null when no member of the
+  // unit is a Lawn Care Service visit.
   const mowing = await unitMowingRule(service, prefs, ctx);
   // Far-south days stay far-south: null (rule off, a far-south visit, zone unresolved) = no filter.
   const south = await southDayKept.ruleFor(service, ctx);
@@ -1311,7 +1314,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0,
     ...(ctx.keepTech === true ? { other_tech: 0 } : {}),
     ...(territoryTechId ? { other_territory: 0 } : {}),
-    ...(mowing && mowing.mode === 'true' ? { mowing_day: 0 } : {}),
+    ...(mowing ? { mowing_day: 0 } : {}),
     ...(south ? { south_day_kept: 0 } : {}),
   };
   // The current placement is read first: a visit in overlap also gets every
@@ -1332,12 +1335,12 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   const scored = await rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops);
   const run = { prefs, findTimeArgs, slots, flexRules, hard, geo };
   const withDry = await withDryWindowCandidates(scored, run);
-  return { current, ...withDry, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates), ...mowingField(mowing, await mowingShadowCandidates(admitted, run)) };
+  return { current, ...withDry, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates), ...mowingField(mowing) };
 }
 
 // The unit's mowing rule (mowing-days.js unitRule): the visit and, when it is
 // not a Lawn Care Service visit itself, its open group members, which move
-// with it. Gate off (no `mowing` on the prefs): null, nothing read.
+// with it. No `mowing` on the prefs: null, nothing read.
 async function unitMowingRule(service, prefs, ctx) {
   if (!prefs.mowing) return null;
   const siblings = service.visit_id && !mowingDays.isLawnCareService(service.service_type)
@@ -1345,34 +1348,9 @@ async function unitMowingRule(service, prefs, ctx) {
   return mowingDays.unitRule(prefs, [service, ...siblings]);
 }
 
-// GATE_AUTO_DISPATCH_MOWING_DAYS='shadow': the candidates mode 'true' would
-// rank, from the SAME pipeline the live list takes (the HARD filters with the
-// rule live, the ranking and its cap, the dry-window additions), under the
-// conflict 'true' would read for this visit (ctx.evalConflict, else the
-// simulated mowing_day one, mowing-days.js simulatedConflict). Codex #7472
-// r2-r4 each found a place where a partial copy of this pipeline drifted from
-// live (the legacy cap, the grouped-window checks, the dry-window slots), so
-// shadow runs the pipeline itself. Its drops go to a scratch tally; live
-// decisions never read the pool.
-async function mowingShadowCandidates(admitted, run) {
-  const { hard, geo } = run;
-  const { service, ctx, mowing } = hard;
-  if (!mowing || mowing.mode !== 'shadow') return null;
-  const evalConflict = ctx.evalConflict || mowingDays.simulatedConflict(mowing, {
-    service, dateStr: toDateStr(service.scheduled_date), conflictMoves: ctx.conflictMoves, existing: null,
-  });
-  const shadowCtx = { ...ctx, evalConflict };
-  const asTrue = { ...hard, ctx: shadowCtx, drops: { ...hard.drops, mowing_day: 0 }, mowing: { ...mowing, mode: 'true' } };
-  const candidates = admitted.map((slot) => candidateFromSlot(slot, asTrue)).filter(Boolean);
-  const ranked = await rankSurvivorsForSharedModel(service, geo, candidates, shadowCtx, asTrue.drops);
-  return (await withDryWindowCandidates(ranked, { ...run, hard: asTrue })).candidates;
-}
-
-// The evaluation result's `mowing` (index.js audits it), with the shadow
-// pool when there is one; none when the rule is null.
-const mowingField = (mowing, shadowCandidates = null) => (mowing
-  ? { mowing, ...(shadowCandidates ? { mowing_shadow_candidates: shadowCandidates } : {}) }
-  : {});
+// The evaluation result's `mowing` (index.js audits it); none when the rule
+// is null.
+const mowingField = (mowing) => (mowing ? { mowing } : {});
 
 module.exports = {
   SCORE_CAP,

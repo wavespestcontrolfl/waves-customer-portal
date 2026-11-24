@@ -21,7 +21,6 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-process.env.GATE_EDIT_APPT_ADDRESS = 'true';
 // send_autopay_setup_link's preview runs the Auto Pay service's own eligibility
 // read, which refuses before the channel preflight while the lane is dark.
 process.env.GATE_AUTOPAY_SETUP_LINK = 'true';
@@ -62,11 +61,6 @@ jest.mock('../services/route-optimizer', () => ({
 
 const TOOLS_DIR = path.join(__dirname, '..', 'services', 'intelligence-bar');
 
-// These assertions assume LEGACY drive times (see the mocked haversine above),
-// and the mock deliberately pulls the REAL gate-sensitive estimator. Pin the
-// gate off so the suite does not depend on the ambient environment; the
-// calibrated model is covered by drive-time-calibration.test.js.
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 // cancel_plan (C3) is dark behind GATE_CANCEL_FLOW_V2 — its unconfirmed
 // call 404s (a tool error, not a preview) with the gate off, so pin it ON
 // here: the contract under test is "no mutation without confirmed", which
@@ -76,11 +70,11 @@ const ORIGINAL_PLATFORM_GATE = process.env.GATE_IB_PLATFORM;
 beforeAll(() => {
   // reprice_future_visits is dark behind GATE_IB_REPRICE_VISITS; off, its preview refuses.
   process.env.GATE_IB_REPRICE_VISITS = 'true';
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
+  process.env.GATE_IB_SEND_ESTIMATE = 'true';
   process.env.GATE_IB_LEAD_CONVERT = 'true';
   process.env.GATE_IB_VOID_INVOICE = 'true';
   process.env.GATE_IB_PREPAY_SWITCH = 'true';
@@ -105,6 +99,7 @@ afterAll(() => {
   delete process.env.GATE_IB_RECORD_PAYMENT;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
+  delete process.env.GATE_IB_SEND_ESTIMATE;
   delete process.env.GATE_IB_LEAD_CONVERT;
   delete process.env.GATE_IB_VOID_INVOICE;
   delete process.env.GATE_IB_PREPAY_SWITCH;
@@ -119,8 +114,6 @@ afterAll(() => {
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-  else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
   if (ORIGINAL_CANCEL_GATE === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
   else process.env.GATE_CANCEL_FLOW_V2 = ORIGINAL_CANCEL_GATE;
   delete process.env.GATE_IB_REPRICE_VISITS;
@@ -130,7 +123,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'tool-additions.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js', 'record-payment-fences.js', 'model-context.js', 'series-move.js', 'fast-mode.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'tool-additions.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js', 'record-payment-fences.js', 'model-context.js', 'series-move.js', 'fast-mode.js', 'service-record-facts.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -201,6 +194,7 @@ const WRITE_TWO_STEP = [
   'remove_saved_payment_method',
   'correct_invoice_address',
   'accept_estimate',
+  'send_estimate',
   'send_invoice',
   'record_payment',
   'void_invoice',
@@ -331,6 +325,7 @@ const READ_ONLY = [
   'query_customers', 'find_overdue_customers', 'get_customer_detail', 'get_schedule_view',
   'query_revenue', 'compare_technicians', 'find_duplicates', 'draft_sms',
   'get_recent_completions',
+  'get_sprinkler_timer_counts',
   'search_ib_history',
   'find_schedule_gaps', 'get_day_summary', 'get_zone_density', 'find_available_slots',
   'cancel_and_reschedule_far_out',
@@ -384,7 +379,7 @@ const READ_ONLY = [
   'get_scheduled_job_health',
   'search_call_research',
   // closeout-tools.js (#3647 follow-up): read-only surface over closeout-status.
-  'get_closeout_status', 'list_open_closeouts',
+  'get_closeout_status', 'get_closeout_bill_preview', 'list_open_closeouts',
   // gap-report-tools.js: read-only list over agent_gap_reports (rows are
   // written server-side by agent-gap-reports.js, never by a model tool).
   'list_gap_reports',
@@ -801,6 +796,15 @@ const UNCONFIRMED_CALLS = [
       customers: [{ id: '00000000-0000-0000-0000-00000000e002', first_name: 'Accept', last_name: 'Fixture', email: 'accept@example.com', pipeline_stage: 'lead', monthly_rate: 0 }],
       scheduled_services: [],
     }],
+    // send_estimate reads the estimate and the estimate page's own send preview (spied below; the route's preview is
+    // covered by admin-estimates-reviewed-send.test.js, the card by intelligence-bar-send-estimate.test.js). It writes nothing.
+    ['estimate-send-tools', 'executeEstimateSendTool', 'send_estimate', { estimate_id: '00000000-0000-0000-0000-00000000e101' }, {
+      estimates: [{
+        id: '00000000-0000-0000-0000-00000000e101', token: 'sendfixture1', status: 'draft', customer_id: null, customer_name: 'Send Fixture',
+        monthly_total: 49, annual_total: 588, onetime_total: 0, waveguard_tier: 'Bronze', estimate_group_id: null,
+        sent_at: null, scheduled_at: null, archived_at: null, price_locked_at: null, estimate_data: {},
+      }],
+    }],
     // send_invoice reads the invoice, the hold, the payer ownership and the recipients (the route helpers
     // are spied below — their own paths are covered by intelligence-bar-invoice-actions.test.js). It writes nothing.
     ['invoice-action-tools', 'executeInvoiceActionTool', 'send_invoice', { invoice_id: '00000000-0000-0000-0000-00000000f101' }, {
@@ -1077,14 +1081,6 @@ const UNCONFIRMED_CALLS = [
     dbMock.raw.mockImplementation(db.raw);
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
-
-    // The two route optimizers refuse BEFORE their confirmation gate while
-    // drive-time calibration is off — they may not certify an arrival window
-    // on the uncalibrated model (that refusal has its own coverage in
-    // admin-schedule-optimize-window-guard). This contract is about the gate,
-    // so give them the calibrated model and let them reach it.
-    const needsCalibration = String(toolName).startsWith('optimize_');
-    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     // This recorder has no pricing_config rows. Live sync success is a
     // controlled prerequisite here; the real-DB estimate suite tests outages.
@@ -1171,6 +1167,19 @@ const UNCONFIRMED_CALLS = [
           ],
         },
       }) : null;
+    // send_estimate's card is the estimate page's own send preview, run through the route handler; here the
+    // tool itself must send and write nothing, so the preview answers a canned message.
+    const sendEstimatePreview = toolName === 'send_estimate'
+      ? jest.spyOn(require('../routes/admin-estimates'), 'estimateSendPreviewForBar').mockResolvedValue({
+        status: 200,
+        json: {
+          id: '00000000-0000-0000-0000-00000000e101', status: 'draft', editVersion: 'edit-v1', messageVersion: 'msg-v1',
+          customerName: 'Send Fixture', customerPhone: '+19415550177', customerEmail: 'send@example.com', address: '1 Fixture Way',
+          smsBlockReason: null, uncertainAttempt: false, messages: { sms: 'Your estimate is ready.', email: { provider: 'sendgrid', subject: 'Your estimate', text: 'Ready.' } },
+        },
+      }) : null;
+    const sendEstimateSend = toolName === 'send_estimate'
+      ? jest.spyOn(require('../routes/admin-estimates'), 'sendEstimateFromBar').mockResolvedValue({ status: 200, json: { success: true, sent: true } }) : null;
     const receiptResolvers = toolName === 'resend_receipt'
       ? [
         jest.spyOn(require('../services/invoice-email'), 'resolveReceiptEmailRecipient')
@@ -1233,7 +1242,9 @@ const UNCONFIRMED_CALLS = [
       repriceCoverage?.mockRestore();
       prepaySwitchPreview?.mockRestore();
       acceptDryRun?.mockRestore();
-      if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+      sendEstimatePreview?.mockRestore();
+      expect(sendEstimateSend?.mock.calls || []).toEqual([]);
+      sendEstimateSend?.mockRestore();
       if (outsideFixture) {
         for (const [key, value] of Object.entries(savedEnv)) {
           if (value === undefined) delete process.env[key];
@@ -1313,14 +1324,6 @@ describe('confirmed-endpoint writes are inert without server-derived context.con
     dbMock.raw.mockImplementation(db.raw);
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
-
-    // The two route optimizers refuse BEFORE their confirmation gate while
-    // drive-time calibration is off — they may not certify an arrival window
-    // on the uncalibrated model (that refusal has its own coverage in
-    // admin-schedule-optimize-window-guard). This contract is about the gate,
-    // so give them the calibrated model and let them reach it.
-    const needsCalibration = String(toolName).startsWith('optimize_');
-    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     const result = await executor(toolName, input, context);
 
@@ -1388,6 +1391,6 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // The Agent Review draft cards (_sideEffects): their confirmed runs text the customer (approve, revise) or record the draft ignored.
     // resolve_dispatch_alert / unblock_sender (_sideEffects): their confirmed runs resolve an Action Queue card / remove a blocklist entry and its Gmail filter.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'switch_visit_to_annual_prepay', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'resolve_dispatch_alert', 'unblock_sender', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_estimate', 'send_invoice', 'record_payment', 'void_invoice', 'switch_visit_to_annual_prepay', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'resolve_dispatch_alert', 'unblock_sender', 'propose_admin_edit']);
   });
 });
