@@ -3958,6 +3958,14 @@ router.put('/:id', async (req, res, next) => {
       const stockBefore = numberOrNull(locked.inventory_on_hand);
       const stockChanged = req.body.inventoryOnHand !== undefined && stockBefore !== nextStock;
       const currentUnit = locked.inventory_unit || null;
+      // Limits tab: suggested limits are worked out in one unit; refuse the
+      // save when the product's unit changed after the report loaded.
+      if (req.body.expectedInventoryUnit !== undefined
+        && normalizeInventoryUnit(req.body.expectedInventoryUnit || '') !== normalizeInventoryUnit(currentUnit || '')) {
+        const err = new Error(`Stock unit is now ${currentUnit || 'unset'}, not ${req.body.expectedInventoryUnit || 'unset'}; refresh the suggested limits`);
+        err.statusCode = 409;
+        throw err;
+      }
       if (nextStock != null && currentUnit && nextUnit && normalizeInventoryUnit(currentUnit) !== normalizeInventoryUnit(nextUnit)) {
         const err = new Error(`Inventory unit must stay ${currentUnit} when editing stock; use a manual adjustment after normalizing units`);
         err.statusCode = 400;

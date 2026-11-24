@@ -34,6 +34,9 @@ const ROW = {
 };
 const IDLE = { ...ROW, productId: 'idle-1', name: 'Synthetic unused product', status: 'no_usage', suggestedThreshold: null, suggestedReorder: null, usageRecords: 0 };
 const HOLD = { ...ROW, productId: 'hold-1', name: 'Synthetic 24-0-11', status: 'blackout_hold', suggestedThreshold: null, suggestedReorder: null };
+// No whole pack fits before June 1: shown, but not saveable (a saved 0 reads
+// as "not set up" to the sweep after the blackout).
+const CAPPED_ZERO = { ...ROW, productId: 'cap-1', name: 'Synthetic 10-0-22', status: 'blackout_capped', suggestedThreshold: 5, suggestedReorder: 0, packs: 0 };
 
 let fetchMock;
 beforeEach(() => {
@@ -41,7 +44,7 @@ beforeEach(() => {
   fetchMock = vi.fn((url, init = {}) => {
     const path = String(url);
     if (path.includes('/reorder-suggestions')) {
-      return Promise.resolve(reply({ today: '2026-11-24', options: { leadDays: 3, bufferDays: 7, reorderDays: 21 }, forecastError: null, products: [ROW, IDLE, HOLD] }));
+      return Promise.resolve(reply({ today: '2026-11-24', options: { leadDays: 3, bufferDays: 7, reorderDays: 21 }, forecastError: null, products: [ROW, IDLE, HOLD, CAPPED_ZERO] }));
     }
     if (init.method === 'PUT') return Promise.resolve(reply({ product: { id: productId } }));
     return Promise.resolve(reply({}));
@@ -76,12 +79,21 @@ describe('Limits tab', () => {
     mount();
     await screen.findByText('Synthetic jug product');
     const buttons = screen.getAllByRole('button', { name: 'Use' });
-    expect(buttons).toHaveLength(1); // the blackout hold row has no Use
+    expect(buttons).toHaveLength(1); // the blackout hold and zero-reorder rows have no Use
+    expect(screen.getByText('Synthetic 10-0-22')).toBeInTheDocument();
     fireEvent.click(buttons[0]);
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(true));
     const [url, init] = fetchMock.mock.calls.find(([, i]) => i?.method === 'PUT');
     expect(String(url)).toContain(`/admin/inventory/${productId}`);
-    expect(JSON.parse(init.body)).toEqual({ lowStockThreshold: 0.75, reorderQuantity: 3 });
+    expect(JSON.parse(init.body)).toEqual({ lowStockThreshold: 0.75, reorderQuantity: 3, expectedInventoryUnit: 'gal' });
     expect(await screen.findByRole('button', { name: 'Saved' })).toBeDisabled();
+  });
+
+  it('a failed load shows Retry, not an empty report or stale Use buttons', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'boom' }) }));
+    mount();
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByText('No products with use to suggest limits for.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Use' })).not.toBeInTheDocument();
   });
 });

@@ -2080,8 +2080,10 @@ function limitRowIsIdle(row) {
 function limitAlreadySet(row) {
   return row.currentThreshold === row.suggestedThreshold && row.currentReorder === row.suggestedReorder;
 }
+// A zero reorder (no whole pack fits before June 1) stays informational:
+// saved, it would read as "not set up" to the sweep after the blackout.
 function limitCanUse(row) {
-  return row.suggestedThreshold != null && row.suggestedReorder != null && row.status !== "blackout_hold";
+  return row.suggestedThreshold != null && row.suggestedReorder > 0 && row.status !== "blackout_hold";
 }
 function limitIsLow(row) {
   return row.onHand != null && row.suggestedThreshold != null && row.onHand <= row.suggestedThreshold;
@@ -2144,12 +2146,16 @@ function ReorderLimitsTab({ showToast }) {
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState("");
   const [showAll, setShowAll] = useState(false);
+  const [loadError, setLoadError] = useState(null);
   const load = useCallback(async () => {
     setLoading(true);
     try {
       setData(await adminFetch("/admin/inventory/reorder-suggestions"));
+      setLoadError(null);
     } catch (err) {
-      showToast(`Suggested limits failed: ${err.message}`);
+      // A failed read never leaves old suggestions (and their Use buttons) up.
+      setData(null);
+      setLoadError(err.message || String(err));
     } finally {
       setLoading(false);
     }
@@ -2165,6 +2171,9 @@ function ReorderLimitsTab({ showToast }) {
         body: JSON.stringify({
           lowStockThreshold: row.suggestedThreshold,
           reorderQuantity: row.suggestedReorder,
+          // The limits were worked out in this unit; the server refuses the
+          // save if the product's unit changed since the report loaded.
+          expectedInventoryUnit: row.unit,
         }),
       });
       setData((prev) => ({
@@ -2213,7 +2222,9 @@ function ReorderLimitsTab({ showToast }) {
           </Button>
         </div>
       </div>
-      {loading ? (
+      {loadError ? (
+        <LoadRetry what="suggested limits" error={loadError} onRetry={load} />
+      ) : loading ? (
         <ActionFeedback>Working out limits (this reads the lawn schedule, about a minute)...</ActionFeedback>
       ) : rows.length === 0 ? (
         <div className="text-zinc-900 text-ui-body">No products with use to suggest limits for.</div>
