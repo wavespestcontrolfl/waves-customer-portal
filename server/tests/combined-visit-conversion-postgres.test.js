@@ -567,7 +567,7 @@ postgres('combined capacity conversion on the migrated application schema', () =
 
   // GATE_TECH_SHIFT_HOURS (D4). Hour mode, as production runs: the accept judged the reserved visit's own block
   // (slot-reservation.js). The second program copies that visit's hour and technician and runs for its own length.
-  describe('hour mode: a second program on the reserved visit\'s trip and its technician\'s shift', () => {
+  describe('shift hours: a second program on the reserved visit\'s trip', () => {
     const eligibility = require('../services/technician-eligibility');
     const GATES = ['GATE_SCHEDULING_CAPACITY', 'GATE_TECH_SHIFT_HOURS'];
     // Converts pest (the reserved visit, 09:00 to 10:00) with termite bait (90 minutes, so 09:00 to 10:30), in a
@@ -657,6 +657,35 @@ postgres('combined capacity conversion on the migrated application schema', () =
         expect(later.length).toBeGreaterThan(0);
       } finally {
         read.mockRestore();
+      }
+    });
+
+    test('a combined visit\'s member is not judged here: it keeps the anchor\'s technician and the conversion is not refused', async () => {
+      // A member without the anchor's technician refuses the whole accept (assertCapacityServices), and the accept
+      // judged the combined block. Here the shift is cut after the commit: it ends inside the second member's hour.
+      const trx = await mockPg.transaction();
+      const saved = process.env.GATE_TECH_SHIFT_HOURS;
+      const read = jest.spyOn(eligibility, 'shiftExcluding');
+      try {
+        const f = await fixture(trx, lines.slice(0, 2));
+        delete process.env.GATE_TECH_SHIFT_HOURS;
+        await commitReservation({ scheduledServiceId: f.anchor.id, customerId: f.customerId, trx });
+        await trx('technicians').where({ id: f.anchor.technician_id }).update({ shift_start: '08:00', shift_end: '10:30' });
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        read.mockClear();
+        await converter.convertEstimate(f.estimateId, { ...options, database: trx });
+        const members = await trx('scheduled_services').where({ source_estimate_id: f.estimateId }).whereNull('recurring_parent_id')
+          .orderBy('window_start');
+        expect(members.map((row) => [row.window_start, row.window_end, row.technician_id])).toEqual([
+          ['09:00:00', '10:00:00', f.anchor.technician_id],
+          ['10:00:00', '11:00:00', f.anchor.technician_id],
+        ]);
+        expect(read).not.toHaveBeenCalled();
+      } finally {
+        read.mockRestore();
+        await trx.rollback();
+        if (saved === undefined) delete process.env.GATE_TECH_SHIFT_HOURS;
+        else process.env.GATE_TECH_SHIFT_HOURS = saved;
       }
     });
   });
