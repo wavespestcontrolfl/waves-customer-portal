@@ -157,6 +157,9 @@ describe('deriveStatus: Punta Gorda is not served (owner ruling 2026-10-22)', ()
     expect(sharedZipNeedsCity('Harbour Heights', '33983')).toBe(false);
     expect(sharedZipNeedsCity('Unknown', '33983')).toBe(true);
     expect(sharedZipNeedsCity('Unknown', '33948')).toBe(false);
+    // a real town on the wrong shared ZIP is not evidence
+    expect(sharedZipNeedsCity('Babcock Ranch', '33983')).toBe(true);
+    expect(sharedZipNeedsCity('Deep Creek', '33983')).toBe(false);
   });
 
   test('a Punta Gorda-only ZIP is out even when the locality is missing', () => {

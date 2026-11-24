@@ -98,6 +98,10 @@ describe('a ZIP Punta Gorda shares, with no city anywhere, is unknown (null), ne
     expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, Apt 4, Babcock Ranch FL 33982' })).toBe(false);
     // an address parse's guess is never city evidence: a street direction, or a city run into the street with no comma
     expect(namesSharedZipWithoutCity({ text: '9 Sample Rd NE FL 33982' })).toBe(true);
+    // a country suffix, a placeholder or a town from another ZIP is not evidence (per-ZIP allow-list)
+    expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, FL 33982, USA' })).toBe(true);
+    expect(namesSharedZipWithoutCity({ zip: '33982', city: 'Unknown' })).toBe(true);
+    expect(namesSharedZipWithoutCity({ zip: '33983', city: 'Babcock Ranch' })).toBe(true);
     expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, NE, FL 33982' })).toBe(true);
     expect(namesSharedZipWithoutCity({ text: '9 Sample Rd Babcock Ranch FL 33982' })).toBe(true);
     expect(namesSharedZipWithoutCity({ city: 'NE', zip: '33982' })).toBe(true);

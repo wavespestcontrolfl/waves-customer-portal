@@ -23,7 +23,7 @@
 
 const { isInServiceAreaCounty } = require('./call-triage-flags');
 const { zipToCity } = require('../utils/zip-to-city');
-const { isExcludedLocality, isExcludedZip, normalizeLocality, isPuntaGordaSharedZip, namesTown } = require('./excluded-localities');
+const { isExcludedLocality, isExcludedZip, normalizeLocality, isPuntaGordaSharedZip, namesSharedZipTown } = require('./excluded-localities');
 const { parseRawAddress } = require('../utils/address-normalizer');
 
 const SERVICE_AREA_BOUNDS = Object.freeze({
@@ -100,12 +100,15 @@ function namesExcludedPlace({ city = null, zip = null, text = null, places = nul
 function namesSharedZipWithoutCity({ city = null, zip = null, text = null, places = null } = {}) {
   const texts = (Array.isArray(text) ? text : [text]).map((t) => String(t || '')).filter(Boolean);
   const zips = [zip, ...(places || []).map((p) => p?.zip), ...texts.map(zipFromAddressText)];
-  if (!zips.some(isPuntaGordaSharedZip)) return false;
+  const shared = zips.filter(isPuntaGordaSharedZip);
+  if (!shared.length) return false;
   // City evidence is a structured city (the geocode's, a place's) or a comma-separated PART of an address text after its first
   // (street) part, never an address parse's guess: a parse can take "NE" or "FL 33982" for a city. A part counts only when it
   // names a town (namesTown): no digit, not a direction, unit or state word.
   const textParts = texts.flatMap((t) => t.split(',').slice(1));
-  return ![city, ...(places || []).map((p) => p?.city), ...textParts].some(namesTown);
+  // It must also be a town known on that shared ZIP (namesSharedZipTown), so "USA" or a town on the wrong ZIP never counts.
+  const cities = [city, ...(places || []).map((p) => p?.city), ...textParts];
+  return !shared.some((z) => cities.some((c) => namesSharedZipTown(c, z)));
 }
 
 function isInDesotoExclusion(lat, lng) {
