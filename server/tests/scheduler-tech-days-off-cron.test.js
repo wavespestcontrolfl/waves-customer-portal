@@ -70,3 +70,19 @@ test('a failed run is logged, never thrown out of the tick', async () => {
   await expect(tick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('[tech-days-off] daily sync failed: boom');
 });
+
+test('a pass that failed for any day is thrown after the pass, so the health record says failed', async () => {
+  syncTechDaysOff.mockResolvedValueOnce({ written: 1, failed: 2 });
+  let thrown;
+  runExclusive.mockImplementationOnce(async (_key, task) => { try { return await task(); } catch (err) { thrown = err; throw err; } });
+  await expect(tick()).resolves.toBeUndefined();
+  expect(thrown).toBeInstanceOf(Error);
+  expect(thrown.message).toBe('2 day(s) could not be written');
+  expect(logger.error).toHaveBeenCalledWith('[tech-days-off] daily sync failed: 2 day(s) could not be written');
+});
+
+test('a clean pass is not thrown', async () => {
+  syncTechDaysOff.mockResolvedValueOnce({ written: 1, failed: 0 });
+  await tick();
+  expect(logger.error).not.toHaveBeenCalled();
+});

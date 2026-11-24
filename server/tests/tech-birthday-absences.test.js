@@ -3,12 +3,21 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn(async () => []) }));
+jest.mock('../config/feature-gates', () => ({ techBirthdayPayLive: jest.fn(() => false) }));
+jest.mock('../services/payroll-time-off', () => ({ createTimeOff: jest.fn(async () => ({ entry: {} })) }));
 
 const logger = require('../services/logger');
 const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+const { techBirthdayPayLive } = require('../config/feature-gates');
+const { createTimeOff } = require('../services/payroll-time-off');
 const {
-  HORIZON_DAYS, ABSENCE_REASON, birthdayDateInYear, birthdayDatesBetween, addDaysToDateStr, syncTechDaysOff,
+  HORIZON_DAYS, ABSENCE_REASON, PAY_KIND, PAY_HOURS, PAY_NOTE, birthdayDateInYear, birthdayDatesBetween, syncTechDaysOff,
 } = require('../services/tech-birthday-absences');
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  techBirthdayPayLive.mockReturnValue(false);
+});
 
 describe('date logic (pure)', () => {
   test('a birthday keeps its month and day in any year; the birth year never matters', () => {
@@ -38,13 +47,6 @@ describe('date logic (pure)', () => {
     expect(birthdayDatesBetween('1992-02-29', '2027-02-01', '2029-03-31')).toEqual(['2027-02-28', '2028-02-29', '2029-02-28']);
   });
 
-  test('adding days is plain calendar arithmetic, across month, year and DST edges', () => {
-    expect(addDaysToDateStr('2026-11-24', 120)).toBe('2027-03-24');
-    expect(addDaysToDateStr('2026-12-31', 1)).toBe('2027-01-01');
-    expect(addDaysToDateStr('2027-03-13', 1)).toBe('2027-03-14');
-    expect(addDaysToDateStr('2028-02-28', 1)).toBe('2028-02-29');
-  });
-
   test('the reason is the generic one tech-out already accepts, with no birthday wording', () => {
     const { REASONS } = require('../services/tech-out');
     expect(REASONS).toContain(ABSENCE_REASON);
@@ -54,23 +56,38 @@ describe('date logic (pure)', () => {
 });
 
 describe('syncTechDaysOff (knex double)', () => {
-  // technicians -> `techs`; technician_absences -> the rows already there (any, cleared or not); inserts are recorded.
-  function makeConn({ techs = [], absences = [] } = {}) {
+  // technicians -> `techs`; technician_absences -> the rows already there (any, cleared or not); payroll_time_off -> `timeOff`;
+  // audit_log -> `audit`; inserts into technician_absences are recorded.
+  function makeConn({ techs = [], absences = [], timeOff = [], audit = [] } = {}) {
     const inserted = [];
     const tableOf = (table) => {
       if (table === 'technicians') {
-        const q = { where: jest.fn(() => q), whereNotNull: jest.fn(() => q), select: jest.fn(async () => techs) };
+        const q = {
+          where: jest.fn(() => q), whereNotNull: jest.fn(() => q), whereIn: jest.fn(() => q), select: jest.fn(async () => techs),
+        };
+        return q;
+      }
+      if (table === 'payroll_time_off') {
+        const q = { where: jest.fn((c) => { q.c = c; return q; }), first: jest.fn(async () => timeOff.find((r) => r.technician_id === q.c.technician_id && r.work_date === q.c.work_date)) };
+        return q;
+      }
+      if (table === 'audit_log') {
+        const q = { where: jest.fn(() => q), whereRaw: jest.fn((_sql, [id, date]) => { q.k = [id, date]; return q; }), first: jest.fn(async () => audit.find((r) => r.technician_id === q.k[0] && r.work_date === q.k[1])) };
         return q;
       }
       const filter = {};
+      let openOnly = false;
       const q = {
         where: jest.fn((cond) => { Object.assign(filter, cond); return q; }),
-        first: jest.fn(async () => absences.find((a) => a.technician_id === filter.technician_id && a.absence_date === filter.absence_date)),
+        whereNull: jest.fn(() => { openOnly = true; return q; }),
+        first: jest.fn(async () => absences.find((a) => a.technician_id === filter.technician_id && a.absence_date === filter.absence_date
+          && (!openOnly || !a.cleared_at))),
         insert: jest.fn(async (row) => { inserted.push(row); absences.push({ ...row }); }),
       };
       return q;
     };
     const conn = jest.fn(tableOf);
+    conn.raw = jest.fn((sql) => sql);
     conn.transaction = jest.fn(async (fn) => fn(conn));
     return { conn, inserted, absences };
   }
@@ -93,6 +110,7 @@ describe('syncTechDaysOff (knex double)', () => {
     // each row is written under the tech-day fence, never through markTechOut (no alert, no parked stop)
     expect(lockTechDays).toHaveBeenCalledWith(expect.anything(), [{ techId: 't1', date: '2026-12-02' }]);
     expect(conn.mock.calls.every(([table]) => table === 'technicians' || table === 'technician_absences')).toBe(true);
+    expect(createTimeOff).not.toHaveBeenCalled(); // the pay half is dark
   });
 
   test('today counts: a birthday today is written', async () => {
@@ -156,5 +174,130 @@ describe('syncTechDaysOff (knex double)', () => {
     const logged = [...logger.error.mock.calls, ...logger.info.mock.calls].map(([m]) => m).join('\n');
     expect(logged).toMatch(/\[tech-days-off\]/);
     expect(logged).not.toMatch(/birth/i);
+  });
+
+  test('the horizon comes from one captured instant, across a DST change', async () => {
+    // 2027-03-13 23:30 ET (spring forward is the next morning): 120 days on is 2027-07-11, whatever the clock offset.
+    const at = new Date('2027-03-14T03:30:00Z');
+    const { conn, inserted } = makeConn({ techs: [{ id: 't1', dob: '1990-07-11' }, { id: 't2', dob: '1990-07-12' }] });
+    await syncTechDaysOff({ now: at, conn });
+    expect(inserted.map((r) => r.absence_date)).toEqual(['2027-07-11']);
+  });
+
+  test('a limit of technician ids reaches the read', async () => {
+    const { conn } = makeConn({ techs: [] });
+    await syncTechDaysOff({ now: NOW, conn, technicianIds: ['t1'] });
+    expect(conn.mock.results[0].value.whereIn).toHaveBeenCalledWith('id', ['t1']);
+  });
+});
+
+describe('the pay half (GATE_TECH_BIRTHDAY_PAY)', () => {
+  const NOW = new Date('2026-11-24T17:00:00Z');
+  const TODAY = '2026-11-24';
+  const w2 = (extra = {}) => ({ id: 't1', dob: '1990-11-24', employment_type: 'w2', ...extra });
+
+  // reuse the harness from the block above through a small copy
+  function conn2({ techs, absences = [], timeOff = [], audit = [] }) {
+    const inserted = [];
+    const tableOf = (table) => {
+      const filter = {};
+      let raw = null;
+      const q = {
+        where: jest.fn((c) => { Object.assign(filter, c); return q; }),
+        whereNull: jest.fn(() => { filter.open = true; return q; }),
+        whereNotNull: jest.fn(() => q),
+        whereIn: jest.fn(() => q),
+        whereRaw: jest.fn((_s, args) => { raw = args; return q; }),
+        select: jest.fn(async () => techs),
+        insert: jest.fn(async (row) => { inserted.push(row); absences.push({ ...row }); }),
+        first: jest.fn(async () => {
+          if (table === 'technician_absences') {
+            return absences.find((a) => a.technician_id === filter.technician_id && a.absence_date === filter.absence_date && (!filter.open || !a.cleared_at));
+          }
+          if (table === 'payroll_time_off') return timeOff.find((r) => r.technician_id === filter.technician_id && r.work_date === filter.work_date);
+          if (table === 'audit_log') return audit.find((r) => r.technician_id === raw[0] && r.work_date === raw[1]);
+          return undefined;
+        }),
+      };
+      return q;
+    };
+    const conn = jest.fn(tableOf);
+    conn.raw = jest.fn((sql) => sql);
+    conn.transaction = jest.fn(async (fn) => fn(conn));
+    return { conn, inserted };
+  }
+
+  beforeEach(() => techBirthdayPayLive.mockReturnValue(true));
+
+  test('gate off: nothing is recorded for pay, and no pay table is read', async () => {
+    techBirthdayPayLive.mockReturnValue(false);
+    const { conn } = conn2({ techs: [w2()] });
+    const out = await syncTechDaysOff({ now: NOW, conn });
+    expect(out).toMatchObject({ written: 1, paid: 0, paySkipped: 0 });
+    expect(createTimeOff).not.toHaveBeenCalled();
+    expect(conn.mock.calls.map(([t]) => t)).not.toContain('payroll_time_off');
+  });
+
+  test('gate on, on the day: one 10 hour holiday entry through the payroll time-off service, with a generic note', async () => {
+    const { conn } = conn2({ techs: [w2()] });
+    const out = await syncTechDaysOff({ now: NOW, conn });
+    expect(out).toMatchObject({ written: 1, paid: 1, paySkipped: 0, failed: 0 });
+    expect(createTimeOff).toHaveBeenCalledTimes(1);
+    expect(createTimeOff).toHaveBeenCalledWith({
+      technicianId: 't1', workDate: TODAY, kind: 'holiday', hours: 10, note: 'Paid day off',
+    }, null, conn);
+    expect([PAY_KIND, PAY_HOURS, PAY_NOTE]).toEqual(['holiday', 10, 'Paid day off']);
+    expect(PAY_NOTE).not.toMatch(/birth/i);
+  });
+
+  test('a birthday still ahead pays nothing yet', async () => {
+    const { conn } = conn2({ techs: [w2({ dob: '1990-12-02' })] });
+    const out = await syncTechDaysOff({ now: NOW, conn });
+    expect(out).toMatchObject({ written: 1, paid: 0, paySkipped: 0 });
+    expect(createTimeOff).not.toHaveBeenCalled();
+  });
+
+  test('never over an entry the office made for that date', async () => {
+    const { conn } = conn2({ techs: [w2()], timeOff: [{ technician_id: 't1', work_date: TODAY }] });
+    const out = await syncTechDaysOff({ now: NOW, conn });
+    expect(out).toMatchObject({ paid: 0, paySkipped: 1 });
+    expect(createTimeOff).not.toHaveBeenCalled();
+  });
+
+  test('never again for an entry once added and since removed (audit log)', async () => {
+    const { conn } = conn2({ techs: [w2()], audit: [{ technician_id: 't1', work_date: TODAY }] });
+    const out = await syncTechDaysOff({ now: NOW, conn });
+    expect(out).toMatchObject({ paid: 0, paySkipped: 1 });
+    expect(createTimeOff).not.toHaveBeenCalled();
+  });
+
+  test('a cleared absence row pays nothing, and neither does a technician who is not W-2', async () => {
+    const cleared = conn2({ techs: [w2()], absences: [{ technician_id: 't1', absence_date: TODAY, reason: 'other', cleared_at: new Date() }] });
+    expect(await syncTechDaysOff({ now: NOW, conn: cleared.conn })).toMatchObject({ paid: 0, paySkipped: 1 });
+    const contractor = conn2({ techs: [w2({ employment_type: '1099' })] });
+    expect(await syncTechDaysOff({ now: NOW, conn: contractor.conn })).toMatchObject({ paid: 0, paySkipped: 1 });
+    expect(createTimeOff).not.toHaveBeenCalled();
+  });
+
+  test('a 409 from the service (a final week, a row that appeared) is a skip; any other error is a failure', async () => {
+    createTimeOff.mockRejectedValueOnce(Object.assign(new Error('final'), { name: 'PayrollError', status: 409 }));
+    const a = conn2({ techs: [w2()] });
+    expect(await syncTechDaysOff({ now: NOW, conn: a.conn })).toMatchObject({ paid: 0, paySkipped: 1, failed: 0 });
+    createTimeOff.mockRejectedValueOnce(new Error('db down'));
+    const b = conn2({ techs: [w2()] });
+    expect(await syncTechDaysOff({ now: NOW, conn: b.conn })).toMatchObject({ paid: 0, failed: 1 });
+    const logged = [...logger.error.mock.calls, ...logger.warn.mock.calls, ...logger.info.mock.calls].map(([m]) => m).join('\n');
+    expect(logged).toMatch(/\[tech-days-off\]/);
+    expect(logged).not.toMatch(/birth/i);
+  });
+
+  test('a second tick the same day does not pay again once the entry exists', async () => {
+    const timeOff = [];
+    createTimeOff.mockImplementation(async ({ technicianId, workDate }) => { timeOff.push({ technician_id: technicianId, work_date: workDate }); return { entry: {} }; });
+    const { conn } = conn2({ techs: [w2()], timeOff });
+    expect((await syncTechDaysOff({ now: NOW, conn })).paid).toBe(1);
+    expect((await syncTechDaysOff({ now: NOW, conn })).paid).toBe(0);
+    expect(createTimeOff).toHaveBeenCalledTimes(1);
+    createTimeOff.mockImplementation(async () => ({ entry: {} }));
   });
 });

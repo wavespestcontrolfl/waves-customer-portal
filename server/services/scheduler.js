@@ -1632,7 +1632,12 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('25 3 * * *', async () => {
     try {
-      await runExclusive('tech-days-off', () => require('./tech-birthday-absences').syncTechDaysOff());
+      await runExclusive('tech-days-off', async () => {
+        const result = await require('./tech-birthday-absences').syncTechDaysOff();
+        // A pass that failed for any day must not be recorded as a success: throw after the whole pass ran.
+        if (result && result.failed > 0) throw new Error(`${result.failed} day(s) could not be written`);
+        return result;
+      });
     } catch (err) {
       logger.error(`[tech-days-off] daily sync failed: ${err.message}`);
     }

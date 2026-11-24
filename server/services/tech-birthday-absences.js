@@ -27,26 +27,45 @@
  *     already written stays if a dob later changes; the office clears it in the
  *     tech-out screen.
  *   - Idempotent: a second tick the same day writes nothing.
- * No gate: it sends nothing, charges nothing and deletes nothing.
+ * The schedule half has no gate: it sends nothing, charges nothing and deletes nothing.
+ *
+ * Pay half (GATE_TECH_BIRTHDAY_PAY, default off; owner 2026-11-24: one paid day, 10 hours at the
+ * straight rate): on the day itself, the same tick records ONE payroll_time_off entry through the
+ * payroll time-off service (createTimeOff, so its lock, final-week and W-2 rules hold). It is
+ * written ON the day, never ahead: a technician who leaves, or a date the office changes, before
+ * the day costs nothing to undo. Rules:
+ *   - kind 'holiday', 600 minutes, a generic note. 'pto' would draw the time-off bank; a holiday
+ *     never does. (As any holiday entry does, it also pays the holiday work premium on a shift
+ *     worked that day.)
+ *   - Only for an active W-2 technician whose absence row for today is still open: a row the
+ *     office cleared ("tech is back") pays nothing.
+ *   - At most once per technician per date, ever: it is skipped when payroll_time_off already
+ *     holds a row for the date (the office's own entry is never overwritten) OR the audit log
+ *     shows an entry was once added for that technician and date (so an entry the office removed
+ *     is not written again by a later tick).
+ *   - The pay run reads it only with GATE_PAYROLL_TIME_OFF on; the pay run counts it once because
+ *     payroll_time_off is unique on (technician, date).
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, dateOnlyString } = require('../utils/datetime-et');
+const { etDateString, addETDays, dateOnlyString, validCalendarDate } = require('../utils/datetime-et');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 
 const HORIZON_DAYS = 120;
 const ABSENCE_REASON = 'other';
+// The paid day: 10 hours at the straight rate (handbook), a holiday-kind entry so the time-off bank is never drawn.
+const PAY_KIND = 'holiday';
+const PAY_HOURS = 10;
+const PAY_NOTE = 'Paid day off';
 
 const isLeapYear = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
 
 /** { month, day } of a stored dob (Date or YYYY-MM-DD), or null when unreadable. Pure. */
 function monthDayOf(dob) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dob == null || dob === '' ? '' : dateOnlyString(dob)));
-  if (!m) return null;
-  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  const dt = new Date(Date.UTC(y, mo - 1, d));
-  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return null;
-  return { month: mo, day: d };
+  if (dob == null || dob === '') return null;
+  const day = validCalendarDate(dateOnlyString(dob));
+  if (!day) return null;
+  return { month: Number(day.slice(5, 7)), day: Number(day.slice(8, 10)) };
 }
 
 /** The date (YYYY-MM-DD) a birthday is kept on in `year`; Feb 29 is Feb 28 in a common year. Null for an unreadable dob. Pure. */
@@ -72,41 +91,84 @@ function birthdayDatesBetween(dob, fromStr, toStr) {
   return out;
 }
 
-/** YYYY-MM-DD plus N calendar days (UTC arithmetic on the parts, so a DST change never shifts it). Pure. */
-function addDaysToDateStr(dateStr, days) {
-  const [y, m, d] = String(dateStr).slice(0, 10).split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+/**
+ * The pay half for ONE technician-day (today only; see the header). Returns 'written' or 'skipped';
+ * throws on a real failure. The caller has checked the gate.
+ */
+async function recordPaidDay(conn, tech, date) {
+  if (tech.employment_type !== 'w2') return 'skipped';
+  const open = await conn('technician_absences').where({ technician_id: tech.id, absence_date: date }).whereNull('cleared_at').first('id');
+  if (!open) return 'skipped';
+  if (await conn('payroll_time_off').where({ technician_id: tech.id, work_date: date }).first('id')) return 'skipped';
+  // An entry once added for this date (the office may have removed it since) is never added again.
+  const added = await conn('audit_log').where({ action: 'payroll.time_off_added' })
+    .whereRaw("metadata->>'technician_id' = ? AND metadata->>'work_date' = ?", [tech.id, date]).first('id');
+  if (added) return 'skipped';
+  try {
+    await require('./payroll-time-off').createTimeOff({
+      technicianId: tech.id, workDate: date, kind: PAY_KIND, hours: PAY_HOURS, note: PAY_NOTE,
+    }, null, conn);
+  } catch (err) {
+    // 409: a row appeared in between (never overwritten), the week's pay run is final, or the technician is not W-2.
+    if (err && err.name === 'PayrollError' && err.status === 409) {
+      logger.warn(`[tech-days-off] paid day for technician ${tech.id} on ${date} not recorded: ${err.message}`);
+      return 'skipped';
+    }
+    throw err;
+  }
+  return 'written';
+}
+
+/** One technician-day: the absence row, then (today only, gate on) the paid day. Counts into `result`; never throws. */
+async function syncOneDay(conn, tech, date, { payNow, result }) {
+  try {
+    const written = await conn.transaction(async (trx) => {
+      await lockTechDays(trx, [{ techId: tech.id, date }]);
+      // ANY row for the day, cleared or not: an uncleared one means already out, a cleared one is the office's call.
+      const existing = await trx('technician_absences').where({ technician_id: tech.id, absence_date: date }).first('id');
+      if (existing) return false;
+      await trx('technician_absences').insert({ technician_id: tech.id, absence_date: date, reason: ABSENCE_REASON });
+      return true;
+    });
+    if (written) result.written += 1; else result.skipped += 1;
+  } catch (err) {
+    result.failed += 1;
+    logger.error(`[tech-days-off] could not write a day off for technician ${tech.id} on ${date}: ${err.message}`);
+    return;
+  }
+  if (!payNow) return;
+  try {
+    if (await recordPaidDay(conn, tech, date) === 'written') result.paid += 1; else result.paySkipped += 1;
+  } catch (err) {
+    result.failed += 1;
+    logger.error(`[tech-days-off] could not record the paid day for technician ${tech.id} on ${date}: ${err.message}`);
+  }
 }
 
 /**
- * Write the missing rows. Returns { technicians, written, skipped, failed }. One technician-day per
- * transaction under the tech-day fence (the same fence markTechOut takes), so a concurrent mark-out
- * or assignment queues instead of racing. A failure for one day is logged and does not stop the rest.
+ * Write the missing rows. Returns { technicians, written, skipped, paid, paySkipped, failed }. One technician-day
+ * per transaction under the tech-day fence (the same fence markTechOut takes), so a concurrent mark-out or
+ * assignment queues instead of racing. A failure for one day is logged and does not stop the rest; the caller
+ * decides what a non-zero `failed` means (the cron throws after the pass). `now` is read once: both ends of the
+ * horizon come from that one instant. `technicianIds` limits the pass to those technicians.
  */
-async function syncTechDaysOff({ now, conn = db, horizonDays = HORIZON_DAYS } = {}) {
-  const today = etDateString(now);
-  const horizon = addDaysToDateStr(today, horizonDays);
-  const techs = await conn('technicians').where('employment_status', 'active').whereNotNull('dob').select('id', 'dob');
-  const result = { technicians: techs.length, written: 0, skipped: 0, failed: 0 };
+async function syncTechDaysOff({ now, conn = db, horizonDays = HORIZON_DAYS, technicianIds } = {}) {
+  const instant = now instanceof Date ? now : new Date();
+  const today = etDateString(instant);
+  const horizon = etDateString(addETDays(instant, horizonDays));
+  const query = conn('technicians').where('employment_status', 'active').whereNotNull('dob');
+  if (Array.isArray(technicianIds)) query.whereIn('id', technicianIds);
+  const techs = await query.select('id', 'employment_type', conn.raw("to_char(dob, 'YYYY-MM-DD') AS dob"));
+  const payLive = require('../config/feature-gates').techBirthdayPayLive();
+  const result = { technicians: techs.length, written: 0, skipped: 0, paid: 0, paySkipped: 0, failed: 0 };
   for (const tech of techs) {
     for (const date of birthdayDatesBetween(tech.dob, today, horizon)) {
-      try {
-        const written = await conn.transaction(async (trx) => {
-          await lockTechDays(trx, [{ techId: tech.id, date }]);
-          // ANY row for the day, cleared or not: an uncleared one means already out, a cleared one is the office's call.
-          const existing = await trx('technician_absences').where({ technician_id: tech.id, absence_date: date }).first('id');
-          if (existing) return false;
-          await trx('technician_absences').insert({ technician_id: tech.id, absence_date: date, reason: ABSENCE_REASON });
-          return true;
-        });
-        if (written) result.written += 1; else result.skipped += 1;
-      } catch (err) {
-        result.failed += 1;
-        logger.error(`[tech-days-off] could not write a day off for technician ${tech.id} on ${date}: ${err.message}`);
-      }
+      await syncOneDay(conn, tech, date, { payNow: payLive && date === today, result });
     }
   }
-  if (result.written || result.failed) logger.info(`[tech-days-off] ${result.written} day(s) off written, ${result.skipped} already set, ${result.failed} failed`);
+  if (result.written || result.paid || result.failed) {
+    logger.info(`[tech-days-off] ${result.written} day(s) off written, ${result.skipped} already set, ${result.paid} paid day(s) recorded, ${result.failed} failed`);
+  }
   return result;
 }
 
@@ -115,6 +177,8 @@ module.exports = {
   ABSENCE_REASON,
   birthdayDateInYear,
   birthdayDatesBetween,
-  addDaysToDateStr,
+  PAY_KIND,
+  PAY_HOURS,
+  PAY_NOTE,
   syncTechDaysOff,
 };

@@ -11,6 +11,13 @@
  * matching the other GATE_*-owned admin surfaces (e.g. admin-job-card.js). The GET
  * response also carries `auto_move_enabled` so the client can show/hide the
  * "Auto-assign parked stops" action without a second round trip.
+ *
+ * Two handlers are the exception while the gate is off: lookup (GET) and clear
+ * (DELETE). A technician_absences row blocks assignment whatever the gate says (the
+ * daily days-off tick writes them without it), so the office must always be able to
+ * see and clear one. GET with the gate off answers the 404 only when the technician
+ * has no open absence; DELETE with the gate off clears it. Marking out (POST) and
+ * auto-assign stay behind the gate.
  */
 const express = require('express');
 const router = express.Router();
@@ -31,10 +38,16 @@ router.param('technicianId', (req, res, next, value) => {
 });
 
 router.get('/:technicianId', async (req, res, next) => {
-  if (!techOutEnabled()) return res.status(404).json({ enabled: false });
+  const gateOn = techOutEnabled();
   try {
     const date = req.query.date || etDateString();
     if (!validCalendarDate(date)) return res.status(400).json({ error: 'date must be a valid calendar date (YYYY-MM-DD)' });
+    // Gate off: only an open absence is shown (so the office can clear it); nothing else about the screen is on.
+    if (!gateOn) {
+      const open = await getTechOut({ technicianId: req.params.technicianId, date });
+      if (!open) return res.status(404).json({ enabled: false });
+      return res.json({ enabled: true, absence: open, auto_move_enabled: false });
+    }
     const absence = await getTechOut({ technicianId: req.params.technicianId, date });
     res.json({ enabled: true, absence, auto_move_enabled: autoMoveEnabled() });
   } catch (err) { next(err); }
@@ -60,8 +73,8 @@ router.post('/:technicianId', async (req, res, next) => {
   }
 });
 
+// Clear works whatever the gate: an absence row blocks assignment with the gate off too.
 router.delete('/:technicianId', async (req, res, next) => {
-  if (!techOutEnabled()) return res.status(404).json({ enabled: false });
   try {
     const date = req.query.date || etDateString();
     if (!validCalendarDate(date)) return res.status(400).json({ error: 'date must be a valid calendar date (YYYY-MM-DD)' });
