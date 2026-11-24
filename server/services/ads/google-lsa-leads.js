@@ -19,9 +19,10 @@ const GoogleLsa = require('./google-lsa');
 // time. This job stores every lead of the last 30 days in lsa_leads and matches
 // each to the portal's call_log row, lead and customer.
 //
-// It only READS Google and writes lsa_leads. It changes no call_log, leads,
-// customers or ad_service_attribution row (step B does that later) and messages
-// no one.
+// Step A only READS Google and writes lsa_leads. Step B (relabelMatches, owner
+// 2026-11-23 "do step b next") then files the funnel row of each matched call as
+// google_lsa instead of waves_website. It changes no call_log, leads or
+// customers row and messages no one.
 //
 // Field names are checked against the google-ads-api v23 typings. The typings
 // list local_services_lead.contact_details as ONE field (a message with
@@ -427,6 +428,191 @@ async function refillMatches() {
   return filled;
 }
 
+// ---------------------------------------------------------------------------
+// Step B: file a matched call's funnel row as google_lsa
+//
+// The office line is a main_site source, so the call pipeline files each Local
+// Services call's ad_service_attribution row as waves_website (organic). A lead
+// matched by phone and time (match_basis phone_time) PROVES the call was a
+// Local Services call, so its row is relabeled. The rules keep first touch
+// first: only a row the pipeline filed as waves_website FOR THIS CALL changes.
+// ---------------------------------------------------------------------------
+const RELABEL_LOOKBACK_DAYS = 90;
+const RELABEL_BASIS = 'lsa_lead_match';
+const RELABEL_DETAIL = 'Local Services';
+// recordCallPpcAttribution refusals that will not change on a retry: the lead's
+// row belongs to another source, another call, a web click, or has no call id.
+// Anything else (no_customer, no_lead, an insert error) can still come right.
+const UNPROVEN_REFUSALS = new Set(['other_source', 'other_call', 'unprovenanced_row', 'web_attributed']);
+
+// Pure. What to do with a lead's funnel row (null = the lead has none yet).
+//   create  - no row: file one as google_lsa (the writer may still refuse)
+//   relabel - a waves_website row that came from this very call
+//   keep    - leave the row; `result` is the audit text
+function relabelAction(row, lsaLead) {
+  if (!row) return { type: 'create' };
+  if (row.lead_source === 'google_lsa') return { type: 'keep', result: 'already_lsa' };
+  if (row.lead_source === 'waves_website') {
+    const sameCall = row.source_call_id && lsaLead.call_log_id
+      && String(row.source_call_id) === String(lsaLead.call_log_id);
+    return sameCall
+      ? { type: 'relabel', from: 'waves_website', result: 'relabeled' }
+      : { type: 'keep', result: 'unproven' };
+  }
+  // First touch wins: a web form, google_ads, referral... keeps its channel.
+  return { type: 'keep', result: `kept_${row.lead_source || 'none'}`.slice(0, 40) };
+}
+
+// { ok } | { retry } | { unproven: reason }. A lead born from another call
+// (it only reused this one) is unproven: first touch keeps its channel.
+async function callStillAttributable(trx, lsaLead, lead) {
+  // Lazy require: call-attribution loads google-call-bridge, which is heavy.
+  const { resolveSourceCallProvenanceLocked } = require('./call-attribution');
+  const prov = await resolveSourceCallProvenanceLocked(trx, { leadId: lead.id, twilioCallSid: lead.twilio_call_sid });
+  if (prov.refusedReason === 'call_unsettled') return { retry: 'call_unsettled' };
+  if (prov.refusedReason === 'call_rejected') {
+    // The resolver also says call_rejected while a reprocess holds the call.
+    // Only the durable verdict (metadata.no_attribution) is final.
+    const call = await trx('call_log').where({ id: lsaLead.call_log_id }).first('metadata');
+    if (!noAttributionVerdict(call?.metadata)) return { retry: 'call_processing' };
+  }
+  if (prov.refusedReason) return { unproven: String(prov.refusedReason).slice(0, 40) };
+  if (!prov.sourceCallId || String(prov.sourceCallId) !== String(lsaLead.call_log_id)) return { unproven: 'lead_not_from_call' };
+  return { ok: true };
+}
+
+function noAttributionVerdict(metadata) {
+  try {
+    const md = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
+    return md?.no_attribution === true;
+  } catch { return false; }
+}
+
+async function markLsaLead(trx, lsaLead, result, from) {
+  await trx('lsa_leads').where({ id: lsaLead.id }).update({
+    relabeled_at: new Date(),
+    relabel_result: result,
+    relabeled_from: from,
+    updated_at: new Date(),
+  });
+  return { result };
+}
+
+// One lead, one transaction. Lock order is the repo's: the lead, then its
+// funnel row. { retry: reason } = nothing written, try again next run.
+async function relabelInTransaction(trx, lsaLead, startedAt) {
+  // The match may have moved since the batch read (a refill, a re-match):
+  // act only on the ids still on the row, under its lock.
+  const current = await trx('lsa_leads').where({ id: lsaLead.id }).forUpdate()
+    .first('lead_id', 'customer_id', 'call_log_id', 'match_basis', 'relabeled_at');
+  if (!current || current.relabeled_at || current.match_basis !== 'phone_time'
+    || String(current.lead_id) !== String(lsaLead.lead_id)
+    || String(current.customer_id) !== String(lsaLead.customer_id)
+    || String(current.call_log_id) !== String(lsaLead.call_log_id)) return { retry: 'match_changed' };
+  const lead = await trx('leads').where({ id: lsaLead.lead_id }).forUpdate().first('id', 'customer_id', 'twilio_call_sid', 'status');
+  if (!lead) return { retry: 'no_lead' };
+  // Paid credit needs the lead's CURRENT owner to be the matched customer.
+  if (!lead.customer_id || String(lead.customer_id) !== String(lsaLead.customer_id)) return { retry: 'customer_changed' };
+  // The pipeline's own check, under the same lead -> call_log lock order: the
+  // call still belongs to this lead and was not rejected (spam, not a lead),
+  // repointed or left unsettled. A rejected call never regains paid credit.
+  const proof = await callStillAttributable(trx, lsaLead, lead);
+  if (proof.retry) return proof;
+  if (proof.unproven) return markLsaLead(trx, lsaLead, 'unproven', proof.unproven);
+  const row = await trx('ad_service_attribution')
+    .where({ lead_id: lsaLead.lead_id })
+    .forUpdate()
+    .first('id', 'lead_source', 'source_call_id');
+  const action = relabelAction(row, lsaLead);
+  let result = action.result;
+  let from = action.from || null;
+  if (action.type === 'create') {
+    const { recordCallPpcAttribution } = require('./call-attribution');
+    const recorded = await recordCallPpcAttribution({
+      customerId: lsaLead.customer_id,
+      leadId: lsaLead.lead_id,
+      leadSource: 'google_lsa',
+      isPaid: true,
+      leadSourceDetail: RELABEL_DETAIL,
+      leadDate: startedAt || lsaLead.lead_created_at,
+      sourceCallId: lsaLead.call_log_id,
+      attributionBasis: RELABEL_BASIS,
+      dbc: trx,
+    });
+    if (!recorded.recorded) {
+      // The pipeline says the lead's row is not provably this call's: final.
+      if (!UNPROVEN_REFUSALS.has(recorded.reason)) return { retry: recorded.reason || 'not_recorded' };
+      result = 'unproven';
+      from = String(recorded.reason).slice(0, 40);
+    } else {
+      result = 'created';
+      // The row starts at 'lead'; a conversion that happened before it existed
+      // advanced nothing, so replay the lead's current status (won, lost...).
+      const { bridgeLeadFunnelStage } = require('../lead-funnel-bridge');
+      if (lead.status) {
+        const replay = await bridgeLeadFunnelStage(lead.id, lead.status, trx);
+        // The bridge swallows its errors; a failed replay rolls the new row back.
+        if (replay?.reason === 'error') throw Object.assign(new Error('stage replay failed'), { code: 'stage_replay' });
+      }
+    }
+  } else if (action.type === 'relabel') {
+    await trx('ad_service_attribution').where({ id: row.id }).update({
+      lead_source: 'google_lsa',
+      is_paid: true,
+      lead_source_detail: RELABEL_DETAIL,
+      attribution_basis: RELABEL_BASIS,
+      updated_at: new Date(),
+    });
+  }
+  return markLsaLead(trx, lsaLead, result, from);
+}
+
+// Phone-call leads matched to a call, the lead and the customer, not yet done,
+// created in the last 90 days. A refill (above) completes the ids first.
+async function relabelMatches() {
+  const since = new Date(Date.now() - RELABEL_LOOKBACK_DAYS * 24 * 3600 * 1000);
+  const rows = await db('lsa_leads')
+    .where({ match_basis: 'phone_time' })
+    .whereNotNull('lead_id')
+    .whereNotNull('customer_id')
+    .whereNotNull('call_log_id')
+    .whereNull('relabeled_at')
+    .where('lead_created_at', '>=', since)
+    .orderBy('lead_created_at')
+    .select('id', 'call_log_id', 'lead_id', 'customer_id', 'lead_created_at');
+  const counts = { relabeled: 0, created: 0, kept: 0, retry: 0, failed: 0 };
+  if (!rows.length) return counts;
+  const calls = await db('call_log').whereIn('id', rows.map((r) => r.call_log_id))
+    .select('id', 'twilio_call_sid', 'created_at', 'metadata', 'duration_seconds', 'recording_duration_seconds');
+  const byId = new Map(calls.map((c) => [c.id, c]));
+  for (const lsaLead of rows) {
+    const call = byId.get(lsaLead.call_log_id) || null;
+    const startedAt = call ? callStartedAt(call) : null;
+    let out;
+    try {
+      out = await db.transaction((trx) => relabelInTransaction(trx, lsaLead, startedAt));
+    } catch (err) {
+      // Never the row's values: the step, code, constraint and table only.
+      logger.error(`[google-lsa-leads] database ${dbErrorText('relabel', err)}`);
+      counts.failed += 1;
+      continue;
+    }
+    if (out.retry === 'error') {
+      // The writer swallowed a database error: a failure, not a wait.
+      logger.error('[google-lsa-leads] relabel writer error');
+      counts.failed += 1;
+    } else if (out.retry) {
+      logger.warn(`[google-lsa-leads] relabel waits: ${out.retry}`);
+      counts.retry += 1;
+    } else if (out.result === 'relabeled' || out.result === 'created') {
+      counts[out.result] += 1;
+    } else {
+      counts.kept += 1;
+    }
+  }
+  return counts;
+}
+
 // A database error can echo the row it refused (the consumer's phone and name),
 // so a DB failure is logged and thrown as its step, code, constraint and table
 // only. Google's own errors go through errorText.
@@ -484,8 +670,11 @@ async function runLeadSync() {
   const stored = await dbStep('store', () => upsertLeads(leads));
   const counts = await dbStep('match', () => matchOpenLeads());
   const refilled = await dbStep('refill', () => refillMatches());
-  logger.info(`[google-lsa-leads] Stored ${stored} leads (${since} to ${until}); matched ${counts.matched}, ambiguous ${counts.ambiguous}, unmatched ${counts.unmatched}, waiting ${counts.pending}, refilled ${refilled}`);
-  return { configured: true, leads: stored, ...counts, refilled };
+  const relabel = await dbStep('relabel', () => relabelMatches());
+  logger.info(`[google-lsa-leads] Stored ${stored} leads (${since} to ${until}); matched ${counts.matched}, ambiguous ${counts.ambiguous}, unmatched ${counts.unmatched}, waiting ${counts.pending}, refilled ${refilled}; relabeled ${relabel.relabeled}, created ${relabel.created}, kept ${relabel.kept}, waiting ${relabel.retry}, failed ${relabel.failed}`);
+  // A lead that failed is retried next run; the throw puts it in job_health.
+  if (relabel.failed) throw new Error(`database step relabel, ${relabel.failed} lead(s) failed`);
+  return { configured: true, leads: stored, ...counts, refilled, relabel };
 }
 
 module.exports = {
@@ -515,6 +704,10 @@ module.exports = {
     startedInWindow,
     refillFields,
     refillMatches,
+    relabelAction,
+    relabelInTransaction,
+    relabelMatches,
+    RELABEL_BASIS,
     dbErrorText,
     callHeldByOther,
     findOnlyCustomer,

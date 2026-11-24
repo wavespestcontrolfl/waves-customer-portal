@@ -1803,4 +1803,6 @@ module.exports = {
   reconcileMovedCallAttributionRow,
   sweepPendingAttributionTransfers,
   _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION, callCarriesDurableLeadEvidence },
+  // The LSA relabel (google-lsa-leads.js) re-proves its call with the same check.
+  resolveSourceCallProvenanceLocked,
 };
