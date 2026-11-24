@@ -91,14 +91,21 @@ afterEach(() => {
 });
 
 describe("Blog editor keeps unsaved edits (BLOG-06)", () => {
-  it("a new hero image does not undo an unsaved title", async () => {
-    routes["POST /api/admin/content/blog/post-17/regenerate-image"] = () =>
-      json({
+  it("a new hero image does not undo an unsaved title, and the request names the selected post type", async () => {
+    let sentBody = null;
+    routes["POST /api/admin/content/blog/post-17/regenerate-image"] = (_url, options) => {
+      sentBody = JSON.parse(options.body);
+      return json({
         success: true,
         post: { ...basePost, featured_image_url: "https://example.invalid/new.jpg" },
       });
+    };
     const title = await openEditor(basePost);
     fireEvent.change(title, { target: { value: "Corrected title" } });
+    // The server refuses an unsaved type change that changes the picture
+    // rules, so the editor sends the type it has selected.
+    const typeSelect = screen.getByRole("option", { name: "Diagnostic" }).closest("select");
+    fireEvent.change(typeSelect, { target: { value: "diagnostic" } });
     fireEvent.click(screen.getByRole("button", { name: "Regenerate image" }));
 
     await waitFor(() =>
@@ -108,6 +115,7 @@ describe("Blog editor keeps unsaved edits (BLOG-06)", () => {
       ),
     );
     expect(screen.getByDisplayValue("Corrected title")).toBeInTheDocument();
+    expect(sentBody).toEqual({ post_type: "diagnostic" });
   });
 
   it("a status refresh takes the Astro state but not the saved title", async () => {

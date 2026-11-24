@@ -3,6 +3,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { parseETDateTime, etDateString } = require('../utils/datetime-et');
 const {
   computeOpsScoreboard,
+  computeCustomerPickerConversion,
   classifyCall,
   classifyBooking,
   planFollowed,
@@ -256,6 +257,58 @@ function withArrivalEvents(rowsByTable) {
 const WIN = { from: '2026-09-01', to: '2026-09-07' };
 function etTs(dateStr) { return `${dateStr}T12:00:00.000Z`; } // safely inside any ET calendar day
 
+describe('computeCustomerPickerConversion', () => {
+  const picked = (estimateId, serviceId, overrides = {}) => ({
+    actor_type: 'customer', action: 'estimate_hold_started', resource_type: 'estimate',
+    resource_id: estimateId, metadata: { scheduled_service_id: serviceId },
+    created_at: etTs('2026-09-03'), ...overrides,
+  });
+
+  test('measures the existing customer selection cohort against the exact committed appointment', async () => {
+    const rows = {
+      audit_log: [
+        picked('est-1', 'hold-1'),
+        // Retry of one hold is one selected appointment.
+        picked('est-1', 'hold-1'),
+        // JSON metadata is the shape some PostgreSQL clients return.
+        picked('est-2', 'hold-2', { metadata: JSON.stringify({ scheduled_service_id: 'hold-2' }) }),
+        picked('est-3', 'hold-3'),
+      ],
+      scheduled_services: [
+        // A later cancellation or leftover expiry stamp does not erase that
+        // this customer-linked row became a booking.
+        { id: 'hold-1', source_estimate_id: 'est-1', customer_id: 'cust-1', status: 'cancelled', reservation_expires_at: etTs('2026-09-03') },
+        // Cross-estimate linkage is not allowed to claim this selection.
+        { id: 'hold-2', source_estimate_id: 'other-estimate', customer_id: 'cust-2' },
+        // Still an uncommitted hold.
+        { id: 'hold-3', source_estimate_id: 'est-3', customer_id: null },
+      ],
+    };
+    await expect(computeCustomerPickerConversion(WIN, makeFilteringDb(rows))).resolves.toEqual({
+      numerator: 1, denominator: 3, share: 1 / 3,
+      selectedAppointments: 3, bookedAppointments: 1, appointmentShare: 1 / 3,
+    });
+  });
+
+  test('uses only real-customer events inside the ET window and reports no data as null shares', async () => {
+    const rows = {
+      audit_log: [
+        picked('est-staff', 'hold-staff', { actor_type: 'staff' }),
+        picked('est-old', 'hold-old', { created_at: etTs('2026-08-31') }),
+        picked('est-search', 'hold-search', { action: 'estimate_slot_search' }),
+      ],
+      scheduled_services: [
+        { id: 'hold-staff', source_estimate_id: 'est-staff', customer_id: 'cust' },
+        { id: 'hold-old', source_estimate_id: 'est-old', customer_id: 'cust' },
+      ],
+    };
+    await expect(computeCustomerPickerConversion(WIN, makeFilteringDb(rows))).resolves.toEqual({
+      numerator: 0, denominator: 0, share: null,
+      selectedAppointments: 0, bookedAppointments: 0, appointmentShare: null,
+    });
+  });
+});
+
 describe('computeOpsScoreboard — ai_call_share', () => {
   test('sandbox calls are excluded from both numerator and denominator', async () => {
     const rows = {
@@ -463,6 +516,7 @@ describe('computeOpsScoreboard — zero denominators never read as 0%', () => {
     expect(out.driveMinutesPerStop.share).toBeNull();
     expect(out.aiCallShare.share).toBeNull();
     expect(out.bookingsWithoutStaff.share).toBeNull();
+    expect(out.customerPickerConversion.share).toBeNull();
     expect(out.aiRouteDays.share).toBeNull();
   });
 });

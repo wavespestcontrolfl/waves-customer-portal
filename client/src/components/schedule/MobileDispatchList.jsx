@@ -11,7 +11,7 @@
 // against America/New_York — the business is in SW Florida. No UTC.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BookOpen, Leaf, MapPin, ShieldCheck } from 'lucide-react';
+import { BookOpen, MapPin, ShieldCheck } from 'lucide-react';
 import WavesMark from '../brand/WavesMark';
 import { Badge } from '../ui';
 import { serviceColor } from '../../lib/service-colors';
@@ -22,6 +22,7 @@ import DispatchReadinessStrip from './DispatchReadinessStrip';
 import { ScheduleAccessLine } from './ScheduleAccess';
 import { openHoursForDay, hourToHHMM, useHourClock, NOT_OCCUPYING } from './openHours';
 import { formatTimeWindow } from './timeWindow';
+import { paidReportNotSent } from './visitInvoice';
 import { directionsHref } from '../../lib/directionsHref';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -69,7 +70,7 @@ function formatOpenRow(hour) {
   return formatTimeWindow(hourToHHMM(hour), hourToHHMM(hour + 1));
 }
 
-// Tie-proximity display order (server, GATE_SCHEDULE_TIE_PROXIMITY):
+// Tie-proximity display order (server):
 // `displayOrder` is a 0-based index within ONE technician's day. This list
 // can mix techs, so a pairwise "use displayOrder if same tech" comparator
 // would be non-transitive. Instead each stop gets one fixed key: walking a
@@ -122,11 +123,6 @@ function sortByWindow(services) {
 function canMarkEnRoute(service) {
   return ['pending', 'confirmed', 'rescheduled'].includes(service?.status);
 }
-
-function isLawnService(service) {
-  return /lawn|turf/.test(String(service?.serviceType || '').toLowerCase());
-}
-
 
 // The drive into a stop, drawn as a thin line above its card (owner
 // 2026-10-05): "59 min drive from <previous stop>". The server stamps each
@@ -217,7 +213,7 @@ function ButtonLabel({ children }) {
   return <span className="block max-w-full text-center leading-tight" style={{ fontSize: 14 }}>{children}</span>;
 }
 
-function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
+function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
   const needsAttention =
@@ -259,7 +255,6 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
     clearTimeout(longPressTimer.current);
   }, []);
 
-  const showTreatmentPlan = isLawnService(service) && Boolean(onTreatmentPlan);
   const showProtocol = Boolean(onProtocol);
   const showAudit =
     service.status === 'completed' &&
@@ -269,7 +264,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
   const showNavigate = Boolean(service.address);
   const canAssignTechnician = (technicians || []).length > 0 || Boolean(service.technicianId);
   const hasActions =
-    canAssignTechnician || showTreatmentPlan || showProtocol || showAudit || showEnRoute || showNavigate;
+    canAssignTechnician || showProtocol || showAudit || showEnRoute || showNavigate;
 
   // Icon over a one-word label (owner 2026-10-05), so a new tech can tell
   // the buttons apart.
@@ -311,6 +306,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
               // Completed but the closeout (invoice / report / text) is still
               // owed — tapping the row reopens the completion panel to resume.
               <Badge tone="alert">Closeout owed</Badge>
+            )}
+            {paidReportNotSent(service) && (
+              // Arrived and paid, report still owed: a same-day payment no
+              // longer closes the visit (GATE_REPORT_AFTER_PAY). Tapping the
+              // row opens the completion, as for any open visit.
+              <Badge tone="warn">Paid, report not sent</Badge>
             )}
             {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
               <span
@@ -398,19 +399,6 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                   />
                 )}
               </div>
-            )}
-            {showTreatmentPlan && (
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); onTreatmentPlan(service); }}
-                className={actionBtnClass}
-                style={btnStyle}
-                title="Treatment plan"
-                aria-label="Treatment plan"
-              >
-                <Leaf size={16} strokeWidth={1.75} />
-                <ButtonLabel>Plan</ButtonLabel>
-              </button>
             )}
             {showProtocol && (
               <button
@@ -546,7 +534,7 @@ function withOpenHours(sorted, openHours) {
   return rows;
 }
 
-function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, outTechIds, bookingHours }) {
+function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, outTechIds, bookingHours }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const now = useHourClock();
   // Techs marked out for the day can't take a booking; with the whole roster
@@ -632,7 +620,6 @@ function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute,
             onEdit={onEdit}
             onEnRoute={onEnRoute}
             onProtocol={onProtocol}
-            onTreatmentPlan={onTreatmentPlan}
             onViewAudit={onViewAudit}
             owesCompletion={owesCompletion}
             technicians={technicians}
@@ -658,7 +645,7 @@ function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute,
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, bookingHours }) {
+export default function MobileDispatchList({ mode, date, services, refreshKey, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, bookingHours }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -717,7 +704,6 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
           onEdit={onEdit}
           onEnRoute={onEnRoute ? handleEnRoute : undefined}
           onProtocol={onProtocol}
-          onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}
           owesCompletion={owesCompletion}
           technicians={technicians}
@@ -756,7 +742,6 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
           onEdit={onEdit}
           onEnRoute={onEnRoute ? handleEnRoute : undefined}
           onProtocol={onProtocol}
-          onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}
           owesCompletion={owesCompletion}
           technicians={technicians}

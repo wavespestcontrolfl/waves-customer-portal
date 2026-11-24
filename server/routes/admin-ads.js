@@ -6,6 +6,7 @@ const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { buildChannelAttribution, splitFacebookByPaid } = require('../services/channel-attribution');
 const { rankCapitalAllocation } = require('../services/capital-allocation');
+const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
 // Lazy-load heavy Google Ads modules (~87MB) — only loaded on first request
 let _BudgetManager, _CampaignAdvisor, _googleAds;
@@ -55,9 +56,38 @@ const SYNCED_STATUS_REFUSALS = new Map([
   ['google_ads', "Use /pause or /enable to change a Google campaign's status — they sync Google Ads."],
   ['facebook', "A Meta campaign's status comes from Meta Ads Manager. Change it there; the daily Meta sync brings it in."],
 ]);
-// Campaign metadata keys only the hold routes write: the owner's hold and its
-// release record. Generic campaign writes refuse them and keep the stored ones.
-const HOLD_METADATA_KEYS = ['budget_hold', 'budget_hold_cleared'];
+// The Local Services row the daily sync owns (one row for the account; it
+// carries the sync's account mark, see ads/google-lsa.js ownsCampaign) takes
+// its status from Google. A campaign entered by hand has no mark and stays
+// editable here. The sync marks a row only when it inserts it and never takes
+// over an existing one, so a row's owner cannot change between the read and
+// the write below. google-lsa.js
+// loads the Google Ads SDK only when a sync runs, so the require is cheap.
+const LSA_SYNCED_STATUS_REFUSAL = "A synced Local Services campaign's status comes from Google. Change it there; the daily Local Services sync brings it in.";
+// The sync writes its row's type once, at insert, and the Ads page puts a row on
+// the "Local Service Ads" card by that type. A changed type would take the
+// row's cost off the card for good.
+const LSA_SYNCED_TYPE_REFUSAL = "The synced Local Services row's type is set by the daily Local Services sync. It keeps the row on the Local Service Ads card.";
+function ownedByLsaSync(campaign) {
+  return campaign.platform === 'google_lsa' && require('../services/ads/google-lsa').ownsCampaign(campaign);
+}
+function syncedStatusRefusal(campaign) {
+  if (campaign.platform === 'google_lsa') {
+    return ownedByLsaSync(campaign) ? LSA_SYNCED_STATUS_REFUSAL : undefined;
+  }
+  return SYNCED_STATUS_REFUSALS.get(campaign.platform);
+}
+// Campaign metadata keys that generic campaign writes refuse and keep as stored,
+// each with where it is written instead. budget_hold / budget_hold_cleared: the
+// owner's hold and its release record. lsa_customer_id: the Local Services
+// sync's mark on a row it owns (ads/google-lsa.js ACCOUNT_KEY); a generic write
+// that set or erased it would change whether the row counts as synced.
+const HOLD_SWITCH = 'use the hold switch (POST/DELETE /campaigns/:id/hold)';
+const RESERVED_METADATA_KEYS = new Map([
+  ['budget_hold', HOLD_SWITCH],
+  ['budget_hold_cleared', HOLD_SWITCH],
+  ['lsa_customer_id', 'the daily Local Services sync writes it'],
+]);
 // Managed by /budget, /mode, /pause, /enable, /sync — never the generic writes.
 const CAMPAIGN_MANAGED_FIELDS = ['budget_mode', 'daily_budget_base', 'daily_budget_current'];
 // Identity — settable at creation, never repointed on update.
@@ -81,10 +111,10 @@ function sanitizeCampaignWrite(body, isUpdate) {
   }
 
   // status is settable on create (honored rather than defaulted to active) and
-  // on update (the only route to pause/remove a manual or google_lsa campaign —
+  // on update (the only route to pause/remove a campaign entered by hand —
   // /pause + /enable reject non-google_ads; the route additionally steers a
   // Google campaign's status change to those synced endpoints and refuses one
-  // on a synced Meta campaign).
+  // on a synced Meta or Local Services campaign).
   const allow = isUpdate
     ? ['status', ...CAMPAIGN_META_FIELDS]
     : [...CAMPAIGN_CREATE_ONLY_FIELDS, 'status', ...CAMPAIGN_META_FIELDS];
@@ -111,11 +141,12 @@ function sanitizeCampaignWrite(body, isUpdate) {
   }
   // metadata.budget_hold is the owner's budget switch, and budget_hold_cleared is
   // its release record. Only the hold routes write them: they push the held
-  // budget, check the end date and stamp the release.
+  // budget, check the end date and stamp the release. lsa_customer_id is the
+  // Local Services sync's mark.
   if (out.metadata != null) {
     const meta = metadataObject(out.metadata);
-    const key = HOLD_METADATA_KEYS.find((k) => Object.prototype.hasOwnProperty.call(meta, k));
-    if (key) return { ok: false, error: `${key} can't be set here — use the hold switch (POST/DELETE /campaigns/:id/hold).` };
+    const key = [...RESERVED_METADATA_KEYS.keys()].find((k) => Object.prototype.hasOwnProperty.call(meta, k));
+    if (key) return { ok: false, error: `${key} can't be set here — ${RESERVED_METADATA_KEYS.get(key)}.` };
   }
 
   if (out.monthly_budget !== undefined && out.monthly_budget !== null) {
@@ -211,7 +242,15 @@ router.get('/campaigns', async (req, res, next) => {
       };
     });
 
-    res.json({ campaigns: enriched });
+    // The Local Service Ads card's lead row; null when it cannot be read.
+    const lsaSummary = await require('../services/ads/lsa-summary').lsaSummary(enriched, {
+      since: d30,
+      until: today,
+      // Same lead exclusions as the dashboard's channel ROI (soft-deleted, internal, test).
+      excludeRows: (qb) => applyAttributionExclusions(qb, LSA_SUMMARY_EXCLUDE),
+    });
+
+    res.json({ campaigns: enriched, lsaSummary });
   } catch (err) { next(err); }
 });
 
@@ -230,16 +269,25 @@ router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
   try {
     const clean = sanitizeCampaignWrite(req.body, true);
     if (!clean.ok) return res.status(400).json({ error: clean.error });
-    // A synced platform owns its campaign's status (SYNCED_STATUS_REFUSALS); a
+    // A synced platform owns its campaign's status (syncedStatusRefusal); a
     // direct local flip here would drift from the platform until the next sync.
-    // Manual / google_lsa campaigns have no synced status route, so PUT is the
-    // way to retire them.
-    if (clean.value.status !== undefined) {
+    // A campaign entered by hand has no synced status route, so PUT is the way
+    // to retire it.
+    if (clean.value.status !== undefined || clean.value.campaign_type !== undefined) {
       const existing = await db('ad_campaigns').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Campaign not found' });
-      const refusal = SYNCED_STATUS_REFUSALS.get(existing.platform);
-      if (refusal && clean.value.status !== existing.status) {
-        return res.status(400).json({ error: refusal });
+      const refusal = clean.value.status !== undefined && syncedStatusRefusal(existing);
+      if (refusal) {
+        if (clean.value.status !== existing.status) return res.status(400).json({ error: refusal });
+        // The platform owns this status, so an unchanged one is not written
+        // back: a sync that changes it between this read and the update below
+        // must not be undone by the echo.
+        delete clean.value.status;
+      }
+      // Same for the type of the row the Local Services sync owns.
+      if (clean.value.campaign_type !== undefined && ownedByLsaSync(existing)) {
+        if (clean.value.campaign_type !== existing.campaign_type) return res.status(400).json({ error: LSA_SYNCED_TYPE_REFUSAL });
+        delete clean.value.campaign_type;
       }
     }
     let campaign;
@@ -249,14 +297,15 @@ router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
         .update({ ...clean.value, updated_at: new Date() })
         .returning('*');
     } else {
-      // A metadata replacement keeps the owner's hold and its release record:
-      // read them under the row lock so a hold saved meanwhile is not erased.
+      // A metadata replacement keeps the reserved keys (the owner's hold, its
+      // release record, the Local Services sync's mark): read them under the
+      // row lock so a hold saved meanwhile is not erased.
       campaign = await db.transaction(async (trx) => {
         const locked = await trx('ad_campaigns').where({ id: req.params.id }).forUpdate().first();
         if (!locked) return null;
         const patch = { ...clean.value, updated_at: new Date() };
         const lockedMeta = metadataObject(locked.metadata);
-        const kept = Object.fromEntries(HOLD_METADATA_KEYS.filter((k) => lockedMeta[k] !== undefined).map((k) => [k, lockedMeta[k]]));
+        const kept = Object.fromEntries([...RESERVED_METADATA_KEYS.keys()].filter((k) => lockedMeta[k] !== undefined).map((k) => [k, lockedMeta[k]]));
         if (Object.keys(kept).length) patch.metadata = JSON.stringify({ ...metadataObject(patch.metadata), ...kept });
         const [row] = await trx('ad_campaigns').where({ id: req.params.id }).update(patch).returning('*');
         return row;
@@ -656,6 +705,8 @@ const SYNC_JOBS = [
   { platform: 'google_ads', job: 'google-ads-sync', configured: () => require('../services/ads/google-ads-config').isConfigured() },
   { platform: 'facebook', job: 'meta-ads-campaigns', configured: () => getMetaAds().isConfigured() },
   { platform: 'facebook', job: 'meta-ads-performance', configured: () => getMetaAds().isConfigured() },
+  // google-lsa.js loads the Google Ads SDK only when a sync runs, not here.
+  { platform: 'google_lsa', job: 'google-lsa-sync', configured: () => require('../services/ads/google-lsa').isConfigured() },
 ];
 router.get('/sync-status', async (req, res, next) => {
   try {
@@ -680,12 +731,11 @@ router.get('/sync-status', async (req, res, next) => {
 
 // GET /api/admin/ads/health — the read-only Ad health card on Ads → Dashboard (owner 2026-11-04, PPC gap page
 // option A): live serving status, disapprovals, conversion uploads and a 30-day who-changed-what timeline. It only
-// reads. GATE_ADS_HEALTH_CARD off: 404, and the card renders nothing.
+// reads.
 let _adsHealth;
 function getAdsHealth() { return _adsHealth || (_adsHealth = require('../services/ads/ads-health')); }
 router.get('/health', async (req, res, next) => {
   try {
-    if (require('../config/feature-gates').adsHealthCardLive?.() !== true) return res.status(404).json({ error: 'ads_health_off' });
     return res.json(await getAdsHealth().buildAdsHealth());
   } catch (err) { return next(err); }
 });
@@ -1188,6 +1238,10 @@ function applyAttributionExclusions(qb, exclude) {
   return qb;
 }
 
+// The exclusions the dashboard's channel ROI passes to fetchChannelAttribution;
+// the Local Service Ads lead row on the campaigns list uses the same ones.
+const LSA_SUMMARY_EXCLUDE = { deletedLeads: true, internalNames: INTERNAL_TEST_CUSTOMERS };
+
 // Shared channel attribution: completed-lead revenue/GP/customers + TRUE platform
 // spend (ad_performance_daily by platform, so a paid channel-month with spend but
 // zero tracked leads still surfaces, with no cent-rounding drift). Platform values
@@ -1279,13 +1333,16 @@ async function fetchChannelAttribution(since, months = 1, exclude = null) {
     } catch { /* settings unreadable — keep the default */ }
     // Same exclusions as the completed rows — an excluded internal/deleted
     // "conversion" must not add reward cost the card's rows don't show.
-    const [{ n }] = await applyAttributionExclusions(
+    const completedReferrals = () => applyAttributionExclusions(
       db('ad_service_attribution as asa')
         .where({ 'asa.lead_source': 'referral', 'asa.funnel_stage': 'completed' })
         .where('asa.lead_date', '>=', since),
       exclude,
-    ).countDistinct({ n: 'asa.customer_id' });
-    const refCost = round((Number(n) || 0) * perConversion, 2);
+    );
+    // The recorded amounts for a referral with a Step 2 settlement (a $25 or a capped $0 member credit, plus the
+    // friend's credit), whatever the gate says now; the flat settings for every other referral.
+    const ids = (await completedReferrals().distinct('asa.customer_id')).map((r) => r.customer_id).filter(Boolean);
+    const refCost = round(await require('../services/referral-engine').referralAcquisitionCost(db, ids, perConversion), 2);
     if (refCost > 0) fixedCostBySource.referral = (fixedCostBySource.referral || 0) + refCost;
   } catch { /* ad_service_attribution shape / no referrals — no-op */ }
 
@@ -1446,3 +1503,5 @@ module.exports = router;
 // dashboard only swaps in its own window semantics (ET calendar periods +
 // attribution fresh-start floor) for this file's trailing-days windows.
 module.exports.fetchChannelAttribution = fetchChannelAttribution;
+module.exports.applyAttributionExclusions = applyAttributionExclusions;
+module.exports.LSA_SUMMARY_EXCLUDE = LSA_SUMMARY_EXCLUDE;

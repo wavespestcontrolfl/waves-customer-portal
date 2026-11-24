@@ -60,6 +60,7 @@ function setupDb() {
       select: jest.fn(() => q),
       count: jest.fn(() => q),
       first: jest.fn(() => Promise.resolve(tableState.post ?? null)),
+      columnInfo: jest.fn(() => Promise.resolve(tableState.heroColumn ?? { type: 'text', maxLength: null })),
       update: jest.fn((u) => { calls.updates.push({ table, filters: { ...q._filters }, updates: u }); return { returning: () => Promise.resolve([{ ...tableState.post, ...u }]) }; }),
       // Mirrors the atomic guarded delete: only a non-astro-active existing
       // row deletes; anything else reports 0 rows like Postgres would.
@@ -247,6 +248,99 @@ describe('regenerate-image publish guard (codex r10)', () => {
     expect(r.statusCode).toBe(200);
     expect(AstroPublisher.generatePlannedImage).toHaveBeenCalledWith(expect.objectContaining({ mode: 'blog-hero', index: 0, slug: 'pest-control/ghost-ants-sarasota', title: 'Ghost Ants In Sarasota', keyword: 'ghost ants' }));
     expect(calls.updates.at(-1).updates.featured_image_url).toBe('data:image/png;base64,QUJD');
+    // Production's featured_image_url is varchar(255): the multi-MB data URL
+    // cannot be saved there, so the route refuses BEFORE the paid image call
+    // (pre-push audit P1 on 4e35f451be); an unreadable column counts as too short.
+    AstroPublisher.generatePlannedImage.mockClear();
+    const writes = calls.updates.length;
+    for (const column of [{ type: 'character varying', maxLength: 255 }, {}]) {
+      tableState.heroColumn = column;
+      const refused = await invoke('post', '/blog/:id/regenerate-image', { params: { id: POST_ID } });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.payload.error).toMatch(/cannot save a generated picture yet/);
+    }
+    expect(AstroPublisher.generatePlannedImage).not.toHaveBeenCalled();
+    expect(calls.updates).toHaveLength(writes);
+  });
+
+  test('a post that becomes an identification post while the picture is made refuses the save, and an unsaved selection that would make it one is refused before the image call; both checks are null-safe (pre-push audit P1s on 5608d79a6a and 9395fddc43)', async () => {
+    const AstroPublisher = require('../services/content-astro/astro-publisher');
+    AstroPublisher.generatePlannedImage.mockResolvedValue({ dataUrl: 'data:image/png;base64,QUJD', model: 'gpt-image-2', plan: { style: 'cartoon', setting: 'in a backyard, dew on the grass' }, screen: { checked: true, ok: true, reasons: [] } });
+    // The fake reads `readRow` and evaluates the save's post_type group (if
+    // the route adds one) against `writeRow`, the row as an editor left it
+    // during the slow picture call: null, free of 'diagnostic' (the exact raw
+    // SQL is checked), or the type as read.
+    const fakeDb = (readRow, writeRow) => {
+      db.mockImplementation(() => {
+        let typeGroup = false;
+        let rawSql = null;
+        let sameType;
+        const sub = {
+          whereNull: (col) => { if (col === 'post_type') typeGroup = true; return sub; },
+          where: () => sub,
+          orWhere: (col, v) => { if (col === 'post_type') sameType = v; return sub; },
+          orWhereNot: () => sub,
+          orWhereRaw: (sql) => { rawSql = sql; return sub; },
+        };
+        const q = {
+          where: jest.fn((a) => { if (typeof a === 'function') a(sub); return q; }),
+          columnInfo: jest.fn(() => Promise.resolve({ type: 'text', maxLength: null })),
+          first: jest.fn(() => Promise.resolve(readRow)),
+          update: jest.fn((u) => ({
+            returning: () => {
+              const t = writeRow.post_type ?? null;
+              if (typeGroup) expect(rawSql).toBe("strpos(post_type, 'diagnostic') = 0");
+              const ok = !typeGroup || t == null || !String(t).includes('diagnostic') || t === sameType;
+              return Promise.resolve(ok ? [{ ...writeRow, ...u }] : []);
+            },
+          })),
+        };
+        return q;
+      });
+    };
+    const send = async () => (await invoke('post', '/blog/:id/regenerate-image', { params: { id: POST_ID } })).statusCode;
+    const typed = { id: POST_ID, status: 'draft', title: 'Ghost Ants In Sarasota', slug: 'pest-control/ghost-ants-sarasota', keyword: 'ghost ants', post_type: 'how-to' };
+    fakeDb(typed, { ...typed, post_type: 'diagnostic' });
+    expect(await send()).toBe(409);
+    expect(AstroPublisher.generatePlannedImage).toHaveBeenLastCalledWith(expect.objectContaining({ identification: false }));
+    fakeDb(typed, typed);
+    expect(await send()).toBe(200);
+    const untyped = { ...typed, post_type: null };
+    fakeDb(untyped, untyped);
+    expect(await send()).toBe(200);
+    fakeDb(untyped, { ...untyped, post_type: 'diagnostic' });
+    expect(await send()).toBe(409);
+    // A change between two other post types keeps the paid picture (pre-push
+    // audit P1 on 13fcac98f5); a change away from diagnostic does not.
+    fakeDb(typed, { ...typed, post_type: 'location' });
+    expect(await send()).toBe(200);
+    // A hero planned for an identification post is safe on any row, so its
+    // save has no post-type condition (pre-push audit P1 on 5585d13f4c: a
+    // padded 'diagnostic\t' row is planned as identification and saves).
+    const diag = { ...typed, post_type: 'diagnostic' };
+    fakeDb(diag, { ...diag, post_type: 'how-to' });
+    expect(await send()).toBe(200);
+    const padded = { ...typed, post_type: 'diagnostic\t' };
+    fakeDb(padded, padded);
+    expect(await send()).toBe(200);
+    // ...and a row that became one, padded, is refused.
+    fakeDb(typed, { ...typed, post_type: '\tdiagnostic' });
+    expect(await send()).toBe(409);
+    // The editor's unsaved selection (pre-push audit P1 on 9395fddc43): one that
+    // would make the post an identification post is refused BEFORE the paid
+    // image call; any other selection, or the saved type, goes on.
+    const sendWith = async (row, postType) => { fakeDb(row, row); return (await invoke('post', '/blog/:id/regenerate-image', { params: { id: POST_ID }, body: { post_type: postType } })); };
+    AstroPublisher.generatePlannedImage.mockClear();
+    const refused = await sendWith(typed, 'diagnostic');
+    expect(refused.statusCode).toBe(409);
+    expect(refused.payload.error).toMatch(/Save the post type change first/);
+    expect(AstroPublisher.generatePlannedImage).not.toHaveBeenCalled();
+    expect((await sendWith(typed, 'location')).statusCode).toBe(200);
+    expect((await sendWith(diag, 'diagnostic')).statusCode).toBe(200);
+    // Away from diagnostic, unsaved: the hero is planned for an identification
+    // post, which is safe on any post, so the call goes on.
+    expect((await sendWith(diag, '')).statusCode).toBe(200);
+    expect(AstroPublisher.generatePlannedImage).toHaveBeenCalledTimes(3);
   });
 });
 

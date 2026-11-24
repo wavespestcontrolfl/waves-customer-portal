@@ -83,7 +83,6 @@ const DAY_NO = { dayOnly: false, level: 'none', eligible: false };
 
 let enabled;
 let prefsRow;
-const OLD_GATE = process.env.GATE_DAY_ONLY_PROMISE;
 const OLD_PAGE = process.env.GATE_APPOINTMENT_PAGE;
 
 function restoreEnv(name, value) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
@@ -98,14 +97,12 @@ beforeEach(() => {
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
   db.transaction = jest.fn(async (run) => run(db));
-  process.env.GATE_DAY_ONLY_PROMISE = 'true';
   delete process.env.GATE_APPOINTMENT_PAGE;
 });
 
 afterEach(() => {
   jest.useRealTimers();
   jest.restoreAllMocks();
-  restoreEnv('GATE_DAY_ONLY_PROMISE', OLD_GATE);
   restoreEnv('GATE_APPOINTMENT_PAGE', OLD_PAGE);
 });
 
@@ -266,24 +263,6 @@ describe('the booking confirmation', () => {
     expect(send).not.toHaveProperty('promisedWindowUnknown');
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('appointment_confirmation_day_v1'));
     expect(row.confirmation_sent).toBe(true);
-  });
-
-  test('gate off: the decision is never asked, and the text is byte-for-byte today\'s', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    const send = await run(150);
-    expect(timePromise.dayOnlySendDecision).not.toHaveBeenCalled();
-    expect(rendered()).toEqual(['appointment_confirmation']);
-    const [, vars] = templateCall('appointment_confirmation');
-    expect(vars).toEqual({
-      first_name: 'Ada', service_type: 'Pest Control', date: 'November 16', time: '3:00 PM', day: 'Monday',
-      reschedule_line: `Reschedule here: ${LINK}\n\n`,
-    });
-    expect(send.body).toBe('rendered:appointment_confirmation');
-    expect(send.metadata).toEqual({
-      original_message_type: 'confirmation', templateKey: 'appointment_confirmation', scheduled_service_id: 'svc-1',
-      rendered_slot_ms: NOW.getTime() + 150 * HOUR, useCustomerChannel: true,
-    });
-    expect(Object.keys(send).sort()).not.toContain('promisedWindowUnknown');
   });
 
   describe('the 24-hour reminder must really be sendable (Codex P1-3)', () => {
@@ -543,20 +522,6 @@ describe('the 72-hour reminder', () => {
     expect(vars).toMatchObject({ window: expect.stringContaining('between'), time: expect.any(String), reschedule_line: `Reschedule here: ${LINK}\n\n` });
     expect(send.metadata).toEqual({
       original_message_type: 'reminder_72h', templateKey: 'reminder_72h', scheduled_service_id: 'svc-1', visit_id: null,
-      rendered_slot_ms: reminderRow().appointment_time.getTime(), useCustomerChannel: true,
-    });
-  });
-
-  test('gate off: byte-for-byte today (the decision is never asked; the no-pick row keeps its prefix)', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    const { send } = await run(stamped);
-    expect(timePromise.dayOnlySendDecision).not.toHaveBeenCalled();
-    expect(rendered()).toEqual(['reminder_72h_no_reply_v1']);
-    const [, vars, , opts] = templateCall('reminder_72h_no_reply_v1');
-    expect(vars.reschedule_line).toBe(`Want a different time? Reschedule here: ${LINK}\n\n`);
-    expect(opts).toEqual({ requiredVars: ['date', 'window'] });
-    expect(send.metadata).toEqual({
-      original_message_type: 'reminder_72h', templateKey: 'reminder_72h_no_reply_v1', scheduled_service_id: 'svc-1', visit_id: null,
       rendered_slot_ms: reminderRow().appointment_time.getTime(), useCustomerChannel: true,
     });
   });

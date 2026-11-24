@@ -226,12 +226,11 @@ function validateLayoutPayload(payload) {
 
 // Lowercase, punctuation and spacing blind, with a recognized trailing ZIP (5 or 5+4) and then a trailing state
 // (FL or Florida) taken off. Nothing else is trimmed: a street suffix, direction or unit stays part of the key.
-const addressKey = (value) => String(value || '')
-  .toLowerCase()
-  .replace(/[^a-z0-9]+/g, ' ')
-  .trim()
-  .replace(/ \d{5}(?: \d{4})?$/, '')
-  .replace(/ (?:fl|florida)$/, '');
+const normalizedAddress = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const ZIP_TAIL = / (\d{5})(?: \d{4})?$/;
+const addressKey = (value) => normalizedAddress(value).replace(ZIP_TAIL, '').replace(/ (?:fl|florida)$/, '');
+/** The trailing 5-digit ZIP that addressKey drops, or '' when the address ends with none. */
+const addressZip = (value) => normalizedAddress(value).match(ZIP_TAIL)?.[1] || '';
 
 /**
  * Is the layout's address the estimate's address? Compared case, spacing and punctuation blind and ignoring a
@@ -261,6 +260,8 @@ module.exports = {
   MAX_NOZZLES,
   validateLayoutPayload,
   looksLikePng,
+  addressKey,
+  addressZip,
   sameProperty,
   operationalError,
   feetPerPixel,

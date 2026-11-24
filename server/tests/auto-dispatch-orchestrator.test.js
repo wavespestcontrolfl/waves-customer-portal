@@ -457,7 +457,6 @@ test.each([
   // Staff took the visit out of auto-dispatch after pass 1 (r21 P2).
   ['with a visit locked', { auto_dispatch_locked: true }],
   ['with a visit excluded', { auto_dispatch_excluded: true }],
-  ['who confirmed the visit', { customer_confirmed: true }],
 ])('a customer %s after pass 1 raises no missing-geo notice', async (_label, change) => {
   geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
@@ -467,6 +466,17 @@ test.each([
   db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc(child)] : [svc({ ...child, ...change })])));
   await runAutoDispatch({ mode: 'dry_run' });
   expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+});
+
+// Owner 2026-11-22: a confirmation no longer takes a visit out of auto-dispatch, so its pin still matters.
+test('a customer who confirmed the visit after pass 1 still gets the missing-geo notice', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  let reads = 0;
+  const child = { recurring_parent_id: 'parent-1' };
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc(child)] : [svc({ ...child, customer_confirmed: true })])));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
 });
 
 // A visit that is not a recurring child never goes through auto-dispatch: its pin serves the route check, so a
@@ -1387,6 +1397,13 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
 });
 
 describe('move limit (owner 2026-10-09: at most two automatic moves per visit)', () => {
+  // The default is off since owner 2026-11-22 ("this is all too limiting"); these tests run the cap the env brings back.
+  let prevLimit;
+  beforeEach(() => { prevLimit = process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT; process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT = '2'; });
+  afterEach(() => {
+    if (prevLimit === undefined) delete process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT;
+    else process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT = prevLimit;
+  });
   const AT_LIMIT = [{ scheduled_service_id: 's1', moves: '2' }];
   const OVERLAP = { kind: 'overlap', date: CURRENT.date, with: ['other-1'] };
   const applyMode = async (fn) => {

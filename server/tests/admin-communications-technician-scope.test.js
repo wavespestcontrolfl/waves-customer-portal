@@ -39,7 +39,12 @@ jest.mock('@anthropic-ai/sdk', () => (function Anthropic() { return { messages: 
 const mockSendPrep = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/prep-guide-sender', () => ({ ...jest.requireActual('../services/prep-guide-sender'), sendPrepToCustomer: (...a) => mockSendPrep(...a) }));
 const mockMarkRead = jest.fn(async () => ({ updated: 1, notificationsCleared: 0 }));
-jest.mock('../services/inbound-sms-read', () => ({ markInboundSmsRead: (...a) => mockMarkRead(...a), countUnreadInboundSms: jest.fn() }));
+const mockMarkAllRead = jest.fn(async () => ({ updated: 3, notificationsCleared: 1 }));
+jest.mock('../services/inbound-sms-read', () => ({
+  markInboundSmsRead: (...a) => mockMarkRead(...a),
+  markAllInboundSmsRead: (...a) => mockMarkAllRead(...a),
+  countUnreadInboundSms: jest.fn(),
+}));
 
 const mockLoadPending = jest.fn();
 jest.mock('../services/sms-pending-conversations', () => ({
@@ -142,6 +147,35 @@ describe('routes', () => {
     expect((await call('POST', '/api/admin/communications/messages/read', 'admin', { messageIds: ['m1'] })).status).toBe(200);
   });
 
+  test('POST /messages/read-all needs a boundary and is office-only; a technician reads thread by thread', async () => {
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', {})).status).toBe(400);
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: 'nope' })).status).toBe(400);
+    // A bare wall-clock time would be read in the server's zone: refused.
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: '2026-11-19T12:00:00' })).status).toBe(400);
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: 1763553600000 })).status).toBe(400);
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: 'front desk' })).status).toBe(400);
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: 4155550100 })).status).toBe(400);
+    // A present but empty phone is refused, never widened to the whole inbox.
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: null })).status).toBe(400);
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: '' })).status).toBe(400);
+    expect(mockMarkAllRead).not.toHaveBeenCalled();
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: '+19415550100' })).status).toBe(200);
+    expect(mockMarkAllRead).toHaveBeenLastCalledWith(expect.objectContaining({ contactPhone: '+19415550100' }));
+    mockMarkAllRead.mockClear();
+    expect(mockMarkAllRead).not.toHaveBeenCalled();
+    const readBefore = '2026-11-19T12:00:00.000Z';
+    // A technician is refused before any read: one thread at a time, through the scoped /messages/read check.
+    const tech = await call('POST', '/api/admin/communications/messages/read-all', 'tech', { readBefore });
+    expect(tech.status).toBe(403);
+    expect(mockMarkAllRead).not.toHaveBeenCalled();
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore })).status).toBe(200);
+    expect(mockMarkAllRead).toHaveBeenLastCalledWith({
+      readBefore: new Date(readBefore), role: 'admin', adminUserId: 'admin-1', contactPhone: null,
+      // The inbox log's internal-phone exclusion rides along.
+      excludePhones: expect.arrayContaining([expect.stringMatching(/^\+1\d{10}$/)]),
+    });
+  });
+
   describe('GET /unread-count', () => {
     const OWN = '99999999-2222-4333-8444-555555555555';
     const pendingRows = [
@@ -150,20 +184,45 @@ describe('routes', () => {
       { id: 'c', peer: '9415550102', customer_id: CUSTOMER },
       { id: 'd', peer: '9415550103', customer_id: null },
     ];
-    function ownedRows(rows) {
-      const q = chain();
-      q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
-      return q;
+    // The lookup the badge makes over the pending rows: unread texts in threads the technician's inbox shows.
+    let lookup;
+    function visibleLookup(visibleIds) {
+      db.mockImplementation((table) => {
+        if (table !== 'messages as m') throw new Error(`unexpected table ${table}`);
+        const q = { join: jest.fn(() => q), whereIn: jest.fn(() => q), andWhere: jest.fn(() => q) };
+        q.pluck = jest.fn(async () => visibleIds);
+        lookup = q;
+        return q;
+      });
     }
     beforeEach(() => {
       mockLoadPending.mockResolvedValue(pendingRows);
-      scope.technicianCustomerIdsSubquery.mockImplementation(() => ownedRows([{ customer_id: OWN }]));
+      scope.technicianCustomerIdsSubquery.mockImplementation(() => 'SCOPED_CUSTOMER_IDS');
+      visibleLookup(['a', 'b']);
     });
 
-    test('a technician counts only texts from its own customers; unknown senders and other customers stay out', async () => {
+    test('a technician counts only unread texts in threads its inbox shows (its own customers\' conversations)', async () => {
       const res = await call('GET', '/api/admin/communications/unread-count', 'tech');
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ conversations: 1, messages: 2 });
+      // Same ownership rule as /log: the conversation's customer, not a phone match.
+      expect(lookup.join).toHaveBeenCalledWith('conversations as c', 'c.id', 'm.conversation_id');
+      expect(lookup.whereIn).toHaveBeenCalledWith('m.id', ['a', 'b', 'c', 'd']);
+      expect(lookup.whereIn).toHaveBeenCalledWith('c.customer_id', 'SCOPED_CUSTOMER_IDS');
+      expect(lookup.andWhere).toHaveBeenCalledTimes(1);
+    });
+
+    test('a technician count drops a text somebody already read (owner 2026-11-19)', async () => {
+      visibleLookup(['b']);
+      const res = await call('GET', '/api/admin/communications/unread-count', 'tech');
+      expect(res.body).toEqual({ conversations: 1, messages: 1 });
+    });
+
+    test('no pending texts: a zero count and no lookup', async () => {
+      mockLoadPending.mockResolvedValue([]);
+      const res = await call('GET', '/api/admin/communications/unread-count', 'tech');
+      expect(res.body).toEqual({ conversations: 0, messages: 0 });
+      expect(db).not.toHaveBeenCalledWith('messages as m');
     });
 
     test('a technician asking for a customer off its route gets 404 and no count', async () => {
@@ -172,11 +231,12 @@ describe('routes', () => {
       expect(mockLoadPending).not.toHaveBeenCalled();
     });
 
-    test('an admin still gets the shared count from the unscoped reader', async () => {
+    test('an admin still gets the shared unread count from the unscoped reader', async () => {
       const read = require('../services/inbound-sms-read');
       read.countUnreadInboundSms.mockResolvedValue({ conversations: 7, messages: 9 });
       const res = await call('GET', '/api/admin/communications/unread-count', 'admin');
       expect(res.body).toEqual({ conversations: 7, messages: 9 });
+      expect(read.countUnreadInboundSms).toHaveBeenCalledWith(expect.objectContaining({ unreadOnly: true }));
       expect(mockLoadPending).not.toHaveBeenCalled();
     });
   });

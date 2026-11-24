@@ -25,6 +25,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { isoInstantSql } = require('./self-serve-estimates');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, ASSESSMENT_EXCEPTION_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const RETIRE_BATCH_LIMIT = 200;
@@ -143,10 +144,11 @@ const SENT_CHANNELS_SQL = (alias) => `(jsonb_array_length(
     CASE WHEN jsonb_typeof(${alias}.estimate_data #> '{deliveryState,sentChannels}') = 'array'
       THEN ${alias}.estimate_data #> '{deliveryState,sentChannels}' ELSE '[]'::jsonb END) > 0
   AND ${alias}.viewed_at IS NOT NULL)`;
-// Shape AND validity: the shape regex alone lets an ISO-looking but invalid
-// value abort the whole candidate query at the cast, and pg_input_is_valid
-// alone accepts special literals such as 'infinity'.
-const ISO_INSTANT_SQL = (expr) => `(${expr} ~ '^[0-9]{4}-' AND pg_input_is_valid(${expr}, 'timestamptz'))`;
+// Shape AND validity, shared with the watchers (self-serve-estimates.js
+// isoInstantSql): the shape regex alone lets an ISO-looking but invalid value
+// abort the whole candidate query at the cast, and pg_input_is_valid alone
+// accepts special literals such as 'infinity'.
+const ISO_INSTANT_SQL = isoInstantSql;
 const DELIVERED_AT_SQL = (alias) => ISO_INSTANT_SQL(`(${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}')`);
 const SENT_TIME_SQL = (alias) => `(CASE
   WHEN ${DELIVERED_AT_SQL(alias)}
@@ -165,10 +167,10 @@ const SENT_TIME_SQL = (alias) => `(CASE
 // never count: /api/public/quote/calculate is unauthenticated, so a caller
 // who knows a prospect's email and address could otherwise mint a "sent" row
 // that archives that customer's staff drafts (codex security review).
-// Report click-to-estimate and plan-restart mints stamp sent_at
-// at mint time with nothing delivered (publish-without-delivery), so they
-// count only once deliveryState records a delivery — the same witness the
-// unworked-comms watcher uses for these two sources.
+// Report click-to-estimate, plan-restart and portal plan-start mints stamp
+// sent_at at mint time with nothing delivered (publish-without-delivery), so
+// they count only once deliveryState records a delivery — the same witness
+// the unworked-comms watcher uses for these sources.
 const SENT_EVIDENCE_SQL = (alias) => `(${alias}.sent_at IS NOT NULL OR COALESCE(${DELIVERED_AT_SQL(alias)}, false))
   AND ${alias}.status <> 'draft'
   AND ${LINKAGE_MARKERS_ABSENT_SQL(alias)}
@@ -176,7 +178,7 @@ const SENT_EVIDENCE_SQL = (alias) => `(${alias}.sent_at IS NOT NULL OR COALESCE(
   AND (jsonb_typeof(${alias}.estimate_data->'deliveryState') IS DISTINCT FROM 'object'
        OR COALESCE(${DELIVERED_AT_SQL(alias)}, false)
        OR COALESCE(${SENT_CHANNELS_SQL(alias)}, false))
-  AND (COALESCE(${alias}.source, '') NOT IN ('service_report_cta', 'plan_restart')
+  AND (COALESCE(${alias}.source, '') NOT IN ('service_report_cta', 'plan_restart', 'plan_start')
        OR COALESCE(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')`;
 
 // Archive one draft and mark its open "draft ready" bells done, in one

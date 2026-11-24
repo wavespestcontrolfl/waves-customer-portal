@@ -4,10 +4,11 @@ import { cn } from '../ui/cn';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
-import PrepGuideForm, { PREP_GUIDE_LINKS } from './PrepGuideForm';
+import PrepGuideForm, { PREP_GUIDE_LINKS, EMAIL_AGAIN_LINKS } from './PrepGuideForm';
 
-// The composers' Quick Links picker: one searchable sheet over links and prep
-// guides. The SMS composer supplies its per-customer minted links (reschedule,
+// The composers' Quick Links picker: one searchable sheet over links, prep
+// guides and how-to guides. A guide row opens the send form (PrepGuideForm)
+// instead of inserting anything. The SMS composer supplies its per-customer minted links (reschedule,
 // re-service, review request, pay balance, latest estimate, referral, Auto
 // Pay setup), the per-office Google review links, and the whole link library
 // (sitemap-synced website pages + hand-managed rows). Presentation only: the
@@ -123,7 +124,7 @@ export default function InsertLinkSheet({
   }, [open, prepGuide]);
 
   const groups = useMemo(
-    () => buildLinkGroups([...(links || []), ...PREP_GUIDE_LINKS], query, activeCategory),
+    () => buildLinkGroups([...(links || []), ...EMAIL_AGAIN_LINKS, ...PREP_GUIDE_LINKS], query, activeCategory),
     [links, query, activeCategory],
   );
   const hasQuery = Boolean(query.trim());
@@ -155,7 +156,8 @@ export default function InsertLinkSheet({
             Back to Quick Links
           </Button>
           <PrepGuideForm active={open} guide={prepGuide} initialSearch={recipientSearch}
-            initialChannel={prepChannel} onSendingChange={setPrepSending} />
+            initialChannel={prepChannel} onSendingChange={setPrepSending}
+            onInsertSteps={() => { setPrepGuide(null); onPick(prepGuide); }} />
         </SheetBody>
       ) : <>
       <div className="px-5 pt-3 pb-2 border-b border-hairline border-zinc-200 shrink-0">
@@ -219,7 +221,7 @@ export default function InsertLinkSheet({
                   <div key={link.key}>
                   <button
                     type="button"
-                    onClick={() => (link.pestType
+                    onClick={() => (link.pestType || link.steps || link.sendForm
                       ? setPrepGuide(link)
                       : link.channels
                       ? setChannelRowKey(chooserOpen ? null : link.key)

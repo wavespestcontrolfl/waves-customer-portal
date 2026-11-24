@@ -1558,11 +1558,11 @@ describe('the November nitrogen target on the lawn brief', () => {
   });
 });
 
-// GATE_LAWN_RECLAIMED_HALF_N: the brief states a reclaimed lawn's nitrogen bag the way the plan sizes it (half), and leaves a pre-emergent bag alone.
+// Reclaimed water: the brief states a reclaimed lawn's nitrogen bag the way the plan sizes it (half), and leaves a pre-emergent bag alone.
 describe('the nitrogen target on the lawn brief for a reclaimed property', () => {
   const { LAWN_V13_VERSION } = require('../services/lawn-program');
   const water = require('../services/lawn-reclaimed-water');
-  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_RECLAIMED_HALF_N'];
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE'];
   const BAG = 'LESCO 24-0-11 with PolyPlus OPTI';
   const DIMENSION = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
   const visit = (month, name, targetN) => mockSummarize.mockReturnValue({
@@ -1594,6 +1594,12 @@ describe('the nitrogen target on the lawn brief for a reclaimed property', () =>
     expect((await bagFor('2026-10-14', DIMENSION)).gates.targetN).toBe('0.73 lb N/1000');
   });
 
+  test('the October Stonewall 0.37% 18-0-10 bag (its catalog name has no "Pre-Emergent Plus Fertilizer") keeps its stated target too', async () => {
+    const STONEWALL = 'LESCO Stonewall 0.37% 18-0-10';
+    visit(10, STONEWALL, '0.73 lb N/1000');
+    expect((await bagFor('2026-10-14', STONEWALL)).gates.targetN).toBe('0.73 lb N/1000');
+  });
+
   test('the December potash bag (states K2O) keeps its stated target', async () => {
     mockSummarize.mockReturnValue({
       version: LAWN_V13_VERSION,
@@ -1603,15 +1609,10 @@ describe('the nitrogen target on the lawn brief for a reclaimed property', () =>
     expect((await bagFor('2026-12-10', 'LESCO 10-0-22 50% PolyPlus OPTI45')).gates.targetN).toBe('0.45 lb N/1000');
   });
 
-  test('a lawn that is not reclaimed, and the gate off (no read), keep the stored target', async () => {
+  test('a lawn that is not reclaimed keeps the stored target', async () => {
     visit(2, BAG, '0.75 lb N/1000');
     reclaimed.mockResolvedValue(false);
     expect((await bagFor('2026-02-10', BAG)).gates.targetN).toBe('0.75 lb N/1000');
-    reclaimed.mockClear();
-    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-    reclaimed.mockResolvedValue(true);
-    expect((await bagFor('2026-02-10', BAG)).gates.targetN).toBe('0.75 lb N/1000');
-    expect(reclaimed).not.toHaveBeenCalled();
   });
 
   test('a failed property read aborts the generation, as the brief\'s other reads do', async () => {
@@ -1622,8 +1623,9 @@ describe('the nitrogen target on the lawn brief for a reclaimed property', () =>
   });
 });
 
-// GATE_LAWN_CHINCH_TETRINO_RATE (owner 2026-10-22): the brief states the May Tetrino rate the way the plan does.
-describe('the May Tetrino rate on the lawn brief', () => {
+// The brief is created before today's scouting. It can show the stored rate as
+// a reference, but historical maps cannot turn that into a treatment decision.
+describe('the May Tetrino scouting decision on the lawn brief', () => {
   const { LAWN_V13_VERSION } = require('../services/lawn-program');
   const areas = require('../services/lawn-trouble-areas');
   const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_CHINCH_TETRINO_RATE'];
@@ -1652,39 +1654,45 @@ describe('the May Tetrino rate on the lawn brief', () => {
   };
   const tetOf = (guidance) => [...guidance.products, ...guidance.conditional_products].find((p) => p.name === TET);
 
-  test('chinch mapped: Tetrino states 0.735 with the reason and the normal figure; Arena is unchanged', async () => {
+  test('a historical chinch map keeps the normal reference rate and says current scouting comes first', async () => {
     may();
     const guidance = await guidanceFor();
-    expect(tetOf(guidance).ratePer1000).toBe(0.735);
-    expect(tetOf(guidance).gates).toEqual({ sunnyTurfOnly: true, chinchRate: '0.735 fl oz/1000 (chinch bugs mapped; normal 0.367 fl oz/1000)' });
+    expect(tetOf(guidance).ratePer1000).toBe(0.367);
+    expect(tetOf(guidance).gates).toEqual({
+      sunnyTurfOnly: true,
+      trigger: 'current scouting evidence',
+      scoutEvidence: 'Record the target and current observations before selecting Tetrino; grubs also require local peak-flight or egg-hatch timing.',
+    });
+    expect(tetOf(guidance).trigger).toBe('current scouting evidence');
     expect(guidance.conditional_products.find((p) => p.name === 'Arena 50 WDG').ratePer1000).toBe(0.147);
-    expect(hasArea).toHaveBeenCalledWith(expect.anything(), PROPERTY, 'chinch', { withinDays: 365 });
+    expect(hasArea).not.toHaveBeenCalled();
   });
 
-  test('no change and no read when the gate is off, the program is not v13, the month is not May, or no chinch is mapped', async () => {
+  test('the scout-first message does not depend on the old high-rate gate or a historical map; non-v13 and non-May stay unchanged', async () => {
     may();
     delete process.env.GATE_LAWN_CHINCH_TETRINO_RATE;
     const off = await guidanceFor();
     expect(tetOf(off).ratePer1000).toBe(0.367);
-    expect(tetOf(off).gates).toEqual({ sunnyTurfOnly: true });
+    expect(tetOf(off).gates).toMatchObject({ sunnyTurfOnly: true, trigger: 'current scouting evidence' });
     process.env.GATE_LAWN_CHINCH_TETRINO_RATE = 'true';
     may('2026.05');
-    expect(tetOf(await guidanceFor()).ratePer1000).toBe(0.367);
+    expect(tetOf(await guidanceFor()).gates).toEqual({ sunnyTurfOnly: true });
     may(LAWN_V13_VERSION, 6);
-    expect(tetOf(await guidanceFor()).ratePer1000).toBe(0.367);
+    expect(tetOf(await guidanceFor()).gates).toEqual({ sunnyTurfOnly: true });
     expect(hasArea).not.toHaveBeenCalled();
     may();
     hasArea.mockResolvedValue(false);
-    expect(tetOf(await guidanceFor()).ratePer1000).toBe(0.367);
+    expect(tetOf(await guidanceFor()).gates).toMatchObject({ sunnyTurfOnly: true, trigger: 'current scouting evidence' });
+    expect(hasArea).not.toHaveBeenCalled();
   });
 
-  test('a failed area read aborts the generation: nothing is stored', async () => {
+  test('a historical-area outage cannot block or alter the scout-first brief', async () => {
     may();
     hasArea.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
     const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2027-05-10', property_id: PROPERTY }] }));
-    await expect(PrevisitBrief.generateVisitBrief('svc-1')).rejects.toThrow('db down');
-    expect(global.__dispatch).not.toHaveBeenCalled();
-    expect(state.updates.scheduled_services || []).toEqual([]);
+    await expect(PrevisitBrief.generateVisitBrief('svc-1')).resolves.toMatchObject({ generated: true });
+    expect(tetOf(storedBrief(state).brief.product_guidance).ratePer1000).toBe(0.367);
+    expect(hasArea).not.toHaveBeenCalled();
   });
 });
 

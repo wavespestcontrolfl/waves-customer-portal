@@ -43,18 +43,13 @@ const {
   },
 } = require('../services/auto-dispatch/candidate-slots');
 
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 const ORIGINAL_SHARED_GATE = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
 beforeEach(() => {
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   jest.clearAllMocks();
   probeMoveConflicts.mockResolvedValue({ rows: [], snapshot: [] }); // default: no occupancy conflicts anywhere
 });
 afterEach(() => {
   if (ORIGINAL_SHARED_GATE === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = ORIGINAL_SHARED_GATE;
-});
-afterAll(() => {
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION; else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
 });
 
 const SERVICE = {

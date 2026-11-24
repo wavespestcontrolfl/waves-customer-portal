@@ -1136,7 +1136,7 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
 
 // GET /api/admin/dashboard/ops-scoreboard?from=YYYY-MM-DD&to=YYYY-MM-DD
 // Weekly ops scoreboard (owner ruling 2026-09-26): drive minutes/stop,
-// AI call share, bookings without staff, AI route-day adherence. Owner-only
+// AI call share, bookings without staff, customer picker conversion, and AI route-day adherence. Owner-only
 // like /core-kpis above — this router's top-level
 // router.use(adminAuthenticate, requireAdmin) already gates it. Window
 // defaults to the last completed 7-day week (ops-scoreboard.js) and is
@@ -1274,11 +1274,13 @@ router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
         const s = await require('../services/referral-engine').getSettings();
         perConversion = ((Number(s?.referrer_reward_cents) || 0) + (Number(s?.referee_discount_cents) || 0)) / 100;
       } catch { /* settings unreadable — keep the default */ }
-      const [{ n }] = await db('ad_service_attribution')
+      const completedReferrals = () => db('ad_service_attribution')
         .where({ lead_source: 'referral', funnel_stage: 'completed' })
-        .where('lead_date', '>=', monthStart)
-        .countDistinct({ n: 'customer_id' });
-      referralRewards = (Number(n) || 0) * perConversion;
+        .where('lead_date', '>=', monthStart);
+      // The recorded amounts for a referral with a Step 2 settlement, whatever the gate says now; the flat settings
+      // for every other referral.
+      const ids = (await completedReferrals().distinct('customer_id')).map((r) => r.customer_id).filter(Boolean);
+      referralRewards = await require('../services/referral-engine').referralAcquisitionCost(db, ids, perConversion);
     } catch { /* no attribution rows — no referral cost */ }
 
     // Overhead assumptions: latest company_financials row. Admin overhead is

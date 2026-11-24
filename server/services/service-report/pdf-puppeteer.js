@@ -89,14 +89,14 @@ async function launchBrowser() {
   }
 }
 
-async function renderReportPdfWithBrowser(url) {
+async function renderReportPdfWithBrowser(url, { readySelector = '.service-report-v1' } = {}) {
   if (!chromium) throw new Error('Playwright is not installed');
   const browser = await launchBrowser();
   let page = null;
   try {
     page = await browser.newPage({ viewport: { width: 1120, height: 1440 } });
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForSelector('.service-report-v1', { timeout: 10000 });
+    await page.waitForSelector(readySelector, { timeout: 10000 });
     await page.emulateMedia({ media: 'print', colorScheme: 'light' });
     const pdf = await page.pdf({
       format: 'Letter',

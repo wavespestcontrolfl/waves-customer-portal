@@ -190,17 +190,18 @@ maybeDescribe('alert episodes (live Postgres)', () => {
   test('keyset paging at full precision: rows created in one millisecond, microseconds apart, are neither skipped nor repeated across a cursor', async () => {
     const ids = [];
     for (const us of ['123900', '123500', '123100']) {
-      const row = await bell(`keyset-${us}`);
+      // needs-you: the bell lists rank 0 first, so these 2031 rows are the first rows of the list.
+      const row = await bell(`keyset-${us}`, { meta: { severity: 'needs-you' } });
       await db('notifications').where({ id: row.id }).update({ created_at: db.raw('?::timestamptz', [`2031-01-01 12:00:00.${us}+00`]) });
       ids.push(row.id);
     }
     const page = async (before) => (await NotificationService.getAdminNotifications(1, 0, { role: 'admin', before })).filter((r) => ids.includes(r.id) || r.created_at_cursor?.startsWith('2031-01-01'));
     const first = await page(null);
-    expect(first.map((r) => r.id)).toEqual([ids[0]]); // newest row in the table (year 2031)
+    expect(first.map((r) => r.id)).toEqual([ids[0]]); // newest needs-you row in the table (year 2031)
     expect(first[0].created_at_cursor).toMatch(/^2031-01-01 \d\d:00:00\.1239\d*[+-]\d\d/);
-    const second = await page({ at: first[0].created_at_cursor, id: first[0].id });
+    const second = await page({ rank: 0, at: first[0].created_at_cursor, id: first[0].id });
     expect(second.map((r) => r.id)).toEqual([ids[1]]);
-    const third = await page({ at: second[0].created_at_cursor, id: second[0].id });
+    const third = await page({ rank: 0, at: second[0].created_at_cursor, id: second[0].id });
     expect(third.map((r) => r.id)).toEqual([ids[2]]);
   });
 

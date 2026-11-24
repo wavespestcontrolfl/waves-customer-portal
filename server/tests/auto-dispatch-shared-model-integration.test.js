@@ -25,15 +25,12 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { _internals: { evaluatePlacement } } = require('../services/auto-dispatch');
 
 const ORIGINAL_SHARED_GATE = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 beforeEach(() => {
   process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   jest.clearAllMocks();
 });
 afterAll(() => {
   if (ORIGINAL_SHARED_GATE === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = ORIGINAL_SHARED_GATE;
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION; else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
 });
 
 const PREFS = {

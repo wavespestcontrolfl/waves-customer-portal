@@ -71,13 +71,12 @@
  * finished verdict (stamped once in metadata, see sendSlotDeadline); the
  * 2-minute sweep is what picks it up.
  *
- * Failed press-1 screen (GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN, owner
- * ruling 2026-10-24 "this should be fixed": no text-back to robocalls): the
+ * Failed press-1 screen (owner ruling 2026-10-24 "this should be fixed":
+ * no text-back to robocalls): the
  * pre-connect screen (GATE_CALL_PRECONNECT_SCREEN, twilio-voice-webhook.js)
  * asks an unknown caller on STIR attestation B to press 1, and stamps
  * metadata.preconnect_screen 'failed' when no key came and the call fell to
- * the voicemail recorder. With the gate on, such a call is skipped
- * (skipped:screen_failed). In the 4 weeks to 2026-10-24, 17 of this lane's 27
+ * the voicemail recorder. Such a call is skipped (skipped:screen_failed). In the 4 weeks to 2026-10-24, 17 of this lane's 27
  * texts went to failed-screen callers (16 in the Oct 14-16 robocall bursts) and, in
  * 90 days of failed-screen calls, no text-back case was a real prospect.
  * Unlike the robodialer pattern rules below, nobody can be primed into it: a
@@ -115,7 +114,6 @@ const { autoTextHoldReason, deliveredTexts } = require('./messaging/auto-text-ho
 
 const GATE = 'missedCallTextBack';
 const EMPTY_VOICEMAIL_GATE = 'missedCallTextBackEmptyVoicemail';
-const SKIP_FAILED_SCREEN_GATE = 'missedCallTextSkipFailedScreen';
 const MESSAGE_TYPE = 'missed_call_text_back';
 // voicemail-lead-sms.js's provisional claim outcome: its text is not out
 // yet, and it deletes the row on a failure that never consumed its one-shot.
@@ -547,9 +545,7 @@ async function precheckRow(row, now) {
   // GATE_TECH_STAFF_GUARDS (census M12): an active technician's own cell is staff, never a lead.
   if (TWILIO_NUMBERS.isInternalNumber(phone) || await staffSenderPhones.isStaffTechSender(phone)) return { ok: false, outcome: 'skipped:internal_number', reason: 'internal_number' };
   // A caller who failed the press-1 screen is not texted (owner ruling 2026-10-24).
-  if (failedPreconnectScreen(row) && isEnabled(SKIP_FAILED_SCREEN_GATE) === true) {
-    return { ok: false, outcome: 'skipped:screen_failed', reason: 'screen_failed' };
-  }
+  if (failedPreconnectScreen(row)) return { ok: false, outcome: 'skipped:screen_failed', reason: 'screen_failed' };
 
   // Voicemail-landing grace, from when the call ended, any hour of the day
   // (owner ruling 2026-09-28: no 8am-8pm window check here any more) — same
@@ -1042,7 +1038,6 @@ module.exports = {
     textBackCoreEligible,
     emptyVoicemailOn,
     failedPreconnectScreen,
-    SKIP_FAILED_SCREEN_GATE,
     stampEmptyVoicemailSeen,
     EMPTY_VOICEMAIL_LANDING_MS,
     callEndedAt,

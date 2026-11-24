@@ -1,9 +1,9 @@
 /**
- * GATE_CALL_SPELLED_EMAIL_SETTLES (owner 2026-11-04, "A", call-agent audit).
+ * Spelled letters settle a call email disagreement (owner 2026-11-04, "A", call-agent audit).
  *
  * When the two call extraction passes write different emails, the 2026-09-25
  * hold saves no email and files one read-back card. In 60 days 11 of 13 such
- * cards were never worked, so those leads got no email. With the gate on, the
+ * cards were never worked, so those leads got no email. The
  * letters the caller spelled settle it when the spelling decoder heard ONE
  * spelling at full confidence, adopted it, and it is exactly one pass value,
  * and neither spelling is on the do-not-email list. The 2026-10-05
@@ -12,8 +12,7 @@
  * The rule itself is unit-tested in call-email-hygiene.test.js. This file
  * pins how the processor uses it: the settled shape satisfies the 2026-10-05
  * rule while the hold shape does not, the do-not-email check fails closed and
- * keeps addresses out of the log, the wiring order inside processRecording,
- * and the gate's dark default.
+ * keeps addresses out of the log, and the wiring order inside processRecording.
  */
 const fs = require('fs');
 const path = require('path');
@@ -112,10 +111,9 @@ describe('processRecording wiring', () => {
   const holdStart = src.indexOf('if (Array.isArray(extracted.email_candidates) && extracted.email_candidates.length >= 2) {');
   const block = src.slice(holdStart, src.indexOf('\n    }\n', holdStart));
 
-  test('the settle check runs inside the disagreement block, gated, before the hold', () => {
+  test('the settle check runs inside the disagreement block, before the hold', () => {
     expect(holdStart).toBeGreaterThan(-1);
     const order = [
-      "isEnabled('callSpelledEmailSettles')",
       'spelledLettersSettleEmailDisagreement(extracted, dictationEmailPayload)',
       'await eitherSpellingSuppressed(settled)',
       'email_spelling_settled: { email: settled.email, other_spelling: settled.otherSpelling }',
@@ -131,25 +129,5 @@ describe('processRecording wiring', () => {
     expect(src.indexOf('[quarantine-arbiter] review verdict')).toBeLessThan(holdStart);
     expect(holdStart).toBeLessThan(src.indexOf('callEmailCheck = await screenCallEmail(extracted);'));
     expect(holdStart).toBeLessThan(src.indexOf('if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail: normalizedEmail })) {'));
-  });
-});
-
-describe('GATE_CALL_SPELLED_EMAIL_SETTLES', () => {
-  const load = (value) => {
-    const prior = process.env.GATE_CALL_SPELLED_EMAIL_SETTLES;
-    if (value === undefined) delete process.env.GATE_CALL_SPELLED_EMAIL_SETTLES;
-    else process.env.GATE_CALL_SPELLED_EMAIL_SETTLES = value;
-    let on;
-    jest.isolateModules(() => { on = require('../config/feature-gates').isEnabled('callSpelledEmailSettles'); });
-    if (prior === undefined) delete process.env.GATE_CALL_SPELLED_EMAIL_SETTLES;
-    else process.env.GATE_CALL_SPELLED_EMAIL_SETTLES = prior;
-    return on;
-  };
-
-  test('ships dark: only exactly "true" turns it on', () => {
-    expect(load(undefined)).toBe(false);
-    expect(load('1')).toBe(false);
-    expect(load('TRUE')).toBe(false);
-    expect(load('true')).toBe(true);
   });
 });

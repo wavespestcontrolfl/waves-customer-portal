@@ -352,7 +352,7 @@ describe('ProjectReportViewPage pre-treat sticker', () => {
   });
 });
 
-describe('ProjectReportViewPage follow-up appointment (GATE_DAY_ONLY_PROMISE)', () => {
+describe('ProjectReportViewPage follow-up appointment (day-only)', () => {
   it('day-only: the date and the arrival note, no hour', async () => {
     const { findAllByText, queryByText } = renderProjectReport(payload('termite_treatment', {
       upcomingAppointment: {

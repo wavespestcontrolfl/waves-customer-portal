@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
   default: {
+    // Billing mounts Home's add-a-service card (owner 2026-11-21).
+    getPropertyRecommendations: vi.fn(async () => ({ available: false })),
     getSchedule: vi.fn(),
     getNotificationPrefs: vi.fn(),
     getPropertyNotificationPrefs: vi.fn(),

@@ -88,4 +88,26 @@ describe('handleLeadInquiry lead_source_id', () => {
     expect(ins.row).not.toHaveProperty('lead_source_id');
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Email Inquiry lead source lookup failed'));
   });
+
+  test.each([
+    ['tagged hub link', 'Waves <contact+gbp-sarasota_home@wavespestcontrol.com>', { kind: 'google_business', label: 'Google Business Profile', detail: 'GBP — Sarasota · email link, home page' }],
+    ['untagged spoke address', 'contact@palmettoexterminator.com', { kind: 'website', label: 'Website', detail: 'palmettoexterminator.com' }],
+  ])('new lead from a %s stores source evidence and keeps lead_source_id', async (name, to, expected) => {
+    const state = setupDb({ leadSource: { id: 'src-email' } });
+    await handleLeadInquiry({ ...email, to_address: to }, classification);
+    const [ins] = leadInserts(state);
+    expect(ins.row.lead_source_id).toBe('src-email');
+    expect(JSON.parse(ins.row.extracted_data).source_evidence).toMatchObject(expected);
+  });
+
+  test.each([
+    ['plain main address', 'contact@wavespestcontrol.com'],
+    ['forged tag', 'contact+gbp-nowhere_home@wavespestcontrol.com'],
+    ['no to_address', null],
+  ])('new lead from a %s keeps the plain Email inquiry (no evidence written)', async (name, to) => {
+    const state = setupDb({ leadSource: { id: 'src-email' } });
+    await handleLeadInquiry({ ...email, to_address: to }, classification);
+    const [ins] = leadInserts(state);
+    expect(ins.row).not.toHaveProperty('extracted_data');
+  });
 });

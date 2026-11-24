@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
 import { Field } from '../ui/Field';
@@ -20,7 +20,9 @@ const KINDS = [
   { value: 'health_allowance', label: 'Health allowance' },
   { value: 'hsa_employer', label: 'HSA from Waves' },
 ];
-const kindWord = kind => (KINDS.find(k => k.value === kind) || { label: kind }).label;
+// The pay run works these three out itself (Tech Rewards Plan): they show in the list and cannot be added or removed here.
+const SYNCED_LABELS = { season_bonus: 'Season bonus', stay_bonus: 'Stay bonus', december_gift: 'December gift' };
+const kindWord = kind => SYNCED_LABELS[kind] || (KINDS.find(k => k.value === kind) || { label: kind }).label;
 const WEEK_CHOICES = 12;
 
 // '46.15' -> 4615. Anything that is not dollars with at most 2 decimals -> null.
@@ -51,7 +53,7 @@ function LinesTable({ title, lines, onRemove, busy }) {
         <TD>{spanWord(line)}</TD>
         <TD>{line.note || ''}</TD>
         {onRemove && <TD>
-          <Button variant="secondary" disabled={busy} onClick={() => onRemove(line)} aria-label={`Remove ${kindWord(line.kind)} for ${line.name}`}>Remove</Button>
+          {!SYNCED_LABELS[line.kind] && <Button variant="secondary" disabled={busy} onClick={() => onRemove(line)} aria-label={`Remove ${kindWord(line.kind)} for ${line.name}`}>Remove</Button>}
         </TD>}
       </TR>)}
     </TBody>
@@ -69,17 +71,26 @@ export default function PayLinesPanel({ call, weekStart, refreshKey, onChanged }
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
+  // Only the newest load may write. A finalize or a void of another run starts a new load while an older one
+  // can still be on its way: an old answer that arrives last would put a paid line back in the waiting list.
+  const newestLoad = useRef(0);
   const load = useCallback(async () => {
+    newestLoad.current += 1;
+    const mine = newestLoad.current;
+    const superseded = () => mine !== newestLoad.current;
     try {
       const openData = await call('/pay-lines?status=open');
+      if (superseded()) return;
       setEnabled(true);
       setOpen(openData.payLines || []);
       setError('');
       // Every W-2 employee, one who has left too (a commission paid after the last day).
       const [paidData, techData] = await Promise.all([call('/pay-lines?status=paid'), call('/pay-lines/technicians')]);
+      if (superseded()) return;
       setPaid((paidData.payLines || []).slice(0, 10));
       setTechnicians(techData.technicians || []);
     } catch (failure) {
+      if (superseded()) return;
       if (failure.status === 404) { setEnabled(false); return; }
       // Fail closed: only a successful gated answer opens the panel.
       setError(failure.message);

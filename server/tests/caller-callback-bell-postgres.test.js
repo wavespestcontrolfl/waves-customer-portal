@@ -5,15 +5,15 @@
  * gets ONE Leads bell once it is late (with the right key, headline, link, subject, done-when and Call button) and a
  * repeat run adds nothing; a call from the caller after the call ended closes it ("They called back"); a call or a
  * text from the caller, a booked visit, a lost lead, a call that was not a new lead, a callback not yet due, and one
- * due more than 24 hours ago all raise nothing; the gate off reads nothing. It reads every candidate promise in the
+ * due more than 24 hours ago all raise nothing. It reads every candidate promise in the
  * database, so it asserts on its own rows only.
  *
- * GATE_CALLER_CALLBACK_PROMISE_CLOSE (promiseCloseEnabled): a caller who called back, texted, or whom a person followed
+ * Promise close: a caller who called back, texted, or whom a person followed
  * up (a booked visit) gets the PROMISE row closed as kept (status fulfilled, fulfillment closed_by
  * caller_callback_bell naming the inbound call or text), in the close pass (bell raised) and the raise pass (due or
  * not, bell or not); a lost lead writes nothing; a row a person touched or edited between the read and the write is
  * not overwritten; refreshFulfillment on the call leaves it closed; a Waves promise on the same call is untouched;
- * gate off leaves every row open as before. It refuses any database but a private QA one or CI's.
+ * It refuses any database but a private QA one or CI's.
  */
 // Read once, when feature-gates loads; put back after the suite so a later suite in the same worker sees its own env.
 const ENV_BEFORE = { GATE_ADMIN_BELL_POLICY: process.env.GATE_ADMIN_BELL_POLICY, GATE_CALL_COMMITMENTS: process.env.GATE_CALL_COMMITMENTS };
@@ -37,7 +37,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
   const NOW = new Date('2026-11-04T18:00:00Z'); // 1:00 PM Eastern, Wednesday
   const CALL_AT = '2026-11-04T15:00:00Z'; // 10:00 AM Eastern; with 120 s of talk time it ends 10:02, due 12:02 PM
   const ids = { customers: [], leads: [], calls: [], promises: [], visits: [], texts: [], estimates: [] };
-  let seq = 0;
+  const usedPhones = new Set();
 
   beforeAll(() => {
     const target = new URL(process.env.DATABASE_URL);
@@ -64,10 +64,40 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     await db('customers').whereIn('id', ids.customers).del();
   });
 
+  // A number that no call row, text row or customer record in this database has. The bell counts ANY inbound call
+  // or text from the caller's number after the fixture call ended (2026-11-04; no upper bound, since in production no
+  // row is newer than now), and other DB suites leave inbound rows on random +1941555NNNN numbers stamped with the
+  // real clock. The old fixed numbers (+19415551001 and up) met such a row at random: the caller then read as "called
+  // back", so the bell was missing, or closed as "They called back", or an open promise read fulfilled (four failed
+  // main runs on 2026-11-20).
+  // A customer record on the number counts as well: a caller with no customer record is matched to every customer who
+  // carries the caller's number, and a visit booked for one of them after the call reads as "followed up"
+  // (followup-sla-watcher.js bookedVisits). Other DB suites leave customers on +1941555NNNN numbers with visits
+  // stamped with the real clock, so a number clean of calls and texts still read as followed up at random (five
+  // failed main runs on 2026-11-21 and 11-22, each on a caller with no customer record).
+  // Suites run one at a time in a database, so a number that is clean here stays clean.
+  async function freshPhone() {
+    const { phoneWhereAny } = require('../services/call-commitments');
+    for (let tries = 0; tries < 500; tries += 1) {
+      const phone = `+1941555${1000 + Math.floor(Math.random() * 9000)}`;
+      if (usedPhones.has(phone)) continue;
+      const rows = await Promise.all([
+        ...['call_log', 'sms_log'].map((table) => db(table).where((b) => {
+          phoneWhereAny(b, 'from_phone', [phone]);
+          phoneWhereAny(b, 'to_phone', [phone], { or: true });
+        }).first('id')),
+        phoneWhereAny(db('customers'), 'phone', [phone]).first('id'),
+      ]);
+      if (rows.some(Boolean)) continue;
+      usedPhones.add(phone);
+      return phone;
+    }
+    throw new Error('No unused fixture number left in +1941555NNNN');
+  }
+
   // One synthetic new-lead caller: a lead, the inbound call that made it, and the caller's own call_back promise.
   async function caller({ nature = 'new_lead', leadStatus = 'new', callAt = CALL_AT, withCustomer = false, promiseOver = {} } = {}) {
-    seq += 1;
-    const phone = `+1941555${String(1000 + seq)}`;
+    const phone = await freshPhone();
     const leadId = randomUUID();
     const callId = randomUUID();
     const sid = `CA${randomUUID().replace(/-/g, '')}`;
@@ -121,7 +151,39 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     return id;
   }
 
-  const run = (now = NOW) => Bell.runCallerCallbackBell({ now, gateEnabled: true });
+  const run = (now = NOW) => Bell.runCallerCallbackBell({ now });
+
+  // A customer on `phone` with a visit booked at `at`, as another suite leaves one: no link to any fixture call.
+  async function customerWithVisit(phone, at) {
+    const customerId = randomUUID();
+    await db('customers').insert({ id: customerId, first_name: 'Lee', last_name: 'Synthetic', phone });
+    ids.customers.push(customerId);
+    const visitId = randomUUID();
+    await db('scheduled_services').insert({
+      id: visitId, customer_id: customerId, scheduled_date: '2026-11-10', service_type: 'Quarterly Pest Control Service', status: 'confirmed', created_at: at,
+    });
+    ids.visits.push(visitId);
+    return customerId;
+  }
+
+  // Rows as another suite leaves them: on a +1941555NNNN number, stamped with the real clock.
+  test.each([
+    ['a call or a text', 'sms_log', (phone) => inboundText(phone, new Date().toISOString())],
+    ['a customer record', 'customers', (phone) => customerWithVisit(phone, new Date().toISOString())],
+  ])('a fixture caller never gets a number that already has %s', async (_name, table, leave) => {
+    const taken = await freshPhone();
+    usedPhones.delete(taken);
+    const left = await leave(taken);
+    const draw = jest.spyOn(Math, 'random').mockReturnValueOnce((Number(taken.slice(-4)) - 1000 + 0.5) / 9000);
+    try {
+      const c = await caller();
+      expect(draw.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(c.phone).not.toBe(taken);
+      expect(await db(table).where({ id: left }).first('id')).toBeTruthy();
+    } finally {
+      draw.mockRestore();
+    }
+  });
 
   test('a late callback raises one Leads bell with the right fields, and a repeat run adds nothing', async () => {
     const c = await caller();
@@ -191,6 +253,15 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     expect(await rowsFor(c.promiseId)).toHaveLength(0);
   });
 
+  // Why freshPhone skips a number a customer carries: the call has no customer record, and the visit of a customer on
+  // the caller's number still counts as the follow-up.
+  test('no bell when a visit was booked for a customer who carries the number of a caller with no customer record', async () => {
+    const c = await caller();
+    await customerWithVisit(c.phone, '2026-11-04T16:00:00Z');
+    await run();
+    expect(await rowsFor(c.promiseId)).toHaveLength(0);
+  });
+
   test('a quote sent after the call does not stop the bell: the caller may have promised to call back about it', async () => {
     const owned = await caller({ withCustomer: true });
     await deliveredQuote({ customerId: owned.customerId }, '2026-11-04T16:00:00Z');
@@ -226,14 +297,8 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     expect(await rowsFor(old.promiseId)).toHaveLength(0);
   });
 
-  test('gate off: nothing is read and nothing is written', async () => {
-    const c = await caller();
-    await expect(Bell.runCallerCallbackBell({ now: NOW, gateEnabled: false })).resolves.toEqual({ skipped: 'disabled' });
-    expect(await rowsFor(c.promiseId)).toHaveLength(0);
-  });
-  describe('promise close (GATE_CALLER_CALLBACK_PROMISE_CLOSE)', () => {
+  describe('promise close', () => {
     const commitments = () => require('../services/call-commitments');
-    const runClosing = (now = NOW) => Bell.runCallerCallbackBell({ now, gateEnabled: true, promiseCloseEnabled: true });
     const promiseRow = (id) => db('call_commitments').where({ id }).first();
     const EARLY = new Date('2026-11-04T16:30:00Z'); // 11:30 AM Eastern, before the 12:02 PM due time
     const bookedVisit = async (c) => {
@@ -247,7 +312,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     test('a caller who called back closes the promise even when it was not yet due and no bell rang', async () => {
       const c = await caller();
       const callId = await inboundCall(c.phone, '2026-11-04T16:00:00Z');
-      const result = await runClosing(EARLY);
+      const result = await run(EARLY);
       expect(result.promisesClosed).toBeGreaterThanOrEqual(1);
       expect(await rowsFor(c.promiseId)).toHaveLength(0);
       const row = await promiseRow(c.promiseId);
@@ -258,7 +323,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
         basis: 'caller_called', closed_by: 'caller_callback_bell', closed_at: EARLY.toISOString(),
       });
       // Settled and closed: a later run finds no open promise, raises nothing and writes nothing more.
-      const again = await runClosing(NOW);
+      const again = await run(NOW);
       expect(again.promisesClosed).toBe(0);
       expect(await rowsFor(c.promiseId)).toHaveLength(0);
     });
@@ -266,7 +331,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     test('a caller who texted closes the promise, naming the text', async () => {
       const c = await caller();
       const textId = await inboundText(c.phone, '2026-11-04T16:10:00Z');
-      await runClosing(EARLY);
+      await run(EARLY);
       const row = await promiseRow(c.promiseId);
       expect(row.status).toBe('fulfilled');
       expect(row.fulfillment).toMatchObject({ kind: 'inbound_sms', record_type: 'sms_log', record_id: textId, basis: 'caller_texted', closed_by: 'caller_callback_bell' });
@@ -275,7 +340,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     test('a booked visit closes the promise with basis followed_up and no record, at the run time', async () => {
       const c = await caller({ withCustomer: true });
       await bookedVisit(c);
-      await runClosing(EARLY);
+      await run(EARLY);
       const row = await promiseRow(c.promiseId);
       expect(row.status).toBe('fulfilled');
       expect(row.fulfillment).toEqual({
@@ -290,7 +355,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
       expect(await rowsFor(c.promiseId)).toHaveLength(1);
       expect((await promiseRow(c.promiseId)).status).toBe('open');
       const callId = await inboundCall(c.phone, '2026-11-04T17:30:00Z');
-      const next = await runClosing(new Date('2026-11-04T18:15:00Z'));
+      const next = await run(new Date('2026-11-04T18:15:00Z'));
       expect(next.closed).toBeGreaterThanOrEqual(1);
       expect(next.promisesClosed).toBeGreaterThanOrEqual(1);
       const [bell] = await rowsFor(c.promiseId);
@@ -307,7 +372,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
       const raised = await caller();
       await run();
       await db('leads').where({ id: raised.leadId }).update({ status: 'lost' });
-      await runClosing(new Date('2026-11-04T18:15:00Z'));
+      await run(new Date('2026-11-04T18:15:00Z'));
       for (const c of [lost, earlier, raised]) expect((await promiseRow(c.promiseId)).status).toBe('open');
       const [bell] = await rowsFor(raised.promiseId);
       expect(bell.resolution).toBe('The lead is closed');
@@ -316,7 +381,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     test('a caller who called back kept the promise even when the lead closed since (booked, or said no on that call)', async () => {
       const won = await caller({ leadStatus: 'won', withCustomer: true });
       const callId = await inboundCall(won.phone, '2026-11-04T16:00:00Z');
-      await runClosing(EARLY);
+      await run(EARLY);
       const row = await promiseRow(won.promiseId);
       expect(row.status).toBe('fulfilled');
       expect(row.fulfillment).toMatchObject({ record_id: callId, basis: 'caller_called' });
@@ -328,7 +393,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
       const quiet = await caller();
       await db('leads').whereIn('id', [kept.leadId, quiet.leadId]).del();
       const callId = await inboundCall(kept.phone, '2026-11-04T16:00:00Z');
-      await runClosing(NOW);
+      await run(NOW);
       expect((await promiseRow(kept.promiseId)).fulfillment).toMatchObject({ record_id: callId, basis: 'caller_called' });
       expect((await promiseRow(quiet.promiseId)).status).toBe('open');
       for (const c of [kept, quiet]) expect(await rowsFor(c.promiseId)).toHaveLength(0);
@@ -353,7 +418,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     test('refreshFulfillment on the call leaves the closed promise closed (the promise_evidence marker would reopen it)', async () => {
       const c = await caller();
       await inboundCall(c.phone, '2026-11-04T16:00:00Z');
-      await runClosing(EARLY);
+      await run(EARLY);
       const closed = await promiseRow(c.promiseId);
       expect(closed.status).toBe('fulfilled');
       const refreshed = await commitments().refreshFulfillment(db, c.callId);
@@ -371,24 +436,12 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
         description: 'We will call you back tomorrow', created_at: CALL_AT, updated_at: CALL_AT,
       }).returning('*');
       await inboundCall(c.phone, '2026-11-04T16:00:00Z');
-      await runClosing(EARLY);
+      await run(EARLY);
       expect((await promiseRow(c.promiseId)).status).toBe('fulfilled');
       const after = await promiseRow(waves.id);
       expect(after.status).toBe('open');
       expect(after.fulfillment).toBeNull();
       expect(new Date(after.updated_at).getTime()).toBe(new Date(waves.updated_at).getTime());
-    });
-
-    test('gate off: the promise stays open exactly as today, bell or no bell', async () => {
-      const early = await caller();
-      await inboundCall(early.phone, '2026-11-04T16:00:00Z');
-      const rung = await caller();
-      await run();
-      await inboundCall(rung.phone, '2026-11-04T17:30:00Z');
-      const off = await Bell.runCallerCallbackBell({ now: new Date('2026-11-04T18:15:00Z'), gateEnabled: true, promiseCloseEnabled: false });
-      expect(off.promisesClosed).toBe(0);
-      expect((await rowsFor(rung.promiseId))[0].resolution).toBe('They called back');
-      for (const c of [early, rung]) expect(await promiseRow(c.promiseId)).toMatchObject({ status: 'open', fulfillment: null, fulfilled_at: null });
     });
   });
 });

@@ -52,6 +52,7 @@ describe('recipe text', () => {
       const line = text.find((entry) => entry.startsWith('Fertilizer safety:'));
       expect(line).toMatch(/deflector shield/);
       expect(line).toMatch(/10 ft fertilizer-free band from any water body, wetland, seawall or top of bank/);
+      expect(line).toMatch(/in North Port keep 25 ft from wetlands and never fertilize a swale's flow channel/i);
       expect(line).toMatch(/severe thunderstorm, flood or tropical watch or warning/);
       expect(line).toMatch(/sweep fertilizer off driveways, sidewalks and streets back onto the lawn/);
       expect(line).toMatch(/Manatee BMP decal/);

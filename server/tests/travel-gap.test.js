@@ -20,7 +20,7 @@ const {
 const PALMETTO = { lat: 27.545, lng: -82.545 };
 const BRADENTON = { lat: 27.425, lng: -82.410 };
 
-const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION'];
+const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES'];
 const saved = {};
 beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
 beforeEach(() => {
@@ -107,8 +107,8 @@ describe('travelGapViolation', () => {
 });
 
 describe('travelGapConflicts — route neighbours only', () => {
-  // ~24 straight-line miles south of Palmetto: ~67 modeled minutes + 15.
-  const FAR_SOUTH = { lat: 27.20, lng: -82.545 };
+  // ~27 straight-line miles south of Palmetto: ~67 modeled minutes + 15.
+  const FAR_SOUTH = { lat: 27.155, lng: -82.545 };
   const candidate = { startMin: 675, endMin: 735, ...PALMETTO }; // 11:15–12:15
   const farEarlier = { startMin: 540, endMin: 600, ...FAR_SOUTH, id: 'far' }; // 9–10, 75 free min
   const adjacent = { startMin: 615, endMin: 660, ...PALMETTO, id: 'adjacent' }; // 10:15–11:00, 15 free min

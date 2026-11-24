@@ -10,7 +10,6 @@ const { unblockSender, manualBlockSender } = require('../services/email/spam-blo
 const { sendEmailMessage } = require('../services/email/send-message');
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { emailReclassifyPickLive } = require('../config/feature-gates');
 const { parseETDateTime, etParts, etDateString, etWallClockOccurrences } = require('../utils/datetime-et');
 const { countProcessedInvoices } = require('../services/email/invoice-outcome');
 const {
@@ -672,21 +671,18 @@ router.post('/message/:id/ai-draft', async (req, res) => {
 // AI Classification & Auto-Actions (Session 2)
 // ============================================
 
-// GET /reclassify-options — the labels staff may pick on Reclassify
-// (GATE_EMAIL_RECLASSIFY_PICK). Off, the client sees no picker.
+// GET /reclassify-options — the labels staff may pick on Reclassify.
 router.get('/reclassify-options', (req, res) => {
-  if (!emailReclassifyPickLive()) return res.json({ enabled: false });
   const { EMAIL_CATEGORIES } = require('../services/email/email-classifier');
-  res.json({ enabled: true, categories: EMAIL_CATEGORIES });
+  res.json({ categories: EMAIL_CATEGORIES });
 });
 
-// POST /message/:id/reclassify — re-run Sonnet classification, or (gate on,
-// body.classification) set the label staff picked.
+// POST /message/:id/reclassify — re-run Sonnet classification, or
+// (body.classification) set the label staff picked.
 router.post('/message/:id/reclassify', async (req, res) => {
   try {
-    // Gate off, the body is ignored: byte-identical to the AI-only route.
     let staffPick = null;
-    if (emailReclassifyPickLive() && req.body && req.body.classification !== undefined && req.body.classification !== null) {
+    if (req.body && req.body.classification !== undefined && req.body.classification !== null) {
       const { EMAIL_CATEGORIES } = require('../services/email/email-classifier');
       if (typeof req.body.classification !== 'string' || !EMAIL_CATEGORIES.includes(req.body.classification)) {
         return res.status(400).json({ error: 'Unknown email label' });

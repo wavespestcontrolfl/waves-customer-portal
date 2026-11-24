@@ -182,7 +182,7 @@ describe('the cut follows the protocol the PLANNER resolves for the visit (codex
     expect(bag(await sheet()).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
   });
 
-  test('the spot target capture is off (or the trouble-areas gate is): a pinned visit makes NO protocol lookup of its own, and the sheet is unchanged', async () => {
+  test('the spot target capture is off (or the trouble-areas gate is): the sheet is unchanged and no area is read (the reclaimed-water rule alone still asks for the visit\'s protocol, once)', async () => {
     Object.assign(visit, pin(LAWN_V13_VERSION));
     for (const name of ['GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_TROUBLE_AREAS']) {
       process.env.GATE_LAWN_SPOT_TARGET = 'true';
@@ -190,7 +190,7 @@ describe('the cut follows the protocol the PLANNER resolves for the visit (codex
       delete process.env[name];
       operatingLayer.getProtocolWindowContext.mockClear();
       const body = await sheet();
-      expect(pinnedCalls()).toHaveLength(0);
+      expect(pinnedCalls()).toHaveLength(1);
       expect(bag(body).raw).toBe(STALE);
       expect(bag(body).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
     }

@@ -23,7 +23,7 @@
  *   - a visit booked: the new-lead class's live top-level visit predicate,
  *     passed in as `bookedVisits`;
  *   - an email a person answered: a Gmail SENT row in the customer's thread
- *     (personSentFilter + resolveEmailCustomerLink, email-customer-link.js);
+ *     (personSentFilter + emailCustomerLink, email-customer-link.js);
  *   - a visit that ran after a voicemail (voice items only): the voicemail's customer,
  *     by customer id and never by phone, has a visit in a status that ran with
  *     completed_at after the call's start on the same Eastern day.
@@ -36,7 +36,7 @@
  *     (by customer id, never by phone) within 24 hours after the text
  *     (sms-staff-action-answers.js, the one definition the Messages reader shares).
  *   - an email a person sent to a portal chat's customer (customer items only): a Gmail SENT
- *     row after the bell, in ANY thread, that resolveEmailCustomerLink links to that customer
+ *     row after the bell, in ANY thread, that emailCustomerLink links to that customer
  *     (the same linkage as the email reply above, but not tied to one thread). Read only for
  *     rows whose To/Cc/Bcc carries the customer's own address.
  * read_at is never evidence. Read-only: nothing here writes, locks or sends.
@@ -44,6 +44,11 @@
  * Each item is judged only by events AFTER its own anchor: the text, call or
  * email the bell is about (its own time), else the bell's. Callers pass plain
  * references (ids, a phone); this module knows no notification metadata shape.
+ *
+ * A lead that other open leads may share a phone with (refs.exclusive, the new-lead reminder) is matched by the rule
+ * lead-contact-sync.js judgeLeads uses: a text or call tied to a customer counts only when that is the lead's own
+ * customer, never when the lead has none; one tied to no customer counts by the lead's own phone, which the caller
+ * leaves out when another open lead holds it. The customer's file phone is not added for it (exclusiveMatch).
  */
 
 const { phoneIdentityKey } = require('../utils/phone');
@@ -54,7 +59,7 @@ const { phoneIdentitySql } = require('./sms-response-policy');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-const { personSentFilter, resolveEmailCustomerLink, extractEmailAddresses } = require('./email/email-customer-link');
+const { personSentFilter, emailCustomerLink, extractEmailAddresses } = require('./email/email-customer-link');
 const staffActionDef = require('./sms-staff-action-answers');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -85,6 +90,14 @@ function namesItem(row, item) {
 // sender's text bell is judged on this path, so the subject always has an id.)
 function ownMatch(row, item) {
   return !!item.customerId && !!row.customer_id && String(row.customer_id) === item.customerId;
+}
+
+// A lead among leads that may share its phone (refs.exclusive): a row tied to a customer names it only when that is the
+// lead's own customer, never when the lead has none (a text to customer B on a number a lead with no customer also
+// gave says nothing about that lead); a row tied to no customer names it by the phone the caller passed.
+function exclusiveMatch(row, item) {
+  if (row.customer_id) return !!item.customerId && String(row.customer_id) === item.customerId;
+  return !!row.peer && item.peers.has(row.peer);
 }
 
 // The newest time among the witness rows that name this item.
@@ -166,7 +179,7 @@ function identify(item, lookups) {
   const anchor = found.anchor || item.bellAt;
   const peers = new Set(found.phones.map((p) => phoneIdentityKey(p)).filter(Boolean));
   if (!anchor || (!customerId && !peers.size)) return null;
-  return { item, customerId, peers, anchor, email: found.email || null };
+  return { item, customerId, peers, anchor, email: found.email || null, exclusive: item.refs.exclusive === true };
 }
 
 // How far back a text or call row ties a customer to a phone when judging whether
@@ -208,20 +221,6 @@ async function sharedPhoneItems(conn, smsIdents, since) {
     if ([...ids].some((id) => id !== ident.customerId)) shared.add(ident);
   }
   return shared;
-}
-
-// The newest text each unknown sender (an sms item with no customer id) sent after its anchor, by phone: a bell for
-// an unknown sender is raised once per 4-hour window, so the text it names may not be the sender's latest, and a reply
-// that came before a later text does not answer it (admin-alert-relevance.js unknownTextAnswered).
-async function latestInboundTexts(conn, unknownIdents) {
-  const peers = unique(unknownIdents.flatMap((i) => [...i.peers]));
-  if (!peers.length) return new Map();
-  const peerSql = phoneIdentitySql('sl.from_phone');
-  const since = new Date(Math.min(...unknownIdents.map((i) => i.anchor.getTime())));
-  const rows = await excludeUnresolvedSendReservations(conn('sms_log as sl').where('sl.direction', 'inbound'), 'sl')
-    .whereRaw(`${peerSql} = ANY(?)`, [peers]).where('sl.created_at', '>', since)
-    .select(conn.raw(`${peerSql} as peer`)).max('sl.created_at as at').groupByRaw('1');
-  return new Map(unknownIdents.map((ident) => [ident, rows.filter((r) => ident.peers.has(r.peer)).reduce((best, r) => later(asDate(r.at), best), null)]));
 }
 
 // A person's reply to a customer on a SHARED phone, by customer id: the replies the
@@ -399,7 +398,7 @@ async function attachEmailReplies(conn, idents, bundles) {
     const at = asDate(row.received_at);
     const owners = emailIdents.filter((i) => i.email.gmail_thread_id === row.gmail_thread_id && at && at.getTime() > i.anchor.getTime());
     if (!owners.length) continue;
-    const linked = await resolveEmailCustomerLink(conn, row);
+    const { customerId: linked } = await emailCustomerLink(conn, row);
     for (const owner of owners.filter((o) => String(linked) === o.customerId)) {
       const bundle = bundles.get(String(owner.item.id));
       bundle.replyAt = later(bundle.replyAt, at);
@@ -408,7 +407,7 @@ async function attachEmailReplies(conn, idents, bundles) {
 }
 
 // An email a person sent to a portal chat's customer after the bell, in any thread: a Gmail SENT row
-// that resolveEmailCustomerLink links to the customer. Bounded: only rows after the earliest anchor whose
+// that emailCustomerLink links to the customer. Bounded: only rows after the earliest anchor whose
 // To/Cc/Bcc text holds one of these customers' own addresses are read (a prefilter; the link decides).
 async function attachCustomerEmailSends(conn, idents, bundles) {
   const owners = idents.filter((i) => i.item.kind === 'customer' && i.customerId);
@@ -428,7 +427,7 @@ async function attachCustomerEmailSends(conn, idents, bundles) {
     const recipients = new Set(extractEmailAddresses([row.to_address, row.cc_address, row.bcc_address].filter(Boolean).join(',')));
     const named = owners.filter((o) => at && at.getTime() > o.anchor.getTime() && [...(addressOf.get(o.customerId) || [])].some((a) => recipients.has(a)));
     if (!named.length) continue;
-    const linked = await resolveEmailCustomerLink(conn, row);
+    const { customerId: linked } = await emailCustomerLink(conn, row);
     for (const owner of named.filter((o) => String(linked) === o.customerId)) {
       const bundle = bundles.get(String(owner.item.id));
       bundle.replyAt = later(bundle.replyAt, at);
@@ -460,13 +459,14 @@ async function loadContactBundles(items, { conn, bookedVisits }) {
   const idents = items.map((item) => identify(item, lookups)).filter(Boolean);
   if (!idents.length) return bundles;
 
-  // A known customer's own phone also names them (a text or call that carries no customer id).
+  // A known customer's own phone also names them (a text or call that carries no customer id). Not for an exclusive
+  // item: only the lead's own phone, as the caller passed it, speaks for it.
   const customerIds = unique(idents.map((i) => i.customerId));
   if (customerIds.length) {
     const owners = await conn('customers').whereIn('id', customerIds).whereNull('deleted_at').select('id', 'phone');
     for (const owner of owners) {
       const peer = phoneIdentityKey(owner.phone);
-      if (peer) idents.filter((i) => i.customerId === String(owner.id)).forEach((i) => i.peers.add(peer));
+      if (peer) idents.filter((i) => i.customerId === String(owner.id) && !i.exclusive).forEach((i) => i.peers.add(peer));
     }
   }
   const peers = unique(idents.flatMap((i) => [...i.peers]));
@@ -488,26 +488,23 @@ async function loadContactBundles(items, { conn, bookedVisits }) {
   const visits = await bookedVisits(customerIds);
   const ranVisits = await visitsThatRan(conn, idents.filter((i) => i.item.kind === 'voice'));
   const staffActed = await staffActionsAfterTexts(conn, smsIdents);
-  const unknownSenders = idents.filter((i) => i.item.kind === 'sms' && i.item.refs.unknownSender === true && !i.customerId);
-  const lastInbound = await latestInboundTexts(conn, unknownSenders);
   for (const ident of idents) {
     const { item, customerId } = ident;
-    // A shared phone: this customer's own evidence by customer id only (ownMatch).
+    // A shared phone: this customer's own evidence by customer id only (ownMatch). An exclusive item: exclusiveMatch.
     const own = shared.has(ident);
+    const matches = own ? ownMatch : (ident.exclusive ? exclusiveMatch : namesItem);
     const bundle = {
       anchor: ident.anchor,
       shared: item.kind === 'sms' ? own : null,
       pending: item.kind === 'sms' ? [...ident.peers].some((peer) => pendingPeers.has(peer)) : null,
-      textAt: own ? latestFor(replyRows, ident, ownMatch) : latestFor(textRows, ident),
-      backAt: latestFor(backRows, ident, own ? ownMatch : namesItem),
-      inAt: latestFor(inRows, ident, own ? ownMatch : namesItem),
+      textAt: own ? latestFor(replyRows, ident, ownMatch) : latestFor(textRows, ident, matches),
+      backAt: latestFor(backRows, ident, matches),
+      inAt: latestFor(inRows, ident, matches),
       visitAt: customerId ? asDate(visits.get(customerId)) : null,
       quote: false,
       replyAt: null,
       visitRanAt: ranVisits.get(String(item.id)) || null,
       ...staffActionFields(staffActed, item),
-      unknownSender: lastInbound.has(ident),
-      lastInboundAt: lastInbound.get(ident),
     };
     bundle.quote = await quoteHandedOff(conn, ident, bundle);
     bundles.set(String(item.id), bundle);

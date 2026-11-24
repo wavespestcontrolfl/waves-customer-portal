@@ -258,7 +258,8 @@ function isCommercialAutoEstimate(estimate = {}) {
 const ESTIMATE_PARK_COLUMNS = ['customer_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'estimate_group_id', 'customer_phone_typed'];
 // `pricing_authority` rides every projected read: the add-on gates read the AUTHORITATIVE result container (a SERVER reprice
 // can leave an empty `result` beside a stale `engineResult` that still lists an add-on).
-const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'pricing_authority', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest', ...ESTIMATE_PARK_COLUMNS];
+// (+ source, bill_by_invoice, show_one_time_option: the fields staffChangedQuoteSlotRefusal reads.)
+const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'pricing_authority', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest', 'source', 'bill_by_invoice', 'show_one_time_option', ...ESTIMATE_PARK_COLUMNS];
 
 // B18 park: the estimate's phone belongs to another customer, so it cannot self-book (contact_review, decided by
 // the ONE precedence helper in estimate-public.js - the existing quote-required / trenching refusals each caller
@@ -299,14 +300,25 @@ function blockingStateRefusal(state, { browse = false } = {}) {
     ? { status: 200, body: parkedSlotBrowseBody() }
     : { status: 409, body: acceptOfficeReviewBody(), park: { rejectedCustomerId: state.rejectedCustomerId } };
 }
+// A customer's own plan quote that staff changed (the one-time option or invoice billing on): its accept refuses it
+// (estimate-public.js, staffChangedQuoteRefusal), so every route here answers that same 409, the slot reads too. It is
+// judged after the blocking state (the park comes first, as in the accept) and before every shortcut, inside the two
+// shared checks: slotBlockingRefusal (each route's first read, and the card steps' post-Stripe re-read) and
+// lockedContactReviewRefusal (the locked reserve and extend rows). The page shows its refused-quote banner (codex
+// pre-push P1 x2: a tab opened before the change could hold a time, and a change during the Stripe mint passed).
+function staffChangedQuoteSlotRefusal(row) {
+  const refusal = require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(row);
+  return refusal ? { status: 409, body: { error: refusal.message, code: refusal.code } } : null;
+}
 async function slotBlockingRefusal(estimate, opts, shape) {
-  return blockingStateRefusal(await blockingStateFor(estimate, opts), shape);
+  return blockingStateRefusal(await blockingStateFor(estimate, opts), shape) || staffChangedQuoteSlotRefusal(estimate);
 }
 // The re-check a card-intent route runs AFTER its Stripe mint, before a client secret leaves the server: the
 // ESTIMATE row is re-read (staff can edit its phone, email or address, or deactivate it, during the mint) and judged
 // by the same helper with the candidate cache bypassed. An estimate that is no longer active is withheld too.
 // The add-on gate (both intent routes) and the one-time-only rule (the recurring intent passes `requestedServiceMode`) are
-// re-judged on the reloaded row as well: an add-on added, or the gate turned off, while Stripe minted the intent.
+// re-judged on the reloaded row as well: an add-on added, or the gate turned off, while Stripe minted the intent. So is a
+// plan quote staff changed meanwhile (slotBlockingRefusal).
 async function postMintRefusal(estimate, { requestedServiceMode } = {}) {
   const row = await db('estimates').where({ id: estimate.id }).first();
   if (!row || !isEstimateAcceptActive(row)) return { status: 409, body: ESTIMATE_INACTIVE_409 };
@@ -332,6 +344,21 @@ async function refuseParkedRecurringIntent(res, estimate, parkState, replaceSetu
     }
   }
   return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
+}
+// The card-intent routes answer a staff-changed plan quote (staffChangedQuoteSlotRefusal) after the park decision and
+// before any policy answer or Stripe work (codex pre-push P1). A replace request's named capture is retired first, as the
+// park does (503 when Stripe cannot confirm).
+async function refuseStaffChangedQuoteIntent(res, estimate, replaceSetupIntentId = '') {
+  const refusal = staffChangedQuoteSlotRefusal(estimate);
+  if (!refusal) return null;
+  if (replaceSetupIntentId) {
+    try {
+      await retireOrDenyDroppedCapture(estimate, replaceSetupIntentId);
+    } catch (retireErr) {
+      return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+    }
+  }
+  return res.status(refusal.status).json(refusal.body);
 }
 async function sendRecheckedIntentResponse(res, estimate, status, body, { retireSetupIntentId = null, requestedServiceMode } = {}) {
   const blocked = await postMintRefusal(estimate, { requestedServiceMode });
@@ -372,16 +399,19 @@ const CUSTOMER_BUSY_REFUSAL = {
 // quote requirement (resolved when the estimate looks parked, via a plain read) BEFORE it ever attempts the NOWAIT candidate
 // lock, so by the time a 55P03 can be raised nothing of higher priority is outstanding, and skipping on busy (extend) or
 // answering the retryable refusal (reserve) loses nothing but the park decision itself.
+// The plan-quote rule (staffChangedQuoteSlotRefusal) reads the row alone, so it is judged after the blocking state, and on
+// an extend's busy skip as well.
 async function lockedContactReviewRefusal(row, trx, { skipOnBusy = false } = {}) {
+  let blocked = null;
   try {
-    return trx
-      ? await savepointScope(trx, async (scoped) => blockingStateRefusal(
-        await blockingStateFor(row, { database: scoped, lock: true })))
-      : await slotBlockingRefusal(row, {});
+    blocked = blockingStateRefusal(trx
+      ? await savepointScope(trx, async (scoped) => blockingStateFor(row, { database: scoped, lock: true }))
+      : await blockingStateFor(row, {}));
   } catch (err) {
-    if (err?.code === '55P03') return skipOnBusy ? null : CUSTOMER_BUSY_REFUSAL;
-    throw err;
+    if (err?.code !== '55P03') throw err;
+    if (!skipOnBusy) return CUSTOMER_BUSY_REFUSAL;
   }
+  return blocked || staffChangedQuoteSlotRefusal(row);
 }
 // The customer an unowned estimate's phone matches - the one its accept will land on - for the add-ons' yearly-limit
 // recheck at reserve (area-addon-limits.js limitSubject: a customer known by then has their history read).
@@ -920,6 +950,8 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
       const parkState = await contactReviewState(estimate, { estData, quoteRequirement });
       if (parkState) return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
     }
+    const changedHoldQuote = await refuseStaffChangedQuoteIntent(res, estimate);
+    if (changedHoldQuote) return changedHoldQuote;
 
     // The hold only applies to a one-time booking — mirror accept's one-time
     // availability gate before minting the intent so a one_time request on an
@@ -1049,6 +1081,8 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     // B18 park: no card is captured for an estimate whose phone belongs to another customer (see card-hold-intent).
     const recurringParkState = await contactReviewState(estimate, { estData, quoteRequirement });
     if (recurringParkState) return refuseParkedRecurringIntent(res, estimate, recurringParkState, replaceSetupIntentId);
+    const changedRecurringQuote = await refuseStaffChangedQuoteIntent(res, estimate, replaceSetupIntentId);
+    if (changedRecurringQuote) return changedRecurringQuote;
 
     // The Auto Pay card only applies to the recurring lane — a one-time
     // request keeps its own card-hold intent endpoint.
@@ -1452,8 +1486,10 @@ const SETTLED_SLOT_CODES = ['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_
 // /data reconciles a stale frozen membership snapshot (in memory, never persisted) before building either, so this
 // does too: a lapsed plan can reprice the default selection or make the estimate quote-required.
 // Shared by the texting AI (offerableEstimateSlots) and the daily no-time-soon check.
-async function pageSlotPicker(estimateId) {
-  const full = await db('estimates').where({ id: estimateId }).first();
+// `row`: the caller's own read of this estimate (the 07:05 fill list), so every check it makes reads one revision. The
+// picker works on a copy: the snapshot step below may rewrite the row's estimate_data in place.
+async function pageSlotPicker(estimateId, { row = null } = {}) {
+  const full = row ? structuredClone(row) : await db('estimates').where({ id: estimateId }).first();
   if (!full) return null;
   await reconcileFrozenMembershipSnapshot(full);
   const pricing = await buildPricingBundle(full, { monthlyBilled: await estimateRendersMonthlyBilling(full) });

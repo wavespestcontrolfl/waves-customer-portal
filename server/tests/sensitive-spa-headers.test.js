@@ -5,11 +5,13 @@ const {
   isPestReportPath,
   isServiceReportPath,
   isEstimatePath,
+  isMailHomePath,
   isSecureCardPath,
   isPriceChangeNoticePath,
   isContractPath,
   isAppointmentPath,
   isCareersInterviewPath,
+  isCareersOfferPath,
   isInspectionPath,
 } = require('../utils/sensitive-spa-headers');
 
@@ -112,6 +114,35 @@ describe('sensitive SPA document headers', () => {
     expect(isCareersInterviewPath('/careers')).toBe(false);
   });
 
+  // The client route /careers/offer/:token (react-router 6) decodes each segment and ignores case and extra trailing
+  // slashes, for any token. Every document path that opens the page must get the headers, not only the canonical one.
+  test.each([
+    `/careers/offer/${'a'.repeat(64)}`,
+    `/Careers/Offer/${'a'.repeat(64)}`,
+    `/CAREERS/OFFER/${'a'.repeat(64)}/`,
+    `/careers/%6Fffer/${'a'.repeat(64)}`, // %6F = o
+    `/careers/offer/%61${'a'.repeat(63)}`,
+    `/careers/offer/${'a'.repeat(64)}//`,
+  ])('marks the job-offer document %s noindex, no-referrer and no-store', (path) => {
+    const res = mockResponse();
+    applySensitiveSpaHeaders(path, res);
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+  });
+
+  test('matches every path the offer route opens, and no other', () => {
+    expect(isCareersOfferPath(`/careers/offer/${'A'.repeat(64)}`)).toBe(true);
+    expect(isCareersOfferPath('/careers/offer/not-a-token')).toBe(true); // the page opens and shows not-valid
+    expect(isCareersOfferPath('/careers/offer/a%2Fb')).toBe(true); // an encoded slash stays inside the token
+    expect(isCareersOfferPath('/careers/offer/%E0%A4%A')).toBe(true); // malformed: matched as written, as the router does
+    expect(isCareersOfferPath('/careers/offer/')).toBe(false);
+    expect(isCareersOfferPath('/careers/offer/a/b')).toBe(false);
+    expect(isCareersOfferPath('/careers/offers/a')).toBe(false);
+    expect(isCareersOfferPath('/careers')).toBe(false);
+    expect(isCareersOfferPath(`/api/public/careers/offer/${'a'.repeat(64)}`)).toBe(false);
+  });
+
   test('recognizes only full lawn-report 32-hex token document paths', () => {
     expect(isLawnReportPath(`/lawn-report/${LAWN_TOKEN}`)).toBe(true);
     expect(isLawnReportPath(`/lawn-report/${LAWN_TOKEN}/`)).toBe(true);
@@ -186,6 +217,27 @@ describe('sensitive SPA document headers', () => {
     expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}/other`)).toBe(false);
     expect(isEstimatePath('/estimate')).toBe(false);
     expect(isEstimatePath('/api/estimates/0123456789abcdef0123456789abcdef/data')).toBe(false);
+  });
+
+  test('marks new-home postcard token pages noindex, no-referrer, and no-store; and every spelling the client route renders', () => {
+    const HOME_TOKEN = '0123456789abcdef0123456789abcdef';
+    const res = mockResponse();
+
+    applySensitiveSpaHeaders(`/h/${HOME_TOKEN}`, res);
+
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    expect(isMailHomePath(`/h/${HOME_TOKEN}/`)).toBe(true);
+    // Every spelling the client route renders gets the headers: any case, a percent-encoded letter, extra slashes, and
+    // any token (a bad one only shows the not-available page under them).
+    for (const alt of [`/H/${HOME_TOKEN}`, `/%68/${HOME_TOKEN}`, `/h/${HOME_TOKEN}//`, `/h/${HOME_TOKEN.toUpperCase()}`, '/h/not-a-token']) {
+      expect(isMailHomePath(alt)).toBe(true);
+    }
+    expect(isMailHomePath('/h')).toBe(false);
+    expect(isMailHomePath(`/h/${HOME_TOKEN}/extra`)).toBe(false);
+    expect(isMailHomePath(`/api/public/home/${HOME_TOKEN}`)).toBe(false);
+    expect(isMailHomePath(`/help/${HOME_TOKEN}`)).toBe(false);
   });
 
   test('marks secure-appointment card token pages noindex, no-referrer, and no-store', () => {

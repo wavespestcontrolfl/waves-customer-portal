@@ -126,7 +126,7 @@ function appliedLine(sinceLast) {
   return list.length ? `Last visit we applied ${joinList(list)}.` : null;
 }
 
-// `withheld` (GATE_LAWN_LIGHTING only): the gate-off line this block would have had,
+// `withheld` (lighting only): the gate-off line this block would have had,
 // which the light rules took away. It still takes its place in the block's size
 // limits and is removed last, so the gate can only remove a sentence.
 function overallLine(progress) {
@@ -138,7 +138,7 @@ function overallLine(progress) {
 
 function metricLines(progress) {
   // The slots are chosen from each item's LEGACY state (what the engine said before
-  // GATE_LAWN_LIGHTING; the same as `state` when the gate is off), exactly as they
+  // lighting; the same as `state` when the gate is off), exactly as they
   // always were; only then is a line replaced by, or withheld for, the state the
   // light rules left. So the gate can only remove a sentence, never replace one
   // or let in a line that was cut for room.
@@ -161,7 +161,7 @@ function metricLines(progress) {
     .sort((a, b) => LINE_PRIORITY.indexOf(a.legacyState) - LINE_PRIORITY.indexOf(b.legacyState))
     .slice(0, MAX_METRIC_LINES)
     // A metric whose state the light rules withheld keeps its slot (flagged `withheld`)
-    // and is removed at the end (THE RULE of GATE_LAWN_LIGHTING: remove a gate-off
+    // and is removed at the end (THE RULE of the lighting rules: remove a gate-off
     // sentence, never print a different one).
     .map(({ metric, legacyState }) => ({ text: METRIC_SENTENCE[metric][legacyState], state: legacyState, withheld: actual.get(metric) !== legacyState }));
 }

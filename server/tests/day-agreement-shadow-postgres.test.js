@@ -115,6 +115,8 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
     return id;
   };
   const SERVICE_NAME = 'Quarterly Pest Control Service';
+  // ~1.3 miles from the depot, so a first visit on an empty day clears the self-serve drive cap on the drive clock.
+  const NEAR_DEPOT = { latitude: 27.42, longitude: -82.42 };
   const catalogService = () => trx('services').where({ service_key: 'pest_general_quarterly' }).first();
   const sweep = (deps) => shadow.runDayAgreementShadow({ now: NOW, conn: trx, deps });
   const decisions = () => trx('day_agreement_decisions').orderBy('source_key');
@@ -981,7 +983,9 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
           { id: on, name: 'Sample On', field_dispatchable: true, employment_status: 'active' },
         ]);
         await trx('technician_capabilities').insert({ technician_id: off, service_category: 'general', active: false });
-        const customerId = await customer();
+        // Near the depot: under the 30-minute self-serve drive cap an empty day's round trip must fit, and each leg
+        // costs the drive clock's 8-minute overhead plus the miles (1.3 miles here: 11 minutes a leg, 22 round trip).
+        const customerId = await customer(NEAR_DEPOT);
         const target = dayPlus(2);
         const args = { customerId, day: target, daypart: 'any', fromVisit: null, service: await catalogService() };
         const picked = await shadow._internals.pickSlot(trx, args, {});
@@ -1022,7 +1026,7 @@ postgres('day-agreement shadow sweep (Postgres)', () => {
       process.env.GATE_SCHEDULING_CAPACITY = 'true';
       try {
         await trx('technicians').insert({ id: randomUUID(), name: 'Sample Tech', field_dispatchable: true, employment_status: 'active' });
-        const customerId = await customer();
+        const customerId = await customer(NEAR_DEPOT);
         const target = dayPlus(2);
         const first = await shadow._internals.pickSlot(trx, { customerId, day: target, daypart: 'morning', fromVisit: null, service: await catalogService() }, {});
         expect(first.slot).toBeDefined();

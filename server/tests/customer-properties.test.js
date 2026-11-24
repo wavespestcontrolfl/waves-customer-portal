@@ -186,7 +186,7 @@ describe('syncPrimaryAddress explicit line 2 intent', () => {
   });
 });
 
-describe('syncPrimaryAddress and the reclaimed-water answer (GATE_LAWN_RECLAIMED_HALF_N)', () => {
+describe('syncPrimaryAddress and the reclaimed-water answer', () => {
   const RECLAIMED = { reclaimed_water: true, reclaimed_water_source: 'office', reclaimed_water_checked_at: new Date('2026-10-20T12:00:00Z') };
   const CLEARED = { reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null };
   const primary = (extra = {}) => ({

@@ -1,7 +1,9 @@
+const morgan = require('morgan');
 const {
   isSensitiveQueryKey,
   redactRequestUrl,
 } = require('../utils/redact-request-url');
+const { REDACTED_COMBINED_LOG, registerRedactedTokens } = require('../utils/request-log-format');
 
 describe('request URL log redaction', () => {
   test.each([
@@ -34,6 +36,17 @@ describe('request URL log redaction', () => {
       .toBe('/api/admin/leads?q=[REDACTED]&page=2');
     expect(redactRequestUrl('/api/admin/estimator/geocode?address=123+Main+St'))
       .toBe('/api/admin/estimator/geocode?address=[REDACTED]');
+  });
+
+  test('the Builders job-site read keeps the kind and masks the builder name, in the URL and the access line', () => {
+    const url = '/api/admin/prospects/builders/permits?kind=pool&builder=PAT%20SAMPLE';
+    const masked = '/api/admin/prospects/builders/permits?kind=pool&builder=[REDACTED]';
+    expect(redactRequestUrl(url)).toBe(masked);
+    registerRedactedTokens(morgan);
+    const req = { method: 'GET', httpVersionMajor: 1, httpVersionMinor: 1, headers: { 'user-agent': 'x' }, originalUrl: url, url, socket: { remoteAddress: '203.0.113.9' } };
+    const line = morgan.compile(REDACTED_COMBINED_LOG)(morgan, req, { statusCode: 200, getHeader: () => '-' });
+    expect(line).toContain(`GET ${masked} HTTP/1.1`);
+    expect(line).not.toMatch(/PAT|SAMPLE/);
   });
 
   test('redacts token-like parameters while preserving useful query context', () => {

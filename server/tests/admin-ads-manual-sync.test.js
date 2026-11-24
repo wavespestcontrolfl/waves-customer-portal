@@ -7,9 +7,14 @@
  * - POST /sync/meta runs both steps with throwOnError + throwOnSkip: a failed
  *   step answers 502, a lock another sync holds answers 409.
  * - PUT /campaigns/:id refuses a status change on a synced Meta campaign, as it
- *   already does on a Google one; manual / google_lsa campaigns keep it.
+ *   already does on a Google one, and on a Local Services campaign the daily
+ *   sync owns (it carries the sync's account mark); one entered by hand keeps it.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+// The Local Services cases need the sync to read its default account, whatever
+// the developer's own environment holds.
+delete process.env.GOOGLE_LSA_CUSTOMER_ID;
+delete process.env.GOOGLE_ADS_CUSTOMER_ID;
 jest.setTimeout(30000);
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -28,6 +33,8 @@ const mockGoogle = {
   syncSearchTerms: jest.fn(),
 };
 jest.mock('../services/ads/google-ads', () => mockGoogle);
+const mockLinkCampaigns = jest.fn();
+jest.mock('../services/ads/campaign-link', () => ({ linkCampaigns: (...a) => mockLinkCampaigns(...a) }));
 const mockMeta = {
   isConfigured: jest.fn(),
   syncCampaigns: jest.fn(),
@@ -111,6 +118,7 @@ beforeEach(() => {
   mockGoogle.syncCampaigns.mockResolvedValue([{}]);
   mockGoogle.syncDailyPerformance.mockResolvedValue([{}, {}]);
   mockGoogle.syncSearchTerms.mockResolvedValue([{}, {}, {}]);
+  mockLinkCampaigns.mockResolvedValue({ checked: 2, linked: { gclid_click_view: 2 }, unlinked: 0 });
   mockMeta.isConfigured.mockReturnValue(true);
   mockMeta.syncCampaigns.mockResolvedValue([{}, {}]);
   mockMeta.syncDailyPerformance.mockResolvedValue([{}, {}, {}, {}, {}]);
@@ -120,12 +128,13 @@ describe('POST /sync (Google)', () => {
   test("runs the cron's job under its lock and job_health row; every step throws on error", async () => {
     const res = await call('POST', '/sync');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ success: true, synced: { campaigns: 1, performanceRows: 2, searchTerms: 3 } });
+    expect(res.body).toEqual({ success: true, synced: { campaigns: 1, performanceRows: 2, searchTerms: 3, campaignLinks: 2 } });
     expect(mockRunExclusive).toHaveBeenCalledWith('google-ads-sync', expect.any(Function));
     expect(mockOutcomes['google-ads-sync']).toBe('success');
     expect(mockGoogle.syncCampaigns).toHaveBeenCalledWith({ throwOnError: true });
     expect(mockGoogle.syncDailyPerformance).toHaveBeenCalledWith(7, { throwOnError: true });
     expect(mockGoogle.syncSearchTerms).toHaveBeenCalledWith(30, { throwOnError: true });
+    expect(mockLinkCampaigns).toHaveBeenCalledWith({ googleAds: mockGoogle });
     expect(mockSyncOwnerWords).not.toHaveBeenCalled(); // GATE_ADS_NEGATIVES off
   });
 
@@ -138,18 +147,33 @@ describe('POST /sync (Google)', () => {
     expect(res.body.failed).toEqual(['campaigns', 'performanceRows']);
     expect(res.body.error).toMatch(/Campaigns not synced: PERMISSION_DENIED/);
     expect(res.body.error).toMatch(/Performance not synced: quota exceeded/);
-    expect(res.body.synced).toEqual({ campaigns: 0, performanceRows: 0, searchTerms: 3 });
+    expect(res.body.synced).toEqual({ campaigns: 0, performanceRows: 0, searchTerms: 3, campaignLinks: 2 });
     expect(mockGoogle.syncSearchTerms).toHaveBeenCalled();
     expect(mockOutcomes['google-ads-sync']).toBe('failed: PERMISSION_DENIED');
   });
 
-  test("the owner's negative word list runs as the fourth step while GATE_ADS_NEGATIVES is on", async () => {
+  test('a Google refusal while linking campaigns fails that step by name', async () => {
+    mockLinkCampaigns.mockRejectedValue(new Error('click_view: PERMISSION_DENIED'));
+    const res = await call('POST', '/sync');
+    expect(res.status).toBe(502);
+    expect(res.body.failed).toEqual(['campaignLinks']);
+    expect(res.body.error).toMatch(/Campaign links not synced: click_view: PERMISSION_DENIED/);
+  });
+
+  test("an SDK-shaped Google failure keeps Google's reason, not 'unknown error'", async () => {
+    mockLinkCampaigns.mockRejectedValue({ errors: [{ message: 'The caller does not have permission' }] });
+    const res = await call('POST', '/sync');
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/Campaign links not synced: The caller does not have permission/);
+  });
+
+  test("the owner's negative word list runs as the fifth step while GATE_ADS_NEGATIVES is on", async () => {
     mockNegativesLive.mockReturnValue(true);
     mockSyncOwnerWords.mockResolvedValue({ pushed: 2, failed: 0, removed: 1, googleFailed: 0 });
     const res = await call('POST', '/sync');
     expect(res.status).toBe(200);
     expect(res.body.synced).toEqual({
-      campaigns: 1, performanceRows: 2, searchTerms: 3,
+      campaigns: 1, performanceRows: 2, searchTerms: 3, campaignLinks: 2,
       negativeWords: { pushed: 2, failed: 0, removed: 1, googleFailed: 0 },
     });
     expect(mockSyncOwnerWords).toHaveBeenCalledTimes(1);
@@ -243,7 +267,7 @@ describe('PUT /campaigns/:id status on synced platforms', () => {
     expect(updates).toEqual([]);
   });
 
-  test('a Meta campaign still takes non-status edits, and its unchanged status', async () => {
+  test('a Meta campaign still takes non-status edits; its unchanged status is accepted but never written back', async () => {
     campaignRow = { id: 'c-1', platform: 'facebook', status: 'active', campaign_name: 'Meta' };
     let res = await call('PUT', '/campaigns/c-1', { campaign_name: 'Meta - Renamed' });
     expect(res.status).toBe(200);
@@ -251,15 +275,69 @@ describe('PUT /campaigns/:id status on synced platforms', () => {
     expect(res.status).toBe(200);
     expect(updates.map(({ updated_at: _ignored, ...rest }) => rest)).toEqual([
       { campaign_name: 'Meta - Renamed' },
-      { status: 'active', target_area: 'Parrish' },
+      // No status in the write: a sync that changed it since the read is not undone.
+      { target_area: 'Parrish' },
     ]);
   });
 
-  test('a google_lsa campaign can still be retired through PUT', async () => {
+  test('a google_lsa campaign entered by hand can still be retired through PUT, with or without a Google id', async () => {
     campaignRow = { id: 'c-2', platform: 'google_lsa', status: 'active', campaign_name: 'LSA' };
-    const res = await call('PUT', '/campaigns/c-2', { status: 'removed' });
+    let res = await call('PUT', '/campaigns/c-2', { status: 'removed' });
     expect(res.status).toBe(200);
     expect(res.body.campaign.status).toBe('removed');
+    // An id typed at creation is not the sync's mark: the row is still hand-entered.
+    campaignRow = { id: 'c-5', platform: 'google_lsa', platform_campaign_id: '777', status: 'active', campaign_name: 'LSA', metadata: { note: 'typed in' } };
+    res = await call('PUT', '/campaigns/c-5', { status: 'removed' });
+    expect(res.status).toBe(200);
+  });
+
+  test('a Local Services campaign the sync owns refuses a status change but takes other edits', async () => {
+    campaignRow = {
+      id: 'c-4', platform: 'google_lsa', platform_campaign_id: '555', status: 'active', campaign_name: 'Local Service Ads',
+      metadata: { lsa_customer_id: '7636809139' },
+    };
+    let res = await call('PUT', '/campaigns/c-4', { status: 'paused' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/comes from Google/);
+    expect(updates).toEqual([]);
+    res = await call('PUT', '/campaigns/c-4', { status: 'active', target_area: 'Bradenton' });
+    expect(res.status).toBe(200);
+    expect(updates.map(({ updated_at: _ignored, ...rest }) => rest)).toEqual([{ target_area: 'Bradenton' }]);
+  });
+
+  test('the row the Local Services sync owns refuses a type change (the type keeps it on the Local Service Ads card); an unchanged type is not written back', async () => {
+    campaignRow = {
+      id: 'c-4', platform: 'google_lsa', platform_campaign_id: '7636809139', status: 'active', campaign_name: 'Local Service Ads',
+      campaign_type: 'google_lsa', metadata: { lsa_customer_id: '7636809139' },
+    };
+    let res = await call('PUT', '/campaigns/c-4', { campaign_type: 'google_search' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/set by the daily Local Services sync/);
+    expect(updates).toEqual([]);
+    res = await call('PUT', '/campaigns/c-4', { campaign_type: 'google_lsa', campaign_name: 'LSA Lakewood Ranch' });
+    expect(res.status).toBe(200);
+    expect(updates.map(({ updated_at: _ignored, ...rest }) => rest)).toEqual([{ campaign_name: 'LSA Lakewood Ranch' }]);
+  });
+
+  test('a google_lsa campaign entered by hand keeps an editable type', async () => {
+    campaignRow = { id: 'c-2', platform: 'google_lsa', status: 'active', campaign_name: 'LSA', campaign_type: 'google_lsa' };
+    const res = await call('PUT', '/campaigns/c-2', { campaign_type: 'other' });
+    expect(res.status).toBe(200);
+    expect(updates.map(({ updated_at: _ignored, ...rest }) => rest)).toEqual([{ campaign_type: 'other' }]);
+  });
+
+  test('a campaign marked by an account the sync no longer reads is editable again', async () => {
+    campaignRow = { id: 'c-6', platform: 'google_lsa', platform_campaign_id: '888', status: 'active', campaign_name: 'Old account', metadata: { lsa_customer_id: '1112223333' } };
+    const res = await call('PUT', '/campaigns/c-6', { status: 'removed' });
+    expect(res.status).toBe(200);
+  });
+
+  test('a generic write cannot set the sync mark', async () => {
+    campaignRow = { id: 'c-4', platform: 'google_lsa', platform_campaign_id: '555', status: 'active', campaign_name: 'Local Service Ads', metadata: { lsa_customer_id: '7636809139' } };
+    const res = await call('PUT', '/campaigns/c-4', { metadata: { lsa_customer_id: '1112223333' } });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/lsa_customer_id can't be set here/);
+    expect(updates).toEqual([]);
   });
 
   test('a Google campaign still points to /pause and /enable', async () => {

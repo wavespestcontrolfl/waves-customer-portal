@@ -14,15 +14,53 @@ const { qualifyingKeysForRow } = require('../services/waveguard-existing-service
 // unlinked rows) is never plan coverage, even when its stale/canonical
 // service_type ("Rodent Pest Control") would classify as pest_control on the
 // combined text. Only then does the family classifier decide.
-function portalRowWaveGuardFamily(row) {
+// Every plan family the row covers (a combined visit, "Lawn + Tree & Shrub
+// Service", covers more than one). The row's serviceFamily is the first.
+function portalRowWaveGuardFamilies(row) {
   const { isCommercialServiceRow, isNonBaitRodentServiceRow } = require('../services/self-booking-plan-sync');
-  if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return null;
-  const keys = qualifyingKeysForRow(row);
+  if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return [];
+  return qualifyingKeysForRow(row);
+}
+function portalRowWaveGuardFamily(row) {
+  const keys = portalRowWaveGuardFamilies(row);
   return keys.length > 0 ? keys[0] : null;
 }
 function portalRowQualifiesForWaveGuard(row) {
   return portalRowWaveGuardFamily(row) !== null;
 }
+// The service families of the customer's plan, for the two portal places
+// that NAME them (Billing's Plan Charges, the Learn sentence). Two existing
+// server rules decide, and the portal client rebuilds neither from labels:
+//   - which visits count: the tier alignment's row rule
+//     (serviceRowCountsTowardWaveGuard: recurring, live, not a re-service,
+//     not booked through a one-time source);
+//   - which families a visit covers: the verdict this answer already gives
+//     each visit (portalRowWaveGuardFamilies: the catalog identity before
+//     the label; no commercial, non-bait rodent or misting row). So the
+//     list and a visit's own waveguardQualifying never disagree.
+// `rows` are the list query's rows: a booking the office has not reviewed
+// (customerVisibleBookingWhere) names nothing, and the catalog identity is
+// that query's own join, with no second read to fail or fall back.
+function portalPlanFamilies(rows) {
+  const { serviceRowCountsTowardWaveGuard } = require('../services/self-booking-plan-sync');
+  const families = new Set();
+  for (const s of rows) {
+    if (!serviceRowCountsTowardWaveGuard(s)) continue;
+    portalRowWaveGuardFamilies({
+      service_type: s.service_type,
+      service_key: s.catalog_service_key,
+      service_name: s.catalog_service_name,
+      catalog_billing_type: s.catalog_billing_type,
+    }).forEach((family) => families.add(family));
+  }
+  return [...families];
+}
+// The customer's visit list holds these statuses. A visit the technician has
+// started (en_route, on_site) is not on the list, but it is still plan
+// evidence until it completes: the plan-coverage read loads it for
+// portalPlanFamilies only.
+const VISIT_LIST_STATUSES = ['pending', 'confirmed', 'rescheduled'];
+const VISIT_IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
@@ -34,7 +72,7 @@ const { dayOnlyIds, dayOnlyFields, shownSlotFor } = require('../services/time-di
 // portal can never advertise a link that 404s or hide one the route serves
 // (codex r3 P1).
 const {
-  DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned, UNREVIEWED_VOICE_MOVED_SQL,
+  OFFICE_REVIEW_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned, customerVisibleBookingWhere,
 } = require('../services/call-booking-source-actions');
 const { awaitingCustomerPick, AWAITING_PICK_REFUSAL } = require('../services/scheduling/self-serve-notice');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
@@ -140,7 +178,7 @@ function customerPickByIso(row) {
 
 // GATE_DAY_ONLY_PROMISE (part C1): a visit the customer was told only the DAY for shows no hour. `hidden` is the
 // Set of row ids from ONE dayOnlyIds() call per payload. The server blanks the hour fields (an older app bundle then
-// renders the date alone) and adds day_only + arrival_note. Not in the set (gate off, hour told, inside the 24-hour
+// renders the date alone) and adds day_only + arrival_note. Not in the set (hour told, inside the 24-hour
 // cutoff, any lookup failure): the fields are exactly today's, and no key is added.
 const hourOf = (hidden, row, field) => (hidden.has(String(row.id)) ? null : row[field]);
 
@@ -187,18 +225,14 @@ router.get('/', async (req, res, next) => {
     const upcomingQuery = db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId });
     applyPropertyPredicate(upcomingQuery, scope);
-    const upcoming = await upcomingQuery
-      .whereIn('scheduled_services.status', ['pending', 'confirmed', 'rescheduled'])
+    const listRows = await upcomingQuery
+      .whereIn('scheduled_services.status', allProperties ? [...VISIT_LIST_STATUSES, ...VISIT_IN_PROGRESS_STATUSES] : VISIT_LIST_STATUSES)
       // A call-created follow-up (visit 2) is dispatch-owned until the office
       // confirms the exact time — hide the still-pending, never-confirmed row
       // so the portal can't surface (and confirm) the default interval before
       // dispatch reviews it. De Morgan with NULL-safe legs: most rows have no
       // source_action, and `NOT (NULL = x)` would filter them out.
-      .where((qb) => qb
-        .whereNull('scheduled_services.source_action')
-        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
-        .orWhere('scheduled_services.customer_confirmed', true))
+      .where(customerVisibleBookingWhere)
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoffDate)
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -214,6 +248,9 @@ router.get('/', async (req, res, next) => {
         'catalog_svc.billing_type as catalog_billing_type'
       )
       .orderBy('scheduled_services.scheduled_date', 'asc');
+    // The visit list itself is unchanged: in-progress rows (loaded for the
+    // plan-coverage read's planFamilies only) never enter it.
+    const upcoming = allProperties ? listRows.filter((s) => VISIT_LIST_STATUSES.includes(s.status)) : listRows;
 
     // The SAME cancellation-eligibility verdict POST /api/requests enforces,
     // so the Plan tab's Account Options gate renders from the server's
@@ -235,6 +272,10 @@ router.get('/', async (req, res, next) => {
         hasCancellableWork: cancellable,
         reservice: null,
         overlayHandoff: false,
+        // The plan's service families. In this projection only: the
+        // house-scoped list holds one house's visits, and a contact session
+        // never takes this branch.
+        planFamilies: portalPlanFamilies(listRows),
         upcoming: upcoming.map((s) => ({
           id: s.id,
           date: s.scheduled_date,
@@ -801,11 +842,7 @@ router.get('/account-next', async (req, res, next) => {
     const rows = await db('scheduled_services')
       .whereIn('scheduled_services.customer_id', ids)
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
-      .where((qb) => qb
-        .whereNull('scheduled_services.source_action')
-        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
-        .orWhere('scheduled_services.customer_confirmed', true))
+      .where(customerVisibleBookingWhere)
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoffDate)
       .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.customer_confirmed', 'scheduled_services.customer_pick_by')
@@ -862,11 +899,7 @@ router.get('/properties-next', async (req, res, next) => {
       .whereIn('scheduled_services.customer_id', ids)
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
       // Same dispatch-owned guard as GET / and GET /next.
-      .where((qb) => qb
-        .whereNull('scheduled_services.source_action')
-        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
-        .orWhere('scheduled_services.customer_confirmed', true))
+      .where(customerVisibleBookingWhere)
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoffDate)
       .select(
@@ -949,11 +982,7 @@ router.get('/next', async (req, res, next) => {
       // Same dispatch-owned guard as the list above: a still-pending,
       // never-confirmed call-created follow-up can't surface as the
       // customer's next appointment (NULL-safe De Morgan legs).
-      .where((qb) => qb
-        .whereNull('scheduled_services.source_action')
-        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
-        .orWhere('scheduled_services.customer_confirmed', true))
+      .where(customerVisibleBookingWhere)
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select('scheduled_services.*', 'technicians.name as technician_name')

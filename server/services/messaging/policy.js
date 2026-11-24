@@ -40,6 +40,8 @@
  *   'application_received' |  // recruiting: submit confirmation (audience 'applicant')
  *   'interview_invite'     |  // recruiting: self-scheduling link
  *   'interview_confirmation' | // recruiting: booked/rebooked confirmation
+ *   'offer_sent'              | // recruiting: job offer link (owner-pressed Send, GATE_JOB_OFFERS)
+ *   'offer_reminder'          | // recruiting: the one reminder of an open job offer (GATE_JOB_OFFER_REMINDER)
  *   'applicant_reply'         // recruiting: owner-authored reply to an applicant
  * )} MessagePurpose
  *
@@ -111,6 +113,10 @@ const MESSAGE_PURPOSES = [
   'application_received',
   'interview_invite',
   'interview_confirmation',
+  // Job offer link (GATE_JOB_OFFERS), owner-pressed Send, audience 'applicant' only.
+  'offer_sent',
+  // The one reminder of an open job offer (GATE_JOB_OFFER_REMINDER), sent by the reminder pass, audience 'applicant' only.
+  'offer_reminder',
   'applicant_reply',
 ];
 const IDENTITY_TRUST_LEVELS = [
@@ -538,6 +544,27 @@ const PURPOSE_POLICY = {
     allowEmoji: false,
     allowExactPrice: false,
     maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_provided_unverified',
+    requireIds: [],
+  },
+  // Job offer link (GATE_JOB_OFFERS): the owner presses Send; same shape as interview_invite. The text carries a 64-char
+  // bearer link, so a long first name can reach a third segment.
+  offer_sent: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 3,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_provided_unverified',
+    requireIds: [],
+  },
+  // The one reminder of an open job offer (GATE_JOB_OFFER_REMINDER): the same link and the same shape as offer_sent.
+  offer_reminder: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 3,
     requireConsent: 'transactional',
     prefsColumn: null,
     minIdentityTrust: 'phone_provided_unverified',

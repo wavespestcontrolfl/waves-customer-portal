@@ -8,8 +8,11 @@
  *      (the 8 AM summary banner covers them).
  *   B. messenger_reply (a Facebook message) pushes at any hour, like a text.
  *   C. new_lead_email (a lead created from an email, or an email that completed a quote request) pushes at any hour, like
- *      a text, behind its own gate GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"). Its
+ *      a text (owner 2026-11-04, "ring new"). Its
  *      writer names the kind with notifyAdmin's `bannerKind` option, which is never stored on the row.
+ *   D. new_lead_quote (a website quote: the public quote wizard's new-lead bell) pushes at any hour, like a web form
+ *      lead (owner 2026-11-19, "do phase 1 first": the lead plan's "missing push for website quotes"). Its writer
+ *      (routes/public-quote.js) names the kind with `bannerKind`; the bell row is written exactly as before.
  *
  * NotificationService.notifyAdmin calls bannerAfterWrite(result, { metadata, trx }) once per write. The banner goes
  * out only after the bell row is durable: a write on the caller's transaction waits for the OUTERMOST commit (a
@@ -28,12 +31,17 @@ const BELL_BANNER_KINDS = Object.freeze({
   sms_operational_followup: Object.freeze({ nightQuiet: true }),
   call_commitment_overdue: Object.freeze({ nightQuiet: true }),
   messenger_reply: Object.freeze({ nightQuiet: false }),
-  new_lead_email: Object.freeze({ nightQuiet: false, gate: 'ringNewContactsLive' }),
+  new_lead_email: Object.freeze({ nightQuiet: false }),
+  // A website quote (routes/public-quote.js, the quote wizard's new-lead bell): any hour, like a web form lead.
+  new_lead_quote: Object.freeze({ nightQuiet: false }),
   // The owner steps in on a live call whose caller sounds upset (live-call-upset-alert.js, GATE_LIVE_CALL_UPSET_ALERT,
-  // owner 2026-11-16): any hour, the call is live now. Its own gate, like new_lead_email.
+  // owner 2026-11-16): any hour, the call is live now. Its own gate.
   live_call_upset: Object.freeze({ nightQuiet: false, gate: 'liveCallUpsetAlertLive' }),
   // A customer stuck booking from an estimate (estimate-stuck-alert.js, owner 2026-11-05 "1, 2 and 3").
   estimate_stuck: Object.freeze({ nightQuiet: true }),
+  // A call booked a visit on an open estimate: its card filed, or time runs short on it (call-phone-yes-bell.js, owner
+  // 2026-11-18 "ok go", phone-yes step 1). Its writer runs only under GATE_CALL_PHONE_YES_ACCEPT.
+  call_phone_yes: Object.freeze({ nightQuiet: true }),
 });
 
 const QUIET_FROM_HOUR = 21;

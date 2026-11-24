@@ -1,13 +1,13 @@
 // client/src/components/admin/CustomerMovingCardV2.jsx
-// Customer 360 "Moving" card (owner 2026-11-02, dark behind GATE_MOVING_FLOW).
+// Customer 360 "Moving" card (owner 2026-11-02).
 //
 // Shows where the customer's move stands in plain words and gives the office
 // three ways to send the moving link: email it, copy it, or text it from the
 // Communications composer. Sending is always this click; nothing here sends
-// by itself. While the gate is dark the server answers { enabled: false } and
-// the card renders nothing, so the page looks exactly as it did before.
+// by itself. The card renders nothing until the first read of the customer's
+// moves succeeds.
 //
-// Moving PR B2 (GATE_MOVING_APPLY): "Apply move" opens a preview of what will
+// Moving PR B2: "Apply move" opens a preview of what will
 // change, and only the office's confirm applies it (new home primary, old
 // house's plans stopped after move-out with no customer text and no fee).
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -266,11 +266,10 @@ function ApplyMoveAction({ move, customerId, onDone }) {
 }
 
 export default function CustomerMovingCardV2({ customerId }) {
-  const [enabled, setEnabled] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [moves, setMoves] = useState([]);
   const [text, setText] = useState(null);
   const [estimateEnabled, setEstimateEnabled] = useState(false);
-  const [applyEnabled, setApplyEnabled] = useState(false);
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
   const [manualUrl, setManualUrl] = useState("");
@@ -280,13 +279,14 @@ export default function CustomerMovingCardV2({ customerId }) {
     try {
       const res = await adminFetch(`/admin/customers/${encodeURIComponent(customerId)}/moves`, { signal });
       if (!res.ok) return;
-      const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => null);
       if (signal?.aborted) return;
-      setEnabled(data.enabled === true);
-      setMoves(Array.isArray(data.moves) ? data.moves : []);
+      // An unreadable answer leaves the card hidden, never an empty move history.
+      if (!data || !Array.isArray(data.moves)) return;
+      setLoaded(true);
+      setMoves(data.moves);
       setText(data.text || null);
       setEstimateEnabled(data.estimateEnabled === true);
-      setApplyEnabled(data.applyEnabled === true);
     } catch {
       // The card is optional: a failed read leaves it hidden.
     }
@@ -294,11 +294,10 @@ export default function CustomerMovingCardV2({ customerId }) {
 
   useEffect(() => {
     if (!customerId) return undefined;
-    setEnabled(false);
+    setLoaded(false);
     setMoves([]);
     setText(null);
     setEstimateEnabled(false);
-    setApplyEnabled(false);
     setNote("");
     setManualUrl("");
     const ac = new AbortController();
@@ -346,12 +345,12 @@ export default function CustomerMovingCardV2({ customerId }) {
     }
   };
 
-  if (!enabled) return null;
+  if (!loaded) return null;
   const textLink = textHref(customerId, text);
   // New-home estimate (GATE_MOVING_ESTIMATE): only moves the server marked.
   const newHomeMoves = estimateEnabled ? moves.filter((m) => m?.new_home) : [];
-  // Apply move (GATE_MOVING_APPLY): only moves the server marked for review or blocked.
-  const applyMoves = applyEnabled ? moves.filter((m) => m?.apply && m.apply.action !== "applied") : [];
+  // Apply move: only moves the server marked for review or blocked.
+  const applyMoves = moves.filter((m) => m?.apply && m.apply.action !== "applied");
 
   return (
     <div className="mt-5" data-testid="customer-moving-card">

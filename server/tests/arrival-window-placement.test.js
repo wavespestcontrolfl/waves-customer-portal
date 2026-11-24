@@ -7,12 +7,6 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const RouteOptimizer = require('../services/route-optimizer');
 
 const DATE = etDateString(addETDays(new Date(), 10));
-const originalGate = process.env.GATE_DRIVE_TIME_CALIBRATION;
-beforeAll(() => { process.env.GATE_DRIVE_TIME_CALIBRATION = 'true'; });
-afterAll(() => {
-  if (originalGate === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-  else process.env.GATE_DRIVE_TIME_CALIBRATION = originalGate;
-});
 
 // Synthetic route: two neighbouring northern properties, one southern stop.
 // Real calibrated driving model; no customer records or external API calls.

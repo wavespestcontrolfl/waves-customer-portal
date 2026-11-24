@@ -41,7 +41,7 @@ const { pestPressureConfigAllowsTechnicianRating } = require('./pest-pressure/te
 const { isValidRateUnit } = require('./inventory-units');
 const { completionSuppliesOwedMarker } = require('./supplies-consumption');
 const { promoteStagedServicePhotos } = require('./service-photos');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, dateOnlyString } = require('../utils/datetime-et');
 
 const PEST_CONTROL_CATEGORY = 'pest_control';
 
@@ -404,6 +404,48 @@ async function traceOnReportForVisit(svc, profile, knex = db) {
   return visitTraceOnReport(svc, profile, lane, knex);
 }
 
+/** Non-retracted ledger rows on one service record (quantity, dilution, date); [] on any failure. */
+async function ledgerFactsFor(recordId, knex) {
+  try {
+    const rows = await knex('property_application_history')
+      .where({ service_record_id: recordId })
+      .whereNull('retracted_at')
+      .select(['product_id', 'service_product_id', 'quantity_applied', 'quantity_unit', 'dilution_rate', 'application_date']);
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
+/** One ledger row's facts the Taurus warning reads (quantity with its unit, dilution, application date). */
+function ledgerRowFacts(row) {
+  const dilution = String(row.dilution_rate ?? '').trim();
+  const appliedOn = dateOnlyString(row.application_date);
+  return {
+    ...(Number(row.quantity_applied) > 0 && row.quantity_unit
+      ? { quantity: Number(row.quantity_applied), quantity_unit: row.quantity_unit } : {}),
+    ...(dilution ? { dilution_rate: dilution } : {}),
+    ...(appliedOn ? { application_date: appliedOn } : {}),
+  };
+}
+
+/**
+ * The compliance ledger's rows on each recorded product, for the Taurus yearly-limit warning on a reopened
+ * recap: their quantity (a recap save replaces its product rows without amounts, but the ledger keeps it), their
+ * dilution (no recap writes it, so a save keeps it, and it decides the count) and their date. A record can hold
+ * several active rows for one product, and the yearly count reads it at its strongest, so every row goes: the
+ * ones linked to the product row (a legacy row with no product_id is reachable only that way) and the ones of
+ * its catalog id. Fail-soft (no rows, no warning input).
+ */
+async function attachLedgerFacts(recordId, products, knex) {
+  const ledgerRows = await ledgerFactsFor(recordId, knex);
+  const same = (a, b) => a != null && b != null && String(a) === String(b);
+  for (const sp of products) {
+    const rows = ledgerRows.filter((row) => same(row.service_product_id, sp.service_product_id) || same(row.product_id, sp.product_id));
+    if (rows.length) sp.ledger_rows = rows.map(ledgerRowFacts);
+  }
+}
+
 async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
@@ -458,6 +500,8 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
       .select([
         'product_name', 'product_category', 'active_ingredient', 'moa_group',
         'application_rate', 'rate_unit',
+        // The row id, to find its compliance-ledger row (the Taurus yearly-limit warning reads its quantity).
+        'id as service_product_id',
         ...(hasProductIdCol ? ['product_id'] : []),
       ])
       .catch(() => {
@@ -465,6 +509,8 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
         return [];
       })
     : [];
+
+  if (existingRecord && existingProducts.length) await attachLedgerFacts(existingRecord.id, existingProducts, knex);
 
   // null when the caller did not ask for the list.
   const commonProducts = await commonProductsLoad;

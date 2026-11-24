@@ -232,33 +232,33 @@ describe('day cap on the page', () => {
 });
 
 describe('notice coalescing after the commit', () => {
-  test('gate off: handleReschedule gets exactly two arguments, as before', async () => {
+  test('the cap gate off: handleReschedule gets no deferral option', async () => {
     wireDb({ log: [pick(minutesAgo(5)), pick(new Date())] });
     await postCommit();
     expect(mockHandleReschedule).toHaveBeenCalledTimes(1);
-    expect(mockHandleReschedule.mock.calls[0]).toHaveLength(2);
+    expect(mockHandleReschedule.mock.calls[0][2]).not.toHaveProperty('deferNoticeMinutes');
   });
 
-  test('gate on, first move: the notice goes out as before', async () => {
+  test('the cap gate on, first move: the notice goes out as before', async () => {
     process.env.GATE_RESCHEDULE_CAP_ALL = 'true';
     wireDb({ log: [pick(new Date())] });
     await postCommit();
-    expect(mockHandleReschedule.mock.calls[0]).toHaveLength(2);
+    expect(mockHandleReschedule.mock.calls[0][2]).not.toHaveProperty('deferNoticeMinutes');
   });
 
-  test('gate on, second move inside 15 minutes: the notice is deferred to the confirmation sweep', async () => {
+  test('the cap gate on, second move inside 15 minutes: the notice is deferred to the confirmation sweep', async () => {
     process.env.GATE_RESCHEDULE_CAP_ALL = 'true';
     wireDb({ log: [pick(minutesAgo(5)), pick(new Date())] });
     await postCommit();
     expect(mockHandleReschedule).toHaveBeenCalledTimes(1);
-    expect(mockHandleReschedule.mock.calls[0][2]).toEqual({ deferNoticeMinutes: 15 });
+    expect(mockHandleReschedule.mock.calls[0][2]).toMatchObject({ deferNoticeMinutes: 15 });
   });
 
-  test('gate on, earlier move 20 minutes back: the notice goes out as before', async () => {
+  test('the cap gate on, earlier move 20 minutes back: the notice goes out as before', async () => {
     process.env.GATE_RESCHEDULE_CAP_ALL = 'true';
     wireDb({ log: [pick(minutesAgo(20)), pick(new Date())] });
     await postCommit();
-    expect(mockHandleReschedule.mock.calls[0]).toHaveLength(2);
+    expect(mockHandleReschedule.mock.calls[0][2]).not.toHaveProperty('deferNoticeMinutes');
   });
 });
 
@@ -311,7 +311,7 @@ describe('geocode once for an unpinned visit', () => {
     expect(mockResolveBookingCoords).toHaveBeenCalledTimes(1);
   });
 
-  test('gate on, repair gates off: the pin is not written and the row is not read', async () => {
+  test('the cap gate on, repair gates off: the pin is not written and the row is not read', async () => {
     process.env.GATE_RESCHEDULE_CAP_ALL = 'true';
     mockGeocodeWithStatus.mockResolvedValue({ location: { lat: 27.3, lng: -82.5 }, permanent: false });
     await build(unpinned());

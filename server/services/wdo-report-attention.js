@@ -15,13 +15,13 @@
  * Gate: wdoReportAttention (GATE_WDO_REPORT_ATTENTION). Reads projects +
  * scheduled_services; writes nothing but admin notifications.
  *
- * GATE_WDO_ATTENTION_RINGS (owner 2026-11-05, wdoAttentionRingsLive): the bell
- * rings again. The category has no default under GATE_ADMIN_BELL_POLICY, so
- * the policy muted every ring (notifyAdmin returned a sentinel and wrote no
- * row), the sweep counted that as rung, and the last real alert row is from
- * August. On: the ring carries bellDefault (a saved owner "off" still wins), a
- * muted result is not a ring, the sweep closes its own open rows when nothing
- * is stalled, and a standing row is kept true when the set changes.
+ * Rings (owner 2026-11-05): the category has no default under
+ * GATE_ADMIN_BELL_POLICY, so the policy muted every ring (notifyAdmin returned
+ * a sentinel and wrote no row), the sweep counted that as rung, and the last
+ * real alert row is from August. Now the ring carries bellDefault (a saved
+ * owner "off" still wins), a muted result is not a ring, the sweep closes its
+ * own open rows when nothing is stalled, and a standing row is kept true when
+ * the set changes.
  */
 
 const db = require('../models/db');
@@ -37,14 +37,6 @@ const REMIND_DAYS = 7;
 const CATEGORY = 'wdo_report_attention';
 const CLEARED_RESOLUTION = 'All WDO reports are sent and no WDO inspection is waiting.';
 const SUPERSEDED_RESOLUTION = 'Replaced by a newer WDO alert.';
-
-// GATE_WDO_ATTENTION_RINGS, read at call time; a missing or throwing reader reads as off.
-function ringsLive() {
-  try {
-    const gates = require('../config/feature-gates');
-    return typeof gates.wdoAttentionRingsLive === 'function' && gates.wdoAttentionRingsLive() === true;
-  } catch { return false; }
-}
 
 // Query failures propagate — a schema/connection outage must surface as a
 // failed sweep in the scheduler's error log, never as clean:true (this sweep
@@ -107,17 +99,16 @@ function itemIds({ signedUnsent, stuckAppts }) {
 // Every current item already covered by a bell newer than REMIND_DAYS → stay
 // quiet. Any uncovered item, or only-stale coverage → ring (with the full
 // current picture, not just the delta).
-// skipCleared (GATE_WDO_ATTENTION_RINGS): a row this sweep closed because the lane was clean no longer
-// covers anything, so an item that comes back rings again.
-async function priorBellCovers(currentIds, now = new Date(), { skipCleared = false } = {}) {
+// A row this sweep closed because the lane was clean no longer covers anything, so an item that comes back rings again.
+async function priorBellCovers(currentIds, now = new Date()) {
   const since = new Date(now.getTime() - REMIND_DAYS * 24 * 3600e3);
   // Propagates on failure (same contract as findAttentionItems): a broken
   // dedupe read must fail the sweep loudly, not silently re-ring or go quiet.
-  let query = db('notifications')
+  const priors = await db('notifications')
     .where({ recipient_type: 'admin', category: CATEGORY })
-    .where('created_at', '>', since);
-  if (skipCleared) query = query.whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'");
-  const priors = await query.select('metadata');
+    .where('created_at', '>', since)
+    .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
+    .select('metadata');
   const covered = new Set();
   for (const row of priors) {
     let meta = row.metadata;
@@ -161,7 +152,7 @@ function parseMeta(metadata) {
 
 const sameIds = (stored, ids) => Array.isArray(stored) && JSON.stringify([...stored].sort()) === JSON.stringify(ids);
 
-// Gate on: this sweep's rows that are still open (not done, not closed by a sweep), newest first.
+// This sweep's rows that are still open (not done, not closed by a sweep), newest first.
 async function standingRows() {
   const rows = await db('notifications')
     .where({ recipient_type: 'admin', category: CATEGORY })
@@ -172,7 +163,7 @@ async function standingRows() {
   return rows.map((r) => ({ id: r.id, meta: parseMeta(r.metadata) }));
 }
 
-// Gate on, nothing stalled: close every row this sweep left open, done by a person or not, so the bell does not keep
+// Nothing stalled: close every row this sweep left open, done by a person or not, so the bell does not keep
 // an alert about reports that are sent. A person's earlier Done keeps its own stamps (closeAdminAlertKeys).
 async function closeClearedRows(now) {
   const keys = await episodes.openAdminAlertKeys(db, `${CATEGORY}:`);
@@ -183,7 +174,7 @@ async function closeClearedRows(now) {
   return { ok: true, clean: true, closed };
 }
 
-// Gate on: an open row whose item set is not the current one is stale. When nothing new rang (items given: the
+// An open row whose item set is not the current one is stale. When nothing new rang (items given: the
 // current set is covered, so it only SHRANK), the newest stale row is rewritten in place and quietly to the current
 // picture, so its count is true and the bell does not ring again for work the owner just did. Every other stale row,
 // and every stale row after a new ring, is closed as replaced. A row already showing exactly the current set is
@@ -214,14 +205,12 @@ async function runWdoReportAttentionSweep({ now = new Date() } = {}) {
   // and deploy overlap the same way the call-ingest watchdog does.
   const { runExclusive } = require('../utils/cron-lock');
   return runExclusive('wdo-report-attention', async () => {
-    const live = ringsLive();
     const items = await findAttentionItems(now);
     const ids = itemIds(items);
-    if (!ids.length) return live ? closeClearedRows(now) : { ok: true, clean: true };
+    if (!ids.length) return closeClearedRows(now);
     // Read once, before anything is written: the rows this run may close or rewrite.
-    const standing = live ? await standingRows() : [];
-    if (await priorBellCovers(ids, now, { skipCleared: live })) {
-      if (!live) return { ok: true, deduped: true, items: ids.length };
+    const standing = await standingRows();
+    if (await priorBellCovers(ids, now)) {
       const settled = await settleStandingRows(standing, { ids, now, items });
       return { ok: true, deduped: true, items: ids.length, ...settled };
     }
@@ -234,7 +223,7 @@ async function runWdoReportAttentionSweep({ now = new Date() } = {}) {
       {
         link: '/admin/projects',
         // bellDefault: ring unless the owner saved "off" for the category (that override sits above it).
-        ...(live ? { bellDefault: true } : {}),
+        bellDefault: true,
         metadata: bellMetadata(items, ids),
       },
     );
@@ -243,14 +232,14 @@ async function runWdoReportAttentionSweep({ now = new Date() } = {}) {
     // record a ring and go quiet for six hours. (Intentional suppression
     // returns a truthy sentinel and correctly counts as rung.)
     if (!bell) throw new Error('admin notification insert failed — bell not recorded');
-    // Gate on: the sentinel ({ id: null, suppressed: true }, the bell policy or an internal test customer) wrote no
+    // The sentinel ({ id: null, suppressed: true }, the bell policy or an internal test customer) wrote no
     // row, so nothing rang. Not recorded as a ring; the next run tries again.
-    if (live && bell.suppressed === true) {
+    if (bell.suppressed === true) {
       logger.warn(`[wdo-report-attention] not rung: the alert was muted (${ids.length} item(s) wait)`);
       return { ok: true, rang: false, suppressed: true };
     }
     logger.info(`[wdo-report-attention] rang: ${summary}`);
-    if (live) await settleStandingRows(standing, { ids, now });
+    await settleStandingRows(standing, { ids, now });
     return { ok: true, rang: true, items: ids.length };
   });
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
+import { attachedVisitInvoice, paidReportNotSent, visitInvoiceStatusNote } from './visitInvoice';
 
 const ACCEPT_MINTED_FIRST_VISIT = {
   estimatedPrice: 115,
@@ -113,5 +113,37 @@ describe('visitInvoiceStatusNote', () => {
       .toBe('Refunded — not collectible; bill via a new invoice.');
     expect(visitInvoiceStatusNote(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoiceStatus: 'cancelled' })))
       .toBe('Canceled — not collectible; bill via a new invoice.');
+  });
+});
+
+describe('paidReportNotSent', () => {
+  it('marks only an arrived visit that a payment holds open (the server\'s row flag)', () => {
+    const heldOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', checkoutInvoiceStatus: 'paid', reportAfterPayHeld: true };
+    expect(paidReportNotSent(heldOnSite)).toBe(true);
+    // Not arrived yet, or the report is already done.
+    expect(paidReportNotSent({ ...heldOnSite, status: 'en_route' })).toBe(false);
+    expect(paidReportNotSent({ ...heldOnSite, status: 'completed' })).toBe(false);
+    // No payment holds the visit (none yet, one made before the arrival, or one with another bill already on the visit).
+    expect(paidReportNotSent({ ...heldOnSite, reportAfterPayHeld: false })).toBe(false);
+    expect(paidReportNotSent(null)).toBe(false);
+  });
+
+  it('reads the hold, not the newest bill: a bill the office adds after the payment keeps the badge (pre-push audit round 6)', () => {
+    const heldOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', reportAfterPayHeld: true };
+    // The row's checkout invoice is now the newer draft: the report is still owed.
+    expect(paidReportNotSent({ ...heldOnSite, checkoutInvoiceStatus: 'draft' })).toBe(true);
+    // A paid attached invoice alone is not the hold.
+    expect(paidReportNotSent({ ...heldOnSite, checkoutInvoiceStatus: 'paid', reportAfterPayHeld: undefined })).toBe(false);
+  });
+
+  it('reads the hold alone: no second row flag can hide a held visit (pre-push audit round 12)', () => {
+    const heldOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', checkoutInvoiceStatus: 'paid', reportAfterPayHeld: true };
+    // The server records a hold only while the gate is on, for a visit whose completion sends the customer a report. This client
+    // no longer reads reportAfterPayEnabled: a row without it, or with it false (a server from before the change), shows its hold.
+    expect(paidReportNotSent(heldOnSite)).toBe(true);
+    expect(paidReportNotSent({ ...heldOnSite, reportAfterPayEnabled: false })).toBe(true);
+    // Gate off, or no hold: the server sends the hold flag false, or an older payload carries none.
+    expect(paidReportNotSent({ ...heldOnSite, reportAfterPayHeld: false })).toBe(false);
+    expect(paidReportNotSent({ ...heldOnSite, reportAfterPayHeld: undefined })).toBe(false);
   });
 });

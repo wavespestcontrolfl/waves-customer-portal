@@ -83,6 +83,7 @@ jest.mock('../config/feature-gates', () => ({
   mosquitoMistingLive: () => false,
   mistingLayoutDesignerLive: () => false,
   estimateConsumerNoticeLive: () => false,
+  estimateApprovePreferredTimeLive: () => false,
 }));
 
 const mockComputeConsultationSlotsForLead = jest.fn();

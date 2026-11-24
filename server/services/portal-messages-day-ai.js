@@ -65,6 +65,8 @@ async function candidates(now) {
     .where('m.created_at', '>=', oldest)
     .where('m.created_at', '<=', newest)
     .whereRaw("(m.metadata->'nightAi') IS NULL AND (m.metadata->'dayAi') IS NULL")
+    // A photo is for a person to look at (portal-messages.js customerPost): the assistant leaves it.
+    .whereRaw("coalesce(m.media, '[]'::jsonb) = '[]'::jsonb")
     .whereNotExists(function newerCustomerMessage() {
       this.select(db.raw('1')).from('messages as n')
         .whereRaw('n.conversation_id = cv.id')

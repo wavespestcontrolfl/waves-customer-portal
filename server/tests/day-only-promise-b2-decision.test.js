@@ -73,14 +73,6 @@ function fakeConn({ services = [], reminders = [], moves = {}, messages = [], fa
   return conn;
 }
 
-const withGate = (value, fn) => async () => {
-  const prior = process.env.GATE_DAY_ONLY_PROMISE;
-  if (value === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = value;
-  try { await fn(); } finally {
-    if (prior === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = prior;
-  }
-};
-
 const base = (over = {}) => ({
   id: 's1', newStartAt: FAR, oldDate: '2026-11-12', newDate: '2026-11-15', now: NOW, reminder24hEnabled: true, ...over,
 });
@@ -95,93 +87,95 @@ describe('officeMoveIntent', () => {
 });
 
 describe('dayOnlyMoveDecision: every condition alone', () => {
-  test('gate off: false and nothing is read', withGate(undefined, async () => {
-    const conn = ok();
-    expect(await decide(conn, { intent: 'day' })).toBe(false);
-    expect(conn.reads).toEqual([]);
-  }));
 
-  test('the happy path: explicit day intent, date changes, far out, 24-hour reminder on', withGate('true', async () => {
+  test('the happy path: explicit day intent, date changes, far out, 24-hour reminder on', async () => {
     expect(await decide(ok(), { intent: 'day' })).toBe(true);
-  }));
+  });
 
-  test('a same-day re-time always names the window', withGate('true', async () => {
+  test('a same-day re-time always names the window', async () => {
     expect(await decide(ok(), { intent: 'day', oldDate: '2026-11-15', newDate: '2026-11-15' })).toBe(false);
-  }));
+  });
 
-  test('a missing or invalid date: false', withGate('true', async () => {
+  test('a missing or invalid date: false', async () => {
     for (const over of [{ oldDate: undefined }, { oldDate: null }, { newDate: undefined }, { oldDate: 'garbage' }]) {
       expect(await decide(ok(), { intent: 'day', ...over })).toBe(false);
     }
-  }));
+  });
 
-  test('a Date object for the old date works (a pg DATE value)', withGate('true', async () => {
+  test('a Date object for the old date works (a pg DATE value)', async () => {
     expect(await decide(ok(), { intent: 'day', oldDate: new Date('2026-11-12T05:00:00Z') })).toBe(true);
-  }));
+  });
 
-  test('inside the 24.25 h cutoff: false', withGate('true', async () => {
+  test('inside the 24.25 h cutoff: false', async () => {
     expect(await decide(ok(), { intent: 'day', newStartAt: NEAR, newDate: '2026-11-11' })).toBe(false);
-  }));
+  });
 
-  test('the cutoff boundary is exact', withGate('true', async () => {
-    const at = (h) => new Date(NOW.getTime() + h * 3600000);
-    expect(await decide(ok(), { intent: 'day', newStartAt: at(DAY_PROMISE_CUTOFF_HOURS) })).toBe(false);
-    expect(await decide(ok(), { intent: 'day', newStartAt: at(DAY_PROMISE_CUTOFF_HOURS + 0.01) })).toBe(true);
-  }));
+  test('the cutoff boundary is exact', async () => {
+    // 11:50 PM ET: 24.25 h later is 12:05 AM two ET days on, so only the cutoff decides.
+    const now = new Date('2026-11-11T04:50:00Z');
+    const at = (h) => new Date(now.getTime() + h * 3600000);
+    expect(await decide(ok(), { intent: 'day', now, newStartAt: at(DAY_PROMISE_CUTOFF_HOURS) })).toBe(false);
+    expect(await decide(ok(), { intent: 'day', now, newStartAt: at(DAY_PROMISE_CUTOFF_HOURS + 0.01) })).toBe(true);
+  });
 
-  test('a missing or invalid start: false', withGate('true', async () => {
+  test('a move to tomorrow on the ET calendar names the window, even beyond the cutoff', async () => {
+    // NOW is Tue 9:00 AM ET; Wed 5:00 PM ET is 32 h out.
+    expect(await decide(ok(), { intent: 'day', newStartAt: new Date('2026-11-11T22:00:00Z'), newDate: '2026-11-11' })).toBe(false);
+  });
+
+  test('a missing or invalid start: false', async () => {
     for (const v of [null, undefined, 'not a time']) expect(await decide(ok(), { intent: 'day', newStartAt: v })).toBe(false);
-  }));
+  });
 
-  test('the 24-hour reminder will not go out: false', withGate('true', async () => {
+  test('the 24-hour reminder will not go out: false', async () => {
     expect(await decide(ok(), { intent: 'day', reminder24hEnabled: false })).toBe(false);
-  }));
+  });
 
-  test('intent set_time: false even when everything else holds, and nothing is read', withGate('true', async () => {
+  test('intent set_time: false even when everything else holds, and nothing is read', async () => {
     const conn = ok();
     expect(await decide(conn, { intent: 'set_time' })).toBe(false);
     expect(conn.reads).toEqual([]);
-  }));
+  });
 
-  test('intent day: true without reading anything', withGate('true', async () => {
+  test('intent day: true without reading anything', async () => {
     const conn = ok();
     expect(await decide(conn, { intent: 'day' })).toBe(true);
     expect(conn.reads).toEqual([]);
-  }));
+  });
 });
 
 describe('dayOnlyMoveDecision: no intent named (rain, series): the recorded intent decides, the old promise does not', () => {
-  test('column true: window (even for an office-booked first visit)', withGate('true', async () => {
+  test('column true: window (even for an office-booked first visit)', async () => {
     const conn = fakeConn({ services: [svc('s1', { customer_asked_time: true })], reminders: [office('s1')] });
     expect(await decide(conn)).toBe(false);
-  }));
+  });
 
-  test('column false: day (even for a customer-source first visit)', withGate('true', async () => {
+  test('column false: day (even for a customer-source first visit)', async () => {
     const conn = fakeConn({ services: [svc('s1', { customer_asked_time: false })], reminders: [office('s1', 'booking_new')] });
     expect(await decide(conn)).toBe(true);
-  }));
+  });
 
-  test('column NULL, first visit: the booking source decides', withGate('true', async () => {
+  test('column NULL, first visit: the booking source decides', async () => {
     expect(await decide(fakeConn({ services: [svc('s1')], reminders: [office('s1', 'admin_manual')] }))).toBe(true);
     expect(await decide(fakeConn({ services: [svc('s1')], reminders: [office('s1', 'booking_new')] }))).toBe(false);
     expect(await decide(fakeConn({ services: [svc('s1')], reminders: [office('s1', 'call_recording')] }))).toBe(false);
     expect(await decide(fakeConn({ services: [svc('s1')] }))).toBe(false);
-  }));
+  });
 
-  test('column NULL, recurring child: day unless the customer picked its slot', withGate('true', async () => {
+  test('column NULL, recurring child: day unless the customer picked its slot', async () => {
     expect(await decide(fakeConn({ services: [child('s1')], reminders: [office('s1', 'cron_selfheal')] }))).toBe(true);
     const picked = { s1: [{ created_at: '2026-11-08T10:00:00Z', new_date: '2026-11-15', initiated_by: 'customer_self_serve' }] };
     expect(await decide(fakeConn({ services: [child('s1')], moves: picked }))).toBe(false);
-  }));
+  });
 
-  test('the OLD promise is not read: a child whose latest promise is an hour is still day-only after a move', withGate('true', async () => {
+  test('the OLD promise is not read: a child whose latest promise is an hour is still day-only after a move', async () => {
     const hour = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: Date.parse('2026-11-12T14:00:00Z') } };
     const conn = fakeConn({ services: [child('s1')], messages: [hour] });
     expect(await decide(conn)).toBe(true);
     expect(conn.reads).not.toContain('messaging_audit_log as a');
-  }));
+  });
 
-  test('a stop is judged as a whole: one set-time member makes the notice a window', withGate('true', async () => {
+  test('a stop is judged as a whole: one set-time member makes the notice a window', async () => {
     const services = [
       svc('s1', { visit_id: 'v1', customer_asked_time: false }),
       svc('s2', { visit_id: 'v1', customer_asked_time: true }),
@@ -190,26 +184,26 @@ describe('dayOnlyMoveDecision: no intent named (rain, series): the recorded inte
     expect(await decide(conn)).toBe(false);
     const allDay = fakeConn({ services: services.map((s) => ({ ...s, customer_asked_time: false })), reminders: [office('s1'), office('s2')] });
     expect(await decide(allDay)).toBe(true);
-  }));
+  });
 
-  test('several ids (a series): every one must be day-only', withGate('true', async () => {
+  test('several ids (a series): every one must be day-only', async () => {
     const services = [child('a'), child('b', { customer_asked_time: true })];
     expect(await decide(fakeConn({ services }), { id: null, ids: ['a', 'b'] })).toBe(false);
     expect(await decide(fakeConn({ services }), { id: null, ids: ['a'] })).toBe(true);
-  }));
+  });
 
-  test('no id at all: false', withGate('true', async () => {
+  test('no id at all: false', async () => {
     expect(await decide(ok(), { id: null, ids: [] })).toBe(false);
-  }));
+  });
 
-  test('any read failure: false (the window text is the safe side)', withGate('true', async () => {
+  test('any read failure: false (the window text is the safe side)', async () => {
     for (const table of ['scheduled_services', 'appointment_reminders']) {
       const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')], failOn: table });
       expect(await decide(conn)).toBe(false);
     }
     const history = fakeConn({ services: [child('s1')], failOn: 'reschedule_log' });
     expect(await decide(history)).toBe(false);
-  }));
+  });
 });
 
 describe('dayOnlyReplayDecision: a held or merged move notice re-sent as a confirmation keeps the recorded intent', () => {
@@ -217,75 +211,63 @@ describe('dayOnlyReplayDecision: a held or merged move notice re-sent as a confi
   const hourFor = (date) => ({ id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: Date.parse(`${date}T14:00:00Z`) } });
   const replay = (conn, over) => dayOnlyReplayDecision(conn, { id: 's1', startAt: FAR, now: NOW, reminder24hEnabled: true, ...over });
 
-  test('gate off: false and nothing is read', withGate(undefined, async () => {
-    const conn = fakeConn({ services: [svc('s1', { customer_asked_time: false })] });
-    expect(await replay(conn)).toBe(false);
-    expect(conn.reads).toEqual([]);
-  }));
-
-  test('a day intent (false) with an OLD hour promise for another date: the day row again', withGate('true', async () => {
+  test('a day intent (false) with an OLD hour promise for another date: the day row again', async () => {
     const conn = fakeConn({ services: [svc('s1', { customer_asked_time: false })], messages: [hourFor('2026-11-12')] });
     expect(await replay(conn)).toBe(true);
-  }));
+  });
 
-  test('a day intent whose latest promise is a window for THIS date (newer, known): the window stands', withGate('true', async () => {
+  test('a day intent whose latest promise is a window for THIS date (newer, known): the window stands', async () => {
     const conn = fakeConn({ services: [svc('s1', { customer_asked_time: false })], messages: [hourFor('2026-11-15')] });
     expect(await replay(conn)).toBe(false);
     expect(FAR_SLOT).toBeGreaterThan(0);
-  }));
+  });
 
-  test('a day intent with no promise at all, or a day promise: the day row', withGate('true', async () => {
+  test('a day intent with no promise at all, or a day promise: the day row', async () => {
     expect(await replay(fakeConn({ services: [svc('s1', { customer_asked_time: false })] }))).toBe(true);
     const day = { id: 2, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { promise_level: 'day', window_unknown: true } };
     expect(await replay(fakeConn({ services: [svc('s1', { customer_asked_time: false })], messages: [day] }))).toBe(true);
-  }));
+  });
 
   describe('a grouped stop is judged as a whole (every live member must be eligible)', () => {
     const member = (id, over) => svc(id, { visit_id: 'v1', customer_asked_time: false, ...over });
 
-    test('anchor marked day only but a sibling marked set time: the window copy, even with no promise at all', withGate('true', async () => {
+    test('anchor marked day only but a sibling marked set time: the window copy, even with no promise at all', async () => {
       const conn = fakeConn({ services: [member('s1'), member('s2', { customer_asked_time: true })] });
       expect(await replay(conn)).toBe(false);
-    }));
+    });
 
-    test('every live member marked day only: the day row again; an ended sibling does not block', withGate('true', async () => {
+    test('every live member marked day only: the day row again; an ended sibling does not block', async () => {
       expect(await replay(fakeConn({ services: [member('s1'), member('s2')] }))).toBe(true);
       expect(await replay(fakeConn({ services: [member('s1'), member('s2', { customer_asked_time: true, status: 'cancelled' })] }))).toBe(true);
-    }));
+    });
 
-    test('an old hour level does not block (the move replaced it), a stop-wide read failure is false', withGate('true', async () => {
+    test('an old hour level does not block (the move replaced it), a stop-wide read failure is false', async () => {
       expect(await replay(fakeConn({ services: [member('s1'), member('s2')], messages: [hourFor('2026-11-12')] }))).toBe(true);
       expect(await replay(fakeConn({ services: [member('s1'), member('s2')], failOn: 'appointment_reminders' }))).toBe(false);
-    }));
+    });
   });
 
-  test('a set time (true) stays a window; an unrecorded intent (NULL) is today\'s rules, not this one', withGate('true', async () => {
+  test('a set time (true) stays a window; an unrecorded intent (NULL) is today\'s rules, not this one', async () => {
     expect(await replay(fakeConn({ services: [svc('s1', { customer_asked_time: true })] }))).toBe(false);
     expect(await replay(fakeConn({ services: [svc('s1')] }))).toBe(false);
-  }));
+  });
 
-  test('inside the cutoff, 24-hour reminder off, an unknown-window promise, or a read failure: false', withGate('true', async () => {
+  test('inside the cutoff, 24-hour reminder off, an unknown-window promise, or a read failure: false', async () => {
     const day = fakeConn({ services: [svc('s1', { customer_asked_time: false })] });
     expect(await replay(day, { startAt: NEAR })).toBe(false);
     expect(await replay(day, { reminder24hEnabled: false })).toBe(false);
     const unknown = { id: 3, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { window_unknown: true } };
     expect(await replay(fakeConn({ services: [svc('s1', { customer_asked_time: false })], messages: [unknown] }))).toBe(false);
     expect(await replay(fakeConn({ services: [svc('s1', { customer_asked_time: false })], failOn: 'scheduled_services' }))).toBe(false);
-  }));
+  });
 });
 
 // The intent's own clock: the database's now() (customer_asked_time_at), so currentIntent can tell a stale intent.
 const AT_NOW = { sql: 'now()', bindings: undefined };
 
 describe('recordCustomerAskedTime', () => {
-  test('gate off: no write at all (the UPDATE payloads stay today\'s)', withGate(undefined, async () => {
-    const conn = fakeConn();
-    expect(await recordCustomerAskedTime(conn, ['s1'], true)).toBe(0);
-    expect(conn.updates).toEqual([]);
-    expect(conn.reads).toEqual([]);
-  }));
 
-  test('gate on: true only for exactly true; ids de-duplicated; empty is a no-op', withGate('true', async () => {
+  test('true only for exactly true; ids de-duplicated; empty is a no-op', async () => {
     const conn = fakeConn();
     await recordCustomerAskedTime(conn, ['s1', 's1', 's2', null], true);
     await recordCustomerAskedTime(conn, ['s3'], false);
@@ -296,10 +278,10 @@ describe('recordCustomerAskedTime', () => {
       ['scheduled_services', ['s3'], { customer_asked_time: false, customer_asked_time_at: AT_NOW }],
       ['scheduled_services', ['s4'], { customer_asked_time: false, customer_asked_time_at: AT_NOW }],
     ]);
-  }));
+  });
 
-  test('a failed write throws, so a caller inside a transaction fails the move with it', withGate('true', async () => {
+  test('a failed write throws, so a caller inside a transaction fails the move with it', async () => {
     const conn = Object.assign(() => ({ whereIn: () => ({ update: async () => { throw new Error('write failed'); } }) }), { raw: () => 'now' });
     await expect(recordCustomerAskedTime(conn, ['s1'], true)).rejects.toThrow('write failed');
-  }));
+  });
 });

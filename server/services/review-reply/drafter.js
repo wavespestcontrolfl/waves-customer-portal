@@ -27,11 +27,14 @@ const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { SERVED_CITIES } = require('./grounding');
 const { whereHasRealReply } = require('./draft-prefix');
+const { wavesApp, offAppName } = require('./app-name');
 
 // reply-v2 (2026-09-24, #4713): the safe-copy template rung is gone, so a
 // reply-v1 draft stored on a failed publish may be that canned text — the
 // runner's publish-retry reuse only takes drafts of the CURRENT version.
-const REPLY_VERSION = 'reply-v2';
+// reply-v3 (2026-11-19): the app is always "the Waves app" (owner), so a
+// stored v2 draft that says "the app" is never reused on a publish retry.
+const REPLY_VERSION = 'reply-v3';
 const DRAFT_TIMEOUT_MS = 45 * 1000;
 const RECENT_REPLIES_LIMIT = 10;
 
@@ -554,6 +557,9 @@ function classifyReplyMode(grounding) {
   return 'service_quality';
 }
 
+// The app-name rules (owner 2026-11-19, "the Waves app") live in ./app-name:
+// the publisher refuses any reply that breaks them, on every path.
+
 /**
  * Split a candidate into { body, signOff } and normalize whitespace.
  */
@@ -890,6 +896,8 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   if (body.includes('—') || body.includes('–')) return reject('em_dash');
   if (FIRST_PERSON_SINGULAR_RE.test(body)) return reject('first_person_singular');
   if (LEGACY_BRAND_RE.test(body)) return reject('legacy_brand');
+  const appSaid = offAppName(body);
+  if (appSaid) return reject('app_name', appSaid);
   if (EMAIL_RE.test(body)) return reject('email', body.match(EMAIL_RE)[0]);
   if (URL_RE.test(body)) return reject('url', body.match(URL_RE)[0]);
   if (PHONE_RE.test(body)) return reject('phone', body.match(PHONE_RE)[0]);
@@ -1175,6 +1183,7 @@ HARD RULES (a reply breaking any of these is discarded):
 - No incentives of any kind (discount, free, credit, gift, reward). Never ask for stars or for the review to be changed.
 - No safety claims ("safe", "non-toxic", "EPA"), no re-entry or drying times, no guarantees or warranties, no "best"/"#1" claims, no competitor names.
 - No emoji in the body. No em dashes. No stock phrases: "means the world", "thrilled", "delighted to hear", "made our day", "taking the time to", "pest and lawn team", "down here", "here in the neighborhood".
+- If the reply mentions an app, it is the Waves app: call it "the Waves app" ("The Waves app" at the start of a sentence), word for word, and write "app" nowhere else. Never "the app", "our app", "your app", "an app", "Waves app" without "the", "the Waves Pest Control app" or "App Store".
 - Do not repeat the openings or phrasing of the recent replies you are shown.
 - Do not summarize the review back to the reviewer.
 
@@ -1234,13 +1243,13 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
 
 // Rejection codes whose span cannot carry a person BY CONSTRUCTION — a word
 // count, a fixed-vocabulary match (stock phrase, dispute word, private-channel
-// phrase, unsourced claim), a stray digit, a listed city — and so may be
+// phrase, unsourced claim, app name), a stray digit, a listed city — and so may be
 // stored on the row and the audit log. Every other span reaches the retry
 // prompt only: a name, a phone number, an email, an address, a link, the
 // opening (which starts with the greeting name), a date phrase, and a banned
 // phrase — BANNED_RE spans intervening words ("give ... stars", "take ...
 // off"), so its match can absorb any name the reviewer wrote.
-const STORED_SPAN_CODES = new Set(['too_long', 'dispute_words', 'stock_phrase', 'private_channel', 'unlisted_digits', 'unlisted_city', 'unlisted_service_claim', 'negated_review_claim', 'unlisted_relationship_claim', 'unlisted_credential_claim', 'unlisted_experience_claim']);
+const STORED_SPAN_CODES = new Set(['too_long', 'app_name', 'dispute_words', 'stock_phrase', 'private_channel', 'unlisted_digits', 'unlisted_city', 'unlisted_service_claim', 'negated_review_claim', 'unlisted_relationship_claim', 'unlisted_credential_claim', 'unlisted_experience_claim']);
 
 const FEEDBACK_FOR = {
   too_long: 'too many words',
@@ -1250,6 +1259,7 @@ const FEEDBACK_FOR = {
   emoji: 'an emoji appeared in the body',
   em_dash: 'an em dash was used',
   first_person_singular: 'used "I"/"my" instead of "we"/"our"',
+  app_name: 'named the app wrong: write "the Waves app" word for word ("The Waves app" at the start of a sentence) and write "app" nowhere else',
   url: 'contained a link', email: 'contained an email address', phone: 'contained a phone number',
   money: 'mentioned money', address: 'contained a street address',
   banned_phrase: 'used a banned phrase (incentive, safety claim, guarantee, rank claim, competitor, or rating request)',
@@ -1333,7 +1343,9 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
       // supersedes the 2026-09-03 "never parks for want of copy" directive.
       return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: res.reason, error: res.error };
     }
-    const normalized = splitReply(res.text, grounding.locationName).full;
+    // Rewrite after splitReply (it trims and strips outer quotes), so the
+    // rewrite and the verifier judge a sentence start on the same text.
+    const normalized = wavesApp(splitReply(res.text, grounding.locationName).full);
     const verdict = verifyReplyDetailed(normalized, grounding, { recentReplies, mode });
     if (!verdict) {
       return { ok: true, text: normalized, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reviewOnly: step.reviewOnly };

@@ -1,4 +1,9 @@
+const { fertilizerJurisdictionId } = require('../config/address-county');
+const { resolveOrdinanceJurisdiction } = require('./fertilizer-jurisdiction');
+
 const TREE_SHRUB_CLOSEOUT_VERSION = 'tree_shrub_closeout_v1';
+const { validatePestTreatmentEvidence } = require('./tree-shrub-pest-check');
+const { NUTRIROOT_FIELD, NUTRIROOT_SOIL_TEST_REFERENCE_FIELD, isNutriRootName, validateNutriRootEvidence } = require('./tree-shrub-fertilizer-evidence');
 
 const TREE_SHRUB_SERVICE_LINES = new Set(['tree_shrub', 'palm']);
 const BLACKOUT_ZONES = new Set(['sarasota_venice', 'manatee_parrish', 'other_unknown']);
@@ -160,31 +165,15 @@ function normalizeOrdinanceZone(value) {
   return '';
 }
 
-// The N/P fertilizer blackout belongs to the property treated, not to the customer's mailing city. A visit row stamps
-// its own service address (service_address_city), and that city wins over the customer city the row carries.
-// The CITY decides the zone: street text ("123 North Port Boulevard") names a road, not a place, so it never
-// overrides a city. Only a row with no city at all falls back to street text, and then only to a blackout zone: a
-// street can add a restriction, never lift one (North Port is the one zone with no summer blackout).
+const TREE_SHRUB_ZONES = {
+  north_port_fl: 'north_port',
+  manatee_county_fl: 'manatee_parrish',
+  sarasota_county_fl: 'sarasota_venice',
+};
+
 function inferTreeShrubOrdinanceZone(service = {}) {
-  const stampedCity = text(service.service_address_city);
-  const cityText = stampedCity
-    ? combinedText(stampedCity)
-    : combinedText(service.city, service.municipality, service.county);
-  const hasCity = Boolean(cityText.trim());
-  const streetText = hasCity ? '' : combinedText(
-    service.service_address_line1,
-    service.address,
-    service.address_line1,
-    service.property_address,
-    service.service_address,
-  );
-  const location = hasCity ? cityText : streetText;
-  if (hasCity && /\bnorth\s*port\b/.test(location)) return 'north_port';
-  if (/\b(parrish|manatee|bradenton|palmetto|ellenton|lakewood\s*ranch)\b/.test(location)) {
-    return 'manatee_parrish';
-  }
-  if (/\b(sarasota|venice|nokomis|osprey|englewood)\b/.test(location)) return 'sarasota_venice';
-  return 'other_unknown';
+  const jurisdiction = resolveOrdinanceJurisdiction(service);
+  return TREE_SHRUB_ZONES[fertilizerJurisdictionId(jurisdiction)] || 'other_unknown';
 }
 
 function normalizePollinatorStatus(value) {
@@ -501,6 +490,10 @@ function pushInjectionRecordBlocks(blocks, injection, productRefs) {
   if (!injection.followUpDate) pushBlock(blocks, 'tree_shrub_injection_follow_up_required', 'Injection record requires follow-up date.', 'injectionRecord.followUpDate');
 }
 
+function ordinaryNpFertilizer(ref) {
+  return productHasNpFertilizer(ref) && !isNutriRootName(productName(ref));
+}
+
 function validateTreeShrubCloseout({
   service = {},
   serviceLine,
@@ -529,6 +522,18 @@ function validateTreeShrubCloseout({
   if (!TREE_SHRUB_SERVICE_LINES.has(serviceLine)) {
     return { ok: true, blocks: [], warnings: [], normalized: null, productFlags };
   }
+
+  // A manually selected zone cannot grant the Manatee soil-test exception.
+  const propertyZone = inferTreeShrubOrdinanceZone(service);
+  const visitDate = serviceDate || service.scheduled_date;
+  const evidence = validateNutriRootEvidence(completion, {
+    zone: propertyZone, serviceDate: visitDate,
+    productNames: productRefs.map(productName),
+  });
+  blocks.push(...evidence.blocks);
+  warnings.push(...evidence.warnings);
+  if (evidence.decision?.basis) normalized[NUTRIROOT_FIELD] = evidence.decision.basis;
+  if (evidence.decision?.soilTestReference) normalized[NUTRIROOT_SOIL_TEST_REFERENCE_FIELD] = evidence.decision.soilTestReference;
 
   if (!normalized.ordinanceZone) {
     pushBlock(blocks, 'tree_shrub_ordinance_zone_required', 'Select the ordinance zone for this Tree/Shrub visit.', 'ordinanceZone');
@@ -589,8 +594,9 @@ function validateTreeShrubCloseout({
     );
   }
   if (
-    productFlags.hasNpFertilizer &&
-    isSummerBlackoutForZone(serviceDate || service.scheduled_date, normalized.ordinanceZone)
+    productRefs.some(ordinaryNpFertilizer) &&
+    (isSummerBlackoutForZone(visitDate, normalized.ordinanceZone)
+      || (evidence.decision && isSummerBlackoutForZone(visitDate, propertyZone)))
   ) {
     pushBlock(
       blocks,
@@ -745,6 +751,7 @@ function validateTreeShrubTypedCompliance({
   products = [],
   productRows = [],
   completionPhotos = [],
+  treeShrubReview = null,
 } = {}) {
   const blocks = [];
   const warnings = [];
@@ -754,6 +761,20 @@ function validateTreeShrubTypedCompliance({
   const needsIracFracLog = productRefs.some(productNeedsIracFracLog);
   const missingActuals = productRefs.filter(missingProductActuals).map(productName).filter(Boolean);
   const pollinatorStatus = text(values.pollinator_status);
+
+  blocks.push(...validatePestTreatmentEvidence(treeShrubReview, {
+    hasInsectProduct,
+    productNames: productRefs.map(productName).filter(Boolean),
+    fallbackValues: values,
+  }));
+
+  const nutriRootEvidence = validateNutriRootEvidence(values, {
+    zone,
+    serviceDate: serviceDate || service.scheduled_date,
+    productNames: productRefs.map(productName).filter(Boolean),
+  });
+  blocks.push(...nutriRootEvidence.blocks);
+  warnings.push(...nutriRootEvidence.warnings);
 
   const treatments = String(values.treatments_completed || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
@@ -770,7 +791,7 @@ function validateTreeShrubTypedCompliance({
   }
 
   if (
-    productRefs.some(productHasNpFertilizer)
+    productRefs.some(ordinaryNpFertilizer)
     && isSummerBlackoutForZone(serviceDate || service.scheduled_date, zone)
   ) {
     pushBlock(

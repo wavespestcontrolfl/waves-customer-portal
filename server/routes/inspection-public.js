@@ -206,8 +206,8 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty, reverseGeocodeLocality } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
-const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough } = require('../services/service-area');
-const { isExcludedLocality, isExcludedZip, isPuntaGordaSharedZip } = require('../services/excluded-localities');
+const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough, isServedSouthHillsboroughTown } = require('../services/service-area');
+const { isExcludedLocality, isExcludedZip, sharedZipNeedsCity } = require('../services/excluded-localities');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { isOpenLeadRow } = require('../services/lead-statuses');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
@@ -216,6 +216,8 @@ const ASSESSMENT_EXPECTED_IDENTITY = Object.freeze({ catalogServiceKey: ASSESSME
 const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
 const { parseRawAddress, leadAddressFields, premiseUnitKey } = require('../utils/address-normalizer');
 const { buildRescheduleLink } = require('../services/reschedule-link');
+const { truckMayTakeDate, perTruckLive, funnelOn, isFunnelZone } = require('../services/scheduling/zone-day-funnel');
+const { leadBookingZone } = require('../services/slot-zone');
 
 // Per-lead advisory-lock namespace for the commit's provisioning/booking
 // critical section (see the file header and the commit handler below).
@@ -548,9 +550,7 @@ async function loadAssessmentCatalog() {
 async function resolveServiceAddress(lead, custRow, suppliedAddress) {
   const supplied = suppliedAddressFields(suppliedAddress);
   if (supplied) {
-    if (custRow?.geocode_review_blocked
-      && Boolean(custRow.address_line1)
-      && !profileAffirmativelyDiffers(custRow, supplied)) {
+    if (quarantineRefusesSupplied(custRow, supplied)) {
       return { location: null, address: null, source: null, unresolved: true };
     }
     const location = await geocodeServiceAddress(supplied);
@@ -571,6 +571,23 @@ async function resolveServiceAddress(lead, custRow, suppliedAddress) {
     if (location) return { location, address, source, unresolved: false };
   }
   return { location: null, address: null, source: null, unresolved: anyAddressText };
+}
+
+// Whether a geocode review quarantines this typed address for this profile: the profile is blocked, has an address on
+// file, and the typed address is not proven another property (profileAffirmativelyDiffers). resolveServiceAddress
+// then answers `unresolved`.
+function quarantineRefusesSupplied(custRow, supplied) {
+  return Boolean(custRow?.geocode_review_blocked && custRow.address_line1 && !profileAffirmativelyDiffers(custRow, supplied));
+}
+
+// Phase 1's review rule for a linked profile (provisionLinkedCustomer): a profile a geocode review blocks
+// (`blockedRow`) books only a typed address that is affirmatively another property than the address on file
+// (`storedRow`); with no address on file, none. Stricter than the list's rule above, which lets a typed address
+// through for a profile with no address on file. A refused booking's refresh reads this rule for the profile its next
+// commit loads (nextCommitRefresh; pre-push P1 on 756cfc2628).
+function reviewRefusesBooking(blockedRow, storedRow, resolved) {
+  if (!blockedRow?.geocode_review_blocked) return false;
+  return !(resolved.source === 'supplied' && storedRow.address_line1 && profileAffirmativelyDiffers(storedRow, resolved.address));
 }
 
 // The page's typed address as structured fields, or null when none.
@@ -619,6 +636,92 @@ function storedAddressCandidates(lead, custRow) {
     candidates.push({ source: 'lead', address: leadAddressFields(lead) });
   }
   return candidates;
+}
+
+// What a refused booking answers besides its error (sendSlotTaken's fields),
+// so the times the page shows next are times its next commit admits (pre-push
+// P1s on e88162fc27, 903ecc5ff0, 910b741125 and 0cdae8374e). The next commit
+// reads this commit's own inputs only when the page sends a typed address
+// again (it re-sends the address its gate resolved) and the booking stayed at
+// that pin: then the fresh times are built here, with that address and the
+// trusted customer read again, as the next commit's first build reads them
+// (phase 1's copy can be stale by now: pre-push P1 on c08db66cc0); a failed
+// read carries none. They are built only on the profile this booking used,
+// and only when the next commit's phase 1 keeps no other staff-verified pin
+// for that address (retainReviewedLocation); when it would, the refusal
+// answers as a moved booking does (`address_changed`), so the page drops the
+// typed address and its reload and retry read that pin (pre-push P1 on
+// 419b536e4b). A booking from the stored address (none typed) that phase 1
+// moved to a matched profile's other stored location answers
+// `address_changed` with no times: the page shows the address it resolved, so
+// it reloads that address and its times together (pre-push P1 on 8fa8005c52).
+// Otherwise it builds them at
+// its pin when the profile read again still has that stored pin and address:
+// the next commit, with none typed, resolves to them, and the page makes no
+// new lookup (pre-push P1 on 419b536e4b: its reload's GET paid for a county
+// lookup). A profile a review blocks has no stored pin, so that refusal
+// reloads. An address a geocode review now quarantines for that
+// customer answers the next commit's own refusal (`failure`
+// 'address_unresolved', which sendSlotTaken sends in place of SLOT_TAKEN), so
+// the page shows its address message, not the times it holds. The rule is the
+// next commit's phase 1 rule (reviewRefusesBooking; pre-push P1s on
+// 23dfae53de, 172712852a and 756cfc2628), and it applies at a moved pin too
+// (pre-push P1 on 1ef6ba1b16: a quarantined row has no pin to move to, so the
+// page kept the typed address, and its own list then refused it with a 422
+// it does not show). Any other refusal carries no times (`location` null), and
+// the page reloads its own list (GET, or POST /:token/availability with a
+// typed address), which reads the same resolver and trusted customer as the
+// next commit. When that reload fails, the page clears its old times
+// (ScheduleFlowPage): phase one may have linked a profile at another address
+// (pre-push P1 on 8f40c19990). A booking moved to a matched profile's other stored location
+// says so (`address_changed`) when the next commit, with no address typed,
+// resolves to that very property: the same profile as the trusted customer it
+// loads, with the stored pin and address phase 1 adopted (storedCoordsResolution,
+// as resolveServiceAddress reads them). The page then drops the typed address,
+// so its reload and its next commit read that profile, where this booking was
+// going. Otherwise the typed address stays: without it, the next commit would
+// reach another profile, or a property staff moved since phase 1 (pre-push P1
+// on 756cfc2628). A failed read keeps it too. With the funnel off
+// (GATE_SOUTH_ZONE_DAY_FUNNEL) no list or commit reads a zone, so every
+// refusal carries fresh times at the booking location, the answer the switch
+// restores (pre-push P1 on 7cdf34198a).
+async function nextCommitRefresh({ lead, verified, resolved, custRow, bookingAddress, bookingLocation, locationMoved }) {
+  if (!funnelOn()) return { location: bookingLocation, address: bookingAddress, customer: custRow };
+  const nextCust = await loadLead(db, lead.id)
+    .then((nextLead) => (nextLead ? loadTrustedCustomer(db, nextLead, verified) : null))
+    .catch((err) => {
+      logger.warn(`[inspection-public] next-commit customer read failed for lead ${lead.id}: ${err.message}`);
+      return null;
+    });
+  const fresh = { location: bookingLocation, address: bookingAddress, customer: nextCust };
+  // The property a commit with no address typed books: the profile's stored pin and address (none for a profile a
+  // geocode review blocks, so that refusal reloads the list, which shows the address form).
+  const stored = nextCust ? storedCoordsResolution(nextCust) : null;
+  const atStored = Boolean(stored) && sameLocation(stored.location, bookingLocation)
+    && require('node:util').isDeepStrictEqual(locationMoved ? customerAddressFields(nextCust) : stored.address, bookingAddress);
+  if (resolved.source !== 'supplied') {
+    // The page shows the address it resolved (the profile's on file, else the lead's). A booking phase 1 moved to a
+    // matched profile's other stored location reloads that address and its times together (pre-push P1 on 8fa8005c52).
+    if (locationMoved) return { location: null, addressChanged: true };
+    return atStored ? fresh : { location: null };
+  }
+  if (reviewRefusesBooking(nextCust, nextCust, resolved)) return { location: null, failure: 'address_unresolved' };
+  const sameProfile = Boolean(nextCust) && String(nextCust.id) === String(custRow.id);
+  if (locationMoved) return { location: null, addressChanged: sameProfile && atStored };
+  if (!sameProfile) return { location: null };
+  // Phase 1 keeps the profile's staff-verified pin for a typed address the customers row matches
+  // (retainReviewedLocation, read as listFallbackCity reads it). A pin other than this booking's moves that commit.
+  const pin = { lat: Number(nextCust.latitude), lng: Number(nextCust.longitude) };
+  const keepsOtherPin = Boolean(nextCust.verified_by_review) && nextCust.latitude != null && nextCust.longitude != null
+    && !sameLocation(pin, bookingLocation)
+    && await db('customers').where({ id: nextCust.id }).first('address_line1', 'address_line2', 'zip', 'latitude', 'longitude')
+      .then((row) => Boolean(row) && profileMatchesAddress(row, resolved.address, resolved.location))
+      .catch((err) => {
+        logger.warn(`[inspection-public] next-commit pin read failed for customer ${nextCust.id}: ${err.message}`);
+        return null;
+      });
+  if (keepsOtherPin === null) return { location: null };
+  return keepsOtherPin ? { location: null, addressChanged: true } : fresh;
 }
 
 // Everything the page's own booking address resolves from when no address
@@ -694,7 +797,8 @@ async function checkServiceArea(location, address = null) {
   // county with a served county's name (Charlotte County, VA) would pass
   // the name match alone. Outside the box is out of area, no network call.
   if (!isInServiceAreaCoarseBox(location.lat, location.lng)) return { ok: false, county: null };
-  // Excluded localities (Punta Gorda, owner ruling 2026-10-22) sit inside a
+  // Excluded localities (Punta Gorda, owner ruling 2026-10-22; any place held until a second technician is hired,
+  // services/excluded-localities.js) sit inside a
   // served county, so the county name below cannot refuse them: the address's
   // own city, or a ZIP that belongs only to one, does. No county is named in
   // the answer (serviceAreaFailure uses the city / ZIP as the region).
@@ -704,6 +808,10 @@ async function checkServiceArea(location, address = null) {
   // address's own ZIP proves a served locality (isInServiceAreaBox). With a
   // key the reverse-geocoded county decides below and wins over the rectangle.
   if (!key) {
+    // No lookup can place the pin, so a ZIP Punta Gorda shares with a served town, with no submitted city (or only the city
+    // the ZIP maps to, which the lead webhook fills in for a cityless submission), is unknowable:
+    // unavailable (recoverable), the same answer the keyed path gives for it, never served.
+    if (sharedZipNeedsCity(address?.city, address?.zip, { trustInferred: false })) return { ok: false, county: null, unavailable: true };
     return { ok: isInServiceAreaBox(location.lat, location.lng, { zip: address?.zip }), county: null };
   }
   let county = null;
@@ -714,7 +822,7 @@ async function checkServiceArea(location, address = null) {
   }
   if (!county) return { ok: false, county: null, unavailable: true };
   if (isInServiceAreaCounty(county)) {
-    // Punta Gorda sits inside served Charlotte County, and the submitted
+    // Punta Gorda (and any held place) sits inside served Charlotte County, and the submitted
     // city/ZIP can be blank or wrong (Codex #6424 r1 security P2), so the
     // locality and ZIP Google places on the coordinate decide too. An
     // unknowable answer is unavailable (recoverable 503), never "served".
@@ -728,7 +836,7 @@ async function checkServiceArea(location, address = null) {
       if (!place) return { ok: false, county: null, unavailable: true };
       if (isExcludedLocality(place.city) || isExcludedZip(place.zip)) return { ok: false, county: null };
       // No locality on a ZIP Punta Gorda shares with a served town: unknowable.
-      if (!place.city && isPuntaGordaSharedZip(place.zip)) return { ok: false, county: null, unavailable: true };
+      if (sharedZipNeedsCity(place.city, place.zip)) return { ok: false, county: null, unavailable: true };
     }
     return { ok: true, county };
   }
@@ -778,9 +886,12 @@ async function serviceAreaFailure(location, address = null) {
   return null;
 }
 
-// The address as the text the south-zone day funnel resolves its zone from (null when there is none).
-function zoneFunnelText(address) {
-  return [address?.line1, address?.line2, address?.city, address?.state, address?.zip].filter(Boolean).join(', ') || null;
+// The address as the south-zone day funnel resolves its zone from: its text and its city (resolveEstimateZone: a
+// city decides alone, the text only without one), or null when there is no text. One shape for the list
+// (zoneFunnelAddress / zoneFunnelCity) and the booking (callbackVisit.zoneAddress), so the two resolve the same zone.
+function zoneFunnelInputs(address) {
+  const text = [address?.line1, address?.line2, address?.city, address?.state, address?.zip].filter(Boolean).join(', ');
+  return text ? { address: text, city: address?.city || null } : null;
 }
 
 // A customer row's address in the {line1, line2, city, state, zip} shape the booking address uses.
@@ -790,10 +901,77 @@ const customerAddressFields = (cust) => ({
 });
 
 // `address`: the booking address ({line1, line2, city, state, zip}) on every list a customer is OFFERED; the
-// south-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL) reads it. Commit and re-validation rebuilds omit it.
-async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null }) {
+// south-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL) reads it. The commit and re-validation rebuilds pass it too:
+// per truck (owner rule B) they drop the same openings as the list (zone-day-funnel.js dropOtherTruckDays).
+// `customer`: the trusted customer, which a list (and a refusal's list) passes so that an address in no zone takes
+// the zone of its city on file, the zone the booking falls back to (slot-zone.js leadBookingZone; pre-push P1 on
+// aa30bd86f1). Only for that customer's own property (profileMatchesAddress: the same street and unit, and ZIP or
+// pin): phase 1 books another street on a corrected or another profile, with the typed city, so the city on file
+// there named the old street, and its zone would drop another truck's opening the booking admits (pre-push P1 on
+// 1ef6ba1b16). Phase 1 makes the profile it books this lead's trusted one, so a retry's list reads that profile.
+// Nor for a place the area check refuses (Punta Gorda), which phase 1 never keeps, nor when the typed address names a
+// served South Hillsborough town, by city or ZIP: the area check may admit it by that name alone, so phase 1 keeps the
+// typed city (pre-push P1s on f6c3fdc9e9 and c49372bb7d: a kept Venice at a Hillsborough pin failed the next area
+// check). Both hold unless phase 1 keeps the whole profile (`retained`: provisionLinkedCustomer retainReviewedLocation,
+// a staff-verified pin and a typed address that matches the customers row by its own ZIP or pin), as it then writes
+// nothing. zoneFallbackCity is that city, the one phase 1 may keep: phase 1 keeps only it, read from the same trusted
+// view of the profile as the list (its pin can be the primary property's). A list reads it through listFallbackCity,
+// which asks the customers row itself whether phase 1 keeps the whole profile, as phase 1 does (pre-push P1 on
+// cebd106404: a list took a staff-verified pin on the primary property alone for that, and so dropped the only free
+// truck for a refused city that phase 1 then wrote over). With the funnel off (GATE_SOUTH_ZONE_DAY_FUNNEL) nothing
+// reads the city, so it reads no row, and a failed read is no fallback city, logged (pre-push P1 on 979f0dbec9): the
+// list then reads the address's own zone only, and with none it serves the unfiltered list, as offerFunnelView fails
+// open; the commit's zone re-check then reads the city on file (revalidateSlotAt `zoneMoved`).
+// `fallbackCity`: a caller that already knows the city passes it. The commit's first build passes the one its zone
+// re-check compares with. The re-check runs after phase 1, so it passes the city on file of the profile phase 1
+// booked, the city createSelfBooking falls back to: a sibling phase 1 reused keeps its own city, even a refused place.
+const zoneFallbackCity = (customer, address, coords, { retained = false } = {}) => (
+  customer && profileMatchesAddress(customer, address, coords)
+    && (retained || !(isExcludedLocality(customer.city)
+      || isServedSouthHillsboroughTown({ cities: [address.city], zips: address.zip ? [address.zip] : [] })))
+    ? customer.city : null
+);
+async function listFallbackCity(conn, customer, address, coords) {
+  if (!funnelOn()) return null;
+  let row = null;
+  if (customer?.verified_by_review) {
+    try {
+      row = await conn('customers').where({ id: customer.id }).first('address_line1', 'address_line2', 'zip', 'latitude', 'longitude');
+    } catch (err) {
+      logger.warn(`[inspection-public] fallback-city read failed for customer ${customer.id} (no fallback city): ${err.message}`);
+      return null;
+    }
+  }
+  return zoneFallbackCity(customer, address, coords, { retained: Boolean(row) && profileMatchesAddress(row, address, coords) });
+}
+// Service-line map LIVE (owner 2026-11-21): a Waves Assessment is offered the home and gap technician of the
+// line its lead asked for. The lead in hand decides alone (`leadId`: the page's own lead, which may have no customer
+// yet; the estimate page's linked lead), so the offer and the commit read the same row; without one the customer's
+// leads are read. Not live: nothing read, nothing named (any active field tech, as before). The answer is the
+// builder's `serviceLines` option, spread as it is: a LINE SCOPE.
+//   conn + strict: the booking transaction's own re-check reads on that transaction and must not turn a failed read
+//   into the default line (assessmentLineUnchanged).
+async function assessmentServiceLines(customer, leadId, { conn = db, strict = false } = {}) {
+  const lineTechnician = require('../services/scheduling/line-technician');
+  if (!lineTechnician.lineMapLive()) return {};
+  const { line } = await lineTechnician.assessmentLineFor(conn, { customerId: customer?.id || null, leadId: leadId || null, strict });
+  return { serviceLines: [line] };
+}
+// The booking transaction's line re-check (pre-push P0): the commit found its slot, and so its technician, in a build
+// for `lineScope`, read before the transaction. Staff can change the lead's service interest in between. Read again
+// on the booking's own transaction, the lead row held until it ends: another line refuses the slot
+// (createSelfBooking's slotGuard: 409 SLOT_TAKEN, and the page gets fresh times for the line as it is now). Not
+// live: both are empty and nothing is read.
+async function assessmentLineUnchanged(conn, { lineScope, customer, leadId }) {
+  const now = await assessmentServiceLines(customer, leadId, { conn, strict: true });
+  return String(now.serviceLines || '') === String((lineScope || {}).serviceLines || '');
+}
+// `lineScope`: a commit passes the scope it read once (assessmentServiceLines), so every build of that commit and its
+// transaction re-check agree on it; a list reads its own.
+async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer, leadId = null, lineScope = null, fallbackCity }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
+  const zoneInputs = zoneFunnelInputs(address);
   return buildBookingAvailability({
     lat: coords.lat,
     lng: coords.lng,
@@ -802,9 +980,11 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // createSelfBooking's commit probe measures with (callbackVisit), so the
     // offered travel gap and the commit-time check always agree. No funnel
     // key → no service-type filter: any active field tech (owner decision —
-    // all active techs, scope doc §7).
+    // all active techs, scope doc §7); while GATE_SERVICE_LINE_MAP is live, the
+    // technicians of the line the lead asked for (assessmentServiceLines).
     serviceKey: ASSESSMENT_SERVICE_KEY,
     serviceIdentity: ASSESSMENT_EXPECTED_IDENTITY,
+    ...(lineScope || await assessmentServiceLines(customer, leadId)),
     rangeFrom,
     rangeTo,
     config,
@@ -829,7 +1009,11 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // same gate and grace value.
     bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
-    ...(zoneFunnelText(address) ? { zoneFunnelAddress: zoneFunnelText(address) } : {}),
+    ...(zoneInputs ? {
+      zoneFunnelAddress: zoneInputs.address,
+      zoneFunnelCity: zoneInputs.city,
+      zoneFunnelCustomerCity: fallbackCity === undefined ? await listFallbackCity(db, customer, address, coords) : fallbackCity,
+    } : {}),
   });
 }
 
@@ -886,7 +1070,7 @@ async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
-    const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, address: resolved.address });
+    const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, address: resolved.address, customer: custRow, leadId: lead.id });
     return {
       ok: true, slots: flattenNextSlots(built, count), needsAddress: false, address: resolved.address,
       addressInputs: bookingAddressInputs(lead, custRow),
@@ -1825,7 +2009,7 @@ router.get('/:token', async (req, res, next) => {
     let availability = null;
     if (resolved.location) {
       try {
-        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address });
+        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow, leadId: lead.id });
         availability = built ? shapeAvailability(built, range) : null;
       } catch (err) {
         logger.error(`[inspection-public] availability failed for lead ${lead.id}: ${err.message}`);
@@ -1882,7 +2066,7 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
     if (!catalog.serviceId) return res.status(503).json({ error: 'booking_unavailable' });
     let availability = null;
     try {
-      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address });
+      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow, leadId: lead.id });
       availability = built ? shapeAvailability(built, range) : null;
     } catch (err) {
       logger.error(`[inspection-public] address availability failed for lead ${lead.id}: ${err.message}`);
@@ -1953,7 +2137,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     try {
       availability = await buildAvailabilityForLead(resolved.location, {
         rangeFrom: when.dateFrom, rangeTo: when.dateTo, config,
-        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, address: resolved.address,
+        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, address: resolved.address, customer: custRow, leadId: lead.id,
       });
     } catch (err) {
       logger.error(`[inspection-public] find-slots availability failed for lead ${lead.id}: ${err.message}`);
@@ -2017,12 +2201,7 @@ async function provisionLinkedCustomer(trx, {
     return { locationFailure: 'address_unresolved' };
   }
   provisioned = freshCustRow;
-  const explicitDifferentAddress = [
-    resolved.source === 'supplied',
-    Boolean(storedCustRow.address_line1),
-    profileAffirmativelyDiffers(storedCustRow, resolved.address),
-  ].every(Boolean);
-  if (freshCustRow.geocode_review_blocked && !explicitDifferentAddress) {
+  if (reviewRefusesBooking(freshCustRow, storedCustRow, resolved)) {
     return { locationFailure: 'address_unresolved' };
   }
   // A supplied address that is NOT the linked profile's own address is
@@ -2034,8 +2213,9 @@ async function provisionLinkedCustomer(trx, {
   // never geocoded (no coordinates: nothing validated to lose).
   // A lead-address fallback is held to the same rule as a typed one
   // (Codex #4737 r11 pre-push P1): neither overwrites an established
-  // property.
-  const anotherProperty = (resolved.source === 'supplied' || resolved.source === 'lead')
+  // property. Phase 1 runs only on a resolved location, so any source but
+  // this row's own address is one of those two.
+  const anotherProperty = resolved.source !== 'customer'
     && Boolean(freshCustRow.address_line1)
     && !profileMatchesAddress(freshCustRow, resolved.address, resolved.location)
     && !(await correctableInPlace(trx, freshLead, freshCustRow));
@@ -2056,10 +2236,11 @@ async function provisionLinkedCustomer(trx, {
     && freshCustRow.latitude != null && freshCustRow.longitude != null
     ? { lat: Number(freshCustRow.latitude), lng: Number(freshCustRow.longitude) }
     : null;
+  const matchesStoredAddress = profileMatchesAddress(storedCustRow, resolved.address, resolved.location);
   const retainReviewedLocation = [
     Boolean(reviewedLocation),
     Boolean(storedCustRow.address_line1),
-    profileMatchesAddress(storedCustRow, resolved.address, resolved.location),
+    matchesStoredAddress,
   ].every(Boolean);
   if (resolved.source !== 'customer' && !retainReviewedLocation) {
     // The pre-lock resolution did NOT come from this row's own
@@ -2067,22 +2248,39 @@ async function provisionLinkedCustomer(trx, {
     // geocode and a lead/supplied fallback won) — write the
     // validated resolution back so a missing/bad address isn't
     // asked for again (this file's own contract — see the header).
+    // An address that matches this row (same street and unit, and ZIP or
+    // pin) keeps the row's city on file, the city its list read
+    // (zoneFallbackCity), only when the far-south funnel's zone comes from
+    // it: the typed city is in no zone and the row's city is in a funneled
+    // one (slot-zone.js leadBookingZone, isFunnelZone), so a typed name no
+    // zone lists would take the property out of the zone its list read, for
+    // this commit, its refusal's times and every retry (owner rule B,
+    // pre-push P1s on 850a6a79f0 and 7a682696f6). A place the area check
+    // refuses (Punta Gorda) is never kept: the typed address passed that
+    // check. Nor is any city kept over a typed South Hillsborough town,
+    // which the area check may admit by its name. Every other address takes
+    // the typed city, the validated
+    // correction (pre-push P1s on 63e29d5511 and f344681474: a zone with no
+    // truck rule, such as Sarasota, needs no kept city); with the funnel off
+    // no zone is read from it. The match reads the trusted view of the row
+    // (freshCustRow), as the list does: its pin can be the primary
+    // property's (pre-push P1 on c49372bb7d). This branch does not keep the
+    // whole profile, so no `retained`.
+    const listCity = zoneFallbackCity(freshCustRow, resolved.address, resolved.location);
+    const { zone: cityZone, fromCustomer } = funnelOn()
+      ? await leadBookingZone(trx, zoneFunnelInputs(resolved.address), listCity) : {};
+    const city = fromCustomer && isFunnelZone(cityZone) ? listCity : resolved.address.city;
     const after = {
       address_line1: resolved.address.line1,
       address_line2: resolved.address.line2,
-      city: resolved.address.city,
+      city,
       state: resolved.address.state,
       zip: resolved.address.zip,
       latitude: resolved.location.lat,
       longitude: resolved.location.lng,
     };
     await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
-    provisioned = {
-      ...freshCustRow,
-      address_line1: resolved.address.line1, address_line2: resolved.address.line2,
-      city: resolved.address.city, state: resolved.address.state, zip: resolved.address.zip,
-      latitude: resolved.location.lat, longitude: resolved.location.lng,
-    };
+    provisioned = { ...freshCustRow, ...after };
   }
   // else resolved.source === 'customer': the pre-lock resolution WAS
   // this row's own stored address. Its text needs no write-back, but
@@ -2202,10 +2400,16 @@ function sendLocationFailure(res, failure, county, leadId) {
 // (round-10 P2) let a LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY caller
 // hand back the customer's CURRENT address alongside the refreshed times —
 // every other caller omits them and the body is byte-identical to before.
-async function sendSlotTaken(res, { location, address = null, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
+// `location` null (nextCommitRefresh): no times, so the page reloads its own
+// list; a refused booking moved to a matched profile's other stored location
+// may pass `addressChanged` with it. `customer`: as the page's own list
+// passes it (buildAvailabilityForLead). `failure` (nextCommitRefresh): the
+// next commit would refuse the address, so that refusal is the answer.
+async function sendSlotTaken(res, { location, address = null, customer, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false, failure = null }) {
+  if (failure) return sendLocationFailure(res, failure, null, leadId);
   let refreshed = null;
   try {
-    refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address });
+    if (location) refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address, customer, leadId });
   } catch (err) {
     logger.warn(`[inspection-public] refresh availability failed for lead ${leadId}: ${err.message}`);
   }
@@ -2219,14 +2423,29 @@ async function sendSlotTaken(res, { location, address = null, range, config, cat
   return res.status(409).json(body);
 }
 
-// The picked slot re-checked at a location that differs from the one it
-// was offered for — the MATCHED slot object (technician/end_time can differ
-// by location), or null when it is not open there.
-async function revalidateSlotAt(location, { date, time, config, catalog, leadId }) {
+// The slot a booking takes at its final location and zone address: the
+// picked `slot` (the anti-forgery build's, at the typed location and address)
+// when nothing that decides it changed, else that start re-checked there — the
+// MATCHED slot object (technician/end_time can differ by location), or null
+// when it is not open there. `address` and `customer` are the address whose
+// zone the booking checks and the customer whose city it falls back to: per
+// truck the far-south rule drops the same openings as on the commit's own
+// rebuild (zone-day-funnel.js dropOtherTruckDays). Re-checked
+// when the location `moved`, and per truck when the customer's city decides
+// the zone and the first build read another one (`zoneMoved`, slot-zone.js
+// leadBookingZone) and the funnel covers that `zone`: it can leave the hour to
+// another truck, which the re-check books (pre-push P1 on 46fd83d04f). With
+// one truck, a zone the funnel does not cover, or the city the first build
+// read, a same-pin re-check would only repeat the first build and its travel
+// lookups (pre-push P1s on 2b747741a9, 5fc5e4d648 and 4eb9c11d2a). It reads
+// the customer's city on file as phase 1 left it (`fallbackCity`), the city the
+// booking falls back to, so a reused sibling's city on file decides here too.
+async function revalidateSlotAt(location, { slot, moved, zoneMoved, zone, date, time, config, catalog, leadId, lineScope = null, address, customer }) {
+  if (!moved && !(zoneMoved && perTruckLive() && isFunnelZone(zone))) return slot;
   let refreshedDay = null;
   try {
     refreshedDay = await buildAvailabilityForLead(location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address, customer, leadId, lineScope, fallbackCity: customer.city ?? null,
     });
   } catch (err) {
     logger.warn(`[inspection-public] slot re-validation failed for lead ${leadId}: ${err.message}`);
@@ -2294,7 +2513,8 @@ function parseCommitBody(body) {
 // own and no leadDedupe (its dedupe is the per-customer assessment lane below).
 async function bookAssessmentVisit({
   booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe,
-  source = 'inspection_link', alertLabel = '🔁 Free consultation self-booked:', estimateGuard = null,
+  source = 'inspection_link', alertLabel = '🔁 Free consultation self-booked:', estimateGuard = null, slotGuard = null,
+  zoneAddress = null, lineLeadId = null,
 }) {
   const { createSelfBooking } = booking._internals;
   return createSelfBooking({
@@ -2330,6 +2550,14 @@ async function bookAssessmentVisit({
       leadDedupe,
       // The estimate-token page's in-transaction re-check (estimate-assessment-public.js); absent for a lead link.
       ...(estimateGuard ? { estimateGuard } : {}),
+      // The page's slot re-check on the booking transaction: the lead link's far-south truck check under the date lock
+      // (owner rule B per truck), and both pages' line check (assessmentLineUnchanged).
+      ...(slotGuard ? { slotGuard } : {}),
+      // The lead this assessment is booked for: the shadow log compares with that inquiry (line-technician).
+      ...(lineLeadId ? { lineLeadId } : {}),
+      // The lead link's booking address, as its list resolved the zone (zoneFunnelInputs), given the booking's own
+      // customer row: the visit's zone, and so the slot guard's, resolves the same way.
+      ...(zoneAddress ? { zoneAddress } : {}),
     },
   });
 }
@@ -2487,7 +2715,7 @@ async function trustedLeadProfileIds(dbConn, leadId, token, custId, { includeMer
 // A failed createSelfBooking mapped to the page's responses: ALREADY_BOOKED
 // resolves to GET's already_booked shape; a 409 is SLOT_TAKEN with fresh
 // times; anything else passes through.
-async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, verified }) {
+async function sendBookingFailure(res, result, { lead, custRow, leadPayload, nextCommit, range, config, catalog, verified }) {
   // A validated, in-area address the lead supplied through their own
   // link stays on the customer even when this attempt fails (owner
   // ruling 2026-09-24): undoing it raced concurrent bookings that had
@@ -2547,8 +2775,10 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
   if (result.code === 'ADDRESS_UNVERIFIED') {
     return res.status(409).json({ error: result.error, code: 'ADDRESS_UNVERIFIED' });
   }
+  // With the funnel on, fresh times only where the page's next commit reads this one's inputs, else none and the page
+  // reloads its own list (nextCommitRefresh), so the times it shows are times that commit admits (owner rule B per truck).
   if (result.status === 409) {
-    return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id, error: result.error });
+    return sendSlotTaken(res, { ...(await nextCommitRefresh(nextCommit)), range, config, catalog, leadId: lead.id, error: result.error });
   }
   return res.status(result.status || 500).json({ error: result.error });
 }
@@ -2616,12 +2846,25 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     if (windowFailure) return res.status(windowFailure.status).json({ error: windowFailure.error });
 
     // Anti-forgery: re-validate against a fresh single-day availability
-    // build at the CATALOG's real duration (reservice-public's model).
+    // build at the CATALOG's real duration (reservice-public's model). It
+    // passes the address and the trusted customer like the offered lists: one
+    // truck (fleet view), a one-day build funnels to itself and reads nothing;
+    // per truck (GATE_MULTI_TECH_CONFIRM, owner rule B) it drops each opening
+    // of a truck on another truck's far-south day, with the zone the list read
+    // (the customer's city when the address is in no zone), so the start goes
+    // to the truck the list offered, or SLOT_TAKEN when that truck lost the
+    // hour (pre-push P1 on 4eb9c11d2a: phase 1 can write the typed city onto
+    // the profile, and no later check then reads the city the list read).
+    // It reads that city once, before phase 1 can write the row
+    // (listFallbackCity), and the zone re-check below compares with it.
+    const firstCity = await listFallbackCity(db, custRow, resolved.address, resolved.location);
+    // The line this commit books on, read once: both builds below and the transaction's re-check use it.
+    const lineScope = await assessmentServiceLines(custRow, lead.id);
     const dayAvailability = await buildAvailabilityForLead(resolved.location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address: resolved.address, customer: custRow, leadId: lead.id, lineScope, fallbackCity: firstCity,
     });
     const slot = findSlotIn(dayAvailability, date, time);
-    if (!slot) return sendSlotTaken(res, { location: resolved.location, address: resolved.address, range, config, catalog, leadId: lead.id });
+    if (!slot) return sendSlotTaken(res, { location: resolved.location, address: resolved.address, customer: custRow, range, config, catalog, leadId: lead.id });
 
     // Phase 1 — lock, re-read the lead's customer_id FRESH (a concurrent
     // commit's phase 1 may have just linked one), re-run eligibility, then
@@ -2675,10 +2918,37 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // always uses the global `db` connection and can do real network I/O
     // of its own (a gated weather-outlook call), neither of which may run
     // while that lock is held.
-    const bookingSlot = locationMoved
-      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id })
-      : slot;
-    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id });
+    // The booking address is the profile's own there; at the same pin it stays
+    // the typed address, as the list and the next commit's own check read it.
+    // With the funnel on, createSelfBooking reads its zone from that address,
+    // else from its customer's city on file (slot-zone.js leadBookingZone;
+    // owner rule B, pre-push P1s on 3e6fd14320, 3b494d3581 and 46fd83d04f).
+    // Phase 1 keeps the profile's city when that city decides the far-south
+    // zone of a typed address that matches the profile
+    // (provisionLinkedCustomer; pre-push P1s on 850a6a79f0, 7a682696f6,
+    // 63e29d5511 and f344681474), so that city stays the one the first build
+    // read. A place the area check refuses is not kept, so that booking reads
+    // no zone.
+    // Every build here passes that address and this customer, so it reads the
+    // same zone. When the city decides and is not the city the first build
+    // read (`firstCity`: none for another street), the slot is re-checked; a 409 answers fresh times only as
+    // nextCommitRefresh says. With the funnel off the booking reads no zone
+    // address, so nothing is looked up here. A failed lookup re-checks nothing
+    // (logged); the booking still checks its own zone under its date lock
+    // (pre-push P1 on 84c9b2d840).
+    const bookingAddress = locationMoved ? customerAddressFields(custRow) : resolved.address;
+    const { zone: bookingZone, fromCustomer } = funnelOn()
+      ? await leadBookingZone(db, zoneFunnelInputs(bookingAddress), custRow.city).catch((err) => {
+        logger.warn(`[inspection-public] lead zone lookup failed for lead ${lead.id}: ${err.message}`);
+        return { fromCustomer: false };
+      })
+      : { fromCustomer: false };
+    const nextCommit = { lead, verified, resolved, custRow, bookingAddress, bookingLocation, locationMoved };
+    const bookingSlot = await revalidateSlotAt(bookingLocation, {
+      slot, moved: locationMoved, zoneMoved: fromCustomer && custRow.city !== firstCity, zone: bookingZone,
+      date, time, config, catalog, leadId: lead.id, lineScope, address: bookingAddress, customer: custRow,
+    });
+    if (!bookingSlot) return sendSlotTaken(res, { ...(await nextCommitRefresh(nextCommit)), range, config, catalog, leadId: lead.id });
 
     // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
     // (dedupeLane, left at its true default — no transaction of ours wraps
@@ -2706,10 +2976,24 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // addresses never both book.
     const resolveCustomerIds = (conn, opts) => trustedLeadProfileIds(conn, lead.id, verified, custRow.id, opts);
     let fencedUniverse = null;
-    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
+    // Owner rule B per truck, under the booking's date lock: two commits can rebuild the same new far-south day
+    // before either inserts, each with a different truck; the second finds the first's stop and gets SLOT_TAKEN.
+    // createSelfBooking hands over the zone it stamps on the visit, resolved from the booking address as this link's
+    // list resolved it (zoneAddress: its city decides, its text only without one), so the list, the check and the row agree.
+    // And the line re-check, on the same transaction: the lead's service interest as it is at the save.
+    const slotGuard = async (conn, { zone = null } = {}) => (await truckMayTakeDate(conn, {
+      estimateZone: zone, date, technicianId: bookingSlot.technician_id ?? null,
+    })) && assessmentLineUnchanged(conn, { lineScope, customer: custRow, leadId: lead.id });
+    // That address, given createSelfBooking's own customer row: the typed (or the lead's) address, or, when the
+    // booking uses the profile's own address, the row's address as the booking reads it, which its lock fences
+    // (pre-push P1 on 5fc5e4d648: a copy of the profile read here could be stale by then).
+    const zoneAddress = (cust) => zoneFunnelInputs(
+      locationMoved || resolved.source === 'customer' ? customerAddressFields(cust) : bookingAddress,
+    );
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, zoneAddress, lineLeadId: lead.id, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 
     if (!result.ok) {
-      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, verified });
+      return sendBookingFailure(res, result, { lead, custRow, leadPayload, nextCommit, range, config, catalog, verified });
     }
 
     return res.json(await finishCommittedBooking({ result, notes, date, bookingSlot }));
@@ -2832,6 +3116,8 @@ router._internals = {
   searchParseOpts,
   loadAssessmentCatalog,
   buildAvailabilityForLead,
+  assessmentServiceLines,
+  assessmentLineUnchanged,
   shapeAvailability,
   findSlotIn,
   commitWindowFailure,
@@ -2844,6 +3130,8 @@ router._internals = {
 };
 
 router._test = {
+  zoneFallbackCity,
+  listFallbackCity,
   tokenMayUseProfile,
   outrightProspect,
   loadTrustedCustomer,
@@ -2876,6 +3164,8 @@ router._test = {
   // Test hooks (geocode review quarantine round 3 P0 fixes, PR #5064).
   profileMatchesOrQuarantined,
   resolveOrLinkCustomerForLead,
+  nextCommitRefresh,
+  reviewRefusesBooking,
 };
 
 module.exports = router;

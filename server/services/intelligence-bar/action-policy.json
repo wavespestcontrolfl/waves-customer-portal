@@ -567,6 +567,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "get_closeout_bill_preview": {
+    "module": "closeout-tools.js",
+    "domain": "closeout",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
+  },
   "get_closeout_status": {
     "module": "closeout-tools.js",
     "domain": "closeout",
@@ -1242,6 +1250,14 @@
   "get_source_performance": {
     "module": "leads-tools.js",
     "domain": "leads",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
+  "get_sprinkler_timer_counts": {
+    "module": "tools.js",
+    "domain": "customers",
     "kind": "read",
     "role": "admin",
     "approval": null,
@@ -2026,6 +2042,14 @@
   "send_email_reply": {
     "module": "email-tools.js",
     "domain": "email",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "send_estimate": {
+    "module": "estimate-send-tools.js",
+    "domain": "estimate",
     "kind": "external_action",
     "role": "admin",
     "approval": "ui_confirm",

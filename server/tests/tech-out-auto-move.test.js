@@ -345,7 +345,8 @@ describe('autoAssignParkedAlert', () => {
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
-    expect(assertAssignableTechnician).toHaveBeenCalledWith(CANDIDATE.id, expect.objectContaining({ workDays: true }));
+    // `hours` (GATE_TECH_SHIFT_HOURS): the stop's own block, 09:00 to 11:00, so a tech whose shift does not hold it is skipped too.
+    expect(assertAssignableTechnician).toHaveBeenCalledWith(CANDIDATE.id, expect.objectContaining({ workDays: true, hours: { startMin: 540, endMin: 660 } }));
     expect(res).toEqual({ moved: false, alert_id: ALERT_ID, reason: 'no_eligible_candidate' });
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
@@ -569,7 +570,7 @@ describe('in-transaction fit recheck (moveGuard)', () => {
 
     await expect(guard({ trx, technicianId: CANDIDATE.id, service: baseStop() }))
       .rejects.toMatchObject({ code: NOT_ASSIGNABLE });
-    expect(assertAssignableTechnician).toHaveBeenCalledWith(CANDIDATE.id, { conn: trx, date: DATE, workDays: true });
+    expect(assertAssignableTechnician).toHaveBeenCalledWith(CANDIDATE.id, { conn: trx, date: DATE, workDays: true, hours: { startMin: 540, endMin: 660 } });
   });
 
   test('an off-day refusal at commit is a failed candidate: the next candidate is tried, and when none is left the card stays open as no_eligible_candidate', async () => {

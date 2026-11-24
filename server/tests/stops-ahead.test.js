@@ -13,10 +13,13 @@ const TODAY = '2026-08-14';
 function baseSvc(overrides = {}) {
   return {
     id: 'svc-self',
+    customer_id: 'customer-1',
     technician_id: 'tech-1',
     scheduled_date: TODAY,
     status: 'confirmed',
     track_state: 'scheduled',
+    customer_pick_by: null,
+    recurring_dispatch_due_date: null,
     route_order: null,
     window_start: '10:00:00',
     created_at: '2026-08-01T12:00:00.000Z',
@@ -51,7 +54,7 @@ function makeDb({
     return q;
   });
   dbFn.raw = jest.fn((sql, bindings) => {
-    if (/SELECT s\.id, s\.technician_id/.test(sql)) {
+    if (/SELECT s\.id, s\.customer_id, s\.technician_id/.test(sql)) {
       // Sibling-group eligibility fetch: the target row plus any sibling
       // rows of the same (customer, slot). A NULL-technician target
       // yields no rows (the self-join drops it), matching Postgres.
@@ -78,11 +81,12 @@ function makeDb({
     }
     if (rawError) return Promise.reject(rawError);
     if (rawFloor === null) return Promise.resolve({ rows: [] }); // guarded no-op write
-    const stored = rawFloor !== undefined ? rawFloor : bindings[1];
+    const stored = rawFloor !== undefined ? rawFloor : bindings[bindings.length - 4];
     return Promise.resolve({ rows: [{ stops_ahead_min_shown: stored }] });
   });
   dbFn.countCall = () => dbFn.raw.mock.calls.find(([sql]) => /WITH target/.test(sql));
   dbFn.updateCalls = () => dbFn.raw.mock.calls.filter(([sql]) => /UPDATE scheduled_services/.test(sql));
+  dbFn.reReadCalls = () => dbFn.raw.mock.calls.filter(([sql]) => /SELECT MIN\(s\.stops_ahead_min_shown\)/.test(sql));
   dbFn.queries = queries;
   return dbFn;
 }
@@ -110,13 +114,23 @@ describe('computeStopsAhead', () => {
     const db = makeDb({ svcRow: baseSvc(), countN: 2, beforeAll: 5, othersAll: 7, doneBefore: 3 });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY }))
       .toEqual({ stopsAhead: 2, yourStop: 6, totalStops: 8, currentStop: 3, atStop: false, headingToStop: false });
-    // Single conditional group UPDATE — (id, clamped, today) feed the
-    // grp/floor_val CTEs, (today, today) the SET stamp + date guard. The
+    // Single conditional group UPDATE — the original placement and target
+    // eligibility feed grp before (clamped, today) feed floor_val; the last
+    // two dates are the SET stamp + date guard. The
     // floor lands on EVERY sibling row, not just the requested one.
     expect(db.updateCalls()).toHaveLength(1);
-    expect(db.updateCalls()[0][1]).toEqual(['svc-self', 2, TODAY, TODAY, TODAY]);
+    expect(db.updateCalls()[0][1]).toEqual([
+      'tech-1', TODAY, 'customer-1', '10:00:00', 'svc-self',
+      ...NOT_A_STOP_STATUSES,
+      2, TODAY, TODAY, TODAY,
+    ]);
     const [updateSql] = db.updateCalls()[0];
-    expect(updateSql).toContain('WITH grp AS');
+    expect(updateSql).toContain('WITH locked_group AS MATERIALIZED');
+    expect(updateSql).toContain('FROM locked_group');
+    expect(updateSql).toContain('technician_id = ?::uuid');
+    expect(updateSql).toContain('scheduled_date = ?::date');
+    expect(updateSql).toContain('window_start IS NOT DISTINCT FROM ?::time');
+    expect(updateSql).toContain('(window_start IS NOT NULL OR (customer_pick_by IS NULL AND recurring_dispatch_due_date IS NULL))');
     expect(updateSql).toContain('u.window_start IS NOT DISTINCT FROM g.window_start');
     expect(updateSql).toContain('RETURNING f.v AS stops_ahead_min_shown');
     // Single-snapshot CTE aggregate: bound to (target id, group-floor
@@ -125,6 +139,10 @@ describe('computeStopsAhead', () => {
     const [countSql, countBindings] = db.countCall();
     expect(countBindings).toEqual([
       'svc-self',
+      'tech-1',
+      TODAY,
+      '10:00:00',
+      ...NOT_A_STOP_STATUSES,          // target eligibility at this slot
       TODAY,                           // group_floor display date
       ...NOT_A_ROUTE_STOP_STATUSES,    // sibling-anchor lateral
       ...NOT_A_ROUTE_STOP_STATUSES,    // day_rows route filter
@@ -157,9 +175,18 @@ describe('computeStopsAhead', () => {
     expect(countSql).toMatch(/progressed_beyond/);
     // Dead estimate-slot holds must not count (live-hold predicate).
     expect(countSql).toContain('(s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())');
+    // Neither marked parked shape is a route contributor; markerless legacy
+    // date-only rows remain valid stops.
+    const placedOrLegacyS = '(s.window_start IS NOT NULL OR (s.customer_pick_by IS NULL AND s.recurring_dispatch_due_date IS NULL))';
+    expect(countSql.split(placedOrLegacyS)).toHaveLength(3); // lateral anchor + day_rows
     // Tracker-terminal rows drop out of the LIVE flag by track_state too,
     // NULL-safely (track_state can diverge from status).
     expect(countSql).toContain("(dr.track_state IS NULL OR dr.track_state NOT IN ('complete', 'cancelled'))");
+    // Every same-stop token locks the sibling group in the same order, then
+    // rechecks the target from those locked rows before updating the floor.
+    // This avoids cross-token deadlocks and fences a status-only rebook.
+    expect(updateSql).toContain('ORDER BY id');
+    expect(updateSql).toContain('FOR UPDATE');
   });
 
   test(`raw count above the cap (${STOPS_AHEAD_DISPLAY_CAP}) → null and nothing persists`, async () => {
@@ -189,7 +216,41 @@ describe('computeStopsAhead', () => {
     // date guard re-stamps it.
     const db = makeDb({ svcRow: baseSvc(), countN: 3, groupFloor: null });
     expect((await computeStopsAhead(db, 'svc-self', { today: TODAY }))?.stopsAhead).toBe(3);
-    expect(db.updateCalls()[0][1]).toEqual(['svc-self', 3, TODAY, TODAY, TODAY]);
+    expect(db.updateCalls()[0][1]).toEqual([
+      'tech-1', TODAY, 'customer-1', '10:00:00', 'svc-self',
+      ...NOT_A_STOP_STATUSES,
+      3, TODAY, TODAY, TODAY,
+    ]);
+  });
+
+  test.each([
+    ['Quick Move', { customer_pick_by: '2026-08-14T22:00:00Z' }],
+    ['recurring-dispatch', { recurring_dispatch_due_date: TODAY }],
+  ])('a parked %s NULL-window sibling cannot anchor, suppress, read, or receive the legacy target floor', async (_label, marker) => {
+    const target = baseSvc({ window_start: null });
+    const parked = baseSvc({
+      id: 'svc-parked', window_start: null,
+      status: 'completed', track_state: 'complete',
+      created_at: '2026-07-01T12:00:00.000Z',
+      ...marker,
+    });
+    const db = makeDb({
+      svcRow: target, siblings: [parked], countN: 1,
+      rawFloor: null, reReadFloor: 1,
+    });
+
+    expect((await computeStopsAhead(db, target.id, { today: TODAY }))?.stopsAhead).toBe(1);
+    const [countSql] = db.countCall();
+    const [updateSql] = db.updateCalls()[0];
+    const [reReadSql] = db.reReadCalls()[0];
+    expect(countSql).toContain('(window_start IS NOT NULL OR (customer_pick_by IS NULL AND recurring_dispatch_due_date IS NULL))');
+    expect(countSql).toContain('(ss.window_start IS NOT NULL OR (ss.customer_pick_by IS NULL AND ss.recurring_dispatch_due_date IS NULL))');
+    const placedOrLegacyS = '(s.window_start IS NOT NULL OR (s.customer_pick_by IS NULL AND s.recurring_dispatch_due_date IS NULL))';
+    expect(countSql.split(placedOrLegacyS)).toHaveLength(3); // lateral anchor + day_rows
+    expect(updateSql).toContain(placedOrLegacyS);
+    expect(updateSql).toContain('(u.window_start IS NOT NULL OR (u.customer_pick_by IS NULL AND u.recurring_dispatch_due_date IS NULL))');
+    expect(reReadSql).toContain('(t.window_start IS NOT NULL OR (t.customer_pick_by IS NULL AND t.recurring_dispatch_due_date IS NULL))');
+    expect(reReadSql).toContain(placedOrLegacyS);
   });
 
   test('floor only lowers: stored 3, truth 1 → 1', async () => {
@@ -212,6 +273,8 @@ describe('computeStopsAhead', () => {
     ['no technician assigned', baseSvc({ technician_id: null })],
     ['terminal status', baseSvc({ status: 'completed' })],
     ['rescheduled placeholder (still track_state=scheduled)', baseSvc({ status: 'rescheduled' })],
+    ['unplaced customer-pick handoff', baseSvc({ customer_pick_by: '2026-08-14T22:00:00Z', window_start: null })],
+    ['unplaced recurring-dispatch due date', baseSvc({ recurring_dispatch_due_date: TODAY, window_start: null })],
     ['en route to this stop (scheduled card owns the count)', baseSvc({ track_state: 'en_route' })],
     ['on the property already', baseSvc({ track_state: 'on_property' })],
     ['scheduled for a future date', baseSvc({ scheduled_date: '2026-08-15' })],

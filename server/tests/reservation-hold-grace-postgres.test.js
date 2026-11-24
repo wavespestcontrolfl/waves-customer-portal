@@ -147,6 +147,23 @@ postgres('hold grace + extend (real Postgres)', () => {
     else process.env.RESERVATION_COMMIT_GRACE_MINUTES = originalGrace;
   });
 
+  test('zone confirmation counts a booked visit as soon as staff claim the expired hold', async () => {
+    await withHold({ expiresInSeconds: -30, windowStart: '10:00', windowEnd: '11:00' }, async ({ trx, holdId, customerId, date }) => {
+      const availability = require('../services/availability');
+      const city = 'Synthetic Booking City';
+      const zone = { id: randomUUID(), zone_name: city, cities: [city] };
+      await trx('service_zones').insert(zone);
+      await trx('customers').where({ id: customerId }).update({ city });
+      const hour = { start: 600, end: 660 };
+      expect(await availability.loadZoneOccupied(trx, zone, date)).not.toContainEqual(hour);
+
+      await trx('scheduled_services').where({ id: holdId }).update({ customer_id: customerId, status: 'confirmed' });
+      expect(await availability.loadZoneOccupied(trx, zone, date)).toContainEqual(hour);
+      await expect(availability.confirmBooking(null, customerId, date, '10:00', null, { trx }))
+        .rejects.toMatchObject({ code: 'SLOT_TAKEN' });
+    });
+  });
+
   describe('commitGraceMinutes()', () => {
     test('defaults to 10 and clamps to [0, 30]', () => {
       delete process.env.RESERVATION_COMMIT_GRACE_MINUTES;

@@ -1,4 +1,5 @@
-import React, { useState, useEffect, lazy, Suspense } from "react";
+import React, { useState, useEffect, Suspense } from "react";
+import { lazyPanel } from "../../components/LazyPanel";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
@@ -16,10 +17,10 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 // rendered `embedded` so their own AdminCommandHeader is suppressed and this
 // page's header is the single header. Lazy-loaded to match the ContentCalendar
 // tab — heavy optional surfaces stay out of the base blog chunk.
-const AutonomousContentReviewPage = lazy(
+const AutonomousContentReviewPage = lazyPanel(
   () => import("./AutonomousContentReviewPage"),
 );
-const ContentRegistryPage = lazy(() => import("./ContentRegistryPage"));
+const ContentRegistryPage = lazyPanel(() => import("./ContentRegistryPage"));
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // Tier 2 token pass: preserve the existing inline-style architecture while
@@ -567,6 +568,9 @@ function PostEditor({ post, onBack, onUpdate }) {
             Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
             "Content-Type": "application/json",
           },
+          // The server plans from the saved post type and refuses an unsaved
+          // type change that would change the picture rules.
+          body: JSON.stringify({ post_type: editing.post_type || null }),
         },
       );
       const d = await r.json().catch(() => ({}));
@@ -2551,7 +2555,7 @@ function AuditTab() {
 // =========================================================================
 // MAIN PAGE
 // =========================================================================
-const ContentCalendar = lazy(() => import("./ContentCalendar"));
+const ContentCalendar = lazyPanel(() => import("./ContentCalendar"));
 const TABS = [
   { key: "posts", label: "Posts", Icon: FileText },
   { key: "calendar", label: "Calendar", Icon: CalendarDays },

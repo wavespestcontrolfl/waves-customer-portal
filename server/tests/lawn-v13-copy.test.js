@@ -64,7 +64,7 @@ describe('v13 monthly program line', () => {
   const EVIDENCE = {
     pre_emergent: /stonewall|dimension|pre-emergent/i,
     micros: /nutra-tech/i,
-    feed: /24-0-11|10-0-22|44-0-0|dimension 0\.21/i,
+    feed: /24-0-11|10-0-22|44-0-0|dimension 0\.21|stonewall 0\.37% 18-0-10/i,
     fungicide: /artavia|velista|gravex/i,
     broadleaf: /celsius|dismiss/i,
     insect_spot: /arena|talak|acelepryn|dylox/i,
@@ -349,7 +349,12 @@ describe('the service outline bullets with GATE_LAWN_V13 on name treatment categ
           const bullets = outlineService.customerProtocolBullets(visit);
           expect({ grass, month: visit.month, any: bullets.length > 0 }).toEqual({ grass, month: visit.month, any: true });
           for (const bullet of bullets) {
-            expect(ALLOWED.some((label) => bullet.startsWith(`${label} may be relevant`))).toBe(true);
+            if (bullet.startsWith('Insect scouting ')) {
+              expect(visit.month).toBe('May');
+              expect(bullet).toContain('treatment is only as needed after evidence is found');
+            } else {
+              expect(ALLOWED.some((label) => bullet.startsWith(`${label} may be relevant`))).toBe(true);
+            }
             for (const name of recipeNames) expect(bullet.toLowerCase()).not.toContain(name.toLowerCase().split(' ')[0] === 'lesco' ? name.toLowerCase() : name.toLowerCase().split(' ')[0]);
             expect(bullet).not.toMatch(/\d|fl oz|per 1,?000|lb\b|—/i);
           }
@@ -358,7 +363,7 @@ describe('the service outline bullets with GATE_LAWN_V13 on name treatment categ
     });
   });
 
-  test('October and May read as the categories the recipe applies (Dimension 18-0-10 and its spots; Tetrino)', () => {
+  test('October and May read as the categories the recipe applies (Stonewall 0.37% 18-0-10 and its spots; Tetrino)', () => {
     withGate('true', () => {
       const oct = outlineService.customerProtocolBullets(v13.bermuda.visits.find((v) => v.month === 'Oct')).map((b) => b.split(' may be')[0]);
       expect(oct).toEqual(expect.arrayContaining(['Pre-emergent weed control with fertilizer', 'Disease control', 'Insect control', 'Weed spot treatment']));

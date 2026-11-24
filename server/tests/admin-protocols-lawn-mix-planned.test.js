@@ -215,3 +215,58 @@ describe('task-line classification', () => {
     }
   });
 });
+
+// Owner 2026-11-18: LESCO Crosscheck Plus is the house bifenthrin. The gate-off July chinch rescue is the product to use when the June
+// bifenthrin failed, so its line may name only Arena: with the full Crosscheck name in it, the matcher took Crosscheck (the longer name).
+describe('the gate-off July chinch rescue line', () => {
+  test('resolves to Arena 50 WDG with LESCO Crosscheck Plus in the catalog, never to the bifenthrin that failed', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const real = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'protocols.json'), 'utf8'));
+    const july = real.lawn.st_augustine.visits.find((visit) => visit.month === 'Jul');
+    const line = july.secondary.split('\n').find((text) => text.includes('Arena 50 WDG'));
+    expect(line).toBeTruthy();
+    const catalog = [...CATALOG, {
+      id: 'crosscheck', name: 'LESCO Crosscheck Plus', aliases: ['Crosscheck Plus', 'Talstar P'],
+      default_rate_per_1000: 0.5, rate_unit: 'fl_oz', cost_per_unit: 0.2414, cost_unit: 'fl_oz',
+    }];
+    const items = resolveProtocolItems(parseProtocolLines(line, 'conditional'), catalog, {}, {});
+    expect(items.map((item) => item.product?.id)).toEqual(['arena']);
+  });
+});
+
+// Owner 2026-11-18: the gate-off June bifenthrin lines name LESCO Crosscheck Plus, whose label (page 7) keeps a ground spray 25 ft from
+// lakes, ponds and streams. The tank sheet shows each line with the setback, still a rescue the technician selects.
+describe('the gate-off June LESCO Crosscheck Plus lines', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const real = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'protocols.json'), 'utf8'));
+  const CROSSCHECK = {
+    id: 'crosscheck', name: 'LESCO Crosscheck Plus', aliases: ['Crosscheck Plus'],
+    default_rate_per_1000: 0.5, rate_unit: 'fl_oz', cost_per_unit: 0.2414, cost_unit: 'fl_oz',
+  };
+
+  test.each([
+    ['A_St_Aug_Sun', 'st_augustine'],
+    ['C1_Bermuda', 'bermuda'],
+  ])('%s: the sheet line keeps 25 ft from ponds, lakes and canals', async (trackParam, track) => {
+    const fixture = protocols.lawn[track];
+    protocols.lawn[track] = { name: `Fixture ${track}`, visits: [real.lawn[track].visits.find((v) => v.month === 'Jun')] };
+    const catalog = [...CATALOG, CROSSCHECK];
+    db.mockImplementation((table) => {
+      if (table === 'equipment_calibrations as ec') return readQuery([calibration]);
+      if (table === 'products_catalog') return readQuery(catalog);
+      if (table === 'product_aliases') return readQuery(catalog.flatMap((product) => product.aliases.map((alias_name) => ({ product_id: product.id, alias_name }))));
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    try {
+      const body = await lawnMix({ track: trackParam, month: '6' });
+      const items = body.items.filter((item) => item.product?.id === 'crosscheck');
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ scope: 'CONDITIONAL_RESCUE', selected: false });
+      expect(items[0].raw).toMatch(/LESCO Crosscheck Plus curative[^\n]*; keep 25 ft from ponds, lakes and canals/);
+    } finally {
+      if (fixture) protocols.lawn[track] = fixture; else delete protocols.lawn[track];
+    }
+  });
+});

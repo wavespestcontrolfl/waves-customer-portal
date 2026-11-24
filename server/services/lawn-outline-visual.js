@@ -11,14 +11,15 @@
 // Customer words: the reviewed copy of the scope page (two Fable rounds). Product names appear only in the product list.
 const lawnRounds = require('./lawn-rounds');
 const { visitForRound } = require('./lawn-program');
+const { NORTH_PORT_FERTILIZER_SETBACKS } = require('./lawn-fertilizer-safety');
 const { etDateString } = require('../utils/datetime-et');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTH_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const MONTH_INITIALS = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
-const KEY_STEPS = Object.freeze(['feeding', 'barrier', 'micros', 'insects']);
-const ROUND_SHORT = Object.freeze(['Barrier + color', 'Feed + barrier', 'Spring feed', 'Insects', 'Color + barrier', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Potassium feed']);
-const MONTH_SHORT = Object.freeze(['Barrier + color', 'Feed', 'Barrier + color', 'Feed', 'Insects', 'Color + barrier', 'Inspection', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Feed', 'Potassium feed']);
+const KEY_STEPS = Object.freeze(['feeding', 'barrier', 'micros', 'inspection']);
+const ROUND_SHORT = Object.freeze(['Barrier + color', 'Feed + barrier', 'Spring feed', 'Insect scouting', 'Color + barrier', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Potassium feed']);
+const MONTH_SHORT = Object.freeze(['Barrier + color', 'Feed', 'Barrier + color', 'Feed', 'Insect scouting', 'Color + barrier', 'Inspection', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Feed', 'Potassium feed']);
 const PLAN_LABELS = Object.freeze({ rounds: '9 visits a year, one per round', months12: '12 visits a year, one a month' });
 // The month bar's words. A plan that is not known (a 6-visit plan, several lawn
 // lines) gets no visit count: its words are the month list's own approved line plus the 12-visit body without "One visit a month".
@@ -76,8 +77,8 @@ const ROUND_WORDS = Object.freeze([
     ]
   },
   {
-    title: "Insect season",
-    why: "Before the rains, chinch bugs and other lawn insects peak in hot, sunny turf. The sunny turf gets the program's one whole-lawn insect treatment where it fits the property, and we spot treat chinch bugs, weeds and dry spots elsewhere.",
+    title: "Insect scouting",
+    why: "Before the rains, chinch bugs and other lawn insects can peak in hot, sunny turf. We scout first and record the target and current observations. Insect treatment is only as needed after current evidence is found; a scouting-only visit is valid. We also check for weeds, dry spots and disease.",
     atHome: "Text us a photo the day a dry-looking patch shows on a watered lawn.",
     links: [
       {
@@ -247,7 +248,7 @@ const FAQ_ROWS = Object.freeze([
   },
   {
     q: "Are chinch bugs and other lawn insects included?",
-    a: "Yes. We confirm chinch bugs at the edge of the damage, then treat where we find them, and we rotate products to slow resistance. In round 4, the sunny turf gets a whole-lawn insect treatment where it fits the property. Caterpillars, mole crickets and grubs are covered too. Fire ant control is an add-on, on request.",
+    a: "Yes. In round 4, we scout and record the target and current observations. Insect treatment is only as needed after evidence is found: chinch bugs counted at a damaged edge, or current grub signs plus a local flight or hatch indication. A scouting-only visit is valid. Caterpillars and mole crickets are covered too. Fire ant control is an add-on, on request.",
     links: [
       {
         label: "Southern chinch bug",
@@ -260,8 +261,8 @@ const FAQ_ROWS = Object.freeze([
         source: "Waves blog"
       }
     ],
-    aMonths: "Yes. We confirm chinch bugs at the edge of the damage, then treat where we find them, and we rotate products to slow resistance. In May, the sunny turf gets a whole-lawn insect treatment where it fits the property. Caterpillars, mole crickets and grubs are covered too. Fire ant control is an add-on, on request.",
-    aUnknown: "Yes. We confirm chinch bugs at the edge of the damage, then treat where we find them, and we rotate products to slow resistance. Caterpillars, mole crickets and grubs are covered too. Fire ant control is an add-on, on request."
+    aMonths: "Yes. In May, we scout and record the target and current observations. Insect treatment is only as needed after evidence is found: chinch bugs counted at a damaged edge, or current grub signs plus a local flight or hatch indication. A scouting-only visit is valid. Caterpillars and mole crickets are covered too. Fire ant control is an add-on, on request.",
+    aUnknown: "Yes. We scout and record the target and current observations. Insect treatment is only as needed after evidence is found: chinch bugs counted at a damaged edge, or current grub signs plus a local flight or hatch indication. A scouting-only visit is valid. Caterpillars and mole crickets are covered too. Fire ant control is an add-on, on request."
   },
   {
     q: "What about fungus and mushrooms?",
@@ -461,17 +462,25 @@ function roundAsNeededSteps(round, months, trackKey, kit) {
 }
 
 // The nine rounds of the program year that holds `now`, with dates, day counts and derived steps.
-function roundFacts(programYear, trackKey, kit) {
+function roundFacts(programYear, trackKey, kit, jurisdictionId) {
   return lawnRounds.LAWN_ROUND_TABLE.map(({ round }) => {
     const start = lawnRounds.roundStart(programYear, round);
     const end = lawnRounds.roundEnd(programYear, round);
+    const splitSpring = round === 3 && jurisdictionId === 'north_port_fl';
     return {
       n: round,
       start,
       end,
       days: dayDiff(start, end) + 1,
       window: windowText(start, end),
-      main: roundMainSteps(round, trackKey, kit),
+      main: splitSpring ? ['inspection'] : roundMainSteps(round, trackKey, kit),
+      words: splitSpring ? {
+        ...ROUND_WORDS[round - 1],
+        short: 'Feed in March only',
+        title: 'March feeding and April inspection',
+        why: 'A March visit can include the spring feeding. From April 1 we hold nitrogen and phosphorus on turf. We inspect for take-all root rot and check damaged areas for chinch bugs before choosing spot treatments.',
+        extra: 'If this is your first visit, we check whether a spring weed barrier fits your lawn. A barrier that contains nitrogen or phosphorus can be used only during the March part of this round.',
+      } : ROUND_WORDS[round - 1],
       asNeeded: roundAsNeededSteps(round, monthsInRange(start, end), trackKey, kit),
     };
   });
@@ -489,9 +498,12 @@ function limitBand(rule, barStart, year) {
   const start = ymd(year, startMonth, startDay);
   const end = ymd(year, endMonth, endDay);
   const area = rule.jurisdiction_name ? `Your rule area: ${rule.jurisdiction_name}. ` : '';
+  const northPort = rule.jurisdiction_id === 'north_port_fl';
+  const scope = northPort ? ' on turf' : '';
+  const caption = `${area}No nitrogen or phosphorus${scope} from ${MONTH_FULL[startMonth - 1]} ${startDay} to ${MONTH_FULL[endMonth - 1]} ${endDay}; micronutrients keep the color instead.`;
   return {
     limit: { offset: dayDiff(barStart, start), days: dayDiff(start, end) + 1, label: LIMIT_LABEL },
-    caption: `${area}No nitrogen or phosphorus from ${MONTH_FULL[startMonth - 1]} ${startDay} to ${MONTH_FULL[endMonth - 1]} ${endDay}; micronutrients keep the color instead.`,
+    caption: northPort ? [caption, ...NORTH_PORT_FERTILIZER_SETBACKS].join(' ') : caption,
   };
 }
 
@@ -510,13 +522,16 @@ function roundsBar({ rounds, programYear, rule, kit }) {
     days: r.days,
     window: r.window,
     main: r.main,
-    short: ROUND_SHORT[r.n - 1],
+    short: r.words.short || ROUND_SHORT[r.n - 1],
     from: r.start.slice(5),
     to: r.end.slice(5),
-    now: `You are here: round ${r.n} (${r.window}).`,
+    now: `You are here: round ${r.n} (${r.window}).${r.words.short ? ` ${r.words.title}.` : ''}`,
     aside: `Round ${r.n} · ${r.window}`,
   }));
-  const bullets = rounds.map((r) => stepsLine(`Round ${r.n} (${r.window})`, r.main, kit.stepLabels));
+  const bullets = rounds.map((r) => {
+    const label = `Round ${r.n} (${r.window})`;
+    return r.words.short ? `${label}: ${r.words.short}. ${r.words.why}` : stepsLine(label, r.main, kit.stepLabels);
+  });
   if (band) bullets.push(band.caption);
   return barSection('Your Year In Nine Rounds', 'Nine visits a year, one in each round. Each round has set dates and one main job. Tap a round to jump to it.', bullets, {
     blocks,
@@ -530,17 +545,17 @@ function roundsBar({ rounds, programYear, rule, kit }) {
   }, kit);
 }
 
-function monthsBar({ plan, trackKey, year, rule, kit }) {
+function monthsBar({ plan, months, year, rule, kit }) {
   const words = MONTH_BAR_WORDS[plan] || MONTH_BAR_WORDS.unknown;
   const barStart = ymd(year, 1, 1);
   const band = limitBand(rule, barStart, year);
-  const blocks = MONTH_ABBR.map((label, index) => ({
+  const blocks = months.map(({ label, main }, index) => ({
     key: index + 1,
     label,
     days: daysInMonth(year, index + 1),
     window: label,
-    main: kit.monthSteps(kit.protocolVisitForMonth(trackKey, index + 1)).main,
-    short: MONTH_SHORT[index],
+    main,
+    short: index === 3 && main.includes('inspection') ? 'Inspection' : MONTH_SHORT[index],
     from: `${pad(index + 1)}-01`,
     to: `${pad(index + 1)}-${pad(daysInMonth(LEAP_YEAR, index + 1))}`,
     now: `You are here: ${MONTH_FULL[index]}.`,
@@ -569,7 +584,7 @@ function roundLinks(n, words, jurisdictionId) {
 
 function roundsSection(rounds, jurisdictionId, kit) {
   const cards = rounds.map((r) => {
-    const words = ROUND_WORDS[r.n - 1];
+    const words = r.words;
     return {
       n: r.n,
       window: r.window,
@@ -646,19 +661,20 @@ function faqSection(plan, kit) {
 
 // ── entry points ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 // The program year holding `now` (ET) and its nine rounds.
-function roundsContext(now, trackKey, kit) {
+function roundsContext(now, trackKey, kit, jurisdictionId) {
   const { programYear } = lawnRounds.roundOf(etDateString(now));
-  return { programYear, rounds: roundFacts(programYear, trackKey, kit) };
+  return { programYear, rounds: roundFacts(programYear, trackKey, kit, jurisdictionId) };
 }
 
 // The outline's sections under the gate, in the approved order. `parts` carries what the outline builds itself: the visit steps,
 // the exclusions and, for a monthly plan, today's month list (called only then).
 function visualSections({ plan, trackKey, jurisdictionRule, productList, now, kit, parts }) {
   const jurisdictionId = jurisdictionRule?.jurisdiction_id;
-  const rounding = plan === 'rounds' ? roundsContext(now, trackKey, kit) : null;
+  const rounding = plan === 'rounds' ? roundsContext(now, trackKey, kit, jurisdictionId) : null;
+  const months = rounding ? null : parts.monthList();
   const head = rounding
     ? [roundsBar({ ...rounding, rule: jurisdictionRule, kit }), roundsSection(rounding.rounds, jurisdictionId, kit)]
-    : [monthsBar({ plan, trackKey, year: Number(etDateString(now).slice(0, 4)), rule: jurisdictionRule, kit }), parts.monthList()];
+    : [monthsBar({ plan, months: months.visual.months, year: Number(etDateString(now).slice(0, 4)), rule: jurisdictionRule, kit }), months];
   return [
     ...head,
     parts.typicalVisit,

@@ -139,7 +139,7 @@ const TAB_GROUPS = [
     key: "planning",
     label: "Planning",
     Icon: ShoppingCart,
-    tabs: ["forecast", "unit-review", "restock"],
+    tabs: ["forecast", "limits", "unit-review", "restock"],
   },
   {
     key: "content",
@@ -177,6 +177,10 @@ const LEAF_META = {
   },
   forecast: {
     label: "Forecast",
+    Icon: ShoppingCart,
+  },
+  limits: {
+    label: "Limits",
     Icon: ShoppingCart,
   },
   "unit-review": {
@@ -230,6 +234,8 @@ const OWNER_ONLY_INVENTORY_TABS = new Set([
   // Unit review exists to fix inventory units (POST .../unit-review/:id/fix is
   // admin-only): a technician tab that could only ever 403 on its one action.
   "unit-review",
+  // Suggested reorder limits: the read and the save (PUT /:id) are owner-only.
+  "limits",
 ]);
 export default function InventoryPage() {
   const { lastMutation } = useIntelligenceBarActions();
@@ -518,6 +524,7 @@ export default function InventoryPage() {
           canAuthor={isAdminRole}
         />
       )}
+      {tab === "limits" && <ReorderLimitsTab showToast={showToast} onUpdate={loadStats} />}
       {tab === "unit-review" && <UnitReviewTab showToast={showToast} />}
       {tab === "restock" && (
         <RestockRequestsTab
@@ -2052,6 +2059,215 @@ function WaveGuardForecastTab({
     </Card>
   );
 }
+// Suggested reorder limits (GET /reorder-suggestions, read only). "Use"
+// saves the suggested threshold + reorder amount through the ordinary product
+// edit (PUT /:id). It never turns "reorder when low" on or off.
+const IDLE_LIMIT_STATUSES = new Set(["no_usage"]);
+const LIMIT_STATUS_LABEL = {
+  ok: "",
+  no_unit: "No stock unit",
+  no_usage: "No use",
+  needs_unit_review: "Unit review",
+  no_pack_size: "Pack size unread",
+  no_price: "No price row",
+  blackout_capped: "June 1 cap",
+  blackout_hold: "Blackout hold",
+  demand_unknown: "Demand unknown",
+};
+function limitRowIsIdle(row) {
+  return IDLE_LIMIT_STATUSES.has(row.status) || (row.status === "no_unit" && !row.usageRecords);
+}
+function limitAlreadySet(row) {
+  return row.currentThreshold === row.suggestedThreshold && row.currentReorder === row.suggestedReorder;
+}
+// Fertilizer rows near or in the June 1 - Sept 30 blackout stay
+// informational: the sweep reads a saved amount without the seasonal cap, so
+// a capped number would become the standing order. A zero reorder would read
+// as "not set up".
+const SEASONAL_LIMIT_STATUSES = new Set(["blackout_hold", "blackout_capped"]);
+function limitCanUse(row) {
+  return row.suggestedThreshold != null && row.suggestedReorder > 0 && !SEASONAL_LIMIT_STATUSES.has(row.status);
+}
+function limitIsLow(row) {
+  return row.onHand != null && row.suggestedThreshold != null && row.onHand <= row.suggestedThreshold;
+}
+const orDash = (v) => (v == null ? "—" : v);
+function ReorderLimitRow({ row, saving, onUse }) {
+  const canUse = limitCanUse(row);
+  const saved = limitAlreadySet(row);
+  return (
+    <TR>
+      <TD>
+        <strong>{row.name}</strong>
+        <div className="text-ink-secondary text-ui-body">
+          {row.vendor || "No vendor"}
+          {row.autoReorder ? " · reorder when low on" : ""}
+        </div>
+      </TD>
+      <TD nums>
+        {orDash(row.onHand)} {row.unit || ""}
+        {limitIsLow(row) && <div><Badge tone="warn">At or under suggested</Badge></div>}
+      </TD>
+      <TD nums>
+        {orDash(row.dailyUse)}
+        {row.basis && <div className="text-ink-secondary text-ui-body">{row.basis}</div>}
+      </TD>
+      <TD nums>
+        {orDash(row.currentThreshold)} → <strong>{orDash(row.suggestedThreshold)}</strong>
+      </TD>
+      <TD nums>
+        {orDash(row.currentReorder)} → <strong>{orDash(row.suggestedReorder)}</strong>
+        {row.packs != null && (
+          <div className="text-ink-secondary text-ui-body">
+            {row.packs} × {row.packSize} {row.unit}
+          </div>
+        )}
+      </TD>
+      <TD>
+        {LIMIT_STATUS_LABEL[row.status] && (
+          <div><Badge tone="warn">{LIMIT_STATUS_LABEL[row.status]}</Badge></div>
+        )}
+        {row.note && <div className="text-ink-secondary text-ui-body">{row.note}</div>}
+      </TD>
+      <TD>
+        {canUse && (
+          <Button
+            onClick={onUse}
+            disabled={saving || saved}
+            variant="primary"
+          >
+            {saved ? "Saved" : "Use"}
+          </Button>
+        )}
+      </TD>
+    </TR>
+  );
+}
+
+function ReorderLimitsTab({ showToast, onUpdate }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [savingId, setSavingId] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  const [loadError, setLoadError] = useState(null);
+  const load = useCallback(async () => {
+    // Clear the error first so the loading state replaces Retry at once.
+    setLoadError(null);
+    setLoading(true);
+    try {
+      setData(await adminFetch("/admin/inventory/reorder-suggestions"));
+    } catch (err) {
+      // A failed read never leaves old suggestions (and their Use buttons) up.
+      setData(null);
+      setLoadError(err.message || String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [showToast]);
+  useEffect(() => {
+    load();
+  }, [load]);
+  async function acceptSuggestion(row) {
+    setSavingId(row.productId);
+    try {
+      await adminFetch(`/admin/inventory/${row.productId}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          lowStockThreshold: row.suggestedThreshold,
+          reorderQuantity: row.suggestedReorder,
+          // The limits were worked out in this unit; the server refuses the
+          // save if the product's unit changed since the report loaded.
+          expectedInventoryUnit: row.unit,
+        }),
+      });
+      setData((prev) => prev && ({
+        ...prev,
+        products: prev.products.map((p) =>
+          p.productId === row.productId
+            ? { ...p, currentThreshold: row.suggestedThreshold, currentReorder: row.suggestedReorder }
+            : p,
+        ),
+      }));
+      showToast(`${row.name}: limits saved`);
+      onUpdate?.(); // the header's low-stock count reads the new threshold
+    } catch (err) {
+      if (err.status === 409) {
+        // The stock unit changed since this report loaded: its numbers are
+        // stale, so reload instead of letting the same save repeat.
+        showToast(`${row.name}: the stock unit changed; reloading suggestions`);
+        setSavingId("");
+        load();
+        return;
+      }
+      showToast(`Save failed: ${err.message}`);
+    } finally {
+      setSavingId("");
+    }
+  }
+  const rows = (data?.products || []).filter((r) => showAll || !limitRowIsIdle(r));
+  const hidden = (data?.products || []).length - rows.length;
+  const o = data?.options;
+  return (
+    <Card className="p-5 mb-3">
+      <div className="flex justify-between gap-[12px] flex-wrap mb-[14px]">
+        <div>
+          <h3 className="m-0 text-zinc-900">Suggested reorder limits</h3>
+          <p className="[margin:4px_0_0] text-ink-secondary text-ui-body">
+            From recorded use and the lawn schedule
+            {o ? ` (${o.leadDays}-day lead time, ${o.bufferDays}-day buffer, ${o.reorderDays}-day reorder, whole packs)` : ""}.
+            Use saves the threshold and reorder amount; it does not turn on
+            reorder when low.
+          </p>
+          {data?.forecastError && (
+            <p className="[margin:4px_0_0] text-warn-fg text-ui-body">
+              Lawn schedule: {data.forecastError}
+            </p>
+          )}
+        </div>
+        <div className="flex gap-[8px] items-start">
+          <Checkbox
+            label={`Show all${hidden ? ` (${hidden} hidden)` : ""}`}
+            checked={showAll}
+            onChange={(e) => setShowAll(e.target.checked)}
+          />
+          <Button onClick={load} disabled={loading || Boolean(savingId)} variant="secondary">
+            Refresh
+          </Button>
+        </div>
+      </div>
+      {loadError ? (
+        <LoadRetry what="suggested limits" error={loadError} onRetry={load} />
+      ) : loading ? (
+        <ActionFeedback>Working out limits (this reads the lawn schedule, about a minute)...</ActionFeedback>
+      ) : rows.length === 0 ? (
+        <div className="text-zinc-900 text-ui-body">No products with use to suggest limits for.</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
+                {["Product", "On hand", "Use / day", "Threshold", "Reorder", "Note", ""].map((h) => (
+                  <TH key={h}>{h}</TH>
+                ))}
+              </TR>
+            </THead>
+            <TBody>
+              {rows.map((row) => (
+                <ReorderLimitRow
+                  key={row.productId}
+                  row={row}
+                  saving={Boolean(savingId)}
+                  onUse={() => acceptSuggestion(row)}
+                />
+              ))}
+            </TBody>
+          </Table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function UnitReviewTab({ showToast }) {
   const [data, setData] = useState({
     products: [],

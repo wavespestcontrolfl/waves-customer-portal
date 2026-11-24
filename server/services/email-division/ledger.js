@@ -126,6 +126,16 @@ async function settleAbandonedReservations(trx, customerId, now) {
   return stale.length;
 }
 
+// The sweep above, for a reader that is not reserving: under the same per-customer lock, in its own
+// transaction. A reader that counts `reserved` rows (the plan offer's one-offer-per-12-months rule) calls it
+// first, so a row a crash left behind past RESERVATION_LIFETIME_MS is settled, not counted.
+async function settleStaleReservations(customerId, now = new Date()) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${customerId}`]);
+    return settleAbandonedReservations(trx, customerId, now);
+  });
+}
+
 // The row an idempotency key names must be THIS operation's: same customer,
 // stream, email key, marketing class and pest. A key reused for another
 // customer (a batch sender's campaign-level key, or two concurrent
@@ -645,5 +655,5 @@ async function settleDispatchOutcome(row, outcome) {
 }
 
 module.exports = {
-  reserve, markSent, markSkipped, markFailed, reconcileFromMessage, reserveWithCap, reservationHandoff, sendWithLedger, RESERVATION_LIFETIME_MS,
+  reserve, markSent, markSkipped, markFailed, reconcileFromMessage, reserveWithCap, reservationHandoff, sendWithLedger, settleStaleReservations, messageStateFor, RESERVATION_LIFETIME_MS,
 };

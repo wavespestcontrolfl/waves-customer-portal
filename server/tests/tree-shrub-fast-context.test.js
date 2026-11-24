@@ -503,6 +503,22 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx.products.find((p) => p.id === 'orn').tsFlags.npBlackout).toBe(blackout);
   });
 
+  test.each([
+    ['34240', 'sarasota_venice', false],
+    ['34202', 'manatee_parrish', true],
+    [null, 'other_unknown', false],
+  ])('a Lakewood Ranch visit in ZIP %s shows the applicable NutriRoot choice', async (zip, zone, soilTestEligible) => {
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit({
+        scheduled_date: '2026-11-19',
+        service_address_line1: '200 Sample Lane', service_address_city: 'Lakewood Ranch', service_address_zip: zip,
+      }),
+      products_catalog: [...catalog, cat('nutriroot', 'Arborjet NutriRoot 2-2-3', { category: 'fertilizer' })],
+    }));
+    expect(ctx).toMatchObject({ eligible: true, ordinanceZone: zone });
+    expect(ctx.products.find((row) => row.id === 'nutriroot').tsFlags.nutriRootSoilTestEligible).toBe(soilTestEligible);
+  });
+
   test('a visit with no stamped address takes the customer city zone', async () => {
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit({ scheduled_date: '2026-07-10', cust_city: 'North Port' }),

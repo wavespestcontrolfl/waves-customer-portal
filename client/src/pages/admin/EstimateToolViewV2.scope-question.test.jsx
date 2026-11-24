@@ -18,6 +18,7 @@ import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import EstimateToolViewV2 from "./EstimateToolViewV2";
+import { OPEN_QUESTION_NEXT_STEP } from "../../components/admin/ScopeQuestionPrompt";
 
 vi.mock("../../components/admin/EstimateSendDialog", () => ({ useEstimateSend: () => vi.fn() }));
 
@@ -162,6 +163,13 @@ describe("scope question", { timeout: 20000 }, () => {
     // The Places result carries its required source attribution.
     expect(within(prompt).getByText("Google Maps", { exact: true })).toBeInTheDocument();
     expect(prompt).toHaveTextContent(QUESTION);
+    // The open question reads as the next step and comes before the property
+    // card: for a business inside a shared parcel that card is all "Not
+    // found" until staff answer, and read first it looks like a failed lookup
+    // (owner report 2026-11-19).
+    expect(prompt).toHaveTextContent(OPEN_QUESTION_NEXT_STEP);
+    const card = screen.getByRole("region", { name: "Property lookup results" });
+    expect(prompt.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByRole("button", { name: "Just their space" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "The whole building" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Not this business" })).toBeEnabled();
@@ -184,6 +192,8 @@ describe("scope question", { timeout: 20000 }, () => {
     await waitFor(() => expect(lookupBodies()).toHaveLength(2));
     expect(lookupBodies()[1]).toMatchObject({ address: ADDRESS, occupancy: "suite" });
     await waitFor(() => expect(screen.queryByText(QUESTION)).not.toBeInTheDocument());
+    // Answered: nothing is waiting on staff, so the next-step line goes too.
+    expect(screen.queryByText(OPEN_QUESTION_NEXT_STEP)).not.toBeInTheDocument();
     pickPest();
     const generate = screen.getByRole("button", { name: "Generate Estimate", exact: true });
     expect(generate).toBeEnabled();

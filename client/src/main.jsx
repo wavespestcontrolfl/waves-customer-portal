@@ -7,7 +7,14 @@ import { initNativePush } from './native/nativePush';
 import { initNativeLinks } from './native/nativeLinks';
 import { clearStaffDeviceData, getAdminAuthToken } from './lib/adminAuth';
 import { installStaffSessionGuard } from './lib/staffSessionGuard';
-import { handleVitePreloadError } from './lib/staleChunkReload';
+import { installPortalVersionWatch } from './lib/portalVersion';
+import { handleVitePreloadError, watchPageUse } from './lib/staleChunkReload';
+
+// Reads which client build the server runs from each staff API answer, so an
+// out-of-date staff tab can tell (lib/portalVersion.js). First, so later
+// fetch wrappers (the staff session guards) wrap it and can still remove
+// themselves.
+installPortalVersionWatch();
 
 // A staff session the server refuses anywhere in the app (admin pages too)
 // deletes the offline route copy and offline pass, so a later no-signal
@@ -23,7 +30,12 @@ installStaffSessionGuard({ getToken: getAdminAuthToken, onRejected: clearStaffDe
 // genuine outage still surfaces instead of reload-looping. The handler also
 // marks the reload pending so the import it swallows (it resolves undefined)
 // shows a loading placeholder, not the crash screen — see staleChunkReload.js.
+// On a staff page it never reloads: the import fails, and the page or part
+// that asked for the code decides.
 window.addEventListener('vite:preloadError', (event) => handleVitePreloadError(event));
+// A staff tab used on the page in view since the last page move keeps the
+// tab at a missing page's code: its retry screen asks before it reloads.
+watchPageUse();
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

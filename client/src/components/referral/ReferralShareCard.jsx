@@ -15,7 +15,8 @@ import { useState } from 'react';
  * promoter (a durable row), which is why a render must never do it.
  *
  * Props:
- *   referral   — { headline, cta } from the render payload; null → renders nothing
+ *   referral   — { headline, cta, offer? } from the render payload; null → renders nothing.
+ *                `offer` (GATE_REFERRAL_STEP2) is one server-composed line shown under the headline
  *   fetchLink  — async () => { code, link, smsBody, emailSubject, emailBody };
  *                the caller owns the endpoint (and any analytics beacon)
  *   staffView  — true suppresses the fetch entirely (a QA tap must not enroll)
@@ -23,8 +24,8 @@ import { useState } from 'react';
  *                the fetch decision — analytics, never enrollment
  *   className  — outer section class hook (the report page passes its
  *                report-card classes; the estimate page uses the glass card)
- *   styles     — optional inline style overrides { heading, button, link,
- *                code, copy } for surfaces without the report stylesheet
+ *   styles     — optional inline style overrides { heading, offer, button,
+ *                link, code, copy } for surfaces without the report stylesheet
  */
 export default function ReferralShareCard({ referral, fetchLink, staffView = false, onTap = null, className = '', dataSection = 'referral', style = null, styles = {} }) {
   // idle → loading → open | failed | staff
@@ -54,7 +55,10 @@ export default function ReferralShareCard({ referral, fetchLink, staffView = fal
   };
   return (
     <section data-glass="card" className={className} data-section={dataSection} style={style || undefined}>
-      <h2 style={styles.heading || undefined}>{referral.headline}</h2>
+      <h2 style={styles.heading}>{referral.headline}</h2>
+      {referral.offer ? (
+        <p className="cross-sell-fine referral-offer" style={styles.offer}>{referral.offer}</p>
+      ) : null}
       {shareState === 'open' && share ? (
         <div className="referral-share">
           <div className="referral-code-chip">

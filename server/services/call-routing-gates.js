@@ -1095,6 +1095,9 @@ function buildTriageItem({
     // The caller chose annual prepay on a call the pipeline booked (call-prepay-choice.js, GATE_CALL_PREPAY_CHOICE):
     // one admin-only card with a one-tap accept of the open estimate as annual prepay.
     call_prepay_choice: 'billing_review',
+    // A call booked a pest visit while the customer had an open estimate (call-phone-yes-accept.js,
+    // GATE_CALL_PHONE_YES_ACCEPT): one admin card, so the office accepts the estimate.
+    call_phone_yes: 'billing_review',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;
@@ -1140,6 +1143,9 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
   // An owed first-name capture on the call's linked customer: replacing the recording does
   // not supply the name, and a superseded (terminal) card would block re-filing it.
   'missing_first_name',
+  // The phone-yes card belongs to the booked visit and the open estimate, not to the transcript (also in
+  // SUPERSEDE_KEPT_CARD_SQL below, which the implausible-transcript rejection reads).
+  'call_phone_yes',
 ]);
 
 // Owner ruling 2026-09-30: a street-level address hold's review card (the
@@ -1154,7 +1160,9 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
 // An owed first-name card belongs to the call's linked CUSTOMER, not to the transcript:
 // no transcript cleanup (swap, adopt, or an implausible-transcript rejection) closes it,
 // because a terminal card blocks re-filing it (codex #5559 r13).
-const SUPERSEDE_KEPT_CARD_SQL = "NOT ((reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true') OR (reason_code = 'attached_booking_followup_unbooked' AND COALESCE(payload->>'skipped_reason', '') = 'street_level_address_confirmed_follow_up_unbooked') OR reason_code = 'missing_first_name')";
+// The phone-yes card (GATE_CALL_PHONE_YES_ACCEPT) belongs to the booked visit and the open estimate, for the same
+// reason: its sweep re-reads the yes from the new read, and closes it when the visit or the estimate is gone.
+const SUPERSEDE_KEPT_CARD_SQL = "NOT ((reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true') OR (reason_code = 'attached_booking_followup_unbooked' AND COALESCE(payload->>'skipped_reason', '') = 'street_level_address_confirmed_follow_up_unbooked') OR reason_code = 'call_phone_yes' OR reason_code = 'missing_first_name')";
 
 module.exports = {
   SUPERSEDE_KEPT_CARD_SQL,

@@ -44,9 +44,9 @@ function installFetch({ calls = [CALL], catalog = [ASSESSMENT, PEST] } = {}) {
     if (url.endsWith('/admin/schedule') && options.method === 'POST') return Promise.resolve(json({ id: 'appt-1' }));
     if (url.includes('/admin/triage?')) return Promise.resolve(json({ items: [] }));
     if (url.includes('/admin/services?')) return Promise.resolve(json({ services: catalog }));
-    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [], canChangeAppointmentAddress: false }));
+    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [] }));
     if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [] }));
-    if (url.includes('/reservice-request-suggestion')) return Promise.resolve(json({ enabled: false, suggestion: null }));
+    if (url.includes('/reservice-request-suggestion')) return Promise.resolve(json({ suggestion: null }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));
     if (url.endsWith('/annual-prepay-availability')) return Promise.resolve(json({ enabled: false }));

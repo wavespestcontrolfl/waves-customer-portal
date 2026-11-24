@@ -812,9 +812,11 @@ export default function CreateProjectModal({
         squareFootage: findings.square_footage,
         linearFeet: findings.linear_feet,
         trenchDepthFt: findings.trench_depth_ft,
+        concentrationPct: findings.concentration_pct,
       })
       : null
-  ), [hasChemistryFields, findings.product_name, findings.square_footage, findings.linear_feet, findings.trench_depth_ft]);
+  ), [hasChemistryFields, findings.product_name, findings.square_footage, findings.linear_feet, findings.trench_depth_ft,
+    findings.concentration_pct]);
   // appointmentManaged types complete through the standard appointment flow
   // now — they're not creatable as projects (server 422s them too).
   // linkedCreationOnly types (WDO, pre-treat cert — owner ruling 2026-07-13)

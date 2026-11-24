@@ -17,6 +17,14 @@ const { closeAlertsWhenHandled: closePortalInboxAlerts } = require('../services/
 const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const { preferredRouteDecisionForFeedback } = require('../services/call-route-decisions');
 const { withLockedRouteDecisions, innerJoinRouteFeedback, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_REVISION_SQL } = require('../services/call-routing-gates');
+const {
+  addSourceRegistryJoin,
+  applyCallListOrder,
+  decorateCalls,
+  loadCurrentMonth,
+  sourceSelectColumns,
+} = require('../services/call-log-analytics');
+const { loadRelatedVisits } = require('../services/related-visit-links');
 
 async function tableExists(name) {
   return db.schema.hasTable(name).catch(() => false);
@@ -469,6 +477,8 @@ router.get('/admin/calls', adminAuthenticate, requireAdmin, async (req, res, nex
   try {
     const { days = 30, limit = 50, search, id } = req.query;
     const searchTerm = typeof search === 'string' ? search.trim() : '';
+    const sort = req.query.sort === 'source' ? 'source' : 'received';
+    const order = String(req.query.order || '').toLowerCase() === 'asc' ? 'asc' : 'desc';
     // Exact-id read (the Owed queue deep link pins a call that is outside the
     // default window): same joins and route decoration as the list, no age
     // bound, no search. A non-UUID id is a 400 rather than a Postgres error.
@@ -476,6 +486,9 @@ router.get('/admin/calls', adminAuthenticate, requireAdmin, async (req, res, nex
     if (exactId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(exactId)) {
       return res.status(400).json({ error: 'id must be a UUID' });
     }
+    // Exact-id reads support pinned calls and lazy row details; the ordinary
+    // list/search request owns the one full-company monthly aggregation.
+    const includeCurrentMonth = !exactId && req.query.include_month !== '0';
 
     let q = db('call_log as cl')
       .leftJoin('customers as c', 'cl.customer_id', 'c.id')
@@ -484,13 +497,14 @@ router.get('/admin/calls', adminAuthenticate, requireAdmin, async (req, res, nex
         'c.first_name',
         'c.last_name',
         'c.phone as customer_phone',
-        'c.waveguard_tier'
+        'c.waveguard_tier',
+        ...sourceSelectColumns(db)
       )
       // Voice-agent sandbox calls (the dead GA# test number) are test
       // records, never customer calls — same exclusion the unified inbox
       // applies in conversations.syncVoiceMessageForCall.
-      .modify((qb) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(qb, 'cl.source'))
-      .orderBy('cl.created_at', 'desc');
+      .modify((qb) => require('../services/voice-agent/relay-protocol').whereNotSandboxCall(qb, 'cl.source'));
+    q = addSourceRegistryJoin(q, db, 'cl');
 
     if (exactId) {
       q = q.where('cl.id', exactId);
@@ -510,7 +524,24 @@ router.get('/admin/calls', adminAuthenticate, requireAdmin, async (req, res, nex
     }
 
     const effectiveLimit = exactId ? 1 : searchTerm ? Math.max(parseInt(limit), 1000) : parseInt(limit);
-    const calls = await q.limit(effectiveLimit);
+    q = applyCallListOrder(q, db, { sort, order });
+    const includeOutcomes = !!exactId && req.query.include_outcomes === '1';
+    const outcomesPromise = includeOutcomes
+      ? loadRelatedVisits(db, exactId)
+        .then((items) => ({ status: 'available', items }))
+        .catch((err) => {
+          logger.warn(`[ai-assistant] related call outcomes unavailable code=${err?.code || 'unknown'}`);
+          return { status: 'unavailable', items: null };
+        })
+      : Promise.resolve(null);
+    const [calls, currentMonth, relatedOutcomes] = await Promise.all([
+      q.limit(effectiveLimit),
+      includeCurrentMonth ? loadCurrentMonth(db).catch((err) => {
+        logger.warn(`[ai-assistant] monthly call totals unavailable code=${err?.code || 'unknown'}`);
+        return null;
+      }) : Promise.resolve(null),
+      outcomesPromise,
+    ]);
     const callIds = calls.map((call) => call.id).filter(Boolean);
     const routeDecisionByCall = new Map();
     const routeFeedbackByCall = new Map();
@@ -550,7 +581,13 @@ router.get('/admin/calls', adminAuthenticate, requireAdmin, async (req, res, nex
       }
     }
 
-    const callsWithRouting = calls.map((call) => ({
+    const decoratedCalls = await decorateCalls(db, calls);
+    const callsWithEvidence = relatedOutcomes ? decoratedCalls.map((call) => ({
+      ...call,
+      related_visits_status: relatedOutcomes.status,
+      related_visits: relatedOutcomes.items,
+    })) : decoratedCalls;
+    const callsWithRouting = callsWithEvidence.map((call) => ({
       ...call,
       routeDecision: mapRouteDecision(routeDecisionByCall.get(call.id)),
       routeFeedback: mapRouteFeedback(routeFeedbackByCall.get(call.id)),
@@ -575,6 +612,7 @@ router.get('/admin/calls', adminAuthenticate, requireAdmin, async (req, res, nex
       // GATE_CALL_TRANSCRIPT_SYNC read at call time: the tab renders the
       // clickable audio-synced transcript only when this is true.
       transcript_sync_enabled: gateEnvValue('GATE_CALL_TRANSCRIPT_SYNC'),
+      ...(includeCurrentMonth ? { current_month: currentMonth } : {}),
     });
   } catch (err) { next(err); }
 });

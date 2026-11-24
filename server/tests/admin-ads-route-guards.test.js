@@ -21,6 +21,7 @@ jest.setTimeout(30000);
 
 let mockCurrentRole = 'admin';
 
+jest.mock('../services/ads/campaign-link', () => ({ linkCampaigns: jest.fn().mockResolvedValue({ checked: 0, linked: { gclid_click_view: 0 }, unlinked: 0 }) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => {
   const actual = jest.requireActual('../middleware/admin-auth');
@@ -259,13 +260,13 @@ describe('POST /sync reports a rolled-back search-term snapshot (Codex r13 on #5
     expect(res.status).toBe(502);
     expect(res.body.success).toBe(false);
     expect(res.body.error).toMatch(/Search terms not synced: .*missing locally/);
-    expect(res.body.synced).toEqual({ campaigns: 1, performanceRows: 2, searchTerms: 0 });
+    expect(res.body.synced).toEqual({ campaigns: 1, performanceRows: 2, searchTerms: 0, campaignLinks: 0 });
   });
 
   test('complete sync: 200 success', async () => {
     stubSyncs(() => Promise.resolve([{}, {}, {}]));
     const res = await call('post', '/api/admin/ads/sync', {});
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ success: true, synced: { campaigns: 1, performanceRows: 2, searchTerms: 3 } });
+    expect(res.body).toEqual({ success: true, synced: { campaigns: 1, performanceRows: 2, searchTerms: 3, campaignLinks: 0 } });
   });
 });

@@ -50,6 +50,15 @@ describe('guardMode — the resolved day-move guard, flex over tiers over legacy
   test('both on ⇒ flex takes precedence', () => {
     expect(getAutoDispatchConfig({ routeTiersEnabled: true, flexTierEnabled: true }).guardMode).toBe('flex');
   });
+  // The admin page states a run's flex rule from these (AutoDispatchPage policyText), so an older run keeps its own.
+  test('a flex config records the night freeze (25 h) and the widest band (7); other modes record neither', () => {
+    expect(getAutoDispatchConfig({ routeTiersEnabled: false, flexTierEnabled: true })).toMatchObject({ flexFreezeHours: 25, flexWideRadiusDays: 7 });
+    for (const routeTiersEnabled of [true, false]) {
+      const cfg = getAutoDispatchConfig({ routeTiersEnabled, flexTierEnabled: false });
+      expect(cfg).not.toHaveProperty('flexFreezeHours');
+      expect(cfg).not.toHaveProperty('flexWideRadiusDays');
+    }
+  });
 });
 
 describe('customer recurring handoff prerequisites', () => {
