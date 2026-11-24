@@ -2996,6 +2996,17 @@ router.get('/stats', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /reorder-suggestions — suggested low-stock threshold + reorder amount
+// for every active product (procurement/reorder-limit-suggestions.js). Read
+// only; the Limits tab saves an accepted pair through PUT /:id like any
+// hand edit. Owner-only (not in STAFF_INVENTORY_REQUEST).
+router.get('/reorder-suggestions', async (req, res, next) => {
+  try {
+    const { buildReorderLimitSuggestions } = require('../services/procurement/reorder-limit-suggestions');
+    res.json(await buildReorderLimitSuggestions());
+  } catch (err) { next(err); }
+});
+
 // GET /waveguard-forecast — projected WaveGuard product demand from upcoming lawn appointments.
 router.get('/waveguard-forecast', async (req, res, next) => {
   try {
@@ -3852,6 +3863,17 @@ async function autoReorderPatch(body) {
   return upd;
 }
 
+// Limits tab: suggested limits are worked out in one stock unit. A save that
+// names expectedInventoryUnit is refused (409) when the product's unit is no
+// longer that unit. Returns the error to throw, or null.
+function expectedUnitConflict(body, unit) {
+  if (body.expectedInventoryUnit === undefined) return null;
+  if (normalizeInventoryUnit(body.expectedInventoryUnit || '') === normalizeInventoryUnit(unit || '')) return null;
+  const err = new Error(`Stock unit is now ${unit || 'unset'}, not ${body.expectedInventoryUnit || 'unset'}; refresh the suggested limits`);
+  err.statusCode = 409;
+  return err;
+}
+
 router.put('/:id', async (req, res, next) => {
   try {
     const product = await db('products_catalog').where({ id: req.params.id }).first();
@@ -3906,6 +3928,10 @@ router.put('/:id', async (req, res, next) => {
     // new size — the ounces of a measurable size, null for a count size, so
     // "64 oz" → "32 oz" scales to 32 and "12 count" enters count mode.
     if (upd.container_size !== undefined && req.body.unitSizeOz === undefined) upd.unit_size_oz = quantityToOz(upd.container_size);
+    // Checked before the unit validation below, so a unit cleared since the
+    // report loaded answers 409 (reload), not 400.
+    const unitConflict = expectedUnitConflict(req.body, product.inventory_unit || null);
+    if (unitConflict) return res.status(409).json({ error: unitConflict.message });
     const nextStock = req.body.inventoryOnHand !== undefined
       ? numberOrNull(req.body.inventoryOnHand)
       : numberOrNull(product.inventory_on_hand);
@@ -3947,6 +3973,9 @@ router.put('/:id', async (req, res, next) => {
       const stockBefore = numberOrNull(locked.inventory_on_hand);
       const stockChanged = req.body.inventoryOnHand !== undefined && stockBefore !== nextStock;
       const currentUnit = locked.inventory_unit || null;
+      // Limits tab: re-checked on the locked row (see expectedUnitConflict).
+      const lockedUnitConflict = expectedUnitConflict(req.body, currentUnit);
+      if (lockedUnitConflict) throw lockedUnitConflict;
       if (nextStock != null && currentUnit && nextUnit && normalizeInventoryUnit(currentUnit) !== normalizeInventoryUnit(nextUnit)) {
         const err = new Error(`Inventory unit must stay ${currentUnit} when editing stock; use a manual adjustment after normalizing units`);
         err.statusCode = 400;

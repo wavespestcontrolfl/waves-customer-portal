@@ -2,12 +2,12 @@ const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-cor
 const { toE164, isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { sameGmailInbox } = require('../utils/email-equivalence');
-const { isExcludedLocality, isExcludedZip } = require('./excluded-localities');
+const { isExcludedLocality, isExcludedZip, sharedZipNeedsCity } = require('./excluded-localities');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
 // Owner ruling 2026-09-30: DeSoto County (Arcadia) is NOT served; owner ruling
 // 2026-10-22: the city of Punta Gorda (inside Charlotte County) is NOT served, and
-// owner ruling 2026-11-23 holds more places until a second technician is hired
+// a place can be held until a second technician is hired
 // (services/excluded-localities.js). The three
 // served counties plus the south-Hillsborough towns (config/locations.js
 // SOUTH_HILLSBOROUGH_CITIES, city-keyed, not county-keyed) are the footprint.
@@ -585,10 +585,12 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     if (addr.county && !isInServiceAreaCounty(addr.county)) {
       flags.push('out_of_service_area');
     } else if (isExcludedLocality(addr.city) || isExcludedZip(addr.postal_code)) {
-      // Punta Gorda (owner ruling 2026-10-22) and Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, El Jobean,
-      // Charlotte Harbor and Deep Creek (owner ruling 2026-11-23, until a second technician is hired) sit inside served counties,
-      // so the county check alone passes them.
+      // Punta Gorda (owner ruling 2026-10-22) and any place held until a second technician is hired
+      // (excluded-localities.js; none is held now) sit inside served counties, so the county check alone passes them.
       flags.push('out_of_service_area');
+    } else if (sharedZipNeedsCity(addr.city, addr.postal_code)) {
+      // A ZIP Punta Gorda shares with a served town, with no city: the area is unknown, so hold the address for review.
+      flags.push('address_unverified');
     }
     // Validation was attempted with a real address but the API was unreachable.
     // Don't silently auto-route an address we couldn't verify — hold for review.

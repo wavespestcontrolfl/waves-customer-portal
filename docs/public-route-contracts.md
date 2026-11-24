@@ -4831,6 +4831,8 @@ Lead call/text follow-up (owner 2026-10-24; always on): on `POST /api/webhooks/t
 
 Pre-connect press-1 challenge TwiML (`GATE_CALL_PRECONNECT_SCREEN`; owner 2026-11-20 "ok do this" + 2026-11-23 wording pick, PR #8183): the challenge that `POST /api/webhooks/twilio/voice` returns (to a B-attested unknown caller, and under `GATE_CALL_SCREEN_EXCHANGE_HISTORY` to an exchange-rule hit) is built by `buildPreconnectChallengeTwiML`. First `<Gather input="dtmf" numDigits="1" timeout="6" finishOnKey="" action="/api/webhooks/twilio/voice?screened=1">` says the dialed line's opening plus "To help us stop spam calls, please press 1 to reach our office.". The opening is "Thanks for calling <spokenName>." on a spoke-site line (its own brand, never "Waves"), "Thanks for calling Waves in <spokenTown>." on a Waves line with a town, and "Thanks for calling Waves." otherwise. A second identical `<Gather>` says "This is a recording. To reach our office, press any key, or stay on the line to leave a message.". Then `<Redirect>` to `?screenfail=1`, which routes to the Waves voicemail recorder. Any key passes, `#` included (`finishOnKey=""`, so a lone `#` is a digit, not an empty submit). Never a `<Dial>` before a key, never a `<Hangup>`.
 
+`GATE_CALL_SCREEN_ALL_UNKNOWN` (dark; owner 2026-11-24 "trial", 14-day trial; needs `GATE_CALL_PRECONNECT_SCREEN`; read at call time): on `POST /api/webhooks/twilio/voice`, the trial ADDS the same pre-connect press-1 challenge TwiML (the entry above) for an unknown caller that attestation B and the exchange rule (`GATE_CALL_SCREEN_EXCHANGE_HISTORY`, when on) do not already challenge. Those two triggers are unchanged; the skips here apply only to the calls the trial adds. A trial challenge is skipped when the number is a Waves line, a staff phone or an active technician phone, on a live lead, shorter than 10 digits, or a remembered caller (an earlier inbound call where a person talked for 30 s or more after the staff press 1 (`forward_acceptance.accepted_at`, else `conference_path.accepted_at`, to Twilio's recorded end, `metadata.ended_at`), or an earlier inbound call sent to the Waves voicemail (`answered_by` voicemail) that no staff accepted, with one recording only (no `additional_recordings` or `superseded_recordings`), over 10 s, and a finished transcript that holds words and is not a phone carrier's voicemail greeting, on a call with no Sandy outcome and no Sandy session key (`relay_*` in metadata); `server/services/press1-screen-all-unknown.js`). Re-entries and known callers never reach the check. The customer read and the trial's single statement each get a 1.5 s limit with a cancelling statement timeout; a timeout, an error, or a failed exchange read fails open to normal routing. A call the trial challenged is stamped `metadata.preconnect_screen_all_unknown = 'gated'`. Gate off = the TwiML response is byte-identical and no read runs. Only inbound history counts (a person the office called back is nearly always on a lead). A Twilio redelivery of the first request replays the first delivery's trial challenge (its `preconnect_screen_all_unknown` stamp) before the customer match and every screen read, and never runs the trial read itself; a redelivery that lands before that stamp is stored rings through.
+
 `GATE_CUSTOMER_TEXT_TO_VISIT_TECH` (dark; census M3, 2026-10-25): on `POST /api/webhooks/twilio/sms`, a text from a KNOWN customer to an office line (any line except a technician line), when the sender's number belongs to exactly ONE live customer across every identity phone slot (primary, service contacts, second phone; a number on two customers relays nothing, even when the webhook matched one by the primary phone), also writes a tech-home text card (`tech_notifications` type `tech_line_sms`, headline "Text from your customer") and one push to the technician of each of that customer's visits TODAY (Eastern) that is en route or on site, or is that technician's next open stop in the dispatch day-plan order (`server/services/visit-tech-relay.js`). One card per technician per text. It is registered before the consuming branches (reschedule reply, lead intake), so a consumed reply is relayed too, and it runs after the response is sent. No copy for an admin technician (the owner already gets the office bell), an inactive or office-only (not field-dispatchable) account, a text to the AI customer-chat line, a STOP / START / HELP keyword, a reaction, a courtesy-only text or a staff sender. The TwiML response, the inbox row, the `sms_log` row, the office bell and the owner forward are unchanged, and nothing is sent to the customer. A relay error is logged and the webhook carries on. Gate off = no visit read at all and every response and side effect byte-identical.
 
 `GATE_SMS_BARE_YES_REPLY` (dark, strict `true`, read at call time via `smsBareYesReplyLive()`; owner 2026-10-29, weekly sweep #5007 B3): on `POST /api/webhooks/twilio/sms`, a compliance-eligible sender's bare "YES" (the opt-in detector's keyword `YES`: any case, trailing punctuation ignored, a tapback quoting it included) is handled as START today: the inbox row is typed `opt_in`, suppression is cleared, recipient asks are confirmed, `notification_prefs.sms_enabled` is set, the TwiML response is `<Message>You've been re-subscribed to Waves SMS.</Message>` (owner 2026-11-04: texts say "Waves") (or the "received your request" text after a failed clear), and the handler returns before every later branch. Gate on, `server/services/messaging/bare-yes-reply.js` decides first, right after the carrier-command detector: the YES keeps that START handling and response only while it can restore something — an active `messaging_suppression` row for the number (`loadSuppressionState`), `notification_prefs.sms_enabled = false` on the matched customer, or a recipient ask this YES would confirm (`yesWouldConfirmAsk`, sharing its predicate with `markRecipientOptin`). Otherwise the text continues down the ordinary inbound path as a text with no carrier command: no opt-in response (the ordinary `<Response></Response>` or whatever a later branch answers), no suppression clear, no consent or preference write, no `opt_in` typing, and the existing courtesy rule decides the reply bell. The decision is made once, before the recruiting lookup (so for any sender's bare YES), and every later keyword check reads it: a YES called a reply takes the ordinary recruiting lookup (fail-closed for a plausible applicant, where a command's lookup is best-effort), is a staff text from an active technician's phone (`GATE_TECH_STAFF_GUARDS`), and reaches the visit-technician relay (`GATE_CUSTOMER_TEXT_TO_VISIT_TECH`). One `logger.info` line with the masked phone. A failed or incomplete lookup keeps START. START, SUBSCRIBE, UNSTOP, OPTIN, OPT IN, STOP/HELP and every non-eligible sender are unchanged. Off (unset) = byte-identical.
@@ -5932,12 +5934,13 @@ center/zoom/size, and the whole success body also runs the shared Maps-key
 scrub (`scrubMapsKeysDeep`) as a last line. The marketing site's quote form
 renders `closeUrl` as a plain `<img src>`, which is why the URL is absolute.
 `satellite.inServiceArea` is the coordinate box AND no excluded place: a geocoded or typed city, ZIP or
-address part naming DeSoto, Punta Gorda or one of the places held until a second technician is hired
-(owner ruling 2026-11-23: Rotonda West, Placida, Boca Grande, Babcock Ranch, Gulf Cove / El Jobean, Charlotte Harbor
-and Deep Creek; Englewood and Port Charlotte are served again, same day), `namesExcludedPlace` over
-`services/excluded-localities.js`, is `false`, for a fresh lookup and a cached one alike. A Port Charlotte property
-with no usable ZIP (five digits or ZIP+4) in the geocode, the record or the typed address is `null`, unknown: the held
-shared ZIPs 33980 / 33981 / 33983 carry the name too (`namesPortCharlotteWithoutZip`).
+address part naming DeSoto, Punta Gorda or a place held until a second technician is hired (the
+`NOT_YET_SERVED_*` lists, empty since the hire: Rotonda West, Placida, Boca Grande, Babcock Ranch, Gulf Cove /
+El Jobean, Charlotte Harbor and Deep Creek are served), `namesExcludedPlace` over
+`services/excluded-localities.js`, is `false`, for a fresh lookup and a cached one alike. A property whose only locality
+evidence is a ZIP Punta Gorda shares with a served town (33980 / 33982 / 33983), with no city in the geocode, the record or
+any address text (a state / ZIP tail such as "FL 33982" is not a city), is `null`, unknown (`namesSharedZipWithoutCity`), fresh and cached alike; the quote wizard and the
+call lookup treat only `true` as served.
 `/api/public/map-image/:token` (GET/HEAD, read-only signed satellite image
 proxy; the ONLY way the public lookup, the customer service report
 (`treatmentMap.satellite.live.url`, `stationMap.image.url`) and the customer
@@ -8795,29 +8798,27 @@ street-level quality filtering but `requireInServiceArea:false` (the box
 alone is never grounds to discard a geocode as unresolvable); checked
 against the service area via `checkServiceArea`, applied uniformly to every
 resolved location including a customer's stored coordinates: first, the
-address's own city or ZIP is out when it names Punta Gorda (not served per the
-2026-10-22 owner ruling) or one of the places held until a second technician is
-hired (owner ruling 2026-11-23): Rotonda West, Placida, Boca Grande, Babcock
-Ranch, Gulf Cove / El Jobean, Charlotte Harbor and Deep Creek. Their ZIPs are held
-whole, the three that Punta Gorda shared included (33980, 33982, 33983), so a
-"Port Charlotte" address on 33980 / 33981 / 33983 is held by its ZIP. Englewood and
-Port Charlotte were held for a few hours the same day and are served again
-(owner "ok do this"); North Port is not held
-(`services/excluded-localities.js`, city / ZIP only, no coordinate box); then
-county via
+address's own city or a Punta Gorda-only ZIP (33950, 33951, 33955; 33980, 33982 and 33983 are shared with served towns, so the city decides) is out
+(Punta Gorda is not served per the 2026-10-22 owner ruling, although Charlotte
+County is; `services/excluded-localities.js`, city / ZIP only, no coordinate
+box), and so is a place held until a second technician is hired (the
+`NOT_YET_SERVED_*` lists, empty since the hire; owner ruling 2026-11-23 held
+Rotonda West, Placida, Boca Grande, Babcock Ranch, Gulf Cove / El Jobean,
+Charlotte Harbor and Deep Creek for a few hours); then county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
 `{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,
 DeSoto is not served per the 2026-09-30 owner ruling; when that county is
 Charlotte, a second lookup, `reverseGeocodeLocality`, reads the locality and
-ZIP Google places on the coordinate: an excluded locality or ZIP (including a
-bare 33980 / 33982 / 33983, which are held whole) is out, a 422 `out_of_area`,
-even when the submitted address names none, and a failed or empty lookup, or a "Port Charlotte"
-locality with no ZIP, or, with no Google key, a submitted "Port Charlotte" address with no ZIP (the held shared
-ZIPs 33980 / 33981 / 33983 carry that name too), is 503
-`{ error: 'service_area_unavailable' }`, recoverable; no Sarasota booking makes
-the lookup), else the explicit
-no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
+ZIP Google places on the coordinate: an excluded locality or Punta Gorda-only
+ZIP is out even when the submitted address names none, and a failed or empty
+lookup, or no locality on a shared ZIP 33980 / 33982 / 33983, is 503
+`{ error: 'service_area_unavailable' }`, recoverable), else the explicit
+no-key fallback: outside the coarse box is out; an address with a blank city (or a state / ZIP tail, or only the city
+the ZIP itself maps to, which the lead webhook fills in for a cityless submission) on a
+ZIP Punta Gorda shares with a served town (33980 / 33982 / 33983) cannot be told from Punta Gorda with no lookup to
+place the pin, so it is 503 `{ error: 'service_area_unavailable' }`, recoverable (`sharedZipNeedsCity` in
+`services/excluded-localities.js`, the same answer the keyed path gives for that ZIP); inside the DeSoto exclusion
 rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
 is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no
 DeSoto ZIP); elsewhere in the box is in. Out of area 422s

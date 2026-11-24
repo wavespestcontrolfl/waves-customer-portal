@@ -32,7 +32,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
-const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
+const { isExcludedLocality, isExcludedZip, sharedZipNeedsCity } = require('../excluded-localities');
 const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
 const { etDateString, etCalendarDaysUntil } = require('../../utils/datetime-et');
@@ -107,7 +107,7 @@ function hasNoCounty(county) {
 }
 
 function inServiceArea(county, city, zip) {
-  return isInServiceAreaCounty(clean(county)) && !isExcludedLocality(clean(city)) && !isExcludedZip(clean(zip));
+  return isInServiceAreaCounty(clean(county)) && !isExcludedLocality(clean(city)) && !isExcludedZip(clean(zip)) && !sharedZipNeedsCity(clean(city), clean(zip));
 }
 
 // A trailing extension ("x12", "ext. 12", "extension 12", "#12") is dropped first, so its digits never join the number.
