@@ -34,6 +34,8 @@
  * getClosedHolidays, getBlackoutDates and isBlackoutDate THROW on a read
  * failure instead. The nightly auto-dispatch path passes it (owner 2026-10-09): an unreadable
  * closed-day list there must stop a move, never let one onto a closed day.
+ * Strict getClosedHolidays also throws on a stored value that is not a JSON array (corrupted setting); a missing or empty value
+ * still means every holiday open.
  * Customer-facing callers keep the fail-open default.
  */
 
@@ -106,11 +108,32 @@ function expandWeeklyDaysOff(fromStr, toStr, dowSet) {
   return dates;
 }
 
+// A stored holiday-closures value is well formed when it is missing or empty (every holiday open) or a JSON array.
+// parseHolidayClosures fails open on anything else, which is right for a customer-facing read but wrong for a strict
+// caller: a corrupted value must stop a night move or a days-off sweep, never read as "every holiday open".
+function assertHolidayClosuresWellFormed(value) {
+  if (value == null || value === '') return;
+  let parsed = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw Object.assign(new Error('schedule_holiday_closures is not valid JSON'), { code: 'MALFORMED_SETTING' });
+    }
+  }
+  if (!Array.isArray(parsed)) {
+    throw Object.assign(new Error('schedule_holiday_closures is not a JSON array'), { code: 'MALFORMED_SETTING' });
+  }
+}
+
 // Set of holiday keys the business closes (scheduling/holidays.js). Fail-open
-// (empty set = every holiday open) and `strict`, like getWeeklyDaysOff.
+// (empty set = every holiday open) and `strict`, like getWeeklyDaysOff. Strict
+// also THROWS on a stored value that is not a JSON array (a missing or empty
+// value is still "every holiday open").
 async function getClosedHolidays(conn = db, { strict = false } = {}) {
   try {
     const row = await readOptional(conn, (dbh) => dbh('system_settings').where('key', HOLIDAY_CLOSURES_KEY).first('value'));
+    if (strict) assertHolidayClosuresWellFormed(row && row.value);
     return parseHolidayClosures(row && row.value);
   } catch (err) {
     if (strict) throw err;

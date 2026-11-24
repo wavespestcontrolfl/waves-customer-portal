@@ -125,3 +125,32 @@ describe('a holiday read failure', () => {
     await expect(blackout.getBlackoutLayers('2026-11-01', '2026-11-30', conn)).rejects.toThrow('db down');
   });
 });
+
+describe('a malformed stored holiday list (strict readers fail closed)', () => {
+  const malformed = ['not json', '{"christmas":true}', '"christmas"', '7', 'true'];
+
+  test('the default read fails open: a malformed value closes nothing, exactly as before', async () => {
+    for (const holidays of malformed) {
+      const conn = mockTables({ holidays });
+      expect((await blackout.getClosedHolidays(conn)).size).toBe(0);
+      expect(await blackout.isBlackoutDate('2026-11-26', conn)).toBe(false);
+    }
+  });
+
+  test('a strict read throws on it, through every strict reader', async () => {
+    for (const holidays of malformed) {
+      const conn = mockTables({ holidays });
+      await expect(blackout.getClosedHolidays(conn, { strict: true })).rejects.toMatchObject({ code: 'MALFORMED_SETTING' });
+      await expect(blackout.isBlackoutDate('2026-11-26', conn, { strict: true })).rejects.toMatchObject({ code: 'MALFORMED_SETTING' });
+      await expect(blackout.getBlackoutDates('2026-11-23', '2026-11-27', conn, { strict: true })).rejects.toMatchObject({ code: 'MALFORMED_SETTING' });
+    }
+  });
+
+  test('a missing, empty or well-formed value still reads strict: every holiday open, or the keys listed', async () => {
+    for (const [holidays, size] of [[undefined, 0], ['', 0], ['[]', 0], ['["thanksgiving","christmas"]', 2], [['christmas'], 1]]) {
+      const conn = mockTables({ holidays });
+      expect((await blackout.getClosedHolidays(conn, { strict: true })).size).toBe(size);
+    }
+    expect(await blackout.isBlackoutDate('2026-11-26', mockTables({ holidays: '["thanksgiving"]' }), { strict: true })).toBe(true);
+  });
+});
