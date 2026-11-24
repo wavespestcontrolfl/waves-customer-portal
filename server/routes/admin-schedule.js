@@ -15666,10 +15666,6 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
         await acquireScheduledInvoiceMintLock(trx, req.params.id);
       }
-      // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): the plan's open rows as this save finds them, read
-      // after the fences above and before any write. The save's last step compares them with the rows it
-      // leaves and tells the office about the plan's other visits (planOfficeLines). Gate off: null, no read.
-      const planBefore = await require('../services/scheduling/plan-office-lines').planRowsBefore(trx, req.params.id);
       // Save-time eligibility for the FINAL technician on the FINAL date
       // this save lands on (tech-out P1 pre-push audit): assignScheduleJobs
       // below only runs when the technician itself is changing, so a
@@ -15859,6 +15855,13 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         throw httpError(422, 'Change the address and the recurrence in separate saves.');
       }
 
+      // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): the plan's open rows as this save finds them. Read
+      // HERE: no row has been written yet, and the locks this save takes ahead of its writes are held (the
+      // fences, the plan's maintenance lock when this save takes it, the customer's comms lock and row), so
+      // the waits for them are over and a writer that takes one of them cannot change the plan before the
+      // save's last step. That step compares these rows with the rows the save leaves and tells the office
+      // about the plan's other visits (planOfficeLines). Gate off: null, no read.
+      const planBefore = await require('../services/scheduling/plan-office-lines').planRowsBefore(trx, req.params.id);
       if (assignmentPlan && JSON.stringify(await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope))
         !== JSON.stringify(assignmentPlan)) {
         throw Object.assign(httpError(409, 'Appointments changed routes while saving — reload and save again.'), {

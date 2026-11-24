@@ -23,6 +23,16 @@
  * Both reads are savepoint reads on the save's transaction: a read that fails
  * is logged and gives no line. An advisory line never fails a save.
  * Gate off: no read and no line.
+ *
+ * The two reads take no row lock: an advisory line is not worth a lock that can
+ * hold or fail another writer. The save takes the first read after the locks it
+ * takes ahead of its writes (its fences, the plan's maintenance lock when it
+ * takes it, the customer's comms lock and row): the waits for those are over,
+ * and a writer that takes one of them cannot change the plan between the
+ * reads. A writer that takes none of them (a move of one other visit, an
+ * assignment) and commits a change to one of the plan's other visits between
+ * the reads is read as this save's: the line is then true of the row, and
+ * about another editor's change.
  */
 const { techShiftHoursLive } = require('../../config/feature-gates');
 const { failSoftRead } = require('../../utils/savepoint-read');
