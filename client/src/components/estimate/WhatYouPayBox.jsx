@@ -47,9 +47,25 @@ const feeRowsUnreadable = (input) => feeRowsOf(input).some((row) => carriesPrice
 // proves (same amount as the line's setup). Any other row, of any kind, means a first bill this box
 // cannot describe (a bait-station setup, an add-on, a discount): no box.
 function breakdownIsClean(input) {
+  // With a one-time option on the estimate the breakdown is the ALTERNATE one-time price (an either/or
+  // choice, not a charge beside the plan), so it says nothing about this bill. The real recurring charges
+  // are still read from the fee rows, the up-front rows and the first-visit line.
+  if (input.showOneTimeOption === true) return true;
   const items = Array.isArray(input.oneTimeItems) ? input.oneTimeItems : [];
   const setup = Number(input.firstVisit?.setup);
   return items.every((item) => item?.service === 'waveguard_setup' && setup > 0 && sameCents(Number(item.amount), setup));
+}
+
+// Every displayed service must have its own priced row in the selected frequency: the first application
+// the page quotes is read from those rows, and falls back to a same-day total when a row is unpriced
+// (a partly priced bundle). Rows are matched by service key; an extra, missing or unpriced row means no box.
+const ROW_PRICE_KEYS = ['displayPrice', 'priceAfterDiscount', 'netPerTreatment', 'price', 'perTreatment', 'perApp', 'perVisit', 'pa'];
+const rowIsPriced = (row) => ROW_PRICE_KEYS.some((key) => Number(row?.[key]) > 0);
+function everyServicePriced(input) {
+  const rows = Array.isArray(input.treatmentRows) ? input.treatmentRows : [];
+  const services = input.model.services;
+  return rows.length === services.length && rows.every(rowIsPriced)
+    && services.every((service) => rows.some((row) => row?.service === service.key));
 }
 
 // The plan the box describes: recurring, per application, billed by card, nothing else on the first bill.
@@ -59,7 +75,7 @@ function describablePlan(input) {
   if (serviceMode !== 'recurring' || invoiceMode || siteConfirmationHold || commercial) return false;
   if (input.paymentPreference === 'prepay_annual') return false;
   if (!model || model.credit || creditApplies || upFrontRowCount > 0 || Number(oneTimeExtrasTotal) > 0) return false;
-  return !feeRowsUnreadable(input) && breakdownIsClean(input);
+  return !feeRowsUnreadable(input) && breakdownIsClean(input) && everyServicePriced(input);
 }
 
 // The setup fee comes from ONE place: the page's existing first-visit line (`firstVisit`, the figure
@@ -72,6 +88,8 @@ function proofOfFirstVisit(input, applications) {
   const line = input.firstVisit || null;
   if (!line) return feeRowsOf(input).some(hasPositiveAmount) ? null : { fee: 0, total: applications };
   if (input.model.services.length !== 1 || !sameCents(line.firstApplication, applications)) return null;
+  // Another first-visit fee (the initial cockroach treatment) is more than the line's two parts.
+  if (feeRowsOf(input).some((row) => hasPositiveAmount(row) && !isSetupFee(row))) return null;
   const fee = round2(line.setup);
   return sameCents(line.total, applications + fee) && fee > 0 ? { fee, total: round2(line.total) } : null;
 }

@@ -213,6 +213,16 @@ describe('estimate page: what you pay and when', () => {
     expect(box(second.container)).toBeNull();
   });
 
+  it('page: a one-time option beside the plan (its alternate one-time row in the breakdown) still shows the box', async () => {
+    const payload = pestOnly();
+    payload.estimate = { ...payload.estimate, showOneTimeOption: true };
+    payload.pricing.anchorOneTimePrice = 249;
+    payload.pricing.oneTimeBreakdown = { total: 348, items: [{ service: 'one_time_pest', label: 'One-time pest visit', amount: 249, kind: 'charge' }, ...setupBreakdown.items] };
+    const { container } = await renderPage(payload);
+    await waitFor(() => expect(box(container)).not.toBeNull());
+    expect(text(container)).toContain('First visit total$198.00');
+  });
+
   it('never prints a price as a monthly bill: no "/mo" and no "about"', async () => {
     const { container } = await renderPage(bundle());
     await waitFor(() => expect(box(container)).not.toBeNull());
@@ -258,10 +268,12 @@ describe('buildWhatYouPay', () => {
   const line = { firstApplication: 99, setup: 99, total: 198 };
   // Pest only with the page's first-visit line, as the page builds it.
   const input = (extra = {}) => ({
-    model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, firstVisit: line, oneTimeItems: [{ service: 'waveguard_setup', amount: 99, kind: 'charge' }], ...extra,
+    model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, firstVisit: line, oneTimeItems: [{ service: 'waveguard_setup', amount: 99, kind: 'charge' }],
+    treatmentRows: [{ service: 'pest_control', displayPrice: 99 }], ...extra,
   });
   // A plan with no setup charge anywhere and so no first-visit line (bundle, lawn only).
-  const noFee = (extra = {}) => input({ model: both, fees: [], invoiceFirstVisit: 177, firstVisit: null, oneTimeItems: [], ...extra });
+  const noFee = (extra = {}) => input({ model: both, fees: [], invoiceFirstVisit: 177, firstVisit: null, oneTimeItems: [],
+    treatmentRows: [{ service: 'pest_control', displayPrice: 99 }, { service: 'lawn_care', displayPrice: 78 }], ...extra });
   const FEE_SENTENCE = 'This plan has a one-time $99.00 setup fee.';
 
   it('the annual prepay choice renders no box (the Reserve your spot box owns payment timing and prepay)', () => {
@@ -321,6 +333,29 @@ describe('buildWhatYouPay', () => {
     expect(buildWhatYouPay(noFee({ oneTimeItems }))).toBeNull();
   });
 
+  it('with a one-time option the breakdown is the alternate price: it does not hide the box, while real recurring charges still do', () => {
+    const alternate = [{ service: 'one_time_pest', amount: 249, kind: 'charge' }, { service: 'waveguard_setup', amount: 99 }];
+    expect(buildWhatYouPay(input({ showOneTimeOption: true, oneTimeItems: alternate })).firstVisitTotal).toBe(198);
+    expect(buildWhatYouPay(input({ oneTimeItems: alternate }))).toBeNull();
+    // A cockroach first-visit fee, or a bait-station row beside the plan, still blocks it.
+    const roach = { service: 'pest_initial_roach', amount: 150, waivedWithPrepay: false };
+    expect(buildWhatYouPay(input({ showOneTimeOption: true, oneTimeItems: alternate, fees: [setupFee, roach] }))).toBeNull();
+    expect(buildWhatYouPay(input({ showOneTimeOption: true, oneTimeItems: alternate, upFrontRowCount: 1 }))).toBeNull();
+  });
+
+  // The page's first application falls back to a same-day total when a row is unpriced; the box must not
+  // print lines for a bundle the accept does not fully price.
+  it.each([
+    ['a displayed service has no row in the selected frequency', [{ service: 'pest_control', displayPrice: 99 }]],
+    ['a displayed service row is unpriced', [{ service: 'pest_control', displayPrice: 99 }, { service: 'lawn_care' }]],
+    ['a row names another service', [{ service: 'pest_control', displayPrice: 99 }, { service: 'mosquito', displayPrice: 78 }]],
+    ['an extra row beside the displayed services', [{ service: 'pest_control', displayPrice: 99 }, { service: 'lawn_care', displayPrice: 78 }, { service: 'mosquito', displayPrice: 60 }]],
+    ['no rows at all', undefined],
+  ])('a partly priced bundle: no box (%s)', (_label, treatmentRows) => {
+    expect(buildWhatYouPay(noFee({ treatmentRows }))).toBeNull();
+    expect(buildWhatYouPay(noFee()).firstVisitTotal).toBe(177);
+  });
+
   it('a setup row in the breakdown with no first-visit line to prove it: no box', () => {
     expect(buildWhatYouPay(noFee({ oneTimeItems: [{ service: 'waveguard_setup', amount: 99 }] }))).toBeNull();
   });
@@ -335,6 +370,6 @@ describe('buildWhatYouPay', () => {
     expect(result.setup).toBeNull();
     expect(result.setupSentence).toBeNull();
     expect(result.firstVisitTotal).toBe(177);
-    expect(buildWhatYouPay(noFee({ model: pest, invoiceFirstVisit: 99 })).firstVisitTotal).toBe(99);
+    expect(buildWhatYouPay(noFee({ model: pest, invoiceFirstVisit: 99, treatmentRows: [{ service: 'pest_control', displayPrice: 99 }] })).firstVisitTotal).toBe(99);
   });
 });

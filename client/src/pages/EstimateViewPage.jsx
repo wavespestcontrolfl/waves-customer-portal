@@ -9881,6 +9881,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     firstVisit: firstVisitLine,
     otherFeeRows: [pricing.setupFee, setupFeeEffective],
     oneTimeItems: pricing.oneTimeBreakdown?.items,
+    showOneTimeOption: !!estimate.showOneTimeOption,
+    treatmentRows: combinedFrequency?.perServiceTreatments,
   });
 
   // Service/price cards — shared by the live configurator (below) and the
