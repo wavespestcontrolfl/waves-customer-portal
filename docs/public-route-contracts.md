@@ -5926,9 +5926,12 @@ center/zoom/size, and the whole success body also runs the shared Maps-key
 scrub (`scrubMapsKeysDeep`) as a last line. The marketing site's quote form
 renders `closeUrl` as a plain `<img src>`, which is why the URL is absolute.
 `satellite.inServiceArea` is the coordinate box AND no excluded place: a geocoded or typed city, ZIP or
-address part naming DeSoto, Punta Gorda or one of the six places held until a second technician is hired
-(owner ruling 2026-11-23, `namesExcludedPlace` over `services/excluded-localities.js`) is `false`, for a fresh
-lookup and a cached one alike.
+address part naming DeSoto, Punta Gorda or one of the places held until a second technician is hired
+(owner ruling 2026-11-23: Rotonda West, Placida, Boca Grande, Babcock Ranch, Gulf Cove / El Jobean, Charlotte Harbor
+and Deep Creek; Englewood and Port Charlotte are served again, same day), `namesExcludedPlace` over
+`services/excluded-localities.js`, is `false`, for a fresh lookup and a cached one alike. A Port Charlotte property
+with no usable ZIP (five digits or ZIP+4) in the geocode, the record or the typed address is `null`, unknown: the held
+shared ZIPs 33980 / 33981 / 33983 carry the name too (`namesPortCharlotteWithoutZip`).
 `/api/public/map-image/:token` (GET/HEAD, read-only signed satellite image
 proxy; the ONLY way the public lookup, the customer service report
 (`treatmentMap.satellite.live.url`, `stationMap.image.url`) and the customer
@@ -8787,10 +8790,13 @@ alone is never grounds to discard a geocode as unresolvable); checked
 against the service area via `checkServiceArea`, applied uniformly to every
 resolved location including a customer's stored coordinates: first, the
 address's own city or ZIP is out when it names Punta Gorda (not served per the
-2026-10-22 owner ruling) or one of six places held until a second technician is
-hired (owner ruling 2026-11-23): Rotonda West, Englewood, Placida, Boca Grande,
-Port Charlotte and Babcock Ranch. Their ZIPs are held whole, the three that
-Punta Gorda shared included (33980, 33982, 33983); North Port is not held
+2026-10-22 owner ruling) or one of the places held until a second technician is
+hired (owner ruling 2026-11-23): Rotonda West, Placida, Boca Grande, Babcock
+Ranch, Gulf Cove / El Jobean, Charlotte Harbor and Deep Creek. Their ZIPs are held
+whole, the three that Punta Gorda shared included (33980, 33982, 33983), so a
+"Port Charlotte" address on 33980 / 33981 / 33983 is held by its ZIP. Englewood and
+Port Charlotte were held for a few hours the same day and are served again
+(owner "ok do this"); North Port is not held
 (`services/excluded-localities.js`, city / ZIP only, no coordinate box); then
 county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
@@ -8800,11 +8806,11 @@ DeSoto is not served per the 2026-09-30 owner ruling; when that county is
 Charlotte, a second lookup, `reverseGeocodeLocality`, reads the locality and
 ZIP Google places on the coordinate: an excluded locality or ZIP (including a
 bare 33980 / 33982 / 33983, which are held whole) is out, a 422 `out_of_area`,
-even when the submitted address names none, and a failed or empty lookup is 503
-`{ error: 'service_area_unavailable' }`, recoverable; a Sarasota-county pin
-inside the Englewood area (`isInHeldLocalityPinBox`) gets the same lookup and the
-same answers whatever city and ZIP the submitted address carries (stored values
-can be stale), and no Sarasota booking outside that area makes the lookup), else the explicit
+even when the submitted address names none, and a failed or empty lookup, or a "Port Charlotte"
+locality with no ZIP, or, with no Google key, a submitted "Port Charlotte" address with no ZIP (the held shared
+ZIPs 33980 / 33981 / 33983 carry that name too), is 503
+`{ error: 'service_area_unavailable' }`, recoverable; no Sarasota booking makes
+the lookup), else the explicit
 no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
 rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
 is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no

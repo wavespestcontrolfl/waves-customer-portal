@@ -7,7 +7,7 @@ const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStree
 
 // Owner ruling 2026-09-30: DeSoto County (Arcadia) is NOT served; owner ruling
 // 2026-10-22: the city of Punta Gorda (inside Charlotte County) is NOT served, and
-// owner ruling 2026-11-23 holds six more places until a second technician is hired
+// owner ruling 2026-11-23 holds more places until a second technician is hired
 // (services/excluded-localities.js). The three
 // served counties plus the south-Hillsborough towns (config/locations.js
 // SOUTH_HILLSBOROUGH_CITIES, city-keyed, not county-keyed) are the footprint.
@@ -585,8 +585,8 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     if (addr.county && !isInServiceAreaCounty(addr.county)) {
       flags.push('out_of_service_area');
     } else if (isExcludedLocality(addr.city) || isExcludedZip(addr.postal_code)) {
-      // Punta Gorda (owner ruling 2026-10-22) and Rotonda, Englewood, Placida, Boca Grande, Port Charlotte and
-      // Babcock Ranch (owner ruling 2026-11-23, until a second technician is hired) sit inside served counties,
+      // Punta Gorda (owner ruling 2026-10-22) and Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, El Jobean,
+      // Charlotte Harbor and Deep Creek (owner ruling 2026-11-23, until a second technician is hired) sit inside served counties,
       // so the county check alone passes them.
       flags.push('out_of_service_area');
     }
