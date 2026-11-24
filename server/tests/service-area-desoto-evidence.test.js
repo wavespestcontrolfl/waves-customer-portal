@@ -9,6 +9,7 @@ const { isInServiceAreaBox, zipFromAddressText } = require('../services/service-
 const {
   isDesotoLocality, isDesotoZip,
   isPuntaGordaLocality, isPuntaGordaZip, isExcludedLocality, isExcludedZip,
+  isNotYetServedLocality, isNotYetServedZip, NOT_YET_SERVED_ZIPS,
 } = require('../services/excluded-localities');
 
 describe('DeSoto locality list', () => {
@@ -42,8 +43,12 @@ describe('Punta Gorda excluded locality', () => {
   );
 
   test.each(['Port Charlotte', 'Englewood', 'Rotonda West', 'North Port', 'Placida', 'Charlotte Harbor', '', null])(
-    '%s is not Punta Gorda and stays served', (city) => {
+    '%s is not Punta Gorda itself', (city) => {
       expect(isPuntaGordaLocality(city)).toBe(false);
+    },
+  );
+  test.each(['North Port', 'Venice', 'Sarasota', 'Bradenton', 'Parrish', 'Riverview', '', null])(
+    '%s stays served', (city) => {
       expect(isExcludedLocality(city)).toBe(false);
     },
   );
@@ -55,10 +60,9 @@ describe('Punta Gorda excluded locality', () => {
     }
   });
 
-  test('ZIPs shared with Port Charlotte-area addresses (33980, 33983) are not excluded by ZIP alone', () => {
+  test('ZIPs Punta Gorda shared with Port Charlotte-area addresses (33980, 33983) are not Punta Gorda-only ZIPs', () => {
     for (const zip of ['33980', '33983', '33948', '33952', '34223', '']) {
       expect(isPuntaGordaZip(zip)).toBe(false);
-      expect(isExcludedZip(zip)).toBe(false);
     }
   });
 
@@ -72,6 +76,55 @@ describe('Punta Gorda excluded locality', () => {
     // 26.93, -82.05 is outside the DeSoto rectangle, so the coarse box passes it.
     expect(isInServiceAreaBox(26.93, -82.05)).toBe(true);
   });
+});
+
+// Owner ruling 2026-11-23: six places are held until a second technician is hired.
+// North Port is NOT held (owner, same day: every North Port ZIP stays served).
+describe('not-yet-served localities (owner ruling 2026-11-23)', () => {
+  test.each([
+    'Rotonda', 'Rotonda West', 'rotonda  west', 'Rotunda West', 'Englewood', 'ENGLEWOOD', 'Placida', 'Boca Grande',
+    'Port Charlotte', 'port charlotte.', 'Charlotte Harbor', 'Gulf Cove', 'El Jobean', 'Deep Creek', 'Babcock Ranch',
+  ])('%s is held', (city) => {
+    expect(isNotYetServedLocality(city)).toBe(true);
+    expect(isExcludedLocality(city)).toBe(true);
+    expect(isPuntaGordaLocality(city)).toBe(false);
+  });
+
+  test.each([
+    ['Rotonda West', ['33947']],
+    ['Englewood', ['34223', '34224', '34295']],
+    ['Placida', ['33946', '33927']],
+    ['Boca Grande', ['33921']],
+    ['Port Charlotte', ['33938', '33948', '33949', '33952', '33953', '33954', '33981']],
+    ['Port Charlotte / Punta Gorda shared ZIPs, Babcock Ranch', ['33980', '33983', '33982']],
+  ])('%s ZIPs are held, ZIP+4 included', (_place, zips) => {
+    for (const zip of zips) {
+      expect(isNotYetServedZip(zip)).toBe(true);
+      expect(isExcludedZip(zip)).toBe(true);
+      expect(isExcludedZip(`${zip}-1234`)).toBe(true);
+    }
+  });
+
+  test('every North Port ZIP and every Sarasota, Manatee and south Hillsborough ZIP in the served map stays served', () => {
+    const { ZIP_TO_CITY } = require('../utils/zip-to-city');
+    for (const zip of ['34286', '34287', '34288', '34289', '34290', '34291', '34285', '34292', '34293', '34202', '33570', '33569']) {
+      expect(isExcludedZip(zip)).toBe(false);
+    }
+    // the held ZIPs are exactly the served-map ZIPs of a held place or of Punta Gorda, nothing else
+    for (const zip of Object.keys(ZIP_TO_CITY)) {
+      const city = ZIP_TO_CITY[zip].toLowerCase();
+      if (isExcludedZip(zip)) expect(['port charlotte', 'babcock ranch', 'placida', 'rotonda west', 'englewood', 'boca grande']).toContain(city);
+      else expect(isExcludedLocality(city)).toBe(false);
+    }
+    expect(NOT_YET_SERVED_ZIPS.has('34286')).toBe(false);
+  });
+
+  test.each(['North Port', 'north port', 'Venice', 'Nokomis', 'Osprey', 'Laurel', 'Lakewood Ranch', 'Duette'])(
+    '%s is not held', (city) => {
+      expect(isNotYetServedLocality(city)).toBe(false);
+      expect(isExcludedLocality(city)).toBe(false);
+    },
+  );
 });
 
 describe('zipFromAddressText (Codex r5 P2)', () => {

@@ -35,7 +35,7 @@ const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks'
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { isInDesotoExclusion, isServedSouthHillsboroughTown } = require('./service-area');
-const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip } = require('./excluded-localities');
+const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip } = require('./excluded-localities');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -2164,8 +2164,9 @@ function agreedOneTimeJobCardPrice(v2Extraction, bookedService) {
 //      on-file pin in the DeSoto rectangle — vetoes first, ahead of a
 //      positive AV verdict (which may describe a different, V2 address) and
 //      of any served-town exemption (Riverview + 34266 cannot launder it).
-//      Punta Gorda (city, or a Punta Gorda-only ZIP; Charlotte County is
-//      otherwise served) vetoes at the same point, on the call or on file.
+//      Punta Gorda (city, or a Punta Gorda-only ZIP) vetoes at the same point,
+//      on the call or on file, and so do the not-yet-served places of owner
+//      ruling 2026-11-23 (excluded-localities.js).
 //   2. a positive Address Validation verdict (inServiceArea === true) then
 //      clears the rest, including a model-stated county NAME of DeSoto.
 //   3. an AV out_of_service_area / inServiceArea false verdict, or a county
@@ -2225,6 +2226,12 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   if (cities.some(isPuntaGordaLocality) || zips.some(isPuntaGordaZip)
     || onFileCities.some(isPuntaGordaLocality) || onFileZips.some(isPuntaGordaZip)) {
     return { reason: 'punta_gorda_locality', county: 'Charlotte' };
+  }
+  // The six places held until a second technician is hired (owner ruling 2026-11-23: Rotonda, Englewood, Placida,
+  // Boca Grande, Port Charlotte, Babcock Ranch) veto the same way. Englewood straddles two counties, so no county is named.
+  if (cities.some(isNotYetServedLocality) || zips.some(isNotYetServedZip)
+    || onFileCities.some(isNotYetServedLocality) || onFileZips.some(isNotYetServedZip)) {
+    return { reason: 'not_yet_served_locality', county: null };
   }
   if (av && av.inServiceArea === true) return null;
   if (countyKey === 'desoto') {

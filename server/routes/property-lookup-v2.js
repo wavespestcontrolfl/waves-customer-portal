@@ -20,7 +20,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, condoUnitFolioEnabled, addressMayNameUnit, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
-const { isInServiceAreaBox, zipFromAddressText } = require('../services/service-area');
+const { isInServiceAreaBox, zipFromAddressText, namesExcludedPlace } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -926,6 +926,9 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
   if (geo) try {
     lat = geo.lat;
     lng = geo.lng;
+    // The geocoder's own city and ZIP ride on the cached record: an AI-only record carries neither, and a cache hit
+    // must reach the same held-place verdict as this lookup (owner ruling 2026-11-23).
+    if (result.propertyRecord && (geo.city || geo.zip || geo.formattedAddress)) result.propertyRecord._geoLocality = { city: geo.city || null, zip: geo.zip || null, formattedAddress: geo.formattedAddress || null };
 
     // Validate within SWFL service area
     if (!isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip })) {
@@ -978,7 +981,16 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
         superCloseUrl,
         closeUrl: closeUrlWithKey,
         wideUrl: wideUrlWithKey,
-        inServiceArea: isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip }),
+        // The box AND no excluded place: DeSoto, Punta Gorda and the six places held until a second technician is
+        // hired (owner ruling 2026-11-23) sit inside served counties, so the coordinate alone cannot say no.
+        inServiceArea: isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip })
+          && !namesExcludedPlace({
+            city: geo.city,
+            zip: geo.zip,
+            // the same evidence a cache hit reads (record + stored geocode): a county record naming a held town counts here too
+            places: [{ city: result.propertyRecord?.city, zip: result.propertyRecord?.zipCode }],
+            text: [geo.formattedAddress, result.propertyRecord?.formattedAddress, address],
+          }),
         _microCloseB64: microCloseB64,
         _ultraCloseB64: ultraCloseB64,
         _superCloseB64: superCloseB64,
@@ -1336,9 +1348,14 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
     // changes the in-area verdict.
     satellite: buildSatelliteUrlSet(lat, lng, {
       county: record?._parcel?.county || record?.county || null,
+      city: record?.city || null,
+      places: [record?._geoLocality].filter(Boolean),
+      // The cached record's own address text names a held place the same way a fresh geocode does.
+      text: [record?.formattedAddress, record?._geoLocality?.formattedAddress, row?.normalized_address, address],
       // AI-only records carry zipCode '' — fall back to the formatted
       // address, the cache row's normalized address, then the typed one.
       zip: record?.zipCode
+        || record?._geoLocality?.zip
         || zipFromAddressText(record?.formattedAddress)
         || zipFromAddressText(row?.normalized_address)
         || zipFromAddressText(address)
@@ -1372,7 +1389,7 @@ function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
     superCloseUrl: urlAtZoom(20),
     closeUrl: urlAtZoom(19),
     wideUrl: urlAtZoom(18),
-    inServiceArea: isInServiceAreaBox(lat, lng, areaEvidence),
+    inServiceArea: isInServiceAreaBox(lat, lng, areaEvidence) && !namesExcludedPlace(areaEvidence),
   };
 }
 
@@ -6865,6 +6882,7 @@ module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
 module.exports.resolveCalculateQualifyingEvidence = resolveCalculateQualifyingEvidence;
 module.exports.countyCeilingStillValid = countyCeilingStillValid;
 module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
+module.exports.buildSatelliteUrlSet = buildSatelliteUrlSet;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyCommercialSuiteSize,

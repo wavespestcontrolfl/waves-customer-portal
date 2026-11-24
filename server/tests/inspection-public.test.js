@@ -2380,7 +2380,7 @@ describe('POST /:token commit', () => {
     // kept Venice would fail the next check at that pin, so phase 1 writes Wimauma and the list reads no fallback.
     test.each([
       ['with the funnel off', false, 'Nokomis', 'Laurel', '34209', 'Sarasota'],
-      ['and a profile city the area check refuses', true, 'Punta Gorda', 'Charlotte Harbor', '33980', 'Charlotte'],
+      ['and a profile city the area check refuses', true, 'Punta Gorda', 'Laurel', '34292', 'Sarasota'],
       ['and a profile city in a zone with no truck rule', true, 'Sarasota', 'Bee Ridge', '34233', 'Sarasota'],
       ['and a typed South Hillsborough town the area check admits by its name alone', true, 'Venice', 'Wimauma', '34285', 'Hillsborough County'],
     ])('a typed city in no zone at the profile\'s address, %s: phase 1 writes the typed city', async (_label, funnel, storedCity, typedCity, zip, county) => {
@@ -4438,17 +4438,67 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { zip: '33950' })).toEqual({ ok: false, county: null });
     });
 
-    test('33983 + Punta Gorda is refused; 33980 + Port Charlotte is served', async () => {
+    test('33983 + Punta Gorda is refused', async () => {
       mockCounty.mockImplementation(async () => 'Charlotte');
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Punta Gorda', zip: '33983' })).toEqual({ ok: false, county: null });
-      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33980' })).toEqual({ ok: true, county: 'Charlotte' });
     });
 
-    test('Port Charlotte 33948, Englewood and ZIP-only 33983 stay served', async () => {
+    // Owner ruling 2026-11-23: Rotonda, Englewood, Placida, Boca Grande, Port Charlotte and Babcock Ranch are held
+    // until a second technician is hired; the address's own city or ZIP refuses them before any lookup.
+    test.each([
+      [{ city: 'Port Charlotte', zip: '33980' }], [{ city: 'Port Charlotte', zip: '33948' }], [{ zip: '33983' }],
+      [{ city: 'Englewood', zip: '34223' }], [{ city: 'Rotonda West' }], [{ zip: '33947' }],
+      [{ city: 'Placida' }], [{ city: 'Boca Grande' }], [{ city: 'Babcock Ranch', zip: '33982' }],
+    ])('held place %j is refused', async (address) => {
       mockCounty.mockImplementation(async () => 'Charlotte');
-      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33948' })).toEqual({ ok: true, county: 'Charlotte' });
-      expect(await checkServiceArea({ lat: 26.96, lng: -82.35 }, { city: 'Englewood', zip: '34223' })).toEqual({ ok: true, county: 'Charlotte' });
-      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { zip: '33983' })).toEqual({ ok: true, county: 'Charlotte' });
+      mockCounty.mockClear();
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, address)).toEqual({ ok: false, county: null });
+      expect(mockCounty).not.toHaveBeenCalled();
+    });
+
+    test('Englewood on the Sarasota side is refused by its city or ZIP, not by the county', async () => {
+      mockCounty.mockImplementation(async () => 'Sarasota');
+      expect(await checkServiceArea({ lat: 26.96, lng: -82.35 }, { city: 'Englewood', zip: '34223' })).toEqual({ ok: false, county: null });
+      expect(await checkServiceArea({ lat: 26.96, lng: -82.35 }, { zip: '34223' })).toEqual({ ok: false, county: null });
+    });
+
+    // Englewood spans two counties: a Sarasota-county pin in the Englewood area gets the locality read a Charlotte pin
+    // gets, whatever city and ZIP the address carries (owner ruling 2026-11-23). No other Sarasota pin does.
+    describe('a Sarasota-county pin in the Englewood area', () => {
+      const ENGLEWOOD_PIN = { lat: 26.96, lng: -82.35 };
+      beforeEach(() => { mockCounty.mockImplementation(async () => 'Sarasota'); mockLocality.mockClear(); });
+
+      test("Google's own locality refuses it when the submitted address omits the place or carries stale served values", async () => {
+        mockLocality.mockImplementation(async () => ({ city: 'Englewood', zip: '34223' }));
+        expect(await checkServiceArea(ENGLEWOOD_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null });
+        expect(await checkServiceArea(ENGLEWOOD_PIN, { line1: '1 Main St', city: 'Venice' })).toEqual({ ok: false, county: null });
+        expect(await checkServiceArea(ENGLEWOOD_PIN, { line1: '1 Main St', zip: '34285' })).toEqual({ ok: false, county: null });
+        expect(await checkServiceArea(ENGLEWOOD_PIN, { line1: '1 Main St', city: 'North Port', zip: '34287' })).toEqual({ ok: false, county: null });
+        mockLocality.mockImplementation(async () => ({ city: null, zip: '34224' }));
+        expect(await checkServiceArea(ENGLEWOOD_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null });
+      });
+
+      test('a served locality there books, and a failed lookup is unavailable, never served', async () => {
+        mockLocality.mockImplementation(async () => ({ city: 'North Port', zip: '34287' }));
+        expect(await checkServiceArea(ENGLEWOOD_PIN, { line1: '1 Main St' })).toEqual({ ok: true, county: 'Sarasota' });
+        mockLocality.mockImplementation(async () => null);
+        expect(await checkServiceArea(ENGLEWOOD_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null, unavailable: true });
+      });
+
+      test('no extra paid lookup when the pin is outside the Englewood area', async () => {
+        mockLocality.mockImplementation(async () => ({ city: 'Englewood', zip: '34223' }));
+        expect(await checkServiceArea({ lat: 27.0998, lng: -82.4543 }, { line1: '1 Main St' })).toEqual({ ok: true, county: 'Sarasota' });
+        expect(await checkServiceArea({ lat: 27.3365, lng: -82.5307 }, { line1: '1 Main St' })).toEqual({ ok: true, county: 'Sarasota' });
+        expect(mockLocality).not.toHaveBeenCalled();
+      });
+    });
+
+    test('North Port (34286-34291) stays served', async () => {
+      mockCounty.mockImplementation(async () => 'Sarasota');
+      mockLocality.mockImplementation(async () => ({ city: 'North Port', zip: '34287' }));
+      for (const zip of ['34286', '34287', '34288', '34289', '34291']) {
+        expect(await checkServiceArea({ lat: 27.0443, lng: -82.2359 }, { city: 'North Port', zip })).toEqual({ ok: true, county: 'Sarasota' });
+      }
     });
 
     test("Google's own locality refuses a Punta Gorda pin the submitted address does not name (Codex #6424 r1)", async () => {
@@ -4460,20 +4510,23 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null });
     });
 
+    test("Google's own locality refuses a held place the submitted address does not name (2026-11-23)", async () => {
+      mockCounty.mockImplementation(async () => 'Charlotte');
+      mockLocality.mockImplementation(async () => ({ city: 'Port Charlotte', zip: '33948' }));
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St', city: 'Venice' })).toEqual({ ok: false, county: null });
+      mockLocality.mockImplementation(async () => ({ city: null, zip: '33983' }));
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null });
+    });
+
     test('a failed locality lookup in Charlotte is unavailable, never served', async () => {
       mockCounty.mockImplementation(async () => 'Charlotte');
       mockLocality.mockImplementation(async () => null);
-      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null, unavailable: true });
-      mockLocality.mockImplementation(async () => ({ city: null, zip: '33983' }));
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null, unavailable: true });
       mockLocality.mockImplementation(async () => { throw new Error('boom'); });
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null, unavailable: true });
     });
 
-    test('Babcock Ranch (33982) and other served counties need no locality refusal', async () => {
-      mockCounty.mockImplementation(async () => 'Charlotte');
-      mockLocality.mockImplementation(async () => ({ city: 'Babcock Ranch', zip: '33982' }));
-      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St', zip: '33982' })).toEqual({ ok: true, county: 'Charlotte' });
+    test('other served counties need no locality lookup', async () => {
       mockCounty.mockImplementation(async () => 'Manatee');
       mockLocality.mockClear();
       expect(await checkServiceArea({ lat: 27.4989, lng: -82.5748 }, { line1: '1 Main St' })).toEqual({ ok: true, county: 'Manatee' });
@@ -4487,7 +4540,7 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
       delete process.env.GOOGLE_MAPS_API_KEY;
       try {
         expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Punta Gorda' })).toEqual({ ok: false, county: null });
-        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33980' })).toEqual({ ok: true, county: null });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33980' })).toEqual({ ok: false, county: null });
       } finally {
         if (savedA !== undefined) process.env.GOOGLE_API_KEY = savedA;
         if (savedB !== undefined) process.env.GOOGLE_MAPS_API_KEY = savedB;
