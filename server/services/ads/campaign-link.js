@@ -19,6 +19,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { errorText } = require('./google-ads-config');
 
 // Google answers click_view for the last 90 days.
 const CLICK_VIEW_DAYS = 90;
@@ -126,7 +127,10 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
     // A lead past the click window stays only when Google already named its campaign (it waits for the local row).
     .filter((r) => GCLID_RE.test(String(r.gclid)) && (dayString(r.lead_date) >= windowStart || tried[r.id]?.google_campaign_id));
   const triedAt = (id) => String(tried[id]?.at || '');
-  const rows = [...eligible].sort((a, b) => triedAt(a.id).localeCompare(triedAt(b.id))).slice(0, BATCH);
+  // Least recently tried first; among equals (never tried), the oldest lead first: its click expires soonest.
+  const rows = [...eligible]
+    .sort((a, b) => triedAt(a.id).localeCompare(triedAt(b.id)) || dayString(a.lead_date).localeCompare(dayString(b.lead_date)))
+    .slice(0, BATCH);
   out.checked = rows.length;
   if (!rows.length) return out;
   const campaigns = await conn('ad_campaigns').where('platform', 'google_ads').select('id', 'platform_campaign_id');
@@ -145,7 +149,10 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
       if (n) out.linked[basis] += 1;
     }
     // Matches are linked first; then the step fails with Google's reason.
-    if (lookupError) throw lookupError;
+    if (lookupError) {
+      logger.warn(`[ads-campaign-link] Google failed after linking ${out.linked.gclid_click_view}: ${errorText(lookupError)}`);
+      throw lookupError;
+    }
   } finally {
     // Keep tries only for leads still waiting, also when Google failed mid-run.
     const waiting = new Set(eligible.map((r) => r.id));

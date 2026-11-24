@@ -219,3 +219,12 @@ test('two leads sharing a gclid: a click goes only to the lead whose days hold i
   expect(query.mock.calls.some(([q]) => q.includes("'2026-08-25'"))).toBe(true); // the older lead keeps searching to the window start
 });
 
+test('never-tried leads: the oldest goes first, its click expires soonest', async () => {
+  const leads = Array.from({ length: 11 }, (_, i) => ({ id: `o${i}`, gclid: `${GCLID_NEW}o${i}`, lead_date: `2026-11-${String(22 - i).padStart(2, '0')}` }));
+  const conn = fakeConn({ leads, campaigns });
+  await linkCampaigns({ now: NOW, conn, googleAds: googleAdsWith({}) });
+  const saved = JSON.parse(conn.settings['ads.campaign_link.tried']);
+  expect(saved.o10).toBeDefined(); // the oldest (11-12) got a turn
+  expect(saved.o0).toBeUndefined(); // the newest (11-22) waits for the next run
+});
+
