@@ -925,6 +925,21 @@ jobs:
         # Three workers on the 4-vCPU runner: shards took 3-7 min against 5-8 with two.
         # The default 5 s test timeout is raised to 15 s because a third worker slows
         # cold module loads; a test that sets its own timeout keeps it.
+        #
+        # NODE_OPTIONS lifts V8's old-space limit from its ~4 GB default to 6 GB for the
+        # jest workers (child processes inherit it). tests/public-route-allowlist.test.js
+        # scans the whole app in beforeAll (route-surface/scan.js keeps the AST of every
+        # route file live while it runs). Measured 2026-11-23: that scan needs more than
+        # 2 GB of live heap and peaks near 2.9 GB. workerIdleMemoryLimit only checks
+        # BETWEEN files, so a worker that arrives with up to 2 GB left over from earlier
+        # files hit the 4 GB wall inside this one file: "FATAL ERROR: Ineffective
+        # mark-compacts near heap limit" then ChildProcessWorker._onExit, with 0 failed
+        # tests (jobs 137272891557, 137362224816, 137363786155; always this file; the
+        # time-balanced sequencer puts it in shard 4). 6 GB keeps three workers inside the 16 GB runner:
+        # the other files stay under the 2 GB recycle limit, so only the worker running
+        # this file grows that large.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npx jest --ci --silent --maxWorkers=3 --shard=${{ matrix.shard }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js --config='{"workerIdleMemoryLimit":"2GB","testTimeout":15000}'
 
   client:
@@ -1042,7 +1057,11 @@ jobs:
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      # No --with-deps: ubuntu-24.04 already has every library Chromium needs,
+      # and the QA pages load their own fonts (scripts/qa/browser.js
+      # waitForFonts). The apt step only added system fonts from a slow mirror:
+      # 5.4-7.1 min in 10 of 12 runs on 2026-11-23, against 6 s for the browser.
+      - run: npx playwright install chromium
       - run: npm run worktree:setup
       - name: Select the disposable CI database cluster
         run: |
@@ -1061,7 +1080,7 @@ jobs:
         run: npm run qa:cleanup
       - name: Verify retained journey results survived cleanup
         run: |
-          node -e "const r = require('./.tmp/qa/e2e/report.json'); require('node:assert/strict').equal(r.steps.filter(s => s.passed).length, 13)"
+          node -e "const r = require('./.tmp/qa/e2e/report.json'); const a = require('node:assert/strict'); a.ok(r.steps.length >= 13, 'fewer journey steps than expected'); a.deepEqual(r.steps.filter(s => !s.passed).map(s => s.name), [])"
       - name: Application QA evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

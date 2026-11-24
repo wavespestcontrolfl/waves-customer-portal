@@ -186,6 +186,7 @@ const {
   renderedConsentVersionIsCurrent: paymentConsentVersionIsCurrent,
 } = require('../services/payment-method-consent-text');
 const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
+const firstVisitRequestService = require('../services/estimate-first-visit-request');
 const { buildEstimateConsultationOffer } = require('../services/estimate-consultation-offer');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
 const estimateMapImage = require('../services/estimate-map-image');
@@ -19621,6 +19622,156 @@ router.post('/:token/commercial-agreement', commercialAgreementLimiter, async (r
   }
 });
 
+// ── First-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME, owner 2026-11-23 "do all") ─────────────────────────────────
+// Under the time picker a customer whose offered times do not work sends preferred days instead. It is a REQUEST, never an
+// acceptance: the estimate keeps its status and nothing is converted, invoiced, scheduled or charged; the office books with
+// the existing accept-on-book. services/estimate-first-visit-request.js owns the storage, the expiry hold and the one bell.
+
+// The row-derived half of "this estimate may take a first-visit request", the one verdict /data, the route's unlocked read and
+// the route's locked re-check all apply: a published, open standard recurring plan, not one of the frozen or manual shapes.
+function firstVisitRequestRowOpen(row, estData) {
+  if (!row || !['sent', 'viewed'].includes(row.status)) return false;
+  return isEstimateCustomerViewable(row) && isEstimateAcceptActive(row)
+    && !frozenOfferRefusal(row)
+    && row.source !== 'plan_start'
+    && !isStructuralOneTimeOnlyEstimate(estData, row)
+    && !resolveEstimateInvoiceMode(row)
+    && !isCommercialAutoAcceptEstimate(row)
+    && !estimateTrenchingReviewRequired(estData);
+}
+
+// What /data tells the page: null (gate off or not eligible, so /data is byte-identical) or { offered: true }. Nothing about an
+// earlier request is stored or served: a reopened link shows the normal picker and the request link again.
+function firstVisitRequestState(estimate, estData) {
+  if (!featureGates.estimateApprovePreferredTimeLive() || !firstVisitRequestRowOpen(estimate, estData)) return null;
+  return { offered: true };
+}
+
+// True when the estimate is in a blocking state (quote required, termite trenching review, contact_review park) or the state
+// cannot be established. The quote requirement is recomputed from `row` (the locked row on the second call), never trusted from
+// an earlier read; `database` + `lock` run the park's candidate read FOR SHARE on the writing transaction.
+async function firstVisitRequestBlocked(row, estData, { database = null } = {}) {
+  try {
+    const supplemented = withSupplementedRecurringServices(estData) || estData;
+    const quoteRequirement = resolveEstimateQuoteRequirement(
+      await buildPricingBundle(supplemented === estData ? row : { ...row, estimate_data: supplemented }), estData,
+    );
+    const state = await estimatePublicBlockingState(row, {
+      estData, quoteRequirement, ...(database ? { database, lock: true, fresh: true } : {}),
+    });
+    return !!state;
+  } catch (err) {
+    logger.warn(`[estimate-public] first-visit-request blocking state failed (code=${String(err?.code || err?.name || 'error').slice(0, 40)})`);
+    return true;
+  }
+}
+
+// True when the estimate already has a visit, by two checks. (1) A plain one, because the adoption lookup filters by service family
+// and misses a recurring visit on a mixed estimate: ANY scheduled_services row tied to this estimate (source_estimate_id, or the id
+// the estimate data names) that is not cancelled (a rescheduled row still counts), including a live hold (a lapsed hold does not).
+// (2) The customer-wide adoption lookup the page's own acceptance contract uses (an upcoming visit the customer could adopt).
+async function firstVisitRequestHasVisit(row, estData, { database = null } = {}) {
+  const conn = database || db;
+  const linkedId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(estData?.scheduled_service_id || ''))
+    ? String(estData.scheduled_service_id) : null;
+  const found = await conn('scheduled_services')
+    .whereRaw("status NOT IN ('cancelled', 'canceled')")
+    .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
+    .where(function () {
+      this.where('source_estimate_id', row.id);
+      if (linkedId) this.orWhere('id', linkedId);
+    })
+    .first('id');
+  if (found) return true;
+  return !!(await findLinkedUpcomingAppointment(row, estData, {
+    serviceModes: adoptionServiceModesForContract(row, estData),
+    ...(database ? { database } : {}),
+  }));
+}
+
+// What /data's acceptance contract carries: the state above, minus an estimate that already has a visit tied to it.
+async function firstVisitRequestOffer(estimate, estData) {
+  const state = firstVisitRequestState(estimate, estData);
+  if (!state) return null;
+  try {
+    return (await firstVisitRequestHasVisit(estimate, estData)) ? null : state;
+  } catch {
+    return null;
+  }
+}
+
+const firstVisitRequestLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.estimateApprovePreferredTimeLive(),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like commercialAgreementPreGuard: the privacy
+// headers and the dark gate's generic 404 land ahead of any limiter. POST only.
+const FIRST_VISIT_REQUEST_PATH_RE = /^\/[^/]+\/first-visit-request\/?$/i;
+function firstVisitRequestPreGuard(req, res, next) {
+  if (req.method !== 'POST' || !FIRST_VISIT_REQUEST_PATH_RE.test(req.path || '')) return next();
+  stampCommercialAgreementHeaders(res);
+  if (!featureGates.estimateApprovePreferredTimeLive()) return res.status(404).json({ error: 'Estimate not found' });
+  return next();
+}
+
+// POST /api/estimates/:token/first-visit-request — { days: ['mon'..'sat'], window: 'morning' | 'afternoon' | 'either', note? }.
+// Every ineligible token (dark gate, unknown, not viewable, accepted, declined, expired, archived, unpublished, frozen offer,
+// one-time-only, invoice-mode, commercial, trenching review, quote required, a linked visit, call-side block, staff preview)
+// answers the same generic 404. The body is validated only after that, so a probe cannot read gate state from a 400. The
+// checks are re-run on the estimate row locked in the writing transaction; a change landing in between answers 409
+// REQUEST_UNAVAILABLE and writes nothing. The route is stateless: the estimate row is never written, the only effect is ONE
+// office bell, deduped open-only per estimate, so a repeat while it is open answers 200 and rings nothing.
+router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req, res) => {
+  stampCommercialAgreementHeaders(res);
+  const notFound = () => res.status(404).json({ error: 'Estimate not found' });
+  try {
+    if (!featureGates.estimateApprovePreferredTimeLive() || req.query.adminPreview === '1') return notFound();
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return notFound();
+    const estData = parseEstimateDataSafe(estimate);
+    if (await callSideBlockForEstimateData(db, estData, { estimateStatus: estimate.status })) return notFound();
+    if (!firstVisitRequestRowOpen(estimate, estData)) return notFound();
+    // The one blocking-state decision every public write shares (quote-required, termite trenching review, the B18
+    // contact_review park). A lookup that fails is a refusal: the request fails closed.
+    if (await firstVisitRequestBlocked(estimate, estData)) return notFound();
+    if (await firstVisitRequestHasVisit(estimate, estData)) return notFound();
+
+    const parsed = firstVisitRequestService.normalizeFirstVisitRequest(req.body);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error, code: 'PREFERRED_TIME_INVALID' });
+
+    const outcome = await db.transaction(async (trx) => {
+      const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+      const lockedData = parseEstimateDataSafe(locked);
+      // The gate is read again after the lock: a kill switch thrown while this waited writes nothing.
+      if (!featureGates.estimateApprovePreferredTimeLive() || !firstVisitRequestRowOpen(locked, lockedData)) return { refused: true };
+      if (await estimateCallLinkageBlockedFor(trx, locked)) return { refused: true };
+      // The blocking state again from the LOCKED row: the quote requirement recomputed from it, and the contact_review park
+      // judged FOR SHARE on the same transaction.
+      if (await firstVisitRequestBlocked(locked, lockedData, { database: trx })) return { refused: true };
+      if (await firstVisitRequestHasVisit(locked, lockedData, { database: trx })) return { refused: true };
+      // The one write: the office bell, on this transaction, right after the last recheck.
+      return firstVisitRequestService.raiseFirstVisitRequestBell({ estimate: locked, request: parsed.value, trx });
+    });
+    if (outcome.refused) {
+      return res.status(409).json({ error: 'This estimate was just updated. Please reload the page.', code: 'REQUEST_UNAVAILABLE' });
+    }
+    return res.status(outcome.deduped ? 200 : 201).json({
+      success: true, requestPending: true, days: parsed.value.days, window: parsed.value.window,
+    });
+  } catch (err) {
+    // err.code only, never err.message (PG constraint errors can quote the bound token and the customer's note), and the raw
+    // error is never passed on to the global handler, which would log it.
+    logger.warn(`[estimate-public] first-visit-request failed (code=${String(err?.code || 'none').slice(0, 40)})`);
+    return res.status(500).json({ error: 'Something went wrong. Please try again, or call or text us.' });
+  }
+});
+
 // "Pick your first visit" after a commercial agreement is signed (GATE_COMMERCIAL_FIRST_VISIT, owner 2026-10-26: decision
 // page choice 1B). services/commercial-first-visit.js owns the plan, the times and the booking; these routes decide only
 // that the token names an open estimate the customer is viewing. Gate-aware limiters: a dark gate answers the generic 404
@@ -29097,11 +29248,12 @@ async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
     invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
     invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
     commercialNoSlotAccept,
+    preferredTime: await firstVisitRequestOffer(estimate, estData),
   });
   return { defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance };
 }
 
-function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, invoiceOnlyContactRequired = false, commercialNoSlotAccept = false } = {}) {
+function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, invoiceOnlyContactRequired = false, commercialNoSlotAccept = false, preferredTime = null } = {}) {
   if (quoteRequirement.quoteRequired) {
     return {
       mode: 'quote_required',
@@ -29156,6 +29308,8 @@ function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppoin
     mode: 'standard_slot_pick',
     ctaLabel: 'Pick appointment',
     reason: null,
+    // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the first-visit request under the picker (absent with the gate off).
+    ...(preferredTime ? { preferredTime } : {}),
   };
 }
 
@@ -29973,6 +30127,22 @@ async function estimateCustomerPreservesMonthlyBilling(estimate) {
   } catch (e) {
     logger.warn(`[estimate-public] billing-lane lookup failed for estimate ${estimate?.id}: ${e.message}`);
     return false;
+  }
+}
+
+// The billing lane for a caller that must NOT guess (the "What you pay" box): true = monthly member, false =
+// per application, null = a lookup failed. The display resolvers answer a failure as per application, which is
+// the wrong direction here; they are left alone (estimate-per-month-copy pins their single raw caller).
+async function estimateMonthlyBillingLaneKnown(estimate) {
+  try {
+    if (!(await perApplicationBillingColumnsExist())) return true;
+    if (!estimate?.customer_id && !estimate?.customer_phone) return false;
+    const customer = estimate.customer_id
+      ? await db('customers').where({ id: estimate.customer_id }).first()
+      : (await matchAcceptCustomerByPhone(estimate)).match;
+    return customer ? BillingCadence.customerPreservesMonthlyMembership(customer) : false;
+  } catch {
+    return null;
   }
 }
 
@@ -31645,6 +31815,203 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
  * their default false, which naturally withholds returnVisit and the
  * staff-preview flag rather than fabricating request state.
  */
+// "What you pay and when" box (owner 2026-11-23): the first visit itemised, each later application and the
+// setup fee, for the plan the page OPENS on. Read-only data. It is built from the very functions the accept
+// path mints the first invoice with, so the page can only print what acceptance bills:
+// - the first application: sameDayVisitRowAmounts / sameDayVisitTotalForPricingFrequency over the selected
+//   frequency (the matched cadence combo rebased exactly as the accept rebases it) and the accept's own
+//   recurring service list (acceptanceServiceLists), so a service the page does not show still has to be priced;
+// - the setup fee: shouldIncludeWaveGuardSetupFeeForRecurring + frozenSetupFeeAmount, read from the stored
+//   estimate the way the converter reads it (never from the page's fee lists);
+// - the waiver: acceptPrepayAvailable.
+// Null whenever one of those cannot resolve, a credit/preference/up-front charge moves the first bill off the
+// plain per-line prices, or the per-line amounts do not add up to the first invoice amount to the cent. The
+// page shows the box only while its selection (frequency + cadences) is the one named in `selection`.
+const centsOfWyp = (n) => Math.round(Number(n) * 100);
+
+function whatYouPayDefaultSelection(pricingBundle) {
+  const frequencies = Array.isArray(pricingBundle?.frequencies) ? pricingBundle.frequencies : [];
+  const base = defaultFrequencyFromList(frequencies);
+  if (!base) return null;
+  const combos = Array.isArray(pricingBundle?.serviceCadenceCombos) ? pricingBundle.serviceCadenceCombos : [];
+  if (!combos.length) return { frequency: base, serviceCadences: null };
+  const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
+  // The page's default cadence map: each non-pest combo axis at its own section's default.
+  const cadences = {};
+  for (const axis of Object.keys(combos[0].selection || {}).filter((k) => k !== 'pest_control')) {
+    const section = sections.find((sec) => sec?.key === axis);
+    const key = section ? (section.defaultFrequencyKey || section.frequencies?.[0]?.key) : null;
+    if (key) cadences[axis] = String(key);
+  }
+  const axes = Object.keys(cadences);
+  if (!axes.length) return { frequency: base, serviceCadences: null };
+  const combo = combos.find((c) => {
+    const sel = c.selection || {};
+    const nonPest = Object.keys(sel).filter((k) => k !== 'pest_control');
+    return nonPest.length === axes.length && axes.every((k) => sel[k] === cadences[k])
+      && (!sel.pest_control || sel.pest_control === base.key);
+  });
+  if (!combo) return null;
+  // The accept's rebase of the visit-pricing frequency on the matched combo.
+  return {
+    serviceCadences: cadences,
+    frequency: {
+      ...base,
+      monthly: combo.monthly,
+      annual: combo.annual,
+      perServiceTreatments: combo.perServiceTreatments ?? base.perServiceTreatments,
+      sameDayTreatmentTotal: combo.sameDayTreatmentTotal ?? base.sameDayTreatmentTotal,
+      manualDiscount: combo.manualDiscount,
+      manualDiscountSuppressed: combo.manualDiscountSuppressed,
+    },
+  };
+}
+
+// Every reason the first bill is more than the plain per-line prices (a credit, a preference credit, a plan
+// credit slice, a rodent or misting setup, another first-visit fee, a one-time charge beside the plan).
+function whatYouPayFirstBillIsPlain({ estimate, estData, pricingBundle, frequency, services, prefs, rowAmounts }) {
+  const liveCredit = (md) => md && Number(md.amount ?? md.recurringAmount) > 0;
+  if ([frequency, pricingBundle?.combinedRecurring, pricingBundle].some((src) => liveCredit(src?.manualDiscount))) return false;
+  if (rowAmounts.some((entry) => centsOfWyp(entry.amount) !== centsOfWyp(entry.baseAmount))) return false;
+  if (services.length > 1 && planCreditFirstVisitSlice(frequency, { preferences: prefs, services })) return false;
+  const EstimateConverter = require('../services/estimate-converter');
+  if (EstimateConverter.frozenRodentBaitSetupAmount(estData) > 0 || EstimateConverter.frozenMistingInstall(estData)) return false;
+  const fees = Array.isArray(pricingBundle?.firstVisitFees) ? pricingBundle.firstVisitFees : [];
+  if (fees.some((fee) => fee?.service !== 'waveguard_setup' && Number(fee?.amount) > 0)) return false;
+  // Only the setup row (read through the setup fee path) and, with a one-time option, the ALTERNATE one-time
+  // choice row(s) may sit in the breakdown. Anything else (Bora-Care, a pest specialty, an area add-on) is billed
+  // with either choice, so the first bill is more than the plain lines.
+  const items = Array.isArray(pricingBundle?.oneTimeBreakdown?.items) ? pricingBundle.oneTimeBreakdown.items : [];
+  const choiceCategory = estimate.show_one_time_option === true ? serviceCategoryForOneTimeChoice(estData, pricingBundle) : null;
+  return items.every((item) => item?.service === 'waveguard_setup'
+    || (choiceCategory && isOneTimeChoiceItemForCategory(item, choiceCategory)));
+}
+
+// A tier plan carries billingFrequencyKey 'monthly' even when it bills per application (billedPerApplication).
+// A real monthly account is out; a per-application tier is in, but only when the printed price is the per-visit
+// charge the accept stamps (perApplicationChargeAmount over the plan annual and visit count), to the cent.
+function whatYouPayTierBillsPerApplication({ estData, frequency, lines }) {
+  if (frequency.billingFrequencyKey !== 'monthly') return true;
+  if (frequency.billedPerApplication !== true || lines.length !== 1) return false;
+  const cadence = BillingCadence.resolveBillingCadence({
+    monthlyRate: Number(frequency.monthly),
+    annualRate: Number(frequency.annual),
+    frequencyKey: 'monthly',
+    estimateData: estData,
+    fallbackFrequencyKey: 'quarterly',
+  });
+  const charge = BillingCadence.perApplicationChargeAmount({
+    billingCadence: cadence,
+    annualRate: Number(frequency.annual),
+    monthlyRate: Number(frequency.monthly),
+    visitsPerYear: Number(frequency.visitsPerYear) || null,
+    serviceKey: frequency.key || null,
+  });
+  return charge != null && centsOfWyp(charge) === centsOfWyp(lines[0].perApplication);
+}
+
+// The estimate shapes the box never describes: not open, held, invoiced, monthly-billed, commercial, a frozen offer.
+// `monthlyBilled` must be exactly false (a resolved per-application lane) and `pendingDeposit` exactly 0 (no paid,
+// unconsumed deposit the accept would credit against the first invoice): null, true or an amount all mean no box.
+function whatYouPayEstimateIsStandard({ estimate, estData, invoiceMode, siteConfirmationHold, monthlyBilled, pendingDeposit, quoteRequired }) {
+  if (invoiceMode || siteConfirmationHold || monthlyBilled !== false || pendingDeposit !== 0 || quoteRequired) return false;
+  if (!isEstimateAcceptActive(estimate) || estimate.price_locked_at || frozenOfferRefusal(estimate)) return false;
+  return !(isCommercialAutoAcceptEstimate(estimate) || isCommercialOneTimePricedEstimate(estimate) || estimateHasCommercialScope(estData));
+}
+
+// The accept's recurring service list for this estimate: the accept reads the SUPPLEMENTED data first (a legacy
+// plan keeps services in both the result block and the root block).
+function whatYouPayServices(estimate, estData) {
+  const services = acceptanceServiceLists(withSupplementedRecurringServices(estData) || estData).recurringSvcList;
+  const pestOnly = services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
+  return estimate.show_one_time_option && pestOnly.length ? pestOnly : services;
+}
+
+// One line per recurring service from the accept's row amounts, or null when any line cannot be read.
+function whatYouPayLines({ rowAmounts, pricingBundle, total }) {
+  const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
+  const lines = rowAmounts.map(({ row, amount }) => {
+    const key = recurringServiceKey(row);
+    return {
+      key,
+      label: String(sections.find((sec) => sec?.key === key)?.label || row?.label || row?.name || key),
+      perApplication: Math.round(amount * 100) / 100,
+      applicationsPerYear: treatmentVisitsForPricingRow(row),
+    };
+  });
+  const readable = lines.every((line) => line.key && line.perApplication > 0 && Number.isInteger(line.applicationsPerYear) && line.applicationsPerYear > 0);
+  // The per-line amounts must be the first invoice amount, to the cent.
+  return readable && total > 0 && centsOfWyp(lines.reduce((sum, line) => sum + line.perApplication, 0)) === centsOfWyp(total) ? lines : null;
+}
+
+// The setup fee the converter would invoice with the first application, and whether prepay waives it. null = unresolved.
+function whatYouPaySetupFee({ estimate, estData, frequency, services, lineCount }) {
+  const EstimateConverter = require('../services/estimate-converter');
+  const applies = EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
+    recurringServices: EstimateConverter.recurringServicesFromEstimateData(estData),
+    estimateData: estData,
+  });
+  if (!applies) return { amount: 0, waivedWithPrepay: false };
+  const amount = EstimateConverter.frozenSetupFeeAmount(estData);
+  if (!(amount > 0) || lineCount !== 1) return null;
+  return {
+    amount,
+    waivedWithPrepay: acceptPrepayAvailable({
+      selectedFrequency: frequency, recurringSvcList: services, oneTimeList: acceptanceServiceLists(withSupplementedRecurringServices(estData) || estData).oneTimeList, estData, estimate,
+    }) === true,
+  };
+}
+
+// The paid, unconsumed deposit the accept would credit against the first invoice: 0 = none, an amount = some,
+// null = the ledger could not be read. Same ledger reads the accept transaction makes.
+async function whatYouPayPendingDeposit(estimate) {
+  try {
+    const Deposits = require('../services/estimate-deposits');
+    const own = await Deposits.pendingDepositCredit(estimate.id);
+    const customer = estimate.customer_id ? await Deposits.pendingDepositCreditForCustomer(estimate.customer_id) : null;
+    return Math.round(((Number(own?.amount) || 0) + (Number(customer?.amount) || 0)) * 100) / 100;
+  } catch (err) {
+    logger.warn(`[estimate-data] whatYouPay deposit lookup failed for estimate ${estimate?.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// The two live lookups the accept depends on, resolved together for `whatYouPayForData`.
+async function whatYouPayAcceptLookups(estimate) {
+  const [monthlyBilled, pendingDeposit] = await Promise.all([estimateMonthlyBillingLaneKnown(estimate), whatYouPayPendingDeposit(estimate)]);
+  return { monthlyBilled, pendingDeposit };
+}
+
+function whatYouPayForData(input = {}) {
+  try {
+    const { estimate, estData, pricingBundle } = input;
+    if (!whatYouPayEstimateIsStandard(input)) return null;
+    const selection = whatYouPayDefaultSelection(pricingBundle);
+    const frequency = selection?.frequency;
+    if (!frequency || frequency.quoteRequired === true || Number(frequency.lowConfidenceRangePct) > 0) return null;
+    const services = whatYouPayServices(estimate, estData);
+    const prefs = normalizePrefs(estData?.preferences);
+    const rowAmounts = services.length ? sameDayVisitRowAmounts(frequency, { preferences: prefs, services }) : null;
+    if (!rowAmounts || rowAmounts.length !== services.length) return null;
+    if (!whatYouPayFirstBillIsPlain({ estimate, estData, pricingBundle, frequency, services, prefs, rowAmounts })) return null;
+    const total = sameDayVisitTotalForPricingFrequency(frequency, { preferences: prefs, services });
+    const lines = whatYouPayLines({ rowAmounts, pricingBundle, total });
+    if (lines && !whatYouPayTierBillsPerApplication({ estData, frequency, lines })) return null;
+    const setup = lines ? whatYouPaySetupFee({ estimate, estData, frequency, services, lineCount: lines.length }) : null;
+    if (!lines || !setup) return null;
+    return {
+      selection: { frequency: String(frequency.key), serviceCadences: selection.serviceCadences },
+      lines,
+      setupFee: setup.amount > 0 ? setup.amount : null,
+      setupWaivedWithPrepay: setup.waivedWithPrepay,
+      firstVisitTotal: Math.round((total + setup.amount) * 100) / 100,
+    };
+  } catch (err) {
+    logger.warn(`[estimate-data] whatYouPay skipped: ${err.message}`);
+    return null;
+  }
+}
+
 async function composeEstimateDataPayload(estimate, {
   adminDraftPreview = false,
   isPdfRenderPass = false,
@@ -31753,6 +32120,8 @@ async function composeEstimateDataPayload(estimate, {
     // the page or in Ask Waves, may state them.
     const noEstimateWideGuarantee = !estimateCarriesPlanTerms(estimateDataForIntelligence, pricingBundle);
     const effectiveInvoiceMode = estimate.bill_by_invoice === true || guaranteeOnlyAccept;
+    // Live lookups the "What you pay" box must resolve (an unresolved lane or deposit ledger means no box).
+    const whatYouPayLookups = await whatYouPayAcceptLookups(estimate);
     const intelligence = isRegulatedCertificateSurface
       ? null
       : buildWaveGuardIntelligencePayload(
@@ -31821,6 +32190,8 @@ async function composeEstimateDataPayload(estimate, {
         logger.warn(`[estimate-data] phone-contradiction lookup failed for estimate ${estimate.id}: ${parkErr.message}`);
       }
     }
+    // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: a parked estimate is held for the office, so the page offers no first-visit request.
+    if (phoneReviewHold && acceptance?.preferredTime) delete acceptance.preferredTime;
 
     const membership = await buildEstimateMembershipContext(estimate);
 
@@ -32766,6 +33137,16 @@ async function composeEstimateDataPayload(estimate, {
         })()),
         defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
       },
+      // Read-only: the first visit and each later application as acceptance bills them (see whatYouPayForData).
+      whatYouPay: whatYouPayForData({
+        estimate,
+        estData: estimateDataForIntelligence,
+        pricingBundle,
+        invoiceMode: effectiveInvoiceMode,
+        siteConfirmationHold,
+        ...whatYouPayLookups,
+        quoteRequired: quoteRequirement?.quoteRequired === true,
+      }),
       cta: {
         // Priced termite trenching is review-before-booking: the price stays visible
         // (NOT quoteRequired) but self-accept/self-book is suppressed on the React
@@ -33348,6 +33729,9 @@ module.exports.mapImagePreGuard = mapImagePreGuard;
 module.exports.contactPhonePreGuard = contactPhonePreGuard;
 module.exports.commercialAgreementPreGuard = commercialAgreementPreGuard;
 module.exports.consumerNoticePreGuard = consumerNoticePreGuard;
+module.exports.firstVisitRequestPreGuard = firstVisitRequestPreGuard;
+module.exports.firstVisitRequestState = firstVisitRequestState;
+module.exports.firstVisitRequestOffer = firstVisitRequestOffer;
 module.exports.commercialFirstVisitPreGuard = commercialFirstVisitPreGuard;
 module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;
@@ -33442,6 +33826,9 @@ module.exports.isReservationHeldAppointment = isReservationHeldAppointment;
 module.exports.findLinkedUpcomingAppointment = findLinkedUpcomingAppointment;
 module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
+module.exports.whatYouPayForData = whatYouPayForData;
+module.exports.whatYouPayAcceptLookups = whatYouPayAcceptLookups;
+module.exports.estimateMonthlyBillingLaneKnown = estimateMonthlyBillingLaneKnown;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
 module.exports.estimateClosedOnline = estimateClosedOnline;
 module.exports.estimateLinkageInvalidated = estimateLinkageInvalidated;

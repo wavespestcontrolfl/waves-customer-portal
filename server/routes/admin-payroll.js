@@ -59,6 +59,8 @@
  * GET    /time-off/balance?technicianId=&year=   allowance, hours booked, hours paid, holidays.
  * PUT    /technicians/:id/pto-allowance          { hoursPerYear | null } the yearly allowance.
  * PUT    /technicians/:id/week-minimum           { hours | null } the minimum paid hours of a full workweek (owner account).
+ * GET    /production-share/preview?technicianId=&weekStart=   the week's production share credit, stop by stop (owner account; pays nothing).
+ * PUT    /production-share/settings              { technicianId | null, fromWeek?, rateBps, barType, barCents, callbackStopValueCents } (owner account).
  *                                    The allowance only warns; it never blocks an entry.
  * PUT    /technicians/:id/pto-payout-week        { weekStart | null, shownWeekStart | null, shownState }
  *                                    "Pay out the bank": the pay run for that week pays every hour the time-off
@@ -124,6 +126,7 @@ const payrollTimeOff = require('../services/payroll-time-off');
 const payrollPayLines = require('../services/payroll-pay-lines');
 const payrollFamilyEmployee = require('../services/payroll-family-employee');
 const payrollMercury = require('../services/payroll-mercury');
+const productionShare = require('../services/production-share');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -204,6 +207,20 @@ router.put('/technicians/:id/week-minimum', timeOffOnly, requireFullAccess, asyn
   try {
     res.json({ technician: await payrollTimeOff.setWeekMinimum(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set minimum paid week', err); }
+});
+
+// Production share (PR 1: the credit and its numbers; nothing is paid). Owner account only, like the other payroll
+// money settings. No gate: a preview reads, and the numbers pay nothing until the pay line ships.
+router.get('/production-share/preview', requireFullAccess, async (req, res) => {
+  try {
+    res.json(await productionShare.previewWeek(req.query.technicianId, req.query.weekStart));
+  } catch (err) { fail(res, 'preview the production share', err); }
+});
+
+router.put('/production-share/settings', requireFullAccess, async (req, res) => {
+  try {
+    res.json({ settings: await productionShare.saveSettings(req.body, req.technicianId) });
+  } catch (err) { fail(res, 'save the production share settings', err); }
 });
 
 // A payout decides an employee's last wages (the handbook's two exceptions need the owner's judgment), so it

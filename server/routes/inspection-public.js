@@ -206,8 +206,8 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty, reverseGeocodeLocality } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
-const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough, isServedSouthHillsboroughTown, isInHeldLocalityPinBox } = require('../services/service-area');
-const { isExcludedLocality, isExcludedZip } = require('../services/excluded-localities');
+const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough, isServedSouthHillsboroughTown } = require('../services/service-area');
+const { isExcludedLocality, isExcludedZip, isPortCharlotteLocality, hasUsableZip } = require('../services/excluded-localities');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { isOpenLeadRow } = require('../services/lead-statuses');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
@@ -797,8 +797,8 @@ async function checkServiceArea(location, address = null) {
   // county with a served county's name (Charlotte County, VA) would pass
   // the name match alone. Outside the box is out of area, no network call.
   if (!isInServiceAreaCoarseBox(location.lat, location.lng)) return { ok: false, county: null };
-  // Excluded localities (Punta Gorda, owner ruling 2026-10-22; Rotonda, Englewood, Placida, Boca Grande, Port
-  // Charlotte and Babcock Ranch until a second technician is hired, owner ruling 2026-11-23) sit inside a
+  // Excluded localities (Punta Gorda, owner ruling 2026-10-22; Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf
+  // Cove, El Jobean, Charlotte Harbor and Deep Creek until a second technician is hired, owner ruling 2026-11-23) sit inside a
   // served county, so the county name below cannot refuse them: the address's
   // own city, or a ZIP that belongs only to one, does. No county is named in
   // the answer (serviceAreaFailure uses the city / ZIP as the region).
@@ -808,6 +808,9 @@ async function checkServiceArea(location, address = null) {
   // address's own ZIP proves a served locality (isInServiceAreaBox). With a
   // key the reverse-geocoded county decides below and wins over the rectangle.
   if (!key) {
+    // No lookup can place the pin, so a Port Charlotte address with no ZIP cannot be told from one on a held shared ZIP
+    // (33980 / 33981 / 33983): unavailable (recoverable), never served.
+    if (isPortCharlotteLocality(address?.city) && !hasUsableZip(address?.zip)) return { ok: false, county: null, unavailable: true };
     return { ok: isInServiceAreaBox(location.lat, location.lng, { zip: address?.zip }), county: null };
   }
   let county = null;
@@ -818,16 +821,11 @@ async function checkServiceArea(location, address = null) {
   }
   if (!county) return { ok: false, county: null, unavailable: true };
   if (isInServiceAreaCounty(county)) {
-    // Punta Gorda and the 2026-11-23 held places sit inside served Charlotte County, and the submitted
+    // Punta Gorda and the held places sit inside served Charlotte County, and the submitted
     // city/ZIP can be blank or wrong (Codex #6424 r1 security P2), so the
     // locality and ZIP Google places on the coordinate decide too. An
     // unknowable answer is unavailable (recoverable 503), never "served".
-    // Englewood spans two counties, so a Sarasota-county pin in the Englewood area gets the same read, whatever city and
-    // ZIP the address carries (stored values can be stale): every other Sarasota booking makes no extra paid lookup.
-    const charlotte = /^charlotte(\s+county)?$/i.test(String(county).trim());
-    const sarasotaEnglewoodArea = /^sarasota(\s+county)?$/i.test(String(county).trim())
-      && isInHeldLocalityPinBox(location.lat, location.lng);
-    if (charlotte || sarasotaEnglewoodArea) {
+    if (/^charlotte(\s+county)?$/i.test(String(county).trim())) {
       let place = null;
       try {
         place = await reverseGeocodeLocality({ latitude: location.lat, longitude: location.lng }, key);
@@ -836,6 +834,9 @@ async function checkServiceArea(location, address = null) {
       }
       if (!place) return { ok: false, county: null, unavailable: true };
       if (isExcludedLocality(place.city) || isExcludedZip(place.zip)) return { ok: false, county: null };
+      // Port Charlotte is served, but ZIPs 33980 / 33981 / 33983 hold by ZIP and Google names some of their addresses
+      // "Port Charlotte": a Port Charlotte locality with no ZIP cannot be told from a held address: unknowable.
+      if ((isPortCharlotteLocality(place.city) || (!place.city && isPortCharlotteLocality(address?.city))) && !hasUsableZip(place.zip)) return { ok: false, county: null, unavailable: true };
     }
     return { ok: true, county };
   }

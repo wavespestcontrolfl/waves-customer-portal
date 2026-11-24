@@ -2041,12 +2041,8 @@ postgres('tech rewards pay lines: the December gift', () => {
       process.env[SEASON_GATE] = 'true';
       delete process.env.GATE_TECH_REWARDS_PAY_LINES; // the season bonus does not need the gift's gate
       jest.setSystemTime(Date.parse('2027-10-12T17:00:00Z')); // every week used below has ended
-      TAX_YEARS[2027] = TAX_YEARS[2026]; // no 2027 withholding tables are on file yet, and a 2027 check needs them
       scores.buildSeasonScore.mockReset().mockResolvedValue(scoreOf(92.5, 400));
       scores.getSettings.mockReset().mockResolvedValue(SETTINGS);
-    });
-    afterEach(() => {
-      delete TAX_YEARS[2027];
     });
 
     it('is the band rate of the score times the pay earned in the season times the multiplier, on the run dated the last Friday of September', async () => {

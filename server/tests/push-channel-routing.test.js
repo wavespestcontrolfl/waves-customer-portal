@@ -301,3 +301,43 @@ describe('policy table hygiene', () => {
     expect(p).toEqual({ title: 'Watering after today’s visit', link: '/?tab=documents', category: 'service' });
   });
 });
+
+describe("a technician's On-my-way tap keeps the customer's channel (useCustomerChannel)", () => {
+  // sendTechEnRoute marks a manual tap operatorInitiated (send-window marker) AND
+  // metadata.useCustomerChannel. The mark lifts the operator text lock, so the notice
+  // follows the policy. Since 2026-11-20 (owner: "lets revert to text") the policy for
+  // an on-the-way notice is text; the customer's own App choice goes through
+  // wantsAppFirst, which honors the same mark.
+  const route = (overrides = {}) => decidePushRoute({
+    gateOn: true, customerId: 'c-1', messageType: 'tech_en_route', hasMedia: false, humanAuthored: false,
+    operatorInitiated: true, useCustomerChannel: true, ...overrides,
+  });
+
+  it('a tapped en-route notice goes by text, like an automated one', () => {
+    expect(route()).toBe('sms_only');
+    expect(route({ operatorInitiated: false, useCustomerChannel: false })).toBe('sms_only');
+  });
+
+  it('a marked reminder follows the policy too: the text alone', () => {
+    expect(route({ messageType: 'appointment_reminder' })).toBe('sms_only');
+  });
+
+  it('an operator send WITHOUT the mark still stays a text (staff chose Text)', () => {
+    expect(route({ useCustomerChannel: undefined })).toBe('sms_only');
+    expect(route({ useCustomerChannel: 'true' })).toBe('sms_only');
+    expect(route({ messageType: 'billing_reminder', useCustomerChannel: false })).toBe('sms_only');
+  });
+
+  it('an admin-attributed send with the mark follows the policy; without it, a text', () => {
+    expect(route({ operatorInitiated: false, adminAttributed: true, messageType: 'billing_reminder' })).toBe('push_and_sms');
+    expect(route({ operatorInitiated: false, adminAttributed: true, messageType: 'billing_reminder', useCustomerChannel: false })).toBe('sms_only');
+  });
+
+  it('the mark never lifts the other text-only rules', () => {
+    expect(route({ humanAuthored: true })).toBe('sms_only');
+    expect(route({ hasMedia: true })).toBe('sms_only');
+    expect(route({ bundledReview: true, messageType: 'service_complete' })).toBe('sms_only');
+    expect(route({ messageType: 'appointment_confirmation' })).toBe('sms_only');
+    expect(route({ gateOn: false })).toBe('sms_only');
+  });
+});

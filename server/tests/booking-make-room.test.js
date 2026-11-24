@@ -55,7 +55,7 @@ const TEXTS = { smsEnabled: true, serviceReminder72h: true, serviceReminder24h: 
 
 function makeDeps({
   rows = exampleDay(), told = ['visit-e'], setTime = null, prefs = {}, pref = {}, feasible = true, blocks = [], holdIds = [], techBlind = true,
-  channel72 = {}, assignable = [TECH], absent = [], blackout = [], inactive = [], pushRoute = 'push_and_sms', device = null,
+  channel72 = {}, assignable = [TECH], absent = [], blackout = [], inactive = [],
   travelGap = false, multiTech = false,
 } = {}) {
   const evaluated = [];
@@ -95,9 +95,6 @@ function makeDeps({
     customerMaxDetourMinutes: jest.fn(() => 30),
     zoneRouteDaysLive: () => false,
     readZoneRouteDays: jest.fn(async () => ({ synthetic: true })),
-    // The sender's app routing for a reminder type, and the customer's app device as its sender reads it.
-    pushRouteFor: jest.fn(() => pushRoute),
-    appDeviceStatus: jest.fn(async () => device || { enabled: true, registered: false, fresh: false, reachable: false }),
     techBlind: () => techBlind,
     closeMin: 17 * 60,
     ownHoldIds: jest.fn(async () => new Set(holdIds)),
@@ -231,19 +228,6 @@ describe('the rules a moved customer adds', () => {
     expect(report.byReason.reminders_not_text).toBeGreaterThanOrEqual(1);
   });
 
-  test('with app-first routing, a customer the sender can reach in the app never moves (reminders go in the app instead)', async () => {
-    const device = { enabled: true, registered: true, fresh: false, reachable: true };
-    const { report, deps } = await check({ deps: makeDeps({ pushRoute: 'push_first', device }) });
-    expect(starts(report)).not.toContain('09:00');
-    expect(report.byReason.reminders_not_text).toBeGreaterThanOrEqual(1);
-    expect(deps.pushRouteFor).toHaveBeenCalledWith('cust-b', 'reminder_72h');
-  });
-
-  test('with app-first routing, a customer with no app device still gets texts and may move', async () => {
-    const { report } = await check({ deps: makeDeps({ pushRoute: 'push_first' }) });
-    expect(starts(report)).toContain('09:00');
-  });
-
   test('reminders by text and email count as text, and the 72-hour channel is resolved the way the sender does', async () => {
     const prefs = { 'cust-c': { ...TEXTS, reminder72hChannel: 'both', reminder24hChannel: 'both', reminder72hChannelExplicit: true, emailEnabled: true } };
     const { report, deps } = await check({ deps: makeDeps({ prefs }) });
@@ -251,8 +235,6 @@ describe('the rules a moved customer adds', () => {
     expect(deps.resolve72hChannel).toHaveBeenCalledWith('both', 'visit-c', { prefsUnavailable: undefined, explicitChoice: true, emailEnabled: true, conn: expect.anything() });
     // The prefs read rides the check's own connection (a hold's transaction inside reserve or extend).
     expect(deps.getReminderPrefs).toHaveBeenCalledWith('cust-c', { scheduledServiceId: 'visit-c', conn: expect.anything() });
-    // 'both' always keeps a text leg, so the app device is never read for it.
-    expect(deps.appDeviceStatus).not.toHaveBeenCalledWith('cust-c', expect.anything());
   });
 
   test('a time preference that does not allow the new hour stops the chain', async () => {
@@ -528,7 +510,7 @@ describe('the time budget (Codex round 5: a lost race never cancels a read alrea
   test.each([
     ['an open-day read (assignableTechIds)', 'assignableTechIds', ['getBlackoutDates', 'absentTechDays', 'loadBlocks']],
     ['a full-check read (loadBlocks)', 'loadBlocks', ['placement', 'loadArrivalRouteContext', 'loadDayContext', 'getReminderPrefs', 'loadPref']],
-    ['a moved stop\'s reminder settings (getReminderPrefs)', 'getReminderPrefs', ['resolve72hChannel', 'appDeviceStatus', 'loadPref']],
+    ['a moved stop\'s reminder settings (getReminderPrefs)', 'getReminderPrefs', ['resolve72hChannel', 'loadPref']],
   ])('%s outlasts the budget: the check sends no later read, and returns only once that read answers', async (_label, slow, later) => {
     const deps = makeDeps();
     const release = holdRead(deps, slow);
@@ -613,8 +595,6 @@ describe('the default reads', () => {
     expect(deps.customerMaxDetourMinutes).toBe(policy.customerMaxDetourMinutes);
     expect(deps.zoneRouteDaysLive).toBe(require('../config/feature-gates').zoneRouteDaysLive);
     expect(deps.readZoneRouteDays).toBe(require('../services/scheduling/zone-route-days').readZoneRouteDays);
-    expect(typeof require('../services/push-notifications').customerStatus).toBe('function');
-    expect(typeof deps.pushRouteFor('cust-1', 'reminder_72h')).toBe('string');
     expect(typeof deps.techBlind()).toBe('boolean');
     const arrivalRoute = require('../services/scheduling/arrival-route');
     expect(deps.loadArrivalRouteContext).toBe(arrivalRoute.loadArrivalRouteContext);

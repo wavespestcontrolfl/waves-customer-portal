@@ -5,6 +5,7 @@
 const db = require('../../models/db');
 
 const { portalUrl } = require('../../utils/portal-url');
+const { displayedPerApplication } = require('../estimate-pricing-bundle-utils');
 const MAX_PER_CUSTOMER = 10;
 const DEFAULT_PER_CUSTOMER = 3;
 
@@ -278,6 +279,188 @@ function blockedRecord(row) {
   };
 }
 
+// ── The accepted choice ──────────────────────────────────────────────
+// An accepted estimate's page still carries EVERY offered cadence. Real miss
+// 2026-11-22: the customer took bi-monthly, the reader quoted the monthly
+// option as "the price", and called the visits overpriced. The choice lives
+// in estimates.accepted_service_mode + accepted_frequency_key (migration
+// 20260626000002, stamped by the /accept handler as the UI selection key that
+// matches pricing.services[].frequencies[].key) and, in a bundle, in
+// estimate_data.customerSelection.serviceCadences (service key -> tier key,
+// stamped by the same handler). Legacy accepts carry neither, so a choice that
+// cannot be resolved is reported as unknown, never implied.
+// Rows are marked in place: the page object is this tool's own sanitized copy.
+const ACCEPTED_OPTIONS_NOTE = 'quote this block as what the customer agreed to; options marked accepted:false are offers the customer did not take';
+const hasOwn = (node, field) => !!node && typeof node === 'object' && Object.hasOwn(node, field);
+
+function storedServiceCadences(data) {
+  const raw = data?.customerSelection?.serviceCadences || data?.result?.customerSelection?.serviceCadences;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  for (const [service, tier] of Object.entries(raw)) if (typeof tier === 'string' && tier) out[service] = tier;
+  return Object.keys(out).length ? out : null;
+}
+
+// The independently selectable non-pest services: the cadence combinations'
+// selection keys (the client's comboAxisKeys), plus any stored cadence key.
+// Every other recurring section mirrors the pest cadence and is locked to it.
+function selectableAxes(pricing, cadences) {
+  const axes = new Set(Object.keys(cadences || {}));
+  const first = Array.isArray(pricing.serviceCadenceCombos) ? pricing.serviceCadenceCombos[0] : null;
+  for (const axis of Object.keys(first?.selection || {})) axes.add(axis);
+  axes.delete('pest_control');
+  return axes;
+}
+
+// One section's accepted row, from the stored selection that applies to THAT
+// service: an independently selectable axis reads its own serviceCadences
+// entry; pest and mirrored sections read the accepted (pest) key; else the
+// section's only cadence.
+function resolveSectionRow(section, acceptedKey, cadences, axes) {
+  const rows = Array.isArray(section.frequencies) ? section.frequencies : [];
+  if (axes.has(section.key)) {
+    const row = rows.find((r) => r.key === cadences?.[section.key]);
+    return row ? { row, basis: 'stored_service_cadence' } : null;
+  }
+  const byKey = rows.find((r) => r.key === acceptedKey);
+  if (byKey) return { row: byKey, basis: 'accepted_key' };
+  return rows.length === 1 ? { row: rows[0], basis: 'only_option' } : null;
+}
+
+function discountState(node) {
+  if (!hasOwn(node, 'manualDiscount') && !hasOwn(node, 'manualDiscountSuppressed')) return null;
+  if (node.manualDiscountSuppressed === true) return { suppressed: true, discount: null };
+  return { suppressed: false, discount: node.manualDiscount || null };
+}
+
+function acceptedServiceEntry(section, row, basis) {
+  // The price card's own per-application price (net of discounts), not the
+  // gross outer perVisit/perTreatment of a solo pest row.
+  const shown = displayedPerApplication(row);
+  const entry = {
+    service_key: section.key, service_label: section.label || section.key,
+    frequency_key: row.key, frequency_label: row.label || null, basis,
+    per_visit: shown ? shown.amount : null, visits_per_year: shown ? shown.visits : (row.visitsPerYear ?? null), monthly: row.monthly ?? null,
+  };
+  if (!shown && !row.ranged && !row.combined_total_withheld) entry.price_unavailable = 'the page shows no single per-visit price for this cadence; open the estimate link';
+  if (row.monthlyBase != null && row.monthly != null && row.monthlyBase !== row.monthly) entry.monthly_before_discount = row.monthlyBase;
+  const state = discountState(row);
+  if (state) {
+    entry.discount = state.discount;
+    if (state.suppressed) entry.discount_suppressed = true;
+    // With per-service slices stamped, this is only THIS service's share of the plan credit.
+    if (state.discount?.itemizedPerService === true) entry.discount_scope = 'this_service_slice_only';
+  }
+  if (row.ranged) entry.price_unavailable = 'this cadence is a confirmed-on-site range; the page shows no exact price';
+  else if (row.combined_total_withheld) entry.price_unavailable = 'a combined plan is priced per application; open the estimate link';
+  return entry;
+}
+
+// The matched per-service cadence combination (accept uses the same rule).
+function matchedCombo(pricing, acceptedKey, cadences) {
+  if (!cadences || !Array.isArray(pricing.serviceCadenceCombos)) return null;
+  const wanted = Object.keys(cadences);
+  const isMatch = (combo) => {
+    const sel = combo.selection || {};
+    const nonPest = Object.keys(sel).filter((k) => k !== 'pest_control');
+    if (nonPest.length !== wanted.length || !wanted.every((k) => sel[k] === cadences[k])) return false;
+    return !sel.pest_control || sel.pest_control === acceptedKey;
+  };
+  let found = null;
+  for (const combo of pricing.serviceCadenceCombos) {
+    combo.accepted = isMatch(combo);
+    if (combo.accepted) found = combo;
+  }
+  return found;
+}
+
+function markAcceptedRecurring(pricing, acceptedKey, cadences) {
+  const services = [];
+  const picked = [];
+  const axes = selectableAxes(pricing, cadences);
+  for (const section of pricing.services || []) {
+    const rows = Array.isArray(section.frequencies) ? section.frequencies : [];
+    if (!section.isRecurring) continue;
+    const hit = resolveSectionRow(section, acceptedKey, cadences, axes);
+    for (const row of rows) row.accepted = hit ? row === hit.row : null;
+    if (hit) { picked.push(hit.row); services.push(acceptedServiceEntry(section, hit.row, hit.basis)); continue; }
+    services.push({ service_key: section.key, service_label: section.label || section.key,
+      accepted_choice_unknown: 'the stored selection does not identify which cadence of this service the customer took' });
+  }
+  if (Array.isArray(pricing.frequencies)) for (const row of pricing.frequencies) row.accepted = row.key === acceptedKey;
+  return { services, picked, combo: matchedCombo(pricing, acceptedKey, cadences) };
+}
+
+// The chosen cadence's OWN discount (a lawn minimum can suppress it on that
+// tier while the plan-level credit stays populated). A matched combination
+// that carries no discount fields was stripped by a disclosure rule: say so.
+function acceptedDiscount(pricing, combo, picked) {
+  if (combo) {
+    const state = discountState(combo);
+    if (!state) return { discount: null, discount_unavailable: 'the page shows no per-choice discount for this combined plan; open the estimate link' };
+    return state.suppressed ? { discount: null, discount_suppressed: true } : { discount: state.discount };
+  }
+  const states = picked.map(discountState).filter(Boolean);
+  const granted = states.filter((state) => state.discount);
+  if (granted.some((state) => state.discount.itemizedPerService === true)) return itemizedPlanDiscount(pricing);
+  if (granted.length === 1) return { discount: granted[0].discount };
+  if (granted.length > 1) return { discount: null, discount_unavailable: 'several services carry their own discount; read each under services' };
+  if (states.some((state) => state.suppressed)) return { discount: null, discount_suppressed: true };
+  return { discount: pricing.manualDiscount || null };
+}
+
+// Section discount slices: each row holds only its own service's share, so a
+// slice is never the plan discount. Report the plan credit only as the plan's
+// own percentage; the slices stay under their services.
+function itemizedPlanDiscount(pricing) {
+  const plan = pricing.manualDiscount;
+  if (plan && plan.type === 'PERCENT' && Number(plan.value) > 0) {
+    return { discount: { type: plan.type, value: Number(plan.value), label: plan.label || null, scope: 'plan_percent_only' } };
+  }
+  return { discount: null, discount_unavailable: 'the discount is itemized per service (see each service); the page shows no plan-level amount' };
+}
+
+// A one-time acceptance: the treatment and price the page displays for it.
+function acceptedOneTime(pricing) {
+  const breakdown = pricing.oneTimeBreakdown;
+  const items = (Array.isArray(breakdown?.items) ? breakdown.items : []).map((item) => ({
+    service: item.service ?? null, label: item.label ?? null, amount: item.amount ?? null, kind: item.kind ?? null,
+  }));
+  const price = pricing.anchorOneTimePrice ?? breakdown?.total ?? null;
+  if (!items.length && price == null) return { price_unavailable: 'the page shows no one-time treatment or price for this estimate' };
+  return { one_time: { price, items } };
+}
+
+function oneTimeAcceptedBlock(block, pricing) {
+  for (const section of pricing.services || []) for (const option of section.frequencies || []) option.accepted = false;
+  for (const field of ['frequencies', 'serviceCadenceCombos']) for (const option of pricing[field] || []) option.accepted = false;
+  return { ...block, services: [], ...acceptedOneTime(pricing), other_options_not_accepted: true, note: ACCEPTED_OPTIONS_NOTE };
+}
+
+function pricingUnavailableReason(projection) {
+  if (projection.page) return 'the page withholds pricing for this estimate';
+  return projection.page_unavailable || 'the estimate page is unavailable';
+}
+
+function acceptedBlock(row, projection, data) {
+  if (!row.accepted_at && String(row.status || '').trim().toLowerCase() !== 'accepted') return null;
+  const mode = row.accepted_service_mode || null;
+  const key = row.accepted_frequency_key || null;
+  const block = { at: row.accepted_at || null, service_mode: mode, frequency: key };
+  if (!mode && !key) {
+    return { ...block, accepted_choice_unknown: 'no accepted service mode or frequency was stored for this acceptance (legacy accept); do not treat any listed option as the agreed one' };
+  }
+  const pricing = projection.page?.pricing && !projection.page.pricing.withheld ? projection.page.pricing : null;
+  if (!pricing) return { ...block, services: [], price_unavailable: pricingUnavailableReason(projection), note: ACCEPTED_OPTIONS_NOTE };
+  if (mode === 'one_time') return oneTimeAcceptedBlock(block, pricing);
+  const { services, picked, combo } = markAcceptedRecurring(pricing, key, storedServiceCadences(data));
+  return {
+    ...block, services, ...acceptedDiscount(pricing, combo, picked), other_options_not_accepted: true,
+    ...(services.some((s) => s.frequency_key) ? {} : { price_unavailable: 'no recurring option on the page matches the accepted selection' }),
+    note: ACCEPTED_OPTIONS_NOTE,
+  };
+}
+
 async function shapeEstimate(row) {
   const reconciliation_error = await reconcileMembership(row);
   // Parsed AFTER the reconcile, never before (pre-push audit P1): the
@@ -311,7 +494,7 @@ async function shapeEstimate(row) {
     price_locked_at: row.price_locked_at || null,
     ...projection,
     ...(reconciliation_error ? { reconciliation_error } : {}),
-    accepted: row.accepted_at ? { at: row.accepted_at, service_mode: row.accepted_service_mode || null, frequency: row.accepted_frequency_key || null } : null,
+    accepted: acceptedBlock(row, projection, data),
     customer_notes: row.notes || null,
     ...links,
     sent_at: row.sent_at,
@@ -381,7 +564,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read estimates as the customer's own estimate page prices them: estimate_id returns exactly one, even when customer_id is also given; customer_id alone returns the latest nonarchived estimates (default 3, max 10). Returns status, timestamps, customer or staff preview link state, and the composed page under \`page\`. \`page.pricing\` includes plan cadences, per-application prices, selectable additions, and one-time breakdowns; an authored commercial quote is in \`page.proposal\`. Quote-required pricing is withheld with a reason; low-confidence cadences are marked ranged without exact figures. Residential combined plan totals are withheld while itemized application prices remain; commercial and monthly-billed totals remain where displayed. A verified \`page.propertyGroup\` lists sibling id, address, status and links only; use its id to read that sibling's pricing separately. Deposits report captured face amount plus card surcharge as total_paid, credited/refunded amounts, status and received_at; pending, failed and unknown statuses have total_paid null. A failed deposit read yields deposits:null and deposits_unavailable, never an empty ledger. A failed live membership verification sets \`page\` to null with page_unavailable. Provenance blocks withhold the entire record, including deposits. Accepted service mode/frequency and price_locked_at identify the accepted basis, but stored aggregate totals do not establish the final invoice amount. Use staff_preview_link for staff inspection so it does not register customer engagement; customer_link is the shareable customer URL. Never reconstruct hidden totals or infer final invoice amounts.`,
+  description: `Read estimates as the customer's own estimate page prices them: estimate_id returns exactly one, even when customer_id is also given; customer_id alone returns the latest nonarchived estimates (default 3, max 10). Returns status, timestamps, customer or staff preview link state, and the composed page under \`page\`. \`page.pricing\` includes plan cadences, per-application prices, selectable additions, and one-time breakdowns; an authored commercial quote is in \`page.proposal\`. Quote-required pricing is withheld with a reason; low-confidence cadences are marked ranged without exact figures. Residential combined plan totals are withheld while itemized application prices remain; commercial and monthly-billed totals remain where displayed. A verified \`page.propertyGroup\` lists sibling id, address, status and links only; use its id to read that sibling's pricing separately. Deposits report captured face amount plus card surcharge as total_paid, credited/refunded amounts, status and received_at; pending, failed and unknown statuses have total_paid null. A failed deposit read yields deposits:null and deposits_unavailable, never an empty ledger. A failed live membership verification sets \`page\` to null with page_unavailable. Provenance blocks withhold the entire record, including deposits. Accepted service mode/frequency and price_locked_at identify the accepted basis, but stored aggregate totals do not establish the final invoice amount. For an accepted estimate, quote the \`accepted\` block (accepted service, frequency, per-visit price, discount) as what the customer agreed to: every cadence option on the page carries accepted:true|false, and the accepted:false options are offers the customer did not take, never the quoted price; accepted_choice_unknown means the choice was not stored, so say so instead of picking an option. Use staff_preview_link for staff inspection so it does not register customer engagement; customer_link is the shareable customer URL. Never reconstruct hidden totals or infer final invoice amounts.`,
   input_schema: {
     type: 'object',
     properties: {

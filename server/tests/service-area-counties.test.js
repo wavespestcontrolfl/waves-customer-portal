@@ -40,11 +40,13 @@ describe('Punta Gorda triage flag', () => {
     expect(flagsFor({ county: 'Charlotte', postal_code: '33950' })).toContain('out_of_service_area');
   });
 
-  // Owner ruling 2026-11-23: six more places are held until a second technician is hired.
+  // Owner ruling 2026-11-23: these places are held until a second technician is hired (Englewood and Port Charlotte
+  // were held for a few hours and are served again; Port Charlotte on shared ZIP 33980 / 33981 stays held by ZIP).
   test.each([
     [{ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33980' }],
-    [{ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33948' }],
-    [{ city: 'Englewood', county: 'Sarasota', postal_code: '34223' }],
+    [{ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33981' }],
+    [{ city: 'Gulf Cove', county: 'Charlotte' }],
+    [{ city: 'Deep Creek', county: 'Charlotte' }],
     [{ city: 'Rotonda West', county: 'Charlotte', postal_code: '33947' }],
     [{ city: 'Placida', county: 'Charlotte' }],
     [{ city: 'Boca Grande', county: 'Charlotte' }],
@@ -52,6 +54,12 @@ describe('Punta Gorda triage flag', () => {
     [{ postal_code: '33983', county: 'Charlotte' }],
   ])('held place %j is flagged out_of_service_area', (sa) => {
     expect(flagsFor(sa)).toContain('out_of_service_area');
+  });
+
+  test('Englewood and Port Charlotte are served again and stay unflagged', () => {
+    expect(flagsFor({ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33948' })).not.toContain('out_of_service_area');
+    expect(flagsFor({ city: 'Englewood', county: 'Sarasota', postal_code: '34223' })).not.toContain('out_of_service_area');
+    expect(flagsFor({ city: 'Englewood', county: 'Charlotte', postal_code: '34224' })).not.toContain('out_of_service_area');
   });
 
   test('North Port and Venice stay unflagged', () => {

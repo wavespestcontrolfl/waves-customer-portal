@@ -15,7 +15,6 @@ suite('T&S equipment and protocol defaults on PostgreSQL', () => {
   const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: url, pool: { min: 0, max: 2 } }); });
   afterAll(async () => { await db?.destroy(); await require('../models/db').destroy(); });
-  afterEach(() => { delete process.env.GATE_TREE_SHRUB_FIELD_GUIDE; });
   async function rollback(run) {
     const trx = await db.transaction();
     try { await run(trx); } finally { await trx.rollback(); }
@@ -46,10 +45,8 @@ suite('T&S equipment and protocol defaults on PostgreSQL', () => {
     await migration.down(trx);
     expect(await trx('equipment').where({ id: asset.id }).first()).toBeTruthy();
   }));
-  test('the same appointment yields no defaults while dark, then only routine identities with no manufactured quantities', () => rollback(async trx => {
+  test('the same appointment yields only routine identities with no manufactured quantities', () => rollback(async trx => {
     const f = await fixture(trx);
-    expect((await resolveCompletionProductDefaults({ db: trx, serviceId: f.serviceId })).products).toEqual([]);
-    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
     const result = await resolveCompletionProductDefaults({ db: trx, serviceId: f.serviceId });
     expect(result.error).toBeUndefined();
     expect(result.products.map(row => row.treeShrubKey)).toEqual(['snapshot', 'f8012']);
@@ -65,7 +62,6 @@ suite('T&S equipment and protocol defaults on PostgreSQL', () => {
       service_type: 'Tree & Shrub Care', service_date: '2028-06-15', status: 'completed' });
     await trx('property_application_history').insert({ id: ledger, customer_id: f.customerId, product_id: f.snapshotId,
       service_record_id: record, application_date: '2028-06-15', application_rate: 2.3, rate_unit: 'lb' });
-    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
     const read = () => resolveCompletionProductDefaults({ db: trx, serviceId: f.serviceId });
     const blocked = await read();
     expect(blocked.error).toBeUndefined();
@@ -76,7 +72,6 @@ suite('T&S equipment and protocol defaults on PostgreSQL', () => {
   }));
   test('an unavailable ledger fails closed instead of treating history as empty', () => rollback(async trx => {
     const f = await fixture(trx);
-    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
     await trx.schema.renameTable('property_application_history', 'qa_unavailable_history');
     const result = await resolveCompletionProductDefaults({ db: trx, serviceId: f.serviceId });
     expect(result.products).toEqual([]);

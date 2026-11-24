@@ -17,6 +17,22 @@ function repairedFromWeb(checks) {
   return Boolean(checks) && typeof checks === 'object' && checks.from_web === true;
 }
 
+// The site a result links to, read from its URL: the host, or the target of a Google redirect link
+// (google.<tld>/url?q=<target> or ?url=<target>). From 2026-11-22 every repaired result carried the
+// domain google.com, so `domain` alone cannot say which site the result is (Claude queue 5060dbe3).
+function resultHost(url) {
+  let parsed;
+  try { parsed = new URL(String(url || '')); } catch { return ''; }
+  const host = parsed.hostname.toLowerCase();
+  if (/^(www\.)?google\.(com|[a-z]{2}|co\.[a-z]{2}|com\.[a-z]{2})$/.test(host) && parsed.pathname === '/url') {
+    const target = parsed.searchParams.get('q') || parsed.searchParams.get('url');
+    if (target) {
+      try { return `${host}>${new URL(target).hostname.toLowerCase()}`.slice(0, 80); } catch { /* not a URL */ }
+    }
+  }
+  return host.slice(0, 80);
+}
+
 function pageFacts(items) {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   const types = {};
@@ -31,6 +47,7 @@ function pageFacts(items) {
     organic: organic.length,
     repaired: organic.filter(i => repairedFromWeb(i.checks)).length,
     top_domains: organic.slice(0, 5).map(i => String(i.domain || '').toLowerCase().slice(0, 80)),
+    top_hosts: organic.slice(0, 5).map(i => resultHost(i.url)),
   };
 }
 
@@ -212,4 +229,4 @@ class RankTracker {
 }
 
 module.exports = new RankTracker();
-module.exports._private = { pageFacts };
+module.exports._private = { pageFacts, resultHost };
