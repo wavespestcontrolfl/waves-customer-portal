@@ -914,7 +914,7 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
   return { ledger, pricing, order };
 }
 
-async function claimRequest(trx, { requestId, registry, deadAdapters = null, login = null }) {
+async function claimRequest(trx, { requestId, registry, deadAdapters = null, login = null, now = new Date() }) {
   // The product's pricing advisory lock FIRST — the lock every
   // vendor_pricing writer holds to commit — then the request row, then the
   // product row: the sweep's order (auto-reorder.js lockProductPricing), so
@@ -939,8 +939,12 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
   const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters, login });
   if (resolved.skipped) return resolved;
   const { vendor, adapterKey, m, credentials = null } = resolved;
-  const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit');
+  const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
+  const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit', ...FERTILIZER_COLUMNS);
   if (!product) return { skipped: 'no_product' };
+  // June 1 - Sept 30: order no N/P fertilizer. The request stays open and
+  // unclaimed, with no hand-off bell; the first run after Sept 30 orders it.
+  if (fertilizerBlackoutHold(product, now)) return { skipped: 'fertilizer_blackout' };
   const ineligible = claimIneligibility({ product, request, vendor });
   if (ineligible) return cancelAtClaim(trx, { request, product, m, ineligible });
   const guarded = await lockedProductGuards(trx, { request });
@@ -1411,7 +1415,7 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await bellUndispatchable(conn, requestId, notify)) };
   const registry = adapters || loadAdapters();
   const login = await prefetchVendorLogin(conn, requestId, registry, deadAdapters);
-  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login }));
+  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login, now }));
   if (claim.skipped) {
     // A lost hand-off bell is reported, not swallowed: the request stays open
     // and unclaimed, so the next run re-rings it — and this run goes red.

@@ -49,6 +49,7 @@ const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 const { findLiveRestockRequest, LIVE_RESTOCK_STATUSES } = require('./live-restock-request');
 const { fitAction } = require('../admin-alert-names');
 const { raiserFor, ringOnRefreshAfterConversion } = require('../admin-alert-injected');
+const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
 
 const GATE = 'GATE_AUTO_REORDER';
 const SOURCE = 'auto_reorder';
@@ -80,6 +81,7 @@ async function findLowStockCandidates(conn = db) {
     .select(
       'pc.id', 'pc.name', 'pc.inventory_on_hand', 'pc.inventory_unit', 'pc.low_stock_threshold',
       'pc.reorder_quantity', 'pc.auto_reorder_vendor_id', 'pc.auto_reorder_enabled', 'pc.active',
+      ...FERTILIZER_COLUMNS.map((c) => `pc.${c}`),
       'v.name as vendor_name',
     )
     .orderBy('pc.name');
@@ -231,6 +233,9 @@ async function handleLiveRequest(ctx, p, existing) {
   if (existing.source !== SOURCE || existing.status !== 'open') return;
   const request = await refreshOpenRequest(ctx, p, existing);
   if (!request) return;
+  // June 1 - Sept 30: no "order manually" bell for N/P fertilizer either; the
+  // request waits for the first sweep after the blackout (fertilizer-blackout.js).
+  if (fertilizerBlackoutHold(p, ctx.now)) { ctx.result.held.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'fertilizer_blackout' }); return; }
   // The dispatcher only ever claims a request whose OWN metadata names an
   // auto-orderable vendor (findDispatchable). A request that could not
   // establish a vendor id (pinned to a vendor the product has since left)
@@ -367,6 +372,8 @@ async function sweepProduct(ctx, p) {
   const existing = await findLiveRestockRequest(conn, p.id);
   if (existing) { await handleLiveRequest(ctx, p, existing); return; }
   if (!stillLow(p)) return;
+  // June 1 - Sept 30: never raise a request for N/P fertilizer (owner 2026-11-24).
+  if (fertilizerBlackoutHold(p, ctx.now)) { result.held.push({ productId: p.id, name: p.name, requestId: null, reason: 'fertilizer_blackout' }); return; }
   if (!p.inventory_unit) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_unit' }); return; }
   const reorderQty = num(p.reorder_quantity);
   if (!reorderQty || reorderQty <= 0) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_reorder_quantity' }); return; }
@@ -383,10 +390,10 @@ async function sweepProduct(ctx, p) {
   await bellOrWarn(ctx, p, request, 'bells');
 }
 
-async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
-  if (!gateEnvValue(GATE)) return { skipped: 'gated', created: [], deduped: [], unconfigured: [] };
-  const result = { created: [], deduped: [], unconfigured: [], errors: [], renotified: [], refreshed: [], bells: [] };
-  const ctx = { conn, notify, result };
+async function runSuppliesAutoReorderSweep({ conn = db, notify = null, now = new Date() } = {}) {
+  if (!gateEnvValue(GATE)) return { skipped: 'gated', created: [], deduped: [], unconfigured: [], held: [] };
+  const result = { created: [], deduped: [], unconfigured: [], held: [], errors: [], renotified: [], refreshed: [], bells: [] };
+  const ctx = { conn, notify, result, now };
 
   const candidates = await findLowStockCandidates(conn);
   for (const p of candidates) {
@@ -397,7 +404,7 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
       result.errors.push({ productId: p.id, name: p.name, message: err.message });
     }
   }
-  logger.info(`[auto-reorder] sweep: ${result.created.length} created, ${result.deduped.length} deduped, ${result.unconfigured.length} unconfigured, ${result.errors.length} errors`);
+  logger.info(`[auto-reorder] sweep: ${result.created.length} created, ${result.deduped.length} deduped, ${result.unconfigured.length} unconfigured, ${result.held.length} held (fertilizer blackout), ${result.errors.length} errors`);
   return result;
 }
 

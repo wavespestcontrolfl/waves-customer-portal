@@ -1246,3 +1246,21 @@ test('stale recovery that loses the race to the live dispatcher leaves the settl
   expect(notify).not.toHaveBeenCalled();
   expect(mockState.updates.filter((u) => u.table === 'product_restock_requests')).toHaveLength(0);
 });
+
+// June 1 - Sept 30 N/P fertilizer hold (owner 2026-11-24): no claim, no ledger
+// row, no hand-off bell; the request stays open for the first run after Sept 30.
+test('in the fertilizer blackout an N/P fertilizer request is not claimed or belled', async () => {
+  mockState.product = { ...sticker, name: 'Synthetic 24-0-11 granular', analysis_n: 24, analysis_p: 0 };
+  const a = mockAdapter();
+  const r = await run(a, { now: new Date('2026-07-15T14:00:00Z') });
+  expect(r.skipped).toBe('fertilizer_blackout');
+  expect(a.place).not.toHaveBeenCalled();
+  expect(notify).not.toHaveBeenCalled();
+  expect(mockState.updates.filter((u) => u.table === 'product_restock_requests')).toEqual([]);
+});
+
+test('outside the blackout the same fertilizer request is claimed', async () => {
+  mockState.product = { ...sticker, name: 'Synthetic 24-0-11 granular', analysis_n: 24, analysis_p: 0 };
+  const r = await run(mockAdapter(), { now: new Date('2026-10-01T14:00:00Z') });
+  expect(r.skipped).not.toBe('fertilizer_blackout');
+});

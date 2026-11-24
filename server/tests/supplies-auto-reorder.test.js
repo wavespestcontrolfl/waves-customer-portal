@@ -565,3 +565,47 @@ test('an email claim that lands while a NEW request\'s first bell is written get
     expect(mockState.retiredBells).toEqual([r.created[0].requestId]);
   } finally { mockState.emailOutAfterRing = null; mockState.emailReads = 0; }
 });
+
+// June 1 - Sept 30 N/P fertilizer hold (owner 2026-11-24 "YES"; fertilizer-blackout.js).
+describe('fertilizer blackout', () => {
+  const fert = { ...lowSign, id: 'prod-fert', name: 'Synthetic 24-0-11 granular', inventory_unit: 'lb', category: 'fertilizer', fertilizer_analysis: null, analysis_n: 24, analysis_p: 0 };
+  const JULY = new Date('2026-07-15T14:00:00Z');
+  const MAY31_ET = new Date('2026-06-01T03:30:00Z'); // 11:30 PM May 31 ET
+  const OCT1 = new Date('2026-10-01T14:00:00Z');
+
+  test('in the blackout: no request and no bell for N/P fertilizer; the result names it held', async () => {
+    mockState.candidates = [fert];
+    const notify = jest.fn(async () => ({}));
+    const res = await runSuppliesAutoReorderSweep({ notify, now: JULY });
+    expect(mockState.inserted).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(res.held).toEqual([{ productId: 'prod-fert', name: fert.name, requestId: null, reason: 'fertilizer_blackout' }]);
+  });
+
+  test('in the blackout: a non-fertilizer and a 0-0-x product still order', async () => {
+    mockState.candidates = [{ ...lowSign, name: 'Synthetic 0-0-62 potash', category: 'fertilizer', analysis_n: 0, analysis_p: 0 }];
+    const res = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})), now: JULY });
+    expect(res.created).toHaveLength(1);
+    expect(res.held).toEqual([]);
+  });
+
+  test('in the blackout: an open auto request for N/P fertilizer is not re-belled "order manually"', async () => {
+    mockState.candidates = [fert];
+    mockState.existing = { id: 'req-open', status: 'open', source: 'auto_reorder', product_id: 'prod-fert', requested_quantity: '650', unit: 'lb', metadata: {} };
+    const notify = jest.fn(async () => ({}));
+    const res = await runSuppliesAutoReorderSweep({ notify, now: JULY });
+    expect(notify).not.toHaveBeenCalled();
+    expect(res.held).toEqual([{ productId: 'prod-fert', name: fert.name, requestId: 'req-open', reason: 'fertilizer_blackout' }]);
+  });
+
+  test('the window is the ET date: 11:30 PM May 31 ET still orders; Oct 1 orders again', async () => {
+    for (const now of [MAY31_ET, OCT1]) {
+      mockState.candidates = [fert];
+      mockState.inserted = [];
+      mockState.raws = [];
+      mockState.locked = false;
+      const res = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})), now });
+      expect(res.created).toHaveLength(1);
+    }
+  });
+});
