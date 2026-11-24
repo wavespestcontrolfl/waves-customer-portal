@@ -753,7 +753,7 @@ describe('the down guard migration', () => {
 });
 
 describe('the stop override migration down', () => {
-  const migration = require('../models/migrations/20261124160000_production_share_stop_overrides');
+  const migration = require('../models/migrations/20261124170000_production_share_stop_overrides');
   const fakeKnex = (stored) => {
     const calls = [];
     const knex = (table) => ({ first: async () => { calls.push(`read ${table}`); return stored ? { id: 1 } : undefined; } });
@@ -762,8 +762,8 @@ describe('the stop override migration down', () => {
     return { knex, calls };
   };
 
-  test('sorts after origin/main\'s newest migration at the time of writing', () => {
-    expect('20261124160000_production_share_stop_overrides' > '20261124150000_print_lead_sources').toBe(true);
+  test('sorts after the newest migration of origin/main at the time of writing (20261124160100)', () => {
+    expect('20261124170000_production_share_stop_overrides' > '20261124160100_mail_prospects_keep_typed_views').toBe(true);
   });
 
   test('takes the table lock BEFORE it looks for a stored credit, and refuses when one is there', async () => {
