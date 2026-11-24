@@ -12,11 +12,11 @@
 Waves has **one technician today: Adam (the owner)**. Adam covers every service line in every served ZIP.
 
 When the second technician is hired, the split is **by service line, not by ZIP or territory**:
-- **Second tech:** all pest control and termite work, in every served ZIP.
+- **Second tech:** pest control and termite work, in every served ZIP. Exceptions that stay with Adam: Aggressive Colony Surcharge stinging-insect jobs, and the exclusion line (the first rodent visit, the rodent inspection, sealing and exclusion work).
 - **Adam:** lawn care, tree & shrub, and exclusion, in every served ZIP; fills in on pest when needed.
 
 Do not split work between techs by ZIP cluster. Group a day's stops by geography for drive time only.
-The live mapping is in the auto-dispatch territory settings and the dispatch code; this page only summarizes the rulings.
+Home and cover techs per service line live in `service_line_techs`, edited on the Time Tracking roster's Service Lines card (the territory card is a read-only ZIP view). This page only summarizes the rulings.
 
 ## Route Building Order
 

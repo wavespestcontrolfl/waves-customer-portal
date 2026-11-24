@@ -13,7 +13,7 @@
 Every service line Waves sells, in every served ZIP.
 
 ### Service Lines After the Second Tech Is Hired
-Lawn care, tree & shrub, and exclusion, in every served ZIP. Fills in on pest when needed.
+Lawn care, tree & shrub, and exclusion (including the first rodent visit and the rodent inspection), in every served ZIP. Aggressive Colony Surcharge stinging-insect jobs. Fills in on pest when needed.
 
 ### Dispatch Rules
 - Arborjet palm injection: Adam only.
@@ -24,7 +24,7 @@ Lawn care, tree & shrub, and exclusion, in every served ZIP. Fills in on pest wh
 ## Second Technician (not hired yet)
 
 ### Service Lines After Hire
-All pest control and termite work, in every served ZIP.
+Pest control and termite work, in every served ZIP. Not these (they stay with Adam): Aggressive Colony Surcharge stinging-insect jobs, the first rodent visit, the rodent inspection, and sealing / exclusion work.
 
 ### Planned Day
 - A full day is 12 stops (owner 2026-11-22); 16 is a stretch day only.
@@ -33,5 +33,5 @@ All pest control and termite work, in every served ZIP.
 ---
 
 ## Notes
-- Do not split work between techs by ZIP cluster; the split is by service line. The live mapping is in the auto-dispatch territory settings.
+- Do not split work between techs by ZIP cluster; the split is by service line. Home and cover techs per service line are edited on the Time Tracking roster's Service Lines card (`service_line_techs`).
 - This page holds no performance numbers. Read live figures from the portal reports, never from this page.
