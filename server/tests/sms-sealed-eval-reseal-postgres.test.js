@@ -15,7 +15,7 @@ jest.setTimeout(180000);
 
 (SKIP ? describe.skip : describe)('sealEvalItems on PostgreSQL', () => {
   const schema = `sealed_reseal_${randomUUID().replaceAll('-', '')}`;
-  const VERSION = 'house_voice_v12_real_answers29_n';
+  const VERSION = 'house_voice_v12_real_answers33_n';
   const GATE = 'GATE_SMS_REAL_ANSWERS';
   const DAY = 86400 * 1000;
   let database;
@@ -68,15 +68,18 @@ jest.setTimeout(180000);
     { now: new Date('2026-10-20T15:00:00Z') },
   );
   // the block an earlier identity drafted: the same day-of facts, the earlier static company section
+  // (the six-place hold render of 2026-11-23, prompts 29 to 32, is the newest earlier render)
   const priorRenderBlock = () => {
     const now = currentBlock();
     const section = companyFacts.renderCompanyFactsSection();
     expect(now).toContain(section);
     return now.replace(section, companyFacts.knownCompanyFactsRenders()[1]);
   };
+  // the 26-line render live 2026-10-22 to 2026-11-23 (Charlotte County served except Punta Gorda)
+  const charlotteCountyRenderBlock = () => currentBlock().replace(companyFacts.renderCompanyFactsSection(), companyFacts.knownCompanyFactsRenders()[2]);
   // frozen before the PORTAL SELF-CANCEL line existed (2026-10-09): not recoverable
   // a block drafted under the 19-line render (live 2026-10-09 to 2026-10-22), whose payment and inside-spray lines were reworded since
-  const nineteenLineBlock = () => currentBlock().replace(companyFacts.renderCompanyFactsSection(), companyFacts.knownCompanyFactsRenders()[2]);
+  const nineteenLineBlock = () => currentBlock().replace(companyFacts.renderCompanyFactsSection(), companyFacts.knownCompanyFactsRenders()[3]);
   const prePortalBlock = () => currentBlock().replace(/^PORTAL SELF-CANCEL:.*\n/m, '');
 
   const addDraft = async ({
@@ -137,8 +140,12 @@ jest.setTimeout(180000);
     // an earlier render whose reworded line the reply may restate: not rebased
     await addDraft({ facts: nineteenLineBlock(), inbound: 'Do you take cash?', reply: 'We take cards, never cash.' });
     await addDraft({ facts: nineteenLineBlock(), reply: 'We spray the inside on the first visit.' });
-    // the 26-line render (live to 2026-11-23) already had the payment and inside lines: only the service area line was reworded
+    // the 26-line renders (live to 2026-11-23) already had the payment and inside lines: only the service area line was reworded
     await addDraft({ facts: priorRenderBlock(), inbound: 'Do you cover 33948?', reply: 'Yes, we do.' });
+    await addDraft({ facts: charlotteCountyRenderBlock(), inbound: 'Do you cover 33948?', reply: 'Yes, we do.' });
+    // an exchange drafted under the hold line that turned Englewood or Port Charlotte away: stale now that both are served again
+    await addDraft({ facts: priorRenderBlock(), inbound: 'Can you service Englewood?', reply: 'Not yet, we are not taking new customers there.' });
+    await addDraft({ facts: priorRenderBlock(), inbound: 'Is Port Charlotte covered?', reply: 'Not yet.' });
     // a held place (owner ruling 2026-11-23) named only earlier in the thread, or only in the frozen OPEN TIMES lookup
     await addDraft({ facts: `${priorRenderBlock()}\nRECENT SMS THREAD:\n[CUSTOMER] I'm in Englewood\n`, inbound: 'Can I book?', reply: 'Tuesday works.' });
     await addDraft({
@@ -150,6 +157,15 @@ jest.setTimeout(180000);
 
     expect(out.sealed).toBe(0);
     expect(await items()).toHaveLength(0);
+  });
+
+  test('a block drafted under the Charlotte County render rebases onto today\'s when no service-area word is in the exchange', async () => {
+    const rebased = await addDraft({ facts: charlotteCountyRenderBlock(), ageDays: 9 });
+    const out = await sealedEval.sealEvalItems({ target: 100, dbi: database });
+    expect(out).toMatchObject({ sealed: 1, rebased: 1 });
+    const [row] = await items();
+    expect(row.source_draft_id).toBe(rebased);
+    expect(row.facts_block).toBe(currentBlock());
   });
 
   test('a second pass seals nothing, and a sealed row is never edited', async () => {

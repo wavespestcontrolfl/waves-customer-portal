@@ -600,9 +600,10 @@ async function emailStep(customerId, message, claim, sent) {
 // goes at most once (textStep), and the email carries its own idempotency key. `byStaff` marks a try run by the
 // staff press itself (staffReply): only such a try starts a text, never the sweep.
 async function noticeCustomer(customerId, message, { byStaff = false } = {}) {
-  // This try's text outcome once known: a write that fails after the text went out still tells staff it went (the
-  // stored 'sending' mark keeps the one-text rule for every later try).
-  let texted = null;
+  // This try's outcome so far: a write that fails after the push, the text or the email went out still tells staff
+  // how the customer was reached (the stored 'sending' marks keep the one-text and one-email rules for every later
+  // try).
+  let sofar = {};
   try {
     const claim = await claimNotice(message.id);
     if (!claim) return await storedNotice(message.id);
@@ -611,24 +612,27 @@ async function noticeCustomer(customerId, message, { byStaff = false } = {}) {
     // answer never gets both an app push and a text, and no try has to read what an earlier try's push did.
     const textWay = metaOf(message).noticeMode === 'text';
     const { inFlight, ...sent } = await bellAndPush(customerId, message, { push: !textWay && claim.email === undefined });
+    sofar = sent;
     if (inFlight) {
       // Another try is still sending the push: no email. Its claim stays (this try counted); on the last try the
       // notice ends here, since whatever that push does is the outcome.
       if (claim.attempts >= NOTICE_ATTEMPTS) await recordNotice(message.id, { ...sent, email: 'not_needed', pending: false, claimedAt: claim.at, attempts: claim.attempts });
       return { pending: claim.attempts < NOTICE_ATTEMPTS };
     }
-    texted = textWay ? await textStep(customerId, message, claim, sent, { byStaff }) : null;
+    const texted = textWay ? await textStep(customerId, message, claim, sent, { byStaff }) : null;
     if (texted?.lost) return await storedNotice(message.id);
-    const mail = await emailStep(customerId, message, claim, { ...sent, ...texted });
+    sofar = { ...sent, ...texted };
+    const mail = await emailStep(customerId, message, claim, sofar);
     if (!mail) return await storedNotice(message.id);
-    const outcome = { ...sent, ...texted, email: mail.email };
+    const outcome = { ...sofar, email: mail.email };
+    sofar = outcome;
     const pending = (!outcome.bell || (!noticeReached(outcome) && mail.retry)) && claim.attempts < NOTICE_ATTEMPTS;
     const notice = { ...outcome, pending, claimedAt: claim.at, attempts: claim.attempts };
     await recordNotice(message.id, notice);
     return publicNotice(notice);
   } catch (err) {
     logger.warn(`[portal-messages] notice failed for message ${message.id}: ${err.message}`);
-    return { ...(texted?.text ? { text: texted.text } : {}), pending: true };
+    return { ...publicNotice(sofar), pending: true };
   }
 }
 

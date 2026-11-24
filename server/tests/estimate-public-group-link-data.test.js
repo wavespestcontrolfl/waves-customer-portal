@@ -18,6 +18,7 @@ jest.mock('../config/feature-gates', () => ({
   commercialProposalSignLive: () => false,
   commercialFirstVisitLive: () => false,
   estimateConsumerNoticeLive: () => false,
+  estimateApprovePreferredTimeLive: () => false,
 }));
 jest.mock('../services/property-lookup/lookup-cache', () => ({
   getCachedLookup: jest.fn().mockResolvedValue(null),

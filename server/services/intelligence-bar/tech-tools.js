@@ -19,6 +19,7 @@ const { TECHNICIAN_KNOWLEDGE_CATEGORIES, technicianText } = require('../knowledg
 const { openInvoiceFacts } = require('../visit-context/balance');
 const { baseQuantityUnit, normalizeInventoryUnit } = require('../inventory-units');
 const { loadActiveAliasRows, activeProductsForAlias } = require('../purchase-receipts/product-matcher');
+const { loadServiceRecordFacts, SERVICE_RECORD_COLUMNS } = require('./service-record-facts');
 
 const TECH_TOOLS = [
   {
@@ -199,8 +200,8 @@ async function executeTechTool(toolName, input, techContext) {
     const technician = forTech && techContext.techRole !== 'admin';
     switch (toolName) {
       case 'get_my_route': return await getMyRoute(techContext.techId, techContext.techName, input.date, { technician });
-      case 'get_stop_details': return await getStopDetails(input, techId, technician);
-      case 'get_service_history': return await getServiceHistory(input, techId);
+      case 'get_stop_details': return await getStopDetails(input, techId, technician, forTech);
+      case 'get_service_history': return await getServiceHistory(input, techId, technician, forTech);
       case 'get_product_info': return await getProductInfo(input.product_name, { forTech });
       case 'get_protocol': return await getProtocol(input, { technician });
       case 'check_customer_status': return await checkCustomerStatus(input, techId, { technician });
@@ -289,7 +290,7 @@ async function getMyRoute(techId, techName, date, { technician = false } = {}) {
 // caller-ID line quoting the caller); the customer page withholds them from a technician.
 const crmNotesField = (customer, technician) => (technician ? {} : { notes: customer.crm_notes });
 
-async function getStopDetails(input, techId = null, technician = false) {
+async function getStopDetails(input, techId = null, technician = false, forTech = false) {
   // Resolves only a customer this technician is authorized to read; an
   // unauthorized or missing match both return the generic not-found below so a
   // technician can't probe for customers assigned to someone else.
@@ -300,7 +301,8 @@ async function getStopDetails(input, techId = null, technician = false) {
   const history = await db('service_records')
     .where({ customer_id: customer.id, status: 'completed' })
     .orderBy('service_date', 'desc').limit(3)
-    .select('service_date', 'service_type', 'notes', 'products_used', 'technician_name');
+    .select(SERVICE_RECORD_COLUMNS);
+  const historyFacts = await loadServiceRecordFacts(history, { hideUnit: forTech ? isMlUnit : null });
 
   // Today's scheduled service — tech callers see only THEIR visit for this
   // customer (the same-day row can belong to another technician); admin/
@@ -403,15 +405,17 @@ async function getStopDetails(input, techId = null, technician = false) {
     recent_history: history.map(h => ({
       date: h.service_date,
       type: h.service_type,
-      notes: h.notes,
-      products: typeof h.products_used === 'string' ? JSON.parse(h.products_used || '[]') : (h.products_used || []),
-      tech: h.technician_name,
+      // A technician login gets no past-visit notes: they can hold gate or
+      // lockbox codes from another visit, outside the visit-facts guard.
+      ...(technician ? {} : { notes: historyFacts.notesFor(h) }),
+      products: historyFacts.productsFor(h),
+      tech: historyFacts.technicianFor(h),
     })),
   };
 }
 
 
-async function getServiceHistory(input, techId = null) {
+async function getServiceHistory(input, techId = null, technician = false, forTech = false) {
   const { service_type, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 5, 20);
 
@@ -423,16 +427,17 @@ async function getServiceHistory(input, techId = null) {
 
   if (service_type) query = query.whereILike('service_type', `%${service_type}%`);
 
-  const records = await query;
+  const records = await query.select(SERVICE_RECORD_COLUMNS);
+  const facts = await loadServiceRecordFacts(records, { hideUnit: forTech ? isMlUnit : null });
 
   return {
     customer: `${customer.first_name} ${customer.last_name}`,
     services: records.map(r => ({
       date: r.service_date,
       type: r.service_type,
-      tech: r.technician_name,
-      notes: r.notes,
-      products: typeof r.products_used === 'string' ? JSON.parse(r.products_used || '[]') : (r.products_used || []),
+      tech: facts.technicianFor(r),
+      ...(technician ? {} : { notes: facts.notesFor(r) }),
+      products: facts.productsFor(r),
       duration: r.labor_hours ? `${(parseFloat(r.labor_hours) * 60).toFixed(0)} min` : null,
     })),
     total_records: records.length,

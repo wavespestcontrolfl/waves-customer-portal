@@ -78,12 +78,12 @@ describe('Punta Gorda excluded locality', () => {
   });
 });
 
-// Owner ruling 2026-11-23: six places are held until a second technician is hired.
-// North Port is NOT held (owner, same day: every North Port ZIP stays served).
+// Owner ruling 2026-11-23: these places are held until a second technician is hired. Englewood and Port Charlotte
+// were held for a few hours and are served again (owner "ok do this"). North Port is NOT held (owner, same day).
 describe('not-yet-served localities (owner ruling 2026-11-23)', () => {
   test.each([
-    'Rotonda', 'Rotonda West', 'rotonda  west', 'Rotunda West', 'Englewood', 'ENGLEWOOD', 'Placida', 'Boca Grande',
-    'Port Charlotte', 'port charlotte.', 'Charlotte Harbor', 'Gulf Cove', 'El Jobean', 'Deep Creek', 'Babcock Ranch',
+    'Rotonda', 'Rotonda West', 'rotonda  west', 'Rotunda West', 'Placida', 'Boca Grande',
+    'Charlotte Harbor', 'Gulf Cove', 'El Jobean', 'Deep Creek', 'Babcock Ranch',
   ])('%s is held', (city) => {
     expect(isNotYetServedLocality(city)).toBe(true);
     expect(isExcludedLocality(city)).toBe(true);
@@ -92,11 +92,10 @@ describe('not-yet-served localities (owner ruling 2026-11-23)', () => {
 
   test.each([
     ['Rotonda West', ['33947']],
-    ['Englewood', ['34223', '34224', '34295']],
     ['Placida', ['33946', '33927']],
     ['Boca Grande', ['33921']],
-    ['Port Charlotte', ['33938', '33948', '33949', '33952', '33953', '33954', '33981']],
-    ['Port Charlotte / Punta Gorda shared ZIPs, Babcock Ranch', ['33980', '33983', '33982']],
+    ['Gulf Cove / El Jobean', ['33981']],
+    ['Charlotte Harbor, Deep Creek, Babcock Ranch (shared with Punta Gorda)', ['33980', '33983', '33982']],
   ])('%s ZIPs are held, ZIP+4 included', (_place, zips) => {
     for (const zip of zips) {
       expect(isNotYetServedZip(zip)).toBe(true);
@@ -104,6 +103,22 @@ describe('not-yet-served localities (owner ruling 2026-11-23)', () => {
       expect(isExcludedZip(`${zip}-1234`)).toBe(true);
     }
   });
+
+  test('the held ZIP list is exactly these eight ZIPs', () => {
+    expect([...NOT_YET_SERVED_ZIPS].sort()).toEqual(['33921', '33927', '33946', '33947', '33980', '33981', '33982', '33983']);
+  });
+
+  test.each(['Englewood', 'ENGLEWOOD', 'Port Charlotte', 'port charlotte.'])('%s is served again, not held', (city) => {
+    expect(isNotYetServedLocality(city)).toBe(false);
+    expect(isExcludedLocality(city)).toBe(false);
+  });
+
+  test.each(['34223', '34224', '34295', '33938', '33948', '33949', '33952', '33953', '33954', '34223-1234'])(
+    'Englewood and Port Charlotte ZIP %s is served again', (zip) => {
+      expect(isNotYetServedZip(zip)).toBe(false);
+      expect(isExcludedZip(zip)).toBe(false);
+    },
+  );
 
   test('every North Port ZIP and every Sarasota, Manatee and south Hillsborough ZIP in the served map stays served', () => {
     const { ZIP_TO_CITY } = require('../utils/zip-to-city');
@@ -113,7 +128,7 @@ describe('not-yet-served localities (owner ruling 2026-11-23)', () => {
     // the held ZIPs are exactly the served-map ZIPs of a held place or of Punta Gorda, nothing else
     for (const zip of Object.keys(ZIP_TO_CITY)) {
       const city = ZIP_TO_CITY[zip].toLowerCase();
-      if (isExcludedZip(zip)) expect(['port charlotte', 'babcock ranch', 'placida', 'rotonda west', 'englewood', 'boca grande']).toContain(city);
+      if (isExcludedZip(zip)) expect(['port charlotte', 'babcock ranch', 'placida', 'rotonda west', 'boca grande', 'punta gorda']).toContain(city);
       else expect(isExcludedLocality(city)).toBe(false);
     }
     expect(NOT_YET_SERVED_ZIPS.has('34286')).toBe(false);
@@ -148,7 +163,7 @@ describe('property-lookup cache hit passes area evidence', () => {
 
   test('buildSatelliteUrlSet forwards its evidence to isInServiceAreaBox', () => {
     expect(source).toMatch(/function buildSatelliteUrlSet\(lat, lng, areaEvidence = \{\}\)/);
-    expect(source).toMatch(/inServiceArea: isInServiceAreaBox\(lat, lng, areaEvidence\)/);
+    expect(source).toMatch(/inServiceArea: serviceAreaVerdict\(isInServiceAreaBox\(lat, lng, areaEvidence\), areaEvidence\)/);
   });
 
   test('the cache-hit result passes the stored county and ZIP', () => {

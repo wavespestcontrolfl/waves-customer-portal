@@ -30,14 +30,13 @@ const notificationsRoute = require('../routes/notifications');
 
 const { notificationPrefsDbUpdates, dropLegacyReceiptAppEcho, loadPreferencePayload, CHANNEL_DB_COLUMNS } = notificationsRoute._private;
 
-const ENV_KEYS = ['GATE_PUSH_CHANNEL_ROUTING', 'GATE_CUSTOMER_APP_NOTIFICATIONS', 'GATE_APP_FIRST_STALE_TEXT'];
+const ENV_KEYS = ['GATE_PUSH_CHANNEL_ROUTING', 'GATE_CUSTOMER_APP_NOTIFICATIONS'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   ENV_KEYS.forEach((k) => { process.env[k] = 'true'; });
-  delete process.env.GATE_APP_FIRST_STALE_TEXT;
   mockCustomerStatus.mockReset();
-  mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
+  mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false });
   resolvePrimaryProfileId.mockResolvedValue('primary-1');
 });
 afterEach(() => {
@@ -245,14 +244,6 @@ describe('GET payload: the stored channel is shown, Text for an untouched defaul
     expect(payload.appointmentConfirmationChannel).toBe('sms');
     expect(payload.billingReminderChannel).toBe('sms');
     expect(mockCustomerStatus).not.toHaveBeenCalled();
-  });
-
-  test('a phone not opened in 30 days (GATE_APP_FIRST_STALE_TEXT on) shows Text too', async () => {
-    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-    mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: false, appStale: true });
-    mockRows({ own: defaults, primary: defaults });
-    const payload = await loadPreferencePayload(req());
-    for (const key of KEYS) expect(payload[key]).toBe('sms');
   });
 
   test('the customer\'s own App, Email and Both choices show as stored', async () => {

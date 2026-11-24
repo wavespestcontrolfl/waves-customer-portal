@@ -856,15 +856,28 @@ function lockedEstimateData(row) {
 // either (codex r11 sweep on #3804). An engine draft pulled by a call-linkage
 // invalidation (archived or marker-bearing) is quarantined: money must not
 // move on it.
-async function assertNotQuarantined(trx, freshLinkRow, data) {
+const REPRICE_HOLD_MESSAGE = 'This estimate is held for a re-price (a customer clarify reply). Revise it with the answered unit before accepting.';
+const CALL_LINKAGE_QUARANTINE_MESSAGE = 'This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.';
+
+// The row-only part of assertNotQuarantined, with no read and no lock: an active re-price hold, or a call-composed
+// engine draft the row itself marks as pulled (archived, or carrying a call-linkage invalidation marker). Returns
+// { message } or null. The booking form's "bookable" flag uses it too, so a held quote is never offered for linking.
+function rowQuarantineRefusal(row, data = lockedEstimateData(row)) {
   const eng = data?.estimatorEngine;
   const { repricePendingActive } = require('./estimate-clarify-asks');
-  if (repricePendingActive(eng)) {
-    throw httpError('This estimate is held for a re-price (a customer clarify reply). Revise it with the answered unit before accepting.', 409);
+  if (repricePendingActive(eng)) return { message: REPRICE_HOLD_MESSAGE };
+  if (eng?.callLogId && (row?.archived_at || eng.linkage_invalidated_at || eng.invalidation_pending_at)) {
+    return { message: CALL_LINKAGE_QUARANTINE_MESSAGE };
   }
+  return null;
+}
+
+async function assertNotQuarantined(trx, freshLinkRow, data) {
+  const eng = data?.estimatorEngine;
+  const rowRefusalNow = rowQuarantineRefusal(freshLinkRow, data);
+  if (rowRefusalNow) throw httpError(rowRefusalNow.message, 409);
   if (!eng?.callLogId) return;
-  const quarantined = httpError('This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.', 409);
-  if (freshLinkRow?.archived_at || eng.linkage_invalidated_at || eng.invalidation_pending_at) throw quarantined;
+  const quarantined = httpError(CALL_LINKAGE_QUARANTINE_MESSAGE, 409);
   if (data?.lead_id && ['sid', 'stamp'].includes(data?.lead_linkage)) {
     await trx('leads').where({ id: String(data.lead_id) }).forUpdate().first('id');
   }
@@ -1530,6 +1543,7 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   planStartManualAcceptRefusal,
   manualAcceptRowRefusal,
   manualAcceptLockedRowRefusal,
+  rowQuarantineRefusal,
   persistedAddOnRefusal,
   recurringAcceptWouldDropAreaAddOns,
   AREA_ADDON_RECURRING_MARK_WON_MESSAGE,

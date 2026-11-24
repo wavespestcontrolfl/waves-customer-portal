@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers29_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers29_n+e');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers33_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers33_n+e');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -149,13 +149,13 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
 // Owner rulings 2026-10-21/22 (Waves AI answer book).
 describe('answer-book facts (owner 2026-10-21/22)', () => {
   const section = () => renderCompanyFactsSection();
-  const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
+  const { RETIRED_COMPANY_FACT_LINES, OLDER_RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
   const NEW_LINES = [
     'On a residential general pest plan that includes inside service (not mosquito service), the first visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask. A customer who chose exterior-only service can ask the office to add inside service back. Commercial accounts follow their sold service scope.',
     'Rodent trapping includes the setup visit and at least one trap check. For more trap checks, the office confirms what the job includes.',
     'Residential pest and lawn plans have no long-term contract, and those customers can cancel any time. Termite plans and commercial accounts follow their signed agreement.',
     'A customer who prepays a year of pest or lawn service and cancels within 90 days gets a refund for the visits not yet done.',
-    'We serve Manatee and Sarasota counties, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We are not taking new customers in Port Charlotte, Englewood, Rotonda, Placida, Boca Grande or Babcock Ranch yet; we plan to start there once we add a second technician. Existing customers there keep their visits, reschedules and re-service. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
+    'We serve Manatee and Sarasota counties, plus Englewood, Port Charlotte, Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We are not taking new customers in Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, Charlotte Harbor or Deep Creek yet; we plan to start there once we add a second technician. Existing customers there keep their visits, reschedules and re-service. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
     'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day as the inspection. The office can check on a late report.',
     'We do not tent for termites. For drywood termites in wood we can reach, we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam. When the activity is widespread or in wood we cannot reach, we refer the customer to a fumigation company.',
     'Product labels: the office can tell a customer which products were applied at a visit and can email a product label or Safety Data Sheet on request.',
@@ -180,19 +180,31 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
     expect(Object.keys(RETIRED_COMPANY_FACT_LINES).sort()).toEqual(['0', '10', '22']);
     expect(RETIRED_COMPANY_FACT_LINES[0]).toMatch(/include an interior spray as well as the exterior/);
     expect(RETIRED_COMPANY_FACT_LINES[10]).toMatch(/accept cards at the visit, never cash/);
-    expect(RETIRED_COMPANY_FACT_LINES[22]).toMatch(/Charlotte County except Punta Gorda/);
+    // line 22 was reworded twice on 2026-11-23: the six-place hold is the newest retired wording, the Charlotte County line the older one
+    expect(RETIRED_COMPANY_FACT_LINES[22]).toMatch(/not taking new customers in Port Charlotte, Englewood, Rotonda, Placida, Boca Grande or Babcock Ranch yet/);
+    expect(Object.keys(OLDER_RETIRED_COMPANY_FACT_LINES)).toEqual(['22']);
+    expect(OLDER_RETIRED_COMPANY_FACT_LINES[22]).toMatch(/Charlotte County except Punta Gorda/);
   });
-  test('the service-area line holds six places for a second technician and names no served Charlotte town (owner 2026-11-23)', () => {
+  test('the service-area line serves Englewood and Port Charlotte and holds seven places for a second technician (owner 2026-11-23)', () => {
     const line = COMPANY_FACTS[22];
-    for (const place of ['Port Charlotte', 'Englewood', 'Rotonda', 'Placida', 'Boca Grande', 'Babcock Ranch', 'Punta Gorda']) expect(line).toContain(place);
+    // served: named before the hold sentence
+    const [servedPart, heldPart] = line.split('We are not taking new customers in ');
+    for (const place of ['Englewood', 'Port Charlotte', 'Manatee', 'Sarasota', 'Ruskin', 'Riverview']) expect(servedPart).toContain(place);
+    // held: named in the hold sentence, nowhere before it
+    const heldSentence = heldPart.split(' yet;')[0];
+    expect(heldSentence).toBe('Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, Charlotte Harbor or Deep Creek');
+    for (const place of ['Rotonda', 'Placida', 'Boca Grande', 'Babcock Ranch', 'Gulf Cove', 'Charlotte Harbor', 'Deep Creek']) expect(servedPart).not.toContain(place);
+    expect(heldSentence).not.toMatch(/Englewood|Port Charlotte/);
     expect(line).toContain('second technician');
     // the hold is for NEW customers: existing ones keep their visits, reschedules and re-service
     expect(line).toContain('not taking new customers');
     expect(line).toContain('Existing customers there keep their visits, reschedules and re-service');
-    expect(line).not.toMatch(/We do not serve Port Charlotte/);
+    expect(line).toContain('We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.');
     expect(line).not.toMatch(/North Port/); // North Port stays served and unmentioned
     expect(line).not.toMatch(/Charlotte County/);
     expect(section()).not.toContain('Charlotte County except Punta Gorda');
+    expect(section()).not.toContain('not taking new customers in Port Charlotte');
+    expect(hasBannedCustomerCopy(line)).toBeFalsy();
   });
   test('no price, product brand, EPA claim, or rain return-visit promise is in the section', () => {
     expect(COMPANY_FACTS.join('\n')).not.toMatch(/\$\d|\bEPA\b|\bsafe\b|Alpine|Termidor|Talstar|Taurus|Fusilade/i);
@@ -408,9 +420,10 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
   const facts = require('../services/sms-company-facts');
   const { LABEL_FACTS_NONE_SECTION } = require('../services/sms-label-facts');
   const { exactLabelFactsSection: labelSectionOf } = facts;
-  const serviceAreaRender = facts.knownCompanyFactsRenders()[1]; // the 26-line render live from 2026-10-22 to 2026-11-23
-  const oldRender = facts.knownCompanyFactsRenders()[2]; // the 19-line render live from 2026-10-09 to 2026-10-22
-  const oldestRender = facts.knownCompanyFactsRenders()[3]; // the 16-line render of 2026-10-03
+  const holdRender = facts.knownCompanyFactsRenders()[1]; // the 26-line render of the six-place hold, live 2026-11-23 for a few hours
+  const serviceAreaRender = facts.knownCompanyFactsRenders()[2]; // the 26-line render live from 2026-10-22 to 2026-11-23
+  const oldRender = facts.knownCompanyFactsRenders()[3]; // the 19-line render live from 2026-10-09 to 2026-10-22
+  const oldestRender = facts.knownCompanyFactsRenders()[4]; // the 16-line render of 2026-10-03
   // per-customer head long enough that the company section would not fit a raw 6,000-char prefix
   const head = `CUSTOMER: synthetic\n${Array.from({ length: 110 }, (_, n) => `SERVICE HISTORY ${n}: Quarterly Pest completed`).join('\n')}\n`;
   const tail = 'BILLING:\n- balance: none\nRECENT PHONE CALLS:\n- 2026-10-01: caller was told the tech arrives Thursday\nRECENT SMS THREAD:\n[CUSTOMER] THREAD_SENTINEL';
@@ -423,7 +436,7 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     facts.PRIOR_COMPANY_FACTS_RENDERS.forEach((prior, i) => {
       // fewer lines than today's list, or the same count when a line was reworded in place (then its index is in `retired`)
       expect(prior.lines).toBeLessThanOrEqual(COMPANY_FACTS.length);
-      if (prior.lines === COMPANY_FACTS.length) expect(Array.isArray(prior.retired) && prior.retired.length > 0).toBe(true);
+      if (prior.lines === COMPANY_FACTS.length) expect((Array.isArray(prior.retired) && prior.retired.length > 0) || (Array.isArray(prior.olderRetired) && prior.olderRetired.length > 0)).toBe(true);
       expect(crypto.createHash('sha256').update(renders[i + 1]).digest('hex')).toBe(prior.sha256);
     });
     expect(oldRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(19);
@@ -442,6 +455,14 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     expect(facts.renderCompanyFactsSection()).not.toContain('Charlotte County except Punta Gorda');
     // every earlier render keeps its line 22 either not yet written (19, 16 lines) or old (26 lines)
     expect(oldRender).not.toContain('We serve Manatee');
+    // the six-place hold render (prompts 29 to 32) has the hold wording of line 22, and nothing else different from today's render
+    expect(holdRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(26);
+    expect(holdRender).toContain('We are not taking new customers in Port Charlotte, Englewood, Rotonda, Placida, Boca Grande or Babcock Ranch yet');
+    expect(holdRender).not.toContain('Charlotte County except Punta Gorda');
+    expect(holdRender).not.toContain('accept cards at the visit, never cash');
+    expect(facts.renderCompanyFactsSection()).not.toContain('We are not taking new customers in Port Charlotte');
+    expect(facts.renderCompanyFactsSection().split('\n').filter((l, i) => l !== holdRender.split('\n')[i])).toHaveLength(1);
+    expect(facts.renderCompanyFactsSection().split('\n').filter((l, i) => l !== serviceAreaRender.split('\n')[i])).toHaveLength(1);
   });
 
   test('the judge keeps the size exemption for a block with the earlier render: the thread survives', () => {
@@ -453,6 +474,7 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     expect(out).toContain(oldRender.trim().split('\n').pop()); // the old section itself is still shown, whole
     expect(sanitizeFactsForJudge(blockWith(oldestRender))).toContain('THREAD_SENTINEL'); // and so is the 16-line one
     expect(sanitizeFactsForJudge(blockWith(serviceAreaRender))).toContain('THREAD_SENTINEL'); // and the 26-line one before 2026-11-23
+    expect(sanitizeFactsForJudge(blockWith(holdRender))).toContain('THREAD_SENTINEL'); // and the six-place hold one
     // today's render behaves the same
     expect(sanitizeFactsForJudge(blockWith(facts.renderCompanyFactsSection()))).toContain('THREAD_SENTINEL');
     // an UNKNOWN company section gets no exemption (the exact match is still the rule)
@@ -465,11 +487,14 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     expect(labelSectionOf(oldBlock)).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     expect(labelSectionOf(blockWith(oldestRender))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     expect(labelSectionOf(blockWith(serviceAreaRender))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
+    expect(labelSectionOf(blockWith(holdRender))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     expect(labelSectionOf(blockWith(facts.renderCompanyFactsSection()))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     // contract: today's exact render only, so an old item never grades the new identity
     expect(hasExactCompanyFacts(oldBlock)).toBe(false);
     expect(hasExactCompanyFacts(blockWith(oldestRender))).toBe(false);
     expect(hasExactCompanyFacts(blockWith(serviceAreaRender))).toBe(false);
+    expect(hasExactCompanyFacts(blockWith(holdRender))).toBe(false);
+    expect(facts.hasExactLabelFacts(blockWith(holdRender))).toBe(false);
     expect(facts.hasExactLabelFacts(blockWith(serviceAreaRender))).toBe(false);
     expect(facts.hasExactLabelFacts(oldBlock)).toBe(false);
     expect(hasExactCompanyFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
@@ -564,14 +589,15 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(verdict.reason).toMatch(/company fact retired/);
     const snap = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers14_n', getBody: () => body })({});
     expect(snap.ok).toBe(false);
-    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers29_n', getBody: () => 'See you Tuesday!' })({});
+    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers33_n', getBody: () => 'See you Tuesday!' })({});
     expect(fresh.ok).toBe(true);
   });
-  // Owner ruling 2026-11-23: a draft from prompts 25 to 28 still carries the line that says Charlotte County is served.
-  test('an unedited draft from prompts 25 to 28 is refused too; 29 and later are not', async () => {
+  // Owner ruling 2026-11-23: a draft from prompts 25 to 28 still carries the line that says Charlotte County is served, and one from
+  // prompts 29 to 32 the line that turned Englewood and Port Charlotte away (served again the same day, owner "ok do this").
+  test('an unedited draft from prompts 25 to 32 is refused too; 33 and later are not', async () => {
     const sc = require('../services/agent-decision-send-checks');
-    const body = 'Yes, we can come to Port Charlotte on Tuesday.';
-    for (const v of ['25_n', '26_n', '27_n', '28_n', '26_n+c', '28_n+bcA']) {
+    const body = 'We are not taking new customers in Englewood yet.';
+    for (const v of ['25_n', '26_n', '27_n', '28_n', '29_n', '30_n', '31_n', '32_n', '26_n+c', '28_n+bcA', '29_n+e', '32_n+bcelmvA']) {
       const row = { id: 'd1', input_snapshot: '{}', prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body };
       // immediate send, scheduled send, the provider-boundary row check and the auto-send snapshot check
       expect(retiredCompanyFactBlock({ decision: row, outgoingBody: body })).toMatch(/company fact retired/);
@@ -582,7 +608,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
       // a staff-edited body goes out
       expect(retiredCompanyFactBlock({ decision: row, outgoingBody: `${body} Please confirm.` })).toBeNull();
     }
-    for (const v of ['29_n', '30_n', '31_n', '32_n', '30_n+c']) {
+    for (const v of ['33_n', '34_n', '35_n', '36_n', '34_n+c', '33_n+e']) {
       expect(retiredCompanyFactBlock({ decision: { prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body }, outgoingBody: body })).toBeNull();
     }
   });
@@ -601,7 +627,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(retiredCompanyFactBlock({ decision, outgoingBody: RETIRED_COMPANY_FACT_LINES[10] })).toMatch(/company fact retired/);
   });
   test('a draft from the answer-book prompts, or not a real-answers draft, is never refused by it', () => {
-    for (const prompt_version of ['house_voice_v12_real_answers29_n', 'house_voice_v12_real_answers30_n+c', 'house_voice_v11', null]) {
+    for (const prompt_version of ['house_voice_v12_real_answers33_n', 'house_voice_v12_real_answers34_n+c', 'house_voice_v11', null]) {
       for (const body of [COMPANY_FACTS[10], 'We don’t take cash during your visit; please pay cash through the office.', COMPANY_FACTS[0]]) {
         expect(retiredCompanyFactBlock({ decision: { prompt_version }, outgoingBody: body })).toBeNull();
       }
@@ -632,6 +658,7 @@ describe('rebaseCompanyFactsToCurrent (sealed-eval freezer)', () => {
   });
   test('an earlier render with extra typed text after it is not rebased', () => {
     expect(cf.rebaseCompanyFactsToCurrent(block(knownCompanyFactsRenders()[1], 'Pets: a dog\n'))).toBeNull();
+    expect(cf.rebaseCompanyFactsToCurrent(block(knownCompanyFactsRenders()[2], 'Pets: a dog\n'))).toBeNull();
   });
   test('the earlier conversation is screened too: a held place said three messages up (owner ruling 2026-11-23)', () => {
     const { heldPlaceInConversationContext } = cf;
@@ -648,12 +675,18 @@ describe('rebaseCompanyFactsToCurrent (sealed-eval freezer)', () => {
   });
   test('the retired topics are those of the block\'s own render: the 26-line render keeps payment and inside-spray exchanges', () => {
     const block = (render) => `UPCOMING SERVICES:\n- none\n${render}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n`;
-    const [, current26, nineteen, sixteen] = [null, ...knownCompanyFactsRenders().slice(1)];
-    const re26 = cf.retiredTopicReForBlock(block(current26));
-    expect(re26.test('Do you take cash?\nWe take cards or cash at the visit.')).toBe(false);
-    expect(re26.test('Do you spray inside?')).toBe(false);
-    expect(re26.test('Do you cover 33948?\nYes, we do')).toBe(true);
-    expect(re26.test('Is Port Charlotte served?')).toBe(true);
+    const [, hold26, current26, nineteen, sixteen] = [null, ...knownCompanyFactsRenders().slice(1)];
+    // both 26-line renders (the six-place hold and the Charlotte County one) keep today's payment and inside-spray lines
+    for (const render of [hold26, current26]) {
+      const re26 = cf.retiredTopicReForBlock(block(render));
+      expect(re26.test('Do you take cash?\nWe take cards or cash at the visit.')).toBe(false);
+      expect(re26.test('Do you spray inside?')).toBe(false);
+      expect(re26.test('Do you cover 33948?\nYes, we do')).toBe(true);
+      expect(re26.test('Is Port Charlotte served?')).toBe(true);
+      // Englewood and Port Charlotte are served again, but an exchange drafted under the hold line about them is stale
+      expect(re26.test('Can you service Englewood?\nWe are not taking new customers there yet.')).toBe(true);
+      expect(re26.test('Do you cover 34223?')).toBe(true);
+    }
     for (const r of [nineteen, sixteen]) {
       const re = cf.retiredTopicReForBlock(block(r));
       expect(re.test('Do you take cash?')).toBe(true);
