@@ -41,7 +41,9 @@ describe('price row choice', () => {
   ];
   test('the configured vendor\'s row, never another vendor\'s pack', () => {
     expect(pickPriceRow(rows, { auto_reorder_vendor_id: 'siteone', vendor_name: 'SiteOne' }).row.quantity).toBe('1 gal');
-    expect(pickPriceRow(rows.slice(0, 1), { auto_reorder_vendor_id: 'siteone', vendor_name: 'SiteOne' })).toEqual({ row: null, vendorName: 'SiteOne' });
+    const none = pickPriceRow(rows.slice(0, 1), { auto_reorder_vendor_id: 'siteone', vendor_name: 'SiteOne' });
+    expect(none.row).toBeNull();
+    expect(none.vendorName).toBe('SiteOne');
   });
   test('no vendor configured: best price, and the name says so', () => {
     const r = pickPriceRow(rows, { auto_reorder_vendor_id: null });
