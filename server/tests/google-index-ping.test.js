@@ -19,7 +19,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/seo/search-console-v2', () => ({
   resolveAccessibleProperty: jest.fn(),
   submitSitemap: jest.fn(),
-  _internals: { gscAuthOptions: jest.fn() },
+  _internals: { gscAuthOptions: jest.fn(), gscRequestOptions: jest.fn(() => ({ timeout: 40 })) },
 }));
 
 const SearchConsole = require('../services/seo/search-console-v2');
@@ -331,6 +331,54 @@ test('a truncated 200 sitemap body (index or child) aborts the run before state 
   expect(mockState).toBe(before);
   expect(SearchConsole.submitSitemap).not.toHaveBeenCalled();
   expect(indexing.urlNotifications.publish).not.toHaveBeenCalled();
+});
+
+test('commented-out robots meta and commented-out JobPosting markup never count', async () => {
+  expect(isNoindex(null, '<head><!-- <meta name="robots" content="noindex"> --></head>')).toBe(false);
+  expect(isNoindex(null, '<head><meta name="robots" content="noindex"></head>')).toBe(true);
+  expect(htmlHasJobPosting(`<body><!-- ${JOB_LD} --></body>`)).toBe(false);
+  expect(htmlHasJobPosting(`<body>${JOB_LD}</body>`)).toBe(true);
+  // A page whose only JobPosting is commented out is never pinged.
+  await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01']], pages: { [JOB]: `<html><body><!-- ${JOB_LD} --></body></html>` } }) });
+  expect(indexing.urlNotifications.publish).not.toHaveBeenCalled();
+  // A commented-out noindex does not retire a live job page that still has its JobPosting.
+  await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-02']], pages: { [JOB]: `<html><head><!-- <meta name="robots" content="noindex"> --></head><body>${JOB_LD}</body></html>` } }) });
+  expect(published(indexing)).toEqual([['URL_UPDATED', JOB]]);
+});
+
+test('an index child or url entry with a missing or empty loc aborts the run before any state change', async () => {
+  await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01']], pages: { [JOB]: JOB_LD } }) });
+  const before = mockState;
+  SearchConsole.submitSitemap.mockClear();
+  indexing.urlNotifications.publish.mockClear();
+  const good = `${ORIGIN}/sitemap-0.xml`;
+  const goodDoc = sitemapXml([[`${ORIGIN}/`, null]]);
+  const mixedIndex = (entriesXml) => jest.fn(async (url) => {
+    if (url === `${ORIGIN}/sitemap-index.xml`) return response(200, `<sitemapindex><sitemap><loc>${good}</loc></sitemap>${entriesXml}</sitemapindex>`);
+    if (url === good) return response(200, goodDoc);
+    return response(404);
+  });
+  for (const bad of ['<sitemap><lastmod>2026-11-01</lastmod></sitemap>', '<sitemap><loc></loc></sitemap>', '<sitemap><loc>   </loc></sitemap>']) {
+    await expect(run({ fetchFn: mixedIndex(bad) })).resolves.toMatchObject({ errors: 1 });
+  }
+  for (const badUrl of ['<url><lastmod>2026-11-01</lastmod></url>', '<url><loc/></url>', '<url/>']) {
+    const docs = { [good]: `<urlset><url><loc>${ORIGIN}/</loc></url>${badUrl}</urlset>` };
+    await expect(run({ fetchFn: makeFetch({ sitemaps: docs }) })).resolves.toMatchObject({ errors: 1 });
+  }
+  expect(mockState).toBe(before);
+  expect(SearchConsole.submitSitemap).not.toHaveBeenCalled();
+  expect(indexing.urlNotifications.publish).not.toHaveBeenCalled();
+});
+
+test('a stalled Indexing API publish times out, counts an error and leaves state alone without hanging', async () => {
+  indexing.urlNotifications.publish.mockImplementation((_req, options) => new Promise((_resolve, reject) => {
+    expect(options.timeout).toBe(40);
+    options.signal.addEventListener('abort', () => reject(new Error('The operation was aborted')));
+  }));
+  const out = await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01']], pages: { [JOB]: JOB_LD } }) });
+  expect(out).toMatchObject({ updated: 0, errors: 1 });
+  expect(JSON.parse(mockState).jobs).toEqual({});
+  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('URL_UPDATED not sent'));
 });
 
 test('guards: assertJobUrl refuses anything outside hub /careers/; JSON-LD detection', () => {

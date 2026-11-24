@@ -776,4 +776,4 @@ module.exports = new SearchConsoleService();
 // lockstep with what this sync can tag (the family miner's classifier
 // revalidation derives boundary-safe forms from these exact patterns —
 // a second hand-maintained term list drifts).
-module.exports._internals = { SERVICE_PATTERNS, gscAuthOptions };
+module.exports._internals = { SERVICE_PATTERNS, gscAuthOptions, gscRequestOptions };

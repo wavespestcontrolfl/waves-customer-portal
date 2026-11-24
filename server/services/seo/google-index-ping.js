@@ -32,9 +32,11 @@
 
 const crypto = require('crypto');
 const xml2js = require('xml2js');
+const { parse: parseHtml } = require('parse5');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { isAllowedSitemapChild } = require('./sitemap-manager')._internals;
+const { gscRequestOptions } = require('./search-console-v2')._internals;
 
 const HUB_DOMAIN = 'wavespestcontrol.com';
 // The canonical hub origin, independent of which Search Console property
@@ -143,9 +145,14 @@ async function parseSitemapXml(xml, where) {
 
 const xmlText = (v) => String(v && typeof v === 'object' ? v._ || '' : v || '').trim();
 
-// [{ loc, lastmod }] of one <urlset> / <sitemapindex> child list.
-function xmlEntries(list) {
-  return (list || []).map((e) => ({ loc: xmlText(e.loc?.[0]), lastmod: xmlText(e.lastmod?.[0]) || null })).filter((e) => e.loc);
+// [{ loc, lastmod }] of one <urlset> / <sitemapindex> child list. An entry with a
+// missing or empty <loc> makes the whole read untrustworthy: throw, never skip it.
+function xmlEntries(list, where) {
+  return (list || []).map((e, i) => {
+    const loc = xmlText(e?.loc?.[0]);
+    if (!loc) throw new Error(`${where} entry ${i + 1} has no <loc>`);
+    return { loc, lastmod: xmlText(e.lastmod?.[0]) || null };
+  });
 }
 
 // The <url> entries of one urlset document. Anything else (an HTML 200 page, an
@@ -153,7 +160,7 @@ function xmlEntries(list) {
 async function readUrlset(xml, where) {
   const doc = await parseSitemapXml(xml, where);
   if (!doc.urlset) throw new Error(`${where} is not a sitemap urlset`);
-  const entries = xmlEntries(doc.urlset.url);
+  const entries = xmlEntries(doc.urlset.url, where);
   if (!entries.length) throw new Error(`${where} has no URLs`);
   return entries;
 }
@@ -164,7 +171,7 @@ async function readSitemap(fetchFn) {
   const indexDoc = await parseSitemapXml(indexXml, SITEMAP_URL);
   const entries = [];
   if (indexDoc.sitemapindex) {
-    const children = xmlEntries(indexDoc.sitemapindex.sitemap).map((c) => c.loc);
+    const children = xmlEntries(indexDoc.sitemapindex.sitemap, SITEMAP_URL).map((c) => c.loc);
     if (!children.length) throw new Error('sitemap index lists no child sitemaps');
     if (children.length > MAX_CHILD_SITEMAPS) throw new Error(`sitemap index lists ${children.length} children, over the ${MAX_CHILD_SITEMAPS} cap`);
     const docs = await Promise.all(children.map((c) => fetchHubOk(fetchFn, c)));
@@ -189,13 +196,24 @@ function collectJobPostings(node, out) {
   return collectJobPostings(node['@graph'], out);
 }
 
-// Every JobPosting node in the page's JSON-LD.
+// Every element of the parsed page (comments and text are not elements, so
+// commented-out markup never reaches a visitor).
+function* elements(node) {
+  for (const child of node.childNodes || []) {
+    if (child.tagName) yield child;
+    yield* elements(child);
+  }
+}
+
+const attrOf = (el, name) => el.attrs?.find((a) => a.name === name)?.value;
+
+// Every JobPosting node in the page's real <script type="application/ld+json"> elements.
 function extractJobPostings(html) {
   const out = [];
-  const re = /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-  let m;
-  while ((m = re.exec(html))) {
-    try { collectJobPostings(JSON.parse(m[1]), out); } catch { /* bad JSON-LD block: not a job */ }
+  for (const el of elements(parseHtml(String(html || '')))) {
+    if (el.tagName !== 'script' || String(attrOf(el, 'type') || '').trim().toLowerCase() !== 'application/ld+json') continue;
+    const body = (el.childNodes || []).map((n) => n.value || '').join('');
+    try { collectJobPostings(JSON.parse(body), out); } catch { /* bad JSON-LD block: not a job */ }
   }
   return out;
 }
@@ -226,18 +244,14 @@ function headerNoindexForGoogle(value) {
   return false;
 }
 
-// <meta name="robots|googlebot" content="...">. Other crawler names (bingbot...) do not bind Google.
+// Real <meta name="robots|googlebot" content="..."> elements. Other crawler names
+// (bingbot...) do not bind Google.
 function metaNoindexForGoogle(html) {
-  const tag = /<meta\b[^>]*>/gi;
-  let m;
-  while ((m = tag.exec(html))) {
-    const attrs = {};
-    const attr = /([a-z-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
-    let a;
-    while ((a = attr.exec(m[0]))) attrs[a[1].toLowerCase()] = a[2] ?? a[3];
-    const name = String(attrs.name || '').toLowerCase();
+  for (const el of elements(parseHtml(String(html || '')))) {
+    if (el.tagName !== 'meta') continue;
+    const name = String(attrOf(el, 'name') || '').trim().toLowerCase();
     if (name !== 'robots' && name !== 'googlebot') continue;
-    if (String(attrs.content || '').split(',').some((d) => isNoindexDirective(d.trim().toLowerCase()))) return true;
+    if (String(attrOf(el, 'content') || '').split(',').some((d) => isNoindexDirective(d.trim().toLowerCase()))) return true;
   }
   return false;
 }
@@ -348,7 +362,9 @@ async function pingJobPages({ state, sitemap, fetchFn, indexing, result, warn, n
       const client = indexing || getIndexingClient();
       if (!client) throw new Error('googleapis is not available');
       sends += 1;
-      await client.urlNotifications.publish({ requestBody: { url, type } });
+      // Same finite timeout as submitSitemap; the signal also stops a stalled socket.
+      const base = gscRequestOptions();
+      await client.urlNotifications.publish({ requestBody: { url, type } }, { ...base, signal: AbortSignal.timeout(base.timeout) });
       return true;
     } catch (err) {
       const status = Number(err?.code || err?.response?.status || err?.status) || null;
