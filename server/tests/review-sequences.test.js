@@ -8467,7 +8467,7 @@ describe('Yearly review ask at dispatch', () => {
       const mock = makeMock({ customers: [cust('y-7r')], review_sequences: [yearly('y-7r')] });
       db.mockImplementation(mock);
       await ReviewService.processReviewSequences();
-      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'y-7r' }), { failClosed: true });
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'y-7r' }), { failClosed: true, excludeCallGiven: true });
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
       expect(mockEmailSendTemplate).not.toHaveBeenCalled();
       expect(mock.__state.rows.review_sequences[0].status).toBe('active');

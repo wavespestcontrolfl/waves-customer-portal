@@ -191,6 +191,6 @@ describe('send paths resolve the single recipient through the opt-in hold', () =
 
   test('the staff review-request card pins and rechecks the same recipient the sender resolves', () => {
     expect(read('routes/admin-intelligence-bar.js').match(/resolveServiceContactSmsRecipient\(/g).length).toBe(2);
-    expect(read('services/intelligence-bar/review-tools.js')).toMatch(/await resolveServiceContactSmsRecipient\(customer\)/);
+    expect(read('services/intelligence-bar/review-tools.js')).toMatch(/await resolveServiceContactSmsRecipient\(customer, \{ excludeCallGiven: true \}\)/);
   });
 });

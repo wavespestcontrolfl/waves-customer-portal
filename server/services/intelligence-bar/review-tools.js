@@ -445,7 +445,7 @@ async function triggerReviewRequest(input) {
   // Opt-in aware, like the sender: a contact who has not replied YES yet
   // resolves to the account holder.
   const { resolveServiceContactSmsRecipient } = require('../recipient-optin');
-  const target = await resolveServiceContactSmsRecipient(customer);
+  const target = await resolveServiceContactSmsRecipient(customer, { excludeCallGiven: true });
   if (!target.phone) return { error: `${customer.first_name} ${customer.last_name} has no phone number` };
   // W0B pinned recipient: the operator approved THIS phone on the card —
   // enforced here before ReviewService.create.

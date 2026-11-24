@@ -1939,7 +1939,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // pin the number that will actually receive it (codex r5 P1).
       const contactApi = require('../services/customer-contact');
       const smsTarget = toolUse.name === 'trigger_review_request'
-        ? await require('../services/recipient-optin').resolveServiceContactSmsRecipient(recipient)
+        ? await require('../services/recipient-optin').resolveServiceContactSmsRecipient(recipient, { excludeCallGiven: true })
         : null;
       const pinPhone = smsTarget ? smsTarget.phone : recipient.phone;
       // The resolver keeps role 'service_contact' even when it falls back to
@@ -5135,7 +5135,7 @@ async function commitPendingAction(req, { id, contractHash }) {
           : await resolveReviewRequestRecipient(execParams);
         const livePhone = !r || r.error ? null
           : (action.tool_name === 'trigger_review_request'
-            ? (await require('../services/recipient-optin').resolveServiceContactSmsRecipient(r)).phone
+            ? (await require('../services/recipient-optin').resolveServiceContactSmsRecipient(r, { excludeCallGiven: true })).phone
             : r.phone);
         drifted = !r || r.error || String(livePhone || '') !== String(pinnedPhone);
         // The card promised a NEW review request: any gate that closed

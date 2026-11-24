@@ -25,6 +25,7 @@ const {
   callGivenConsentPersisted,
   holdCallGivenFallback,
 } = _test;
+const { optinRowAllowsCallGiven } = require('../services/call-given-consent');
 
 const GATE = 'GATE_CALL_GIVEN_CONTACT_CONSENT';
 let savedGate;
@@ -230,13 +231,18 @@ describe('call-site wiring (source contract)', () => {
   test('the decision reads the gate, the do-not-contact request, V2 provenance and the held-number list', () => {
     expect(src).toContain('let callGivenConsent = callGivenConsentApplies(secondaryEntry, {');
     expect(src).toContain('doNotContact: v2DoNotContact,');
-    expect(src).toContain('phoneFromV2: v2SecondaryPhoneKeys.has(lastTen(secondaryEntry.phone)),');
+    // The intent must sit on the V2 entry that carries the phone, not on a merge with a V1 contact.
+    expect(src).toContain('phoneFromV2: v2GivenIntentPhoneKeys.has(lastTen(secondaryEntry.phone)),');
+    expect(src).toContain('.filter((c) => c && (c.wants_notifications === true || onSiteOptinAskTrigger(c)))');
+    expect(src).not.toContain('v2SecondaryPhoneKeys');
     expect(src).toContain('heldPhoneKeys: callGivenHeldPhoneKeys,');
     expect(src).toContain('const callGivenHeldPhoneKeys = (callbackNumberNeededHoldActive || callAniCannotText)');
   });
 
   test('a new phone only: a phone already on the account keeps its own standing', () => {
-    expect(src).toContain('callGivenConsent = !givenOnRecord && callGivenConsentRowCovered(givenRow, givenSlots);');
+    expect(src).toContain('callGivenConsent = !givenOnRecord && callGivenConsentRowCovered(givenRow, givenSlots)');
+    // A non-confirmed opt-in row for the phone keeps today's path and ask.
+    expect(src).toContain('&& await optinRowAllowsCallGiven(customerId, secondaryEntry.phone);');
   });
 
   test('consented phone: no blocking opt-in row, no queued on-site ask, no explicit-consent Reply-YES claim, card says why', () => {
@@ -256,8 +262,9 @@ describe('call-site wiring (source contract)', () => {
     expect(src).toContain('&& !optinClaimFailedPhones.has(fanLast10(c.phone)));');
   });
 
-  test('a retry reads the persisted provenance of a phone already on record', () => {
+  test('a retry reads the persisted provenance of a phone already on record, and the save does not need a live opt-in rail for it', () => {
     expect(src).toContain('callGivenRetained = givenOnRecord;');
+    expect(src).toContain('onSiteAskEligible: onSitePreAsk || callGivenConsent || callGivenRetained,');
   });
 
   test('gate off keeps the old call-site behavior: callGivenConsent is false, so the block above it is the old one', () => {
@@ -267,8 +274,12 @@ describe('call-site wiring (source contract)', () => {
 });
 
 describe('callGivenConsentPersisted: the committed outcome, read from the row', () => {
-  function rowDb(row) {
+  function rowDb(row, optin = null) {
     db.mockImplementation((table) => {
+      if (table === 'recipient_optin') {
+        const b = { where: () => b, first: async () => { if (optin instanceof Error) throw optin; return optin; } };
+        return b;
+      }
       expect(table).toBe('customers');
       const b = { where: () => b, first: async () => row };
       return b;
@@ -288,6 +299,24 @@ describe('callGivenConsentPersisted: the committed outcome, read from the row', 
     expect(await callGivenConsentPersisted('c', '+15550100123')).toBe(false); // writer declined: no provenance
     rowDb(undefined);
     expect(await callGivenConsentPersisted('c', '+15550100123')).toBe(false);
+  });
+
+  test('an existing opt-in row: confirmed stands; declined, pending and ask_failed do not (the old ask path keeps them recoverable)', async () => {
+    const row = { service_contacts_consent_at: stamp, service_preferences: prefs({ call_given_phone_keys: ['5550100123'] }) };
+    rowDb(row, { status: 'confirmed' });
+    expect(await callGivenConsentPersisted('c', '+15550100123')).toBe(true);
+    for (const status of ['declined', 'pending', 'ask_failed']) {
+      rowDb(row, { status });
+      expect(await callGivenConsentPersisted('c', '+15550100123')).toBe(false);
+      expect(await optinRowAllowsCallGiven('c', '+15550100123')).toBe(false);
+    }
+    rowDb(row, null);
+    expect(await optinRowAllowsCallGiven('c', '+15550100123')).toBe(true);
+    // Fail closed on an unreadable table; a missing table (un-migrated env) is no row.
+    rowDb(row, Object.assign(new Error('boom'), { code: '57014' }));
+    expect(await optinRowAllowsCallGiven('c', '+15550100123')).toBe(false);
+    rowDb(row, Object.assign(new Error('missing'), { code: '42P01' }));
+    expect(await optinRowAllowsCallGiven('c', '+15550100123')).toBe(true);
   });
 });
 
@@ -355,5 +384,59 @@ describe('contact login (contactSlotMayLogIn): caller-given consent covers texts
     expect(withServerOwnedPrefs({ call_given_phone_keys: [KEY] }, { interior_spray: true }).call_given_phone_keys).toEqual([KEY]);
     const dedupe = fs.readFileSync(require.resolve('../services/customer-dedupe'), 'utf8');
     expect(dedupe).toContain("for (const key of ['unconsented_slot_phone_keys', 'consent_covered_phone_keys', 'call_given_phone_keys']) {");
+  });
+});
+
+describe('review asks: caller-given consent covers appointment and service texts only', () => {
+  const { getServiceContactSmsRecipient } = require('../services/customer-contact');
+  const row = (prefs) => ({
+    id: 'c', phone: '+15550100999', first_name: 'Holder', service_contact_phone: '+15552220000', service_contact_name: 'Sample',
+    service_contacts_consent_at: new Date('2026-10-29T15:14:28Z'), service_preferences: prefs,
+  });
+
+  test('a call-given phone is the service text recipient, but a review ask falls back to the account holder', () => {
+    const r = row(JSON.stringify({ call_given_phone_keys: ['5552220000'] }));
+    expect(getServiceContactSmsRecipient(r).phone).toBe('+15552220000');
+    expect(getServiceContactSmsRecipient(r, { excludeCallGiven: true })).toMatchObject({ phone: '+15550100999', role: 'primary' });
+  });
+
+  test('any other stamped contact still receives the review ask', () => {
+    expect(getServiceContactSmsRecipient(row(null), { excludeCallGiven: true }).phone).toBe('+15552220000');
+    expect(getServiceContactSmsRecipient(row({ call_given_phone_keys: ['5559990000'] }), { excludeCallGiven: true }).phone).toBe('+15552220000');
+  });
+
+  test('every review sender asks with excludeCallGiven; the visit-complete service text does not', () => {
+    const read = (f) => fs.readFileSync(require.resolve(f), 'utf8');
+    const review = read('../services/review-request');
+    const calls = review.match(/resolveServiceContactSmsRecipient\(customer[^)]*\)/g) || [];
+    expect(calls.length).toBeGreaterThanOrEqual(5);
+    for (const call of calls) expect(call).toContain('excludeCallGiven: true');
+    // The past-destinations list (where an earlier ask could have gone) stays the broad one: it is history, not a send.
+    expect(review).toContain('getServiceContactSmsRecipient(owner).phone');
+    expect(read('../services/intelligence-bar/review-tools')).toContain('resolveServiceContactSmsRecipient(customer, { excludeCallGiven: true })');
+    expect(read('../routes/admin-reviews')).toContain('excludeCallGiven: true');
+    expect(read('../routes/admin-intelligence-bar').match(/resolveServiceContactSmsRecipient\([a-z]+, \{ excludeCallGiven: true \}/g)).toHaveLength(2);
+    expect(read('../services/visit-completion-summary')).not.toContain('excludeCallGiven');
+  });
+});
+
+describe('intent must sit on the V2 entry that carries the phone', () => {
+  const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+  const { onSiteOptinAskTrigger } = _test;
+  const keysFor = (extraction) => new Set([canonicalV2Secondary(extraction), ...mapSecondaryContactsToLegacy(extraction.secondary_contacts)]
+    .filter((c) => c && (c.wants_notifications === true || onSiteOptinAskTrigger(c)))
+    .map((c) => String(c.phone || '').replace(/\D/g, '').slice(-10)).filter(Boolean));
+
+  test('a V2 phone-only party with no ask or on-site role gets no key, even when another party wants notifications', () => {
+    const v2 = { secondary_contacts: [
+      { first_name: 'Pat', phone_e164: '+15550100123', role: 'other', wants_notifications: false },
+      { first_name: 'Sam', email: 'sam@example.com', role: 'spouse_partner', wants_notifications: true },
+    ] };
+    expect(keysFor(v2).has('5550100123')).toBe(false);
+  });
+
+  test('the party that carries the number AND the ask, or an on-site role, gets the key', () => {
+    expect(keysFor({ secondary_contacts: [{ first_name: 'Pat', phone_e164: '+15550100123', role: 'tenant', wants_notifications: true }] }).has('5550100123')).toBe(true);
+    expect(keysFor({ secondary_contacts: [{ first_name: 'Pat', phone_e164: '+15550100123', role: 'tenant', on_site: true }] }).has('5550100123')).toBe(true);
   });
 });

@@ -833,7 +833,7 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
     // opt-in table fails the page rather than naming a held contact.
     const { optinHeldPhoneKeys } = require('../services/recipient-optin');
     const heldByCustomer = await optinHeldPhoneKeys(customerIds);
-    const smsRecipient = (c) => getServiceContactSmsRecipient(c, { heldPhoneKeys: heldByCustomer.get(String(c.id)) || null });
+    const smsRecipient = (c) => getServiceContactSmsRecipient(c, { heldPhoneKeys: heldByCustomer.get(String(c.id)) || null, excludeCallGiven: true });
     const phones = customers
       .map(c => smsRecipient(c).phone || c.phone)
       .filter(Boolean)

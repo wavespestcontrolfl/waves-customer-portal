@@ -2482,7 +2482,7 @@ const ReviewService = {
     // Route to the service beneficiary (see services/customer-contact.js) —
     // falls back to the billing phone when no service contact is configured.
     const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
-    const contact = await resolveServiceContactSmsRecipient(customer);
+    const contact = await resolveServiceContactSmsRecipient(customer, { excludeCallGiven: true });
     // W0B pinned recipient at the FINAL recipient read (GH r14 P1): an
     // operator-confirmed card promised a specific number, and this reload
     // re-resolves the recipient — a phone changed between the card's
@@ -4675,7 +4675,7 @@ const ReviewService = {
             suppressed++;
             return;
           }
-          const contact = await resolveServiceContactSmsRecipient(customer);
+          const contact = await resolveServiceContactSmsRecipient(customer, { excludeCallGiven: true });
           if (!contact.phone) {
             // No consented SMS recipient — mark handled so this row can't sit
             // in the 20-row follow-up batch every run and starve later
@@ -4988,7 +4988,7 @@ const ReviewService = {
     // instead of texting the account holder on a fallback. Other sends keep the fallback.
     let contact;
     try {
-      contact = await resolveServiceContactSmsRecipient(customer, { failClosed: smsOnly });
+      contact = await resolveServiceContactSmsRecipient(customer, { failClosed: smsOnly, excludeCallGiven: true });
     } catch (err) {
       if (!smsOnly) throw err;
       logger.warn(`[review] yearly recipient lookup failed (customerId=${customer.id}): ${err.code || "error"}`);
@@ -6530,7 +6530,7 @@ const ReviewService = {
     if (customer.has_left_google_review) return { outcome: "already_reviewed" };
 
     const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
-    const contact = await resolveServiceContactSmsRecipient(customer);
+    const contact = await resolveServiceContactSmsRecipient(customer, { excludeCallGiven: true });
     if (channel === "sms" && !contact.phone) return { outcome: "no_contact" };
 
     const cid = customer.id;
@@ -8636,7 +8636,7 @@ async function phoneIsSuppressed(phone, { failClosed = false } = {}) {
 async function smsRecipientReachable(customer) {
   const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
   // failClosed: a failed opt-in read throws (the picker skips this customer) instead of a primary fallback.
-  const contact = await resolveServiceContactSmsRecipient(customer, { failClosed: true });
+  const contact = await resolveServiceContactSmsRecipient(customer, { failClosed: true, excludeCallGiven: true });
   if (!contact || !contact.phone) return { reachable: false, reason: "no_phone" };
   // US / Canada numbers only: the dispatch normalizer reads any ten digits as +1, so a non-NANP
   // number could be checked here and texted at a different destination. Not NANP = no yearly ask.

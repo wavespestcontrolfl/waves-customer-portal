@@ -919,12 +919,12 @@ async function optinHeldPhoneKeys(customerIds = [], { dbh = db, failClosed = fal
 // (Postgres has already aborted that transaction).
 // failClosed: a failed opt-in read throws instead of falling back to the primary contact (a caller
 // that must not act on a guess, e.g. the yearly review picker before it enrolls).
-async function resolveServiceContactSmsRecipient(customer, { dbh = db, failClosed = false } = {}) {
+async function resolveServiceContactSmsRecipient(customer, { dbh = db, failClosed = false, excludeCallGiven = false } = {}) {
   const { getServiceContactSmsRecipient, getPrimaryContact } = require('./customer-contact');
   const primary = () => ({ ...getPrimaryContact(customer), role: 'primary' });
   let resolved;
   if (!customer || !recipientPhoneKey(customer.service_contact_phone) || !isDoubleOptinEnabled()) {
-    resolved = getServiceContactSmsRecipient(customer);
+    resolved = getServiceContactSmsRecipient(customer, { excludeCallGiven });
   } else {
     let heldPhoneKeys;
     try {
@@ -934,7 +934,7 @@ async function resolveServiceContactSmsRecipient(customer, { dbh = db, failClose
       logger.warn(`[recipient-optin] single-recipient lookup failed (${err.message}) — holding the service contact`);
       return primary();
     }
-    resolved = getServiceContactSmsRecipient(customer, { heldPhoneKeys });
+    resolved = getServiceContactSmsRecipient(customer, { heldPhoneKeys, excludeCallGiven });
   }
   // The contact's OWN texts master switch (contact login, GATE_CONTACT_LOGIN)
   // holds them the way an unconfirmed opt-in does: the account holder takes

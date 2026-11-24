@@ -873,7 +873,7 @@ describe('on-site contact opt-in ask', () => {
     expect(src).toContain("const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;");
     expect(src).toContain('JSON.stringify({ optin_ask: value })');
     // The save only admits an on-site-only contact when the ask can go out.
-    expect(src).toContain('onSiteAskEligible: onSitePreAsk || callGivenConsent,');
+    expect(src).toContain('onSiteAskEligible: onSitePreAsk || callGivenConsent || callGivenRetained,');
     // Either extractor's do-not-contact request blocks the ask.
     expect(src).toMatch(/const v2DoNotContact = v2CanonicalExtraction\?\.consent\?\.do_not_contact_request === true\s*\|\| extracted\.do_not_contact_request === true;/);
     // Explicit V2 consent keeps the original claim path (fresh slot only).
