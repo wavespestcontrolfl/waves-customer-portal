@@ -1,0 +1,191 @@
+import { useState } from 'react';
+import { Button } from '../ui/Button';
+import { Card } from '../ui/Card';
+import { Field } from '../ui/Field';
+import { Input } from '../ui/Input';
+import { Select } from '../ui/Select';
+import { Table, TBody, TD, TH, THead, TR } from '../ui/Table';
+import { etDateString } from '../../lib/timezone';
+import { addStaffCalendarDays } from '../../lib/staffTimeDate';
+import { centsToDollars, dayLabel, lastFinishedWeekStart } from './payrollFormat';
+import { dollarsToCents } from './PayLinesPanel';
+
+// Production share, preview (Technician Terms v3, owner 2026-11-23). PR 1 of the share: the weekly CREDIT and the
+// numbers it is computed with. Nothing here is paid: no pay line, no money on any check. The owner account saves the
+// numbers; the preview shows each completed stop's credit, the shifts, the bar and the share the week would give.
+
+const KIND_WORDS = {
+  priced: 'Priced visit', prepaid_plan: 'Prepaid plan visit', multi_visit_job: 'Part of a multi-visit job',
+  callback_own: 'Callback, own work', callback_other: "Callback, another technician's work", callback_review: 'Callback',
+  free_assessment: 'Free assessment', free_visit: 'Free visit', unpriced: 'No price',
+};
+
+// '15' -> 1500, '12.5' -> 1250. Anything else -> null.
+export function percentToBps(text) {
+  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(String(text || '').trim());
+  if (!match) return null;
+  return Number(match[1]) * 100 + Number((match[2] || '').padEnd(2, '0') || 0);
+}
+const bpsToPercent = bps => String(Number(bps) / 100);
+const centsToPlain = cents => (Number(cents) / 100).toFixed(2);
+
+function SettingsForm({ call, technicians, technicianId, weekStart, current, onSaved }) {
+  const [scope, setScope] = useState('technician');
+  const [rate, setRate] = useState(current ? bpsToPercent(current.rateBps) : '');
+  const [barType, setBarType] = useState(current ? current.barType : 'per_shift');
+  const [bar, setBar] = useState(current ? centsToPlain(current.barCents) : '');
+  const [callbackValue, setCallbackValue] = useState(current ? centsToPlain(current.callbackStopValueCents) : '');
+  const [fromWeek, setFromWeek] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const rateBps = percentToBps(rate);
+  const barCents = dollarsToCents(bar);
+  const callbackCents = dollarsToCents(callbackValue);
+  const ready = rateBps != null && rateBps <= 10000 && barCents != null && callbackCents != null;
+  const who = (technicians || []).find(tech => tech.id === technicianId);
+
+  async function save(event) {
+    event.preventDefault();
+    setBusy(true); setError(''); setMessage('');
+    try {
+      await call('/production-share/settings', {
+        method: 'PUT',
+        body: {
+          technicianId: scope === 'default' ? null : technicianId,
+          ...(fromWeek ? { fromWeek } : {}),
+          rateBps, barType, barCents, callbackStopValueCents: callbackCents,
+        },
+      });
+      setMessage('Saved. It pays nothing yet.');
+      onSaved();
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  return <form onSubmit={save} className="grid gap-3" aria-label="Production share numbers">
+    <h3 className="m-0 text-ui-body font-medium text-zinc-900">Numbers</h3>
+    <p className="m-0 text-ui-caption text-ink-secondary">
+      {current
+        ? `In force for the week of ${dayLabel(weekStart)}: from the week of ${dayLabel(current.fromWeek)}${current.technicianId ? ', for this employee' : ', for everyone'}.`
+        : `No numbers are set for the week of ${dayLabel(weekStart)}, so the share is $0.`}
+    </p>
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <Field label="Applies to">
+        <Select value={scope} onChange={event => setScope(event.target.value)}>
+          <option value="technician">{who ? who.name : 'This employee'} only</option>
+          <option value="default">Everyone (the default)</option>
+        </Select>
+      </Field>
+      <Field label="Share of the amount above the bar (%)">
+        <Input inputMode="decimal" autoComplete="off" value={rate} onChange={event => setRate(event.target.value)} />
+      </Field>
+      <Field label="The bar is">
+        <Select value={barType} onChange={event => setBarType(event.target.value)}>
+          <option value="per_shift">An amount for each shift worked</option>
+          <option value="weekly">One amount for the week</option>
+        </Select>
+      </Field>
+      <Field label={barType === 'per_shift' ? 'Bar for each shift ($)' : 'Bar for the week ($)'}>
+        <Input inputMode="decimal" autoComplete="off" value={bar} onChange={event => setBar(event.target.value)} />
+      </Field>
+      <Field label="Average value of one stop, for a callback on another employee's work ($)">
+        <Input inputMode="decimal" autoComplete="off" value={callbackValue} onChange={event => setCallbackValue(event.target.value)} />
+      </Field>
+      <Field label="From the week of (a Monday, empty = this week)">
+        <Input type="date" value={fromWeek} onChange={event => setFromWeek(event.target.value)} />
+      </Field>
+    </div>
+    <div className="flex flex-wrap items-center gap-2">
+      <Button type="submit" disabled={busy || !ready}>Save numbers</Button>
+      {message && <span role="status" className="text-ui-caption text-zinc-900">{message}</span>}
+      {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+    </div>
+  </form>;
+}
+
+export default function ProductionSharePanel({ call, technicians }) {
+  const [open, setOpen] = useState(false);
+  const [technicianId, setTechnicianId] = useState('');
+  const [weekStart, setWeekStart] = useState(() => lastFinishedWeekStart(etDateString(new Date())));
+  const [preview, setPreview] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function load(id = technicianId, week = weekStart) {
+    if (!id || !week) return;
+    setBusy(true); setError('');
+    try {
+      setPreview(await call(`/production-share/preview?technicianId=${encodeURIComponent(id)}&weekStart=${encodeURIComponent(week)}`));
+    } catch (failure) { setPreview(null); setError(failure.message); }
+    setBusy(false);
+  }
+
+  const options = (technicians || []).filter(tech => !tech.notW2);
+  return <Card>
+    <div className="grid gap-4 p-4">
+      <header>
+        <h2 className="m-0 text-18 font-medium text-zinc-900">Production share preview</h2>
+        <p className="m-0 mt-1 text-ui-caption text-ink-secondary">
+          The credit each employee earned in a pay week and the share it would give. Nothing is paid from this yet.
+        </p>
+      </header>
+      {!open && <div><Button variant="secondary" onClick={() => setOpen(true)}>Open the production share preview</Button></div>}
+      {open && <>
+      <form className="flex flex-wrap items-end gap-3" onSubmit={event => { event.preventDefault(); load(); }}>
+        <Field label="Employee">
+          <Select value={technicianId} onChange={event => { setTechnicianId(event.target.value); setPreview(null); }}>
+            <option value="">Choose an employee</option>
+            {options.map(tech => <option key={tech.id} value={tech.id}>{tech.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="Week starting (Monday)">
+          <Input type="date" value={weekStart} onChange={event => { setWeekStart(event.target.value); setPreview(null); }} />
+        </Field>
+        <Button type="button" variant="secondary" disabled={busy || !technicianId || !weekStart}
+          onClick={() => setWeekStart(addStaffCalendarDays(weekStart, -7))}>Week before</Button>
+        <Button type="submit" disabled={busy || !technicianId || !weekStart}>Show the week</Button>
+      </form>
+      {error && <p role="alert" className="m-0 text-ui-caption text-alert-fg">{error}</p>}
+      {preview && <div className="grid gap-4">
+        <dl className="m-0 grid gap-2 sm:grid-cols-2 lg:grid-cols-5" aria-label="Week summary">
+          <div><dt className="text-ui-caption text-ink-secondary">Shifts</dt><dd className="m-0 text-zinc-900">{preview.shifts}</dd></div>
+          <div><dt className="text-ui-caption text-ink-secondary">Credited production</dt><dd className="m-0 text-zinc-900">{centsToDollars(preview.creditedCents)}</dd></div>
+          <div><dt className="text-ui-caption text-ink-secondary">Bar</dt><dd className="m-0 text-zinc-900">{preview.configured ? centsToDollars(preview.barCents) : 'Not set'}</dd></div>
+          <div><dt className="text-ui-caption text-ink-secondary">Above the bar</dt><dd className="m-0 text-zinc-900">{centsToDollars(preview.aboveBarCents)}</dd></div>
+          <div><dt className="text-ui-caption text-ink-secondary">Share (not paid)</dt><dd className="m-0 text-zinc-900">{centsToDollars(preview.shareCents)}</dd></div>
+        </dl>
+        {!preview.configured && <p className="m-0 text-ui-caption text-ink-secondary">No numbers are set for this week, so the share shows $0.</p>}
+        {preview.refundCents > 0 && <p className="m-0 text-ui-caption text-ink-secondary">
+          Refunds on these stops total {centsToDollars(preview.refundCents)}. They are not taken back yet.
+        </p>}
+        {preview.needsReview.length > 0 && <p role="status" className="m-0 text-ui-caption text-warn-fg">
+          {preview.needsReview.length} stop{preview.needsReview.length === 1 ? '' : 's'} need review. Each shows $0 until the office fixes it, so pay is never guessed.
+        </p>}
+        {preview.stops.length === 0
+          ? <p className="m-0">No completed stops in this week.</p>
+          : <Table aria-label="Stops and their credit">
+            <THead><TR>
+              <TH>Day</TH><TH>Service</TH><TH>Credit for</TH><TH align="right">Credit</TH><TH>Why</TH><TH align="right">Refunded</TH>
+            </TR></THead>
+            <TBody>
+              {preview.stops.map(stop => <TR key={stop.visitId}>
+                <TD>{dayLabel(stop.workDate)}</TD>
+                <TD>{stop.serviceType}</TD>
+                <TD>{KIND_WORDS[stop.kind] || stop.kind}</TD>
+                <TD nums align="right">{centsToDollars(stop.creditCents)}</TD>
+                <TD>{stop.needsReview && <span className="text-warn-fg">Needs review: </span>}{stop.reason}</TD>
+                <TD nums align="right">{stop.refundCents > 0 ? centsToDollars(stop.refundCents) : ''}</TD>
+              </TR>)}
+            </TBody>
+          </Table>}
+        <SettingsForm
+          key={`${technicianId}:${weekStart}:${preview.settings ? preview.settings.id : 'none'}`}
+          call={call} technicians={technicians} technicianId={technicianId} weekStart={weekStart}
+          current={preview.settings} onSaved={() => load()}
+        />
+      </div>}
+      </>}
+    </div>
+  </Card>;
+}

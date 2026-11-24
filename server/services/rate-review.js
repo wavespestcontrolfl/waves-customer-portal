@@ -3230,6 +3230,9 @@ module.exports = {
   // (services/rate-review-apply.js) so a notice targets exactly the visits
   // this ranking priced.
   PLAN_LINE_SQL: { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL, DATING_ROW_SQL },
+  // The refund a payment takes off an invoice's revenue (the card surcharge it returned is not revenue); the production
+  // share exposes refunds per stop with it.
+  REFUND_BASE_SQL,
   lockBatch,
   LEDGER_FAMILIES_FOR_LINE,
   anniversaryInWindow,
