@@ -7351,7 +7351,17 @@ router.get('/', async (req, res, next) => {
     Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services, { now: legsToday ? new Date() : null }));
     // Planned arrival + on-site minutes per stop for the Day grid's blocks
     // (display only, straight-line model, no paid call).
-    Object.values(byTech).forEach((tech) => require('../services/scheduling/planned-blocks').attachPlannedBlocks(tech.services));
+    // Same departure time and tech start points as the day-quality model:
+    // two small reads for the whole request (the start-point read is none
+    // with GATE_TECH_START_POINTS off); a failed read plans from the office
+    // at the legacy 08:00.
+    const plannedTechs = Object.values(byTech);
+    if (plannedTechs.length) {
+      const departureMin = await require('../services/scheduling/departure-time').dayDepartureMinutes(db);
+      const startPoints = await loadTechStartPoints(db, plannedTechs.map((tech) => tech.technicianId)).catch(() => new Map());
+      plannedTechs.forEach((tech) => require('../services/scheduling/planned-blocks')
+        .attachPlannedBlocks(tech.services, { departureMin, home: homeFromMap(startPoints, tech.technicianId) }));
+    }
 
     // Calculate tech summaries
     Object.values(byTech).forEach(tech => {

@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TimeGridDay from './TimeGridDay';
 
+const dnd = vi.hoisted(() => ({ props: null }));
 vi.mock('./RescheduleConfirmModal', () => ({ default: () => null }));
 vi.mock('@dnd-kit/core', () => ({
-  DndContext: (props) => <div>{props.children}</div>,
+  DndContext: (props) => { dnd.props = props; return <div>{props.children}</div>; },
   useDndContext: () => ({ active: null }),
   PointerSensor: function PointerSensor() {},
   useSensor: () => ({}),
@@ -134,5 +135,51 @@ describe('TimeGridDay planned blocks', () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     // The visit's real length (the one-hour window) plus one slot: 10:00 to 11:30.
     expect(JSON.parse(fetch.mock.calls[0][1].body).newWindow).toBe('10:00-11:30');
+  });
+
+  it('saves an up-drag of one slot on a short planned block as 30 minutes off the booked hour', async () => {
+    // Planned 35 min on a one-hour booking: the preview clamps at 30 minutes,
+    // but the save is the pointer's whole slots on the booking (60 - 30).
+    renderDay([visit('a', 'Planned Pat', '10:00', { plannedArrivalMin: 645, plannedMinutes: 35 })]);
+    const handle = screen.getByTitle('Drag to resize');
+    fireEvent.pointerDown(handle, { clientY: 200 });
+    fireEvent(window, new MouseEvent('pointermove', { clientY: 168 }));
+    fireEvent(window, new MouseEvent('pointerup', { clientY: 168 }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(fetch.mock.calls[0][1].body).newWindow).toBe('10:00-10:30');
+  });
+
+  it('draws a 15-minute planned stop at its real height and keeps the next quarter-hour stop in the same lane', () => {
+    renderDay([
+      visit('a', 'Quick Quin', '09:00', { plannedArrivalMin: 540, plannedMinutes: 15 }),
+      visit('b', 'Next Nat', '09:00', { plannedArrivalMin: 555, plannedMinutes: 15 }),
+    ]);
+    expect(parseFloat(block('Quick Quin').style.height)).toBeCloseTo(16);
+    expect(parseFloat(block('Next Nat').style.top)).toBeCloseTo(topOf(555));
+    expect(block('Quick Quin').style.width).toBe('calc(100% - 4px)');
+    expect(block('Next Nat').style.width).toBe('calc(100% - 4px)');
+  });
+
+  it('drops the old plan from a visit moved to another hour while the confirmation is open', () => {
+    renderDay([
+      visit('a', 'Moved Mo', '10:00', { plannedArrivalMin: 12 * 60 + 15, plannedMinutes: 35 }),
+      visit('b', 'Stays Stu', '08:00', { plannedArrivalMin: 8 * 60, plannedMinutes: 35 }),
+    ]);
+    // Before the move it is drawn at its plan, outside its 10-12 window.
+    expect(block('Moved Mo').style.borderLeft).toContain('220, 38, 38');
+    act(() => {
+      dnd.props.onDragEnd({
+        active: { data: { current: { service: visit('a', 'Moved Mo', '10:00') } } },
+        over: { data: { current: { techId: 'tech-1', slotMin: 14 * 60 } } },
+      });
+    });
+    const moved = block('Moved Mo');
+    expect(parseFloat(moved.style.top)).toBeCloseTo(topOf(14 * 60));
+    expect(parseFloat(moved.style.height)).toBeCloseTo(64);
+    expect(moved.style.borderLeft).not.toContain('220, 38, 38');
+    expect(moved.getAttribute('title')).not.toMatch(/Planned arrival/);
+    // The rest of the route keeps its plan until the refresh.
+    expect(parseFloat(block('Stays Stu').style.top)).toBeCloseTo(topOf(480));
+    expect(parseFloat(block('Stays Stu').style.height)).toBeCloseTo((35 / 30) * 32);
   });
 });

@@ -7,20 +7,31 @@
 //
 // The model is day-quality.js's: simulateArrivalRoute over the straight-line
 // fallback leg model (no Google, no paid call), the work of each stop from
-// workDuration (owner planning minutes, else window span or estimate). One
-// simulation per technician-day. Stops run in the order the day list shows
-// (stopOrder: tie-proximity displayOrder, else window start); the van waits
-// for a window to open and carries every earlier delay forward, so a late
-// stop lands past its window (reportLate) instead of failing the model.
+// workDuration (owner planning minutes, else window span or estimate), the van
+// leaving the tech's start point at the day's departure time. One simulation
+// per technician-day. The stops, their order, the visit-group and co-visit
+// pieces and their timing are the ones attachDriveLegs builds for the drive
+// lines (stop-drive-legs.js buildStops / planRoute), so the grid and the
+// drive lines never disagree. The van waits for a window to open and carries
+// every earlier delay forward, so a late stop lands past its window
+// (reportLate) instead of failing the model.
 //
-// Both fields are null for a row the model cannot place: a completed,
-// cancelled, skipped or no-show row, a row with no start time, a row with no
-// usable pin, or a day whose simulation fails. The grid then draws that row
-// as it always did (window start, window or estimated length).
+// One stop is one block: the rows of a visit group, or of a co-visit, share
+// the piece's arrival and minutes. Both fields are null for a row the model
+// cannot place: a completed, cancelled, skipped or no-show row, a row with no
+// start time, a row at or after a leg that cannot be measured (no pin), or a
+// day whose simulation fails. The grid then draws that row as it always did
+// (window start, window or estimated length).
 
 const RouteOptimizer = require('../route-optimizer');
+const { driveMin } = require('../auto-dispatch/geo');
 const { simulateArrivalRoute, effectiveWindowRange } = require('../route-reorder-window-fit');
-const { stopOrder, simRow, hasGeo, minutesOf, NOT_A_STOP } = require('./stop-drive-legs');
+const {
+  buildStops, planRoute, legBetween, hasGeo, minutesOf, NOT_A_STOP,
+} = require('./stop-drive-legs');
+
+// The office's departure when the caller gives none: day-quality's legacy 08:00.
+const DEFAULT_DEPARTURE_MIN = 8 * 60;
 
 function clearPlanned(services) {
   for (const s of services || []) {
@@ -29,42 +40,61 @@ function clearPlanned(services) {
   }
 }
 
-// Open work with a start time: what the route simulation can place.
+// Open work with a start time: what gets a planned block.
 function isPlaceable(s) {
   return !NOT_A_STOP.has(s.status) && s.status !== 'completed' && Number.isFinite(minutesOf(s.windowStart));
 }
 
+// The day's route as the drive lines plan it, run from the departure at the
+// tech's start point. Null when it cannot be run (no pin on the first stop).
+function simulateDay(rows, { departureMin, home }) {
+  const stops = buildStops(rows.filter((s) => !NOT_A_STOP.has(s.status) && Number.isFinite(minutesOf(s.windowStart))));
+  if (!stops.length || !hasGeo(stops[0].anchor)) return null;
+  const legs = stops.slice(1).map((st, i) => legBetween(stops[i], st));
+  const route = planRoute(stops, legs);
+  if (!route) return null;
+  const firstId = route.seq[0].id;
+  const firstLeg = driveMin(home, stops[0].anchor);
+  const rangeFor = (row) => row.arrivalRange || effectiveWindowRange(row);
+  const sim = simulateArrivalRoute(RouteOptimizer, rangeFor, route.seq, {
+    startMin: departureMin,
+    origin: home,
+    end: home,
+    reportLate: true,
+    legMinutes: (_prev, stop) => (stop.id === firstId ? firstLeg : route.legIn.get(stop.id) ?? 0),
+  });
+  return sim ? { sim, membersOf: route.membersOf } : null;
+}
+
 /**
  * Sets `plannedArrivalMin` / `plannedMinutes` (whole minutes or null) in
- * place on one technician's services.
+ * place on one technician's services. `departureMin` is the van's departure
+ * (departure-time.js dayDepartureMinutes); `home` its start point
+ * (tech-start-point.js, the office by default).
  */
-function attachPlannedBlocks(services) {
+function attachPlannedBlocks(services, { departureMin = DEFAULT_DEPARTURE_MIN, home = RouteOptimizer.HQ } = {}) {
   clearPlanned(services);
-  const rows = (services || []).filter(isPlaceable).sort(stopOrder);
+  const rows = (services || []).filter(isPlaceable);
   if (!rows.length) return;
-  // A stop without a pin rides the simulation with no leg (advanceSim) so its
-  // work still moves the clock, but it is never drawn at a planned time.
-  const seq = rows.map((s) => ({ ...simRow(s), lat: s.lat, lng: s.lng }));
   // Display only: a model error must never fail the day feed, so the rows
   // keep null fields and draw as before.
-  let sim = null;
+  let day = null;
   try {
-    sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, seq, {
-      startMin: 0,
-      reportLate: true,
-    });
+    day = simulateDay(services, { departureMin, home });
   } catch {
-    sim = null;
+    day = null;
   }
-  if (!sim) return;
-  const byId = new Map(sim.arrivals.map((a) => [a.id, a]));
-  for (const s of rows) {
-    const a = byId.get(s.id);
-    if (!a || !hasGeo(s)) continue;
+  if (!day) return;
+  const byId = new Map(services.map((s) => [s.id, s]));
+  for (const a of day.sim.arrivals) {
     const minutes = Math.round(a.departureMin - a.arrivalMin);
     if (!Number.isFinite(a.arrivalMin) || !(minutes > 0)) continue;
-    s.plannedArrivalMin = Math.round(a.arrivalMin);
-    s.plannedMinutes = minutes;
+    for (const id of day.membersOf.get(a.id) || []) {
+      const s = byId.get(id);
+      if (!s || !isPlaceable(s)) continue;
+      s.plannedArrivalMin = Math.round(a.arrivalMin);
+      s.plannedMinutes = minutes;
+    }
   }
 }
 

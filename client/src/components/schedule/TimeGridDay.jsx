@@ -189,8 +189,19 @@ function plannedInterval(svc) {
   const mins = svc?.plannedMinutes;
   if (!Number.isFinite(at) || !Number.isFinite(mins) || mins <= 0) return null;
   if (at < DAY_START_HOUR * 60 || at >= DAY_END_HOUR * 60) return null;
-  return { start: at, end: Math.min(DAY_END_HOUR * 60, Math.max(at + mins, at + SLOT_MIN)), minutes: mins };
+  // The real planned end: lanes and height follow the route, not a 30-minute
+  // floor (a 15-minute re-service must not share a lane with the stop after).
+  return { start: at, end: Math.min(DAY_END_HOUR * 60, at + mins), minutes: mins };
 }
+
+// A moved or resized row's plan is the old route's: until the refreshed
+// plan arrives it draws from its booked window (optimistic edits only).
+function withoutPlan(s) {
+  return { ...s, plannedArrivalMin: null, plannedMinutes: null };
+}
+// Shortest drawn planned block: one 14px text line. Smaller real heights
+// (a 15-minute stop is 16px) are drawn as they are down to this.
+const MIN_PLANNED_PX = 16;
 
 // "10:45" (the axis carries AM/PM).
 function plannedClock(min) {
@@ -458,7 +469,8 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
   });
 
   const [resizeHeight, setResizeHeight] = useState(null);
-  const effectiveHeight = resizeHeight != null ? resizeHeight : Math.max(height, SLOT_HEIGHT - 2);
+  const minHeight = planned ? MIN_PLANNED_PX : SLOT_HEIGHT - 2;
+  const effectiveHeight = resizeHeight != null ? resizeHeight : Math.max(height, minHeight);
   const hasAuditAction = service.status === 'completed' && onViewAudit && (service.customerId || service.customer_id);
   const hasProtocolAction = !!onProtocol;
   const hasPlanAction = isLawnService(service) && onTreatmentPlan;
@@ -479,6 +491,9 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
   const promise = planned ? plannedWindow(service, planned.start) : null;
   const outsideWindow = promise?.outside === true;
   const oneLine = planned != null && compact;
+  // A 15-minute stop is drawn at its real 16px: one text line, small buttons.
+  const tiny = planned != null && effectiveHeight < SLOT_HEIGHT - 2;
+  const actionBox = tiny ? 'top-0 h-4 w-4' : 'top-0.5 h-5 w-5';
   // Room for the absolute action buttons at the block's right edge.
   const actionGutter = (actionCount + (routeOrder != null && !oneLine ? 1 : 0)) * 24;
 
@@ -491,36 +506,35 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
     e.preventDefault();
     e.stopPropagation();
     const startY = e.clientY;
-    const startHeight = Math.max(height, SLOT_HEIGHT - 2);
-    let finalHeight = startHeight;
+    const startHeight = Math.max(height, minHeight);
+    // Whole slots moved by the pointer, signed: the save applies them to the
+    // booked length, so a planned block (whose drawn height is not the
+    // booking) drags up one slot as 30 minutes less, whatever the preview
+    // clamp shows.
+    let slots = 0;
 
     const onMove = (ev) => {
-      const dy = ev.clientY - startY;
-      // Whole slots from where the drag began: a planned block's height is
-      // not a slot multiple, so a click with no movement must change nothing.
-      const snapped = Math.max(SLOT_HEIGHT, startHeight + Math.round(dy / SLOT_HEIGHT) * SLOT_HEIGHT);
-      finalHeight = snapped;
-      setResizeHeight(snapped);
+      slots = Math.round((ev.clientY - startY) / SLOT_HEIGHT);
+      setResizeHeight(Math.max(SLOT_HEIGHT, startHeight + slots * SLOT_HEIGHT));
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       setResizeHeight(null);
-      if (finalHeight !== startHeight) {
+      if (slots !== 0) {
         // Delta-based on the visit's REAL duration, not the drawn height: a
         // block clipped at the grid's first row (05:00–07:00 draws 60 min)
         // must keep its hidden pre-grid minutes when the operator drags the
         // bottom edge, or the resize would silently shorten the visit.
-        const deltaMin = ((finalHeight - startHeight) / SLOT_HEIGHT) * SLOT_MIN;
         const baseMin = Number.isFinite(durationMin) && durationMin > 0
           ? durationMin
           : (startHeight / SLOT_HEIGHT) * SLOT_MIN;
-        onResize(service, Math.max(SLOT_MIN, baseMin + deltaMin));
+        onResize(service, Math.max(SLOT_MIN, baseMin + slots * SLOT_MIN));
       }
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-  }, [onResize, service, height]);
+  }, [onResize, service, height, durationMin, minHeight]);
 
   const nameRow = (
     <div className={cn('flex items-center gap-1 min-w-0', oneLine && 'max-w-[45%]')}>
@@ -580,7 +594,8 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
         onEdit?.(service);
       }}
       className={cn(
-        'absolute px-2 py-1 rounded-[3px] cursor-grab active:cursor-grabbing select-none overflow-hidden text-14 leading-tight u-focus-ring',
+        tiny ? 'py-0' : 'py-1',
+        'absolute px-2 rounded-[3px] cursor-grab active:cursor-grabbing select-none overflow-hidden text-14 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
         isSelected && !isDragging && 'ring-2 ring-zinc-900 ring-offset-1 ring-offset-white z-30',
@@ -615,7 +630,7 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
             e.stopPropagation();
             onViewAudit(service);
           }}
-          className="absolute z-[1] top-0.5 right-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring"
+          className={cn('absolute z-[1] right-0.5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring', actionBox)}
           title="View completion audit"
           aria-label="View completion audit"
         >
@@ -632,7 +647,8 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
             onProtocol(service);
           }}
           className={cn(
-            'absolute z-[1] top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            'absolute z-[1] inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            actionBox,
             hasAuditAction ? 'right-6' : 'right-0.5'
           )}
           title="Protocol"
@@ -650,7 +666,8 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
             onTreatmentPlan(service);
           }}
           className={cn(
-            'absolute z-[1] top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            'absolute z-[1] inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            actionBox,
             hasAuditAction && hasProtocolAction ? 'right-11' : hasAuditAction || hasProtocolAction ? 'right-6' : 'right-0.5'
           )}
           title="Treatment plan"
@@ -1449,7 +1466,7 @@ export default function TimeGridDay({
     const next = allServices.map((s) =>
       s.id === svc.id
         ? {
-            ...s,
+            ...withoutPlan(s),
             technicianId: toTech === '__unassigned__' ? null : toTech,
             technicianName: toTech === '__unassigned__'
               ? null
@@ -1557,7 +1574,7 @@ export default function TimeGridDay({
     const optimisticNext = allServices.map((s) =>
       s.id === svc.id
         ? {
-            ...s,
+            ...withoutPlan(s),
             windowEnd: minutesToHHMM(newEndMin),
             windowDisplay: newWindowDisplay,
             estimatedDuration: newDurationMin,
@@ -1687,7 +1704,7 @@ export default function TimeGridDay({
     if (selection.size === 0) return;
     const ids = Array.from(selection);
     setOptimistic(allServices.map((s) =>
-      ids.includes(s.id) ? { ...s, technicianId: null, technicianName: null } : s,
+      ids.includes(s.id) ? { ...withoutPlan(s), technicianId: null, technicianName: null } : s,
     ));
     setBusy(true);
     try {
