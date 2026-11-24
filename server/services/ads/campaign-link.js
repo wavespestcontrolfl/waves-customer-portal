@@ -7,9 +7,10 @@
  * campaign_id (up to BATCH a run, least recently tried first; the try times are kept in system_settings TRIED_KEY so
  * every lead gets a turn). The click can come days before the lead (lead_date is the form or call day):
  *   - lead day still inside Google's click window (CLICK_VIEW_DAYS): Google's click_view names the campaign of that
- *     exact click -> basis 'gclid_click_view'. Each run searches the next CLICK_DAYS days back from where the last
- *     run stopped (the cursor is kept with the try time), only days still in the window, up to SPEND_DAYS back; then
- *     it starts again at the lead day. No answer = tried again on a later run.
+ *     exact click -> basis 'gclid_click_view'. Each run asks every day from the lead day back SPEND_DAYS that Google
+ *     still keeps, newest first, and stops at the first answer (one click_view query per day; ad leads are a handful a
+ *     month, and BATCH caps a run). A campaign Google names that is not in ad_campaigns yet is kept with the try, and
+ *     the next run links it without asking Google again. No answer = tried again on a later run.
  *   - lead day older than the window (Google no longer keeps the click): Google's own campaign metrics (kept long
  *     after click records; never the local copy, which can miss a sync day) from SPEND_DAYS before the lead day
  *     through the lead day, the longest a click can come before its lead -> exactly one campaign with spend in that
@@ -24,12 +25,10 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 // Google answers click_view for the last 90 days.
 const CLICK_VIEW_DAYS = 90;
-// Days up to the lead day searched for the exact click.
-const CLICK_DAYS = 7;
 // How far before the lead a click can be (Google's click attribution window is at most 90 days): the exact search
 // stops there, and for an older click only one campaign may have spent from that day through the lead day.
 const SPEND_DAYS = 90;
-const BATCH = 50;
+const BATCH = 10;
 const TRIED_KEY = 'ads.campaign_link.tried';
 
 function dayString(v) {
@@ -101,20 +100,15 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
   try {
     for (const row of rows) {
       const day = dayString(row.lead_date);
-      const from = Number(tried[row.id]?.back) || 0;
-      tried[row.id] = { at, back: 0 };
-      let googleId = null;
+      const known = tried[row.id]?.google_campaign_id || null;
+      tried[row.id] = { at, ...(known ? { google_campaign_id: known } : {}) };
+      let googleId = known;
       let basis = 'gclid_click_view';
-      if (day >= windowStart) {
-        const span = Array.from({ length: CLICK_DAYS }, (_, i) => from + i)
-          .filter((back) => back <= SPEND_DAYS)
-          .map((back) => daysBack(day, back))
-          .filter((d) => d >= windowStart);
-        if (span.length) {
-          googleId = await clickViewCampaign(customer, row.gclid, span);
-          tried[row.id].back = from + CLICK_DAYS;
-        }
-      } else {
+      if (!googleId && day >= windowStart) {
+        const span = Array.from({ length: SPEND_DAYS + 1 }, (_, back) => daysBack(day, back)).filter((d) => d >= windowStart);
+        googleId = await clickViewCampaign(customer, row.gclid, span);
+        if (googleId) tried[row.id].google_campaign_id = googleId;
+      } else if (!googleId) {
         basis = 'only_campaign_with_spend';
         googleId = await onlyCampaignWithSpend(customer, daysBack(day, SPEND_DAYS), day);
       }
@@ -125,11 +119,11 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
       if (n) out.linked[basis] += 1;
     }
   } finally {
-    // Keep try times and search cursors only for leads still waiting, also when Google failed mid-run.
+    // Keep tries only for leads still waiting, also when Google failed mid-run.
     const waiting = new Set(eligible.map((r) => r.id));
     const keep = Object.fromEntries(Object.entries(tried).filter(([id]) => waiting.has(id)));
     const value = JSON.stringify(keep);
-    await conn('system_settings').insert({ key: TRIED_KEY, value, category: 'ads', description: 'Ad lead campaign link: last try and search cursor per waiting lead' })
+    await conn('system_settings').insert({ key: TRIED_KEY, value, category: 'ads', description: 'Ad lead campaign link: last try per waiting lead (and a campaign Google named)' })
       .onConflict('key').merge({ value, updated_at: conn.fn.now() });
   }
   logger.info(`[ads-campaign-link] checked ${out.checked}, linked ${JSON.stringify(out.linked)}, unlinked ${out.unlinked}`);

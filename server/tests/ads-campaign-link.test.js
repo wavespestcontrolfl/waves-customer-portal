@@ -69,7 +69,7 @@ test('a recent click Google has no record of yet stays unlinked for the next run
   const out = await linkCampaigns({ now: NOW, conn, googleAds: g });
   expect(out.unlinked).toBe(1);
   expect(conn.updates).toEqual([]);
-  expect(g.query).toHaveBeenCalledTimes(7); // the lead day and the 6 days before: a click can come days earlier
+  expect(g.query).toHaveBeenCalledTimes(90); // every day Google still keeps, back from the lead day
 });
 
 test('an older click takes the one campaign Google says had spend that day; two campaigns = unlinked', async () => {
@@ -97,13 +97,13 @@ test('a lead day still inside the 90-day window is looked up exactly, even when 
 
 test('every waiting lead gets a turn: least recently tried first', async () => {
   const leads = Array.from({ length: 55 }, (_, i) => ({ id: `r${i}`, gclid: `${GCLID_NEW}${i}`, lead_date: '2026-11-10' }));
-  const tried = Object.fromEntries(leads.slice(0, 50).map((l) => [l.id, { at: '2026-11-22T11:00:00.000Z', back: 7 }]));
+  const tried = Object.fromEntries(leads.slice(0, 50).map((l) => [l.id, { at: '2026-11-22T11:00:00.000Z' }]));
   const conn = fakeConn({ leads, campaigns, tried });
   const g = googleAdsWith({});
   await linkCampaigns({ now: NOW, conn, googleAds: g });
   const queried = new Set(g.query.mock.calls.map(([q]) => q.match(/gclid = '([^']+)'/)[1]));
   for (let i = 50; i < 55; i += 1) expect(queried.has(`${GCLID_NEW}${i}`)).toBe(true);
-  expect(JSON.parse(conn.settings['ads.campaign_link.tried']).r50).toEqual({ at: NOW.toISOString(), back: 7 });
+  expect(JSON.parse(conn.settings['ads.campaign_link.tried']).r50).toEqual({ at: NOW.toISOString() });
 });
 
 test('a campaign Google names that is not in ad_campaigns, or a malformed click id, is never written', async () => {
@@ -145,21 +145,19 @@ test('a click days before the form is found; an organic lead that kept a gclid i
   expect(query.mock.calls.some(([q]) => q.includes(GCLID_OLD))).toBe(false);
 });
 
-test('retries walk further back each run, then start again at the lead day', async () => {
-  const lead = { id: 'f1', gclid: GCLID_NEW, lead_date: '2026-11-20' };
-  const conn = fakeConn({ leads: [lead], campaigns, tried: { f1: { at: '2026-11-22T11:00:00.000Z', back: 7 } } });
-  const g = googleAdsWith({});
-  await linkCampaigns({ now: NOW, conn, googleAds: g });
-  const dates = g.query.mock.calls.map(([q]) => q.match(/segments.date = '([^']+)'/)[1]);
-  expect(dates).toEqual(['2026-11-13', '2026-11-12', '2026-11-11', '2026-11-10', '2026-11-09', '2026-11-08', '2026-11-07']);
-  expect(JSON.parse(conn.settings['ads.campaign_link.tried']).f1.back).toBe(14);
+test('a campaign Google names that is not local yet is kept, and linked next run without asking Google again', async () => {
+  const lead = { id: 'h1', gclid: GCLID_NEW, lead_date: '2026-11-10' };
+  const first = fakeConn({ leads: [lead], campaigns: [] });
+  const g = googleAdsWith({ [GCLID_NEW]: 24535212391 });
+  expect((await linkCampaigns({ now: NOW, conn: first, googleAds: g })).unlinked).toBe(1);
+  const saved = JSON.parse(first.settings['ads.campaign_link.tried']);
+  expect(saved.h1.google_campaign_id).toBe('24535212391');
 
-  // Past the window start: nothing left to search this round, the cursor goes back to the lead day.
-  const late = fakeConn({ leads: [lead], campaigns, tried: { f1: { at: '2026-11-22T11:00:00.000Z', back: 91 } } });
+  const next = fakeConn({ leads: [lead], campaigns, tried: saved });
   const g2 = googleAdsWith({});
-  await linkCampaigns({ now: NOW, conn: late, googleAds: g2 });
+  expect((await linkCampaigns({ now: NOW, conn: next, googleAds: g2 })).linked.gclid_click_view).toBe(1);
+  expect(next.updates[0]).toMatchObject({ campaign_id: 'local-pest', campaign_link_basis: 'gclid_click_view' });
   expect(g2.query).not.toHaveBeenCalled();
-  expect(JSON.parse(late.settings['ads.campaign_link.tried']).f1.back).toBe(0);
 });
 
 test('a Google failure mid-run still saves the tries made so far', async () => {
@@ -168,7 +166,7 @@ test('a Google failure mid-run still saves the tries made so far', async () => {
   const query = jest.fn(async (q) => { if (q.includes(`${GCLID_NEW}b`)) throw new Error('RESOURCE_EXHAUSTED'); return []; });
   await expect(linkCampaigns({ now: NOW, conn, googleAds: { getCustomer: () => ({ query }) } })).rejects.toThrow('RESOURCE_EXHAUSTED');
   const saved = JSON.parse(conn.settings['ads.campaign_link.tried']);
-  expect(saved.g1).toEqual({ at: NOW.toISOString(), back: 7 });
+  expect(saved.g1).toEqual({ at: NOW.toISOString() });
   expect(saved.g2.at).toBe(NOW.toISOString());
 });
 
