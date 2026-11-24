@@ -1897,6 +1897,24 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(deps.sendWithLedger).not.toHaveBeenCalled();
     });
 
+    test.each([['commercial'], ['not_live'], ['has_plan']])('the pricer answers premises for a %s account: held, no item', async (blocker) => {
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'premises' })),
+        planStartBlocker: jest.fn(async () => blocker),
+      });
+      const summary = await run(deps);
+      expect(liveCounts(summary)).toEqual({ ...ZERO, held: 1 });
+      expect(summary.reasons).toEqual({ [blocker]: 1 });
+      expect(deps.raiseOfficeItem).not.toHaveBeenCalled();
+    });
+
+    test('premises for an address the app cannot prove: the office item, with its own words', async () => {
+      const deps = liveWorld({ buildStartOffer: jest.fn(async () => ({ option: null, reason: 'premises' })) });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, office: 1 });
+      expect(deps.planStartBlocker).toHaveBeenCalledWith(deps.db, 'cust-1');
+      expect(deps.raiseOfficeItem.mock.calls[0][0].reason).toBe('premises');
+    });
+
     test('a mint that cannot price the estimate on the server raises it too', async () => {
       const deps = liveWorld({
         mintPlanStartEstimate: jest.fn(async () => { throw Object.assign(new Error('hand'), { restartUnavailable: true, code: 'pricing_unavailable' }); }),

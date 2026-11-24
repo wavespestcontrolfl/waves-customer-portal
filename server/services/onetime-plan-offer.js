@@ -1084,7 +1084,15 @@ async function liveJob(job, { now, deps, priceSettings }) {
   const result = outcome.verdict === 'sample' ? await mintAndSend(ctx, outcome.option) : outcome;
   // A home the app cannot price gets one office item: a person prices it by hand. A failed write fails the job, so
   // the next morning raises it again (the item's key makes it one item per job).
-  if (result.verdict === 'office') await deps.raiseOfficeItem({ job, customer: ctx.customer, offerDay: ctx.offerDay, reason: result.reason });
+  if (result.verdict === 'office') {
+    // The pricer's `premises` covers a confirmed commercial or closed account as well as an address it cannot prove.
+    // The first is no home to quote (owner 2026-11-21, homes only): held, no item. Only the second goes to the office.
+    if (result.reason === 'premises') {
+      const blocker = await deps.planStartBlocker(deps.db, job.customer_id);
+      if (blocker) return { verdict: 'held', reason: blocker };
+    }
+    await deps.raiseOfficeItem({ job, customer: ctx.customer, offerDay: ctx.offerDay, reason: result.reason });
+  }
   return result;
 }
 
