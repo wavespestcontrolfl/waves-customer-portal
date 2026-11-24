@@ -57,6 +57,8 @@ const EXCLUDED_TITLES = Object.freeze([
   /payment (?:failed|declined)/i,
   /card (?:declined|failed)/i,
   /\b(?:job|sweep|cron|reminder)s?\b[^.]{0,40}\bfail/i,
+  // The nightly auto-dispatch summary: its "held" is a visit it chose not to move, not work held for a person.
+  /^auto-dispatch: \d+ moves?, \d+ held/i,
 ]);
 const EXCLUDED_CATEGORIES = Object.freeze(['ops_digest', 'system']);
 
