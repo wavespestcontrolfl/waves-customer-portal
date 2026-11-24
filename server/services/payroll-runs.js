@@ -308,7 +308,9 @@ function buildCheck({
   // pay lines gate says; a share of $0 changes nothing but the stored figure and snapshot.
   const share = tech.production_share && !tech.production_share.error ? tech.production_share : null;
   const shareCents = share ? share.shareCents : 0;
-  const withLines = payLinesOn() || shareCents > 0;
+  // With the share gate on, EVERY check of an employee who has share settings and a set overtime coverage is a pay line check (a week at or
+  // under the bar too): the qualified overtime is stored as a figure, 0 for an uncovered employee, never left empty.
+  const withLines = payLinesOn() || shareCents > 0 || (share !== null && tech.flsa_overtime_covered != null);
   const coverageProblem = shareCoverageProblem(tech, shareCents);
   if (coverageProblem) return { blocked: coverageProblem };
   const ptoMinutes = tech.pto_minutes || 0;
@@ -1517,6 +1519,12 @@ async function voidRun(runId, input, actor, conn = db) {
     const rows = await loadCheckRows(trx, runId, { lock: true });
     if (run.status === 'finalized' && await laterFinalCheckExists(trx, run, rows.map((row) => row.technician_id))) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first.');
+    }
+    // A credit a LATER final check was worked out against a paid row of this run (a visit moved to another week and shown already
+    // paid, an invoice or package paid here) would change after it was paid. Not behind the gate: a stored check keeps its dependence.
+    const dependents = run.status === 'finalized' ? await productionSharePay.dependentChecksOf(trx, runId) : [];
+    if (dependents.length) {
+      throw new PayrollError(409, `Production share credits on later pay runs were worked out against this run (${dependents.map((one) => `${one.employeeName}, week of ${one.weekStart}`).join('; ')}). Void those runs first.`);
     }
     // The same for the time-off bank, in any year: a later check read the bank with this run in it, or a later final
     // run left time off unpaid that the hours this void gives back would have paid (the 16 early illness hours too),

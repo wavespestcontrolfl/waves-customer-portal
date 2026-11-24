@@ -59,6 +59,8 @@ function snapshotOf({ weekStart, settings, result, stops, degraded = false }) {
       // package visit its package { basisType: 'job', basisId, totalCents, sold, slot }.
       ...(stop.invoices && stop.invoices.length ? { invoices: stop.invoices } : {}),
       ...(stop.bases && stop.bases.length ? { bases: stop.bases } : {}),
+      // The runs whose paid rows this credit was worked out against (voiding one of them is refused while this check is final).
+      ...(stop.dependsOnRuns && stop.dependsOnRuns.length ? { dependsOnRuns: [...stop.dependsOnRuns].sort() } : {}),
     })),
   };
 }
@@ -143,7 +145,7 @@ function revisionOf(inputs) {
   const rows = [...inputs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([id, input]) => {
     if (input.error) return [id, 'error', input.error];
     const { settings } = input;
-    const stops = input.stops.map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases, stop.invoices)])
+    const stops = input.stops.map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases, stop.invoices), [...(stop.dependsOnRuns || [])].sort()])
       .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
     return [id, settings.id, settings.rateBps, settings.barType, settings.barCents, settings.callbackStopValueCents, stops, input.degraded === true];
   });
@@ -173,6 +175,22 @@ function sharesFor(inputs, technicianIds, weekStart) {
   return shares;
 }
 
+/**
+ * The finalized checks (of ANY technician) whose credits were worked out against a paid row of the run `runId`: { employeeName, weekStart }.
+ * Voiding that run would change those credits after they were paid, so voidRun refuses while there are any.
+ */
+async function dependentChecksOf(trx, runId) {
+  const { rows } = await trx.raw(`SELECT DISTINCT c.employee_name, to_char(c.week_start, 'YYYY-MM-DD') AS week_start
+    FROM payroll_checks c
+    JOIN payroll_runs r ON r.id = c.run_id
+    CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(c.calc_snapshot->'productionShare'->'stops') = 'array'
+      THEN c.calc_snapshot->'productionShare'->'stops' ELSE '[]'::jsonb END) AS stop(value)
+    WHERE c.status = 'finalized' AND r.status = 'finalized' AND c.run_id <> ?::uuid
+      AND jsonb_typeof(stop.value->'dependsOnRuns') = 'array' AND jsonb_exists(stop.value->'dependsOnRuns', ?::text)
+    ORDER BY week_start, c.employee_name`, [runId, String(runId)]);
+  return rows.map((row) => ({ employeeName: row.employee_name, weekStart: row.week_start }));
+}
+
 /** The pay line the share is priced as in payroll-regular-rate.js: one line in the check's own week. */
 const priceableLine = (weekStart, shareCents) => ({
   kind: KIND, amountCents: shareCents, earnedWeekStart: weekStart, coversFrom: null, coversTo: null,
@@ -195,7 +213,7 @@ function snapshotOfRow(row) {
 function signature(row) {
   const snapshot = snapshotOfRow(row) || {};
   const stops = (Array.isArray(snapshot.stops) ? snapshot.stops : [])
-    .map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases, stop.invoices)])
+    .map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases, stop.invoices), [...(stop.dependsOnRuns || [])].sort()])
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return [
     snapshot.settingsId == null ? null : Number(snapshot.settingsId),
@@ -236,4 +254,4 @@ function reviewNote(name, count) {
   return `${name}: ${count} ${count === 1 ? 'stop needs' : 'stops need'} review for the production share. ${count === 1 ? 'It pays' : 'They pay'} $0 in the share until fixed. Open the production share preview for the week, fix ${count === 1 ? 'it' : 'them'}, then recompute.`;
 }
 
-module.exports = { KIND, shareOn, readInputs, readInputsUnderLock, restrictInputs, revisionOf, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };
+module.exports = { KIND, shareOn, readInputs, readInputsUnderLock, restrictInputs, dependentChecksOf, revisionOf, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };

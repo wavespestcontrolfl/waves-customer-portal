@@ -777,6 +777,28 @@ async function loadCreditFacts(conn, stops) {
   return { jobs, billed, prepaidRefunds: await termRefunds(conn, stops) };
 }
 
+// What a visit was billed, as plain sorted data: the amounts and the visits and weights of each invoice, so a price edited, a visit added to
+// an invoice or a weight changed after the owner opened the stop shows in its revision.
+function billedFactsOf(entry) {
+  if (!entry) return null;
+  const members = (list) => (list || []).map((member) => [String(member.id), member.weight == null ? null : Number(member.weight)]).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  return [
+    entry.billedCents, entry.refundCents,
+    (entry.shares || []).map((one) => [one.invoiceId, one.totalCents, one.shareCents, members(one.members)]).sort((a, b) => (a[0] < b[0] ? -1 : 1)),
+    (entry.unallocated || []).map((one) => [one.invoiceId, one.totalCents == null ? null : one.totalCents, one.refundCents, members(one.members)]).sort((a, b) => (a[0] < b[0] ? -1 : 1)),
+  ];
+}
+
+// Every input the credit of a stop is worked out from beyond its kind: its own prices and billing, and for a package visit the root's
+// price and billing, the visits it was sold with and the planned visits.
+function pricingFactsOf(stop, job, billed) {
+  return [
+    String(stop.estimated_price ?? ''), String(stop.primary_line_price ?? ''), String(stop.prepaid_amount ?? ''),
+    billedFactsOf(billed.get(stop.id)),
+    job && job.root ? [job.root.id, String(job.root.estimated_price ?? ''), TWO_TREATMENT_PACKAGE_KEYS.has(job.root.service_key) ? 2 : null, [...(job.planned || [])], billedFactsOf(billed.get(job.root.id))] : null,
+  ];
+}
+
 // Everything a paid row elsewhere could touch this stop through: the stop, its package root and every sibling visit, every invoice linked to
 // any of those (charged or not), and every visit on those invoices. Kept on EVERY row, review rows included.
 function relatedIdsOf(stop, job, billed) {
@@ -843,7 +865,7 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
       ledger: ledgerOf(credit, invoiced),
       packageSlot,
       // The pricing facts the owner's credit is checked against under the lock (applyLedger, stopRevision).
-      pricing: { serviceType: stop.service_type || null, originalId: credit.originalId || null },
+      pricing: { serviceType: stop.service_type || null, originalId: credit.originalId || null, facts: pricingFactsOf(stop, job, billed) },
       related: relatedIdsOf(stop, job, billed),
       linkedInvoices: linkedInvoicesOf(invoiced, job, billed),
     });
@@ -934,7 +956,7 @@ function applyLedger(rows, paid, overrides = new Map()) {
       ...done,
       // What the page is shown of a stop, for the owner's credit to be checked against under the lock: the conflict tuples, and a revision
       // of the stop as the RULES see it (their kind, never the owner's credit).
-      conflictTuples: tuples, stopRevision: stopRevisionOf(row, base.kind, tuples),
+      conflictTuples: tuples, stopRevision: stopRevisionOf(row, base.kind, tuples), dependsOnRuns: dependsOnRunsOf(row),
       invoices: done.creditCents > 0 ? done.linkedInvoices || [] : [], bases: done.bases || [],
     };
     delete clean.ledger;
@@ -978,11 +1000,20 @@ function applyLedger(rows, paid, overrides = new Map()) {
   // the stop is related to (row.related: itself, its package root and siblings, every invoice linked to any of those, every visit on
   // those invoices), whole: run, week, visit, the invoice ids it recorded and its package basis, as a sorted list of strings. The credit
   // the owner sets stores the list; a run ignores the credit when a tuple that is NOT in the stored list shows later.
-  function conflictTuplesOf(row) {
+  // The paid stop rows of other weeks that touch the stop (what it depends on).
+  function touchingRows(row) {
     const related = new Set(row.related || []);
     if (!related.size) return [];
-    return [...new Set((paid.rows || [])
-      .filter((one) => related.has(one.visitId) || one.invoices.some((id) => related.has(id)) || one.bases.some((basis) => related.has(basis.basisId)))
+    return (paid.rows || []).filter((one) => related.has(one.visitId) || one.invoices.some((id) => related.has(id)) || one.bases.some((basis) => related.has(basis.basisId)));
+  }
+
+  // The runs those rows belong to: voiding one of them would change this stop's credit (productionShare snapshot dependsOnRuns).
+  function dependsOnRunsOf(row) {
+    return [...new Set(touchingRows(row).map((one) => one.runId))].sort();
+  }
+
+  function conflictTuplesOf(row) {
+    return [...new Set(touchingRows(row)
       .map((one) => JSON.stringify([one.runId, one.weekStart, one.visitId, [...one.invoices].sort(),
         one.bases.map((basis) => [basis.basisType, basis.basisId, basis.slot]).sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1))])))].sort();
   }
@@ -992,7 +1023,7 @@ function applyLedger(rows, paid, overrides = new Map()) {
   function stopRevisionOf(row, baseKind, tuples) {
     const at = row.packageSlot;
     return require('node:crypto').createHash('sha1').update(JSON.stringify([
-      baseKind, row.visitId, (row.pricing || {}).serviceType || null, (row.pricing || {}).originalId || null,
+      baseKind, row.visitId, (row.pricing || {}).serviceType || null, (row.pricing || {}).originalId || null, (row.pricing || {}).facts || null,
       [...(row.linkedInvoices || [])].sort(), at ? [at.rootId, at.slot] : null, tuples,
     ])).digest('hex').slice(0, 16);
   }

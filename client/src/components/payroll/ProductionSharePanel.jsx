@@ -289,7 +289,7 @@ export default function ProductionSharePanel({ call, technicians }) {
                 <TD nums align="right">{centsToDollars(stop.creditCents)}</TD>
                 <TD>
                   {stop.needsReview && <span className="text-warn-fg">Needs review: </span>}{stop.reason}
-                  <StopCreditForm key={`${stop.visitId}:${stop.kind}:${stop.creditCents}`} call={call} technicianId={preview.technician.id}
+                  <StopCreditForm key={`${stop.visitId}:${stop.kind}:${stop.creditCents}:${stop.stopRevision || ''}`} call={call} technicianId={preview.technician.id}
                     weekStart={preview.weekStart} stop={stop} generation={() => selection.current}
                     onChanged={(startedUnder) => { if (startedUnder === selection.current) load(preview.technician.id, preview.weekStart); }} />
                 </TD>

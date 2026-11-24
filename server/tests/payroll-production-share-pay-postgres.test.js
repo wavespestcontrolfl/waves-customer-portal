@@ -738,6 +738,34 @@ postgres('production share pay line', () => {
       expect((await override({ ...key, creditCents: 5000, reason: 'x' })).status).toBe(200);
     });
 
+    it('AUDIT :996: the stop revision follows the invoice totals and the weights of the stop invoices', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      await worked(id, W1, 40);
+      const customerId = await customer();
+      const mine = await stop(id, W1, '1000.00', customerId);
+      const other = await stop(id, W1, '1000.00', customerId);
+      const invoiceId = (await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: '2000.00', discount_amount: '0.00', tax_amount: '0.00', total: '2000.00',
+      }).returning('id'))[0].id;
+      const [visit] = await trx('service_visits').insert({ customer_id: customerId, scheduled_date: W1, stop_base_key: 'k-996', created_by: 'test' }).returning('id');
+      const [packet] = await trx('visit_completion_packets').insert({ visit_id: visit.id, idempotency_key: 'k-996', request_hash: 'h', payload: {} }).returning('id');
+      for (const visitId of [mine, other]) {
+        await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-996-${visitId}`, invoice_id: invoiceId });
+      }
+      const key = { technicianId: id, visitId: mine, weekStart: W1 };
+      const opened = await shownBasis(key);
+      expect(await shownBasis(key)).toBe(opened); // stable while nothing changes
+      // the invoice total is edited: another revision
+      await trx('invoices').where({ id: invoiceId }).update({ subtotal: '2400.00', total: '2400.00' });
+      const afterTotal = await shownBasis(key);
+      expect(afterTotal).not.toBe(opened);
+      // a member's weight (its price) is edited: another revision
+      await trx('scheduled_services').where({ id: other }).update({ estimated_price: '1500.00' });
+      expect(await shownBasis(key)).not.toBe(afterTotal);
+    });
+
     it('AUDIT :1115: a revision with no stored credit is refused; a credit is created only with neither', async () => {
       const { unpriced, key } = await world();
       expect((await override({ ...key, creditCents: 5000, reason: 'x', revision: 'abc123' })).status).toBe(409);
@@ -1072,6 +1100,49 @@ postgres('production share pay line', () => {
     expect(byName(fresh, 'Sample Alpha').productionShareCents).toBe(20700);
     expect(fresh.stale).toBe(false);
     expect((await finalize(created.id)).body.run.status).toBe('finalized');
+  });
+
+  it('AUDIT :861: a run whose paid rows an EARLIER final check of another technician was worked out against cannot be voided until that run is voided', async () => {
+    const alpha = await tech('Sample Alpha');
+    const bravo = await tech('Sample Bravo');
+    await settings(alpha);
+    await settings(bravo);
+    const W2 = addDays(W1, 7);
+    await worked(alpha, W2, 40);
+    await worked(bravo, W1, 40);
+    // run B (week 2) pays Alpha's visit V
+    const moved = await stop(alpha, W2, '3000.00');
+    const runB = (await draft(W2)).body.run;
+    expect(byName(runB, 'Sample Alpha').productionShareCents).toBeGreaterThan(0);
+    expect((await finalize(runB.id)).body.run.status).toBe('finalized');
+    // the A to B move: V is reassigned to Bravo and its completion moves into week 1, where Bravo's check shows it already paid
+    await trx('scheduled_services').where({ id: moved }).update({ technician_id: bravo, completed_at: `${W1}T16:00:00Z`, scheduled_date: W1 });
+    await trx('service_records').where({ scheduled_service_id: moved }).update({ technician_id: bravo, service_date: W1 });
+    await stop(bravo, addDays(W1, 1), '200.00');
+    const runA = (await draft(W1)).body.run;
+    expect((await finalize(runA.id)).body.run.status).toBe('finalized');
+    const snapshot = (await trx('payroll_checks').where({ run_id: runA.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+    expect(snapshot.stops.find((row) => row.visitId === moved)).toMatchObject({ kind: 'already_paid', dependsOnRuns: [runB.id] });
+    // voiding run B would hand V back: refused, naming the dependent check; nothing changes
+    const refusal = await api('POST', `/runs/${runB.id}/void`, { body: { reason: 'sample' } });
+    expect(refusal.status).toBe(409);
+    expect(refusal.body.error).toContain(`Sample Bravo, week of ${W1}`);
+    expect((await trx('payroll_runs').where({ id: runB.id }).first('status')).status).toBe('finalized');
+    // void the dependent run first, then B
+    expect((await api('POST', `/runs/${runA.id}/void`, { body: { reason: 'sample' } })).status).toBe(200);
+    expect((await api('POST', `/runs/${runB.id}/void`, { body: { reason: 'sample' } })).status).toBe(200);
+  });
+
+  it('AUDIT P1 :311: with pay lines off and the share gate on, a week under the bar of an uncovered employee stores 0 qualified overtime, not NULL', async () => {
+    const id = await tech('Sample Alpha', { flsa_overtime_covered: false });
+    await settings(id);
+    await worked(id, W1, 40);
+    await stop(id, W1, '100.00'); // far under the $900.00 bar: share $0
+    const created = (await draft(W1)).body.run;
+    expect(byName(created, 'Sample Alpha')).toMatchObject({ productionShareCents: 0 });
+    const stored = await trx('payroll_checks').where({ run_id: created.id }).first('qualified_overtime_cents', 'production_share_cents');
+    expect(stored.production_share_cents).toBe('0');
+    expect(stored.qualified_overtime_cents).toBe('0');
   });
 
   it('a visit a finalized run already paid is not credited again when its completion moves into another week; voiding that run frees it', async () => {

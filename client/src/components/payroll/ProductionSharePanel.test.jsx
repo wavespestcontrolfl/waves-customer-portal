@@ -323,6 +323,23 @@ describe('Production share preview', () => {
       }));
     });
 
+    it('AUDIT :292: a stop whose revision changed on reload resets the typed amount and reason', async () => {
+      const row = (stopRevision) => ({ visitId: 'v13', workDate: '2026-09-15', stopRevision, serviceType: 'Pest Control', kind: 'unpriced', creditCents: 0, reason: 'No price', needsReview: true, refundCents: 0 });
+      let revision = 'rev-a';
+      const call = vi.fn(async (path) => (path.startsWith('/production-share/preview') ? answerFor(path, { stops: [row(revision)] }) : {}));
+      render(<ProductionSharePanel call={call} technicians={TECHS} />);
+      open();
+      await show(call);
+      fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '33' } });
+      fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'typed' } });
+      // the stop changed behind the page: a reload brings another revision, and the old typing must not stay in the form
+      revision = 'rev-b';
+      fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+      await waitFor(() => expect(call.mock.calls.filter(([path]) => path.startsWith('/production-share/preview'))).toHaveLength(2));
+      await waitFor(() => expect(screen.getByLabelText('Credit ($)')).toHaveValue(''));
+      expect(screen.getByLabelText('Reason')).toHaveValue('');
+    });
+
     it('a stop that was paid elsewhere since the owner set its credit shows Clear and sends DELETE with the revision', async () => {
       const call = await forms([
         { visitId: 'v11', workDate: '2026-09-15', overrideRevision: 'rev-11', serviceType: 'Pest Control', kind: 'owner_override_conflict_changed', creditCents: 0,

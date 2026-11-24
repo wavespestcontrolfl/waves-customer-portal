@@ -177,7 +177,24 @@ describe('buildCheck with a share', () => {
     expect(check.production_share_cents).toBe(0);
     expect(JSON.parse(check.calc_snapshot).productionShare.creditedCents).toBe(50000);
     expect(check.gross_cents).toBe(plain.gross_cents);
-    expect(check).not.toHaveProperty('qualified_overtime_cents');
+    // the qualified overtime is stored as a figure, as in a week with a share: 0 here (no overtime hours)
+    expect(check.qualified_overtime_cents).toBe(0);
+  });
+
+  test('AUDIT P1 :311: every check of an employee with share settings and a set coverage stores qualified overtime, a week under the bar too', () => {
+    const under = workedOut(stops([['v1', '2026-09-14', 50000]]));
+    const overtime = { regular_minutes: '2400.00', overtime_minutes: '300.00' };
+    const covered = build({ production_share: under, flsa_overtime_covered: true, ...overtime }).check;
+    const uncovered = build({ production_share: under, flsa_overtime_covered: false, ...overtime }).check;
+    expect(covered.production_share_cents).toBe(0);
+    expect(covered.qualified_overtime_cents).toBeGreaterThan(0); // the half-time premium of the overtime hours
+    expect(uncovered.qualified_overtime_cents).toBe(0); // 0, not NULL
+    expect(uncovered).toHaveProperty('qualified_overtime_cents', 0);
+    expect(covered.gross_cents).toBe(uncovered.gross_cents);
+    // coverage not set and a $0 share: nothing is guessed, the check is as it was (a positive share would block)
+    expect(build({ production_share: under, flsa_overtime_covered: null, ...overtime }).check).not.toHaveProperty('qualified_overtime_cents');
+    // no settings in force (no share): untouched
+    expect(build({ flsa_overtime_covered: true, ...overtime }).check).not.toHaveProperty('qualified_overtime_cents');
   });
 
   test('no settings, or the gate off: no column, no snapshot key, the check is what it was', () => {
@@ -522,6 +539,36 @@ describe('the credit rules (applyLedger)', () => {
     expect(withCredit.stopRevision).toBe(revision(base));
     // a paid row that touches the stop
     expect(revision(base, [{ runId: 'run-1', weekStart: '2026-09-14', visitId: 'visit-1', invoices: ['inv-1'], bases: [] }])).not.toBe(revision(base));
+  });
+
+  test('AUDIT :861: a credit row lists the runs of the paid rows it was worked out against, and the snapshot, revision and token carry them', () => {
+    const row = plain('visit-2', ['inv-1']);
+    const paidRows = [
+      { runId: 'run-b', weekStart: '2026-09-21', visitId: 'visit-3', invoices: ['inv-1'], bases: [] },
+      { runId: 'run-a', weekStart: '2026-09-14', visitId: 'visit-1', invoices: [], bases: [] },
+      { runId: 'run-a', weekStart: '2026-09-14', visitId: 'visit-9', invoices: ['inv-77'], bases: [] },
+    ];
+    const out = productionShare.applyLedger([row], { visits: new Map(), invoices: new Map(), jobs: new Map(), rows: paidRows })[0];
+    expect(out.dependsOnRuns).toEqual(['run-a', 'run-b']); // unrelated paid rows (inv-77) are not dependencies
+    expect(productionShare.applyLedger([row], paidOf())[0].dependsOnRuns).toEqual([]);
+    const input = (dependsOnRuns) => new Map([['tech-a', { settings: SETTINGS, stops: [{ ...stops([['v1', '2026-09-14', 100000]])[0], dependsOnRuns }] }]]);
+    const snap = (dependsOnRuns) => share.sharesFor(input(dependsOnRuns), ['tech-a'], WEEK).get('tech-a').snapshot;
+    expect(snap(['run-b', 'run-a']).stops[0].dependsOnRuns).toEqual(['run-a', 'run-b']);
+    expect(snap([]).stops[0]).not.toHaveProperty('dependsOnRuns');
+    expect(share.revisionOf(input(['run-a']))).not.toBe(share.revisionOf(input([])));
+    expect(share.signature({ production_share: snap(['run-a']) })).not.toEqual(share.signature({ production_share: snap([]) }));
+  });
+
+  test('AUDIT :996: the stop revision hashes the invoice totals, members and weights, and the package pricing inputs', () => {
+    const revision = (pricing) => productionShare.applyLedger([{ ...plain('visit-2', ['inv-1']), pricing }], paidOf())[0].stopRevision;
+    const facts = (extra = {}) => ({ serviceType: 'General Pest Control', originalId: null, facts: ['100.00', '', '', [100000, 0, [['inv-1', 200000, 100000, [['visit-1', 100000], ['visit-2', 100000]]]], []], null], ...extra });
+    expect(revision(facts())).toBe(revision(facts()));
+    const edited = (patch) => { const base = facts(); const copy = JSON.parse(JSON.stringify(base.facts)); patch(copy); return { ...base, facts: copy }; };
+    expect(revision(edited((f) => { f[3][2][0][1] = 210000; }))).not.toBe(revision(facts())); // the invoice total
+    expect(revision(edited((f) => { f[3][2][0][3][1][1] = 90000; }))).not.toBe(revision(facts())); // a member's weight
+    expect(revision(edited((f) => { f[3][2][0][3].push(['visit-5', 100000]); }))).not.toBe(revision(facts())); // a member visit
+    expect(revision(edited((f) => { f[0] = '120.00'; }))).not.toBe(revision(facts())); // the visit's own price
+    expect(revision(edited((f) => { f[4] = ['root', '2000.00', 2, ['root', 'visit-2'], null]; }))).not.toBe(revision(facts())); // package pricing inputs
   });
 
   test('AUDIT :306: a check with a share above $0 and the overtime coverage not set is blocked, not stored with zero qualified overtime', () => {
