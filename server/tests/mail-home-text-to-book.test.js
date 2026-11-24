@@ -57,7 +57,10 @@ jest.mock('../models/db', () => {
   return db;
 });
 const mockFindOnly = jest.fn();
-jest.mock('../utils/known-caller-phone', () => ({ findOnlyKnownCallerCustomer: (...a) => mockFindOnly(...a) }));
+jest.mock('../utils/known-caller-phone', () => ({
+  findOnlyKnownCallerCustomer: (...a) => mockFindOnly(...a),
+  KNOWN_CALLER_PHONE_COLS: ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', 'secondary_phone'],
+}));
 const mockSend = jest.fn();
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSend(...a) }));
 
@@ -168,13 +171,13 @@ describe('handleHomeTextToBook', () => {
   });
 
   test('the webhook\'s matched customer is passed as customerId so their SMS opt-out and consent are checked', async () => {
-    expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1' } })).handled).toBe(true);
+    expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: SENDER } })).handled).toBe(true);
     expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-1', identityTrustLevel: 'phone_matches_customer', audience: 'lead', purpose: 'conversational' });
   });
 
   test('a customer who opted out (sendCustomerMessage refuses) gets nothing and the claim is released', async () => {
     mockSend.mockResolvedValue({ sent: false, blocked: true, code: 'CONSENT_REVOKED' });
-    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1' } })).toEqual({ handled: false });
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: SENDER } })).toEqual({ handled: false });
     expect(mockState.claims).toHaveLength(0);
   });
 
@@ -190,7 +193,7 @@ describe('handleHomeTextToBook', () => {
   });
 
   test('a number that is a secondary or service-contact phone of ONE customer: that customer\'s consent is read', async () => {
-    mockFindOnly.mockResolvedValue({ id: 'cust-9' });
+    mockFindOnly.mockResolvedValue({ id: 'cust-9', secondary_phone: '(202) 555-0101' });
     expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true })).handled).toBe(true);
     expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-9', identityTrustLevel: 'phone_matches_customer' });
   });
@@ -204,8 +207,53 @@ describe('handleHomeTextToBook', () => {
     expect(mockSend).not.toHaveBeenCalled();
   });
 
+  test('a customer matched on the last ten digits only (an international sender) is NOT that customer: nothing is read as theirs', async () => {
+    const intl = '+442025550101';
+    const text2 = (extra) => handleHomeTextToBook({ from: intl, to: PARRISH, body: '101 EXAMPLE', ...extra });
+    // The webhook matched a NANP customer by the shared last ten digits: not verified, and the lookup finds the same customer.
+    mockFindOnly.mockResolvedValue({ id: 'cust-1', phone: SENDER });
+    expect(await text2({ customer: { id: 'cust-1', phone: SENDER }, knownContact: true })).toEqual({ handled: false });
+    expect(mockSend).not.toHaveBeenCalled();
+    // The one customer that really owns the sender's full number is read instead, and its consent is the one checked.
+    mockFindOnly.mockResolvedValue({ id: 'cust-2', phone: intl });
+    expect((await text2({ customer: { id: 'cust-1', phone: SENDER }, knownContact: true })).handled).toBe(true);
+    expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-2', identityTrustLevel: 'phone_matches_customer' });
+  });
+
+  test('a secondary-phone owner whose stored number is not the sender\'s full number is refused', async () => {
+    mockFindOnly.mockResolvedValue({ id: 'cust-9', secondary_phone: '+442025550101' });
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true })).toEqual({ handled: false });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a CSR or office-manager cell', '+19415551234'],
+    ['one of our own lines', null],
+  ])('%s is never answered', async (_label, number) => {
+    const internal = number || TWILIO_NUMBERS.mainLine.number;
+    jest.spyOn(TWILIO_NUMBERS, 'isInternalNumber').mockImplementation((n) => n === internal);
+    expect(await handleHomeTextToBook({ from: internal, to: PARRISH, body: '101 EXAMPLE' })).toEqual({ handled: false });
+    expect(mockState.prospectQueries).toBe(0);
+    expect(mockSend).not.toHaveBeenCalled();
+    TWILIO_NUMBERS.isInternalNumber.mockRestore();
+  });
+
+  test('claim keys are the full identity key: two international senders with the same last ten digits do not share a cap or a repeat', async () => {
+    mockState.homes = [{ ...HOME }];
+    const a = '+442025550101';
+    const b = '+332025550101';
+    expect((await handleHomeTextToBook({ from: a, to: PARRISH, body: '101 EXAMPLE' })).handled).toBe(true);
+    expect((await handleHomeTextToBook({ from: b, to: PARRISH, body: '101 EXAMPLE' })).handled).toBe(true);
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    expect(mockState.claims.map((c) => c.phone_digits)).toEqual([a, b]);
+    // a NANP sender is keyed on its ten digits, as before
+    mockState.claims = [];
+    await handleHomeTextToBook({ from: '+12025550999', to: PARRISH, body: '101 EXAMPLE' });
+    expect(mockState.claims[0]).toMatchObject({ phone_digits: '2025550999', line_digits: '9412972817' });
+  });
+
   test('the webhook\'s own customer match wins: no second lookup', async () => {
-    await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1' }, knownContact: true });
+    await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: SENDER }, knownContact: true });
     expect(mockFindOnly).not.toHaveBeenCalled();
     expect(mockSend.mock.calls[0][0].customerId).toBe('cust-1');
   });

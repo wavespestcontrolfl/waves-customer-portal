@@ -36,7 +36,8 @@ const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { mailHomePageLive, mailHomeTextBookLive } = require('../../config/feature-gates');
 const { buildBaseSlug, hasUnitPart, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES } = require('./home-slug');
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
-const { findOnlyKnownCallerCustomer } = require('../../utils/known-caller-phone');
+const { findOnlyKnownCallerCustomer, KNOWN_CALLER_PHONE_COLS } = require('../../utils/known-caller-phone');
+const { phoneIdentityKey } = require('../../utils/phone');
 const { publicPortalUrl } = require('../../utils/portal-url');
 
 const LIST_KEY = 'new_home'; // services/mail/new-home-list.js LIST_KEY
@@ -55,7 +56,6 @@ const DIRECTIONALS = new Set(['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW']);
 const UNIT_WORDS = new Set(['UNIT', 'APT', 'APTS', 'APARTMENT', 'STE', 'SUITE', 'BLDG', 'LOT', 'SPC', 'TRLR', 'RM', 'FLOOR']);
 
 const errCode = (err) => String((err && (err.code || err.name)) || 'error').slice(0, 32);
-const digits10 = (phone) => String(phone || '').replace(/\D/g, '').slice(-10);
 const zip5Of = (zip) => (String(zip == null ? '' : zip).match(/\d{5}/) || [null])[0];
 
 /**
@@ -156,8 +156,10 @@ async function findLiveHome({ candidates, zip, street, fallback }) {
  * Two texts at the same moment, for the same home or different homes, wait for each other and see the other's committed row.
  */
 async function claimReply({ from, to, prospectId }) {
-  const sender = digits10(from);
-  const key = { phone_digits: sender, line_digits: digits10(to), prospect_id: prospectId };
+  // phoneIdentityKey: 10 digits for a NANP number, "+<digits>" for any other, so two international senders that share their
+  // last ten digits never share a lock, a cap or a repeat check.
+  const sender = phoneIdentityKey(from);
+  const key = { phone_digits: sender, line_digits: phoneIdentityKey(to), prospect_id: prospectId };
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${CLAIM_TABLE}:${sender}`]);
     const inWindow = () => trx(CLAIM_TABLE).whereRaw(`claimed_at > now() - interval '${REPLY_WINDOW_HOURS} hours'`);
@@ -183,14 +185,18 @@ function replyBody({ address, slug }) {
   return `Here's your Waves page for ${address}: ${publicPortalUrl()}/nh/${slug}\n\nReply STOP to opt out.`;
 }
 
-// The sender's customer, for the opt-out and consent checks: the webhook's own match (primary phone), else the ONE customer
-// that owns the number as a secondary or service-contact phone (`knownContact`: the webhook found such a record). false = a
-// known contact that cannot be pinned to one customer (two owners, or a failed read): no reply, consent cannot be established.
+// The sender's customer, for the opt-out and consent checks. The webhook matches phones on their last ten digits, so a customer
+// counts only when one of its stored numbers IS the sender's full number (phoneIdentityKey): an international sender that shares
+// ten digits with a customer is not that customer. The webhook's primary match is verified first; otherwise (`knownContact`: a
+// record has the number as a secondary or service-contact phone, or the webhook's own match failed the check) the ONE customer
+// owning it is read and verified the same way. null = no record claims the number (a lead). false = a record claims it that
+// cannot be confirmed as the sender's (two owners, a different full number, or a failed read): no reply, consent unknown.
 async function senderCustomerId(from, customer, knownContact) {
-  if (customer) return customer.id;
-  if (!knownContact) return null;
-  const only = await findOnlyKnownCallerCustomer(db, from);
-  return only ? only.id : false;
+  const key = phoneIdentityKey(from);
+  if (customer && phoneIdentityKey(customer.phone) === key) return customer.id;
+  if (!customer && !knownContact) return null;
+  const only = await findOnlyKnownCallerCustomer(db, from, ['id', ...KNOWN_CALLER_PHONE_COLS]);
+  return only && KNOWN_CALLER_PHONE_COLS.some((col) => phoneIdentityKey(only[col]) === key) ? only.id : false;
 }
 
 /**
@@ -208,7 +214,8 @@ async function handleHomeTextToBook({ from, to, body, customer, knownContact, st
     // findByNumber alone is not enough: it also reports the AI chat line (the toll-free number) as a location.
     const locationId = Object.keys(TWILIO_NUMBERS.locations).find((id) => TWILIO_NUMBERS.locations[id].number === to);
     const parsed = parseAddressText(body);
-    const home = locationId && parsed && await findLiveHome(parsed);
+    // Never a staff phone (a CSR or office-manager cell, a forward number, our own lines): GATE_TECH_STAFF_GUARDS covers technicians only.
+    const home = locationId && parsed && !TWILIO_NUMBERS.isInternalNumber(from) && await findLiveHome(parsed);
     if (!home) return { handled: false };
 
     // Checked only now, for a text that matched a live home, so an ordinary text costs no extra read: an estimate address
