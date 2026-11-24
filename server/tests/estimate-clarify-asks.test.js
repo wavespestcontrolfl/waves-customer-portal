@@ -124,6 +124,7 @@ jest.mock('../services/call-property-lookup', () => ({
 const {
   parkClarifyAsk,
   handleClarifyReply,
+  hasAwaitingClarifyAsk,
   recordClarifyAnswer,
   claimClarifyDispatch,
   clarifyPreDispatchCheck,
@@ -303,6 +304,23 @@ describe('parkClarifyAsk', () => {
     const result = await parkClarifyAsk(BASE);
     expect(result.parked).toBe(true);
     expect(mockState.inserts).toHaveLength(1);
+  });
+});
+
+describe('hasAwaitingClarifyAsk (read-only; the postcard reply stands aside for it)', () => {
+  test('an open ask for the phone reads true, none reads false, and nothing is written', async () => {
+    mockState.existingDraft = { id: 'sent-1', flags: '{}' };
+    expect(await hasAwaitingClarifyAsk({ phone: '+19415550142' })).toBe(true);
+    mockState.existingDraft = null;
+    expect(await hasAwaitingClarifyAsk({ phone: '9415550142' })).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
+    expect(mockState.inserts).toHaveLength(0);
+  });
+
+  test('a phone with no usable digits is not waiting; a read error fails closed (waiting)', async () => {
+    expect(await hasAwaitingClarifyAsk({ phone: 'not a phone' })).toBe(false);
+    mockState.firstQueue.push(new Error('db down'));
+    expect(await hasAwaitingClarifyAsk({ phone: '+19415550142' })).toBe(true);
   });
 });
 

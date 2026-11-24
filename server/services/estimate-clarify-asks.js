@@ -1156,30 +1156,10 @@ function extractUnitReply(body, { bareOk = false } = {}) {
   return bare ? normalizeUnitLine(`apt ${bare[1]}`) || null : null;
 }
 
-/**
- * Inbound reply routing for engine/email-originated asks (the intake state
- * machine routes its own replies). A text from a phone with a
- * recently-SENT clarify records the answered fields onto the linked
- * lead/customer rows — which is exactly what the approval-time staleness
- * guard re-derives from, so a stale re-send becomes impossible — and
- * resumes drafting through the SMS-thread engine with the intent gate and
- * cooldown bypassed (the thread now contains the answer). Never sends
- * anything itself; never blocks the webhook's normal handling (the message
- * still flows to the human inbox).
- *
- * Returns { handled } — handled=true means the reply answered a clarify
- * and the caller should skip its own general estimator trigger.
- */
-async function handleClarifyReply({ phone, body, triggerSmsLogId }) {
-  try {
-    if (!clarifyAsksEnabled()) return { handled: false };
-    const allDigits = String(phone || '').replace(/\D/g, '');
-    const digits = allDigits.length === 10
-      ? allDigits
-      : (allDigits.length === 11 && allDigits.startsWith('1') ? allDigits.slice(1) : null);
-    if (!digits || !String(body || '').trim()) return { handled: false };
-
-    const awaiting = await db('message_drafts')
+// The unanswered clarifying question this phone owes us an answer to (pending, mid-approval or sent in the last 7 days),
+// or undefined. One query for handleClarifyReply and hasAwaitingClarifyAsk.
+function findAwaitingClarifyAsk(digits) {
+  return db('message_drafts')
       .where({ intent: 'estimate_clarify', source_ref: `clarify:${digits}` })
       // Consumed asks (every item answered) leave reply routing — later
       // chit-chat ("thanks, sounds good") must not overwrite real answers
@@ -1207,6 +1187,49 @@ async function handleClarifyReply({ phone, body, triggerSmsLogId }) {
       })
       .orderByRaw('(sent_at is not null) asc, sent_at desc')
       .first();
+}
+
+/**
+ * Read-only: is a clarifying question waiting on this phone's answer? Lets another inbound handler (the new-home postcard
+ * reply) stand aside so the estimate address answer is recorded by handleClarifyReply. Fails CLOSED: any error reads as
+ * waiting, so the other handler stays out of the way.
+ */
+async function hasAwaitingClarifyAsk({ phone }) {
+  try {
+    if (!clarifyAsksEnabled()) return false;
+    const allDigits = String(phone || '').replace(/\D/g, '');
+    const digits = allDigits.length === 10 ? allDigits : (allDigits.length === 11 && allDigits.startsWith('1') ? allDigits.slice(1) : null);
+    if (!digits) return false;
+    return Boolean(await findAwaitingClarifyAsk(digits));
+  } catch (err) {
+    return true;
+  }
+}
+
+/**
+ * Inbound reply routing for engine/email-originated asks (the intake state
+ * machine routes its own replies). A text from a phone with a
+ * recently-SENT clarify records the answered fields onto the linked
+ * lead/customer rows — which is exactly what the approval-time staleness
+ * guard re-derives from, so a stale re-send becomes impossible — and
+ * resumes drafting through the SMS-thread engine with the intent gate and
+ * cooldown bypassed (the thread now contains the answer). Never sends
+ * anything itself; never blocks the webhook's normal handling (the message
+ * still flows to the human inbox).
+ *
+ * Returns { handled } — handled=true means the reply answered a clarify
+ * and the caller should skip its own general estimator trigger.
+ */
+async function handleClarifyReply({ phone, body, triggerSmsLogId }) {
+  try {
+    if (!clarifyAsksEnabled()) return { handled: false };
+    const allDigits = String(phone || '').replace(/\D/g, '');
+    const digits = allDigits.length === 10
+      ? allDigits
+      : (allDigits.length === 11 && allDigits.startsWith('1') ? allDigits.slice(1) : null);
+    if (!digits || !String(body || '').trim()) return { handled: false };
+
+    const awaiting = await findAwaitingClarifyAsk(digits);
     if (!awaiting) return { handled: false };
 
     let flags = {};
@@ -2107,6 +2130,7 @@ module.exports = {
   clarifyAsksEnabled,
   parkClarifyAsk,
   handleClarifyReply,
+  hasAwaitingClarifyAsk,
   recordClarifyAnswer,
   claimClarifyDispatch,
   clarifyPreDispatchCheck,

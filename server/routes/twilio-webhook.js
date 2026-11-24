@@ -1227,7 +1227,11 @@ router.post('/sms', async (req, res) => {
     // consumes the text (no AI auto-reply on top; the office thread bell still rings); every other outcome falls through untouched.
     if (Body && inboundMedia.length === 0 && !smsReaction && !staffSender && !complianceCommand && !rescheduleAsk
       && !pendingTimeAnswer && numberConfig.type === 'location' && !isAiNumber && !TWILIO_NUMBERS.isTechLine(To)) {
-      const homeText = await require('../services/mail/home-text-to-book').handleHomeTextToBook({ from: From, to: To, body: Body });
+      const homeText = await require('../services/mail/home-text-to-book').handleHomeTextToBook({
+        from: From, to: To, body: Body, customer,
+        // An estimate address question waiting on this sender's answer comes first (handleClarifyReply records it below).
+        standAside: () => require('../services/estimate-clarify-asks').hasAwaitingClarifyAsk({ phone: From }),
+      });
       if (homeText.handled) {
         await retypeConsumedInbound(smsLogEntry.id, 'mail_home_text_to_book', 'mail-home-text-to-book');
         // The office still sees the text: the same thread bell the post-ack block below rings for any text to an office line.
@@ -2059,7 +2063,7 @@ async function isRepeatUnknownSender({ customer, hasContent, smsLogEntry, From, 
       .first('id');
     return Boolean(prior);
   } catch (e) {
-    logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`);
+    logger.warn(`[twilio-webhook] repeat-sender check failed (${e.code || e.name || 'error'})`);
     return false;
   }
 }

@@ -66,7 +66,11 @@ jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest
 jest.mock('../middleware/spam-block', () => ({ checkInboundBlock: async () => ({ blocked: false }) }));
 jest.mock('../services/contact-correction', () => ({ detectContactCorrectionIntent: () => false }));
 jest.mock('../services/contact-correction-queue', () => ({}));
-jest.mock('../services/estimate-clarify-asks', () => ({ handleClarifyReply: async () => ({ handled: false }) }));
+const mockAwaitingClarify = jest.fn(async () => false);
+jest.mock('../services/estimate-clarify-asks', () => ({
+  handleClarifyReply: async () => ({ handled: false }),
+  hasAwaitingClarifyAsk: (...args) => mockAwaitingClarify(...args),
+}));
 jest.mock('../services/estimator-engine/sms-thread', () => ({ smsThreadDraftsEnabled: () => false }));
 jest.mock('../services/estimate-conversion-agent', () => ({ processInboundSms: async () => ({}) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true, push: { sent: 1 } })) }));
@@ -132,13 +136,29 @@ beforeEach(() => {
   mockIntake.mockResolvedValue({ handled: false });
   mockRecord.mockResolvedValue(undefined);
   mockHomeText.mockResolvedValue({ handled: false });
+  mockAwaitingClarify.mockResolvedValue(false);
 });
 afterAll(() => { process.env = savedEnv; });
 
 test('an office line text goes to the service with the line, the sender and the body', async () => {
   await receive('101 EXAMPLE');
   expect(mockHomeText).toHaveBeenCalledTimes(1);
-  expect(mockHomeText.mock.calls[0][0]).toEqual({ from: sender, to: parrishLine, body: '101 EXAMPLE' });
+  expect(mockHomeText.mock.calls[0][0]).toMatchObject({ from: sender, to: parrishLine, body: '101 EXAMPLE', customer: null });
+});
+
+test('the webhook\'s matched customer goes to the service (so that customer\'s SMS consent is checked)', async () => {
+  mockState.customer = { ...CUSTOMER, lead_intake_status: null };
+  await receive('101 EXAMPLE');
+  expect(mockHomeText.mock.calls[0][0].customer).toMatchObject({ id: CUSTOMER.id });
+});
+
+test('an estimate address question waiting on this sender stands the postcard reply aside (read-only check, answer left to handleClarifyReply)', async () => {
+  mockAwaitingClarify.mockResolvedValue(true);
+  let standsAside;
+  mockHomeText.mockImplementation(async ({ standAside }) => { standsAside = await standAside(); return { handled: false }; });
+  await receive('101 EXAMPLE');
+  expect(standsAside).toBe(true);
+  expect(mockAwaitingClarify).toHaveBeenCalledWith({ phone: sender });
 });
 
 test('a reply that went out consumes the text: empty ack, inbound retyped, no ring, no AI reply, and the office bell rings once', async () => {

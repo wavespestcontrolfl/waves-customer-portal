@@ -157,6 +157,35 @@ describe('handleHomeTextToBook', () => {
     expect(mockSend).not.toHaveBeenCalled();
   });
 
+  test('no matched customer: a lead with an unverified phone, no customerId', async () => {
+    await text('101 EXAMPLE');
+    const input = mockSend.mock.calls[0][0];
+    expect(input.identityTrustLevel).toBe('phone_provided_unverified');
+    expect(input).not.toHaveProperty('customerId');
+  });
+
+  test('the webhook\'s matched customer is passed as customerId so their SMS opt-out and consent are checked', async () => {
+    expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1' } })).handled).toBe(true);
+    expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-1', identityTrustLevel: 'phone_matches_customer', audience: 'lead', purpose: 'conversational' });
+  });
+
+  test('a customer who opted out (sendCustomerMessage refuses) gets nothing and the claim is released', async () => {
+    mockSend.mockResolvedValue({ sent: false, blocked: true, code: 'CONSENT_REVOKED' });
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1' } })).toEqual({ handled: false });
+    expect(mockState.claims).toHaveLength(0);
+  });
+
+  test('standAside: a waiting estimate question means no claim and no send, and an ordinary text never runs the check', async () => {
+    const standAside = jest.fn(async () => true);
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', standAside })).toEqual({ handled: false });
+    expect(standAside).toHaveBeenCalledTimes(1);
+    expect(mockState.claimTxns).toBe(0);
+    expect(mockSend).not.toHaveBeenCalled();
+    const notCalled = jest.fn(async () => true);
+    await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: 'thanks!', standAside: notCalled });
+    expect(notCalled).not.toHaveBeenCalled();
+  });
+
   test('every office location line answers from itself', async () => {
     for (const loc of Object.values(TWILIO_NUMBERS.locations)) {
       mockState.claims = [];

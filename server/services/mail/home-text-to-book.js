@@ -183,11 +183,12 @@ function replyBody({ address, slug }) {
 }
 
 /**
- * Answer a postcard text. Resolves { handled: true } only when a reply was handed to the provider (sent or uncertain),
+ * Answer a postcard text. `customer` is the webhook's matched customer for the sender, if any; `standAside` is an optional
+ * async predicate that makes the reply stand down. Resolves { handled: true } only when a reply was handed to the provider (sent or uncertain),
  * so the webhook can keep the AI auto-reply from answering the same text; every other outcome is { handled: false } and
  * the text goes on through the normal inbound handling. Never throws.
  */
-async function handleHomeTextToBook({ from, to, body }) {
+async function handleHomeTextToBook({ from, to, body, customer = null, standAside = null }) {
   try {
     if (!mailHomePageLive() || !mailHomeTextBookLive()) return { handled: false };
     // Only the office location lines (the GBP numbers the card prints); never the AI line, a tech line or a tracking line.
@@ -199,6 +200,10 @@ async function handleHomeTextToBook({ from, to, body }) {
     if (!parsed) return { handled: false };
     const home = await findLiveHome(parsed);
     if (!home) return { handled: false };
+
+    // Another inbound handler may own this text (an estimate address question waiting on its answer): checked only now, for a
+    // text that matched a live home, so an ordinary text costs no extra read.
+    if (typeof standAside === 'function' && await standAside()) return { handled: false };
 
     const claim = await claimReply({ from, to, prospectId: home.id });
     if (!claim.claimId) {
@@ -217,7 +222,10 @@ async function handleHomeTextToBook({ from, to, body }) {
         channel: 'sms',
         audience: 'lead',
         purpose: 'conversational',
-        identityTrustLevel: 'phone_provided_unverified',
+        // The webhook's own match for this phone (it reads legacy phone formats): the customer's SMS opt-out and consent are
+        // checked, as for every other known-customer auto-reply. No match: a lead, as before.
+        ...(customer && customer.id ? { customerId: customer.id } : {}),
+        identityTrustLevel: customer && customer.id ? 'phone_matches_customer' : 'phone_provided_unverified',
         consentBasis: { status: 'transactional_allowed', source: ENTRY_POINT },
         entryPoint: 'mail_home_text_to_book', // a literal: staff-reply-surfaces-interlock.test.js reads it from the source
         metadata: {
