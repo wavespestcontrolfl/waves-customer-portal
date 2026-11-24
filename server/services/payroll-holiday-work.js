@@ -205,4 +205,45 @@ async function otherWeeksOfShiftsInto(conn, technicianId, days) {
   return [...weeks].sort();
 }
 
-module.exports = { holidayWorkForWeek, holidayWorkByDay, capHolidayDays, dayBounds, otherWeeksOfShiftsInto };
+/**
+ * The finalized pay weeks whose holiday premium reads a recorded break in one of `intervals` ([{ clockIn, clockOut }]):
+ * the weeks (Mondays) of the technician's completed shifts that overlap the interval and run into one of the technician's
+ * holidays from another pay week than the break's own (`ownWeek`). Such a shift's premium is figured with that break as
+ * its meal (holidayWorkForWeek matches meals by interval), so editing or voiding the break would change a final check.
+ * time-tracking.js refuses the change once that week is paid. Sorted, finalized weeks only.
+ */
+async function paidWeeksReadingBreak(conn, technicianId, intervals, ownWeek) {
+  const weeks = new Set();
+  for (const { clockIn, clockOut } of intervals) {
+    if (!clockIn || !clockOut) continue;
+    const shifts = await conn('time_entries')
+      .where({ technician_id: technicianId, entry_type: 'shift' })
+      .whereNot({ status: 'voided' })
+      .whereNotNull('clock_out')
+      .where('clock_in', '<', new Date(clockOut))
+      .where('clock_out', '>', new Date(clockIn))
+      .select('clock_in', 'clock_out', conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
+    for (const shift of shifts) {
+      const week = staffWeekStartForWorkDate(shift.work_date);
+      if (week === ownWeek) continue;
+      const firstDay = etDateString(new Date(shift.clock_in));
+      const lastDay = etDateString(new Date(new Date(shift.clock_out).getTime() - 1));
+      const holiday = await conn('payroll_time_off')
+        .where({ technician_id: technicianId, kind: 'holiday' })
+        .where('work_date', '>=', firstDay)
+        .where('work_date', '<=', lastDay)
+        .first('id');
+      if (holiday) weeks.add(week);
+    }
+  }
+  if (!weeks.size) return [];
+  const paid = await conn('payroll_checks')
+    .where({ technician_id: technicianId, status: 'finalized' })
+    .whereIn('week_start', [...weeks])
+    .distinct('week_start')
+    .pluck('week_start');
+  const paidSet = new Set(paid.map((w) => (w instanceof Date ? w.toISOString().slice(0, 10) : String(w).slice(0, 10))));
+  return [...weeks].filter((w) => paidSet.has(w)).sort();
+}
+
+module.exports = { holidayWorkForWeek, holidayWorkByDay, capHolidayDays, dayBounds, otherWeeksOfShiftsInto, paidWeeksReadingBreak };

@@ -341,6 +341,40 @@ postgres('payroll holiday work premium', () => {
       expect(await trx('payroll_time_off').where({ id: entry.id })).toHaveLength(1);
     });
 
+    it('refuses to void or move a Monday meal break inside the paid Sunday holiday shift, and allows it once that run is void', async () => {
+      const { voidEntry, adminEditEntry } = require('../services/time-tracking');
+      const id = await tech('Sample Alpha');
+      await approved(id, W0, 8);
+      await shift(id, `${addDays(W0, 6)}T20:00`, `${W1}T04:00`, { meal: 30 });
+      const [meal] = await trx('time_entries').insert({
+        technician_id: id, entry_type: 'break', status: 'completed', clock_in: parseETDateTime(`${W1}T01:00`), clock_out: parseETDateTime(`${W1}T01:30`), duration_minutes: '30.00',
+      }).returning('id');
+      expect((await post(id, W1)).status).toBe(201);
+      const done = (await finalize((await draft(W0)).body.run.id)).body.run;
+      expect(byName(done, 'Sample Alpha')).toMatchObject({ holidayWorkHours: '3.50' });
+      const message = 'A final pay run paid a holiday shift that this break falls in. Void that pay run before changing this break.';
+      await expect(voidEntry(meal.id, { reason: 'Sample', voided_by: null })).rejects.toMatchObject({ statusCode: 409, message });
+      await expect(adminEditEntry(meal.id, {
+        clock_in: parseETDateTime(`${W1}T05:00`).toISOString(), clock_out: parseETDateTime(`${W1}T05:30`).toISOString(), edit_reason: 'Sample', edited_by: null,
+      })).rejects.toMatchObject({ statusCode: 409, message });
+      expect(await trx('time_entries').where({ id: meal.id }).first('status')).toEqual({ status: 'completed' });
+      expect((await api('POST', `/runs/${done.id}/void`, { body: { reason: 'Sample correction' } })).status).toBe(200);
+      await expect(voidEntry(meal.id, { reason: 'Sample', voided_by: null })).resolves.toBeTruthy();
+    });
+
+    it('does not refuse a break edit when no final check pays a holiday shift around it', async () => {
+      const { paidWeeksReadingBreak } = require('../services/payroll-holiday-work');
+      const id = await tech('Sample Alpha');
+      await approved(id, W0, 8);
+      await shift(id, `${addDays(W0, 6)}T20:00`, `${W1}T04:00`);
+      const interval = [{ clockIn: parseETDateTime(`${W1}T01:00`), clockOut: parseETDateTime(`${W1}T01:30`) }];
+      // final, but no holiday on the Monday: no premium reads the break
+      await finalize((await draft(W0)).body.run.id);
+      expect(await paidWeeksReadingBreak(trx, id, interval, W1)).toEqual([]);
+      // a break in its own week's shift is never this guard's
+      expect(await paidWeeksReadingBreak(trx, id, interval, W0)).toEqual([]);
+    });
+
     it('does not refuse a holiday with no such shift, or a pto day, or a holiday the final week\'s shift does not reach', async () => {
       const id = await tech('Sample Alpha');
       await approved(id, W0, 10);
