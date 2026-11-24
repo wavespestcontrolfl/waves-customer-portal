@@ -79,8 +79,11 @@ function routeStops(services) {
   for (const stop of list) {
     stop.services.sort((a, b) => timeOf(a) - timeOf(b) || (a.displayOrder ?? Infinity) - (b.displayOrder ?? Infinity));
     stop.at = timeOf(stop.services[0]);
+    stop.order = Math.min(...stop.services.map((s) => s.displayOrder ?? Infinity));
   }
-  return list.sort((a, b) => a.at - b.at || a.index - b.index);
+  // The feed's own display order (the day list's tie-proximity order) breaks a
+  // tie in time; feed position only after that.
+  return list.sort((a, b) => a.at - b.at || a.order - b.order || a.index - b.index);
 }
 
 // Planned minutes of the day and its finish (the last planned departure).

@@ -197,4 +197,20 @@ describe('RouteListDay', () => {
     expect(header).not.toHaveTextContent('Planned finish');
     expect(header).toHaveTextContent('35 min planned');
   });
+
+  it('breaks a tie between stops with the feed\'s display order, not the row order', () => {
+    render(<RouteListDay technicians={TECHS} services={[
+      stop('z', 'Second By Order', '09:00', { plannedArrivalMin: 600, plannedMinutes: 35, displayOrder: 1 }),
+      stop('a', 'First By Order', '09:00', { plannedArrivalMin: 600, plannedMinutes: 35, displayOrder: 0 }),
+    ]} />);
+    expect(lines(card('Alex Tech')).map((b) => b.textContent)).toEqual([
+      expect.stringContaining('First By Order'), expect.stringContaining('Second By Order'),
+    ]);
+  });
+
+  it('writes a finish past midnight as the next day\'s clock with AM and a +1 day mark', () => {
+    // 11:50 PM + 20 min = 1450 minutes: 12:10 AM the next day.
+    render(<RouteListDay technicians={TECHS} services={[stop('a', 'Late Lou', '23:00', { plannedArrivalMin: 1430, plannedMinutes: 20 })]} />);
+    expect(card('Alex Tech').querySelector('header')).toHaveTextContent('Planned finish 12:10 AM (+1 day)');
+  });
 });

@@ -50,8 +50,17 @@ function isPlaceable(s) {
 
 // The day's route as the drive lines plan it, run from the departure at the
 // tech's start point. Null when it cannot be run (no pin on the first stop).
-function simulateDay(rows, { departureMin, home, blockedIntervals }) {
-  const stops = buildStops(rows.filter((s) => !NOT_A_STOP.has(s.status) && Number.isFinite(minutesOf(s.windowStart))));
+// The day's physical stops (attachDriveLegs' grouping), each row of one stop
+// under one key. The key is the stop's position in that grouping, so it does
+// not depend on the route being timed: a stop the model cannot place (no pin,
+// past an unmeasurable leg) is still one stop.
+function physicalStops(services) {
+  const stops = buildStops(services.filter((s) => !NOT_A_STOP.has(s.status) && Number.isFinite(minutesOf(s.windowStart))));
+  stops.forEach((stop, i) => stop.members.forEach((s) => { s.plannedStopKey = `stop-${i}`; }));
+  return stops;
+}
+
+function simulateDay(stops, { departureMin, home, blockedIntervals }) {
   if (!stops.length || !hasGeo(stops[0].anchor)) return null;
   const legs = stops.slice(1).map((st, i) => legBetween(stops[i], st));
   const route = planRoute(stops, legs);
@@ -95,13 +104,13 @@ function memberSlots(piece, arrival, members) {
  */
 function attachPlannedBlocks(services, { departureMin = DEFAULT_DEPARTURE_MIN, home = RouteOptimizer.HQ, blockedIntervals = [] } = {}) {
   clearPlanned(services);
-  const rows = (services || []).filter(isPlaceable);
-  if (!rows.length) return;
   // Display only: a model error must never fail the day feed, so the rows
   // keep null fields and draw as before.
   let day = null;
   try {
-    day = simulateDay(services, { departureMin, home, blockedIntervals });
+    const stops = physicalStops(services || []);
+    if (!(services || []).some(isPlaceable)) return;
+    day = simulateDay(stops, { departureMin, home, blockedIntervals });
   } catch {
     day = null;
   }
@@ -110,13 +119,6 @@ function attachPlannedBlocks(services, { departureMin = DEFAULT_DEPARTURE_MIN, h
   for (const a of day.sim.arrivals) {
     if (!Number.isFinite(a.arrivalMin) || !(a.departureMin > a.arrivalMin)) continue;
     const members = day.membersOf.get(a.id) || [];
-    // The physical stop (planRoute's stop index; a piece id is "stop:piece"):
-    // every row of one stop, planned or not, so a list numbers it once.
-    const stopKey = `stop-${String(a.id).split(':')[0]}`;
-    for (const id of members) {
-      const row = byId.get(id);
-      if (row) row.plannedStopKey = stopKey;
-    }
     for (const slot of memberSlots(day.pieceOf.get(a.id), a, members)) {
       const s = byId.get(slot.id);
       if (!s || !isPlaceable(s) || !(slot.minutes > 0)) continue;

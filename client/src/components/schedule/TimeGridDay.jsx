@@ -240,7 +240,10 @@ function windowSpanText(start, end) {
 
 // "8:15 PM" for the tooltips.
 function clockWithAp(min) {
-  return `${plannedClock(min)} ${min < 12 * 60 ? 'AM' : 'PM'}`;
+  // Past midnight (the route runs on): the next day's clock, marked.
+  const day = min >= 24 * 60;
+  const clock = min % (24 * 60);
+  return `${plannedClock(clock)} ${clock < 12 * 60 ? 'AM' : 'PM'}${day ? ' (+1 day)' : ''}`;
 }
 
 // The arrival window a planned block is held to:

@@ -220,6 +220,36 @@ describe('attachPlannedBlocks', () => {
     expect(by.cx.plannedStopKey).toBeNull();
   });
 
+  it('keys physical stops even where the route cannot be timed (no pin, past an unmeasurable leg)', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    // No pin on the first stop: nothing can be timed, but its two services are one stop.
+    const noPin = [
+      row('g1', '09:00', null, { visitId: 'v1' }),
+      row('g2', '09:00', null, { visitId: 'v1', serviceTypeRaw: 'Lawn Care' }),
+      row('other', '11:00', B),
+    ];
+    attachPlannedBlocks(noPin, EARLY);
+    expect(noPin.map((s) => s.plannedArrivalMin)).toEqual([null, null, null]);
+    expect(noPin[0].plannedStopKey).toBeTruthy();
+    expect(noPin[1].plannedStopKey).toBe(noPin[0].plannedStopKey);
+    expect(noPin[2].plannedStopKey).toBeTruthy();
+    expect(noPin[2].plannedStopKey).not.toBe(noPin[0].plannedStopKey);
+    // A stop after an unmeasurable leg: unplanned, but its services still share a key.
+    const after = [
+      row('a', '08:00', A),
+      row('x', '10:00', null),
+      row('y1', '12:00', B, { visitId: 'v2' }),
+      row('y2', '12:00', B, { visitId: 'v2', serviceTypeRaw: 'Lawn Care' }),
+    ];
+    attachPlannedBlocks(after, EARLY);
+    expect(after[0].plannedArrivalMin).toBe(8 * 60);
+    expect(after[2].plannedArrivalMin).toBeNull();
+    expect(after[3].plannedStopKey).toBe(after[2].plannedStopKey);
+    expect(after[2].plannedStopKey).not.toBe(after[1].plannedStopKey);
+    // The same keys as a day the model can time.
+    expect(after[0].plannedStopKey).not.toBe(after[1].plannedStopKey);
+  });
+
   it('stamps nulls on every row of an empty or unplaceable day', () => {
     const services = [row('a', '08:00', A, { status: 'cancelled' })];
     attachPlannedBlocks(services);
