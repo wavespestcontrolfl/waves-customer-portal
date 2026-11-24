@@ -1231,7 +1231,7 @@ router.post('/sms', async (req, res) => {
       if (homeText.handled) {
         await retypeConsumedInbound(smsLogEntry.id, 'mail_home_text_to_book', 'mail-home-text-to-book');
         // The office still sees the text: the same thread bell the post-ack block below rings for any text to an office line.
-        await ringConsumedOfficeText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, Body });
+        await ringConsumedOfficeText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, Body, smsLogEntry });
         return res.type('text/xml').send('<Response></Response>');
       }
     }
@@ -1422,23 +1422,7 @@ router.post('/sms', async (req, res) => {
     // suppress (leaving a new thread with no alert at all) — with a strict
     // created_at ordering, at most the later one suppresses. An exact
     // timestamp tie fails open to two alerts, the safe direction.
-    let repeatUnknownSender = false;
-    if (!customer && (Body || inboundMedia.length) && smsLogEntry?.created_at) {
-      try {
-        const prior = await db('sms_log')
-          .where({ direction: 'inbound', from_phone: From })
-          .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
-          .where('created_at', '<', smsLogEntry.created_at)
-          .whereNot('twilio_sid', MessageSid)
-          // An enforced solicitation verdict on the prior row means that
-          // text was silently screened out, not a real prior inbound the
-          // sender had a conversation about — it must not itself consume
-          // the next genuine message's alert quota (codex P1, 2026-09-11).
-          .whereRaw("COALESCE(metadata->'spam_verdict'->>'enforced', 'false') != 'true'")
-          .first('id');
-        repeatUnknownSender = Boolean(prior);
-      } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
-    }
+    const repeatUnknownSender = await isRepeatUnknownSender({ customer, hasContent: Boolean(Body || inboundMedia.length), smsLogEntry, From, MessageSid });
 
     // A staff text to a tracking line gets this forward: the tracking-line bell above skips staff
     // senders (GATE_TECH_STAFF_GUARDS), and the office must still hear about it.
@@ -2055,11 +2039,37 @@ async function ringSmsReplyBell(args) {
   return require('../services/sms-reply-alert-delivery').ringSmsReplyBell(args);
 }
 
+// Per-sender limit for UNKNOWN senders' quiet Activity alert: true when this sender already texted within 4 hours, so the
+// alert for a repeat is skipped (spam robotext threads raised one alert per message, 2026-07). Shared by the post-ack block of
+// POST /sms and ringConsumedOfficeText so a consumed text cannot bypass it. Only rows STRICTLY OLDER than this message's own
+// sms_log row count: two near-simultaneous first texts must not each see the other and both suppress (a new thread with no
+// alert at all); an exact timestamp tie fails open to two alerts, the safe direction. Fails open on a query error.
+async function isRepeatUnknownSender({ customer, hasContent, smsLogEntry, From, MessageSid }) {
+  if (customer || !hasContent || !smsLogEntry?.created_at) return false;
+  try {
+    const prior = await db('sms_log')
+      .where({ direction: 'inbound', from_phone: From })
+      .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
+      .where('created_at', '<', smsLogEntry.created_at)
+      .whereNot('twilio_sid', MessageSid)
+      // An enforced solicitation verdict on the prior row means that text was silently screened out, not a real prior
+      // inbound the sender had a conversation about: it must not itself consume the next genuine message's alert quota
+      // (codex P1, 2026-09-11).
+      .whereRaw("COALESCE(metadata->'spam_verdict'->>'enforced', 'false') != 'true'")
+      .first('id');
+    return Boolean(prior);
+  } catch (e) {
+    logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`);
+    return false;
+  }
+}
+
 // The office thread bell for an inbound text a branch consumed and answered itself (the new-home postcard reply): what the
 // post-ack block of POST /sms rings for any text to an office line, in the same order and with the same fallbacks (the
-// unknown-sender bell, the known customer's sms_reply bell, the quiet Activity row when neither landed). One bell per text,
-// no customer reply. Never throws.
-async function ringConsumedOfficeText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, Body }) {
+// unknown-sender bell, the known customer's sms_reply bell, then the quiet Activity row when neither landed, skipped for an
+// unknown sender who texted in the last 4 hours and for the owner texting himself). One bell per text, no customer reply.
+// Never throws.
+async function ringConsumedOfficeText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, Body, smsLogEntry }) {
   try {
     let notified = await require('../services/sms-reply-alert-delivery').ringUnknownOfficeText({
       customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, message: Body, mediaCount: 0,
@@ -2073,7 +2083,10 @@ async function ringConsumedOfficeText({ customer, staffSender, smsReaction, cour
         else logger.error(`[notifications] sms_reply trigger failed: ${e.code || e.name || 'error'}`);
       }
     }
-    if (!notified) await recordInboundTextAlert({ customer, From, MessageSid, Body });
+    const repeat = await isRepeatUnknownSender({ customer, hasContent: Boolean(Body), smsLogEntry, From, MessageSid });
+    if (!notified && !repeat && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+      await recordInboundTextAlert({ customer, From, MessageSid, Body });
+    }
   } catch (e) {
     logger.error(`[twilio-webhook] consumed-text bell failed: ${e.code || e.name || 'error'}`);
   }

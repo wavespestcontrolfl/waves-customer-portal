@@ -11,7 +11,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockGates = {
   mailHomePageLive: jest.fn(() => true),
   mailHomeTextBookLive: jest.fn(() => true),
-  isEnabled: jest.fn((key) => key === 'selfBooking'),
 };
 jest.mock('../config/feature-gates', () => mockGates);
 
@@ -33,10 +32,13 @@ jest.mock('../models/db', () => {
     const run = mockState.lock.then(async () => {
       mockState.claimTxns += 1;
       const trx = () => {
+        const filters = [];
+        const matching = () => mockState.claims.filter((c) => filters.every((f) => Object.entries(f).every(([k, v]) => c[k] === v)));
         const q = {};
-        q.where = () => q;
-        q.whereRaw = () => q;
-        q.first = async () => (mockState.claims.length ? { id: mockState.claims[0].id } : null);
+        q.where = (o) => { filters.push(o); return q; };
+        q.whereRaw = () => q; // every claim in the store is inside the 24 h window
+        q.count = async () => [{ n: String(matching().length) }];
+        q.first = async () => (matching()[0] ? { id: matching()[0].id } : null);
         q.insert = (row) => ({
           returning: async () => {
             const claim = { id: `claim-${mockState.claims.length + 1}`, ...row };
@@ -54,8 +56,6 @@ jest.mock('../models/db', () => {
   };
   return db;
 });
-const mockLoadHome = jest.fn();
-jest.mock('../services/mail/home-book', () => ({ loadHome: (...a) => mockLoadHome(...a) }));
 const mockSend = jest.fn();
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSend(...a) }));
 
@@ -65,11 +65,9 @@ const { handleHomeTextToBook, _test } = require('../services/mail/home-text-to-b
 
 const PARRISH = TWILIO_NUMBERS.locations.parrish.number; // the line the card prints
 const SENDER = '+12025550101';
-const HOME = { id: 'prospect-1', page_slug: '101-example', page_token: '0123456789abcdef0123456789abcdef', address_line1: '101 EXAMPLE TRL', zip: '34219' };
+const HOME = { id: 'prospect-1', page_slug: '101-example', address_line1: '101 EXAMPLE TRL', zip: '34219' };
 // The canonical accepted result (sms-auto-send.js isRealProviderSend): sent, accepted, a real provider message id.
 const SENT = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM123' };
-const BOOK_LINE = "Pick a time and you're booked.";
-const NEUTRAL_LINE = 'See your page, and call us with any questions.';
 
 const text = (body, to = PARRISH) => handleHomeTextToBook({ from: SENDER, to, body });
 
@@ -78,8 +76,6 @@ beforeEach(() => {
   mockGates.mailHomePageLive.mockReturnValue(true);
   mockGates.mailHomeTextBookLive.mockReturnValue(true);
   Object.assign(mockState, { homes: [{ ...HOME }], claims: [], deleted: [], prospectQueries: 0, claimTxns: 0, lock: Promise.resolve() });
-  mockGates.isEnabled.mockImplementation((key) => key === 'selfBooking');
-  mockLoadHome.mockResolvedValue({ row: { id: 'prospect-1' }, facts: {}, price: {} }); // the home's times would answer
   mockSend.mockResolvedValue({ ...SENT });
 });
 
@@ -125,7 +121,7 @@ describe('streetTypeAgrees', () => {
 });
 
 describe('handleHomeTextToBook', () => {
-  test('a live priced home: one send from the office line the text came to, with the short link', async () => {
+  test('a live home: one send from the office line the text came to, with the short link', async () => {
     expect(await text('101 EXAMPLE')).toEqual({ handled: true, prospectId: 'prospect-1' });
     expect(mockSend).toHaveBeenCalledTimes(1);
     const input = mockSend.mock.calls[0][0];
@@ -138,24 +134,19 @@ describe('handleHomeTextToBook', () => {
       entryPoint: 'mail_home_text_to_book',
       metadata: { original_message_type: 'mail_home_text_to_book', fromNumber: PARRISH },
     });
-    expect(input.body).toBe(`Here's your Waves page for 101 Example Trl: https://portal.wavespestcontrol.com/nh/101-example\n\n${BOOK_LINE} Reply STOP to opt out.`);
+    expect(input.body).toBe("Here's your Waves page for 101 Example Trl: https://portal.wavespestcontrol.com/nh/101-example\n\nReply STOP to opt out.");
   });
 
-  test.each([
-    ['a home whose times endpoint would 404 (held back, no price, or missing home facts: loadHome is null)', () => mockLoadHome.mockResolvedValue(null)],
-    ['a home when the booking check throws', () => mockLoadHome.mockRejectedValue(Object.assign(new Error('db 101 Example Trl'), { code: 'X' }))],
-    ['a home when self-booking is off', () => mockGates.isEnabled.mockReturnValue(false)],
-  ])('%s: the reply does not promise a time', async (_label, arrange) => {
-    arrange();
-    expect((await text('101 EXAMPLE')).handled).toBe(true);
-    const sent = mockSend.mock.calls[0][0].body;
-    expect(sent).toBe(`Here's your Waves page for 101 Example Trl: https://portal.wavespestcontrol.com/nh/101-example\n\n${NEUTRAL_LINE} Reply STOP to opt out.`);
-    expect(sent).not.toMatch(/pick a time|booked/i);
-  });
-
-  test('the booking check is home-book loadHome on the home\'s token (the times endpoint\'s own rule)', async () => {
-    await text('101 EXAMPLE');
-    expect(mockLoadHome).toHaveBeenCalledWith('0123456789abcdef0123456789abcdef');
+  test('one copy for every home: no promise of a time or a price', async () => {
+    for (const patch of [{}, { status: 'held_back' }, { price_status: 'unpriced', price_annual: null }]) {
+      mockState.claims = [];
+      mockSend.mockClear();
+      mockState.homes = [{ ...HOME, ...patch }];
+      expect((await text('101 EXAMPLE')).handled).toBe(true);
+      const sent = mockSend.mock.calls[0][0].body;
+      expect(sent).toBe("Here's your Waves page for 101 Example Trl: https://portal.wavespestcontrol.com/nh/101-example\n\nReply STOP to opt out.");
+      expect(sent).not.toMatch(/pick a time|booked|\$/i);
+    }
   });
 
   test.each([
@@ -274,6 +265,37 @@ describe('handleHomeTextToBook', () => {
     const results = await Promise.all([first, second]);
     expect(results.map((r) => r.handled).sort()).toEqual([false, true]);
     expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+
+  test(`a sender gets at most ${_test.MAX_REPLIES_PER_SENDER} replies in 24 hours across homes and office lines`, async () => {
+    const homes = [1, 2, 3, 4].map((n) => ({ ...HOME, id: `p-${n}`, page_slug: `${n}-example`, address_line1: `${n} EXAMPLE TRL` }));
+    mockState.homes = homes;
+    const lines = Object.values(TWILIO_NUMBERS.locations).map((l) => l.number);
+    const results = [];
+    for (let n = 1; n <= 4; n += 1) results.push(await text(`${n} example`, lines[n - 1]));
+    expect(results.map((r) => r.handled)).toEqual([true, true, true, false]);
+    expect(mockSend).toHaveBeenCalledTimes(3);
+  });
+
+  test('another sender is not held by this sender\'s cap', async () => {
+    mockState.homes = [1, 2, 3, 4].map((n) => ({ ...HOME, id: `p-${n}`, page_slug: `${n}-example`, address_line1: `${n} EXAMPLE TRL` }));
+    for (let n = 1; n <= 3; n += 1) await text(`${n} example`);
+    expect((await handleHomeTextToBook({ from: '+12025550999', to: PARRISH, body: '1 example' })).handled).toBe(true);
+    expect(mockSend).toHaveBeenCalledTimes(4);
+  });
+
+  test('simultaneous texts for different homes still stop at the cap (one lock per sender)', async () => {
+    mockState.homes = [1, 2, 3, 4, 5].map((n) => ({ ...HOME, id: `p-${n}`, page_slug: `${n}-example`, address_line1: `${n} EXAMPLE TRL` }));
+    const results = await Promise.all([1, 2, 3, 4, 5].map((n) => text(`${n} example`)));
+    expect(results.filter((r) => r.handled)).toHaveLength(_test.MAX_REPLIES_PER_SENDER);
+    expect(mockSend).toHaveBeenCalledTimes(_test.MAX_REPLIES_PER_SENDER);
+  });
+
+  test('a released claim (a refused send) does not count toward the cap', async () => {
+    mockState.homes = [1, 2, 3, 4].map((n) => ({ ...HOME, id: `p-${n}`, page_slug: `${n}-example`, address_line1: `${n} EXAMPLE TRL` }));
+    mockSend.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED' });
+    expect((await text('1 example')).handled).toBe(false);
+    for (let n = 2; n <= 4; n += 1) expect((await text(`${n} example`)).handled).toBe(true);
   });
 
   test('a refused send (opt-out, landline, cap) releases the claim and is not handled', async () => {

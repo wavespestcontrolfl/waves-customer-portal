@@ -18,12 +18,14 @@
  *   - A text that names a unit ("101 Example Apt 9") gets no reply: the unit is never silently dropped and matched to
  *     another unit's home (the card prints house number and street name only).
  *   - Any other text (most of them) costs no database read: the shape check alone turns it away.
- *   - One reply per sender, office line and home per 24 hours. The reply is CLAIMED before the provider call
- *     (mail_home_text_replies, keyed by the home's prospect id, under a per-key advisory lock): two texts at the same
- *     moment send once; a sent or uncertain reply keeps its claim, a provable non-send releases it. sms_log is not the
- *     witness: link wrapping can rewrite the link in the stored body, and an uncertain handoff may have no row.
- *   - The copy promises "pick a time" only for a home whose times endpoint would answer (home-book.js loadHome, with
- *     self-booking on); any other home gets a neutral line, as its page shows "call us".
+ *   - One reply per sender, office line and home per 24 hours, and at most MAX_REPLIES_PER_SENDER (3) per sender per 24 hours
+ *     across every home and office line (sendCustomerMessage has no recipient-wide daily cap for a customer-less
+ *     conversational send). The reply is CLAIMED before the provider call (mail_home_text_replies, keyed by the home's
+ *     prospect id), under one advisory lock per sender, so the cap and the per-home rule are checked and the row inserted
+ *     atomically: two texts at the same moment send once for a home and never pass the cap. A sent or uncertain reply
+ *     keeps its claim, a provable non-send releases it. sms_log is not the witness: link wrapping can rewrite the link in
+ *     the stored body, and an uncertain handoff may have no row.
+ *   - One copy for every home (the link, then the STOP line): no promise of a time or a price.
  *   - No lead and no customer is created here; the booking page creates the customer. No counter: no existing column fits.
  *   - Logs carry the prospect id and error codes only, never an address, a slug or a phone.
  */
@@ -31,7 +33,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
-const { mailHomePageLive, mailHomeTextBookLive, isEnabled } = require('../../config/feature-gates');
+const { mailHomePageLive, mailHomeTextBookLive } = require('../../config/feature-gates');
 const { buildBaseSlug, hasUnitPart, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES } = require('./home-slug');
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
 const { publicPortalUrl } = require('../../utils/portal-url');
@@ -41,6 +43,9 @@ const LIVE_STATUSES = ['eligible', 'held_back'];
 const ENTRY_POINT = 'mail_home_text_to_book';
 const CLAIM_TABLE = 'mail_home_text_replies';
 const REPLY_WINDOW_HOURS = 24;
+// Replies one sender can get in the window, across every home and office line: sendCustomerMessage has no recipient-wide
+// daily cap for a customer-less conversational send, so the claim table enforces it.
+const MAX_REPLIES_PER_SENDER = 3;
 // A house number, a street, at most a street type, a directional and a ZIP: more words than this is a sentence.
 const MAX_WORDS = 8;
 const MAX_BODY_LENGTH = 80;
@@ -130,7 +135,7 @@ async function findLiveHome({ candidates, zip, street, fallback }) {
     .where({ list_key: LIST_KEY })
     .whereIn('status', LIVE_STATUSES)
     .whereIn('page_slug', candidates)
-    .select('id', 'page_slug', 'page_token', 'address_line1', 'zip');
+    .select('id', 'page_slug', 'address_line1', 'zip');
   const bySlug = new Map(rows.map((row) => [row.page_slug, row]));
   for (const slug of candidates) {
     const row = bySlug.get(slug);
@@ -144,20 +149,22 @@ async function findLiveHome({ candidates, zip, street, fallback }) {
 }
 
 /**
- * The 24-hour claim, taken and committed before the provider call. Returns the claim id, or null when this sender already
- * has one for this home on this office line. The per-key advisory lock makes check-then-insert atomic: a second text at
- * the same moment waits, then sees the first's committed row.
+ * The reply claim, taken and committed before the provider call. Returns { claimId } or { refused: 'sender_cap' | 'repeat' }.
+ * One advisory lock per SENDER makes both checks and the insert atomic: a sender over MAX_REPLIES_PER_SENDER claims in the
+ * window (any home, any office line) is refused, then a sender with a claim for this home on this office line is refused.
+ * Two texts at the same moment, for the same home or different homes, wait for each other and see the other's committed row.
  */
 async function claimReply({ from, to, prospectId }) {
-  const key = { phone_digits: digits10(from), line_digits: digits10(to), prospect_id: prospectId };
+  const sender = digits10(from);
+  const key = { phone_digits: sender, line_digits: digits10(to), prospect_id: prospectId };
   return db.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${CLAIM_TABLE}:${key.phone_digits}:${key.line_digits}:${prospectId}`]);
-    const recent = await trx(CLAIM_TABLE).where(key)
-      .whereRaw(`claimed_at > now() - interval '${REPLY_WINDOW_HOURS} hours'`)
-      .first('id');
-    if (recent) return null;
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${CLAIM_TABLE}:${sender}`]);
+    const inWindow = () => trx(CLAIM_TABLE).whereRaw(`claimed_at > now() - interval '${REPLY_WINDOW_HOURS} hours'`);
+    const [{ n }] = await inWindow().where({ phone_digits: sender }).count({ n: '*' });
+    if (Number(n) >= MAX_REPLIES_PER_SENDER) return { refused: 'sender_cap' };
+    if (await inWindow().where(key).first('id')) return { refused: 'repeat' };
     const [row] = await trx(CLAIM_TABLE).insert(key).returning('id');
-    return (row && row.id) || row;
+    return { claimId: (row && row.id) || row };
   });
 }
 
@@ -170,23 +177,9 @@ async function releaseClaim(claimId) {
   }
 }
 
-// Only a home whose times endpoint would answer is told to pick a time: home-book.js loadHome (an eligible, priced home with
-// the facts the quote needs, the same rule GET /api/public/home/:token/times starts with) and self-booking on.
-async function offersTimes(home) {
-  try {
-    if (isEnabled('selfBooking') !== true || !home.page_token) return false;
-    return Boolean(await require('./home-book').loadHome(home.page_token));
-  } catch (err) {
-    logger.warn(`[mail-home-text-to-book] times check failed for prospect ${home.id} (${errCode(err)})`);
-    return false;
-  }
-}
-
-function replyBody({ address, slug, offerTimes }) {
-  const next = offerTimes
-    ? "Pick a time and you're booked."
-    : 'See your page, and call us with any questions.';
-  return `Here's your Waves page for ${address}: ${publicPortalUrl()}/nh/${slug}\n\n${next} Reply STOP to opt out.`;
+// One copy for every home. It promises nothing the page may not deliver (times, a price): the page says what is on offer.
+function replyBody({ address, slug }) {
+  return `Here's your Waves page for ${address}: ${publicPortalUrl()}/nh/${slug}\n\nReply STOP to opt out.`;
 }
 
 /**
@@ -207,20 +200,20 @@ async function handleHomeTextToBook({ from, to, body }) {
     const home = await findLiveHome(parsed);
     if (!home) return { handled: false };
 
-    const claimId = await claimReply({ from, to, prospectId: home.id });
-    if (!claimId) {
-      logger.info(`[mail-home-text-to-book] repeat text for prospect ${home.id} inside ${REPLY_WINDOW_HOURS} h, no second reply`);
+    const claim = await claimReply({ from, to, prospectId: home.id });
+    if (!claim.claimId) {
+      logger.info(`[mail-home-text-to-book] no reply for prospect ${home.id} (${claim.refused})`);
       return { handled: false };
     }
+    const claimId = claim.claimId;
 
     const { sendCustomerMessage } = require('../messaging/send-customer-message');
     const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../sms-auto-send');
-    const offerTimes = await offersTimes(home);
     let result;
     try {
       result = await sendCustomerMessage({
         to: from,
-        body: replyBody({ address: displayAddress(home.address_line1), slug: home.page_slug, offerTimes }),
+        body: replyBody({ address: displayAddress(home.address_line1), slug: home.page_slug }),
         channel: 'sms',
         audience: 'lead',
         purpose: 'conversational',
@@ -259,4 +252,4 @@ async function handleHomeTextToBook({ from, to, body }) {
   }
 }
 
-module.exports = { handleHomeTextToBook, ENTRY_POINT, _test: { parseAddressText, displayAddress, replyBody, findLiveHome, streetTypeAgrees, claimReply } };
+module.exports = { handleHomeTextToBook, ENTRY_POINT, _test: { parseAddressText, displayAddress, replyBody, findLiveHome, streetTypeAgrees, claimReply, MAX_REPLIES_PER_SENDER } };

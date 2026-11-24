@@ -5,7 +5,7 @@
 const mockState = {};
 function resetState() {
   Object.assign(mockState, {
-    sms: [], smsRetypes: [], drafts: [], sequence: 0, res: null, customer: null, techLookupFails: false, visionTaken: false, messageUpdates: [],
+    sms: [], smsRetypes: [], priorInbound: false, drafts: [], sequence: 0, res: null, customer: null, techLookupFails: false, visionTaken: false, messageUpdates: [],
   });
 }
 resetState();
@@ -29,6 +29,7 @@ function mockDb(table) {
   q.count = async () => [{ n: 0 }];
   q.first = async () => {
     if (table === 'messages') return { is_read: false };
+    if (table === 'sms_log' && mockState.priorInbound) return { id: 'synthetic-prior' }; // the 4-hour repeat-sender read
     if (table === 'technicians' && mockState.techLookupFails) throw new Error('technicians unavailable');
     // hasPendingDraft: any pending draft already parked (one contact here).
     if (table === 'message_drafts as md') return mockState.drafts.find((d) => d.status === 'pending') || null;
@@ -95,6 +96,8 @@ const mockRing = jest.fn(async () => ({ rang: true }));
 jest.mock('../services/lead-call-reply-ring', () => ({ ringForCallReply: (...args) => mockRing(...args) }));
 
 
+const mockOwnerAlert = jest.fn(async () => ({}));
+jest.mock('../services/owner-alerts', () => ({ recordOwnerAlert: (...args) => mockOwnerAlert(...args) }));
 const mockHomeText = jest.fn();
 jest.mock('../services/mail/home-text-to-book', () => ({ handleHomeTextToBook: (...args) => mockHomeText(...args) }));
 
@@ -164,6 +167,21 @@ test('a stranger\'s consumed postcard text rings the unknown-sender office bell 
   expect(ringSmsReplyBell).not.toHaveBeenCalled();
   expect(mockDispatch).not.toHaveBeenCalled();
   expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+});
+
+test('a consumed stranger text keeps the Activity fallback when the unknown-sender bell did not land', async () => {
+  mockHomeText.mockResolvedValue({ handled: true, prospectId: 'prospect-1' });
+  await receive('101 EXAMPLE'); // ringUnknownOfficeText resolves false (the default mock)
+  expect(mockOwnerAlert).toHaveBeenCalledTimes(1);
+});
+
+test('a consumed stranger text keeps the 4-hour per-sender limit: a repeat sender gets no fallback alert', async () => {
+  mockHomeText.mockResolvedValue({ handled: true, prospectId: 'prospect-1' });
+  mockState.priorInbound = true; // this sender texted within the last 4 hours
+  const res = await receive('101 EXAMPLE');
+  expect(res.body).toBe('<Response></Response>');
+  expect(ringUnknownOfficeText).toHaveBeenCalledTimes(1);
+  expect(mockOwnerAlert).not.toHaveBeenCalled();
 });
 
 test('a text the service did not answer is handled as any other text', async () => {
