@@ -56,6 +56,13 @@ const RATE_IN_EFFECT_SENTENCE = 'Each invoice is billed at the rate then in effe
 // the v8+ enrollment bar (consentVersionQualifiesForEnrollment).
 const AFTER_VISIT_CONSENT_VERSION = 'v13_2026-10-01';
 
+// The save-only add-card form (the link in the "add a card" reminder email, owner 2026-11-24): the card is saved and Auto
+// Pay is never turned on, so the form shows this short statement instead of the Auto Pay authorization. It has its own
+// label (≤ 20 chars like every consent label). No payment_method_consents row is written for a save-only add; the label
+// is the version the mint attests and the SetupIntent stamps, and it is kept in the audit_log event.
+const SAVE_ONLY_CONSENT_TEXT = 'Save this card for future payments. We charge it only when you pay with it or turn on Auto Pay.';
+const SAVE_ONLY_CONSENT_VERSION = 'save_only_2026-11-24';
+
 const CARD_CONSENT_TEXT = [
   'By checking this box, I authorize Waves Pest Control, LLC to save',
   'this card and charge it for future service visits and invoices as',
@@ -242,6 +249,11 @@ function renderedConsentVersionIsCurrent(value) {
   return typeof value === 'string' && value.trim() === CONSENT_VERSION;
 }
 
+/** True only for a save-only mint/intent attesting EXACTLY the save-only form's own version. */
+function saveOnlyConsentVersionIsCurrent(value) {
+  return typeof value === 'string' && value.trim() === SAVE_ONLY_CONSENT_VERSION;
+}
+
 /** True only for an intent whose mint stamped EXACTLY this server's CONSENT_VERSION (metadata.consent_text_version). */
 function intentConsentStampIsCurrent(intent) {
   return renderedConsentVersionIsCurrent(intent?.metadata?.[CONSENT_VERSION_METADATA_KEY]);
@@ -261,6 +273,7 @@ function consentVersionStaleError() {
 }
 
 function getConsentText(methodType, { variant = null, holdTerms = null } = {}) {
+  if (variant === 'save_only') return SAVE_ONLY_CONSENT_TEXT;
   // A one-time card hold snapshots the hold disclosure the customer read.
   if (variant === 'card_hold') return cardHoldConsentText(holdTerms || {});
   // Accept both Stripe-style ('us_bank_account') and DB-style ('ach')
@@ -293,6 +306,7 @@ function getConsentText(methodType, { variant = null, holdTerms = null } = {}) {
 const AFTER_VISIT_VARIANTS = new Set(['after_visit_prepay', 'after_visit_card']);
 function consentVersionForVariant(variant, methodType = 'card') {
   if (variant === 'card_hold') return CARD_HOLD_CONSENT_VERSION;
+  if (variant === 'save_only') return SAVE_ONLY_CONSENT_VERSION;
   if (!AFTER_VISIT_VARIANTS.has(variant)) return CONSENT_VERSION;
   const isBank = methodType === 'us_bank_account' || methodType === 'ach';
   if (isBank && variant === 'after_visit_card') return CONSENT_VERSION;
@@ -314,6 +328,9 @@ module.exports = {
   cardHoldConsentText,
   CONSENT_VERSION,
   AFTER_VISIT_CONSENT_VERSION,
+  SAVE_ONLY_CONSENT_TEXT,
+  SAVE_ONLY_CONSENT_VERSION,
+  saveOnlyConsentVersionIsCurrent,
   CONSENT_VERSION_STALE_CODE,
   CONSENT_VERSION_STALE_MESSAGE,
   CONSENT_VERSION_METADATA_KEY,

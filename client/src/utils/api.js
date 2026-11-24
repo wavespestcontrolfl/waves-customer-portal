@@ -1,5 +1,5 @@
 import { clearNativeBadge } from '../native/nativeBadge';
-import { consentAttestation } from '../lib/paymentMethodConsentText';
+import { consentAttestation, saveOnlyConsentAttestation } from '../lib/paymentMethodConsentText';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const REFRESH_LOCK_NAME = 'waves-customer-refresh';
@@ -223,6 +223,7 @@ export class ApiClient {
         // branch on this, never on the human-facing message string.
         if (errorBody?.code) requestErr.code = errorBody.code;
         if (errorBody?.method_type) requestErr.methodType = errorBody.method_type;
+        if (errorBody?.save_only === true) requestErr.saveOnly = true;
         // Per-field validation detail (e.g. PUT /property/preferences when
         // every field in the batch was rejected) — callers that can save
         // partial batches use this to know which fields must never be
@@ -569,11 +570,12 @@ export class ApiClient {
   // 409 CONSENT_VERSION_STALE, which the modal surfaces as "refresh the
   // page" (codex #5434 r1 P1).
   // enrollAutopay:false mints the save-only SetupIntent (the "add a card" reminder email's form): the saved
-  // card is never enrolled in Auto Pay. Omitted = the usual save-and-enroll form.
+  // card is never enrolled in Auto Pay, and the form shows its own short statement, so it attests that text's version.
+  // Omitted = the usual save-and-enroll form.
   createSetupIntent(paymentMethodType = 'card', { enrollAutopay = true } = {}) {
     return this.request('/billing/cards/setup-intent', {
       method: 'POST',
-      body: JSON.stringify({ paymentMethodType, ...(enrollAutopay === false ? { enrollAutopay: false } : {}), ...consentAttestation() }),
+      body: JSON.stringify({ paymentMethodType, ...(enrollAutopay === false ? { enrollAutopay: false, ...saveOnlyConsentAttestation() } : consentAttestation()) }),
     });
   }
 

@@ -4,7 +4,7 @@
 // Auto Pay enable / set-default. Requests that capture nothing keep their
 // exact bodies.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { CONSENT_VERSION, consentAttestation, isConsentVersionStale } from '../lib/paymentMethodConsentText';
+import { CONSENT_VERSION, SAVE_ONLY_CONSENT_VERSION, consentAttestation, isConsentVersionStale } from '../lib/paymentMethodConsentText';
 
 const clearNativeBadge = vi.fn(async () => {});
 vi.mock('../native/nativeBadge', () => ({ clearNativeBadge: (...args) => clearNativeBadge(...args) }));
@@ -40,11 +40,12 @@ describe('api consent-version attestation', () => {
     ]);
   });
 
-  it('the save-only form (the "add a card" email link) mints with enrollAutopay:false and still attests; the usual form never sends the key', async () => {
+  it('the save-only form (the "add a card" email link) mints with enrollAutopay:false and attests its own text version; the usual form never sends the key', async () => {
     await api.createSetupIntent('card', { enrollAutopay: false });
     expect(calls).toEqual([
-      { url: '/billing/cards/setup-intent', method: 'POST', body: { paymentMethodType: 'card', enrollAutopay: false, consentTextVersion: CONSENT_VERSION } },
+      { url: '/billing/cards/setup-intent', method: 'POST', body: { paymentMethodType: 'card', enrollAutopay: false, consentTextVersion: SAVE_ONLY_CONSENT_VERSION } },
     ]);
+    expect(SAVE_ONLY_CONSENT_VERSION).not.toBe(CONSENT_VERSION);
   });
 
   it('a consent_accepted retry attests; a plain Auto Pay change or default swap does not', async () => {
