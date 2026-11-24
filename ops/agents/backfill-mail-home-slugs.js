@@ -8,7 +8,7 @@
 //   homes on the same street keeps the plain slug.
 // - A slug is never changed once set. A home whose address gives none, or whose plain and ZIP forms are both
 //   taken, stays NULL (its card prints the QR code only).
-// - Dry run: prints how many homes have no slug and the slug each would try first. --execute writes through
+// - Dry run: prints how many homes have no slug and the prospect ids it would assign (never a slug or address). --execute writes through
 //   prospect-store backfillPageSlugs (the same assignment as the save), batch by batch.
 // - No customer comms, no paid calls.
 //
@@ -33,8 +33,10 @@ async function main() {
       .select('id', 'address_line1', 'zip');
     const withCandidate = rows.filter((r) => slugCandidates({ addressLine1: r.address_line1, zip: r.zip }).length);
     console.log(`Homes with no slug: ${rows.length} (${withCandidate.length} have an address that gives one)`);
-    // Slugs only, never the full street line (no customer data in the output).
-    for (const r of withCandidate.slice(0, 20)) console.log(`  would try ${slugCandidates({ addressLine1: r.address_line1, zip: r.zip }).join(' then ')}`);
+    // Prospect ids and counts only: a slug is the house number, street and ZIP, so it is never printed.
+    const withZipForm = withCandidate.filter((r) => slugCandidates({ addressLine1: r.address_line1, zip: r.zip }).length > 1).length;
+    console.log(`  ${withZipForm} of them have a ZIP form to fall back on`);
+    for (const r of withCandidate.slice(0, 20)) console.log(`  would assign prospect ${r.id}`);
     if (!EXECUTE) { console.log('Dry run: nothing written. Pass --execute to assign.'); return; }
     const total = { tried: 0, assigned: 0, withoutSlug: 0 };
     let after = null;
