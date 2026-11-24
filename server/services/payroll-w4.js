@@ -21,7 +21,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { recordAuditEvent } = require('./audit-log');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
-const { payrollTimeOffLive, payrollPayLinesLive, payrollFamilyEmployeeLive, payrollMercuryStatusLive } = require('../config/feature-gates');
+const { payrollTimeOffLive, payrollPayLinesLive, payrollProductionShareLive, payrollFamilyEmployeeLive, payrollMercuryStatusLive } = require('../config/feature-gates');
 const { rollIrs } = require('./payroll-tax-calendar');
 
 const FILING_STATUSES = ['single', 'married_separately', 'married_jointly', 'head_of_household'];
@@ -250,12 +250,15 @@ const listedEmployees = (query, formerWithBank, withMinimum) => query.where(func
   if (withMinimum) this.orWhereNotNull('paid_week_minimum_hours');
 });
 
+// The overtime coverage is shown (and editable) whenever a gate that needs it is on: the pay lines, or the production share.
+const coverageLive = () => [payrollPayLinesLive, payrollProductionShareLive].some((gate) => typeof gate === 'function' && gate());
+
 async function listPayrollTechnicians(conn = db, formerWithBank) {
   const today = etDateString();
   // GATE_PAYROLL_TIME_OFF: the yearly paid time off allowance rides on each row.
   const withTimeOff = typeof payrollTimeOffLive === 'function' && payrollTimeOffLive();
-  // GATE_PAYROLL_PAY_LINES: whether federal overtime law covers the employee rides on each row.
-  const withCoverage = typeof payrollPayLinesLive === 'function' && payrollPayLinesLive();
+  // GATE_PAYROLL_PAY_LINES or GATE_PAYROLL_PRODUCTION_SHARE: whether federal overtime law covers the employee rides on each row.
+  const withCoverage = coverageLive();
   // GATE_PAYROLL_FAMILY_EMPLOYEE: the family employee setting rides on each row (null = not set).
   const withFamily = typeof payrollFamilyEmployeeLive === 'function' && payrollFamilyEmployeeLive();
   // GATE_PAYROLL_MERCURY_STATUS: the Mercury recipient id rides on each row (null = not entered).

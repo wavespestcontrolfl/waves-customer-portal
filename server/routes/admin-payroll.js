@@ -117,7 +117,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const {
   payrollLive, payrollFormFiguresLive, payrollTimeOffLive, payrollPayLinesLive, payrollFamilyEmployeeLive,
-  payrollMercuryStatusLive, payrollMercuryPayLive,
+  payrollMercuryStatusLive, payrollMercuryPayLive, payrollProductionShareLive,
 } = require('../config/feature-gates');
 const payrollW4 = require('../services/payroll-w4');
 const payrollSimple = require('../services/payroll-simple');
@@ -276,7 +276,15 @@ router.delete('/pay-lines/:id', payLinesOnly, async (req, res) => {
   } catch (err) { fail(res, 'remove pay line', err); }
 });
 
-router.put('/technicians/:id/flsa-coverage', payLinesOnly, async (req, res) => {
+// The overtime coverage of an employee is needed by the pay lines and by the production share (its overtime is qualified only for a
+// covered employee), so either gate opens it.
+const coverageOnly = (req, res, next) => {
+  const live = (gate) => typeof gate === 'function' && gate();
+  if (!(live(payrollPayLinesLive) || live(payrollProductionShareLive))) return res.status(404).json({ enabled: false });
+  return next();
+};
+
+router.put('/technicians/:id/flsa-coverage', coverageOnly, async (req, res) => {
   try {
     res.json({ technician: await payrollPayLines.setFlsaCoverage(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set overtime coverage', err); }

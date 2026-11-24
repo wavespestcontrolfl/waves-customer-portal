@@ -524,6 +524,54 @@ postgres('production share pay line', () => {
       expect(early).toHaveBeenCalledTimes(1); // only the early read: nothing read apart under the lock
     });
 
+    it('AUDIT :913: a credit set against no conflict is ignored, as review, once the stop invoice is paid elsewhere', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const first = await stop(id, W1, '1000.00', customerId);
+      const unpriced = await stop(id, weeks[1], null, customerId); // review: no price
+      expect((await override({ technicianId: id, visitId: unpriced, weekStart: weeks[1], creditCents: 50000, reason: 'Checked' })).status).toBe(200);
+      expect((await trx('production_share_stop_overrides').where({ visit_id: unpriced }).first('conflict_basis')).conflict_basis).toBe('');
+      // week 1 is paid with an invoice that is, from now on, ALSO linked to the unpriced stop of week 2
+      const invoiceId = (await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: '1000.00', discount_amount: '0.00', tax_amount: '0.00', total: '1000.00', scheduled_service_id: first,
+      }).returning('id'))[0].id;
+      await finalize((await draft(W1)).body.run.id);
+      await trx('invoices').where({ id: invoiceId }).update({ scheduled_service_id: unpriced });
+      const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
+      const row = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops.find((r) => r.visitId === unpriced);
+      expect(row).toMatchObject({ kind: 'owner_override_conflict_changed', creditCents: 0, needsReview: true });
+      // clear is offered with the revision the preview shows
+      const shown = await api('GET', `/production-share/preview?technicianId=${id}&weekStart=${weeks[1]}`);
+      const showing = shown.body.stops.find((r) => r.visitId === unpriced);
+      expect(showing).toMatchObject({ kind: 'owner_override_conflict_changed', overrideRevision: expect.any(String) });
+      expect((await api('DELETE', '/production-share/stop-override', { body: { technicianId: id, visitId: unpriced, weekStart: weeks[1], revision: showing.overrideRevision } })).status).toBe(200);
+    });
+
+    it('AUDIT :306: the overtime coverage editor opens with only the production share gate on, and a share waits until it is set', async () => {
+      process.env.GATE_PAYROLL_PAY_LINES = 'false';
+      const id = await tech('Sample Alpha', { flsa_overtime_covered: null });
+      await settings(id);
+      await worked(id, W1, 40);
+      await threeShifts(id);
+      const listed = await api('GET', '/technicians');
+      expect(listed.body.technicians.find((t) => t.id === id)).toHaveProperty('flsaOvertimeCovered', null);
+      const blocked = (await draft(W1)).body.run;
+      expect(blocked.blocked.map((b) => b.name || b.technicianId)).toEqual(expect.arrayContaining([expect.anything()]));
+      expect(JSON.stringify(blocked.blocked)).toContain('Set the overtime coverage first');
+      const set = await api('PUT', `/technicians/${id}/flsa-coverage`, { body: { covered: true } });
+      expect(set.status).toBe(200);
+      // neither gate: the route stays dark
+      delete process.env.GATE_PAYROLL_PRODUCTION_SHARE;
+      expect((await api('PUT', `/technicians/${id}/flsa-coverage`, { body: { covered: false } })).status).toBe(404);
+      process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'true';
+      const created = (await api('POST', `/runs/${blocked.id}/recompute`)).body.run;
+      expect(byName(created, 'Sample Alpha').productionShareCents).toBe(16200);
+    });
+
     it('AUDIT :1115: a revision with no stored credit is refused; a credit is created only with neither', async () => {
       const { unpriced, key } = await world();
       expect((await override({ ...key, creditCents: 5000, reason: 'x', revision: 'abc123' })).status).toBe(409);

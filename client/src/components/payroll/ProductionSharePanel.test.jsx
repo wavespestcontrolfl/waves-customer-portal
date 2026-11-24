@@ -310,6 +310,19 @@ describe('Production share preview', () => {
       }));
     });
 
+    it('a stop that was paid elsewhere since the owner set its credit shows Clear and sends DELETE with the revision', async () => {
+      const call = await forms([
+        { visitId: 'v11', workDate: '2026-09-15', overrideRevision: 'rev-11', serviceType: 'Pest Control', kind: 'owner_override_conflict_changed', creditCents: 0,
+          reason: 'This stop, its invoice or its package was paid elsewhere since the owner set its credit', needsReview: true, refundCents: 0 },
+      ])();
+      expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
+      expect(screen.getByText('Paid elsewhere since you set it')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Clear the old credit' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
+        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v11', weekStart: '2026-09-14', revision: 'rev-11' },
+      }));
+    });
+
     it('a stop the owner set shows Clear; a stop a pay run already paid shows no form', async () => {
       const call = await forms([
         { visitId: 'v3', workDate: '2026-09-15', overrideRevision: 'rev-3', serviceType: 'Pest Control', kind: 'owner_set', creditCents: 4550, reason: 'Set by the owner: checked', needsReview: false, refundCents: 0 },

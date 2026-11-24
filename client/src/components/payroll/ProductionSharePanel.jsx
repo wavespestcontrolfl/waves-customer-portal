@@ -21,7 +21,7 @@ const KIND_WORDS = {
   free_assessment: 'Free assessment', free_visit: 'Free visit', unpriced: 'No price',
   not_performed: 'No work performed', unverified: 'No closeout record',
   owner_set: 'Set by the owner', already_paid: 'Already paid', invoice_paid_elsewhere: 'Invoice paid elsewhere',
-  package_paid_elsewhere: 'Package paid elsewhere', basis_exhausted: 'Package visit used', owner_override_reassigned: 'Reassigned since you set it', owner_override_closeout_changed: 'Closeout changed since you set it',
+  package_paid_elsewhere: 'Package paid elsewhere', basis_exhausted: 'Package visit used', owner_override_reassigned: 'Reassigned since you set it', owner_override_closeout_changed: 'Closeout changed since you set it', owner_override_conflict_changed: 'Paid elsewhere since you set it',
 };
 
 // '15' -> 1500, '12.5' -> 1250. Anything else -> null.
@@ -114,7 +114,7 @@ function SettingsForm({ call, technicians, technicianId, weekStart, current, gen
 // A stop whose work was not done or confirmed, or that a pay run paid, is never credited by hand (the server refuses it too).
 const NOT_BY_HAND = new Set(['already_paid', 'not_performed', 'unverified']);
 // A credit the owner set, or one the rules ignore now (the stop was reassigned, or its closeout changed): the owner can clear it.
-const CLEARABLE = new Set(['owner_set', 'owner_override_reassigned', 'owner_override_closeout_changed']);
+const CLEARABLE = new Set(['owner_set', 'owner_override_reassigned', 'owner_override_closeout_changed', 'owner_override_conflict_changed']);
 
 // Which visit a review row is: a short id, the time it was completed, its address, and the schedule of the day it was SCHEDULED for
 // (not the pay work date, which can differ) to open it from.

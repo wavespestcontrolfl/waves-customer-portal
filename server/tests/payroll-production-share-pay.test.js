@@ -421,11 +421,15 @@ describe('the credit rules (applyLedger)', () => {
   test('STOP OVERRIDE: the credit the owner set replaces the computed or review row, records the visit invoices, and never beats already paid', () => {
     const set = new Map([['visit-2', { creditCents: 45000, reason: 'Checked the invoice' }]]);
     const run = (row, paid = paidOf()) => productionShare.applyLedger([row], paid, set)[0];
-    // a review row (an invoice paid elsewhere) takes the owner's credit
-    expect(run(plain('visit-2', ['inv-1']), paidOf({ invoices: { 'inv-1': '2026-09-14' } }))).toMatchObject({
+    // a review row (an invoice paid elsewhere) takes the owner's credit, set against the conflict it had
+    const elsewhere = paidOf({ invoices: { 'inv-1': '2026-09-14' } });
+    const basis = productionShare.applyLedger([plain('visit-2', ['inv-1'])], elsewhere)[0].conflictBasis;
+    expect(basis).toMatch(/^[0-9a-f]{16}$/);
+    set.set('visit-2', { ...set.get('visit-2'), conflictBasis: basis });
+    expect(run(plain('visit-2', ['inv-1']), elsewhere)).toMatchObject({
       kind: 'owner_set', creditCents: 45000, needsReview: false, reason: 'Set by the owner: Checked the invoice', invoices: ['inv-1'], bases: [],
     });
-    // a computed credit too, and $0 records no invoice
+    // a computed credit too (the conflict the credit was set against has gone: no NEW conflict), and $0 records no invoice
     expect(run(plain('visit-2', ['inv-1']))).toMatchObject({ kind: 'owner_set', creditCents: 45000 });
     expect(productionShare.applyLedger([plain('visit-2', ['inv-1'])], paidOf(), new Map([['visit-2', { creditCents: 0, reason: 'none' }]]))[0])
       .toMatchObject({ kind: 'owner_set', creditCents: 0, invoices: [] });
@@ -433,6 +437,44 @@ describe('the credit rules (applyLedger)', () => {
     expect(run(plain('visit-3', ['inv-1']))).toMatchObject({ kind: 'priced', creditCents: 100000 });
     // a visit a pay run already paid stays already paid
     expect(run(plain('visit-2', ['inv-1']), paidOf({ visits: { 'visit-2': '2026-09-14' } }))).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true });
+  });
+
+  test('AUDIT :913 STOP OVERRIDE: a NEW conflict (invoice, package or package root paid elsewhere since it was set) ignores the credit as review', () => {
+    const credit = (conflictBasis) => new Map([['visit-2', { creditCents: 45000, reason: 'Checked', technicianId: undefined, conflictBasis, revision: 'rev' }]]);
+    const run = (row, paid, basis) => productionShare.applyLedger([row], paid, credit(basis))[0];
+    const basisOf = (row, paid) => productionShare.applyLedger([row], paid)[0].conflictBasis;
+    const row = plain('visit-2', ['inv-1']);
+    // set with no conflict: the basis is empty and the credit is used
+    expect(basisOf(row, paidOf())).toBe('');
+    expect(run(row, paidOf(), '')).toMatchObject({ kind: 'owner_set', creditCents: 45000 });
+    // the invoice is paid elsewhere afterwards: review, $0, the revision kept so the owner can clear it
+    const later = paidOf({ invoices: { 'inv-1': '2026-09-14' } });
+    const out = run(row, later, '');
+    expect(out).toMatchObject({ kind: 'owner_override_conflict_changed', creditCents: 0, needsReview: true, overrideRevision: 'rev', invoices: [] });
+    expect(out.reason).toContain('paid elsewhere since the owner set its credit');
+    // set against that same conflict: it is the owner's knowing choice, the credit is used
+    expect(run(row, later, basisOf(row, later))).toMatchObject({ kind: 'owner_set', creditCents: 45000 });
+    // a different paid-elsewhere state later is new again
+    const other = paidOf({ invoices: { 'inv-1': '2026-09-07' } });
+    expect(run(row, other, basisOf(row, later)).kind).toBe('owner_override_conflict_changed');
+    // a package slot taken since, and a package root fixed since
+    const slotRow = { visitId: 'visit-2', workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: 0, needsReview: true, ledger: null, linkedInvoices: [],
+      packageSlot: { rootId: 'root', slot: 2, sold: 2, price: null, visits: ['root', 'visit-2'] } };
+    expect(basisOf(slotRow, paidOf())).toBe('');
+    expect(run(slotRow, paidOf({ jobs: { root: [200000, 2, [2]] } }), '').kind).toBe('owner_override_conflict_changed');
+    expect(run({ ...plain('visit-2', []), linkedInvoices: [] }, paidOf({ jobs: { 'visit-2': [200000, 2, [2]] } }), '').kind).toBe('owner_override_conflict_changed');
+    // the package's own earlier paid row is no conflict
+    expect(run(slotRow, paidOf({ invoices: { 'inv-9': ['2026-09-14', 'root'] }, jobs: { root: [200000, 2, [1]] } }), '')).toMatchObject({ kind: 'owner_set' });
+  });
+
+  test('AUDIT :306: a check with a share above $0 and the overtime coverage not set is blocked, not stored with zero qualified overtime', () => {
+    const withShare = { production_share: workedOut() };
+    expect(build({ ...withShare, flsa_overtime_covered: null }).blocked).toContain('Set the overtime coverage first');
+    expect(build({ ...withShare, flsa_overtime_covered: undefined }).blocked).toContain('Set the overtime coverage first');
+    // set either way (covered or not), or no share above $0: a check
+    expect(build({ ...withShare, flsa_overtime_covered: false }).check).toBeTruthy();
+    expect(build({ ...withShare, flsa_overtime_covered: true }).check).toBeTruthy();
+    expect(build({ production_share: workedOut(stops([['v1', '2026-09-14', 50000]])), flsa_overtime_covered: null }).blocked).toBeUndefined();
   });
 
   test('AUDIT :1007 STOP OVERRIDE: it belongs to the technician who held the stop; a stop reassigned since is review and shows no technician id', () => {

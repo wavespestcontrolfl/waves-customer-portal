@@ -287,6 +287,11 @@ const electionOrIrsDefault = (election, payDate) => election || {
   id: null, formYear: Number(String(payDate).slice(0, 4)), filingStatus: 'single', step2Checkbox: false, exempt: false,
 };
 
+// A share is overtime-qualified only for an employee federal overtime law covers; with the coverage not set the premium would be
+// stored as zero qualified overtime without a word, so the check waits for the owner to set it (Payroll settings, overtime coverage).
+const shareCoverageProblem = (tech, shareCents) => (shareCents > 0 && tech.flsa_overtime_covered == null
+  ? 'Set the overtime coverage first: the production share needs to know whether federal overtime law covers this employee.' : null);
+
 /**
  * Works out one technician's check. Returns { check } (the row to insert, minus
  * run_id) or { blocked } with a plain reason. Never throws for a calculation
@@ -304,6 +309,8 @@ function buildCheck({
   const share = tech.production_share && !tech.production_share.error ? tech.production_share : null;
   const shareCents = share ? share.shareCents : 0;
   const withLines = payLinesOn() || shareCents > 0;
+  const coverageProblem = shareCoverageProblem(tech, shareCents);
+  if (coverageProblem) return { blocked: coverageProblem };
   const ptoMinutes = tech.pto_minutes || 0;
   const holidayMinutes = tech.holiday_minutes || 0;
   // The minimum paid week: set by evaluate() only for a technician who has one (payroll-week-minimum.js).
