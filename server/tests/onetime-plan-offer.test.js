@@ -1161,7 +1161,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
 
       test.each([
         ['the provider accepted it', [{ id: 'm-0', sent_at: '2030-01-01T00:00:00Z' }], 'offered_before'],
-        ['the handoff started and the answer was lost', [{ id: 'm-0', provider_handoff_phase: 'started' }], 'offered_before'],
+        ['the handoff started and the answer was lost', [{ id: 'm-0', provider_handoff_phase: 'started', updated_at: '2030-01-01T00:00:00Z' }], 'offered_before'],
       ])('%s: holds the job', async (_name, message, reason) => {
         const deps = world3(message);
         expect((await run(deps)).reasons).toEqual({ [reason]: 1 });
@@ -1175,13 +1175,18 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
         expect(liveCounts(await run(world3(message)))).toEqual({ ...ZERO, sent: 1 });
       });
 
-      test('the failed rows read are the customer\'s other offers inside the 365 days', async () => {
+      test('the year runs from the handoff, not the reservation: an older message does not count', async () => {
+        for (const message of [[{ id: 'm-0', sent_at: '2029-03-01T00:00:00Z' }], [{ id: 'm-0', provider_handoff_phase: 'started', updated_at: '2029-03-01T00:00:00Z' }]]) {
+          expect(liveCounts(await run(world3(message)))).toEqual({ ...ZERO, sent: 1 });
+        }
+      });
+
+      test('the failed rows read are the customer\'s other offers, whatever the reservation\'s age', async () => {
         const deps = world3([]);
         await run(deps);
         const read = deps.db.queriesOf('marketing_email_ledger').find((query) => called(query, 'where', { status: 'failed' }));
         expect(called(read, 'where', { customer_id: 'cust-1', email_key: OFFER_TEMPLATE })).toBe(true);
         expect(called(read, 'whereNot', 'idempotency_key', 'onetime-plan-offer:offer:job-1')).toBe(true);
-        expect(called(read, 'whereRaw', 'COALESCE(sent_at, reserved_at) > ?', [new Date(NOW.getTime() - 365 * 24 * HOUR)])).toBe(true);
       });
 
       test('the reservation\'s guard counts it too, on the reservation\'s transaction', async () => {
@@ -1467,6 +1472,8 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       const { deps, boundaryGuard, trx } = await handoffOf();
       expect(await boundaryGuard(trx)).toBeNull();
       expect(called(trx.queriesOf('customers')[0], 'where', { id: 'cust-1' })).toBe(true);
+      // Read FOR SHARE: a pause that commits later waits for the end of the handoff transaction.
+      expect(called(trx.queriesOf('customers')[0], 'forShare')).toBe(true);
       expect(deps.explicitAutopayDisable).toHaveBeenLastCalledWith(CUSTOMER, trx);
     });
 
@@ -1490,19 +1497,39 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
 
   // The confirmed send is recorded on the offer estimate (deliveryState), the stamp staff views and reports read.
   describe('the confirmed send on the estimate', () => {
-    test('a send the provider took: recorded on the minted estimate, with the run\'s time', async () => {
-      const deps = liveWorld();
+    // The offer message is read twice in a live run: the job's own "already offered" check (nothing yet), then after
+    // the send, for the provider's acceptance time.
+    const MAIL_SENT_AT = '2030-03-13T03:31:00.000Z';
+    const mailAfterSend = (row) => {
+      let reads = 0;
+      return () => { reads += 1; return reads === 1 ? [] : [row]; };
+    };
+
+    test('a send the provider took: recorded on the minted estimate, with the provider\'s acceptance time', async () => {
+      const deps = liveWorld({ tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT }) } });
       expect(liveCounts(await run(deps))).toEqual({ ...ZERO, sent: 1 });
       expect(deps.writeOfferDelivery).toHaveBeenCalledTimes(1);
       expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, {
-        customerId: 'cust-1', jobId: 'job-1', estimateId: 'est-1', deliveredAt: NOW, ifUnstamped: false,
+        customerId: 'cust-1', jobId: 'job-1', estimateId: 'est-1', deliveredAt: new Date(MAIL_SENT_AT), ifUnstamped: false,
       });
     });
 
     test('a send an earlier attempt owns and the ledger settled sent: recorded only when unstamped', async () => {
-      const deps = liveWorld({ sendWithLedger: jest.fn(async () => ({ ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'sent' }, duplicate: true })) });
+      const deps = liveWorld({
+        tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT }) },
+        sendWithLedger: jest.fn(async () => ({ ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'sent' }, duplicate: true })),
+      });
       expect(liveCounts(await run(deps))).toEqual({ ...ZERO, done: 1 });
       expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, expect.objectContaining({ estimateId: 'est-1', ifUnstamped: true }));
+    });
+
+    test('a handoff that started and was lost (no acceptance time) is no confirmed delivery: nothing is recorded', async () => {
+      const deps = liveWorld({
+        tables: { email_messages: mailAfterSend({ id: 'm-1', provider_handoff_phase: 'started' }) },
+        sendWithLedger: jest.fn(async () => ({ ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'sent' }, duplicate: true })),
+      });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, done: 1 });
+      expect(deps.writeOfferDelivery).not.toHaveBeenCalled();
     });
 
     test.each([
@@ -1515,8 +1542,12 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
     });
 
     test('a failed record never fails the job: the email is out', async () => {
-      const deps = liveWorld({ writeOfferDelivery: jest.fn(async () => { throw new Error('write failed'); }) });
+      const deps = liveWorld({
+        tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT }) },
+        writeOfferDelivery: jest.fn(async () => { throw new Error('write failed'); }),
+      });
       expect(liveCounts(await run(deps))).toEqual({ ...ZERO, sent: 1 });
+      expect(deps.writeOfferDelivery).toHaveBeenCalledTimes(1);
     });
 
     test('a later morning that finds the send confirmed records it on the quote that carries the job\'s stamp, once', async () => {

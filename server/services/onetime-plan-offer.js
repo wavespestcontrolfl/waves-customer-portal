@@ -373,20 +373,22 @@ function notOptedOut({ job, customer, deps }) {
 // disagree. A `failed` row counts too when its email was accepted or its handoff started (below). This job's own key never counts: its own send is not "before".
 async function offeredBefore(database, { customerId, jobId, now }) {
   const since = new Date(now.getTime() - OFFER_WINDOW_MS);
-  const earlier = () => database('marketing_email_ledger')
+  const others = () => database('marketing_email_ledger')
     .where({ customer_id: customerId, email_key: OFFER_TEMPLATE })
-    .whereNot('idempotency_key', offerKey(jobId))
-    .whereRaw('COALESCE(sent_at, reserved_at) > ?', [since]);
-  const counted = await earlier().whereIn('status', ['sent', 'reserved']).first('id');
+    .whereNot('idempotency_key', offerKey(jobId));
+  const counted = await others().whereIn('status', ['sent', 'reserved'])
+    .whereRaw('COALESCE(sent_at, reserved_at) > ?', [since]).first('id');
   if (counted) return counted;
   // The ledger settles a `failed` row from email_messages for 30 days only. A failed row whose email the provider
   // took, or whose handoff started (the ledger's own reader, messageStateFor), is an offer that went out, or may
-  // have, for the whole year.
+  // have. The year is measured from that handoff (the message's accepted or last-change time), not from the
+  // reservation: a reservation just over a year old can have been accepted inside the year.
   const { messageStateFor } = require('./email-division/ledger');
-  const failed = await earlier().where({ status: 'failed' }).select('id', 'idempotency_key');
+  const failed = await others().where({ status: 'failed' }).select('id', 'idempotency_key');
   for (const row of failed) {
-    const { kind } = await messageStateFor(database, row.idempotency_key);
-    if (kind === 'accepted' || kind === 'uncertain') return row;
+    const { kind, message } = await messageStateFor(database, row.idempotency_key);
+    const at = kind === 'accepted' ? message.sent_at : message?.updated_at;
+    if ((kind === 'accepted' || kind === 'uncertain') && new Date(at) > since) return row;
   }
   return null;
 }
@@ -611,8 +613,9 @@ async function paysAfterVisit({ job, deps }) {
 // Auto Pay paused now (isPaused), or turned off by the customer (the latest autopay_log toggle,
 // explicitAutopayDisable). Both hold the job in both modes. A failed read throws, and the job fails for the morning.
 // Asked again at the provider handoff, on the handoff's transaction (autoPayGuard).
-async function autoPayReason(database, { customerId, now, deps }) {
-  const account = await database('customers').where({ id: customerId }).first('id', 'autopay_enabled', 'autopay_paused_until');
+async function autoPayReason(database, { customerId, now, deps, lock = false }) {
+  const read = database('customers').where({ id: customerId });
+  const account = await (lock ? read.forShare() : read).first('id', 'autopay_enabled', 'autopay_paused_until');
   if (!account) return 'no_customer';
   if (deps.isAutopayPaused(account, now)) return 'autopay_paused';
   return (await deps.explicitAutopayDisable(account, database)) ? 'autopay_off' : null;
@@ -913,7 +916,9 @@ async function offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps 
 // card policy asked about the estimate (onCardRail) does not refuse either. Retryable like the estimate guard:
 // the next morning's rule holds the job while it stands, and sends once it lifts.
 async function autoPayGuard(trx, { customer, now, deps }) {
-  const reason = await autoPayReason(trx, { customerId: customer.id, now, deps });
+  // The customer row is read FOR SHARE, to the end of the handoff transaction: a pause or turn-off that commits
+  // later waits for the email's send, and one that committed earlier is read here.
+  const reason = await autoPayReason(trx, { customerId: customer.id, now, deps, lock: true });
   return reason ? { reason: reason.toUpperCase(), retryable: true } : null;
 }
 
@@ -1018,9 +1023,14 @@ async function mintAndSend(ctx, option) {
   });
   const settled = await settleOfferSend(out, ctx);
   if (settled.verdict === 'sent' || settled.verdict === 'done') {
-    await recordOfferDelivery(deps, {
-      customerId: customer.id, jobId: job.id, estimateId: minted.estimateId, deliveredAt: now, ifUnstamped: settled.verdict === 'done',
-    });
+    // Confirmed means the provider's acceptance (email_messages.sent_at), and that time is the stamp on every path,
+    // so a run that sends and a run that finds the send record the same instant.
+    const mail = await alreadyOffered(deps.db, job.id);
+    if (mail?.sent_at) {
+      await recordOfferDelivery(deps, {
+        customerId: customer.id, jobId: job.id, estimateId: minted.estimateId, deliveredAt: new Date(mail.sent_at), ifUnstamped: settled.verdict === 'done',
+      });
+    }
   }
   return settled;
 }

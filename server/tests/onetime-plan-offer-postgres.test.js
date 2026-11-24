@@ -1429,8 +1429,10 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         };
 
         test.each([
-          ['accepted, 100 days ago', { daysAgo: 100, message: { status: 'sent', sent_at: new Date() } }],
+          ['accepted, 100 days ago', { daysAgo: 100, message: { status: 'sent', sent_at: new Date(NOW.getTime() - 100 * 24 * HOUR) } }],
           ['handoff started, 200 days ago', { daysAgo: 200, message: { status: 'queued', provider_handoff_phase: 'started' } }],
+          // The year runs from the handoff: reserved 366 days ago, accepted 100 days ago, still inside it.
+          ['reserved 366 days ago but accepted 100 days ago', { daysAgo: 366, message: { status: 'sent', sent_at: new Date(NOW.getTime() - 100 * 24 * HOUR) } }],
         ])('%s: holds the job', async (_name, earlier) => {
           await publishOffer();
           const { customer, job } = await seedJob();
@@ -1445,7 +1447,7 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         test.each([
           ['no message', { daysAgo: 100, message: null }],
           ['a message the provider refused', { daysAgo: 100, message: { status: 'failed', provider_handoff_phase: 'rejected' } }],
-          ['accepted 366 days ago', { daysAgo: 366, message: { status: 'sent', sent_at: new Date() } }],
+          ['accepted 366 days ago', { daysAgo: 366, message: { status: 'sent', sent_at: new Date(NOW.getTime() - 366 * 24 * HOUR) } }],
         ])('not a hold: %s', async (_name, earlier) => {
           await publishOffer();
           const { customer } = await seedJob();
@@ -1769,8 +1771,9 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       expect(await run({})).toMatchObject({ sent: 1, failed: 0 });
       const [quote] = await estimatesOf(customer);
       const state = readPlan(quote.estimate_data).deliveryState;
+      const acceptedAt = new Date((await offerMail(job.id)).sent_at).toISOString();
       expect(state).toMatchObject({
-        sentChannels: ['email'], failedChannels: [], firstDeliveredAt: NOW.toISOString(), lastDeliveredAt: NOW.toISOString(), deliveredAt: [NOW.toISOString()],
+        sentChannels: ['email'], failedChannels: [], firstDeliveredAt: acceptedAt, lastDeliveredAt: acceptedAt, deliveredAt: [acceptedAt],
         channels: { email: { ok: true, providerAccepted: true } },
       });
       expect(readPlan(quote.estimate_data).planStart.offer.jobId).toBe(String(job.id));
