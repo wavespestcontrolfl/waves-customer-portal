@@ -14,7 +14,7 @@ A callback is any return visit where the customer reports the original treatment
 1. Route callback to the original tech first — always offer it before assigning elsewhere
 2. If original tech unavailable same day: offer next available slot within 5 days
 3. If original tech unavailable within 5 days: assign to best-rated tech for that service type
-4. Never assign a callback to a tech who does not do that service line (the split is by service line, not ZIP)
+4. Never assign a callback to a tech who could not have done the original job: same service line, plus its Adam-only exceptions (Aggressive Colony Surcharge, Arborjet injection, WDO). The split is by service line, not ZIP
 
 ## Scheduling Rules
 - Must complete within 5 business days of original service date

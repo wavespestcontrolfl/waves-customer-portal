@@ -17,6 +17,7 @@ Lawn care, tree & shrub, and exclusion (including the first rodent visit and the
 
 ### Dispatch Rules
 - Arborjet palm injection: Adam only.
+- Max 2 termite or WDO jobs (combined) on any single day.
 - Callback: route to the original tech first when available the same day.
 
 ---
