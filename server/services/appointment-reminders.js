@@ -5705,10 +5705,23 @@ const AppointmentReminders = {
         // was rebuilt before it (each piece beats the owner's own).
         if ((kind === '72h' || kind === '24h') && scheduledServiceId) {
           try {
-            const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
+            const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id', 'scheduled_date');
             const visit = svc?.visit_id
               ? await db('service_visits').where({ id: svc.visit_id }).first('id', 'scheduled_date')
               : null;
+            // An UNGROUPED bounce gets the same occurrence check (pre-push Codex P1, 2026-11-24): the row moved since the
+            // text means the bounced notice is stale and the re-armed reminder owns the new date. Before the other-date
+            // promise rule, the old date's hour happened to block this through delayedSendIsStale; it no longer does.
+            if (!visit && svc) {
+              const textedDate = bouncedOccurrenceDate(audit.metadata);
+              const rowDate = svc.scheduled_date instanceof Date
+                ? svc.scheduled_date.toISOString().slice(0, 10)
+                : String(svc.scheduled_date || '').slice(0, 10);
+              if (textedDate && rowDate && textedDate !== rowDate) {
+                logger.info(`[appt-remind] skipping ${kind} email fallback for ${scheduledServiceId} — moved from ${textedDate} to ${rowDate} since the text; the re-armed reminder owns the new date`);
+                return;
+              }
+            }
             if (visit) {
               // The OCCURRENCE the bounced text represented is its own
               // rendered slot (audit metadata), never the visit's current

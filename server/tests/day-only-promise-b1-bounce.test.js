@@ -83,7 +83,7 @@ afterEach(() => {
 const SLOT = Date.parse('2026-06-22T13:00:00.000Z');
 const DAY_META = { promise_level: 'day', window_unknown: true, guard_slot_ms: SLOT, promised_date: '2026-06-22' };
 
-function groupedWorld({ metadata, visitDate = '2026-06-22' }) {
+function groupedWorld({ metadata, visitDate = '2026-06-22', ungrouped = false }) {
   const auditChain = chain({
     first: {
       channel: 'sms', purpose: 'appointment_reminder_72h', customer_id: 'c9',
@@ -106,7 +106,7 @@ function groupedWorld({ metadata, visitDate = '2026-06-22' }) {
     customers: Array.from({ length: 3 }, () => chain({ first: { id: 'c9', phone: '+19415551234', email: 'c9@example.com', line_type: null } })),
     notification_prefs: Array.from({ length: 4 }, () => chain({ first: prefsRow })),
     appointment_reminders: [chain({ first: ownerRow }), chain({})],
-    scheduled_services: [chain({ first: { visit_id: 'visit-9' } })],
+    scheduled_services: [chain({ first: ungrouped ? { visit_id: null, scheduled_date: visitDate } : { visit_id: 'visit-9' } })],
     service_visits: [chain({ first: { id: 'visit-9', scheduled_date: visitDate } })],
     'scheduled_services as ss': [membersChain, labelChain],
     'scheduled_services as s': [chain({ first: null }), chain({ first: null })],
@@ -156,6 +156,25 @@ describe('a bounced day-only grouped 72-hour reminder', () => {
     expect(call.dayOnly).toBe(true);
     expect(call.serviceLabel).toBe('Quarterly Pest Control');
     expect(call.idempotencyKey).toBeUndefined();
+  });
+});
+
+// Pre-push Codex P1 (2026-11-24): an UNGROUPED late bounce after a date change is stale too. Before the other-date promise
+// rule, the old date's hour blocked it by accident (delayedSendIsStale); now the occurrence check does it on purpose.
+describe('a bounced day-only UNGROUPED 72-hour reminder', () => {
+  test('after the row moved to another date: no recovery email', async () => {
+    groupedWorld({ metadata: DAY_META, visitDate: '2026-06-25', ungrouped: true });
+    await bounce('SM_day_ungrouped_moved');
+    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('same date: the per-row day-only email, as before', async () => {
+    groupedWorld({ metadata: DAY_META, ungrouped: true });
+    await bounce('SM_day_ungrouped_same');
+    const call = AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0];
+    expect(call.dayOnly).toBe(true);
+    expect(call.serviceLabel).toBe('Quarterly Pest Control');
   });
 });
 
