@@ -1550,6 +1550,13 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(deps.writeOfferDelivery).toHaveBeenCalledTimes(1);
     });
 
+    test('a failed read of the receipt never fails the job: the email is out', async () => {
+      let reads = 0;
+      const deps = liveWorld({ tables: { email_messages: () => { reads += 1; if (reads > 1) throw new Error('read failed'); return []; } } });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, sent: 1 });
+      expect(deps.writeOfferDelivery).not.toHaveBeenCalled();
+    });
+
     test('a later morning that finds the send confirmed records it on the quote that carries the job\'s stamp, once', async () => {
       const sentAt = '2030-03-06T15:00:00.000Z';
       const deps = liveWorld({ tables: { email_messages: [{ id: 'm-1', sent_at: sentAt }] } });

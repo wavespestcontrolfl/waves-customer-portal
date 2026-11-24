@@ -1024,12 +1024,17 @@ async function mintAndSend(ctx, option) {
   const settled = await settleOfferSend(out, ctx);
   if (settled.verdict === 'sent' || settled.verdict === 'done') {
     // Confirmed means the provider's acceptance (email_messages.sent_at), and that time is the stamp on every path,
-    // so a run that sends and a run that finds the send record the same instant.
-    const mail = await alreadyOffered(deps.db, job.id);
-    if (mail?.sent_at) {
-      await recordOfferDelivery(deps, {
-        customerId: customer.id, jobId: job.id, estimateId: minted.estimateId, deliveredAt: new Date(mail.sent_at), ifUnstamped: settled.verdict === 'done',
-      });
+    // so a run that sends and a run that finds the send record the same instant. The email is out: a failed read
+    // or write here never changes the verdict (the next morning finds the send confirmed and records it).
+    try {
+      const mail = await alreadyOffered(deps.db, job.id);
+      if (mail?.sent_at) {
+        await recordOfferDelivery(deps, {
+          customerId: customer.id, jobId: job.id, estimateId: minted.estimateId, deliveredAt: new Date(mail.sent_at), ifUnstamped: settled.verdict === 'done',
+        });
+      }
+    } catch (err) {
+      logger.warn(`[onetime-plan-offer] delivery lookup failed for job ${job.id} (code=${err?.code || 'none'})`);
     }
   }
   return settled;
