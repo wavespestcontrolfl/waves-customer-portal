@@ -86,10 +86,21 @@ function routeStops(services) {
   });
   const timeOf = (s) => planOf(s)?.start ?? parseHHMM(s.windowStart) ?? Infinity;
   const orderOf = (s) => s.displayOrder ?? Infinity;
+  // Where a stop sits among rows outside the route: the modeled stop arrival
+  // of its live members, else a live member's booked start; a cancelled or
+  // skipped member's booked time only when nothing else exists.
+  const anchorOf = (members) => {
+    const live = members.filter((m) => !TERMINAL.has(m.status));
+    const planned = live.map((m) => (Number.isFinite(m.plannedStopArrivalMin) ? m.plannedStopArrivalMin : planOf(m)?.start)).filter(Number.isFinite);
+    if (planned.length) return Math.min(...planned);
+    const booked = live.map((m) => parseHHMM(m.windowStart)).filter(Number.isFinite);
+    if (booked.length) return Math.min(...booked);
+    return Math.min(...members.map(timeOf));
+  };
   const list = [...stops.values()];
   for (const stop of list) {
     stop.services.sort((a, b) => timeOf(a) - timeOf(b) || orderOf(a) - orderOf(b));
-    stop.at = timeOf(stop.services[0]);
+    stop.at = anchorOf(stop.services);
     stop.order = Math.min(...stop.services.map(orderOf));
   }
   const stopIndex = (stop) => Number(String(stop.key).match(/(\d+)$/)?.[1]);
@@ -106,6 +117,8 @@ function routeStops(services) {
 // Planned minutes of the day and its finish (the last planned departure).
 // Rows of one co-visit share a stretch of work: counted once.
 const CLOSED = new Set(['completed', 'skipped', 'cancelled', 'no_show']);
+// Rows that will not be worked: they never set where a stop sits.
+const TERMINAL = new Set(['skipped', 'cancelled', 'no_show']);
 
 function dayTotals(stops) {
   const seen = new Set();
@@ -179,12 +192,13 @@ function StopLine({ service, onEdit, owesCompletion }) {
   );
 }
 
-function RouteCard({ name, stops, onEdit, owesCompletion }) {
+function RouteCard({ name, stops, outToday, onEdit, owesCompletion }) {
   const { minutes, finish, unplanned } = dayTotals(stops);
   return (
     <section className="rounded-sm border border-zinc-200 bg-white overflow-hidden" aria-label={`${name} route`}>
       <header className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-2 bg-zinc-50 border-b border-zinc-200 text-14">
         <h3 className="font-medium text-zinc-900 truncate min-w-0">{name}</h3>
+        {outToday && <span className="text-warn-fg">Out today</span>}
         <span className="u-nums text-ink-secondary">{stops.length} {stops.length === 1 ? 'stop' : 'stops'}</span>
         {minutes > 0 && <span className="u-nums text-ink-secondary">{minutes} min planned</span>}
         {unplanned > 0 ? (
@@ -227,7 +241,7 @@ export default function RouteListDay({ services = [], technicians = [], onEdit, 
     const seen = new Set();
     for (const t of technicians) {
       seen.add(t.id);
-      out.push({ id: t.id, name: t.name, stops: routeStops(byTech.get(t.id) || []) });
+      out.push({ id: t.id, name: t.name, outToday: t.outToday === true, stops: routeStops(byTech.get(t.id) || []) });
     }
     // A technician with visits who is not on the roster still gets a card.
     for (const [id, list] of byTech) {
@@ -238,7 +252,7 @@ export default function RouteListDay({ services = [], technicians = [], onEdit, 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 p-3" data-testid="route-list">
       {cards.map((card) => (
-        <RouteCard key={card.id} name={card.name} stops={card.stops} onEdit={onEdit} owesCompletion={owesCompletion} />
+        <RouteCard key={card.id} name={card.name} stops={card.stops} outToday={card.outToday} onEdit={onEdit} owesCompletion={owesCompletion} />
       ))}
     </div>
   );

@@ -240,4 +240,26 @@ describe('RouteListDay', () => {
     expect(card('Alex Tech').querySelector('header')).toHaveTextContent('1 stop');
     expect(within(within(card('Alex Tech')).getByTestId('stop')).getAllByRole('button')).toHaveLength(3);
   });
+
+  it('anchors a stop on its live members, not on a cancelled member\'s earlier booked time', () => {
+    render(<RouteListDay technicians={TECHS} services={[
+      // The cancelled member was booked at 08:00; the live one is modeled at 11:15.
+      stop('c', 'Pair Pia', '08:00', { visitId: 'v1', status: 'cancelled' }),
+      stop('p', 'Pair Pia', '11:00', { visitId: 'v1', plannedStopKey: 'stop-0', plannedArrivalMin: 11 * 60 + 15, plannedStopArrivalMin: 11 * 60 + 15, plannedMinutes: 35 }),
+      // Outside the route, booked 10:00: before the 11:15 stop, not after an 08:00 anchor.
+      stop('o', 'Loose Lo', '10:00', { status: 'cancelled' }),
+    ]} />);
+    expect(lines(card('Alex Tech')).map((b) => b.textContent)).toEqual([
+      expect.stringContaining('Loose Lo'), expect.stringContaining('Pair Pia'), expect.stringContaining('Pair Pia'),
+    ]);
+    expect(numbers('Alex Tech')).toEqual(['1', '2']);
+    expect(within(within(card('Alex Tech')).getAllByTestId('stop')[1]).getAllByRole('button')).toHaveLength(2);
+  });
+
+  it('shows the same Out today warning as the grid column on a technician marked out', () => {
+    render(<RouteListDay technicians={[{ id: 't1', name: 'Alex Tech', outToday: true }, { id: 't2', name: 'Blair Tech' }]} services={[]} />);
+    const header = card('Alex Tech').querySelector('header');
+    expect(within(header).getByText('Out today')).toHaveClass('text-warn-fg');
+    expect(within(card('Blair Tech').querySelector('header')).queryByText('Out today')).toBeNull();
+  });
 });
