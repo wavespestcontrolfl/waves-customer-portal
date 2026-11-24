@@ -21,11 +21,12 @@ const COMPANY_FACTS_HEADER = 'COMPANY FACTS (owner-approved; state these plainly
 // closed set differs from this list, and sms-company-facts.test.js checks that the line names exactly these.
 const FACT_CLOSED_HOLIDAY_KEYS = Object.freeze(['new_years_day', 'memorial_day', 'independence_day', 'labor_day', 'thanksgiving', 'christmas']);
 /**
- * True when Settings still says what the closed-days line says: the closed holidays are exactly the six AND Sunday is not a weekly
- * day off (the line says "We work Sundays"). The line names no other weekday. `weeklyDaysOff`: any iterable of 0 to 6, 0 = Sunday. Pure.
+ * True when Settings still says what the closed-days line says: the closed holidays are exactly the six AND no weekday is a weekly
+ * day off. The line says "We work Sundays and all other holidays", and any weekly day off closes holidays that fall on it (a Friday
+ * off closes Good Friday and Black Friday), so ANY weekly day off is a mismatch. `weeklyDaysOff`: any iterable of 0 to 6. Pure.
  */
 function factsLineMatchesSettings({ closedHolidays, weeklyDaysOff } = {}) {
-  return closedHolidaysMatchFactsLine(closedHolidays) && !new Set(weeklyDaysOff || []).has(0);
+  return closedHolidaysMatchFactsLine(closedHolidays) && new Set(weeklyDaysOff || []).size === 0;
 }
 /** True when `closedKeys` (any iterable of holiday keys) is exactly the set the facts line names. Pure. */
 function closedHolidaysMatchFactsLine(closedKeys) {

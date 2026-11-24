@@ -2,10 +2,9 @@
 /**
  * Reseal the SMS sealed exam from recent judged drafts.
  *
- * Why: the freezer only accepts drafts whose frozen facts carry the CURRENT drafter's fact contract. Every
- * wording edit to the static COMPANY FACTS section used to make every older draft incompatible, so the pool
- * held a handful of items. sealEvalItems now re-renders that static section onto the current one (rows get
- * schema_version "sms-sealed-eval.v1+rebased"), and rotates the oldest incompatible items out of the active
+ * Why: the freezer only accepts drafts whose frozen facts carry the CURRENT drafter's fact contract, today's exact static
+ * COMPANY FACTS render included. A draft under an earlier render is not sealed or rebased (every earlier render carries the
+ * retired holidays line, owner 2026-11-24). sealEvalItems rotates the oldest incompatible items out of the active
  * pool (active=false; nothing is deleted). This script runs that same pass once, on demand.
  *
  * Pure selection: no LLM call, no SMS, no email. Items already sealed are never edited.

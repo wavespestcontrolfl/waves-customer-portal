@@ -300,13 +300,15 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     // VISIT STATUS & OPEN LOOPS (header at its rendered position), Payment options, the MISSED VISIT scope line, PORTAL SELF-CANCEL
     const CURRENT_BINDINGS = [pattern_('FOLLOW-UP SLA RIGHT NOW:'), ...RS_BINDINGS, D_, D_, exactStructureRegexSource('optional'), D_, D_, exactStructureRegexSource('required'), ...VL_BINDINGS, pattern_('- Payment options:'), ...MV_BINDINGS, PC_BINDING];
     for (const [, args] of likeRaws) {
-      expect([CURRENT_BINDINGS, anyRender(CURRENT_BINDINGS)]).toContainEqual(args[1]);
+      expect(args[1]).toEqual(CURRENT_BINDINGS);
       expect(String(args[0])).not.toMatch(/!~ \?/); // 11_n+c: every fact the version carries is required, none forbidden
       expect(String(args[0])).not.toMatch(/NOT \(position\(\?::text in split_part\(split_part\(/);
     }
-    // exactly the candidate query (md.facts_block) takes the earlier company renders; the count and the retirement stay exact
+    // the candidate query (md.facts_block) takes ONLY today's company render too: a draft under an earlier render (all of them carry
+    // the retired holidays line) is never fetched, so the historical backlog is not read or rebased
     for (const [, args] of likeRaws) {
-      expect(/md\.facts_block/.test(String(args[0]))).toBe(JSON.stringify(args[1]) === JSON.stringify(anyRender(CURRENT_BINDINGS)));
+      expect(args[1]).toEqual(CURRENT_BINDINGS);
+      expect(args[1]).not.toEqual(anyRender(CURRENT_BINDINGS));
     }
     expect(likeRaws.some(([, args]) => /md\.facts_block/.test(String(args[0])))).toBe(true);
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
@@ -336,7 +338,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(contract.length).toBeGreaterThanOrEqual(2); // the count + the candidate filter
     for (const [, args] of contract) {
       expect(String(args[0])).not.toMatch(/(?<!!)~ \?(?!:)/); // nothing required, both lines forbidden
-      expect([CONTRACT_BINDINGS, anyRender(CONTRACT_BINDINGS)]).toContainEqual(args[1]);
+      expect(args[1]).toEqual(CONTRACT_BINDINGS);
     }
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block/.test(String(args[0])) && /!~ \?/.test(String(args[0])))).toBe(true);
     // the v12 items beyond the target are retired (the fake reports 3)

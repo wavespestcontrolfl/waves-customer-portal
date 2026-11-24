@@ -129,13 +129,14 @@ A visit that cannot move stays on the closed day. `auto-dispatch/needs-person-no
 ### The agents' holiday line
 
 The texting, voice and chat agents carry one static line naming the six closed holidays and saying
-"We work Sundays" (`COMPANY_FACTS[6]` in `server/services/sms-company-facts.js`, keys in
+"We work Sundays and all other holidays" (`COMPANY_FACTS[6]` in `server/services/sms-company-facts.js`, keys in
 `FACT_CLOSED_HOLIDAY_KEYS`). The line is static: the voice agent renders it when its module loads and
 the sealed exam pins the render by hash, so it does not follow Settings.
 
 Nothing in the portal compares the line with Settings. `factsLineMatchesSettings({ closedHolidays, weeklyDaysOff })`
 in the same file is the pure check: true when the closed holidays are exactly `FACT_CLOSED_HOLIDAY_KEYS` and
-Sunday is not a weekly day off. A daily read-only ops check outside the portal compares the live settings with it
+no weekday at all is a weekly day off. Any weekly day off is a mismatch: a Friday off, for example, closes Good Friday
+and Black Friday, and the line says Waves works every holiday it does not name. A daily read-only ops check outside the portal compares the live settings with it
 and raises one self-closing admin bell when they differ. Changing the closed days takes a code edit to the line
 and to `FACT_CLOSED_HOLIDAY_KEYS` together.
 

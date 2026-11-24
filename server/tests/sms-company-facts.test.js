@@ -213,13 +213,15 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
     expect(closedHolidaysMatchFactsLine(FACT_CLOSED_HOLIDAY_KEYS.slice(1))).toBe(false);
     expect(closedHolidaysMatchFactsLine([])).toBe(false);
     expect(closedHolidaysMatchFactsLine(null)).toBe(false);
-    // the line also says "We work Sundays": Sunday as a weekly day off is a mismatch, any other weekday is not
+    // the line says Sundays and every other holiday are work days
     const { factsLineMatchesSettings } = require('../services/sms-company-facts');
     expect(COMPANY_FACTS[6]).toContain('We work Sundays');
     const six = FACT_CLOSED_HOLIDAY_KEYS;
     expect(factsLineMatchesSettings({ closedHolidays: six, weeklyDaysOff: [] })).toBe(true);
-    expect(factsLineMatchesSettings({ closedHolidays: six, weeklyDaysOff: [6] })).toBe(true);
-    expect(factsLineMatchesSettings({ closedHolidays: six, weeklyDaysOff: new Set([0]) })).toBe(false);
+    // ANY weekly day off is a mismatch: a Friday off closes Good Friday and Black Friday, which the line says are work days
+    for (const day of [0, 1, 2, 3, 4, 5, 6]) expect(factsLineMatchesSettings({ closedHolidays: six, weeklyDaysOff: [day] })).toBe(false);
+    expect(factsLineMatchesSettings({ closedHolidays: six, weeklyDaysOff: new Set([5]) })).toBe(false);
+    expect(factsLineMatchesSettings({ closedHolidays: six, weeklyDaysOff: new Set() })).toBe(true);
     expect(factsLineMatchesSettings({ closedHolidays: six.slice(1), weeklyDaysOff: [] })).toBe(false);
     expect(factsLineMatchesSettings({})).toBe(false);
   });

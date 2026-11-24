@@ -1,7 +1,7 @@
 /**
  * The sealed exam's freezer against a real Postgres: recent judged drafts reach the pool when they carry
- * the facts the CURRENT drafter needs, a known earlier render of the static COMPANY FACTS section is
- * rebased (not a reason to wait a week), incompatible drafts stay out, and the pool rotates toward the
+ * the facts the CURRENT drafter needs (today's exact static COMPANY FACTS render included: a draft under any
+ * earlier render is never fetched or rebased), incompatible drafts stay out, and the pool rotates toward the
  * compatible items by retiring (never deleting) the oldest incompatible ones.
  *
  * Facts blocks come from the real buildFactsBlock, so the contract markers are checked against what the
