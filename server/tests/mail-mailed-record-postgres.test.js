@@ -244,16 +244,16 @@ postgres('mailed record on PostgreSQL', () => {
 
   test('labelsFor: the would-be batch before marking, the batch after (frozen price, hold from mailed_at); office line by city', async () => {
     const lwr = await row({ price_annual: 601.02, recipient_names: JSON.stringify(['TESTER ALEX J', 'TESTER JAMIE']) });
-    const venice = await row({ city: 'NORTH PORT', zip: '34286', page_slug: null, recipient_names: JSON.stringify(['SAMPLE SAM']) });
+    const venice = await row({ city: 'NORTH PORT', zip: '34286', page_slug: null, price_setup_fee: 99, recipient_names: JSON.stringify(['SAMPLE SAM']) });
     const before = await labelsFor({ now: NOW });
     expect(before.labels).toHaveLength(2);
     const bySlug = (list, slug) => list.find((l) => l.slug === slug);
     const first = (list) => list.find((l) => l.name === 'Alex & Jamie Tester');
     expect(first(before.labels)).toEqual({
       name: 'Alex & Jamie Tester', price: '50.09', perApplication: '150.26', slug: (await stored(lwr)).page_slug, token: (await stored(lwr)).page_token,
-      textNumber: '(941) 318-7612', heldUntil: 'Jan 23',
+      textNumber: '(941) 318-7612', heldUntil: 'Jan 23', setupFee: null,
     });
-    expect(bySlug(before.labels, null)).toMatchObject({ name: 'Sam Sample', price: '50', perApplication: '150', textNumber: '(941) 297-3337', token: (await stored(venice)).page_token });
+    expect(bySlug(before.labels, null)).toMatchObject({ name: 'Sam Sample', price: '50', perApplication: '150', textNumber: '(941) 297-3337', token: (await stored(venice)).page_token, setupFee: '99' });
     expect((await stored(lwr)).mailed_at).toBeNull(); // read only
 
     await markBatch({ batch: 'b-1', now: NOW });

@@ -78,6 +78,16 @@ describe('mark-mail-batch arguments', () => {
     expect(result.stderr).toMatch(/ECONNREFUSED/);
   });
 
+  test('only DATABASE_PUBLIC_URL set (outside the nested run) is refused before any database is opened', () => {
+    const result = spawnSync(process.execPath, [SCRIPT], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH, DATABASE_PUBLIC_URL: 'postgres://prod:prod@prod-db.invalid:5432/railway' },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/DATABASE_URL is not set/);
+    expect(result.stderr).not.toMatch(/ENOTFOUND/);
+  });
+
   test('a private DATABASE_URL with no public URL stops with the nested-command message', () => {
     const result = spawnSync(process.execPath, [SCRIPT], {
       encoding: 'utf8',

@@ -82,6 +82,11 @@ async function main() {
   if (process.env.DATABASE_PUBLIC_URL && process.env.RAILWAY_SERVICE_NAME === 'Postgres') {
     process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
   }
+  // No silent default: without an explicit DATABASE_URL, models/db would read .env or another fallback and could pick a
+  // database nobody named.
+  if (!process.env.DATABASE_URL) {
+    throw Object.assign(new Error('DATABASE_URL is not set: name the database, or run the nested Postgres command above'), { code: 'PRIVATE_DB_URL' });
+  }
   if (PRIVATE_HOST.test(process.env.DATABASE_URL || '')) {
     throw Object.assign(new Error('only the private database URL is set: run it with the nested Postgres command above'), { code: 'PRIVATE_DB_URL' });
   }
