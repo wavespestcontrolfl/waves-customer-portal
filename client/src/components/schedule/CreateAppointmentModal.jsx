@@ -55,6 +55,7 @@ import { formatETTime } from '../../lib/timezone';
 import InPersonCardSheet from './InPersonCardSheet';
 import { AskedTimeBoxLegacy } from './DayOnlyPromiseLegacy';
 import { askedTimeCreateFields, reminderAnswerFor } from './dayOnlyPromise';
+import { openEstimateLinkNotice, recentOpenEstimates } from './openEstimateLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -519,12 +520,17 @@ export function pickAutoScheduleEstimate({
   linkedEstimate = null,
   serviceCount = 0,
   appliedKey = null,
+  nowMs = Date.now(),
 } = {}) {
   if (!customerId || isLoading || error || linkedEstimate || serviceCount > 0) return null;
-  // Only auto-apply a formally ACCEPTED quote. Open quotes (sent/viewed) are
-  // surfaced in the picker but must be picked deliberately — auto-applying one
-  // would let an unrelated booking silently mark it accepted on submit.
-  const candidates = estimates.filter((estimate) => estimate.status === 'accepted' && !estimate.linkedAppointment);
+  // A formally ACCEPTED quote links first. With none, exactly one open quote
+  // (sent/viewed) this customer was sent in the last 60 days links by default
+  // so the booking records the win through the normal accept-on-book path
+  // (owner 2026-11-23). Staff untick it with Clear. Two or more open quotes
+  // never auto-link: the notice asks staff to pick the one the customer
+  // said yes to.
+  const accepted = estimates.filter((estimate) => estimate.status === 'accepted' && !estimate.linkedAppointment);
+  const candidates = accepted.length > 0 ? accepted : recentOpenEstimates(estimates, customerId, nowMs);
   if (candidates.length !== 1) return null;
   const estimate = candidates[0];
   const key = `${customerId}:${estimate.id}`;
@@ -5935,6 +5941,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       Showing estimates for {formatBookingPropertyAddress(selectedBookingProperty).street} only.
                     </div>
                   )}
+                  {(() => {
+                    // Booking-win tracking: tell staff about an open estimate
+                    // this booking would otherwise leave sitting at "sent".
+                    const notice = openEstimateLinkNotice({
+                      estimates: visibleScheduleEstimates,
+                      linkedEstimate,
+                      customerId: selectedCustomer?.id,
+                    });
+                    return notice ? (
+                      <div data-testid="open-estimate-link-notice" style={{ fontSize: 14, color: D.text, marginTop: 8 }}>
+                        {notice}
+                      </div>
+                    ) : null;
+                  })()}
                   {linkedEstimate && (
                     <>
                       {/* Acceptance status — spells out whether the customer

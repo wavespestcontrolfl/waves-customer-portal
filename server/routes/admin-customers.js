@@ -3285,7 +3285,7 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         .select(
           'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
           'estimate_slug', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'property_id',
+          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'property_id', 'sent_at',
         ),
       db('services')
         // mosquito_seasonal is active as of 20260805000010, making the
@@ -3385,6 +3385,9 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         serviceInterest: estimate.service_interest,
         acceptedAt: estimate.accepted_at,
         createdAt: estimate.created_at,
+        // When it went out: the booking modal offers to link a quote sent in
+        // the last 60 days so the booking records the win.
+        sentAt: estimate.sent_at || null,
         monthlyTotal,
         annualTotal,
         onetimeTotal,
