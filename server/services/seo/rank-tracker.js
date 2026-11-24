@@ -24,7 +24,7 @@ function resultHost(url) {
   let parsed;
   try { parsed = new URL(String(url || '')); } catch { return ''; }
   const host = parsed.hostname.toLowerCase();
-  if (/(^|\.)google\.[a-z.]+$/.test(host) && parsed.pathname === '/url') {
+  if (/^(www\.)?google\.(com|[a-z]{2}|co\.[a-z]{2}|com\.[a-z]{2})$/.test(host) && parsed.pathname === '/url') {
     const target = parsed.searchParams.get('q') || parsed.searchParams.get('url');
     if (target) {
       try { return `${host}>${new URL(target).hostname.toLowerCase()}`.slice(0, 80); } catch { /* not a URL */ }
