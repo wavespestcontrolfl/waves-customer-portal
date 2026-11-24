@@ -332,8 +332,23 @@ async function getAutopaySelectedMethodIds(customer, knex = defaultDb, { rethrow
   }
 }
 
+// A saved method a charge could use today: it has a Stripe id, a card is not past its expiry month, and a bank account
+// is neither unverified/failed nor held back by the customer's own ach_status. The same test as stripe.js
+// methodEligibleForCharge (the charge path), shared by the "add a card" reminder (what counts as a card on file) and the
+// save-only add form (which method keeps the default role).
+function isUsableSavedMethod(method, customer = {}, now = new Date()) {
+  if (!method?.stripe_payment_method_id) return false;
+  if (isExpiredCardMethod(method, now)) return false;
+  if (isBankMethodType(method.method_type)) {
+    if (customer?.ach_status && customer.ach_status !== 'active') return false;
+    if (BLOCKED_PM_ACH_STATUSES.includes(method.ach_status)) return false;
+  }
+  return true;
+}
+
 module.exports = {
   customerOnAutopay,
+  isUsableSavedMethod,
   getChargeableAutopayMethod,
   getAutopaySelectedMethodIds,
   listChargeableAutopayMethods,

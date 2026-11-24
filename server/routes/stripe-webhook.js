@@ -5649,6 +5649,9 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // the customer turns Auto Pay on from the Auto Pay card, which asks for its own checkbox.
       const SaveOnlyCard = require('../services/portal-save-only-card');
       if (SaveOnlyCard.setupIntentSavesOnly(setupIntent)) {
+        // The same stale-copy rule as the browser save (and the branch below): an intent minted under older consent text
+        // neither records what the customer saw nor takes the default role; the office is asked to re-collect.
+        if (!(await ConsentService.deferredCaptureConsentVersionCurrent(setupIntent, { context: 'portal add-method webhook', customerId: wavesCustomerId }))) return;
         await SaveOnlyCard.finishSaveOnlyAdd({
           customerId: wavesCustomerId,
           method: saved,

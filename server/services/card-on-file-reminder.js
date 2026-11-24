@@ -44,7 +44,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { propertyDisplayLabel } = require('../utils/property-display');
-const { isExpiredCardMethod, isBankMethodType } = require('./autopay-eligibility');
+const { isUsableSavedMethod, isBankMethodType } = require('./autopay-eligibility');
 
 const TEMPLATE_KEY = 'payment.card_on_file_reminder';
 const TRANSACTIONAL_GROUP = 'transactional_required';
@@ -102,7 +102,8 @@ async function collectEvents(today, now, customerIds = null) {
   const consider = (customerId, event) => {
     if (!customerId || event.on > today || event.on < oldest) return;
     const known = newest.get(String(customerId));
-    if (!known || event.on > known.on) newest.set(String(customerId), event);
+    // Two losses on the same ET day: the larger key wins, so the sweep and the handoff re-read pick the same one.
+    if (!known || event.on > known.on || (event.on === known.on && event.key > known.key)) newest.set(String(customerId), event);
   };
 
   // The ORIGINAL notice only (idempotency key payment.method_removed:<customer>:<method>): a bounce-recovery copy
@@ -139,17 +140,6 @@ async function collectEvents(today, now, customerIds = null) {
   const due = new Map();
   for (const [customerId, event] of newest) if (event.on <= dueBy) due.set(customerId, event);
   return due;
-}
-
-// Mirrors the charge path's methodEligibleForCharge (stripe.js): the method a charge could use.
-function methodUsable(method, customer, now) {
-  if (!method.stripe_payment_method_id) return false;
-  if (isExpiredCardMethod(method, now)) return false;
-  if (isBankMethodType(method.method_type)) {
-    if (customer.ach_status && customer.ach_status !== 'active') return false;
-    if (['pending_verification', 'verification_failed'].includes(method.ach_status)) return false;
-  }
-  return true;
 }
 
 // Customer turned Auto Pay off with the toggle (an autopay_disabled event with no removal or card-swap source), and
@@ -252,7 +242,7 @@ async function liveVerdict(customerId, event, today, now) {
     return { ok: false, reason: 'customer_not_active' };
   }
   const methods = await db('payment_methods').where({ customer_id: customerId });
-  if (methods.some((method) => methodUsable(method, customer, now))) return { ok: false, reason: 'has_usable_method' };
+  if (methods.some((method) => isUsableSavedMethod(method, customer, now))) return { ok: false, reason: 'has_usable_method' };
   if (event.kind === 'expired' && await autopayTurnedOffOnPurpose(customer)) return { ok: false, reason: 'autopay_off_on_purpose' };
 
   // A collections dispute hold withholds the notice (its link is billing follow-up): decided here, before a shadow row
@@ -397,5 +387,5 @@ async function runCardOnFileReminderSweep({ now: fixedNow = null, customerIds = 
 module.exports = {
   runCardOnFileReminderSweep,
   TEMPLATE_KEY,
-  _private: { collectEvents, liveVerdict, methodUsable, expiredOnDate, expiryMonthsInWindow, plusDays, decideOne, nextSelfPayVisit },
+  _private: { collectEvents, liveVerdict, expiredOnDate, expiryMonthsInWindow, plusDays, decideOne, nextSelfPayVisit },
 };

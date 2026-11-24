@@ -51,6 +51,7 @@ jest.mock('../services/stripe', () => ({
 }));
 jest.mock('../services/payment-method-consents', () => ({
   hasEnrollmentScopedConsent: jest.fn(async () => true),
+  deferredCaptureConsentVersionCurrent: jest.fn(async () => true),
   recordConsent: jest.fn(async () => ({})),
   linkPaymentMethodId: jest.fn(async () => ({})),
 }));
@@ -144,5 +145,12 @@ describe('portal-add-method webhook save-only form', () => {
     expect(enrollConsentedMethod).not.toHaveBeenCalled();
     expect(PayerService.resolveForInvoice).not.toHaveBeenCalled();
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('an intent minted under older consent text is neither recorded nor given the default role', async () => {
+    ConsentService.deferredCaptureConsentVersionCurrent.mockResolvedValueOnce(false);
+    await handleSetupIntentSucceeded({ ...SETUP_INTENT, metadata: { ...SETUP_INTENT.metadata, enroll_autopay: 'false' } });
+    expect(finishSaveOnlyAdd).not.toHaveBeenCalled();
+    expect(enrollConsentedMethod).not.toHaveBeenCalled();
   });
 });

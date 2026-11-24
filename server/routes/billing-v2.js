@@ -444,7 +444,9 @@ router.post('/cards', async (req, res, next) => {
     if (!card) {
       card = await StripeService.savePaymentMethod(req.customerId, resolvedPaymentMethodId, {
         enableAutopay: false,
-        makeDefault: !currentAutopayMethod,
+        // The save-only form (the "add a card" email link) inserts non-default on both paths; finishSaveOnlyAdd settles
+        // the default role under the customer lock, so a usable default is never displaced by the insert.
+        makeDefault: !currentAutopayMethod && !setupIntentSavesOnly(setupIntent),
       });
     }
 

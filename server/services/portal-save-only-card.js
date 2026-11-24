@@ -16,7 +16,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { recordAuditEvent } = require('./audit-log');
-const { isExpiredCardMethod } = require('./autopay-eligibility');
+const { isUsableSavedMethod } = require('./autopay-eligibility');
 const { getConsentText } = require('./payment-method-consent-text');
 
 const SAVE_ONLY_METADATA_KEY = 'enroll_autopay';
@@ -30,12 +30,12 @@ function setupIntentSavesOnly(setupIntent) {
 // makeDefault is "no autopay default", the webhook's is false), and no enrollment follows to settle it. One rule
 // settles it either way, under the customer row lock: a card is the default when the customer has no other usable
 // default. Resolves the method row as it now stands.
-async function settleDefault(trx, customerId, method) {
-  await trx('customers').where({ id: customerId }).forUpdate().first('id');
+async function settleDefault(trx, customer, method) {
+  const customerId = customer.id;
   const rows = await trx('payment_methods').where({ customer_id: customerId });
   const self = rows.find((row) => String(row.id) === String(method.id)) || method;
   const otherUsableDefault = rows.some((row) => String(row.id) !== String(method.id)
-    && row.is_default === true && !!row.stripe_payment_method_id && !isExpiredCardMethod(row));
+    && row.is_default === true && isUsableSavedMethod(row, customer));
   const shouldBeDefault = !otherUsableDefault;
   if (self.is_default === shouldBeDefault) return self;
   if (shouldBeDefault) await trx('payment_methods').where({ customer_id: customerId, is_default: true }).whereNot({ id: method.id }).update({ is_default: false });
@@ -72,8 +72,11 @@ async function recordSaveOnlyEvent(trx, customerId, method, { consentTextVersion
  */
 async function finishSaveOnlyAdd({ customerId, method, consentTextVersion = null, ip = null, userAgent = null, via }) {
   const settled = await db.transaction(async (trx) => {
+    // The customer row lock comes first: the browser save and the webhook finish at about the same time, and the audit
+    // check and the default role must each be decided by whichever of them holds it.
+    const customer = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'ach_status');
     await recordSaveOnlyEvent(trx, customerId, method, { consentTextVersion, ip, userAgent, via });
-    return settleDefault(trx, customerId, method);
+    return settleDefault(trx, customer, method);
   });
   logger.info(`[portal-save-only-card] save-only add completed for customer ${customerId}: pm ${method.id} via ${via}, Auto Pay untouched`);
   return settled;

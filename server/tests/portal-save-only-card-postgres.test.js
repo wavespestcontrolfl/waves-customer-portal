@@ -86,6 +86,38 @@ maybeDescribe('finishSaveOnlyAdd (real schema)', () => {
     expect(await defaults(browserFirst)).toEqual([insertedByBrowser.id]);
   });
 
+  test('the browser save and the webhook finishing at the same moment leave one audit event and one default', async () => {
+    const id = await customer();
+    const method = await card(id, { is_default: false });
+    await Promise.all([
+      finish(id, method),
+      finish(id, method, { via: 'portal_add_method_webhook', ip: null, userAgent: null }),
+    ]);
+    expect(await db('audit_log').where({ action: 'customer.payment_method.saved_card_only', resource_id: method.id })).toHaveLength(1);
+    expect(await defaults(id)).toEqual([method.id]);
+  });
+
+  test('a bank account that cannot be charged (unverified, failed, or held by the customer) does not keep the default', async () => {
+    for (const [methodExtra, customerExtra] of [
+      [{ ach_status: 'pending_verification' }, {}],
+      [{ ach_status: 'verification_failed' }, {}],
+      [{ ach_status: 'verified' }, { ach_status: 'suspended' }],
+    ]) {
+      const id = await customer();
+      if (customerExtra.ach_status) await db('customers').where({ id }).update(customerExtra);
+      const bank = await card(id, { is_default: true, method_type: 'ach', exp_month: null, exp_year: null, ...methodExtra });
+      const added = await card(id, { is_default: false });
+      expect((await finish(id, added)).is_default).toBe(true);
+      expect(await defaults(id)).toEqual([added.id]);
+      expect((await db('payment_methods').where({ id: bank.id }).first()).is_default).toBe(false);
+    }
+    const healthy = await customer();
+    const verifiedBank = await card(healthy, { is_default: true, method_type: 'ach', exp_month: null, exp_year: null, ach_status: 'verified' });
+    const extra = await card(healthy, { is_default: false });
+    expect((await finish(healthy, extra)).is_default).toBe(false);
+    expect(await defaults(healthy)).toEqual([verifiedBank.id]);
+  });
+
   test('another usable default keeps the role; an expired default gives it up to the new card', async () => {
     const keeper = await customer();
     const existing = await card(keeper, { is_default: true });

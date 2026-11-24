@@ -422,6 +422,19 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     expect(await run(stale)).toMatchObject({ candidates: 0 });
   });
 
+  test('two methods lost on the same ET day pick the same trigger in the sweep and in the handoff re-read, whatever order the rows come back in', async () => {
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'true';
+    const id = await dueCustomer();
+    await removalEmail(id);
+    await removalEmail(id);
+    await removalEmail(id);
+    jest.spyOn(lifecycle, 'sendCardOnFileReminder').mockImplementationOnce(async (args) => {
+      expect(await args.beforeProviderHandoff()).toBe(true);
+      return { ok: false, reason: 'stopped' };
+    });
+    expect(await run(id)).toMatchObject({ skipped: { stopped: 1 } });
+  });
+
   test('a customer whose active flag is NULL cannot sign in to the linked form and is not emailed', async () => {
     process.env.GATE_CARD_ON_FILE_REMINDER = 'shadow';
     const id = await dueCustomer({ active: null });
