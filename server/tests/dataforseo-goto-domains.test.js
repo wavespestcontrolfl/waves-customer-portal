@@ -53,6 +53,13 @@ describe('serpOrganic google /goto wrapper normalization', () => {
     expect(item.site_url).toBe('https://www.wavespestcontrol.com');
   });
 
+  test('a port in the breadcrumb origin stays in site_url', async () => {
+    response = serp([organic({ breadcrumb: 'https://shop.example.com:8443' })]);
+    const [item] = itemsOf(await dataforseo.serpOrganic('pest control'));
+    expect(item.domain).toBe('shop.example.com');
+    expect(item.site_url).toBe('https://shop.example.com:8443');
+  });
+
   test('breadcrumb with no host ("5 comments") leaves the item unchanged', async () => {
     response = serp([organic({ breadcrumb: '5 comments' })]);
     const [item] = itemsOf(await dataforseo.serpOrganic('pest control'));
@@ -62,7 +69,7 @@ describe('serpOrganic google /goto wrapper normalization', () => {
   test('normal non-goto organic item and non-organic items are unchanged', async () => {
     const normal = organic({ domain: 'example.com', url: 'https://example.com/pest', breadcrumb: 'https://example.com › pest' });
     const paa = { type: 'people_also_ask', url: GOTO, breadcrumb: 'https://www.masseyservices.com' };
-    response = serp([normal, paa]);
+    response = serp([structuredClone(normal), structuredClone(paa)]);
     const items = itemsOf(await dataforseo.serpOrganic('pest control'));
     expect(items[0]).toEqual(normal);
     expect(items[1]).toEqual(paa);
