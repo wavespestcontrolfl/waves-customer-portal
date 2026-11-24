@@ -444,7 +444,10 @@ async function spanWaitOf(trx, run, technicianId, span, amountCents) {
   // A holiday inside the span makes the base hold the premium of every shift that runs into it, and a shift that started the
   // night before is paid by the check of ITS week, which can be a week before the span (payroll-holiday-work.js). That week
   // must be paid too, or the base would be missing the premium.
-  if (earlier.coversFrom <= earlier.coversTo && timeOffOn()) {
+  // Asked whenever time off is paid, also when the span starts on the run's own Monday (nothing of the span is before the run
+  // then, but the shift of the Sunday night before it can still run into the span's first day): unpaidHolidayShiftWeek only
+  // looks at weeks before the run.
+  if (timeOffOn()) {
     const unpaid = await unpaidHolidayShiftWeek(trx, technicianId, span, beforeRun);
     if (unpaid) return { reason: 'week_not_paid', week: unpaid };
   }

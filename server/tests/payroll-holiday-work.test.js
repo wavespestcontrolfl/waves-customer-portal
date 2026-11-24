@@ -4,7 +4,8 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { holidayWorkForWeek, capHolidayDays, dayBounds } = require('../services/payroll-holiday-work');
+const { allocate, holidayWorkForWeek, capHolidayDays, dayBounds } = require('../services/payroll-holiday-work');
+const { computePaycheck } = require('../services/payroll-calc');
 const { parseETDateTime, etDateString } = require('../utils/datetime-et');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
@@ -174,6 +175,46 @@ describe('holidayWorkForWeek: the unpaid meal inside the day', () => {
     const shift = entry('2026-09-07T08:00', '2026-09-07T17:00');
     const rest = entry('2026-09-07T10:00', '2026-09-07T10:15');
     expect(allWeeks({ shifts: [shift], breaks: [rest], daily: daily([HOLIDAY, 540, 30]) }).get(HOLIDAY)).toBe(510);
+  });
+});
+
+describe('the unpaid meal is shared to the exact hundredth', () => {
+  test('an 11:30 PM to 7:30 AM shift across two holidays pays all 450 minutes, so $24.02 an hour pays $90.08, not $90.07', () => {
+    // 480 minutes, a 30 minute automatic meal; 30 minutes fall in the first holiday and 450 in the second. Each share alone is
+    // 1.875 and 28.125 minutes, which rounds to 1.88 + 28.13 = 30.01 (one hundredth too much). Largest remainder: 1.88 + 28.12.
+    const shift = entry('2026-09-07T23:30', '2026-09-08T07:30');
+    const result = week(HOLIDAY_WEEK, { shifts: [shift], daily: daily([HOLIDAY, 480, 30]), holidays: [HOLIDAY, '2026-09-08'] });
+    expect(result.get(HOLIDAY)).toBe(28.12);
+    expect(result.get('2026-09-08')).toBe(421.88);
+    const minutes = Math.round([...result.values()].reduce((sum, m) => sum + m * 100, 0)) / 100;
+    expect(minutes).toBe(450);
+    const pay = computePaycheck({
+      payDate: '2026-09-18', hourlyRate: '24.02', holidayMinutes: 0, ptoMinutes: 0, holidayWorkMinutes: String(minutes),
+      w4: { formYear: 2026, filingStatus: 'single', step2Checkbox: false },
+    });
+    expect(pay.holidayWorkPremiumCents).toBe(9008);
+  });
+
+  test('the shares of the holidays and of the rest of the shift add up to exactly the deduction, for any split', () => {
+    // 10 PM to 6 AM across one holiday (2 hours inside) with a 45 minute meal: the holiday and the rest share 4500 hundredths
+    const shift = entry('2026-09-06T22:00', '2026-09-07T06:00');
+    const result = week(PRIOR, { shifts: [shift], daily: daily(['2026-09-06', 480, 45]) });
+    // 360 minutes inside, 120 outside: the meal is 3/4 inside = 33.75
+    expect(result.get(HOLIDAY)).toBe(360 - 33.75);
+  });
+
+  test('allocate: whole hundredths that add up to the total, the leftover to the largest remainder, ties to the earliest', () => {
+    expect(allocate(3000, [3000, 45000, 0])).toEqual([188, 2812, 0]);
+    expect(allocate(100, [1, 1, 1])).toEqual([34, 33, 33]);
+    expect(allocate(100, [1, 1, 1]).reduce((a, b) => a + b, 0)).toBe(100);
+    expect(allocate(7, [1, 2, 4])).toEqual([1, 2, 4]);
+    expect(allocate(5, [0, 0])).toEqual([5, 0]);
+    expect(allocate(0, [3, 4])).toEqual([0, 0]);
+    for (let total = 1; total < 60; total += 7) {
+      for (const weights of [[3, 5, 11], [1, 0, 6], [999, 1], [2, 2, 2, 2]]) {
+        expect(allocate(total, weights).reduce((a, b) => a + b, 0)).toBe(total);
+      }
+    }
   });
 });
 

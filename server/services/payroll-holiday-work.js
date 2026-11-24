@@ -75,6 +75,25 @@ function recordedMealPieces(breaks, shifts, floor) {
   return pieces;
 }
 
+// `total` (whole hundredths) shared in proportion to `weights` by largest remainder: whole numbers that add up to exactly
+// `total`, the leftover hundredths going to the largest fractional parts, ties to the earliest part. All weights zero: all to the
+// first part. Pure and deterministic.
+function allocate(total, weights) {
+  if (total <= 0) return weights.map(() => 0);
+  const sum = weights.reduce((acc, w) => acc + w, 0);
+  if (sum <= 0) return weights.map((_, n) => (n === 0 ? total : 0));
+  const shares = weights.map((w) => ({ whole: Math.floor((total * w) / sum), rest: (total * w) % sum }));
+  let left = total - shares.reduce((acc, share) => acc + share.whole, 0);
+  const order = shares.map((share, n) => n).sort((a, b) => (shares[b].rest - shares[a].rest) || (a - b));
+  for (const n of order) {
+    if (left <= 0) break;
+    if (weights[n] <= 0) continue;
+    shares[n].whole += 1;
+    left -= 1;
+  }
+  return shares.map((share) => share.whole);
+}
+
 /**
  * The paid minutes one technician earns on holidays from the shifts of ONE pay week, pure.
  *   dates      the work dates ('YYYY-MM-DD') of the week, Monday to Sunday
@@ -111,18 +130,22 @@ function holidayWorkForWeek({ dates, shifts, breaks = [], daily, holidays }) {
     const pieces = meal > 0 ? recordedMealPieces(breaks.filter((b) => b.work_date === date), group, floor) : [];
     const recordedTotal = pieces.reduce((sum, p) => sum + p.length, 0);
     const placed = Math.min(meal, recordedTotal);
-    for (const holiday of held) {
+    // The parts of the shift the holidays cut it into, in date order: each holiday it overlaps, then (last) the rest of it.
+    const parts = held.map((holiday) => {
       const bounds = dayBounds(holiday);
-      const inside = group.reduce((sum, s) => sum + insideHundredths(s, bounds), 0);
-      if (inside <= 0) continue;
-      let mealInside = 0;
-      if (meal > 0) {
-        const recordedInside = pieces.reduce((sum, p) => sum + p.insideHolidays(bounds), 0);
-        mealInside = (recordedTotal > 0 ? Math.round((recordedInside * placed) / recordedTotal) : 0)
-          + Math.round(((meal - placed) * inside) / (total || inside));
-      }
-      add(holiday, Math.max(0, inside - mealInside));
-    }
+      return {
+        holiday,
+        inside: group.reduce((sum, s) => sum + insideHundredths(s, bounds), 0),
+        recorded: pieces.reduce((sum, piece) => sum + piece.insideHolidays(bounds), 0),
+      };
+    }).filter((part) => part.inside > 0);
+    if (!parts.length) continue;
+    // The deduction is shared in whole hundredths, by largest remainder, so the shares of the holidays and of the rest of
+    // the shift add up to EXACTLY the deduction (never a hundredth lost to rounding each share alone): the placed part by the
+    // recorded meal inside each holiday, the rest by the shift inside each.
+    const placedShares = allocate(placed, [...parts.map((part) => part.recorded), Math.max(0, recordedTotal - parts.reduce((sum, part) => sum + part.recorded, 0))]);
+    const restShares = allocate(meal - placed, [...parts.map((part) => part.inside), Math.max(0, total - parts.reduce((sum, part) => sum + part.inside, 0))]);
+    parts.forEach((part, n) => add(part.holiday, Math.max(0, part.inside - placedShares[n] - restShares[n])));
   }
   return [...totals.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([workDate, units]) => ({ workDate, minutes: units / 100 }));
 }
@@ -227,4 +250,4 @@ async function otherWeeksOfShiftsInto(conn, technicianId, days) {
   return [...weeks].sort();
 }
 
-module.exports = { holidayWorkForWeek, holidayWorkByDay, capHolidayDays, dayBounds, otherWeeksOfShiftsInto };
+module.exports = { allocate, holidayWorkForWeek, holidayWorkByDay, capHolidayDays, dayBounds, otherWeeksOfShiftsInto };
