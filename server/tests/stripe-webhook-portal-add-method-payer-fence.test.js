@@ -124,3 +124,18 @@ describe('portal-add-method webhook payer fence', () => {
     expect(enrollConsentedMethod).not.toHaveBeenCalled();
   });
 });
+
+// The "add a card" reminder email's save-only form (GATE_CARD_ON_FILE_REMINDER): the SetupIntent is stamped
+// enroll_autopay=false, so this webhook saves the method and records its consent but never enrolls Auto Pay.
+describe('portal-add-method webhook save-only form', () => {
+  const ConsentService = require('../services/payment-method-consents');
+
+  test('a stamped SetupIntent is saved and consented, never enrolled, and the payer is not even consulted', async () => {
+    const saveOnly = { ...SETUP_INTENT, metadata: { ...SETUP_INTENT.metadata, enroll_autopay: 'false' } };
+    await handleSetupIntentSucceeded(saveOnly);
+    expect(ConsentService.linkPaymentMethodId).toHaveBeenCalledWith('pm_stripe_1', 'pm-row-1');
+    expect(enrollConsentedMethod).not.toHaveBeenCalled();
+    expect(PayerService.resolveForInvoice).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+});

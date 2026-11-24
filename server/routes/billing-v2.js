@@ -10,6 +10,7 @@ const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
 const { isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
+const { SAVE_ONLY_METADATA_KEY, setupIntentSavesOnly } = require('../services/portal-save-only-card');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral } = require('../services/failed-payments');
 const { isEnabled } = require('../config/feature-gates');
@@ -223,9 +224,12 @@ router.post('/cards/setup-intent', async (req, res, next) => {
       // The saved-payment-method consent version the modal renders beside
       // its (locked) checkbox — see the stale check below.
       consentTextVersion: Joi.string().max(40).optional(),
+      // false = the save-only form (the link in the "add a card" reminder email): a card, never a bank account, and
+      // the saved method is NOT enrolled in Auto Pay (see services/portal-save-only-card.js).
+      enrollAutopay: Joi.boolean().default(true),
     });
 
-    const { paymentMethodType, consentTextVersion } = await schema.validateAsync(req.body);
+    const { paymentMethodType, consentTextVersion, enrollAutopay } = await schema.validateAsync(req.body);
     // Rendered-version attestation (codex #5434 r1 P1): the portal bundles
     // its own copy of the consent text, so the mint refuses a tab whose
     // text is not this server's current version (or that attests none — a
@@ -249,13 +253,17 @@ router.post('/cards/setup-intent', async (req, res, next) => {
     // appear.
     const featureGates = require('../config/feature-gates');
     const achAllowed = featureGates.isEnabled('portalAchAutopay');
-    const effectiveType = !achAllowed && paymentMethodType !== 'card' ? 'card' : paymentMethodType;
+    const effectiveType = (!achAllowed || !enrollAutopay) && paymentMethodType !== 'card' ? 'card' : paymentMethodType;
     const result = await StripeService.createSetupIntent(req.customerId, effectiveType, {
       // Routes setup_intent.succeeded completion for the micro-deposit
       // deferred save (see POST /cards + the stripe-webhook
       // portal_add_method branch). Card intents carry it too — the webhook
       // branch is idempotent alongside the synchronous save below.
-      metadata: { purpose: 'portal_add_method', [CONSENT_VERSION_METADATA_KEY]: consentTextVersion },
+      metadata: {
+        purpose: 'portal_add_method',
+        [CONSENT_VERSION_METADATA_KEY]: consentTextVersion,
+        ...(enrollAutopay ? {} : { [SAVE_ONLY_METADATA_KEY]: 'false' }),
+      },
     });
 
     res.json({
@@ -268,6 +276,22 @@ router.post('/cards/setup-intent', async (req, res, next) => {
     next(err);
   }
 });
+
+// The saved method as POST /cards answers it.
+function savedCardPayload(card) {
+  return {
+    id: card.id,
+    processor: 'stripe',
+    methodType: card.method_type || 'card',
+    brand: card.card_brand,
+    lastFour: card.last_four,
+    expMonth: card.exp_month,
+    expYear: card.exp_year,
+    isDefault: card.is_default,
+    bankName: card.bank_name || null,
+    bankLastFour: card.bank_last_four || null,
+  };
+}
 
 // =========================================================================
 // POST /api/billing/cards — Save a payment method (Stripe)
@@ -474,6 +498,12 @@ router.post('/cards', async (req, res, next) => {
       ip: req.ip,
       userAgent: req.get('user-agent') || null,
     });
+    // Save-only form (the "add a card" reminder email link): the method is saved and its consent is recorded above,
+    // and Auto Pay is NOT turned on. The stamp is on the SetupIntent itself, so a redirect return and the
+    // portal_add_method webhook answer the same way.
+    if (setupIntentSavesOnly(setupIntent)) {
+      return res.json({ success: true, enrolled: false, enrollReason: 'save_only', card: savedCardPayload(card) });
+    }
     // Payer routing BEFORE enrollment (Codex #3395 r7 P1): a customer whose
     // invoices route to a third-party payer must never have their saved
     // card flipped into Auto Pay — self-pay charging would point at the
@@ -525,18 +555,7 @@ router.post('/cards', async (req, res, next) => {
         success: true,
         enrolled: false,
         enrollReason: 'payer_billed',
-        card: {
-          id: card.id,
-          processor: 'stripe',
-          methodType: card.method_type || 'card',
-          brand: card.card_brand,
-          lastFour: card.last_four,
-          expMonth: card.exp_month,
-          expYear: card.exp_year,
-          isDefault: card.is_default,
-          bankName: card.bank_name || null,
-          bankLastFour: card.bank_last_four || null,
-        },
+        card: savedCardPayload(card),
       });
     }
     const { enrollConsentedMethod } = require('../services/autopay-enrollment');
@@ -566,18 +585,7 @@ router.post('/cards', async (req, res, next) => {
         success: true,
         enrolled: false,
         enrollReason: 'payer_billed',
-        card: {
-          id: card.id,
-          processor: 'stripe',
-          methodType: card.method_type || 'card',
-          brand: card.card_brand,
-          lastFour: card.last_four,
-          expMonth: card.exp_month,
-          expYear: card.exp_year,
-          isDefault: card.is_default,
-          bankName: card.bank_name || null,
-          bankLastFour: card.bank_last_four || null,
-        },
+        card: savedCardPayload(card),
       });
     }
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
@@ -592,18 +600,7 @@ router.post('/cards', async (req, res, next) => {
 
     res.json({
       success: true,
-      card: {
-        id: card.id,
-        processor: 'stripe',
-        methodType: card.method_type || 'card',
-        brand: card.card_brand,
-        lastFour: card.last_four,
-        expMonth: card.exp_month,
-        expYear: card.exp_year,
-        isDefault: card.is_default,
-        bankName: card.bank_name || null,
-        bankLastFour: card.bank_last_four || null,
-      },
+      card: savedCardPayload(card),
     });
   } catch (err) {
     next(err);

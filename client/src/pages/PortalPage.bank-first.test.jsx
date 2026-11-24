@@ -23,6 +23,7 @@ vi.mock('../utils/api', () => ({
     updateAutopay: vi.fn(),
     removeCard: vi.fn(),
     createSetupIntent: vi.fn(),
+    saveStripeCard: vi.fn(),
     getNextService: vi.fn(),
     getServices: vi.fn(),
     getStationMap: vi.fn(),
@@ -156,5 +157,44 @@ describe('Billing tab Add Payment Method modal — no close while saving', { tim
     expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(screen.queryByRole('dialog', { name: 'Add payment method' })).toBeNull();
+  });
+});
+
+// The "add a card" reminder email links to /?tab=billing&add_card=1 (GATE_CARD_ON_FILE_REMINDER): the Billing tab
+// opens the Add form once, as a save-only card form that never turns Auto Pay on.
+describe('Billing tab Add Payment Method modal — save-only form from the reminder email link', { timeout: 30000 }, () => {
+  const savedSetupIntent = { status: 'succeeded', payment_method: 'pm_new', id: 'si_new' };
+
+  it('opens by itself, card only, minted with enrollAutopay:false, and says saving does not turn Auto Pay on', async () => {
+    api.createSetupIntent.mockResolvedValue({ publishableKey: 'pk_test_1', clientSecret: 'seti_secret', paymentMethodTypes: ['card'] });
+    getStripe.mockResolvedValue(fakeStripe());
+    render(<BillingTab customer={customer} openAddCard />);
+    const dialog = await screen.findByRole('dialog', { name: 'Add payment method' }, SETTLE);
+    expect(api.createSetupIntent).toHaveBeenCalledTimes(1);
+    expect(api.createSetupIntent).toHaveBeenCalledWith('card', { enrollAutopay: false });
+    expect(dialog).toHaveTextContent('Saving this card does not turn Auto Pay on.');
+    expect(screen.getByRole('button', { name: 'Save Card' })).toBeInTheDocument();
+  });
+
+  it('after the save: the card is saved, Auto Pay is not touched, and the page says it did not turn it on', async () => {
+    api.getAutopay.mockResolvedValue({ ...autopay, state: 'disabled', autopay_enabled: false, autopay_payment_method_id: null, autopay_selected_method_ids: [] });
+    const confirmSetup = vi.fn(async () => ({ setupIntent: savedSetupIntent }));
+    api.createSetupIntent.mockResolvedValue({ publishableKey: 'pk_test_1', clientSecret: 'seti_secret', paymentMethodTypes: ['card'] });
+    api.saveStripeCard.mockResolvedValue({ success: true, enrolled: false, card: { id: 'pm-new' } });
+    getStripe.mockResolvedValue({ ...fakeStripe(), confirmSetup });
+    render(<BillingTab customer={customer} openAddCard />);
+    await screen.findByRole('dialog', { name: 'Add payment method' }, SETTLE);
+    await waitFor(() => expect(handlers.ready).toBeTypeOf('function'), { timeout: 2000 });
+    await act(async () => { handlers.ready(); });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Card' }));
+    await waitFor(() => expect(api.saveStripeCard).toHaveBeenCalledWith('pm_new', 'si_new'));
+    expect(await screen.findByText('Card saved. Saving it did not turn Auto Pay on. You can turn it on below if you want it.', {}, SETTLE)).toBeInTheDocument();
+    expect(api.updateAutopay).not.toHaveBeenCalled();
+  });
+
+  it('the usual Add payment button still mints the full form and shows no save-only line', async () => {
+    await openModal(['card', 'us_bank_account']);
+    expect(api.createSetupIntent).toHaveBeenCalledWith('card_or_bank');
+    expect(screen.getByRole('dialog', { name: 'Add payment method' })).not.toHaveTextContent('does not turn Auto Pay on');
   });
 });

@@ -158,6 +158,15 @@ describe('POST /cards/setup-intent — gate-authoritative method types', () => {
     expect(body.paymentMethodTypes).toEqual(['card', 'us_bank_account']);
   });
 
+  test('the save-only form (the "add a card" email link) mints a card-only SetupIntent stamped enroll_autopay=false, even when a bank is asked for', async () => {
+    mockIsEnabled.mockReturnValue(true);
+    mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs', setupIntentId: 'si_1', paymentMethodTypes: ['card'] });
+    await invoke(handler(), { body: { paymentMethodType: 'card_or_bank', enrollAutopay: false, ...ATTEST } });
+    expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({
+      metadata: { purpose: 'portal_add_method', ...STAMP, enroll_autopay: 'false' },
+    }));
+  });
+
   test.each([
     ['an older bundle (stale version)', { consentTextVersion: 'v11_2026-08-25' }],
     ['a bundle that predates the attestation (absent)', {}],

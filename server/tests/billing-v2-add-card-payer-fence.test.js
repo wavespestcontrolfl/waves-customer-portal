@@ -189,3 +189,36 @@ describe('POST /cards payer fence', () => {
     });
   });
 });
+
+// The "add a card" reminder email links to a save-only add form: its SetupIntent carries enroll_autopay=false, and
+// adding a card there must never turn Auto Pay on (owner 2026-11-24, GATE_CARD_ON_FILE_REMINDER).
+describe('POST /cards save-only form', () => {
+  const ConsentService = require('../services/payment-method-consents');
+  const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+
+  test('a SetupIntent stamped enroll_autopay=false saves the card and records consent, but never enrolls Auto Pay', async () => {
+    StripeService.retrieveSetupIntent.mockResolvedValue({
+      status: 'succeeded',
+      payment_method: { id: 'pm_stripe_1', type: 'card' },
+      metadata: { consent_text_version: CONSENT_VERSION, enroll_autopay: 'false' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postCard(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ success: true, enrolled: false, enrollReason: 'save_only' });
+      expect(body.card.id).toBe('pm-row-1');
+      expect(ConsentService.recordConsent).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-row-1' }));
+      expect(enrollConsentedMethod).not.toHaveBeenCalled();
+      expect(PayerService.resolveForInvoice).not.toHaveBeenCalled();
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+  });
+
+  test('without the stamp the same save still enrolls (the usual add form is unchanged)', async () => {
+    await withServer(async (baseUrl) => {
+      expect((await postCard(baseUrl)).status).toBe(200);
+      expect(enrollConsentedMethod).toHaveBeenCalledTimes(1);
+    });
+  });
+});

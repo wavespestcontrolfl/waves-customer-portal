@@ -5693,6 +5693,12 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
         });
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
+      // Save-only form (the "add a card" reminder email link): the method is saved and its consent recorded above, and
+      // Auto Pay is NOT turned on, here or in POST /billing/cards. The customer chooses it on the Auto Pay card.
+      if (require('../services/portal-save-only-card').setupIntentSavesOnly(setupIntent)) {
+        logger.info(`[stripe-webhook] portal-add-method save-only completed for customer ${wavesCustomerId}: pm ${stripePmId}, Auto Pay untouched`);
+        return;
+      }
       // Payer routing BEFORE enrollment (Codex #3395 r9 P1) — same fence as
       // POST /billing-v2/cards: this webhook fires independently of the
       // browser POST (before or after it), so without its own check a payer

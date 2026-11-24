@@ -6514,7 +6514,7 @@ function BillingChannelSelect({ field, channels, usable, saving, onChange }) {
 // views, so the root stays the same <div> across them.
 const BILLING_COLUMN = { display: 'flex', flexDirection: 'column', gap: 16 };
 
-function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, onSwitchTab = null }) {
+function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, openAddCard = false, onSwitchTab = null }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
   // credits) and the tokenized Pay now hand-off; every management surface
@@ -6622,6 +6622,11 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
   const [addMethodType, setAddMethodType] = useState('card');
   const [achOffered, setAchOffered] = useState(false);
   const [bankPendingNotice, setBankPendingNotice] = useState(false);
+  // Save-only add form (the link in the "add a card" reminder email, ?tab=billing&add_card=1): the SetupIntent is
+  // minted with enrollAutopay:false, so saving the card never turns Auto Pay on; the customer turns it on from the
+  // Auto Pay card if they want it.
+  const [saveOnlyAdd, setSaveOnlyAdd] = useState(false);
+  const [savedWithoutAutopay, setSavedWithoutAutopay] = useState(false);
   const [bankPendingVerifyUrl, setBankPendingVerifyUrl] = useState('');
   const [bankPendingMicrodepositType, setBankPendingMicrodepositType] = useState(null);
   // Set-default consent retry: the default role carries Auto Pay, and a
@@ -6805,17 +6810,22 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
       .finally(() => setStripeLoading(false));
   }, []);
 
-  const handleAddCard = async () => {
+  const handleAddCard = async (opts) => {
+    const saveOnly = opts?.saveOnly === true;
     setStripeLoading(true);
     setStripeError('');
     setStripeReady(false);
     setBankPendingNotice(false);
+    setSavedWithoutAutopay(false);
+    setSaveOnlyAdd(saveOnly);
     setAddMethodType('card');
     try {
       // card_or_bank is a REQUEST — the server downgrades to card-only
       // while GATE_PORTAL_ACH_AUTOPAY is off, and the echoed
       // paymentMethodTypes is what actually decides the bank affordances.
-      const setupData = await api.createSetupIntent('card_or_bank');
+      const setupData = saveOnly
+        ? await api.createSetupIntent('card', { enrollAutopay: false })
+        : await api.createSetupIntent('card_or_bank');
       const bankOffered = (setupData.paymentMethodTypes || []).includes('us_bank_account');
       setAchOffered(bankOffered);
       // Bank-first (owner 2026-11-01): the first tab is bank whenever it is
@@ -6853,6 +6863,14 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
     }
     setStripeLoading(false);
   };
+
+  // Deep link from the "add a card" reminder email: open the save-only form once the billing data has loaded.
+  const openAddCardHandledRef = useRef(false);
+  useEffect(() => {
+    if (!openAddCard || loading || cancelledAccount || openAddCardHandledRef.current) return;
+    openAddCardHandledRef.current = true;
+    handleAddCard({ saveOnly: true });
+  }, [openAddCard, loading, cancelledAccount]);
 
   const handleConfirmCard = async () => {
     if (!stripeRef.current || !elementsRef.current) return;
@@ -6902,6 +6920,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
         await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
       }
       setShowAddCard(false);
+      setSavedWithoutAutopay(saveOnlyAdd);
       paymentElementRef.current = null;
       elementsRef.current = null;
       stripeRef.current = null;
@@ -7895,6 +7914,11 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
             {stripeError}
           </div>
         )}
+        {savedWithoutAutopay && !showAddCard && (
+          <div style={{ padding: 10, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8, fontSize: 14, color: B.glassNavy, marginTop: 8 }}>
+            Card saved. Saving it did not turn Auto Pay on.{autopay?.state === 'active' ? '' : ' You can turn it on below if you want it.'}
+          </div>
+        )}
         {bankPendingNotice && !showAddCard && (
           <div style={{ padding: 10, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8, fontSize: 14, color: B.glassNavy, marginTop: 8 }}>
             Bank account saved. Stripe will send {microdepositSavedPhrases(bankPendingMicrodepositType).deposits} in 1–2 business days — once you {microdepositSavedPhrases(bankPendingMicrodepositType).confirmStep}, the account is verified and ready for Auto Pay.
@@ -8002,6 +8026,11 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
               }}><Icon name="close" size={20} strokeWidth={2} /></button>
             </div>
             <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 16 }} />
+            {saveOnlyAdd && (
+              <div style={{ fontSize: 14, color: muted, marginBottom: 12 }}>
+                Saving this card does not turn Auto Pay on.
+              </div>
+            )}
             {stripeError && (
               <div style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginBottom: 12 }}>
                 {stripeError}
@@ -19059,7 +19088,7 @@ export default function PortalPage() {
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
         }} onRequestVisit={cancelledAccount || contactSession ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
-        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} onSwitchTab={switchTab} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} />}
+        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} onSwitchTab={switchTab} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} openAddCard={new URLSearchParams(location.search).get('add_card') === '1'} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && (savedSecondarySelection

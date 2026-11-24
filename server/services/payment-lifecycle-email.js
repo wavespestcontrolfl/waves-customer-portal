@@ -12,6 +12,7 @@ const { billingChannelAllowed, explicitBillingChannels } = require('./billing-de
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { isDefiniteRejection } = require('./sendgrid-mail');
 const BillingEmailDetails = require('./billing-email-details');
+const { CARD_ON_FILE_REMINDER_CATEGORY } = require('../constants/email-replay-exclusions');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const TRANSACTIONAL_GROUP = 'transactional_required';
@@ -649,6 +650,39 @@ async function sendPaymentMethodExpiring({
   });
 }
 
+// The "add a card" reminder (services/card-on-file-reminder.js, GATE_CARD_ON_FILE_REMINDER). The sweep decides who is
+// due and calls this only under the 'true' mode; the gate is read again here so a direct caller can never send it
+// while the gate is off or in shadow. `beforeProviderHandoff` is the sweep's last eligibility re-check, run right before
+// the provider request (a false answer aborts the send). card_url opens the billing tab's Add card form in save-only
+// mode (add_card=1): saving the card there never turns Auto Pay on.
+async function sendCardOnFileReminder({
+  customerId,
+  propertyLabel,
+  nextVisitDate = null,
+  idempotencyKey,
+  beforeProviderHandoff = null,
+} = {}) {
+  if (require('../config/feature-gates').cardOnFileReminderMode() !== 'true') {
+    return { ok: false, skipped: true, reason: 'gate_off', deliveryOutcome: 'not_sent' };
+  }
+  if (!customerId || !idempotencyKey) return { ok: false, skipped: true, reason: 'missing_identity', deliveryOutcome: 'not_sent' };
+  return sendLifecycleTemplate({
+    customerId,
+    templateKey: 'payment.card_on_file_reminder',
+    eventType: 'payment.card_on_file_reminder',
+    payload: {
+      property_label: clean(propertyLabel) || 'your property',
+      next_visit_date: nextVisitDate ? displayDate(nextVisitDate) : '',
+      card_url: `${publicPortalUrl()}/?tab=billing&add_card=1`,
+    },
+    idempotencyKey,
+    // Never re-sent from a stored copy (email-replay-exclusions): the copy is true only while every send-time check holds.
+    categories: [CARD_ON_FILE_REMINDER_CATEGORY],
+    billingDeliveryCategory: 'billing',
+    beforeProviderHandoff,
+  });
+}
+
 async function invoiceForPayment(payment, explicitInvoiceId = null) {
   const metadata = asObject(payment?.metadata);
   const invoiceId = explicitInvoiceId || payment?.invoice_id || metadata.invoice_id || null;
@@ -1247,6 +1281,7 @@ module.exports = {
   sendPaymentMethodUpdated,
   sendPaymentMethodRemoved,
   sendPaymentMethodExpiring,
+  sendCardOnFileReminder,
   sendPaymentRetryNotice,
   sendPaymentFailed,
   sendAchProcessing,
