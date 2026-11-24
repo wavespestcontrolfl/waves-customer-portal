@@ -18,7 +18,8 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { dateOnlyString } = require('../../utils/date-only');
 const { errorText } = require('./google-ads-config');
 
 // Google answers click_view for the last 90 days.
@@ -28,14 +29,12 @@ const CLICK_BACK_DAYS = 90;
 const BATCH = 10;
 const TRIED_KEY = 'ads.campaign_link.tried';
 
-function dayString(v) {
-  if (!v) return null;
-  if (v instanceof Date) return v.toISOString().slice(0, 10);
-  return String(v).slice(0, 10);
-}
+// A pg DATE value as YYYY-MM-DD (the shared reader, never a local slice).
+const dayString = dateOnlyString;
 
+// The ET calendar day `n` days before `day` (YYYY-MM-DD), through the shared ET helpers.
 function daysBack(day, n) {
-  return new Date(Date.parse(`${day}T00:00:00Z`) - n * 86400000).toISOString().slice(0, 10);
+  return etDateString(addETDays(parseETDateTime(`${day}T12:00`), -n));
 }
 
 // gclids are URL-safe base64; anything else never reaches the query.
