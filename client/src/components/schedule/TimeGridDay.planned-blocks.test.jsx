@@ -355,6 +355,20 @@ describe('TimeGridDay planned blocks', () => {
     expect(block('Second Si').style.borderLeft).not.toContain('220, 38, 38');
   });
 
+  it('holds a stop on both sides of midnight to a promise window that crosses it', () => {
+    const night = { level: 'hour', dayOnly: false, date: '2026-11-25', window: '11:00 PM - 1:00 AM' };
+    const base = { plannedMinutes: 20, scheduledDate: '2026-11-25', told: night };
+    renderDay([
+      visit('a', 'Before Bo', '19:00', { ...base, plannedArrivalMin: 23 * 60 + 50 }),
+      visit('b', 'After Al', '19:00', { ...base, plannedArrivalMin: 24 * 60 + 50 }),
+      visit('c', 'Late Lo', '19:00', { ...base, plannedArrivalMin: 25 * 60 + 10 }),
+    ]);
+    expect(block('Before Bo').style.borderLeft).not.toContain('220, 38, 38');
+    expect(block('After Al').style.borderLeft).not.toContain('220, 38, 38');
+    expect(block('Late Lo').style.borderLeft).toContain('220, 38, 38');
+    expect(block('Late Lo').getAttribute('title')).toMatch(/window 11 PM–1 AM · after the promise/);
+  });
+
   it('labels the window chip by its source, and says exactly why a booked window is not a promise', () => {
     const base = { plannedMinutes: 35, scheduledDate: '2026-11-25' };
     renderDay([

@@ -262,4 +262,50 @@ describe('RouteListDay', () => {
     expect(within(header).getByText('Out today')).toHaveClass('text-warn-fg');
     expect(within(card('Blair Tech').querySelector('header')).queryByText('Out today')).toBeNull();
   });
+
+  it('holds a stop on both sides of midnight to a promise window that crosses it', () => {
+    const night = told('11:00 PM - 1:00 AM');
+    render(<RouteListDay technicians={TECHS} services={[
+      stop('a', 'Before Bo', '22:00', { told: night, plannedArrivalMin: 23 * 60 + 50, plannedMinutes: 20 }),
+      stop('b', 'After Al', '22:00', { told: night, plannedArrivalMin: 24 * 60 + 50, plannedMinutes: 20 }),
+      stop('c', 'Late Lo', '22:00', { told: night, plannedArrivalMin: 25 * 60 + 10, plannedMinutes: 20 }),
+    ]} />);
+    const by = (name) => lines(card('Alex Tech')).find((b) => b.textContent.includes(name));
+    expect(by('Before Bo').style.borderLeftColor).not.toBe('rgb(220, 38, 38)');
+    expect(by('After Al').style.borderLeftColor).not.toBe('rgb(220, 38, 38)');
+    expect(by('Late Lo').style.borderLeftColor).toBe('rgb(220, 38, 38)');
+    expect(screen.getAllByText('window 11–1')).toHaveLength(3);
+  });
+
+  describe('an untimed visit with a customer', () => {
+    const untimed = stop('u', 'Any Time Ann', '09:00', { windowStart: null, windowEnd: null, customerId: 'c1' });
+
+    it('opens the customer profile like the grid\'s all-day strip, with the closeout as its own action', () => {
+      const onEdit = vi.fn();
+      const onViewCustomer = vi.fn();
+      render(<RouteListDay technicians={TECHS} services={[untimed]} onEdit={onEdit} onViewCustomer={onViewCustomer} owesCompletion={() => true} />);
+      fireEvent.click(lines(card('Alex Tech'))[0]);
+      expect(onViewCustomer).toHaveBeenCalledWith(untimed);
+      expect(onEdit).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button', { name: 'Closeout owed' }));
+      expect(onEdit).toHaveBeenCalledWith(untimed);
+      expect(onViewCustomer).toHaveBeenCalledTimes(1);
+    });
+
+    it('still opens the editor for a timed visit, or when there is no customer or no customer handler', () => {
+      const onEdit = vi.fn();
+      const onViewCustomer = vi.fn();
+      const timed = stop('t', 'Timed Tia', '10:00', { customerId: 'c2' });
+      const noCustomer = stop('n', 'No Cust', '09:00', { windowStart: null, windowEnd: null });
+      render(<RouteListDay technicians={TECHS} services={[timed, noCustomer]} onEdit={onEdit} onViewCustomer={onViewCustomer} />);
+      lines(card('Alex Tech')).forEach((b) => fireEvent.click(b));
+      expect(onEdit).toHaveBeenCalledTimes(2);
+      expect(onViewCustomer).not.toHaveBeenCalled();
+      cleanup();
+      const onEdit2 = vi.fn();
+      render(<RouteListDay technicians={TECHS} services={[untimed]} onEdit={onEdit2} />);
+      fireEvent.click(lines(card('Alex Tech'))[0]);
+      expect(onEdit2).toHaveBeenCalledWith(untimed);
+    });
+  });
 });
