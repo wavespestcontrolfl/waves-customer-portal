@@ -315,6 +315,14 @@ const recompute = jest.fn();
 const releaseHolds = jest.fn(async () => ({ released: 0 }));
 // The offer a job is due (the job module's dueOfferOfJob): none by default; mintOffer and the refusal tests set it.
 const planOfferJob = jest.fn();
+// The job module's rule "another estimate is open" (heldByOpenEstimate), which the offer mint asks under the
+// customer's locks. Mirrored here on this suite's table: any quote the customer can open now, but the offer quote
+// of the job itself. The real read is proven on Postgres (plan-offer-mint-postgres.test.js).
+const openEstimateHolds = jest.fn();
+const anotherOpenEstimate = async (_trx, { jobId, now }) => tables.estimates.some((row) => !row.archived_at
+  && ['sending', 'sent', 'viewed'].includes(row.status)
+  && (!row.expires_at || new Date(row.expires_at).getTime() > now.getTime())
+  && require('../services/plan-offer-estimate').planOfferOf(row.estimate_data)?.jobId !== String(jobId));
 // The frozen bundle in the real builder's shape (frequencies[] plus services[], each section with
 // defaultFrequencyKey and frequencies[]): one section for the minted family whose opening entry
 // carries the row's own totals and one treatment row at the per-application price the card
@@ -368,6 +376,7 @@ function deps(overrides = {}) {
     // The scheduler's hold release, recorded: the replace step frees each archived quote's holds.
     releaseEstimateHolds: releaseHolds,
     dueOfferOfJob: planOfferJob,
+    heldByOpenEstimate: openEstimateHolds,
     propertyLookup: null,
     // Single-premises proof + verified-override probe (codex GH r4): green
     // by default here; the refusal tests override them.
@@ -388,6 +397,8 @@ beforeEach(() => {
   releaseHolds.mockClear();
   planOfferJob.mockReset();
   planOfferJob.mockImplementation(async () => null);
+  openEstimateHolds.mockReset();
+  openEstimateHolds.mockImplementation(anotherOpenEstimate);
   recompute.mockResolvedValue({
     recomputed: true,
     serverResult: { engineVersion: 'v9.9', lineItems: [] },
@@ -978,15 +989,41 @@ describe('mintPlanStartEstimate', () => {
       expect(tables.estimates[0].expires_at).not.toEqual(ENDS);
     });
 
-    test('a second offer mint for the same job hands the quote back; the offer of another job retires it and mints again', async () => {
+    test('a second offer mint for the same job hands the quote back: its own quote is not "another open estimate"', async () => {
       const first = await mintOffer();
       const again = await mintOffer();
       expect(again).toEqual({ estimateId: first.estimateId, token: first.token, url: first.url, reused: true });
       expect(tables.estimates).toHaveLength(1);
-      const next = await mintOffer({ ...OFFER, jobId: 'job-2' }, { randomBytes: SECOND_TOKEN });
-      expect(next.reused).toBe(false);
-      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
-      expect(JSON.parse(tables.estimates.find((r) => r.id === next.estimateId).estimate_data).planStart.offer.jobId).toBe('job-2');
+      // Asked on the mint's transaction, for this job and customer, on the mint's clock, before anything is priced.
+      expect(openEstimateHolds).toHaveBeenCalledTimes(2);
+      expect(openEstimateHolds.mock.calls[0][1]).toEqual({ jobId: 'job-1', customerId: LEAD.id, now: FIXED_NOW() });
+      expect(openEstimateHolds.mock.invocationCallOrder[0]).toBeLessThan(recompute.mock.invocationCallOrder[0]);
+    });
+
+    // The job checks "no other open estimate" before the mint's locks. A quote the customer opened in between (a
+    // portal tap), or the offer quote of another job, is a link the customer holds: the lineage retire would
+    // archive it and free its slot hold. So the mint asks the job's rule again under the locks and refuses first.
+    test.each([
+      ['a plain portal quote the customer holds', () => mint()],
+      ['the offer quote of another job', () => mintOffer({ ...OFFER, jobId: 'job-2' })],
+    ])('an offer mint beside %s is refused open_estimate: nothing is priced, retired or minted, and no hold is freed', async (_label, hold) => {
+      const held = await hold();
+      recompute.mockClear();
+      const attempt = mintOffer(OFFER, { randomBytes: SECOND_TOKEN });
+      await expect(attempt).rejects.toMatchObject({ restartUnavailable: true, code: 'open_estimate' });
+      expect(recompute).not.toHaveBeenCalled();
+      expect(tables.estimates).toHaveLength(1);
+      expect(tables.estimates.find((r) => r.id === held.estimateId).archived_at).toBeFalsy();
+      expect(releaseHolds).not.toHaveBeenCalled();
+    });
+
+    test('a failed read of that rule fails the mint: nothing is priced, retired or minted', async () => {
+      const first = await mintOffer();
+      recompute.mockClear();
+      openEstimateHolds.mockImplementation(async () => { throw new Error('read failed'); });
+      await expect(mintOffer({ ...OFFER, firstVisitFrom: '2027-02-24' }, { randomBytes: SECOND_TOKEN })).rejects.toThrow('read failed');
+      expect(recompute).not.toHaveBeenCalled();
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeFalsy();
     });
 
     // The offer day of one job can move (a follow-up visit done later). The core's fingerprint holds no date and the
@@ -1007,8 +1044,11 @@ describe('mintPlanStartEstimate', () => {
       expect(movedRow.expires_at).toEqual(asked.endsAt);
     });
 
-    test('an offer mint never reuses a plain portal quote of the same option: that quote is retired', async () => {
+    // A plain quote that has ended is not one the customer can open now, so it does not refuse the mint. The offer
+    // mint never takes it over: it is retired with the lineage, and the offer is a new quote.
+    test('an offer mint never reuses a plain portal quote that has ended: that quote is retired', async () => {
       const plain = await mint();
+      tables.estimates.find((r) => r.id === plain.estimateId).expires_at = new Date(FIXED_NOW().getTime() - 1000);
       const offered = await mintOffer({ ...OFFER }, { randomBytes: SECOND_TOKEN });
       expect(offered.reused).toBe(false);
       expect(tables.estimates.find((r) => r.id === plain.estimateId).archived_at).toBeTruthy();
@@ -1064,28 +1104,35 @@ describe('mintPlanStartEstimate', () => {
       expect(row.expires_at).toEqual(ENDS);
     });
 
-    test('a plain mint, and a plain tap that re-opens the offer, never ask for a job', async () => {
+    test('a plain mint, and a plain tap that re-opens the offer, never ask for a job or for the open-estimate rule', async () => {
       await mint();
       expect(planOfferJob).not.toHaveBeenCalled();
+      expect(openEstimateHolds).not.toHaveBeenCalled();
+      // Staff archive that quote; the job then makes the offer quote, and the customer taps the card.
+      tables.estimates[0].archived_at = FIXED_NOW();
       await mintOffer(OFFER, { randomBytes: SECOND_TOKEN });
       planOfferJob.mockClear();
+      openEstimateHolds.mockClear();
       const tapped = await mint();
       expect(tapped.reused).toBe(true);
       expect(planOfferJob).not.toHaveBeenCalled();
+      expect(openEstimateHolds).not.toHaveBeenCalled();
     });
 
     // The entry checks the end date before the customer locks and the recompute. It is read again on the clock
     // before the old quote is retired: an end date that passed during the work retires nothing and mints nothing.
     test('an end date that passes while the mint works is a plain Error: the prior quote stays, nothing is minted', async () => {
-      const plain = await mint();
+      // The prior quote is this job's own offer with the dates of an earlier offer day (the one row the mint retires).
+      const first = await mintOffer();
+      const moved = { ...OFFER, endsAt: new Date(ENDS.getTime() + 24 * 3600 * 1000) };
       let worked = false;
       const priced = recompute.getMockImplementation();
       recompute.mockImplementationOnce(async (...args) => { worked = true; return priced(...args); });
-      const now = () => (worked ? new Date(ENDS.getTime() + 1000) : FIXED_NOW());
-      await expect(mintOffer(OFFER, { randomBytes: SECOND_TOKEN, now })).rejects.toThrow(/offer needs an end date that is still ahead/);
+      const now = () => (worked ? new Date(moved.endsAt.getTime() + 1000) : FIXED_NOW());
+      await expect(mintOffer(moved, { randomBytes: SECOND_TOKEN, now })).rejects.toThrow(/offer needs an end date that is still ahead/);
       expect(worked).toBe(true);
       expect(tables.estimates).toHaveLength(1);
-      expect(tables.estimates.find((r) => r.id === plain.estimateId).archived_at).toBeFalsy();
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeFalsy();
     });
 
     // ...and once more after the new quote is published (the retire, the hold release, the snapshot and the

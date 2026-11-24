@@ -10513,11 +10513,12 @@ function initScheduledJobs() {
   // for a customer the offer is for, and emails one sample of the offer and of its
   // reminder to the office inbox. No customer message and no estimate. A
   // missed morning costs nothing: the next one reads the same jobs. Gate read
-  // per tick (GATE_ONETIME_PLAN_OFFER=shadow).
+  // per tick (GATE_ONETIME_PLAN_OFFER=shadow; =live makes the customer's
+  // estimate and sends the customer the offer, owner 2026-11-20).
   // =========================================================================
   // 10:13: off the busy five-minute marks of the hour.
   cron.schedule('13 10 * * *', async () => {
-    if (require('../config/feature-gates').onetimePlanOfferMode?.() !== 'shadow') return;
+    if (!['shadow', 'live'].includes(require('../config/feature-gates').onetimePlanOfferMode?.())) return;
     try {
       await runExclusive('onetime-plan-offer', async () => {
         const result = await require('./onetime-plan-offer').runOnetimePlanOfferJob();

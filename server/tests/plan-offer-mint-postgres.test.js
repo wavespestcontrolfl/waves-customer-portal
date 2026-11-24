@@ -182,7 +182,7 @@ postgres('plan offer quote (live Postgres)', () => {
     expect(parse(plainRow.estimate_data).operatorPriceAdjustment).toBeUndefined();
   });
 
-  test('a second offer mint for the same job hands the quote back; an offer for another job retires it and mints again', async () => {
+  test('a second offer mint for the same job hands the quote back; an offer for another job is refused and the quote stays', async () => {
     const { customer, job } = await seedCustomerWithJob();
     const option = await cardOption(customer, job);
     const first = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
@@ -194,12 +194,61 @@ postgres('plan offer quote (live Postgres)', () => {
     expect(spelled).toMatchObject({ estimateId: first.estimateId, reused: true });
     expect(parse((await rowOf(first.estimateId)).estimate_data).planStart.offer.jobId).toBe(String(job.id));
 
+    // The offer quote of one job is an estimate the customer can open: another job's offer never replaces it.
     const otherJob = await seedJob(customer, { daysAgo: 4 });
-    const next = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(otherJob) });
-    expect(next.reused).toBe(false);
-    expect(next.estimateId).not.toBe(first.estimateId);
-    expect((await rowOf(first.estimateId)).archived_at).not.toBeNull();
-    expect(parse((await rowOf(next.estimateId)).estimate_data).planStart.offer.jobId).toBe(String(otherJob.id));
+    await expect(mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(otherJob) }))
+      .rejects.toMatchObject({ restartUnavailable: true, code: 'open_estimate' });
+    const rows = await trx('estimates').where({ customer_id: customer.id });
+    expect(rows.map((row) => row.id)).toEqual([first.estimateId]);
+    expect(rows[0].archived_at).toBeNull();
+  });
+
+  // The job checks "no other open estimate" before the mint takes the customer's locks. A quote the customer
+  // opens in between (a portal tap takes the same locks) is a link the customer holds, with a slot hold: the
+  // mint's lineage retire would archive it. So the mint asks the job module's rule again under its locks
+  // (heldByOpenEstimate) and refuses before it prices, retires or mints.
+  describe('another estimate the customer can open now', () => {
+    async function withPlainQuote() {
+      const { customer, job } = await seedCustomerWithJob();
+      const option = await cardOption(customer, job);
+      const plain = await mintFor({ customer, option, shown: shownOf(option, option.setupFee) });
+      return { customer, job, option, plain };
+    }
+    const offerMint = ({ customer, job, option }) => mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
+
+    test('a plain portal quote: the offer mint is refused open_estimate, and the quote stays as it was', async () => {
+      const mine = await withPlainQuote();
+      const before = await rowOf(mine.plain.estimateId);
+      await expect(offerMint(mine)).rejects.toMatchObject({ restartUnavailable: true, code: 'open_estimate' });
+      const rows = await trx('estimates').where({ customer_id: mine.customer.id });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: mine.plain.estimateId, archived_at: null, status: before.status, token: before.token });
+      expect(new Date(rows[0].updated_at).getTime()).toBe(new Date(before.updated_at).getTime());
+      expect(parse(rows[0].estimate_data).operatorPriceAdjustment).toBeUndefined();
+    });
+
+    test('an estimate of another kind that the customer can open refuses it too', async () => {
+      const { customer, job } = await seedCustomerWithJob();
+      const option = await cardOption(customer, job);
+      const [other] = await trx('estimates').insert({
+        customer_id: customer.id, customer_name: 'Jordan Example', status: 'sent', source: 'manual',
+        token: hex(16), expires_at: new Date(Date.now() + 5 * DAY_MS), estimate_data: {},
+      }).returning('id');
+      await expect(offerMint({ customer, job, option })).rejects.toMatchObject({ restartUnavailable: true, code: 'open_estimate' });
+      expect((await trx('estimates').where({ customer_id: customer.id })).map((row) => row.id)).toEqual([other.id]);
+    });
+
+    test.each([
+      ['has ended', { expires_at: new Date(Date.now() - 1000) }],
+      ['staff archived', { archived_at: new Date() }],
+    ])('a plain portal quote that %s does not refuse: the offer quote is made', async (_label, change) => {
+      const mine = await withPlainQuote();
+      await trx('estimates').where({ id: mine.plain.estimateId }).update(change);
+      const offered = await offerMint(mine);
+      expect(offered.reused).toBe(false);
+      expect(parse((await rowOf(offered.estimateId)).estimate_data).planStart.offer.jobId).toBe(String(mine.job.id));
+      expect((await rowOf(mine.plain.estimateId)).archived_at).not.toBeNull();
+    });
   });
 
   // The offer day of one job can move: its included follow-up visit is done later. The mint's fingerprint holds no
@@ -274,11 +323,11 @@ postgres('plan offer quote (live Postgres)', () => {
     });
 
     test.each([3, 14])('the customer\'s own job on day %i of the window grants it, with the dates counted from that day', async (daysAgo) => {
-      const mine = await withPlainQuote();
-      const job = await seedJob(mine.customer, { daysAgo });
-      const offered = await mintFor({ customer: mine.customer, option: mine.option, shown: shownOf(mine.option, 0), offer: offerOf(job) });
+      const seeded = await seedCustomerWithJob();
+      const option = await cardOption(seeded.customer, seeded.job);
+      const job = await seedJob(seeded.customer, { daysAgo });
+      const offered = await mintFor({ customer: seeded.customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
       expect(offered.reused).toBe(false);
-      expect((await rowOf(mine.plain.estimateId)).archived_at).not.toBeNull();
       const row = await rowOf(offered.estimateId);
       const terms = termsFor(daysAgo);
       expect(parse(row.estimate_data).planStart.offer).toEqual({
@@ -308,7 +357,10 @@ postgres('plan offer quote (live Postgres)', () => {
   test('an end date that passes while the quote is published rolls the mint back: the prior quote stays live', async () => {
     const { customer, job } = await seedCustomerWithJob();
     const option = await cardOption(customer, job);
-    const plain = await mintFor({ customer, option, shown: shownOf(option, option.setupFee) });
+    // The prior quote is the one row an offer mint retires: this job's own offer quote with the dates of an
+    // earlier offer day. The job's included follow-up, performed 3 days ago, moved the day.
+    const prior = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
+    await seedJob(customer, { daysAgo: 3, followup_included: true, followup_source_service_id: job.id, parent_service_id: job.id });
     let published = false;
     const attempt = restart().mintPlanStartEstimate({
       customer, serviceKey: 'pest_control', optionId: option.id, shown: shownOf(option, 0), offer: offerOf(job),
@@ -326,7 +378,7 @@ postgres('plan offer quote (live Postgres)', () => {
     expect(published).toBe(true);
     const rows = await trx('estimates').where({ customer_id: customer.id, source: 'plan_start' });
     expect(rows).toHaveLength(1);
-    expect(rows[0].id).toBe(plain.estimateId);
+    expect(rows[0].id).toBe(prior.estimateId);
     expect(rows[0].archived_at).toBeNull();
   });
 

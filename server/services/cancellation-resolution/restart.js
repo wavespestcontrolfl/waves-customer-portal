@@ -689,6 +689,9 @@ function resolveMintDeps(deps) {
     // on first call).
     dueOfferOfJob: deps.dueOfferOfJob
       || ((...args) => require('../onetime-plan-offer').dueOfferOfJob(...args)),
+    // The job module's "no other open estimate" rule, asked again under the customer's locks (plan offer only).
+    heldByOpenEstimate: deps.heldByOpenEstimate
+      || ((...args) => require('../onetime-plan-offer').heldByOpenEstimate(...args)),
   };
 }
 
@@ -1699,6 +1702,13 @@ async function mintPlanStartEstimate({
       // price and no charge, so nothing refuses it.
       callerTerms = { jobId: due.jobId, endsAt: due.endsAt, firstVisitFrom: due.firstVisitFrom };
       assertPlanOfferDates(callerTerms, now());
+      // The job's rule "no other open estimate" again, here: the job checked it before these locks. A quote the
+      // customer opened in between (a portal tap takes the same locks, so it has committed) must not be
+      // archived by the lineage retire below, with its link and its slot hold. Any open estimate but this
+      // job's own offer quote refuses the mint before a row is priced, retired or minted. A failed read throws.
+      if (await mintDeps.heldByOpenEstimate(trx, { jobId: due.jobId, customerId: fresh.id, now: now() })) {
+        throw new RestartUnavailableError('open_estimate', 'Another estimate is open on this account.');
+      }
     }
 
     // A plain tap that finds the live offer quote of this service and option re-opens that offer through the
@@ -1734,9 +1744,10 @@ async function mintPlanStartEstimate({
       } : {}),
       ...(reopened ? { reuseOnly: true, reuseRowId: reopened.estimateId } : {}),
       // Reuse only the quote for THIS option (the core adds today's-offer equality). An offer mint also
-      // reuses only its own job's quote with the SAME dates: a plain quote, the offer of another job, or this
-      // job's offer with an older end or first visit date (the offer day moved) is retired and re-minted.
-      // The core's fingerprint carries neither date, and the booking checks read the stored one.
+      // reuses only its own job's quote with the SAME dates: this job's offer with an older end or first visit
+      // date (the offer day moved) is retired and re-minted. A plain quote or another job's offer that the
+      // customer can open never reaches here (heldByOpenEstimate refused above); one that has ended is retired
+      // with the lineage. The core's fingerprint carries neither date, and the booking checks read the stored one.
       matchesLive: (liveData) => liveData?.planStart?.serviceKey === serviceKey
         && liveData?.planStart?.optionId === option.id
         && (!offer || samePlanOffer(planOfferOf(liveData), offer)),
