@@ -107,8 +107,9 @@ async function loadLeads(conn, since, until) {
       'asa.id', 'asa.campaign_id', 'asa.lead_date', 'asa.lead_source', 'asa.funnel_stage',
       'asa.source_call_id', 'asa.created_at', 'ac.campaign_name', 'ac.platform', 'l.first_name as lead_first_name',
       'l.last_name as lead_last_name', 'l.phone as lead_phone', 'l.email as lead_email',
-      // A funnel row can predate the customer; the lead may carry the customer id first.
-      conn.raw('COALESCE(asa.customer_id, l.customer_id) AS customer_id'),
+      // The linked lead's current customer wins (it can be filled first, or reassigned); a row with no lead, or a
+      // lead with no customer yet, keeps the funnel row's customer.
+      conn.raw('COALESCE(l.customer_id, asa.customer_id) AS customer_id'),
     );
 }
 
@@ -294,7 +295,10 @@ async function adResults({ since, until, conn = db } = {}) {
 
   const totals = sumTotals(out);
 
-  return { since, until, rows: out, totals };
+  // Every recorded day in the window, also a day with no spend or lead row: the period's rain total reads this.
+  const rain_days = Object.keys(rainDays).filter((d) => d >= since && d <= until).sort()
+    .map((date) => ({ date, ...rainDayOf(rainDays[date]) }));
+  return { since, until, rows: out, totals, rain_days };
 }
 
 module.exports = { adResults, NO_CAMPAIGN, PAID90_DAYS, LIST_MAX };

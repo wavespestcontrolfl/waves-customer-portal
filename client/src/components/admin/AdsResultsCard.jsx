@@ -37,6 +37,12 @@ function rainText(rows) {
   return `${called.length} called, ${wet} of ${measured.length} wet`;
 }
 
+// The period total counts every recorded day in the window, also a day with no ad row.
+function periodRainRows(data) {
+  if (!Array.isArray(data.rain_days)) return data.rows;
+  return data.rain_days.map(({ date, ...rain_day }) => ({ date, rain_day }));
+}
+
 const PLATFORM_NAMES = { google_ads: "Google Ads", google_lsa: "Google LSA", facebook: "Facebook" };
 
 function rainDayText(rain) {
@@ -211,7 +217,7 @@ export default function AdsResultsCard() {
             ))}
             <TR>
               <TD className="text-ui-body font-medium">All campaigns</TD>
-              <Cells data={data.totals} rain={rainText(data.rows)} />
+              <Cells data={data.totals} rain={rainText(periodRainRows(data))} />
             </TR>
           </TBody>
         </Table>

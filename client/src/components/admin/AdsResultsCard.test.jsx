@@ -94,6 +94,19 @@ describe('AdsResultsCard', () => {
     expect(screen.getByText('2 PM call unknown, not measured yet')).toBeInTheDocument();
   });
 
+  it('the period rain total counts a recorded day with no ad row', async () => {
+    reply({
+      period: '90d', since: 'x', until: 'y', rows, totals: zero,
+      rain_days: [
+        { date: '2026-10-01', call: 'rain', cutoff_call: 'rain', wet_day: true },
+        { date: '2026-10-09', call: 'rain', cutoff_call: 'rain', wet_day: true },
+      ],
+    });
+    render(<AdsResultsCard />);
+    await screen.findByText('Test Campaign A');
+    expect(screen.getAllByRole('row').at(-1).textContent).toContain('2 called, 2 of 2 wet');
+  });
+
   it('asks again when the period changes', async () => {
     reply({ period: '90d', since: 'x', until: 'y', rows, totals: zero });
     render(<AdsResultsCard />);

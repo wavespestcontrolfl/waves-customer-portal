@@ -166,6 +166,8 @@ describe('adResults', () => {
         value: JSON.stringify({
           '2026-10-01': { day: '2026-10-01', call: 'rain', cutoff_call: 'dry', score: { wet_day: true, hit: true, cutoff_hit: false } },
           '2026-10-02': { day: '2026-10-02', call: 'dry', cutoff_call: 'dry' },
+          '2026-11-05': { day: '2026-11-05', call: 'rain', cutoff_call: 'rain' },
+          '2027-01-02': { day: '2027-01-02', call: 'rain', cutoff_call: 'rain' },
         }),
       }],
     });
@@ -175,6 +177,10 @@ describe('adResults', () => {
     });
     expect(rowOf(out, CAMP, '2026-10-02').rain_day).toMatchObject({ call: 'dry', scored: false, wet_day: null, hit: null });
     expect(rowOf(out, CAMP, '2026-10-03').rain_day).toBeNull();
+    // Every recorded day in the window, with or without an ad row; a day outside the window is left out.
+    expect(out.rain_days.map((d) => [d.date, d.cutoff_call])).toEqual([
+      ['2026-10-01', 'dry'], ['2026-10-02', 'dry'], ['2026-11-05', 'rain'],
+    ]);
   });
 
   test('the owner test account is left out', async () => {
