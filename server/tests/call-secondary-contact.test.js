@@ -873,13 +873,13 @@ describe('on-site contact opt-in ask', () => {
     expect(src).toContain("const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;");
     expect(src).toContain('JSON.stringify({ optin_ask: value })');
     // The save only admits an on-site-only contact when the ask can go out.
-    expect(src).toContain('onSiteAskEligible: onSitePreAsk,');
+    expect(src).toContain('onSiteAskEligible: onSitePreAsk || callGivenConsent,');
     // Either extractor's do-not-contact request blocks the ask.
     expect(src).toMatch(/const v2DoNotContact = v2CanonicalExtraction\?\.consent\?\.do_not_contact_request === true\s*\|\| extracted\.do_not_contact_request === true;/);
     // Explicit V2 consent keeps the original claim path (fresh slot only).
     // ...but never for an entry queued for the booking site; that phone is also
     // kept out of the same-call fan-out until it has an opt-in row.
-    expect(src).toMatch(/if \(result === 'written' && secondaryEntry\?\.phone && v2SmsConsentExplicit && !onSiteDecision\.ask && !v2DoNotContact\s*&& onSiteDecision\.reason !== 'phone_not_from_v2'\) \{/);
+    expect(src).toMatch(/if \(result === 'written' && secondaryEntry\?\.phone && v2SmsConsentExplicit && !onSiteDecision\.ask && !v2DoNotContact\s*&& onSiteDecision\.reason !== 'phone_not_from_v2' && !callGivenConsentApplied\) \{/);
     expect(src).toContain('if (!onSiteAlreadyConfirmed) optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));');
     // A re-added phone that already confirmed here gets the account stamp back.
     expect(src).toContain("await require('./recipient-optin').restoreConfirmedPhone(customerId, lastTen(secondaryEntry.phone));");
@@ -901,8 +901,8 @@ describe('on-site contact opt-in ask', () => {
     expect(pre.indexOf("onSiteAlreadyConfirmed = existing?.status === 'confirmed';")).toBeGreaterThan(pre.indexOf('onSiteBlockedBeforeWrite = true;\n          }'));
     const block = src.indexOf('if (newKey && !knownKeys.includes(newKey)) {');
     expect(block).toBeLessThan(src.indexOf('const result = await persistCallSecondaryContact(customerId, secondaryEntry, {', block));
-    // The same-call fan-out gate is the original one.
-    expect(src).toContain('const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(');
+    // The same-call fan-out gate is the original one (plus caller-given phones, GATE_CALL_GIVEN_CONTACT_CONSENT).
+    expect(src).toContain('const extraContacts = (!v2SmsConsentExplicit && !callGivenConsentPhones.size) ? [] : (await filterRecipientsByOptin(');
     // No booking landed: the card says so.
     expect(src).toContain("for (const { entry } of pendingOnSiteAsks) await markOptinAsk(entry, 'not_sent:no_booking');");
   });

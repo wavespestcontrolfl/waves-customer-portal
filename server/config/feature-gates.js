@@ -323,6 +323,7 @@
  *   GATE_CALL_AGREED_ONE_TIME_JOB=true (call booker, owner 2026-11-22 "fix", then "make it an admin notification": a call on which staff priced ONE one-time job keeps the one-time service the V2 extraction named on the lead and the call record. The recurring-intent rule no longer turns the job into a plan visit because of a cadence word (the 2026-11-21 caller spoke of a monthly plan with another company and was booked Monthly Pest Control). When the rule would have changed the service, the AI books no visit and sends no text: the office gets ONE admin notification (Schedule, linked to the call) with the service, the agreed time, the price staff stated, the address, any Bill-To and any follow-up, and books the visit with its price. Inbound calls only. It changes what the AI books, so the flip is the owner's. Off: every call books as before; kill: unset)
  *   GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT=true (call booker: a business address (Google addressUse.business) given with no unit is not held for the missing unit when the caller says they own/lease/occupy the WHOLE building; the extraction judges it and the code verifies the pinned caller quote; suite/unit/strip-mall wording keeps the hold)
  *   GATE_CALL_FIRST_NAME_ADVISORY=true (call booker: a new caller who gave a last name but no first name still becomes a customer and books; the missing first name files an advisory office card instead of holding the booking; strict opt-in, read at call time)
+ *   GATE_CALL_GIVEN_CONTACT_CONSENT=true (call pipeline, owner ruling 2026-10-29: a phone number a caller gives on a call for another person (spouse, on-site contact, tenant) counts as consent to text that person appointment and service messages: the account's consent stamp records it (source call_caller_provided), the phone is not held on the unconsented list, no Reply-YES ask goes out for it, and the same-call confirmation reaches it; it never clears an existing stamp; STOP, do-not-contact, suppression and a disclaimed number still block; changes who gets texts, so the owner flips it; off = today's hold + Reply-YES ask; kill = unset)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
@@ -9563,3 +9564,13 @@ function estimateApprovePreferredTimeLive() {
 module.exports.estimateApprovePreferredTimeLive = estimateApprovePreferredTimeLive;
 // GATE_CALL_SCREEN_ALL_UNKNOWN reader, on its own line so gate PRs never conflict.
 module.exports.callScreenAllUnknownLive = callScreenAllUnknownLive;
+
+// GATE_CALL_GIVEN_CONTACT_CONSENT read at CALL time, strict `=== 'true'`, dark (owner ruling 2026-10-29: "if im on the phone with someone
+// and they give someones contact information, this is conesent"). Named risk: it changes who gets texts (a caller-given phone is
+// texted without its own Reply-YES). On, services/call-recording-processor.js persistCallSecondaryContact stamps
+// customers.service_contacts_consent_at (source call_caller_provided), skips the unconsented hold and the Reply-YES ask. Off = today.
+function callGivenContactConsentLive() {
+  return process.env.GATE_CALL_GIVEN_CONTACT_CONSENT === 'true';
+}
+// GATE_CALL_GIVEN_CONTACT_CONSENT reader, on its own line so gate PRs never conflict.
+module.exports.callGivenContactConsentLive = callGivenContactConsentLive;

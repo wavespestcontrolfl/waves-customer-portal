@@ -4263,6 +4263,51 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
   }
 }
 
+// GATE_CALL_GIVEN_CONTACT_CONSENT (owner ruling 2026-10-29). The consent stamp is ACCOUNT-WIDE, so a caller-given phone may
+// stamp (or ride) it only when no other contact phone on the row is left uncovered: the row has no contact phones yet, or it is
+// already stamped. A row with other unstamped contact phones keeps today's hold and Reply-YES ask.
+const CALL_GIVEN_CONSENT_SOURCE = 'call_caller_provided';
+const CALL_GIVEN_CONSENT_TEXT_VERSION = 'owner-ruling-2026-10-29';
+function callGivenConsentRowCovered(customer, slots) {
+  return !!customer.service_contacts_consent_at
+    || !slots.some((slot) => String(customer[slot.phone] || '').trim());
+}
+// What a caller-given phone changes in persistCallSecondaryContact's write, in one place. Given (the caller decided it from its
+// own read; re-checked here on the row this write sees): the row stamp describes the phone (a row with none gets it, an existing
+// stamp is left exactly as it is and never cleared), nothing holds the phone, and the explicit-consent stamp rule is not used.
+// Not given: the options pass through untouched, so the write is today's.
+function callGivenConsentWrite({ callGivenConsent, contact, customer, slots, consentAt, smsConsentExplicit, holdPhone, keepConsentStamp }) {
+  if (callGivenConsent !== true || !contact.phone || !callGivenConsentRowCovered(customer, slots)) {
+    return { opts: { smsConsentExplicit, holdPhone, keepConsentStamp }, stamp: {} };
+  }
+  return {
+    opts: { smsConsentExplicit: false, holdPhone: false, keepConsentStamp: true },
+    stamp: customer.service_contacts_consent_at ? {} : {
+      service_contacts_consent_at: consentAt instanceof Date ? consentAt : new Date(),
+      service_contacts_consent_source: CALL_GIVEN_CONSENT_SOURCE,
+      service_contacts_consent_text_version: CALL_GIVEN_CONSENT_TEXT_VERSION,
+    },
+  };
+}
+// Does this contact's phone count as caller-given consent on this call? Pure; the gate is read here. A do-not-contact
+// request, a phone only the legacy extractor read, an impossible number, and the call's own held/disclaimed number never do.
+// STOP and the suppression list are checked by the send layer on every text, so they still block whatever is stamped.
+function callGivenConsentApplies(contact, { doNotContact = false, phoneFromV2 = false, heldPhoneKeys = [] } = {}) {
+  if (!require('../config/feature-gates').callGivenContactConsentLive()) return false;
+  if (doNotContact || !phoneFromV2 || !contact || !String(contact.phone || '').trim()) return false;
+  if (isImpossibleNanpPhone(contact.phone)) return false;
+  if (contact.wants_notifications !== true && !onSiteOptinAskTrigger(contact)) return false;
+  const key = String(contact.phone).replace(/\D/g, '').slice(-10);
+  return !heldPhoneKeys.some((held) => String(held || '').replace(/\D/g, '').slice(-10) === key);
+}
+// The call's end (start + duration), else now: the moment the caller gave the number.
+function callGivenConsentAt(call) {
+  const start = callStartedAt(call) || (call.created_at ? new Date(call.created_at) : null);
+  const secs = recordingDurationSeconds(call);
+  const at = start && secs && !Number.isNaN(new Date(start).getTime()) ? new Date(new Date(start).getTime() + secs * 1000) : null;
+  return at && at.getTime() <= Date.now() ? at : new Date();
+}
+
 // Persist a call's secondary contact into the customer's first EMPTY
 // service-contact slot so the existing appointment fan-out
 // (customer-contact.js getAppointmentContacts: confirmation, en-route,
@@ -4279,7 +4324,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp, operatorAttach = false, officeConfirmedBy = null, conn = db } = {}) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp, operatorAttach = false, officeConfirmedBy = null, callGivenConsent, consentAt, conn = db } = {}) {
   // An on-site contact the opt-in ask will actually go to (the caller's
   // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
   // unstamped: the slot is where the ask's phone and the later YES stamp live.
@@ -4431,6 +4476,11 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     write = write.where((q) => q.whereNull(col).orWhere(col, ''));
   }
   const contactRole = String(contact.role || '').trim().toLowerCase();
+  // GATE_CALL_GIVEN_CONTACT_CONSENT (owner ruling 2026-10-29): the caller-given phone is consented, so the row stamp
+  // describes it, it is never held, and an existing stamp is never cleared. The caller decided this from its own read of
+  // the row; it is re-checked here on the row this write sees, and a row it no longer covers falls back to today's rules.
+  const given = callGivenConsentWrite({ callGivenConsent, contact, customer, slots: SERVICE_CONTACT_SLOTS, consentAt, smsConsentExplicit, holdPhone, keepConsentStamp });
+  ({ smsConsentExplicit, holdPhone, keepConsentStamp } = given.opts);
   const slotWrite = {
     [emptySlot.name]: fullName ? capitalizeName(fullName) : null,
     [emptySlot.phone]: contact.phone || null,
@@ -4453,6 +4503,8 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       service_contacts_consent_source: 'call_pipeline_request',
       service_contacts_consent_text_version: 'call-2026-07-23',
     } : {}),
+    // A caller-given phone stamps a row that has none; an existing stamp is left exactly as it is.
+    ...given.stamp,
     // keepConsentStamp: the stamp (other people's consent) stays, and the new
     // phone goes on the account's unconsented list — held out of every text
     // resolver (customer-contact) whatever the opt-in gate does, until that
@@ -17448,6 +17500,9 @@ const CallRecordingProcessor = {
     // fan-out must exclude them — no row means grandfathered, and a claim
     // failure must fail CLOSED for that phone, not text it (#2956 r13).
     const optinClaimFailedPhones = new Set();
+    // GATE_CALL_GIVEN_CONTACT_CONSENT: phones (last 10) the caller gave on this call that now count as consented. The same-call
+    // confirmation fan-out below reaches them even without the caller's own explicit SMS consent; no Reply-YES ask goes to them.
+    const callGivenConsentPhones = new Set();
     // On-site contacts whose opt-in ask is due: the ask is NOT sent here. It
     // goes out at the booking site, only once a confirmed visit has actually
     // landed (not a street-level office-review hold, not an address dispute),
@@ -17466,6 +17521,16 @@ const CallRecordingProcessor = {
         .filter((c) => c && onSiteOptinAskTrigger(c))
         .map((c) => ten(c.phone)).filter(Boolean));
     })();
+    // Every phone the V2 extraction captured for a secondary party (any role): a caller-given consent never rests on a number only
+    // the legacy extractor read.
+    const v2SecondaryPhoneKeys = (() => {
+      const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+      const ten = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      return new Set([canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)]
+        .map((c) => ten(c?.phone)).filter(Boolean));
+    })();
+    // The call's own number is held (callback_number_needed) or cannot text (ani_cannot_text): it never counts as consent.
+    const callGivenHeldPhoneKeys = (callbackNumberNeededHoldActive || callAniCannotText) ? [phone, call.from_phone, call.to_phone].filter(Boolean) : [];
     let onSiteAsksHandled = false;
     // Review-card breadcrumb (secondary_contact_captured payload.optin_ask) for
     // the card's own contact: awaiting_booking | dispatching | sent |
@@ -17515,7 +17580,22 @@ const CallRecordingProcessor = {
         onSitePath = onSitePreAsk;
         let onSiteBlockedBeforeWrite = false;
         let onSiteAlreadyConfirmed = false;
-        if (onSitePreAsk) {
+        // GATE_CALL_GIVEN_CONTACT_CONSENT (owner ruling 2026-10-29): a phone the caller gave for another person is consented, so
+        // no opt-in row blocks it, nothing holds it, and no Reply-YES ask goes to it. Only a row the account's stamp can cover
+        // qualifies (callGivenConsentRowCovered); any other row keeps today's hold and ask. Gate off: false, nothing below changes.
+        // A phone already on the account keeps its own standing (its hold, its YES): only a phone NEW to the account is stamped.
+        let callGivenConsent = callGivenConsentApplies(secondaryEntry, {
+          doNotContact: v2DoNotContact,
+          phoneFromV2: v2SecondaryPhoneKeys.has(lastTen(secondaryEntry.phone)),
+          heldPhoneKeys: callGivenHeldPhoneKeys,
+        });
+        if (callGivenConsent) {
+          const { SERVICE_CONTACT_SLOTS: givenSlots } = require('./customer-contact');
+          const givenRow = (await db('customers').where({ id: customerId }).first()) || {};
+          const onRecordKeys = [givenRow.phone, ...givenSlots.map((slot) => givenRow[slot.phone])].map(lastTen).filter(Boolean);
+          callGivenConsent = !onRecordKeys.includes(lastTen(secondaryEntry.phone)) && callGivenConsentRowCovered(givenRow, givenSlots);
+        }
+        if (onSitePreAsk && !callGivenConsent) {
           const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
           const before = await db('customers').where({ id: customerId }).first();
           // A phone NEW to this account is blocked BEFORE the slot write (a
@@ -17544,12 +17624,17 @@ const CallRecordingProcessor = {
         }
         const result = await persistCallSecondaryContact(customerId, secondaryEntry, {
           smsConsentExplicit: v2SmsConsentExplicit,
-          onSiteAskEligible: onSitePreAsk,
+          onSiteAskEligible: onSitePreAsk || callGivenConsent,
           // Model-inferred on-site contact behind a blocking opt-in row: the
           // account's existing consent (other people's) is not cleared.
           keepConsentStamp: onSiteBlockedBeforeWrite,
           holdPhone: onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed,
+          callGivenConsent,
+          consentAt: callGivenConsent ? callGivenConsentAt(call) : null,
         });
+        // Consent applied by this write: no ask, and the same-call fan-out may text it.
+        const callGivenConsentApplied = callGivenConsent && result === 'written';
+        if (callGivenConsentApplied && lastTen(secondaryEntry.phone)) callGivenConsentPhones.add(lastTen(secondaryEntry.phone));
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         // Re-added phone that already confirmed its own opt-in here: restore
         // the account stamp a contact edit may have cleared (same coverage
@@ -17571,7 +17656,7 @@ const CallRecordingProcessor = {
         // (as always). An on-site contact's ask waits for the booking site
         // (pendingOnSiteAsks) — no booking, no ask.
         const onSiteDecision = decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result, phoneFromV2: onSitePhoneFromV2 });
-        if (onSiteDecision.ask && secondaryEntry?.phone) {
+        if (onSiteDecision.ask && secondaryEntry?.phone && !callGivenConsentApplied) {
           pendingOnSiteAsks.push({ entry: secondaryEntry });
           // Queued for the booking site: excluded from the same-call fan-out
           // (no opt-in row yet must not read as grandfathered) and from the
@@ -17587,7 +17672,7 @@ const CallRecordingProcessor = {
         // ...and never for an on-site candidate refused because its phone is
         // not V2-captured (that number must not be texted by any path).
         if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask && !v2DoNotContact
-          && onSiteDecision.reason !== 'phone_not_from_v2') {
+          && onSiteDecision.reason !== 'phone_not_from_v2' && !callGivenConsentApplied) {
           try {
             const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
             const custRow = await db('customers').where({ id: customerId }).first();
@@ -17630,7 +17715,7 @@ const CallRecordingProcessor = {
             logger.warn(`[call-proc] recipient opt-in hook failed for ${maskSid(callSid)}: ${optErr.message}`);
           }
         }
-        await markOptinAsk(secondaryEntry, optinAskState);
+        await markOptinAsk(secondaryEntry, callGivenConsentApplied ? 'not_sent:call_given_consent' : optinAskState);
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another
           // customer's primary phone — the office decides whether it's the
@@ -24223,11 +24308,14 @@ const CallRecordingProcessor = {
                       const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
                       const { filterRecipientsByOptin } = require('./recipient-optin');
                       // …then the contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow further.
-                      const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(
+                      const extraContacts = (!v2SmsConsentExplicit && !callGivenConsentPhones.size) ? [] : (await filterRecipientsByOptin(
                         getAppointmentContacts(freshCustomer || {}, prefsRow), customerId
                       ).then((optedIn) => require('./contact-notification-prefs')
                         .filterContactsByOwnPrefs(optedIn, customerId, 'appointment_confirmation', { channel: 'sms' }))
                       ).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone)
+                        // Without the caller's own explicit SMS consent, only a phone the caller gave on this call (owner ruling
+                        // 2026-10-29, GATE_CALL_GIVEN_CONTACT_CONSENT) gets the confirmation.
+                        && (v2SmsConsentExplicit || callGivenConsentPhones.has(fanLast10(c.phone)))
                         // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
                         && !optinClaimFailedPhones.has(fanLast10(c.phone)));
                       for (const contact of extraContacts) {
@@ -27160,6 +27248,9 @@ CallRecordingProcessor._test = {
   shouldWarnOwnershipLost,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
+  callGivenConsentApplies,
+  callGivenConsentRowCovered,
+  callGivenConsentAt,
   onSiteOptinAskTrigger,
   decideOnSiteOptinAsk,
   resolveCallBookingPropertyLinkage,
