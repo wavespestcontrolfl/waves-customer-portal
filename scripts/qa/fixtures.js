@@ -34,7 +34,12 @@ function fixtureIdentity(runId = crypto.randomUUID()) {
     phone: `+194155501${String(parseInt(suffix, 16) % 100).padStart(2, '0')}`,
     foreignPhone: `+194155501${String((parseInt(suffix, 16) + 50) % 100).padStart(2, '0')}`,
     ...fixtureDates(new Date()),
-    paymentIntentId: `pi_qa_${suffix}`, eventId: `evt_qa_${suffix}` };
+    paymentIntentId: `pi_qa_${suffix}`, eventId: `evt_qa_${suffix}`,
+    // Saved-card charge journey: its own open invoice, so the webhook journey's invoice stays untouched.
+    cardInvoiceId: id('card-invoice'), cardInvoiceToken: crypto.randomBytes(32).toString('hex'),
+    cardInvoiceNumber: `QA-CARD-${suffix.toUpperCase()}`, cardInvoiceSubtotal: 149.37, cardPaymentMethodId: id('card-payment-method'),
+    stripeCustomerId: `cus_qa_${suffix}`, stripePaymentMethodId: `pm_qa_${suffix}`, cardBrand: 'visa', cardLastFour: '4242',
+    cardEventId: `evt_qa_card_${suffix}` };
 }
 
 async function seed(db, f) {
@@ -61,7 +66,20 @@ async function seed(db, f) {
       email: f.customerEmail, phone: f.phone, account_id: f.customerId, active: true, pipeline_stage: 'active_customer',
       address_line1: '100 Example Court', city: 'Parrish', state: 'FL', zip: '34219',
       onboarding_complete: true, is_primary_profile: true, property_type: 'residential',
-      gate_code: 'QA-PRIVATE-ACCESS-DO-NOT-PUBLISH', autopay_enabled: false,
+      gate_code: 'QA-PRIVATE-ACCESS-DO-NOT-PUBLISH', autopay_enabled: false, stripe_customer_id: f.stripeCustomerId,
+    }).onConflict('id').ignore();
+    // A saved credit card (funding known, so no provider lookup) and an open invoice whose card total
+    // adds the card fee. The fee itself is never written here: the journey asks computeChargeAmount.
+    await trx('payment_methods').insert({ id: f.cardPaymentMethodId, customer_id: f.customerId, processor: 'stripe',
+      method_type: 'card', stripe_payment_method_id: f.stripePaymentMethodId, stripe_customer_id: f.stripeCustomerId,
+      card_brand: f.cardBrand, last_four: f.cardLastFour, exp_month: '12', exp_year: String(new Date().getFullYear() + 3),
+      card_funding: 'credit', card_funding_checked_at: new Date(), is_default: true, autopay_enabled: false,
+    }).onConflict('id').ignore();
+    await trx('invoices').insert({ id: f.cardInvoiceId, customer_id: f.customerId, token: f.cardInvoiceToken,
+      invoice_number: f.cardInvoiceNumber, title: 'QA saved card service', status: 'sent', service_date: etDateString(),
+      due_date: etDateString(addETDays(new Date(), 14)), subtotal: f.cardInvoiceSubtotal, total: f.cardInvoiceSubtotal,
+      discount_amount: 0, tax_rate: 0, tax_amount: 0,
+      line_items: JSON.stringify([{ description: 'QA saved card service', quantity: 1, unit_price: f.cardInvoiceSubtotal, amount: f.cardInvoiceSubtotal }]),
     }).onConflict('id').ignore();
     await trx('customers').insert([
       { id: f.siblingCustomerId, account_id: f.customerId, first_name: 'QA', last_name: 'Sibling', email: f.siblingEmail, phone: f.phone, active: true, is_primary_profile: false, onboarding_complete: true, pipeline_stage: 'active_customer', address_line1: '200 Example Court', city: 'Parrish', state: 'FL', zip: '34219' },
@@ -117,9 +135,10 @@ async function cleanup(db, f) {
   // Only these run-owned root IDs are eligible. FK cascades remove dependent
   // records; an unhandled restrictive FK fails visibly, never broadens cleanup.
   await db.transaction(async (trx) => {
-    await trx('stripe_webhook_events').where({ id: f.eventId }).del();
-    await trx('receipt_delivery_jobs').where({ invoice_id: f.invoiceId }).del();
-    await trx('stripe_payment_notification_log').where({ payment_intent_id: f.paymentIntentId }).del();
+    await trx('stripe_webhook_events').whereIn('id', [f.eventId, f.cardEventId].filter(Boolean)).del();
+    await trx('receipt_delivery_jobs').whereIn('invoice_id', [f.invoiceId, f.cardInvoiceId].filter(Boolean)).del();
+    await trx('stripe_payment_notification_log').whereIn('payment_intent_id',
+      [f.paymentIntentId, ...(f.cardPaymentIntentId ? [f.cardPaymentIntentId] : [])]).del();
     await trx('notifications').whereIn('recipient_id', customerIds)
       .orWhereRaw("metadata->'payload'->>'serviceId' = ?", [f.appointmentId])
       .orWhereRaw("metadata->'payload'->>'invoiceId' = ?", [f.invoiceId]).del();

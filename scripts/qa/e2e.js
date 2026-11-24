@@ -24,6 +24,7 @@ const journeys = [
   require('./journeys/completed-photo-concurrent-retry'),
   require('./journeys/completion-invoice-lineage'),
   require('./journeys/payment-webhook-settles-once'),
+  require('./journeys/saved-card-charge-matches-shown-total'),
   require('./journeys/prepayment-and-series-cancellation-race'),
 ];
 
