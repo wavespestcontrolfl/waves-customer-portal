@@ -874,7 +874,7 @@ keeps every control disabled until a fresh read succeeds; no pre-filled
 transfer link exists for Zelle, so nothing on the page constructs a
 payment URL from the payload. FAQ flag (2026-09-03): with
 GATE_PAY_PAGE_FAQ=true the GET payload carries `payFaq: true` — a display
-flag for the copy-only "Common questions" accordion under the Pay button;
+flag for the copy-only "Payment questions" accordion under the Pay button;
 no other field changes, no customer or invoice data rides it, and gate off
 ⇒ key absent, payload byte-identical — unset the gate to kill it. THIRD-PARTY
 BILL-TO WITHDRAWAL (2026-09-12): a combined-visit invoice whose Bill-To moved

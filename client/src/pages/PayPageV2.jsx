@@ -104,6 +104,7 @@ import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE, CARD_SURCHARGE_NOTICE } 
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
 import { microdepositDetailFromNextAction, microdepositGuidance, microdepositSavedPhrases } from '../lib/microdeposit';
 import { getStripe } from '../lib/stripeLoader';
+import { WAVES_ADDRESS_LINE } from '../constants/business';
 import { fetchWithNetworkRetry } from '../lib/fetchRetry';
 import { consentAttestation, CONSENT_VERSION_STALE_MESSAGE, isConsentVersionStale } from '../lib/paymentMethodConsentText';
 
@@ -601,7 +602,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
   // on Zelle's find-your-bank page.
   const rowStyle = narrow ? PAY_ROW_GRID_NARROW : PAY_ROW_GRID;
   return (
-    <div data-glass="soft" className="waves-no-print" style={{ marginTop: SP.lg }}>
+    <div className="waves-no-print" style={{ marginTop: SP.lg }}>
       <button
         type="button"
         data-glass="soft"
@@ -700,7 +701,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
 }
 
 // ── Pay-page FAQ (GATE_PAY_PAGE_FAQ, 2026-09-03) ───────────────────
-// Three or four questions at the end of the pay card, below the invoice
+// The payment questions at the end of the pay card, below the invoice
 // details and above "Other ways to pay" (the card form moved above the
 // details on 2026-11-06). Every answer restates a fact this page already carries (the
 // method tiles, the consent copy, the bank-processing / verification
@@ -744,8 +745,8 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
   const rate = Number(cardSurchargeRate);
   const pct = Number(((Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_CARD_SURCHARGE_RATE) * 100).toFixed(2)).toString();
   return (
-    <div data-glass="soft" className="waves-no-print" style={{ marginTop: SP.lg }}>
-      <div style={{ ...eyebrow, marginBottom: SP.xs }}>Common questions</div>
+    <div className="waves-no-print" style={{ marginTop: SP.lg }}>
+      <div style={{ ...eyebrow, marginBottom: SP.xs }}>Payment questions</div>
       <div data-glass="soft" role="region" aria-label="Payment questions" style={{ position: 'relative', padding: `0 ${SP.sm}px`, ...PAY_BOX }}>
         <PayFaqItem question="Why is there a card fee, and how do I avoid it?">
           Credit cards entered directly carry a surcharge of up to {pct}% — the exact surcharge and
@@ -775,6 +776,43 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
             emailing billing@wavespestcontrol.com or calling us.
           </PayFaqItem>
         )}
+        <PayFaqItem question="The page or my bank link isn’t working. What do I do?">
+          Reload this page and try once more. If your bank still won’t connect, you can pay with a
+          card or a different account instead. Still stuck? Give us a call and we’ll sort it out
+          — <HelpPhoneLink tone="dark" inline />.
+        </PayFaqItem>
+        <PayFaqItem question="Will I get a receipt, and where is my invoice copy?">
+          Yes — we email your receipt once the payment goes through (a bank transfer, once it
+          settles). For a copy of this invoice, use Download PDF or Print at the top of this
+          page.
+        </PayFaqItem>
+        <PayFaqItem question="Why is this the amount? Where is my WaveGuard discount?">
+          Each service is listed above with its price. A WaveGuard membership discount shows on its
+          own line under the subtotal, and “Total due” is what you pay after it.
+        </PayFaqItem>
+        <PayFaqItem question="Can I pay by check or cash?">
+          Yes. Your technician can take a card, check or cash at the visit, and the office takes
+          checks and cash too. Mail checks to Waves Pest Control, {WAVES_ADDRESS_LINE}, with the
+          invoice number in the memo.
+        </PayFaqItem>
+        <PayFaqItem question="How do I pay from my bank automatically?">
+          Future visits can be billed to a bank account kept on file. Call or email
+          billing@wavespestcontrol.com and we’ll set it up with you.
+        </PayFaqItem>
+        <PayFaqItem question="Can I prepay for the year?">
+          Yes — a year of pest or lawn service can be paid up front. Call us to set it up. If you
+          cancel within 90 days, you’re refunded for the visits not yet done.
+        </PayFaqItem>
+        {!thirdPartyBilled && (
+          <PayFaqItem question="Someone else is paying (a closing or a property manager). How does that work?">
+            Call or email billing@wavespestcontrol.com before you pay and tell us who to bill.
+            We’ll send the invoice to them instead.
+          </PayFaqItem>
+        )}
+        <PayFaqItem question="I think this bill is wrong. Who do I contact?">
+          Don’t pay it yet. Email billing@wavespestcontrol.com or call us with the invoice number
+          and we’ll review it with you — <HelpPhoneLink tone="dark" inline />.
+        </PayFaqItem>
       </div>
     </div>
   );
