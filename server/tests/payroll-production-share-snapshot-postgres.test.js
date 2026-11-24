@@ -20,7 +20,7 @@ const noon = (date) => `${date}T16:00:00Z`;
 postgres('production share credit snapshot (two real connections)', () => {
   let database;
   const OLD = process.env.GATE_PAYROLL_PRODUCTION_SHARE;
-  const made = { technicians: [], customers: [], visits: [] };
+  const made = { technicians: [], customers: [], visits: [], invoices: [], serviceVisits: [], packets: [] };
 
   const tech = async (name) => {
     const id = randomUUID();
@@ -31,10 +31,12 @@ postgres('production share credit snapshot (two real connections)', () => {
     made.technicians.push(id);
     return id;
   };
-  const stop = async (technicianId, date, price) => {
-    const customerId = randomUUID();
-    await database('customers').insert({ id: customerId, first_name: 'Sample', phone: `+1941${Math.floor(1e6 + Math.random() * 8e6)}` });
-    made.customers.push(customerId);
+  const stop = async (technicianId, date, price, sameCustomer = null) => {
+    const customerId = sameCustomer || randomUUID();
+    if (!sameCustomer) {
+      await database('customers').insert({ id: customerId, first_name: 'Sample', phone: `+1941${Math.floor(1e6 + Math.random() * 8e6)}` });
+      made.customers.push(customerId);
+    }
     const id = randomUUID();
     await database('scheduled_services').insert({
       id, customer_id: customerId, technician_id: technicianId, scheduled_date: date, service_type: 'General Pest Control',
@@ -62,6 +64,10 @@ postgres('production share credit snapshot (two real connections)', () => {
   afterAll(async () => {
     if (OLD === undefined) delete process.env.GATE_PAYROLL_PRODUCTION_SHARE; else process.env.GATE_PAYROLL_PRODUCTION_SHARE = OLD;
     if (database) {
+      await database('visit_completion_packet_items').whereIn('packet_id', made.packets).del();
+      await database('visit_completion_packets').whereIn('id', made.packets).del();
+      await database('service_visits').whereIn('id', made.serviceVisits).del();
+      await database('invoices').whereIn('id', made.invoices).del();
       await database('service_records').whereIn('scheduled_service_id', made.visits).del();
       await database('scheduled_services').whereIn('id', made.visits).del();
       await database('customers').whereIn('id', made.customers).del();
@@ -133,6 +139,57 @@ postgres('production share credit snapshot (two real connections)', () => {
       const owners = mine.filter((id) => inputs.get(id).stops.some((row) => row.visitId === world.moving));
       expect(owners).toEqual([world.second]);
       expect(inputs.get(world.first).stops).toHaveLength(1);
+    } finally {
+      await trx.rollback();
+    }
+  });
+
+  it('under the payroll lock two technicians who share an invoice see ONE split, even when it is repriced between their reads', async () => {
+    const a = await tech('Sample Alpha');
+    const b = await tech('Sample Bravo');
+    const [first, second] = [a, b].sort();
+    const customerId = randomUUID();
+    await database('customers').insert({ id: customerId, first_name: 'Sample', phone: `+1941${Math.floor(1e6 + Math.random() * 8e6)}` });
+    made.customers.push(customerId);
+    const v1 = await stop(first, W, '1000.00', customerId);
+    const v2 = await stop(second, W, '1000.00', customerId);
+    const [invoice] = await database('invoices').insert({
+      token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+      subtotal: '2000.00', discount_amount: '0.00', tax_amount: '0.00', total: '2000.00',
+    }).returning('id');
+    made.invoices.push(invoice.id);
+    const [sv] = await database('service_visits').insert({ customer_id: customerId, scheduled_date: W, stop_base_key: `k-${v1}`, created_by: 'test' }).returning('id');
+    made.serviceVisits.push(sv.id);
+    const [packet] = await database('visit_completion_packets').insert({ visit_id: sv.id, idempotency_key: `k-${v1}`, request_hash: 'h', payload: {} }).returning('id');
+    made.packets.push(packet.id);
+    for (const visitId of [v1, v2]) {
+      await database('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-${visitId}`, invoice_id: invoice.id });
+    }
+    const real = productionShare.weekCreditsFor;
+    const trx = await database.transaction(); // READ COMMITTED, as the pay run's transaction
+    try {
+      jest.spyOn(productionShare, 'weekCreditsFor').mockImplementation((conn, settingsById, week) => {
+        // calls of conn.transaction: 1 = the shared facts, 2 = the first technician, 3 = the second. The invoice is repriced (a
+        // $3,000.00 price for the second visit moves the split to $500 / $1,500) right before the second technician's rows.
+        let calls = 0;
+        const wrapped = new Proxy(conn, {
+          get(target, key) {
+            if (key !== 'transaction') return Reflect.get(target, key);
+            return async (handler) => {
+              calls += 1;
+              if (calls === 3) await database('scheduled_services').where({ id: v2 }).update({ estimated_price: '3000.00' });
+              return target.transaction(handler);
+            };
+          },
+        });
+        return real(wrapped, settingsById, week);
+      });
+      const inputs = await productionSharePay.readInputsUnderLock(trx, W);
+      const credit = (technicianId, visitId) => inputs.get(technicianId).stops.find((row) => row.visitId === visitId).creditCents;
+      // both read the split as it was when the invoice and jobs were read: $1,000.00 each, adding up to the invoice
+      expect([credit(first, v1), credit(second, v2)]).toEqual([100000, 100000]);
+      // and the same basis (the split of both visits) is on both rows
+      expect(inputs.get(first).stops[0].bases).toEqual(inputs.get(second).stops[0].bases);
     } finally {
       await trx.rollback();
     }

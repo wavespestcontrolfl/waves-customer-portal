@@ -294,54 +294,83 @@ describe('the read under the payroll lock', () => {
   });
 });
 
-describe('a shared invoice frozen with its week', () => {
+describe('the first finalized payment freezes the credit basis (applyFrozen)', () => {
   const productionShare = require('../services/production-share');
-  const live = (a, b) => ({ invoiceId: 'inv-1', allocation: { 'visit-1': a, 'visit-2': b } });
-  const row = (a, b) => ({ visitId: 'visit-2', workDate: '2026-09-21', kind: 'priced', creditCents: b, needsReview: false, invoices: [live(a, b)] });
-  const frozen = new Map([['inv-1', { weekStart: '2026-09-14', allocation: { 'visit-1': 10000, 'visit-2': 10000 } }]]);
+  const invoiceBasis = (a, b) => ({ basisType: 'invoice', basisId: 'inv-1', totalCents: a + b, allocation: { 'visit-1': a, 'visit-2': b } });
+  const frozenInvoice = (basis = invoiceBasis(60000, 60000)) => [{ weekStart: '2026-09-14', basis }];
+  // A week-2 row of visit-2 as it prices live now: from the invoice (bases) or from its own price (no bases)
+  const live = (cents, bases = [invoiceBasis(cents, 120000 - cents)], kind = 'priced') => ({ visitId: 'visit-2', workDate: '2026-09-21', kind, creditCents: cents, needsReview: false, bases });
+  const none = new Map();
 
-  test('the same split changes nothing; a split moved either way is $0 and names the week it was paid in', () => {
-    expect(productionShare.markSharedChanged([row(10000, 10000)], frozen)[0]).toMatchObject({ kind: 'priced', creditCents: 10000, needsReview: false });
-    for (const [a, b] of [[15000, 5000], [5000, 15000]]) {
-      expect(productionShare.markSharedChanged([row(a, b)], frozen)[0]).toMatchObject({
-        kind: 'shared_invoice_changed', creditCents: 0, needsReview: true,
-        reason: expect.stringContaining('The shared invoice changed after the week of 2026-09-14 was paid'),
-      });
+  test('a listed visit credits its frozen cents, whatever its live invoice link, price or split (lost link, repriced, new weights)', () => {
+    // the live split moved either way: the frozen $600.00 stays
+    for (const cents of [90000, 30000]) {
+      expect(productionShare.applyFrozen([live(cents)], none, frozenInvoice())[0]).toMatchObject({ kind: 'frozen_basis', creditCents: 60000, needsReview: false });
     }
-    // a visit that joined the invoice later is a changed split too
-    const joined = { ...row(10000, 10000), invoices: [{ invoiceId: 'inv-1', allocation: { 'visit-1': 10000, 'visit-2': 5000, 'visit-3': 5000 } }] };
-    expect(productionShare.markSharedChanged([joined], frozen)[0].kind).toBe('shared_invoice_changed');
+    // the invoice link is gone: the visit falls back to its own $1,000.00 price, and still credits the frozen $600.00
+    expect(productionShare.applyFrozen([live(100000, [])], none, frozenInvoice())[0]).toMatchObject({ kind: 'frozen_basis', creditCents: 60000 });
+    // no live price at all (unpriced review): the frozen cents still stand
+    expect(productionShare.applyFrozen([{ ...live(0, []), kind: 'unpriced', needsReview: true }], none, frozenInvoice())[0]).toMatchObject({ creditCents: 60000, needsReview: false });
   });
 
-  test('no frozen split, a row with no shared invoice, or a row already under review is left alone', () => {
-    expect(productionShare.markSharedChanged([row(15000, 5000)], new Map())[0].kind).toBe('priced');
-    const plain = { visitId: 'v', creditCents: 100, needsReview: false };
-    expect(productionShare.markSharedChanged([plain], frozen)[0]).toBe(plain);
-    const review = { ...row(15000, 5000), needsReview: true, kind: 'unpriced', creditCents: 0 };
-    expect(productionShare.markSharedChanged([review], frozen)[0].kind).toBe('unpriced');
+  test('a credit that is not price-derived (prepaid slice, callback value, free visit, not performed) keeps its own credit', () => {
+    for (const kind of ['prepaid_plan', 'callback_other', 'free_visit', 'not_performed', 'unverified']) {
+      const row = live(40000, [], kind);
+      expect(productionShare.applyFrozen([row], none, frozenInvoice())[0]).toBe(row);
+    }
   });
 
-  test('an invoice that went from one visit to several (or back) is a changed split, for the credit it priced', () => {
-    const wasWhole = new Map([['inv-1', { weekStart: '2026-09-14', allocation: { 'visit-1': 20000 } }]]);
-    // visit-2 joined the invoice after it was paid whole to visit-1
-    expect(productionShare.markSharedChanged([row(10000, 10000)], wasWhole)[0]).toMatchObject({ kind: 'shared_invoice_changed', creditCents: 0 });
-    // the invoice was split, then visit-2 left it: visit-1 now holds it whole, and a later week of visit-1 is a changed split too
-    const wasSplit = new Map([['inv-1', { weekStart: '2026-09-14', allocation: { 'visit-1': 10000, 'visit-2': 10000 } }]]);
-    const whole = { visitId: 'visit-1', workDate: '2026-09-21', kind: 'priced', creditCents: 20000, needsReview: false, invoices: [{ invoiceId: 'inv-1', allocation: { 'visit-1': 20000 } }] };
-    expect(productionShare.markSharedChanged([whole], wasSplit)[0].kind).toBe('shared_invoice_changed');
+  test('a visit that joined the basis live and is not in its allocation is $0 and named; so is one that joined an invoice paid whole', () => {
+    const joined = { ...live(60000), visitId: 'visit-9', bases: [invoiceBasis(60000, 60000)] };
+    expect(productionShare.applyFrozen([joined], none, frozenInvoice())[0]).toMatchObject({
+      kind: 'joined_basis', creditCents: 0, needsReview: true, reason: expect.stringContaining('joined, after the week of 2026-09-14 was paid'),
+    });
+    const wholeBefore = frozenInvoice({ basisType: 'invoice', basisId: 'inv-1', totalCents: 120000, allocation: { 'visit-1': 120000 } });
+    expect(productionShare.applyFrozen([live(60000)], none, wholeBefore)[0]).toMatchObject({ kind: 'joined_basis', creditCents: 0 });
   });
 
-  test('a row with no invoice behind its credit (own price, prepaid slice, callback value) is never touched by a split guard', () => {
-    const ownPrice = { visitId: 'visit-2', workDate: '2026-09-21', kind: 'priced', creditCents: 5000, needsReview: false, invoices: [] };
-    expect(productionShare.markSharedChanged([ownPrice], frozen)[0]).toBe(ownPrice);
+  test('a visit already credited on a finalized check is already_paid, before anything else', () => {
+    expect(productionShare.applyFrozen([live(60000)], new Map([['visit-2', '2026-09-14']]), frozenInvoice())[0]).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true });
   });
 
-  test('the snapshot freezes the invoice split on the stop, and only on a stop that has one', () => {
-    const rows = [{ visitId: 'v1', workDate: '2026-09-14', kind: 'priced', creditCents: 100, needsReview: false, invoices: [live(1, 2)] },
-      { visitId: 'v2', workDate: '2026-09-15', kind: 'priced', creditCents: 100, needsReview: false, invoices: [] }];
+  const jobBasis = { basisType: 'job', basisId: 'root-1', totalCents: 200000, sold: 2, allocation: { 'root-1': 100000 }, slots: { 'root-1': 1 } };
+  const followUp = (repricedPart, nth = 2) => ({
+    visitId: 'visit-2', workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: repricedPart, needsReview: false,
+    bases: [{ basisType: 'job', basisId: 'root-1', totalCents: 120000, sold: 2, allocation: { 'root-1': 60000, 'visit-2': repricedPart }, slots: { 'root-1': 1, 'visit-2': nth } }],
+  });
+
+  test('a package follow-up takes its free slot of the FROZEN job price when the root is repriced after half was paid ($2,000.00 -> $1,200.00)', () => {
+    const out = productionShare.applyFrozen([followUp(60000)], none, [{ weekStart: '2026-09-14', basis: jobBasis }])[0];
+    expect(out).toMatchObject({ kind: 'frozen_basis', creditCents: 100000, needsReview: false });
+    // the row carries the frozen job with its own part added, so a later week reads it too
+    expect(out.bases[0]).toMatchObject({ basisId: 'root-1', totalCents: 200000, allocation: { 'root-1': 100000, 'visit-2': 100000 }, slots: { 'root-1': 1, 'visit-2': 2 } });
+  });
+
+  test('a follow-up that was planned when the first visit was paid is listed: its frozen cents', () => {
+    const planned = { ...jobBasis, allocation: { 'root-1': 100000, 'visit-2': 100000 }, slots: { 'root-1': 1, 'visit-2': 2 } };
+    expect(productionShare.applyFrozen([followUp(60000)], none, [{ weekStart: '2026-09-14', basis: planned }])[0]).toMatchObject({ kind: 'frozen_basis', creditCents: 100000 });
+  });
+
+  test('a visit that wants a slot the frozen job already used, or one past the sold count, is $0 and named', () => {
+    expect(productionShare.applyFrozen([followUp(60000, 1)], none, [{ weekStart: '2026-09-14', basis: jobBasis }])[0]).toMatchObject({ kind: 'joined_basis', creditCents: 0 });
+    expect(productionShare.applyFrozen([followUp(60000, 3)], none, [{ weekStart: '2026-09-14', basis: jobBasis }])[0]).toMatchObject({ kind: 'joined_basis', creditCents: 0 });
+  });
+
+  test('no frozen basis changes nothing, and a row with no basis behind it is left alone', () => {
+    const row = live(60000);
+    expect(productionShare.applyFrozen([row], none, [])[0]).toBe(row);
+    const own = live(100000, []);
+    expect(productionShare.applyFrozen([own], none, frozenInvoice())[0]).toMatchObject({ kind: 'frozen_basis' }); // listed: frozen
+    const other = { ...live(100000, []), visitId: 'visit-7' };
+    expect(productionShare.applyFrozen([other], none, frozenInvoice())[0]).toBe(other);
+  });
+
+  test('the snapshot freezes the bases on the stop, and only on a stop that has one', () => {
+    const rows = [{ visitId: 'v1', workDate: '2026-09-14', kind: 'priced', creditCents: 100, needsReview: false, bases: [invoiceBasis(1, 2)] },
+      { visitId: 'v2', workDate: '2026-09-15', kind: 'priced', creditCents: 100, needsReview: false, bases: [] }];
     const made = share.snapshotOf({ weekStart: WEEK, settings: SETTINGS, result: shareForWeek({ credits: rows, shifts: 2, settings: SETTINGS }), stops: rows });
-    expect(made.stops[0].invoices).toEqual([live(1, 2)]);
-    expect(made.stops[1]).not.toHaveProperty('invoices');
+    expect(made.stops[0].bases).toEqual([invoiceBasis(1, 2)]);
+    expect(made.stops[1]).not.toHaveProperty('bases');
   });
 });
 
@@ -406,10 +435,10 @@ describe('the down guard migration', () => {
   });
 });
 
-describe('the invoice splits are in both finalize comparisons', () => {
-  const split = (a, b) => [{ invoiceId: 'inv-1', allocation: { v1: a, v2: b } }];
-  const withInvoices = (invoices) => stops([['v1', '2026-09-14', 100000], ['v2', '2026-09-15', 110000], ['v3', '2026-09-16', 100000], ['v4', '2026-09-17', 102000]])
-    .map((stop, i) => (i === 1 ? { ...stop, invoices } : stop));
+describe('the credit bases are in both finalize comparisons', () => {
+  const split = (a, b) => [{ basisType: 'invoice', basisId: 'inv-1', totalCents: a + b, allocation: { v1: a, v2: b } }];
+  const withInvoices = (bases) => stops([['v1', '2026-09-14', 100000], ['v2', '2026-09-15', 110000], ['v3', '2026-09-16', 100000], ['v4', '2026-09-17', 102000]])
+    .map((stop, i) => (i === 1 ? { ...stop, bases } : stop));
 
   test('the revision changes when only a split changes (the credits stay the same)', () => {
     const rev = (invoices) => share.revisionOf(new Map([['tech-a', { settings: SETTINGS, stops: withInvoices(invoices) }]]));

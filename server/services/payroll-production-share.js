@@ -24,7 +24,7 @@
  *
  * What the check freezes (calc_snapshot.productionShare, with payroll_checks.production_share_cents): the credited
  * production, the bar, the amount above it, the rate, the bar type, the shifts and one row per stop { visitId, workDate,
- * kind, creditCents, needsReview, invoices? }. No customer name, address or price detail is copied. A stop that needs review credits
+ * kind, creditCents, needsReview, bases? }. No customer name, address or price detail is copied. A stop that needs review credits
  * $0 (production-share.js) and the draft says how many; it never blocks the run. The review token takes the share and a
  * signature of those rows, so a credit that changes after drafting makes the draft stale.
  */
@@ -53,9 +53,9 @@ function snapshotOf({ weekStart, settings, result, stops }) {
     shareCents: result.shareCents,
     stops: stops.map((stop) => ({
       visitId: stop.visitId, workDate: stop.workDate, kind: stop.kind, creditCents: stop.creditCents, needsReview: Boolean(stop.needsReview),
-      // The shared invoices the credit came from, with their full split (visit id -> cents) as it was when this week was paid: a
-      // later week of another visit of the same invoice is checked against it (production-share.js markSharedChanged).
-      ...(stop.invoices && stop.invoices.length ? { invoices: stop.invoices } : {}),
+      // The credit bases (a shared invoice or a multi-visit job, with the split of ALL its visits) this credit was priced from, frozen
+      // with the week: every later week reads them by visit id (production-share.js applyFrozen).
+      ...(stop.bases && stop.bases.length ? { bases: stop.bases } : {}),
     })),
   };
 }
@@ -130,19 +130,20 @@ async function readInputsUnderLock(trx, weekStart) {
  * credit, review mark), whatever the order. The pay run's finalize reads the inputs again under the payroll lock and compares
  * revisions, so credits that changed between its first read and the lock are never frozen onto a check. Pure.
  */
-// The invoices a stop's credit came from, in a fixed order: [[invoiceId, [[visitId, cents], ...]], ...]. The review token and the
-// revision both take it, so a split that changes after drafting makes the draft stale even when the credits do not move.
-function invoicesSignature(invoices) {
-  return (Array.isArray(invoices) ? invoices : []).map((one) => [one.invoiceId,
-    Object.entries(one.allocation || {}).map(([visitId, cents]) => [visitId, Number(cents)]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))])
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+// The credit bases a stop was priced from, in a fixed order: [[type, id, total, sold, [[visitId, cents, slot], ...]], ...]. The review
+// token and the revision both take it, so a basis that changes after drafting makes the draft stale even when the credits do not move.
+function basesSignature(bases) {
+  return (Array.isArray(bases) ? bases : []).map((one) => [one.basisType, one.basisId, Number(one.totalCents), Number(one.sold || 0),
+    Object.entries(one.allocation || {}).map(([visitId, cents]) => [visitId, Number(cents), Number((one.slots || {})[visitId] || 0)])
+      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))])
+    .sort((a, b) => (`${a[0]}:${a[1]}` < `${b[0]}:${b[1]}` ? -1 : 1));
 }
 
 function revisionOf(inputs) {
   const rows = [...inputs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([id, input]) => {
     if (input.error) return [id, 'error', input.error];
     const { settings } = input;
-    const stops = input.stops.map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, invoicesSignature(stop.invoices)])
+    const stops = input.stops.map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases)])
       .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
     return [id, settings.id, settings.rateBps, settings.barType, settings.barCents, settings.callbackStopValueCents, stops];
   });
@@ -194,7 +195,7 @@ function snapshotOfRow(row) {
 function signature(row) {
   const snapshot = snapshotOfRow(row) || {};
   const stops = (Array.isArray(snapshot.stops) ? snapshot.stops : [])
-    .map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, invoicesSignature(stop.invoices)])
+    .map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases)])
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return [
     snapshot.settingsId == null ? null : Number(snapshot.settingsId),
