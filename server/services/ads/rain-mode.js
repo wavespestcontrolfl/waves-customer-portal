@@ -95,12 +95,19 @@ function countWetHours(hours, day) {
  * morning a wet early span can be gone) is open (`rain: null`) and is not counted either way. The call needs
  * MIN_AREAS settled areas.
  */
+const NWS_WAIT_MS = 10000;
+
 async function forecastDay(day, { read = getNwsHourlyRain } = {}) {
   const zones = Object.keys(ZONE_COORDS);
   const areas = [];
   const unread = [];
+  // No one waits on this cron: each NWS fetch may take NWS_WAIT_MS, and an area NWS does not answer is asked once more.
+  // The first prod ticks (2026-11-24) lost 4 of 6 areas to the 2.5 s default at the busy top of the hour.
+  const readOnce = (zone) => Promise.resolve()
+    .then(() => read(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng, { fetchTimeoutMs: NWS_WAIT_MS }))
+    .catch(() => null);
   await Promise.all(zones.map(async (zone) => {
-    const hours = await Promise.resolve().then(() => read(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng)).catch(() => null);
+    const hours = (await readOnce(zone)) || (await readOnce(zone));
     const counted = Array.isArray(hours) ? countWetHours(hours, day) : null;
     const total = (DAY_CLOSE - DAY_OPEN) / HOUR;
     if (!counted || counted.missing >= total) { unread.push(zone); return; }
