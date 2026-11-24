@@ -2080,10 +2080,13 @@ function limitRowIsIdle(row) {
 function limitAlreadySet(row) {
   return row.currentThreshold === row.suggestedThreshold && row.currentReorder === row.suggestedReorder;
 }
-// A zero reorder (no whole pack fits before June 1) stays informational:
-// saved, it would read as "not set up" to the sweep after the blackout.
+// Fertilizer rows near or in the June 1 - Sept 30 blackout stay
+// informational: the sweep reads a saved amount without the seasonal cap, so
+// a capped number would become the standing order. A zero reorder would read
+// as "not set up".
+const SEASONAL_LIMIT_STATUSES = new Set(["blackout_hold", "blackout_capped"]);
 function limitCanUse(row) {
-  return row.suggestedThreshold != null && row.suggestedReorder > 0 && row.status !== "blackout_hold";
+  return row.suggestedThreshold != null && row.suggestedReorder > 0 && !SEASONAL_LIMIT_STATUSES.has(row.status);
 }
 function limitIsLow(row) {
   return row.onHand != null && row.suggestedThreshold != null && row.onHand <= row.suggestedThreshold;

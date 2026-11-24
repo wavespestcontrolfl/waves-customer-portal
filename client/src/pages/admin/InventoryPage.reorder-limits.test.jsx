@@ -37,6 +37,7 @@ const HOLD = { ...ROW, productId: 'hold-1', name: 'Synthetic 24-0-11', status: '
 // No whole pack fits before June 1: shown, but not saveable (a saved 0 reads
 // as "not set up" to the sweep after the blackout).
 const CAPPED_ZERO = { ...ROW, productId: 'cap-1', name: 'Synthetic 10-0-22', status: 'blackout_capped', suggestedThreshold: 5, suggestedReorder: 0, packs: 0 };
+const CAPPED_TWO = { ...ROW, productId: 'cap-2', name: 'Synthetic 24-0-11 bags', status: 'blackout_capped', suggestedThreshold: 50, suggestedReorder: 100, packs: 2 };
 
 let fetchMock;
 beforeEach(() => {
@@ -44,7 +45,7 @@ beforeEach(() => {
   fetchMock = vi.fn((url, init = {}) => {
     const path = String(url);
     if (path.includes('/reorder-suggestions')) {
-      return Promise.resolve(reply({ today: '2026-11-24', options: { leadDays: 3, bufferDays: 7, reorderDays: 21 }, forecastError: null, products: [ROW, IDLE, HOLD, CAPPED_ZERO] }));
+      return Promise.resolve(reply({ today: '2026-11-24', options: { leadDays: 3, bufferDays: 7, reorderDays: 21 }, forecastError: null, products: [ROW, IDLE, HOLD, CAPPED_ZERO, CAPPED_TWO] }));
     }
     if (init.method === 'PUT') return Promise.resolve(reply({ product: { id: productId } }));
     return Promise.resolve(reply({}));
@@ -79,7 +80,8 @@ describe('Limits tab', () => {
     mount();
     await screen.findByText('Synthetic jug product');
     const buttons = screen.getAllByRole('button', { name: 'Use' });
-    expect(buttons).toHaveLength(1); // the blackout hold and zero-reorder rows have no Use
+    expect(buttons).toHaveLength(1); // blackout hold and June-1-capped rows (zero or not) have no Use
+    expect(screen.getByText('Synthetic 24-0-11 bags')).toBeInTheDocument();
     expect(screen.getByText('Synthetic 10-0-22')).toBeInTheDocument();
     fireEvent.click(buttons[0]);
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(true));
