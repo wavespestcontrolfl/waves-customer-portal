@@ -1785,38 +1785,42 @@ function memberOutsideShift(shiftOf, date, landings, judged = {}) {
 
 /**
  * GATE_TECH_SHIFT_HOURS (D4 part 3c): the office's own move of a grouped stop
- * is told from the rows it leaves. After every write of the move (each
- * member's own move, and the assignment to the technician the move names),
- * each member that moved is read once, and the office is told about the
- * technician that row now has (memberOfficeLine). No writer's answer is used,
+ * is told from the rows it leaves. `rows` is the visit's rows as the mover
+ * itself read them FOR UPDATE to retarget the visit, after every member's own
+ * move and its assignment to the technician the move names: a reassignment
+ * linearizes after that read. Each member that moved is asked once, about the
+ * technician its row has there (memberOfficeLine). No writer's answer is used,
  * so a line is never about a row as it was planned, and is not lost with a
  * writer's answer (a refused assignment, a member's failed post-commit work).
  * Each line once: two members can state the same one. Gate off, or a move the
- * office did not start: no read and no line (gate off, each member's own move
- * states its day-off line, as before). A read that fails is logged: the move
- * is committed, and is not failed for a line.
+ * office did not start: no line (gate off, each member's own move states its
+ * day-off line, as before). A line that cannot be read is logged: the move is
+ * committed, and is not failed for a line.
  */
-async function unitOfficeLines(targets, moved, initiatedBy) {
+async function unitOfficeLines(targets, moved, rows, initiatedBy) {
   if (initiatedBy !== 'admin' || !require('../config/feature-gates').techShiftHoursLive()) return [];
-  const lines = await Promise.all(targets.filter((x) => moved.includes(x.id)).map((target) => memberOfficeLine(target).catch((err) => {
+  const lineOf = async ({ id, expect }) => memberOfficeLine(rows.find((row) => String(row.id) === String(id)), expect);
+  const lines = await Promise.all(targets.filter((x) => moved.includes(x.id)).map((target) => lineOf(target).catch((err) => {
     require('./logger').warn(`[visit-groups] unit move: the office line of moved member ${target.id} was not read: ${err.message}`);
   })));
   return [...new Set(lines)].filter(Boolean);
 }
 
-// One moved member's line, about the row as it now is: the day-off line, or the
-// shift line when the shift does not hold the row. `expect` is the row as the
-// plan read it. A member that kept its day and its technician is asked the
-// shift alone (as one visit's hours-only move is); with its hours kept too the
-// move changed nothing a line is about, and it is not asked. An end the plan
-// did not have is not compared (the member's own move derives one).
-async function memberOfficeLine({ id, expect }) {
-  const row = await db('scheduled_services').where({ id })
-    .first('technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+// One moved member's line, about its row as the move left it: the day-off line,
+// or the shift line when the shift does not hold the row. `expect` is the row
+// as the plan read it. A member that kept its day and its technician is asked
+// the shift alone (as one visit's hours-only move is); when its block is the
+// one it had too, the move changed nothing a line is about, and it is not
+// asked. The blocks are compared as a shift reads them (rowBlockMinutes, on
+// the stored length): an end the member's own move derived is no change, an
+// end the office set later than the length is.
+function memberOfficeLine(row, expect) {
   if (!row || !row.technician_id) return undefined;
+  const { rowBlockMinutes } = require('./scheduling/window-rules');
   const kept = expectMatchesRow(row, { scheduled_date: expect.scheduled_date, technician_id: expect.technician_id });
-  const hours = { window_start: expect.window_start, ...(expect.window_end ? { window_end: expect.window_end } : {}) };
-  if (kept && expectMatchesRow(row, hours)) return undefined;
+  const was = rowBlockMinutes({ window_start: expect.window_start, window_end: expect.window_end, estimated_duration_minutes: row.estimated_duration_minutes });
+  const now = rowBlockMinutes(row);
+  if (kept && was.startMin === now.startMin && was.endMin === now.endMin) return undefined;
   return require('./technician-eligibility').dayWarningFor(row.technician_id, dateOnly(row.scheduled_date), { block: row, shiftOnly: kept });
 }
 
@@ -2931,6 +2935,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 
   // ---- 3. retarget the parent from the rows that actually landed ----
   let parentRetargetFailed = false;
+  let leftRows = [];
   const newKey = stopBaseKey({ propertyId: plan.propertyId, customerId: plan.customerId, scheduledDate: newDateStr });
   try {
     await db.transaction(async (t) => {
@@ -2950,7 +2955,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
         .orderBy('id').forUpdate()
-        .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
+        .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'estimated_duration_minutes');
+      // The rows as this move left them, for the office's lines (unitOfficeLines).
+      leftRows = rows;
       // Every member reported MOVED must still be a member of this visit
       // sitting at its landed target under these locks (codex r17): a
       // newer assignment/move between a member's move and this retarget can
@@ -3142,7 +3149,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     .filter(Boolean).map((v) => String(v).slice(0, 5)).sort();
   const visitStart = representedStarts[0] || null;
   const visitMove = { visitId: plan.visitId, moved, failed, members, unchanged, visitStart, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
-  const lines = [...warnings, ...await unitOfficeLines(plan.targets, moved, initiatedBy)];
+  const lines = [...warnings, ...await unitOfficeLines(plan.targets, moved, leftRows, initiatedBy)];
   return { ...(primaryResult || { success: true, newDate }), visitMove, ...(lines.length ? { warnings: lines } : {}) };
 }
 
