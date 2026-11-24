@@ -280,6 +280,25 @@ describe('adResults', () => {
     expect(rowOf(out, CAMP, '2026-10-01').customers).toEqual([]);
   });
 
+  test('a legacy paid invoice with no paid_at counts when it was created on or after the lead day', async () => {
+    const conn = fakeConn({
+      ad_service_attribution: [
+        lead({ id: 'l1', customer_id: 'c1' }),
+        lead({ id: 'l2', customer_id: 'c2', lead_date: '2026-10-05' }),
+      ],
+      customers: [customer('c1'), customer('c2')],
+      invoices: [
+        invoice('c1', '2026-10-03T15:00:00Z', 10, { paid_at: null, created_at: new Date('2026-10-03T15:00:00Z') }),
+        invoice('c2', '2026-10-03T15:00:00Z', 10, { paid_at: null, created_at: new Date('2026-10-03T15:00:00Z') }),
+      ],
+      payments: [],
+    });
+    const out = await adResults({ ...WINDOW, conn });
+    expect(rowOf(out, CAMP, '2026-10-01')).toMatchObject({ paid_customers: 1 });
+    expect(rowOf(out, CAMP, '2026-10-01').customers[0]).toMatchObject({ customer_id: 'c1', first_paid_date: null });
+    expect(rowOf(out, CAMP, '2026-10-05').paid_customers).toBe(0);
+  });
+
   test('two leads on one day: the earlier-created lead gets the paid credit', async () => {
     const conn = fakeConn({
       ad_service_attribution: [

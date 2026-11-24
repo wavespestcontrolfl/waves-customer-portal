@@ -192,7 +192,9 @@ export default function AdsResultsCard() {
       {state === "loading" && <div className="text-ui-body text-ink-secondary">Loading.</div>}
       {state === "error" && <div className="text-ui-body text-ink-secondary">Ad results could not load: {message}</div>}
       {state === "ready" && groups.length === 0 && (
-        <div className="text-ui-body text-ink-secondary">No ad spend or leads in this period.</div>
+        <div className="text-ui-body text-ink-secondary">
+          No ad spend or leads in this period. Rain days: {rainText(periodRainRows(data))}.
+        </div>
       )}
       {state === "ready" && groups.length > 0 && (
         <Table aria-label="Ad results by campaign">

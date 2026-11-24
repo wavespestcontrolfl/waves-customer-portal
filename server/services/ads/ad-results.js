@@ -129,9 +129,9 @@ async function loadPaidInvoices(conn, ids, from) {
     const rows = await conn('invoices')
       .whereIn('customer_id', part)
       .where('status', 'paid')
-      .whereNotNull('paid_at')
-      .where('paid_at', '>=', from)
-      .select('id', 'customer_id', 'total', 'paid_at', 'service_type', 'title');
+      // A legacy paid invoice can have no paid_at; its created_at is the earliest it could have been paid.
+      .whereRaw('COALESCE(paid_at, created_at) >= ?', [from])
+      .select('id', 'customer_id', 'total', 'paid_at', 'created_at', 'service_type', 'title');
     out.push(...rows);
   }
   return out;
@@ -192,13 +192,15 @@ async function creditPaid(conn, rows, firstLead, customers) {
   for (const inv of invoices) {
     const key = String(inv.customer_id);
     if (!byCustomer.has(key)) byCustomer.set(key, []);
-    byCustomer.get(key).push({ ...inv, day: etDateString(new Date(inv.paid_at)) });
+    const at = inv.paid_at || inv.created_at;
+    if (!at) continue;
+    byCustomer.get(key).push({ ...inv, at, day: etDateString(new Date(at)) });
   }
   for (const [customerId, lead] of firstLead) {
     const leadDay = dateOnlyString(lead.lead_date);
     const paid = (byCustomer.get(customerId) || [])
       .filter((inv) => inv.day >= leadDay)
-      .sort((a, b) => new Date(a.paid_at) - new Date(b.paid_at));
+      .sort((a, b) => new Date(a.at) - new Date(b.at));
     const lastDay = daysAfter(leadDay, PAID90_DAYS);
     // Money in counts even before an invoice is paid (an estimate deposit); the customer counts need a paid invoice.
     const paid90 = cents((collected.get(customerId) || [])
@@ -221,7 +223,7 @@ async function creditPaid(conn, rows, firstLead, customers) {
     if (churned) row.cancels += 1;
     row.customers.push({
       customer_id: customerId,
-      first_paid_date: paid[0].day,
+      first_paid_date: paid[0].paid_at ? paid[0].day : null, // null: a legacy invoice with no paid date
       service: paid[0].service_type || paid[0].title || null,
       plan,
       churned,
