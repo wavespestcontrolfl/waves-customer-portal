@@ -55,7 +55,10 @@ describe('applyMinimum', () => {
     const conn = (table) => {
       const q = {
         whereIn: () => q, where: () => q, whereNotNull: () => q, whereRaw: () => q, whereBetween: () => q, groupBy: () => q,
-        select: async () => (table === 'technicians' ? techs : []),
+        distinctOn: () => q, select: () => q,
+        // The minimum of the week comes from payroll_week_minimum_changes; the rest from technicians.
+        orderBy: async () => techs.map((t) => ({ technician_id: t.id, hours: t.paid_week_minimum_hours })),
+        then: (ok, bad) => Promise.resolve(table === 'technicians' ? techs : []).then(ok, bad),
       };
       return q;
     };

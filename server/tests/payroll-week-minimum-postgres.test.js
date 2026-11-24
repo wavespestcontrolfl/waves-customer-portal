@@ -33,7 +33,8 @@ const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
 const { EARLIER_STAY, NO_HIRE_DATE } = require('../services/payroll-week-minimum');
-const { addStaffWorkDays } = require('../utils/staff-time-work-date');
+const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
+const { etDateString } = require('../utils/datetime-et');
 
 jest.setTimeout(60000);
 
@@ -57,6 +58,8 @@ postgres('payroll minimum paid week', () => {
       id, name, employment_type: 'w2', employment_status: 'active', pay_rate: '22.00',
       pto_hours_per_year: hours, hire_date: hired, paid_week_minimum_hours: minimum, ...patch,
     });
+    // The minimum applies from a pay week (payroll_week_minimum_changes): here from long before every test week.
+    if (minimum != null) await trx('payroll_week_minimum_changes').insert({ technician_id: id, from_week: '2020-01-06', hours: minimum });
     await trx('payroll_w4_elections').insert({
       technician_id: id, form_year: 2026, filing_status: 'single', signed_on: '2026-01-02', effective_on: '2026-01-02',
     });
@@ -225,6 +228,7 @@ postgres('payroll minimum paid week', () => {
     const set = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40' }, email: OWNER });
     expect([set.status, set.body.error]).toEqual([409, 'Enter a readable hire date first (Staff), then set the minimum.']);
     await trx('technicians').where({ id }).update({ paid_week_minimum_hours: '40' });
+    await trx('payroll_week_minimum_changes').insert({ technician_id: id, from_week: '2020-01-06', hours: '40' });
     await worked(id, W1, 12);
     expect((await draft(W1)).body.run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: NO_HIRE_DATE }]);
     // A hire date the calendar code cannot read (year 20251) counts as none.
@@ -325,12 +329,10 @@ postgres('payroll minimum paid week', () => {
     await trx('time_entry_daily_summary').insert({ technician_id: id, work_date: W1, total_shift_minutes: 900 });
     const run = (await draft(W1)).body.run;
     expect(run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: EARLIER_STAY }]);
-    // Clearing the minimum pays the week as before.
+    // Clearing the minimum now applies from this week on: the old week keeps its own minimum and stays held.
     await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: null }, email: OWNER });
     const again = (await api('POST', `/runs/${run.id}/recompute`)).body.run;
-    expect(again.blocked).toEqual([]);
-    expect(byName(again, 'Sample Alpha')).toMatchObject({ regularHours: '15.00', grossCents: 33000 });
-    expect(byName(again, 'Sample Alpha')).not.toHaveProperty('minimumWeekHours');
+    expect(again.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: EARLIER_STAY }]);
   });
 
   it('a day of time off before the hire date is not an earlier stay', async () => {
@@ -371,28 +373,31 @@ postgres('payroll minimum paid week', () => {
     expect(created.status === 201 ? created.body.run.checks : []).toEqual([]);
   });
 
-  it('the setting: owner account only, 0 to 40 hours, changes only while every finished week is paid, and audited', async () => {
+  it('the setting: owner account only, 0 to 40 hours, each change applies from the week it is saved in, and audited', async () => {
     const id = await tech('Sample Alpha', { minimum: null });
     await worked(id, W1, 30);
     const put = (body, email = OWNER) => api('PUT', `/technicians/${id}/week-minimum`, { body, email });
     expect((await put({ hours: '40' }, null)).status).toBe(403);
     expect((await put({ hours: '41' })).status).toBe(400);
     expect((await put({ hours: '0' })).status).toBe(400);
-    // Week 1 holds work no final run paid: a change now would reach it when it is paid. Refused.
-    const open = await put({ hours: '40' });
-    expect([open.status, open.body.error]).toEqual([409, `The week of ${W1} has work or time off that no final pay run has paid yet. Finalize that pay run first, then change the minimum: a week paid after the change would get the new minimum.`]);
-    expect((await finalize((await draft(W1)).body.run.id)).status).toBe(200);
+    // A change applies from the pay week it is saved in: week 1, earlier, keeps no minimum when it is paid late.
     const set = await put({ hours: '40' });
     expect([set.status, set.body]).toEqual([200, { technician: { id, paidWeekMinimumHours: 40, paidWeekMinimumLastDay: null } }]);
     const listed = (await api('GET', '/technicians')).body.technicians.find((row) => row.id === id);
     expect(listed.paidWeekMinimumHours).toBe(40);
-    // An unpaid week blocks clearing too; a last day alone (hours unchanged) is not this guard's.
-    await worked(id, addDays(W1, 7), 20);
-    expect((await put({ hours: '' })).status).toBe(409);
-    const day = await put({ hours: '40', lastDay: addDays(W1, 8) });
-    expect([day.status, day.body.technician.paidWeekMinimumLastDay]).toEqual([200, addDays(W1, 8)]);
+    const late = (await draft(W1)).body.run;
+    expect(byName(late, 'Sample Alpha')).toMatchObject({ regularHours: '30.00' });
+    expect(byName(late, 'Sample Alpha')).not.toHaveProperty('minimumWeekHours');
+    const thisWeek = staffWeekStartForWorkDate(etDateString());
+    const changes = () => trx('payroll_week_minimum_changes').where({ technician_id: id })
+      .select(trx.raw("to_char(from_week, 'YYYY-MM-DD') AS from_week"), 'hours');
+    expect(await changes()).toEqual([{ from_week: thisWeek, hours: '40.00' }]);
+    // A second change in the same week replaces that week's row; a last day alone adds none.
+    expect((await put({ hours: '' })).status).toBe(200);
+    expect((await put({ hours: '', lastDay: addDays(W1, 8) })).status).toBe(200);
+    expect(await changes()).toEqual([{ from_week: thisWeek, hours: null }]);
     const audit = await trx('audit_log').where({ action: 'payroll.week_minimum_changed', resource_id: id }).count('* as n').first();
-    expect(Number(audit.n)).toBe(2);
+    expect(Number(audit.n)).toBe(3);
   });
 
   it('a draft read before a last-day change goes stale', async () => {

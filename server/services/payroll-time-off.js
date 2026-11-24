@@ -145,10 +145,6 @@ const weekMinimumSchema = Joi.object({
     lastDay: Joi.any().allow(null),
   }),
 });
-const MINIMUM_WEEK_OPEN = (week) => `The week of ${week} has work or time off that no final pay run has paid yet. `
-  + 'Finalize that pay run first, then change the minimum: a week paid after the change would get the new minimum.';
-// The earliest week asked: the hire date, or the first pay week the pay runs could hold.
-const FIRST_PAY_WEEK = '2020-01-06';
 const WEEK_MINIMUM_STALE = 'The minimum or the last day changed since this page was read. Read the page again.';
 const sameHours = (a, b) => (a == null || a === '' ? null : Number(a)) === (b == null || b === '' ? null : Number(b));
 const LAST_DAY_PAID = (week) => `A final pay run already paid this employee for the week of ${week} or later, so the last day `
@@ -489,17 +485,6 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
     if (v.hours != null && tech.employment_type !== 'w2') throw new PayrollError(409, 'A minimum paid week is for W-2 employees.');
     // The first week counts the days from the hire date: without one it cannot be counted.
     if (v.hours != null && !tech.hire_date) throw new PayrollError(409, 'Enter a readable hire date first (Staff), then set the minimum.');
-    // The minimum is a current setting (a pay run reads it as it stands), so it changes only while every finished week
-    // of the employee is paid: no week paid late ever gets a minimum set after it.
-    if (!sameHours(v.hours, tech.paid_week_minimum_hours)) {
-      const thisWeek = staffWeekStartForWorkDate(etDateString());
-      // The pay run's own test of a week still to pay (tech-rewards-pay-lines.js), read at call time: that module
-      // reads the pay run modules at call time too.
-      const open = await require('./tech-rewards-pay-lines').oldestUnpaidWeek(trx, tech.id, {
-        coversFrom: tech.hire_date || FIRST_PAY_WEEK, coversTo: addStaffWorkDays(thisWeek, -1), skipClosed: true,
-      });
-      if (open) throw new PayrollError(409, MINIMUM_WEEK_OPEN(open));
-    }
     // Clearing the minimum keeps the last day on file: the paid weeks it shaped stay as they were, and a rehire (a
     // later hire date) does not read it again.
     const lastDay = v.lastDay === undefined ? tech.last_day : v.lastDay;
@@ -522,6 +507,14 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
     }
     await trx('technicians').where({ id: technicianId })
       .update({ paid_week_minimum_hours: v.hours, paid_week_minimum_last_day: lastDay, updated_at: trx.fn.now() });
+    // A change of the hours applies from the pay week it is saved in (payroll_week_minimum_changes): a pay run reads
+    // the minimum of its own week, so a week paid late, voided and made again, or reopened keeps its own minimum
+    // (owner 2026-11-23 *a*). A second change in the same week replaces that week's row.
+    if (!sameHours(v.hours, tech.paid_week_minimum_hours)) {
+      await trx('payroll_week_minimum_changes')
+        .insert({ technician_id: tech.id, from_week: staffWeekStartForWorkDate(etDateString()), hours: v.hours })
+        .onConflict(['technician_id', 'from_week']).merge(['hours', 'created_at']);
+    }
     await recordAuditEvent({
       trx, critical: true, actor_type: 'admin', actor_id: actorId,
       action: 'payroll.week_minimum_changed', resource_type: 'technicians', resource_id: technicianId,
