@@ -878,23 +878,7 @@ async function findUnmintedSetupFeeObligation({
   };
 }
 
-// Does any COLLECTIBLE-or-settled invoice on this series already carry the one-time setup fee line? The invoice truth
-// an orphaned (negative) pending_setup_fee claim is judged by: the completion heals the claim when the line exists
-// and adopts it when it does not (complete-scheduled-service.js), and the close-out bill preview reads the same.
-// Only collectible-or-settled invoices count (Codex #2980 r3): a voided/cancelled/refunded invoice collects nothing, so
-// treating it as proof would clear the claim and the customer would permanently skip the selected fee. Read-only.
-function seriesCarriesSetupFeeLine(conn, setupParentId) {
-  return conn('invoices')
-    .whereIn('scheduled_service_id', conn('scheduled_services').select('id').where(function series() {
-      this.where({ id: setupParentId }).orWhere({ recurring_parent_id: setupParentId });
-    }))
-    .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
-    .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
-    .first('id');
-}
-
 module.exports = {
-  seriesCarriesSetupFeeLine,
   seriesSetupFeeDeferredByPaf,
   prepayWaivesDeferredSetupFee,
   estimateSetupSeries,

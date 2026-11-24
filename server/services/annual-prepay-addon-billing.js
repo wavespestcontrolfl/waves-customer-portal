@@ -109,26 +109,6 @@ async function annualPrepayExtrasForVisit(svc, addons, database = null) {
   return { lines: total > 0 ? lines : [], total, ambiguous };
 }
 
-// What a covered visit's add-ons owe, read without side effects (the closeout's billableExtras alerts or bills on the
-// verdict; the close-out bill preview reports it). kind: 'error' (a read failed: the closeout holds), 'unbuildable',
-// 'unpriced' (an add-on awaits its price), 'none' (nothing to bill), 'ambiguous' (a visit-wide discount) or 'bill'.
-async function coveredVisitExtrasRead(svc, conn = null) {
-  let current;
-  let addons;
-  let extras;
-  try {
-    current = { ...svc, ...(await (conn || db)('scheduled_services').where({ id: svc.id }).first()) };
-    addons = await annualPrepayAddonRows(current, conn || db);
-    extras = await annualPrepayExtrasForVisit(current, addons, conn);
-  } catch (err) {
-    return { kind: err.code === 'ADDON_LINES_NOT_BUILT' ? 'unbuildable' : 'error', error: err };
-  }
-  if (addons.unpriced) return { kind: 'unpriced', addons };
-  if (!extras.lines.length) return { kind: 'none', addons };
-  if (extras.ambiguous) return { kind: 'ambiguous', addons, extras };
-  return { kind: 'bill', current, addons, extras };
-}
-
 // Sort an office invoice's lines against this visit: does it bill only this
 // visit's add-ons (kept, not voided — its add-on charges stay owed), and
 // does it carry charges that are not the covered base (re-billed by the
@@ -256,25 +236,31 @@ class CoveredVisitCloseout {
   // is cut only when every owed add-on has a clear price: never a partial
   // bill beside an amount the office still has to decide.
   async billableExtras() {
-    const read = await coveredVisitExtrasRead(this.svc);
-    if (read.kind === 'error') {
-      this.hold(read.error, 'add-on lines');
+    let current;
+    let addons;
+    let extras;
+    try {
+      current = { ...this.svc, ...(await db('scheduled_services').where({ id: this.svc.id }).first()) };
+      addons = await annualPrepayAddonRows(current);
+      extras = await annualPrepayExtrasForVisit(current, addons);
+    } catch (err) {
+      if (err.code !== 'ADDON_LINES_NOT_BUILT') {
+        this.hold(err, 'add-on lines');
+        return null;
+      }
+      await this.alert('the add-on lines could not be built', { error: String(err.message).slice(0, 200) });
       return null;
     }
-    if (read.kind === 'unbuildable') {
-      await this.alert('the add-on lines could not be built', { error: String(read.error.message).slice(0, 200) });
-      return null;
-    }
-    if (read.kind === 'unpriced') {
+    if (addons.unpriced) {
       await this.alert('an add-on has no price yet — price the add-ons and bill them');
       return null;
     }
-    if (read.kind === 'none') return null;
-    if (read.kind === 'ambiguous') {
-      await this.alert(`a visit-wide discount applies, so the add-ons' share of it is unclear (they list at $${read.extras.total.toFixed(2)})`, { addonTotal: read.extras.total });
+    if (!extras.lines.length) return null;
+    if (extras.ambiguous) {
+      await this.alert(`a visit-wide discount applies, so the add-ons' share of it is unclear (they list at $${extras.total.toFixed(2)})`, { addonTotal: extras.total });
       return null;
     }
-    return { current: read.current, addons: read.addons, extras: read.extras };
+    return { current, addons, extras };
   }
 
   // Bill the add-ons on a visit with no invoice. The mint re-checks, under
@@ -553,4 +539,4 @@ async function reconcileCoveredVisitInvoice(ctx) {
   return new CoveredVisitCloseout(ctx).run();
 }
 
-module.exports = { reconcileCoveredVisitInvoice, annualPrepayAddonRows, classifyCoveredVisitInvoice, coveredVisitExtrasRead };
+module.exports = { reconcileCoveredVisitInvoice, annualPrepayAddonRows, classifyCoveredVisitInvoice };

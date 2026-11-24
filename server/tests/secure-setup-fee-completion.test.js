@@ -33,9 +33,7 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
     // Recovery consults the durable record — a COLLECTIBLE-or-settled
     // series invoice carrying the setup line (a voided/cancelled/refunded
     // invoice collects nothing and must not clear the claim).
-    // The query lives in setup-fee-obligation.js (seriesCarriesSetupFeeLine) so the close-out bill preview reads the same evidence.
-    expect(dispatchSource).toMatch(/seriesCarriesSetupFeeLine\(db, setupParentId\)/);
-    expect(fs.readFileSync(path.join(__dirname, '../services/setup-fee-obligation.js'), 'utf8')).toMatch(/\.whereNotIn\('status', \['void', 'cancelled', 'canceled', 'refunded'\]\)\s*\n\s*\.whereRaw\('line_items::text ILIKE \?', \['%one-time setup fee%'\]\)/);
+    expect(dispatchSource).toMatch(/\.whereNotIn\('status', \['void', 'cancelled', 'canceled', 'refunded'\]\)\s*\n\s*\.whereRaw\('line_items::text ILIKE \?', \['%one-time setup fee%'\]\)/);
     // Heal: line exists → clear the marker, never a second line.
     expect(dispatchSource).toMatch(/orphaned setup-fee claim healed/);
     // Adopt: no line → exactly one adopter via the updated_at lease CAS.
