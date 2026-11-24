@@ -473,11 +473,16 @@ async function recheckApprovedBillTo(conn, approved, customer, lockedVisit) {
 // hold. A payer assigned, an invoice committed on the visit, a retention offer granted, or the customer or the visit record
 // changed while the create waited for the locks is a 409 (IB_SCOPE_CHANGED) and the transaction rolls back.
 async function recheckApprovedScope(conn, approved) {
+  // A non-bar caller's own lock, taken before the card's lock chain (setup-fee-bill-button.js: the customer row
+  // FOR UPDATE, so the chain's FOR SHARE on it is never an upgrade).
+  if (typeof approved.callerPreLock === 'function') await approved.callerPreLock(conn);
   const lockedVisit = await lockApprovedVisit(conn, approved);
   const customer = await conn('customers').where({ id: approved.customerId }).whereNull('deleted_at').forShare().first();
   if (!customer || customerPin(customer, personName(customer) || customer.id) !== approved.customerPin) throw scopeChanged('The customer changed after the card was shown');
   if (approved.serviceRecordId) await recheckApprovedRecord(conn, approved);
   await recheckApprovedBillTo(conn, approved, customer, lockedVisit);
+  // A non-bar caller's own check (setup-fee-bill-button.js), under the same locks; it throws to refuse.
+  if (typeof approved.callerRecheck === 'function') await approved.callerRecheck(conn);
 }
 
 async function commitCreate(input) {
@@ -488,7 +493,11 @@ async function commitCreate(input) {
   const run = plan.mode === 'from_visit' ? invoices.createInvoiceFromServiceFromBar : invoices.createInvoiceFromBar;
   let result;
   try {
-    result = await run({ body: plan._body, approved: plan._approved });
+    const callerHooks = {
+      ...(typeof input._callerPreLock === 'function' ? { callerPreLock: input._callerPreLock } : {}),
+      ...(typeof input._callerRecheck === 'function' ? { callerRecheck: input._callerRecheck } : {}),
+    };
+    result = await run({ body: plan._body, approved: { ...plan._approved, ...callerHooks } });
   } catch (err) {
     // A 409 from the visit route (a deposit would apply, the price moved) is thrown before anything is created.
     if (err?.status === 409) {
@@ -513,6 +522,8 @@ async function commitCreate(input) {
   logger.info(`[intelligence-bar:create-invoice] created draft invoice ${json.id}`);
   return {
     ...base, success: true, status: 'draft', invoice_id: json.id, invoice_number: json.invoice_number || null,
+    // The draft's edit time as created, so a later step can prove it acts on this exact draft.
+    invoice_version: json.updated_at ? new Date(json.updated_at).getTime() : null,
     amount: money(json.total), due_date: dayOf(json.due_date), sent_to_customer: false,
     note: `Draft invoice${json.invoice_number ? ` ${json.invoice_number}` : ''} for ${money(json.total)} is created. Nothing was sent and no card was charged. To send it, use send_invoice.`,
   };
@@ -557,4 +568,8 @@ module.exports = {
   recheckApprovedScope,
   onPlatformPath,
   cardLines,
+  // The card's own plan and commit, for a confirmed step outside the bar (setup-fee-bill-button.js: the bell's Bill and
+  // send). The caller owns the admin check and its own gate; the plan pin and every lock are this card's.
+  planDraftInvoice: buildPlan,
+  commitDraftInvoice: commitCreate,
 };

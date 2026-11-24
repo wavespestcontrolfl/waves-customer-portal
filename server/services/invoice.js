@@ -6549,7 +6549,11 @@ const InvoiceService = {
     // for linked money writes; plain unlinked creates keep the
     // untransacted path).
     const stampedEstimateIdInNotes = require('./setup-fee-alert-reconcile').acceptedEstimateIdFromNotes(notes);
-    if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
+    // A WaveGuard setup or membership fee line (any amount) also takes the account's fee lock, last in the order:
+    // the bell's Bill and send holds it from its final coverage read until its text goes out
+    // (setup-fee-bill-button.js), so a fee invoice from any writer waits and the button sees it, or the reverse.
+    const carriesFeeLine = !!customerId && require('./setup-fee-obligation').carriesWaveguardFeeLine({ line_items: lineItems });
+    if (linkedScheduledServiceId || stampedEstimateIdInNotes || carriesFeeLine) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
           // The SHARED lock chain (mint advisory lock → customer KEY SHARE →
@@ -6567,6 +6571,9 @@ const InvoiceService = {
         }
         if (stampedEstimateIdInNotes) {
           await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
+        }
+        if (carriesFeeLine) {
+          await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`setup_fee_account:${customerId}`]);
         }
       } else if (typeof (database || db).transaction === 'function') {
         // Resolve the record link again INSIDE the transaction, before any

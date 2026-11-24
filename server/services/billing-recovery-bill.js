@@ -544,5 +544,5 @@ async function previewBillVisit(scheduledServiceId, options = {}) {
 
 module.exports = {
   assessVisitBillable, billVisit, previewBillVisit, pendingDepositForVisit, liveCardHoldForVisit, dueDateFromVisit, siblingCoverageStatus,
-  INVOICE_BACKED_DISPOSITIONS, deadInvoiceStatuses, claimDispositionSlot, loadBillingMode,
+  INVOICE_BACKED_DISPOSITIONS, deadInvoiceStatuses, claimDispositionSlot, loadBillingMode, currentDisposition,
 };
