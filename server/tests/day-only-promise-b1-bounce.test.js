@@ -372,6 +372,18 @@ describe('revalidateDelayedDaySend occurrenceDate', () => {
     expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: '2026-06-22' });
   });
 
+  test('a move notice whose visit moved between the two reads: suppress, never set aside as older (codex P1)', async () => {
+    const told = require('../services/auto-dispatch/told-visits');
+    const spy = jest.spyOn(told, 'resolvePromises').mockResolvedValue(new Map([['ss-owner', { visit_id: 'ss-owner', start_at: null, communicated_at: null, date_mismatch: true }]]));
+    timePromise.loadPromiseLevels.mockResolvedValue(new Map([['ss-owner', 'hour']]));
+    setDbQueues({ scheduled_services: [chain({ first: { scheduled_date: '2026-06-22' } })] });
+    const verdict = await AppointmentReminders.revalidateDelayedDaySend({
+      customerId: 'c9', scheduledServiceId: 'ss-owner', apptTime: new Date(SLOT), noticeAt: '2026-06-18T14:00:00Z', noticeDate: '2026-06-22', occurrenceDate: '2026-06-22',
+    });
+    expect(verdict).toBe('suppress');
+    spy.mockRestore();
+  });
+
   test('no date (an undated legacy body): the raw rule, an hour for any date suppresses', async () => {
     levelsByRule();
     setDbQueues({});

@@ -1416,6 +1416,7 @@ function bouncedOccurrenceDate(metadata) {
  *  (fail closed), as does a promise that cannot be resolved at all. */
 function promiseSupersedesNotice(promise, notice) {
   if (!promise) return true; // the level read said 'hour' but no promise resolves now: unprovable, so it stands
+  if (promise.date_mismatch === true) return true; // the visit moved off the body's date between reads: suppress (Codex P1)
   const at = new Date(promise.communicated_at).getTime();
   if (!Number.isFinite(at)) return true;
   if (at <= notice.at.getTime()) return false;
