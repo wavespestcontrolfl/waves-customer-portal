@@ -166,6 +166,15 @@ function effectiveDuration(svc) {
   return 30;
 }
 
+// The booking's own length: its window span. The feed fills a missing
+// estimate with 60, so the estimate is only the base when the window is not
+// a valid span.
+function bookedLength(svc) {
+  const start = parseHHMM(svc?.windowStart);
+  const end = parseHHMM(svc?.windowEnd);
+  return start != null && end != null && end > start ? end - start : effectiveDuration(svc);
+}
+
 function minutesToTopPx(min) {
   return ((min - DAY_START_HOUR * 60) / SLOT_MIN) * SLOT_HEIGHT;
 }
@@ -794,15 +803,19 @@ function SlotDroppable({ techId, slotIdx, onCreateStart, takesNew = true }) {
   // the server accepts it.
   const laneOpen = takesNew || (activeSvc != null && activeSvc.technicianId === techId);
   const bookable = laneOpen && isBookableSlotIdx(slotIdx, activeSvc ? effectiveDuration(activeSvc) : 60);
+  // Registered whenever the lane takes the visit: whether the visit fits
+  // the day is decided in onDragEnd, once the gesture is known (a block
+  // dragged straight across keeps its booking and needs no fit). `bookable`
+  // is only the visual hint and the drag-create gate.
   const { setNodeRef, isOver } = useDroppable({
     id: `slot-${techId}-${slotIdx}`,
     data: { techId, slotMin },
-    disabled: !bookable,
+    disabled: !laneOpen,
   });
   const isHour = slotIdx % 2 === 0;
   return (
     <div
-      ref={bookable ? setNodeRef : undefined}
+      ref={laneOpen ? setNodeRef : undefined}
       onPointerDown={onCreateStart && bookable ? (e) => onCreateStart(e, slotIdx) : undefined}
       aria-disabled={bookable ? undefined : true}
       data-slot-min={slotMin}
@@ -880,9 +893,9 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
   })));
   const freedHours = freedBy(['cancelled', 'skipped']);
   const doneHours = freedBy(['completed', 'no_show']);
-  // An Open marker is opaque and sits above the blocks: never over a visit
-  // drawn at its planned time (the hour stays open for booking, it is just not
-  // advertised on top of that visit).
+  // An Open marker is opaque and sits above the blocks: never drawn over a
+  // visit drawn at its planned time (the hour stays open for booking; its
+  // button stays for the keyboard and screen readers, out of sight).
   const underPlanned = new Set(openHours.filter((h) => services.some((svc) => {
     const planned = plannedInterval(svc);
     return planned && planned.start < (h + 1) * 60 && planned.end > h * 60;
@@ -933,17 +946,24 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             or drag; the button itself is the keyboard / screen-reader way in.
             Over a skipped or cancelled block (which frees its hour) the
             button takes the click itself, so it never opens that visit. */}
-        {openHours.filter((h) => !doneHours.has(h) && !underPlanned.has(h)).map((h) => (
+        {openHours.filter((h) => !doneHours.has(h)).map((h) => (
           <button
             key={`open-${h}`}
             type="button"
             onClick={() => onCreateSlot?.({ techId: tech.id, windowStart: hourToHHMM(h), windowEnd: hourToHHMM(h + 1) })}
             aria-label={`Book open hour ${formatOpenHour(h)} for ${tech.name}`}
-            className={cn(
-              'absolute z-[2] flex items-center justify-between rounded-xs border border-dashed border-zinc-300 bg-zinc-50 text-ink-tertiary focus-visible:border-zinc-900 u-focus-ring',
-              freedHours.has(h) ? 'cursor-pointer hover:border-zinc-900' : 'pointer-events-none',
-            )}
-            style={{ top: minutesToTopPx(h * 60) + 3, height: (60 / SLOT_MIN) * SLOT_HEIGHT - 6, left: 6, right: 6, padding: '0 10px', fontSize: 14 }}
+            className={underPlanned.has(h)
+              // Under a visit drawn here: out of sight and out of the way of
+              // the mouse, still a keyboard / screen-reader way to book the
+              // hour (it shows while focused).
+              ? 'sr-only focus-visible:not-sr-only focus-visible:absolute focus-visible:z-[3] focus-visible:flex focus-visible:items-center focus-visible:gap-2 focus-visible:rounded-xs focus-visible:border focus-visible:border-zinc-900 focus-visible:bg-zinc-50 focus-visible:px-2 focus-visible:text-ink-tertiary u-focus-ring'
+              : cn(
+                'absolute z-[2] flex items-center justify-between rounded-xs border border-dashed border-zinc-300 bg-zinc-50 text-ink-tertiary focus-visible:border-zinc-900 u-focus-ring',
+                freedHours.has(h) ? 'cursor-pointer hover:border-zinc-900' : 'pointer-events-none',
+              )}
+            style={underPlanned.has(h)
+              ? { top: minutesToTopPx(h * 60) + 3, left: 6, fontSize: 14 }
+              : { top: minutesToTopPx(h * 60) + 3, height: (60 / SLOT_MIN) * SLOT_HEIGHT - 6, left: 6, right: 6, padding: '0 10px', fontSize: 14 }}
           >
             <span className="u-nums">Open · {formatOpenHour(h)}</span>
             <span className="font-medium">+ Book</span>
@@ -990,7 +1010,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
                 top={top}
                 height={height}
                 planned={planned}
-                durationMin={dur}
+                durationMin={bookedLength(svc)}
                 laneIdx={lane.laneIdx}
                 laneCount={lane.laneCount}
                 onEdit={onEdit}

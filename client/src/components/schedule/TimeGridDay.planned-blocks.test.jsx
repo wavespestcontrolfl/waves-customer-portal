@@ -7,15 +7,20 @@ import TimeGridDay from './TimeGridDay';
 
 const dnd = vi.hoisted(() => ({ props: null }));
 const modal = vi.hoisted(() => ({ props: null }));
+const dndState = vi.hoisted(() => ({ active: null, drops: [] }));
 vi.mock('./RescheduleConfirmModal', () => ({ default: (props) => { modal.props = props; return null; } }));
 vi.mock('@dnd-kit/core', () => ({
   DndContext: (props) => { dnd.props = props; return <div>{props.children}</div>; },
-  useDndContext: () => ({ active: null }),
+  useDndContext: () => ({ active: dndState.active }),
   PointerSensor: function PointerSensor() {},
   useSensor: () => ({}),
   useSensors: () => [],
   useDraggable: () => ({ attributes: {}, listeners: {}, setNodeRef: vi.fn(), transform: null, isDragging: false }),
-  useDroppable: () => ({ setNodeRef: vi.fn(), isOver: false }),
+  useDroppable: (props) => {
+    const setNodeRef = vi.fn();
+    dndState.drops.push({ ...props, setNodeRef });
+    return { setNodeRef, isOver: false };
+  },
   pointerWithin: vi.fn(),
 }));
 
@@ -48,7 +53,7 @@ beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'test-token');
   global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); modal.props = null; localStorage.removeItem('waves_admin_user'); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); modal.props = null; dndState.active = null; dndState.drops = []; localStorage.removeItem('waves_admin_user'); });
 
 describe('TimeGridDay planned blocks', () => {
   it('draws a planned visit at its planned arrival, as tall as its planned minutes', () => {
@@ -226,19 +231,25 @@ describe('TimeGridDay planned blocks', () => {
     });
   });
 
-  it('draws no Open marker over a visit drawn away from its booked hour', () => {
+  it('moves the Open marker out of sight under a visit drawn away from its booked hour, keeping the booking action', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-11-25T11:00:00Z')); // 6:00 AM ET
     // Booked 10:00, planned 11:15: the 11 AM hour is open for booking, but the
     // visit is drawn there.
+    const onCreateSlot = vi.fn();
     renderDay(
       [visit('a', 'Late Lou', '10:00', { plannedArrivalMin: 11 * 60 + 15, plannedMinutes: 35 })],
-      { onCreateSlot: vi.fn() },
+      { onCreateSlot },
     );
     vi.useRealTimers();
-    expect(screen.queryByLabelText(/Book open hour 11–12 AM/)).toBeNull();
-    expect(screen.getByLabelText(/Book open hour 12–1 PM/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Book open hour 9–10 AM/)).toBeInTheDocument();
+    const hidden = screen.getByLabelText(/Book open hour 11 AM–12 PM/);
+    expect(hidden).toHaveClass('sr-only');
+    expect(screen.queryByText('Open · 11 AM–12 PM')).toBeInTheDocument(); // text is for screen readers
+    fireEvent.click(hidden);
+    expect(onCreateSlot).toHaveBeenCalledWith(expect.objectContaining({ techId: 'tech-1', windowStart: '11:00', windowEnd: '12:00' }));
+    // Other open hours keep the visible marker.
+    expect(screen.getByLabelText(/Book open hour 12–1 PM/)).not.toHaveClass('sr-only');
+    expect(screen.getByLabelText(/Book open hour 9–10 AM/)).not.toHaveClass('sr-only');
   });
 
   describe('dragging a block drawn away from its booked hour', () => {
@@ -261,12 +272,21 @@ describe('TimeGridDay planned blocks', () => {
       expect(modal.props.technicianChange).toBeTruthy();
     });
 
-    it('moves a 17:00 two-hour booking drawn at 19:00 straight across, past the cutoff check', () => {
+    it('moves a 17:00 two-hour booking drawn at 19:00 straight across, through the registered 19:00 slot', () => {
       const svc = visit('a', 'Late Lou', '17:00', { windowEnd: '19:00', estimatedDuration: 120, plannedArrivalMin: 19 * 60, plannedMinutes: 35 });
-      render(<TimeGridDay date="2026-11-25" services={[svc]} technicians={TWO} />);
-      // The pointer is on the 19:00 slot, where a two-hour visit would not fit.
-      drag(svc, { techId: 'tech-2', slotMin: 19 * 60 }, { x: 200, y: 0 });
+      dndState.active = { data: { current: { service: svc } } };
+      const { container } = render(<TimeGridDay date="2026-11-25" services={[svc]} technicians={TWO} />);
+      // Where a two-hour visit would not fit, the slot is only dimmed: it is
+      // still a registered drop target with its node attached.
+      const slot = container.querySelectorAll('[data-slot-min="1140"]')[2];
+      expect(slot.getAttribute('aria-disabled')).toBe('true');
+      const entry = dndState.drops.filter((d) => d.id === 'slot-tech-2-26').at(-1);
+      expect(entry.disabled).toBe(false);
+      expect(entry.setNodeRef).toHaveBeenCalledWith(slot);
+      // The drop the real droppable would report.
+      drag(svc, { techId: entry.data.techId, slotMin: entry.data.slotMin }, { x: 200, y: 0 });
       expect(modal.props.open).toBe(true);
+      expect(modal.props.fromMinutes).toBe(17 * 60);
       expect(modal.props.toMinutes).toBe(17 * 60);
     });
 
@@ -305,6 +325,17 @@ describe('TimeGridDay planned blocks', () => {
       renderDay([visit('g2', 'Second Si', '09:00', { visitId: 'v1', told, plannedArrivalMin: 12 * 60 + 5, plannedMinutes: 35, plannedStopArrivalMin: 11 * 60 + 30 })]);
       expect(block('Second Si').style.borderLeft).toContain('220, 38, 38');
     });
+  });
+
+  it('resizes from the booked window span when the feed filled a 60-minute estimate', async () => {
+    // 09:00-10:30 booking, estimate null in the stored row (the feed shows 60).
+    renderDay([visit('a', 'Ninety Nan', '09:00', { windowEnd: '10:30', estimatedDuration: 60 })]);
+    const handle = screen.getByTitle('Drag to resize');
+    fireEvent.pointerDown(handle, { clientY: 200 });
+    fireEvent(window, new MouseEvent('pointermove', { clientY: 232 }));
+    fireEvent(window, new MouseEvent('pointerup', { clientY: 232 }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(fetch.mock.calls[0][1].body).newWindow).toBe('09:00-11:00');
   });
 
   it('sends nothing when an up-drag on a 30-minute booking clamps back to 30 minutes', async () => {
