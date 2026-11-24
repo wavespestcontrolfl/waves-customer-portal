@@ -152,6 +152,11 @@ describe('the remembered-caller proof', () => {
     expect(seen.sql.some((q) => q.includes("forward_acceptance'->>'accepted_at'") && q.includes("(metadata->>'ended_at')::timestamptz"))).toBe(true);
   });
 
+  test('a Sandy sandbox or tech-voice row is never caller history', () => {
+    expect(seen.sql.filter((q) => q === "COALESCE(??, '') <> ?")).toHaveLength(2);
+    expect(seen.bindings).toEqual(expect.arrayContaining(['source']));
+  });
+
   test('only inbound history counts (a callback caller is on a lead already)', () => {
     expect(seen.sql.some((q) => q.includes('to_phone'))).toBe(false);
   });

@@ -29,6 +29,7 @@ const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { phoneKeySql } = require('../middleware/spam-block');
 const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 
 const READ_TIMEOUT_MS = 1500;
 const TALK_SECONDS = 30;
@@ -78,7 +79,8 @@ const NO_SPEECH_SQL = String.raw`\[(VOICEMAIL|NO SPEECH)\]|\[Recording had no us
 // Inbound history only: a person the office called back is almost always on
 // a lead, and the lead check already lets them through.
 function rememberedRows(key) {
-  return db('call_log').select(db.raw('1'))
+  // Sandy sandbox and tech-voice rows are never caller history.
+  return whereNotSandboxCall(db('call_log').select(db.raw('1')))
     .where('direction', 'inbound')
     // The last-10 expression matches call_log_from_phone_last10_index, so the
     // history read is an index lookup; the full key check follows.
