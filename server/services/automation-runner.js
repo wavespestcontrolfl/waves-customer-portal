@@ -571,9 +571,7 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
   // termite bond (see the post-lock check in runEnrollment).
   if (requiresTermiteBond(templateKey) && !customer.id) return { enrolled: false, reason: 'not_termite_bond' };
 
-  const steps = await dbh('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
-    .orderBy('step_order', 'asc');
+  const steps = await enabledSequenceSteps(templateKey, dbh);
   if (!steps.length) return { enrolled: false, reason: 'no steps' };
 
   const leadId = await enrollmentLeadIdFor({ templateKey, customer, normalizedEmail, context });
@@ -839,18 +837,25 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
 // its place is the enabled step just before current_step, which is the step it
 // would have sent next anyway.
 //
-// GATE_NEW_LEAD_DRIP_STEPS (owner 2026-11-24): the new_lead sequence has steps 1 and 2 in the table, but with the gate off the
-// runner never loads them (the two seeded rows, by id: a step the owner adds by hand is never hidden), so an enrollment completes after step 0 exactly as before (one that was waiting on step 1 when the gate
-// was switched off completes without a send). Read at call time; a suite that mocks the whole gates module has no function there.
-function enabledSequenceSteps(templateKey) {
-  const query = db('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
-    .orderBy('step_order', 'asc')
-    .orderBy('id', 'asc');
-  if (templateKey === 'new_lead' && require('../config/feature-gates').newLeadDripStepsLive?.() !== true) {
-    query.where((rest) => rest.whereNotIn('id', NEW_LEAD_DRIP_STEP_IDS));
+// GATE_NEW_LEAD_DRIP_STEPS (owner 2026-11-24): the new_lead sequence has two seeded steps (1 and 2, found by id) that migration
+// 20261124140100 stores with enabled=false, so a runner from before this change, or a revert of it, never selects them. Gate on:
+// they are loaded whatever their enabled flag says (the gate is their switch; their copy is still editable in Admin). Gate off:
+// they are never loaded, even if someone set enabled=true, so an enrollment completes after step 0 exactly as before (one that
+// was waiting on step 1 when the gate was switched off completes without a send). A step the owner adds by hand follows the
+// ordinary enabled rule either way. Read at call time; a suite that mocks the whole gates module has no function there.
+// `client` lets enrollCustomer read through its own transaction.
+function enabledSequenceSteps(templateKey, client = db) {
+  let query;
+  if (templateKey !== 'new_lead') {
+    query = client('automation_steps').where({ template_key: templateKey, enabled: true });
+  } else if (require('../config/feature-gates').newLeadDripStepsLive?.() === true) {
+    query = client('automation_steps').where({ template_key: templateKey })
+      .where((own) => own.where('enabled', true).orWhereIn('id', NEW_LEAD_DRIP_STEP_IDS));
+  } else {
+    query = client('automation_steps').where({ template_key: templateKey, enabled: true })
+      .where((rest) => rest.whereNotIn('id', NEW_LEAD_DRIP_STEP_IDS));
   }
-  return query;
+  return query.orderBy('step_order', 'asc').orderBy('id', 'asc');
 }
 
 const stepKey = (step) => [Number(step.step_order), String(step.id)];

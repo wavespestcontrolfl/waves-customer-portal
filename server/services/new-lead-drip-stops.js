@@ -22,7 +22,7 @@ const logger = require('./logger');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { NON_LIVE_APPOINTMENT_STATUSES } = require('./estimate-conversion-guard');
 
-// The two steps migration 20261124140000_new_lead_drip_steps seeds, by their fixed ids (the migration carries the same ids).
+// The two steps migration 20261124140000_new_lead_drip_steps seeds (and 20261124140100 stores disabled), by their fixed ids (the migrations carry the same ids).
 // Only these exist for the runner while GATE_NEW_LEAD_DRIP_STEPS is on (automation-runner.js enabledSequenceSteps), and only
 // these get the stops below: a step the owner adds to new_lead in Admin by hand is neither hidden by the gate nor stopped by it.
 const NEW_LEAD_DRIP_STEP_IDS = Object.freeze(['c215d7f2-8052-47ac-94ac-e5c049ed2ca2', '04ca91c9-8bcf-49f2-95a3-5b6c3a359602']);
@@ -97,17 +97,20 @@ async function newLeadDripStop(enrollment) {
   const email = String(enrollment.email || '').trim().toLowerCase();
   const leadId = enrollmentMeta(enrollment).lead_id || null;
   try {
-    const lead = leadId ? (await db('leads').where({ id: leadId }).first('phone', 'converted_at', 'estimate_id')) || null : null;
-    if (await estimateSince(enrollment, email) || await leadHasEstimate(leadId, lead)) {
+    const lead = leadId ? (await db('leads').where({ id: leadId }).first('phone', 'converted_at', 'estimate_id', 'customer_id')) || null : null;
+    // The lead webhook can enroll a lead with no customer id, and booking an assessment later links the lead to a customer
+    // without converting it: the lead's current customer id stands in for the enrollment's missing one in every read below.
+    const who = { ...enrollment, customer_id: enrollment.customer_id || lead?.customer_id || null };
+    if (await estimateSince(who, email) || await leadHasEstimate(leadId, lead)) {
       return { reason: 'The lead has an estimate since enrolling', cancelReason: 'new_lead_estimate' };
     }
-    if (await visitBooked(enrollment.customer_id)) {
+    if (await visitBooked(who.customer_id)) {
       return { reason: 'The lead has a booked visit', cancelReason: 'new_lead_booked' };
     }
-    if (await isPayingCustomer(enrollment.customer_id, lead)) {
+    if (await isPayingCustomer(who.customer_id, lead)) {
       return { reason: 'The lead is a customer', cancelReason: 'new_lead_customer' };
     }
-    if (await repliedSince(enrollment, email, lead)) {
+    if (await repliedSince(who, email, lead)) {
       return { reason: 'The lead replied since enrolling', cancelReason: 'new_lead_replied' };
     }
     return null;

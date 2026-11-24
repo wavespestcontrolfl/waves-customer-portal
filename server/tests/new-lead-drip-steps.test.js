@@ -103,10 +103,11 @@ function queues({ steps, reads = {}, enrollment: overrides = {}, passed = [], le
   const enrollmentUpdate = chain();
   const sendUpdate = chain();
   const stepsChain = chain({ result: steps });
-  const noCustomer = !enrollment.customer_id;
+  const noLock = !enrollment.customer_id;
+  const noCustomer = noLock && !reads.lead?.customer_id;
   setDbQueues({
     // A lead with no customer record has no prep-send lock to take, so the row is read once.
-    automation_enrollments: noCustomer
+    automation_enrollments: noLock
       ? [chain({ first: enrollment }), enrollmentUpdate]
       : [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate],
     automation_templates: [chain({ first: { key: enrollment.template_key, name: 'New Lead', asm_group: 'newsletter' } })],
@@ -150,6 +151,7 @@ describe('gate off = today', () => {
     const { enrollmentUpdate, stepsChain } = queues({ steps: [STEP_0] });
     const sent = await sendOk();
     expect(sent.subject).toBe('Subject 0, Pat');
+    expect(stepsChain.where).toHaveBeenCalledWith({ template_key: 'new_lead', enabled: true });
     const filter = stepsChain.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
     const rest = { whereNotIn: jest.fn() };
     filter(rest);
@@ -179,7 +181,13 @@ describe('gate on: delays and cursor', () => {
   test('step 0 sent: the enrollment moves to step 1, due in 48 hours, with no stop read', async () => {
     const { enrollmentUpdate, stepsChain } = queues({ steps: STEPS });
     await sendOk();
-    expect(stepsChain.where.mock.calls.some(([arg]) => typeof arg === 'function')).toBe(false);
+    // Gate on: the two seeded ids load whatever their enabled flag says (they are stored enabled=false), and nothing hides them.
+    expect(stepsChain.where).toHaveBeenCalledWith({ template_key: 'new_lead' });
+    const filter = stepsChain.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    const own = { where: jest.fn(() => own), orWhereIn: jest.fn() };
+    filter(own);
+    expect(own.where).toHaveBeenCalledWith('enabled', true);
+    expect(own.orWhereIn).toHaveBeenCalledWith('id', NEW_LEAD_DRIP_STEP_IDS);
     const patch = enrollmentUpdate.update.mock.calls[0][0];
     expect(patch.current_step).toBe(1);
     expect(patch.status).toBeUndefined();
@@ -290,6 +298,15 @@ describe('gate on: stops at step 1 and step 2', () => {
     cancelledWith(enrollmentUpdate, 'new_lead_replied');
     expect(followUp.hasRepliedSince).toHaveBeenCalledWith(
       { id: 'enrollment-n', customer_id: null, customer_phone: '+19415550123', customer_email: 'pat@example.com' }, ENROLLED_AT, { throwOnError: true });
+  });
+
+  test('a lead enrolled with no customer id that has since booked an assessment (leads.customer_id) cancels as new_lead_booked', async () => {
+    const { enrollmentUpdate } = queues({
+      steps: STEPS, passed: [STEP_0], leadId: 'lead-1', enrollment: { customer_id: null },
+      reads: { lead: { phone: null, converted_at: null, estimate_id: null, customer_id: 'cust-linked' }, visit: { id: 'visit-1' } },
+    });
+    await stopped('The lead has a booked visit');
+    cancelledWith(enrollmentUpdate, 'new_lead_booked');
   });
 
   test('a step the owner added by hand to new_lead gets no stop checks, gate on', async () => {
@@ -415,6 +432,30 @@ describe('the migration', () => {
     await migration.down(knex);
     expect(deletes).toHaveLength(0);
     expect(knex).not.toHaveBeenCalled();
+  });
+
+  test('the follow-up migration stores exactly the two seeded ids as enabled=false, so an older runner or a revert never sees them', async () => {
+    const disable = require('../models/migrations/20261124140100_new_lead_drip_steps_disabled');
+    const calls = [];
+    const q = {
+      where: jest.fn((c) => { calls.push(['where', c]); return q; }),
+      whereIn: jest.fn((col, ids) => { calls.push(['whereIn', col, ids]); return q; }),
+      update: jest.fn(async (patch) => { calls.push(['update', patch]); return 2; }),
+    };
+    const knex = jest.fn(() => q);
+    knex.fn = { now: () => 'NOW' };
+    knex.schema = { hasTable: jest.fn(async () => true) };
+    await disable.up(knex);
+    expect(calls).toEqual([
+      ['where', { template_key: 'new_lead' }],
+      ['whereIn', 'id', [...NEW_LEAD_DRIP_STEP_IDS]],
+      ['update', { enabled: false, updated_at: 'NOW' }],
+    ]);
+    const idle = jest.fn();
+    idle.schema = { hasTable: jest.fn(async () => false) };
+    await disable.up(idle);
+    expect(idle).not.toHaveBeenCalled();
+    await expect(disable.down()).resolves.toBeUndefined();
   });
 
   test('never writes step 0: the first email has its own copy migration', () => {
