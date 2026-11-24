@@ -42,7 +42,7 @@ function fixtureIdentity(runId = crypto.randomUUID()) {
     cardEventId: `evt_qa_card_${suffix}`,
     // Prepay-at-booking journey: its own recurring estimate, so the one-time estimate above stays untouched.
     prepayEstimateId: id('prepay-estimate'), prepayToken: crypto.randomBytes(32).toString('hex'),
-    prepayConsentId: id('prepay-consent'), prepayAppointmentId: id('prepay-appointment') };
+    prepayConsentId: id('prepay-consent'), prepayAppointmentId: id('prepay-appointment'), prepayEventId: `evt_qa_prepay_${suffix}` };
 }
 
 async function seed(db, f) {
@@ -163,7 +163,7 @@ async function cleanup(db, f) {
   // Only these run-owned root IDs are eligible. FK cascades remove dependent
   // records; an unhandled restrictive FK fails visibly, never broadens cleanup.
   await db.transaction(async (trx) => {
-    await trx('stripe_webhook_events').whereIn('id', [f.eventId, f.cardEventId].filter(Boolean)).del();
+    await trx('stripe_webhook_events').whereIn('id', [f.eventId, f.cardEventId, f.prepayEventId].filter(Boolean)).del();
     // Receipt jobs and payment notices follow the run's own invoices and card payments, whichever journey made them.
     await trx('receipt_delivery_jobs').whereIn('invoice_id', trx('invoices').select('id').whereIn('customer_id', customerIds)).del();
     await trx('stripe_payment_notification_log').whereIn('payment_intent_id',

@@ -34,7 +34,10 @@ module.exports = {
     assert.equal(Math.round(quote.surcharge * 100), expected.surchargeCents);
     assert.equal(Math.round(quote.base * 100), expected.baseCents);
     assert.equal(quote.last4, fixture.cardLastFour);
-    assert.ok(quote.base > 0 && quote.base <= 180, 'The year costs no more than four visits at the quoted rate');
+    // A pest plan's prepay waives the setup fee rather than taking a percent off (estimate-public.js annual prepay),
+    // so the year is exactly four visits at the seeded visit price.
+    const heldVisit = await db('scheduled_services').where({ id: fixture.prepayAppointmentId }).first('estimated_price');
+    assert.equal(Math.round(quote.base * 100), Math.round(Number(heldVisit.estimated_price) * 4 * 100), 'The year is four visits at the quoted rate');
     assert.deepEqual(stripeMethods(), [], 'A quote must reach no Stripe call');
     assert.equal((await db('estimates').where({ id: fixture.prepayEstimateId }).first()).status, 'sent');
     assert.equal((await db('invoices').where({ customer_id: fixture.customerId, total: quote.base }).whereNot({ id: fixture.cardInvoiceId })).length, 0);
@@ -65,6 +68,12 @@ module.exports = {
 
     // 4. The year is recorded once: one accepted estimate, one paid invoice for the quoted base, one payment for the total.
     assert.equal((await db('estimates').where({ id: fixture.prepayEstimateId }).first()).status, 'accepted');
+    // The paid booking keeps the held visit: it no longer expires, belongs to this estimate and records the prepay choice.
+    const booked = await db('scheduled_services').where({ id: fixture.prepayAppointmentId }).first();
+    assert.equal(booked.reservation_expires_at, null, 'The paid booking must clear the slot hold expiry');
+    assert.equal(booked.source_estimate_id, fixture.prepayEstimateId);
+    assert.equal(booked.payment_method_preference, 'prepay_annual');
+    assert.ok(['pending', 'confirmed'].includes(booked.status), `The booked visit stays scheduled (status ${booked.status})`);
     const invoice = await db('invoices').where({ id: call.metadata.waves_invoice_id }).first();
     assert.equal(invoice.customer_id, fixture.customerId);
     assert.equal(invoice.status, 'paid');
@@ -103,7 +112,7 @@ module.exports = {
     assert.notEqual(jobBefore.status, 'running');
     const again = await json(await accept(acknowledged));
     assert.equal(again.alreadyAccepted, true);
-    const event = { id: `evt_qa_prepay_${fixture.runId.slice(0, 8)}`, type: 'payment_intent.succeeded', created: Math.floor(Date.now() / 1000),
+    const event = { id: fixture.prepayEventId, type: 'payment_intent.succeeded', created: Math.floor(Date.now() / 1000),
       data: { object: { id: payments[0].stripe_payment_intent_id, object: 'payment_intent', status: 'succeeded', amount: call.amount,
         amount_received: call.amount, currency: call.currency, payment_method_types: call.payment_method_types,
         latest_charge: `ch_${payments[0].stripe_payment_intent_id}`, customer: call.customer, payment_method: call.payment_method,
