@@ -54,7 +54,7 @@ function fakeDb(tables = {}) {
       return (source || []).filter((row) => !statuses?.includes('declined') || statuses.includes(row.status));
     };
     const builder = {
-      first: async () => rows()[0],
+      first: async (...columns) => { query.calls.push(['first', ...columns]); return rows()[0]; },
       select: async () => rows(),
     };
     const recorded = [
@@ -1506,6 +1506,13 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       let reads = 0;
       return () => { reads += 1; return reads === 1 ? [] : [row]; };
     };
+
+    test('the receipt read asks for the estimate the message linked', async () => {
+      const deps = liveWorld({ tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT, estimate_id: 'est-1' }) } });
+      await run(deps);
+      const [alreadyOfferedRead] = deps.db.queriesOf('email_messages');
+      expect(called(alreadyOfferedRead, 'first', 'id', 'sent_at', 'estimate_id')).toBe(true);
+    });
 
     test('a send the provider took: recorded on the minted estimate, with the provider\'s acceptance time', async () => {
       const deps = liveWorld({ tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT, estimate_id: 'est-1' }) } });

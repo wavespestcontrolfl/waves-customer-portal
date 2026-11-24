@@ -804,7 +804,7 @@ async function alreadyOffered(database, jobId) {
   const row = await database('email_messages')
     .where({ idempotency_key: offerKey(jobId) })
     .where((sent) => sent.whereNotNull('sent_at').orWhere('provider_handoff_phase', 'started'))
-    .first('id', 'sent_at');
+    .first('id', 'sent_at', 'estimate_id');
   return row || null;
 }
 
