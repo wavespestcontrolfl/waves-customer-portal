@@ -38,7 +38,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { syncTechRewardLines, stayBonusStatus, seasonBonusPaidCents } = require('../services/tech-rewards-pay-lines');
+const { syncTechRewardLines, stayBonusStatus, seasonBonusPaidCents, unpaidHolidayShiftWeek } = require('../services/tech-rewards-pay-lines');
 const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
 const { readBonusPay, closedSeason, seasonBonusOf, readSeasonFigures } = require('../services/tech-rewards-scoreboard');
 const { getYearStatement } = require('../services/tech-rewards-year-statement');
@@ -955,6 +955,64 @@ postgres('tech rewards pay lines: the December gift', () => {
       const again = await recompute(run.id);
       expect(checkOf(again, tech).techRewardsCents).toBe(GIFT);
       expect(dateOf((await lineOf(tech)).covers_from)).toBe('2026-12-10');
+    });
+
+    it('waits while an earlier week holds a shift that runs into a holiday inside the span and has no final check', async () => {
+      // hired Monday Sep 7 (a holiday, the span's first day); the week before holds Sunday night's shift into it, approved and unpaid
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      const tech = await readyTech('Sample Alpha', { hire_date: '2026-09-07' });
+      await paidWeek(tech, '2026-09-07'); // the holiday's own week is paid; only the week before is not
+      await trx('payroll_time_off').insert({ technician_id: tech, work_date: '2026-09-07', kind: 'holiday', minutes: '600.00' });
+      await trx('time_entries').insert({
+        technician_id: tech, entry_type: 'shift', status: 'completed', duration_minutes: '240.00',
+        clock_in: new Date('2026-09-07T02:00:00Z'), clock_out: new Date('2026-09-07T06:00:00Z'),
+      });
+      await approvedWeek(tech, '2026-08-31', '240.00');
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(await linesOf(tech)).toHaveLength(0);
+      const stored = await trx('payroll_runs').where({ id: run.id }).first('tech_rewards_waits');
+      expect(stored.tech_rewards_waits).toEqual([{ technician_id: tech, kind: 'december_gift', source_id: `december_gift:${tech}:2026`, reason: 'week_not_paid', week: '2026-08-31' }]);
+      // that week paid: the gift is written
+      await paidWeek(tech, '2026-08-31');
+      expect(checkOf(await recompute(run.id), tech).techRewardsCents).toBe(GIFT);
+    });
+
+    it('asks only the weeks that hold a shift into a holiday of the span, not an unrelated unpaid week before them', async () => {
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      const tech = await readyTech('Sample Alpha', { hire_date: '2026-09-07' });
+      await paidWeek(tech, '2026-09-07');
+      await trx('payroll_time_off').insert({ technician_id: tech, work_date: '2026-09-07', kind: 'holiday', minutes: '600.00' });
+      await trx('time_entries').insert({
+        technician_id: tech, entry_type: 'shift', status: 'completed', duration_minutes: '240.00',
+        clock_in: new Date('2026-09-07T02:00:00Z'), clock_out: new Date('2026-09-07T06:00:00Z'),
+      });
+      await approvedWeek(tech, '2026-08-31', '240.00');
+      await paidWeek(tech, '2026-08-31'); // the week of the shift is paid
+      await approvedWeek(tech, '2026-08-10', '240.00'); // an older week, unpaid, with no shift into any holiday: not asked
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(checkOf(run, tech).techRewardsCents).toBe(GIFT);
+    });
+
+    it('waits for the prior week\'s Sunday-night shift when the span starts on the run\'s own Monday holiday', async () => {
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      // hired Monday Dec 7, the run's own Monday and a holiday: no week of the span is before the run, but the shift that
+      // started Sunday night in the week before runs into the holiday and is approved and unpaid
+      const tech = await readyTech('Sample Alpha', { hire_date: GIFT_WEEK });
+      await trx('payroll_time_off').insert({ technician_id: tech, work_date: GIFT_WEEK, kind: 'holiday', minutes: '600.00' });
+      await trx('time_entries').insert({
+        technician_id: tech, entry_type: 'shift', status: 'completed', duration_minutes: '240.00',
+        clock_in: new Date('2026-12-07T03:00:00Z'), clock_out: new Date('2026-12-07T07:00:00Z'),
+      });
+      await approvedWeek(tech, '2026-11-30', '240.00');
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(await linesOf(tech)).toHaveLength(0);
+      const stored = await trx('payroll_runs').where({ id: run.id }).first('tech_rewards_waits');
+      expect(stored.tech_rewards_waits).toEqual([{ technician_id: tech, kind: 'december_gift', source_id: `december_gift:${tech}:2026`, reason: 'week_not_paid', week: '2026-11-30' }]);
+      await paidWeek(tech, '2026-11-30');
+      expect(checkOf(await recompute(run.id), tech).techRewardsCents).toBe(GIFT);
     });
 
     it('says what waits when a week has nothing else to pay: no run is kept, and the message carries the note', async () => {
@@ -2022,6 +2080,59 @@ postgres('tech rewards pay lines: the December gift', () => {
       jest.setSystemTime(Date.parse('2027-10-12T17:00:00Z')); // every week used below has ended
       scores.buildSeasonScore.mockReset().mockResolvedValue(scoreOf(92.5, 400));
       scores.getSettings.mockReset().mockResolvedValue(SETTINGS);
+    });
+
+    it('waits for an unpaid February Sunday shift into a March 1 holiday when the technician is rehired in June: the readiness looks at the full season', async () => {
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      const tech = await readyTech('Sample Alpha', { hire_date: '2027-06-14' }); // the current stay starts in the middle of the season
+      await trx('payroll_time_off').insert({ technician_id: tech, work_date: '2027-03-01', kind: 'holiday', minutes: '600.00' });
+      await trx('time_entries').insert({
+        technician_id: tech, entry_type: 'shift', status: 'completed', duration_minutes: '240.00',
+        clock_in: new Date('2027-03-01T03:00:00Z'), clock_out: new Date('2027-03-01T07:00:00Z'), // Sunday Feb 28 10 PM to Monday Mar 1 2 AM (EST)
+      });
+      await approvedWeek(tech, '2027-02-22', '240.00'); // the shift's week, never paid
+      await paidWeek(tech, '2027-03-01'); // the holiday's own week is paid
+      await paidWeek(tech, '2027-06-14');
+      await approvedWeek(tech, BONUS_WEEK);
+      // the hire-clipped span alone finds no holiday (they are all before the hire date); the full season finds the shift's week
+      expect(await unpaidHolidayShiftWeek(trx, tech, { coversFrom: '2027-06-14', coversTo: '2027-08-31' }, '2027-09-12')).toBeNull();
+      expect(await unpaidHolidayShiftWeek(trx, tech, { coversFrom: '2027-06-14', coversTo: '2027-08-31' }, '2027-09-12',
+        { coversFrom: '2027-03-01', coversTo: '2027-08-31' })).toBe('2027-02-22');
+      const run = await draft(BONUS_WEEK);
+      expect(await linesOf(tech)).toHaveLength(0);
+      const stored = await trx('payroll_runs').where({ id: run.id }).first('tech_rewards_waits');
+      expect(stored.tech_rewards_waits).toEqual([{ technician_id: tech, kind: 'season_bonus', source_id: `season_bonus:${tech}:2027`, reason: 'week_not_paid', week: '2027-02-22' }]);
+      // that week paid: the bonus is written, covering from the hire date
+      await paidWeek(tech, '2027-02-22');
+      await recompute(run.id);
+      const line = await lineOf(tech);
+      expect(line).toMatchObject({ kind: 'season_bonus', status: 'open' });
+      expect([dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual(['2027-06-14', '2027-08-31']);
+    });
+
+    it('waits for an unpaid April week with a daytime shift on a holiday when the technician is rehired in June, then pays: the unpaid-week check starts at the season start', async () => {
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      const tech = await readyTech('Sample Alpha', { hire_date: '2027-06-14' });
+      // Monday Apr 5, a holiday, worked 10 AM to 2 PM (EDT): the shift never crosses a pay-week boundary, so only the unpaid-week
+      // check can see it
+      await trx('payroll_time_off').insert({ technician_id: tech, work_date: '2027-04-05', kind: 'holiday', minutes: '600.00' });
+      await trx('time_entries').insert({
+        technician_id: tech, entry_type: 'shift', status: 'completed', duration_minutes: '240.00',
+        clock_in: new Date('2027-04-05T14:00:00Z'), clock_out: new Date('2027-04-05T18:00:00Z'),
+      });
+      await approvedWeek(tech, '2027-04-05', '240.00'); // never paid
+      await paidWeek(tech, '2027-06-14');
+      await approvedWeek(tech, BONUS_WEEK);
+      const run = await draft(BONUS_WEEK);
+      expect(await linesOf(tech)).toHaveLength(0);
+      const stored = await trx('payroll_runs').where({ id: run.id }).first('tech_rewards_waits');
+      expect(stored.tech_rewards_waits).toEqual([{ technician_id: tech, kind: 'season_bonus', source_id: `season_bonus:${tech}:2027`, reason: 'week_not_paid', week: '2027-04-05' }]);
+      await paidWeek(tech, '2027-04-05');
+      await recompute(run.id);
+      const line = await lineOf(tech);
+      expect(line).toMatchObject({ kind: 'season_bonus', status: 'open' });
+      // the line is still allocated over the hire-clipped span
+      expect([dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual(['2027-06-14', '2027-08-31']);
     });
 
     it('is the band rate of the score times the pay earned in the season times the multiplier, on the run dated the last Friday of September', async () => {

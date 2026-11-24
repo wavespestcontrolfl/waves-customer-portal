@@ -283,6 +283,9 @@ function lineComponents(line) {
  *                                           "anything else" below
  *   holiday pay (holiday_pay_cents)        the dated holiday records of the week,       payroll_time_off (kind holiday)
  *                                           weighted by minutes
+ *   holiday work premium                   the holidays worked, weighted by the paid     calc_snapshot.holidayWorkDays (frozen
+ *   (holiday_work_premium_cents)            minutes worked ON each (the part of a shift   with the check; payroll-holiday-work.js)
+ *                                           inside the holiday's Eastern day)
  *   commission lines (commission_cents)    the payment day for a ledger line            payroll_pay_lines of the check:
  *   review bonus lines (review_bonus_      (covers_to), the day the review was          LINE_DAY_SQL
  *   cents), health allowance lines         credited for a review bonus; a line with
@@ -318,6 +321,8 @@ function checkComponents(check) {
     { cents: wageCents, spread: weights },
     { cents: check.ptoPayCents, spread: timeOff(check.ptoRecords) },
     { cents: check.holidayPayCents, spread: timeOff(check.holidayRecords) },
+    // The extra half of the hours worked on a holiday is earned on the holidays worked, by the paid minutes worked on each.
+    { cents: check.holidayWorkPremiumCents || 0, spread: timeOff(check.holidayWorkDays) },
     ...(check.lines || []).flatMap(lineComponents),
     ...(check.lineOvertimeWeeks || []).map((w) => ({ cents: w.premiumCents, week: w.weekStart })),
   ];
@@ -494,11 +499,18 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
   const query = conn('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
-    .whereRaw('c.week_start + 6 >= ?::date', [from]);
+    // A week before the window can still hold pay earned inside it: the holiday work premium is paid with the shift's own
+    // week and dated by the holiday it overlapped, which can be days after that week (payroll-holiday-work.js). The check
+    // names those dates itself (calc_snapshot.holidayWorkDays, frozen with it), so one that names a date on or after the
+    // window's start is read, however far back its week is; no fixed look-back.
+    .whereRaw(`(c.week_start + 6 >= ?::date OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.calc_snapshot->'holidayWorkDays') = 'array'
+        THEN c.calc_snapshot->'holidayWorkDays' ELSE '[]'::jsonb END) AS d WHERE (d->>'workDate')::date >= ?::date))`, [from, from]);
   if (throughWeek) query.whereRaw('c.week_start <= ?::date', [throughWeek]);
   const rows = await query
     .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents', 'c.regular_pay_cents',
-      'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents', 'c.tech_rewards_cents',
+      'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents', 'c.holiday_work_premium_cents', 'c.tech_rewards_cents',
+      conn.raw("c.calc_snapshot->'holidayWorkDays' AS holiday_work_days"),
       conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"),
       conn.raw("c.calc_snapshot->'ptoBank'->'paidDays' AS pto_paid_days"),
       'c.pto_minutes', conn.raw("c.calc_snapshot->'ptoBank'->'payoutMinutes' AS pto_payout_minutes"));
@@ -527,6 +539,9 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
       overtimeMinutes: Number(row.overtime_minutes) || 0,
       ptoPayCents: toCents(row.pto_pay_cents) - ptoPayoutCents(row),
       holidayPayCents: toCents(row.holiday_pay_cents),
+      holidayWorkPremiumCents: toCents(row.holiday_work_premium_cents),
+      holidayWorkDays: (Array.isArray(row.holiday_work_days) ? row.holiday_work_days : [])
+        .map((d) => ({ workDate: d.workDate, minutes: Number(d.minutes) || 0 })),
       techRewardsCents: toCents(row.tech_rewards_cents),
       lines: ownLines.filter((line) => GROSS_LINE_KINDS.includes(line.kind))
         .map((line) => ({ cents: toCents(line.amount_cents), earnedOn: line.earned_on, weekStart: line.week_start, coversFrom: line.covers_from, coversTo: line.covers_to })),
