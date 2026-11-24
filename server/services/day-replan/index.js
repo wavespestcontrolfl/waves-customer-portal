@@ -28,7 +28,10 @@
  * stop are fixed, checked after the rules above: first_or_one_time (not a recurring visit with a parent series),
  * person_placed (the customer picked or asked for the date or time; the auto-dispatch rule
  * eligibility.isPersonPlacedVisit, and an unreadable history keeps the stop fixed) and time_told (the customer has a
- * known time from a delivered text, email, call or booking, by the no-show detector's promise reader). A staff placement
+ * known time from a delivered text, email, call or booking, by the no-show detector's promise reader). A stop held only by
+ * first_or_one_time or time_told may still change its hour by up to 2 hours from the slot the customer was told
+ * (TOLD_SHIFT_MIN, toldStart; owner 2026-11-24, "we give a 2 hr window"): the planner keeps it inside that band
+ * (limitToldShift) and the writer re-checks the new hour. No known told slot on the day keeps it fixed. A staff placement
  * and a customer confirmation alone no longer fix a stop (owner 2026-11-22: "i dont think it matters if staff pick it or
  * tom confirmed it"; that evening, "this is all too limiting").
  * One more kind of stop is fixed, and checked FIRST (owner 2026-11-22), because the app records whether the customer asked
@@ -56,7 +59,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { dayReplanMode } = require('../../config/feature-gates');
-const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { etDateString, etParts, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
 const { bookedVisitOrLiveHold } = require('../scheduling/reservation-occupancy');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
@@ -76,6 +79,10 @@ const DEFAULT_DAYS_AHEAD = 14;
 const MAX_DAYS_AHEAD = 30;
 // A visit whose appointment starts within this many hours is locked (the 24-hour reminder's reach).
 const LOCK_HOURS = 24.25;
+// Owner 2026-11-24: "we give a 2 hr window, so if we move it back two hrs, this is fine". A stop held only because the
+// customer was told its hour (time_told, or first_or_one_time) may change its hour by up to this many minutes from the
+// told slot's start (toldStart). The re-plan sends no text, so the told slot stays the anchor night after night.
+const TOLD_SHIFT_MIN = 120;
 const MOVABLE_STATUSES = ['pending', 'confirmed'];
 const EXCLUDED_STATUSES = ['cancelled', 'completed', 'skipped', 'rescheduled', 'no_show'];
 const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
@@ -202,6 +209,31 @@ async function loadToldLevels(conn, rows, now) {
 }
 
 /**
+ * Map<id, minutes after ET midnight>: the start of the hour slot each stop's customer was told, only when that slot is
+ * on `dateStr` (a slot told for another date anchors nothing). A failed read returns an empty map: no stop gets the
+ * 2-hour shift (fail closed).
+ */
+function toldStartsOnDate(starts, dateStr) {
+  const out = new Map();
+  for (const [id, start] of starts) {
+    if (etDateString(start) !== dateStr) continue;
+    const p = etParts(start);
+    out.set(id, p.hour * 60 + p.minute);
+  }
+  return out;
+}
+
+async function loadToldStartMinutes(conn, rows, dateStr, now) {
+  try {
+    const starts = await require('../auto-dispatch/told-visits').loadToldStarts(conn, rows.map((r) => r.id), now);
+    return toldStartsOnDate(starts, dateStr);
+  } catch (err) {
+    logger.warn(`[day-replan] the told-start read failed (${err.message}); no told stop changes its hour`);
+    return new Map();
+  }
+}
+
+/**
  * The stops that have a set time (owner 2026-11-22), as Map<id, 'set_time' | 'set_time_unread'> holding only the fixed
  * ids. THE rule is time-promise.dayOnlyEligibility with the told level ignored: a visit that is not eligible there may
  * not be promised as a day only, so its time is set ('set_time'). The customer asked for it (customer_asked_time), or
@@ -251,7 +283,7 @@ async function loadDayContext(conn, dateStr, now, makeRoomWriteProof = false) {
   const sent24 = await loadReminder24hSent(conn, rows.map((r) => r.id));
   const reminder24hOff = await loadReminder24hOffIds(conn, rows);
   const ctx = { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24, reminder24hOff };
-  const facts = await loadToldLevels(conn, rows, now);
+  const facts = { ...(await loadToldLevels(conn, rows, now)), toldStart: await loadToldStartMinutes(conn, rows, dateStr, now) };
   // askRecorded: this context carries the set-time facts (the app records whether the customer asked for the time).
   const ask = { askRecorded: true, setTime: await loadSetTime(conn, rows, now) };
   return { ...ctx, toldLock: true, ...facts, ...ask, personPlaced: await loadPersonPlaced(conn, rows) };
@@ -300,7 +332,14 @@ function officeReviewPending(row) {
  * the `setTime` map) fixes the stop first, whatever the customer was told, so a day-only notice does not free it; a
  * context without `askRecorded` (a hand-built one) ignores `setTime`.
  */
-function toldLockReason(row, { told, personPlaced, dayTold, askRecorded, setTime }) {
+/** True when the stop's hour is within TOLD_SHIFT_MIN of the slot its customer was told (toldStart, ET minutes). */
+function withinToldShift(row, toldStart) {
+  const told = toldStart ? toldStart.get(row.id) : undefined;
+  if (!Number.isFinite(told) || row.window_start == null) return false;
+  return Math.abs(hhmmToMin(row.window_start) - told) <= TOLD_SHIFT_MIN;
+}
+
+function toldLockReason(row, { told, personPlaced, dayTold, askRecorded, setTime, toldStart }) {
   if (askRecorded === true) {
     const set = setTime ? setTime.get(row.id) : 'set_time_unread';
     if (set) return set;
@@ -308,10 +347,13 @@ function toldLockReason(row, { told, personPlaced, dayTold, askRecorded, setTime
   // A stop the customer was told only the DAY for (dayTold) may change its hour inside that
   // day, so being a first or one-time visit, or a customer-held slot, does not fix it (the re-plan only changes the
   // hour). A customer confirmation does not fix a stop (owner 2026-11-22).
+  // A stop told an hour may change it by up to 2 hours from the told slot (owner 2026-11-24); the writer checks the
+  // new hour too, so a move past 2 hours stops as first_or_one_time or time_told.
   const dayOnly = !!dayTold && dayTold.has(row.id);
-  if (!dayOnly && (row.is_recurring !== true || row.recurring_parent_id == null)) return 'first_or_one_time';
+  const shift = withinToldShift(row, toldStart);
+  if (!dayOnly && !shift && (row.is_recurring !== true || row.recurring_parent_id == null)) return 'first_or_one_time';
   if (!dayOnly && (!personPlaced || personPlaced.has(row.id))) return 'person_placed';
-  if (!told || told.has(row.id)) return 'time_told';
+  if (!shift && (!told || told.has(row.id))) return 'time_told';
   return null;
 }
 
@@ -425,6 +467,21 @@ async function attachPrefs(conn, entries) {
 }
 
 /**
+ * A movable stop its customer was told an hour for takes only hours within TOLD_SHIFT_MIN of that slot: its `pref`
+ * becomes the overlap of the preference and that band. No overlap keeps the stop fixed (time_told).
+ */
+function limitToldShift(entries, toldStart) {
+  for (const entry of entries) {
+    const told = !entry.why && toldStart ? toldStart.get(entry.row.id) : undefined;
+    if (!Number.isFinite(told)) continue;
+    const band = { startMin: told - TOLD_SHIFT_MIN, endMin: told + TOLD_SHIFT_MIN + 1 };
+    const pref = entry.pref ? { startMin: Math.max(entry.pref.startMin, band.startMin), endMin: Math.min(entry.pref.endMin, band.endMin) } : band;
+    if (pref.startMin >= pref.endMin) entry.why = 'time_told';
+    else entry.pref = pref;
+  }
+}
+
+/**
  * One planner stop for a group of entries: a lone row, or a co-visit group (same customer, property and window)
  * merged into ONE fixed stop charged the co-visit helpers' on-site minutes, so the search can never separate it.
  */
@@ -492,6 +549,7 @@ async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) 
   const origin = homeFromMap(env.techHomes, techId);
   const entries = rows.map((row) => ({ row, why: fixedReason(row, dayContext), pref: null }));
   await attachPrefs(conn, entries);
+  limitToldShift(entries, dayContext.toldStart);
   const planned = planEntries(env, { rows, entries, blocks, origin, techId, dayContext });
   const plan = { entries, blocks, origin, dayContext, ...planned, hash: versionHash(dayContext.allRows) };
   return planned.verdict.accepted ? plan : withPackPlan(env, plan, { rows, techId });
@@ -900,6 +958,8 @@ function applyDeps() {
     // The move transaction re-reads whether the visit's 24-hour reminder will go out (apply.js recheckVisit).
     loadReminder24hOffIds,
     loadPromiseLevels: (conn, ids, now) => require('../auto-dispatch/told-visits').loadPromiseLevels(conn, ids, now),
+    loadToldStarts: (conn, ids, now) => require('../auto-dispatch/told-visits').loadToldStarts(conn, ids, now),
+    toldStartsOnDate,
     // Whether the visit's time is now a set time (apply.js toldLockFacts).
     loadSetTime,
     isPersonPlacedVisit: (row, conn) => require('../auto-dispatch/eligibility').isPersonPlacedVisit(row, conn),
@@ -927,6 +987,7 @@ function applyDeps() {
 }
 
 module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, loadReminder24hOffIds, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, loadSetTime, skipReason, horizonDates, LOCK_HOURS,
+  limitToldShift, toldStartsOnDate, TOLD_SHIFT_MIN,
   // The booking-time make-room check (scheduling/booking-make-room.js) reads a day, a preference and a leg the same way.
   loadDayStops, loadPref, legMin,
   // The close-gaps measurement (owner 2026-11-18).

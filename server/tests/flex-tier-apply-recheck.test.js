@@ -396,8 +396,9 @@ describe('the band is the visit\'s own radius (pass 1)', () => {
 
   test.each([
     ['quarterly', { recurring_pattern: 'quarterly' }, 7],
-    ['bimonthly', { recurring_pattern: 'bimonthly' }, 7],
-    ['custom 56 days', { recurring_pattern: 'custom', recurring_interval_days: 56 }, 7],
+    ['bimonthly', { recurring_pattern: 'bimonthly' }, 6], // owner 2026-11-24: "make it 6 for bi monthly"
+    ['custom 56 days', { recurring_pattern: 'custom', recurring_interval_days: 56 }, 6],
+    ['custom 84 days', { recurring_pattern: 'custom', recurring_interval_days: 84 }, 7],
     ['monthly', { recurring_pattern: 'monthly' }, 5],
     ['custom 55 days', { recurring_pattern: 'custom', recurring_interval_days: 55 }, 5],
     ['a row with no pattern', {}, 5],

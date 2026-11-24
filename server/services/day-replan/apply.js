@@ -176,7 +176,20 @@ async function toldLockFacts(trx, deps, { row, id, dateStr }) {
   // set_time_unread.
   const ask = { askRecorded: true, setTime: await deps.loadSetTime(trx, [{ id }], deps.now()) };
   const verdict = await deps.isPersonPlacedVisit({ ...row, scheduled_date: dateStr }, trx);
-  return { toldLock: true, ...levels, ...ask, personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
+  return { toldLock: true, ...levels, ...ask, toldStart: await toldStartFacts(trx, deps, { id, dateStr }), personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
+}
+
+/**
+ * The told slot's start (ET minutes on `dateStr`) for the 2-hour shift (owner 2026-11-24), re-read inside the move
+ * transaction. No reader, or a read that throws, gives an empty map: a told stop then stays fixed (fail closed).
+ */
+async function toldStartFacts(trx, deps, { id, dateStr }) {
+  if (typeof deps.loadToldStarts !== 'function' || typeof deps.toldStartsOnDate !== 'function') return new Map();
+  try {
+    return deps.toldStartsOnDate(await deps.loadToldStarts(trx, [id], deps.now()), dateStr);
+  } catch (_) {
+    return new Map();
+  }
 }
 
 /**

@@ -97,4 +97,20 @@ async function loadPromiseLevels(conn, ids, now = new Date()) {
   return levels;
 }
 
-module.exports = { loadToldVisitIds, loadPromiseLevels, resolvePromises, promiseLevelOf };
+/** Map<id, Date>: the start of the hour slot the customer was told, for each id whose level is 'hour' with a known slot
+ *  (promise.start_at). An unknown window, a withdrawn promise or a day-only promise has no entry. The day re-plan lets such a visit change its
+ *  hour by up to 2 hours from this start (owner 2026-11-24). Throws when a read fails; every caller must fail closed. */
+async function loadToldStarts(conn, ids, now = new Date()) {
+  const starts = new Map();
+  if (!ids || ids.length === 0) return starts;
+  const promises = await resolvePromises(conn, ids, now);
+  for (const id of ids) {
+    const promise = promises.get(id);
+    if (promiseLevelOf(promise) !== 'hour' || promise.withdrawn === true || promise.start_at == null) continue;
+    const start = promise.start_at instanceof Date ? promise.start_at : new Date(promise.start_at);
+    if (!Number.isNaN(start.getTime())) starts.set(id, start);
+  }
+  return starts;
+}
+
+module.exports = { loadToldVisitIds, loadPromiseLevels, loadToldStarts, resolvePromises, promiseLevelOf };

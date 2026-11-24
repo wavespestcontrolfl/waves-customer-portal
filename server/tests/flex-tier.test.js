@@ -19,6 +19,8 @@ jest.mock('../services/appointment-reminders', () => ({
 const {
   FLEX_TIER_RADIUS_DAYS,
   FLEX_TIER_WIDE_RADIUS_DAYS,
+  FLEX_TIER_BIMONTHLY_RADIUS_DAYS,
+  FLEX_TIER_WIDEST_MIN_INTERVAL_DAYS,
   FLEX_TIER_WIDE_MIN_INTERVAL_DAYS,
   flexRadiusDaysFor,
   FLEX_TIER_FREEZE_HOURS,
@@ -35,8 +37,10 @@ const { MIN_DESTINATION_DAYS_OUT } = require('../services/auto-dispatch/route-ti
 describe('constants match the approved policy', () => {
   test('±5 days, 73h freeze, shared destination floor', () => {
     expect(FLEX_TIER_RADIUS_DAYS).toBe(5);
-    expect(FLEX_TIER_WIDE_RADIUS_DAYS).toBe(7); // owner 2026-11-22: 7-day range for plans of 2 months or longer
+    expect(FLEX_TIER_WIDE_RADIUS_DAYS).toBe(7); // owner 2026-11-22: 7-day range; 3 months or longer since 11-24
+    expect(FLEX_TIER_BIMONTHLY_RADIUS_DAYS).toBe(6); // owner 2026-11-24: "make it 6 for bi monthly"
     expect(FLEX_TIER_WIDE_MIN_INTERVAL_DAYS).toBe(56);
+    expect(FLEX_TIER_WIDEST_MIN_INTERVAL_DAYS).toBe(84);
     expect(FLEX_TIER_FREEZE_HOURS).toBe(73);
     expect(MIN_DESTINATION_DAYS_OUT).toBe(5); // reused from route-tiers, not re-derived
   });
@@ -187,20 +191,22 @@ describe('flexTierMoveWindow — the ±5 days are measured from the durable orig
   });
 });
 
-describe('flexRadiusDaysFor — ±7 for a plan of 2 months or longer, ±5 for everything else', () => {
+describe('flexRadiusDaysFor — ±7 for a plan of 3 months or longer, ±6 for 2 months, ±5 for everything else', () => {
   const { MONTH_RECURRENCE_INTERVALS } = require('../services/rebooker');
 
   test.each(Object.entries(MONTH_RECURRENCE_INTERVALS))('month pattern %s (every %i month(s))', (pattern, months) => {
-    expect(flexRadiusDaysFor({ recurring_pattern: pattern })).toBe(months >= 2 ? 7 : 5);
+    expect(flexRadiusDaysFor({ recurring_pattern: pattern })).toBe(months >= 3 ? 7 : (months === 2 ? 6 : 5));
   });
 
   test('the month table reads: monthly is the only narrow one', () => {
     expect(Object.keys(MONTH_RECURRENCE_INTERVALS).filter((k) => flexRadiusDaysFor({ recurring_pattern: k }) === 5)).toEqual(['monthly']);
   });
 
-  test('custom: 55 days is 5, 56 days is 7; a missing, zero or non-numeric interval is 5', () => {
+  test('custom: 55 days is 5, 56 to 83 days is 6, 84 days is 7; a missing, zero or non-numeric interval is 5', () => {
     expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: 55 })).toBe(5);
-    expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: 56 })).toBe(7);
+    expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: 56 })).toBe(6);
+    expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: 83 })).toBe(6);
+    expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: 84 })).toBe(7);
     expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: '90' })).toBe(7);
     expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: 365 })).toBe(7);
     for (const bad of [undefined, null, 0, -90, '', 'abc', NaN, Infinity * 0]) {
@@ -246,9 +252,16 @@ describe('flexBandRadius — the wide band needs the pattern AND room in the ser
     for (const bad of [undefined, NaN, '90', -1]) expect(flexBandRadius({ radiusDays: 7, neighbors: { nearestDays: bad } })).toBe(5);
   });
 
+  test('the 2-month band is 6 with room in the series, and 5 with a live occurrence closer than 56 days', () => {
+    expect(flexBandRadius({ radiusDays: 6, neighbors: { nearestDays: null } })).toBe(6);
+    expect(flexBandRadius({ radiusDays: 6, neighbors: { nearestDays: 56 } })).toBe(6);
+    expect(flexBandRadius({ radiusDays: 6, neighbors: { nearestDays: 55 } })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 6, neighbors: {} })).toBe(5);
+  });
+
   test('the narrow band never widens; a bad radius reads 5', () => {
     expect(flexBandRadius({ radiusDays: 5, neighbors: { nearestDays: null } })).toBe(5);
-    for (const bad of [undefined, null, 0, 6, 30, NaN, '7']) expect(flexBandRadius({ radiusDays: bad, neighbors: { nearestDays: null } })).toBe(5);
+    for (const bad of [undefined, null, 0, 4, 8, 30, NaN, '7', '6']) expect(flexBandRadius({ radiusDays: bad, neighbors: { nearestDays: null } })).toBe(5);
   });
 
   test('flexTierMoveWindow applies it: radius 7 with the next visit 40 days ahead is the ±5 window', () => {
@@ -346,8 +359,8 @@ describe('loadSeriesNeighbors — withRadius (the apply-time read)', () => {
     ] };
     const entry = (await loadSeriesNeighbors(seriesDbStub(moved), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
     // The crossing guard still sees the old cadence date; the band reads where the sibling is now.
-    expect(entry).toMatchObject({ next: '2027-01-10', nearestDays: 70, radiusDays: 7 });
-    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(7);
+    expect(entry).toMatchObject({ next: '2027-01-10', nearestDays: 70, radiusDays: 6 }); // bimonthly: ±6 (owner 2026-11-24)
+    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(6);
   });
 
   test('a sibling rescheduled onto the visit\'s own date is 0 days away: the band is narrow', async () => {

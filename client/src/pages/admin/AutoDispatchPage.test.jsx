@@ -49,6 +49,13 @@ it("words the policy by the guard mode in force", async () => {
   expect(flex.length).toBeGreaterThan(0);
   expect(screen.queryByText(/more than 14 days out/)).not.toBeInTheDocument();
   cleanup();
+  // A run saved with the 2-month band (owner 2026-11-24: "make it 6 for bi monthly").
+  automation = { scheduledEnabled: true, config: { ...config, routeTiersEnabled: false, flexTierEnabled: true, guardMode: "flex", flexFreezeHours: 25, flexWideRadiusDays: 7, flexBimonthlyRadiusDays: 6, dayOnlyPromise: true } };
+  detail = { run: { ...run, config_snapshot: automation.config }, logs: [{ ...decision }] };
+  mount();
+  await screen.findByText("Original decision");
+  expect(screen.getAllByText(/A bimonthly visit may move up to 6 days, and a visit that repeats every 12 weeks or less often \(quarterly, longer\) up to 7 days, when the nearest other visit of its series is 56 days away or more\.$/).length).toBeGreaterThan(0);
+  cleanup();
   automation = { scheduledEnabled: true, config: { ...config, routeTiersEnabled: false, guardMode: "legacy" } };
   detail = { run: { ...run, config_snapshot: automation.config }, logs: [{ ...decision }] };
   mount();
