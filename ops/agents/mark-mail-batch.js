@@ -57,13 +57,18 @@ const value = (name) => {
 // could be committed. The real path of its folder (symlinks followed) is checked: neither it nor any parent may hold .git.
 function checkLabelsPath(labelsPath) {
   const outside = 'must point outside any git checkout (it holds buyer names and page tokens), e.g. ~/mail-labels/batch.json';
+  const name = path.basename(labelsPath);
+  if (!name || name === '.' || name === '..') throw usage('--labels must name a file');
   let dir;
-  try { dir = fs.realpathSync(path.dirname(path.resolve(labelsPath))); } catch { throw usage(`--labels folder does not exist: create it first; it ${outside}`); }
+  // The folder as given, with every symlink and ".." resolved by the file system (not by string), so the checked folder
+  // is the one written to.
+  try { dir = fs.realpathSync(path.dirname(labelsPath)); } catch { throw usage(`--labels folder does not exist: create it first; it ${outside}`); }
   const repo = fs.realpathSync(path.resolve(__dirname, '..', '..'));
   for (let d = dir; ; d = path.dirname(d)) {
     if (d === repo || fs.existsSync(path.join(d, '.git'))) throw usage(`--labels ${outside}`);
     if (path.dirname(d) === d) break;
   }
+  return path.join(dir, name);
 }
 
 function parseArgs() {
@@ -74,13 +79,14 @@ function parseArgs() {
   // as "no filter" and widen the run to every eligible home.
   const idsText = value('--ids');
   const ids = idsText === undefined ? undefined : idsText.split(',').map((s) => s.trim()).filter(Boolean);
-  const labelsPath = value('--labels');
+  const labelsArg = value('--labels');
   if (ids && !ids.length) throw usage('--ids is empty: give prospect ids, or leave the flag out');
-  if (labelsPath !== undefined && !labelsPath.trim()) throw usage('--labels is empty: give an output file');
+  if (labelsArg !== undefined && !labelsArg.trim()) throw usage('--labels is empty: give an output file');
   if (batch !== undefined && !batch.trim()) throw usage('--batch is empty: give a batch name');
   if (execute && !batch) throw usage('--execute needs --batch <name>');
-  if (labelsPath !== undefined && !batch) throw usage('--labels needs --batch <name>: labels are printed from a marked batch only');
-  if (labelsPath !== undefined) checkLabelsPath(labelsPath);
+  if (labelsArg !== undefined && !batch) throw usage('--labels needs --batch <name>: labels are printed from a marked batch only');
+  // The checked, canonical destination is the one written: the temp file and the rename both use it.
+  const labelsPath = labelsArg === undefined ? undefined : checkLabelsPath(labelsArg);
   return { execute, batch, ids, labelsPath };
 }
 

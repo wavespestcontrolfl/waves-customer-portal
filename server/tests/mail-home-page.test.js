@@ -89,7 +89,7 @@ describe('getHomePage', () => {
     });
     const page = await getHomePage(TOKEN);
     expect(page.price).toEqual({ monthly: 52.25, annual: 627.01, setupFee: 0, pricedAt: '2026-11-22T22:00:00.000Z' });
-    expect(page.heldUntil).toBe('2027-01-23');
+    expect(page.heldUntil).toBeNull(); // no hold until booking honors the printed price
   });
 
   test('a mailed home whose snapshot cannot be read shows no price and no hold date', async () => {

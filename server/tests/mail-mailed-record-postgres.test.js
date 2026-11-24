@@ -240,7 +240,7 @@ postgres('mailed record on PostgreSQL', () => {
     await markBatch({ batch: 'frozen', now: NOW });
     const page = await getHomePage(token);
     expect(page.price).toEqual({ monthly: 50, annual: 600, setupFee: 0, pricedAt: '2026-11-22T22:00:00.000Z' });
-    expect(page.heldUntil).toBe('2027-01-23'); // 60 days after 2026-11-24
+    expect(page.heldUntil).toBeNull(); // no hold until booking honors the printed price
   });
 
   test('labelsFor: the would-be batch before marking, the batch after (frozen price, hold from mailed_at); office line by city', async () => {
