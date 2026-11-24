@@ -72,13 +72,13 @@ test('a recent click Google has no record of yet stays unlinked for the next run
   expect(g.query).toHaveBeenCalledTimes(90); // every day Google still keeps, back from the lead day
 });
 
-test('an older click takes the one campaign Google says had spend that day; two campaigns = unlinked', async () => {
+test('an older click takes the only campaign that ever had spend; two campaigns = unlinked', async () => {
   const lead = { id: 'b1', gclid: GCLID_OLD, lead_date: '2026-07-01' };
   const one = fakeConn({ leads: [lead], campaigns });
   const g1 = googleAdsWith({}, ['22594274874']);
   expect((await linkCampaigns({ now: NOW, conn: one, googleAds: g1 })).linked.only_campaign_with_spend).toBe(1);
   expect(one.updates[0]).toMatchObject({ campaign_id: 'local-gbp', campaign_link_basis: 'only_campaign_with_spend' });
-  expect(g1.query.mock.calls[0][0]).toMatch(/FROM campaign WHERE segments.date BETWEEN '2026-04-02' AND '2026-07-01'/);
+  expect(g1.query.mock.calls[0][0]).toMatch(/FROM campaign WHERE segments.date BETWEEN '2015-01-01' AND '2026-07-01'/);
 
   const two = fakeConn({ leads: [lead], campaigns });
   const g2 = googleAdsWith({}, ['22594274874', '24535212391']);
@@ -177,5 +177,18 @@ test('one click_view query per day covers every lead of the run', async () => {
   await linkCampaigns({ now: NOW, conn, googleAds: g });
   expect(g.query).toHaveBeenCalledTimes(90); // days, not leads x days
   expect(g.query.mock.calls[0][0]).toContain(`IN ('${GCLID_NEW}k0', '${GCLID_NEW}k1'`);
+});
+
+test('an exact match found before a later day fails is kept for the next run', async () => {
+  const leads = [{ id: 'm1', gclid: `${GCLID_NEW}m1`, lead_date: '2026-11-20' }, { id: 'm2', gclid: `${GCLID_NEW}m2`, lead_date: '2026-11-19' }];
+  const conn = fakeConn({ leads, campaigns: [] });
+  const query = jest.fn(async (q) => {
+    if (q.includes("'2026-11-20'")) return [{ click_view: { gclid: `${GCLID_NEW}m1` }, campaign: { id: 24535212391 } }];
+    throw new Error('RESOURCE_EXHAUSTED');
+  });
+  await expect(linkCampaigns({ now: NOW, conn, googleAds: { getCustomer: () => ({ query }) } })).rejects.toThrow('RESOURCE_EXHAUSTED');
+  const saved = JSON.parse(conn.settings['ads.campaign_link.tried']);
+  expect(saved.m1).toEqual({ at: NOW.toISOString(), google_campaign_id: '24535212391' });
+  expect(saved.m2).toEqual({ at: NOW.toISOString() });
 });
 

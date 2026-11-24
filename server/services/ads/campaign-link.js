@@ -10,10 +10,11 @@
  *     exact click -> basis 'gclid_click_view'. Each run asks every day from the lead day back SPEND_DAYS that Google
  *     still keeps, newest first, in one query per day for all the run's leads (clickViewCampaigns). A campaign Google names that is not in ad_campaigns yet is kept with the try, and
  *     the next run links it without asking Google again. No answer = tried again on a later run.
- *   - lead day older than the window (Google no longer keeps the click): Google's own campaign metrics (kept long
- *     after click records; never the local copy, which can miss a sync day) from SPEND_DAYS before the lead day
- *     through the lead day, the longest a click can come before its lead -> exactly one campaign with spend in that
- *     whole span = that campaign -> basis 'only_campaign_with_spend'. Two or more, or none: left unlinked.
+ *   - lead day older than the window (Google no longer keeps the click): the click day is unknown (a customer can
+ *     reopen an old tagged link), so only proof works: Google's own campaign metrics (never the local copy, which can
+ *     miss a sync day) from the account's start (EVER) through the lead day. Exactly one campaign has ever had spend =
+ *     no other campaign could have made the click -> basis 'only_campaign_with_spend'. Two or more, or none: left
+ *     unlinked.
  * A Google failure saves the tries made so far, then fails the step, so the next run moves on to other leads.
  * A campaign Google names that is not in ad_campaigns is left unlinked (the campaigns step syncs it first).
  * Writes only campaign_id + campaign_link_basis, only where campaign_id is still NULL. Read-only toward Google.
@@ -28,6 +29,8 @@ const CLICK_VIEW_DAYS = 90;
 // stops there, and for an older click only one campaign may have spent from that day through the lead day.
 const SPEND_DAYS = 90;
 const BATCH = 10;
+// Before any Waves ad account existed: the start of the one-spender proof.
+const EVER = '2015-01-01';
 const TRIED_KEY = 'ads.campaign_link.tried';
 
 function dayString(v) {
@@ -46,10 +49,10 @@ const GCLID_RE = /^[A-Za-z0-9_-]{10,200}$/;
 /**
  * Google campaign ids by gclid from click_view. `spans` maps each gclid to the days it may have been clicked; one
  * query per day asks every gclid still open on it (click_view takes one day a query), newest day first, so a run is at
- * most SPEND_DAYS + 1 queries whatever the number of leads. Returns Map gclid -> Google campaign id.
+ * most SPEND_DAYS + 1 queries whatever the number of leads. Fills and returns `found` (gclid -> Google campaign id),
+ * so the matches of the days already asked survive a later failed query.
  */
-async function clickViewCampaigns(customer, spans) {
-  const found = new Map();
+async function clickViewCampaigns(customer, spans, found = new Map()) {
   const days = [...new Set([...spans.values()].flat())].sort().reverse();
   for (const day of days) {
     const open = [...spans].filter(([gclid, span]) => !found.has(gclid) && span.includes(day)).map(([gclid]) => gclid);
@@ -86,6 +89,25 @@ function clickSpans(rows, tried, windowStart) {
   return spans;
 }
 
+/**
+ * Marks every lead of the run tried (so a Google failure still moves the next run on), then asks click_view for the
+ * leads that need it, batched by day. An exact match is kept with its try even when a later day's query failed.
+ */
+async function lookupClicks(customer, rows, tried, { at, windowStart }) {
+  for (const row of rows) {
+    const known = tried[row.id]?.google_campaign_id;
+    tried[row.id] = { at, ...(known ? { google_campaign_id: known } : {}) };
+  }
+  const spans = clickSpans(rows, tried, windowStart);
+  const clicks = new Map();
+  try {
+    if (spans.size) await clickViewCampaigns(customer, spans, clicks);
+  } finally {
+    for (const row of rows) if (clicks.has(row.gclid)) tried[row.id].google_campaign_id = clicks.get(row.gclid);
+  }
+  return clicks;
+}
+
 function parseTried(v) {
   try {
     const o = typeof v === 'string' ? JSON.parse(v) : v;
@@ -120,14 +142,7 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
   const at = now.toISOString();
 
   try {
-    // Every lead of the run counts as tried now, so a Google failure below still moves the next run on.
-    for (const row of rows) {
-      const known = tried[row.id]?.google_campaign_id;
-      tried[row.id] = { at, ...(known ? { google_campaign_id: known } : {}) };
-    }
-    // Exact click lookups first, batched by day across the leads that need one.
-    const spans = clickSpans(rows, tried, windowStart);
-    const clicks = spans.size ? await clickViewCampaigns(customer, spans) : new Map();
+    const clicks = await lookupClicks(customer, rows, tried, { at, windowStart });
     for (const row of rows) {
       const day = dayString(row.lead_date);
       const known = tried[row.id].google_campaign_id || clicks.get(row.gclid) || null;
@@ -136,7 +151,7 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
       let basis = 'gclid_click_view';
       if (!googleId && day < windowStart) {
         basis = 'only_campaign_with_spend';
-        googleId = await onlyCampaignWithSpend(customer, daysBack(day, SPEND_DAYS), day);
+        googleId = await onlyCampaignWithSpend(customer, EVER, day);
       }
       const campaignId = googleId ? localId.get(googleId) || null : null;
       if (!campaignId) { out.unlinked += 1; continue; }
