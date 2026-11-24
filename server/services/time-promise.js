@@ -10,7 +10,7 @@
  * Parts B1 (booking confirmation, 72-hour reminder) and B2 (move notices) call it. It sends nothing and spends nothing.
  */
 
-const { loadPromiseLevels, resolvePromises, promiseLevelOf } = require('./auto-dispatch/told-visits');
+const { loadPromiseLevels, loadPromiseFacts, resolvePromises, promiseLevelOf } = require('./auto-dispatch/told-visits');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
@@ -306,12 +306,22 @@ async function dayOnlyEligibility(conn, ids, now = new Date(), { ignoreLevel = f
     // A MOVE replaces the old promise (part B2), so its decision ignores the level: every visit reads as 'none'.
     // `onDate` (a send's own rendered date): the level read is pinned to it, so a visit moved off that date reads 'hour'
     // (fail closed) and an hour told for that date is never dropped against the visit's new date (pre-push Codex P1).
-    const levels = ignoreLevel ? new Map(ids.map((id) => [id, 'none']))
-      : await loadPromiseLevels(conn, ids, now, onDate ? { sameDateOnly: onDate } : undefined);
+    // With `onDate`, one facts read: a visit moved off its rendered date between reads is unverified (not eligible,
+    // 'hour', failed), so a screen keeps the hour and an AI context withholds it, as for any failed read (Codex P1).
+    const moved = new Set();
+    let levels;
+    if (ignoreLevel) levels = new Map(ids.map((id) => [id, 'none']));
+    else if (!onDate) levels = await loadPromiseLevels(conn, ids, now);
+    else {
+      const promiseFacts = await loadPromiseFacts(conn, ids, now, { sameDateOnly: onDate });
+      levels = new Map([...promiseFacts].map(([id, fact]) => [id, fact.level]));
+      for (const [id, fact] of promiseFacts) if (fact.mismatch === true) moved.add(id);
+    }
     const facts = await loadStopFacts(conn, ids);
     const memberIds = [...new Set([...facts.values()].flat().map((m) => String(m.id)))];
     const sources = await loadBookingSources(conn, memberIds);
     for (const id of ids) {
+      if (moved.has(id)) { result.set(id, { eligible: false, level: 'hour', failed: true }); continue; }
       const level = levels.get(id) || 'hour';
       const members = facts.get(String(id)) || [];
       let eligible = level !== 'hour' && members.length > 0;

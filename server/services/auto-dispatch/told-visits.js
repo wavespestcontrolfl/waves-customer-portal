@@ -162,7 +162,8 @@ async function loadPromiseFacts(conn, ids, now = new Date(), { sameDateOnly = tr
       const at = promise.start_at instanceof Date ? promise.start_at : new Date(promise.start_at);
       if (!Number.isNaN(at.getTime())) start = at;
     }
-    facts.set(id, { level, start });
+    // A visit seen off its expected date (date_mismatch) is unverified: callers keep the hour and mark the read failed.
+    facts.set(id, promise?.date_mismatch === true ? { level, start, mismatch: true } : { level, start });
   }
   return facts;
 }

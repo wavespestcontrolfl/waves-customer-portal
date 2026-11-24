@@ -353,7 +353,7 @@ describe('loadTimeDisplay', () => {
     test('a row rendered on a date the visit has left keeps the hour told for that date (codex P1)', async () => {
       const told = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: Date.parse('2026-11-20T14:00:00Z') } };
       const moved = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-21' })], reminders: [office('s1')], messages: [told] });
-      expect((await loadTimeDisplay(moved, [row('s1', '2026-11-20')], NOW)).get('s1')).toMatchObject({ showHour: true, level: 'hour' });
+      expect((await loadTimeDisplay(moved, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: true, level: 'hour', eligible: false, failed: true });
     });
 
     test('an eligible visit inside the cutoff: the hour', async () => {
@@ -383,12 +383,12 @@ describe('loadTimeDisplay', () => {
     });
 
     test('the failed marker is only on a failed read: a real hour verdict and a good read carry none', async () => {
-      const hour = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: SLOT } };
-      const told = fakeConn({ services: [svc('s1')], reminders: [office('s1')], messages: [hour] });
+      const hour = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: Date.parse('2026-11-20T14:00:00Z') } };
+      const told = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-20' })], reminders: [office('s1')], messages: [hour] });
       const out = await loadTimeDisplay(told, [row('s1', '2026-11-20')], NOW);
       expect(out.get('s1')).toEqual({ showHour: true, level: 'hour', eligible: false });
       expect('failed' in out.get('s1')).toBe(false);
-      const good = fakeConn({ services: [svc('s2')], reminders: [office('s2')] });
+      const good = fakeConn({ services: [svc('s2', { scheduled_date: '2026-11-20' })], reminders: [office('s2')] });
       expect('failed' in (await loadTimeDisplay(good, [row('s2', '2026-11-20')], NOW)).get('s2')).toBe(false);
     });
 
