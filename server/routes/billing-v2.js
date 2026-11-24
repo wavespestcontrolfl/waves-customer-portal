@@ -344,7 +344,9 @@ router.post('/cards', async (req, res, next) => {
       : renderedConsentVersionIsCurrent(setupIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY]);
     if (!stampIsCurrent) {
       logger.warn(`[billing-v2] add-method refused — SI ${setupIntentId} stamped consent text version ${setupIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY] || 'absent'}, not the current one (customer ${req.customerId})`);
-      return res.status(409).json(consentVersionStaleResponse());
+      // save_only tells the client which form to reopen after the refresh it asks for (a Stripe redirect return has no
+      // other way to know the intent came from the save-only form).
+      return res.status(409).json({ ...consentVersionStaleResponse(), ...(setupIntentSavesOnly(setupIntent) ? { save_only: true } : {}) });
     }
 
     // Micro-deposit deferred save (portal ACH lane): a bank SetupIntent

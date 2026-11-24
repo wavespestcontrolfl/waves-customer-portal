@@ -223,6 +223,7 @@ export class ApiClient {
         // branch on this, never on the human-facing message string.
         if (errorBody?.code) requestErr.code = errorBody.code;
         if (errorBody?.method_type) requestErr.methodType = errorBody.method_type;
+        if (errorBody?.save_only === true) requestErr.saveOnly = true;
         // Per-field validation detail (e.g. PUT /property/preferences when
         // every field in the batch was rejected) — callers that can save
         // partial batches use this to know which fields must never be

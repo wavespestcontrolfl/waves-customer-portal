@@ -234,7 +234,10 @@ describe('POST /cards save-only form', () => {
       await withServer(async (baseUrl) => {
         const res = await postCard(baseUrl);
         expect(res.status).toBe(409);
-        expect((await res.json()).code).toBe('CONSENT_VERSION_STALE');
+        const stale = await res.json();
+        expect(stale.code).toBe('CONSENT_VERSION_STALE');
+        // The client reads this to reopen the save-only form after a Stripe redirect return.
+        expect(stale.save_only).toBe(true);
       });
     }
     expect(finishSaveOnlyAdd).not.toHaveBeenCalled();

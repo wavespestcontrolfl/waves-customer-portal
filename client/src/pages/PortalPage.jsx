@@ -6809,6 +6809,19 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
         setAutopayRefreshKey((k) => k + 1);
       })
       .catch((err) => {
+        // An intent from before a text change is refused as stale (same as the inline save). Drop the returned intent
+        // from the URL, so a refresh does not resubmit it; a save-only one also brings the save-only link back, so the
+        // refresh reopens the save-only form, never the Auto Pay one.
+        if (err?.code === 'CONSENT_VERSION_STALE') {
+          try {
+            clearReturnedSetupIntent();
+            if (err.saveOnly === true) {
+              const url = new URL(window.location.href);
+              url.searchParams.set('add_card', '1');
+              window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+            }
+          } catch { /* a browser without history.replaceState: the customer reopens the link from the email */ }
+        }
         setStripeError(err.message || 'Failed to finish bank account setup');
       })
       .finally(() => setStripeLoading(false));

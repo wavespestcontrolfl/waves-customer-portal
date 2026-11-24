@@ -214,6 +214,23 @@ describe('Billing tab Add Payment Method modal — save-only form from the remin
     expect(window.location.search).toContain('add_card=1');
   });
 
+  it.each([
+    ['a save-only intent', true, true],
+    ['a usual (Auto Pay) intent', false, false],
+  ])('coming back from a Stripe redirect with %s refused as stale: the returned intent leaves the URL, and only save-only brings the link back', async (_name, saveOnly, linkBack) => {
+    const stale = Object.assign(new Error('The payment authorization text was updated. Please refresh the page and try again.'), { status: 409, code: 'CONSENT_VERSION_STALE', ...(saveOnly ? { saveOnly: true } : {}) });
+    api.saveStripeCard.mockRejectedValue(stale);
+    window.history.replaceState({}, '', '/?tab=billing&stripe_setup_flow=portal_add_card&setup_intent=si_old&redirect_status=succeeded');
+    render(<BillingTab customer={customer} />);
+    expect(await screen.findByText(/payment authorization text was updated/, {}, SETTLE)).toBeInTheDocument();
+    expect(api.saveStripeCard).toHaveBeenCalledWith(null, 'si_old');
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get('setup_intent')).toBeNull();
+    expect(params.get('stripe_setup_flow')).toBeNull();
+    expect(params.get('tab')).toBe('billing');
+    expect(params.get('add_card')).toBe(linkBack ? '1' : null);
+  });
+
   it('a failed start keeps the link and the save-only mode: the retry button mints save-only again, never the Auto Pay form', async () => {
     api.createSetupIntent
       .mockRejectedValueOnce(new Error('Could not start the form'))
