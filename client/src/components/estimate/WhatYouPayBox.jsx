@@ -35,43 +35,46 @@ function setupFeeSentence(fee, prepayWaivable) {
   return prepayWaivable ? `${base} It is waived if you prepay the year.` : base;
 }
 
-// A setup fee is shown only when the page can prove the plan is one service. Acceptance reads the whole
-// stored plan (a legacy split estimate keeps a root and a result recurring block), and a second recurring
-// service there waives the fee while the page shows one section. So the lone displayed section must also
-// be the estimate's own category and no combined plan block may exist; otherwise the box stays away.
-function soloPlanProven(input) {
-  const { model } = input;
-  return model.services.length === 1 && !model.multi && !input.combinedRecurring
-    && !!input.serviceCategory && input.serviceCategory === model.services[0].key;
-}
-
 // The plan the box describes: recurring, per application, billed by card, nothing else on the first bill.
 function describablePlan(input) {
   const { model, serviceMode, invoiceMode, siteConfirmationHold, commercial, creditApplies, oneTimeExtrasTotal, upFrontRowCount } = input;
   if (serviceMode !== 'recurring' || invoiceMode || siteConfirmationHold || commercial) return false;
   if (input.paymentPreference === 'prepay_annual') return false;
-  if (!model || model.credit || creditApplies || upFrontRowCount > 0 || Number(oneTimeExtrasTotal) > 0) return false;
-  const charged = positiveFees(input.fees);
-  // Another first-visit fee (the initial cockroach treatment): the first bill is more than the lines here.
-  if (charged.some((fee) => !isSetupFee(fee))) return false;
-  return charged.length === 0 || soloPlanProven(input);
+  return !!model && !model.credit && !creditApplies && !(upFrontRowCount > 0) && !(Number(oneTimeExtrasTotal) > 0);
+}
+
+// The setup fee comes from ONE place: the page's existing first-visit line (`firstVisit`, the figure
+// PriceFollowUps prints, from firstVisitTotalPreview). Fee lists and the one-time breakdown are not read
+// to build a fee row: they can disagree with what acceptance charges (a legacy split estimate, a frozen
+// bundle whose only setup row sits in the breakdown). So:
+// - the line exists: its application must be the sum of these prices to the cent; the fee is its setup
+//   and the box's first-visit total is its total, never another figure;
+// - no line: the box states no fee, and only when no setup charge appears anywhere on the page.
+// Any mismatch or doubt returns null.
+function proofOfFirstVisit(input, applications) {
+  const line = input.firstVisit || null;
+  if (!line) return input.setupAnywhere === false ? { fee: 0, total: applications } : null;
+  if (input.model.services.length !== 1 || !sameCents(line.firstApplication, applications)) return null;
+  const fee = round2(line.setup);
+  return sameCents(line.total, applications + fee) && fee > 0 ? { fee, total: round2(line.total) } : null;
 }
 
 // Everything the box prints, or null when the first bill is not proven to be these figures.
 export function buildWhatYouPay(input = {}) {
   if (!describablePlan(input)) return null;
   const { model } = input;
-  const firstApplications = round2(model.services.reduce((sum, s) => sum + s.perApplication, 0));
-  // The proof: the "Reserve your spot" box's first application is the sum of these prices to the cent.
-  if (!(input.invoiceFirstVisit > 0) || !sameCents(input.invoiceFirstVisit, firstApplications)) return null;
-  const setupFee = positiveFees(input.fees).find(isSetupFee) || null;
-  const feeAmount = setupFee ? round2(setupFee.amount) : 0;
-  const prepayWaivable = input.annualPrepayOffered === true && setupFee?.waivedWithPrepay === true;
+  const applications = round2(model.services.reduce((sum, s) => sum + s.perApplication, 0));
+  // The "Reserve your spot" box's first application is the sum of these prices to the cent.
+  if (!(input.invoiceFirstVisit > 0) || !sameCents(input.invoiceFirstVisit, applications)) return null;
+  const proof = proofOfFirstVisit(input, applications);
+  if (!proof) return null;
+  const feeRow = positiveFees(input.fees).find(isSetupFee) || null;
+  const prepayWaivable = input.annualPrepayOffered === true && feeRow?.waivedWithPrepay === true;
   return {
     lines: model.services.map((s) => ({ key: s.key, label: s.label, amount: s.perApplication, visits: s.visits })),
-    setup: setupFee ? { amount: feeAmount } : null,
-    firstVisitTotal: round2(firstApplications + feeAmount),
-    setupSentence: setupFee ? setupFeeSentence(setupFee, prepayWaivable) : null,
+    setup: proof.fee > 0 ? { amount: proof.fee } : null,
+    firstVisitTotal: proof.total,
+    setupSentence: proof.fee > 0 ? setupFeeSentence({ amount: proof.fee }, prepayWaivable) : null,
   };
 }
 

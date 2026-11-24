@@ -168,12 +168,35 @@ describe('estimate page: what you pay and when', () => {
     expect(text(container)).not.toMatch(/waived/i);
   });
 
-  it('a legacy split estimate (page shows pest + $99 under a bundle category): no box', async () => {
+  it('the first-visit total is the existing first-visit line figure, never another one', async () => {
+    const { container } = await renderPage(pestOnly());
+    await waitFor(() => expect(box(container)).not.toBeNull());
+    await waitFor(() => expect(container.querySelector('[data-first-visit-line]')).not.toBeNull());
+    expect(container.querySelector('[data-first-visit-line]').textContent).toContain('$198.00');
+    expect(text(container)).toContain('First visit total$198.00');
+  });
+
+  // The fee row comes only from the existing first-visit line. A fee that sits only in the one-time
+  // breakdown (a frozen bundle) or under a category the page cannot trust has no such line: the box must
+  // not print a plan without its fee, so it shows nothing.
+  it('a bundle whose only setup row is in the one-time breakdown: no box (the fee is never omitted)', async () => {
+    const payload = bundle();
+    payload.pricing.oneTimeBreakdown = setupBreakdown;
+    const { container } = await renderPage(payload);
+    await waitFor(() => expect(container.querySelector('[data-price-follow-ups]')).not.toBeNull());
+    expect(box(container)).toBeNull();
+  });
+
+  it('a legacy split estimate (one pest section + $99 under a bundle category): the box agrees with the existing line or is absent', async () => {
     const payload = pestOnly();
     payload.estimate = { ...payload.estimate, serviceCategory: 'bundle' };
     const { container } = await renderPage(payload);
     await waitFor(() => expect(container.querySelector('[data-price-follow-ups]')).not.toBeNull());
-    expect(box(container)).toBeNull();
+    const line = container.querySelector('[data-first-visit-line]');
+    if (box(container)) {
+      expect(line).not.toBeNull();
+      expect(text(container)).toContain('First visit total$198.00');
+    }
   });
 
   it('never prints a price as a monthly bill: no "/mo" and no "about"', async () => {
@@ -217,7 +240,14 @@ describe('buildWhatYouPay', () => {
     services: services.map(([key, label, perApplication, visits]) => ({ key, label, perApplication, visits, monthly: 0 })),
   });
   const pest = model([['pest_control', 'Pest Control', 99, 4]]);
-  const input = (extra = {}) => ({ model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, serviceCategory: 'pest_control', ...extra });
+  const both = model([['pest_control', 'Pest Control', 99, 4], ['lawn_care', 'Lawn Care', 78, 9]]);
+  const line = { firstApplication: 99, setup: 99, total: 198 };
+  // Pest only with the page's first-visit line, as the page builds it.
+  const input = (extra = {}) => ({
+    model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, firstVisit: line, setupAnywhere: true, ...extra,
+  });
+  // A plan with no setup charge anywhere and so no first-visit line (bundle, lawn only).
+  const noFee = (extra = {}) => input({ model: both, fees: [], invoiceFirstVisit: 177, firstVisit: null, setupAnywhere: false, ...extra });
   const FEE_SENTENCE = 'This plan has a one-time $99.00 setup fee.';
 
   it('the annual prepay choice renders no box (the Reserve your spot box owns payment timing and prepay)', () => {
@@ -232,33 +262,36 @@ describe('buildWhatYouPay', () => {
     expect(buildWhatYouPay(input({ fees: [notWaivable], annualPrepayOffered: true })).setupSentence).toBe(FEE_SENTENCE);
   });
 
-  it('prints no plan total and no payment-timing or prepay field', () => {
+  it('with the first-visit line: the fee and the total ARE the line figures; no plan total, timing or prepay field', () => {
     const result = buildWhatYouPay(input({ annualPrepayOffered: true }));
     expect(Object.keys(result).sort()).toEqual(['firstVisitTotal', 'lines', 'setup', 'setupSentence']);
+    expect(result.setup.amount).toBe(99);
     expect(result.firstVisitTotal).toBe(198);
   });
 
-  it('the box first application must equal the sum of the prices to the cent', () => {
-    expect(buildWhatYouPay(input({ invoiceFirstVisit: 100 }))).toBeNull();
-    expect(buildWhatYouPay(input({ invoiceFirstVisit: null }))).toBeNull();
-  });
-
-  it('a bundle that carries a setup fee is not a plan this box describes', () => {
-    const both = model([['pest_control', 'Pest Control', 99, 4], ['lawn_care', 'Lawn Care', 78, 9]]);
-    expect(buildWhatYouPay(input({ model: both, invoiceFirstVisit: 177 }))).toBeNull();
-    expect(buildWhatYouPay(input({ model: both, fees: [], invoiceFirstVisit: 177 })).firstVisitTotal).toBe(177);
-  });
-
-  // A legacy split estimate keeps a root and a result recurring block: the page can show one pest section
-  // (and the $99 fee) while acceptance also sees lawn and waives the setup. The page cannot prove the plan
-  // is solo there, so it shows no box whenever a setup fee would print.
   it.each([
-    ['the estimate category names more than the lone section', { serviceCategory: 'bundle' }],
-    ['the estimate category is missing', { serviceCategory: undefined }],
-    ['a combined plan block rides beside the one section', { combinedRecurring: { monthlySubtotal: 113.1 } }],
-  ])('a setup fee over one displayed section with an ambiguous plan shape: no box (%s)', (_label, extra) => {
+    ['the line application differs from the prices', { firstVisit: { ...line, firstApplication: 100, total: 199 } }],
+    ['the line total is not application + fee', { firstVisit: { ...line, total: 200 } }],
+    ['the line carries no fee', { firstVisit: { firstApplication: 99, setup: 0, total: 99 } }],
+    ['the line sits over two displayed services (a legacy split plan)', { model: both, invoiceFirstVisit: 177, firstVisit: { firstApplication: 177, setup: 99, total: 276 } }],
+    ['the box first application differs', { invoiceFirstVisit: 100 }],
+    ['no first application', { invoiceFirstVisit: null }],
+  ])('any mismatch returns null: %s', (_label, extra) => {
     expect(buildWhatYouPay(input(extra))).toBeNull();
-    // Without a fee there is nothing to overstate, so the same shape still shows its prices.
-    expect(buildWhatYouPay(input({ ...extra, fees: [] })).firstVisitTotal).toBe(99);
+  });
+
+  it('no first-visit line: a fee anywhere (fee list, stored fee or breakdown setup row) means no box, never a plan without its fee', () => {
+    expect(buildWhatYouPay(noFee({ setupAnywhere: true }))).toBeNull();
+    expect(buildWhatYouPay(noFee({ model: pest, invoiceFirstVisit: 99, setupAnywhere: true }))).toBeNull();
+    // The signal missing is doubt too.
+    expect(buildWhatYouPay(noFee({ setupAnywhere: undefined }))).toBeNull();
+  });
+
+  it('no first-visit line and no setup charge anywhere: the prices alone, with no fee row', () => {
+    const result = buildWhatYouPay(noFee());
+    expect(result.setup).toBeNull();
+    expect(result.setupSentence).toBeNull();
+    expect(result.firstVisitTotal).toBe(177);
+    expect(buildWhatYouPay(noFee({ model: pest, invoiceFirstVisit: 99 })).firstVisitTotal).toBe(99);
   });
 });
