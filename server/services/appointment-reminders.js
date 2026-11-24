@@ -1473,12 +1473,35 @@ async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTi
   return (await dayOnlyNow({ customerId, scheduledServiceId, apptTime: startAt, ignoreLevel: notice?.setAsideOld === true })) ? 'day' : 'window';
 }
 
+/** Did the visit move off the date a bounced text was about? True when the text names an occurrence date
+ *  (bouncedOccurrenceDate) and the visit's current date differs, or cannot be read (fail closed). False when the text
+ *  names no date (a legacy send: today's rules) or there is no visit id. */
+async function bouncedDateMoved(metadata, scheduledServiceId) {
+  const textedDate = bouncedOccurrenceDate(metadata);
+  if (!textedDate || !scheduledServiceId) return false;
+  try {
+    const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
+    const value = row ? row.scheduled_date : null;
+    const current = value instanceof Date ? value.toISOString().slice(0, 10) : (value ? String(value).slice(0, 10) : null);
+    return !current || current !== textedDate;
+  } catch {
+    return true;
+  }
+}
+
 /** The email recovery of a bounced appointment text. A window text recovers as before. A day-only text goes through the
  *  delayed-send chokepoint: suppress -> nothing; day -> a day-only email; window -> today's window copy (the email path
  *  renders it fresh). */
 async function recoverBouncedNotice({ audit, kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey }) {
   let dayOnly = false;
   if (isDayPromise(audit.metadata)) {
+    // ONE occurrence check for every day-only bounce (confirmation, 72h, 24h; grouped or not), fail closed (pre-push Codex
+    // P1, 2026-11-24): the date the bounced text was about must still be the visit's date, or the re-armed sends own the
+    // new date. Before the other-date promise rule the old date's hour blocked these by accident in delayedSendIsStale.
+    if (await bouncedDateMoved(audit.metadata, scheduledServiceId)) {
+      logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: the visit moved since the text (or its date cannot be read) - recovery email suppressed as stale`);
+      return;
+    }
     const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime });
     if (verdict === 'suppress') {
       logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
