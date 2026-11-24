@@ -37,7 +37,10 @@ module.exports = {
     assert.equal(texts().length, 1, 'Exactly one text goes out');
     const [text] = texts();
     assert.equal(text.to, fixture.phone);
-    assert.equal(text.customerId, fixture.customerId);
+    // The fake transport only sees the phone, which the sibling fixture shares; the app's own log names the customer.
+    const logged = await db('sms_log').where({ twilio_sid: text.sid, direction: 'outbound' });
+    assert.equal(logged.length, 1, 'The reminder is logged once');
+    assert.equal(logged[0].customer_id, fixture.customerId, 'The app records the reminder against this customer');
     assert.ok(text.body.includes(expectedWhen), `The text names the visit's day, date and arrival window: ${expectedWhen} in ${JSON.stringify(text.body)}`);
     assert.ok(text.body.includes(visit.service_type), 'The text names the service');
     const sent = await reminderRow();
@@ -53,8 +56,9 @@ module.exports = {
     assert.equal(second.sent72h, 0);
     assert.equal(second.sent24h, 0);
     const after = await reminderRow();
-    assert.deepEqual({ id: after.id, sent: after.reminder_72h_sent, at: String(after.reminder_72h_sent_at), updated: String(after.updated_at) },
-      { id: sent.id, sent: true, at: String(sent.reminder_72h_sent_at), updated: String(sent.updated_at) });
+    const ms = (value) => (value == null ? null : new Date(value).getTime());
+    assert.deepEqual({ id: after.id, sent: after.reminder_72h_sent, at: ms(after.reminder_72h_sent_at), updated: ms(after.updated_at) },
+      { id: sent.id, sent: true, at: ms(sent.reminder_72h_sent_at), updated: ms(sent.updated_at) }, 'The second pass rewrites no stamp');
     assert.equal(texts().length, 1, 'Still one text after the second pass');
     return { date, expectedWhen, body: text.body, firstPass: first, secondPass: second };
   },
