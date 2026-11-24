@@ -14,11 +14,15 @@
  * Credit of a completed stop (the technician the visit is assigned to; the work date is the ET date it was completed):
  *   Review map (CLAUDE.md rule 22), where each rule this module needs lives:
  *   - What a visit was billed          the pre-tax amount of the invoice linked to the visit (billedByVisit), whether or not it
- *     is paid, by the links the rate review reads (rate-review.js VISIT_INVOICE_LINK_SQL: direct, service record,
- *     first-application, completion packet); a shared invoice is split across its visits by visit price, to the cent. A fee
- *     change later never moves a credit already earned.
- *   - What a visit is priced at         with no invoice: completionInvoiceAmount + hasAuthoritativeZeroPrice (billing-lane.js).
- *     The Terms credit the PRICE CHARGED, before sales tax, not what settled: an unpaid invoice still credits. The settled-cash
+ *     is paid, by the links the rate review reads (rate-review.js VISIT_INVOICE_LINK_SQL: direct, any service record of the
+ *     visit, first-application, completion packet); a shared invoice is split across its visits by visit price, to the cent. A
+ *     fee change later never moves a credit already earned. Left out of the amount: a monthly dues line (billing-lane.js
+ *     MEMBERSHIP_DUES_LINE_KEY) and a one-time setup FEE line (the classifier the setup-fee code uses,
+ *     estimate-first-application-invoice.js sumPositiveSetupFeeCents), never a line judged by its words alone. An invoice
+ *     with only such lines names no visit price.
+ *   - What a visit is priced at         with no invoice naming it: the price recorded on the visit (completionInvoiceAmount +
+ *     hasAuthoritativeZeroPrice, billing-lane.js). The account's CURRENT per-application fee is never used for past work, and
+ *     the Terms credit the PRICE CHARGED, before sales tax, not what settled. The settled-cash
  *     helpers of rate-review.js (visitRevenueCents, duesPerVisitCents: paid invoices, settled prepay, settled dues) are
  *     NOT used on purpose. completionInvoiceAmount is called with monthlyRate 0: its fallback to the customer's whole
  *     MONTHLY dues is a billing fallback (a month's dues is not the value of one visit); a dues-covered plan visit with no
@@ -50,7 +54,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { roundDiv } = require('./payroll-calc');
 const { PayrollError } = require('./payroll-w4');
-const { completionInvoiceAmount, hasAuthoritativeZeroPrice, resolveBillingLane, ANNUAL_PREPAY_PREPAID_METHOD } = require('./billing-lane');
+const { completionInvoiceAmount, hasAuthoritativeZeroPrice, ANNUAL_PREPAY_PREPAID_METHOD, MEMBERSHIP_DUES_LINE_KEY } = require('./billing-lane');
 const { NON_CHARGEABLE_CLOSEOUT_OUTCOMES } = require('./visit-outcomes');
 const { TWO_TREATMENT_PACKAGE_KEYS } = require('./typed-followup-obligation');
 const { isReService } = require('./re-service');
@@ -388,16 +392,39 @@ function allocateCents(totalCents, members) {
   return new Map(parts.map((part) => [part.id, Number(part.floor)]));
 }
 
-// Evidence that an invoice (`i`) combines a setup/initial fee with application work: line items include at least one setup or
-// initial line AND at least one other line (not the deposit credit). Only then are the fee lines left out of the visit's credit
-// (rate-review.js APPLICATION_LINES_SQL). A title that says "setup" or an invoice whose only line is "Initial Pest Cleanout" is
-// the visit's own work, billed in full.
-const COMBINED_SETUP_AND_APPLICATION_SQL = `(jsonb_typeof(COALESCE(i.line_items::jsonb, 'null'::jsonb)) = 'array'
-  AND EXISTS (SELECT 1 FROM jsonb_array_elements(i.line_items::jsonb) fl
-    WHERE COALESCE(fl ->> 'name', fl ->> 'description', '') ILIKE '%setup%' OR COALESCE(fl ->> 'name', fl ->> 'description', '') ILIKE '%initial%')
-  AND EXISTS (SELECT 1 FROM jsonb_array_elements(i.line_items::jsonb) al
-    WHERE NOT (COALESCE(al ->> 'name', al ->> 'description', '') ILIKE '%setup%' OR COALESCE(al ->> 'name', al ->> 'description', '') ILIKE '%initial%')
-      AND COALESCE(al ->> 'category', '') <> 'deposit_credit'))`;
+// One line's amount in cents (the shape every invoice-line reader here uses: amount, else unit price x quantity).
+const lineCents = (line) => {
+  const qty = line && line.quantity != null ? Number(line.quantity) : 1;
+  const amount = line && line.amount != null ? Number(line.amount) : Number(line && line.unit_price) * qty;
+  return Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+};
+
+/**
+ * The visit-priced part of an invoice, before tax, in cents: the invoice's pre-tax total less the lines that are not the
+ * visit's price. Left out: a monthly dues line (stamped `membership_dues_month`, billing-lane.js MEMBERSHIP_DUES_LINE_KEY),
+ * and a one-time setup FEE line, by the classifier the setup-fee code already uses (estimate-first-application-invoice.js
+ * sumPositiveSetupFeeCents: a line that says "setup fee", not waived). A line is never judged by words such as "initial": a
+ * $150 "Initial Pest Cleanout" is treatment work and counts. null = the invoice does not establish the visit's own price (it
+ * had only lines that were left out), so the caller falls back to a price recorded on the visit.
+ */
+function visitPreTaxCents(row) {
+  let lines = row.line_items;
+  if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = null; } }
+  const base = (Number(row.subtotal) > 0
+    ? cents(row.subtotal) - (cents(row.discount_amount) || 0)
+    : cents(row.total) - (cents(row.tax_amount) || 0) + (cents(row.deposit_credit) || 0));
+  if (!Array.isArray(lines) || !lines.length) return Math.max(0, base);
+  const { sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
+  let left = 0;
+  let positive = false;
+  for (const line of lines) {
+    const amount = lineCents(line);
+    if (amount <= 0 || (line && line.category === 'deposit_credit')) continue;
+    if (line[MEMBERSHIP_DUES_LINE_KEY] || sumPositiveSetupFeeCents({ line_items: [line] }) > 0) left += amount;
+    else positive = true;
+  }
+  return positive ? Math.max(0, base - left) : null;
+}
 
 /**
  * What each visit was BILLED, before sales tax, and what was refunded on it, from the invoices linked to the visit by the
@@ -407,7 +434,7 @@ const COMBINED_SETUP_AND_APPLICATION_SQL = `(jsonb_typeof(COALESCE(i.line_items:
  * prices, with the cents settled exactly; when a member has no price the split is unknowable: the visit is flagged with that
  * invoice (`unallocated`, with the invoice's whole refund kept visible) and never priced from the visit instead. Draft and void invoices are no charge. The prepay invoice of an annual term
  * is never attributed here: its refunds go to the term's visits (termRefunds).
- * Returns Map visitId -> { billedCents, refundCents, unallocated: [{ invoiceId, refundCents }] }.
+ * Returns Map visitId -> { billedCents (null = no invoice named the visit's price), refundCents, unallocated: [{ invoiceId, refundCents }] }.
  */
 async function billedByVisit(conn, visitIds) {
   const out = new Map();
@@ -419,19 +446,20 @@ async function billedByVisit(conn, visitIds) {
       AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = i.stripe_payment_intent_id)
         OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = i.stripe_charge_id)
         OR p.metadata::jsonb ->> 'invoice_id' = i.id::text))`;
+  // Every service record of the visit counts for ownership (an invoice can hang on an earlier one); only the closeout outcome reads
+  // the latest. One row per visit and invoice.
   const links = await conn.raw(`
-    SELECT s.id AS visit_id, i.id AS invoice_id,
-      CASE WHEN ${COMBINED_SETUP_AND_APPLICATION_SQL} THEN ${rr.APPLICATION_LINES_SQL}
-           WHEN COALESCE(i.subtotal, 0) > 0 THEN i.subtotal - COALESCE(i.discount_amount, 0)
-           ELSE i.total - COALESCE(i.tax_amount, 0) + ${rr.depositCreditSql('i')} END AS pretax,
+    SELECT DISTINCT s.id AS visit_id, i.id AS invoice_id, i.line_items, i.subtotal, i.discount_amount, i.total, i.tax_amount,
+      ${rr.depositCreditSql('i')} AS deposit_credit,
       ${refundOf} AS refunded
     FROM scheduled_services s
-    LEFT JOIN LATERAL (SELECT id AS service_record_id FROM service_records WHERE scheduled_service_id = s.id ORDER BY created_at DESC LIMIT 1) sr ON true
+    LEFT JOIN (SELECT scheduled_service_id, id AS service_record_id FROM service_records WHERE scheduled_service_id = ANY(?::uuid[])) sr
+      ON sr.scheduled_service_id = s.id
     JOIN invoices i ON ${rr.VISIT_INVOICE_LINK_SQL}
     WHERE s.id = ANY(?::uuid[]) AND i.archived_at IS NULL AND i.annual_prepay_term_id IS NULL
       AND i.status <> ALL(?::text[])
       AND NOT EXISTS (SELECT 1 FROM annual_prepay_terms t WHERE t.prepay_invoice_id = i.id)`,
-  [visitIds, NOT_CHARGED_INVOICE_STATUSES]);
+  [visitIds, visitIds, NOT_CHARGED_INVOICE_STATUSES]);
   if (!links.rows.length) return out;
   const invoiceIds = [...new Set(links.rows.map((row) => row.invoice_id))];
   const members = await conn.raw(`
@@ -453,8 +481,10 @@ async function billedByVisit(conn, visitIds) {
   for (const row of links.rows) {
     if (shares.has(row.invoice_id)) continue;
     const list = byInvoice.get(row.invoice_id) || [];
-    const billed = Math.max(0, cents(row.pretax) || 0);
+    const billed = visitPreTaxCents(row);
     const refunded = cents(row.refunded) || 0;
+    // The invoice does not establish a visit price (only dues or setup-fee lines): it is not this visit's charge or refund.
+    if (billed === null) { shares.set(row.invoice_id, { skipped: true }); continue; }
     if (list.length <= 1) {
       shares.set(row.invoice_id, { billed: new Map([[row.visit_id, billed]]), refunded: new Map([[row.visit_id, refunded]]) });
     } else {
@@ -464,10 +494,11 @@ async function billedByVisit(conn, visitIds) {
   }
   for (const row of links.rows) {
     const share = shares.get(row.invoice_id);
-    const entry = out.get(row.visit_id) || { billedCents: 0, refundCents: 0, unallocated: [] };
+    if (share.skipped) continue;
+    const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [] };
     if (share.unallocated !== undefined) entry.unallocated.push({ invoiceId: row.invoice_id, refundCents: share.unallocated });
     else if (share.billed.has(row.visit_id)) {
-      entry.billedCents += share.billed.get(row.visit_id);
+      entry.billedCents = (entry.billedCents || 0) + share.billed.get(row.visit_id);
       entry.refundCents += (share.refunded && share.refunded.get(row.visit_id)) || 0;
     }
     out.set(row.visit_id, entry);
@@ -526,7 +557,7 @@ function jobCredit(stop, job, billed) {
   if (!sold) return toReview('multi_visit_job', 'The number of visits this job was sold with cannot be established (only the two-treatment packages are known).');
   const invoiced = billed.get(job.root.id);
   if (invoiced && invoiced.unallocated.length) return toReview('multi_visit_job', UNALLOCATED_REASON);
-  const price = invoiced ? invoiced.billedCents : cents(job.root.estimated_price);
+  const price = invoiced && invoiced.billedCents !== null ? invoiced.billedCents : cents(job.root.estimated_price);
   const nth = job.planned.indexOf(stop.id) + 1;
   if (!(price > 0)) return toReview('multi_visit_job', "The job's first visit has no price on file.");
   if (nth < 1 || nth > sold || job.planned.length > sold) return toReview('multi_visit_job', "This visit is not among the job's sold visits.");
@@ -559,18 +590,19 @@ function ownPriceCredit(stop, invoiced) {
   }
   if (invoiced && invoiced.unallocated.length) return toReview('unpriced', UNALLOCATED_REASON);
   // What the visit's invoice charged, before tax, whether or not it is paid; a fee change later never moves it.
-  if (invoiced) {
+  if (invoiced && invoiced.billedCents !== null) {
     if (invoiced.billedCents > 0) return credited('priced', invoiced.billedCents, "Pre-tax amount of the visit's invoice");
     return isConsultationServiceType(stop.service_type)
       ? credited('free_assessment', 0, 'A free assessment')
       : credited('free_visit', 0, "The visit's invoice charges $0");
   }
-  const lane = resolveBillingLane({ billing_mode: stop.billing_mode, waveguard_tier: stop.waveguard_tier, monthly_rate: stop.monthly_rate });
+  // No invoice names the price: the price recorded on the visit itself. Never today's fee for the customer (the per-application
+  // fee and the monthly dues are CURRENT settings: raising a fee must not move a past week's credit), so those are left out.
   const amount = cents(completionInvoiceAmount({
     estimatedPrice: stop.estimated_price,
     isCallback: false,
-    perApplicationBilling: lane.mode === 'per_application',
-    perApplicationFee: stop.per_application_fee,
+    perApplicationBilling: false, // the account's current per-application fee is not a price recorded for this visit
+    perApplicationFee: 0,
     monthlyRate: 0, // see the review map: a month of dues is not one visit's price
     billingMode: stop.billing_mode,
     primaryLinePrice: stop.primary_line_price,
@@ -579,7 +611,7 @@ function ownPriceCredit(stop, invoiced) {
   if (amount > 0) return credited('priced', amount, 'Price of the visit, before sales tax');
   if (isConsultationServiceType(stop.service_type)) return credited('free_assessment', 0, 'A free assessment');
   if (hasAuthoritativeZeroPrice(stop.estimated_price, stop.primary_line_price)) return credited('free_visit', 0, 'The visit is priced at $0');
-  return toReview('unpriced', 'The visit has no price of its own on file (a plan visit covered by dues, or never priced).');
+  return toReview('unpriced', 'No price was recorded for this visit (no invoice, no stamp, no visit price), and today\'s fee is never used for past work.');
 }
 
 /**
@@ -606,7 +638,7 @@ async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
       's.prepaid_method', 's.service_key_snapshot', 's.completed_at', 's.service_address_line1', 's.service_address_line2',
       's.service_address_zip', 'sv.service_key', 'sv.name as service_name', 'cp.address_line1 as prop_line1',
       'cp.address_line2 as prop_line2', 'cp.zip as prop_zip', 'rec.record_status', 'rec.record_notes',
-      'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.per_application_fee',
+      'c.billing_mode',
       conn.raw(`to_char(${WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`), conn.raw(`${LINE_SQL} AS line`))
     .orderByRaw(`${WORK_DATE_SQL}, s.completed_at NULLS LAST, s.id`);
   const withFollowUp = stops.length

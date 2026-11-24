@@ -146,4 +146,24 @@ describe('Production share preview', () => {
     expect(put.body.technicianId).toBe('tech-a');
     await waitFor(() => expect(call).toHaveBeenLastCalledWith('/production-share/preview?technicianId=tech-a&weekStart=2026-09-14'));
   });
+
+  it('does not refresh the preview after a save when the employee or week changed while it was saving', async () => {
+    let finishSave;
+    const call = vi.fn((path) => {
+      if (path === '/production-share/settings') return new Promise((resolve) => { finishSave = () => resolve({}); });
+      return Promise.resolve(answerFor(path));
+    });
+    render(<ProductionSharePanel call={call} technicians={[...TECHS, { id: 'tech-b', name: 'Sample Bravo' }]} />);
+    open();
+    await show(call);
+    fireEvent.click(screen.getByRole('button', { name: 'Save numbers' }));
+    await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/settings', expect.anything()));
+    const previews = () => call.mock.calls.filter(([path]) => path.startsWith('/production-share/preview')).length;
+    expect(previews()).toBe(1);
+    fireEvent.change(screen.getByLabelText('Employee'), { target: { value: 'tech-b' } });
+    await act(async () => { finishSave(); });
+    // The save finished for tech-a: nothing is loaded for tech-b, and nothing is shown for either.
+    expect(previews()).toBe(1);
+    expect(screen.queryByLabelText('Week summary')).toBeNull();
+  });
 });

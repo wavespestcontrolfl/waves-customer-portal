@@ -30,7 +30,7 @@ export function percentToBps(text) {
 const bpsToPercent = bps => String(Number(bps) / 100);
 const centsToPlain = cents => (Number(cents) / 100).toFixed(2);
 
-function SettingsForm({ call, technicians, technicianId, weekStart, current, onSaved }) {
+function SettingsForm({ call, technicians, technicianId, weekStart, current, generation, onSaved }) {
   const [scope, setScope] = useState('technician');
   const [rate, setRate] = useState(current ? bpsToPercent(current.rateBps) : '');
   const [barType, setBarType] = useState(current ? current.barType : 'per_shift');
@@ -49,6 +49,8 @@ function SettingsForm({ call, technicians, technicianId, weekStart, current, onS
   async function save(event) {
     event.preventDefault();
     setBusy(true); setError(''); setMessage('');
+    // The selection this save was started under: the answer is refreshed only if the selection is still the same after the save.
+    const startedUnder = generation();
     try {
       await call('/production-share/settings', {
         method: 'PUT',
@@ -59,7 +61,7 @@ function SettingsForm({ call, technicians, technicianId, weekStart, current, onS
         },
       });
       setMessage('Saved. It pays nothing yet.');
-      onSaved();
+      onSaved(startedUnder);
     } catch (failure) { setError(failure.message); }
     setBusy(false);
   }
@@ -209,7 +211,8 @@ export default function ProductionSharePanel({ call, technicians }) {
         <SettingsForm
           key={`${preview.technician.id}:${preview.weekStart}:${preview.settings ? preview.settings.id : 'none'}`}
           call={call} technicians={technicians} technicianId={preview.technician.id} weekStart={preview.weekStart}
-          current={preview.settings} onSaved={() => load(preview.technician.id, preview.weekStart)}
+          current={preview.settings} generation={() => newest.current}
+          onSaved={(startedUnder) => { if (startedUnder === newest.current) load(preview.technician.id, preview.weekStart); }}
         />
       </div>}
       </>}

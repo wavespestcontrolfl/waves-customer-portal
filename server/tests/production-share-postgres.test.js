@@ -285,16 +285,18 @@ postgres('production share credit', () => {
       expect(productionShare.shiftDays(rows)).toHaveLength(3);
     });
 
-    it('never takes a month of dues for one visit: an unpriced dues visit is $0 for review, a per-application fee is its price', async () => {
+    it('never takes a month of dues, or today\'s per-application fee, for one past visit: no recorded price = $0 for review', async () => {
       const a = await tech('Sample Alpha');
       const member = await customer({ billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: '89.00' });
       const perApp = await customer({ billing_mode: 'per_application', per_application_fee: '65.00' });
       const dues = await stop(a, member, day(0), { estimated_price: null, is_recurring: true });
       const fee = await stop(a, perApp, day(1), { estimated_price: null });
-      const zero = await stop(a, member, day(2), { estimated_price: '0.00', primary_line_price: '110.00' });
+      const recorded = await stop(a, perApp, day(2), { estimated_price: '58.00' }); // the price recorded on this visit, not today's fee
+      const zero = await stop(a, member, day(3), { estimated_price: '0.00', primary_line_price: '110.00' });
       const rows = await credits(a);
       expect(byVisit(rows, dues)).toMatchObject({ kind: 'unpriced', creditCents: 0, needsReview: true });
-      expect(byVisit(rows, fee)).toMatchObject({ kind: 'priced', creditCents: 6500 });
+      expect(byVisit(rows, fee)).toMatchObject({ kind: 'unpriced', creditCents: 0, needsReview: true });
+      expect(byVisit(rows, recorded)).toMatchObject({ kind: 'priced', creditCents: 5800 });
       expect(byVisit(rows, zero)).toMatchObject({ kind: 'free_visit', creditCents: 0, needsReview: false });
     });
 
@@ -338,20 +340,59 @@ postgres('production share credit', () => {
       expect(byVisit(await credits(a), visit)).toMatchObject({ creditCents: 9000 });
     });
 
-    it('keeps a standalone initial-cleanout invoice whole, and leaves out the fee line only of a combined setup + application invoice', async () => {
+    it('credits treatment work named "Initial", and leaves out only a setup FEE line (by the setup-fee classifier)', async () => {
       const a = await tech('Sample Alpha');
       const c1 = await customer();
       const c2 = await customer();
+      const c3 = await customer();
       const alone = await stop(a, c1, day(0), { estimated_price: '150.00' });
-      await invoice(c1, { scheduled_service_id: alone, subtotal: '150.00', total: '150.00', line_items: JSON.stringify([{ name: 'Initial Pest Cleanout', amount: 150 }]) });
-      const combined = await stop(a, c2, day(1), { estimated_price: '219.00' });
+      await invoice(c1, { scheduled_service_id: alone, subtotal: '150.00', total: '150.00', line_items: JSON.stringify([{ description: 'Initial Pest Cleanout', amount: 150 }]) });
+      // A $150 cleanout and a $25 add-on are both the visit's work.
+      const withAddon = await stop(a, c2, day(1), { estimated_price: '175.00' });
       await invoice(c2, {
+        scheduled_service_id: withAddon, subtotal: '175.00', total: '175.00',
+        line_items: JSON.stringify([{ description: 'Initial Pest Cleanout', amount: 150 }, { description: 'Wasp nest removal', amount: 25 }]),
+      });
+      // A real setup fee line is not the visit's price.
+      const combined = await stop(a, c3, day(2), { estimated_price: '219.00' });
+      await invoice(c3, {
         scheduled_service_id: combined, subtotal: '219.00', total: '219.00',
-        line_items: JSON.stringify([{ name: 'Setup fee', amount: 99 }, { name: 'Quarterly Pest Service', amount: 120 }]),
+        line_items: JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }, { description: 'Quarterly Pest Service', amount: 120 }]),
       });
       const rows = await credits(a);
       expect(byVisit(rows, alone)).toMatchObject({ kind: 'priced', creditCents: 15000 });
+      expect(byVisit(rows, withAddon)).toMatchObject({ kind: 'priced', creditCents: 17500 });
       expect(byVisit(rows, combined)).toMatchObject({ kind: 'priced', creditCents: 12000 });
+    });
+
+    it('leaves a monthly dues line out of the visit credit and falls back to the price recorded on the visit, else review', async () => {
+      const a = await tech('Sample Alpha');
+      const c1 = await customer();
+      const dues = { description: 'WaveGuard Monthly dues', amount: 89, membership_dues_month: '2026-09' };
+      const recorded = await stop(a, c1, day(0), { estimated_price: '60.00' });
+      await invoice(c1, { scheduled_service_id: recorded, subtotal: '89.00', total: '89.00', line_items: JSON.stringify([dues]) });
+      const none = await stop(a, c1, day(1), { estimated_price: null });
+      await invoice(c1, { scheduled_service_id: none, subtotal: '89.00', total: '89.00', line_items: JSON.stringify([dues]) });
+      const mixed = await stop(a, c1, day(2), { estimated_price: '70.00' });
+      await invoice(c1, { scheduled_service_id: mixed, subtotal: '149.00', total: '149.00', line_items: JSON.stringify([dues, { description: 'Pest service', amount: 60 }]) });
+      const rows = await credits(a);
+      expect(byVisit(rows, recorded)).toMatchObject({ kind: 'priced', creditCents: 6000, needsReview: false });
+      expect(byVisit(rows, none)).toMatchObject({ kind: 'unpriced', creditCents: 0, needsReview: true });
+      expect(byVisit(rows, mixed)).toMatchObject({ kind: 'priced', creditCents: 6000 });
+    });
+
+    it('finds the invoice through any service record of the visit, not only the latest', async () => {
+      const a = await tech('Sample Alpha');
+      const c1 = await customer();
+      const visit = await stop(a, c1, day(0), { estimated_price: '120.00' });
+      const first = await trx('service_records').where({ scheduled_service_id: visit }).first('id');
+      // A later closeout record: the closeout outcome reads it, the invoice hangs on the first.
+      await trx('service_records').insert({
+        customer_id: c1, technician_id: a, service_date: day(0), service_type: 'General Pest Control', scheduled_service_id: visit,
+        status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }), created_at: new Date(Date.now() + 60000),
+      });
+      await invoice(c1, { service_record_id: first.id, subtotal: '90.00', total: '90.00' });
+      expect(byVisit(await credits(a), visit)).toMatchObject({ kind: 'priced', creditCents: 9000 });
     });
 
     it('splits a completion-packet invoice across all its visits by visit price, to the cent, and counts its refund once', async () => {
