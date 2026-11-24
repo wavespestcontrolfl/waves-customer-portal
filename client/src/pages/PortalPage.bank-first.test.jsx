@@ -195,6 +195,23 @@ describe('Billing tab Add Payment Method modal — save-only form from the remin
     expect(api.updateAutopay).not.toHaveBeenCalled();
   });
 
+  it('a failed start keeps the link and the save-only mode: the retry button mints save-only again, never the Auto Pay form', async () => {
+    api.createSetupIntent
+      .mockRejectedValueOnce(new Error('Could not start the form'))
+      .mockResolvedValue({ publishableKey: 'pk_test_1', clientSecret: 'seti_secret', paymentMethodTypes: ['card'] });
+    getStripe.mockResolvedValue(fakeStripe());
+    window.history.replaceState({}, '', '/?tab=billing&add_card=1');
+    render(<BillingTab customer={customer} openAddCard />);
+    expect(await screen.findByText('Could not start the form', {}, SETTLE)).toBeInTheDocument();
+    // The link is only consumed once the form is open, so a refresh would try the save-only form again.
+    expect(window.location.search).toBe('?tab=billing&add_card=1');
+    fireEvent.click(screen.getByRole('button', { name: 'Add payment' }));
+    await screen.findByRole('dialog', { name: 'Add payment method' }, SETTLE);
+    expect(api.createSetupIntent).toHaveBeenCalledTimes(2);
+    expect(api.createSetupIntent).toHaveBeenLastCalledWith('card', { enrollAutopay: false });
+    expect(window.location.search).toBe('?tab=billing');
+  });
+
   it('the usual Add payment button still mints the full form and shows no save-only line', async () => {
     await openModal(['card', 'us_bank_account']);
     expect(api.createSetupIntent).toHaveBeenCalledWith('card_or_bank');

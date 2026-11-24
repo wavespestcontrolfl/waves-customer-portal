@@ -94,7 +94,8 @@ function expiryMonthsInWindow(today) {
 
 // The customer's NEWEST event inside the 10-day window, kept only when that event is due (3 or more days old).
 // Newer events are read too: they decide whether an older one has waited long enough. Map<customerId, { kind, key, on }>.
-async function collectEvents(today, now) {
+// `customerIds` scopes the read to those customers (the handoff re-check, the Postgres test's own rows).
+async function collectEvents(today, now, customerIds = null) {
   const dueBy = plusDays(today, -DUE_AFTER_DAYS);
   const oldest = plusDays(today, -(DUE_AFTER_DAYS + GRACE_DAYS));
   const newest = new Map();
@@ -104,17 +105,18 @@ async function collectEvents(today, now) {
     if (!known || event.on > known.on) newest.set(String(customerId), event);
   };
 
-  const removals = await db('email_messages')
+  const removalQuery = db('email_messages')
     .where({ template_key: 'payment.method_removed', recipient_type: 'customer' })
     // A superset of the ET window: the exact day test is made on the ET calendar day below.
-    .where('created_at', '>=', new Date(now.getTime() - (DUE_AFTER_DAYS + GRACE_DAYS + 2) * DAY_MS))
-    .select('id', 'recipient_id', 'created_at');
+    .where('created_at', '>=', new Date(now.getTime() - (DUE_AFTER_DAYS + GRACE_DAYS + 2) * DAY_MS));
+  if (customerIds) removalQuery.whereIn('recipient_id', customerIds.map(String));
+  const removals = await removalQuery.select('id', 'recipient_id', 'created_at');
   for (const row of removals) {
     consider(row.recipient_id, { kind: 'removed', key: `removed:${row.id}`, on: etDateString(new Date(row.created_at)) });
   }
 
   const months = expiryMonthsInWindow(today);
-  const cards = await db('payment_methods')
+  const cardQuery = db('payment_methods')
     .whereNotNull('stripe_payment_method_id')
     .where((qb) => {
       // exp_month and exp_year are text columns: Stripe saves '01'..'09', older rows hold '1'..'9' and 2-digit years.
@@ -123,8 +125,9 @@ async function collectEvents(today, now) {
           .whereIn('exp_year', [String(year), String(year - 2000)])
           .whereIn('exp_month', [String(month), String(month).padStart(2, '0')]));
       }
-    })
-    .select('id', 'customer_id', 'method_type', 'exp_month', 'exp_year');
+    });
+  if (customerIds) cardQuery.whereIn('customer_id', customerIds);
+  const cards = await cardQuery.select('id', 'customer_id', 'method_type', 'exp_month', 'exp_year');
   for (const card of cards) {
     if (isBankMethodType(card.method_type)) continue;
     const on = expiredOnDate(card);
@@ -158,26 +161,50 @@ async function autopayTurnedOffOnPurpose(customer) {
   return last?.event_type === 'autopay_disabled' && !asObject(last.details).source;
 }
 
-// How many upcoming visits are read for the first one billed to the customer.
-const VISIT_LOOKAHEAD = 10;
+// Upcoming visits are read in pages, in a stable order, until one bills the customer or they run out. A customer with
+// more than VISIT_PAGES pages is not judged either way: the read throws and the customer fails closed.
+const VISIT_PAGE = 25;
+const VISIT_PAGES = 16;
 
 // The soonest upcoming visit that bills the CUSTOMER: each visit's payer is resolved with its own id, because a
 // third-party Bill-To can be set on one visit alone. { visit, payerBilled }: payerBilled says visits existed and every
 // one of them bills someone else. A payer lookup failure throws (the caller fails closed).
 async function nextSelfPayVisit(customerId, today) {
   const { whereVisitRowLive } = require('./customer-lifecycle-guard');
-  const visits = await db('scheduled_services')
-    .where({ customer_id: customerId })
-    .where(function liveVisit() { whereVisitRowLive(this, today); })
-    .where('scheduled_date', '>=', today)
-    .orderBy('scheduled_date', 'asc')
-    .limit(VISIT_LOOKAHEAD)
-    .select('id', 'scheduled_date');
-  for (const visit of visits) {
-    const payer = await require('./payer').resolveForInvoice({ customerId, scheduledServiceId: visit.id, throwOnError: true });
-    if (!payer?.payerId) return { visit, payerBilled: false };
+  const payerService = require('./payer');
+  let seen = 0;
+  for (let page = 0; page < VISIT_PAGES; page += 1) {
+    const visits = await db('scheduled_services')
+      .where({ customer_id: customerId })
+      .where(function liveVisit() { whereVisitRowLive(this, today); })
+      .where('scheduled_date', '>=', today)
+      .orderBy([{ column: 'scheduled_date', order: 'asc' }, { column: 'id', order: 'asc' }])
+      .limit(VISIT_PAGE)
+      .offset(page * VISIT_PAGE)
+      .select('id', 'scheduled_date', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+    for (const visit of visits) {
+      const payer = await payerService.resolveForInvoice({ customerId, scheduledServiceId: visit.id, throwOnError: true });
+      if (!payer?.payerId) return { visit, payerBilled: false };
+    }
+    seen += visits.length;
+    if (visits.length < VISIT_PAGE) return { visit: null, payerBilled: seen > 0 };
   }
-  return { visit: null, payerBilled: visits.length > 0 };
+  throw new Error(`more than ${VISIT_PAGE * VISIT_PAGES} upcoming visits`);
+}
+
+// Where the email says the visits are: the visit's own address when the booking stamped one (a secondary saved
+// property), else the customer's profile address.
+function visitPropertyLabel(customer, visit) {
+  if (visit?.service_address_line1) {
+    return propertyDisplayLabel({
+      address_line1: visit.service_address_line1,
+      address_line2: visit.service_address_line2,
+      city: visit.service_address_city,
+      state: visit.service_address_state,
+      zip: visit.service_address_zip,
+    });
+  }
+  return propertyDisplayLabel(customer);
 }
 
 // The billing email the lifecycle sender would use, and whether anything blocks it (rule f).
@@ -246,7 +273,7 @@ async function liveVerdict(customerId, event, today, now) {
     ok: true,
     customer,
     nextVisitDate: visit ? dateOnlyString(visit.scheduled_date) : null,
-    propertyLabel: propertyDisplayLabel(customer),
+    propertyLabel: visitPropertyLabel(customer, visit),
   };
 }
 
@@ -311,9 +338,15 @@ async function decideOne(customerId, event, mode, today, now) {
     // the send, and so does a change to what the email says (a visit moved or cancelled, the address edited): the next
     // daily pass decides again and sends the current facts.
     beforeProviderHandoff: async () => {
-      const again = await liveVerdict(customerId, event, today, new Date());
+      const handoffAt = new Date();
+      const handoffToday = etDateString(handoffAt);
+      // The customer's newest loss must still be the due event this send was decided on: a card removed after the
+      // sweep read its events makes a newer one that is not due yet.
+      const current = (await collectEvents(handoffToday, handoffAt, [customerId])).get(String(customerId));
+      const again = current?.key === event.key ? await liveVerdict(customerId, event, handoffToday, handoffAt) : null;
       let reason = null;
-      if (!again.ok) reason = again.reason;
+      if (!again) reason = 'event_changed';
+      else if (!again.ok) reason = again.reason;
       else if (again.nextVisitDate !== verdict.nextVisitDate || again.propertyLabel !== verdict.propertyLabel) reason = 'details_changed';
       if (reason) logger.info(`[card-on-file-reminder] send for customer ${customerId} stopped at the provider handoff: ${reason}`);
       return !reason;
@@ -329,8 +362,7 @@ async function runCardOnFileReminderSweep({ now = new Date(), customerIds = null
   const mode = require('../config/feature-gates').cardOnFileReminderMode();
   if (mode === 'off') return { mode, candidates: 0, sent: 0, shadow: 0 };
   const today = etDateString(now);
-  const events = await collectEvents(today, now);
-  if (customerIds) for (const id of [...events.keys()]) if (!customerIds.map(String).includes(id)) events.delete(id);
+  const events = await collectEvents(today, now, customerIds);
   const summary = { mode, candidates: events.size, sent: 0, shadow: 0, skipped: {}, failed: 0 };
   for (const [customerId, event] of events) {
     try {
@@ -353,5 +385,5 @@ async function runCardOnFileReminderSweep({ now = new Date(), customerIds = null
 module.exports = {
   runCardOnFileReminderSweep,
   TEMPLATE_KEY,
-  _private: { collectEvents, liveVerdict, methodUsable, expiredOnDate, expiryMonthsInWindow, plusDays, decideOne },
+  _private: { collectEvents, liveVerdict, methodUsable, expiredOnDate, expiryMonthsInWindow, plusDays, decideOne, nextSelfPayVisit },
 };

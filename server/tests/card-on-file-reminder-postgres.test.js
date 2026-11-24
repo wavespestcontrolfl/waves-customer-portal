@@ -428,6 +428,46 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     expect(message.text_snapshot).not.toContain('Next visit');
   });
 
+  test('a card removed after the sweep read its events makes a newer loss that is not due: the send stops', async () => {
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'true';
+    const id = await dueCustomer();
+    jest.spyOn(lifecycle, 'sendCardOnFileReminder').mockImplementationOnce(async (args) => {
+      await removalEmail(id, new Date('2026-11-24T14:00:00Z'));
+      expect(await args.beforeProviderHandoff()).toBe(false);
+      return { ok: false, reason: 'stopped' };
+    });
+    expect(await run(id)).toMatchObject({ sent: 0, skipped: { stopped: 1 } });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(await ledger(id)).toHaveLength(0);
+  });
+
+  test('a visit booked at a secondary saved property names that property, not the profile address', async () => {
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'true';
+    const id = await customer();
+    await removalEmail(id);
+    await visit(id, '2026-12-02', {
+      service_address_line1: '77 Rental Court', service_address_city: 'Venice', service_address_state: 'FL', service_address_zip: '34285',
+    });
+    expect(await run(id)).toMatchObject({ sent: 1 });
+    const [message] = await emails(id);
+    expect(message.text_snapshot).toContain('Your Waves visits at 77 Rental Court, Venice, FL 34285 are still on the schedule.');
+    expect(message.text_snapshot).not.toContain('Example Loop');
+  });
+
+  test('the payer search pages past the first ten visits: an eleventh visit that bills the customer still counts', async () => {
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'shadow';
+    const id = await customer();
+    await removalEmail(id);
+    const ids = [];
+    for (let day = 1; day <= 11; day += 1) ids.push(await visit(id, `2027-01-${String(day).padStart(2, '0')}`));
+    jest.spyOn(payer, 'resolveForInvoice').mockImplementation(async ({ scheduledServiceId }) => (
+      scheduledServiceId === ids[10] ? { payerId: null } : { payerId: 'payer-1' }
+    ));
+    expect(await run(id)).toMatchObject({ shadow: 1 });
+    const [row] = await ledger(id);
+    expect(String(row.next_visit_date)).toContain('2027');
+  });
+
   test('a collections dispute hold withholds it in live AND shadow mode, writes no ledger row, and the next pass tries again', async () => {
     const id = await dueCustomer();
     const hold = require('../services/collections/collection-hold');

@@ -6840,6 +6840,17 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
       const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
       elementsRef.current = elements;
       setShowAddCard(true);
+      // The form is open: consume the email link now. A Stripe redirect (3DS, bank auth) returns to THIS url, and a page
+      // that still carried add_card=1 would open a second form after the save. Until this point (a failed Stripe.js
+      // load or SetupIntent) the link stays, so a refresh tries the same save-only form again. The router's own
+      // location is left as it is.
+      if (saveOnly) {
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.delete('add_card');
+          window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+        } catch { /* a browser without history.replaceState keeps the param; the ref still guards this mount */ }
+      }
       // Mount after modal renders
       setTimeout(() => {
         if (cardMountRef.current) {
@@ -6870,13 +6881,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
   useEffect(() => {
     if (!openAddCard || loading || cancelledAccount || openAddCardHandledRef.current) return;
     openAddCardHandledRef.current = true;
-    // Consume the link now: a Stripe redirect (3DS, bank auth) returns to THIS url, and a page that still carried
-    // add_card=1 would open a second form after the save. The router's own location is left as it is.
-    try {
-      const url = new URL(window.location.href);
-      url.searchParams.delete('add_card');
-      window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
-    } catch { /* a browser without history.replaceState keeps the param; the ref still guards this mount */ }
     handleAddCard({ saveOnly: true });
   }, [openAddCard, loading, cancelledAccount]);
 
@@ -6931,6 +6935,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
       setShowAddCard(false);
       // The server answers save_only for a SetupIntent minted by the save-only form: its word, not this tab's state.
       setSavedWithoutAutopay(saved?.enrollReason === 'save_only');
+      setSaveOnlyAdd(false);
       paymentElementRef.current = null;
       elementsRef.current = null;
       stripeRef.current = null;
@@ -7948,7 +7953,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
             it repeated the same information (owner 08-28). */}
         <button
           type="button"
-          onClick={handleAddCard}
+          onClick={() => handleAddCard({ saveOnly: saveOnlyAdd })}
           disabled={stripeLoading}
           data-glass-accent=""
           style={{ ...secondaryButton, marginTop: 14, width: '100%', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', opacity: stripeLoading ? 0.6 : 1, cursor: stripeLoading ? 'wait' : 'pointer', position: 'relative' }}
@@ -8233,7 +8238,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
                   {!cancelledAccount && (
                   <button type="button" onClick={() => {
                     document.getElementById('billing-payment-methods')?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
-                    handleAddCard();
+                    handleAddCard({ saveOnly: saveOnlyAdd });
                   }} style={{
                     minHeight: 44, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
                     background: '#fff', color: B.red, fontSize: 14, fontWeight: 700, cursor: 'pointer',
