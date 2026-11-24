@@ -25,7 +25,7 @@ const sameCents = (a, b) => Math.round(Number(a) * 100) === Math.round(Number(b)
 const isSetupFee = (fee) => fee?.service === 'waveguard_setup';
 const positiveFees = (fees) => (Array.isArray(fees) ? fees : []).filter((fee) => Number(fee?.amount) > 0);
 
-const visitsText = (visits) => (visits === 1 ? 'once a year' : `${visits} visits a year in all, the first one included`);
+const visitsText = (visits) => (visits === 1 ? 'once a year' : `${visits} visits a year, counting the first`);
 
 // The one answer to "what is due today", for the choice the customer is looking at. Pay per
 // application reads the same sentence the "Reserve your spot" box prints; the prepay lines mirror

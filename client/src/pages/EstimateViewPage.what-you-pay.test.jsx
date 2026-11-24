@@ -123,7 +123,7 @@ describe('estimate page: what you pay and when', () => {
     expect(t).toContain('Setup fee$99.00');
     expect(t).toContain('First visit total$198.00');
     expect(t).toContain('Each visit after that');
-    expect(t).toContain('4 visits a year in all, the first one included');
+    expect(t).toContain('4 visits a year, counting the first');
     expect(t).toContain('First year total');
     expect(t).toContain('$495.00');
     expect(t).toContain('Includes the $99.00 setup fee.');
@@ -140,8 +140,8 @@ describe('estimate page: what you pay and when', () => {
     expect(t).toContain('Pest Control$99.00');
     expect(t).toContain('Lawn Care$78.00');
     expect(t).toContain('First visit total$177.00');
-    expect(t).toContain('4 visits a year in all, the first one included');
-    expect(t).toContain('9 visits a year in all, the first one included');
+    expect(t).toContain('4 visits a year, counting the first');
+    expect(t).toContain('9 visits a year, counting the first');
     expect(t).toContain('First year total$1,098.00');
     expect(t).not.toMatch(/setup fee/i);
     // The monthly figure is explained as an average, never as the price.
@@ -153,7 +153,7 @@ describe('estimate page: what you pay and when', () => {
     await waitFor(() => expect(box(container)).not.toBeNull());
     const t = text(container);
     expect(t).toContain('Lawn Care$78.00');
-    expect(t).toContain('9 visits a year in all, the first one included');
+    expect(t).toContain('9 visits a year, counting the first');
     expect(t).toContain('First year total$702.00');
     expect(t).not.toMatch(/setup fee/i);
     expect(t).not.toContain('First visit total');
