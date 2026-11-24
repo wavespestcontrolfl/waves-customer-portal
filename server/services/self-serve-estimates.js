@@ -165,6 +165,14 @@ function firstDeliveryEvidenceSql(alias) {
     `CASE WHEN ${unreadableStaffStamp} THEN NULL ELSE LEAST(${staffStamp}, ${deliveryInstantSql(alias, 'websiteLinkTextedAt')}, ${legacySentAt}, ${alias}.viewed_at, ${alias}.accepted_at) END`);
 }
 
+// The website-quote text receipt (deliveryState.websiteLinkTextedAt, recorded by
+// website-quote-publication.js recordWebsiteLinkTexted) must survive every rebuild of
+// deliveryState, which a send replaces wholesale: spread this into the rebuilt object.
+// It carries the EXISTING value only, so it never moves later.
+const carryWebsiteLinkTexted = (priorDeliveryState) => (priorDeliveryState?.websiteLinkTextedAt
+  ? { websiteLinkTextedAt: priorDeliveryState.websiteLinkTextedAt }
+  : {});
+
 // A delivery stamp is present (firstDeliveredAt, not empty or JSON null): the
 // row WAS delivered even when the stamp is unreadable in SQL.
 const deliveryStampPresentSql = (alias) => `(${presentStampSql(alias)} IS NOT NULL)`;
@@ -189,6 +197,6 @@ function countableViewAtSql(alias) {
 
 
 module.exports = {
-  SELF_SERVE_ESTIMATE_SOURCES, firstDeliveryEvidenceSql, deliveryStampPresentSql, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, undeliveredSelfServeSql,
+  SELF_SERVE_ESTIMATE_SOURCES, firstDeliveryEvidenceSql, deliveryStampPresentSql, carryWebsiteLinkTexted, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, undeliveredSelfServeSql,
   sentAtSql, countableViewAtSql, isoInstantSql, deliveryInstantSql, firstDeliveredAtMs,
 };

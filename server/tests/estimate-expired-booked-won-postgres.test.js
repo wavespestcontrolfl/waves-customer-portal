@@ -564,13 +564,17 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
   });
 
   test('(y) a completed visit whose closeout says nothing was performed (customer_declined) is not a conversion signal, for the reclaim or the open sweep', async () => {
-    const declinedVisit = async (cust, outcome) => {
+    // closeouts: [[status, visitOutcome, createdDay], ...] linked to one completed visit.
+    const closeouts = async (cust, list) => {
       const visitId = await completedVisit(mockTransaction, cust, sentPlus(30), sentPlus(20));
-      await mockTransaction('service_records').insert({
-        id: randomUUID(), customer_id: cust, scheduled_service_id: visitId, service_date: dateOnly(sentPlus(30)), service_type: 'Pest Control',
-        status: 'completed', structured_notes: JSON.stringify({ visitOutcome: outcome }),
-      });
+      for (const [status, outcome, day] of list) {
+        await mockTransaction('service_records').insert({
+          id: randomUUID(), customer_id: cust, scheduled_service_id: visitId, service_date: dateOnly(sentPlus(30)), service_type: 'Pest Control',
+          status, structured_notes: JSON.stringify({ visitOutcome: outcome }), created_at: sentPlus(day),
+        });
+      }
     };
+    const declinedVisit = (cust, outcome) => closeouts(cust, [['completed', outcome, 30]]);
     const declined = await customer(mockTransaction);
     const declinedId = await expiredEstimate(mockTransaction, declined);
     await declinedVisit(declined, 'customer_declined');
@@ -586,9 +590,24 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     const livePerformedId = await expiredEstimate(mockTransaction, livePerformed, { status: 'viewed', expires_at: null, disposition: null, disposition_source: null, disposition_at: null });
     await declinedVisit(livePerformed, 'completed');
 
+    // Only the LATEST closeout counts: a performed re-closeout overrides an earlier decline; a later
+    // decline or an 'incomplete' record overrides an earlier performed closeout.
+    const overridden = await customer(mockTransaction);
+    const overriddenId = await expiredEstimate(mockTransaction, overridden);
+    await closeouts(overridden, [['completed', 'customer_declined', 28], ['completed', 'completed', 31]]);
+    const laterDeclined = await customer(mockTransaction);
+    const laterDeclinedId = await expiredEstimate(mockTransaction, laterDeclined);
+    await closeouts(laterDeclined, [['completed', 'completed', 28], ['completed', 'customer_declined', 31]]);
+    const incomplete = await customer(mockTransaction);
+    const incompleteId = await expiredEstimate(mockTransaction, incomplete);
+    await closeouts(incomplete, [['incomplete', 'completed', 31]]);
+
     await guard.reclaimExpiredConvertedEstimates();
     await guard.archiveConvertedOpenEstimates();
 
+    expect((await row(overriddenId)).disposition).toBe('converted_other_path');
+    expect((await row(laterDeclinedId)).disposition).toBe('expired_viewed');
+    expect((await row(incompleteId)).disposition).toBe('expired_viewed');
     expect((await row(declinedId)).disposition).toBe('expired_viewed');
     expect((await row(performedId)).disposition).toBe('converted_other_path');
     expect((await row(liveDeclinedId)).archived_at).toBeNull();
@@ -609,9 +628,13 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     const texted = await mk();
     const never = await mk();
     const textedAt = new Date('2026-10-01T12:01:00Z');
-    await recordWebsiteLinkTexted(texted, textedAt, mockTransaction);
+    const url = 'https://portal.example.test/estimate/tok?website=1';
+    const body = `Your quote: ${url}`;
+    expect(await recordWebsiteLinkTexted(texted, { body, url, at: textedAt, conn: mockTransaction })).toBe(true);
     // A second text keeps the first time.
-    await recordWebsiteLinkTexted(texted, new Date('2026-10-02T12:00:00Z'), mockTransaction);
+    await recordWebsiteLinkTexted(texted, { body, url, at: new Date('2026-10-02T12:00:00Z'), conn: mockTransaction });
+    // A rendered text WITHOUT the link (a template with no {booking_url}) records nothing.
+    expect(await recordWebsiteLinkTexted(never, { body: 'Thanks for your quote request!', url, conn: mockTransaction })).toBe(false);
 
     await guard.reclaimExpiredConvertedEstimates();
 
@@ -621,6 +644,37 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect((await row(never)).disposition).toBe('expired_viewed');
     // The lead-reach stamp is untouched: this is not a person's handoff.
     expect(stored.estimate_data.deliveryState.firstDeliveredAt).toBeUndefined();
+  });
+
+  test('(aa) the text receipt survives a staff resend rebuilding deliveryState, suppressed or delivered, and never moves later', async () => {
+    const { recordWebsiteLinkTexted } = require('../services/website-quote-publication');
+    const { carryWebsiteLinkTexted } = require('../services/self-serve-estimates');
+    const published = new Date('2026-10-01T12:00:00Z');
+    const cust = await customer(mockTransaction);
+    const id = await expiredEstimate(mockTransaction, cust, { source: 'quote_wizard', created_at: published, sent_at: published });
+    const url = 'https://portal.example.test/estimate/tok?website=1';
+    const first = new Date('2026-10-01T12:01:00Z');
+    await recordWebsiteLinkTexted(id, { body: url, url, at: first, conn: mockTransaction });
+    const rebuild = async (extra) => {
+      const prior = (await row(id)).estimate_data.deliveryState;
+      // The shape sendEstimateNow writes: a wholesale deliveryState with the carry spread in.
+      const patch = { deliveryState: { attemptedAt: new Date().toISOString(), sentChannels: [], ...carryWebsiteLinkTexted(prior), ...extra } };
+      await mockTransaction('estimates').where({ id }).update({
+        estimate_data: mockTransaction.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]),
+      });
+      return (await row(id)).estimate_data.deliveryState;
+    };
+    const suppressed = await rebuild({});
+    expect(suppressed.websiteLinkTextedAt).toBe(first.toISOString());
+    const delivered = await rebuild({ firstDeliveredAt: '2026-10-05T12:00:00.000Z' });
+    expect(delivered.websiteLinkTextedAt).toBe(first.toISOString());
+    expect(delivered.firstDeliveredAt).toBe('2026-10-05T12:00:00.000Z');
+    // The carry reads only an existing receipt.
+    expect(carryWebsiteLinkTexted({})).toEqual({});
+    expect(carryWebsiteLinkTexted(null)).toEqual({});
+    // The two rebuild sites spread it (source check; the send path itself needs the whole send stack).
+    const admin = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
+    expect(admin.split('carryWebsiteLinkTexted(').length - 1).toBe(2);
   });
 
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {

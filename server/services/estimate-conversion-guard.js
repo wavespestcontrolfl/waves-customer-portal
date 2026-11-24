@@ -126,11 +126,14 @@ function paidInvoiceSignal(query) {
 // assessment that PREDATES the estimate: that fails toward KEEPING the
 // estimate, never toward archiving it.
 //
-// A completed visit whose closeout says nothing was performed (customer_declined,
-// inspection_only, incomplete: visit-outcomes.js NON_CHARGEABLE_CLOSEOUT_OUTCOMES, the
-// outcome lives on the linked service_records row) is not a sale either. Shared by the
-// open sweep and the archive route: a declined visit must not archive an open estimate
-// as converted, any more than an assessment does. (The none-before side stays broad.)
+// A completed visit whose LATEST closeout (its newest linked service_records row, by
+// created_at then id) performed nothing is not a sale either: status 'incomplete', or a
+// completed record whose visitOutcome is customer_declined, inspection_only or incomplete
+// (visit-outcomes.js NON_CHARGEABLE_CLOSEOUT_OUTCOMES; the outcome lives in the record's
+// structured_notes). Only the latest counts: a later performed re-closeout overrides an
+// earlier declined one. Shared by the open sweep and the archive route: a declined visit
+// must not archive an open estimate as converted, any more than an assessment does.
+// (The none-before side stays broad.)
 function completedVisitSignal(query) {
   return excludeAssessmentBookings(
     query
@@ -140,11 +143,16 @@ function completedVisitSignal(query) {
   ).whereNotExists(function () {
     this.select(db.raw("1"))
       .from("service_records as closeout")
-      .whereRaw("closeout.scheduled_service_id = scheduled_services.id")
-      .where("closeout.status", "completed")
       .whereRaw(
-        `COALESCE(closeout.structured_notes->>'visitOutcome', '') IN (${NON_CHARGEABLE_CLOSEOUT_OUTCOMES.map(() => "?").join(", ")})`,
-        NON_CHARGEABLE_CLOSEOUT_OUTCOMES,
+        "closeout.id = (SELECT latest.id FROM service_records latest WHERE latest.scheduled_service_id = scheduled_services.id ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)",
+      )
+      .where((q) =>
+        q.where("closeout.status", "incomplete").orWhere((done) =>
+          done.where("closeout.status", "completed").whereRaw(
+            `COALESCE(closeout.structured_notes->>'visitOutcome', '') IN (${NON_CHARGEABLE_CLOSEOUT_OUTCOMES.map(() => "?").join(", ")})`,
+            NON_CHARGEABLE_CLOSEOUT_OUTCOMES,
+          ),
+        ),
       );
   });
 }
