@@ -1433,12 +1433,12 @@ async function delayedSendIsStale(scheduledServiceId, notice = null) {
   if (!scheduledServiceId) return false;
   try {
     const timePromise = require('./time-promise');
-    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date());
+    // The RAW rule (sameDateOnly false), for both reads (told-visits loadPromiseFacts header): a delayed body was written
+    // for its own date, so an hour for any date still suppresses it, exactly as before the other-date rule.
+    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date(), { sameDateOnly: false });
     if (levels.get(scheduledServiceId) !== 'hour') return false;
     if (!notice) return true;
-    // The same other-date rule as the level above (told-visits sameDateOnly, pre-push Codex P1 2026-11-24): both checks
-    // must judge the same standing promise, or an earlier-date sibling slot could set aside a current-date hour.
-    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date(), { sameDateOnly: true })).get(scheduledServiceId);
+    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date())).get(scheduledServiceId);
     if (promiseSupersedesNotice(promise, notice)) return true;
     notice.setAsideOld = true;
     return false;

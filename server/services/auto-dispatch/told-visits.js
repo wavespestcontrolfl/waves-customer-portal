@@ -134,11 +134,16 @@ function promiseLevelOf(promise) {
  *  sameDateOnly), so a visit whose latest hour was for another date reads 'none', and in a grouped stop a sibling's
  *  current hour still stands. Seen live after a no-show: the 24-hour text said Nov 14 9-11, the office moved the visit to
  *  Nov 23 with no text, and the 3-day text still quoted an hour. An unknown visit date or slot date keeps the event (fail
- *  closed); so does an unknown window. resolvePromises, the night freeze and the office's told badge are unchanged. */
-async function loadPromiseFacts(conn, ids, now = new Date()) {
+ *  closed); so does an unknown window. resolvePromises, the night freeze and the office's told badge are unchanged.
+ *
+ *  `sameDateOnly: false` keeps the raw rule (an hour for ANY date counts). Delayed day-only sends use it
+ *  (appointment-reminders delayedSendIsStale): every stored body, bounce and queued replay was written for its own date,
+ *  and the raw rule suppresses it after a move, as before this change. The worst case is a skipped stale resend; the
+ *  re-armed sends for the new date still go out (pre-push Codex, 2026-11-24). */
+async function loadPromiseFacts(conn, ids, now = new Date(), { sameDateOnly = true } = {}) {
   const facts = new Map();
   if (!ids || ids.length === 0) return facts;
-  const promises = await resolvePromises(conn, ids, now, { sameDateOnly: true });
+  const promises = await resolvePromises(conn, ids, now, { sameDateOnly });
   for (const id of ids) {
     const promise = promises.get(id);
     const level = promiseLevelOf(promise);
@@ -154,8 +159,8 @@ async function loadPromiseFacts(conn, ids, now = new Date()) {
 
 /** Map<id, 'none' | 'day' | 'hour'>: what the customer was told about each visit (loadPromiseFacts' level). Throws when
  *  a read fails; every caller must fail closed. */
-async function loadPromiseLevels(conn, ids, now = new Date()) {
-  const facts = await loadPromiseFacts(conn, ids, now);
+async function loadPromiseLevels(conn, ids, now = new Date(), { sameDateOnly = true } = {}) {
+  const facts = await loadPromiseFacts(conn, ids, now, { sameDateOnly });
   return new Map([...facts].map(([id, fact]) => [id, fact.level]));
 }
 

@@ -271,6 +271,11 @@ describe('loadPromiseFacts', () => {
       expect(out.s2).toEqual({ level: 'hour', start: null });
     });
 
+    test('the raw rule (sameDateOnly false, delayed sends): an old-date hour still reads hour', async () => {
+      const levels = await loadPromiseLevels(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }), ['s1'], NOW, { sameDateOnly: false });
+      expect(Object.fromEntries(levels)).toEqual({ s1: 'hour' });
+    });
+
     test('loadToldVisitIds (the night freeze) is unchanged: the old-date hour still freezes', async () => {
       const told = await loadToldVisitIds(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }), ['s1'], NOW);
       expect([...told]).toEqual(['s1']);
