@@ -31,6 +31,7 @@ function callGivenConsentWrite({ callGivenConsent, contact, customer, slots, con
     return { opts: { smsConsentExplicit, holdPhone, keepConsentStamp }, stamp: {}, guard: (q) => q };
   }
   const stamped = !!customer.service_contacts_consent_at;
+  const givenKey = String(contact.phone).replace(/\D/g, '').slice(-10);
   return {
     opts: { smsConsentExplicit: false, holdPhone: false, keepConsentStamp: true },
     stamp: {
@@ -40,8 +41,10 @@ function callGivenConsentWrite({ callGivenConsent, contact, customer, slots, con
         service_contacts_consent_text_version: CALL_GIVEN_CONSENT_TEXT_VERSION,
       }),
       service_preferences: conn.raw(
-        "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{call_given_phone_keys}', (SELECT COALESCE(jsonb_agg(DISTINCT k), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(service_preferences -> 'call_given_phone_keys', '[]'::jsonb) || to_jsonb(?::text)) k))",
-        [String(contact.phone).replace(/\D/g, '').slice(-10)],
+        // Same UPDATE: record the provenance AND drop this phone from login_attested_phone_keys, so a stale holder attestation
+        // left by a contact that was removed can never grant login to the phone this call re-adds (a fresh holder save is needed).
+        "COALESCE(service_preferences, '{}'::jsonb) || jsonb_build_object('call_given_phone_keys', (SELECT COALESCE(jsonb_agg(DISTINCT k), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(service_preferences -> 'call_given_phone_keys', '[]'::jsonb) || to_jsonb(?::text)) k)) || CASE WHEN jsonb_typeof(service_preferences -> 'login_attested_phone_keys') = 'array' THEN jsonb_build_object('login_attested_phone_keys', (SELECT COALESCE(jsonb_agg(k), '[]'::jsonb) FROM jsonb_array_elements(service_preferences -> 'login_attested_phone_keys') k WHERE k <> to_jsonb(?::text))) ELSE '{}'::jsonb END",
+        [givenKey, givenKey],
       ),
     },
     guard: (q) => slots.reduce(
@@ -59,7 +62,10 @@ async function holdCallGivenFallback(customerId, phone, conn = db) {
     phone_key: key, phone_e164: String(phone || '').trim(), status: 'ask_failed',
     customer_id: customerId, requested_by: 'call_pipeline', requested_at: new Date(),
   }).onConflict(['customer_id', 'phone_key']).ignore();
-  await conn('customers').where({ id: customerId }).update({
+  // One statement: a YES that landed since the pending read leaves a confirmed row, and the phone is then not put back on the list.
+  await conn('customers').where({ id: customerId })
+    .whereRaw("NOT EXISTS (SELECT 1 FROM recipient_optin WHERE customer_id = ? AND phone_key = ? AND status = 'confirmed')", [customerId, key])
+    .update({
     service_preferences: conn.raw(
       "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text))",
       [key],

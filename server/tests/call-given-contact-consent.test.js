@@ -155,7 +155,11 @@ describe('persistCallSecondaryContact with callGivenConsent', () => {
     // Per-phone provenance in the same UPDATE; the phone is NOT put on the unconsented list.
     expect(writes.updates[0].service_preferences.sql).toContain('call_given_phone_keys');
     expect(writes.updates[0].service_preferences.sql).not.toContain('unconsented_slot_phone_keys');
-    expect(writes.updates[0].service_preferences.binds).toEqual(['5550100123']);
+    // The same UPDATE drops the phone from login_attested_phone_keys (a stale holder attestation from a removed contact must not
+    // grant login to a phone this call re-adds): the key binds twice, once per jsonb edit.
+    expect(writes.updates[0].service_preferences.binds).toEqual(['5550100123', '5550100123']);
+    expect(writes.updates[0].service_preferences.sql).toContain("jsonb_build_object('login_attested_phone_keys'");
+    expect(writes.updates[0].service_preferences.sql).toContain('WHERE k <> to_jsonb(?::text)');
   });
 
   test('the UPDATE is pinned to the coverage the decision used: stamp absent + every contact phone as read', async () => {
@@ -234,6 +238,8 @@ describe('call-site wiring (source contract)', () => {
     // The intent must sit on the V2 entry that carries the phone, not on a merge with a V1 contact.
     expect(src).toContain('phoneFromV2: v2GivenIntentPhoneKeys.has(lastTen(secondaryEntry.phone)),');
     expect(src).toContain('.filter((c) => c && (c.wants_notifications === true || onSiteOptinAskTrigger(c)))');
+    // Original V2 entries mapped one by one, never merged by canonicalV2Secondary.
+    expect(src).toContain('new Set([mapSecondaryContactToLegacy(v2CanonicalExtraction?.secondary_contact), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)]');
     expect(src).not.toContain('v2SecondaryPhoneKeys');
     expect(src).toContain('heldPhoneKeys: callGivenHeldPhoneKeys,');
     expect(src).toContain('const callGivenHeldPhoneKeys = (callbackNumberNeededHoldActive || callAniCannotText)');
@@ -324,18 +330,21 @@ describe('holdCallGivenFallback: a write that fell back takes the fail-closed pa
   test('blocking ask_failed row + unconsented list', async () => {
     const inserted = [];
     const updated = [];
+    const guards = [];
     db.raw = jest.fn((sql, binds) => ({ sql, binds }));
     db.mockImplementation((table) => {
       if (table === 'recipient_optin') {
         return { insert: (row) => { inserted.push(row); return { onConflict: () => ({ ignore: async () => 1 }) }; } };
       }
-      const b = { where: () => b, update: async (p) => { updated.push(p); return 1; } };
+      const b = { where: () => b, whereRaw: (sql, binds) => { guards.push([sql, binds]); return b; }, update: async (p) => { updated.push(p); return 1; } };
       return b;
     });
     await holdCallGivenFallback('cust-1', '+15550100123');
     expect(inserted[0]).toMatchObject({ phone_key: '5550100123', status: 'ask_failed', customer_id: 'cust-1' });
     expect(updated[0].service_preferences.sql).toContain('unconsented_slot_phone_keys');
     expect(updated[0].service_preferences.binds).toEqual(['5550100123']);
+    // Single-statement guard: a YES that landed since the read (a confirmed row) means the phone is not put back on the list.
+    expect(guards).toEqual([["NOT EXISTS (SELECT 1 FROM recipient_optin WHERE customer_id = ? AND phone_key = ? AND status = 'confirmed')", ['cust-1', '5550100123']]]);
   });
 });
 
@@ -421,9 +430,9 @@ describe('review asks: caller-given consent covers appointment and service texts
 });
 
 describe('intent must sit on the V2 entry that carries the phone', () => {
-  const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+  const { mapSecondaryContactToLegacy, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
   const { onSiteOptinAskTrigger } = _test;
-  const keysFor = (extraction) => new Set([canonicalV2Secondary(extraction), ...mapSecondaryContactsToLegacy(extraction.secondary_contacts)]
+  const keysFor = (extraction) => new Set([mapSecondaryContactToLegacy(extraction.secondary_contact), ...mapSecondaryContactsToLegacy(extraction.secondary_contacts)]
     .filter((c) => c && (c.wants_notifications === true || onSiteOptinAskTrigger(c)))
     .map((c) => String(c.phone || '').replace(/\D/g, '').slice(-10)).filter(Boolean));
 
@@ -432,6 +441,14 @@ describe('intent must sit on the V2 entry that carries the phone', () => {
       { first_name: 'Pat', phone_e164: '+15550100123', role: 'other', wants_notifications: false },
       { first_name: 'Sam', email: 'sam@example.com', role: 'spouse_partner', wants_notifications: true },
     ] };
+    expect(keysFor(v2).has('5550100123')).toBe(false);
+  });
+
+  test('a name-only singleton that wants notifications is NOT merged with a phone-only array entry of the same first name', () => {
+    const v2 = {
+      secondary_contact: { first_name: 'Pat', role: 'spouse_partner', wants_notifications: true },
+      secondary_contacts: [{ first_name: 'Pat', last_name: 'Smith', phone_e164: '+15550100123', role: 'other', wants_notifications: false }],
+    };
     expect(keysFor(v2).has('5550100123')).toBe(false);
   });
 

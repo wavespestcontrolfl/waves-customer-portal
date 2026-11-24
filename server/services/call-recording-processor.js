@@ -17507,9 +17507,11 @@ const CallRecordingProcessor = {
     // role): the merge with a V1 contact can pair an email-only party who wants notifications with a phone-only V2 party who
     // does not, so the intent must sit on the V2 entry that holds the number, never on the merged entry.
     const v2GivenIntentPhoneKeys = (() => {
-      const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+      const { mapSecondaryContactToLegacy, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
       const ten = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-      return new Set([canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)]
+      // The original V2 entries, mapped one by one and never merged (canonicalV2Secondary pairs a name-only singleton with an
+      // array entry by first name): the phone and the intent must sit on ONE original entry.
+      return new Set([mapSecondaryContactToLegacy(v2CanonicalExtraction?.secondary_contact), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)]
         .filter((c) => c && (c.wants_notifications === true || onSiteOptinAskTrigger(c)))
         .map((c) => ten(c.phone)).filter(Boolean));
     })();
