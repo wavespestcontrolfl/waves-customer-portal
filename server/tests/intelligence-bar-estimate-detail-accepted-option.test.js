@@ -220,3 +220,83 @@ test('one-time acceptance carries the accepted treatment and its displayed price
   expect(shaped.accepted.one_time).toEqual({ price: 185, items: [{ service: 'pest_initial_roach', label: 'Initial roach treatment', amount: 185, kind: 'charge' }] });
   expect(shaped.accepted).not.toHaveProperty('price_unavailable');
 });
+
+test('bundle: a mirrored section follows the accepted pest key while the lawn axis reads its own selection', async () => {
+  const withMirror = bundlePayload();
+  withMirror.pricing.services.push({ key: 'mosquito', label: 'Mosquito', isRecurring: true, defaultFrequencyKey: 'quarterly',
+    frequencies: [
+      { key: 'monthly', label: 'Monthly', monthly: 60, perTreatment: 60, visitsPerYear: 12 },
+      { key: 'bimonthly', label: 'Bi-monthly', monthly: 35, perTreatment: 70, visitsPerYear: 6 },
+      { key: 'quarterly', label: 'Quarterly', monthly: 25, perTreatment: 75, visitsPerYear: 4 },
+    ] });
+  mockCompose.mockResolvedValue(withMirror);
+  const shaped = await shapeEstimate(bundleRow({ lawn_care: 'enhanced' }));
+  const byKey = (k) => shaped.accepted.services.find((s) => s.service_key === k);
+  expect(byKey('mosquito')).toMatchObject({ frequency_key: 'bimonthly', basis: 'accepted_key', per_visit: 70 });
+  expect(byKey('lawn_care')).toMatchObject({ frequency_key: 'enhanced', basis: 'stored_service_cadence' });
+  expect(shaped.page.pricing.services[2].frequencies.map((o) => o.accepted)).toEqual([false, true, false]);
+});
+
+test('an axis service missing from the stored selection is still unknown, not read from the pest key', async () => {
+  mockCompose.mockResolvedValue(bundlePayload());
+  const shaped = await shapeEstimate(bundleRow({ tree_shrub: 'standard' }));
+  expect(shaped.accepted.services.find((s) => s.service_key === 'lawn_care').accepted_choice_unknown).toMatch(/does not identify/);
+});
+
+test('per-visit price is the price card net price, not the gross outer pest price', async () => {
+  const solo = payload();
+  solo.pricing.services = [{ key: 'pest_control', label: 'Pest Control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: [
+    { key: 'quarterly', label: 'Quarterly', monthly: 36, perTreatment: 120, perVisit: 120, visitsPerYear: 4,
+      perServiceTreatments: [{ service: 'pest_control', displayPrice: 108, visitsPerYear: 4 }] },
+  ] }];
+  mockCompose.mockResolvedValue(solo);
+  const shaped = await shapeEstimate(row({ accepted_frequency_key: 'quarterly' }));
+  expect(shaped.accepted.services[0]).toMatchObject({ frequency_key: 'quarterly', per_visit: 108, visits_per_year: 4 });
+});
+
+test('several priced treatments on one row: no single per-visit price is invented', async () => {
+  const multi = payload();
+  multi.pricing.services = [{ key: 'pest_control', label: 'Pest Control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: [
+    { key: 'quarterly', label: 'Quarterly', monthly: 90, perTreatment: 120, visitsPerYear: 4,
+      perServiceTreatments: [{ displayPrice: 80, visitsPerYear: 4 }, { displayPrice: 40, visitsPerYear: 4 }] },
+  ] }];
+  mockCompose.mockResolvedValue(multi);
+  const shaped = await shapeEstimate(row({ accepted_frequency_key: 'quarterly' }));
+  expect(shaped.accepted.services[0].per_visit).toBeNull();
+  expect(shaped.accepted.services[0].price_unavailable).toMatch(/no single per-visit price/);
+});
+
+const sliceBundle = (planDiscount) => {
+  const slice = (amount) => ({ type: 'PERCENT', value: 10, label: 'Neighbor discount', amount, recurringAmount: amount, itemizedPerService: true });
+  return {
+    estimate: { id: 'est-acc', status: 'accepted' },
+    pricing: {
+      manualDiscount: planDiscount,
+      services: [
+        { key: 'pest_control', label: 'Pest Control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: [
+          { key: 'quarterly', label: 'Quarterly', monthly: 30, perTreatment: 90, visitsPerYear: 4, manualDiscount: slice(40) }] },
+        { key: 'termite_bait', label: 'Termite Bait', isRecurring: true, defaultFrequencyKey: 'recurring', frequencies: [
+          { key: 'recurring', label: 'Monitoring', monthly: 45, perTreatment: 135, visitsPerYear: 4, manualDiscount: slice(60) }] },
+      ],
+    },
+    cta: { canAccept: false, monthlyBilled: true },
+  };
+};
+
+test('itemized section discounts stay under their services; the first slice is never the plan discount', async () => {
+  mockCompose.mockResolvedValue(sliceBundle({ type: 'PERCENT', value: 10, label: 'Neighbor discount', amount: 100 }));
+  const shaped = await shapeEstimate(row({ accepted_frequency_key: 'quarterly' }));
+  const [pest, termite] = shaped.accepted.services;
+  expect(pest).toMatchObject({ discount: { amount: 40 }, discount_scope: 'this_service_slice_only' });
+  expect(termite).toMatchObject({ discount: { amount: 60 }, discount_scope: 'this_service_slice_only' });
+  expect(shaped.accepted.discount).toEqual({ type: 'PERCENT', value: 10, label: 'Neighbor discount', scope: 'plan_percent_only' });
+  expect(JSON.stringify(shaped.accepted.discount)).not.toMatch(/"amount":40/);
+});
+
+test('itemized section discounts with no authoritative plan field: plan discount is unavailable', async () => {
+  mockCompose.mockResolvedValue(sliceBundle({ label: 'Discount' }));
+  const shaped = await shapeEstimate(row({ accepted_frequency_key: 'quarterly' }));
+  expect(shaped.accepted.discount).toBeNull();
+  expect(shaped.accepted.discount_unavailable).toMatch(/itemized per service/);
+  expect(shaped.accepted.services.map((s) => s.discount.amount)).toEqual([40, 60]);
+});

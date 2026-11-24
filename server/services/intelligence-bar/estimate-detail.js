@@ -5,6 +5,7 @@
 const db = require('../../models/db');
 
 const { portalUrl } = require('../../utils/portal-url');
+const { displayedPerApplication } = require('../estimate-pricing-bundle-utils');
 const MAX_PER_CUSTOMER = 10;
 const DEFAULT_PER_CUSTOMER = 3;
 
@@ -300,18 +301,28 @@ function storedServiceCadences(data) {
   return Object.keys(out).length ? out : null;
 }
 
+// The independently selectable non-pest services: the cadence combinations'
+// selection keys (the client's comboAxisKeys), plus any stored cadence key.
+// Every other recurring section mirrors the pest cadence and is locked to it.
+function selectableAxes(pricing, cadences) {
+  const axes = new Set(Object.keys(cadences || {}));
+  const first = Array.isArray(pricing.serviceCadenceCombos) ? pricing.serviceCadenceCombos[0] : null;
+  for (const axis of Object.keys(first?.selection || {})) axes.add(axis);
+  axes.delete('pest_control');
+  return axes;
+}
+
 // One section's accepted row, from the stored selection that applies to THAT
-// service: its own serviceCadences entry, else the accepted key (pest, or a
-// section mirroring the pest cadence), else the section's only cadence.
-function resolveSectionRow(section, acceptedKey, cadences) {
+// service: an independently selectable axis reads its own serviceCadences
+// entry; pest and mirrored sections read the accepted (pest) key; else the
+// section's only cadence.
+function resolveSectionRow(section, acceptedKey, cadences, axes) {
   const rows = Array.isArray(section.frequencies) ? section.frequencies : [];
-  const own = cadences?.[section.key];
-  if (own) {
-    const row = rows.find((r) => r.key === own);
+  if (axes.has(section.key)) {
+    const row = rows.find((r) => r.key === cadences?.[section.key]);
     return row ? { row, basis: 'stored_service_cadence' } : null;
   }
-  const tierAxis = cadences && section.key !== 'pest_control';
-  const byKey = tierAxis ? null : rows.find((r) => r.key === acceptedKey);
+  const byKey = rows.find((r) => r.key === acceptedKey);
   if (byKey) return { row: byKey, basis: 'accepted_key' };
   return rows.length === 1 ? { row: rows[0], basis: 'only_option' } : null;
 }
@@ -323,14 +334,23 @@ function discountState(node) {
 }
 
 function acceptedServiceEntry(section, row, basis) {
+  // The price card's own per-application price (net of discounts), not the
+  // gross outer perVisit/perTreatment of a solo pest row.
+  const shown = displayedPerApplication(row);
   const entry = {
     service_key: section.key, service_label: section.label || section.key,
     frequency_key: row.key, frequency_label: row.label || null, basis,
-    per_visit: row.perTreatment ?? row.perVisit ?? null, visits_per_year: row.visitsPerYear ?? null, monthly: row.monthly ?? null,
+    per_visit: shown ? shown.amount : null, visits_per_year: shown ? shown.visits : (row.visitsPerYear ?? null), monthly: row.monthly ?? null,
   };
+  if (!shown && !row.ranged && !row.combined_total_withheld) entry.price_unavailable = 'the page shows no single per-visit price for this cadence; open the estimate link';
   if (row.monthlyBase != null && row.monthly != null && row.monthlyBase !== row.monthly) entry.monthly_before_discount = row.monthlyBase;
   const state = discountState(row);
-  if (state) { entry.discount = state.discount; if (state.suppressed) entry.discount_suppressed = true; }
+  if (state) {
+    entry.discount = state.discount;
+    if (state.suppressed) entry.discount_suppressed = true;
+    // With per-service slices stamped, this is only THIS service's share of the plan credit.
+    if (state.discount?.itemizedPerService === true) entry.discount_scope = 'this_service_slice_only';
+  }
   if (row.ranged) entry.price_unavailable = 'this cadence is a confirmed-on-site range; the page shows no exact price';
   else if (row.combined_total_withheld) entry.price_unavailable = 'a combined plan is priced per application; open the estimate link';
   return entry;
@@ -357,10 +377,11 @@ function matchedCombo(pricing, acceptedKey, cadences) {
 function markAcceptedRecurring(pricing, acceptedKey, cadences) {
   const services = [];
   const picked = [];
+  const axes = selectableAxes(pricing, cadences);
   for (const section of pricing.services || []) {
     const rows = Array.isArray(section.frequencies) ? section.frequencies : [];
     if (!section.isRecurring) continue;
-    const hit = resolveSectionRow(section, acceptedKey, cadences);
+    const hit = resolveSectionRow(section, acceptedKey, cadences, axes);
     for (const row of rows) row.accepted = hit ? row === hit.row : null;
     if (hit) { picked.push(hit.row); services.push(acceptedServiceEntry(section, hit.row, hit.basis)); continue; }
     services.push({ service_key: section.key, service_label: section.label || section.key,
@@ -380,10 +401,23 @@ function acceptedDiscount(pricing, combo, picked) {
     return state.suppressed ? { discount: null, discount_suppressed: true } : { discount: state.discount };
   }
   const states = picked.map(discountState).filter(Boolean);
-  const granted = states.find((state) => state.discount);
-  if (granted) return { discount: granted.discount };
+  const granted = states.filter((state) => state.discount);
+  if (granted.some((state) => state.discount.itemizedPerService === true)) return itemizedPlanDiscount(pricing);
+  if (granted.length === 1) return { discount: granted[0].discount };
+  if (granted.length > 1) return { discount: null, discount_unavailable: 'several services carry their own discount; read each under services' };
   if (states.some((state) => state.suppressed)) return { discount: null, discount_suppressed: true };
   return { discount: pricing.manualDiscount || null };
+}
+
+// Section discount slices: each row holds only its own service's share, so a
+// slice is never the plan discount. Report the plan credit only as the plan's
+// own percentage; the slices stay under their services.
+function itemizedPlanDiscount(pricing) {
+  const plan = pricing.manualDiscount;
+  if (plan && plan.type === 'PERCENT' && Number(plan.value) > 0) {
+    return { discount: { type: plan.type, value: Number(plan.value), label: plan.label || null, scope: 'plan_percent_only' } };
+  }
+  return { discount: null, discount_unavailable: 'the discount is itemized per service (see each service); the page shows no plan-level amount' };
 }
 
 // A one-time acceptance: the treatment and price the page displays for it.
