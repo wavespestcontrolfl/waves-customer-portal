@@ -21,7 +21,7 @@ const KIND_WORDS = {
   free_assessment: 'Free assessment', free_visit: 'Free visit', unpriced: 'No price',
   not_performed: 'No work performed', unverified: 'No closeout record',
   owner_set: 'Set by the owner', already_paid: 'Already paid', invoice_paid_elsewhere: 'Invoice paid elsewhere',
-  package_paid_elsewhere: 'Package paid elsewhere', basis_exhausted: 'Package visit used',
+  package_paid_elsewhere: 'Package paid elsewhere', basis_exhausted: 'Package visit used', owner_override_reassigned: 'Reassigned since you set it',
 };
 
 // '15' -> 1500, '12.5' -> 1250. Anything else -> null.
@@ -111,7 +111,10 @@ function SettingsForm({ call, technicians, technicianId, weekStart, current, gen
 }
 
 // The owner sets the credit of a stop the rules cannot credit, with a reason; a pay run uses it for that stop in that week. A paid week refuses.
-function StopCreditForm({ call, technicianId, weekStart, stop, onChanged }) {
+// A stop whose work was not done or confirmed, or that a pay run paid, is never credited by hand (the server refuses it too).
+const NOT_BY_HAND = new Set(['already_paid', 'not_performed', 'unverified']);
+
+function StopCreditForm({ call, technicianId, weekStart, stop, generation, onChanged }) {
   const [credit, setCredit] = useState('');
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
@@ -121,19 +124,23 @@ function StopCreditForm({ call, technicianId, weekStart, stop, onChanged }) {
 
   async function run(method, payload) {
     setBusy(true); setError('');
+    // The selection this change was started under: the week is reloaded only if the selection is still the same after it.
+    const startedUnder = generation();
     try {
       await call('/production-share/stop-override', { method, body: payload });
-      onChanged();
+      onChanged(startedUnder);
     } catch (failure) { setError(failure.message); }
     setBusy(false);
   }
-  if (stop.kind === 'owner_set') {
+  if (stop.kind === 'owner_set' || stop.kind === 'owner_override_reassigned') {
     return <div className="mt-1 flex flex-wrap items-center gap-2">
-      <Button type="button" variant="secondary" disabled={busy} onClick={() => run('DELETE', body)}>Clear the credit I set</Button>
+      <Button type="button" variant="secondary" disabled={busy} onClick={() => run('DELETE', body)}>
+        {stop.kind === 'owner_set' ? 'Clear the credit I set' : 'Clear the old credit'}
+      </Button>
       {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
     </div>;
   }
-  if (!stop.needsReview || stop.kind === 'already_paid') return null;
+  if (!stop.needsReview || NOT_BY_HAND.has(stop.kind)) return null;
   return <form className="mt-1 flex flex-wrap items-end gap-2" aria-label="Set the credit of this stop"
     onSubmit={event => { event.preventDefault(); run('PUT', { ...body, creditCents: cents, reason: reason.trim() }); }}>
     <Field label="Credit ($)">
@@ -246,7 +253,8 @@ export default function ProductionSharePanel({ call, technicians }) {
                 <TD>
                   {stop.needsReview && <span className="text-warn-fg">Needs review: </span>}{stop.reason}
                   <StopCreditForm key={`${stop.visitId}:${stop.kind}:${stop.creditCents}`} call={call} technicianId={preview.technician.id}
-                    weekStart={preview.weekStart} stop={stop} onChanged={() => load(preview.technician.id, preview.weekStart)} />
+                    weekStart={preview.weekStart} stop={stop} generation={() => newest.current}
+                    onChanged={(startedUnder) => { if (startedUnder === newest.current) load(preview.technician.id, preview.weekStart); }} />
                 </TD>
                 <TD nums align="right">{stop.refundCents > 0 ? centsToDollars(stop.refundCents) : ''}</TD>
               </TR>)}

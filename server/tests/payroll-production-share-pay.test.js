@@ -435,6 +435,18 @@ describe('the credit rules (applyLedger)', () => {
     expect(run(plain('visit-2', ['inv-1']), paidOf({ visits: { 'visit-2': '2026-09-14' } }))).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true });
   });
 
+  test('AUDIT :1007 STOP OVERRIDE: it belongs to the technician who held the stop; a stop reassigned since is review and shows no technician id', () => {
+    const credit = { creditCents: 45000, reason: 'Checked', technicianId: 'tech-a' };
+    const row = (technicianId) => ({ ...plain('visit-2', ['inv-1']), technicianId });
+    const run = (technicianId) => productionShare.applyLedger([row(technicianId)], paidOf(), new Map([['visit-2', credit]]))[0];
+    expect(run('tech-a')).toMatchObject({ kind: 'owner_set', creditCents: 45000, needsReview: false });
+    const moved = run('tech-b');
+    expect(moved).toMatchObject({ kind: 'owner_override_reassigned', creditCents: 0, needsReview: true, invoices: [], bases: [] });
+    expect(moved.reason).toContain('reassigned since the owner set its credit');
+    expect(moved).not.toHaveProperty('technicianId');
+    expect(run('tech-a')).not.toHaveProperty('technicianId');
+  });
+
   test('STOP OVERRIDE: the revision and the review token change with the credit the owner set, and with its kind alone', () => {
     const base = (stop) => share.revisionOf(new Map([['tech-a', { settings: SETTINGS, stops: [{ ...stops([['v1', '2026-09-14', 100000]])[0], ...stop }] }]]));
     expect(base({})).not.toBe(base({ kind: 'owner_set' }));
@@ -530,6 +542,33 @@ describe('the down guard migration', () => {
       'ALTER TABLE payroll_checks DROP CONSTRAINT IF EXISTS payroll_checks_production_share_check',
       'ALTER TABLE payroll_checks DROP COLUMN IF EXISTS production_share_cents',
     ]);
+  });
+});
+
+describe('the stop override migration down', () => {
+  const migration = require('../models/migrations/20261124160000_production_share_stop_overrides');
+  const fakeKnex = (stored) => {
+    const calls = [];
+    const knex = (table) => ({ first: async () => { calls.push(`read ${table}`); return stored ? { id: 1 } : undefined; } });
+    knex.raw = async (sql) => { calls.push(sql.trim()); };
+    knex.schema = { hasTable: async () => true };
+    return { knex, calls };
+  };
+
+  test('sorts after origin/main\'s newest migration at the time of writing', () => {
+    expect('20261124160000_production_share_stop_overrides' > '20261124150000_print_lead_sources').toBe(true);
+  });
+
+  test('takes the table lock BEFORE it looks for a stored credit, and refuses when one is there', async () => {
+    const { knex, calls } = fakeKnex(true);
+    await expect(migration.down(knex)).rejects.toThrow(/credits the owner set/);
+    expect(calls).toEqual(['LOCK TABLE production_share_stop_overrides IN ACCESS EXCLUSIVE MODE', 'read production_share_stop_overrides']);
+  });
+
+  test('with nothing stored it drops the table after the lock', async () => {
+    const { knex, calls } = fakeKnex(false);
+    await migration.down(knex);
+    expect(calls).toEqual(['LOCK TABLE production_share_stop_overrides IN ACCESS EXCLUSIVE MODE', 'read production_share_stop_overrides', 'DROP TABLE IF EXISTS production_share_stop_overrides']);
   });
 });
 

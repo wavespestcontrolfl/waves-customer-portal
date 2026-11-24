@@ -26,9 +26,14 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  // A credit the owner set is a pay decision on file: rolling back would lose it without a word.
-  if (await knex.schema.hasTable('production_share_stop_overrides') && await knex('production_share_stop_overrides').first('id')) {
-    throw new Error('production_share_stop_overrides holds credits the owner set for stops. Roll forward; do not drop it.');
+  // A credit the owner set is a pay decision on file: rolling back would lose it without a word. The table lock comes BEFORE the row
+  // check and is held through the drop (the migration runs in one transaction), so a credit saved between the check and the drop cannot
+  // be lost.
+  if (await knex.schema.hasTable('production_share_stop_overrides')) {
+    await knex.raw('LOCK TABLE production_share_stop_overrides IN ACCESS EXCLUSIVE MODE');
+    if (await knex('production_share_stop_overrides').first('id')) {
+      throw new Error('production_share_stop_overrides holds credits the owner set for stops. Roll forward; do not drop it.');
+    }
   }
   await knex.raw('DROP TABLE IF EXISTS production_share_stop_overrides');
 };

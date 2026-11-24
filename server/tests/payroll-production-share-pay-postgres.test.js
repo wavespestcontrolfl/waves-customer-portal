@@ -393,6 +393,67 @@ postgres('production share pay line', () => {
       expect(await trx('production_share_stop_overrides').where({ technician_id: id })).toEqual([]);
     });
 
+    it('AUDIT :1047: under the lock a new credit is refused once the stop no longer needs review; an existing one can still be changed', async () => {
+      const { unpriced, key } = await world();
+      // the office prices the stop after the owner's page was loaded
+      await trx('scheduled_services').where({ id: unpriced }).update({ estimated_price: '1260.00' });
+      const refusal = await override({ ...key, creditCents: 5000, reason: 'late' });
+      expect(refusal.status).toBe(409);
+      expect(refusal.body.error).toContain('no longer needs review');
+      expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced })).toEqual([]);
+      // a credit the owner already set on a stop can be changed, whatever the rules say now
+      await trx('scheduled_services').where({ id: unpriced }).update({ estimated_price: null });
+      expect((await override({ ...key, creditCents: 5000, reason: 'first' })).status).toBe(200);
+      await trx('scheduled_services').where({ id: unpriced }).update({ estimated_price: '1260.00' });
+      expect((await override({ ...key, creditCents: 6000, reason: 'second' })).status).toBe(200);
+      expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced }).first('credit_cents')).toMatchObject({ credit_cents: '6000' });
+    });
+
+    it('AUDIT :1047: a stop with no closeout record (its work cannot be known) cannot be credited by hand', async () => {
+      const { id, key } = await world();
+      const bare = randomUUID();
+      await trx('scheduled_services').insert({
+        id: bare, customer_id: await customer(), technician_id: id, scheduled_date: addDays(W1, 3), service_type: 'General Pest Control',
+        status: 'completed', completed_at: noon(addDays(W1, 3)), estimated_price: '100.00',
+      });
+      const refusal = await override({ ...key, visitId: bare, creditCents: 5000, reason: 'unknown work' });
+      expect(refusal.status).toBe(409);
+      expect(refusal.body.error).toContain('cannot be credited by hand');
+    });
+
+    it('AUDIT :1007: a credit belongs to the technician who held the stop: after a reassignment the stop is review, and clearing works for the new holder', async () => {
+      const { unpriced, key } = await world();
+      const other = await tech('Sample Bravo');
+      await settings(other);
+      await worked(other, W1, 40);
+      expect((await override({ ...key, creditCents: 126000, reason: 'Checked' })).status).toBe(200);
+      await trx('scheduled_services').where({ id: unpriced }).update({ technician_id: other });
+      await trx('service_records').where({ scheduled_service_id: unpriced }).update({ technician_id: other });
+      const created = (await draft(W1)).body.run;
+      const check = byName(created, 'Sample Bravo');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(snapshot.stops.find((row) => row.visitId === unpriced)).toMatchObject({ kind: 'owner_override_reassigned', creditCents: 0, needsReview: true });
+      // Alpha no longer holds it: her two priced stops are all she is credited, and the owner's credit is paid to nobody
+      expect(byName(created, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 252000, needsReviewCount: 0 });
+      // the new holder cannot reuse the old credit as a new one (the stop does not need review by the rules), but can clear it
+      expect((await api('DELETE', '/production-share/stop-override', { body: { ...key, technicianId: other } })).status).toBe(200);
+      expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced })).toEqual([]);
+    });
+
+    it('AUDIT :1076: a clear checks the paid week of the technician stored with the credit, not the one the caller names', async () => {
+      const { unpriced, key } = await world();
+      const other = await tech('Sample Bravo');
+      expect((await override({ ...key, creditCents: 126000, reason: 'Checked' })).status).toBe(200);
+      await finalize((await draft(W1)).body.run.id); // Alpha's week is paid with the credit
+      await trx('scheduled_services').where({ id: unpriced }).update({ technician_id: other });
+      const refusal = await api('DELETE', '/production-share/stop-override', { body: { ...key, technicianId: other } });
+      expect(refusal.status).toBe(409);
+      expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced })).toHaveLength(1);
+      // an unknown stop is a 404 whoever is named
+      expect((await api('DELETE', '/production-share/stop-override', { body: { ...key, visitId: randomUUID() } })).status).toBe(404);
+    });
+
     it('never beats a visit a pay run already paid: that stays already paid', async () => {
       const id = await tech('Sample Alpha');
       await settings(id);
@@ -875,6 +936,26 @@ postgres('production share pay line', () => {
       await trx('invoices').where({ id: invoiceId }).update({ scheduled_service_id: null });
       const root = await stop(id, weeks[1], '0.00', customerId, pkg);
       await trx('invoices').where({ id: invoiceId }).update({ scheduled_service_id: root });
+      const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+    });
+
+    it('AUDIT :537: a draft invoice linked to a paid stop is in its invoice history, and never in its dollars', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const first = await stop(id, W1, '1000.00', customerId);
+      const second = await stop(id, weeks[1], '1000.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '300.00', { scheduled_service_id: first, status: 'draft' });
+      const week1 = (await draft(W1)).body.run;
+      // the dollars come from the visit's own price, not from the draft
+      expect(byName(week1, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 100000 });
+      await finalize(week1.id);
+      expect((await snapshotStops(week1.id))[0].invoices).toEqual([invoiceId]);
+      // the draft is issued later and moves to the other visit: that visit is review, the invoice was paid with the first
+      await trx('invoices').where({ id: invoiceId }).update({ status: 'sent', scheduled_service_id: second });
       const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
       expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
     });
