@@ -486,6 +486,28 @@ describe('reschedule — shared occupancy conflict gate', () => {
         expect(reads(hoursOnly.trx, 'technicians')).toBe(false);
       });
 
+      // The stop's move tells the office once, on the technician each member will carry (visit-groups unitOfficeLines).
+      test('the office\'s own move of a visit group\'s member onto a day off: no line with the shift gate on, the day-off line with it off', async () => {
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        try {
+          const targetDow = new Date(`${TARGET}T12:00:00Z`).getUTCDay();
+          const dayOff = { techShift: ['08:00', '10:00'], techWorkDays: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== targetDow) };
+          const member = () => SmartRebooker.reschedule(
+            'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true },
+          );
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          wireRescheduleMocks(service(tech), dayOff);
+          expect(await member()).toMatchObject({ success: true });
+          wireRescheduleMocks(service(tech), dayOff);
+          expect((await member()).warnings).toBeUndefined();
+          delete process.env.GATE_TECH_SHIFT_HOURS;
+          wireRescheduleMocks(service(tech), dayOff);
+          expect((await member()).warnings).toEqual([expect.stringMatching(/^Tech does not work on \w+days\.$/)]);
+        } finally {
+          delete process.env.GATE_TECH_WORK_DAYS;
+        }
+      });
+
       test('gate off: a non-admin move outside the set hours commits as before, an hours-only move reads nothing, and neither pins more', async () => {
         const dated = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
         expect(await SmartRebooker.reschedule(

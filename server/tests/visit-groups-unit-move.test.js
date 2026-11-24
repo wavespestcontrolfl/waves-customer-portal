@@ -1320,6 +1320,68 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       expect((await unit(fakeRebooker(), undefined)).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
     });
 
+    describe('the office\'s own move is told once for the stop (D4 part 3c)', () => {
+      const LINE = "Tech's shift is 8:00 AM to 12:00 PM. This visit is outside those hours.";
+      let dayWarningFor;
+      beforeEach(() => { dayWarningFor = jest.spyOn(eligibility, 'dayWarningFor').mockResolvedValue(LINE); });
+      afterEach(() => dayWarningFor.mockRestore());
+      const asked = () => dayWarningFor.mock.calls.map(([technicianId, date, { block, shiftOnly }]) => ({ technicianId, date, block, shiftOnly }));
+      const sameDay = (members, options = {}) => {
+        db.__script = script({ members, landed: [
+          { id: 'a', scheduled_date: '2026-08-30', window_start: '13:00', window_end: '14:00', technician_id: options.technicianId || 't1' },
+          { id: 'b', scheduled_date: '2026-08-30', window_start: '14:00', window_end: '15:00', technician_id: options.technicianId || members[1].technician_id },
+        ] });
+        return moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', newWindow: '13:00-14:00', reason: 'office', initiatedBy: 'admin', options });
+      };
+
+      test('each service that will change is asked as the move leaves it, on the technician it will carry; one line comes back, and each write pins what its line read', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        db.__script = script({ members: pair({ estimated_duration_minutes: 45 }), landed: landed('13:00', '14:00', 't9') });
+        const rebooker = fakeRebooker();
+        const out = await unit(rebooker, '13:00-14:00', 'admin', { technicianId: 't9' });
+        expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(out.warnings).toEqual([LINE]);
+        expect(asked()).toEqual([
+          { technicianId: 't9', date: '2026-09-02', block: { window_start: '13:00', window_end: '14:00', estimated_duration_minutes: undefined }, shiftOnly: false },
+          { technicianId: 't9', date: '2026-09-02', block: { window_start: '14:00', window_end: '15:00', estimated_duration_minutes: 45 }, shiftOnly: false },
+        ]);
+        expect(rebooker.reschedule.mock.calls.map((c) => [c[0], c[5].expect.window_start, c[5].expect.window_end, c[5].expect.estimated_duration_minutes]))
+          .toEqual([['a', '09:00', '10:00', null], ['b', '10:00', '11:00', 45]]);
+      });
+
+      test('new hours on the stop\'s own day: a service that keeps its technician is asked the shift alone; one the move hands to another technician is not', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        expect((await sameDay(pair())).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(asked().map((x) => [x.technicianId, x.date, x.shiftOnly])).toEqual([['t1', '2026-08-30', true], ['t1', '2026-08-30', true]]);
+        dayWarningFor.mockClear();
+        // The move names t9: a is on t1 (it changes technician), b is on t9 already.
+        expect((await sameDay(pair({ technician_id: 't9' }), { technicianId: 't9' })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(asked().map((x) => [x.technicianId, x.shiftOnly])).toEqual([['t9', false], ['t9', true]]);
+      });
+
+      test('a service with no technician is not asked, and its write pins no length', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        db.__script = script({ members: pair({ technician_id: null }), landed: [landed('13:00', '14:00')[0], { ...landed('13:00', '14:00')[1], technician_id: null }] });
+        const rebooker = fakeRebooker();
+        expect((await unit(rebooker, '13:00-14:00', 'admin')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(asked().map((x) => x.technicianId)).toEqual(['t1']);
+        expect(rebooker.reschedule.mock.calls.map((c) => [c[0], 'estimated_duration_minutes' in c[5].expect])).toEqual([['a', true], ['b', false]]);
+      });
+
+      test('gate off, or a move the office did not start: not asked, and no line', async () => {
+        db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
+        const off = await unit(fakeRebooker(), '13:00-14:00', 'admin');
+        expect(off.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(off.warnings).toBeUndefined();
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
+        const automatic = await unit(fakeRebooker(), '13:00-14:00', 'tech');
+        expect(automatic.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(automatic.warnings).toBeUndefined();
+        expect(dayWarningFor).not.toHaveBeenCalled();
+      });
+    });
+
     test('the office\'s own move is not judged, and no shift is read', async () => {
       db.__script = script({ members: pair(), landed: landed('14:00', '15:00') });
       const rebooker = fakeRebooker();
@@ -1363,12 +1425,12 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       await expect(unit(fakeRebooker(), undefined, 'tech', { expect: { window_end: '10:30' } })).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
       db.__script = script({ members: pair(), landed: landed('09:00', '10:00') });
       expect((await unit(fakeRebooker(), undefined, 'tech', { expect: { window_start: '9:00', window_end: '10:00:00' } })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-      // The office's own move keeps the caller's fence for the write to judge, as before: no key is added.
+      // The office's own move keeps the caller's fence for the write to judge, as before: it is not refused here.
+      // Its first service is told about (D4 part 3c), so the write pins the stored hours and the length its line read.
       db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
       const office = fakeRebooker();
       expect((await unit(office, '13:00-14:00', 'admin', { expect: { technician_id: 't9' } })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-      expect(office.reschedule.mock.calls[0][5].expect).toMatchObject({ technician_id: 't9' });
-      expect('window_start' in office.reschedule.mock.calls[0][5].expect).toBe(false);
+      expect(office.reschedule.mock.calls[0][5].expect).toMatchObject({ technician_id: 't9', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: null });
       // A first service no shift judged (its technician has no set hours): another technician is still stale, because
       // no verdict was for that technician. Another length is not: no verdict used a length.
       delete shifts.t1;

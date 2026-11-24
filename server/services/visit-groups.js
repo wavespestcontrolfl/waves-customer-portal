@@ -1784,6 +1784,34 @@ function memberOutsideShift(shiftOf, date, landings, judged = {}) {
 }
 
 /**
+ * GATE_TECH_SHIFT_HOURS (D4 part 3c): what the office is told about its own move
+ * of a grouped stop. One answer for the unit, at the plan and under the stop
+ * lock: for each member that will change, on the technician it will carry (the
+ * named one, else its own), the day-off line, or, on a day that technician
+ * works, the shift line when the shift does not hold the member as the move
+ * leaves it (technician-eligibility dayWarningFor). A member the move leaves on
+ * its day and its technician (`from`) is asked the shift alone. A member's
+ * own move through the rebooker then states nothing (officeSlotTechnician): it
+ * runs on the technician the member has, which the unit's move may change.
+ * `read` takes the stored length each line was about; that member's own write
+ * pins it (shiftPin). Gate off: no read here, and the members' own moves state
+ * the day-off line as before.
+ */
+async function unitOfficeLines(t, date, landings, read) {
+  if (!require('../config/feature-gates').techShiftHoursLive()) return [];
+  const lines = new Set();
+  for (const landing of landings.filter((x) => x.technicianId)) {
+    const line = await require('./technician-eligibility').dayWarningFor(landing.technicianId, date, {
+      conn: t, block: { window_start: landing.start, window_end: landing.end, estimated_duration_minutes: landing.durationMinutes },
+      shiftOnly: landing.from.date === date && landing.from.technicianId === landing.technicianId,
+    });
+    read[landing.id] = landing.durationMinutes ?? null;
+    if (line) lines.add(line);
+  }
+  return [...lines];
+}
+
+/**
  * GATE_TECH_SHIFT_HOURS, read-only: moveVisitAsUnit's shift check as a test of
  * one placement, for a list whose pick commits as an automatic move of
  * `service` with the technicians kept (the tech app's rain-out sheets).
@@ -2184,20 +2212,28 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // does not hold refuses the whole unit as a clash does (SLOT_TAKEN),
         // so no group is moved in part. The office's own move is not checked.
         // Gate off: loadTechShifts answers "no shift" before any read.
-        // shiftJudgedLengths: the length each judged member's verdict used,
-        // read here under the stop lock. That member's own move pins it.
+        // shiftJudgedLengths: the length each member's verdict, or the office's
+        // line, used, read here under the stop lock. That member's own move
+        // pins it.
         const shiftJudgedLengths = {};
-        if (initiatedBy !== 'admin') {
-          // A member's own move takes its new window as a range in minutes
-          // (the rebooker's parseWindow reads no other range string); for any
-          // other range string it keeps the row's stored hours, as on main (a
-          // requested time sent with seconds, "09:00:00"). So such a member
-          // is judged where its write leaves it: at its stored hours.
-          const keepsStored = (index) => typeof targets[index].window === 'string' && !/^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/.test(targets[index].window);
-          const landings = members.map((m, index) => ({
-            id: m.id, start: keepsStored(index) ? m.window_start : planned[index].start, end: keepsStored(index) ? m.window_end : planned[index].end, durationMinutes: m.estimated_duration_minutes,
-            technicianId: options.technicianId !== undefined ? (options.technicianId || null) : (m.technician_id || null),
-          })).filter((landing, index) => !targets[index].alreadyAtTarget);
+        // A member's own move takes its new window as a range in minutes
+        // (the rebooker's parseWindow reads no other range string); for any
+        // other range string it keeps the row's stored hours, as on main (a
+        // requested time sent with seconds, "09:00:00"). So such a member
+        // is judged where its write leaves it: at its stored hours.
+        const keepsStored = (index) => typeof targets[index].window === 'string' && !/^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/.test(targets[index].window);
+        const landings = members.map((m, index) => ({
+          id: m.id, start: keepsStored(index) ? m.window_start : planned[index].start, end: keepsStored(index) ? m.window_end : planned[index].end, durationMinutes: m.estimated_duration_minutes,
+          technicianId: options.technicianId !== undefined ? (options.technicianId || null) : (m.technician_id || null),
+          // Where the member is now: the office's line needs it (unitOfficeLines).
+          from: { date: dateOnly(m.scheduled_date), technicianId: m.technician_id || null },
+        })).filter((landing, index) => !targets[index].alreadyAtTarget);
+        const dayLines = [];
+        if (initiatedBy === 'admin') {
+          // The office's own move is told, never refused (D4 part 3c): one
+          // answer for the unit, on the technician each member will carry.
+          dayLines.push(...await unitOfficeLines(t, newDateStr, landings, shiftJudgedLengths));
+        } else {
           const shiftOf = await require('./technician-eligibility').loadTechShifts(t, { technicianIds: [...new Set(landings.map((x) => x.technicianId).filter(Boolean).map(String))] });
           const outside = memberOutsideShift(shiftOf, newDateStr, landings, shiftJudgedLengths);
           if (outside != null) {
@@ -2226,7 +2262,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         }
         return {
           visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
-          customerId: visit.customer_id, propertyId: visit.property_id, techClashWarnings, shiftJudgedLengths,
+          customerId: visit.customer_id, propertyId: visit.property_id, techClashWarnings, dayLines, shiftJudgedLengths,
           targets, memberIds: members.map((m) => m.id),
           anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
           primary,
@@ -2506,7 +2542,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   };
   const moved = [];
   const failed = [];
-  const warnings = [...(plan.techClashWarnings || [])];
+  const warnings = [...(plan.techClashWarnings || []), ...plan.dayLines];
   let primaryResult = null;
   // technicianId is NOT forwarded to sibling moves (codex r15 P1): the
   // rebooker writes technician_id directly, bypassing the canonical
@@ -2600,8 +2636,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // move of the day alone carries them to the new day, and the other
     // members shift by the first service's stored start. A sibling's fence
     // has them already; the first service's loses them when the caller sends
-    // a fence of its own. Not judged (gate off, the office's move, no set
-    // hours): no key is added.
+    // a fence of its own. The office's own move pins the same for each member
+    // its line was about (unitOfficeLines). Not judged and not told (gate off,
+    // no set hours on an automatic move): no key is added.
     const shiftPin = Object.prototype.hasOwnProperty.call(plan.shiftJudgedLengths, target.id)
       ? { window_start: target.expect.window_start, window_end: target.expect.window_end, estimated_duration_minutes: plan.shiftJudgedLengths[target.id] } : {};
     const primaryExpect = {

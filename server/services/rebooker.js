@@ -39,14 +39,15 @@ const automaticShiftLive = (initiatedBy) => initiatedBy !== 'admin' && techShift
 // reads): the day-off line, or, on a day the technician works, the shift line when the
 // shift does not hold `landed`, the row as the move leaves it
 // (technician-eligibility.dayWarningFor). A move that changes only the hours is told
-// the shift line alone. Not for a grouped stop's member (`unitMember`): the unit's
-// move may hand it to another technician after this call, so its shift is not this
-// call's to state.
+// the shift line alone. A grouped stop's member (`unitMember`) states nothing with the
+// shift gate on: the unit's move may hand it to another technician after this call, and
+// tells the office once, on the technician each member will carry (visit-groups
+// unitOfficeLines). Gate off: the member's day-off line, as before.
 async function officeSlotTechnician(technicianId, trx, date, { warnings, shiftOnly, landed, unitMember }) {
   if (!shiftOnly) await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: false });
-  if (!warnings) return;
+  if (!warnings || (unitMember && techShiftHoursLive())) return;
   const line = await require('./technician-eligibility').dayWarningFor(technicianId, String(date).slice(0, 10), {
-    conn: trx, block: unitMember ? null : landed, shiftOnly,
+    conn: trx, block: landed, shiftOnly,
   });
   if (line) warnings.add(line);
 }
