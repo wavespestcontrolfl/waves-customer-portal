@@ -2804,15 +2804,22 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               // rebooker's own order.
               const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
               await acquireOccupancyLock(t, newDateStr);
-              await t.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['slot-reserve', `${options.technicianId}:${newDateStr}`]);
+              // Both tech-days the assignment will lock (the row's current
+              // technician and the destination), in the canonical order and
+              // BEFORE the row lock, so a route reorder holding one of them
+              // cannot wait on this row while this waits on it.
+              const current = await t('scheduled_services').where({ id: target.id }).first('technician_id');
+              await require('./scheduling/tech-day-lock').lockTechDays(t, [
+                { techId: current ? current.technician_id : null, date: newDateStr },
+                { techId: options.technicianId, date: newDateStr },
+              ]);
               // the row's COMMITTED window (a start-only landing derived its end); the landed contract is the fallback
               // Lock and read the allocation stamp in the SAME transaction
               // that reassigns the row. A capacity allocation appearing
               // after the time move therefore reaches moveGuard and stays
               // locked through assignDispatchJob instead of being split.
               const row = await t('scheduled_services').where({ id: target.id }).forUpdate()
-                .first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type', 'reservation_service_mix')
-                .catch(() => null);
+                .first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type', 'reservation_service_mix');
               const windowStart = (row && row.window_start) || landed.window_start || target.startHHMM || null;
               const windowEnd = (row && row.window_end) || landed.window_end || null;
               const probeEnd = windowEnd ? String(windowEnd).slice(0, 5) : (windowStart ? shiftClock(String(windowStart).slice(0, 5), Number(row && row.estimated_duration_minutes) || 60) : null);

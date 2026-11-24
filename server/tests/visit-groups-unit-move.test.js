@@ -1759,3 +1759,16 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
     });
   });
 });
+
+describe('the member assignment transaction locks both tech-days before it locks the row', () => {
+  test('lockTechDays comes first and a failed row lock (a deadlock) is not swallowed', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'visit-groups.js'), 'utf8');
+    const at = src.indexOf("await acquireOccupancyLock(t, newDateStr);");
+    expect(at).toBeGreaterThan(0);
+    const block = src.slice(at, src.indexOf('const windowStart = (row && row.window_start)', at));
+    expect(block.indexOf('lockTechDays')).toBeGreaterThan(0);
+    expect(block.indexOf('lockTechDays')).toBeLessThan(block.indexOf('.forUpdate()'));
+    expect(block).toContain('technician_id: options.technicianId');
+    expect(block).not.toContain('.catch(');
+  });
+});
