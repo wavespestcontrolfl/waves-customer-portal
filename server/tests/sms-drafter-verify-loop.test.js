@@ -816,6 +816,8 @@ describe('generateGroundedDraft — factsGeneratedAt is the exact instant the SL
     // generateGroundedDraft would otherwise capture with `new Date()`.
     jest.useFakeTimers({ toFake: ['Date'], now: new Date('2026-09-28T23:59:00.000Z') });
     const drafter = require('../services/sms-shadow-drafter');
+    // the closure read is its own seam (an open calendar here); an unreadable one gives the untimed phrase
+    jest.spyOn(require('../services/sms-followup-sla'), 'loadFollowupClosedDates').mockResolvedValue(new Set());
     const client = makeClient([
       { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate', note: 'followup_promised' }], missing_info: null },
       { supported: true, violations: [] },
@@ -835,6 +837,8 @@ describe('generateGroundedDraft — factsGeneratedAt is the exact instant the SL
   test('drafted one minute later, past the boundary, returns the later instant and the "tomorrow morning" phrase', async () => {
     jest.useFakeTimers({ toFake: ['Date'], now: new Date('2026-09-29T00:01:00.000Z') }); // Mon 20:01 ET
     const drafter = require('../services/sms-shadow-drafter');
+    // the closure read is its own seam (an open calendar here); an unreadable one gives the untimed phrase
+    jest.spyOn(require('../services/sms-followup-sla'), 'loadFollowupClosedDates').mockResolvedValue(new Set());
     const client = makeClient([
       { reply: 'So sorry about that — a manager will reach out by 9 AM tomorrow morning.', intended_actions: [{ type: 'escalate', note: 'followup_promised' }], missing_info: null },
       { supported: true, violations: [] },
