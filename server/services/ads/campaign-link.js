@@ -122,7 +122,12 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
   const eligible = (await conn('ad_service_attribution')
     .where('lead_source', 'google_ads')
     .whereNotNull('gclid').whereNull('campaign_id').whereNotNull('lead_date')
-    .orderBy('lead_date', 'desc')
+    // Expired leads never load, unless Google already named their campaign.
+    .where((q) => {
+      q.where('lead_date', '>=', windowStart);
+      const named = Object.keys(tried).filter((id) => tried[id]?.google_campaign_id);
+      if (named.length) q.orWhereIn('id', named);
+    })
     .select('id', 'gclid', 'lead_date'))
     // A lead past the click window stays only when Google already named its campaign (it waits for the local row).
     .filter((r) => GCLID_RE.test(String(r.gclid)) && (dayString(r.lead_date) >= windowStart || tried[r.id]?.google_campaign_id));
