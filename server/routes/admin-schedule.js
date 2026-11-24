@@ -15384,6 +15384,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
     // (move probe + recurrence guards) — returned as `warnings` so the
     // modal can say what stacked.
     const editWarnings = [];
+    // The day-off / shift line of the edited visit was asked for a new day or a new technician.
+    let dayLineAsked = false;
     const useArrivalWindows = require('../services/scheduling/arrival-route').arrivalWindowRoutingEnabled();
     // Rung-1 lock set for every date this save's recurrence paths can write
     // (cadence rewrite moves, make-recurring spawn, visit-count / ongoing
@@ -15701,6 +15703,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           // same read says when the shift does not hold the visit as this save
           // leaves it: the row's hours and length, with this save's own (dayWarningFor).
           const offDayLine = await require('../services/technician-eligibility').dayWarningFor(finalTechnicianId, finalDate, { conn: trx, block: { ...eligibilityRow, ...updates } });
+          dayLineAsked = true;
           if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
           // Job type (GATE_TECH_JOB_TYPE_CHECKS): a technician set to Off for this visit's
           // category. Advisory, never a block ([] with the gate off).
@@ -16258,11 +16261,25 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             // non-null end and the visit went invisible to occupancy.
             updates.window_end = occEnd;
           }
+          const lengthChanged = updates.estimated_duration_minutes !== undefined
+            && Number(updates.estimated_duration_minutes) !== Number(occRow.estimated_duration_minutes);
+          // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): a save that keeps the
+          // visit's day and technician and changes its hours or its length is told
+          // when the technician's shift does not hold the visit as this save leaves
+          // it: the locked row with this save's values. The shift line alone
+          // (`shiftOnly`): this save put no one on a new day. A save that changes the
+          // day or the technician was asked above (dayLineAsked), and is asked once.
+          // Gate off: no read.
+          if (!dayLineAsked && (!slotUnchanged || lengthChanged)) {
+            const shiftLine = await require('../services/technician-eligibility').dayWarningFor(savedTechnicianId(updates, occRow), occDate, {
+              conn: trx, block: { ...occRow, ...updates }, shiftOnly: true,
+            });
+            if (shiftLine) editWarnings.push(shiftLine);
+          }
           // A longer job or a different technician/order can break arrival
           // promises even when the nominal calendar block is unchanged.
           const arrivalRouteChanged = useArrivalWindows && (assignmentNeedsChange
-            || (updates.estimated_duration_minutes !== undefined
-              && Number(updates.estimated_duration_minutes) !== Number(occRow.estimated_duration_minutes))
+            || lengthChanged
             || (updates.route_order !== undefined && updates.route_order !== occRow.route_order));
           if ((!slotUnchanged || arrivalRouteChanged) && occDate && occStart && occEnd) {
             const adminMoveClash = await findConflictingVisits({

@@ -1066,6 +1066,29 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
         expect(hoursReads(dayOnly.calls)).toEqual([]);
       });
 
+      // D4 part 3c: an office save that keeps the visit's day and technician and changes its hours or its length.
+      test('shiftOnly: the shift line alone, none on a day the technician does not work, and no read with the shift gate off', async () => {
+        const offFridays = { tech: { ...TECH_ROW, work_days: [1, 2, 3, 4] } };
+        const only = (block, dates, made = commitConn(offFridays)) => dayWarningsFor('tech-1', dates, { conn: made.conn, block, shiftOnly: true });
+        // The shift gate off and the work-days gate on: nothing is read (without shiftOnly this is the day-off line).
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        const quiet = commitConn(offFridays);
+        expect(await only(visit('18:00', '19:00'), ['2031-03-07'], quiet)).toEqual([]);
+        expect(quiet.conn).not.toHaveBeenCalled();
+        gateOn();
+        // 2031-03-06 is a Thursday (a work day), 03-07 a Friday (a day off: no line of either kind).
+        expect(await only(visit('18:00', '19:00'), ['2031-03-06'])).toEqual([LINE]);
+        expect(await only(visit('18:00', '19:00'), ['2031-03-07'])).toEqual([]);
+        expect(await only(visit('18:00', '19:00'), ['2031-03-07', '2031-03-06'])).toEqual([LINE]);
+        expect(await only(visit('09:00', '10:00'), ['2031-03-06'])).toEqual([]);
+        const one = (date) => dayWarningFor('tech-1', date, { conn: commitConn(offFridays).conn, block: visit('18:00', '19:00'), shiftOnly: true });
+        expect(await one('2031-03-07')).toBeNull();
+        expect(await one('2031-03-06')).toBe(LINE);
+        // With the work-days gate off no day is a day off: the Friday is told.
+        delete process.env.GATE_TECH_WORK_DAYS;
+        expect(await only(visit('18:00', '19:00'), ['2031-03-07'])).toEqual([LINE]);
+      });
+
       test('each read stands alone: a failed read of the hours keeps the day-off line, a failed read of the name keeps the shift line', async () => {
         gateOn();
         process.env.GATE_TECH_WORK_DAYS = 'true';

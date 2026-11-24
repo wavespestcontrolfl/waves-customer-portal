@@ -191,6 +191,45 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
     expect(shiftLines(await move(off, dayAfter(nextDay), { start: '13:00', end: '14:00' }, 'admin', { overlapAdvisory: true }))).toEqual([]);
   });
 
+  // A calendar drag or resize: the day and the technician stay. On main, and before this part, the office's
+  // own move then asks nothing about the technician.
+  test('the office\'s own move that changes only the hours is told the shift; inside the shift, and with the gate off, no line', async () => {
+    const id = await seed();
+    const outside = await move(id, f.date, { start: '13:00', end: '14:00' }, 'admin', { overlapAdvisory: true });
+    expect(outside).toMatchObject({ success: true });
+    expect(shiftLines(outside)).toEqual([OFFICE_LINE]);
+    expect(await rowOf(id)).toMatchObject({ day: f.date, window_start: '13:00:00', window_end: '14:00:00' });
+    expect(shiftLines(await move(id, f.date, { start: '10:00', end: '11:00' }, 'admin', { overlapAdvisory: true }))).toEqual([]);
+    // A resize: the same start, and an end after the shift.
+    expect(shiftLines(await move(id, f.date, { start: '10:00', end: '13:00' }, 'admin', { overlapAdvisory: true }))).toEqual([OFFICE_LINE]);
+    delete process.env.GATE_TECH_SHIFT_HOURS;
+    const off = await move(id, f.date, { start: '14:00', end: '15:00' }, 'admin', { overlapAdvisory: true });
+    expect(off).toMatchObject({ success: true });
+    expect(shiftLines(off)).toEqual([]);
+  });
+
+  test('the office\'s own hours-only move is told the shift alone: on a day the technician does not work there is no line, and a technician marked out is not refused', async () => {
+    const dow = new Date(`${f.date}T12:00:00Z`).getUTCDay();
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    try {
+      const id = await seed();
+      await f.db('technician_absences').insert({ technician_id: f.ids.technician, absence_date: f.date, reason: 'synthetic' });
+      // Marked out on the visit's day: the day's rules are not asked of a move that keeps the day.
+      const markedOut = await move(id, f.date, { start: '13:00', end: '14:00' }, 'admin', { overlapAdvisory: true });
+      expect(markedOut).toMatchObject({ success: true });
+      expect(shiftLines(markedOut)).toEqual([OFFICE_LINE]);
+      // The visit's day is a day off: the office put the visit there and was told then.
+      await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== dow) });
+      const dayOff = await move(id, f.date, { start: '14:00', end: '15:00' }, 'admin', { overlapAdvisory: true });
+      expect(dayOff).toMatchObject({ success: true });
+      expect(dayOff.warnings || []).toEqual([]);
+    } finally {
+      delete process.env.GATE_TECH_WORK_DAYS;
+      await f.db('technician_absences').del();
+      await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: null });
+    }
+  });
+
   // A visit group moves each member through reschedule (skipVisitSeam) and may name a technician
   // that call does not see. The group is judged as one unit, so a member is not judged alone here.
   test('a visit group\'s member move is not judged alone here', async () => {
@@ -236,6 +275,21 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       expect(await rowOf(id)).toEqual({ ...asSeeded, technician_id: f.ids.otherTech });
     });
 
+    // The office's line names a technician's shift and is about the visit's stored length. A move that was told
+    // (a new day, or new hours on the same day) writes only the row it was told about.
+    test('the office\'s own move: a reassignment or a longer job after its read ends the move as a concurrent change', async () => {
+      const board = (id, patch) => ({ overlapAdvisory: true, ...edit(id, patch) });
+      const id = await seed();
+      await expect(move(id, nextDay, { start: '10:00', end: '11:00' }, 'admin', board(id, { estimated_duration_minutes: 240 })))
+        .rejects.toMatchObject({ statusCode: 409 });
+      expect(await rowOf(id)).toEqual(asSeeded);
+      await expect(move(id, f.date, { start: '10:00', end: '11:00' }, 'admin', board(id, { estimated_duration_minutes: 300 })))
+        .rejects.toMatchObject({ statusCode: 409 });
+      await expect(move(id, f.date, { start: '10:00', end: '11:00' }, 'admin', board(id, { technician_id: f.ids.otherTech })))
+        .rejects.toMatchObject({ statusCode: 409 });
+      expect(await rowOf(id)).toEqual({ ...asSeeded, technician_id: f.ids.otherTech });
+    });
+
     test('gate off: the same two edits do not stop the move, as before', async () => {
       delete process.env.GATE_TECH_SHIFT_HOURS;
       await otherShift('08:00', '12:00');
@@ -247,6 +301,11 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       expect(await move(longer, nextDay, { start: '10:00', end: '11:00' }, 'customer', edit(longer, { estimated_duration_minutes: 240 })))
         .toMatchObject({ success: true });
       expect(await rowOf(longer)).toMatchObject({ day: nextDay, window_start: '10:00:00', window_end: '11:00:00' });
+      // The office's own hours-only move the same.
+      const office = await seed();
+      expect(await move(office, f.date, { start: '10:00', end: '11:00' }, 'admin', { overlapAdvisory: true, ...edit(office, { estimated_duration_minutes: 240 }) }))
+        .toMatchObject({ success: true });
+      expect(await rowOf(office)).toMatchObject({ day: f.date, window_start: '10:00:00', window_end: '11:00:00' });
     });
   });
 
@@ -1080,11 +1139,68 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       expect(await daysOf(later)).toEqual(moved);
     });
 
-    test('the office\'s own series move inside the shift has no line', async () => {
+    // The office's own plan move that keeps the tapped visit's day (a calendar drag with a plan scope).
+    const officeSameDay = (ids, window, options = {}) => SmartRebooker.rescheduleSeries(ids[0], f.date, window, 'admin', 'admin', { sourceSurface: 'dispatch_board', overlapAdvisory: true, ...options });
+
+    test('the office\'s own series move that changes only the tapped visit\'s hours is told the shift for it; a later visit it leaves where it is is not asked about', async () => {
+      // The second visit is at 12:00 to 13:00, past the shift end. A same-day move does not touch it.
+      const ids = await seedSeries({ 1: { window_start: '12:00', window_end: '13:00' } });
+      expect(shiftLines(await officeSameDay(ids, { start: '11:00', end: '12:00' }))).toEqual([]);
+      const outside = await officeSameDay(ids, { start: '13:00', end: '14:00' });
+      expect(outside).toMatchObject({ success: true });
+      expect(shiftLines(outside)).toEqual([OFFICE_LINE]);
+      expect(await rowOf(ids[0])).toMatchObject({ day: f.date, window_start: '13:00:00', window_end: '14:00:00' });
+      expect(await daysOf(ids)).toEqual(seeded);
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      expect(shiftLines(await officeSameDay(ids, { start: '14:00', end: '15:00' }))).toEqual([]);
+    });
+
+    test('the office\'s own hours-only series move on a day the technician does not work has no line', async () => {
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: [new Date(`${nextDay}T12:00:00Z`).getUTCDay()] });
+      try {
+        const ids = await seedSeries();
+        const result = await officeSameDay(ids, { start: '13:00', end: '14:00' });
+        expect(result).toMatchObject({ success: true });
+        expect(result.warnings || []).toEqual([]);
+      } finally {
+        delete process.env.GATE_TECH_WORK_DAYS;
+        await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: null });
+      }
+    });
+
+    test('the office\'s own series move: an edit of the tapped visit\'s length after its line ends the move as a concurrent change', async () => {
       const ids = await seedSeries();
-      const result = await moveSeries(ids, fits, 'admin', { sourceSurface: 'dispatch_board', overlapAdvisory: true });
-      expect(result).toMatchObject({ success: true, occurrencesRescheduled: 3 });
-      expect(shiftLines(result)).toEqual([]);
+      // On a second connection, right after the office's line was read and before the tapped visit's write.
+      const eligibility = require('../services/technician-eligibility');
+      const ask = eligibility.dayWarningFor;
+      const spy = jest.spyOn(eligibility, 'dayWarningFor').mockImplementation(async (...args) => {
+        const line = await ask(...args);
+        await dispatchEdit(ids[0], { estimated_duration_minutes: 90 });
+        return line;
+      });
+      try {
+        await expect(officeSameDay(ids, { start: '13:00', end: '14:00' })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/changed concurrently/) });
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await rowOf(ids[0])).toMatchObject({ day: f.date, window_start: '09:00:00', window_end: '10:00:00' });
+    });
+
+    test('the office\'s own series move inside the shift has no line; each visit that changes day is asked once', async () => {
+      const ids = await seedSeries();
+      const eligibility = require('../services/technician-eligibility');
+      const spy = jest.spyOn(eligibility, 'dayWarningFor');
+      try {
+        const result = await moveSeries(ids, fits, 'admin', { sourceSurface: 'dispatch_board', overlapAdvisory: true });
+        expect(result).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+        expect(shiftLines(result)).toEqual([]);
+        // The tapped visit takes a new day and new hours: it is asked with its day, not a second time for its hours.
+        expect(spy).toHaveBeenCalledTimes(3);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test('gate off: the same moves land and the same edit does not stop the move, as before', async () => {

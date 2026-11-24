@@ -157,11 +157,16 @@ function shiftWarning(tech, shift, hours) {
  * failed read can never abort the caller's transaction; a failed read gives no
  * line of its kind and keeps the other kind's (an advisory line never blocks
  * a save).
+ * `shiftOnly`: an office save that keeps the visit's day and technician and
+ * changes its hours or its length (D4 part 3c). It put no one on a new day, so
+ * it is told the shift line alone: no day-off line, no line on a day the
+ * technician does not work (the shift is not that day's), and no read with
+ * GATE_TECH_SHIFT_HOURS off.
  */
-async function dayWarningsFor(technicianId, dates, { conn = db, block = null } = {}) {
+async function dayWarningsFor(technicianId, dates, { conn = db, block = null, shiftOnly } = {}) {
   const list = (Array.isArray(dates) ? dates : [dates]).filter(Boolean);
   const hours = techShiftHoursLive() && block ? require('./scheduling/window-rules').rowBlockMinutes(block) : null;
-  if (!(techWorkDaysLive() || isBlock(hours)) || !technicianId || !list.length) return [];
+  if (!((techWorkDaysLive() && !shiftOnly) || isBlock(hours)) || !technicianId || !list.length) return [];
   const guarded = async (read, failed) => {
     try {
       return await (conn.isTransaction && typeof conn.transaction === 'function' ? conn.transaction((sp) => read(sp)) : read(conn));
@@ -174,15 +179,16 @@ async function dayWarningsFor(technicianId, dates, { conn = db, block = null } =
   const shiftOf = isBlock(hours) ? await guarded((c) => loadTechShifts(c, { technicianIds: [technicianId] }), noShift) : noShift;
   const lines = new Set();
   for (const date of [...list].sort()) {
-    const line = offDayWarning(tech, date) || shiftWarning(tech, shiftOf(technicianId, date), hours);
+    const offDay = offDayWarning(tech, date);
+    const line = offDay ? !shiftOnly && offDay : shiftWarning(tech, shiftOf(technicianId, date), hours);
     if (line) lines.add(line);
   }
   return [...lines];
 }
 
 /** dayWarningsFor for one date: its line (the day-off line or the shift line), or null. */
-async function dayWarningFor(technicianId, dateStr, { conn = db, block = null } = {}) {
-  const [line] = await dayWarningsFor(technicianId, [dateStr], { conn, block });
+async function dayWarningFor(technicianId, dateStr, { conn = db, block = null, shiftOnly } = {}) {
+  const [line] = await dayWarningsFor(technicianId, [dateStr], { conn, block, shiftOnly });
   return line || null;
 }
 
