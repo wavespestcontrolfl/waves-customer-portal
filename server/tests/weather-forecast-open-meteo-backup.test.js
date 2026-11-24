@@ -66,6 +66,17 @@ describe('weather-forecast Open-Meteo backup', () => {
     spy.mockRestore();
   });
 
+  test('a long NWS read is not shared: a short reader at the same point makes its own read', async () => {
+    let release;
+    global.fetch.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const long = getNwsHourlyRain(27.65, -82.65, { fetchTimeoutMs: 10000 });
+    global.fetch.mockResolvedValueOnce({ ok: false });
+    expect(await getNwsHourlyRain(27.65, -82.65)).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(2); // its own read, not a wait on the long one
+    release({ ok: false });
+    expect(await long).toBeNull();
+  });
+
   test('getNwsHourlyRain: a cached backup answer is not used; its NWS answer is cached and reused', async () => {
     process.env.OPEN_METEO_API_KEY = 'test-key';
     // Another reader cached a backup answer for this point.

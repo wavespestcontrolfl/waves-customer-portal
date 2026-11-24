@@ -391,7 +391,10 @@ async function getNwsHourlyRain(lat, lng, { fetchTimeoutMs = FETCH_TIMEOUT_MS } 
   const cached = _hourlyCache.get(key);
   const fromNws = (hours) => Array.isArray(hours) && !hours.some((h) => h.source === 'open-meteo');
   if (cached && Date.now() - cached.at < HOURLY_CACHE_TTL_MS && fromNws(cached.value)) return cached.value;
-  const nws = await nwsHourlyShared(latNum, lngNum, key, Date.now() + 2 * fetchTimeoutMs, false, fetchTimeoutMs);
+  // A longer read is never published as the shared in-flight read: a reader with a short budget that joined it would
+  // wait past the time it keeps for its own backup.
+  const longer = fetchTimeoutMs > FETCH_TIMEOUT_MS;
+  const nws = await nwsHourlyShared(latNum, lngNum, key, Date.now() + 2 * fetchTimeoutMs, longer, fetchTimeoutMs);
   if (nws) cachePut(_hourlyCache, key, { at: Date.now(), value: nws }, HOURLY_CACHE_TTL_MS);
   return nws;
 }
