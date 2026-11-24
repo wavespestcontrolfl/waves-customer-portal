@@ -913,6 +913,11 @@ const PINNED_DISPLAY_BUILDERS = {
   reprice_future_visits: (_params, preview) => (preview?.preview === true
     ? { customer: preview.customer_name, ...(preview.property_label ? { property: preview.property_label } : {}), service: preview.service_label, new_price: `${preview.new_price} per visit` }
     : null),
+  // book_plan_visits: the card names the customer, the address, the service and cadence; every visit date and the
+  // text line ride the contract's curated lines (authorization-contract.js).
+  book_plan_visits: (_params, preview) => (preview?.preview === true && preview.visits
+    ? { customer: preview.customer_name, address: preview.address, service: `${preview.service} (${preview.cadence})`, first_visit: preview.visits[0]?.date }
+    : null),
   // The card names the invoice, what the receipt states, whether this is a
   // re-send, and who it reaches — never just the raw invoice id the model sent.
   resend_receipt: (params, preview) => (preview?.preview === true
@@ -1120,6 +1125,9 @@ const VERIFIED_VERSION_PARAMS = {
   // reprice_future_visits binds every listed visit's id, date, status, price
   // and row version (reprice-visits-tools.js plan version).
   reprice_future_visits: '_verified_reprice_version',
+  // book_plan_visits binds the exact create body, every planned date, the price, the property, the technician and the
+  // customer's billing fields the card showed (book-plan-visits-tools.js _version).
+  book_plan_visits: '_verified_book_plan_version',
   // create_customer_link binds the customer, kind and the phone (last ten)
   // the card showed; a number changed since is refused at commit
   // (customer-link-tools.js pinnedVersionRefusal).

@@ -1,0 +1,459 @@
+/**
+ * book_plan_visits (owner 2026-11-24, "book a recurring plan from the bar"): the Intelligence Bar books a recurring
+ * visit series for ONE existing customer who already has (or had) a plan for the same service, through the
+ * Schedule screen's own create handler (createScheduleBooking). The narrow re-cut of the closed start_program card:
+ * visits only, no bill, no welcome text.
+ *
+ * Scenario: a quarterly pest customer whose series ran out (a completed parent row) is booked back onto quarterly
+ * visits from 2099-03-02 at 9:00 AM. The card lists every date, the first visit sends its confirmation text, and
+ * Confirm makes exactly one createScheduleBooking call with the pinned body. Synthetic names only.
+ */
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+jest.setTimeout(30000);
+
+const tables = {};
+const writes = [];
+
+// Table-aware fake: where/first/select return the seeded rows for that table; any write is recorded so the suite can
+// prove the preview never writes.
+jest.mock('../models/db', () => {
+  const builder = (table) => {
+    const q = {};
+    for (const m of ['whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'whereIn', 'andWhere', 'orderBy', 'orWhereNot', 'limit', 'whereRaw', 'leftJoin', 'forUpdate', 'forShare', 'modify']) q[m] = () => q;
+    q.where = () => q;
+    q.first = () => Promise.resolve((tables[table] || [])[0]);
+    q.select = () => q;
+    q.columnInfo = () => Promise.resolve({});
+    q.then = (resolve, reject) => Promise.resolve(tables[table] || []).then(resolve, reject);
+    for (const m of ['insert', 'update', 'del', 'delete']) q[m] = (...args) => { writes.push({ table, op: m, args }); return q; };
+    return q;
+  };
+  const db = jest.fn((table) => builder(table));
+  db.schema = { hasTable: async () => true };
+  db.raw = jest.fn();
+  db.fn = { now: jest.fn() };
+  db.transaction = jest.fn(async (cb) => cb(db));
+  return db;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
+const AdminSchedule = require('../routes/admin-schedule');
+const Seeder = require('../services/recurring-appointment-seeder');
+const PlanSync = require('../services/self-booking-plan-sync');
+const ServiceLibrary = require('../services/service-library');
+const { executeBookPlanVisitsTool, BOOK_PLAN_VISITS_TOOLS } = require('../services/intelligence-bar/book-plan-visits-tools');
+const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
+const { WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+const ActionRegistry = require('../services/intelligence-bar/action-registry');
+
+const CUSTOMER_ID = '00000000-0000-0000-0000-0000000bc001';
+const PROPERTY_ID = '00000000-0000-0000-0000-0000000bc002';
+const TECH_ID = '00000000-0000-0000-0000-0000000bc003';
+const SERVICE_ID = '00000000-0000-0000-0000-0000000bc004';
+const INPUT = { customer_id: CUSTOMER_ID, service_type: 'Quarterly Pest Control Service', scheduled_date: '2099-03-02', time_window: '9:00 AM' };
+// The Schedule create's own plan keeps a month cadence on the first visit's nth weekday (the 1st Monday here).
+const QUARTERLY_DATES = ['2099-03-02', '2099-06-01', '2099-09-07', '2099-12-07'];
+
+const confirmedInput = (card, input = INPUT) => ({ ...input, confirmed: true, _verified_book_plan_version: card._version });
+
+let schedule;
+let pricing;
+let syncVerdict;
+let openSeries;
+let bookingReply;
+
+function seed(overrides = {}) {
+  tables.customers = [{
+    id: CUSTOMER_ID, first_name: 'Robin', last_name: 'Sample', active: true, deleted_at: null, billing_mode: 'per_visit', payer_id: null,
+    monthly_rate: null, waveguard_tier: null, address_line1: '1 Example Way', city: 'Bradenton', state: 'FL', zip: '34205', ...overrides.customer,
+  }];
+  tables.services = overrides.services || [{
+    id: SERVICE_ID, name: 'Quarterly Pest Control Service', service_key: 'pest_quarterly', category: 'pest_control', billing_type: 'recurring',
+    frequency: 'quarterly', base_price: 89, is_active: true,
+  }];
+  // The earlier series: a finished parent for the same service.
+  tables.scheduled_services = overrides.series || [{
+    id: 'old-parent', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID,
+    service_type: 'Quarterly Pest Control Service', property_id: null, status: 'completed',
+  }];
+  tables.customer_properties = overrides.properties || [{ id: PROPERTY_ID, customer_id: CUSTOMER_ID, active: true, is_primary: true }];
+  tables.annual_prepay_terms = overrides.terms || [];
+  tables.technicians = overrides.technicians || [];
+}
+
+beforeEach(() => {
+  jest.restoreAllMocks();
+  writes.length = 0;
+  process.env.GATE_IB_BOOK_PLAN_VISITS = 'true';
+  seed();
+  pricing = { finalPrice: 89, primaryBase: 89, primaryDiscount: null, appointmentDiscount: null, addonLines: [] };
+  syncVerdict = { writes: false, reason: 'no_change' };
+  openSeries = [];
+  schedule = jest.spyOn(AdminSchedule, 'planCreateSeriesDates');
+  jest.spyOn(AdminSchedule, 'buildAppointmentPricing').mockImplementation(async () => pricing);
+  jest.spyOn(Seeder, 'findActiveRecurringSeries').mockImplementation(async () => openSeries);
+  jest.spyOn(PlanSync, 'bookingWouldChangeCustomerPlan').mockImplementation(async () => syncVerdict);
+  jest.spyOn(ServiceLibrary, 'retiredServicesNotHeldBy').mockResolvedValue([]);
+  bookingReply = {
+    status: 201,
+    json: { id: 'visit-1', recurringCreated: 4, appointments: QUARTERLY_DATES.map((date, i) => ({ id: `visit-${i + 1}`, date })), warnings: [] },
+  };
+  jest.spyOn(AdminSchedule, 'createScheduleBooking').mockImplementation(async () => bookingReply);
+});
+
+afterEach(() => { delete process.env.GATE_IB_BOOK_PLAN_VISITS; });
+
+const propose = (input = INPUT, ctx) => executeBookPlanVisitsTool('book_plan_visits', input, ctx);
+
+describe('the card', () => {
+  test('lists every planned visit date, who, where, what it costs and that the confirmation text goes; writes nothing', async () => {
+    const card = await propose();
+    expect(card.error).toBeUndefined();
+    expect(card).toMatchObject({
+      preview: true, customer_name: 'Robin S.', address: '1 Example Way, Bradenton, FL 34205',
+      service: 'Quarterly Pest Control Service', cadence: 'quarterly', ongoing: true, technician: null,
+      price_per_visit: '$89.00', send_texts: true, notifies_customer: true,
+    });
+    expect(card.visits.map((v) => v.date)).toEqual(QUARTERLY_DATES);
+    expect(card.visits.every((v) => v.window === '9:00 AM')).toBe(true);
+    expect(writes).toEqual([]);
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('the dates come from the Schedule create\'s own planner, run once with the same body the booking will carry', async () => {
+    const card = await propose();
+    expect(schedule).toHaveBeenCalledTimes(1);
+    const [, opts] = schedule.mock.calls[0];
+    expect(opts).toMatchObject({ customerId: CUSTOMER_ID, scheduledDate: '2099-03-02', isRecurring: true, recurringPattern: 'quarterly', recurringOngoing: true });
+    expect(card._body).toMatchObject({ recurringPattern: 'quarterly', recurringOngoing: true });
+  });
+
+  test('a fixed visit count books exactly that many visits', async () => {
+    const card = await propose({ ...INPUT, visit_count: 3 });
+    expect(card.ongoing).toBe(false);
+    expect(card.visits).toHaveLength(3);
+    expect(card._body).toMatchObject({ recurringCount: 3, recurringOngoing: false });
+  });
+
+  test('names the picked technician and the picked property\'s address', async () => {
+    tables.technicians = [{ id: TECH_ID, name: 'Jo Tech' }];
+    tables.customer_properties = [
+      { id: PROPERTY_ID, customer_id: CUSTOMER_ID, active: true, is_primary: true },
+      { id: '00000000-0000-0000-0000-0000000bc009', customer_id: CUSTOMER_ID, active: true },
+    ];
+    const CustomerProperties = require('../services/customer-properties');
+    jest.spyOn(CustomerProperties, 'bookingPropertyStamp').mockResolvedValue({
+      property_id: PROPERTY_ID, service_address_line1: '9 Rental Row', service_address_line2: null, service_address_city: 'Venice',
+      service_address_state: 'FL', service_address_zip: '34285', lat: null, lng: null,
+    });
+    jest.spyOn(require('../services/estimate-converter'), 'buildSeriesAddressScope').mockResolvedValue(null);
+    const Tools = require('../services/intelligence-bar/tools');
+    jest.spyOn(Tools, 'resolveActiveTechnicianById').mockResolvedValue({ id: TECH_ID, name: 'Jo Tech' });
+    const card = await propose({ ...INPUT, property_id: PROPERTY_ID, technician_id: TECH_ID });
+    expect(card.error).toBeUndefined();
+    expect(card.address).toBe('9 Rental Row, Venice, FL 34285');
+    expect(card.technician).toBe('Jo Tech');
+    expect(card._body).toMatchObject({ propertyId: PROPERTY_ID, technicianId: TECH_ID });
+  });
+
+  test('the card lines (the contract) show every date, the price and the text; it is a confirm card that contacts the customer', async () => {
+    const card = await propose();
+    const contract = AuthorizationContract.buildContract({ toolName: 'book_plan_visits', params: INPUT, preview: card });
+    expect(contract.tier).toBe('yellow');
+    expect(contract.notifies_customer).toBe(true);
+    expect(contract.irreversible).toBe(true);
+    const text = contract.effects.map((e) => e.label).join('\n');
+    for (const date of QUARTERLY_DATES) expect(text).toContain(date);
+    expect(text).toContain('Robin S.');
+    expect(text).toContain('Price per visit: $89.00');
+    expect(text).toContain('booking confirmation');
+    expect(text).toContain('No welcome text and no invoice');
+    expect(require('../services/intelligence-bar/action-policy.json').book_plan_visits).toMatchObject({ kind: 'external_action', approval: 'ui_confirm', role: 'admin' });
+  });
+
+  test('send_texts false shows no confirmation text and does not contact the customer', async () => {
+    const card = await propose({ ...INPUT, send_texts: false });
+    expect(card).toMatchObject({ send_texts: false, notifies_customer: false });
+    expect(card._body.sendConfirmationSms).toBe(false);
+    const contract = AuthorizationContract.buildContract({ toolName: 'book_plan_visits', params: { ...INPUT, send_texts: false }, preview: card });
+    expect(contract.notifies_customer).toBe(false);
+    expect(contract.effects.map((e) => e.label).join('\n')).toContain('No booking confirmation text goes, as asked.');
+  });
+
+  test('a dues-covered member\'s series shows no per-visit price', async () => {
+    seed({ customer: { billing_mode: 'monthly_membership', monthly_rate: 59, waveguard_tier: 'Gold' } });
+    const card = await propose();
+    expect(card.price_per_visit).toBeNull();
+    expect(card.price_note).toMatch(/monthly dues/);
+  });
+});
+
+describe('refusals (nothing is booked, nothing is carded)', () => {
+  const refused = async (input, code) => {
+    const result = await propose(input);
+    expect(result.code).toBe(code);
+    expect(result.error).toMatch(/Nothing was booked\./);
+    expect(result.preview).toBeUndefined();
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+    return result;
+  };
+
+  test('gate off', async () => {
+    delete process.env.GATE_IB_BOOK_PLAN_VISITS;
+    await refused(INPUT, 'book_plan_visits_not_enabled');
+  });
+
+  test('the tool is offered only while the gate is on', () => {
+    const action = ActionRegistry.actions.get('book_plan_visits');
+    expect(ActionRegistry.allowed(action, { role: 'admin', context: 'customers' })).toBe(true);
+    delete process.env.GATE_IB_BOOK_PLAN_VISITS;
+    expect(ActionRegistry.allowed(action, { role: 'admin', context: 'customers' })).toBe(false);
+    process.env.GATE_IB_BOOK_PLAN_VISITS = 'true';
+    expect(ActionRegistry.allowed(action, { role: 'technician', context: 'tech' })).toBe(false);
+    expect(WRITE_TWO_STEP_TOOL_NAMES.has('book_plan_visits')).toBe(true);
+    for (const context of ['customers', 'dashboard']) {
+      expect(ActionRegistry.initialTools(context, { role: 'admin' }).map((t) => t.name)).toContain('book_plan_visits');
+    }
+  });
+
+  test('a technician login', async () => {
+    const result = await propose(INPUT, { isAdmin: false });
+    expect(result.code).toBe('permission_denied');
+  });
+
+  test('a brand-new program (no earlier series for the service) points at accept_estimate', async () => {
+    seed({ series: [{ id: 'other', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: 'svc-lawn', service_type: 'Bi-Monthly Lawn Care Service', property_id: null, status: 'completed' }] });
+    const result = await refused(INPUT, 'new_program');
+    expect(result.error).toMatch(/accept_estimate/);
+  });
+
+  test('a customer with no series at all', async () => {
+    seed({ series: [] });
+    await refused(INPUT, 'new_program');
+  });
+
+  test('an open series for the service (the duplicate-series guard)', async () => {
+    openSeries = [{ id: 'open-parent', next_upcoming_date: '2099-02-10' }];
+    const result = await refused(INPUT, 'duplicate_series');
+    expect(result.error).toMatch(/2099-02-10/);
+  });
+
+  test('an inactive customer', async () => {
+    seed({ customer: { active: false } });
+    await refused(INPUT, 'customer_not_active');
+  });
+
+  test('a deleted customer', async () => {
+    seed({ customer: { deleted_at: new Date() } });
+    await refused(INPUT, 'customer_not_live');
+  });
+
+  test('a service that is not in the catalog', async () => {
+    await refused({ ...INPUT, service_type: 'Unicorn Control' }, 'service_not_in_catalog');
+  });
+
+  test('a catalog service that is not a recurring plan service', async () => {
+    seed({ services: [{ id: SERVICE_ID, name: 'Quarterly Pest Control Service', service_key: 'pest_quarterly', billing_type: 'one_time', frequency: 'quarterly', base_price: 89, is_active: true }] });
+    await refused(INPUT, 'not_a_plan_service');
+  });
+
+  test('an add-on treatment', async () => {
+    seed({ services: [{ id: SERVICE_ID, name: 'Quarterly Pest Control Service', service_key: 'area_addon_attic', billing_type: 'recurring', frequency: 'quarterly', base_price: 89, is_active: true }] });
+    await refused(INPUT, 'addon_by_name_unsupported');
+  });
+
+  test('a cadence other than the catalog\'s', async () => {
+    await refused({ ...INPUT, recurring_pattern: 'monthly' }, 'cadence_not_in_catalog');
+  });
+
+  test('a customer on annual prepay, or with a live prepay term', async () => {
+    seed({ customer: { billing_mode: 'annual_prepay' } });
+    await refused(INPUT, 'annual_prepay_customer');
+    seed({ terms: [{ id: 'term-1' }] });
+    await refused(INPUT, 'annual_prepay_term');
+  });
+
+  test('a booking whose tier or monthly-rate sync would write the customer row', async () => {
+    syncVerdict = { writes: true, reason: 'member_alignment', fields: ['monthly_rate'] };
+    const result = await refused(INPUT, 'billing_would_change');
+    expect(result.error).toMatch(/tier or monthly rate/);
+  });
+
+  test('a price that would carry a discount or an add-on line', async () => {
+    pricing = { ...pricing, primaryDiscount: { discountId: 'd1', discountDollars: 10 } };
+    await refused(INPUT, 'price_would_change');
+    pricing = { ...pricing, primaryDiscount: null, addonLines: [{ name: 'Add-on' }] };
+    await refused(INPUT, 'price_would_change');
+  });
+
+  test('a customer with several active properties and no property_id lists them', async () => {
+    seed({ properties: [
+      { id: PROPERTY_ID, customer_id: CUSTOMER_ID, active: true, is_primary: true, address_line1: '1 Example Way', city: 'Bradenton', state: 'FL', zip: '34205' },
+      { id: '00000000-0000-0000-0000-0000000bc009', customer_id: CUSTOMER_ID, active: true, address_line1: '9 Rental Row', city: 'Venice', state: 'FL', zip: '34285' },
+    ] });
+    const result = await refused(INPUT, 'property_choice_required');
+    expect(result.properties).toHaveLength(2);
+  });
+
+  test('a retired service the customer does not hold', async () => {
+    ServiceLibrary.retiredServicesNotHeldBy.mockResolvedValue([{ name: 'Quarterly Tree & Shrub Care' }]);
+    await refused(INPUT, 'retired_service');
+  });
+
+  test('a missing or off-the-hour time, and a past date', async () => {
+    await refused({ ...INPUT, time_window: '' }, 'time_window_required');
+    const offHour = await propose({ ...INPUT, time_window: '9:30 AM' });
+    expect(offHour.code).toBe('window_not_on_the_hour');
+    await refused({ ...INPUT, scheduled_date: '2020-01-01' }, 'invalid_date');
+  });
+
+  test('no technician match', async () => {
+    const Tools = require('../services/intelligence-bar/tools');
+    jest.spyOn(Tools, 'resolveTechnicianByName').mockResolvedValue(null);
+    await refused({ ...INPUT, technician_name: 'Nobody' }, 'technician_not_found');
+  });
+
+  test('a visit that no billing would invoice (no catalog price, no dues cover)', async () => {
+    pricing = { ...pricing, finalPrice: null, primaryBase: null };
+    jest.spyOn(AdminSchedule, 'recurringWithoutBillableAmount').mockReturnValue({ error: 'x' });
+    await refused(INPUT, 'no_billable_amount');
+  });
+});
+
+describe('Confirm', () => {
+  test('makes exactly one createScheduleBooking call with exactly the pinned body, as the confirming admin', async () => {
+    tables.technicians = [{ id: 'staff-1', name: 'Test Admin' }];
+    const card = await propose();
+    const result = await propose(confirmedInput(card), { technicianId: 'staff-1' });
+    expect(AdminSchedule.createScheduleBooking).toHaveBeenCalledTimes(1);
+    const arg = AdminSchedule.createScheduleBooking.mock.calls[0][0];
+    expect(arg.body).toEqual(card._body);
+    expect(arg.actor).toEqual({ technicianId: 'staff-1', technicianName: 'Test Admin' });
+    expect(arg.body).toEqual({
+      customerId: CUSTOMER_ID, scheduledDate: '2099-03-02', serviceType: 'Quarterly Pest Control Service', serviceId: SERVICE_ID,
+      windowStart: '09:00', isRecurring: true, recurringPattern: 'quarterly', recurringOngoing: true, createInvoice: true, sendConfirmationSms: true,
+    });
+    expect(result).toMatchObject({ success: true, visits_booked: 4, dates: QUARTERLY_DATES });
+  });
+
+  test('the body carries no price, discount, add-on, booster, prepay, estimate or duplicate-series override', async () => {
+    const card = await propose({ ...INPUT, visit_count: 4 });
+    const keys = Object.keys(card._body);
+    for (const banned of ['estimatedPrice', 'primaryLinePrice', 'primaryLineDiscount', 'discountId', 'discountType', 'discountAmount', 'serviceAddons',
+      'boosterMonths', 'prepaid', 'billingTerm', 'prepayVisitCount', 'sourceEstimateId', 'source_estimate_id', 'allowDuplicateSeries',
+      'duplicateSeriesOverride', 'allowCallBookingDuplicate', 'expected_price']) {
+      expect(keys).not.toContain(banned);
+    }
+  });
+
+  test('send_texts false passes the no-text flag the handler reads', async () => {
+    const input = { ...INPUT, send_texts: false };
+    const card = await propose(input);
+    await propose(confirmedInput(card, input));
+    expect(AdminSchedule.createScheduleBooking.mock.calls[0][0].body.sendConfirmationSms).toBe(false);
+  });
+
+  test('refuses without the card\'s version (a model call can never approve itself)', async () => {
+    const result = await propose({ ...INPUT, confirmed: true });
+    expect(result.error).toMatch(/confirmation card/);
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['the price changed', () => { pricing = { ...pricing, finalPrice: 99 }; }],
+    ['the planned dates changed', () => { schedule.mockImplementationOnce(async (_c, o) => { o.plannedChildDates.push('2099-06-02', '2099-09-08', '2099-12-08'); return { plannedCount: 4 }; }); }],
+    ['the address changed', () => { tables.customers[0].address_line1 = '2 Moved Street'; }],
+    ['the customer\'s billing changed', () => { tables.customers[0].monthly_rate = 59; }],
+    ['the catalog price changed', () => { tables.services[0].base_price = 95; }],
+  ])('a stale card is refused when %s, and nothing is booked', async (_label, change) => {
+    const card = await propose();
+    change();
+    const result = await propose(confirmedInput(card));
+    expect(result.preview_changed).toBe(true);
+    expect(result.error).toMatch(/changed after the card was shown/);
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('a duplicate series that appeared since the card refuses at Confirm', async () => {
+    const card = await propose();
+    openSeries = [{ id: 'new-parent', next_upcoming_date: '2099-04-01' }];
+    const result = await propose(confirmedInput(card));
+    expect(result.code).toBe('duplicate_series');
+    expect(result.preview_changed).toBe(true);
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('the gate turned off between the card and Confirm refuses', async () => {
+    const card = await propose();
+    delete process.env.GATE_IB_BOOK_PLAN_VISITS;
+    const result = await propose(confirmedInput(card));
+    expect(result.code).toBe('gate_off');
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('the handler\'s own 409 duplicate-series answer comes back as a refusal', async () => {
+    bookingReply = { status: 409, json: { error: 'Customer already has an active series', existingSeries: [{ id: 'p1' }] } };
+    const card = await propose();
+    const result = await propose(confirmedInput(card));
+    expect(result).toMatchObject({ code: 'duplicate_series', status: 409 });
+    expect(result.success).toBeUndefined();
+  });
+
+  test('another handler refusal keeps its words and code', async () => {
+    bookingReply = { status: 409, json: { error: 'The billing lane has no billable amount', code: 'recurring_without_billable_amount' } };
+    const card = await propose();
+    const result = await propose(confirmedInput(card));
+    expect(result).toMatchObject({ code: 'recurring_without_billable_amount' });
+    expect(result.error).toMatch(/no billable amount/);
+  });
+
+  test('an operational error the handler throws is a refusal; any other throw is an unknown outcome', async () => {
+    const card = await propose();
+    AdminSchedule.createScheduleBooking.mockRejectedValueOnce(Object.assign(new Error('Technician is absent that day'), { status: 422, isOperational: true, code: 'TECH_ABSENT' }));
+    expect(await propose(confirmedInput(card))).toMatchObject({ code: 'TECH_ABSENT', status: 422 });
+    AdminSchedule.createScheduleBooking.mockRejectedValueOnce(new Error('connection reset'));
+    const unknown = await propose(confirmedInput(card));
+    expect(unknown).toMatchObject({ outcome_unknown: true, code: 'execution_interrupted' });
+    expect(unknown.success).toBeUndefined();
+  });
+
+  test('the handler\'s warnings ride back on the result', async () => {
+    bookingReply.json.warnings = ['Recurring plan requested 4 visits but only 3 could be placed'];
+    const card = await propose();
+    const result = await propose(confirmedInput(card));
+    expect(result.success).toBe(true);
+    expect(result.warning).toMatch(/only 3 could be placed/);
+  });
+});
+
+describe('the pieces it shares with the Schedule create', () => {
+  test('the tool\'s schema is strict and carries no confirmed or pricing field', () => {
+    const schema = BOOK_PLAN_VISITS_TOOLS[0].input_schema;
+    expect(Object.keys(schema.properties).sort()).toEqual([
+      'customer_id', 'property_id', 'recurring_pattern', 'scheduled_date', 'send_texts', 'service_type', 'technician_id', 'technician_name', 'time_window', 'visit_count',
+    ]);
+    expect(schema.required).toEqual(['customer_id', 'service_type', 'scheduled_date', 'time_window']);
+  });
+
+  test('planCreateSeriesDates keeps a quarterly series on the first visit nth weekday and plans nothing for a one-off', async () => {
+    const real = jest.requireActual('../routes/admin-schedule');
+    const anchor = real.seriesMonthAnchorOpts({ isRecurring: true, recurringPattern: 'quarterly', scheduledDate: '2099-03-02' });
+    const seriesDates = new Set(['2099-03-02']);
+    const plannedChildDates = [];
+    const plan = await real.planCreateSeriesDates(jest.requireMock('../models/db'), {
+      customerId: CUSTOMER_ID, scheduledDate: '2099-03-02', bookingProperty: null, isRecurring: true, recurringPattern: 'quarterly',
+      recurringIntervalDays: undefined, recurringCount: 4, recurringOngoing: false, monthAnchorOpts: anchor, skipWeekends: false,
+      weekendShift: undefined, seriesDates, plannedChildDates,
+    });
+    expect(plannedChildDates).toEqual(['2099-06-01', '2099-09-07', '2099-12-07']);
+    expect(plan.plannedCount).toBe(4);
+    expect(plan.shortfallWarning).toBeNull();
+    // Not recurring: no plan at all.
+    const none = await real.planCreateSeriesDates(jest.requireMock('../models/db'), {
+      customerId: CUSTOMER_ID, scheduledDate: '2099-03-02', isRecurring: false, recurringPattern: undefined,
+      monthAnchorOpts: {}, seriesDates: new Set(), plannedChildDates: [],
+    });
+    expect(none.plannedCount).toBe(0);
+  });
+});

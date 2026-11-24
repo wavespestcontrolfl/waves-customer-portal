@@ -8650,6 +8650,86 @@ function askedTimeStamp(cols, customerAskedTime) {
   return cols.customer_asked_time && customerAskedTime === true ? { customer_asked_time: true } : {};
 }
 
+// The month anchor of a new series: a month-based cadence (and the Feb-Oct season) takes its nth weekday from
+// the first visit's date; every other pattern passes the operator's nth / weekday through raw.
+// seasonal_feb_oct derives its anchor from the date like every other month-based cadence;
+// monthly_nth_weekday stays raw passthrough because there the operator supplies nth/weekday explicitly.
+function seriesMonthAnchorOpts({ isRecurring, recurringPattern, scheduledDate, recurringNth, recurringWeekday }) {
+  return (isRecurring
+    && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
+    ? recurrenceOrdinalOptions(scheduledDate, { nth: recurringNth, weekday: recurringWeekday })
+    : { nth: recurringNth, weekday: recurringWeekday };
+}
+
+// The dates a NEW recurring series writes (the Schedule POST's own plan, run by the handler before its
+// transaction and by the Intelligence Bar's book_plan_visits card). Fills `plannedChildDates` (the visits after
+// the first) and adds each to `seriesDates` (which already holds the first visit's date). Reads only.
+// Returns the plan's inputs the handler reuses for boosters, and a shortfall warning when blackout days leave
+// the plan undersized.
+async function planCreateSeriesDates(conn, {
+  customerId, scheduledDate, bookingProperty, isRecurring, recurringPattern, recurringIntervalDays,
+  recurringCount, recurringOngoing, monthAnchorOpts, skipWeekends, weekendShift, seriesDates, plannedChildDates,
+}) {
+  const parsedRecurringCount = Number.parseInt(recurringCount, 10);
+  const plannedCount = isRecurring
+    ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
+    : 0;
+  // Lawn neighborhood day (lawn-area-days.js): a NEW rounds series is placed from its area's anchor
+  // (the parent stores it below).
+  // createRoundOptions returns {} for any pattern other than lawn_rounds_9 without a read.
+  const rOpts = {
+    ...monthAnchorOpts,
+    intervalDays: recurringIntervalDays,
+    ...await createRoundOptions(conn, customerId, bookingProperty, recurringPattern),
+  };
+  const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
+  // B6 (owner ruling 2026-08-27): a customer whose saved property
+  // preference names a weekday has said "not weekends" — generated
+  // children/booster DATES honor it even when the operator left the
+  // skip-weekends box unticked. The STAMPED flag stays the operator's
+  // raw value: every generator and the rebooker consult the preference
+  // LIVE, so removing it restores weekend eligibility without touching
+  // series rows. The ANCHOR date itself never moves — the operator
+  // picked it deliberately.
+  const skipWeekendsEffective = !!skipWeekends
+    || (isRecurring && recurringPattern ? await customerPrefersNoWeekends(conn, customerId) : false);
+  // Blackout days (one-off + weekly days off) over the series horizon —
+  // every generated child/booster date runs through the shared nudge.
+  const seriesBlackoutDates = (isRecurring && recurringPattern)
+    ? await loadSeriesBlackoutDates(conn, dateOnly(scheduledDate))
+    : null;
+  let shortfallWarning = null;
+  if (isRecurring && recurringPattern && plannedCount > 1) {
+    // Iterate by inserts, not by attempts: when skip-weekends collapses
+    // consecutive recurrences onto the same shifted weekday (e.g. custom
+    // interval=1 over Sat+Sun → Mon), we still need plannedCount-1 children
+    // inserted, not plannedCount-1 attempts. Cap iterations to avoid an
+    // infinite loop if the pattern is degenerate.
+    const maxAttempts = (plannedCount - 1) * 4 + 30;
+    let attempt = 1;
+    while (plannedChildDates.length < plannedCount - 1 && attempt < maxAttempts) {
+      const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
+      attempt++;
+      const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipWeekendsEffective, shiftDir, seriesBlackoutDates);
+      if (!nextDateStr) continue;
+      if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
+      if (seriesDateTaken(seriesDates, recurringPattern, nextDateStr)) continue;
+      seriesDates.add(nextDateStr);
+      plannedChildDates.push(nextDateStr);
+    }
+    // Blackout/day-off exhaustion must not silently shrink the requested
+    // plan (mirror of the visit-count top-up's shortfall reporting): tell
+    // the office what was actually placed instead of returning success on
+    // an undersized series nobody can see.
+    if (plannedChildDates.length < plannedCount - 1) {
+      const placed = plannedChildDates.length + 1;
+      logger.warn(`[schedule/create] recurring series wanted ${plannedCount} visit(s), placed ${placed} — every remaining candidate within ${maxAttempts} cadence steps is blacked out, on a closed weekday, or a duplicate`);
+      shortfallWarning = `Recurring plan requested ${plannedCount} visits but only ${placed} could be placed — the remaining dates fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`;
+    }
+  }
+  return { plannedCount, rOpts, shiftDir, skipWeekendsEffective, seriesBlackoutDates, shortfallWarning };
+}
+
 // GATE_RESERVICE_FOLD (owner 2026-11-17): a pest/lawn re-service within 14 days before the customer's next plan visit of
 // that line moves that visit up instead of booking. null = no fold (gate off, a recurring booking, not a re-service, not a
 // free one without add-on lines, no plan visit in range); otherwise services/reservice-fold.js moveFoldTarget's { moved, answer | warning }.
@@ -9332,10 +9412,7 @@ async function scheduleCreateHandler(req, res, next) {
     // seasonal_feb_oct derives its anchor from the date like every other
     // month-based cadence; monthly_nth_weekday stays raw passthrough because
     // there the operator supplies nth/weekday explicitly.
-    const monthAnchorOpts = (isRecurring
-      && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
-      ? recurrenceOrdinalOptions(scheduledDate, { nth: recurringNth, weekday: recurringWeekday })
-      : { nth: recurringNth, weekday: recurringWeekday };
+    const monthAnchorOpts = seriesMonthAnchorOpts({ isRecurring, recurringPattern, scheduledDate, recurringNth, recurringWeekday });
 
     // Re-service rows (pest_re_service / lawn_re_service) ARE callbacks by
     // definition — the new-appointment modal never sends `isCallback`, so
@@ -9484,64 +9561,16 @@ async function scheduleCreateHandler(req, res, next) {
     const plannedChildDates = [];
     const plannedBoosterDates = [];
 
-    // Recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
-    const parsedRecurringCount = Number.parseInt(recurringCount, 10);
-    const plannedCount = isRecurring
-      ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
-      : 0;
-    // Lawn neighborhood day (lawn-area-days.js): a NEW rounds series is placed from its area's anchor
-    // (the parent stores it below). The dates are planned once
-    // here and the insert loop writes exactly these, so plan and write cannot differ.
-    // createRoundOptions returns {} for any pattern other than lawn_rounds_9 without a read.
-    const rOpts = {
-      ...monthAnchorOpts,
-      intervalDays: recurringIntervalDays,
-      ...await createRoundOptions(db, customerId, bookingProperty, recurringPattern),
-    };
-    const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
-    // B6 (owner ruling 2026-08-27): a customer whose saved property
-    // preference names a weekday has said "not weekends" — generated
-    // children/booster DATES honor it even when the operator left the
-    // skip-weekends box unticked. The STAMPED flag stays the operator's
-    // raw value: every generator and the rebooker consult the preference
-    // LIVE, so removing it restores weekend eligibility without touching
-    // series rows. The ANCHOR date itself never moves — the operator
-    // picked it deliberately.
-    const skipWeekendsEffective = !!skipWeekends
-      || (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false);
-    // Blackout days (one-off + weekly days off) over the series horizon —
-    // every generated child/booster date runs through the shared nudge.
-    const seriesBlackoutDates = (isRecurring && recurringPattern)
-      ? await loadSeriesBlackoutDates(db, dateOnly(scheduledDate))
-      : null;
-    if (isRecurring && recurringPattern && plannedCount > 1) {
-      // Iterate by inserts, not by attempts: when skip-weekends collapses
-      // consecutive recurrences onto the same shifted weekday (e.g. custom
-      // interval=1 over Sat+Sun → Mon), we still need plannedCount-1 children
-      // inserted, not plannedCount-1 attempts. Cap iterations to avoid an
-      // infinite loop if the pattern is degenerate.
-      const maxAttempts = (plannedCount - 1) * 4 + 30;
-      let attempt = 1;
-      while (plannedChildDates.length < plannedCount - 1 && attempt < maxAttempts) {
-        const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
-        attempt++;
-        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipWeekendsEffective, shiftDir, seriesBlackoutDates);
-        if (!nextDateStr) continue;
-        if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
-        if (seriesDateTaken(seriesDates, recurringPattern, nextDateStr)) continue;
-        seriesDates.add(nextDateStr);
-        plannedChildDates.push(nextDateStr);
-      }
-      // Blackout/day-off exhaustion must not silently shrink the requested
-      // plan (mirror of the visit-count top-up's shortfall reporting): tell
-      // the office what was actually placed instead of returning success on
-      // an undersized series nobody can see.
-      if (plannedChildDates.length < plannedCount - 1) {
-        const placed = plannedChildDates.length + 1;
-        logger.warn(`[schedule/create] recurring series wanted ${plannedCount} visit(s), placed ${placed} — every remaining candidate within ${maxAttempts} cadence steps is blacked out, on a closed weekday, or a duplicate`);
-        bookingWarnings.push(`Recurring plan requested ${plannedCount} visits but only ${placed} could be placed — the remaining dates fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`);
-      }
-    }
+    // Recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX).
+    // The dates are planned once here by the shared planner and the insert loop writes exactly these,
+    // so plan and write cannot differ (the Intelligence Bar's book_plan_visits card runs the same planner).
+    const {
+      plannedCount, rOpts, shiftDir, skipWeekendsEffective, seriesBlackoutDates, shortfallWarning,
+    } = await planCreateSeriesDates(db, {
+      customerId, scheduledDate, bookingProperty, isRecurring, recurringPattern, recurringIntervalDays,
+      recurringCount, recurringOngoing, monthAnchorOpts, skipWeekends, weekendShift, seriesDates, plannedChildDates,
+    });
+    if (shortfallWarning) bookingWarnings.push(shortfallWarning);
 
     // Booster months — extra one-off visits on top of the base series
     // (e.g. quarterly pest + summer-month boosters). Pre-seed the next 12
@@ -30481,6 +30510,12 @@ module.exports.stripTechOwnerOnlyMoney = stripTechOwnerOnlyMoney;
 
 // Same handler as POST / — see createScheduleBooking above.
 module.exports.createScheduleBooking = createScheduleBooking;
+// The create handler's own series-date plan, price builder and lawn-rounds pattern rewrite — consumed lazily by the IB
+// book_plan_visits card so its dates and per-visit price are the ones the handler will write.
+module.exports.planCreateSeriesDates = planCreateSeriesDates;
+module.exports.seriesMonthAnchorOpts = seriesMonthAnchorOpts;
+module.exports.lawnRoundsSeriesForBooking = lawnRoundsSeriesForBooking;
+module.exports.bookingCreatesWaveGuardCoverage = bookingCreatesWaveGuardCoverage;
 // Same handler as PUT /:id/update-details — see updateVisitDetails above.
 module.exports.updateVisitDetails = updateVisitDetails;
 module.exports.assertApprovedRepriceState = assertApprovedRepriceState;
