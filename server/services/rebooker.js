@@ -23,10 +23,10 @@ const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gate
 // whose shift that day does not hold the block is refused the same way.
 //
 // shiftBlockMinutes: the block a shift judges, in minutes. A start or an end
-// that is there but is no clock time (unreadableBound, the unit mover's rule)
-// gives no block to read, and the write can still store it: PostgreSQL reads
-// "4:05 PM" as 16:05. Such a row is judged as the whole day, which no set
-// shift holds.
+// that is there but is no clock time the check reads exactly (unreadableBound,
+// the unit mover's rule) gives no block to trust, and the write can still
+// store it: PostgreSQL reads "4:05 PM" as 16:05 and keeps the seconds of
+// "12:00:30". Such a row is judged as the whole day, which no set shift holds.
 const WHOLE_DAY = { window_start: '00:00', window_end: '24:00' };
 function shiftBlockMinutes(block) {
   const { rowBlockMinutes, unreadableBound } = require('./scheduling/window-rules');
@@ -155,12 +155,13 @@ function hhmm(value) {
 }
 
 // Does this write change the row's hours (start or end, to the minute)? Each value is read as its
-// clock minute. One that is no clock time stays text, and text never equals a minute: PostgreSQL can
-// still store "10:00 PM", which begins like a stored "10:00" and is 22:00.
+// clock minute. One the shift check cannot read exactly (unreadableBound) stays text, and text never
+// equals a minute: PostgreSQL can still store "10:00 PM", which begins like a stored "10:00" and is
+// 22:00, and it keeps the seconds of "10:00:30".
 function hoursChangedBy(update, row) {
-  const { parseHHMM } = require('./scheduling/window-rules');
-  const read = (value) => parseHHMM(value) ?? hhmm(value);
-  return read(update.window_start) !== read(row.window_start) || read(update.window_end) !== read(row.window_end);
+  const { parseHHMM, unreadableBound } = require('./scheduling/window-rules');
+  const read = (value, isEnd) => (unreadableBound(value, isEnd) ? String(value) : parseHHMM(value) ?? hhmm(value));
+  return read(update.window_start) !== read(row.window_start) || read(update.window_end, true) !== read(row.window_end, true);
 }
 
 // GATE_TECH_SHIFT_HOURS (D4 part 3b-2c): the shift check for one row of a stop a series move judges,

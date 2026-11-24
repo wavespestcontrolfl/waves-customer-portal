@@ -74,8 +74,9 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
   });
 
   test('a new start or end the shift check cannot read as a clock time is refused, on the same day too: the write would still store it', async () => {
-    // PostgreSQL reads "4:05 PM" as 16:05 and "1:00 PM" as 13:00, and holds 24:00 as a start. The shift check reads none of them.
-    for (const window of [{ start: '4:05 PM', end: '5:05 PM' }, { start: '24:00', end: '24:00' }, { start: '10:00', end: '1:00 PM' }]) {
+    // PostgreSQL reads "4:05 PM" as 16:05 and "1:00 PM" as 13:00, holds 24:00 as a start, and keeps the 30 seconds of
+    // 12:00:30, past the 12:00 shift end. The shift check reads none of them exactly.
+    for (const window of [{ start: '4:05 PM', end: '5:05 PM' }, { start: '24:00', end: '24:00' }, { start: '10:00', end: '1:00 PM' }, { start: '11:00', end: '12:00:30' }]) {
       const id = await seed();
       await expect(move(id, nextDay, window)).rejects.toMatchObject(refused);
       expect(await rowOf(id)).toEqual(asSeeded);
@@ -85,8 +86,10 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
     const id = await seed();
     await expect(move(id, f.date, { start: '09:00 PM', end: '10:00 PM' })).rejects.toMatchObject(refused);
     await expect(move(id, f.date, { start: '09:00', end: '10:00 PM' })).rejects.toMatchObject(refused);
+    // So is an end thirty seconds later.
+    await expect(move(id, f.date, { start: '09:00:00', end: '10:00:30' })).rejects.toMatchObject(refused);
     expect(await rowOf(id)).toEqual(asSeeded);
-    // The same hours with seconds are the same hours: nothing is placed, nothing is judged.
+    // The same hours with zero seconds are the same hours: nothing is placed, nothing is judged.
     await f.db('scheduled_services').where({ id }).update({ window_start: '12:00', window_end: '13:00' });
     expect(await move(id, f.date, { start: '12:00:00', end: '13:00:00' })).toMatchObject({ success: true });
     // The office is not checked, and a technician with no set hours is not judged: the same request lands as before.
@@ -695,8 +698,9 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
     });
 
     test('a new start or end the shift check cannot read as a clock time is refused: the write would still store it', async () => {
-      // PostgreSQL reads "4:05 PM" as 16:05 and "1:00 PM" as 13:00, and holds 24:00 as a start. The shift check reads none of them.
-      for (const window of [{ start: '4:05 PM', end: '5:05 PM' }, { start: '24:00', end: '24:00' }, { start: '10:00', end: '1:00 PM' }]) {
+      // PostgreSQL reads "4:05 PM" as 16:05 and "1:00 PM" as 13:00, holds 24:00 as a start, and keeps the 30 seconds of
+      // 12:00:30, past the 12:00 shift end. The shift check reads none of them exactly.
+      for (const window of [{ start: '4:05 PM', end: '5:05 PM' }, { start: '24:00', end: '24:00' }, { start: '10:00', end: '1:00 PM' }, { start: '11:00', end: '12:00:30' }]) {
         const ids = await seedSeries();
         await expect(moveSeries(ids, window)).rejects.toMatchObject(refused);
         expect(await daysOf(ids)).toEqual(seeded);
@@ -706,6 +710,7 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       const kept = await seedSeries();
       await expect(sameDay(kept, { start: '09:00 PM', end: '10:00 PM' })).rejects.toMatchObject(refused);
       await expect(sameDay(kept, { start: '09:00', end: '10:00 PM' })).rejects.toMatchObject(refused);
+      await expect(sameDay(kept, { start: '09:00:00', end: '10:00:30' })).rejects.toMatchObject(refused);
       expect(await rowOf(kept[0])).toEqual(asSeeded);
       await f.db('scheduled_services').del();
       // The office is not checked, and a technician with no set hours is not judged: the same request lands as before.

@@ -204,12 +204,17 @@ function occupancyBlockFor(row) {
 // PostgreSQL's TIME also holds 24:00:00, the end of the day; parseHHMM does not read it.
 const END_OF_DAY = /^24:00(?::00(?:\.0+)?)?$/;
 
-// A window bound that is there but is no clock time rowBlockMinutes reads: a start parseHHMM cannot
-// read, or an end it reads neither as a clock time nor as 24:00. A request can carry one, and
-// PostgreSQL's TIME accepts forms parseHHMM does not (24:00:00 as a start), so a write can store it
-// while the shift check has no block to judge.
+// A window bound that is there but is no clock time rowBlockMinutes reads exactly: a start parseHHMM
+// cannot read, an end it reads neither as a clock time nor as 24:00, or a time whose seconds are not
+// zero. A request can carry one, and PostgreSQL's TIME stores what parseHHMM does not read (24:00:00
+// as a start) or drops (it keeps 12:00:30 and reads 12:00:60 as 12:01), so a write can store a time
+// the shift check did not judge.
+const WHOLE_MINUTE = /^\d{1,2}:\d{2}(?::00(?:\.0+)?)?$/;
 function unreadableBound(value, isEnd = false) {
-  return value != null && value !== '' && parseHHMM(value) == null && !(isEnd && END_OF_DAY.test(String(value).trim()));
+  if (value == null || value === '') return false;
+  const text = String(value).trim();
+  if (isEnd && END_OF_DAY.test(text)) return false;
+  return parseHHMM(text) == null || !WHOLE_MINUTE.test(text);
 }
 
 function rowBlockMinutes(row, minutes = null) {
