@@ -302,14 +302,15 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(input.body).not.toMatch(/https?:|www\.|reschedule|track/i);
     });
 
-    test('each kind is its own text; the reminder purposes and the en-route text carry no link either', async () => {
+    test('each kind is its own text; the reminders carry no link and the en-route text carries only the tracker link', async () => {
       for (const kind of ['confirmation', 'reminder_72h', 'reminder_24h']) await notify(kind);
       await notify('en_route', { context: { techName: 'Pat', etaMinutes: 12, trackUrl: 'https://x.test/track/abc' } });
       expect(sendCustomerMessage.mock.calls.map(([i]) => i.purpose)).toEqual([
         'appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h', 'tech_en_route',
       ]);
-      for (const [input] of sendCustomerMessage.mock.calls) expect(input.body).not.toMatch(/https?:|track|reschedule/i);
-      expect(sendCustomerMessage.mock.calls[3][0].body).toContain('Pat is on the way, about 12 minutes away.');
+      for (const [input] of sendCustomerMessage.mock.calls.slice(0, 3)) expect(input.body).not.toMatch(/https?:|track|reschedule/i);
+      expect(sendCustomerMessage.mock.calls[3][0].body).toContain('Pat is on the way, about 12 minutes away. Track live: https://x.test/track/abc');
+      expect(sendCustomerMessage.mock.calls[3][0].body).not.toMatch(/reschedule/i);
     });
 
     test('Bob gets nothing for another visit on the account, a cancelled visit, or when the sender already texts his number', async () => {

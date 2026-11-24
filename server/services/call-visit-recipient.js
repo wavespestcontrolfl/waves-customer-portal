@@ -22,8 +22,9 @@
  *
  * What the person receives is informational copy built here, never the holder's template: no
  * reschedule, confirm or move link (the appointment page link carries the visit's management token)
- * and no tracker link (the tracker token also opens the visit's report, invoice and review cards
- * after completion). The text goes through the same send layer as every other text, with no
+ * The en-route text alone carries the visit's tracker link (owner 2026-11-24, "yes he gets it"), the same
+ * link the holder gets, passed in by the sender; the owner was told it also opens the visit's report and
+ * invoice after completion. The other texts carry no link. The text goes through the same send layer as every other text, with no
  * "customer-initiated" exemption: the send window applies, and a text held for it is persisted and
  * replayed (visit_text_recipient_deferred in messaging/deferred-replay-registry.js) after a fresh
  * visit, gate and decline check.
@@ -242,8 +243,9 @@ async function ownedContact(row, visit, kind, conn) {
 }
 
 /**
- * The text itself: informational, with no link of any kind (see the header). Pure.
- * `facts`: { label, day, date, window, dayOnly } for a visit text; { techName, etaMinutes } for en route.
+ * The text itself: informational, no management link (see the header). Pure.
+ * `facts`: { label, day, date, window, dayOnly } for a visit text; { techName, etaMinutes, trackUrl } for en route
+ * (trackUrl: an https link or nothing; anything else is dropped).
  * `dayOnly`: the holder's notice promised only the day (GATE_DAY_ONLY_PROMISE), so this one does too.
  */
 function informationalBody(kind, firstName, facts = {}) {
@@ -261,7 +263,9 @@ function informationalBody(kind, firstName, facts = {}) {
   }
   if (kind === 'en_route') {
     const eta = facts.etaMinutes ? `, about ${facts.etaMinutes} minutes away` : '';
-    return `${hi} Waves here. ${facts.techName || 'Your technician'} is on the way${eta}. ${stop}`;
+    const url = typeof facts.trackUrl === 'string' && /^https:\/\/\S+$/.test(facts.trackUrl) ? facts.trackUrl : null;
+    const track = url ? ` Track live: ${url}` : '';
+    return `${hi} Waves here. ${facts.techName || 'Your technician'} is on the way${eta}.${track} ${stop}`;
   }
   const next = facts.dayOnly ? ' We will text you the arrival window the day before.' : '';
   return `${hi} a reminder from Waves. ${visit}${next} ${stop}`;
@@ -368,7 +372,7 @@ async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, re
 
 /**
  * Text the visit-only recipients of this visit for one kind of notice: the ONE function every sender calls.
- * `excludePhones`: the numbers the sender already texts. `context`: en route only, { techName, etaMinutes }.
+ * `excludePhones`: the numbers the sender already texts. `context`: en route only, { techName, etaMinutes, trackUrl }.
  * `dayOnly`: the holder's confirmation or 72 h reminder promised only the day, so this one does too.
  * `gate(contact)`: optional per-recipient check by the sender, 'send' (default), 'skip' or 'abort'
  * (the pipeline lost its claim). Never throws into the sender. Returns false only when a gate aborted.

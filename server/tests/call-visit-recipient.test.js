@@ -139,7 +139,7 @@ describe('eligibleEntries: one rule, judged on the V2 entry alone', () => {
   });
 });
 
-describe('informationalBody: no link of any kind, no management or tracker token', () => {
+describe('informationalBody: no management link; only the en-route text carries the tracker link', () => {
   const facts = { label: 'Pest Control', day: 'Tuesday', date: 'December 1', window: 'between 9:00 AM and 11:00 AM' };
 
   test('the sender is "Waves", never "Waves Pest Control"', () => {
@@ -167,11 +167,18 @@ describe('informationalBody: no link of any kind, no management or tracker token
     expect(body.length).toBeLessThan(300);
   });
 
-  test('en route names the technician and the ETA and carries no tracker link', () => {
-    const body = VisitRecipient.informationalBody('en_route', 'Bob', { techName: 'Pat', etaMinutes: 15, trackUrl: 'https://x.test/track/abc' });
-    expect(body).toContain('Pat is on the way, about 15 minutes away.');
-    expect(body).not.toMatch(/https?:|track/i);
+  test('en route names the technician and the ETA and carries the tracker link (owner 2026-11-24)', () => {
+    const body = VisitRecipient.informationalBody('en_route', 'Bob', { techName: 'Pat', etaMinutes: 15, trackUrl: 'https://x.test/t/abc' });
+    expect(body).toBe('Hi Bob, Waves here. Pat is on the way, about 15 minutes away. Track live: https://x.test/t/abc Reply STOP to opt out.');
+    expect(body).not.toMatch(/reschedule|confirm\b/i);
     expect(VisitRecipient.informationalBody('en_route', null, {})).toContain('Hi there,');
+  });
+
+  test('en route drops a missing or non-https tracker link', () => {
+    for (const trackUrl of [undefined, null, '', 'http://x.test/t/abc', 'javascript:alert(1)', 'https://x.test/a b', 42]) {
+      const body = VisitRecipient.informationalBody('en_route', 'Bob', { techName: 'Pat', trackUrl });
+      expect(body).toBe('Hi Bob, Waves here. Pat is on the way. Reply STOP to opt out.');
+    }
   });
 });
 
@@ -400,13 +407,13 @@ describe('sendTechEnRoute hands the en-route text to the visit-only recipients',
     expect(sentTo()).toEqual([HOLDER]);
   });
 
-  test('gate ON: the recipient sender gets the visit, the technician and the ETA, never the tracker link; the holder results are untouched', async () => {
+  test('gate ON: the recipient sender gets the visit, the technician, the ETA and the holder\'s tracker link (owner 2026-11-24); the holder results are untouched', async () => {
     process.env[GATE] = 'true';
     const result = await enRoute();
     expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledWith({
-      scheduledServiceId: 'ss-1', kind: 'en_route', excludePhones: [HOLDER], context: { techName: expect.any(String), etaMinutes: 15 },
+      scheduledServiceId: 'ss-1', kind: 'en_route', excludePhones: [HOLDER],
+      context: { techName: expect.any(String), etaMinutes: 15, trackUrl: expect.stringMatching(/^https:\/\/\S+\/track\/tok-1$/) },
     });
-    expect(JSON.stringify(VisitRecipient.notifyVisitRecipients.mock.calls[0][0])).not.toContain('tok-1');
     expect(sentTo()).toEqual([HOLDER]);
     expect(result.results).toHaveLength(1);
   });

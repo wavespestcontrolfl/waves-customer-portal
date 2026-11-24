@@ -2276,7 +2276,7 @@ const TwilioService = {
           scheduledServiceId,
           kind: "en_route",
           excludePhones: servedPhones,
-          context: { techName: customerTechName, etaMinutes },
+          context: { techName: customerTechName, etaMinutes, trackUrl: trackUrl || longTrackUrl },
         });
       }
     }
