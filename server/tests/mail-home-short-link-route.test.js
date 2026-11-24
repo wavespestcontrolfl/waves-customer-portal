@@ -126,6 +126,13 @@ describe('GET /nh/:slug', () => {
     expect(mockFirst).not.toHaveBeenCalled();
   });
 
+  test('a method other than GET or HEAD is a 404 with the gate off too, never a redirect', async () => {
+    mailHomePageLive.mockReturnValue(false);
+    const res = await fetch(`${base}/nh/101-example`, { method: 'POST', headers: freshIp(), redirect: 'manual' });
+    expect(res.status).toBe(404);
+    expect(res.headers.get('location')).toBeNull();
+  });
+
   test('the limiter: 60 a minute for one client, then 429 with the privacy headers; another client is not held', async () => {
     const client = { 'x-forwarded-for': '10.99.0.1' };
     let last;

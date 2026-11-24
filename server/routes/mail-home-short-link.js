@@ -48,6 +48,8 @@ const toSite = (res) => res.redirect(302, MARKETING_SITE);
 // The privacy headers on every answer; a method other than GET and HEAD finds no handler below (Express answers 404).
 router.use((req, res, next) => {
   privacyHeaders(res);
+  // Only GET and HEAD exist here; any other method is a 404 whatever the gate (no redirect, no database).
+  if (req.method !== 'GET' && req.method !== 'HEAD') return res.status(404).type('text').send('Not found');
   // Gate off and bad shapes need no database and no limiter.
   if (!mailHomePageLive()) return toSite(res);
   const match = SLUG_PATH.exec(req.path);

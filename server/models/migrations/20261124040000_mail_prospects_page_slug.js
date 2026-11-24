@@ -33,6 +33,12 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable(TABLE))) return;
+  // A slug is printed on mailed postcards and must never move to another home. Once any is assigned, refuse the
+  // rollback: dropping the column would free every slug for reassignment. Roll back only before the first assignment.
+  if (await knex.schema.hasColumn(TABLE, SLUG)) {
+    const assigned = await knex(TABLE).whereNotNull(SLUG).first(SLUG);
+    if (assigned) throw new Error('mail_prospects.page_slug has assigned slugs (printed on postcards); refusing to drop it');
+  }
   await knex.raw('ALTER TABLE ?? DROP CONSTRAINT IF EXISTS ??', [TABLE, SLUG_CHECK]);
   await knex.raw('DROP INDEX IF EXISTS ??', [SLUG_INDEX]);
   if (await knex.schema.hasColumn(TABLE, SLUG)) {

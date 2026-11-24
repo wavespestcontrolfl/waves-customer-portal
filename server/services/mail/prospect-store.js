@@ -282,16 +282,23 @@ async function assignPageSlug(id, conn = db) {
  * 500) that have no slug and tries each once. Returns `{ tried, assigned, withoutSlug }`; a home left without a slug
  * has an address that gives none, or both candidates are taken.
  */
-async function backfillPageSlugs({ limit = 500 } = {}, conn = db) {
+// `after` is the cursor a previous call returned (`next`): a home that can never get a slug is not read again, so a
+// batch of such homes cannot stop the backfill from reaching the rows after them.
+async function backfillPageSlugs({ limit = 500, after = null } = {}, conn = db) {
   if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) throw new TypeError('backfillPageSlugs: limit must be a positive integer');
-  const rows = await conn('mail_prospects')
+  let query = conn('mail_prospects')
     .where({ list_key: SLUG_LIST_KEY })
     .whereIn('status', SLUG_STATUSES)
-    .whereNull('page_slug')
+    .whereNull('page_slug');
+  if (after) {
+    query = query.whereRaw('(created_at, id) > (?, ?)', [after.createdAt, after.id]);
+  }
+  const rows = await query
     .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
     .limit(limit)
-    .select('id');
-  const summary = { tried: 0, assigned: 0, withoutSlug: 0 };
+    .select('id', 'created_at');
+  const last = rows[rows.length - 1];
+  const summary = { tried: 0, assigned: 0, withoutSlug: 0, next: rows.length === limit && last ? { createdAt: last.created_at, id: last.id } : null };
   for (const { id } of rows) {
     summary.tried += 1;
     if (await assignPageSlug(id, conn)) summary.assigned += 1;

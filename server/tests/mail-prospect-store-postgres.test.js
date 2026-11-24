@@ -410,15 +410,28 @@ postgres('mail prospect store on PostgreSQL', () => {
       await saveProspect(home('202699000004', '8000000080', '12A EXAMPLE TRL', '34212'));
       await saveProspect(home('202699000005', '9000000090', '101 EXAMPLE CT', '34212'));
       await conn('mail_prospects').update({ page_slug: null }); // as before this feature
-      expect(await backfillPageSlugs({ limit: 3 })).toEqual({ tried: 3, assigned: 3, withoutSlug: 0 });
-      expect(await backfillPageSlugs()).toEqual({ tried: 2, assigned: 0, withoutSlug: 2 });
+      const first = await backfillPageSlugs({ limit: 3 });
+      expect(first).toMatchObject({ tried: 3, assigned: 3, withoutSlug: 0 });
+      expect(first.next).toEqual(expect.objectContaining({ id: expect.anything() }));
+      expect(await backfillPageSlugs()).toEqual({ tried: 2, assigned: 0, withoutSlug: 2, next: null });
       expect(await slugOf('202699000001')).toBe('101-example');
       expect(await slugOf('202699000002')).toBe('101-example-34212');
       expect(await slugOf('202699000003')).toBe('55-tester');
       expect(await slugOf('202699000004')).toBeNull();
       expect(await slugOf('202699000005')).toBeNull();
-      expect(await backfillPageSlugs()).toEqual({ tried: 2, assigned: 0, withoutSlug: 2 }); // nothing moves on a re-run
+      expect(await backfillPageSlugs()).toEqual({ tried: 2, assigned: 0, withoutSlug: 2, next: null }); // nothing moves on a re-run
       await expect(backfillPageSlugs({ limit: 0 })).rejects.toThrow(TypeError);
+      // The cursor walks past homes that can never get a slug: one row a batch still reaches the last one.
+      const one = await backfillPageSlugs({ limit: 1 });
+      expect(one).toMatchObject({ tried: 1, withoutSlug: 1 });
+      expect(await backfillPageSlugs({ limit: 1, after: one.next })).toMatchObject({ tried: 1, withoutSlug: 1 });
+    });
+
+    test('the migration refuses to roll back once a slug is assigned (slugs are printed on postcards)', async () => {
+      await saveProspect(home('202699000011', '5133090591', '77 EXAMPLE TRL', '34212'));
+      const migration = require('../models/migrations/20261124040000_mail_prospects_page_slug');
+      await expect(migration.down(conn)).rejects.toThrow(/refusing to drop/);
+      expect(await slugOf('202699000011')).toBe('77-example');
     });
   });
 
