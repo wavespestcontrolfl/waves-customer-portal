@@ -33,7 +33,8 @@ function parseMetadata(value) {
   try { return JSON.parse(value || '{}') || {}; } catch { return {}; }
 }
 
-const office = (why) => ({ ok: false, code: 'office', message: `${why} Bill it from the Invoices page.` });
+// Never "bill it" outright: the refusal may be coverage. Staff check what exists, then bill only what is unpaid.
+const office = (why) => ({ ok: false, code: 'office', message: `${why} Check the customer's invoices, then bill only what is still unpaid from the Invoices page.` });
 const centsOk = (n) => Number.isSafeInteger(n) && n > 0;
 // A visit price column as cents, -1 for none (button args hold numbers only).
 const priceCents = (value) => (value == null || value === '' ? -1 : Math.round(Number(value) * 100));
@@ -374,7 +375,7 @@ function sendVerify(facts) {
         await sp.raw("SET LOCAL lock_timeout = '3s'");
         // The account's fee lock (an advisory lock, never the customer row: the text's sms_log insert on another
         // connection needs KEY SHARE on that row). Every invoice create that carries a WaveGuard fee line takes it
-        // (admin-invoices.js), so a new fee invoice waits until this send's transaction ends.
+        // (InvoiceService.create, invoice.js), so a new fee invoice waits until this send's transaction ends.
         await sp.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`setup_fee_account:${claimed.customer_id}`]);
         const rows = await sp('invoices').where({ customer_id: claimed.customer_id }).whereNot('id', claimed.id)
           .whereNotIn('status', ['void', 'cancelled', 'canceled']).orderBy('id').forUpdate()

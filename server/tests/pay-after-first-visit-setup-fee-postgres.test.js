@@ -282,6 +282,14 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
         // ... while it holds the account's fee lock, which every fee-line invoice create takes (admin-invoices.js).
         const other = await mockPg.raw('SELECT pg_try_advisory_lock(hashtext(?)) AS got', [`setup_fee_account:${f.customerId}`]);
         expect(other.rows[0].got).toBe(false);
+        // A fee-line invoice from any writer (InvoiceService.create) waits on it.
+        await expect(mockPg.transaction(async (writer) => {
+          await writer.raw("SET LOCAL lock_timeout = '300ms'");
+          await require('../services/invoice').create({
+            database: writer, customerId: f.customerId, title: 'Setup fee',
+            lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: SETUP_FEE }],
+          });
+        })).rejects.toMatchObject({ code: '55P03' });
       } finally { await sendTrx.rollback(); }
     } finally { await cleanup(f); }
   });
