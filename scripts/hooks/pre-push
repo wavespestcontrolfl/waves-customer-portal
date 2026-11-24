@@ -35,6 +35,8 @@
 #   CLAUDE_REVIEW_MODEL=opus           — fallback auditor model (default sonnet)
 #   SPLIT_WARN_FILES=25                — advisory split threshold, files (0 disables)
 #   SPLIT_WARN_BYTES=120000            — advisory split threshold, bytes (0 disables)
+#   SPLIT_WARN_LINES=600               — advisory split threshold, changed lines of
+#                                         non-test code (0 disables)
 #   CODEX_REVIEW_ROUND_LOG=off         — do not log this push in the round log; or
 #                                         a directory to log it in (default: the
 #                                         clone's common git dir)
@@ -497,6 +499,7 @@ CLAUDE_TIMEOUT="${CLAUDE_REVIEW_TIMEOUT:-600}"
 CLAUDE_MODEL="${CLAUDE_REVIEW_MODEL:-sonnet}"
 SPLIT_WARN_FILES="${SPLIT_WARN_FILES:-25}"
 SPLIT_WARN_BYTES="${SPLIT_WARN_BYTES:-120000}"
+SPLIT_WARN_LINES="${SPLIT_WARN_LINES:-600}"
 
 # ── Preflight: required tools / files ────────────────────────────────────
 # warn_and_pass <message> <round-log reason>
@@ -1351,6 +1354,9 @@ for i in "${!REF_SHAS[@]}"; do
   CHANGED_FILES="$(git diff --name-only "$BASE...$AUDIT_SHA" 2>/dev/null)"
   DIFF_BYTES="$(printf '%s' "$DIFF" | wc -c | tr -d ' ')"
   FILE_COUNT="$(printf '%s\n' "$CHANGED_FILES" | wc -l | tr -d ' ')"
+  # Changed lines outside tests, lockfiles and generated indexes (binary files count 0).
+  CODE_LINES="$(git diff --numstat "$BASE...$AUDIT_SHA" 2>/dev/null \
+    | awk -F'\t' '$3 !~ /(^|\/)(tests?|__tests__)\/|\.test\.[cm]?[jt]sx?$|package-lock\.json$|docs\/gate-index\.md$/ { if ($1 != "-") n += $1 + $2 } END { print n + 0 }')"
 
   # ── Split advisory (never blocks) ──────────────────────────────────────
   # waves-ship §4's round cap discovers "this PR is too large to converge"
@@ -1366,12 +1372,18 @@ for i in "${!REF_SHAS[@]}"; do
     [ -n "$SPLIT_HINT" ] && SPLIT_HINT="$SPLIT_HINT, "
     SPLIT_HINT="$SPLIT_HINT$DIFF_BYTES bytes (threshold $SPLIT_WARN_BYTES)"
   fi
+  # 11-16..23: 1 of 205 PRs at 400 changed lines or fewer needed 3+ Codex
+  # verdicts, against 14 of 58 over 1,500 (owner 2026-11-24).
+  if [ "$SPLIT_WARN_LINES" -gt 0 ] && [ "$CODE_LINES" -gt "$SPLIT_WARN_LINES" ]; then
+    [ -n "$SPLIT_HINT" ] && SPLIT_HINT="$SPLIT_HINT, "
+    SPLIT_HINT="$SPLIT_HINT$CODE_LINES changed lines of non-test code (threshold $SPLIT_WARN_LINES)"
+  fi
   if [ -n "$SPLIT_HINT" ]; then
     echo "" >&2
     echo "[codex-review] ⚠️  SPLIT ADVISORY — $AUDIT_LABEL is large: $SPLIT_HINT" >&2
     echo "[codex-review] Wide PRs have run 15–18 review rounds here; narrow ones converge in 1–3." >&2
     echo "[codex-review] Consider cutting siblings off main BEFORE the first @codex tag." >&2
-    echo "[codex-review] Advisory only, the push is not blocked. Tune with SPLIT_WARN_FILES / SPLIT_WARN_BYTES." >&2
+    echo "[codex-review] Advisory only, the push is not blocked. Tune with SPLIT_WARN_FILES / SPLIT_WARN_BYTES / SPLIT_WARN_LINES." >&2
     echo "" >&2
   fi
 
