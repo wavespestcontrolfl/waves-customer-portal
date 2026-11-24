@@ -13,9 +13,10 @@
  *                 IS the series' first visit, so a "child" (recurring_parent_id
  *                 set) is always a 2nd+ occurrence.
  *   Flexible tier = everything eligibility.js lets through. May re-time SAME
- *                 DAY, or move up to ±5 days (±7 for a plan that runs every
- *                 2 months or longer with no live occurrence of its series
- *                 inside 56 days, see flexBandRadius), SILENTLY —
+ *                 DAY, or move up to ±5 days (±6 for a plan that runs every
+ *                 2 months, ±7 for one that runs every 3 months or longer,
+ *                 with no live occurrence of its series inside 56 days, see
+ *                 flexBandRadius), SILENTLY —
  *                 no customer comms (apply.js's rebooker call is unchanged;
  *                 it already sends none) — until FLEX_TIER_FREEZE_HOURS
  *                 before the visit (25 h for the night pass, owner 2026-11-03:
@@ -31,7 +32,7 @@
  *                 included, and the cron's own SELECT re-reads the table
  *                 fresh each 15-minute tick) — always carries the FINAL
  *                 window.
- *   Anchor      = the band's allowance (that visit's own radius, 5 or 7) is
+ *   Anchor      = the band's allowance (that visit's own radius, 5, 6 or 7) is
  *                 measured from the visit's DURABLE original date as well as
  *                 its current one: route-tiers' cumulative drift anchor
  *                 (loadAnchorMap / resolveAnchor — the earliest
@@ -60,7 +61,11 @@ const FLEX_TIER_RADIUS_DAYS = 5;
 // longer (flexRadiusDaysFor). Monthly stays at 5: ±7 each way could put two
 // neighbouring monthly visits about 16 days apart.
 const FLEX_TIER_WIDE_RADIUS_DAYS = 7;
+// Owner 2026-11-24: "make it 6 for bi monthly". A plan every 2 months (or a custom plan of 56 to 83 days) gets ±6; a plan
+// every 3 months or longer (a custom plan of 84 days or more) keeps ±7.
+const FLEX_TIER_BIMONTHLY_RADIUS_DAYS = 6;
 const FLEX_TIER_WIDE_MIN_INTERVAL_DAYS = 56;
+const FLEX_TIER_WIDEST_MIN_INTERVAL_DAYS = 84;
 const FLEX_TIER_FREEZE_HOURS = 73;
 // Owner 2026-11-03: the night pass's lock is the 24-hour
 // reminder. 25 = 24 plus the same 1-hour margin 73 has over 72, and it must
@@ -71,9 +76,10 @@ const FLEX_TIER_FREEZE_HOURS_24H = 25;
 
 /**
  * The band radius (days) for ONE visit, from its OWN row: 7 when
- * `recurring_pattern` is a month-based pattern of 2 months or more
+ * `recurring_pattern` is a month-based pattern of 3 months or more
  * (rebooker.js MONTH_RECURRENCE_INTERVALS, the one table) or `custom` with
- * `recurring_interval_days` >= FLEX_TIER_WIDE_MIN_INTERVAL_DAYS; 5 for
+ * `recurring_interval_days` >= FLEX_TIER_WIDEST_MIN_INTERVAL_DAYS; 6 for a
+ * 2-month pattern or `custom` from FLEX_TIER_WIDE_MIN_INTERVAL_DAYS up; 5 for
  * everything else. Unknown, null or malformed reads the narrow band (fail
  * closed). Pure. rebooker is required lazily: it is a large module and
  * apply.js already loads it.
@@ -83,17 +89,20 @@ function flexRadiusDaysFor(service) {
   if (typeof pattern !== 'string') return FLEX_TIER_RADIUS_DAYS;
   if (pattern === 'custom') {
     const days = Number(service.recurring_interval_days);
-    return Number.isFinite(days) && days >= FLEX_TIER_WIDE_MIN_INTERVAL_DAYS ? FLEX_TIER_WIDE_RADIUS_DAYS : FLEX_TIER_RADIUS_DAYS;
+    if (!Number.isFinite(days)) return FLEX_TIER_RADIUS_DAYS;
+    if (days >= FLEX_TIER_WIDEST_MIN_INTERVAL_DAYS) return FLEX_TIER_WIDE_RADIUS_DAYS;
+    return days >= FLEX_TIER_WIDE_MIN_INTERVAL_DAYS ? FLEX_TIER_BIMONTHLY_RADIUS_DAYS : FLEX_TIER_RADIUS_DAYS;
   }
   const { MONTH_RECURRENCE_INTERVALS } = require('../rebooker');
   const months = Object.prototype.hasOwnProperty.call(MONTH_RECURRENCE_INTERVALS, pattern) ? MONTH_RECURRENCE_INTERVALS[pattern] : 0;
-  return months >= 2 ? FLEX_TIER_WIDE_RADIUS_DAYS : FLEX_TIER_RADIUS_DAYS;
+  if (months >= 3) return FLEX_TIER_WIDE_RADIUS_DAYS;
+  return months === 2 ? FLEX_TIER_BIMONTHLY_RADIUS_DAYS : FLEX_TIER_RADIUS_DAYS;
 }
 
-// A caller's radius is used only when it is exactly one of the two approved
+// A caller's radius is used only when it is exactly one of the approved
 // bands; anything else reads the default.
 function approvedRadius(radiusDays) {
-  return radiusDays === FLEX_TIER_WIDE_RADIUS_DAYS ? FLEX_TIER_WIDE_RADIUS_DAYS : FLEX_TIER_RADIUS_DAYS;
+  return radiusDays === FLEX_TIER_WIDE_RADIUS_DAYS || radiusDays === FLEX_TIER_BIMONTHLY_RADIUS_DAYS ? radiusDays : FLEX_TIER_RADIUS_DAYS;
 }
 
 /**
@@ -114,10 +123,11 @@ function approvedRadius(radiusDays) {
  * passing 7 on its own).
  */
 function flexBandRadius({ radiusDays, neighbors }) {
-  if (approvedRadius(radiusDays) !== FLEX_TIER_WIDE_RADIUS_DAYS) return FLEX_TIER_RADIUS_DAYS;
+  const radius = approvedRadius(radiusDays);
+  if (radius === FLEX_TIER_RADIUS_DAYS) return FLEX_TIER_RADIUS_DAYS;
   const nearest = neighbors ? neighbors.nearestDays : undefined;
-  if (nearest === null) return FLEX_TIER_WIDE_RADIUS_DAYS;
-  return Number.isFinite(nearest) && nearest >= FLEX_TIER_WIDE_MIN_INTERVAL_DAYS ? FLEX_TIER_WIDE_RADIUS_DAYS : FLEX_TIER_RADIUS_DAYS;
+  if (nearest === null) return radius;
+  return Number.isFinite(nearest) && nearest >= FLEX_TIER_WIDE_MIN_INTERVAL_DAYS ? radius : FLEX_TIER_RADIUS_DAYS;
 }
 
 /**
@@ -300,9 +310,9 @@ async function loadSeriesNeighbors(db, services, { lock = false, withRadius = fa
  * behind its next one — leaves no legal move at all: every day move would
  * cross it (Codex #4995 r7 P1). The lookahead horizon is the caller's
  * (candidate-slots.js caps any ctx.tierWindow).
- * The band is the visit's own radius (flexBandRadius: 7 for a plan of 2 months
- * or longer whose nearest live sibling, `neighbors.nearestDays`, is 56 days
- * away or more, else 5); a missing or unapproved `radiusDays` reads 5.
+ * The band is the visit's own radius (flexBandRadius: 7 for a plan of 3 months
+ * or longer, 6 for a plan of 2 months, when its nearest live sibling,
+ * `neighbors.nearestDays`, is 56 days away or more, else 5); a missing or unapproved `radiusDays` reads 5.
  * Returns {dateFrom, dateTo[, dayMoveFrom][, dayMoveTo]} — the span to
  * generate candidates in — or null when nothing is legal, or the anchor is
  * unknown (fail closed — never guess a budget).
@@ -478,7 +488,9 @@ function flexCandidateRules(service, ctx) {
 module.exports = {
   FLEX_TIER_RADIUS_DAYS,
   FLEX_TIER_WIDE_RADIUS_DAYS,
+  FLEX_TIER_BIMONTHLY_RADIUS_DAYS,
   FLEX_TIER_WIDE_MIN_INTERVAL_DAYS,
+  FLEX_TIER_WIDEST_MIN_INTERVAL_DAYS,
   flexRadiusDaysFor,
   flexBandRadius,
   FLEX_TIER_FREEZE_HOURS,
