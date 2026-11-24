@@ -173,16 +173,15 @@ async function labelFactsBlock({ decision, outgoingBody }) {
 // line 22 saying Waves was "not taking new customers" in the held places (six places in 29 to 32, seven in 33 to 36). The line
 // now says again what prompts 25 to 28 said (Charlotte County is served except Punta Gorda), so an UNEDITED draft from 29 to 36
 // is refused too: it could turn away a customer who is now served; a person rewrites it. Prompts 25 to 28 and 37_n on
-// (sms-shadow-drafter.js) are not affected.
-const ANSWER_BOOK_PROMPT_NUMBER = 25;
-const SERVICE_AREA_HOLD_FIRST_PROMPT_NUMBER = 29;
-const SERVICE_AREA_HOLD_END_PROMPT_NUMBER = 37;
+// (sms-shadow-drafter.js) were not affected by that.
+// HOLIDAYS LINE (owner 2026-11-24): every prompt below 41_n carried COMPANY FACTS line 6, "We work Sundays and holidays, same as any
+// other day". Waves is now closed on six holidays, so an unedited draft from any of them could promise a visit on one of those days
+// (prompts 25 to 28 and 37 to 40 included); a person rewrites it. 41_n on (sms-shadow-drafter.js) carry the closed-days line.
+const COMPANY_FACTS_CURRENT_PROMPT_NUMBER = 41;
 function draftedBeforeAnswerBook(decision) {
   const m = /^house_voice_v12_real_answers(\d*)/.exec(String(decision?.prompt_version || ''));
   if (!m) return false;
-  const n = Number(m[1]);
-  return !m[1] || n < ANSWER_BOOK_PROMPT_NUMBER
-    || (n >= SERVICE_AREA_HOLD_FIRST_PROMPT_NUMBER && n < SERVICE_AREA_HOLD_END_PROMPT_NUMBER);
+  return !m[1] || Number(m[1]) < COMPANY_FACTS_CURRENT_PROMPT_NUMBER;
 }
 const RETIRED_COMPANY_FACT_REASON = 'company fact retired (an unedited draft written under earlier company facts)';
 const RETIRED_COMPANY_FACT_REASON_PREFIX = 'company fact retired';

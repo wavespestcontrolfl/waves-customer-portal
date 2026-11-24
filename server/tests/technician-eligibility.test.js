@@ -375,7 +375,7 @@ describe('technician eligibility', () => {
         gateOn();
         const { conn, techChain } = connWithAbsence(ROW, undefined);
         await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-30' })).resolves.toBe(ROW);
-        expect(techChain.first).toHaveBeenCalledWith('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active');
+        expect(techChain.first).toHaveBeenCalledWith('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active', 'dob');
       });
 
       test('with the option and the gate on, an off day throws 422 TECH_NOT_ASSIGNABLE with offDay set', async () => {
@@ -395,13 +395,13 @@ describe('technician eligibility', () => {
         gateOn();
         const { conn, techChain } = connWithAbsence(ROW, undefined);
         await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-29', workDays: true })).resolves.toBe(ROW);
-        expect(techChain.first).toHaveBeenCalledWith('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active', 'work_days');
+        expect(techChain.first).toHaveBeenCalledWith('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active', 'work_days', 'dob');
       });
 
       test('with the option but the gate off, an off day passes with the original column list', async () => {
         const { conn, techChain } = connWithAbsence(ROW, undefined);
         await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-30', workDays: true })).resolves.toBe(ROW);
-        expect(techChain.first).toHaveBeenCalledWith('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active');
+        expect(techChain.first).toHaveBeenCalledWith('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active', 'dob');
       });
 
       test('with the option but no date nothing is checked', async () => {

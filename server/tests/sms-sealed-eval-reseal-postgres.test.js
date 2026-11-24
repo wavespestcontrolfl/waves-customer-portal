@@ -15,7 +15,7 @@ jest.setTimeout(180000);
 
 (SKIP ? describe.skip : describe)('sealEvalItems on PostgreSQL', () => {
   const schema = `sealed_reseal_${randomUUID().replaceAll('-', '')}`;
-  const VERSION = 'house_voice_v12_real_answers37_n';
+  const VERSION = 'house_voice_v12_real_answers41_n';
   const GATE = 'GATE_SMS_REAL_ANSWERS';
   const DAY = 86400 * 1000;
   let database;

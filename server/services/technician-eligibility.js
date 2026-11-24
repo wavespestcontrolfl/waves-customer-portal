@@ -237,6 +237,7 @@ async function assertAssignableTechnician(technicianId, { conn = db, date, workD
   if (conn.isTransaction) query = query.forShare();
   const columns = ['id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active'];
   if (checkWorkDays) columns.push('work_days');
+  if (date) columns.push('dob');
   const tech = await query.first(...columns);
   let reason = reasonFor(tech);
   if (!reason && date) {
@@ -246,6 +247,9 @@ async function assertAssignableTechnician(technicianId, { conn = db, date, workD
       .first('id');
     if (absence) reason = `is marked out on ${date}`;
   }
+  // A technician's own birthday is a paid day off (owner 2026-11-24): it blocks
+  // assignment exactly like an absence row, with no row to write or clear.
+  if (!reason && date && tech && isBirthdayOn(tech.dob, date)) reason = `has their birthday off on ${dateOnlyString(date)}`;
   let flag = null;
   if (!reason && checkWorkDays && isOffDay(tech, date)) {
     flag = 'offDay';
@@ -311,8 +315,14 @@ function employmentPatch(status) {
  * no change of its own. `includeOffDays: false` opts out (the open-visit nudge
  * must keep naming a visit a technician really holds on an off day). Gate off
  * or the option false = no extra read, byte-identical.
+ *
+ * Birthdays (owner 2026-11-24, no gate): every date in range that is an active
+ * technician's own birthday (technicians.dob, see birthdayTechDays) is added
+ * too, so find-time, the recurring seeder, auto-dispatch, pick-technician and
+ * every other reader of this seam treat it exactly like an absence.
+ * `includeBirthdays: false` opts out.
  */
-async function absentTechDays(conn, { dateFrom, dateTo, technicianIds = null, includeOffDays = true } = {}) {
+async function absentTechDays(conn, { dateFrom, dateTo, technicianIds = null, includeOffDays = true, includeBirthdays = true } = {}) {
   let query = conn('technician_absences')
     .whereBetween('absence_date', [dateFrom, dateTo])
     .whereNull('cleared_at');
@@ -326,6 +336,90 @@ async function absentTechDays(conn, { dateFrom, dateTo, technicianIds = null, in
   }
   if (includeOffDays && techWorkDaysLive()) {
     for (const key of await offDayTechDays(conn, { dateFrom, dateTo, technicianIds })) days.add(key);
+  }
+  if (includeBirthdays) {
+    for (const key of await birthdayTechDays(conn, { dateFrom, dateTo, technicianIds })) days.add(key);
+  }
+  return days;
+}
+
+// ---- Birthdays (owner 2026-11-24, benefits ruling E6 2026-11-20) -------------
+// Each technician gets their own birthday off, one paid day. The date comes from
+// technicians.dob (payroll profile, migration 20260428000007). A Feb 29 birthday
+// falls on Feb 28 in a year with no Feb 29. Inactive/prospective technicians and
+// a NULL dob have no birthday day. No table of days: it is derived from dob.
+
+function isLeapYear(year) {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+/** { month, day } (1-based) of a stored dob (Date or YYYY-MM-DD), or null. Pure. */
+function birthdayMonthDay(dob) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dob == null || dob === '' ? '' : dateOnlyString(dob)));
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day) return null;
+  return { month, day };
+}
+
+/**
+ * The calendar date a birthday is kept on in `year` (YYYY-MM-DD), or null when
+ * the dob is unreadable. Feb 29 -> Feb 28 when `year` is not a leap year. Pure.
+ */
+function birthdayDateInYear(dob, year) {
+  const b = birthdayMonthDay(dob);
+  if (!b || !Number.isInteger(year)) return null;
+  const day = b.month === 2 && b.day === 29 && !isLeapYear(year) ? 28 : b.day;
+  return `${String(year).padStart(4, '0')}-${String(b.month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/** True when `dateStr` (YYYY-MM-DD) is the technician's birthday off. Pure. */
+function isBirthdayOn(dob, dateStr) {
+  const d = /^(\d{4})-\d{2}-\d{2}/.exec(String(dateStr == null ? '' : dateOnlyString(dateStr)));
+  if (!d) return false;
+  return birthdayDateInYear(dob, Number(d[1])) === dateOnlyString(dateStr);
+}
+
+/** Every birthday-off date within [dateFrom, dateTo] (inclusive), ascending. Pure. */
+function birthdayDatesInRange(dob, dateFrom, dateTo) {
+  const from = /^(\d{4})/.exec(String(dateFrom || ''));
+  const to = /^(\d{4})/.exec(String(dateTo || ''));
+  if (!from || !to) return [];
+  const lo = dateOnlyString(dateFrom);
+  const hi = dateOnlyString(dateTo);
+  const out = [];
+  for (let year = Number(from[1]); year <= Number(to[1]); year += 1) {
+    const d = birthdayDateInYear(dob, year);
+    if (d && d >= lo && d <= hi) out.push(d);
+  }
+  return out;
+}
+
+/**
+ * Every (technician, date) pair in [dateFrom, dateTo] (inclusive, YYYY-MM-DD)
+ * that is an ACTIVE technician's birthday off, as a Set of `${technicianId}:${date}`
+ * keys, the same shape absentTechDays returns. `technicianIds` narrows the read
+ * as it does there. No gate. One read of technicians; empty when no technician
+ * in scope has a dob. A failed read is isolated in a savepoint and reads as "no
+ * birthdays", so a bad read never takes scheduling down with it.
+ */
+async function birthdayTechDays(conn, { dateFrom, dateTo, technicianIds = null } = {}) {
+  const days = new Set();
+  if (!dateFrom || !dateTo) return days;
+  try {
+    const rows = await savepointRead(conn, (q) => {
+      let query = q('technicians').where('employment_status', 'active').whereNotNull('dob');
+      if (Array.isArray(technicianIds) && technicianIds.length) query = query.whereIn('id', technicianIds);
+      return query.select('id', 'dob');
+    });
+    for (const row of Array.isArray(rows) ? rows : []) {
+      for (const d of birthdayDatesInRange(row.dob, dateFrom, dateTo)) days.add(`${row.id}:${d}`);
+    }
+  } catch (err) {
+    logger.warn(`[technician-eligibility] birthday read failed (no birthdays applied): ${err.message}`);
   }
   return days;
 }
@@ -535,6 +629,10 @@ module.exports = {
   employmentPatch,
   absentTechDays,
   offDayTechDays,
+  isBirthdayOn,
+  birthdayDateInYear,
+  birthdayDatesInRange,
+  birthdayTechDays,
   loadTechShifts,
   shiftBounds,
   shiftExcluding,

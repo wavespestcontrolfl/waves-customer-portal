@@ -35,7 +35,7 @@ describe('mode reader', () => {
 });
 
 describe('version identity', () => {
-  const REAL = 'house_voice_v12_real_answers38_n';
+  const REAL = 'house_voice_v12_real_answers42_n';
   // The longest identity in use without a patch: next-of-series base (32) + '+' + six one-character
   // tags (four hand-off categories b c l m, voice pin v, edit learning e) = 39 characters.
   const LONGEST = `${REAL}+bcelmv`;
@@ -165,7 +165,7 @@ describe('the drafter prompt and its identity', () => {
     for (const name of ['GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL']) setEnv(name, 'true');
     setEnv('GATE_SMS_VOICE_PROFILE_PIN', '4');
     const base = drafter.currentPromptVersionBase();
-    expect(base).toBe('house_voice_v12_real_answers38_n+bcelmv');
+    expect(base).toBe('house_voice_v12_real_answers42_n+bcelmv');
     expect(base).toHaveLength(39);
     patch.setActivePatchSnapshot(snapshot('C'));
     const live = drafter.currentPromptVersion();
@@ -221,7 +221,7 @@ describe('the drafter prompt and its identity', () => {
 
   test('a tag that does not fit the version columns leaves BOTH the block and the version unpatched', () => {
     const none = { block: '', version: null };
-    const longBase = `house_voice_v12_real_answers38_n+bcml${'x'.repeat(4)}`;
+    const longBase = `house_voice_v12_real_answers42_n+bcml${'x'.repeat(4)}`;
     expect(patch.resolvePromptPatch({ realAnswersOn: true, options: { promptPatch: { ...snapshot('E'), baseVersion: longBase } }, baseVersion: longBase })).toEqual(none);
     expect(patch.resolvePromptPatch({ realAnswersOn: false, options: { promptPatch: { ...snapshot('E'), baseVersion: 'house_voice_v11' } }, baseVersion: 'house_voice_v11' })).toEqual(none);
   });
