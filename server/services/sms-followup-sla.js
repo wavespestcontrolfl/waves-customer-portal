@@ -7,27 +7,27 @@
 // Every phrase followupSlaPhrase (sms-shadow-drafter) can emit — the only
 // follow-up timings a gate-on draft may quote, so their presence in a reply
 // is a deterministic "this draft promises a human follow-up" signal.
-// A closed day (a one-off blackout, a weekly day off or a closed holiday: scheduling/blackout-dates.js) names the next OPEN day
-// instead ("by 9 AM Friday"), so the weekday family is part of the list: the only follow-up timings a draft may quote are still
-// these exact phrases, and a draft quotes only the one its own facts state.
-const WEEKDAY_NAMES = Object.freeze(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']);
-const SLA_PHRASES = Object.freeze(['within the hour', 'by 9 AM this morning', 'by 9 AM tomorrow morning', ...WEEKDAY_NAMES.map((day) => `by 9 AM ${day}`)]);
+// A closed day (a one-off blackout, a weekly day off or a closed holiday: scheduling/blackout-dates.js), or a closure read that
+// failed, gets ONE untimed phrase: never promise a time we cannot verify. It carries no deadline and is never stale.
+const REOPEN_PHRASE = 'as soon as the office reopens';
+const SLA_PHRASES = Object.freeze(['within the hour', 'by 9 AM this morning', 'by 9 AM tomorrow morning', REOPEN_PHRASE]);
+const isTimedPhrase = (phrase) => String(phrase || '').toLowerCase() !== REOPEN_PHRASE;
 
-// How far ahead the closed days are read: "the next open day" is found inside this window.
-const CLOSED_DAYS_LOOKAHEAD = 30;
+// What loadFollowupClosedDates hands back when the closed days could not be read (a Set when they could).
+const CLOSED_DAYS_UNREADABLE = Object.freeze({ unreadable: true });
 /**
- * The closed dates (YYYY-MM-DD Set) from today ET through the lookahead, from the shared closed-day reader
- * (blackout-dates.js getBlackoutDates, strict). A failed read logs a warning and returns an empty Set: the phrase is then
- * today's, as before closed days existed. Async callers load it once and hand it to followupSlaPhrase / slaPhraseStatus.
+ * The closed dates (a Set of YYYY-MM-DD) for today and tomorrow ET, from the shared closed-day reader (blackout-dates.js
+ * getBlackoutDates, strict). A failed read logs a warning and returns CLOSED_DAYS_UNREADABLE: the phrase is then the untimed one.
+ * Async callers load it once and hand it to followupSlaPhrase / slaPhraseStatus. A caller that passes nothing gets the plain phrases.
  */
 async function loadFollowupClosedDates(now = new Date(), conn = undefined) {
   try {
     const { getBlackoutDates } = require('./scheduling/blackout-dates');
     const { etDateString, addETDays } = require('../utils/datetime-et');
-    return new Set(await getBlackoutDates(etDateString(now), etDateString(addETDays(now, CLOSED_DAYS_LOOKAHEAD)), conn, { strict: true }));
+    return new Set(await getBlackoutDates(etDateString(now), etDateString(addETDays(now, 1)), conn, { strict: true }));
   } catch (err) {
-    require('./logger').warn(`[sms-followup-sla] closed days not read (the follow-up phrase ignores them): ${err.message}`);
-    return new Set();
+    require('./logger').warn(`[sms-followup-sla] closed days not read (the follow-up promise is untimed): ${err.message}`);
+    return CLOSED_DAYS_UNREADABLE;
   }
 }
 
@@ -53,9 +53,13 @@ function slaPhraseStatus(body, now = new Date(), closedDates = null) {
   const text = String(body || '').toLowerCase();
   const present = SLA_PHRASES.filter((p) => text.includes(p.toLowerCase()));
   if (!present.length) return 'none';
+  // The untimed phrase promises no time: it is never stale. Only a timed phrase is held to the clock and the closed days, so a
+  // timed phrase is stale once today is closed or the closed days cannot be read (the phrase now is the untimed one).
+  const timed = present.filter(isTimedPhrase);
+  if (!timed.length) return 'current';
   const { followupSlaPhrase } = require('./sms-shadow-drafter'); // lazy: the drafter requires this module
   const current = followupSlaPhrase(now, closedDates).toLowerCase();
-  return present.every((p) => p.toLowerCase() === current) ? 'current' : 'stale';
+  return timed.every((p) => p.toLowerCase() === current) ? 'current' : 'stale';
 }
 
 // Did THIS draft promise an office follow-up? (Codex r5) The phrases are
@@ -120,15 +124,7 @@ function followupDeadline(phrase, draftedAt) {
     const generatedBeforeMidnight = etParts(at).hour < 8;
     return parseETDateTime(`${etDateString(generatedBeforeMidnight ? at : addETDays(at, 1))}T09:00:00`);
   }
-  // "by 9 AM <weekday>": the first such weekday after the day the phrase was drafted (it is only ever generated when the
-  // next 9 AM falls on a closed day or today is closed, so the named day is always a later date).
-  const named = WEEKDAY_NAMES.findIndex((day) => p === `by 9 am ${day.toLowerCase()}`);
-  if (named >= 0) {
-    for (let ahead = 1; ahead <= 7; ahead += 1) {
-      const date = etDateString(addETDays(at, ahead));
-      if (new Date(`${date}T12:00:00Z`).getUTCDay() === named) return parseETDateTime(`${date}T09:00:00`);
-    }
-  }
+  // The untimed phrase (as soon as the office reopens) has no deadline: null, so nothing can pass it.
   return null;
 }
 // The deadline is the ORIGINAL promise's (Codex #5194 r4): an operator who
@@ -186,7 +182,7 @@ function slaDraftedAt(decision) {
 }
 
 module.exports = {
-  SLA_PHRASES, WEEKDAY_NAMES, loadFollowupClosedDates, FOLLOWUP_PROMISED_NOTE, realAnswersGateOn, replyPromisesFollowup, slaPhraseStatus,
+  SLA_PHRASES, REOPEN_PHRASE, CLOSED_DAYS_UNREADABLE, loadFollowupClosedDates, FOLLOWUP_PROMISED_NOTE, realAnswersGateOn, replyPromisesFollowup, slaPhraseStatus,
   draftPromisedFollowup, followupPromiseIsStale, followupPromiseEdited, followupPromiseBlockReason,
   followupDeadline, followupDeadlinePassed, slaDraftedAt,
 };

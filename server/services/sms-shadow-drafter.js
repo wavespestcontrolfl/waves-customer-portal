@@ -427,39 +427,22 @@ NO FALSE PROMISES (these override the house voice examples above):
 // NEVER pinned/hashed — the system prompt only ever describes the STABLE
 // RULE ("use the exact wording from the facts"), never the live value.
 //
-// Closed days (owner 2026-11-24): `closedDates` (any Set of YYYY-MM-DD from the shared closed-day reader, loaded by the async caller,
-// sms-followup-sla loadFollowupClosedDates) makes the promise honest on a day Waves is closed. When today is closed, or the next 9 AM
-// falls on a closed day, it names the next OPEN day ("by 9 AM Friday"). With no closed dates (none given, none in the window, or the
-// read failed) every branch below is the old one, byte for byte.
-function etWeekdayName(dateStr) {
-  return followupSla.WEEKDAY_NAMES[new Date(`${dateStr}T12:00:00Z`).getUTCDay()];
-}
+// Closed days (owner 2026-11-24): `closedDates` is what sms-followup-sla loadFollowupClosedDates reads (the shared closed-day
+// reader): a Set of today's and tomorrow's closed dates, or CLOSED_DAYS_UNREADABLE when the read failed. When today is closed, after
+// 8 PM ET when tomorrow is closed, or when the closed days could not be read, the promise is the untimed "as soon as the office
+// reopens": never a time we cannot verify. With no closed dates given (a caller that does not read them) or none that matter, every
+// branch below is the old one, byte for byte.
 function followupSlaPhrase(now = new Date(), closedDates = null) {
   const { hour } = etParts(now);
-  const closed = closedDates && closedDates.size ? closedDates : null;
-  if (closed) {
-    const nextOpenFrom = (dateStr) => {
-      for (let ahead = 1; ahead <= 30; ahead += 1) {
-        const candidate = etDateString(addETDays(new Date(`${dateStr}T12:00:00Z`), ahead));
-        if (!closed.has(candidate)) return candidate;
-      }
-      return null; // nothing open inside the window: keep the plain phrase
-    };
-    const today = etDateString(now);
-    if (closed.has(today)) {
-      const open = nextOpenFrom(today);
-      if (open) return `by 9 AM ${etWeekdayName(open)}`;
-    } else if (hour >= 20) {
-      const tomorrow = etDateString(addETDays(now, 1));
-      if (closed.has(tomorrow)) {
-        const open = nextOpenFrom(tomorrow);
-        if (open) return `by 9 AM ${etWeekdayName(open)}`;
-      }
-    }
+  if (closedDates === followupSla.CLOSED_DAYS_UNREADABLE) return followupSla.REOPEN_PHRASE;
+  if (closedDates && closedDates.size) {
+    if (closedDates.has(etDateString(now))) return followupSla.REOPEN_PHRASE;
+    if (hour >= 20 && closedDates.has(etDateString(addETDays(now, 1)))) return followupSla.REOPEN_PHRASE;
   }
   if (hour >= 8 && hour < 20) return 'within the hour';
   return hour < 8 ? 'by 9 AM this morning' : 'by 9 AM tomorrow morning';
 }
+
 /**
  * Does the reply quote the follow-up timing THESE facts state, and no other? Only the exact phrase on the facts block's
  * FOLLOW-UP SLA RIGHT NOW line passes ("by 9 AM tomorrow morning" under a "by 9 AM Friday" fact fails). A frozen block with no

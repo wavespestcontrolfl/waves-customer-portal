@@ -1770,14 +1770,10 @@ describe('follow-up SLA helpers (Codex r3): a promised follow-up is detectable, 
   test('the module and the drafter export the same helpers, and SLA_PHRASES is exactly what followupSlaPhrase can emit', () => {
     expect(direct.replyPromisesFollowup).toBe(replyPromisesFollowup);
     expect(direct.slaPhraseStatus).toBe(slaPhraseStatus);
-    // the three clock phrases, plus "by 9 AM <weekday>" for the next open day when Waves is closed (every weekday can be named)
-    const named = [];
-    for (let i = 0; i < 7; i += 1) {
-      const closedDay = new Date(Date.UTC(2026, 10, 22 + i, 15)); // Sun 11-22 .. Sat 11-28, 10 AM ET
-      named.push(followupSlaPhrase(closedDay, new Set([closedDay.toISOString().slice(0, 10)])));
-    }
-    expect(new Set(SLA_PHRASES)).toEqual(new Set([followupSlaPhrase(DAY), followupSlaPhrase(NIGHT), followupSlaPhrase(DAWN), ...named]));
-    expect(new Set(named).size).toBe(7);
+    // the three clock phrases, plus the untimed one a closed day (or an unreadable closure read) gives
+    const reopen = followupSlaPhrase(new Date('2026-11-26T15:00:00Z'), new Set(['2026-11-26'])); // Thanksgiving 10 AM ET
+    expect(reopen).toBe('as soon as the office reopens');
+    expect(new Set(SLA_PHRASES)).toEqual(new Set([followupSlaPhrase(DAY), followupSlaPhrase(NIGHT), followupSlaPhrase(DAWN), reopen]));
   });
 
   test('replyPromisesFollowup: any SLA phrase, case-insensitive; nothing else', () => {
