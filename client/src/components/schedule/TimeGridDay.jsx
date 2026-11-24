@@ -170,6 +170,51 @@ function minutesToTopPx(min) {
   return ((min - DAY_START_HOUR * 60) / SLOT_MIN) * SLOT_HEIGHT;
 }
 
+// The promise to the customer is a 2-hour arrival window from the booked
+// start (server ARRIVAL_WINDOW_MINUTES, the same bound the late check uses),
+// while the booked row stays one hour.
+const ARRIVAL_WINDOW_MIN = 120;
+// Planned arrival outside that window: a genuine alert (red left edge).
+const OUTSIDE_WINDOW_EDGE = '#DC2626';
+// A hairline across the middle of a 30-minute row (the 15-minute mark).
+const QUARTER_LINE = 'linear-gradient(to bottom, transparent calc(50% - 0.5px), #F7F7F8 calc(50% - 0.5px), #F7F7F8 calc(50% + 0.5px), transparent calc(50% + 0.5px))';
+
+// Where the visit sits on the day's PLANNED route (GET /admin/schedule stamps
+// plannedArrivalMin / plannedMinutes from the route model, owner 2026-11-24):
+// the block starts at the planned arrival and is as tall as the planned
+// on-site minutes. Null (draw the booked window as before) when either field
+// is missing, or the arrival falls outside the grid.
+function plannedInterval(svc) {
+  const at = svc?.plannedArrivalMin;
+  const mins = svc?.plannedMinutes;
+  if (!Number.isFinite(at) || !Number.isFinite(mins) || mins <= 0) return null;
+  if (at < DAY_START_HOUR * 60 || at >= DAY_END_HOUR * 60) return null;
+  return { start: at, end: Math.min(DAY_END_HOUR * 60, Math.max(at + mins, at + SLOT_MIN)), minutes: mins };
+}
+
+// "10:45" (the axis carries AM/PM).
+function plannedClock(min) {
+  const h12 = Math.floor(min / 60) % 12 || 12;
+  return `${h12}:${String(min % 60).padStart(2, '0')}`;
+}
+
+// "8" or "8:30": an hour-aligned window reads as bare hours.
+function windowHour(min) {
+  const h12 = Math.floor(min / 60) % 12 || 12;
+  return min % 60 === 0 ? String(h12) : `${h12}:${String(min % 60).padStart(2, '0')}`;
+}
+
+// The promised window of a planned block: { label: "window 8–10", outside }.
+function plannedWindow(svc, plannedStart) {
+  const ws = parseHHMM(svc.windowStart);
+  if (ws == null) return null;
+  const we = ws + ARRIVAL_WINDOW_MIN;
+  return {
+    label: `window ${windowHour(ws)}–${windowHour(we)}`,
+    outside: plannedStart < ws || plannedStart > we,
+  };
+}
+
 // Square-style flat color blocks. Default/scheduled → blue-500;
 // active states darken; completed fades to grey; skipped stays red.
 // White text reads on every non-completed bg.
@@ -206,6 +251,10 @@ function computeLanes(services) {
   const result = new Map();
   const items = services
     .map((s) => {
+      // A planned block is laid out by the interval it is DRAWN at, so
+      // back-to-back stops stack full width.
+      const planned = plannedInterval(s);
+      if (planned) return { svc: s, start: planned.start, end: planned.end };
       const start = parseHHMM(s.windowStart);
       const endRaw = parseHHMM(s.windowEnd);
       const dur = effectiveDuration(s);
@@ -363,7 +412,43 @@ function driveInLabel(service) {
   return `~${service.driveFromPrevMin} min drive in`;
 }
 
-function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent, routeStale = false }) {
+// Tooltip line for a planned block.
+function plannedTitleLine(planned, promise) {
+  const outside = promise?.outside ? ` — outside the ${promise.label}` : '';
+  return `\nPlanned arrival ${plannedClock(planned.start)} · ${planned.minutes} min${outside}`;
+}
+
+// A planned block's head row: route number (one-line blocks only), planned
+// arrival, and the promised-window chip at the right. A one-line block also
+// carries the name, service and minutes on this row.
+function PlannedHeadline({ service, planned, promise, oneLine, routeOrder, gutter, nameRow }) {
+  return (
+    <div className="flex items-center gap-1 min-w-0" style={{ paddingRight: gutter }}>
+      {oneLine && routeOrder != null && (
+        <span
+          className="shrink-0 u-nums text-14 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs"
+          style={{ minWidth: 14, textAlign: 'center', lineHeight: '14px' }}
+        >{routeOrder}</span>
+      )}
+      <span className="u-nums shrink-0 opacity-90">{plannedClock(planned.start)}</span>
+      {oneLine && nameRow}
+      {oneLine && (
+        <span className="opacity-80 truncate min-w-0">
+          · {serviceDisplayName(service)} · <span className="u-nums">{planned.minutes} min</span>
+        </span>
+      )}
+      {promise && (
+        <span
+          className="shrink-0 ml-auto rounded-xs bg-white/20 px-1 u-nums opacity-90 whitespace-nowrap"
+          style={{ fontSize: 14 }}
+          title="Promised arrival window"
+        >{promise.label}</span>
+      )}
+    </div>
+  );
+}
+
+function AppointmentBlock({ service, top, height, planned = null, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent, routeStale = false }) {
   // A move awaiting confirmation changes the route: the server's legs are
   // stale until the refresh, so they hide.
   const drive = routeStale ? null : driveInLabel(service);
@@ -389,6 +474,13 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
   // The drive into this stop needs a one-hour block, and stays off one whose
   // foot carries the readiness strip; the tooltip always carries it.
   const showDrive = drive && effectiveHeight >= SLOT_HEIGHT * 2 && !readinessAtFoot;
+  // Planned block (route model): the planned arrival leads, the promised
+  // window moves to a chip, and a short block is one line.
+  const promise = planned ? plannedWindow(service, planned.start) : null;
+  const outsideWindow = promise?.outside === true;
+  const oneLine = planned != null && compact;
+  // Room for the absolute action buttons at the block's right edge.
+  const actionGutter = (actionCount + (routeOrder != null && !oneLine ? 1 : 0)) * 24;
 
   const dragStyle = transform
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
@@ -404,8 +496,9 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
 
     const onMove = (ev) => {
       const dy = ev.clientY - startY;
-      const raw = startHeight + dy;
-      const snapped = Math.max(SLOT_HEIGHT, Math.round(raw / SLOT_HEIGHT) * SLOT_HEIGHT);
+      // Whole slots from where the drag began: a planned block's height is
+      // not a slot multiple, so a click with no movement must change nothing.
+      const snapped = Math.max(SLOT_HEIGHT, startHeight + Math.round(dy / SLOT_HEIGHT) * SLOT_HEIGHT);
       finalHeight = snapped;
       setResizeHeight(snapped);
     };
@@ -428,6 +521,49 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
   }, [onResize, service, height]);
+
+  const nameRow = (
+    <div className={cn('flex items-center gap-1 min-w-0', oneLine && 'max-w-[45%]')}>
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          const customerId = service.customerId || service.customer_id;
+          if (customerId) onViewCustomer?.(service);
+        }}
+        className={cn(
+          'text-left text-14 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
+          'text-inherit bg-transparent border-0 p-0 cursor-pointer'
+        )}
+        title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
+      >
+        {service.customerName || 'Unassigned'}
+      </button>
+      {owesCompletion?.(service) && <CloseoutOwedChip />}
+      {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && effectiveHeight >= SLOT_HEIGHT * 2 && (
+        <span
+          className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
+          style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 14 }}
+          title="Prepaid"
+        >$</span>
+      )}
+      {/* Visit group (visit-group-scope.md §3): this row is one of N
+          services at the same stop — one route card, one En Route /
+          On Site tap for the tech. Monochrome chip; the schedule feed
+          attaches `visit` only to grouped rows. */}
+      {service.visit && Number(service.visit.serviceCount) > 1 && (
+        <span
+          className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium bg-zinc-200 text-zinc-800"
+          // A one-slot (30 min) block carries the chip on its first row
+          // (the time shares it), which leaves room for the 18px pill.
+          style={{ height: 18, padding: '0 6px', fontSize: 14 }}
+          title={`Visit of ${service.visit.serviceCount} services: ${(service.visit.serviceTypes || []).join(' + ')}`}
+          data-testid="visit-chip"
+        >Visit · {service.visit.serviceCount}</span>
+      )}
+    </div>
+  );
 
   return (
     <div
@@ -455,12 +591,12 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         left: `calc(${laneIdx * (100 / laneCount)}% + 2px)`,
         width: `calc(${100 / laneCount}% - 4px)`,
         background: statusBlockFill(service.status) || undefined,
-        borderLeft: accent ? `3px solid ${accent}` : undefined,
+        borderLeft: outsideWindow ? `3px solid ${OUTSIDE_WINDOW_EDGE}` : accent ? `3px solid ${accent}` : undefined,
         ...dragStyle,
       }}
-      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}${drive ? `\nDrive: ${drive}` : ''}\nShift+click to select for bulk actions`}
+      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}${planned ? plannedTitleLine(planned, promise) : ''}${drive ? `\nDrive: ${drive}` : ''}\nShift+click to select for bulk actions`}
     >
-      {routeOrder != null && (
+      {routeOrder != null && !oneLine && (
         <div
           className={cn(
             'absolute top-0.5 u-nums text-14 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs',
@@ -523,57 +659,34 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
           <Leaf size={12} strokeWidth={1.75} />
         </button>
       )}
-      <div className={compact ? 'flex items-center gap-1 min-w-0' : undefined}>
-      <div className={cn('opacity-90 truncate', compact && 'shrink-0 max-w-[50%]')}>
-        {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)}
-      </div>
-      <div className="flex items-center gap-1 min-w-0">
-        <button
-          type="button"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            const customerId = service.customerId || service.customer_id;
-            if (customerId) onViewCustomer?.(service);
-          }}
-          className={cn(
-            'text-left text-14 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
-            'text-inherit bg-transparent border-0 p-0 cursor-pointer'
-          )}
-          title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
-        >
-          {service.customerName || 'Unassigned'}
-        </button>
-        {owesCompletion?.(service) && <CloseoutOwedChip />}
-        {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && effectiveHeight >= SLOT_HEIGHT * 2 && (
-          <span
-            className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 14 }}
-            title="Prepaid"
-          >$</span>
-        )}
-        {/* Visit group (visit-group-scope.md §3): this row is one of N
-            services at the same stop — one route card, one En Route /
-            On Site tap for the tech. Monochrome chip; the schedule feed
-            attaches `visit` only to grouped rows. */}
-        {service.visit && Number(service.visit.serviceCount) > 1 && (
-          <span
-            className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium bg-zinc-200 text-zinc-800"
-            // A one-slot (30 min) block carries the chip on its first row
-            // (the time shares it), which leaves room for the 18px pill.
-            style={{ height: 18, padding: '0 6px', fontSize: 14 }}
-            title={`Visit of ${service.visit.serviceCount} services: ${(service.visit.serviceTypes || []).join(' + ')}`}
-            data-testid="visit-chip"
-          >Visit · {service.visit.serviceCount}</span>
-        )}
-      </div>
-      </div>
+      {planned ? (
+        <>
+          <PlannedHeadline
+            service={service}
+            planned={planned}
+            promise={promise}
+            oneLine={oneLine}
+            routeOrder={routeOrder}
+            gutter={actionGutter}
+            nameRow={nameRow}
+          />
+          {!oneLine && nameRow}
+        </>
+      ) : (
+        <div className={compact ? 'flex items-center gap-1 min-w-0' : undefined}>
+          <div className={cn('opacity-90 truncate', compact && 'shrink-0 max-w-[50%]')}>
+            {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)}
+          </div>
+          {nameRow}
+        </div>
+      )}
       {/* At 14px a one-hour block holds three rows (time, name, service),
           so the drive rides on the service row; the service name truncates
           first. */}
-      {effectiveHeight > SLOT_HEIGHT && (
+      {effectiveHeight > SLOT_HEIGHT && !oneLine && (
         <div className="flex items-center gap-1 min-w-0">
           <span className="opacity-80 truncate min-w-0">{serviceDisplayName(service)}</span>
+          {planned && <span className="opacity-80 shrink-0 u-nums">· {planned.minutes} min</span>}
           {showDrive && (
             <>
               <span className="opacity-70 shrink-0" aria-hidden="true">·</span>
@@ -655,6 +768,9 @@ function SlotDroppable({ techId, slotIdx, onCreateStart, takesNew = true }) {
       style={{
         height: SLOT_HEIGHT,
         borderTop: `1px solid ${isHour ? '#E4E4E7' : '#F4F4F5'}`,
+        // Planned blocks start on route minutes, not on the hour: a faint
+        // 15-minute line (mid-row) to read them against.
+        backgroundImage: QUARTER_LINE,
       }}
     />
   );
@@ -804,8 +920,9 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             // visit); one wholly before it is a compact block pinned on the
             // first row. The block still carries its real window label.
             const dur = effectiveDuration(svc);
-            const dispStart = Math.max(startMin, DAY_START_HOUR * 60);
-            const dispEnd = Math.max(startMin + dur, dispStart + SLOT_MIN);
+            const planned = plannedInterval(svc);
+            const dispStart = planned ? planned.start : Math.max(startMin, DAY_START_HOUR * 60);
+            const dispEnd = planned ? planned.end : Math.max(startMin + dur, dispStart + SLOT_MIN);
             const top = minutesToTopPx(dispStart);
             const height = ((dispEnd - dispStart) / SLOT_MIN) * SLOT_HEIGHT;
             const lane = lanes.get(svc.id) || { laneIdx: 0, laneCount: 1 };
@@ -818,6 +935,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
                 routeStale={routeStale}
                 top={top}
                 height={height}
+                planned={planned}
                 durationMin={dur}
                 laneIdx={lane.laneIdx}
                 laneCount={lane.laneCount}

@@ -7349,6 +7349,9 @@ router.get('/', async (req, res, next) => {
     // runs from the clock; any other day's from the booked plan.
     const legsToday = date === etDateString();
     Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services, { now: legsToday ? new Date() : null }));
+    // Planned arrival + on-site minutes per stop for the Day grid's blocks
+    // (display only, straight-line model, no paid call).
+    Object.values(byTech).forEach((tech) => require('../services/scheduling/planned-blocks').attachPlannedBlocks(tech.services));
 
     // Calculate tech summaries
     Object.values(byTech).forEach(tech => {

@@ -444,4 +444,4 @@ function attachDriveLegs(services, { now = null } = {}) {
   }
 }
 
-module.exports = { attachDriveLegs };
+module.exports = { attachDriveLegs, stopOrder, simRow, hasGeo, minutesOf, NOT_A_STOP };
