@@ -7,6 +7,9 @@
  * comms, followUp, license), each not_required | pending | done | failed |
  * unknown with reason + evidence, plus contradictions[] and unavailable[].
  *
+ * get_closeout_bill_preview adds a read-only answer to "what will the close-out bill?" for one open visit
+ * (services/closeout-bill-preview.js, built on the completion's own invoice decision).
+ *
  * READ-ONLY: no writes, no comms, no Stripe — deliberately NOT registered in
  * write-gates.js. Admin-only by the standing role gate (non-admin tokens
  * pass only TECH_TOOL_NAMES). Results carry ids, states, and reasons — no
@@ -32,6 +35,18 @@ Use for: "check the closeout for the visit we just finished", "did the report go
       type: 'object',
       properties: {
         service_id: { type: 'string', format: 'uuid', description: 'scheduled_services.id of the visit' },
+      },
+      required: ['service_id'],
+    },
+  },
+  {
+    name: 'get_closeout_bill_preview',
+    description: `What the close-out will bill for ONE open visit (scheduled_services id), before the tech closes it out. Read-only: it runs the completion's own invoice rules and builds the invoice lines the completion would mint; it cuts no invoice, sends nothing and charges nothing. It predicts the common cases and says "uncertain" for the rest: prediction is 'confident' or 'uncertain'. When confident it returns will_invoice (true/false) with the reason, the invoice lines, discount lines with their names (a WaveGuard tier or estimate discount shows only when the visit price carries it), the one-time setup fee state (included, or never invoiced and held for manual billing), subtotal, tax and total, and the gate states that change the outcome. A false answer names why: held for manual billing (unminted setup fee), covered by monthly dues, covered by annual prepay, covered by a recorded prepayment, already invoiced (with the invoice number), or no mint trigger. When uncertain, will_invoice is null and the reason names the state (a voided, canceled or refunded invoice on the visit, annual-prepay add-ons, a queued or orphaned setup fee claim, a partial prepayment): the close-out may hand the bill to the office, so do not tell staff yes or no.
+Use for: "what will the close-out bill for this visit?", "is the setup fee included when I close out today's service?", "does this visit include her tier discount?", "will completing this job make an invoice?", "what will the invoice be for today's appointment?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        service_id: { type: 'string', format: 'uuid', description: 'scheduled_services.id of the open visit' },
       },
       required: ['service_id'],
     },
@@ -81,6 +96,15 @@ async function getCloseoutStatusTool(input) {
       : { error: 'No visit with that id', serviceId };
   }
   return stripFreeText(status);
+}
+
+async function getCloseoutBillPreviewTool(input) {
+  const serviceId = String(input?.service_id || '').trim();
+  if (!serviceId) return { error: 'service_id is required' };
+  const { previewCloseoutBill } = require('../closeout-bill-preview');
+  const preview = await previewCloseoutBill(serviceId);
+  if (!preview.found) return { error: 'No visit with that id', serviceId };
+  return preview;
 }
 
 async function listOpenCloseouts(input) {
@@ -154,6 +178,7 @@ async function executeCloseoutTool(toolName, input) {
   try {
     switch (toolName) {
       case 'get_closeout_status': return await getCloseoutStatusTool(input);
+      case 'get_closeout_bill_preview': return await getCloseoutBillPreviewTool(input);
       case 'list_open_closeouts': return await listOpenCloseouts(input);
       default: return { error: `Unknown tool: ${toolName}` };
     }
