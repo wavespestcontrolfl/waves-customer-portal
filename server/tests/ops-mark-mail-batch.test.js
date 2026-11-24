@@ -26,6 +26,8 @@ describe('mark-mail-batch arguments', () => {
     [['--execute', '--batch', 'run-1', '--ids', 'a', '--ids', 'b'], /--ids is given twice/],
     [['--dry-run'], /unknown argument "--dry-run"/],
     [['--labels', 'out.json'], /--labels needs --batch/],
+    [['--batch', 'run-1', '--labels', 'out.json'], /--labels must point outside the repo/],
+    [['--batch', 'run-1', '--labels', path.join(__dirname, 'labels.json')], /--labels must point outside the repo/],
   ])('%j is refused with a usage message and nothing is run', (args, message) => {
     const result = run(...args);
     expect(result.status).toBe(1);

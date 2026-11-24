@@ -274,6 +274,11 @@ postgres('mailed record on PostgreSQL', () => {
     await conn.raw('ALTER TABLE mail_prospects DISABLE TRIGGER mail_prospects_freeze_mailed_trg');
     await conn('mail_prospects').where({ id }).update({ mailed_at: null, mail_batch: null, mailed_price: null });
     await conn.raw('ALTER TABLE mail_prospects ENABLE TRIGGER mail_prospects_freeze_mailed_trg');
+    // A typed-link visit on a home not yet mailed also blocks the drop.
+    const visited = await row();
+    await conn('mail_prospects').where({ id: visited }).update({ page_typed_views: 2 });
+    await expect(conn.transaction((trx) => mailedMigration.down(trx))).rejects.toThrow(/typed-link visit counts/);
+    await conn('mail_prospects').where({ id: visited }).update({ page_typed_views: 0 });
     await conn.transaction((trx) => mailedMigration.down(trx));
     const cols = (await conn.raw("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = 'mail_prospects'", [schema])).rows.map((c) => c.column_name);
     for (const name of ['mailed_at', 'mail_batch', 'mailed_price', 'page_typed_views']) expect(cols).not.toContain(name);

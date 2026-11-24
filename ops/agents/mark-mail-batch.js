@@ -67,6 +67,12 @@ function parseArgs() {
   if (batch !== undefined && !batch.trim()) throw usage('--batch is empty: give a batch name');
   if (execute && !batch) throw usage('--execute needs --batch <name>');
   if (labelsPath !== undefined && !batch) throw usage('--labels needs --batch <name>: labels are printed from a marked batch only');
+  // The file holds buyer names and page tokens: it must never land inside the checkout, where it could be committed.
+  if (labelsPath !== undefined) {
+    const repo = path.resolve(__dirname, '..', '..');
+    const out = path.resolve(labelsPath);
+    if (out === repo || out.startsWith(`${repo}${path.sep}`)) throw usage('--labels must point outside the repo (it holds buyer names and page tokens), e.g. ~/mail-labels/batch.json');
+  }
   return { execute, batch, ids, labelsPath };
 }
 
