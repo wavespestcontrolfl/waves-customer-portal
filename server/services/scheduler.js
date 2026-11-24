@@ -8622,6 +8622,23 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // 6:06, 14:06 and 15:06 ET — Schedule rain record (record only, $0; owner 2026-11-23, plan v2). What the rain rule
+  // would do to the next work day's schedule: a same-day re-time, or a one-off move to another day when the whole day
+  // is wet, at most 10 a day. The 14:06 run is the 2 PM cutoff (frozen); 15:06 only retries a cutoff that failed; 6:06 on
+  // the day itself rechecks beside it and scores past days against measured radar rain. Writes only its own
+  // system_settings rows: no visit change, text, email or admin notification, no paid call (NWS + MRMS), so no gate.
+  // Off the :00 beat the ad crons use. runExclusive records job_health ('schedule-rain-record') and keeps a deploy
+  // overlap from writing twice. See scheduling/rain-schedule-record.js.
+  // =========================================================================
+  cron.schedule('6 6,14,15 * * *', async () => {
+    try {
+      await runExclusive('schedule-rain-record', () => require('./scheduling/rain-schedule-record').runScheduleRainRecord());
+    } catch (err) {
+      logger.error(`Schedule rain record failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // NIGHTLY 3AM — Customer Intelligence Pipeline
   // =========================================================================
   cron.schedule('0 3 * * *', async () => {
