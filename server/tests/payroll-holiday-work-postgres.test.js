@@ -40,6 +40,7 @@ jest.setTimeout(60000);
 
 const W1 = '2026-09-14'; // Monday; pay Fri 2026-09-25
 const LONG_AGO = '2026-01-05';
+const NOW = Date.parse('2026-10-05T17:00:00Z'); // every week above has ended
 
 postgres('payroll holiday work premium', () => {
   let database;
@@ -129,6 +130,13 @@ postgres('payroll holiday work premium', () => {
     baseUrl = `http://127.0.0.1:${server.address().port}/api/admin/payroll`;
   });
   beforeEach(async () => {
+    // The clock is pinned: the pay run asks today whether a week has ended, and the time-off routes refuse dates more than
+    // 400 days from today, so the suite must not age (AGENTS.md date-freshness rule). Only Date is faked; timers and I/O stay real.
+    jest.useFakeTimers({
+      now: NOW,
+      doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame',
+        'requestIdleCallback', 'cancelIdleCallback', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'],
+    });
     process.env.GATE_PAYROLL = 'true';
     process.env.GATE_PAYROLL_TIME_OFF = 'true';
     trx = await database.transaction();
@@ -136,6 +144,7 @@ postgres('payroll holiday work premium', () => {
     await trx('technicians').insert({ id: ADMIN_ID, name: 'Sample Admin', role: 'admin', employment_type: '1099', employment_status: 'active' });
   });
   afterEach(async () => {
+    jest.useRealTimers();
     await trx.rollback();
     if (OLD_GATE === undefined) delete process.env.GATE_PAYROLL; else process.env.GATE_PAYROLL = OLD_GATE;
     if (OLD_OFF === undefined) delete process.env.GATE_PAYROLL_TIME_OFF; else process.env.GATE_PAYROLL_TIME_OFF = OLD_OFF;
@@ -341,40 +350,6 @@ postgres('payroll holiday work premium', () => {
       expect(await trx('payroll_time_off').where({ id: entry.id })).toHaveLength(1);
     });
 
-    it('refuses to void or move a Monday meal break inside the paid Sunday holiday shift, and allows it once that run is void', async () => {
-      const { voidEntry, adminEditEntry } = require('../services/time-tracking');
-      const id = await tech('Sample Alpha');
-      await approved(id, W0, 8);
-      await shift(id, `${addDays(W0, 6)}T20:00`, `${W1}T04:00`, { meal: 30 });
-      const [meal] = await trx('time_entries').insert({
-        technician_id: id, entry_type: 'break', status: 'completed', clock_in: parseETDateTime(`${W1}T01:00`), clock_out: parseETDateTime(`${W1}T01:30`), duration_minutes: '30.00',
-      }).returning('id');
-      expect((await post(id, W1)).status).toBe(201);
-      const done = (await finalize((await draft(W0)).body.run.id)).body.run;
-      expect(byName(done, 'Sample Alpha')).toMatchObject({ holidayWorkHours: '3.50' });
-      const message = 'A final pay run paid a holiday shift that this break falls in. Void that pay run before changing this break.';
-      await expect(voidEntry(meal.id, { reason: 'Sample', voided_by: null })).rejects.toMatchObject({ statusCode: 409, message });
-      await expect(adminEditEntry(meal.id, {
-        clock_in: parseETDateTime(`${W1}T05:00`).toISOString(), clock_out: parseETDateTime(`${W1}T05:30`).toISOString(), edit_reason: 'Sample', edited_by: null,
-      })).rejects.toMatchObject({ statusCode: 409, message });
-      expect(await trx('time_entries').where({ id: meal.id }).first('status')).toEqual({ status: 'completed' });
-      expect((await api('POST', `/runs/${done.id}/void`, { body: { reason: 'Sample correction' } })).status).toBe(200);
-      await expect(voidEntry(meal.id, { reason: 'Sample', voided_by: null })).resolves.toBeTruthy();
-    });
-
-    it('does not refuse a break edit when no final check pays a holiday shift around it', async () => {
-      const { paidWeeksReadingBreak } = require('../services/payroll-holiday-work');
-      const id = await tech('Sample Alpha');
-      await approved(id, W0, 8);
-      await shift(id, `${addDays(W0, 6)}T20:00`, `${W1}T04:00`);
-      const interval = [{ clockIn: parseETDateTime(`${W1}T01:00`), clockOut: parseETDateTime(`${W1}T01:30`) }];
-      // final, but no holiday on the Monday: no premium reads the break
-      await finalize((await draft(W0)).body.run.id);
-      expect(await paidWeeksReadingBreak(trx, id, interval, W1)).toEqual([]);
-      // a break in its own week's shift is never this guard's
-      expect(await paidWeeksReadingBreak(trx, id, interval, W0)).toEqual([]);
-    });
-
     it('does not refuse a holiday with no such shift, or a pto day, or a holiday the final week\'s shift does not reach', async () => {
       const id = await tech('Sample Alpha');
       await approved(id, W0, 10);
@@ -388,6 +363,31 @@ postgres('payroll holiday work premium', () => {
       await shift(other, `${addDays(W0, 6)}T22:00`, `${W1}T02:00`);
       expect((await post(other, W1, 'pto')).status).toBe(201);
     });
+  });
+
+  it('a break of the next work date cannot change a final check\'s premium: it is not in the Sunday shift\'s deduction', async () => {
+    // Sunday 10 PM to Monday 2 AM, 30 minutes of automatic meal on Sunday. A 1 AM Monday meal has Monday as its work date, so
+    // it is in Monday's deduction and never in Sunday's: adding, changing or voiding it later moves nothing of Sunday's check.
+    const { holidayWorkByDay } = require('../services/payroll-holiday-work');
+    const W0 = addDays(W1, -7);
+    const id = await tech('Sample Alpha');
+    await approved(id, W0, 3.5);
+    await shift(id, `${addDays(W0, 6)}T22:00`, `${W1}T02:00`, { meal: 30 });
+    await offDay(id, W1, 10);
+    const created = (await draft(W0)).body.run;
+    // 4 h shift, 2 h inside Monday, half of the 30 minutes of meal inside it: 105 minutes
+    expect(byName(created, 'Sample Alpha')).toMatchObject({ holidayWorkHours: '1.75', holidayWorkPremiumCents: 1925 });
+    await finalize(created.id);
+    const before = await holidayWorkByDay(trx, W0, addDays(W0, 6));
+    const [meal] = await trx('time_entries').insert({
+      technician_id: id, entry_type: 'break', status: 'completed', duration_minutes: '30.00',
+      clock_in: parseETDateTime(`${W1}T01:00`), clock_out: parseETDateTime(`${W1}T01:30`),
+    }).returning('id');
+    expect(await holidayWorkByDay(trx, W0, addDays(W0, 6))).toEqual(before);
+    await trx('time_entries').where({ id: meal.id }).update({ clock_in: parseETDateTime(`${W1}T00:10`), clock_out: parseETDateTime(`${W1}T00:50`), duration_minutes: '40.00' });
+    expect(await holidayWorkByDay(trx, W0, addDays(W0, 6))).toEqual(before);
+    await trx('time_entries').where({ id: meal.id }).update({ status: 'voided' });
+    expect(await holidayWorkByDay(trx, W0, addDays(W0, 6))).toEqual(before);
   });
 
   it('the fallback is per work date: a holiday summary with no shift entries still pays beside a measured shift', async () => {

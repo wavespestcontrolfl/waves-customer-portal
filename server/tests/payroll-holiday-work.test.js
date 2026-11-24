@@ -117,14 +117,36 @@ describe('holidayWorkForWeek: the unpaid meal inside the day', () => {
     expect(allWeeks({ shifts: [shift], breaks: [late], daily: rows }).get(HOLIDAY)).toBe(225);
   });
 
-  test('a recorded meal at 1 AM belongs to the shift it lies in, whatever its own work date', () => {
-    // Tuesday 8 PM to Wednesday 4 AM, a 30 minute meal at 1 AM Wednesday (work date Wednesday), and the 30 minute
-    // deduction on Tuesday's summary: the meal is inside Wednesday, so 240 - 30 = 210 (not 225).
+  test('a break of another work date is not in this date\'s deduction: a 1 AM meal does not move the Tuesday shift\'s premium', () => {
+    // Tuesday 8 PM to Wednesday 4 AM, a 30 minute meal at 1 AM Wednesday and the 30 minute deduction on Tuesday's summary.
+    // The 1 AM break has Wednesday as its work date, so the daily summary counts it in WEDNESDAY's deduction (it has no shift
+    // there); Tuesday's 30 minutes are the automatic ones, with no clock time, shared by the half of the shift inside
+    // Wednesday: 240 - 15 = 225, and whatever happens to that break later cannot change this figure.
     const shift = entry('2026-09-08T20:00', '2026-09-09T04:00');
     const meal = entry('2026-09-09T01:00', '2026-09-09T01:30');
     expect(meal.work_date).toBe('2026-09-09');
-    const result = week(HOLIDAY_WEEK, { shifts: [shift], breaks: [meal], daily: daily(['2026-09-08', 480, 30]), holidays: ['2026-09-09'] });
-    expect(result.get('2026-09-09')).toBe(210);
+    const input = { shifts: [shift], daily: daily(['2026-09-08', 480, 30]), holidays: ['2026-09-09'] };
+    expect(week(HOLIDAY_WEEK, { ...input, breaks: [meal] }).get('2026-09-09')).toBe(225);
+    expect(week(HOLIDAY_WEEK, { ...input, breaks: [] }).get('2026-09-09')).toBe(225);
+    expect(week(HOLIDAY_WEEK, { ...input, breaks: [{ ...meal, clock_in: at('2026-09-09T02:00'), clock_out: at('2026-09-09T02:45'), duration_minutes: '45.00' }] }).get('2026-09-09')).toBe(225);
+  });
+
+  test('a meal taken on the shift\'s own work date is placed by its clock time', () => {
+    // Tuesday 8 PM to Wednesday 4 AM with the meal at 11 PM Tuesday (the shift's own work date): it is before Wednesday, so
+    // none of the 30 minutes comes off the holiday hours.
+    const shift = entry('2026-09-08T20:00', '2026-09-09T04:00');
+    const meal = entry('2026-09-08T23:00', '2026-09-08T23:30');
+    expect(week(HOLIDAY_WEEK, { shifts: [shift], breaks: [meal], daily: daily(['2026-09-08', 480, 30]), holidays: ['2026-09-09'] }).get('2026-09-09')).toBe(240);
+  });
+
+  test('a break is clipped to the shift before the deduction is placed: only the part inside the shift is placed', () => {
+    // The shift ends 11:50 PM; its 40 minute meal runs 11:30 PM to 12:10 AM (work date the same). Only 20 minutes of it are
+    // inside the shift, so 20 are placed and the other 20 of the 40 deducted are shared by the whole shift: all inside the
+    // holiday, so all 40 minutes come off: 350 - 40 = 310 (not 320, which counts the break as 30 placed minutes).
+    const shift = entry('2026-09-07T18:00', '2026-09-07T23:50');
+    const meal = entry('2026-09-07T23:30', '2026-09-08T00:10');
+    expect(meal.work_date).toBe(HOLIDAY);
+    expect(week(HOLIDAY_WEEK, { shifts: [shift], breaks: [meal], daily: daily([HOLIDAY, 350, 40]) }).get(HOLIDAY)).toBe(310);
   });
 
   test('only the deduction without a recorded time is shared by the share of the shift inside the day', () => {

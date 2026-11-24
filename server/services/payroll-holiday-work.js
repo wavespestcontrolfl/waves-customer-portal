@@ -17,9 +17,9 @@
  * - An entry wholly inside a holiday counts its stored duration_minutes (what the pay run pays); an entry that crosses a
  *   midnight counts the clipped clock span.
  * - The unpaid meal is the shift's work date's unpaid_meal_minutes (what the pay deducts; 0 with GATE_AUTO_LUNCH off).
- *   Recorded meal breaks (completed, 30 minutes or more) are matched to the shift by INTERVAL (a break at 1 AM belongs to the
- *   shift it lies in, whatever its own work date): the deduction up to their length is placed by their clock times, and only
- *   the rest of the deduction (an automatic one, which has no clock time) is shared by the share of the shift inside the
+ *   Recorded meal breaks (completed, 30 minutes or more) count only in the deduction of THEIR OWN work date (the date of their
+ *   clock-in, as the daily summary groups them), clipped to that date's shifts: that part of the deduction is placed by clock
+ *   time, and only the rest of it (an automatic one, which has no clock time, or the part of a break outside the shift) is shared by the share of the shift inside the
  *   holiday.
  * - Fallback, per work date: when the time entries cannot give clock times for that date (a shift with no clock-out, or no
  *   shift entries while the day's summary holds shift minutes), the date's summary row is read as a whole (shift minutes
@@ -56,14 +56,30 @@ function insideHundredths(entry, bounds) {
   return clipped > 0 ? Math.round(clipped * HUNDREDTHS_PER_MS) : 0;
 }
 
-const overlaps = (a, b) => new Date(a.clock_in).getTime() < new Date(b.clock_out).getTime()
-  && new Date(b.clock_in).getTime() < new Date(a.clock_out).getTime();
+// The parts of a work date's recorded meals that lie inside its shifts: the completed breaks of 30 minutes or more
+// (the pay's own test, on the whole break), each clipped to every shift it overlaps. [{ length, insideHolidays(bounds) }].
+function recordedMealPieces(breaks, shifts, floor) {
+  const pieces = [];
+  for (const b of breaks) {
+    if (!b.clock_out || fullHundredths(b) < floor) continue;
+    for (const s of shifts) {
+      const from = Math.max(new Date(b.clock_in).getTime(), new Date(s.clock_in).getTime());
+      const to = Math.min(new Date(b.clock_out).getTime(), new Date(s.clock_out).getTime());
+      if (to <= from) continue;
+      // a break wholly inside the shift keeps its stored duration, as the pay counts it
+      const whole = from === new Date(b.clock_in).getTime() && to === new Date(b.clock_out).getTime();
+      const piece = { clock_in: new Date(from), clock_out: new Date(to), duration_minutes: whole ? b.duration_minutes : null };
+      pieces.push({ length: fullHundredths(piece), insideHolidays: (bounds) => insideHundredths(piece, bounds) });
+    }
+  }
+  return pieces;
+}
 
 /**
  * The paid minutes one technician earns on holidays from the shifts of ONE pay week, pure.
  *   dates      the work dates ('YYYY-MM-DD') of the week, Monday to Sunday
  *   shifts     shift entries { clock_in, clock_out, duration_minutes, work_date } whose work date is in the week, not voided
- *   breaks     break entries of the same shape (only completed ones with a clock-out count), any work date
+ *   breaks     break entries of the same shape, with their own work_date (only completed ones with a clock-out count)
  *   daily      Map of work date -> { total_shift_minutes, unpaid_meal_minutes } (the day's summary row)
  *   holidays   the holiday dates of the technician ('YYYY-MM-DD'), from the week's start to a week after its end
  * Returns [{ workDate, minutes }] in holiday date order (minutes > 0), the date being the holiday's.
@@ -73,7 +89,6 @@ function holidayWorkForWeek({ dates, shifts, breaks = [], daily, holidays }) {
   const totals = new Map();
   const add = (day, units) => { if (units > 0) totals.set(day, (totals.get(day) || 0) + units); };
   const floor = hundredths(UNPAID_MEAL_MIN_BREAK_MINUTES);
-  const meals = breaks.filter((b) => b.clock_out && fullHundredths(b) >= floor);
   for (const date of dates) {
     const group = shifts.filter((s) => s.work_date === date);
     const row = daily.get(date) || null;
@@ -86,9 +101,15 @@ function holidayWorkForWeek({ dates, shifts, breaks = [], daily, holidays }) {
     if (!group.length) continue;
     const total = group.reduce((sum, s) => sum + fullHundredths(s), 0);
     const meal = row ? hundredths(row.unpaid_meal_minutes) : 0;
-    // The recorded meals that lie in this date's shifts, matched by interval.
-    const recorded = meal > 0 ? meals.filter((b) => group.some((s) => overlaps(s, b))) : [];
-    const recordedTotal = recorded.reduce((sum, b) => sum + fullHundredths(b), 0);
+    // The recorded meals of THIS work date's deduction, clipped to its shifts. A break counts in the deduction of the work date
+    // of its own clock-in (time-tracking.js computeDailySummaryInTransaction groups breaks by that date, and
+    // dayUnpaidMealUnits reads only that group), so only breaks of this date are read here, and only the part inside this
+    // date's shifts. A break of ANOTHER work date (a 1 AM meal in a shift that started the evening before) is in that other
+    // date's deduction, never in this one: so a break edited in another pay week can never change this shift's premium or a
+    // check that is already final, and no lock on break edits is needed. The deduction left without a recorded part inside the
+    // shifts is shared by the share of the shift inside the holiday.
+    const pieces = meal > 0 ? recordedMealPieces(breaks.filter((b) => b.work_date === date), group, floor) : [];
+    const recordedTotal = pieces.reduce((sum, p) => sum + p.length, 0);
     const placed = Math.min(meal, recordedTotal);
     for (const holiday of held) {
       const bounds = dayBounds(holiday);
@@ -96,7 +117,7 @@ function holidayWorkForWeek({ dates, shifts, breaks = [], daily, holidays }) {
       if (inside <= 0) continue;
       let mealInside = 0;
       if (meal > 0) {
-        const recordedInside = recorded.reduce((sum, b) => sum + insideHundredths(b, bounds), 0);
+        const recordedInside = pieces.reduce((sum, p) => sum + p.insideHolidays(bounds), 0);
         mealInside = (recordedTotal > 0 ? Math.round((recordedInside * placed) / recordedTotal) : 0)
           + Math.round(((meal - placed) * inside) / (total || inside));
       }
@@ -142,8 +163,9 @@ async function holidayWorkByDay(conn, start, end) {
     .whereNot({ status: 'active' })
     .whereNotNull('clock_out')
     .where('clock_in', '>=', new Date(dayBounds(start).start))
-    .where('clock_in', '<', new Date(dayBounds(reach).end))
-    .select('technician_id', 'clock_in', 'clock_out', 'duration_minutes');
+    .where('clock_in', '<', new Date(dayBounds(end).end))
+    .select('technician_id', 'clock_in', 'clock_out', 'duration_minutes',
+      conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
   const dailyRows = await conn('time_entry_daily_summary')
     .whereIn('technician_id', ids)
     .where('work_date', '>=', start)
@@ -205,45 +227,4 @@ async function otherWeeksOfShiftsInto(conn, technicianId, days) {
   return [...weeks].sort();
 }
 
-/**
- * The finalized pay weeks whose holiday premium reads a recorded break in one of `intervals` ([{ clockIn, clockOut }]):
- * the weeks (Mondays) of the technician's completed shifts that overlap the interval and run into one of the technician's
- * holidays from another pay week than the break's own (`ownWeek`). Such a shift's premium is figured with that break as
- * its meal (holidayWorkForWeek matches meals by interval), so editing or voiding the break would change a final check.
- * time-tracking.js refuses the change once that week is paid. Sorted, finalized weeks only.
- */
-async function paidWeeksReadingBreak(conn, technicianId, intervals, ownWeek) {
-  const weeks = new Set();
-  for (const { clockIn, clockOut } of intervals) {
-    if (!clockIn || !clockOut) continue;
-    const shifts = await conn('time_entries')
-      .where({ technician_id: technicianId, entry_type: 'shift' })
-      .whereNot({ status: 'voided' })
-      .whereNotNull('clock_out')
-      .where('clock_in', '<', new Date(clockOut))
-      .where('clock_out', '>', new Date(clockIn))
-      .select('clock_in', 'clock_out', conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
-    for (const shift of shifts) {
-      const week = staffWeekStartForWorkDate(shift.work_date);
-      if (week === ownWeek) continue;
-      const firstDay = etDateString(new Date(shift.clock_in));
-      const lastDay = etDateString(new Date(new Date(shift.clock_out).getTime() - 1));
-      const holiday = await conn('payroll_time_off')
-        .where({ technician_id: technicianId, kind: 'holiday' })
-        .where('work_date', '>=', firstDay)
-        .where('work_date', '<=', lastDay)
-        .first('id');
-      if (holiday) weeks.add(week);
-    }
-  }
-  if (!weeks.size) return [];
-  const paid = await conn('payroll_checks')
-    .where({ technician_id: technicianId, status: 'finalized' })
-    .whereIn('week_start', [...weeks])
-    .distinct('week_start')
-    .pluck('week_start');
-  const paidSet = new Set(paid.map((w) => (w instanceof Date ? w.toISOString().slice(0, 10) : String(w).slice(0, 10))));
-  return [...weeks].filter((w) => paidSet.has(w)).sort();
-}
-
-module.exports = { holidayWorkForWeek, holidayWorkByDay, capHolidayDays, dayBounds, otherWeeksOfShiftsInto, paidWeeksReadingBreak };
+module.exports = { holidayWorkForWeek, holidayWorkByDay, capHolidayDays, dayBounds, otherWeeksOfShiftsInto };

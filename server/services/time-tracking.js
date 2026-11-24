@@ -620,14 +620,6 @@ async function adminEditEntry(entryId, {
       staffWorkDate(entry.clock_in),
       requestedWorkDate,
     ], (entry_type || entry.entry_type) === 'shift' ? requestedWorkDate : null);
-    if (entry.entry_type === 'break' || entry_type === 'break') {
-      await assertNoPaidHolidayPremiumReadsBreak(trx, entry.technician_id, [
-        ...(entry.entry_type === 'break' ? [{ clockIn: entry.clock_in, clockOut: entry.clock_out }] : []),
-        ...((entry_type || entry.entry_type) === 'break'
-          ? [{ clockIn: clock_in ? new Date(clock_in) : entry.clock_in, clockOut: clock_out ? new Date(clock_out) : entry.clock_out }]
-          : []),
-      ], staffWorkDate(entry.clock_in));
-    }
     // Optimistic version check (codex P2 #3152 round 22): an automated
     // caller (the time-on-site linked-timer sync) states the updated_at it
     // observed — if a payroll admin edited the entry between that snapshot
@@ -893,9 +885,6 @@ async function voidEntry(entryId, { reason, voided_by }) {
     const entry = await trx('time_entries').where({ id: entryId }).forUpdate().first();
     assertEntryStillInLockedWeek(entry, preview.technician_id, previewWeek);
     await assertEntryMutable(trx, entry, 'void', [staffWorkDate(entry.clock_in)]);
-    if (entry.entry_type === 'break') {
-      await assertNoPaidHolidayPremiumReadsBreak(trx, entry.technician_id, [{ clockIn: entry.clock_in, clockOut: entry.clock_out }], staffWorkDate(entry.clock_in));
-    }
 
     const [saved] = await trx('time_entries')
       .where({ id: entryId, status: entry.status })
@@ -930,18 +919,6 @@ function assertEntryStillInLockedWeek(entry, technicianId, weekStart) {
   const currentWeek = staffWeekStartForWorkDate(staffWorkDate(entry.clock_in));
   if (entry.technician_id !== technicianId || currentWeek !== weekStart) {
     throw staffTimeHttpError(409, 'Entry changed; reload before editing it.');
-  }
-}
-
-// Codex P2 #8425: a recorded break can be the meal of a shift from ANOTHER pay week that runs into a holiday (a Sunday
-// night shift into a Monday holiday); that shift's holiday premium is paid on its own week's check and reads the break
-// (payroll-holiday-work.js). Editing or voiding the break after that check is final would change a paid premium, so it
-// is refused like any change to a paid week. `intervals` = the break's interval before and after the change.
-async function assertNoPaidHolidayPremiumReadsBreak(trx, technicianId, intervals, ownWorkDate) {
-  const { paidWeeksReadingBreak } = require('./payroll-holiday-work');
-  const weeks = await paidWeeksReadingBreak(trx, technicianId, intervals, staffWeekStartForWorkDate(ownWorkDate));
-  if (weeks.length) {
-    throw staffTimeHttpError(409, 'A final pay run paid a holiday shift that this break falls in. Void that pay run before changing this break.');
   }
 }
 
