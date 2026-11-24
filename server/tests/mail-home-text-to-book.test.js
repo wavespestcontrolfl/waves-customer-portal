@@ -67,6 +67,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const logger = require('../services/logger');
 const { handleHomeTextToBook, _test } = require('../services/mail/home-text-to-book');
+const { buildBaseSlug } = require('../services/mail/home-slug');
 
 const PARRISH = TWILIO_NUMBERS.locations.parrish.number; // the line the card prints
 const SENDER = '+12025550101';
@@ -109,6 +110,44 @@ describe('parseAddressText', () => {
     '101 Example Apt 9', '101 Example Unit 4',
   ])('not an address: %j', (body) => {
     expect(_test.parseAddressText(body)).toBeNull();
+  });
+});
+
+describe('every address the slug builder accepts is accepted by the text parser', () => {
+  // A county line with no unit part. The card prints the house number and street name; a sender may add the street type.
+  const LINES = [
+    '101 EXAMPLE TRL',
+    '88 LAKE VIEW BLVD',
+    '5 ST. JAMES CT',
+    "12 O'NEIL WAY",
+    '9 MARTIN LUTHER KING JR BLVD',
+    '1 A B C D E F G H I J K L M DR', // many short words
+    '3 CAF\u00c9 DEL MAR DR',
+    '4512 N RIVER OAKS DR',
+    '123 SW 5TH AVE',
+    '123 MAIN ST NW',
+    '7 SMITH & JONES RD',
+    '10 HIGHWAY 41 N',
+    '55 SOUTH TAMIAMI TRL',
+    '200 THE VILLAGE AT THE LAKES OF SARASOTA PARK DR',
+    '12 COUNTY ROAD 12345',
+  ];
+  test.each(LINES)('%s', (line) => {
+    const slug = buildBaseSlug(line);
+    expect(slug).toBeTruthy();
+    // The printed text (house number and street name, as the slug reads) and the full line both find the slug.
+    for (const typed of [line, slug.replace(/-/g, ' ')]) {
+      const parsed = _test.parseAddressText(typed);
+      expect(parsed && parsed.candidates).toContain(slug);
+    }
+  });
+
+  test('a longest allowed slug (60 characters) with its street type and a ZIP still parses', () => {
+    const name = 'abcdefghi '.repeat(5).trim(); // 5 words, 49 characters
+    const line = `101 ${name} DR`;
+    const slug = buildBaseSlug(line);
+    expect(slug.length).toBeLessThanOrEqual(60);
+    expect(_test.parseAddressText(`${line} 34211`).candidates).toContain(slug);
   });
 });
 
@@ -207,16 +246,15 @@ describe('handleHomeTextToBook', () => {
     expect(mockSend).not.toHaveBeenCalled();
   });
 
-  test('a customer matched on the last ten digits only (an international sender) is NOT that customer: nothing is read as theirs', async () => {
-    const intl = '+442025550101';
-    const text2 = (extra) => handleHomeTextToBook({ from: intl, to: PARRISH, body: '101 EXAMPLE', ...extra });
-    // The webhook matched a NANP customer by the shared last ten digits: not verified, and the lookup finds the same customer.
-    mockFindOnly.mockResolvedValue({ id: 'cust-1', phone: SENDER });
-    expect(await text2({ customer: { id: 'cust-1', phone: SENDER }, knownContact: true })).toEqual({ handled: false });
+  test('a customer whose stored number is international but shares the sender\'s last ten digits is NOT that customer', async () => {
+    const stored = '+442025550101';
+    // The webhook matched on the last ten digits: not verified, and the lookup finds the same customer: no reply.
+    mockFindOnly.mockResolvedValue({ id: 'cust-1', phone: stored });
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: stored }, knownContact: true })).toEqual({ handled: false });
     expect(mockSend).not.toHaveBeenCalled();
-    // The one customer that really owns the sender's full number is read instead, and its consent is the one checked.
-    mockFindOnly.mockResolvedValue({ id: 'cust-2', phone: intl });
-    expect((await text2({ customer: { id: 'cust-1', phone: SENDER }, knownContact: true })).handled).toBe(true);
+    // The one customer that really owns the sender's NANP number is read instead, and its consent is the one checked.
+    mockFindOnly.mockResolvedValue({ id: 'cust-2', phone: '(202) 555-0101' });
+    expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: stored }, knownContact: true })).handled).toBe(true);
     expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-2', identityTrustLevel: 'phone_matches_customer' });
   });
 
@@ -238,16 +276,23 @@ describe('handleHomeTextToBook', () => {
     TWILIO_NUMBERS.isInternalNumber.mockRestore();
   });
 
-  test('claim keys are the full identity key: two international senders with the same last ten digits do not share a cap or a repeat', async () => {
-    mockState.homes = [{ ...HOME }];
-    const a = '+442025550101';
-    const b = '+332025550101';
-    expect((await handleHomeTextToBook({ from: a, to: PARRISH, body: '101 EXAMPLE' })).handled).toBe(true);
-    expect((await handleHomeTextToBook({ from: b, to: PARRISH, body: '101 EXAMPLE' })).handled).toBe(true);
-    expect(mockSend).toHaveBeenCalledTimes(2);
-    expect(mockState.claims.map((c) => c.phone_digits)).toEqual([a, b]);
-    // a NANP sender is keyed on its ten digits, as before
-    mockState.claims = [];
+  test.each([
+    ['an international number', '+442025550101'],
+    ['a ten-digit international number (+45 and eight digits), which a +1 normalizer would misread', '+4512345678'],
+    ['a +1 number with an impossible area code', '+10005550101'],
+    ['a +1 number with an impossible exchange', '+12020550101'],
+    ['a number with no plus', '2025550101'],
+    ['a number that is too short', '+1202555010'],
+    ['no number', ''],
+    ['no number at all', undefined],
+  ])('%s: no reply, no table read, no claim', async (_label, from) => {
+    expect(await handleHomeTextToBook({ from, to: PARRISH, body: '101 EXAMPLE' })).toEqual({ handled: false });
+    expect(mockState.prospectQueries).toBe(0);
+    expect(mockState.claimTxns).toBe(0);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('a US sender is keyed on its ten digits (sender and office line)', async () => {
     await handleHomeTextToBook({ from: '+12025550999', to: PARRISH, body: '101 EXAMPLE' });
     expect(mockState.claims[0]).toMatchObject({ phone_digits: '2025550999', line_digits: '9412972817' });
   });

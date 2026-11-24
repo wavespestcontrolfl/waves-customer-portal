@@ -17,6 +17,7 @@
  *     new_home, status eligible or held_back). A bare address whose home only has the ZIP form is not guessed.
  *   - A text that names a unit ("101 Example Apt 9") gets no reply: the unit is never silently dropped and matched to
  *     another unit's home (the card prints house number and street name only).
+ *   - Only a US/NANP sender (+1) is answered: the card is mailed to SW Florida homes. Any other number gets no reply and no read.
  *   - Any other text (most of them) costs no database read: the shape check alone turns it away.
  *   - One reply per sender, office line and home per 24 hours, and at most MAX_REPLIES_PER_SENDER (3) per sender per 24 hours
  *     across every home and office line (sendCustomerMessage has no recipient-wide daily cap for a customer-less
@@ -48,9 +49,13 @@ const REPLY_WINDOW_HOURS = 24;
 // Replies one sender can get in the window, across every home and office line: sendCustomerMessage has no recipient-wide
 // daily cap for a customer-less conversational send, so the claim table enforces it.
 const MAX_REPLIES_PER_SENDER = 3;
-// A house number, a street, at most a street type, a directional and a ZIP: more words than this is a sentence.
-const MAX_WORDS = 8;
-const MAX_BODY_LENGTH = 80;
+// The body is bounded by length only: a street name of any word count fits the 60-character slug, and the exact live-slug
+// match is the real filter. 120 covers a 60-character slug plus its street type, a ZIP and punctuation.
+const MAX_BODY_LENGTH = 120;
+// The postcard goes to SW Florida homes: only a US/NANP sender (+1, a valid area code and exchange) is answered. Any other
+// number gets no reply and no table read; it never reaches the recipient normalizer of the SMS pipeline, which would read
+// ten international digits as a +1 number.
+const NANP_SENDER = /^\+1[2-9]\d{2}[2-9]\d{6}$/;
 const DIRECTIONALS = new Set(['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW']);
 // Where a county address line's unit part starts (home-slug.js UNIT_WORDS).
 const UNIT_WORDS = new Set(['UNIT', 'APT', 'APTS', 'APARTMENT', 'STE', 'SUITE', 'BLDG', 'LOT', 'SPC', 'TRLR', 'RM', 'FLOOR']);
@@ -70,9 +75,9 @@ function parseAddressText(body) {
   if (typeof body !== 'string') return null;
   const text = body.trim().replace(/\s+/g, ' ').toUpperCase().replace(/[.!]+$/, '');
   if (!text || text.length > MAX_BODY_LENGTH) return null;
-  // Digits first, then letters, digits and the few marks an address carries; no "?", no URL, no sentence.
-  if (!/^\d+ [A-Z0-9 .,'-]+$/.test(text)) return null;
-  if (text.split(' ').length > MAX_WORDS) return null;
+  // A house number, then any letters (accents too: the slug builder folds them), digits and the marks a street name carries;
+  // no "?", ":" or other sentence or URL punctuation, no control character.
+  if (!/^\d+ [\p{L}\p{N} .,'\u2019&/()-]+$/u.test(text)) return null;
 
   let street = text;
   let zip = null;
@@ -156,8 +161,7 @@ async function findLiveHome({ candidates, zip, street, fallback }) {
  * Two texts at the same moment, for the same home or different homes, wait for each other and see the other's committed row.
  */
 async function claimReply({ from, to, prospectId }) {
-  // phoneIdentityKey: 10 digits for a NANP number, "+<digits>" for any other, so two international senders that share their
-  // last ten digits never share a lock, a cap or a repeat check.
+  // Ten-digit keys: the sender is a NANP number (NANP_SENDER) and the line is one of ours, so phoneIdentityKey is their ten digits.
   const sender = phoneIdentityKey(from);
   const key = { phone_digits: sender, line_digits: phoneIdentityKey(to), prospect_id: prospectId };
   return db.transaction(async (trx) => {
@@ -186,11 +190,11 @@ function replyBody({ address, slug }) {
 }
 
 // The sender's customer, for the opt-out and consent checks. The webhook matches phones on their last ten digits, so a customer
-// counts only when one of its stored numbers IS the sender's full number (phoneIdentityKey): an international sender that shares
-// ten digits with a customer is not that customer. The webhook's primary match is verified first; otherwise (`knownContact`: a
-// record has the number as a secondary or service-contact phone, or the webhook's own match failed the check) the ONE customer
-// owning it is read and verified the same way. null = no record claims the number (a lead). false = a record claims it that
-// cannot be confirmed as the sender's (two owners, a different full number, or a failed read): no reply, consent unknown.
+// counts only when one of its stored numbers is the sender's NANP number (phoneIdentityKey: the same ten digits, and a stored
+// international number never equals it). The webhook's primary match is verified first; otherwise (`knownContact`: a record has
+// the number as a secondary or service-contact phone, or the webhook's own match failed the check) the ONE customer owning it is
+// read and verified the same way. null = no record claims the number (a lead). false = a record claims it that cannot be
+// confirmed as the sender's (two owners, a different number, or a failed read): no reply, consent unknown.
 async function senderCustomerId(from, customer, knownContact) {
   const key = phoneIdentityKey(from);
   if (customer && phoneIdentityKey(customer.phone) === key) return customer.id;
@@ -209,7 +213,7 @@ async function senderCustomerId(from, customer, knownContact) {
  */
 async function handleHomeTextToBook({ from, to, body, customer, knownContact, standAside = async () => false }) {
   try {
-    if (!mailHomePageLive() || !mailHomeTextBookLive()) return { handled: false };
+    if (!mailHomePageLive() || !mailHomeTextBookLive() || !NANP_SENDER.test(from)) return { handled: false };
     // Only the office location lines (the GBP numbers the card prints); never the AI line, a tech line or a tracking line.
     // findByNumber alone is not enough: it also reports the AI chat line (the toll-free number) as a location.
     const locationId = Object.keys(TWILIO_NUMBERS.locations).find((id) => TWILIO_NUMBERS.locations[id].number === to);
