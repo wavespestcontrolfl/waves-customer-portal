@@ -407,15 +407,27 @@ describe('sendTechEnRoute hands the en-route text to the visit-only recipients',
     expect(sentTo()).toEqual([HOLDER]);
   });
 
-  test('gate ON: the recipient sender gets the visit, the technician, the ETA and the holder\'s tracker link (owner 2026-11-24); the holder results are untouched', async () => {
+  test('gate ON: the recipient sender gets the visit, the technician, the ETA and a builder for the recipient\'s OWN tracker link; the holder results are untouched', async () => {
     process.env[GATE] = 'true';
     const result = await enRoute();
     expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledWith({
       scheduledServiceId: 'ss-1', kind: 'en_route', excludePhones: [HOLDER],
-      context: { techName: expect.any(String), etaMinutes: 15, trackUrl: expect.stringMatching(/^https:\/\/\S+\/track\/tok-1$/) },
+      context: { techName: expect.any(String), etaMinutes: 15, trackUrlFor: expect.any(Function) },
     });
     expect(sentTo()).toEqual([HOLDER]);
     expect(result.results).toHaveLength(1);
+  });
+
+  test('gate ON: the recipient\'s link is built from the recipient token alone; the holder\'s tracker token never reaches the recipient sender', async () => {
+    process.env[GATE] = 'true';
+    await enRoute();
+    const [{ context }] = VisitRecipient.notifyVisitRecipients.mock.calls[0];
+    // No trackUrl of any kind in the context: only a builder that takes the recipient's token.
+    expect(Object.keys(context).sort()).toEqual(['etaMinutes', 'techName', 'trackUrlFor']);
+    const url = await context.trackUrlFor('r'.repeat(64));
+    expect(url).toMatch(/^https:\/\/\S+\/track\/r{64}$/);
+    expect(url).not.toContain('tok-1');
+    expect(JSON.stringify(VisitRecipient.notifyVisitRecipients.mock.calls)).not.toContain('tok-1');
   });
 
   test('gate ON: the holder result is the same when the holder send is blocked', async () => {

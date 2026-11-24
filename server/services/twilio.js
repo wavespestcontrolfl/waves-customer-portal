@@ -2276,7 +2276,21 @@ const TwilioService = {
           scheduledServiceId,
           kind: "en_route",
           excludePhones: servedPhones,
-          context: { techName: customerTechName, etaMinutes, trackUrl: trackUrl || longTrackUrl },
+          // The person's OWN map-only link (a token minted on their row), never the holder's tracker link: that one
+          // opens the report, the invoice and the cards after the visit.
+          context: {
+            techName: customerTechName,
+            etaMinutes,
+            trackUrlFor: async (recipientToken) => {
+              const long = `${origin}/track/${recipientToken}`;
+              return (await shortenOrPassthrough(long, {
+                kind: "tracking",
+                entityType: "visit_text_recipients",
+                customerId,
+                expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+              })) || long;
+            },
+          },
         });
       }
     }

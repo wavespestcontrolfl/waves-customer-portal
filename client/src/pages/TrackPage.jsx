@@ -736,7 +736,21 @@ function OnPropertyCard({ data }) {
   );
 }
 
+// A visit text recipient's link (scope 'visit_recipient', GATE_CALL_GIVEN_VISIT_TEXTS): the visit is over and that is
+// all it says. The server sends no summary, report, invoice, review or offer data to this link.
+function RecipientCompleteCard({ data }) {
+  return (
+    <Card accent={COLORS.green}>
+      <TechBlock tech={data.tech} size="lg" />
+      <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: '20px 0 0' }}>
+        {data.service?.type ? `The ${data.service.type.toLowerCase()} visit is complete.` : 'The visit is complete.'}
+      </h1>
+    </Card>
+  );
+}
+
 function CompleteCard({ data }) {
+  if (data.scope === 'visit_recipient') return <RecipientCompleteCard data={data} />;
   const { summary = {} } = data;
   const photos = Array.isArray(summary.photos) ? summary.photos.slice(0, 6) : [];
   return (

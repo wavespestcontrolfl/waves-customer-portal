@@ -654,6 +654,125 @@ const PRIVACY_HEADERS = {
   'Referrer-Policy': 'no-referrer',
 };
 
+// What a visit text recipient's tracker link shows (GATE_CALL_GIVEN_VISIT_TEXTS, owner 2026-11-24, "yes he gets it"):
+// the map and the arrival of ONE visit, nothing else. A WHITELIST: a key added to the holder payload never reaches the
+// recipient until it is listed here. Absent on purpose: the account holder's name and the service contacts' names, the
+// street address and unit, the report, invoice, prep and review tokens, photos and the visit summary, the offer and
+// referral cards, the reschedule and sign-in actions, the cancellation reason, the next visit of the plan, and every key
+// not named below. `scope` tells the page to hide what only the holder sees. After the visit it is the plain
+// "complete" state, with the tech and the service name and nothing about the work (no summary, no links).
+const RECIPIENT_VISIT_CHANGE_KINDS = new Set(['pending_rebook']);
+function recipientTrackPayload(full) {
+  const state = full.state;
+  const property = full.property || {};
+  return {
+    scope: 'visit_recipient',
+    state,
+    tech: full.tech ? { firstName: full.tech.firstName ?? null, photoUrl: full.tech.photoUrl ?? null, yearsWithWaves: null } : null,
+    window: full.window ? { date: full.window.date ?? null, start: full.window.start ?? null, end: full.window.end ?? null } : null,
+    // The pin for the map and the town, not the street.
+    property: { lat: property.lat ?? null, lng: property.lng ?? null, city: property.city ?? null },
+    service: { type: full.service?.type ?? null },
+    // Live position and ETA while the tech drives to this visit (vehicle is null in every other state).
+    vehicle: state === 'en_route' && full.vehicle
+      ? {
+          lat: full.vehicle.lat ?? null,
+          lng: full.vehicle.lng ?? null,
+          lastReportedAt: full.vehicle.lastReportedAt ?? null,
+          stale: full.vehicle.stale === true,
+          etaMinutes: full.vehicle.etaMinutes ?? null,
+          etaSource: full.vehicle.etaSource ?? null,
+        }
+      : null,
+    arrivedAt: full.arrivedAt ?? null,
+    // The visit's own kind only when the office is rebooking it; no reason, no action, no other visit.
+    visitChange: full.visitChange && RECIPIENT_VISIT_CHANGE_KINDS.has(full.visitChange.kind) ? { kind: full.visitChange.kind } : null,
+    meta: {
+      // The page's poll is the only live update this link has (no socket): keep it while the tech is on the way or on site.
+      pollIntervalSeconds: state === 'en_route' || state === 'on_property' ? EN_ROUTE_POLL_SECONDS : 0,
+    },
+  };
+}
+
+// The visit a recipient's link names while the gate is on, the row stands and the person has not declined; else null.
+function recipientVisitId(token) {
+  return require('../services/call-visit-recipient').visitForTrackToken(token).then((hit) => (hit ? hit.visitId : null));
+}
+
+// The same expiry fence as the holder's link: it is the visit's own track_token_expires_at.
+async function recipientVisitLive(visitId) {
+  const visit = await db('scheduled_services').where({ id: visitId }).first('track_token_expires_at');
+  return Boolean(visit) && isTrackTokenLive(visit.track_token_expires_at);
+}
+
+// The visit row both token kinds read: the holder's tracker token and a visit text recipient's own.
+// `where` is { 's.track_view_token': token } or { 's.id': visitId }.
+function readTrackVisit(where) {
+  return db('scheduled_services as s')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .leftJoin('technicians as t', 's.technician_id', 't.id')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where(where)
+    .first(
+      's.id',
+      's.customer_id',
+      's.technician_id',
+      's.scheduled_date',
+      's.window_start',
+      's.window_end',
+      's.service_type',
+      's.status',
+      's.track_state',
+      's.en_route_at',
+      's.arrived_at',
+      's.completed_at',
+      's.cancelled_at',
+      's.cancellation_reason',
+      's.customer_pick_by',
+      's.recurring_dispatch_due_date',
+      's.service_id',
+      's.property_id',
+      's.is_recurring',
+      's.recurring_parent_id',
+      's.is_callback',
+      's.followup_included',
+      's.track_token_expires_at',
+      's.prep_token',
+      's.prep_sent_at',
+      'c.first_name as cust_first_name',
+      'c.last_name as cust_last_name',
+      // Service-contact slots (unaliased — getServiceContactSlots reads
+      // the raw column names) supply the tenant / property-manager names
+      // for the identity block. Deliberately NOT selecting c.email or
+      // c.phone: contact PII never enters this tokenized payload.
+      ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
+      db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+      db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
+      db.raw('COALESCE(s.service_address_city, c.city) as city'),
+      db.raw('COALESCE(s.service_address_state, c.state) as state'),
+      db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
+      // Stamped visits carry their own coords (property geocode stamped
+      // at booking) — read them first. The customer's primary coords are
+      // a valid fallback unless the stamp DIVERGES from the primary:
+      // every phone booking stamps, including primary-address bookings,
+      // so "stamped" alone must not blank the pin (codex round-4 P1).
+      db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
+      db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
+      db.raw(`${stampedDivergesSql('s', 'c')} as stamped_address_diverges`),
+      't.name as tech_name',
+      't.bouncie_imei_changed_at as tech_mapping_changed_at',
+      't.photo_url as tech_photo_url',
+      't.photo_s3_key as tech_photo_s3_key',
+      // Customer-friendly description from the service library. Used
+      // for the "Today's visit" line on the en-route / on-property
+      // cards. Null when scheduled_services.service_id is missing
+      // (legacy rows) or when description is unset on the service.
+      'sv.description as service_description',
+      'sv.customer_visible as service_customer_visible'
+
+    );
+}
+
 router.get('/:token', async (req, res, next) => {
   res.set(PRIVACY_HEADERS);
   if (!TOKEN_RE.test(req.params.token || '')) {
@@ -661,68 +780,16 @@ router.get('/:token', async (req, res, next) => {
   }
 
   try {
-    let row = await db('scheduled_services as s')
-      .leftJoin('customers as c', 's.customer_id', 'c.id')
-      .leftJoin('technicians as t', 's.technician_id', 't.id')
-      .leftJoin('services as sv', 's.service_id', 'sv.id')
-      .where('s.track_view_token', req.params.token)
-      .first(
-        's.id',
-        's.customer_id',
-        's.technician_id',
-        's.scheduled_date',
-        's.window_start',
-        's.window_end',
-        's.service_type',
-        's.status',
-        's.track_state',
-        's.en_route_at',
-        's.arrived_at',
-        's.completed_at',
-        's.cancelled_at',
-        's.cancellation_reason',
-        's.customer_pick_by',
-        's.recurring_dispatch_due_date',
-        's.service_id',
-        's.property_id',
-        's.is_recurring',
-        's.recurring_parent_id',
-        's.is_callback',
-        's.followup_included',
-        's.track_token_expires_at',
-        's.prep_token',
-        's.prep_sent_at',
-        'c.first_name as cust_first_name',
-        'c.last_name as cust_last_name',
-        // Service-contact slots (unaliased — getServiceContactSlots reads
-        // the raw column names) supply the tenant / property-manager names
-        // for the identity block. Deliberately NOT selecting c.email or
-        // c.phone: contact PII never enters this tokenized payload.
-        ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
-        db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
-        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
-        db.raw('COALESCE(s.service_address_city, c.city) as city'),
-        db.raw('COALESCE(s.service_address_state, c.state) as state'),
-        db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
-        // Stamped visits carry their own coords (property geocode stamped
-        // at booking) — read them first. The customer's primary coords are
-        // a valid fallback unless the stamp DIVERGES from the primary:
-        // every phone booking stamps, including primary-address bookings,
-        // so "stamped" alone must not blank the pin (codex round-4 P1).
-        db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
-        db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
-        db.raw(`${stampedDivergesSql('s', 'c')} as stamped_address_diverges`),
-        't.name as tech_name',
-        't.bouncie_imei_changed_at as tech_mapping_changed_at',
-        't.photo_url as tech_photo_url',
-        't.photo_s3_key as tech_photo_s3_key',
-        // Customer-friendly description from the service library. Used
-        // for the "Today's visit" line on the en-route / on-property
-        // cards. Null when scheduled_services.service_id is missing
-        // (legacy rows) or when description is unset on the service.
-        'sv.description as service_description',
-        'sv.customer_visible as service_customer_visible'
-      );
+    let row = await readTrackVisit({ 's.track_view_token': req.params.token });
+    // A visit text recipient's own link (GATE_CALL_GIVEN_VISIT_TEXTS): the same visit, a map-only view.
+    let recipientScope = false;
+    if (!row) {
+      const recipient = await require('../services/call-visit-recipient').visitForTrackToken(req.params.token);
+      if (recipient) {
+        row = await readTrackVisit({ 's.id': recipient.visitId });
+        recipientScope = Boolean(row);
+      }
+    }
 
     if (!row) return res.status(404).json({ error: 'Not found' });
     if (!isTrackTokenLive(row.track_token_expires_at)) {
@@ -757,7 +824,8 @@ router.get('/:token', async (req, res, next) => {
     // a value that isn't yet the durable clamp floor comes back pending
     // and the page acks via POST /:token/stops-ahead, which persists.
     const scheduledRouteTracking = allowsScheduledRouteTracking(row, customerState);
-    const stops = scheduledRouteTracking
+    // The route count is the holder's; a recipient's link never reads or shows it.
+    const stops = scheduledRouteTracking && !recipientScope
       ? await computeStopsAhead(db, row.id, { readOnly: true })
       : null;
     const stopsReady = stops && !stops.pending ? stops : null;
@@ -822,9 +890,10 @@ router.get('/:token', async (req, res, next) => {
       vehicleApprox: stopsReady && (stopsReady.atStop || stopsReady.headingToStop)
         ? await buildApproxVehicle(row)
         : null,
-      summary: customerState === 'complete' ? await buildSummary(row) : null,
+      // A visit text recipient's link never reaches the report, invoice, review or offer cards.
+      summary: customerState === 'complete' && !recipientScope ? await buildSummary(row) : null,
       // GATE_DOC_CROSS_SELL: absent keys = no cards (see trackCards).
-      ...(customerState === 'complete' ? await trackCards(req.params.token) : {}),
+      ...(customerState === 'complete' && !recipientScope ? await trackCards(req.params.token) : {}),
       cancellation: customerState === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }
         : null,
@@ -864,7 +933,7 @@ router.get('/:token', async (req, res, next) => {
     // automation or a rejected email leaves a token with no send; exposing
     // it would show prep the customer never received. Visits that never
     // had prep sent stay null — the card renders no link.
-    if (row.id) {
+    if (row.id && !recipientScope) {
       const linkedProject = await db('projects')
         .where({ scheduled_service_id: row.id })
         .whereNotNull('prep_token')
@@ -876,7 +945,7 @@ router.get('/:token', async (req, res, next) => {
         || null;
     }
 
-    res.json(response);
+    res.json(recipientScope ? recipientTrackPayload(response) : response);
   } catch (err) {
     next(err);
   }
@@ -901,7 +970,15 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
         's.id', 's.status', 's.track_state', 's.track_token_expires_at',
         's.customer_pick_by', 's.recurring_dispatch_due_date', 's.window_start',
       );
-    if (!row || !isTrackTokenLive(row.track_token_expires_at)) {
+    if (!row) {
+      // A visit text recipient's link: valid, but the route count is the holder's, so it answers the generic state
+      // (the reduced payload never asks for it) and writes nothing.
+      const visitId = await recipientVisitId(req.params.token);
+      return visitId && await recipientVisitLive(visitId)
+        ? res.json({ stopsAhead: null, routeProgress: null })
+        : res.status(404).json({ error: 'Not found' });
+    }
+    if (!isTrackTokenLive(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });
     }
     // Same terminal-status precedence as the GET: only the scheduled
@@ -938,7 +1015,15 @@ router.post('/:token/view', async (req, res) => {
     const row = await db('scheduled_services as s')
       .where('s.track_view_token', req.params.token)
       .first('s.id', 's.customer_id', 's.track_token_expires_at');
-    if (!row || !isTrackTokenLive(row.track_token_expires_at)) {
+    if (!row) {
+      // A visit text recipient's link: the view counts as no customer's page view (it is not the account holder's),
+      // so it records nothing; a valid link answers the same 204.
+      const visitId = await recipientVisitId(req.params.token);
+      return visitId && await recipientVisitLive(visitId)
+        ? res.status(204).end()
+        : res.status(404).json({ error: 'Not found' });
+    }
+    if (!isTrackTokenLive(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });
     }
     void recordPageView({
@@ -1042,6 +1127,7 @@ router._test = {
   allowsScheduledRouteTracking,
   publicTrackState,
   trackCards,
+  recipientTrackPayload,
 };
 
 module.exports = router;

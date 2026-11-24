@@ -21,10 +21,12 @@
  *   - twilio.js sendTechEnRoute.
  *
  * What the person receives is informational copy built here, never the holder's template: no
- * reschedule, confirm or move link (the appointment page link carries the visit's management token)
- * The en-route text alone carries the visit's tracker link (owner 2026-11-24, "yes he gets it"), the same
- * link the holder gets, passed in by the sender; the owner was told it also opens the visit's report and
- * invoice after completion. The other texts carry no link. The text goes through the same send layer as every other text, with no
+ * reschedule, confirm or move link (the appointment page link carries the visit's management token).
+ * The en-route text alone carries a tracker link (owner 2026-11-24, "yes he gets it"), and it is the person's OWN:
+ * a map-only token minted on the recipient's row (track_token), never the holder's tracker token (that one opens the
+ * report, the invoice and the other visits' links after completion). routes/track-public.js serves that token a
+ * reduced view of this one visit. The other texts carry no link. The text goes through the same send layer as every
+ * other text, with no
  * "customer-initiated" exemption: the send window applies, and a text held for it is persisted and
  * replayed (visit_text_recipient_deferred in messaging/deferred-replay-registry.js) after a fresh
  * visit, gate and decline check.
@@ -245,7 +247,7 @@ async function ownedContact(row, visit, kind, conn) {
 /**
  * The text itself: informational, no management link (see the header). Pure.
  * `facts`: { label, day, date, window, dayOnly } for a visit text; { techName, etaMinutes, trackUrl } for en route
- * (trackUrl: an https link or nothing; anything else is dropped).
+ * (trackUrl: an https link or nothing; anything else is dropped; the sender never passes it, buildMessage derives it).
  * `dayOnly`: the holder's notice promised only the day (GATE_DAY_ONLY_PROMISE), so this one does too.
  */
 function informationalBody(kind, firstName, facts = {}) {
@@ -372,7 +374,7 @@ async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, re
 
 /**
  * Text the visit-only recipients of this visit for one kind of notice: the ONE function every sender calls.
- * `excludePhones`: the numbers the sender already texts. `context`: en route only, { techName, etaMinutes, trackUrl }.
+ * `excludePhones`: the numbers the sender already texts. `context`: en route only, { techName, etaMinutes, trackUrlFor(token) }.
  * `dayOnly`: the holder's confirmation or 72 h reminder promised only the day, so this one does too.
  * `gate(contact)`: optional per-recipient check by the sender, 'send' (default), 'skip' or 'abort'
  * (the pipeline lost its claim). Never throws into the sender. Returns false only when a gate aborted.
@@ -408,10 +410,56 @@ async function arrivalSnapshot(visit, conn) {
   return { hhmm, window: spokenArrivalWindow(hhmm) };
 }
 
+/**
+ * The recipient's OWN map-only tracker credential, minted on first use. One atomic write: two senders racing get the
+ * same token. The holder's tracker token is never read here: it opens the report, the invoice and the other visits' links.
+ */
+async function ensureTrackToken(visitRecipientId, conn = db) {
+  const rows = await conn(TABLE)
+    .where({ id: visitRecipientId })
+    .update({ track_token: conn.raw("COALESCE(track_token, encode(gen_random_bytes(32), 'hex'))") })
+    .returning('track_token');
+  const first = Array.isArray(rows) ? rows[0] : null;
+  return (first && typeof first === 'object' ? first.track_token : first) || null;
+}
+
+// The recipient's tracker link: the sender supplies `context.trackUrlFor(token)` (it knows the public origin and the
+// shortener); this module only mints the token. Any failure sends the text without the link.
+async function recipientTrackUrl(contact, context, conn) {
+  if (!context || typeof context.trackUrlFor !== 'function') return null;
+  try {
+    const token = await ensureTrackToken(contact.visitRecipientId, conn);
+    return token ? await context.trackUrlFor(token) : null;
+  } catch (err) {
+    logger.warn(`[call-visit-recipient] tracker link unavailable for visit ${contact.visit.id}: ${err.code || err.name || 'error'}`);
+    return null;
+  }
+}
+
+const TRACK_TOKEN_RE = /^[a-f0-9]{64}$/;
+
+/**
+ * The visit a recipient's tracker token opens, or null. The link works only while the gate is on, the row still exists
+ * (it goes with the visit), and the person has not declined en-route texts. The caller serves the reduced, map-only view
+ * and judges the visit's own link expiry. Throws on an unreadable answer (the route answers an error, never an open view).
+ */
+async function visitForTrackToken(token, { conn = db } = {}) {
+  if (!gateLive() || !TRACK_TOKEN_RE.test(token || '')) return null;
+  const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id', 'phone_key', 'phone_e164');
+  if (!row) return null;
+  const visit = await conn('scheduled_services').where({ id: row.scheduled_service_id }).first('id', 'customer_id');
+  if (!visit) return null;
+  if (await declinedByRecipient({ customerId: visit.customer_id, phoneKey: row.phone_key, phoneE164: row.phone_e164, purpose: KINDS.en_route.purpose, conn })) return null;
+  return { visitId: visit.id, recipientId: row.id };
+}
+
 // The copy and the slot the send is guarded on. null = nothing sendable.
 async function buildMessage(contact, kind, context, dayOnly, conn) {
   const firstName = String(contact.name || '').trim().split(/\s+/)[0] || null;
-  if (kind === 'en_route') return { body: informationalBody(kind, firstName, context), slotMs: null, arrivalStart: null };
+  if (kind === 'en_route') {
+    const trackUrl = await recipientTrackUrl(contact, context, conn);
+    return { body: informationalBody(kind, firstName, { ...context, trackUrl }), slotMs: null, arrivalStart: null };
+  }
   const { buildServiceLabel } = require('./appointment-reminders');
   const { parseETDateTime, formatETDay, formatETDate } = require('../utils/datetime-et');
   const arrival = await arrivalSnapshot(contact.visit, conn);
@@ -545,6 +593,8 @@ module.exports = {
   declinedByRecipient,
   contactsForVisit,
   informationalBody,
+  ensureTrackToken,
+  visitForTrackToken,
   notifyVisitRecipients,
   sendOnce,
   deliveryAccepted,

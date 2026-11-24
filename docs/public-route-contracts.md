@@ -7841,7 +7841,19 @@ not approved for customer copy, the payload instead uses neutral
 `pending_rebook` office recovery with no reason or picker action. That unplaced
 shape returns no stops count, route progress, approximate vehicle or scheduled
 polling, and the stops-ahead POST does not compute or persist a count for it.
-The track payload never returns or mints a reschedule token. A
+The track payload never returns or mints a reschedule token. A second
+token kind resolves on this route while GATE_CALL_GIVEN_VISIT_TEXTS is on: a
+visit text recipient's own `visit_text_recipients.track_token` (64 hex, minted
+when their en-route text is built). It returns a reduced whitelist payload with
+`scope: 'visit_recipient'` for that one visit: state, technician first name and
+photo, window, lat/lng and town (no street, zip or names), service name, live
+vehicle and ETA, arrival time, `visitChange` only as `{ kind: 'pending_rebook' }`.
+It never returns `summary`, the report, invoice, prep or review tokens, photos,
+the offer and referral cards, `customer`, `cancellation`, stops count or route
+progress, and the cards and summary reads do not run. Its stops-ahead POST
+answers nulls and its view POST records nothing. Gate off, a deleted row, a
+declined person, an unknown token or an expired visit link answer the same 404.
+A
 cancelled or missed visit returns only that the office is the next actor. An
 operational `rescheduled` row adds `visitChange.kind = pending_rebook`; its
 public state is `scheduled` with a null window, no vehicle, no stops count and

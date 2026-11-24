@@ -302,15 +302,35 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(input.body).not.toMatch(/https?:|www\.|reschedule|track/i);
     });
 
-    test('each kind is its own text; the reminders carry no link and the en-route text carries only the tracker link', async () => {
+    test('each kind is its own text; the reminders carry no link and the en-route text carries only Bob\'s OWN tracker link', async () => {
+      const HOLDER_TOKEN = 'a'.repeat(64);
+      await db('scheduled_services').where({ id: visitId }).update({ track_view_token: HOLDER_TOKEN });
       for (const kind of ['confirmation', 'reminder_72h', 'reminder_24h']) await notify(kind);
-      await notify('en_route', { context: { techName: 'Pat', etaMinutes: 12, trackUrl: 'https://x.test/track/abc' } });
+      await notify('en_route', { context: { techName: 'Pat', etaMinutes: 12, trackUrlFor: async (token) => `https://x.test/track/${token}` } });
       expect(sendCustomerMessage.mock.calls.map(([i]) => i.purpose)).toEqual([
         'appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h', 'tech_en_route',
       ]);
       for (const [input] of sendCustomerMessage.mock.calls.slice(0, 3)) expect(input.body).not.toMatch(/https?:|track|reschedule/i);
-      expect(sendCustomerMessage.mock.calls[3][0].body).toContain('Pat is on the way, about 12 minutes away. Track live: https://x.test/track/abc');
-      expect(sendCustomerMessage.mock.calls[3][0].body).not.toMatch(/reschedule/i);
+      const [{ track_token: bobToken }] = await rows();
+      expect(bobToken).toMatch(/^[a-f0-9]{64}$/);
+      expect(bobToken).not.toBe(HOLDER_TOKEN);
+      const enRouteBody = sendCustomerMessage.mock.calls[3][0].body;
+      expect(enRouteBody).toContain(`Pat is on the way, about 12 minutes away. Track live: https://x.test/track/${bobToken}`);
+      expect(enRouteBody).not.toContain(HOLDER_TOKEN);
+      expect(enRouteBody).not.toMatch(/reschedule/i);
+    });
+
+    test('a sender that passes the holder\'s link in the context still gets no holder link into the text', async () => {
+      await notify('en_route', { context: { techName: 'Pat', trackUrl: 'https://x.test/track/HOLDERLINK' } });
+      expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('HOLDERLINK');
+      expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Track live');
+      expect((await rows())[0].track_token).toBeNull();
+    });
+
+    test('a link builder that fails sends the text without a link', async () => {
+      await notify('en_route', { context: { techName: 'Pat', trackUrlFor: async () => { throw new Error('shortener down'); } } });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Track live');
     });
 
     test('Bob gets nothing for another visit on the account, a cancelled visit, or when the sender already texts his number', async () => {
@@ -598,6 +618,53 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       delete process.env[GATE];
       await expect(notify('confirmation')).resolves.toBe(true);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the recipient\'s own tracker token', () => {
+    const TOKEN_FORMAT = /^[a-f0-9]{64}$/;
+    let contactPhoneDeclinesText;
+    beforeEach(async () => {
+      process.env[GATE] = 'true';
+      ({ contactPhoneDeclinesText } = require('../services/contact-notification-prefs'));
+      await record();
+    });
+    afterEach(() => { delete process.env[GATE]; });
+
+    test('minted once on first use, the same value after, never the holder\'s; two racing mints agree', async () => {
+      const [{ id }] = await rows();
+      expect((await rows())[0].track_token).toBeNull();
+      const minted = await Promise.all([VisitRecipient.ensureTrackToken(id), VisitRecipient.ensureTrackToken(id), VisitRecipient.ensureTrackToken(id)]);
+      expect(minted[0]).toMatch(TOKEN_FORMAT);
+      expect(new Set(minted).size).toBe(1);
+      expect((await rows())[0].track_token).toBe(minted[0]);
+    });
+
+    test('the token opens exactly its own visit while the gate is on, and is unique per row', async () => {
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id);
+      expect(await VisitRecipient.visitForTrackToken(token)).toEqual({ visitId, recipientId: id });
+      const [other] = await db('visit_text_recipients').insert({
+        scheduled_service_id: otherVisitId, phone_key: BOB.slice(-10), phone_e164: BOB, consent_version: 'x', track_token: token === 'f'.repeat(64) ? 'e'.repeat(64) : 'f'.repeat(64),
+      }).returning('id');
+      await expect(db('visit_text_recipients').where({ id: other.id }).update({ track_token: token })).rejects.toMatchObject({ code: '23505' });
+    });
+
+    test('404 cases: gate off, a wrong token, a declined person, the visit gone', async () => {
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id);
+      expect(await VisitRecipient.visitForTrackToken('c'.repeat(64))).toBeNull();
+      contactPhoneDeclinesText.mockResolvedValueOnce(true);
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      await suppress(BOB);
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      await db('messaging_suppression').where({ phone: BOB }).update({ active: false });
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      delete process.env[GATE];
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      process.env[GATE] = 'true';
+      await db('scheduled_services').where({ id: visitId }).del();
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
     });
   });
 
