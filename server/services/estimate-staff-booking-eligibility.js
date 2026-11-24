@@ -12,7 +12,9 @@
  *     would leave the visit booked and the estimate unwon: manualAcceptRowRefusal
  *     (unresolved manager approval, lapsed bid date, missing business type, ...)
  *     and manualAcceptLockedRowRefusal (the retired 4x/quarterly tree-and-shrub
- *     cadence, a non-proposal invoice-mode quote, a one-time option, no owner).
+ *     cadence, a non-proposal invoice-mode quote, a one-time option, no owner),
+ *     and rowQuarantineRefusal (an active re-price hold, or a call-linkage
+ *     correction marker; the call-log reads of assertNotQuarantined stay with the accept).
  *
  * Not covered here, because they depend on the booking being made: the area
  * add-on yearly limits on the booked day and a quote priced for another
@@ -33,6 +35,10 @@ function staffBookingRefusalForOpenEstimate(estimate) {
   if (estimate.status !== 'accepted') {
     const accept = manual.manualAcceptRowRefusal(estimate, { billingTerm: 'standard' }) || manual.manualAcceptLockedRowRefusal(estimate);
     if (accept) return { code: accept.code || 'accept_refused', message: accept.message };
+    // A re-price hold or a call-linkage correction marker on the row: assertNotQuarantined refuses it after the visit
+    // commits. Only the row-only part runs here; the call-log reads stay with the accept.
+    const quarantine = manual.rowQuarantineRefusal(estimate);
+    if (quarantine) return { code: 'quarantined', message: quarantine.message };
   }
   return null;
 }
