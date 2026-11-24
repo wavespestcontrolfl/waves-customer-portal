@@ -135,6 +135,7 @@ async function publishInTransaction(trx, { estimateId, leadId, engineInput, engi
 // The link as a COMPLETE link: at the start, or after whitespace or '(', and followed by the end,
 // whitespace, ')' or sentence punctuation that itself ends the word. Never inside another URL's
 // path or query (a longer URL that merely starts with, or contains, this one).
+// (GATE_SMS_LINK_WRAP is dark; a link the pipeline wrapped no longer matches, so no receipt: fail closed, no win.)
 function carriesLinkWhole(body, bare) {
   const escaped = bare.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`(?:^|[\\s(])${escaped}(?=$|[\\s)]|[.,;:!]($|[\\s)]))`).test(String(body || ''));
