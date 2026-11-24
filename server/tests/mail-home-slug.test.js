@@ -3,7 +3,7 @@
  * functions; the unique-index clash rule is tested against PostgreSQL in mail-prospect-store-postgres.test.js.
  * Synthetic addresses only.
  */
-const { buildBaseSlug, slugCandidates, SLUG_RE, STREET_SUFFIXES } = require('../services/mail/home-slug');
+const { buildBaseSlug, hasUnitPart, slugCandidates, SLUG_RE, STREET_SUFFIXES } = require('../services/mail/home-slug');
 
 describe('buildBaseSlug', () => {
   test.each([
@@ -130,5 +130,32 @@ describe('slugCandidates', () => {
     expect(slugCandidates({ addressLine1: line, zip: '34211' })).toHaveLength(2);
     const long = `101 ${'abcdefgh '.repeat(6)}DR`; // 58 chars; + 6 = 64: over the limit
     expect(slugCandidates({ addressLine1: long, zip: '34211' })).toHaveLength(1);
+  });
+});
+
+describe('buildBaseSlug keepStreetType (text-to-book: the words as typed)', () => {
+  test.each([
+    ['88 LAKE VIEW', '88-lake-view'],
+    ['88 LAKE VIEW BLVD', '88-lake-view-blvd'],
+    ['101 EXAMPLE TRL', '101-example-trl'],
+    ['123 MAIN ST NW', '123-main-st-nw'],
+    ['88 LAKE VIEW BLVD UNIT 3', '88-lake-view-blvd'], // the unit part is still dropped
+  ])('%s', (line, expected) => {
+    expect(buildBaseSlug(line, { keepStreetType: true })).toBe(expected);
+  });
+
+  test.each([
+    ['101 EXAMPLE TRL APT 9', true],
+    ['88 LAKE VIEW BLVD UNIT 3', true],
+    ['5 MAIN ST #7', true],
+    ['101 EXAMPLE TRL', false],
+    ['5 APT ROAD', false], // a street that starts with a unit word is a street
+  ])('hasUnitPart %s', (line, expected) => {
+    expect(hasUnitPart(line)).toBe(expected);
+  });
+
+  test('the default drops the street type, as the postcard slug does', () => {
+    expect(buildBaseSlug('88 LAKE VIEW BLVD')).toBe('88-lake-view');
+    expect(buildBaseSlug('88 LAKE VIEW BLVD', { keepStreetType: false })).toBe('88-lake-view');
   });
 });
