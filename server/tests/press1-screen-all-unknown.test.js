@@ -146,3 +146,18 @@ test('callerKey matches phoneKeySql for stored US numbers', () => {
   expect(callerKey('(941) 555-0101')).toBe('19415550101');
   expect(callerKey('9415550101')).toBe('19415550101');
 });
+
+test('the trial statement runs once per call (a Knex builder runs once per then)', async () => {
+  fakeDb();
+  let runs = 0;
+  db.select.mockImplementation(() => {
+    const outer = {
+      timeout: () => outer,
+      // A thenable like a Knex builder: every then() is another execution.
+      first: () => ({ then: (ok, bad) => { runs += 1; return Promise.resolve({ tech: false, lead: false, remembered: false }).then(ok, bad); } }),
+    };
+    return outer;
+  });
+  await expect(screenAllUnknownHit(CALLER)).resolves.toBe(true);
+  expect(runs).toBe(1);
+});

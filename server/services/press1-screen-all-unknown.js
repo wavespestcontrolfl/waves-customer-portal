@@ -138,8 +138,9 @@ async function screenAllUnknownHit(from) {
       db.raw('EXISTS (?) AS lead', [liveLeadRows(key)]),
       db.raw('EXISTS (?) AS remembered', [rememberedRows(key)]),
     ).timeout(READ_TIMEOUT_MS, { cancel: true }).first();
-    read.catch(() => {}); // a read that fails after the limit has no one left to tell
-    const row = await withinLimit(read, 'timeout');
+    // A Knex builder runs once per then(); turn it into ONE promise first.
+    // Promise.race keeps a handler on it, so a late failure is handled.
+    const row = await withinLimit(Promise.resolve(read), 'timeout');
     if (row === 'timeout') {
       logger.warn('[preconnect-screen] all-unknown check ran past its limit (failing open, no challenge)');
       return false;
