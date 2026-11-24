@@ -8684,6 +8684,22 @@ async function assertApprovedCustomer(trx, customerId, approved) {
   if ((await refreshableTermsForCustomer(customerId, trx)).length) throw approvedBookingChanged('An annual prepay term would be refreshed by this booking.');
 }
 
+// The earlier series that made this a rebook (not a brand-new program), re-read under lock: it must still belong to this
+// customer, still be the same service family, and still be stamped with the booking property.
+async function assertApprovedPriorSeries(trx, customerId, approved) {
+  const prior = approved.priorSeries;
+  const row = prior?.id
+    ? await trx('scheduled_services').where({ id: prior.id }).forShare().first('id', 'customer_id', 'service_id', 'service_type', 'property_id')
+    : null;
+  const { duplicateGuardFamilyKey } = require('../services/recurring-appointment-seeder');
+  const sameFamily = !!row && ((row.service_id != null && String(row.service_id) === String(prior.serviceId))
+    || (!!row.service_type && duplicateGuardFamilyKey(row.service_type) === prior.family));
+  if (!row || String(row.customer_id) !== String(customerId) || !sameFamily
+    || String(row.property_id || '') !== String(approved.propertyId || '')) {
+    throw approvedBookingChanged('The earlier plan this rebook relies on changed since the card was shown.');
+  }
+}
+
 async function assertApprovedBooking(trx, approved, { rows, customerId, planBefore }) {
   const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
   // 1. The inserted dates are the pinned dates.
@@ -9740,7 +9756,8 @@ async function scheduleCreateHandler(req, res, next) {
     // check does. This is an admin route (requireAdmin): the staff user pays.
     // A parent with a time, a technician and a location only; any refusal,
     // error or slow answer leaves the save on the cache and the model.
-    if (windowStart && resolvedTechId) {
+    // An approved (Intelligence Bar card) booking never buys one: the card showed no road-time spend.
+    if (windowStart && resolvedTechId && !approvedBooking) {
       // A chosen property is stamped on the visit with its own pin (nulls
       // included: the route read then excludes the primary address's pin), so
       // only that pin is priced; the customer's pin is for a visit with none.
@@ -9890,6 +9907,7 @@ async function scheduleCreateHandler(req, res, next) {
       }
       // The card's eligibility facts, against the locked customer row, before anything is inserted.
       if (approvedBooking) await assertApprovedCustomer(trx, customerId, approvedBooking.customer);
+      if (approvedBooking) await assertApprovedPriorSeries(trx, customerId, approvedBooking);
       // Race-safe duplicate-series backstop (P0: check-then-insert race).
       // The preflight above ran OUTSIDE this transaction, so two concurrent
       // recurring creates for the same customer + service family could both

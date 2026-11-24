@@ -508,6 +508,8 @@ describe('Confirm', () => {
     expect(arg.approvedBooking).toEqual({
       dates: QUARTERLY_DATES, price: 89, propertyId: PROPERTY_ID, technicianId: null,
       address: { line1: '1 Example Way', line2: '', city: 'Bradenton', state: 'FL', zip: '34205' },
+      // The earlier series that made this a rebook; the handler re-reads it under lock.
+      priorSeries: { id: 'old-parent', family: require('../services/recurring-appointment-seeder').duplicateGuardFamilyKey('Quarterly Pest Control Service'), serviceId: SERVICE_ID },
       // The eligibility facts the handler compares with the locked customer row.
       customer: { id: CUSTOMER_ID, active: true, billing_mode: 'per_visit', payer_id: null, monthly_rate: null, waveguard_tier: null },
     });
@@ -592,6 +594,23 @@ describe('Confirm', () => {
       expect(result).toMatchObject({ code, preview_changed: true });
       expect(result.success).toBeUndefined();
     }
+  });
+
+  test('CUSTOMER_CHANGED_RETRY (an operational error with only statusCode) is a stale card, not an interrupted booking', async () => {
+    const card = await propose();
+    AdminSchedule.createScheduleBooking.mockRejectedValueOnce(Object.assign(new Error('The customer record changed while booking'), { statusCode: 409, isOperational: true, code: 'CUSTOMER_CHANGED_RETRY' }));
+    const result = await propose(confirmedInput(card));
+    expect(result).toMatchObject({ code: 'CUSTOMER_CHANGED_RETRY', status: 409, preview_changed: true });
+    expect(result.outcome_unknown).toBeUndefined();
+  });
+
+  test('the earlier series is pinned: when it stops qualifying between the card and Confirm, Confirm refuses', async () => {
+    const card = await propose();
+    expect(card._approved.priorSeries).toMatchObject({ id: 'old-parent', serviceId: SERVICE_ID });
+    tables.scheduled_services[0].property_id = '00000000-0000-0000-0000-0000000bc0aa';
+    const result = await propose(confirmedInput(card));
+    expect(result).toMatchObject({ code: 'new_program', preview_changed: true });
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
   });
 
   test('another handler refusal keeps its words and code', async () => {

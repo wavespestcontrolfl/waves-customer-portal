@@ -135,7 +135,8 @@ async function resolveService(serviceType) {
 // Does this customer already have (or had) a recurring series for the same service family at the booking property? The
 // duplicate-series guard's own family classifier (duplicateGuardFamilyKey) decides the family, over every series parent in any
 // status, so a cancelled or run-out series counts. The parent's STAMPED property_id must equal the booking property (active,
-// resolved by resolveProperty); a legacy row with no property stamp does not qualify.
+// resolved by resolveProperty); a legacy row with no property stamp does not qualify. Returns the qualifying parent
+// ({ id, family }), or null; the card pins it and the handler re-reads it under lock.
 async function hadPlanForService(customerId, catalogRow, bookingProperty) {
   const { duplicateGuardFamilyKey } = require('../recurring-appointment-seeder');
   const target = duplicateGuardFamilyKey(catalogRow.name);
@@ -143,11 +144,12 @@ async function hadPlanForService(customerId, catalogRow, bookingProperty) {
     .where({ customer_id: customerId, is_recurring: true })
     .whereNull('recurring_parent_id')
     .select('id', 'service_id', 'service_type', 'property_id');
-  return (parents || []).some((p) => {
+  const prior = (parents || []).find((p) => {
     const sameFamily = (p.service_id != null && String(p.service_id) === String(catalogRow.id))
       || (p.service_type && duplicateGuardFamilyKey(p.service_type) === target);
     return !!sameFamily && !!p.property_id && String(p.property_id) === String(bookingProperty.property_id);
   });
+  return prior ? { id: String(prior.id), family: target } : null;
 }
 
 // An open series for the service (the handler's duplicate-series guard, asked now so no card is made).
@@ -406,7 +408,8 @@ async function planBooking(input) {
   if (property.refusal) return refuse(property.refusal.error.replace(/ Nothing was (proposed|booked)\.?$/, ''), property.refusal.code, property.refusal.properties ? { properties: property.refusal.properties } : {});
   const bookingProperty = property.stamp;
 
-  if (!(await hadPlanForService(customerId, catalogRow, bookingProperty))) {
+  const priorSeries = await hadPlanForService(customerId, catalogRow, bookingProperty);
+  if (!priorSeries) {
     return refuse(`${privateName(customer)} has no earlier ${catalogRow.name} plan, so this would be a brand-new program. ${ESTIMATE_PATH}`, 'new_program');
   }
   const open = await openSeriesFor(customerId, catalogRow, bookingProperty);
@@ -448,6 +451,7 @@ async function planBooking(input) {
   const cadenceLabel = effectivePattern === LAWN_ROUNDS_PATTERN ? 'nine lawn rounds a year' : cadence.label;
   const pins = {
     effective_pattern: effectivePattern,
+    prior_series: priorSeries,
     body,
     dates: planned.dates,
     price: priced.price,
@@ -488,6 +492,8 @@ async function planBooking(input) {
       dates: planned.dates, price: priced.price, propertyId: bookingProperty.property_id, technicianId: tech.tech ? String(tech.tech.id) : null,
       // The eligibility facts the card judged; the handler compares them with the locked customer row before inserting.
       customer: pins.customer,
+      // The earlier series that made this a rebook; the handler re-reads it under lock.
+      priorSeries: { id: priorSeries.id, family: priorSeries.family, serviceId: String(catalogRow.id) },
       address: { line1: bookingProperty.service_address_line1, line2: bookingProperty.service_address_line2, city: bookingProperty.service_address_city, state: bookingProperty.service_address_state, zip: bookingProperty.service_address_zip },
     },
   };
@@ -555,8 +561,10 @@ async function commit(input, actionContext) {
     // The one booking call: exactly the body the card pinned.
     reply = await createScheduleBooking({ body: plan._body, actor: await actorFor(actionContext), approvedBooking: plan._approved });
   } catch (err) {
-    if (err?.status && err.status < 500 && err.isOperational) {
-      return refuse(err.message, err.code || 'schedule_refused', { status: err.status, ...(STALE_CARD_CODES.has(err.code) ? { preview_changed: true } : {}) });
+    // Some operational errors carry only statusCode (CUSTOMER_CHANGED_RETRY): classify on either.
+    const status = err?.status || err?.statusCode;
+    if (status && status < 500 && err.isOperational) {
+      return refuse(err.message, err.code || 'schedule_refused', { status, ...(STALE_CARD_CODES.has(err.code) ? { preview_changed: true } : {}) });
     }
     logger.error(`[intelligence-bar:book-plan-visits] booking interrupted for ${plan.customer_id}: ${err?.code || err?.name || 'error'}`);
     return {
