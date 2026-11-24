@@ -85,6 +85,7 @@ function phoneDigits(value) {
 
 // Shared with the admin spam-disposition guard (utils/known-caller-phone).
 const { customerPhoneLookupKey, knownCallerPhoneExists } = require('../utils/known-caller-phone');
+const press1ScreenAllUnknown = require('../services/press1-screen-all-unknown');
 const {
   isVoicemailAnsweredBy,
   sendOutboundVoicemailText,
@@ -834,20 +835,44 @@ const VOICEMAIL_COMPLETE_ACTION = '/api/webhooks/twilio/voicemail-complete';
 // 6-digit exchange hung up on us in 14 days (missed-call-bell.js
 // exchangeHangupScreenHit). `exchangeHit` is true only with that gate on; off,
 // the webhook stamps metadata.preconnect_screen_exchange='shadow' instead.
-function preconnectScreenDecision({ knownCaller, stirVerstat, gateOn, exchangeHit = false }) {
+//
+// All-unknown trial (GATE_CALL_SCREEN_ALL_UNKNOWN, owner 2026-11-24 "trial"):
+// every unknown caller on any attestation is challenged, except a staff phone,
+// a number on a live lead, and a remembered caller
+// (services/press1-screen-all-unknown.js). `allUnknownHit` is true only with
+// that gate on.
+function preconnectScreenDecision({ knownCaller, stirVerstat, gateOn, exchangeHit = false, allUnknownHit = false }) {
   if (knownCaller) return 'none';
-  if (!/-B$/.test(String(stirVerstat || '')) && !exchangeHit) return 'none';
+  if (!/-B$/.test(String(stirVerstat || '')) && !exchangeHit && !allUnknownHit) return 'none';
   return gateOn ? 'gate' : 'would_gate';
+}
+
+// The call_log.metadata stamps of one first delivery's screen decision.
+//  - preconnect_screen: 'would_gate' (shadow, gate off) or 'gated' (challenge
+//    issued), later 'passed'/'failed'. Absent when nothing triggered.
+//  - preconnect_screen_exchange: 'gated' only when the exchange rule itself
+//    challenged (its gate on); 'shadow' when it only would have, including a
+//    call the all-unknown trial challenged. The shadow week reads these rows.
+//  - preconnect_screen_all_unknown: 'gated' when the trial challenged the call
+//    (not B, not the exchange rule). The 14-day watch reads these rows.
+function preconnectScreenStamps({ screenDecision, exchangeTrigger, allUnknownTrigger, exchangeGateOn }) {
+  const stamps = {};
+  if (screenDecision !== 'none') stamps.preconnect_screen = screenDecision === 'gate' ? 'gated' : 'would_gate';
+  if (exchangeTrigger) stamps.preconnect_screen_exchange = screenDecision === 'gate' && exchangeGateOn ? 'gated' : 'shadow';
+  if (allUnknownTrigger && screenDecision === 'gate') stamps.preconnect_screen_all_unknown = 'gated';
+  return stamps;
 }
 
 // The exchange trigger's read, on the ring path before any TwiML. Fails OPEN:
 // a slow or broken query never challenges a caller.
+// A failed read answers null (falsy, so the exchange rule never challenges),
+// which also tells the all-unknown trial to stand down for this call.
 async function exchangeTriggerHit(from) {
   try {
     return await require('../services/missed-call-bell').exchangeHangupScreenHit(from);
   } catch (err) {
-    logger.warn(`[preconnect-screen] exchange check failed (failing open, no challenge): ${err.message}`);
-    return false;
+    logger.warn(`[preconnect-screen] exchange check failed (failing open, no challenge): ${err?.code || err?.name || 'error'}`);
+    return null;
   }
 }
 
@@ -858,17 +883,43 @@ async function exchangeTriggerHit(from) {
 // screen; checked only when it could change the outcome, so the extra query
 // never runs on ordinary calls. A check failure fails OPEN — never challenge
 // a caller because Postgres hiccupped.
-async function screenCandidate(from, stirVerstat) {
+const NO_SCREEN = Object.freeze({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
+
+// The customer-slot check. With the all-unknown trial on it sits in front of
+// most unknown calls, so it gets the trial's bounded read (a timeout counts as
+// known). A failure counts as known too: never challenge on a broken read.
+async function screenKnownCaller(from, trialOn) {
+  try {
+    return trialOn
+      ? await press1ScreenAllUnknown.knownCallerWithinLimit(from)
+      : await knownCallerPhoneExists(db, from);
+  } catch (err) {
+    // A code only: a Knex error echoes the bound values, here the caller's number.
+    logger.warn(`[preconnect-screen] known-caller check failed (failing open, no challenge): ${err?.code || err?.name || 'error'}`);
+    return true;
+  }
+}
+
+async function screenCandidate(from, stirVerstat, { redelivery = false } = {}) {
+  const gates = require('../config/feature-gates');
+  const trialOn = gates.isEnabled('callPreconnectScreen') && gates.callScreenAllUnknownLive();
+  // A redelivery's stored trial challenge is replayed by the handler, before
+  // the customer match; here a redelivery never runs the trial read.
   const attestationB = /-B$/.test(String(stirVerstat || ''));
   const exchangeHit = !attestationB && await exchangeTriggerHit(from);
-  if (!attestationB && !exchangeHit) return { knownCaller: false, exchangeTrigger: false };
-  try {
-    const knownCaller = await knownCallerPhoneExists(db, from);
-    return { knownCaller, exchangeTrigger: exchangeHit && !knownCaller };
-  } catch (err) {
-    logger.warn(`[preconnect-screen] known-caller check failed (failing open, no challenge): ${err.message}`);
-    return { knownCaller: true, exchangeTrigger: false };
-  }
+  // Nothing to screen, or a failed exchange read (null) on a non-B caller:
+  // route normally without another read.
+  // A redelivery never runs the trial read, so the trial alone is no reason
+  // to read on.
+  if ((!attestationB && !exchangeHit && !(trialOn && !redelivery)) || exchangeHit === null) return NO_SCREEN;
+  if (await screenKnownCaller(from, trialOn)) return { ...NO_SCREEN, knownCaller: true };
+  // The trial's own read runs only on a first delivery, for a caller B and the
+  // exchange rule do not already challenge (an exchange hit with its gate off
+  // is only a shadow, so the trial still screens it). It fails open inside.
+  const exchangeGates = exchangeHit && gates.isEnabled('callScreenExchangeHistory');
+  const allUnknownTrigger = trialOn && !redelivery && !attestationB && !exchangeGates
+    && await press1ScreenAllUnknown.screenAllUnknownHit(from);
+  return { knownCaller: false, exchangeTrigger: Boolean(exchangeHit), allUnknownTrigger: Boolean(allUnknownTrigger) };
 }
 
 // Press-1 prompt words. The end of the first prompt lives in ONE constant so
@@ -1406,19 +1457,10 @@ router.post('/voice', async (req, res) => {
 
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
 
-    // Match caller to customer. The raw matches are fetched once: a single
-    // match links the call; 2+ matches deliberately do NOT auto-link (shared
-    // number) but still count as a known caller for the screen bypass below.
-    const customerPhoneMatches = await findCustomerPhoneMatches(db, From);
-    let customer = customerPhoneMatches.length === 1 ? customerPhoneMatches[0] : null;
-    if (customerPhoneMatches.length > 1) {
-      logger.warn(`[voice] ${customerPhoneMatches.length} customers share caller phone ${maskPhone(From)}; not auto-linking call_log`);
-    }
-
-    // Pre-connect screen decision (see helpers above). Re-entries from the
-    // challenge TwiML arrive on this same route with ?screened=1 (a key was
-    // pressed) or ?screenfail=1 (both Gathers timed out) — they are never a
-    // first delivery, so the insert/stamp below doesn't double-fire.
+    // Pre-connect screen re-entries. The challenge TwiML comes back to this
+    // same route with ?screened=1 (a key was pressed) or ?screenfail=1 (both
+    // Gathers timed out); they are never a first delivery, so the insert and
+    // stamp below don't double-fire.
     const screenReentry = req.query.screened === '1'
       ? 'passed'
       : (req.query.screenfail === '1' ? 'failed' : null);
@@ -1428,16 +1470,39 @@ router.post('/voice', async (req, res) => {
     // English exactly as the Gather timeout would have.
     const langReentry = req.query.lang === 'menu';
     const spanishChosen = langReentry && spanishSelected(req.body);
+
+    // Only the delivery that owns the dedupe claim makes a fresh trial
+    // decision. Any other (a Twilio redelivery, or a claim that could not be
+    // written) replays the stored trial challenge before any other read (the
+    // customer match included), so one call never gets two answers. No
+    // stored challenge, or a failed read: no replay (fail open).
+    const replayedTrialChallenge = !voiceClaim.owned && Boolean(CallSid) && !screenReentry && !langReentry
+      && isEnabled('callPreconnectScreen') && require('../config/feature-gates').callScreenAllUnknownLive()
+      && await press1ScreenAllUnknown.storedTrialDecision(CallSid);
+
+    // Match caller to customer. The raw matches are fetched once: a single
+    // match links the call; 2+ matches deliberately do NOT auto-link (shared
+    // number) but still count as a known caller for the screen bypass below.
+    // A replayed challenge needs no match: a redelivery logs nothing.
+    const customerPhoneMatches = replayedTrialChallenge ? [] : await findCustomerPhoneMatches(db, From);
+    let customer = customerPhoneMatches.length === 1 ? customerPhoneMatches[0] : null;
+    if (customerPhoneMatches.length > 1) {
+      logger.warn(`[voice] ${customerPhoneMatches.length} customers share caller phone ${maskPhone(From)}; not auto-linking call_log`);
+    }
+
+    // Pre-connect screen decision (see helpers above).
     let knownCaller = customerPhoneMatches.length > 0;
     let exchangeTrigger = false;
-    if (!knownCaller && !screenReentry && !langReentry) {
-      ({ knownCaller, exchangeTrigger } = await screenCandidate(From, req.body.StirVerstat));
+    let allUnknownTrigger = Boolean(replayedTrialChallenge);
+    if (!knownCaller && !allUnknownTrigger && !screenReentry && !langReentry) {
+      ({ knownCaller, exchangeTrigger, allUnknownTrigger } = await screenCandidate(From, req.body.StirVerstat, { redelivery: !voiceClaim.owned }));
     }
     const screenDecision = (screenReentry || langReentry) ? 'none' : preconnectScreenDecision({
       knownCaller,
       stirVerstat: req.body.StirVerstat,
       gateOn: isEnabled('callPreconnectScreen'),
       exchangeHit: exchangeTrigger && isEnabled('callScreenExchangeHistory'),
+      allUnknownHit: allUnknownTrigger,
     });
 
     // No caller-name lookup here. One used to run on every unknown inbound
@@ -1471,18 +1536,12 @@ router.post('/voice', async (req, res) => {
         // that absence is itself a finding (Marchex was silent for months).
         stir_verstat: req.body.StirVerstat || null,
         addons: parseAddOnsForAudit(req.body.AddOns),
-        // Pre-connect screen lifecycle: 'would_gate' (shadow, gate off) or
-        // 'gated' (challenge issued) → later 'passed'/'failed'. Absent for
-        // known customers and non-B attestation without the exchange trigger.
-        ...(screenDecision !== 'none'
-          ? { preconnect_screen: screenDecision === 'gate' ? 'gated' : 'would_gate' }
-          : {}),
-        // Exchange trigger: 'gated' when it challenged this caller, 'shadow'
-        // when it would have (its gate or the screen gate off). The shadow
-        // week reads these rows before the gate flips.
-        ...(exchangeTrigger
-          ? { preconnect_screen_exchange: screenDecision === 'gate' ? 'gated' : 'shadow' }
-          : {}),
+        ...preconnectScreenStamps({
+          screenDecision,
+          exchangeTrigger,
+          allUnknownTrigger,
+          exchangeGateOn: isEnabled('callScreenExchangeHistory'),
+        }),
         ...promiseChaserEligibilityStamp(),
       });
     await db.transaction(async (trx) => {
@@ -4820,6 +4879,7 @@ router._test = {
   findCustomerPhoneMatches,
   knownCallerPhoneExists,
   preconnectScreenDecision,
+  preconnectScreenStamps,
   exchangeTriggerHit,
   screenCandidate,
   connectingAnnouncement,

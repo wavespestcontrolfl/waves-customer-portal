@@ -15,6 +15,7 @@
  *   GATE_LIVE_CALL_TRANSCRIPTION=true (owner 2026-11-16 "ok build all", live-call suite PR 1: when a staff member presses 1 to take an inbound call, Twilio Real-Time Transcription starts on the caller's call, both sides, and each final utterance is saved card-number scrubbed in call_live_utterances through POST /api/webhooks/twilio/live-transcription. It collects text only; the features that read it come later. Read via isEnabled('liveCallTranscription') at boot, strict 'true', dark by default; off = no transcription starts and the press-1 TwiML is unchanged. Spends money when on (Twilio, $0.027 a call minute): owner flip only. Kill: delete the variable.)
  *   GATE_LIVE_CALL_UPSET_ALERT=true (owner 2026-11-16 "ok build all", live-call suite: while a call is live, when the caller sounds upset and the owner is not the one on the call, one bell row and one phone banner tell him so he can step in. After a caller utterance is saved, a Claude Haiku 5.5 read of the last two minutes runs when the caller has 3 or more new utterances, at most once per 45 seconds and 8 times per call; mood upset or angry raises one alert per call. Needs GATE_LIVE_CALL_TRANSCRIPTION data. Read via isEnabled('liveCallUpsetAlert') at boot, strict 'true', dark by default; off = no model call, no new read, behavior byte-identical. Spends money when on (a Haiku call per check): owner flip only. Kill: delete the variable.)
  *   GATE_CALL_SCREEN_EXCHANGE_HISTORY=true (owner 2026-11-16 "build", spam-call audit: robodialers moved to STIR attestation A, so the press-1 screen also challenges an unknown caller when 2+ other unknown numbers from its 6-digit exchange hung up with no message or failed the screen in 14 days; a caller who fails the screen keeps the missed-call alert row but no push. Off = shadow stamps only. Kill: unset)
+ *   GATE_CALL_SCREEN_ALL_UNKNOWN=true (owner 2026-11-24 "trial", 14-day trial; needs GATE_CALL_PRECONNECT_SCREEN: every caller not on a customer record hears the press-1 prompt on any attestation, except a staff phone, a number on a live lead, or a remembered caller who talked with the office 30 s or more or left a message over 10 s on an earlier call; a failed-screen call writes its missed-call bell without a push. Named risk: a real caller who does not press 1 goes to voicemail. Kill = unset, instant off. Off = today's behavior, no extra read.)
  *   GATE_MISSED_CALL_SPAM_REPEAT=true (owner 2026-11-19 "YES BUILD", missed-call spam check: an unknown caller on a Google listing line whose same number already hung up with no message on another Google line, or twice on any line, in 14 days keeps the missed-call alert row, titled "likely robocall", but gets no push or re-push. Off = shadow stamp only. Kill: unset)
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
  *   GATE_CARD_DETAILS_SYNC=true (owner 2026-11-05, Stripe audit: Stripe's card account updater renews saved cards and the portal never heard, so Auto Pay skipped a renewed card it read as expired. On, the payment_method.automatically_updated webhook and a daily 8:31 AM ET job re-read the card from Stripe and refresh the stored expiry, last four, brand and funding (services/card-details-sync.js). Sends nothing to a customer. Read at boot; dark by default in production; off = nothing is read or written. Kill switch: unset.)
@@ -2054,6 +2055,15 @@ const gates = {
   // written without a push (stamped 'screen_quiet'). Off = shadow:
   // preconnect_screen_exchange='shadow' and missed_call_screen_quiet_shadow.
   callScreenExchangeHistory: process.env.GATE_CALL_SCREEN_EXCHANGE_HISTORY === 'true',
+  // Press-1 screen for every unknown caller (owner 2026-11-24 "trial", 14-day
+  // trial; needs GATE_CALL_PRECONNECT_SCREEN). On: an unknown caller on any
+  // attestation hears the press-1 prompt unless the number is a staff phone, on
+  // a live lead, or a remembered caller (talked with the office 30 s+ or left a
+  // message over 10 s before; services/press1-screen-all-unknown.js), and a
+  // failed-screen call's missed-call push is quiet. Named risk: a real caller
+  // who does not press 1. Kill = unset (instant off: code reads
+  // callScreenAllUnknownLive() at call time). Off = no extra read.
+  callScreenAllUnknown: process.env.GATE_CALL_SCREEN_ALL_UNKNOWN === 'true',
 
   // Live call transcription (live-call suite PR 1, owner 2026-11-16 "ok build all"): after a staff
   // press 1, Twilio Real-Time Transcription runs on the caller's call and posts each final utterance to
@@ -7598,6 +7608,13 @@ function shiftCloseReviewLive() {
 
 // Staff guards (services/staff-sender-phones.js, routes/tech-track.js), read at CALL time. Strict
 // `=== 'true'`, dark in every environment; unsetting it is the kill switch.
+// Press-1 all-unknown trial (services/press1-screen-all-unknown.js, the voice
+// webhook's screenCandidate and the missed-call push quiet), read at CALL time
+// so unsetting it is an instant kill. Strict `=== 'true'`, dark by default.
+function callScreenAllUnknownLive() {
+  return process.env.GATE_CALL_SCREEN_ALL_UNKNOWN === 'true';
+}
+
 function techStaffGuardsLive() {
   return process.env.GATE_TECH_STAFF_GUARDS === 'true';
 }
@@ -9520,3 +9537,5 @@ function estimateApprovePreferredTimeLive() {
 }
 // GATE_ESTIMATE_APPROVE_PREFERRED_TIME reader, on its own line so gate PRs never conflict.
 module.exports.estimateApprovePreferredTimeLive = estimateApprovePreferredTimeLive;
+// GATE_CALL_SCREEN_ALL_UNKNOWN reader, on its own line so gate PRs never conflict.
+module.exports.callScreenAllUnknownLive = callScreenAllUnknownLive;
