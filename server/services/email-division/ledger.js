@@ -655,5 +655,5 @@ async function settleDispatchOutcome(row, outcome) {
 }
 
 module.exports = {
-  reserve, markSent, markSkipped, markFailed, reconcileFromMessage, reserveWithCap, reservationHandoff, sendWithLedger, settleStaleReservations, RESERVATION_LIFETIME_MS,
+  reserve, markSent, markSkipped, markFailed, reconcileFromMessage, reserveWithCap, reservationHandoff, sendWithLedger, settleStaleReservations, messageStateFor, RESERVATION_LIFETIME_MS,
 };

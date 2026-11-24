@@ -54,7 +54,7 @@ function fakeDb(tables = {}) {
       return (source || []).filter((row) => !statuses?.includes('declined') || statuses.includes(row.status));
     };
     const builder = {
-      first: async () => rows()[0],
+      first: async (...columns) => { query.calls.push(['first', ...columns]); return rows()[0]; },
       select: async () => rows(),
     };
     const recorded = [
@@ -131,6 +131,7 @@ function world({ tables = {}, jobs = [JOB], ...deps } = {}) {
     payAfterFirstVisitCardRail: jest.fn(() => true),
     sendWithLedger: jest.fn(async () => ({ ok: true, sent: true, reason: null, row: { id: 'led-1' }, duplicate: false })),
     settleStaleReservations: jest.fn(async () => 0),
+    writeOfferDelivery: jest.fn(async () => true),
     isAutopayPaused: jest.fn(() => false),
     explicitAutopayDisable: jest.fn(async () => false),
     unsubscribeUrl: (token) => `https://unsub.test/${token}`,
@@ -815,7 +816,7 @@ describe('the default wiring', () => {
       'isInternalTestContact', 'activeSuppressionsFor', 'sendTemplate', 'unsubscribeUrl', 'raisePriceSettingsAlert', 'closePriceSettingsAlert',
       // Live mode: the library's own send resolution, the ledger, the mint, and the estimate page's card-rail functions.
       'resolveTemplateForSend', 'sendWithLedger', 'settleStaleReservations', 'mintPlanStartEstimate', 'buildEstimateMembershipContext',
-      'resolveRecurringCardPolicyForEstimate', 'payAfterFirstVisitCardRail', 'isAutopayPaused', 'explicitAutopayDisable',
+      'resolveRecurringCardPolicyForEstimate', 'payAfterFirstVisitCardRail', 'isAutopayPaused', 'explicitAutopayDisable', 'writeOfferDelivery',
     ]) {
       expect([name, typeof deps[name]]).toEqual([name, 'function']);
     }
@@ -991,7 +992,9 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
         expectedRecipientEmail: 'jordan@example.test',
         guard: expect.any(Function),
         boundaryGuard: expect.any(Function),
-        template: { templateKey: OFFER_TEMPLATE, payload: expect.any(Object), categories: ['onetime_plan_offer'] },
+        template: {
+          templateKey: OFFER_TEMPLATE, payload: expect.any(Object), categories: ['onetime_plan_offer'], linkEstimateId: 'est-1',
+        },
       });
       expect(_test.offerKey('job-1')).toBe('onetime-plan-offer:offer:job-1');
       // The payload carries exactly the template's variables, with the price and the dates of the offer.
@@ -1149,6 +1152,57 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(deps.sendTemplate).not.toHaveBeenCalled();
     });
 
+    // The ledger settles a `failed` row from email_messages for 30 days only. Across the whole year, a failed row
+    // whose email the provider took (or whose handoff started) is an offer that went out, or may have.
+    describe('a failed ledger row counts when its email went out, or may have', () => {
+      const failedRow = { id: 'led-f', idempotency_key: 'onetime-plan-offer:offer:job-0' };
+      const ledgerOf = (failed) => (query) => (called(query, 'where', { status: 'failed' }) ? failed : []);
+      const world3 = (message, failed = [failedRow]) => liveWorld({
+        tables: { marketing_email_ledger: ledgerOf(failed), email_messages: (query) => (called(query, 'where', { idempotency_key: failedRow.idempotency_key }) ? message : []) },
+      });
+
+      test.each([
+        ['the provider accepted it', [{ id: 'm-0', sent_at: '2030-01-01T00:00:00Z' }], 'offered_before'],
+        ['the handoff started and the answer was lost', [{ id: 'm-0', provider_handoff_phase: 'started', updated_at: '2030-01-01T00:00:00Z' }], 'offered_before'],
+      ])('%s: holds the job', async (_name, message, reason) => {
+        const deps = world3(message);
+        expect((await run(deps)).reasons).toEqual({ [reason]: 1 });
+        expect(deps.mintPlanStartEstimate).not.toHaveBeenCalled();
+      });
+
+      test.each([
+        ['no message at all', []],
+        ['a message the provider refused', [{ id: 'm-0', provider_handoff_phase: 'rejected', status: 'failed' }]],
+      ])('%s: not an offer, the job goes on', async (_name, message) => {
+        expect(liveCounts(await run(world3(message)))).toEqual({ ...ZERO, sent: 1 });
+      });
+
+      test('the year runs from the handoff, not the reservation: an older message does not count', async () => {
+        for (const message of [[{ id: 'm-0', sent_at: '2029-03-01T00:00:00Z' }], [{ id: 'm-0', provider_handoff_phase: 'started', updated_at: '2029-03-01T00:00:00Z' }]]) {
+          expect(liveCounts(await run(world3(message)))).toEqual({ ...ZERO, sent: 1 });
+        }
+      });
+
+      test('the failed rows read are the customer\'s other offers, whatever the reservation\'s age', async () => {
+        const deps = world3([]);
+        await run(deps);
+        const read = deps.db.queriesOf('marketing_email_ledger').find((query) => called(query, 'where', { status: 'failed' }));
+        expect(called(read, 'where', { customer_id: 'cust-1', email_key: OFFER_TEMPLATE })).toBe(true);
+        expect(called(read, 'whereNot', 'idempotency_key', 'onetime-plan-offer:offer:job-1')).toBe(true);
+      });
+
+      test('the reservation\'s guard counts it too, on the reservation\'s transaction', async () => {
+        const deps = liveWorld();
+        await run(deps);
+        const { guard } = sendOf(deps);
+        const trx = fakeDb({
+          marketing_email_ledger: ledgerOf([failedRow]), email_messages: [{ id: 'm-0', sent_at: '2030-01-01T00:00:00Z' }],
+        });
+        expect(await guard(trx)).toEqual({ reason: 'OFFERED_BEFORE' });
+        expect(trx.queriesOf('email_messages')).toHaveLength(1);
+      });
+    });
+
     test('the rule runs right after the opt-outs and before the money rules', async () => {
       const heldBy = async (change) => (await run(liveWorld({ tables: { marketing_email_ledger: [{ id: 'led-0' }] }, ...change }))).reasons;
       expect(await heldBy({ tables: { marketing_email_ledger: [{ id: 'led-0' }], notification_prefs: [{ marketing_offers: false }] } })).toEqual({ offers_off: 1 });
@@ -1194,14 +1248,14 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
     ])('%s denies both, in the ledger\'s spelling', async (_name, tables, reason) => {
       const { guard, boundaryGuard } = await guardsOf();
       expect(await guard(fakeDb({ marketing_email_ledger: [], ...tables }))).toEqual({ reason });
-      expect(await boundaryGuard(fakeDb({ estimates: [MINTED_ROW], ...tables }))).toEqual({ reason });
+      expect(await boundaryGuard(fakeDb({ estimates: [MINTED_ROW], customers: [CUSTOMER], ...tables }))).toEqual({ reason });
     });
 
     test('a suppression of the marketing group denies both, read for the address the email was built for, on that transaction', async () => {
       const { deps, guard, boundaryGuard } = await guardsOf();
       deps.activeSuppressionsFor.mockResolvedValue([{ id: 'sup-1' }]);
       const reserving = fakeDb({ marketing_email_ledger: [] });
-      const handoff = fakeDb({ estimates: [MINTED_ROW] });
+      const handoff = fakeDb({ estimates: [MINTED_ROW], customers: [CUSTOMER] });
       expect(await guard(reserving)).toEqual({ reason: 'EMAIL_SUPPRESSED' });
       expect(await boundaryGuard(handoff)).toEqual({ reason: 'EMAIL_SUPPRESSED' });
       expect(deps.activeSuppressionsFor).toHaveBeenCalledWith(null, 'jordan@example.test', 'marketing_newsletter', reserving);
@@ -1211,7 +1265,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
     test('no opt-out: both answer null, and the handoff guard reads the customer\'s preferences on its own transaction', async () => {
       const { guard, boundaryGuard } = await guardsOf();
       expect(await guard(fakeDb({ marketing_email_ledger: [] }))).toBeNull();
-      const handoff = fakeDb({ estimates: [MINTED_ROW] });
+      const handoff = fakeDb({ estimates: [MINTED_ROW], customers: [CUSTOMER] });
       expect(await boundaryGuard(handoff)).toBeNull();
       expect(called(handoff.queriesOf('notification_prefs')[0], 'where', { customer_id: 'cust-1' })).toBe(true);
       // The 12-month rule is the reservation's: the handoff does not read the ledger again.
@@ -1231,7 +1285,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
     const handoffOf = async (change = {}) => {
       const deps = liveWorld();
       await run(deps);
-      const trx = fakeDb({ estimates: [{ ...MINTED_ROW, ...change }] });
+      const trx = fakeDb({ estimates: [{ ...MINTED_ROW, ...change }], customers: [CUSTOMER] });
       return { boundaryGuard: sendOf(deps).boundaryGuard, trx };
     };
     const GONE = { reason: 'OFFER_ESTIMATE_GONE', retryable: true };
@@ -1373,7 +1427,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       const deps = liveWorld();
       await run(deps);
       const { boundaryGuard } = sendOf(deps);
-      expect(await boundaryGuard(fakeDb({ estimates: [MINTED_ROW] }))).toBeNull();
+      expect(await boundaryGuard(fakeDb({ estimates: [MINTED_ROW], customers: [CUSTOMER] }))).toBeNull();
       for (const value of ['off', 'shadow', undefined]) {
         if (value === undefined) delete process.env.GATE_ONETIME_PLAN_OFFER;
         else process.env.GATE_ONETIME_PLAN_OFFER = value;
@@ -1391,6 +1445,195 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       const summary = await run(deps);
       expect(summary).toMatchObject({ held: 1, failed: 0, sent: 0 });
       expect(summary.reasons).toEqual({ offer_gate_off: 1 });
+    });
+  });
+
+  // The customer can pause or turn off Auto Pay during the mint; the card policy asked about the estimate does not
+  // refuse either, so the handoff asks the account again, on its own transaction.
+  describe('Auto Pay at the provider handoff', () => {
+    const handoffOf = async (change = {}) => {
+      const deps = liveWorld(change);
+      await run(deps);
+      return { deps, boundaryGuard: sendOf(deps).boundaryGuard, trx: fakeDb({ estimates: [MINTED_ROW], customers: [CUSTOMER] }) };
+    };
+
+    test.each([
+      ['paused', { isAutopayPaused: jest.fn((_account, _now) => false) }, 'AUTOPAY_PAUSED'],
+      ['turned off', { explicitAutopayDisable: jest.fn(async () => false) }, 'AUTOPAY_OFF'],
+    ])('Auto Pay %s since the job\'s own check: the email does not leave; retryable', async (_name, change, reason) => {
+      const { deps, boundaryGuard, trx } = await handoffOf(change);
+      // Same answers as the job's check (off), then the customer changes it before the handoff.
+      if (reason === 'AUTOPAY_PAUSED') deps.isAutopayPaused.mockReturnValue(true);
+      else deps.explicitAutopayDisable.mockResolvedValue(true);
+      expect(await boundaryGuard(trx)).toEqual({ reason, retryable: true });
+      expect(deps.isAutopayPaused).toHaveBeenLastCalledWith(CUSTOMER, NOW);
+      expect(deps.explicitAutopayDisable).toHaveBeenLastCalledWith(CUSTOMER, reason === 'AUTOPAY_OFF' ? trx : expect.anything());
+    });
+
+    test('Auto Pay on: the handoff goes on; the account is read on the handoff transaction', async () => {
+      const { deps, boundaryGuard, trx } = await handoffOf();
+      expect(await boundaryGuard(trx)).toBeNull();
+      expect(called(trx.queriesOf('customers')[0], 'where', { id: 'cust-1' })).toBe(true);
+      // Read FOR SHARE: a pause that commits later waits for the end of the handoff transaction.
+      expect(called(trx.queriesOf('customers')[0], 'forShare')).toBe(true);
+      expect(deps.explicitAutopayDisable).toHaveBeenLastCalledWith(CUSTOMER, trx);
+    });
+
+    test('the estimate answers first, the opt-outs last', async () => {
+      const { deps, boundaryGuard } = await handoffOf();
+      deps.isAutopayPaused.mockReturnValue(true);
+      deps.activeSuppressionsFor.mockResolvedValue([{ id: 'sup-1' }]);
+      expect(await boundaryGuard(fakeDb({ estimates: [], customers: [CUSTOMER] }))).toMatchObject({ reason: 'OFFER_ESTIMATE_GONE' });
+      expect(await boundaryGuard(fakeDb({ estimates: [MINTED_ROW], customers: [CUSTOMER] }))).toMatchObject({ reason: 'AUTOPAY_PAUSED' });
+    });
+
+    test('the ledger\'s refusal is a held job, not a failure', async () => {
+      const deps = liveWorld({
+        sendWithLedger: jest.fn(async () => ({ ok: false, sent: false, reason: 'AUTOPAY_OFF', row: { id: 'led-1' }, duplicate: false })),
+      });
+      const summary = await run(deps);
+      expect(summary).toMatchObject({ held: 1, failed: 0, sent: 0 });
+      expect(summary.reasons).toEqual({ autopay_off: 1 });
+    });
+  });
+
+  // The confirmed send is recorded on the offer estimate (deliveryState), the stamp staff views and reports read.
+  describe('the confirmed send on the estimate', () => {
+    // The offer message is read twice in a live run: the job's own "already offered" check (nothing yet), then after
+    // the send, for the provider's acceptance time.
+    const MAIL_SENT_AT = '2030-03-13T03:31:00.000Z';
+    const mailAfterSend = (row) => {
+      let reads = 0;
+      return () => { reads += 1; return reads === 1 ? [] : [row]; };
+    };
+
+    test('the receipt read asks for the estimate the message linked', async () => {
+      const deps = liveWorld({ tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT, estimate_id: 'est-1' }) } });
+      await run(deps);
+      const [alreadyOfferedRead] = deps.db.queriesOf('email_messages');
+      expect(called(alreadyOfferedRead, 'first', 'id', 'sent_at', 'estimate_id')).toBe(true);
+    });
+
+    test('a send the provider took: recorded on the minted estimate, with the provider\'s acceptance time', async () => {
+      const deps = liveWorld({ tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT, estimate_id: 'est-1' }) } });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, sent: 1 });
+      expect(deps.writeOfferDelivery).toHaveBeenCalledTimes(1);
+      expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, {
+        customerId: 'cust-1', jobId: 'job-1', estimateId: 'est-1', deliveredAt: new Date(MAIL_SENT_AT),
+      });
+    });
+
+    test('a send an earlier attempt owns and the ledger settled sent: recorded only when unstamped', async () => {
+      const deps = liveWorld({
+        tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT, estimate_id: 'est-1' }) },
+        sendWithLedger: jest.fn(async () => ({ ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'sent' }, duplicate: true })),
+      });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, done: 1 });
+      expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, expect.objectContaining({ estimateId: 'est-1' }));
+    });
+
+    test('the estimate is the one the accepted message linked (an earlier attempt\'s), not this run\'s; a message with no link records nothing', async () => {
+      const duplicate = jest.fn(async () => ({ ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'sent' }, duplicate: true }));
+      const earlier = liveWorld({
+        tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT, estimate_id: 'est-0' }) }, sendWithLedger: duplicate,
+      });
+      await run(earlier);
+      expect(earlier.writeOfferDelivery).toHaveBeenCalledWith(earlier.db, expect.objectContaining({ estimateId: 'est-0' }));
+      const unlinked = liveWorld({ tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT }) }, sendWithLedger: duplicate });
+      await run(unlinked);
+      expect(unlinked.writeOfferDelivery).not.toHaveBeenCalled();
+    });
+
+    test('a handoff that started and was lost (no acceptance time) is no confirmed delivery: nothing is recorded', async () => {
+      const deps = liveWorld({
+        tables: { email_messages: mailAfterSend({ id: 'm-1', provider_handoff_phase: 'started' }) },
+        sendWithLedger: jest.fn(async () => ({ ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'sent' }, duplicate: true })),
+      });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, done: 1 });
+      expect(deps.writeOfferDelivery).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['a denied send', { sendWithLedger: jest.fn(async () => ({ ok: false, sent: false, reason: 'CAP_SAME_DAY', row: null, duplicate: false })) }],
+      ['a duplicate still in flight', { sendWithLedger: jest.fn(async () => ({ ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'reserved' }, duplicate: true })) }],
+    ])('%s: nothing is recorded', async (_name, change) => {
+      const deps = liveWorld(change);
+      await run(deps);
+      expect(deps.writeOfferDelivery).not.toHaveBeenCalled();
+    });
+
+    test('a failed record never fails the job: the email is out', async () => {
+      const deps = liveWorld({
+        tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT, estimate_id: 'est-1' }) },
+        writeOfferDelivery: jest.fn(async () => { throw new Error('write failed'); }),
+      });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, sent: 1 });
+      expect(deps.writeOfferDelivery).toHaveBeenCalledTimes(1);
+    });
+
+    test('a failed read of the receipt never fails the job: the email is out', async () => {
+      let reads = 0;
+      const deps = liveWorld({ tables: { email_messages: () => { reads += 1; if (reads > 1) throw new Error('read failed'); return []; } } });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, sent: 1 });
+      expect(deps.writeOfferDelivery).not.toHaveBeenCalled();
+    });
+
+    // The sweep: accepted offers whose estimate does not carry the delivery, whatever the job's own window says.
+    describe('the daily sweep of accepted offers the estimate does not carry yet', () => {
+      const SENT_AT = '2030-03-06T15:00:00.000Z';
+      const message = (change = {}) => ({
+        estimate_id: 'est-1', sent_at: SENT_AT, customer_id: 'cust-1', estimate_data: stamp('job-1'), ...change,
+      });
+      const sweepWorld = (rows, change = {}) => liveWorld({ jobs: [], tables: { 'email_messages as m': rows }, ...change });
+
+      test('an accepted offer the estimate lacks is recorded on the estimate the email linked, with no job due', async () => {
+        const deps = sweepWorld([message()]);
+        expect((await run(deps)).jobs).toBe(0);
+        expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, {
+          customerId: 'cust-1', jobId: 'job-1', estimateId: 'est-1', deliveredAt: new Date(SENT_AT),
+        });
+        expect(deps.sendWithLedger).not.toHaveBeenCalled();
+        expect(deps.sendTemplate).not.toHaveBeenCalled();
+      });
+
+      test.each([
+        ['already in the estimate\'s history', { estimate_data: { ...stamp('job-1'), deliveryState: { deliveredAt: [SENT_AT] } } }],
+        ['an estimate with no offer stamp', { estimate_data: {} }],
+      ])('%s: nothing is written', async (_name, change) => {
+        const deps = sweepWorld([message(change)]);
+        await run(deps);
+        expect(deps.writeOfferDelivery).not.toHaveBeenCalled();
+      });
+
+      test('the read is bounded: this template, an accepted time inside 30 days, newest first, 200 at most, linked estimates only', async () => {
+        const deps = sweepWorld([]);
+        await run(deps);
+        const [read] = deps.db.queriesOf('email_messages as m');
+        expect(called(read, 'join', 'estimates as e', 'e.id', 'm.estimate_id')).toBe(true);
+        expect(called(read, 'where', 'm.template_key', OFFER_TEMPLATE)).toBe(true);
+        expect(called(read, 'whereNotNull', 'm.sent_at')).toBe(true);
+        expect(called(read, 'where', 'm.sent_at', '>', new Date(NOW.getTime() - 30 * 24 * HOUR))).toBe(true);
+        // Rows already recorded are filtered in SQL, before the limit.
+        expect(read.calls.some(([method, sql]) => method === 'whereRaw' && String(sql).includes('jsonb_exists'))).toBe(true);
+        expect(called(read, 'orderBy', 'm.sent_at', 'desc')).toBe(true);
+        expect(called(read, 'limit', 200)).toBe(true);
+      });
+
+      test('shadow never runs it; a failed read never fails the run', async () => {
+        process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+        const shadow = sweepWorld([message()]);
+        await run(shadow);
+        expect(shadow.db.queriesOf('email_messages as m')).toHaveLength(0);
+        process.env.GATE_ONETIME_PLAN_OFFER = 'live';
+        const failing = sweepWorld(() => { throw new Error('read failed'); });
+        expect(await run(failing)).toMatchObject({ failed: 0 });
+      });
+    });
+
+    test('an uncertain handoff (no accepted time) is not a confirmed delivery: nothing is recorded', async () => {
+      const deps = liveWorld({ tables: { email_messages: [{ id: 'm-1', provider_handoff_phase: 'started' }] } });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, done: 1 });
+      expect(deps.writeOfferDelivery).not.toHaveBeenCalled();
     });
   });
 

@@ -1223,7 +1223,7 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     const ledgerRow = (jobId) => trx('marketing_email_ledger').where({ idempotency_key: offerKey(jobId) }).first();
     const estimatesOf = (customer) => trx('estimates').where({ customer_id: customer.id }).orderBy('created_at', 'asc');
     const tomorrow = new Date(NOW.getTime() + 24 * HOUR);
-    const runAt = (at) => Offer.runOnetimePlanOfferJob({ now: at, deps: {} });
+    const runAt = (at, deps = {}) => Offer.runOnetimePlanOfferJob({ now: at, deps });
 
     // A job's offer terms by hand: the job's service was done `daysAgo` ET days ago.
     const { parseETDateTime } = require('../utils/datetime-et');
@@ -1412,6 +1412,65 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         const { customer, job } = await seedJob();
         await arrange(customer, job);
         expect(await run({})).toMatchObject({ sent: 1, held: 0, failed: 0 });
+      });
+
+      // The ledger settles a `failed` row from email_messages for 30 days only. Past that, an offer whose email the
+      // provider took (or whose handoff started) still counts for the whole year.
+      describe('a failed ledger row whose email went out, or may have', () => {
+        const failedOffer = async (customer, { daysAgo, message }) => {
+          const key = `onetime-plan-offer:offer:${crypto.randomUUID()}`;
+          await earlierOffer(customer, { daysAgo, status: 'failed', key });
+          if (message) {
+            await trx('email_messages').insert({
+              idempotency_key: key, recipient_email_snapshot: customer.email, recipient_type: 'customer', recipient_id: customer.id,
+              template_key: OFFER, ...message,
+            });
+          }
+        };
+
+        test.each([
+          ['accepted, 100 days ago', { daysAgo: 100, message: { status: 'sent', sent_at: new Date(NOW.getTime() - 100 * 24 * HOUR) } }],
+          ['handoff started, 200 days ago', { daysAgo: 200, message: { status: 'queued', provider_handoff_phase: 'started' } }],
+          // The year runs from the handoff: reserved 366 days ago, accepted 100 days ago, still inside it.
+          ['reserved 366 days ago but accepted 100 days ago', { daysAgo: 366, message: { status: 'sent', sent_at: new Date(NOW.getTime() - 100 * 24 * HOUR) } }],
+        ])('%s: holds the job', async (_name, earlier) => {
+          await publishOffer();
+          const { customer, job } = await seedJob();
+          await failedOffer(customer, earlier);
+          const summary = await run({});
+          expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+          expect(summary.reasons).toEqual({ offered_before: 1 });
+          expect(await estimatesOf(customer)).toEqual([]);
+          expect(await offerMail(job.id)).toBeUndefined();
+        });
+
+        test.each([
+          ['no message', { daysAgo: 100, message: null }],
+          ['a message the provider refused', { daysAgo: 100, message: { status: 'failed', provider_handoff_phase: 'rejected' } }],
+          ['accepted 366 days ago', { daysAgo: 366, message: { status: 'sent', sent_at: new Date(NOW.getTime() - 366 * 24 * HOUR) } }],
+        ])('not a hold: %s', async (_name, earlier) => {
+          await publishOffer();
+          const { customer } = await seedJob();
+          await failedOffer(customer, earlier);
+          expect(await run({})).toMatchObject({ sent: 1, held: 0, failed: 0 });
+        });
+
+        test('the guard inside the reservation counts it too: an offer that landed after the job\'s own check; the quote stays', async () => {
+          await publishOffer();
+          const { customer, job } = await seedJob();
+          const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+          const summary = await run({
+            mintPlanStartEstimate: async (args) => {
+              const minted = await real(args);
+              await failedOffer(customer, { daysAgo: 100, message: { status: 'sent', sent_at: new Date() } });
+              return minted;
+            },
+          });
+          expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+          expect(summary.reasons).toEqual({ offered_before: 1 });
+          expect(await estimatesOf(customer)).toHaveLength(1);
+          expect(await ledgerRow(job.id)).toBeUndefined();
+        });
       });
 
       // A worker that died after it reserved and before the provider leaves a `reserved` row. The ledger settles it
@@ -1672,6 +1731,123 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       expect(await ledgerRow(job.id)).toMatchObject({ status: 'failed', reason: 'OFFER_GATE_OFF' });
       process.env.GATE_ONETIME_PLAN_OFFER = 'live';
       expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0, failed: 0 });
+    });
+
+    // The customer turns Auto Pay off while the quote is made. The card policy for the estimate does not read an
+    // explicit turn-off of a customer who is no plan member, so the handoff asks the account again.
+    test('Auto Pay turned off after the estimate was made: the provider is never called; back on, the next morning sends', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const providerRequest = jest.fn();
+      Sendgrid.sendOne.mockImplementationOnce(async ({ database, providerBoundaryCheck }) => {
+        await providerBoundaryCheck({ database });
+        providerRequest();
+        return { messageId: 'sg-sample' };
+      });
+      const first = await run({
+        mintPlanStartEstimate: async (args) => {
+          const minted = await real(args);
+          await trx('customers').where({ id: customer.id }).update({ autopay_enabled: false });
+          await trx('autopay_log').insert({ customer_id: customer.id, event_type: 'autopay_disabled' });
+          return minted;
+        },
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ autopay_off: 1 });
+      expect(providerRequest).not.toHaveBeenCalled();
+      expect(await ledgerRow(job.id)).toMatchObject({ status: 'failed', reason: 'AUTOPAY_OFF' });
+      // Still off the next morning: the job's own rule holds it. Back on, it sends.
+      expect((await runAt(tomorrow)).reasons).toEqual({ autopay_off: 1 });
+      await trx('customers').where({ id: customer.id }).update({ autopay_enabled: true });
+      await trx('autopay_log').insert({ customer_id: customer.id, event_type: 'autopay_enabled', created_at: new Date(Date.now() + 1000) });
+      expect(await runAt(new Date(tomorrow.getTime() + 24 * HOUR))).toMatchObject({ sent: 1, held: 0, failed: 0 });
+    });
+
+    // Staff views, the win/loss report and the click-mint reports date a send by deliveryState.firstDeliveredAt.
+    test('a sent offer is recorded on the estimate once: first and last delivery, the email channel, and a later morning adds nothing', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      expect(await run({})).toMatchObject({ sent: 1, failed: 0 });
+      const [quote] = await estimatesOf(customer);
+      const state = readPlan(quote.estimate_data).deliveryState;
+      const acceptedAt = new Date((await offerMail(job.id)).sent_at).toISOString();
+      expect(state).toMatchObject({
+        sentChannels: ['email'], failedChannels: [], firstDeliveredAt: acceptedAt, lastDeliveredAt: acceptedAt, deliveredAt: [acceptedAt],
+        channels: { email: { ok: true, providerAccepted: true } },
+      });
+      expect(readPlan(quote.estimate_data).planStart.offer.jobId).toBe(String(job.id));
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 0, done: 1 });
+      expect(readPlan((await estimatesOf(customer))[0].estimate_data).deliveryState).toEqual(state);
+    });
+
+    // The write of the stamp failed (or the run died after the send). A later run records it from the message, with
+    // the job long out of its 3 to 14 day window, and never sends anything.
+    describe('a send the provider took whose estimate was never stamped', () => {
+      const failedWrite = async () => { throw new Error('write failed'); };
+      const stateOf = async (customer) => readPlan((await estimatesOf(customer))[0].estimate_data).deliveryState;
+      const lateRun = () => runAt(new Date(NOW.getTime() + 20 * 24 * HOUR));
+
+      test('the email links its estimate; a run 20 days later stamps it with the message\'s time, once', async () => {
+        await publishOffer();
+        const { customer, job } = await seedJob();
+        expect(await run({ writeOfferDelivery: failedWrite })).toMatchObject({ sent: 1, failed: 0 });
+        const [quote] = await estimatesOf(customer);
+        expect(quote.estimate_data.deliveryState).toBeUndefined();
+        const mail = await offerMail(job.id);
+        expect(mail.estimate_id).toBe(quote.id);
+        expect(await lateRun()).toMatchObject({ sent: 0, jobs: 0, failed: 0 });
+        const state = await stateOf(customer);
+        expect(state.firstDeliveredAt).toBe(new Date(mail.sent_at).toISOString());
+        expect(state.deliveredAt).toEqual([new Date(mail.sent_at).toISOString()]);
+        // A recorded delivery is filtered out in SQL: a later run finds nothing to write.
+        const writes = jest.fn(Offer._test.defaultDeps().writeOfferDelivery);
+        await runAt(new Date(NOW.getTime() + 21 * 24 * HOUR), { writeOfferDelivery: writes });
+        expect(writes).not.toHaveBeenCalled();
+        expect(await stateOf(customer)).toEqual(state);
+        expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      });
+
+      test('a staff resend already on the estimate: the offer\'s handoff is merged in, in time order; first is the earliest, last the latest', async () => {
+        await publishOffer();
+        const { customer, job } = await seedJob();
+        expect(await run({ writeOfferDelivery: failedWrite })).toMatchObject({ sent: 1, failed: 0 });
+        const [quote] = await estimatesOf(customer);
+        const mail = await offerMail(job.id);
+        const resentAt = new Date(new Date(mail.sent_at).getTime() + 2 * HOUR).toISOString();
+        await trx('estimates').where({ id: quote.id }).update({
+          estimate_data: JSON.stringify({
+            ...readPlan(quote.estimate_data),
+            deliveryState: { sentChannels: ['sms'], failedChannels: [], firstDeliveredAt: resentAt, lastDeliveredAt: resentAt, deliveredAt: [resentAt] },
+          }),
+        });
+        await lateRun();
+        const state = await stateOf(customer);
+        const offerAt = new Date(mail.sent_at).toISOString();
+        expect(state).toMatchObject({ firstDeliveredAt: offerAt, lastDeliveredAt: resentAt, deliveredAt: [offerAt, resentAt] });
+        expect(state.sentChannels.sort()).toEqual(['email', 'sms']);
+        // The email's result joins the channel results; the staff resend stays the latest attempt.
+        expect(state.channels.email).toMatchObject({ ok: true, providerAccepted: true });
+        expect(state.attemptedAt).toBeUndefined();
+      });
+
+      test('a quote minted after the email left (a replacement for the same job) is not stamped: the email linked the first one', async () => {
+        await publishOffer();
+        const { customer, job } = await seedJob();
+        expect(await run({ writeOfferDelivery: failedWrite })).toMatchObject({ sent: 1, failed: 0 });
+        const [quote] = await estimatesOf(customer);
+        const {
+          id, token: _token, estimate_slug: _slug, created_at: _createdAt, ...rest
+        } = quote;
+        await trx('estimates').insert({ ...rest, token: crypto.randomBytes(16).toString('hex'), created_at: new Date(Date.now() + 60000) });
+        const mail = await offerMail(job.id);
+        expect(mail.estimate_id).toBe(id);
+        await lateRun();
+        const [first, second] = await estimatesOf(customer);
+        expect(first.id).toBe(id);
+        expect(readPlan(first.estimate_data).deliveryState.firstDeliveredAt).toBe(new Date(mail.sent_at).toISOString());
+        expect(readPlan(second.estimate_data).deliveryState).toBeUndefined();
+      });
     });
 
     test('offers turned off after the estimate was made: the reservation is denied and leaves no row; back on, the next morning sends', async () => {

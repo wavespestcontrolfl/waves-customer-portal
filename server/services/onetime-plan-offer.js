@@ -157,6 +157,7 @@ function defaultDeps() {
     resolveRecurringCardPolicyForEstimate: (...args) => require('./recurring-card-on-file').resolveRecurringCardPolicyForEstimate(...args),
     payAfterFirstVisitCardRail: (...args) => require('./recurring-card-on-file').payAfterFirstVisitCardRail(...args),
     // Auto Pay state, by the card lane's own readers (recurring-card-on-file.js, autopay-eligibility.js).
+    writeOfferDelivery,
     isAutopayPaused: require('./autopay-eligibility').isPaused,
     explicitAutopayDisable: require('./recurring-card-on-file').explicitAutopayDisable,
     unsubscribeUrl: require('./sendgrid-mail').unsubscribeUrl,
@@ -369,14 +370,27 @@ function notOptedOut({ job, customer, deps }) {
 // reserved within the last 365 days, holds this job. The email division's ledger is the record: only real
 // customer sends reserve there (the office samples are test sends and never do), and it is the same table the
 // reservation's guard reads under the customer's lock (offeredBeforeGuard), so the rule and the guard cannot
-// disagree. This job's own key never counts: its own send is not "before".
-function offeredBefore(database, { customerId, jobId, now }) {
-  return database('marketing_email_ledger')
+// disagree. A `failed` row counts too when its email was accepted or its handoff started (below). This job's own key never counts: its own send is not "before".
+async function offeredBefore(database, { customerId, jobId, now }) {
+  const since = new Date(now.getTime() - OFFER_WINDOW_MS);
+  const others = () => database('marketing_email_ledger')
     .where({ customer_id: customerId, email_key: OFFER_TEMPLATE })
-    .whereIn('status', ['sent', 'reserved'])
-    .whereNot('idempotency_key', offerKey(jobId))
-    .whereRaw('COALESCE(sent_at, reserved_at) > ?', [new Date(now.getTime() - OFFER_WINDOW_MS)])
-    .first('id');
+    .whereNot('idempotency_key', offerKey(jobId));
+  const counted = await others().whereIn('status', ['sent', 'reserved'])
+    .whereRaw('COALESCE(sent_at, reserved_at) > ?', [since]).first('id');
+  if (counted) return counted;
+  // The ledger settles a `failed` row from email_messages for 30 days only. A failed row whose email the provider
+  // took, or whose handoff started (the ledger's own reader, messageStateFor), is an offer that went out, or may
+  // have. The year is measured from that handoff (the message's accepted or last-change time), not from the
+  // reservation: a reservation just over a year old can have been accepted inside the year.
+  const { messageStateFor } = require('./email-division/ledger');
+  const failed = await others().where({ status: 'failed' }).select('id', 'idempotency_key');
+  for (const row of failed) {
+    const { kind, message } = await messageStateFor(database, row.idempotency_key);
+    const at = kind === 'accepted' ? message.sent_at : message?.updated_at;
+    if ((kind === 'accepted' || kind === 'uncertain') && new Date(at) > since) return row;
+  }
+  return null;
 }
 
 // A worker that crashed after it reserved leaves a `reserved` row. The ledger settles it when it is older than
@@ -598,11 +612,17 @@ async function paysAfterVisit({ job, deps }) {
 // Auto Pay turn-off only for plan members. So the account is asked directly, with the card lane's own readers:
 // Auto Pay paused now (isPaused), or turned off by the customer (the latest autopay_log toggle,
 // explicitAutopayDisable). Both hold the job in both modes. A failed read throws, and the job fails for the morning.
-async function autoPayAllowed({ job, now, deps }) {
-  const account = await deps.db('customers').where({ id: job.customer_id }).first('id', 'autopay_enabled', 'autopay_paused_until');
+// Asked again at the provider handoff, on the handoff's transaction (autoPayGuard).
+async function autoPayReason(database, { customerId, now, deps, lock = false }) {
+  const read = database('customers').where({ id: customerId });
+  const account = await (lock ? read.forShare() : read).first('id', 'autopay_enabled', 'autopay_paused_until');
   if (!account) return 'no_customer';
   if (deps.isAutopayPaused(account, now)) return 'autopay_paused';
-  return (await deps.explicitAutopayDisable(account, deps.db)) ? 'autopay_off' : null;
+  return (await deps.explicitAutopayDisable(account, database)) ? 'autopay_off' : null;
+}
+
+function autoPayAllowed({ job, now, deps }) {
+  return autoPayReason(deps.db, { customerId: job.customer_id, now, deps });
 }
 
 // The offer's own estimate, once the customer ended it (declined it, or took it). A failed send leaves the quote
@@ -743,8 +763,8 @@ async function alreadySampled(database, jobId) {
   const row = await database('email_messages')
     .where({ idempotency_key: sampleKey(REMINDER_TEMPLATE, jobId) })
     .whereNotNull('sent_at')
-    .first('id');
-  return Boolean(row);
+    .first('id', 'sent_at', 'estimate_id');
+  return row || null;
 }
 
 async function shadowJob(job, { now, deps, priceSettings }) {
@@ -784,8 +804,60 @@ async function alreadyOffered(database, jobId) {
   const row = await database('email_messages')
     .where({ idempotency_key: offerKey(jobId) })
     .where((sent) => sent.whereNotNull('sent_at').orWhere('provider_handoff_phase', 'started'))
-    .first('id');
-  return Boolean(row);
+    .first('id', 'sent_at', 'estimate_id');
+  return row || null;
+}
+
+// The confirmed send on the estimate: estimate_data.deliveryState, in the shape sendEstimateNow writes for an email
+// the provider accepted (admin-estimates.js: sentChannels, channels, firstDeliveredAt, lastDeliveredAt, deliveredAt
+// history capped at DELIVERY_HISTORY_MAX). That function sends and stamps in one piece for the office's own sends, so
+// there is no separate writer to call. Staff views, the win/loss report and the click-mint reports read this stamp:
+// without it an emailed offer reads as never delivered. The estimate is the one the email linked
+// (email_messages.estimate_id, set by the send), never a guess. A handoff is merged into whatever the estimate
+// already carries, by its time: deduplicated, the history in time order, firstDeliveredAt the earliest and
+// lastDeliveredAt the latest of all (call-commitments.js reads them as a set of instants). A staff resend before
+// or after it stays. Idempotent: a time already in the history changes nothing. The row is locked for the
+// read-modify-write.
+const DELIVERY_HISTORY_MAX = 25;
+const earliest = (...times) => times.filter(Boolean).sort()[0];
+const latest = (...times) => times.filter(Boolean).sort().pop();
+async function writeOfferDelivery(database, {
+  customerId, jobId, estimateId, deliveredAt,
+}) {
+  const at = deliveredAt.toISOString();
+  return database.transaction(async (trx) => {
+    const row = await trx('estimates').where({ id: estimateId, customer_id: customerId, source: 'plan_start' })
+      .whereRaw("estimate_data->'planStart'->'offer'->>'jobId' = ?", [String(jobId)])
+      .forUpdate().first('id', 'estimate_data');
+    if (!row) return false;
+    const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+    const prior = data.deliveryState || {};
+    const history = Array.isArray(prior.deliveredAt) ? prior.deliveredAt.filter((time) => typeof time === 'string') : [];
+    if (history.includes(at)) return false;
+    const newest = !prior.lastDeliveredAt || at > prior.lastDeliveredAt;
+    const deliveryState = {
+      ...prior,
+      // The email's own result joins the channel results (an SMS result stays beside it). An older handoff
+      // does not move the time of the latest attempt.
+      ...(newest ? { attemptedAt: at } : {}),
+      channels: { ...prior.channels, email: { ok: true, providerAttempted: true, providerAccepted: true, provider: OFFER_TEMPLATE } },
+      sentChannels: [...new Set([...(prior.sentChannels || []), 'email'])],
+      failedChannels: prior.failedChannels || [],
+      firstDeliveredAt: earliest(prior.firstDeliveredAt, at),
+      lastDeliveredAt: latest(prior.lastDeliveredAt, at),
+      deliveredAt: [...history, at].sort().slice(-DELIVERY_HISTORY_MAX),
+    };
+    await trx('estimates').where({ id: row.id }).update({ estimate_data: JSON.stringify({ ...data, deliveryState }) });
+    return true;
+  });
+}
+
+async function recordOfferDelivery(deps, args) {
+  try {
+    await deps.writeOfferDelivery(deps.db, args);
+  } catch (err) {
+    logger.warn(`[onetime-plan-offer] delivery record failed for job ${args.jobId} (code=${err?.code || 'none'})`);
+  }
 }
 
 // The estimate the mint answered with, read once for the two checks below.
@@ -843,6 +915,25 @@ async function offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps 
   return open ? null : { reason: OFFER_ESTIMATE_GONE, retryable: !ENDED_OFFER_STATUSES.includes(estimate?.status) };
 }
 
+// The Auto Pay rule again at the handoff: the customer can pause or turn off Auto Pay during the mint, and the
+// card policy asked about the estimate (onCardRail) does not refuse either. Retryable like the estimate guard:
+// the next morning's rule holds the job while it stands, and sends once it lifts.
+async function autoPayGuard(trx, { customer, now, deps }) {
+  // The customer row is read FOR SHARE, to the end of the handoff transaction: a pause or turn-off that commits
+  // later waits for the email's send, and one that committed earlier is read here.
+  const reason = await autoPayReason(trx, { customerId: customer.id, now, deps, lock: true });
+  return reason ? { reason: reason.toUpperCase(), retryable: true } : null;
+}
+
+// Every refusal the offer owns at the provider handoff, in the order the transaction reads them: the kill switch
+// (no lock), the estimate (takes the customer-comms lock, the last wait), Auto Pay, the opt-outs.
+async function handoffGuard(trx, { customer, jobId, estimateId, now, deps }) {
+  if (!liveModeOn()) return { reason: OFFER_GATE_OFF, retryable: true };
+  return (await offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps }))
+    || (await autoPayGuard(trx, { customer, now, deps }))
+    || optedOutGuard(trx, { customer, deps });
+}
+
 // The opt-outs of Waves marketing again (notOptedOut), on the ledger's own transaction. The division's checks
 // for this stream do not read them: offers turned off in the app, marketing by text only, a suppression of the
 // marketing group. The job's check ran before the home was priced and the estimate was made, so a customer
@@ -865,7 +956,7 @@ async function optedOutGuard(trx, { customer, deps }) {
 // later morning, never "offered". `reserved` is a send in flight, or one a crash left: the ledger settles it on
 // a later morning. Any other row (sent) is the offer.
 // The handoff's own refusals (boundaryGuard): the job is held, whatever the ledger settled the row as.
-const HANDOFF_HOLDS = ['OFFER_ESTIMATE_GONE', 'OFFER_GATE_OFF'];
+const HANDOFF_HOLDS = ['OFFER_ESTIMATE_GONE', 'OFFER_GATE_OFF', 'AUTOPAY_PAUSED', 'AUTOPAY_OFF', 'NO_CUSTOMER'];
 const EARLIER_ATTEMPT = Object.freeze({ skipped: 'send_dropped', reserved: 'send_in_flight' });
 async function settleOfferSend(out, { deps }) {
   if (HANDOFF_HOLDS.includes(out.reason)) return { verdict: 'held', reason: out.reason.toLowerCase() };
@@ -930,13 +1021,28 @@ async function mintAndSend(ctx, option) {
     expectedRecipientEmail: customer.email,
     guard: async (trx) => (await offeredBeforeGuard(trx, { customerId: customer.id, jobId: job.id, now }))
       || optedOutGuard(trx, { customer, deps }),
-    boundaryGuard: async (trx) => (liveModeOn() ? null : { reason: OFFER_GATE_OFF, retryable: true })
-      || (await offerEstimateGuard(trx, {
-      customer, jobId: job.id, estimateId: minted.estimateId, now, deps,
-    })) || optedOutGuard(trx, { customer, deps }),
-    template: { templateKey: OFFER_TEMPLATE, payload, categories: [OFFER_CATEGORY] },
+    boundaryGuard: (trx) => handoffGuard(trx, { customer, jobId: job.id, estimateId: minted.estimateId, now, deps }),
+    // linkEstimateId: provenance only (email_messages.estimate_id), the estimate this email links to.
+    template: { templateKey: OFFER_TEMPLATE, payload, categories: [OFFER_CATEGORY], linkEstimateId: minted.estimateId },
   });
-  return settleOfferSend(out, ctx);
+  const settled = await settleOfferSend(out, ctx);
+  if (settled.verdict === 'sent' || settled.verdict === 'done') {
+    // Confirmed means the provider's acceptance (email_messages.sent_at), and that time is the stamp on every path,
+    // so a run that sends and a run that finds the send record the same instant. The email is out: a failed read
+    // or write here never changes the verdict (the next morning finds the send confirmed and records it).
+    try {
+      const mail = await alreadyOffered(deps.db, job.id);
+      // The estimate the accepted message linked, which an earlier attempt's message can name instead of this run's.
+      if (mail?.sent_at && mail.estimate_id) {
+        await recordOfferDelivery(deps, {
+          customerId: customer.id, jobId: job.id, estimateId: mail.estimate_id, deliveredAt: new Date(mail.sent_at),
+        });
+      }
+    } catch (err) {
+      logger.warn(`[onetime-plan-offer] delivery lookup failed for job ${job.id} (code=${err?.code || 'none'})`);
+    }
+  }
+  return settled;
 }
 
 async function liveJob(job, { now, deps, priceSettings }) {
@@ -947,6 +1053,38 @@ async function liveJob(job, { now, deps, priceSettings }) {
   const outcome = await evaluateJob(ctx);
   // 'sample' is the shared verdict for "priced and allowed". Live turns it into the customer's offer.
   return outcome.verdict === 'sample' ? mintAndSend(ctx, outcome.option) : outcome;
+}
+
+// The offers the provider accepted whose estimate does not carry the delivery yet: the stamp write failed, or the run
+// died after the send. Independent of the job's 3 to 14 day window, so a job that has left it is still recorded.
+// Bounded: the messages of the last RECONCILE_DAYS days, newest first, RECONCILE_LIMIT at most, only those that link
+// an estimate (email_messages.estimate_id), whose time is not yet in the estimate's history. Sends nothing, and a
+// failure here never fails the run (the next morning reads the same rows).
+const RECONCILE_DAYS = 30;
+const RECONCILE_LIMIT = 200;
+async function reconcileOfferDeliveries({ now, deps }) {
+  const since = new Date(now.getTime() - RECONCILE_DAYS * 24 * 60 * 60 * 1000);
+  const messages = await deps.db('email_messages as m')
+    .join('estimates as e', 'e.id', 'm.estimate_id')
+    .where('m.template_key', OFFER_TEMPLATE)
+    .whereNotNull('m.sent_at')
+    .where('m.sent_at', '>', since)
+    // Not yet in the estimate's history, so the limit never counts the rows already recorded. The instant is spelled
+    // as toISOString spells it.
+    .whereRaw(`NOT jsonb_exists(COALESCE(e.estimate_data->'deliveryState'->'deliveredAt', '[]'::jsonb),
+      to_char(m.sent_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))`)
+    .orderBy('m.sent_at', 'desc')
+    .limit(RECONCILE_LIMIT)
+    .select('m.estimate_id', 'm.sent_at', 'e.customer_id', 'e.estimate_data');
+  for (const message of messages) {
+    const at = new Date(message.sent_at);
+    const data = typeof message.estimate_data === 'string' ? JSON.parse(message.estimate_data) : message.estimate_data;
+    const stamp = planOfferOf(data);
+    const stamped = Array.isArray(data?.deliveryState?.deliveredAt) && data.deliveryState.deliveredAt.includes(at.toISOString());
+    if (stamp && !stamped) {
+      await recordOfferDelivery(deps, { customerId: message.customer_id, jobId: stamp.jobId, estimateId: message.estimate_id, deliveredAt: at });
+    }
+  }
 }
 
 // ---- The price settings. ----
@@ -1053,6 +1191,13 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
     page = page.length < PAGE_SIZE ? [] : await dueJobsPage(deps.db, today, page[page.length - 1]);
   }
   await reportPriceSettings(run, run.priceSettings);
+  if (mode === 'live') {
+    try {
+      await reconcileOfferDeliveries(run);
+    } catch (err) {
+      logger.warn(`[onetime-plan-offer] delivery reconcile failed (code=${err?.code || 'none'})`);
+    }
+  }
   return summary;
 }
 
