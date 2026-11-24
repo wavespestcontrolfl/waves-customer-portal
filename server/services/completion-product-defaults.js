@@ -91,7 +91,6 @@
  */
 
 const { matchServiceProtocol, MATCH_RULES } = require('./protocol-matcher');
-const { gateEnvValue } = require('../config/feature-gates');
 const { filterTreeShrubDefaults } = require('./tree-shrub-completion-defaults');
 const { inferTreeShrubOrdinanceZone } = require('./tree-shrub-closeout');
 
@@ -404,11 +403,7 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     });
 
     let holds = [];
-    if (resolved.programKey === 'tree_shrub' && !gateEnvValue('GATE_TREE_SHRUB_FIELD_GUIDE')) {
-      // Gate dark: the new protocol-visit entries stay hidden, and every other
-      // source keeps main's pre-#5089 behavior unchanged.
-      if (resolved.source === 'protocol_visit') return { ...empty, programKey: 'tree_shrub' };
-    } else if (resolved.programKey === 'tree_shrub') {
+    if (resolved.programKey === 'tree_shrub') {
       // Legacy service defaults are not reviewed T&S treatment choices.
       if (resolved.source !== 'protocol_visit') return { ...empty, programKey: 'tree_shrub' };
       const zone = await propertyOrdinanceZone(db, scheduled.property_id);

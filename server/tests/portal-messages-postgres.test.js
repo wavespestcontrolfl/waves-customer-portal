@@ -137,6 +137,20 @@ maybeDescribe('portal messages (live Postgres)', () => {
   const thread = (customerId) => db('conversations').where({ customer_id: customerId, channel: 'portal', our_endpoint_id: 'portal' });
   const openAdminBells = (key, value) => db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
     .whereRaw(`metadata->>'${key}' = ?`, [String(value)]);
+  // Postgres refuses only this answer's final notice write (notice.pending false) while `press` runs; the claim and
+  // the 'sending' marks before it still land.
+  async function withFinalNoticeWriteFailing(clientRequestId, press) {
+    await db.raw("CREATE OR REPLACE FUNCTION test_fail_notice_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected notice write failure'; END $$");
+    await db.raw(`CREATE TRIGGER test_fail_notice_write BEFORE UPDATE ON messages FOR EACH ROW
+      WHEN (NEW.metadata->>'clientRequestId' = '${clientRequestId}' AND NEW.metadata->'notice'->>'pending' = 'false')
+      EXECUTE FUNCTION test_fail_notice_write()`);
+    try {
+      return await press();
+    } finally {
+      await db.raw('DROP TRIGGER IF EXISTS test_fail_notice_write ON messages');
+      await db.raw('DROP FUNCTION IF EXISTS test_fail_notice_write()');
+    }
+  }
 
   beforeAll(async () => {
     const target = new URL(process.env.DATABASE_URL);
@@ -203,6 +217,21 @@ maybeDescribe('portal messages (live Postgres)', () => {
     const result = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'On our way Thursday.', actor });
     expect(result.notice).toEqual({ bell: true, pushAccepted: 1, email: 'not_needed' });
     expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['an app device took the push', 1, { bell: true, pushAccepted: 1, email: 'not_needed', pending: true }, 0],
+    ['the email went', 0, { bell: true, pushAccepted: 0, email: 'sent', pending: true }, 1],
+  ])('a failed last write after %s still tells staff how the customer was reached', async (_how, pushed, notice, emails) => {
+    const pat = await customer();
+    const { escalationId } = await chat(pat.id, { alert: false });
+    mockPushResult.sent = pushed;
+    const clientRequestId = randomUUID();
+    const result = await withFinalNoticeWriteFailing(clientRequestId,
+      () => PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'On our way Thursday.', clientRequestId, actor }));
+    expect(result.notice).toEqual(notice);
+    expect(PushService.sendToCustomer).toHaveBeenCalledTimes(1);
+    expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(emails);
   });
 
   test('an answer to a service request resolves it quietly with a note, and closes its bell; a staff-made request is not an item', async () => {
@@ -997,20 +1026,9 @@ maybeDescribe('portal messages (live Postgres)', () => {
       const pat = await customer();
       const { escalationId } = await chat(pat.id, { alert: false });
       const clientRequestId = randomUUID();
-      // Postgres refuses only this answer's final notice write (notice.pending false); the claim and the boundary
-      // mark still land.
-      await db.raw("CREATE OR REPLACE FUNCTION test_fail_notice_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected notice write failure'; END $$");
-      await db.raw(`CREATE TRIGGER test_fail_notice_write BEFORE UPDATE ON messages FOR EACH ROW
-        WHEN (NEW.metadata->>'clientRequestId' = '${clientRequestId}' AND NEW.metadata->'notice'->>'pending' = 'false')
-        EXECUTE FUNCTION test_fail_notice_write()`);
-      let first;
-      try {
-        first = await staffPress({ kind: 'chat', id: escalationId, body: 'See you Tuesday.', clientRequestId, actor });
-      } finally {
-        await db.raw('DROP TRIGGER IF EXISTS test_fail_notice_write ON messages');
-        await db.raw('DROP FUNCTION IF EXISTS test_fail_notice_write()');
-      }
-      expect(first.notice).toEqual({ text: 'sent', pending: true });
+      const first = await withFinalNoticeWriteFailing(clientRequestId,
+        () => staffPress({ kind: 'chat', id: escalationId, body: 'See you Tuesday.', clientRequestId, actor }));
+      expect(first.notice).toEqual({ bell: true, pushAccepted: 0, text: 'sent', email: 'not_needed', pending: true });
       expect(mockAnswerText.requests).toHaveLength(1);
       expect(await storedNotice(first.message.id)).toMatchObject({ text: 'sending', pending: true });
       // A later try reads the stored mark as maybe sent: no second text, no email.

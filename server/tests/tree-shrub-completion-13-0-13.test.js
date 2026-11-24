@@ -47,10 +47,8 @@ const visitOn = (date) => ({ id: 'svc-1', customer_id: 'cust-1', property_id: 'p
 const applied = (product_name, application_date, extra = {}) => ({ product_name, application_date, ledger_property_id: 'prop-1', property_id: 'prop-1', application_rate: 7.5, rate_unit: 'lb', ...extra });
 
 async function resolveOn(date, history = [], extra = {}) {
-  process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
   return resolveCompletionProductDefaults({ db: fakeDb({ scheduled: visitOn(date), history, ...extra }), serviceId: 'svc-1' });
 }
-afterEach(() => { delete process.env.GATE_TREE_SHRUB_FIELD_GUIDE; });
 
 describe('the protocol lists 13-0-13 as a keyed default', () => {
   test('Feb to May and Oct to Dec name the exact catalog row with treeShrubKey f13013, after the palm feed; other months do not', () => {
@@ -130,7 +128,6 @@ describe('the property\'s ordinance zone decides the June to September hold on t
     expect(out.holds).toEqual([]);
   });
   test('the resolver reads the property city for the zone and falls back to the conservative rule when it cannot', async () => {
-    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
     const run = (property) => resolveCompletionProductDefaults({ db: fakeDb({ scheduled: visitOn('2028-10-10'), property }), serviceId: 'svc-1' });
     // October is outside the blackout in every zone: the line is offered whatever the property says.
     expect(offered(await run({ city: 'North Port', address_line1: '1 Synthetic Rd' }))).toBe(true);

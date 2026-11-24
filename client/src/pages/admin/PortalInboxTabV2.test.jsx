@@ -537,8 +537,10 @@ describe("Portal inbox tab: answers in the portal", () => {
     [{ bell: true, pushAccepted: 0, email: "email_opted_out" }, "Sent to Pat Synthetic in the portal, but we could not reach them by app or email. Reply by text too."],
     // GATE_PORTAL_ANSWER_TEXT: the text in place of the push; a text that may have gone counts as sent.
     [{ bell: true, pushAccepted: 0, text: "sent", email: "not_needed" }, "Sent to Pat Synthetic in the portal. We texted them your answer."],
-    // The text went out, then the try's last write failed: staff still read that the text went.
-    [{ text: "sent", pending: true }, "Sent to Pat Synthetic in the portal. We texted them your answer."],
+    // The push, the text or the email went out, then the try's last write failed (pending): staff still read how.
+    [{ bell: true, pushAccepted: 1, email: "not_needed", pending: true }, "Sent to Pat Synthetic in the portal. They got a notice in the Waves app."],
+    [{ bell: true, pushAccepted: 0, text: "sent", email: "not_needed", pending: true }, "Sent to Pat Synthetic in the portal. We texted them your answer."],
+    [{ bell: true, pushAccepted: 0, email: "sent", pending: true }, "Sent to Pat Synthetic in the portal. We emailed them your answer."],
     [{ bell: true, pushAccepted: 0, text: "uncertain", email: "not_needed" }, "Sent to Pat Synthetic in the portal. We could not confirm the text went out. Check their texts in Communications before you send another."],
     [{ bell: true, pushAccepted: 0, text: "sending", pending: true }, "Sent to Pat Synthetic in the portal. A text with your answer may be going out now. Check their texts in Communications before you send another."],
     [{ bell: true, pushAccepted: 0, text: "not_sent", email: "sent" }, "Sent to Pat Synthetic in the portal. We emailed them your answer."],

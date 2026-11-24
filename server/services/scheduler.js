@@ -9183,6 +9183,34 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 2 HOURS at :53 ET — Tell Google about hub changes (owner 2026-11-23,
+  // "build"; services/seo/google-index-ping.js). Resubmits the hub sitemap when
+  // the live sitemap changed, and pings the Indexing API for /careers/ job pages
+  // only (JobPosting JSON-LD; Google allows nothing else). Free write to our own
+  // Search Console: no gate, no customer message. Idempotent: state moves only
+  // after Google accepts a call, so a dropped tick or a deploy kill is caught up
+  // by the next run. Minute 53 at even hours has no other job.
+  // =========================================================================
+  const runGoogleIndexPingTick = async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('google-index-ping', async () => {
+        const out = await require('./seo/google-index-ping').runGoogleIndexPing();
+        // Throw so job_health records the failed run; the catch below still logs and never crashes.
+        if (out?.errors > 0) throw new Error(`google index ping finished with ${out.errors} error(s)`);
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('google-index-ping', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[google-index-ping] tick failed: ${err.message}`);
+    }
+  };
+  cron.schedule('53 */2 * * *', runGoogleIndexPingTick, { timezone: 'America/New_York' });
+  registerDeployKillRetry('google-index-ping', runGoogleIndexPingTick);
+
+  // =========================================================================
   // DAILY 6AM ET — Converted-estimate archive sweep, THEN estimate expiration
   // (Estimates v2 spec §5). One job, hard-ordered: the sweep must stamp
   // archived_at on converted customers' open estimates BEFORE expiration
@@ -10355,27 +10383,6 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Tech open-visit nudge failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // DAILY 8:30PM — Stale-app notice check (owner 2026-11-18). Read-only: finds
-  // visits from the last 48 h whose notices all went as app push, no text, to a
-  // customer whose app was not opened in 30 days. One self-closing ops digest.
-  // =========================================================================
-  cron.schedule('30 20 * * *', async () => {
-    try {
-      await runExclusive('app-first-stale-notice-check', async () => {
-        const check = require('./app-first-stale-notice-check');
-        const result = await check.runAppFirstStaleNoticeCheck();
-        // Counts only in the log: the digest result can carry provider text.
-        logger.info(`App-first stale-notice check done: found=${result.found ?? 'n/a'} skipped=${result.skipped || 'none'}`);
-        // A failed run must read as FAILED in job_health (like the sibling digests): throw a fixed code.
-        const failure = check.staleNoticeCheckFailure(result);
-        if (failure) throw new Error(`app-first-stale-notice-check: ${failure}`);
-      });
-    } catch (err) {
-      logger.error(`App-first stale-notice check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

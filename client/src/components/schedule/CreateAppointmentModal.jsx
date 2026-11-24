@@ -51,10 +51,11 @@ import { labelNamesRetiredSale, RETIRED_SALE_SERVICE_KEYS } from '../../constant
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
 import { NOTICED_AMOUNT_DECLINED, sendWithNoticedAmountConfirm } from '../../lib/noticedRenewalAmount';
-import { formatETTime } from '../../lib/timezone';
+import { formatETDate, formatETTime } from '../../lib/timezone';
 import InPersonCardSheet from './InPersonCardSheet';
 import { AskedTimeBoxLegacy } from './DayOnlyPromiseLegacy';
 import { askedTimeCreateFields, reminderAnswerFor } from './dayOnlyPromise';
+import { openEstimateLinkNotice, recentOpenEstimates } from './openEstimateLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -2440,9 +2441,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const formatScheduleEstimateLabel = (estimate) => {
     if (!estimate) return '';
     const isAccepted = estimate.status === 'accepted';
-    const stamp = isAccepted ? estimate.acceptedAt : (estimate.createdAt || estimate.acceptedAt);
+    // Eastern dates, and the same sent-or-created stamp the booking-win notice
+    // uses, so the picker and the notice never name different days.
+    const stamp = isAccepted ? estimate.acceptedAt : (estimate.sentAt || estimate.createdAt || estimate.acceptedAt);
     const date = stamp
-      ? new Date(stamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      ? formatETDate(stamp, { month: 'short', day: 'numeric' })
       : '';
     // Spell out acceptance so the operator can tell a phone-accepted-but-not-
     // yet-marked quote from one the customer formally accepted.
@@ -5935,6 +5938,54 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       Showing estimates for {formatBookingPropertyAddress(selectedBookingProperty).street} only.
                     </div>
                   )}
+                  {(() => {
+                    // Booking-win tracking: an open estimate this booking would
+                    // otherwise leave at "sent". Recomputed from the offered list
+                    // on every render (customer, address and property changes all
+                    // move it); nothing is linked until staff tap the button, which
+                    // is the same pick as choosing it in the picker above. A pick replaces the
+                    // service list, so the notice shows only while the booking has no lines.
+                    const settled = bookingPropertyState === 'ready' || bookingPropertyState === 'hidden';
+                    if (linkedEstimate || saving || partialCommitLocked || !settled || services.length > 0) return null;
+                    // Only a quote for the address the booking will use: with one active
+                    // property the picker is hidden and the list holds every property's
+                    // quotes, so keep a quote for that property or an address-free one.
+                    const activeId = propertyPickerActive ? String(selectedPropertyId || '')
+                      : (bookingProperties.length === 1 ? String(bookingProperties[0].id) : '');
+                    // A quote tied to a property counts only for that property; one tied to
+                    // none counts only when it carries no street of its own (it may be for
+                    // another address). Anything else gets no notice.
+                    const forThisAddress = visibleScheduleEstimates.filter((e) => (e.propertyId
+                      ? String(e.propertyId) === activeId
+                      : !e.hasQuotedAddress));
+                    // Fail closed: an open quote with no property and a street of its own may
+                    // be the one the customer said yes to, so with one present no quote is
+                    // singled out (it would make an address-free quote look like the only one).
+                    const unplacedStreetQuote = recentOpenEstimates(visibleScheduleEstimates, selectedCustomer?.id)
+                      .some((e) => !e.propertyId && e.hasQuotedAddress);
+                    const notice = unplacedStreetQuote ? null : openEstimateLinkNotice({ estimates: forThisAddress, customerId: selectedCustomer?.id });
+                    if (!notice) return null;
+                    return (
+                      <div data-testid="open-estimate-link-notice" style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', fontSize: 14, color: D.text }}>
+                        <span style={{ minWidth: 0 }}>{notice.text}</span>
+                        {notice.estimateId != null && (
+                          <button
+                            type="button"
+                            onClick={() => applyScheduleEstimate(notice.estimateId)}
+                            style={{
+                              border: `1px solid ${D.border}`, borderRadius: 6,
+                              background: 'transparent', color: D.text, cursor: 'pointer',
+                              fontSize: isMobile ? 14 : 12, fontWeight: 500, whiteSpace: 'nowrap',
+                              padding: isMobile ? '10px 14px' : '6px 10px',
+                              minHeight: isMobile ? 40 : undefined,
+                            }}
+                          >
+                            Link it
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {linkedEstimate && (
                     <>
                       {/* Acceptance status — spells out whether the customer

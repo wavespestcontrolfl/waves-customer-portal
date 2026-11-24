@@ -18,7 +18,6 @@
  *   GATE_MISSED_CALL_SPAM_REPEAT=true (owner 2026-11-19 "YES BUILD", missed-call spam check: an unknown caller on a Google listing line whose same number already hung up with no message on another Google line, or twice on any line, in 14 days keeps the missed-call alert row, titled "likely robocall", but gets no push or re-push. Off = shadow stamp only. Kill: unset)
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
  *   GATE_CARD_DETAILS_SYNC=true (owner 2026-11-05, Stripe audit: Stripe's card account updater renews saved cards and the portal never heard, so Auto Pay skipped a renewed card it read as expired. On, the payment_method.automatically_updated webhook and a daily 8:31 AM ET job re-read the card from Stripe and refresh the stored expiry, last four, brand and funding (services/card-details-sync.js). Sends nothing to a customer. Read at boot; dark by default in production; off = nothing is read or written. Kill switch: unset.)
- *   GATE_APP_FIRST_STALE_TEXT=true (owner 2026-11-18, "if the app was not opened in the last 30 days, the text goes too, and the app alert still goes": an app notice goes by push alone only when the account holder's phone app checked in within the last 30 days; otherwise the text goes too (sent first) and the app alert still goes after it. A customer's explicit App choice is unchanged. Read at call time; dark by default; kill = unset)
  *   GATE_CALL_LIVE_ASSIST=true (owner 2026-11-16 "ok build all, use haiku", live-call suite parts 13 and 14: on the Live call panel, each call shows what the caller is asking for, the price and the next open times. While someone watches the panel, a Claude Haiku 5.5 read of the last 3 minutes runs at most once per 45 seconds and 12 times per call. The price is the pricing engine's own text; the open times come from the booking engine at the customer's account address or the address the caller said, and can call the paid Google geocoder. Text on the staff screen only; nothing reaches a customer. Off = no model call, no lookup, panel unchanged. Kill: unset)
  *   GATE_VISIT_LIVE_ACTIVITY=true (owner 2026-11-11, "do this first Visit day on the Lock Screen": on visit day an iPhone with the Waves app shows one live card on its Lock Screen when the technician goes on the way, and the card follows the visit: on the way, arrived, service complete. The iPhone app reports its Apple start token through POST /api/push/live-activity-token and the server keeps it on that phone's own push registration row (iOS 18 or later, an app version that has the card). The card follows the customer's "technician on the way" notice switch, their choice to get appointment notices themselves, and their app notification switch; it sends no text or email and changes no existing notice. The server starts it when the tracker goes on the way, sends one update at arrival, and ends it at service complete (it stays 15 minutes) or at once when the visit is cancelled, moved or rewound; a 2-minute sweep repairs a missed step and takes a card down when a step outlasts its time limit (services/visit-live-activity.js). VISIT_LIVE_ACTIVITY_CUSTOMER_ALLOWLIST (comma-separated customer ids) narrows it to those customers for the first test. Needs Apple's Broadcast Capability on the app id. Strict === 'true', read at call time by visitLiveActivityLive(); dark by default; off = the route stores nothing, no card starts, and the sweep takes every live card down within 2 minutes. Customer-facing, so the owner flips it.)
  *   GATE_MULTI_HOME_ALL_HOMES=true (owner ruling 2026-08-06, "the 10% applies to EVERY home in a multi-home group"; owner 2026-11-04, homes on separate profiles linked as "Same family" count as one group. Changes prices, so the owner flips it. When a home's recurring plan starts with the Multi-Home Discount (an accepted recurring estimate whose manual discount is the catalog preset multi_home, accepted in the last 14 days, on a profile that is multi-home by its own flag or by the Same family link), a 15-minute job puts the same discount on the upcoming visits of the family's OTHER homes: other properties on the same profile and the plans of every other linked profile. It does what the Edit appointment "This and following" save does, through the same helper and guards (services/multi-home-discount-apply.js): from the series' next upcoming visit on, only for per-application plans whose visits are flat (no add-on lines, no discount yet), and the series template is stamped so later auto-extended visits carry the discount too. Anything else (monthly membership, prepaid year, prepaid money, a live invoice, a card confirmation in flight, a plan on hold, a visit already discounted, a series shape the helper refuses, GATE_EDIT_APPT_PRICE_SERVICE_SCOPE off) holds with a reason, rings one Billing bell per home and reason, and is retried on later runs. Each home is recorded in multi_home_discount_applications (applied | held | already_discounted) and once in audit_log. Sends nothing to a customer. Strict opt-in, read at call time via multiHomeAllHomesLive(); off = the job returns before any query. Kill switch: unset. Discounts already written stay.)
@@ -837,18 +836,6 @@ const gates = {
   // through acceptance even after this gate is disabled. Strict opt-in.
   visitCombinedCapacity: process.env.GATE_VISIT_COMBINED_CAPACITY === 'true',
 
-  // Quote-wizard repeat-run dedupe (#3834 split, PR A′): a tokenless
-  // /calculate rerun of an OPEN quote_wizard lead (same email + phone +
-  // address + service, 30 days) files as status 'duplicate' carrying
-  // extracted_data.duplicate_of_lead_id instead of a second 'new' lead —
-  // label only, the public route never writes the original. OFF (default,
-  // every environment): every run files as 'new', byte-identical to before.
-  // Flip only once the conversion side (PR B′: accept-time and self-booking
-  // resolution of a repeat to its root) has merged, or accepted reruns
-  // credit no lead as won. Kill switch: unset. This entry is for
-  // logGateStatus; the route reads gateEnvValue at CALL time.
-  wizardLeadDedupe: gateEnvValue('GATE_WIZARD_LEAD_DEDUPE'),
-
   // Booking stamping contract (Tier 2 consolidation): the shared
   // field-stamping authority in services/booking/create-scheduled-service.js
   // that scheduled_services insert sites converge on. Gate OFF = no
@@ -1563,11 +1550,6 @@ const gates = {
   // Communications composer and send it themselves. Read at call time by
   // server/services/sms-translation.js — this entry is for logGateStatus only.
   smsAnyLanguageInbox: gateEnvValue('GATE_SMS_ANY_LANGUAGE_INBOX'),
-  // Courtesy reply to an automated visit text (owner 2026-10-14): a bare "Ok" / "Thanks" / 👍
-  // after Waves' own confirmation, reminder, en-route, arrival or completion text is marked
-  // read with no bell. Read at call time by server/routes/twilio-webhook.js
-  // smsCourtesyAfterTemplateLive() — this entry is for logGateStatus only.
-  smsCourtesyAfterTemplate: process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
   // Away Watch + Welcome Home (owner 2026-10-31): a member's away dates drive a tech job-card line and a
   // 3-photo closeout minimum. Read at call time by awayWatchLive() — this entry is for logGateStatus only.
   awayWatch: process.env.GATE_AWAY_WATCH === 'true',
@@ -3240,15 +3222,6 @@ const gates = {
   // Enable with GATE_ESTIMATE_SOFT_EXIT=true.
   estimateSoftExit: isProd ? process.env.GATE_ESTIMATE_SOFT_EXIT === 'true' : true,
 
-  // The `lawn_area` block on POST /public/quote/calculate — the priced
-  // treatable-area basis the website estimator renders as "Priced for N sq
-  // ft". Ships DARK because merely EMITTING the field activates the deployed
-  // astro widget's source labels, and until astro PR #464 deploys those
-  // labels include the banned verify-on-first-visit wording (owner ruling
-  // 2026-08-12). Flip AFTER #464 is live on the hub + spokes.
-  // Enable with GATE_PUBLIC_QUOTE_LAWN_AREA=true.
-  publicQuoteLawnArea: isProd ? process.env.GATE_PUBLIC_QUOTE_LAWN_AREA === 'true' : true,
-
   // Website estimate pages publish eligible engine quotes directly into the
   // existing estimate booking/Auto Pay flow. Ordinary lead forms never opt in.
   websiteQuoteBooking: process.env.GATE_WEBSITE_QUOTE_BOOKING === 'true',
@@ -3529,7 +3502,6 @@ const gates = {
   // Current-visit procedure and readable SOP sheet inside the Job Card drawer.
   // Uses the same visit resolver; unset restores the legacy protocol tabs.
   protocolSop: gateEnvValue('GATE_PROTOCOL_SOP'),
-  treeShrubFieldGuide: gateEnvValue('GATE_TREE_SHRUB_FIELD_GUIDE'),
   // Schedule day-view exceptions from the Job Card; no paragraph generation
   // or cache writes. Requires GATE_JOB_CARD too; unset removes the strips.
   dispatchReadiness: gateEnvValue('GATE_DISPATCH_READINESS'),
@@ -5296,8 +5268,6 @@ const gates = {
   dunningCustomerScheduleShadow: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true',
   dunningCustomerSchedule: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true',
   dunningCustomerScheduleAllowlist: String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '').trim() !== '',
-  // GATE_APP_FIRST_STALE_TEXT: read at CALL time via appFirstStaleTextLive(); this entry is for logGateStatus.
-  appFirstStaleText: process.env.GATE_APP_FIRST_STALE_TEXT === 'true',
   // GATE_VISIT_LIVE_ACTIVITY: read at CALL time via visitLiveActivityLive(); this entry is for logGateStatus.
   visitLiveActivity: process.env.GATE_VISIT_LIVE_ACTIVITY === 'true',
   // GATE_BOOKING_MAKE_ROOM: read at CALL time via bookingMakeRoomMode(); this entry is for logGateStatus, so the boot
@@ -8304,14 +8274,6 @@ function portalAiVoiceProfileLive() {
   return process.env.GATE_PORTAL_AI_VOICE_PROFILE === 'true';
 }
 
-// GATE_SMS_COURTESY_AFTER_TEMPLATE read at CALL time — strict `=== 'true'`.
-// The one reader for the inbound-SMS courtesy rule after an automated visit
-// text (server/routes/twilio-webhook.js lastOutboundAskedQuestion). Off = a
-// reply after such a text counts as answering it, as before.
-function smsCourtesyAfterTemplateLive() {
-  return process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true';
-}
-
 // GATE_AWAY_WATCH read at CALL time — strict `=== 'true'`. The one reader for Away Watch + Welcome Home
 // (property-preferences-schema.js writers, routes/property.js and admin-customers.js responses,
 // job-card.js lines, complete-scheduled-service.js photo minimum). Off = no change anywhere.
@@ -8962,8 +8924,6 @@ function oneTapReportLive() {
 module.exports.oneTapReportLive = oneTapReportLive;
 
 
-// GATE_SMS_COURTESY_AFTER_TEMPLATE reader, on its own line so gate PRs never conflict.
-module.exports.smsCourtesyAfterTemplateLive = smsCourtesyAfterTemplateLive;
 // GATE_AWAY_WATCH reader, on its own line so gate PRs never conflict.
 module.exports.awayWatchLive = awayWatchLive;
 // GATE_SMS_BARE_YES_REPLY reader, on its own line so gate PRs never conflict.
@@ -9306,14 +9266,6 @@ function makeRoomLaterDaysLive() {
 // GATE_MAKE_ROOM_LATER_DAYS reader, on its own line so gate PRs never conflict.
 module.exports.makeRoomLaterDaysLive = makeRoomLaterDaysLive;
 
-// GATE_APP_FIRST_STALE_TEXT read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
-// Owner 2026-11-18: a phone app not opened in 30 days no longer takes the notice alone;
-// the text goes too, and the app alert still goes (services/push-notifications.js appFirstStaleFloor).
-function appFirstStaleTextLive() {
-  return process.env.GATE_APP_FIRST_STALE_TEXT === 'true';
-}
-// GATE_APP_FIRST_STALE_TEXT reader, on its own line so gate PRs never conflict.
-module.exports.appFirstStaleTextLive = appFirstStaleTextLive;
 // GATE_VISIT_LIVE_ACTIVITY read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
 // Owner 2026-11-11: the Lock Screen card for visit day. Off = POST /api/push/live-activity-token stores nothing
 // and no card starts.

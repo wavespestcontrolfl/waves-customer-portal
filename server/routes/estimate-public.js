@@ -29976,6 +29976,22 @@ async function estimateCustomerPreservesMonthlyBilling(estimate) {
   }
 }
 
+// The billing lane for a caller that must NOT guess (the "What you pay" box): true = monthly member, false =
+// per application, null = a lookup failed. The display resolvers answer a failure as per application, which is
+// the wrong direction here; they are left alone (estimate-per-month-copy pins their single raw caller).
+async function estimateMonthlyBillingLaneKnown(estimate) {
+  try {
+    if (!(await perApplicationBillingColumnsExist())) return true;
+    if (!estimate?.customer_id && !estimate?.customer_phone) return false;
+    const customer = estimate.customer_id
+      ? await db('customers').where({ id: estimate.customer_id }).first()
+      : (await matchAcceptCustomerByPhone(estimate)).match;
+    return customer ? BillingCadence.customerPreservesMonthlyMembership(customer) : false;
+  } catch {
+    return null;
+  }
+}
+
 // The monthly-billed identity for DISPLAY (the SSR hero fork and its /data
 // mirror) — one resolver, so the two surfaces can't drift.
 //
@@ -31645,6 +31661,203 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
  * their default false, which naturally withholds returnVisit and the
  * staff-preview flag rather than fabricating request state.
  */
+// "What you pay and when" box (owner 2026-11-23): the first visit itemised, each later application and the
+// setup fee, for the plan the page OPENS on. Read-only data. It is built from the very functions the accept
+// path mints the first invoice with, so the page can only print what acceptance bills:
+// - the first application: sameDayVisitRowAmounts / sameDayVisitTotalForPricingFrequency over the selected
+//   frequency (the matched cadence combo rebased exactly as the accept rebases it) and the accept's own
+//   recurring service list (acceptanceServiceLists), so a service the page does not show still has to be priced;
+// - the setup fee: shouldIncludeWaveGuardSetupFeeForRecurring + frozenSetupFeeAmount, read from the stored
+//   estimate the way the converter reads it (never from the page's fee lists);
+// - the waiver: acceptPrepayAvailable.
+// Null whenever one of those cannot resolve, a credit/preference/up-front charge moves the first bill off the
+// plain per-line prices, or the per-line amounts do not add up to the first invoice amount to the cent. The
+// page shows the box only while its selection (frequency + cadences) is the one named in `selection`.
+const centsOfWyp = (n) => Math.round(Number(n) * 100);
+
+function whatYouPayDefaultSelection(pricingBundle) {
+  const frequencies = Array.isArray(pricingBundle?.frequencies) ? pricingBundle.frequencies : [];
+  const base = defaultFrequencyFromList(frequencies);
+  if (!base) return null;
+  const combos = Array.isArray(pricingBundle?.serviceCadenceCombos) ? pricingBundle.serviceCadenceCombos : [];
+  if (!combos.length) return { frequency: base, serviceCadences: null };
+  const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
+  // The page's default cadence map: each non-pest combo axis at its own section's default.
+  const cadences = {};
+  for (const axis of Object.keys(combos[0].selection || {}).filter((k) => k !== 'pest_control')) {
+    const section = sections.find((sec) => sec?.key === axis);
+    const key = section ? (section.defaultFrequencyKey || section.frequencies?.[0]?.key) : null;
+    if (key) cadences[axis] = String(key);
+  }
+  const axes = Object.keys(cadences);
+  if (!axes.length) return { frequency: base, serviceCadences: null };
+  const combo = combos.find((c) => {
+    const sel = c.selection || {};
+    const nonPest = Object.keys(sel).filter((k) => k !== 'pest_control');
+    return nonPest.length === axes.length && axes.every((k) => sel[k] === cadences[k])
+      && (!sel.pest_control || sel.pest_control === base.key);
+  });
+  if (!combo) return null;
+  // The accept's rebase of the visit-pricing frequency on the matched combo.
+  return {
+    serviceCadences: cadences,
+    frequency: {
+      ...base,
+      monthly: combo.monthly,
+      annual: combo.annual,
+      perServiceTreatments: combo.perServiceTreatments ?? base.perServiceTreatments,
+      sameDayTreatmentTotal: combo.sameDayTreatmentTotal ?? base.sameDayTreatmentTotal,
+      manualDiscount: combo.manualDiscount,
+      manualDiscountSuppressed: combo.manualDiscountSuppressed,
+    },
+  };
+}
+
+// Every reason the first bill is more than the plain per-line prices (a credit, a preference credit, a plan
+// credit slice, a rodent or misting setup, another first-visit fee, a one-time charge beside the plan).
+function whatYouPayFirstBillIsPlain({ estimate, estData, pricingBundle, frequency, services, prefs, rowAmounts }) {
+  const liveCredit = (md) => md && Number(md.amount ?? md.recurringAmount) > 0;
+  if ([frequency, pricingBundle?.combinedRecurring, pricingBundle].some((src) => liveCredit(src?.manualDiscount))) return false;
+  if (rowAmounts.some((entry) => centsOfWyp(entry.amount) !== centsOfWyp(entry.baseAmount))) return false;
+  if (services.length > 1 && planCreditFirstVisitSlice(frequency, { preferences: prefs, services })) return false;
+  const EstimateConverter = require('../services/estimate-converter');
+  if (EstimateConverter.frozenRodentBaitSetupAmount(estData) > 0 || EstimateConverter.frozenMistingInstall(estData)) return false;
+  const fees = Array.isArray(pricingBundle?.firstVisitFees) ? pricingBundle.firstVisitFees : [];
+  if (fees.some((fee) => fee?.service !== 'waveguard_setup' && Number(fee?.amount) > 0)) return false;
+  // Only the setup row (read through the setup fee path) and, with a one-time option, the ALTERNATE one-time
+  // choice row(s) may sit in the breakdown. Anything else (Bora-Care, a pest specialty, an area add-on) is billed
+  // with either choice, so the first bill is more than the plain lines.
+  const items = Array.isArray(pricingBundle?.oneTimeBreakdown?.items) ? pricingBundle.oneTimeBreakdown.items : [];
+  const choiceCategory = estimate.show_one_time_option === true ? serviceCategoryForOneTimeChoice(estData, pricingBundle) : null;
+  return items.every((item) => item?.service === 'waveguard_setup'
+    || (choiceCategory && isOneTimeChoiceItemForCategory(item, choiceCategory)));
+}
+
+// A tier plan carries billingFrequencyKey 'monthly' even when it bills per application (billedPerApplication).
+// A real monthly account is out; a per-application tier is in, but only when the printed price is the per-visit
+// charge the accept stamps (perApplicationChargeAmount over the plan annual and visit count), to the cent.
+function whatYouPayTierBillsPerApplication({ estData, frequency, lines }) {
+  if (frequency.billingFrequencyKey !== 'monthly') return true;
+  if (frequency.billedPerApplication !== true || lines.length !== 1) return false;
+  const cadence = BillingCadence.resolveBillingCadence({
+    monthlyRate: Number(frequency.monthly),
+    annualRate: Number(frequency.annual),
+    frequencyKey: 'monthly',
+    estimateData: estData,
+    fallbackFrequencyKey: 'quarterly',
+  });
+  const charge = BillingCadence.perApplicationChargeAmount({
+    billingCadence: cadence,
+    annualRate: Number(frequency.annual),
+    monthlyRate: Number(frequency.monthly),
+    visitsPerYear: Number(frequency.visitsPerYear) || null,
+    serviceKey: frequency.key || null,
+  });
+  return charge != null && centsOfWyp(charge) === centsOfWyp(lines[0].perApplication);
+}
+
+// The estimate shapes the box never describes: not open, held, invoiced, monthly-billed, commercial, a frozen offer.
+// `monthlyBilled` must be exactly false (a resolved per-application lane) and `pendingDeposit` exactly 0 (no paid,
+// unconsumed deposit the accept would credit against the first invoice): null, true or an amount all mean no box.
+function whatYouPayEstimateIsStandard({ estimate, estData, invoiceMode, siteConfirmationHold, monthlyBilled, pendingDeposit, quoteRequired }) {
+  if (invoiceMode || siteConfirmationHold || monthlyBilled !== false || pendingDeposit !== 0 || quoteRequired) return false;
+  if (!isEstimateAcceptActive(estimate) || estimate.price_locked_at || frozenOfferRefusal(estimate)) return false;
+  return !(isCommercialAutoAcceptEstimate(estimate) || isCommercialOneTimePricedEstimate(estimate) || estimateHasCommercialScope(estData));
+}
+
+// The accept's recurring service list for this estimate: the accept reads the SUPPLEMENTED data first (a legacy
+// plan keeps services in both the result block and the root block).
+function whatYouPayServices(estimate, estData) {
+  const services = acceptanceServiceLists(withSupplementedRecurringServices(estData) || estData).recurringSvcList;
+  const pestOnly = services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
+  return estimate.show_one_time_option && pestOnly.length ? pestOnly : services;
+}
+
+// One line per recurring service from the accept's row amounts, or null when any line cannot be read.
+function whatYouPayLines({ rowAmounts, pricingBundle, total }) {
+  const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
+  const lines = rowAmounts.map(({ row, amount }) => {
+    const key = recurringServiceKey(row);
+    return {
+      key,
+      label: String(sections.find((sec) => sec?.key === key)?.label || row?.label || row?.name || key),
+      perApplication: Math.round(amount * 100) / 100,
+      applicationsPerYear: treatmentVisitsForPricingRow(row),
+    };
+  });
+  const readable = lines.every((line) => line.key && line.perApplication > 0 && Number.isInteger(line.applicationsPerYear) && line.applicationsPerYear > 0);
+  // The per-line amounts must be the first invoice amount, to the cent.
+  return readable && total > 0 && centsOfWyp(lines.reduce((sum, line) => sum + line.perApplication, 0)) === centsOfWyp(total) ? lines : null;
+}
+
+// The setup fee the converter would invoice with the first application, and whether prepay waives it. null = unresolved.
+function whatYouPaySetupFee({ estimate, estData, frequency, services, lineCount }) {
+  const EstimateConverter = require('../services/estimate-converter');
+  const applies = EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
+    recurringServices: EstimateConverter.recurringServicesFromEstimateData(estData),
+    estimateData: estData,
+  });
+  if (!applies) return { amount: 0, waivedWithPrepay: false };
+  const amount = EstimateConverter.frozenSetupFeeAmount(estData);
+  if (!(amount > 0) || lineCount !== 1) return null;
+  return {
+    amount,
+    waivedWithPrepay: acceptPrepayAvailable({
+      selectedFrequency: frequency, recurringSvcList: services, oneTimeList: acceptanceServiceLists(withSupplementedRecurringServices(estData) || estData).oneTimeList, estData, estimate,
+    }) === true,
+  };
+}
+
+// The paid, unconsumed deposit the accept would credit against the first invoice: 0 = none, an amount = some,
+// null = the ledger could not be read. Same ledger reads the accept transaction makes.
+async function whatYouPayPendingDeposit(estimate) {
+  try {
+    const Deposits = require('../services/estimate-deposits');
+    const own = await Deposits.pendingDepositCredit(estimate.id);
+    const customer = estimate.customer_id ? await Deposits.pendingDepositCreditForCustomer(estimate.customer_id) : null;
+    return Math.round(((Number(own?.amount) || 0) + (Number(customer?.amount) || 0)) * 100) / 100;
+  } catch (err) {
+    logger.warn(`[estimate-data] whatYouPay deposit lookup failed for estimate ${estimate?.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// The two live lookups the accept depends on, resolved together for `whatYouPayForData`.
+async function whatYouPayAcceptLookups(estimate) {
+  const [monthlyBilled, pendingDeposit] = await Promise.all([estimateMonthlyBillingLaneKnown(estimate), whatYouPayPendingDeposit(estimate)]);
+  return { monthlyBilled, pendingDeposit };
+}
+
+function whatYouPayForData(input = {}) {
+  try {
+    const { estimate, estData, pricingBundle } = input;
+    if (!whatYouPayEstimateIsStandard(input)) return null;
+    const selection = whatYouPayDefaultSelection(pricingBundle);
+    const frequency = selection?.frequency;
+    if (!frequency || frequency.quoteRequired === true || Number(frequency.lowConfidenceRangePct) > 0) return null;
+    const services = whatYouPayServices(estimate, estData);
+    const prefs = normalizePrefs(estData?.preferences);
+    const rowAmounts = services.length ? sameDayVisitRowAmounts(frequency, { preferences: prefs, services }) : null;
+    if (!rowAmounts || rowAmounts.length !== services.length) return null;
+    if (!whatYouPayFirstBillIsPlain({ estimate, estData, pricingBundle, frequency, services, prefs, rowAmounts })) return null;
+    const total = sameDayVisitTotalForPricingFrequency(frequency, { preferences: prefs, services });
+    const lines = whatYouPayLines({ rowAmounts, pricingBundle, total });
+    if (lines && !whatYouPayTierBillsPerApplication({ estData, frequency, lines })) return null;
+    const setup = lines ? whatYouPaySetupFee({ estimate, estData, frequency, services, lineCount: lines.length }) : null;
+    if (!lines || !setup) return null;
+    return {
+      selection: { frequency: String(frequency.key), serviceCadences: selection.serviceCadences },
+      lines,
+      setupFee: setup.amount > 0 ? setup.amount : null,
+      setupWaivedWithPrepay: setup.waivedWithPrepay,
+      firstVisitTotal: Math.round((total + setup.amount) * 100) / 100,
+    };
+  } catch (err) {
+    logger.warn(`[estimate-data] whatYouPay skipped: ${err.message}`);
+    return null;
+  }
+}
+
 async function composeEstimateDataPayload(estimate, {
   adminDraftPreview = false,
   isPdfRenderPass = false,
@@ -31753,6 +31966,8 @@ async function composeEstimateDataPayload(estimate, {
     // the page or in Ask Waves, may state them.
     const noEstimateWideGuarantee = !estimateCarriesPlanTerms(estimateDataForIntelligence, pricingBundle);
     const effectiveInvoiceMode = estimate.bill_by_invoice === true || guaranteeOnlyAccept;
+    // Live lookups the "What you pay" box must resolve (an unresolved lane or deposit ledger means no box).
+    const whatYouPayLookups = await whatYouPayAcceptLookups(estimate);
     const intelligence = isRegulatedCertificateSurface
       ? null
       : buildWaveGuardIntelligencePayload(
@@ -32766,6 +32981,16 @@ async function composeEstimateDataPayload(estimate, {
         })()),
         defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
       },
+      // Read-only: the first visit and each later application as acceptance bills them (see whatYouPayForData).
+      whatYouPay: whatYouPayForData({
+        estimate,
+        estData: estimateDataForIntelligence,
+        pricingBundle,
+        invoiceMode: effectiveInvoiceMode,
+        siteConfirmationHold,
+        ...whatYouPayLookups,
+        quoteRequired: quoteRequirement?.quoteRequired === true,
+      }),
       cta: {
         // Priced termite trenching is review-before-booking: the price stays visible
         // (NOT quoteRequired) but self-accept/self-book is suppressed on the React
@@ -33442,6 +33667,9 @@ module.exports.isReservationHeldAppointment = isReservationHeldAppointment;
 module.exports.findLinkedUpcomingAppointment = findLinkedUpcomingAppointment;
 module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
+module.exports.whatYouPayForData = whatYouPayForData;
+module.exports.whatYouPayAcceptLookups = whatYouPayAcceptLookups;
+module.exports.estimateMonthlyBillingLaneKnown = estimateMonthlyBillingLaneKnown;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
 module.exports.estimateClosedOnline = estimateClosedOnline;
 module.exports.estimateLinkageInvalidated = estimateLinkageInvalidated;
