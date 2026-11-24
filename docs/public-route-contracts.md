@@ -7852,7 +7852,7 @@ It never returns `summary`, the report, invoice, prep or review tokens, photos,
 the offer and referral cards, `customer`, `cancellation`, stops count or route
 progress, and the cards and summary reads do not run. Its stops-ahead POST
 answers nulls and its view POST records nothing. Gate off, a deleted row, a
-declined person, an unknown token or an expired visit link answer the same 404.
+declined person, an unknown token, an expired visit link or a visit with no expiry on record answer the same 404. A customer-pick visit awaiting the holder shows `{ kind: 'pending_rebook' }`.
 A
 cancelled or missed visit returns only that the office is the next actor. An
 operational `rescheduled` row adds `visitChange.kind = pending_rebook`; its

@@ -304,7 +304,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
 
     test('each kind is its own text; the reminders carry no link and the en-route text carries only Bob\'s OWN tracker link', async () => {
       const HOLDER_TOKEN = 'a'.repeat(64);
-      await db('scheduled_services').where({ id: visitId }).update({ track_view_token: HOLDER_TOKEN });
+      await db('scheduled_services').where({ id: visitId }).update({ track_view_token: HOLDER_TOKEN, track_token_expires_at: new Date(Date.now() + 86400000) });
       for (const kind of ['confirmation', 'reminder_72h', 'reminder_24h']) await notify(kind);
       await notify('en_route', { context: { techName: 'Pat', etaMinutes: 12, trackUrlFor: async (token) => `https://x.test/track/${token}` } });
       expect(sendCustomerMessage.mock.calls.map(([i]) => i.purpose)).toEqual([
@@ -327,7 +327,22 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect((await rows())[0].track_token).toBeNull();
     });
 
+    test('a visit whose own link has no live expiry gets the text without a link, and no token is minted', async () => {
+      const builder = jest.fn(async (token) => `https://x.test/track/${token}`);
+      for (const expiry of [null, new Date(Date.now() - 1000)]) {
+        sendCustomerMessage.mockClear();
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ deliveries: '{}' });
+        await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: expiry });
+        await notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Track live');
+        expect((await rows())[0].track_token).toBeNull();
+      }
+      expect(builder).not.toHaveBeenCalled();
+    });
+
     test('a link builder that fails sends the text without a link', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       await notify('en_route', { context: { techName: 'Pat', trackUrlFor: async () => { throw new Error('shortener down'); } } });
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Track live');
@@ -641,6 +656,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     });
 
     test('the token opens exactly its own visit while the gate is on, and is unique per row', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       const [{ id }] = await rows();
       const token = await VisitRecipient.ensureTrackToken(id);
       expect(await VisitRecipient.visitForTrackToken(token)).toEqual({ visitId, recipientId: id });
@@ -650,7 +666,8 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       await expect(db('visit_text_recipients').where({ id: other.id }).update({ track_token: token })).rejects.toMatchObject({ code: '23505' });
     });
 
-    test('404 cases: gate off, a wrong token, a declined person, the visit gone', async () => {
+    test('404 cases: gate off, a wrong token, a declined person, the visit gone, no live expiry', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       const [{ id }] = await rows();
       const token = await VisitRecipient.ensureTrackToken(id);
       expect(await VisitRecipient.visitForTrackToken('c'.repeat(64))).toBeNull();
@@ -660,6 +677,9 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
       await db('messaging_suppression').where({ phone: BOB }).update({ active: false });
       expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: null });
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       delete process.env[GATE];
       expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
       process.env[GATE] = 'true';

@@ -2286,7 +2286,8 @@ const TwilioService = {
               return (await shortenOrPassthrough(long, {
                 kind: "tracking",
                 entityType: "visit_text_recipients",
-                customerId,
+                // No customerId: the timeline counts a click on a customer's short code as that customer's own
+                // engagement, and this link is clicked by a third party.
                 expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
               })) || long;
             },

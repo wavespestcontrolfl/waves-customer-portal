@@ -33,7 +33,7 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
-const { isTrackTokenLive } = require('../services/track-token-expiry');
+const { isTrackTokenLive, isTrackTokenLiveWithExpiry } = require('../services/track-token-expiry');
 const logger = require('../services/logger');
 const { recordPageView, logViewFailure } = require('../services/customer-page-views');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -662,6 +662,14 @@ const PRIVACY_HEADERS = {
 // not named below. `scope` tells the page to hide what only the holder sees. After the visit it is the plain
 // "complete" state, with the tech and the service name and nothing about the work (no summary, no links).
 const RECIPIENT_VISIT_CHANGE_KINDS = new Set(['pending_rebook']);
+// A visit parked for the HOLDER to pick a new day (customer_pick, awaiting_customer) has no booked time yet: the
+// recipient sees the same neutral pending_rebook as an office rebooking, with no reason and no scheduling action.
+function recipientVisitChange(visitChange) {
+  if (!visitChange) return null;
+  if (visitChange.kind === 'customer_pick' && visitChange.stage === 'awaiting_customer') return { kind: 'pending_rebook' };
+  return RECIPIENT_VISIT_CHANGE_KINDS.has(visitChange.kind) ? { kind: visitChange.kind } : null;
+}
+
 function recipientTrackPayload(full) {
   const state = full.state;
   const property = full.property || {};
@@ -686,7 +694,7 @@ function recipientTrackPayload(full) {
       : null,
     arrivedAt: full.arrivedAt ?? null,
     // The visit's own kind only when the office is rebooking it; no reason, no action, no other visit.
-    visitChange: full.visitChange && RECIPIENT_VISIT_CHANGE_KINDS.has(full.visitChange.kind) ? { kind: full.visitChange.kind } : null,
+    visitChange: recipientVisitChange(full.visitChange),
     meta: {
       // The page's poll is the only live update this link has (no socket): keep it while the tech is on the way or on site.
       pollIntervalSeconds: state === 'en_route' || state === 'on_property' ? EN_ROUTE_POLL_SECONDS : 0,
@@ -699,10 +707,10 @@ function recipientVisitId(token) {
   return require('../services/call-visit-recipient').visitForTrackToken(token).then((hit) => (hit ? hit.visitId : null));
 }
 
-// The same expiry fence as the holder's link: it is the visit's own track_token_expires_at.
+// The visit's own track_token_expires_at, but a missing expiry is refused (the holder's legacy links stay live on null).
 async function recipientVisitLive(visitId) {
   const visit = await db('scheduled_services').where({ id: visitId }).first('track_token_expires_at');
-  return Boolean(visit) && isTrackTokenLive(visit.track_token_expires_at);
+  return Boolean(visit) && isTrackTokenLiveWithExpiry(visit.track_token_expires_at);
 }
 
 // The visit row both token kinds read: the holder's tracker token and a visit text recipient's own.
@@ -792,7 +800,7 @@ router.get('/:token', async (req, res, next) => {
     }
 
     if (!row) return res.status(404).json({ error: 'Not found' });
-    if (!isTrackTokenLive(row.track_token_expires_at)) {
+    if (!(recipientScope ? isTrackTokenLiveWithExpiry : isTrackTokenLive)(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });
     }
     const officeRebooking = row.status === 'rescheduled';

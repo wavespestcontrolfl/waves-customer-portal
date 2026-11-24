@@ -37,6 +37,7 @@ const logger = require('./logger');
 const { toE164, isValidNanpNumber } = require('../utils/phone');
 const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
 const { dateOnlyString } = require('../utils/date-only');
+const { isTrackTokenLiveWithExpiry } = require('./track-token-expiry');
 
 const SOURCE = 'call_caller_provided';
 const CONSENT_VERSION = 'owner-ruling-2026-11-24-visit-only';
@@ -428,6 +429,9 @@ async function ensureTrackToken(visitRecipientId, conn = db) {
 async function recipientTrackUrl(contact, context, conn) {
   if (!context || typeof context.trackUrlFor !== 'function') return null;
   try {
+    // No link for a visit whose own tracker link has no live expiry on record: the recipient's link ends with it.
+    const visit = await conn('scheduled_services').where({ id: contact.visit.id }).first('track_token_expires_at');
+    if (!visit || !isTrackTokenLiveWithExpiry(visit.track_token_expires_at)) return null;
     const token = await ensureTrackToken(contact.visitRecipientId, conn);
     return token ? await context.trackUrlFor(token) : null;
   } catch (err) {
@@ -440,15 +444,15 @@ const TRACK_TOKEN_RE = /^[a-f0-9]{64}$/;
 
 /**
  * The visit a recipient's tracker token opens, or null. The link works only while the gate is on, the row still exists
- * (it goes with the visit), and the person has not declined en-route texts. The caller serves the reduced, map-only view
- * and judges the visit's own link expiry. Throws on an unreadable answer (the route answers an error, never an open view).
+ * (it goes with the visit), and the person has not declined en-route texts, and the visit's own link has a live expiry on record (a null
+ * expiry is refused). The caller serves the reduced, map-only view. Throws on an unreadable answer (the route answers an error, never an open view).
  */
 async function visitForTrackToken(token, { conn = db } = {}) {
   if (!gateLive() || !TRACK_TOKEN_RE.test(token || '')) return null;
   const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id', 'phone_key', 'phone_e164');
   if (!row) return null;
-  const visit = await conn('scheduled_services').where({ id: row.scheduled_service_id }).first('id', 'customer_id');
-  if (!visit) return null;
+  const visit = await conn('scheduled_services').where({ id: row.scheduled_service_id }).first('id', 'customer_id', 'track_token_expires_at');
+  if (!visit || !isTrackTokenLiveWithExpiry(visit.track_token_expires_at)) return null;
   if (await declinedByRecipient({ customerId: visit.customer_id, phoneKey: row.phone_key, phoneE164: row.phone_e164, purpose: KINDS.en_route.purpose, conn })) return null;
   return { visitId: visit.id, recipientId: row.id };
 }

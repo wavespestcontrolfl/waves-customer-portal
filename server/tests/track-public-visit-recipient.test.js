@@ -140,6 +140,18 @@ describe('GET /:token with a visit text recipient\'s token', () => {
     expect(Object.keys(body).sort()).toEqual(ALLOWED_KEYS.slice().sort());
   });
 
+  test('a visit parked for the holder to pick a new day shows the neutral rebooking state, with no reason, deadline or scheduling action', () => {
+    const out = trackPublicRouter._test.recipientTrackPayload({
+      state: 'scheduled',
+      visitChange: {
+        kind: 'customer_pick', stage: 'awaiting_customer', nextActor: 'customer', reason: 'zz-rain', pickBy: '2026-11-20T01:00:00.000Z',
+        current: null, action: { kind: 'portal_visits', href: '/?tab=schedule', label: 'Open Visits' },
+      },
+    });
+    expect(out.visitChange).toEqual({ kind: 'pending_rebook' });
+    expect(JSON.stringify(out)).not.toMatch(/zz-rain|tab=schedule|Open Visits|pickBy/);
+  });
+
   test('a visit the office is rebooking says so, with no reason, action or other visit', async () => {
     install(visitRow({ status: 'rescheduled' }));
     const { body } = await get();
@@ -147,7 +159,7 @@ describe('GET /:token with a visit text recipient\'s token', () => {
   });
 
   test.each([
-    [{ kind: 'customer_pick', stage: 'awaiting_customer', reason: 'zz', action: { kind: 'portal_visits', href: '/?tab=schedule' } }],
+    [{ kind: 'customer_pick', stage: 'booked', reason: 'zz', current: { date: '2026-12-20' } }],
     [{ kind: 'skipped', nextVisit: { date: '2026-12-20' } }],
     [{ kind: 'office_move', reason: 'zz' }],
   ])('a visit change that names the holder\'s other visits or an action never reaches the recipient (%j)', (visitChange) => {
@@ -169,6 +181,16 @@ describe('GET /:token with a visit text recipient\'s token', () => {
   test('404: the visit\'s own link has expired', async () => {
     install(visitRow({ track_token_expires_at: '2000-01-01T00:00:00.000Z' }));
     expect((await get()).statusCode).toBe(404);
+  });
+
+  test.each([[null], [undefined], ['not-a-date']])('404: the visit has no live expiry on record (%s); the holder\'s legacy null still opens', async (expiry) => {
+    install(visitRow({ track_token_expires_at: expiry }));
+    expect((await get()).statusCode).toBe(404);
+  });
+
+  test('the holder\'s own legacy link with a null expiry still opens (unchanged)', async () => {
+    install(visitRow({ track_token_expires_at: null }), { holderRow: visitRow({ track_token_expires_at: null }) });
+    expect((await get(HOLDER_TOKEN)).statusCode).toBe(200);
   });
 
   test('404: the visit row is gone', async () => {
@@ -221,6 +243,11 @@ describe('POST /:token/stops-ahead and /:token/view with a recipient token', () 
 
   test.each(['/:token/stops-ahead', '/:token/view'])('%s: 404 when the visit\'s link has expired', async (path) => {
     install(visitRow({ track_token_expires_at: '2000-01-01T00:00:00.000Z' }));
+    expect((await post(path)).statusCode).toBe(404);
+  });
+
+  test.each(['/:token/stops-ahead', '/:token/view'])('%s: 404 when the visit has no expiry on record', async (path) => {
+    install(visitRow({ track_token_expires_at: null }));
     expect((await post(path)).statusCode).toBe(404);
   });
 });

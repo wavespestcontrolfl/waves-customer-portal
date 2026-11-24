@@ -32,7 +32,8 @@ const GATE = 'GATE_CALL_GIVEN_VISIT_TEXTS';
 const gateBefore = process.env[GATE];
 const TOKEN = 'b'.repeat(64);
 const ROW = { id: 'r-1', scheduled_service_id: 'ss-1', phone_key: '9415550002', phone_e164: '+19415550002' };
-const VISIT = { id: 'ss-1', customer_id: 'cust-1' };
+const LIVE = new Date(Date.now() + 86400000).toISOString();
+const VISIT = { id: 'ss-1', customer_id: 'cust-1', track_token_expires_at: LIVE };
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -76,6 +77,16 @@ describe('visitForTrackToken: who a recipient link opens', () => {
 
   test('a token no row carries resolves nothing', async () => {
     seed({ row: null });
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+  });
+
+  test.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['expired', '2000-01-01T00:00:00.000Z'],
+    ['not a date', 'not-a-date'],
+  ])('a visit whose own link expiry is %s resolves nothing (a missing expiry is refused, unlike the holder\'s legacy link)', async (_label, expiry) => {
+    seed({ visit: { ...VISIT, track_token_expires_at: expiry } });
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
   });
 

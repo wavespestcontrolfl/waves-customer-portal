@@ -424,7 +424,13 @@ describe('sendTechEnRoute hands the en-route text to the visit-only recipients',
     const [{ context }] = VisitRecipient.notifyVisitRecipients.mock.calls[0];
     // No trackUrl of any kind in the context: only a builder that takes the recipient's token.
     expect(Object.keys(context).sort()).toEqual(['etaMinutes', 'techName', 'trackUrlFor']);
+    const { shortenOrPassthrough } = require('../services/short-url');
     const url = await context.trackUrlFor('r'.repeat(64));
+    // The short code carries no customer: the timeline counts a click on a customer's code as that customer's own.
+    const opts = shortenOrPassthrough.mock.calls.at(-1)[1];
+    expect(opts).toMatchObject({ kind: 'tracking', entityType: 'visit_text_recipients' });
+    expect(opts.customerId).toBeUndefined();
+    expect(opts.entityId).toBeUndefined();
     expect(url).toMatch(/^https:\/\/\S+\/track\/r{64}$/);
     expect(url).not.toContain('tok-1');
     expect(JSON.stringify(VisitRecipient.notifyVisitRecipients.mock.calls)).not.toContain('tok-1');
