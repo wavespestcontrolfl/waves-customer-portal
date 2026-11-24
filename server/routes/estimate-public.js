@@ -19668,6 +19668,35 @@ async function firstVisitRequestBlocked(row, estData, { database = null } = {}) 
   }
 }
 
+// A plain check, not the adoption lookup (which filters by service family and misses a recurring visit on a mixed estimate): ANY
+// scheduled_services row that is not cancelled and is tied to this estimate (source_estimate_id, or the id the estimate data
+// names), including a live hold (a lapsed hold does not count). One is enough to refuse: the office books or the customer picks.
+async function firstVisitRequestHasVisit(row, estData, { database = null } = {}) {
+  const conn = database || db;
+  const linkedId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(estData?.scheduled_service_id || ''))
+    ? String(estData.scheduled_service_id) : null;
+  const found = await conn('scheduled_services')
+    .whereRaw("status NOT IN ('cancelled', 'canceled', 'rescheduled')")
+    .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
+    .where(function () {
+      this.where('source_estimate_id', row.id);
+      if (linkedId) this.orWhere('id', linkedId);
+    })
+    .first('id');
+  return !!found;
+}
+
+// What /data's acceptance contract carries: the state above, minus an estimate that already has a visit tied to it.
+async function firstVisitRequestOffer(estimate, estData) {
+  const state = firstVisitRequestState(estimate, estData);
+  if (!state) return null;
+  try {
+    return (await firstVisitRequestHasVisit(estimate, estData)) ? null : state;
+  } catch {
+    return null;
+  }
+}
+
 const firstVisitRequestLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
@@ -19707,7 +19736,7 @@ router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req,
     // The one blocking-state decision every public write shares (quote-required, termite trenching review, the B18
     // contact_review park). A lookup that fails is a refusal: the request fails closed.
     if (await firstVisitRequestBlocked(estimate, estData)) return notFound();
-    if (await findLinkedUpcomingAppointment(estimate, estData, { serviceModes: adoptionServiceModesForContract(estimate, estData) })) return notFound();
+    if (await firstVisitRequestHasVisit(estimate, estData)) return notFound();
 
     const parsed = firstVisitRequestService.normalizeFirstVisitRequest(req.body);
     if (!parsed.ok) return res.status(400).json({ error: parsed.error, code: 'PREFERRED_TIME_INVALID' });
@@ -19721,7 +19750,7 @@ router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req,
       // The blocking state again from the LOCKED row: the quote requirement recomputed from it, and the contact_review park
       // judged FOR SHARE on the same transaction.
       if (await firstVisitRequestBlocked(locked, lockedData, { database: trx })) return { refused: true };
-      if (await findLinkedUpcomingAppointment(locked, lockedData, { serviceModes: adoptionServiceModesForContract(locked, lockedData), database: trx })) return { refused: true };
+      if (await firstVisitRequestHasVisit(locked, lockedData, { database: trx })) return { refused: true };
       return firstVisitRequestService.storeFirstVisitRequest({ trx, locked, request: parsed.value });
     });
     if (outcome.refused) {
@@ -29214,7 +29243,7 @@ async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
     invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
     invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
     commercialNoSlotAccept,
-    preferredTime: firstVisitRequestState(estimate, estData),
+    preferredTime: await firstVisitRequestOffer(estimate, estData),
   });
   return { defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance };
 }
@@ -33472,6 +33501,7 @@ module.exports.commercialAgreementPreGuard = commercialAgreementPreGuard;
 module.exports.consumerNoticePreGuard = consumerNoticePreGuard;
 module.exports.firstVisitRequestPreGuard = firstVisitRequestPreGuard;
 module.exports.firstVisitRequestState = firstVisitRequestState;
+module.exports.firstVisitRequestOffer = firstVisitRequestOffer;
 module.exports.commercialFirstVisitPreGuard = commercialFirstVisitPreGuard;
 module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;

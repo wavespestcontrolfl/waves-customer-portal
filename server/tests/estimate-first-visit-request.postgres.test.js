@@ -2,9 +2,9 @@
  * First-visit request on the estimate page, ROUTE-LEVEL on real migrated Postgres
  * (GATE_ESTIMATE_APPROVE_PREFERRED_TIME; real router, real notification service).
  *
- * Pins: gate off = generic 404 and nothing written. Gate on = ONE transaction stores the request on the estimate, holds the
- * estimate open (expires_at pushed out, so the expiry sweep leaves it), and writes ONE office bell; the estimate is NOT
- * accepted (status unchanged) and no customer, visit, invoice or message is made. A second request writes nothing. A bell that
+ * Pins: gate off = generic 404 and nothing written. Gate on = ONE transaction stores the request on the estimate and writes
+ * ONE office bell (which says when the estimate expires); the estimate is NOT accepted or extended (status and expires_at
+ * unchanged) and no customer, visit, invoice or message is made. A second request writes nothing. A bell that
  * fails rolls the request back. Eligibility is refused with the generic 404, and again on the LOCKED row (a change landing
  * after the unlocked read answers 409 and writes nothing).
  *
@@ -28,30 +28,6 @@ jest.mock('../models/db', () => {
 });
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-// The expiry sweep also sweeps stranded deposits (a real Stripe refund) and fires outbound expiry notifications and emails:
-// none of that may leave this suite. The deposit sweep and the Stripe refund are seams; the notification and automation
-// emitters are stubbed (the sweep's own estimate flips run for real).
-const mockDepositSweep = jest.fn(async () => ({}));
-jest.mock('../services/estimate-deposits', () => ({
-  ...jest.requireActual('../services/estimate-deposits'),
-  sweepTerminalEstimateDeposits: (...args) => mockDepositSweep(...args),
-}));
-const mockRefundPaymentIntent = jest.fn(async () => ({}));
-jest.mock('../services/stripe', () => ({
-  ...jest.requireActual('../services/stripe'),
-  refundPaymentIntent: (...args) => mockRefundPaymentIntent(...args),
-}));
-const mockTriggerNotification = jest.fn(async () => ({}));
-jest.mock('../services/notification-triggers', () => ({
-  ...jest.requireActual('../services/notification-triggers'),
-  triggerNotification: (...args) => mockTriggerNotification(...args),
-}));
-const mockEmitExpired = jest.fn(async () => ({}));
-jest.mock('../services/email-template-automation-emitters', () => ({
-  ...jest.requireActual('../services/email-template-automation-emitters'),
-  recordAutomationIntents: jest.fn(async () => []),
-  emitEstimateExpired: (...args) => mockEmitExpired(...args),
-}));
 // The route's 10-per-hour limiter would 429 a suite that posts a few dozen times from one address.
 jest.mock('express-rate-limit', () => () => (req, res, next) => next());
 const mockSendCustomerMessage = jest.fn(async () => ({ sent: true }));
@@ -118,7 +94,6 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
     });
     mockSendCustomerMessage.mockClear();
     mockSendTemplate.mockClear();
-    [mockDepositSweep, mockRefundPaymentIntent, mockTriggerNotification, mockEmitExpired].forEach((m) => m.mockClear());
     process.env[GATE] = 'true';
   });
   afterEach(async () => {
@@ -185,7 +160,7 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
     body: JSON.stringify(body),
   });
   const row = (id) => mockTransaction('estimates').where({ id }).first();
-  const bells = (id) => mockTransaction('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`estimate-first-visit-request:${id}`]);
+  const bells = (id) => mockTransaction('notifications').whereRaw("starts_with(metadata->>'dedupeKey', ?)", [`estimate-first-visit-request:${id}:`]);
   const untouched = async (estimateId) => {
     expect((await row(estimateId)).estimate_data).not.toHaveProperty('firstVisitRequest');
     expect(await bells(estimateId)).toHaveLength(0);
@@ -201,7 +176,7 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
     await untouched(estimateId);
   });
 
-  test('gate on: stores the request, holds the estimate open, rings ONE bell, and accepts nothing', async () => {
+  test('gate on: stores the request, rings ONE bell, and neither accepts nor extends the estimate', async () => {
     const { estimateId, token } = await estimateFixture(mockTransaction);
     const before = await row(estimateId);
     const res = await post(token);
@@ -220,16 +195,37 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
     expect(await mockTransaction('invoices').where({ customer_id: null }).whereRaw("notes ILIKE ?", [`%${estimateId}%`])).toHaveLength(0);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockSendTemplate).not.toHaveBeenCalled();
-    // Held open: the deadline moves out to about 14 days, never shorter.
-    expect(new Date(after.expires_at).getTime()).toBeGreaterThan(Date.now() + 13 * 86400000);
-    expect(new Date(after.expires_at).getTime()).toBeGreaterThan(new Date(before.expires_at).getTime());
+    // NOT extended: the expiry is exactly what it was.
+    expect(new Date(after.expires_at).getTime()).toBe(new Date(before.expires_at).getTime());
 
     const rows = await bells(estimateId);
     expect(rows).toHaveLength(1);
     expect(rows[0].title).toMatch(/^Schedule — book .*first visit$/);
     expect(rows[0].body).toMatch(/Mon, Wed, mornings/);
     expect(JSON.stringify(rows[0])).toMatch(/Book it from the estimate so it counts as accepted\./);
+    expect(JSON.stringify(rows[0])).toMatch(/Estimate expires [A-Z][a-z]{2} \d{1,2}; book before then or extend it from the estimate\./);
     expect(rows[0].link).toBe(`/admin/estimates?estimateId=${estimateId}`);
+  });
+
+  test('a settled request does not block a fresh one after the estimate is reopened: a new request, a new bell', async () => {
+    const { closeSettledRequestBells } = require('../services/estimate-first-visit-request');
+    const { estimateId, token } = await estimateFixture(mockTransaction);
+    expect((await post(token)).status).toBe(201);
+    await mockTransaction('estimates').where({ id: estimateId }).update({ status: 'accepted', accepted_at: new Date() });
+    await closeSettledRequestBells({ conn: mockTransaction });
+    // Reopened (staff put it back to sent): the old request is settled, so the page offers a fresh one and the route takes it.
+    await mockTransaction('estimates').where({ id: estimateId }).update({ status: 'sent', accepted_at: null });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const res = await post(token, { days: ['sat'], window: 'afternoon' });
+    expect(res.status).toBe(201);
+    expect((await row(estimateId)).estimate_data.firstVisitRequest).toMatchObject({ days: ['sat'], window: 'afternoon' });
+    expect((await row(estimateId)).estimate_data.firstVisitRequest).not.toHaveProperty('settledAt');
+    const rows = await bells(estimateId);
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => !r.done_at)).toHaveLength(1);
+    // And a repeat of the fresh one is a no-op again.
+    expect((await post(token)).status).toBe(200);
+    expect(await bells(estimateId)).toHaveLength(2);
   });
 
   test('a repeat request answers 200 with the stored request and rings no second bell', async () => {
@@ -318,6 +314,53 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
       await untouched(estimateId);
     });
 
+    // The check is plain: ANY non-cancelled scheduled_services row tied to the estimate, whatever its service family, or a live hold.
+    const MIXED_DATA = {
+      ...RECURRING_DATA,
+      result: {
+        ...RECURRING_DATA.result,
+        recurring: {
+          ...RECURRING_DATA.result.recurring,
+          services: [
+            ...RECURRING_DATA.result.recurring.services,
+            { name: 'Lawn Care', service: 'lawn_care', mo: 40, visitsPerYear: 9, perTreatment: 53 },
+          ],
+        },
+      },
+    };
+    async function tiedVisit(trx, estimateId, overrides = {}) {
+      const customerId = randomUUID();
+      await trx('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Tied', phone: `qa-${customerId.slice(0, 8)}`, email: `qa-${customerId.slice(0, 8)}@example.test`, active: true });
+      await trx('scheduled_services').insert({
+        id: randomUUID(), customer_id: customerId, source_estimate_id: estimateId,
+        scheduled_date: new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10),
+        window_start: '09:00:00', window_end: '11:00:00', service_type: 'Lawn Care', status: 'confirmed', is_recurring: true,
+        ...overrides,
+      });
+    }
+
+    test('a linked RECURRING visit of another family on a mixed estimate (tied by source_estimate_id)', async () => {
+      const { estimateId, token } = await estimateFixture(mockTransaction, {}, MIXED_DATA);
+      await tiedVisit(mockTransaction, estimateId);
+      expect((await post(token)).status).toBe(404);
+      await untouched(estimateId);
+    });
+
+    test('a live hold of the estimate blocks; a lapsed hold and a cancelled visit do not', async () => {
+      const held = await estimateFixture(mockTransaction, {}, MIXED_DATA);
+      await tiedVisit(mockTransaction, held.estimateId, { customer_id: null, reservation_expires_at: new Date(Date.now() + 600000), status: 'pending' });
+      expect((await post(held.token)).status).toBe(404);
+      await untouched(held.estimateId);
+
+      const lapsed = await estimateFixture(mockTransaction, {}, MIXED_DATA);
+      await tiedVisit(mockTransaction, lapsed.estimateId, { customer_id: null, reservation_expires_at: new Date(Date.now() - 600000), status: 'pending' });
+      expect((await post(lapsed.token)).status).toBe(201);
+
+      const cancelled = await estimateFixture(mockTransaction, {}, MIXED_DATA);
+      await tiedVisit(mockTransaction, cancelled.estimateId, { status: 'cancelled' });
+      expect((await post(cancelled.token)).status).toBe(201);
+    });
+
     test('a contact_review park (a lone phone owner whose email and address both differ)', async () => {
       const { estimateId, token } = await estimateFixture(mockTransaction);
       const phone = (await row(estimateId)).customer_phone;
@@ -374,6 +417,23 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
       await untouched(estimateId);
     });
 
+    test('a recurring visit of another family tied to a mixed estimate in between answers 409 and writes nothing', async () => {
+      const { estimateId, token } = await estimateFixture(mockTransaction, {}, {
+        ...RECURRING_DATA,
+        result: { ...RECURRING_DATA.result, recurring: { ...RECURRING_DATA.result.recurring, services: [...RECURRING_DATA.result.recurring.services, { name: 'Lawn Care', service: 'lawn_care', mo: 40, visitsPerYear: 9, perTreatment: 53 }] } },
+      });
+      const customerId = randomUUID();
+      await mockTransaction('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Tied', phone: `qa-${customerId.slice(0, 8)}`, email: `qa-${customerId.slice(0, 8)}@example.test`, active: true });
+      changeAtTransactionOpen(estimateId, (trx) => trx('scheduled_services').insert({
+        id: randomUUID(), customer_id: customerId, source_estimate_id: estimateId,
+        scheduled_date: new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10),
+        window_start: '09:00:00', window_end: '11:00:00', service_type: 'Lawn Care', status: 'confirmed', is_recurring: true,
+      }));
+      const res = await post(token);
+      expect(res.status).toBe(409);
+      await untouched(estimateId);
+    });
+
     test('a quote-required verdict that only the LOCKED row carries answers 409 and writes nothing', async () => {
       const { estimateId, token } = await estimateFixture(mockTransaction);
       // An authored commercial proposal is a custom quote: accept refuses it online, so the request must too.
@@ -421,27 +481,10 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
     expect(closedRow.done_at).toBeTruthy();
     expect(closedRow.metadata.autoCleared).toBe(true);
     expect(closedRow.metadata.autoClearedReason).toBe('estimate accepted');
+    // The settled request is stamped in the same pass, so it counts as absent; the waiting one is untouched.
+    expect((await row(booked.estimateId)).estimate_data.firstVisitRequest.settledAt).toBeTruthy();
+    expect((await row(waiting.estimateId)).estimate_data.firstVisitRequest).not.toHaveProperty('settledAt');
     const [openRow] = await bells(waiting.estimateId);
     expect(openRow.done_at).toBeNull();
-  });
-
-  test('expiry holds: the 6am sweep flips a lapsed estimate with no request, and leaves one with a pending request', async () => {
-    const { runEstimateExpiration } = require('../services/estimate-expiration');
-    const lapsed = { sent_at: new Date(Date.now() - 6 * 86400000), expires_at: new Date(Date.now() + 3600000) };
-    const withRequest = await estimateFixture(mockTransaction, lapsed);
-    const control = await estimateFixture(mockTransaction, lapsed);
-    expect((await post(withRequest.token)).status).toBe(201);
-    // Two days later both deadlines have passed, and both are past the send-age cutoff.
-    await mockTransaction('estimates').whereIn('id', [withRequest.estimateId, control.estimateId]).update({ sent_at: new Date(Date.now() - 20 * 86400000) });
-    await mockTransaction('estimates').where({ id: control.estimateId }).update({ expires_at: new Date(Date.now() - 86400000) });
-    await runEstimateExpiration();
-    expect((await row(control.estimateId)).status).toBe('expired');
-    expect((await row(withRequest.estimateId)).status).toBe('sent');
-    // Nothing outbound: the deposit sweep ran as a seam, no Stripe refund, and only the control row was announced.
-    expect(mockDepositSweep).toHaveBeenCalledTimes(1);
-    expect(mockRefundPaymentIntent).not.toHaveBeenCalled();
-    expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_expired', expect.objectContaining({ estimateId: control.estimateId }));
-    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-    expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 });

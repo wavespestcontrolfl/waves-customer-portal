@@ -4,8 +4,9 @@
  * Pins: the body is validated and normalized (unknown days refused, week order, note cut); the one office bell obeys the
  * admin-notification rules, names the customer and the days, carries "Book it from the estimate so it counts as accepted.",
  * and is written on the caller's transaction (errors propagate so the request rolls back with it); storing is idempotent
- * (a stored request writes nothing and rings nothing); the expiry hold never shortens a deadline; and /data's state is gated
- * and eligibility-limited (gate off = the acceptance contract is byte-identical, a stored request reads as pending).
+ * (a pending request writes nothing and rings nothing, a settled one counts as absent); the request never touches the
+ * estimate's expiry (the bell shows it); and /data's state is gated and eligibility-limited (gate off = the acceptance
+ * contract is byte-identical, a pending request reads as pending, a settled one does not).
  * The route itself (one transaction, no acceptance, locked re-check, expiry sweep) is in
  * estimate-first-visit-request.postgres.test.js.
  */
@@ -18,7 +19,7 @@ jest.mock('../services/notification-service', () => ({
 }));
 
 const {
-  normalizeFirstVisitRequest, describeRequest, storedRequest, storeFirstVisitRequest, MAX_NOTE_CHARS, HOLD_DAYS,
+  normalizeFirstVisitRequest, describeRequest, storedRequest, storeFirstVisitRequest, MAX_NOTE_CHARS,
 } = require('../services/estimate-first-visit-request');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 
@@ -57,6 +58,8 @@ describe('describeRequest / storedRequest', () => {
   test('only a stored request with days counts', () => {
     expect(storedRequest({ firstVisitRequest: { days: ['mon'], window: 'either' } })).toBeTruthy();
     expect(storedRequest({ firstVisitRequest: { days: [] } })).toBeNull();
+    // A settled request (its bell closed with the estimate) counts as absent.
+    expect(storedRequest({ firstVisitRequest: { days: ['mon'], window: 'either', settledAt: '2026-12-02T00:00:00.000Z' } })).toBeNull();
     expect(storedRequest({})).toBeNull();
     expect(storedRequest(null)).toBeNull();
   });
@@ -73,7 +76,7 @@ function fakeTrx() {
 }
 
 describe('storeFirstVisitRequest', () => {
-  const locked = { id: 'est-1', customer_name: 'Synthetic Person', estimate_data: {} };
+  const locked = { id: 'est-1', customer_name: 'Synthetic Person', estimate_data: {}, expires_at: new Date('2026-12-09T17:00:00Z') };
   const request = { days: ['tue', 'thu'], window: 'afternoon', note: 'Gate is on the left. Call 941-555-0100 first.' };
   beforeEach(() => mockNotifyAdmin.mockClear());
 
@@ -85,10 +88,8 @@ describe('storeFirstVisitRequest', () => {
     const { patch } = trx.updates[0];
     expect(patch.estimate_data.sql).toMatch(/jsonb_set\(COALESCE\(estimate_data, '\{\}'::jsonb\), '\{firstVisitRequest\}'/);
     expect(JSON.parse(patch.estimate_data.bindings[0])).toMatchObject({ days: ['tue', 'thu'], window: 'afternoon', at: '2026-12-01T15:00:00.000Z' });
-    // Held open: never shortened, never left null, HOLD_DAYS out.
-    expect(patch.expires_at.sql).toMatch(/GREATEST\(COALESCE\(expires_at, NOW\(\)\), NOW\(\) \+ \(\? \* interval '1 day'\)\)/);
-    expect(patch.expires_at.bindings).toEqual([HOLD_DAYS]);
-    expect(HOLD_DAYS).toBe(14);
+    // The request does NOT extend the estimate: its expiry is not written.
+    expect(patch).not.toHaveProperty('expires_at');
 
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, why, opts] = mockNotifyAdmin.mock.calls[0];
@@ -98,10 +99,11 @@ describe('storeFirstVisitRequest', () => {
     expect(why).toMatch(/Tue, Thu, afternoons/);
     expect(opts.trx).toBe(trx);
     expect(opts.bell).toBe(true);
-    expect(opts.dedupeKey).toBe('estimate-first-visit-request:est-1');
+    expect(opts.dedupeKey).toBe(`estimate-first-visit-request:est-1:${Date.parse('2026-12-01T15:00:00Z')}`);
     expect(opts.link).toBe('/admin/estimates?estimateId=est-1');
     expect(opts.metadata).toMatchObject({ estimateId: 'est-1', source: 'estimate_first_visit_request', severity: 'needs-you', doneWhen: 'visit_booked', contact: true });
     expect(opts.detail).toMatch(/has NOT accepted/);
+    expect(opts.detail).toMatch(/Estimate expires Dec 9; book before then or extend it from the estimate\./);
     expect(opts.detail).toMatch(/Book it from the estimate so it counts as accepted\./);
     expect(opts.detail).toMatch(/Gate is on the left/);
     expect(opts.detail).not.toMatch(/941-555-0100/);
@@ -122,7 +124,16 @@ describe('storeFirstVisitRequest', () => {
     expect(mockNotifyAdmin.mock.calls[0][1].length).toBeLessThanOrEqual(60);
   });
 
-  test('a stored request is returned as it is: nothing written, no second bell', async () => {
+  test('a settled request counts as absent: a new one is stored with a NEW bell key', async () => {
+    const trx = fakeTrx();
+    const settled = { days: ['sat'], window: 'either', at: '2026-11-30T10:00:00.000Z', settledAt: '2026-12-02T00:00:00.000Z' };
+    const out = await storeFirstVisitRequest({ trx, locked: { ...locked, estimate_data: { firstVisitRequest: settled } }, request, now: new Date('2026-12-05T15:00:00Z') });
+    expect(out.deduped).toBe(false);
+    expect(trx.updates).toHaveLength(1);
+    expect(mockNotifyAdmin.mock.calls[0][3].dedupeKey).toBe(`estimate-first-visit-request:est-1:${Date.parse('2026-12-05T15:00:00Z')}`);
+  });
+
+  test('a pending request is returned as it is: nothing written, no second bell', async () => {
     const trx = fakeTrx();
     const stored = { days: ['sat'], window: 'either', at: '2026-11-30T10:00:00.000Z' };
     const out = await storeFirstVisitRequest({ trx, locked: { ...locked, estimate_data: JSON.stringify({ firstVisitRequest: stored }) }, request });
@@ -174,6 +185,13 @@ describe('what /data tells the page', () => {
     const { firstVisitRequestState } = route();
     const data = { ...recurringData, firstVisitRequest: { days: ['mon', 'wed'], window: 'morning', note: 'private note', at: '2026-12-01T00:00:00.000Z' } };
     expect(firstVisitRequestState(sent({}, data), data)).toEqual({ offered: true, requestPending: true, days: ['mon', 'wed'], window: 'morning' });
+  });
+
+  test('gate on: a settled request is not shown as pending (the page offers a fresh one)', () => {
+    process.env.GATE_ESTIMATE_APPROVE_PREFERRED_TIME = 'true';
+    const { firstVisitRequestState } = route();
+    const data = { ...recurringData, firstVisitRequest: { days: ['mon'], window: 'morning', at: '2026-12-01T00:00:00.000Z', settledAt: '2026-12-02T00:00:00.000Z' } };
+    expect(firstVisitRequestState(sent({}, data), data)).toEqual({ offered: true });
   });
 
   test.each([
