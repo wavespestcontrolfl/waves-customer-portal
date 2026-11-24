@@ -2,7 +2,7 @@
 
 /**
  * mail_prospects: each new home's short typed address (mailer step 2d-2). The postcard prints
- * "gowavesfl.com/101-example" beside the QR code; GET /go/:slug (routes/mail-home-go.js) sends that slug to the home's
+ * "gowavesfl.com/101-example" beside the QR code; GET /nh/:slug (routes/mail-home-short-link.js) sends that slug to the home's
  * page /h/:page_token. It follows 20261123200000, which is frozen.
  *
  *   page_slug  the house number and the street name, lowercase, joined by dashes ("101-example"); "101-example-34211"

@@ -1,11 +1,11 @@
 /**
- * The short typed address of a new home (mailer step 2d-2), mounted at /go next to the outside-link redirect.
+ * The short typed address of a new home (mailer step 2d-2), mounted at /nh ("new home").
  *
- *   GET /go/:slug   → 302 /h/<page_token> for a live home of the new-home list; every other outcome → 302 to the
+ *   GET /nh/:slug   → 302 /h/<page_token> for a live home of the new-home list; every other outcome → 302 to the
  *                     marketing site (https://www.wavespestcontrol.com/), the same place gowavesfl.com sends any path today
  *
  * The postcard prints "gowavesfl.com/101-example". A Cloudflare rule (NOT part of this build; docs/public-route-contracts.md)
- * sends the paths that look like a slug to portal.wavespestcontrol.com/go/<slug>; this route does the lookup.
+ * sends the paths that look like a slug to portal.wavespestcontrol.com/nh/<slug>; this route does the lookup.
  *
  * A dead slug never errors: the gate off (GATE_MAIL_HOME_PAGE), a bad shape, an unknown slug, a home that is not live
  * (not_eligible, unmatched), a row of another list and a failed lookup all give the same redirect to the marketing site,
@@ -13,9 +13,7 @@
  * client asks more than 60 times a minute. Not an open redirect: both targets are fixed (the site, or a path built from a
  * stored 32-hex token); nothing in the request names them.
  *
- * /go also serves the prep-guide outside links (routes/outbound-redirect.js, a 20-hex code, mounted later). This router
- * is mounted first and hands those codes on (`next('router')`); it answers everything else under /go. A slug always has
- * a dash, so it can never be a 20-hex code.
+ * /go (routes/outbound-redirect.js, the prep-guide outside links) is a separate root and is not touched.
  *
  * The slug is not a credential (owner 2026-11-23: guessing is fine), but the Location it returns IS the home's bearer
  * link, so every answer carries no-store, noindex and no-referrer, and the redirect is never cached.
@@ -27,7 +25,6 @@ const router = express.Router();
 const db = require('../models/db');
 const { mailHomePageLive } = require('../config/feature-gates');
 const { SLUG_RE, MAX_SLUG_LENGTH } = require('../services/mail/home-slug');
-const { CODE_RE } = require('../services/outlink-tracking');
 const { ipFallbackKey } = require('../middleware/rate-limit-key');
 const logger = require('../services/logger');
 
@@ -38,7 +35,6 @@ const TOKEN_RE = /^[0-9a-f]{32}$/;
 // The raw path, before Express decodes it: one slug (any letter case) with or without a trailing slash. A bad percent
 // escape never reaches a decode that could throw.
 const SLUG_PATH = /^\/([0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*)\/?$/i;
-const CODE_PATH = /^\/([a-f0-9]{20})\/?$/i;
 
 function privacyHeaders(res) {
   res.set({
@@ -49,11 +45,8 @@ function privacyHeaders(res) {
 }
 const toSite = (res) => res.redirect(302, MARKETING_SITE);
 
-// Prep-guide outside links keep their own router: a 20-hex code goes on to it, whatever the method. Everything else
-// under /go gets the privacy headers here; a method other than GET and HEAD finds no handler below and goes on too.
+// The privacy headers on every answer; a method other than GET and HEAD finds no handler below (Express answers 404).
 router.use((req, res, next) => {
-  const code = CODE_PATH.exec(req.path);
-  if (code && CODE_RE.test(code[1].toLowerCase())) return next('router');
   privacyHeaders(res);
   // Gate off and bad shapes need no database and no limiter.
   if (!mailHomePageLive()) return toSite(res);
@@ -87,7 +80,7 @@ router.get('/:slug', async (req, res) => {
   } catch (err) {
     // The error code only: a Knex message carries the SQL and its bound values.
     const code = err && (typeof err.code === 'string' || typeof err.code === 'number') ? String(err.code).slice(0, 32) : 'unknown';
-    logger.error(`[mail-home-go] lookup failed (code=${code})`);
+    logger.error(`[mail-home-short-link] lookup failed (code=${code})`);
     return toSite(res);
   }
 });

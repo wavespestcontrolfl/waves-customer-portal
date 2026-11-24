@@ -2,7 +2,7 @@
 
 /**
  * The short typed address of one new home (mailer step 2d-2): the postcard prints "gowavesfl.com/101-example" beside
- * its QR code, and GET /go/:slug (routes/mail-home-go.js) sends it to the home's page. Owner rulings 2026-11-23:
+ * its QR code, and GET /nh/:slug (routes/mail-home-short-link.js) sends it to the home's page. Owner rulings 2026-11-23:
  * the house number and the street NAME only (no street type, no random code); the ZIP is added only when two homes
  * clash ("101-example-34211"); nobody minds that a slug can be guessed.
  *
