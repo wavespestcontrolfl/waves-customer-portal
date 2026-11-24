@@ -470,9 +470,22 @@ async function callStillAttributable(trx, lsaLead, lead) {
   const { resolveSourceCallProvenanceLocked } = require('./call-attribution');
   const prov = await resolveSourceCallProvenanceLocked(trx, { leadId: lead.id, twilioCallSid: lead.twilio_call_sid });
   if (prov.refusedReason === 'call_unsettled') return { retry: 'call_unsettled' };
+  if (prov.refusedReason === 'call_rejected') {
+    // The resolver also says call_rejected while a reprocess holds the call.
+    // Only the durable verdict (metadata.no_attribution) is final.
+    const call = await trx('call_log').where({ id: lsaLead.call_log_id }).first('metadata');
+    if (!noAttributionVerdict(call?.metadata)) return { retry: 'call_processing' };
+  }
   if (prov.refusedReason) return { unproven: String(prov.refusedReason).slice(0, 40) };
   if (!prov.sourceCallId || String(prov.sourceCallId) !== String(lsaLead.call_log_id)) return { unproven: 'lead_not_from_call' };
   return { ok: true };
+}
+
+function noAttributionVerdict(metadata) {
+  try {
+    const md = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
+    return md?.no_attribution === true;
+  } catch { return false; }
 }
 
 async function markLsaLead(trx, lsaLead, result, from) {
@@ -498,7 +511,8 @@ async function relabelInTransaction(trx, lsaLead, startedAt) {
     || String(current.call_log_id) !== String(lsaLead.call_log_id)) return { retry: 'match_changed' };
   const lead = await trx('leads').where({ id: lsaLead.lead_id }).forUpdate().first('id', 'customer_id', 'twilio_call_sid', 'status');
   if (!lead) return { retry: 'no_lead' };
-  if (lead.customer_id && String(lead.customer_id) !== String(lsaLead.customer_id)) return { retry: 'customer_changed' };
+  // Paid credit needs the lead's CURRENT owner to be the matched customer.
+  if (!lead.customer_id || String(lead.customer_id) !== String(lsaLead.customer_id)) return { retry: 'customer_changed' };
   // The pipeline's own check, under the same lead -> call_log lock order: the
   // call still belongs to this lead and was not rejected (spam, not a lead),
   // repointed or left unsettled. A rejected call never regains paid credit.
@@ -535,7 +549,11 @@ async function relabelInTransaction(trx, lsaLead, startedAt) {
       // The row starts at 'lead'; a conversion that happened before it existed
       // advanced nothing, so replay the lead's current status (won, lost...).
       const { bridgeLeadFunnelStage } = require('../lead-funnel-bridge');
-      if (lead.status) await bridgeLeadFunnelStage(lead.id, lead.status, trx);
+      if (lead.status) {
+        const replay = await bridgeLeadFunnelStage(lead.id, lead.status, trx);
+        // The bridge swallows its errors; a failed replay rolls the new row back.
+        if (replay?.reason === 'error') throw Object.assign(new Error('stage replay failed'), { code: 'stage_replay' });
+      }
     }
   } else if (action.type === 'relabel') {
     await trx('ad_service_attribution').where({ id: row.id }).update({
