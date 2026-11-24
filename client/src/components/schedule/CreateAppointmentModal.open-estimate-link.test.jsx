@@ -297,6 +297,38 @@ describe('the New Appointment form for a customer with an open estimate', () => 
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Link it' })).toBeNull());
   });
 
+  it('after Link it on a street-matched quote, switching to an address it does not match unlinks it and its lines', async () => {
+    installFetch({
+      estimates: [quote({ propertyId: null, quotedAddressPropertyIds: ['prop-1'] })],
+      properties: [propertyRow('prop-1', true), propertyRow('prop-2', false)],
+    });
+    mount();
+    const radio = (id) => document.querySelector(`input[name="booking-property"][value="${id}"]`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Link it' }));
+    await waitFor(() => expect(pickerValue()).toBe('est-1'));
+    expect(screen.getAllByText('Quarterly Lawn Care').length).toBeGreaterThan(0);
+    fireEvent.click(radio('prop-2'));
+    await waitFor(() => expect(pickerValue()).toBe(''));
+    expect(screen.queryByText('Quarterly Lawn Care')).toBeNull();
+    expect(screen.queryByText(/saving marks it accepted and links it/)).toBeNull();
+    // Back at the matched address the notice offers it again.
+    fireEvent.click(radio('prop-1'));
+    expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
+  });
+
+  it('a street-matched quote that matches both addresses stays linked across the switch', async () => {
+    installFetch({
+      estimates: [quote({ propertyId: null, quotedAddressPropertyIds: ['prop-1', 'prop-2'] })],
+      properties: [propertyRow('prop-1', true), propertyRow('prop-2', false)],
+    });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Link it' }));
+    await waitFor(() => expect(pickerValue()).toBe('est-1'));
+    fireEvent.click(document.querySelector('input[name="booking-property"][value="prop-2"]'));
+    await waitFor(() => expect(document.querySelector('input[name="booking-property"][value="prop-2"]').checked).toBe(true));
+    expect(pickerValue()).toBe('est-1');
+  });
+
   it('is hidden while the appointment is saving', async () => {
     const hold = {};
     hold.promise = new Promise((resolve) => { hold.resolve = resolve; });

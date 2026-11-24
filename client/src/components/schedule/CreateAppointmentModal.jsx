@@ -2013,13 +2013,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // link AND the lines it filled (they carry sourceEstimateId), otherwise
     // the submit would book the other property at the quote's prices as a
     // manual appointment and skip the server's mismatch check.
-    if (linkedEstimate?.propertyId && String(linkedEstimate.propertyId) !== String(propertyId)) {
+    // A property-unlinked quote linked through its street matched certain saved
+    // addresses only: leaving them drops the link and the lines it filled too.
+    const streetBoundElsewhere = !!linkedEstimate && !linkedEstimate.propertyId
+      && Array.isArray(linkedEstimate.quotedAddressPropertyIds)
+      && !linkedEstimate.quotedAddressPropertyIds.includes(String(propertyId));
+    if (streetBoundElsewhere || (linkedEstimate?.propertyId && String(linkedEstimate.propertyId) !== String(propertyId))) {
       setLinkedEstimate(null);
     }
     // Lines keep their sourcePropertyId after "No estimate" unlinks the quote,
     // so lines priced for another property go regardless of the link state;
     // address-agnostic quote lines and manual lines stay.
-    setServices((arr) => arr.filter((line) => !line.sourcePropertyId || String(line.sourcePropertyId) === String(propertyId)));
+    const unlinkedId = streetBoundElsewhere ? String(linkedEstimate.id) : null;
+    setServices((arr) => arr.filter((line) => (!line.sourcePropertyId || String(line.sourcePropertyId) === String(propertyId))
+      && !(unlinkedId && String(line.sourceEstimateId ?? '') === unlinkedId)));
   };
 
   // Property list failed to load: a property-scoped quote (or its lines) can
