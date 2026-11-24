@@ -35,7 +35,7 @@ jest.mock('../models/db', () => {
       if (table === 'products_catalog') {
         if (mockState.fresh !== undefined) return mockState.fresh;
         const c = mockState.candidates[0];
-        return c ? { inventory_on_hand: c.inventory_on_hand, low_stock_threshold: c.low_stock_threshold, auto_reorder_enabled: true, active: true, reorder_quantity: c.reorder_quantity, auto_reorder_vendor_id: c.auto_reorder_vendor_id, inventory_unit: c.inventory_unit } : null;
+        return c ? { name: c.name, category: c.category, product_type: c.product_type, fertilizer_analysis: c.fertilizer_analysis, analysis_n: c.analysis_n, analysis_p: c.analysis_p, inventory_on_hand: c.inventory_on_hand, low_stock_threshold: c.low_stock_threshold, auto_reorder_enabled: true, active: true, reorder_quantity: c.reorder_quantity, auto_reorder_vendor_id: c.auto_reorder_vendor_id, inventory_unit: c.inventory_unit } : null;
       }
       return null;
     };
@@ -608,4 +608,15 @@ describe('fertilizer blackout', () => {
       expect(res.created).toHaveLength(1);
     }
   });
+
+  test('the hold is re-read on the locked row: a name edited to a fertilizer after the scan raises nothing', async () => {
+    mockState.candidates = [{ ...lowSign, name: 'Synthetic product (unnamed)' }];
+    mockState.fresh = { inventory_on_hand: '80', low_stock_threshold: '100', auto_reorder_enabled: true, active: true, reorder_quantity: '650', auto_reorder_vendor_id: 'vend-gemplers', inventory_unit: 'lb', name: 'Synthetic 24-0-11 granular', analysis_n: 24, analysis_p: 0 };
+    const notify = jest.fn(async () => ({}));
+    const res = await runSuppliesAutoReorderSweep({ notify, now: JULY });
+    expect(mockState.inserted).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(res.held).toEqual([{ productId: 'prod-sign', name: 'Synthetic product (unnamed)', requestId: null, reason: 'fertilizer_blackout' }]);
+  });
 });
+

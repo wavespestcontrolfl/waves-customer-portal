@@ -15,9 +15,16 @@ const { etDateString } = require('../../utils/datetime-et');
 // products_catalog columns productHasNpFertilizer reads besides the name.
 const FERTILIZER_COLUMNS = ['category', 'product_type', 'fertilizer_analysis', 'analysis_n', 'analysis_p'];
 
-function inFertilizerBlackout(now = new Date()) {
-  const month = Number(etDateString(now).split('-')[1]);
+// The one window both automatic ordering and the suggested-limits report
+// (reorder-limit-suggestions.js blackoutWindow) use: months 6-9 of an ET
+// YYYY-MM-DD date.
+function isBlackoutDate(ymd) {
+  const month = Number(String(ymd).split('-')[1]);
   return month >= 6 && month <= 9;
+}
+
+function inFertilizerBlackout(now = new Date()) {
+  return isBlackoutDate(etDateString(now));
 }
 
 // True when automatic ordering must hold this product today. `product` is a
@@ -28,4 +35,4 @@ function fertilizerBlackoutHold(product, now = new Date()) {
   return productHasNpFertilizer(product) === true;
 }
 
-module.exports = { FERTILIZER_COLUMNS, inFertilizerBlackout, fertilizerBlackoutHold };
+module.exports = { FERTILIZER_COLUMNS, isBlackoutDate, inFertilizerBlackout, fertilizerBlackoutHold };

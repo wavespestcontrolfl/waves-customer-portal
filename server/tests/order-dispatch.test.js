@@ -971,7 +971,7 @@ test('a bell that fails to send is persisted with the park, reported, and re-run
   mockState.pendingBells = [{ id: 'ledger-1', evidence, request_id: 'req-1', product_name: 'Yard sign sticker', vendor_name: 'Sticker Mule' }];
   mockState.request = { ...baseRequest(), status: 'ordered' };
   const run2 = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } });
-  expect(run2.bells).toEqual({ rung: ['ledger-1'], pending: [] });
+  expect(run2.bells).toEqual({ rung: ['ledger-1'], pending: [], held: [] });
   // The persisted title and body ride in detail; the headline and why are composed from them (alert step E2).
   expect(notify).toHaveBeenLastCalledWith('system', 'Inventory — reconcile the Yard sign sticker vendor order', expect.any(String), expect.objectContaining({
     dedupeKey: `auto-order:ledger-1:${evidence.bell.v}`, detail: `${evidence.bell.title}\n${evidence.bell.body}`, refreshOnDedupe: true,
@@ -997,7 +997,7 @@ test('a bell delivery retires the row\'s earlier bell versions BEFORE its stamp;
   mockState.pendingBells = [{ id: 'ledger-7', evidence, request_id: 'req-7', product_name: 'x', vendor_name: 'v' }];
   mockState.request = { ...baseRequest(), status: 'ordered' };
   const r = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } });
-  expect(r.bells).toEqual({ rung: ['ledger-7'], pending: [] });
+  expect(r.bells).toEqual({ rung: ['ledger-7'], pending: [], held: [] });
   const order = mockState.updates.map((u) => u.table);
   expect(order.indexOf('notifications')).toBeGreaterThanOrEqual(0);
   expect(order.indexOf('notifications')).toBeLessThan(order.indexOf('vendor_orders')); // retire, then the bellAt stamp — one transaction under the row lock (hook r31 P1)
@@ -1264,3 +1264,24 @@ test('outside the blackout the same fertilizer request is claimed', async () => 
   const r = await run(mockAdapter(), { now: new Date('2026-10-01T14:00:00Z') });
   expect(r.skipped).not.toBe('fertilizer_blackout');
 });
+
+test('in the fertilizer blackout the gated hand-off rings no "order manually" bell for N/P fertilizer', async () => {
+  process.env.GATE_AUTO_ORDER = 'false';
+  mockState.product = { ...sticker, name: 'Synthetic 24-0-11 granular', analysis_n: 24, analysis_p: 0 };
+  const r = await run(mockAdapter(), { now: new Date('2026-07-15T14:00:00Z') });
+  expect(r).toMatchObject({ skipped: 'gated', held: 'fertilizer_blackout' });
+  expect(notify).not.toHaveBeenCalled();
+});
+
+test('in the fertilizer blackout a pre-submit "order manually" bell waits; a dispatched order\'s reconciliation bell still rings', async () => {
+  process.env.GATE_AUTO_ORDER = 'false';
+  const fert = { product_name: 'Synthetic 24-0-11 granular', analysis_n: 24, analysis_p: 0, vendor_name: 'v' };
+  mockState.pendingBells = [
+    { id: 'ledger-pre', evidence: { bell: { title: 'Auto-order needs review: x', body: 'order manually' } }, request_id: 'req-pre', placed_at: null, ...fert },
+    { id: 'ledger-post', evidence: { bell: { title: 'Auto-order needs review: x', body: 'Do NOT re-order' } }, request_id: 'req-post', placed_at: new Date('2026-06-30T12:00:00Z'), ...fert },
+  ];
+  const r = await dispatch.reringPendingBells({ notify, now: new Date('2026-07-15T14:00:00Z') });
+  expect(r.held).toEqual(['ledger-pre']);
+  expect(r.rung).toEqual(['ledger-post']);
+});
+

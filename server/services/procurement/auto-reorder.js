@@ -215,8 +215,11 @@ async function refreshOpenRequest(ctx, p, existing) {
     await lockProductPricing(trx, p.id);
     const request = await trx('product_restock_requests').where({ id: existing.id }).forUpdate().first();
     if (!request || request.status !== 'open' || request.source !== SOURCE) return null;
-    const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('auto_reorder_vendor_id');
+    const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('auto_reorder_vendor_id', 'name', ...FERTILIZER_COLUMNS);
     if (!fresh) return null;
+    // June 1 - Sept 30: no "order manually" bell for N/P fertilizer; the
+    // request waits for the first sweep after the blackout. Read under the lock.
+    if (fertilizerBlackoutHold(fresh, ctx.now)) { ctx.result.held.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'fertilizer_blackout' }); return null; }
     const learned = learnedVendorFields(request, await lockedVendor(trx, p, fresh));
     if (!learned) return request;
     await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ vendor: learned.vendor, metadata: JSON.stringify(learned.metadata), updated_at: new Date() });
@@ -233,9 +236,6 @@ async function handleLiveRequest(ctx, p, existing) {
   if (existing.source !== SOURCE || existing.status !== 'open') return;
   const request = await refreshOpenRequest(ctx, p, existing);
   if (!request) return;
-  // June 1 - Sept 30: no "order manually" bell for N/P fertilizer either; the
-  // request waits for the first sweep after the blackout (fertilizer-blackout.js).
-  if (fertilizerBlackoutHold(p, ctx.now)) { ctx.result.held.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'fertilizer_blackout' }); return; }
   // The dispatcher only ever claims a request whose OWN metadata names an
   // auto-orderable vendor (findDispatchable). A request that could not
   // establish a vendor id (pinned to a vendor the product has since left)
@@ -305,12 +305,14 @@ async function lockedVendor(trx, p, fresh) {
 // raise a stale request that no later sweep would revisit (Codex r3 P2).
 // Runs in one transaction with the insert so a concurrent receive waits on
 // the lock rather than racing past it.
-async function createRequestLocked(conn, p) {
+async function createRequestLocked(conn, p, asOf = new Date()) {
   return conn.transaction(async (trx) => {
     await lockProductPricing(trx, p.id);
     const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate()
-      .first('inventory_on_hand', 'low_stock_threshold', 'auto_reorder_enabled', 'active', 'reorder_quantity', 'auto_reorder_vendor_id', 'inventory_unit');
+      .first('inventory_on_hand', 'low_stock_threshold', 'auto_reorder_enabled', 'active', 'reorder_quantity', 'auto_reorder_vendor_id', 'inventory_unit', 'name', ...FERTILIZER_COLUMNS);
     if (!fresh || !stillLow(fresh)) return { deduped: 'no_longer_low' };
+    // The blackout again on the locked row: a name or analysis edit since the scan counts.
+    if (fertilizerBlackoutHold(fresh, asOf)) return { held: 'fertilizer_blackout' };
     // The SHARED live-request check again, UNDER the lock (pre-push P1,
     // Codex r9 P1): every creation path (staff, forecast, Intelligence Bar,
     // the dispatcher's claim) locks this row first and runs this same read,
@@ -378,7 +380,8 @@ async function sweepProduct(ctx, p) {
   const reorderQty = num(p.reorder_quantity);
   if (!reorderQty || reorderQty <= 0) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_reorder_quantity' }); return; }
 
-  const outcome = await createRequestLocked(conn, p);
+  const outcome = await createRequestLocked(conn, p, ctx.now);
+  if (outcome.held) { result.held.push({ productId: p.id, name: p.name, requestId: null, reason: outcome.held }); return; }
   if (outcome.deduped) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: outcome.deduped }); return; }
   if (outcome.unconfigured) { result.unconfigured.push({ productId: p.id, name: p.name, reason: outcome.unconfigured }); return; }
   const { request } = outcome;
