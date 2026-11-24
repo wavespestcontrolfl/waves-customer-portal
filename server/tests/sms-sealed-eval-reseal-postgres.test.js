@@ -121,23 +121,25 @@ jest.setTimeout(180000);
   };
   const items = () => database('sms_sealed_eval_items').select('*');
 
-  test('seals recent drafts that carry the current facts - as drafted, or rebased from a known earlier company render', async () => {
+  test('seals recent drafts that carry the current facts as drafted; a draft under an earlier render is never rebased (it carries the retired holidays line)', async () => {
     const asDrafted = await addDraft({ facts: currentBlock() });
-    const rebased = await addDraft({ facts: priorRenderBlock(), ageDays: 9 });
+    // every earlier render told the model Waves works every holiday: the exchange is stale whatever the messages say
+    for (const render of companyFacts.knownCompanyFactsRenders().slice(1)) {
+      await addDraft({ facts: currentBlock().replace(companyFacts.renderCompanyFactsSection(), render), ageDays: 9 });
+      await addDraft({ facts: currentBlock().replace(companyFacts.renderCompanyFactsSection(), render), ageDays: 9, inbound: 'December 25?', reply: 'Yes' });
+    }
 
     const out = await sealedEval.sealEvalItems({ target: 100, dbi: database });
 
-    expect(out).toMatchObject({ sealed: 2, rebased: 1 });
+    expect(out).toMatchObject({ sealed: 1 });
     const rows = await items();
-    const byDraft = Object.fromEntries(rows.map((r) => [r.source_draft_id, r]));
-    expect(byDraft[asDrafted].facts_block).toBe(currentBlock());
-    expect(byDraft[asDrafted].schema_version).toBe('sms-sealed-eval.v1');
-    // the rebased row is today's block, byte for byte, and says it was rebased
-    expect(byDraft[rebased].facts_block).toBe(currentBlock());
-    expect(byDraft[rebased].schema_version).toBe('sms-sealed-eval.v1+rebased');
-    for (const r of rows) expect(sealedEval.itemCompatibleWith(r.facts_block, VERSION)).toBe(true);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].source_draft_id).toBe(asDrafted);
+    expect(rows[0].facts_block).toBe(currentBlock());
+    expect(rows[0].schema_version).toBe('sms-sealed-eval.v1');
+    expect(sealedEval.itemCompatibleWith(rows[0].facts_block, VERSION)).toBe(true);
     // the human reply and the inbound are frozen verbatim
-    expect(byDraft[rebased]).toMatchObject({ inbound_message: 'when is my next visit?', human_reply_text: 'Thursday morning.', active: true });
+    expect(rows[0]).toMatchObject({ inbound_message: 'when is my next visit?', human_reply_text: 'Thursday morning.', active: true });
   });
 
   test('does not seal what the current contract cannot grade, or what the freezer never takes', async () => {
@@ -163,8 +165,6 @@ jest.setTimeout(180000);
       facts: priorRenderBlock(), inbound: 'Can I book?', reply: 'Tuesday works.',
       intendedActions: { actions: [], open_times_snapshot: { lookup: { source: 'website_engine', city: 'Port Charlotte' } } },
     });
-    // a holiday named only earlier in the thread (owner 2026-11-24): every earlier render said Waves works every holiday
-    await addDraft({ facts: `${priorRenderBlock()}\nRECENT SMS THREAD:\n[CUSTOMER] Are you coming on Christmas?\n`, inbound: 'Can I book?', reply: 'Tuesday works.' });
 
     const out = await sealedEval.sealEvalItems({ target: 100, dbi: database });
 
@@ -172,17 +172,8 @@ jest.setTimeout(180000);
     expect(await items()).toHaveLength(0);
   });
 
-  test('a block drafted under the six-place hold render rebases onto today\'s when no service-area word is in the exchange', async () => {
-    const rebased = await addDraft({ facts: sixPlaceHoldRenderBlock(), ageDays: 9 });
-    const out = await sealedEval.sealEvalItems({ target: 100, dbi: database });
-    expect(out).toMatchObject({ sealed: 1, rebased: 1 });
-    const [row] = await items();
-    expect(row.source_draft_id).toBe(rebased);
-    expect(row.facts_block).toBe(currentBlock());
-  });
-
   test('a second pass seals nothing, and a sealed row is never edited', async () => {
-    await addDraft({ facts: priorRenderBlock() });
+    await addDraft({ facts: currentBlock() });
     await sealedEval.sealEvalItems({ target: 100, dbi: database });
     const before = await items();
     const again = await sealedEval.sealEvalItems({ target: 100, dbi: database });
@@ -194,7 +185,7 @@ jest.setTimeout(180000);
     // 14 items frozen before the PORTAL SELF-CANCEL line existed, sealed 31..44 days ago
     const old = [];
     for (let i = 0; i < 14; i += 1) old.push(await addSealed({ facts: prePortalBlock(), sealedDaysAgo: 31 + i }));
-    for (let i = 0; i < 10; i += 1) await addDraft({ facts: i % 2 ? currentBlock() : priorRenderBlock(), ageDays: 9 + i });
+    for (let i = 0; i < 10; i += 1) await addDraft({ facts: currentBlock(), ageDays: 9 + i });
 
     const out = await sealedEval.sealEvalItems({ target: 100, dbi: database });
 
@@ -226,16 +217,16 @@ jest.setTimeout(180000);
 
   test('a dry run writes nothing and reports what the real pass then does', async () => {
     for (let i = 0; i < 14; i += 1) await addSealed({ facts: prePortalBlock(), sealedDaysAgo: 31 + i });
-    for (let i = 0; i < 10; i += 1) await addDraft({ facts: priorRenderBlock(), ageDays: 9 + i });
+    for (let i = 0; i < 10; i += 1) await addDraft({ facts: currentBlock(), ageDays: 9 + i });
     const before = await items();
 
     const plan = await sealedEval.sealEvalItems({ target: 100, dbi: database, dryRun: true });
 
     expect(await items()).toEqual(before);
-    expect(plan).toMatchObject({ dryRun: true, sealed: 10, rebased: 10, retired: 4, activeCount: 20 });
+    expect(plan).toMatchObject({ dryRun: true, sealed: 10, retired: 4, activeCount: 20 });
     expect(JSON.stringify(plan)).not.toMatch(/when is my next visit/);
     const real = await sealedEval.sealEvalItems({ target: 100, dbi: database });
-    expect(real).toMatchObject({ sealed: plan.sealed, rebased: plan.rebased, retired: plan.retired, activeCount: plan.activeCount });
+    expect(real).toMatchObject({ sealed: plan.sealed, retired: plan.retired, activeCount: plan.activeCount });
   });
 
   // a dry run plans every branch on the counts the real pass would leave, never on a database it did not change

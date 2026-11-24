@@ -242,7 +242,7 @@ function rebaseCompanyFactsToCurrent(factsBlock) {
   }
   return null;
 }
-// Words around the topics of the lines in RETIRED_COMPANY_FACT_LINES (inside spray; paying; service area; holidays). A reply
+// Words around the topics of the lines in RETIRED_COMPANY_FACT_LINES (inside spray; paying; service area). A reply
 // written under the old wording may state the old policy, so a rebased item whose inbound or human reply
 // touches these topics is not sealed. Extend this when a line is added to RETIRED_COMPANY_FACT_LINES.
 // The service-area topic (line 22, owner ruling 2026-11-23, ended when the second technician was hired): every place either retired
@@ -255,31 +255,44 @@ const HELD_PLACE_TOPIC_WORDS = 'serve|serves|serving|service area|punta gorda|ch
 const HELD_PLACE_TOPIC_ZIPS = '33947|34223|34224|34295|33946|33927|33921|33938|33948|33949|33952|33953|33954|33981|33980|33983|33982';
 const PAYMENT_AND_INSIDE_TOPIC_WORDS = 'inside|interior|indoors?|cash|checks?|cards?|zelle|paid|pay(?:s|ing|ment|ments)?';
 const SERVICE_AREA_TOPIC_RE = new RegExp(`\\b(?:${HELD_PLACE_TOPIC_WORDS}|(?:${HELD_PLACE_TOPIC_ZIPS})(?:-\\d{4})?)\\b`, 'i');
-// The holidays topic (line 6, owner 2026-11-24): the retired wording said Waves works every holiday, so an exchange about Sundays,
-// holidays, being closed or one of the six closed holidays may restate it. Day names and holiday names are written out on purpose.
-const HOLIDAY_TOPIC_WORDS = "holidays?|sundays?|closed|closing|christmas|thanksgiving|new year(?:'?s)?(?: day)?|memorial day|labor day|independence day|(?:4th|fourth) of july|july (?:4|4th|fourth)";
-const HOLIDAY_TOPIC_RE = new RegExp(`\\b(?:${HOLIDAY_TOPIC_WORDS})\\b`, 'i');
 const PAYMENT_AND_INSIDE_TOPIC_RE = new RegExp(`\\b(?:${PAYMENT_AND_INSIDE_TOPIC_WORDS})\\b`, 'i');
 // Every retired topic at once (the render before 2026-10-22 had all three reworded lines).
 const RETIRED_COMPANY_FACT_TOPIC_RE = new RegExp(
-  `\\b(?:${PAYMENT_AND_INSIDE_TOPIC_WORDS}|${HELD_PLACE_TOPIC_WORDS}|${HOLIDAY_TOPIC_WORDS}|(?:${HELD_PLACE_TOPIC_ZIPS})(?:-\\d{4})?)\\b`, 'i');
-const SERVICE_AND_HOLIDAY_TOPIC_RE = new RegExp(`${SERVICE_AREA_TOPIC_RE.source}|${HOLIDAY_TOPIC_RE.source}`, 'i');
+  `\\b(?:${PAYMENT_AND_INSIDE_TOPIC_WORDS}|${HELD_PLACE_TOPIC_WORDS}|(?:${HELD_PLACE_TOPIC_ZIPS})(?:-\\d{4})?)\\b`, 'i');
 // The topics a block's OWN earlier render had reworded since: the 26-line renders live until 2026-11-23 already carried today's
 // payment and inside-spray lines, so only the service area counts for it; the older renders had all of them. null = no earlier render.
-function retiredTopicReForBlock(factsBlock) {
+// The prior-render entry a stored block carries (PRIOR_COMPANY_FACTS_RENDERS), or null: the block's own recorded render, not its text.
+function priorRenderForBlock(factsBlock) {
   const before = textBeforeFirstBilling(factsBlock);
   if (before === null) return null;
   const renders = knownCompanyFactsRenders().slice(1);
   for (let i = 0; i < renders.length; i += 1) {
-    if (!before.includes(`\n${renders[i].replace(/\n$/, '')}`)) continue;
-    const { retired, olderRetired } = PRIOR_COMPANY_FACTS_RENDERS[i];
-    if (retired === true) return RETIRED_COMPANY_FACT_TOPIC_RE;
-    // Newer renders carried today's payment and inside-spray lines: only the topics of the lines they still had reworded count.
-    const had = (n) => (Array.isArray(retired) && retired.includes(n)) || (Array.isArray(olderRetired) && olderRetired.includes(n));
-    if (had(22) && had(6)) return SERVICE_AND_HOLIDAY_TOPIC_RE;
-    return had(22) ? SERVICE_AREA_TOPIC_RE : HOLIDAY_TOPIC_RE;
+    if (before.includes(`\n${renders[i].replace(/\n$/, '')}`)) return PRIOR_COMPANY_FACTS_RENDERS[i];
   }
   return null;
+}
+// `retired: true` (the renders before 2026-10-22) had every reworded line of the time; a list names its lines.
+const renderHadRetiredLine = ({ retired, olderRetired }, index) => retired === true
+  || (Array.isArray(retired) && retired.includes(index)) || (Array.isArray(olderRetired) && olderRetired.includes(index));
+// True when the block's own render carries the retired holidays line (RETIRED_COMPANY_FACT_LINES[6], "we work Sundays and holidays,
+// same as any other day", owner 2026-11-24): every earlier render does, so the model drafting under it was told Waves works every
+// holiday. The sealed exam never takes such an exchange as a reference answer. Keyed on the recorded render, never on message text.
+function carriesRetiredHolidayLine(factsBlock) {
+  const prior = priorRenderForBlock(factsBlock);
+  return !!prior && renderHadRetiredLine(prior, 6);
+}
+// True when the block's own render carries a retired service-area wording (line 22, or the older renders that predate it): the
+// held-place checks of the sealed exam apply to these only (the render live until 2026-11-24 carried today's service-area line).
+function carriesRetiredServiceAreaLine(factsBlock) {
+  const prior = priorRenderForBlock(factsBlock);
+  return !!prior && renderHadRetiredLine(prior, 22);
+}
+function retiredTopicReForBlock(factsBlock) {
+  const prior = priorRenderForBlock(factsBlock);
+  if (!prior) return null;
+  if (prior.retired === true) return RETIRED_COMPANY_FACT_TOPIC_RE;
+  // Newer renders carried today's payment and inside-spray lines: only the service area counts for them, and only when the render had it reworded.
+  return renderHadRetiredLine(prior, 22) ? SERVICE_AREA_TOPIC_RE : null;
 }
 
 // The earlier conversation: does the rest of the frozen facts block (the customer's address, the calls, the SMS thread) name a held
@@ -293,18 +306,6 @@ function heldPlaceInConversationContext(factsBlock) {
   let rest = String(factsBlock || '');
   for (const render of knownCompanyFactsRenders()) rest = rest.split(render.replace(/\n$/, '')).join('');
   return HELD_PLACE_CONTEXT_RE.test(rest);
-}
-
-// The holidays topic in the earlier conversation (owner 2026-11-24): a reply such as "Yes, we will be there" answers a question
-// about Christmas asked three messages up, and every earlier render told the model Waves works every holiday, so that exchange must
-// not become a reference answer either. The static COMPANY FACTS section is removed first (every known render, today's included:
-// the holidays line names the six holidays in every block). Only holiday names and the word "holiday" count here: day names such as
-// "Sunday" and the word "closed" sit in the facts block's own visit dates and notes, and would skip nearly every exchange.
-const HOLIDAY_CONTEXT_RE = /\b(?:holidays?|christmas|thanksgiving|new year(?:'?s)?(?: day)?|memorial day|labor day|independence day|(?:4th|fourth) of july|july (?:4|4th|fourth))\b/i;
-function holidayInConversationContext(factsBlock) {
-  let rest = String(factsBlock || '');
-  for (const render of knownCompanyFactsRenders()) rest = rest.split(render.replace(/\n$/, '')).join('');
-  return HOLIDAY_CONTEXT_RE.test(rest);
 }
 
 // The booking location a frozen OPEN TIMES lookup used (message_drafts.intended_actions.open_times_snapshot.lookup: the city and
@@ -323,10 +324,10 @@ module.exports = {
   retiredTopicReForBlock,
   PAYMENT_AND_INSIDE_TOPIC_RE,
   SERVICE_AREA_TOPIC_RE,
-  HOLIDAY_TOPIC_RE,
   heldPlaceInOpenTimesLookup,
   heldPlaceInConversationContext,
-  holidayInConversationContext,
+  carriesRetiredHolidayLine,
+  carriesRetiredServiceAreaLine,
   HELD_PLACE_CONTEXT_RE,
   rebaseCompanyFactsToCurrent,
   RETIRED_COMPANY_FACT_TOPIC_RE,

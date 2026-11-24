@@ -248,8 +248,8 @@ async function assertAssignableTechnician(technicianId, { conn = db, date, workD
     if (absence) reason = `is marked out on ${date}`;
   }
   // A technician's own birthday is a paid day off (owner 2026-11-24): it blocks
-  // assignment exactly like an absence row, with no row to write or clear.
-  if (!reason && date && tech && isBirthdayOn(tech.dob, date)) reason = `has their birthday off on ${dateOnlyString(date)}`;
+  // assignment exactly like an absence row, with no row to write or clear. The refusal text is generic on purpose: it reaches logs.
+  if (!reason && date && tech && isBirthdayOn(tech.dob, date)) reason = `is unavailable on ${dateOnlyString(date)}`;
   let flag = null;
   if (!reason && checkWorkDays && isOffDay(tech, date)) {
     flag = 'offDay';

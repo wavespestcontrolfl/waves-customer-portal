@@ -61,7 +61,7 @@ Each technician gets their own birthday off, one paid day (benefits ruling E6, 2
   office sets the date of birth and the day is off from then on.
 - It counts exactly like an absence. `absentTechDays` (the shared seam) adds
   `<technicianId>:<date>` for the birthday, and `assertAssignableTechnician` refuses the
-  technician on that date with "has their birthday off on <date>".
+  technician on that date with "is unavailable on <date>" (generic on purpose: the text reaches logs).
 - A failed read of `technicians.dob` throws, like a failed `technician_absences` read, so each
   caller applies its own policy. Booking surfaces fail as they do on an absence read error. The
   recurring seeder and the annual-prepay seeder read in a savepoint and, on a failure, seed the

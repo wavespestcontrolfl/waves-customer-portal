@@ -2563,7 +2563,7 @@ async function assignableRecurringTemplateTechnicianId(conn, parent, date) {
     }
     // The technician's own birthday is a day off (owner 2026-11-24): same as a mark-out.
     if (require('../services/technician-eligibility').isBirthdayOn(tech.dob, date)) {
-      logger.warn(`[recurring] parent=${parent?.id} technician ${techId} has their birthday off on ${date}; seeding child unassigned`);
+      logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is unavailable on ${date}; seeding child unassigned`);
       return null;
     }
   }

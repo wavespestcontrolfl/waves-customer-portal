@@ -90,7 +90,7 @@ postgres('technician birthday off (real Postgres)', () => {
   describe('assertAssignableTechnician', () => {
     test('refuses the birthday, allows the day before and after, and the technician with no dob', async () => {
       await expect(eligibility.assertAssignableTechnician(birthdayTech.id, { conn: db, date: BIRTHDAY }))
-        .rejects.toMatchObject({ code: 'TECH_NOT_ASSIGNABLE', status: 422, message: expect.stringContaining(`has their birthday off on ${BIRTHDAY}`) });
+        .rejects.toMatchObject({ code: 'TECH_NOT_ASSIGNABLE', status: 422, message: expect.stringContaining(`is unavailable on ${BIRTHDAY}`) });
       await expect(eligibility.assertAssignableTechnician(birthdayTech.id, { conn: db, date: DAY_BEFORE })).resolves.toMatchObject({ id: birthdayTech.id });
       await expect(eligibility.assertAssignableTechnician(birthdayTech.id, { conn: db, date: DAY_AFTER })).resolves.toMatchObject({ id: birthdayTech.id });
       await expect(eligibility.assertAssignableTechnician(noDobTech.id, { conn: db, date: BIRTHDAY })).resolves.toMatchObject({ id: noDobTech.id });

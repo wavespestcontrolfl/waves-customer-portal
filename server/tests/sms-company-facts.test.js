@@ -706,20 +706,28 @@ describe('rebaseCompanyFactsToCurrent (sealed-eval freezer)', () => {
     expect(heldPlaceInConversationContext('CUSTOMER: synthetic\nADDRESS: 1 Sample Way, Port Charlotte, FL 33952\n')).toBe(true);
     expect(heldPlaceInConversationContext(null)).toBe(false);
   });
-  test('the earlier conversation: a frozen block that names a holiday keeps the exchange out; the static section never counts (owner 2026-11-24)', () => {
-    const { holidayInConversationContext } = cf;
-    const withThread = (company, thread) => `UPCOMING SERVICES:\n- Sunday 2026-11-29 Quarterly Pest\n${company}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n${thread}`;
-    for (const company of knownCompanyFactsRenders()) {
-      // every known render names the six holidays; none of that counts
-      expect(holidayInConversationContext(withThread(company, '[CUSTOMER] Can I book my first visit?\n[STAFF] Yes, Tuesday works'))).toBe(false);
-      expect(holidayInConversationContext(withThread(company, '[CUSTOMER] Are you coming on Christmas?\n[CUSTOMER] Can I book?'))).toBe(true);
-      expect(holidayInConversationContext(withThread(company, '[CUSTOMER] we are away over the holidays'))).toBe(true);
-      expect(holidayInConversationContext(withThread(company, '[CUSTOMER] what about New Year\'s Day?'))).toBe(true);
-      expect(holidayInConversationContext(withThread(company, '[CUSTOMER] 4th of July weekend?'))).toBe(true);
+  test('every earlier render carries the retired holidays line; today\'s render and typed text do not (owner 2026-11-24)', () => {
+    const { carriesRetiredHolidayLine, carriesRetiredServiceAreaLine } = cf;
+    const block = (render, thread = '') => `UPCOMING SERVICES:\n- none\n${render}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n${thread}`;
+    const [today, ...earlier] = knownCompanyFactsRenders();
+    expect(earlier.length).toBeGreaterThan(0);
+    // keyed on the recorded render: the messages never matter ("December 25?" / "Yes" is as stale as "Christmas?")
+    for (const render of earlier) {
+      expect(carriesRetiredHolidayLine(block(render))).toBe(true);
+      expect(carriesRetiredHolidayLine(block(render, '[CUSTOMER] December 25?\n[STAFF] Yes'))).toBe(true);
     }
-    // a visit date on a Sunday (or the word "closed") in the block's own sections is not a holiday reference
-    expect(holidayInConversationContext(withThread(renderCompanyFactsSection(), '[CUSTOMER] the gate was closed'))).toBe(false);
-    expect(holidayInConversationContext(null)).toBe(false);
+    expect(carriesRetiredHolidayLine(block(today))).toBe(false);
+    expect(carriesRetiredHolidayLine(block(today, '[CUSTOMER] Are you coming on Christmas?'))).toBe(false);
+    // a header typed into a thread proves nothing, and neither does a missing company section
+    expect(carriesRetiredHolidayLine('no billing line')).toBe(false);
+    expect(carriesRetiredHolidayLine(null)).toBe(false);
+    // the line each prior render is built with is the one RETIRED_COMPANY_FACT_LINES keeps
+    for (const render of earlier) expect(render).toContain(cf.RETIRED_COMPANY_FACT_LINES[6]);
+    expect(today).not.toContain(cf.RETIRED_COMPANY_FACT_LINES[6]);
+    // the service-area gate is separate: the render live until the holidays change (prompts 25 to 28, 37 to 40) had today's service-area line
+    expect(carriesRetiredServiceAreaLine(block(earlier[0]))).toBe(false);
+    for (const render of earlier.slice(1)) expect(carriesRetiredServiceAreaLine(block(render))).toBe(true);
+    expect(carriesRetiredServiceAreaLine(block(today))).toBe(false);
   });
   test('the retired topics are those of the block\'s own render: the 26-line render keeps payment and inside-spray exchanges', () => {
     const block = (render) => `UPCOMING SERVICES:\n- none\n${render}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n`;
@@ -734,14 +742,9 @@ describe('rebaseCompanyFactsToCurrent (sealed-eval freezer)', () => {
       // Englewood and Port Charlotte are served again, but an exchange drafted under the hold line about them is stale
       expect(re26.test('Can you service Englewood?\nWe are not taking new customers there yet.')).toBe(true);
       expect(re26.test('Do you cover 34223?')).toBe(true);
-      // the holidays line (owner 2026-11-24) was reworded after every one of them
-      expect(re26.test('Are you open on Christmas?')).toBe(true);
-      expect(re26.test('Do you work Sundays?\nYes')).toBe(true);
     }
-    // the render live until the holidays change had the old holidays line only, so the service area is not a retired topic for it
-    expect(cf.retiredTopicReForBlock(block(wasLive26)).test('Do you cover 33948?')).toBe(false);
-    expect(cf.retiredTopicReForBlock(block(wasLive26)).test('Are you open on Thanksgiving?')).toBe(true);
-    expect(cf.retiredTopicReForBlock(block(wasLive26)).test('Do you take cash?')).toBe(false);
+    // the render live until the holidays change had the old holidays line only, so no service-area topic is retired for it (prompts 37 to 40 stay as on main)
+    expect(cf.retiredTopicReForBlock(block(wasLive26))).toBeNull();
     for (const r of [nineteen, sixteen]) {
       const re = cf.retiredTopicReForBlock(block(r));
       expect(re.test('Do you take cash?')).toBe(true);

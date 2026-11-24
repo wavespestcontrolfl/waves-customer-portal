@@ -13,7 +13,6 @@ const {
   birthdayDatesInRange,
   birthdayTechDays,
 } = require('../services/technician-eligibility');
-const logger = require('../services/logger');
 
 describe('birthday date logic (pure)', () => {
   test('a plain birthday is kept on its month and day in any year', () => {
@@ -204,7 +203,7 @@ describe('assertAssignableTechnician on a birthday', () => {
       status: 422,
       code: NOT_ASSIGNABLE,
       technicianId: 't1',
-      message: expect.stringMatching(/Tech One has their birthday off on 2026-07-14 and cannot be assigned work/),
+      message: expect.stringMatching(/Tech One is unavailable on 2026-07-14 and cannot be assigned work/),
     });
   });
 
