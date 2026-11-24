@@ -37,7 +37,7 @@ const COLUMNS = [
 ];
 
 const cell = (v) => (v == null ? '' : typeof v === 'boolean' ? (v ? 'yes' : 'no') : String(v));
-const csvCell = (v) => { const s = cell(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+const { csvRow } = require('../services/csv-generators'); // formula-injection guard + quoting
 
 function render(result, { format, all }) {
   // Hidden by default: nothing to suggest and nothing recorded (no use, or no
@@ -45,7 +45,13 @@ function render(result, { format, all }) {
   const idle = (r) => r.status === 'no_usage' || (r.status === 'no_unit' && !r.usageRecords);
   const rows = all ? result.products : result.products.filter((r) => !idle(r));
   if (format === 'json') return JSON.stringify({ ...result, products: rows }, null, 2);
-  if (format === 'csv') return [COLUMNS.map((c) => c[1]).join(','), ...rows.map((r) => COLUMNS.map(([k]) => csvCell(r[k])).join(','))].join('\n');
+  if (format === 'csv') {
+    return [
+      ...(result.forecastError ? [csvRow([`Warning: ${result.forecastError}`])] : []),
+      csvRow(COLUMNS.map((c) => c[1])),
+      ...rows.map((r) => csvRow(COLUMNS.map(([k]) => cell(r[k])))),
+    ].join('\n');
+  }
   const tableCols = COLUMNS.filter(([k]) => k !== 'note');
   const widths = tableCols.map(([k, h]) => Math.min(36, Math.max(h.length, ...rows.map((r) => cell(r[k]).length))));
   const dash = (v) => (v === '' ? '-' : v);

@@ -47,8 +47,20 @@ const FORECAST_VISIT_LIMIT = 300;
 // The dispatcher's package math, for a vendor that orders by package.
 const PACKAGE_ADAPTER = Object.freeze({ key: 'reorder-limit-report', packagedQuantity: true });
 
+// True when the vendor's order adapter orders by item count (Sticker Mule),
+// so the price row's quantity is a price tier, not a pack.
+function vendorOrdersByCount(vendor) {
+  if (!vendor) return false;
+  const { _internals } = require('./order-dispatch');
+  const key = _internals.adapterKeyFor(vendor);
+  if (!key) return false;
+  const adapter = require(`./adapters/${key}`);
+  return adapter.packagedQuantity === false;
+}
+
 const exact = (n) => Number(Number(n).toPrecision(12));
 const round4 = (n) => Math.round(n * 10000) / 10000;
+const floor4 = (n) => Math.floor(exact(n * 10000)) / 10000;
 
 function num(v) {
   if (v == null || v === '') return null;
@@ -79,10 +91,11 @@ function packInInventoryUnit(packRaw, inventoryUnit) {
   return packOz && unitOz ? { pack: exact(packOz / unitOz) } : { error: 'no_pack_size', message: `Pack "${packRaw}" cannot be read.` };
 }
 
-// N-P-K analysis with nitrogen or phosphorus above zero.
-function isBlackoutFertilizer(name) {
-  const m = String(name || '').match(/\b(\d{1,2})-(\d{1,2})-(\d{1,2})\b/);
-  return Boolean(m && (Number(m[1]) > 0 || Number(m[2]) > 0));
+// Nitrogen or phosphorus fertilizer: the closeout's own blackout test
+// (name analysis, then catalog fertilizer_analysis / analysis_n / analysis_p).
+function isBlackoutFertilizer(catalog) {
+  const { productHasNpFertilizer } = require('../tree-shrub-closeout');
+  return productHasNpFertilizer(typeof catalog === 'string' ? { name: catalog } : catalog || {});
 }
 
 // Days from `today` (YYYY-MM-DD, ET) to the next June 1, and whether today is
@@ -124,31 +137,53 @@ function dailyRate({ usage, forecastDemand, o }) {
   return rates.reduce((a, b) => (b.rate > a.rate ? b : a));
 }
 
-// Fertilizer blackout: { hold } inside it, else the threshold and raw reorder
-// capped to what is used before June 1, and the pack count rounded DOWN.
-function applyBlackout({ name, today, daily, threshold, reorderRaw }) {
-  if (!isBlackoutFertilizer(name)) return null;
+// Fertilizer blackout: { hold } inside it; otherwise { usable, daysToJune1 }
+// = what is used before June 1. The order is capped AFTER rounding to packs.
+function blackoutLimit({ catalog, today, daily }) {
+  if (!isBlackoutFertilizer(catalog)) return null;
   const { inBlackout, daysToJune1 } = blackoutWindow(today);
   if (inBlackout) return { hold: true };
-  const usable = daily * daysToJune1;
-  if (usable >= threshold + reorderRaw) return null;
-  return {
-    threshold: Math.min(threshold, usable),
-    reorderRaw: Math.max(0, usable - threshold),
-    note: `N/P fertilizer: capped to use before June 1 (${daysToJune1} days).`,
-  };
+  return { usable: daily * daysToJune1, daysToJune1 };
 }
 
 // Whole packs: round UP normally, DOWN under the blackout cap so the order
 // never crosses June 1. The amount is the exact pack multiple, so the
 // dispatcher maps it back to the same pack count.
-function packReorder({ packSize, reorderRaw, capped, packMessage }) {
+// Whole packs, rounded UP, at least one; never above `cap` (the blackout
+// room left) when one is given. The amount is floored to the catalog's 4
+// decimals so the dispatcher (ceil(amount / pack)) maps it back to the same
+// pack count. countOrder = the vendor orders by item count (no packs).
+function packReorder({ packSize, reorderRaw, cap = null, packMessage, countOrder = false }) {
+  const capped = (n) => (cap == null ? n : Math.min(n, cap));
+  if (countOrder) return { reorder: Math.max(0, Math.floor(capped(Math.ceil(reorderRaw - 1e-9)) + 1e-9)), packs: null, countOrder: true };
   if (!(packSize > 0)) {
-    return { reorder: round4(reorderRaw), packs: null, note: `Not rounded to whole packs: ${packMessage || 'no price row with a pack size.'}` };
+    return { reorder: Math.max(0, floor4(capped(reorderRaw))), packs: null, note: `Not rounded to whole packs: ${packMessage || 'no price row with a pack size.'}` };
   }
-  const ratio = exact(reorderRaw / packSize);
-  const packs = capped ? Math.floor(ratio + 1e-9) : Math.max(1, Math.ceil(ratio - 1e-9));
-  return { reorder: exact(packs * packSize), packs };
+  let packs = Math.max(1, Math.ceil(exact(reorderRaw / packSize) - 1e-9));
+  if (cap != null) packs = Math.min(packs, Math.max(0, Math.floor(exact(cap / packSize) + 1e-9)));
+  return { reorder: floor4(exact(packs * packSize)), packs };
+}
+
+// Threshold and order limited to what is used before June 1, the order cut
+// AFTER rounding to packs. note is set only when the cap changed something.
+function capForBlackout({ blackout, threshold, packArgs, uncapped }) {
+  const capThreshold = Math.min(threshold, blackout.usable);
+  const packed = packReorder({ ...packArgs, cap: Math.max(0, blackout.usable - capThreshold) });
+  const changed = packed.reorder < uncapped.reorder || capThreshold < threshold;
+  return {
+    threshold: capThreshold,
+    packed,
+    note: changed ? `N/P fertilizer: capped to use before June 1 (${blackout.daysToJune1} days).` : null,
+  };
+}
+
+// The row when no rate can be set: no stock unit, only unconvertible rows,
+// or no use at all. null when a rate exists.
+function unratedResult({ base, best, unconvertedNote, o }) {
+  if (!best) return { ...base, status: 'no_unit', note: ['No stock unit set; count it in a unit first.', unconvertedNote].filter(Boolean).join(' ') };
+  if (best.rate > 0) return null;
+  if (unconvertedNote) return { ...base, status: 'needs_unit_review', note: unconvertedNote };
+  return { ...base, status: 'no_usage', note: `No use in ${o.historyDays / 7} weeks and none scheduled.` };
 }
 
 function baseRow(product) {
@@ -181,39 +216,41 @@ function baseRow(product) {
  * forecastDemand: lawn demand over forecastDays in the inventory unit, or null
  * unconverted: usage rows + forecast visits whose unit could not be converted
  */
-function suggestLimitsForProduct({ product, usage = [], forecastDemand = null, unconverted = 0, today, options = {} }) {
-  const o = { ...DEFAULTS, ...options };
-  const packSize = product.pack?.pack ?? null;
-  const base = baseRow(product);
-  const unconvertedNote = unconverted ? `${unconverted} usage or scheduled rows are in a unit that does not convert to ${product.inventoryUnit || 'the stock unit'}; review units.` : null;
-  if (!product.inventoryUnit) return { ...base, status: 'no_unit', note: ['No stock unit set; count it in a unit first.', unconvertedNote].filter(Boolean).join(' ') };
+function unconvertedNoteFor(unconverted, unit) {
+  return unconverted ? `${unconverted} usage or scheduled rows are in a unit that does not convert to ${unit || 'the stock unit'}; review units.` : null;
+}
 
-  const best = dailyRate({ usage, forecastDemand, o });
-  if (!(best.rate > 0)) {
-    if (unconverted) return { ...base, status: 'needs_unit_review', note: unconvertedNote };
-    return { ...base, status: 'no_usage', note: `No use in ${o.historyDays / 7} weeks and none scheduled.` };
-  }
+function suggestLimitsForProduct(input) {
+  const { product, today } = input;
+  const usage = input.usage || [];
+  const o = { ...DEFAULTS, ...input.options };
+  const pack = product.pack || {};
+  const base = baseRow(product);
+  const unconvertedNote = unconvertedNoteFor(input.unconverted, product.inventoryUnit);
+  const best = product.inventoryUnit ? dailyRate({ usage, forecastDemand: input.forecastDemand, o }) : null;
+  const unrated = unratedResult({ base, best, unconvertedNote, o });
+  if (unrated) return unrated;
 
   const daily = best.rate;
   const peakWeek = Math.max(0, ...weeklyTotals(usage, o.historyDays));
   const safety = Math.max(o.bufferDays * daily, peakWeek - daily * 7);
   let threshold = o.leadDays * daily + safety;
-  let reorderRaw = o.reorderDays * daily;
+  const reorderRaw = o.reorderDays * daily;
   let status = 'ok';
   const notes = [];
 
-  const blackout = applyBlackout({ name: product.name, today, daily, threshold, reorderRaw });
-  if (blackout?.hold) {
+  const blackout = blackoutLimit({ catalog: product.catalog || { name: product.name }, today, daily });
+  if (blackout && blackout.hold) {
     return { ...base, dailyUse: round4(daily), basis: best.basis, status: 'blackout_hold', note: 'N/P fertilizer: county blackout June 1 - Sept 30. Hold; do not reorder.' };
   }
+  const packArgs = { packSize: pack.pack, reorderRaw, packMessage: pack.message, countOrder: product.countOrder };
+  let packed = packReorder(packArgs);
   if (blackout) {
-    ({ threshold, reorderRaw } = blackout);
-    status = 'blackout_capped';
-    notes.push(blackout.note);
+    const capped = capForBlackout({ blackout, threshold, packArgs, uncapped: packed });
+    ({ threshold, packed } = capped);
+    if (capped.note) { status = 'blackout_capped'; notes.push(capped.note); }
   }
-
-  const packed = packReorder({ packSize, reorderRaw, capped: Boolean(blackout), packMessage: product.pack?.message });
-  if (packed.packs == null) {
+  if (packed.packs == null && !packed.countOrder) {
     if (status === 'ok') status = 'no_pack_size';
     notes.push(packed.note);
   }
@@ -247,7 +284,9 @@ async function readLawnForecast(conn, o, forecast) {
   if (forecast !== undefined) return { rows: forecast || [], warning: null };
   try {
     const { buildWaveGuardInventoryForecast } = require('../waveguard-inventory-forecast');
-    const result = await buildWaveGuardInventoryForecast({ days: o.forecastDays, limit: FORECAST_VISIT_LIMIT, knex: conn });
+    // The forecast counts today through today + days (days + 1 dates), so
+    // ask for forecastDays - 1 to get exactly forecastDays dates.
+    const result = await buildWaveGuardInventoryForecast({ days: o.forecastDays - 1, limit: FORECAST_VISIT_LIMIT, knex: conn });
     const warnings = [];
     if ((result.serviceCount || 0) >= FORECAST_VISIT_LIMIT) warnings.push(`lawn forecast stopped at ${FORECAST_VISIT_LIMIT} visits, so lawn demand may read low`);
     if ((result.errors || []).length) warnings.push(`${result.errors.length} lawn visits could not be planned`);
@@ -274,7 +313,8 @@ async function buildReorderLimitSuggestions({ knex, today, options = {}, forecas
     .select(
       'pc.id', 'pc.name', 'pc.inventory_unit', 'pc.inventory_on_hand', 'pc.low_stock_threshold',
       'pc.reorder_quantity', 'pc.auto_reorder_enabled', 'pc.auto_reorder_vendor_id',
-      'v.name as vendor_name',
+      'pc.category', 'pc.product_type', 'pc.fertilizer_analysis', 'pc.analysis_n', 'pc.analysis_p',
+      'v.name as vendor_name', 'v.code as vendor_code',
     )
     .orderBy('pc.name');
 
@@ -321,7 +361,8 @@ async function buildReorderLimitSuggestions({ knex, today, options = {}, forecas
       }
     }
     const { row: priceRow, vendorName } = pickPriceRow(pricing.filter((r) => r.product_id === p.id), p);
-    const pack = unit && priceRow ? packInInventoryUnit(priceRow.quantity, unit) : null;
+    const countOrder = p.auto_reorder_vendor_id ? vendorOrdersByCount({ code: p.vendor_code, name: p.vendor_name }) : false;
+    const pack = unit && priceRow && !countOrder ? packInInventoryUnit(priceRow.quantity, unit) : null;
     const suggestion = suggestLimitsForProduct({
       product: {
         id: p.id,
@@ -333,6 +374,8 @@ async function buildReorderLimitSuggestions({ knex, today, options = {}, forecas
         autoReorderEnabled: p.auto_reorder_enabled,
         vendorName,
         pack,
+        countOrder,
+        catalog: { name: p.name, category: p.category, product_type: p.product_type, fertilizer_analysis: p.fertilizer_analysis, analysis_n: p.analysis_n, analysis_p: p.analysis_p },
       },
       usage,
       forecastDemand,
@@ -351,6 +394,7 @@ async function buildReorderLimitSuggestions({ knex, today, options = {}, forecas
 module.exports = {
   DEFAULTS,
   packInInventoryUnit,
+  packReorder,
   isBlackoutFertilizer,
   blackoutWindow,
   weeklyTotals,

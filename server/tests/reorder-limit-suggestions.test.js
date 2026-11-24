@@ -108,10 +108,13 @@ describe('suggestLimitsForProduct', () => {
     expect(r.status).toBe('needs_unit_review');
   });
 
-  test('small packs keep exact multiples the dispatcher maps back to the same count', () => {
-    const r = suggestLimitsForProduct({ product: product({ pack: { pack: 0.0078125 } }), usage: steady(0.001), today: '2026-11-24' });
-    expect(r.packs).toBe(3); // 0.021 gal / 0.0078125 = 2.69 -> 3
-    expect(r.suggestedReorder).toBe(0.0234375);
+  test('small packs: the 4-decimal amount maps back to the same pack count in dispatch', () => {
+    const { vendorOrderQuantity } = require('../services/procurement/order-dispatch');
+    const r = suggestLimitsForProduct({ product: product({ pack: { pack: 0.0078125 } }), usage: steady(0.00223), today: '2026-11-24' });
+    expect(r.packs).toBe(6); // 0.0468 gal / 0.0078125 = 5.99 -> 6
+    expect(r.suggestedReorder).toBe(0.0468); // 0.046875 floored to the catalog's 4 decimals
+    const dispatched = vendorOrderQuantity({ adapter: { packagedQuantity: true }, request: { requested_quantity: r.suggestedReorder, unit: 'gal' }, pricing: { quantity: '1 fl oz' } });
+    expect(dispatched.quantity).toBe(6);
   });
 
   test('no stock unit is flagged', () => {
@@ -139,6 +142,26 @@ describe('suggestLimitsForProduct', () => {
     expect(r.status).toBe('blackout_capped');
     expect(r.suggestedThreshold).toBe(50);
     expect(r.suggestedReorder).toBe(0);
+  });
+
+  test('rounding up to bags never crosses June 1', () => {
+    // 31 days left at 5 lb/day = 155 lb; threshold 50 leaves 105 lb: two 50 lb
+    // bags fit, the uncapped three (150 lb) would not.
+    const r = suggestLimitsForProduct({ product: product({ name: 'LESCO 24-0-11', inventoryUnit: 'lb', pack: { pack: 50 } }), usage: steady(5), today: '2026-05-01' });
+    expect(r.status).toBe('blackout_capped');
+    expect(r.suggestedReorder).toBe(100);
+  });
+
+  test('catalog analysis counts when the name has no N-P-K', () => {
+    const catalog = { name: 'Turf Food Blend', fertilizer_analysis: { n: 12, p: 0, k: 6 } };
+    const r = suggestLimitsForProduct({ product: product({ name: catalog.name, catalog, inventoryUnit: 'lb', pack: { pack: 50 } }), usage: steady(5), today: '2026-07-01' });
+    expect(r.status).toBe('blackout_hold');
+  });
+
+  test('a count-ordering vendor gets whole items, not price-tier packs', () => {
+    const r = suggestLimitsForProduct({ product: product({ name: 'Yard sticker', inventoryUnit: 'each', pack: null, countOrder: true }), usage: steady(3.82), today: '2026-11-24' });
+    expect(r.suggestedReorder).toBe(81); // 21 d x 3.82 = 80.2 -> 81 stickers
+    expect(r.status).toBe('ok');
   });
 
   test('N/P fertilizer days before June 1 orders nothing more', () => {
@@ -174,7 +197,13 @@ describe('script output', () => {
     expect(table).not.toContain('Unused');
     expect(table).not.toContain('Uncounted');
     expect(table).toContain('Used uncounted');
-    const csv = render(result, { format: 'csv', all: true });
+    const csv = render({ ...result, forecastError: 'lawn forecast failed: boom' }, { format: 'csv', all: true });
+    expect(csv.split('\n')[0]).toContain('Warning: lawn forecast failed: boom');
     expect(csv).toContain('"Unused, ""old"""');
+  });
+
+  test('csv neutralizes formula-prefixed names', () => {
+    const csv = render({ ...result, products: [{ name: '=HYPERLINK("x")', status: 'ok' }] }, { format: 'csv', all: true });
+    expect(csv).toContain(`"'=HYPERLINK(""x"")"`);
   });
 });
