@@ -261,6 +261,42 @@ describe('the New Appointment form for a customer with an open estimate', () => 
     expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
   });
 
+  it('a quote with no property but a street of its own: offered only where the server matched that street to the booking address', async () => {
+    // The street belongs to a former address (no saved property matches it): no notice.
+    installFetch({ estimates: [quote({ propertyId: null, quotedAddressPropertyIds: [] })], properties: [propertyRow('prop-1', true)] });
+    mount();
+    await waitFor(() => expect(document.querySelector('option[value="est-1"]')).not.toBeNull());
+    await waitFor(() => expect(screen.queryByText('Loading estimates...')).toBeNull());
+    expect(screen.queryByTestId('open-estimate-link-notice')).toBeNull();
+    cleanup();
+    // The street matches another saved property, not this one: no notice.
+    installFetch({ estimates: [quote({ propertyId: null, quotedAddressPropertyIds: ['prop-9'] })], properties: [propertyRow('prop-1', true)] });
+    mount();
+    await waitFor(() => expect(document.querySelector('option[value="est-1"]')).not.toBeNull());
+    expect(screen.queryByTestId('open-estimate-link-notice')).toBeNull();
+    cleanup();
+    // The street matches this property: notice.
+    installFetch({ estimates: [quote({ propertyId: null, quotedAddressPropertyIds: ['prop-1'] })], properties: [propertyRow('prop-1', true)] });
+    mount();
+    expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
+  });
+
+  it('with the address picker on, a street-matched quote follows the chosen address', async () => {
+    installFetch({
+      estimates: [quote({ propertyId: null, quotedAddressPropertyIds: ['prop-2'] })],
+      properties: [propertyRow('prop-1', true), propertyRow('prop-2', false)],
+    });
+    mount();
+    await waitFor(() => expect(document.querySelector('option[value="est-1"]')).not.toBeNull());
+    const radio = (id) => document.querySelector(`input[name="booking-property"][value="${id}"]`);
+    await waitFor(() => expect(radio('prop-2')).not.toBeNull());
+    expect(screen.queryByRole('button', { name: 'Link it' })).toBeNull();
+    fireEvent.click(radio('prop-2'));
+    expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
+    fireEvent.click(radio('prop-1'));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Link it' })).toBeNull());
+  });
+
   it('is hidden while the appointment is saving', async () => {
     const hold = {};
     hold.promise = new Promise((resolve) => { hold.resolve = resolve; });

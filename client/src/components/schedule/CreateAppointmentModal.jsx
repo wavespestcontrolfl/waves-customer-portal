@@ -5949,10 +5949,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     if (linkedEstimate || saving || partialCommitLocked || !settled || services.length > 0) return null;
                     // Only a quote for the address the booking will use: with one active
                     // property the picker is hidden and the list holds every property's
-                    // quotes, so keep an address-free quote or one for that property.
+                    // quotes, so keep a quote for that property or an address-free one.
                     const activeId = propertyPickerActive ? String(selectedPropertyId || '')
                       : (bookingProperties.length === 1 ? String(bookingProperties[0].id) : '');
-                    const forThisAddress = visibleScheduleEstimates.filter((e) => !e.propertyId || String(e.propertyId) === activeId);
+                    // A quote with no property but a street of its own counts only when the
+                    // server matched that street to this address; unknown = no notice.
+                    const forThisAddress = visibleScheduleEstimates.filter((e) => (e.propertyId
+                      ? String(e.propertyId) === activeId
+                      : !Array.isArray(e.quotedAddressPropertyIds) || (!!activeId && e.quotedAddressPropertyIds.includes(activeId))));
                     const notice = openEstimateLinkNotice({ estimates: forThisAddress, customerId: selectedCustomer?.id });
                     if (!notice) return null;
                     return (

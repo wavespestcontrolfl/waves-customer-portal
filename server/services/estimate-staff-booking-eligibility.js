@@ -51,13 +51,29 @@ function staffBookingRefusalForOpenEstimate(estimate) {
   return null;
 }
 
-// Fail closed: an unexpected error reads as "not bookable", so no button shows.
-function estimateBookableByStaff(estimate) {
+// Fail closed: an unexpected error reads as "not bookable", so no button shows. `schedulableLineCount`, when given,
+// is how many service lines the quote yields in the booking form; a quote with none (quote-required-only items)
+// would fill nothing, so it is not offered.
+function estimateBookableByStaff(estimate, { schedulableLineCount } = {}) {
   try {
+    if (schedulableLineCount === 0) return false;
     return staffBookingRefusalForOpenEstimate(estimate) === null;
   } catch {
     return false;
   }
 }
 
-module.exports = { staffBookingRefusalForOpenEstimate, estimateBookableByStaff };
+// For a quote tied to no property but carrying a street of its own: the ids of the saved properties that street
+// matches (the estimate-vs-property matcher the accept path uses). null when the quote is tied to a property or has no
+// address (nothing to contradict); [] when it matches none, or the match cannot be read (unknown = not offered).
+function quotedAddressPropertyIds(estimate, propertyRows) {
+  if (!estimate || estimate.property_id || !String(estimate.address || '').trim()) return null;
+  try {
+    const { estimateQuotesCustomerAddress } = require('./estimate-property-linkage');
+    return (propertyRows || []).filter((row) => estimateQuotesCustomerAddress(estimate.address, row)).map((row) => String(row.id));
+  } catch {
+    return [];
+  }
+}
+
+module.exports = { staffBookingRefusalForOpenEstimate, estimateBookableByStaff, quotedAddressPropertyIds };

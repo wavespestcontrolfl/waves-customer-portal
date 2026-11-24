@@ -3287,7 +3287,7 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
           'estimate_slug', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
           'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'property_id',
           // Read-only inputs for `bookable` and the booking-win notice.
-          'sent_at', 'source', 'pricing_authority', 'price_locked_at', 'category',
+          'sent_at', 'source', 'pricing_authority', 'price_locked_at', 'category', 'address',
         ),
       db('services')
         // mosquito_seasonal is active as of 20260805000010, making the
@@ -3320,6 +3320,21 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
       for (const row of linkedRows) {
         if (!linkedByEstimate.has(row.source_estimate_id)) linkedByEstimate.set(row.source_estimate_id, row);
       }
+    }
+
+    // Property-unlinked quotes can still carry a street for one of the customer's saved addresses. For each, the
+    // active saved properties that address matches (the estimate-vs-property matcher the accept path uses), so the
+    // booking form can offer the link only for the address the booking will use. Fail-soft: unknown = no match.
+    const quotedAddressPropertyIds = new Map();
+    if (estimates.some((e) => !e.property_id && String(e.address || '').trim())) {
+      try {
+        const propertyRows = await db('customer_properties')
+          .where({ customer_id: customer.id, active: true })
+          .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+        for (const e of estimates) {
+          quotedAddressPropertyIds.set(e.id, require('../services/estimate-staff-booking-eligibility').quotedAddressPropertyIds(e, propertyRows));
+        }
+      } catch { /* unknown: no estimate gets a match, so none is offered */ }
     }
 
     const serviceIndex = indexServicesForSchedule(serviceRows);
@@ -3392,8 +3407,13 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         sentAt: estimate.sent_at || null,
         // Would a staff booking accept this quote? Same row refusals as POST
         // /admin/schedule (plan-start, unwon bill-by-invoice proposal, gated or
-        // dropped add-ons, retired T&S cadence). An accepted row runs the helper's accepted branch.
-        bookable: require('../services/estimate-staff-booking-eligibility').estimateBookableByStaff(estimate),
+        // dropped add-ons, retired T&S cadence). An accepted row runs the helper's accepted branch; a quote with no schedulable line (quote-required-only items) is not bookable.
+        bookable: require('../services/estimate-staff-booking-eligibility').estimateBookableByStaff(estimate, { schedulableLineCount: lines.length }),
+        // null = the quote carries no address of its own (or is tied to a property); otherwise the saved property
+        // ids its address matches, [] when none or unknown.
+        quotedAddressPropertyIds: (!estimate.property_id && String(estimate.address || '').trim())
+          ? (quotedAddressPropertyIds.get(estimate.id) || [])
+          : null,
         monthlyTotal,
         annualTotal,
         onetimeTotal,
