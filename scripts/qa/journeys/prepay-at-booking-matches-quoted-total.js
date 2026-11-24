@@ -23,6 +23,11 @@ module.exports = {
     // The customer's slot hold lasts 15 minutes; this journey runs last, so renew it as picking the time again would.
     await db('scheduled_services').where({ id: fixture.prepayAppointmentId }).update({ reservation_expires_at: new Date(Date.now() + 15 * 60000) });
 
+    // Every invoice the customer had before this booking, so the booking's own invoice can be found by difference.
+    const invoiceIdsBefore = new Set((await db('invoices').where({ customer_id: fixture.customerId }).select('id')).map((row) => row.id));
+    const newInvoiceIds = async () => (await db('invoices').where({ customer_id: fixture.customerId }).select('id'))
+      .map((row) => row.id).filter((id) => !invoiceIdsBefore.has(id));
+
     // 1. The accept without an acknowledged total is answered with the quote the page shows, and nothing is booked or charged.
     const quoted = await json(await accept(body), 402);
     assert.equal(quoted.code, 'PREPAY_CHARGE_QUOTE');
@@ -74,6 +79,11 @@ module.exports = {
     assert.equal(booked.source_estimate_id, fixture.prepayEstimateId);
     assert.equal(booked.payment_method_preference, 'prepay_annual');
     assert.ok(['pending', 'confirmed'].includes(booked.status), `The booked visit stays scheduled (status ${booked.status})`);
+    // Exactly one new invoice: the one Stripe charged and the one the estimate's prepay term points at.
+    assert.deepEqual(await newInvoiceIds(), [call.metadata.waves_invoice_id], 'The booking creates exactly one invoice, the charged one');
+    const terms = await db('annual_prepay_terms').where({ source_estimate_id: fixture.prepayEstimateId });
+    assert.equal(terms.length, 1, 'One prepay term for the estimate');
+    assert.equal(terms[0].prepay_invoice_id, call.metadata.waves_invoice_id, 'The prepay term names the charged invoice');
     const invoice = await db('invoices').where({ id: call.metadata.waves_invoice_id }).first();
     assert.equal(invoice.customer_id, fixture.customerId);
     assert.equal(invoice.status, 'paid');
@@ -142,6 +152,8 @@ module.exports = {
     assert.deepEqual({ id: jobs[0].id, status: jobs[0].status, attempts: jobs[0].attempts, next: String(jobs[0].next_attempt_at) },
       { id: jobBefore.id, status: jobBefore.status, attempts: jobBefore.attempts, next: String(jobBefore.next_attempt_at) });
     assert.equal(texts().length, 1, 'Still one text with the total');
+    assert.deepEqual(await newInvoiceIds(), [invoice.id], 'The repeat and the webhook create no other invoice');
+    assert.equal((await db('annual_prepay_terms').where({ source_estimate_id: fixture.prepayEstimateId })).length, 1);
     return { quotedTotalCents: quote.totalCents, stripeAmountCents: call.amount, invoiceId: invoice.id, paymentCount: settled.length,
       textsWithTotal: texts().length, allTexts: since().filter((entry) => entry.kind === 'sms').length };
   },
