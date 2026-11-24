@@ -110,6 +110,12 @@ describe('callGivenConsentApplies', () => {
     expect(callGivenConsentApplies({ ...spouse, wants_notifications: false, on_site: false, wants_appointment_texts: false }, ok)).toBe(false);
   });
 
+  test('gate on: only a NANP number is consented this way (the per-phone keys are last-ten and cannot tell an international number apart)', () => {
+    process.env[GATE] = 'true';
+    expect(callGivenConsentApplies({ ...spouse, phone: '+445550100123' }, ok)).toBe(false);
+    expect(callGivenConsentApplies({ ...spouse, phone: '(555) 010-0123' }, ok)).toBe(true);
+  });
+
   test('gate on: do-not-contact, a legacy-only phone, an impossible number and a held/disclaimed number still block', () => {
     process.env[GATE] = 'true';
     expect(callGivenConsentApplies(spouse, { ...ok, doNotContact: true })).toBe(false);
@@ -236,7 +242,8 @@ describe('call-site wiring (source contract)', () => {
     expect(src).toContain('let callGivenConsent = callGivenConsentApplies(secondaryEntry, {');
     expect(src).toContain('doNotContact: v2DoNotContact,');
     // The intent must sit on the V2 entry that carries the phone, not on a merge with a V1 contact.
-    expect(src).toContain('phoneFromV2: v2GivenIntentPhoneKeys.has(lastTen(secondaryEntry.phone)),');
+    expect(src).toContain('phoneFromV2: v2GivenIntentPhoneKeys.has(phoneIdentityKey(secondaryEntry.phone)),');
+    expect(src).toContain('.map((c) => phoneIdentityKey(c.phone)).filter(Boolean));');
     expect(src).toContain('.filter((c) => c && (c.wants_notifications === true || onSiteOptinAskTrigger(c)))');
     // Original V2 entries mapped one by one, never merged by canonicalV2Secondary.
     expect(src).toContain('new Set([mapSecondaryContactToLegacy(v2CanonicalExtraction?.secondary_contact), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)]');
@@ -263,9 +270,7 @@ describe('call-site wiring (source contract)', () => {
 
   test('same-call confirmation reaches a caller-given phone without the caller\'s own explicit consent; nobody else', () => {
     expect(src).toContain('const extraContacts = (!v2SmsConsentExplicit && !callGivenConsentPhones.size) ? [] : (await filterRecipientsByOptin(');
-    expect(src).toContain('&& (v2SmsConsentExplicit || callGivenConsentPhones.has(fanLast10(c.phone)))');
-    // Opt-in holds and claim failures still filter the fan-out.
-    expect(src).toContain('&& !optinClaimFailedPhones.has(fanLast10(c.phone)));');
+    expect(src).toContain('.filter((c) => confirmationFanOutKeep(c, { smsPhone, smsRecipient, v2SmsConsentExplicit, callGivenConsentPhones, optinClaimFailedPhones }));');
   });
 
   test('a retry reads the persisted provenance of a phone already on record, and the save does not need a live opt-in rail for it', () => {
@@ -432,9 +437,10 @@ describe('review asks: caller-given consent covers appointment and service texts
 describe('intent must sit on the V2 entry that carries the phone', () => {
   const { mapSecondaryContactToLegacy, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
   const { onSiteOptinAskTrigger } = _test;
+  const { phoneIdentityKey } = require('../utils/phone');
   const keysFor = (extraction) => new Set([mapSecondaryContactToLegacy(extraction.secondary_contact), ...mapSecondaryContactsToLegacy(extraction.secondary_contacts)]
     .filter((c) => c && (c.wants_notifications === true || onSiteOptinAskTrigger(c)))
-    .map((c) => String(c.phone || '').replace(/\D/g, '').slice(-10)).filter(Boolean));
+    .map((c) => phoneIdentityKey(c.phone)).filter(Boolean));
 
   test('a V2 phone-only party with no ask or on-site role gets no key, even when another party wants notifications', () => {
     const v2 = { secondary_contacts: [
@@ -452,8 +458,58 @@ describe('intent must sit on the V2 entry that carries the phone', () => {
     expect(keysFor(v2).has('5550100123')).toBe(false);
   });
 
+  test('keys are the full phone identity: an international number never matches a NANP number with the same last ten digits', () => {
+    const v2 = { secondary_contacts: [{ first_name: 'Pat', phone_e164: '+445550100123', role: 'tenant', wants_notifications: true }] };
+    const keys = keysFor(v2);
+    expect(keys.has('+445550100123')).toBe(true);
+    expect(keys.has(phoneIdentityKey('+15550100123'))).toBe(false);
+  });
+
   test('the party that carries the number AND the ask, or an on-site role, gets the key', () => {
     expect(keysFor({ secondary_contacts: [{ first_name: 'Pat', phone_e164: '+15550100123', role: 'tenant', wants_notifications: true }] }).has('5550100123')).toBe(true);
     expect(keysFor({ secondary_contacts: [{ first_name: 'Pat', phone_e164: '+15550100123', role: 'tenant', on_site: true }] }).has('5550100123')).toBe(true);
+  });
+});
+
+describe('same-call confirmation fan-out: deduplicated against the number actually texted', () => {
+  const { confirmationFanOutKeep } = require('../services/call-given-consent');
+  const contact = { phone: '(555) 010-0123', role: 'service_contact' };
+  const base = (over = {}) => ({
+    smsPhone: '+15550100123', smsRecipient: '+15550100999', v2SmsConsentExplicit: false,
+    callGivenConsentPhones: new Set(['5550100123']), optinClaimFailedPhones: new Set(), ...over,
+  });
+
+  test('redirected case: implied consent sent the primary confirmation to the inbound caller, so the caller-given contact (the resolved customer phone) still gets its own', () => {
+    expect(confirmationFanOutKeep(contact, base())).toBe(true);
+  });
+
+  test('not redirected: the contact that already got the primary confirmation is not texted twice', () => {
+    expect(confirmationFanOutKeep(contact, base({ smsRecipient: '+15550100123' }))).toBe(false);
+  });
+
+  test('a caller-given contact that IS the inbound number the text went to is skipped; every other contact keeps the original comparison against smsPhone', () => {
+    expect(confirmationFanOutKeep(contact, base({ smsRecipient: '(555) 010-0123' }))).toBe(false);
+    const other = { phone: '(555) 010-0555' };
+    // Not caller-given: compared with smsPhone, exactly as before the gate.
+    expect(confirmationFanOutKeep({ phone: '+15550100123' }, base({ callGivenConsentPhones: new Set(), v2SmsConsentExplicit: true }))).toBe(false);
+    expect(confirmationFanOutKeep(other, base({ callGivenConsentPhones: new Set(), v2SmsConsentExplicit: true }))).toBe(true);
+  });
+
+  test('without explicit consent only caller-given phones get it; a claim-failed phone fails closed', () => {
+    const other = { phone: '(555) 010-0555' };
+    expect(confirmationFanOutKeep(other, base())).toBe(false);
+    expect(confirmationFanOutKeep(contact, base({ optinClaimFailedPhones: new Set(['5550100123']) }))).toBe(false);
+    expect(confirmationFanOutKeep({ phone: null }, base())).toBe(false);
+  });
+});
+
+describe('call_given_phone_keys is pruned when its phone leaves the slots (migration)', () => {
+  const sql = fs.readFileSync(require.resolve('../models/migrations/20261124150000_prune_call_given_phone_keys_trigger.js'), 'utf8');
+  test('a trigger on the three slot phone columns cuts the list to the phones still stored; the DB-gated suite exercises it', () => {
+    expect(sql).toContain("NEW.service_preferences -> 'call_given_phone_keys'");
+    expect(sql).toContain('BEFORE UPDATE OF service_contact_phone, service_contact2_phone, service_contact3_phone ON customers');
+    for (const col of ['service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
+      expect(sql).toContain(`regexp_replace(COALESCE(NEW.${col}, '')`);
+    }
   });
 });

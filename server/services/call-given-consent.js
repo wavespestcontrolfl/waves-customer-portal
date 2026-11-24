@@ -100,7 +100,22 @@ async function callGivenConsentPersisted(customerId, phone, conn = db) {
   return optinRowAllowsCallGiven(customerId, phone, conn);
 }
 
+// May this appointment contact also get the same-call booking confirmation? Without the caller's own explicit SMS consent, only a
+// phone the caller gave on this call (owner ruling 2026-10-29) does. The contact is deduplicated against the number the primary
+// confirmation ACTUALLY went to: when implied consent redirected it to the inbound caller (smsRecipient), a caller-given contact
+// that is the resolved customer phone (smsPhone) never received it and still gets its own. Every other contact keeps the
+// original comparison against smsPhone, so the gate off is unchanged. A claim-failed phone fails closed (no row is not
+// grandfathered here).
+function confirmationFanOutKeep(contact, { smsPhone, smsRecipient, v2SmsConsentExplicit, callGivenConsentPhones, optinClaimFailedPhones }) {
+  const key = lastTen(contact.phone);
+  if (!key) return false;
+  const given = callGivenConsentPhones.has(key);
+  if (key === lastTen(given ? smsRecipient : smsPhone)) return false;
+  return (v2SmsConsentExplicit || given) && !optinClaimFailedPhones.has(key);
+}
+
 module.exports = {
+  confirmationFanOutKeep,
   CALL_GIVEN_CONSENT_SOURCE,
   CALL_GIVEN_CONSENT_TEXT_VERSION,
   callGivenConsentRowCovered,

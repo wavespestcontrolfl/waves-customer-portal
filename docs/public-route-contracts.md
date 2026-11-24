@@ -7647,6 +7647,14 @@ dark; strict `=== 'true'`, read at call time — `contactLoginHolderOnlyLive()`)
 requires the phone to be listed in `service_preferences.login_attested_phone_keys`,
 which only the signed-in holder's portal contacts save writes (a holder who
 attested contacts before the gate re-saves them once to restore their sign-in). Any other writer of the slot phones (admin edit, call pipeline, dedupe) cannot add to that list, and a database trigger (migration 20261105060000) cuts it to the phones still stored in a slot, so a removed number that is later re-added does not regain sign-in.
+Per-phone exception, independent of that second gate (`GATE_CALL_GIVEN_CONTACT_CONSENT`, dark; owner ruling 2026-10-29): a number the
+call pipeline stamped because the caller gave it on a call for another person is recorded in
+`service_preferences.call_given_phone_keys`. That consent covers appointment and service TEXTS only, so `contactSlotMayLogIn` refuses such a
+phone whether `GATE_CONTACT_LOGIN_HOLDER_ONLY` is on or off, unless the same phone is also listed in `login_attested_phone_keys`
+(the signed-in holder's own contacts save). The call write drops the phone from `login_attested_phone_keys` in the same UPDATE, so a stale
+attestation of a removed contact never carries over, and a database trigger (migration 20261124150000) cuts `call_given_phone_keys` to the
+phones still stored in a slot. Session effect: send-code sends no code and verify-code answers the same 401 for that number, a live contact
+session for it ends at its next request with the same 401, and push notifications to its devices stop, until the holder attests it.
 A consent stamp written by the call pipeline, the grandfather backfill or a
 recipient YES no longer admits a number by itself: send-code sends no code,
 verify-code answers the same 401, and a live contact session ends at its next

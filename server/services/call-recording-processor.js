@@ -29,7 +29,7 @@ const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers')
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const staffSenderPhones = require('./staff-sender-phones');
-const { isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
+const { isLikelyE164, isImpossibleNanpPhone, phoneIdentityKey } = require('../utils/phone');
 const { rejectImpossibleSpokenPhones } = require('./call-spoken-phone-guard');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
@@ -4269,6 +4269,7 @@ const {
   holdCallGivenFallback,
   optinRowAllowsCallGiven,
   callGivenConsentPersisted,
+  confirmationFanOutKeep,
 } = require('./call-given-consent');
 // Does this contact's phone count as caller-given consent on this call? Pure; the gate is read here. A do-not-contact
 // request, a phone only the legacy extractor read, an impossible number, and the call's own held/disclaimed number never do.
@@ -4277,6 +4278,10 @@ function callGivenConsentApplies(contact, { doNotContact = false, phoneFromV2 = 
   if (!require('../config/feature-gates').callGivenContactConsentLive()) return false;
   if (doNotContact || !phoneFromV2 || !contact || !String(contact.phone || '').trim()) return false;
   if (isImpossibleNanpPhone(contact.phone)) return false;
+  // Every per-phone key the consent leaves behind (call_given_phone_keys, the login attestation, opt-in rows) is the last ten
+  // digits, which cannot tell an international number from a NANP one: only a NANP number is ever consented this way.
+  const identity = phoneIdentityKey(contact.phone);
+  if (!identity || identity.startsWith('+')) return false;
   if (contact.wants_notifications !== true && !onSiteOptinAskTrigger(contact)) return false;
   const key = String(contact.phone).replace(/\D/g, '').slice(-10);
   return !heldPhoneKeys.some((held) => String(held || '').replace(/\D/g, '').slice(-10) === key);
@@ -17508,12 +17513,12 @@ const CallRecordingProcessor = {
     // does not, so the intent must sit on the V2 entry that holds the number, never on the merged entry.
     const v2GivenIntentPhoneKeys = (() => {
       const { mapSecondaryContactToLegacy, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
-      const ten = (v) => String(v || '').replace(/\D/g, '').slice(-10);
       // The original V2 entries, mapped one by one and never merged (canonicalV2Secondary pairs a name-only singleton with an
-      // array entry by first name): the phone and the intent must sit on ONE original entry.
+      // array entry by first name): the phone and the intent must sit on ONE original entry. Keyed by the FULL phone identity
+      // (phoneIdentityKey), not the last ten digits: an international number sharing a NANP number's last ten is another person.
       return new Set([mapSecondaryContactToLegacy(v2CanonicalExtraction?.secondary_contact), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)]
         .filter((c) => c && (c.wants_notifications === true || onSiteOptinAskTrigger(c)))
-        .map((c) => ten(c.phone)).filter(Boolean));
+        .map((c) => phoneIdentityKey(c.phone)).filter(Boolean));
     })();
     // The call's own number is held (callback_number_needed) or cannot text (ani_cannot_text): it never counts as consent.
     const callGivenHeldPhoneKeys = (callbackNumberNeededHoldActive || callAniCannotText) ? [phone, call.from_phone, call.to_phone].filter(Boolean) : [];
@@ -17575,7 +17580,7 @@ const CallRecordingProcessor = {
         let callGivenRetained = false;
         let callGivenConsent = callGivenConsentApplies(secondaryEntry, {
           doNotContact: v2DoNotContact,
-          phoneFromV2: v2GivenIntentPhoneKeys.has(lastTen(secondaryEntry.phone)),
+          phoneFromV2: v2GivenIntentPhoneKeys.has(phoneIdentityKey(secondaryEntry.phone)),
           heldPhoneKeys: callGivenHeldPhoneKeys,
         });
         if (callGivenConsent) {
@@ -24311,12 +24316,7 @@ const CallRecordingProcessor = {
                         getAppointmentContacts(freshCustomer || {}, prefsRow), customerId
                       ).then((optedIn) => require('./contact-notification-prefs')
                         .filterContactsByOwnPrefs(optedIn, customerId, 'appointment_confirmation', { channel: 'sms' }))
-                      ).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone)
-                        // Without the caller's own explicit SMS consent, only a phone the caller gave on this call (owner ruling
-                        // 2026-10-29, GATE_CALL_GIVEN_CONTACT_CONSENT) gets the confirmation.
-                        && (v2SmsConsentExplicit || callGivenConsentPhones.has(fanLast10(c.phone)))
-                        // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
-                        && !optinClaimFailedPhones.has(fanLast10(c.phone)));
+                      ).filter((c) => confirmationFanOutKeep(c, { smsPhone, smsRecipient, v2SmsConsentExplicit, callGivenConsentPhones, optinClaimFailedPhones }));
                       for (const contact of extraContacts) {
                         // Re-armed sweep owns the WHOLE phone fan-out
                         // (codex r47): once the primary's MOVE_HOLD re-armed
@@ -27252,6 +27252,7 @@ CallRecordingProcessor._test = {
   callGivenConsentAt,
   callGivenConsentPersisted,
   holdCallGivenFallback,
+  confirmationFanOutKeep,
   onSiteOptinAskTrigger,
   decideOnSiteOptinAsk,
   resolveCallBookingPropertyLinkage,
