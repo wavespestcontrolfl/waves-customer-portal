@@ -46,8 +46,8 @@ function fakeConn({ leads, campaigns, tried = {} }) {
 function googleAdsWith(answers, spenders = []) {
   const query = jest.fn(async (gaql) => {
     if (gaql.includes('FROM campaign ')) return spenders.map((id) => ({ campaign: { id }, metrics: { cost_micros: 1 } }));
-    const hit = Object.entries(answers).find(([gclid]) => gaql.includes(gclid));
-    return hit ? [{ campaign: { id: hit[1] } }] : [];
+    return Object.entries(answers).filter(([gclid]) => gaql.includes(`'${gclid}'`))
+      .map(([gclid, id]) => ({ click_view: { gclid }, campaign: { id } }));
   });
   return { getCustomer: () => ({ query }), query };
 }
@@ -101,7 +101,7 @@ test('every waiting lead gets a turn: least recently tried first', async () => {
   const conn = fakeConn({ leads, campaigns, tried });
   const g = googleAdsWith({});
   await linkCampaigns({ now: NOW, conn, googleAds: g });
-  const queried = new Set(g.query.mock.calls.map(([q]) => q.match(/gclid = '([^']+)'/)[1]));
+  const queried = new Set(g.query.mock.calls.flatMap(([q]) => [...q.matchAll(/'(Cj0[^']+)'/g)].map((m) => m[1])));
   for (let i = 50; i < 55; i += 1) expect(queried.has(`${GCLID_NEW}${i}`)).toBe(true);
   expect(JSON.parse(conn.settings['ads.campaign_link.tried']).r50).toEqual({ at: NOW.toISOString() });
 });
@@ -138,7 +138,7 @@ test('a click days before the form is found; an organic lead that kept a gclid i
     ],
     campaigns,
   });
-  const query = jest.fn(async (gaql) => (gaql.includes("'2026-11-10'") && gaql.includes(GCLID_NEW) ? [{ campaign: { id: 22594274874 } }] : []));
+  const query = jest.fn(async (gaql) => (gaql.includes("'2026-11-10'") && gaql.includes(GCLID_NEW) ? [{ click_view: { gclid: GCLID_NEW }, campaign: { id: 22594274874 } }] : []));
   const out = await linkCampaigns({ now: NOW, conn, googleAds: { getCustomer: () => ({ query }) } });
   expect(out).toMatchObject({ checked: 1, linked: { gclid_click_view: 1 } });
   expect(conn.updates).toEqual([{ id: 'e1', campaign_id: 'local-gbp', campaign_link_basis: 'gclid_click_view', updated_at: 'now()' }]);
@@ -168,5 +168,14 @@ test('a Google failure mid-run still saves the tries made so far', async () => {
   const saved = JSON.parse(conn.settings['ads.campaign_link.tried']);
   expect(saved.g1).toEqual({ at: NOW.toISOString() });
   expect(saved.g2.at).toBe(NOW.toISOString());
+});
+
+test('one click_view query per day covers every lead of the run', async () => {
+  const leads = Array.from({ length: 10 }, (_, i) => ({ id: `k${i}`, gclid: `${GCLID_NEW}k${i}`, lead_date: '2026-11-22' }));
+  const conn = fakeConn({ leads, campaigns });
+  const g = googleAdsWith({});
+  await linkCampaigns({ now: NOW, conn, googleAds: g });
+  expect(g.query).toHaveBeenCalledTimes(90); // days, not leads x days
+  expect(g.query.mock.calls[0][0]).toContain(`IN ('${GCLID_NEW}k0', '${GCLID_NEW}k1'`);
 });
 

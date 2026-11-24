@@ -48,7 +48,8 @@ async function runGoogleAdsDailySync() {
       if (out !== undefined) synced[step.key] = Array.isArray(out) ? out.length : out;
     } catch (err) {
       synced[step.key] = 0;
-      failed.push({ key: step.key, label: step.label, message: err?.message || 'unknown error' });
+      // errorText: the SDK rejects with a GoogleAdsFailure whose reason is in errors[0].message, not .message.
+      failed.push({ key: step.key, label: step.label, message: require('./google-ads-config').errorText(err) });
     }
   }
   if (failed.length) {

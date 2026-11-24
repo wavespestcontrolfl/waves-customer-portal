@@ -160,6 +160,13 @@ describe('POST /sync (Google)', () => {
     expect(res.body.error).toMatch(/Campaign links not synced: click_view: PERMISSION_DENIED/);
   });
 
+  test("an SDK-shaped Google failure keeps Google's reason, not 'unknown error'", async () => {
+    mockLinkCampaigns.mockRejectedValue({ errors: [{ message: 'The caller does not have permission' }] });
+    const res = await call('POST', '/sync');
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/Campaign links not synced: The caller does not have permission/);
+  });
+
   test("the owner's negative word list runs as the fifth step while GATE_ADS_NEGATIVES is on", async () => {
     mockNegativesLive.mockReturnValue(true);
     mockSyncOwnerWords.mockResolvedValue({ pushed: 2, failed: 0, removed: 1, googleFailed: 0 });

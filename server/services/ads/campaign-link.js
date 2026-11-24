@@ -8,8 +8,7 @@
  * every lead gets a turn). The click can come days before the lead (lead_date is the form or call day):
  *   - lead day still inside Google's click window (CLICK_VIEW_DAYS): Google's click_view names the campaign of that
  *     exact click -> basis 'gclid_click_view'. Each run asks every day from the lead day back SPEND_DAYS that Google
- *     still keeps, newest first, and stops at the first answer (one click_view query per day; ad leads are a handful a
- *     month, and BATCH caps a run). A campaign Google names that is not in ad_campaigns yet is kept with the try, and
+ *     still keeps, newest first, in one query per day for all the run's leads (clickViewCampaigns). A campaign Google names that is not in ad_campaigns yet is kept with the try, and
  *     the next run links it without asking Google again. No answer = tried again on a later run.
  *   - lead day older than the window (Google no longer keeps the click): Google's own campaign metrics (kept long
  *     after click records; never the local copy, which can miss a sync day) from SPEND_DAYS before the lead day
@@ -44,15 +43,27 @@ function daysBack(day, n) {
 // gclids are URL-safe base64; anything else never reaches the query.
 const GCLID_RE = /^[A-Za-z0-9_-]{10,200}$/;
 
-/** The Google campaign id of `gclid` from click_view on `days`, or null. */
-async function clickViewCampaign(customer, gclid, days) {
+/**
+ * Google campaign ids by gclid from click_view. `spans` maps each gclid to the days it may have been clicked; one
+ * query per day asks every gclid still open on it (click_view takes one day a query), newest day first, so a run is at
+ * most SPEND_DAYS + 1 queries whatever the number of leads. Returns Map gclid -> Google campaign id.
+ */
+async function clickViewCampaigns(customer, spans) {
+  const found = new Map();
+  const days = [...new Set([...spans.values()].flat())].sort().reverse();
   for (const day of days) {
+    const open = [...spans].filter(([gclid, span]) => !found.has(gclid) && span.includes(day)).map(([gclid]) => gclid);
+    if (!open.length) continue;
     const rows = await customer.query(
-      `SELECT campaign.id FROM click_view WHERE segments.date = '${day}' AND click_view.gclid = '${gclid}'`,
+      `SELECT click_view.gclid, campaign.id FROM click_view WHERE segments.date = '${day}' AND click_view.gclid IN (${open.map((g) => `'${g}'`).join(', ')})`,
     );
-    if (rows.length && rows[0]?.campaign?.id != null) return String(rows[0].campaign.id);
+    for (const r of rows) {
+      const gclid = r?.click_view?.gclid;
+      if (gclid && r?.campaign?.id != null && open.includes(gclid)) found.set(gclid, String(r.campaign.id));
+    }
+    if (found.size === spans.size) break;
   }
-  return null;
+  return found;
 }
 
 /** The one Google campaign id with spend from `from` to `to`, read from Google's campaign metrics, or null. */
@@ -62,6 +73,17 @@ async function onlyCampaignWithSpend(customer, from, to) {
   );
   const ids = [...new Set(rows.map((r) => String(r?.campaign?.id)).filter((id) => id && id !== 'undefined'))];
   return ids.length === 1 ? ids[0] : null;
+}
+
+/** gclid -> the days its click may be on that Google still keeps, for the leads still needing an exact lookup. */
+function clickSpans(rows, tried, windowStart) {
+  const spans = new Map();
+  for (const row of rows) {
+    const day = dayString(row.lead_date);
+    if (tried[row.id]?.google_campaign_id || day < windowStart) continue;
+    spans.set(row.gclid, Array.from({ length: SPEND_DAYS + 1 }, (_, back) => daysBack(day, back)).filter((d) => d >= windowStart));
+  }
+  return spans;
 }
 
 function parseTried(v) {
@@ -98,17 +120,21 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
   const at = now.toISOString();
 
   try {
+    // Every lead of the run counts as tried now, so a Google failure below still moves the next run on.
+    for (const row of rows) {
+      const known = tried[row.id]?.google_campaign_id;
+      tried[row.id] = { at, ...(known ? { google_campaign_id: known } : {}) };
+    }
+    // Exact click lookups first, batched by day across the leads that need one.
+    const spans = clickSpans(rows, tried, windowStart);
+    const clicks = spans.size ? await clickViewCampaigns(customer, spans) : new Map();
     for (const row of rows) {
       const day = dayString(row.lead_date);
-      const known = tried[row.id]?.google_campaign_id || null;
-      tried[row.id] = { at, ...(known ? { google_campaign_id: known } : {}) };
+      const known = tried[row.id].google_campaign_id || clicks.get(row.gclid) || null;
+      if (known) tried[row.id].google_campaign_id = known;
       let googleId = known;
       let basis = 'gclid_click_view';
-      if (!googleId && day >= windowStart) {
-        const span = Array.from({ length: SPEND_DAYS + 1 }, (_, back) => daysBack(day, back)).filter((d) => d >= windowStart);
-        googleId = await clickViewCampaign(customer, row.gclid, span);
-        if (googleId) tried[row.id].google_campaign_id = googleId;
-      } else if (!googleId) {
+      if (!googleId && day < windowStart) {
         basis = 'only_campaign_with_spend';
         googleId = await onlyCampaignWithSpend(customer, daysBack(day, SPEND_DAYS), day);
       }
