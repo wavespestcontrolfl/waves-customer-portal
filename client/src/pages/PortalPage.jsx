@@ -212,13 +212,33 @@ async function fetchAuthedPdfBlob(url) {
 // overlay's Save-to-share-sheet button.
 function useReportPreview(onError, reportKey) {
   const [preview, setPreview] = useState(null); // { doc, src, blob?, blobUrl?, loading? }
+  // The blob URL this hook owns lives in a ref too, so an unmount (a tab or
+  // property switch that never calls closePreview) still releases it, and a
+  // fetch that settles after unmount or after the preview closed creates none.
+  const previewRef = useRef(null);
+  previewRef.current = preview;
+  const ownedBlobUrl = useRef(null);
+  const unmountedRef = useRef(false);
+  const releaseBlob = useCallback(() => {
+    if (ownedBlobUrl.current) URL.revokeObjectURL(ownedBlobUrl.current);
+    ownedBlobUrl.current = null;
+  }, []);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      releaseBlob();
+    };
+  }, [releaseBlob]);
 
   const closePreview = useCallback(() => {
+    releaseBlob();
+    previewRef.current = null;
     setPreview(p => {
       if (p?.blobUrl) URL.revokeObjectURL(p.blobUrl);
       return null;
     });
-  }, []);
+  }, [releaseBlob]);
 
   // reportKey is a key, or a function of the previewed doc (a list of visits
   // binds each preview to its own row). A null key means the report was
@@ -234,10 +254,16 @@ function useReportPreview(onError, reportKey) {
 
   const openPdfPreview = (doc, url) => {
     const openedKey = keyOf(doc);
-    setPreview({ doc, src: null, loading: true, reportKey: openedKey });
+    // Set the ref now: the fetch can settle before React commits the render.
+    previewRef.current = { doc, src: null, loading: true, reportKey: openedKey };
+    setPreview(previewRef.current);
     fetchAuthedPdfBlob(url)
       .then(blob => {
+        // Discard a late result: unmounted, closed, or replaced by another doc.
+        if (unmountedRef.current || previewRef.current?.doc !== doc) return;
+        releaseBlob();
         const blobUrl = URL.createObjectURL(blob);
+        ownedBlobUrl.current = blobUrl;
         setPreview(p => {
           if (!p || p.doc !== doc) { URL.revokeObjectURL(blobUrl); return p; }
           return { doc, src: blobUrl, blob, blobUrl, reportKey: openedKey };
@@ -13830,7 +13856,8 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   const [loading, setLoading] = useState(true);
   const [reportRefreshing, setReportRefreshing] = useState(false);
   const reportRefreshAttemptRef = useRef(0);
-  const { register: registerPortalRead } = usePortalRefresh() || {};
+  const portalRead = usePortalRefresh();
+  const registerPortalRead = portalRead?.register;
   const { preview: reportPreview, openPagePreview: openReportPage, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
     () => showCustomerAlert('Could not open this report. Please try again.'),
     homeReportKey(tracker?.id, tracker?.serviceSummary, selectedProperty || currentEntry?.id),
@@ -13978,6 +14005,21 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
     if (typeof registerPortalRead !== 'function') return undefined;
     return registerPortalRead(() => revalidateCompletedTracker());
   }, [registerPortalRead, revalidateCompletedTracker]);
+
+  // A provider-wide authorization eviction (a 401 or 403 on any read) clears
+  // every reader. The completed tracker withdraws its excerpt, links and open
+  // preview at once and cancels any pending completion read.
+  const registerPortalInvalidation = portalRead?.enabled ? portalRead.registerInvalidation : null;
+  const getPortalEpoch = portalRead?.enabled ? portalRead.getInvalidationEpoch : null;
+  useEffect(() => {
+    if (typeof registerPortalInvalidation !== 'function') return undefined;
+    const key = 'home-completed-tracker';
+    return registerPortalInvalidation(key, getPortalEpoch?.(key), () => {
+      trackerSeqRef.current += 1;
+      const displayed = trackerRef.current;
+      if (displayed?.currentStep === 7 && displayed?.state === 'complete') withdrawCompletionReport(displayed.id);
+    });
+  }, [registerPortalInvalidation, getPortalEpoch, withdrawCompletionReport]);
 
   const lastReportedAt = tracker?.techPosition?.lastReportedAt || tracker?.techPosition?.updatedAt;
   const lastUpdated = useLastUpdated(lastReportedAt);

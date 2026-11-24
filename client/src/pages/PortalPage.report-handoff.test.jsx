@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react';
-import { PortalReadProvider, READ_TIMEOUT_MS } from '../hooks/usePortalRead';
+import { PortalReadProvider, READ_TIMEOUT_MS, usePortalRefresh } from '../hooks/usePortalRead';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -117,6 +117,28 @@ describe('completed visit report handoff on Home', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(screen.queryByText('Reviewed closeout.')).not.toBeInTheDocument();
     expect(screen.queryByText('Service summary')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: "View today's report" })).not.toBeInTheDocument();
+  });
+
+  it('withdraws the tracker report and its open preview on a provider-wide authorization eviction', async () => {
+    nativeState.enabled = true;
+    nativeState.platform = 'ios';
+    todayTracker = completeTracker({
+      customerSummary: 'Reviewed closeout.',
+      reportUrl: '/report/report-native', reportPdfUrl: '/api/reports/report-native', reportPending: false,
+    });
+    function DenyEverything() {
+      const portal = usePortalRefresh();
+      return <button type="button" onClick={() => portal.evict({ clearAll: true, message: 'Session ended' })}>Deny all reads</button>;
+    }
+    render(<PortalReadProvider enabled><DenyEverything /><ServiceTracker /></PortalReadProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: "View today's report" }));
+    expect(screen.getByRole('dialog', { name: 'Visit Report — Quarterly Pest Control' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Deny all reads' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.queryByText('Reviewed closeout.')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: "View today's report" })).not.toBeInTheDocument();
   });
 

@@ -83,4 +83,38 @@ describe('Completed visits report preview', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /Visit Report/ })).not.toBeInTheDocument());
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:completed-report');
   });
+
+  it('revokes the blob when the visits tab unmounts with a preview open', async () => {
+    api.getServices.mockResolvedValue({ historyProperty: 'pa', historyCustomerId: customer.id, services: [visit()], total: 1 });
+    const view = render(
+      <PortalReadProvider enabled>
+        <VisitsTab customer={customer} properties={savedOnly} activePropertyId="cust-1:pa" subTab="completed" onSubTabChange={() => {}} />
+      </PortalReadProvider>
+    );
+    fireEvent.click(await screen.findByText('Quarterly Pest Control'));
+    fireEvent.click(await screen.findByRole('button', { name: /Download/ }));
+    await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
+    view.unmount();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:completed-report');
+  });
+
+  it('creates no blob URL for a PDF that finishes loading after the tab unmounts', async () => {
+    api.getServices.mockResolvedValue({ historyProperty: 'pa', historyCustomerId: customer.id, services: [visit()], total: 1 });
+    let finish;
+    api.fetchRaw.mockReset();
+    api.fetchRaw.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const view = render(
+      <PortalReadProvider enabled>
+        <VisitsTab customer={customer} properties={savedOnly} activePropertyId="cust-1:pa" subTab="completed" onSubTabChange={() => {}} />
+      </PortalReadProvider>
+    );
+    fireEvent.click(await screen.findByText('Quarterly Pest Control'));
+    fireEvent.click(await screen.findByRole('button', { name: /Download/ }));
+    await waitFor(() => expect(api.fetchRaw).toHaveBeenCalled());
+    view.unmount();
+    await act(async () => {
+      finish({ ok: true, headers: { get: () => 'application/pdf' }, blob: async () => new Blob(['late'], { type: 'application/pdf' }) });
+    });
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+  });
 });
