@@ -115,6 +115,17 @@ postgres('production share pay line', () => {
     if (raw) return { status: response.status, text: await response.text() };
     return { status: response.status, body: await response.json().catch(() => ({})) };
   };
+  // The conflict state the preview shows for a stop (what the page sends with a credit); '' when it cannot be read.
+  const shownBasis = async ({ technicianId, visitId, weekStart }) => {
+    try {
+      const shown = await api('GET', `/production-share/preview?technicianId=${technicianId}&weekStart=${weekStart}`);
+      return (shown.body.stops.find((row) => row.visitId === visitId) || {}).conflictBasis || '';
+    } catch { return ''; }
+  };
+  // A page sends the state it saw: the helper reads it from the preview unless the test says what to send.
+  const override = async (body) => api('PUT', '/production-share/stop-override', {
+    body: { ...body, ...(body.conflictBasis === undefined ? { conflictBasis: await shownBasis(body) } : {}) },
+  });
   const draft = (weekStart) => api('POST', '/runs', { body: { weekStart } });
   const finalize = async (runId, token) => {
     const shown = token ? null : await api('GET', `/runs/${runId}`);
@@ -331,7 +342,6 @@ postgres('production share pay line', () => {
   });
 
   describe('the credit the owner sets for a stop (stop override)', () => {
-    const override = (body) => api('PUT', '/production-share/stop-override', { body });
     // The revision of the credit stored for a stop and week (what the preview shows as the stop's overrideRevision).
     const revisionOf = async (visitId, week = W1) => (await productionShare.overridesOf(trx, week)).get(visitId).revision;
     const clear = async (key, patch = {}) => api('DELETE', '/production-share/stop-override', { body: { ...key, revision: await revisionOf(key.visitId, key.weekStart), ...patch } });
@@ -572,6 +582,69 @@ postgres('production share pay line', () => {
       expect(byName(created, 'Sample Alpha').productionShareCents).toBe(16200);
     });
 
+    it('AUDIT :1212: a credit is saved only against the stop state the page showed (conflict state), checked under the lock', async () => {
+      const { unpriced, key } = await world();
+      const shown = await shownBasis(key);
+      expect(shown).toBe('');
+      const put = (body) => api('PUT', '/production-share/stop-override', { body: { ...key, creditCents: 5000, reason: 'x', ...body } });
+      expect((await put({})).status).toBe(400); // the conflict state must be sent
+      expect((await put({ conflictBasis: 'deadbeefdeadbeef' })).status).toBe(409);
+      expect((await put({ conflictBasis: 'deadbeefdeadbeef' })).body.error).toContain('changed since you opened it');
+      expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced })).toEqual([]);
+      expect((await put({ conflictBasis: shown })).status).toBe(200);
+    });
+
+    it('AUDIT :1045: the root of the package paid on its own in another week, with no invoice link, is a conflict for a credit set earlier', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const root = await stop(id, W1, '1000.00', customerId);
+      const followUp = await stop(id, weeks[1], '0.00', customerId, { followup_included: true, followup_source_service_id: root });
+      // the follow-up's package is a review row (the visits it was sold with cannot be known): the owner credits it, root not yet paid
+      expect((await override({ technicianId: id, visitId: followUp, weekStart: weeks[1], creditCents: 40000, reason: 'Checked' })).status).toBe(200);
+      expect((await trx('production_share_stop_overrides').where({ visit_id: followUp }).first('conflict_basis')).conflict_basis).toBe('');
+      // week 1 is paid with the root as a plain visit (the follow-up is out of the job while it is cancelled), then the follow-up comes back
+      await trx('scheduled_services').where({ id: followUp }).update({ status: 'cancelled' });
+      await finalize((await draft(W1)).body.run.id);
+      await trx('scheduled_services').where({ id: followUp }).update({ status: 'completed' });
+      const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
+      const row = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops.find((r) => r.visitId === followUp);
+      expect(row).toMatchObject({ kind: 'owner_override_conflict_changed', creditCents: 0, needsReview: true });
+    });
+
+    it('AUDIT :952: a LATER payment of the same invoice changes the conflict state even when the earliest week stays the same', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const [w1, w2, w3] = [W1, addDays(W1, 7), addDays(W1, 14)];
+      for (const week of [w1, w2, w3]) await worked(id, week, 40);
+      const customerId = await customer();
+      const v1 = await stop(id, w1, '1000.00', customerId);
+      const invoiceId = (await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: '1000.00', discount_amount: '0.00', tax_amount: '0.00', total: '1000.00', scheduled_service_id: v1,
+      }).returning('id'))[0].id;
+      await finalize((await draft(w1)).body.run.id); // week 1 pays visit 1 and records the invoice
+      const relink = (visitId) => trx('invoices').where({ id: invoiceId }).update({ scheduled_service_id: visitId });
+      // the invoice moves to a visit of week 3: a conflict, which the owner knowingly credits against
+      const third = await stop(id, w3, null, customerId);
+      await relink(third);
+      const first = { technicianId: id, visitId: third, weekStart: w3 };
+      expect(await shownBasis(first)).not.toBe('');
+      expect((await override({ ...first, creditCents: 30000, reason: 'Checked' })).status).toBe(200);
+      // then it moves to a visit of week 2, which the owner also credits: week 2 pays and records the same invoice
+      const second = await stop(id, w2, null, customerId);
+      await relink(second);
+      expect((await override({ technicianId: id, visitId: second, weekStart: w2, creditCents: 20000, reason: 'Checked' })).status).toBe(200);
+      await finalize((await draft(w2)).body.run.id);
+      // back on the visit of week 3: the earliest week of the invoice is still week 1, but it was paid again in week 2
+      await relink(third);
+      const check = byName((await draft(w3)).body.run, 'Sample Alpha');
+      const row = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops.find((r) => r.visitId === third);
+      expect(row).toMatchObject({ kind: 'owner_override_conflict_changed', creditCents: 0, needsReview: true });
+    });
+
     it('AUDIT :1115: a revision with no stored credit is refused; a credit is created only with neither', async () => {
       const { unpriced, key } = await world();
       expect((await override({ ...key, creditCents: 5000, reason: 'x', revision: 'abc123' })).status).toBe(409);
@@ -750,7 +823,7 @@ postgres('production share pay line', () => {
       for (const visitId of [root, outside]) {
         await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-990-${visitId}`, invoice_id: invoiceId });
       }
-      expect((await api('PUT', '/production-share/stop-override', { body: { technicianId: id, visitId: followUp, weekStart: weeks[1], creditCents: 100000, reason: 'Checked' } })).status).toBe(200);
+      expect((await override({ technicianId: id, visitId: followUp, weekStart: weeks[1], creditCents: 100000, reason: 'Checked' })).status).toBe(200);
       const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
       const row = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops.find((r) => r.visitId === followUp);
       expect(row).toMatchObject({ kind: 'owner_set', bases: [{ basisType: 'job', basisId: root, totalCents: 200000, sold: 2, slot: 2 }] });

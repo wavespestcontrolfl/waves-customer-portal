@@ -467,6 +467,19 @@ describe('the credit rules (applyLedger)', () => {
     expect(run(slotRow, paidOf({ invoices: { 'inv-9': ['2026-09-14', 'root'] }, jobs: { root: [200000, 2, [1]] } }), '')).toMatchObject({ kind: 'owner_set' });
   });
 
+  test('AUDIT :952: the conflict state covers every paid tuple of an invoice, in stable order, not the earliest week', () => {
+    const row = plain('visit-2', ['inv-1']);
+    const entry = (weekStart, visitId) => ({ weekStart, visitId, root: null });
+    const basis = (entries) => productionShare.applyLedger([row], { visits: new Map(), invoices: new Map([['inv-1', entries]]), jobs: new Map() })[0].conflictBasis;
+    const one = basis([entry('2026-09-14', 'visit-1')]);
+    const two = basis([entry('2026-09-14', 'visit-1'), entry('2026-09-21', 'visit-3')]);
+    expect(one).toMatch(/^[0-9a-f]{16}$/);
+    expect(two).not.toBe(one); // a later payment of the same invoice, the earliest week unchanged
+    expect(basis([entry('2026-09-21', 'visit-3'), entry('2026-09-14', 'visit-1')])).toBe(two); // stable under the order read
+    // another visit paying the same week is a different tuple too
+    expect(basis([entry('2026-09-14', 'visit-4')])).not.toBe(one);
+  });
+
   test('AUDIT :306: a check with a share above $0 and the overtime coverage not set is blocked, not stored with zero qualified overtime', () => {
     const withShare = { production_share: workedOut() };
     expect(build({ ...withShare, flsa_overtime_covered: null }).blocked).toContain('Set the overtime coverage first');

@@ -948,10 +948,10 @@ function applyLedger(rows, paid, overrides = new Map()) {
 
   // The invoices linked to the stop that a paid row of another package (or of none) recorded.
   function invoiceConflicts(row, at) {
-    return (row.linkedInvoices || []).map((id) => {
-      const week = (paid.invoices.get(id) || []).filter((one) => !(at && one.root === at.rootId)).map((one) => one.weekStart).sort()[0];
-      return week ? `inv:${id}:${week}` : null;
-    }).filter(Boolean);
+    // EVERY paid row that recorded the invoice counts (its visit and week), not the earliest one: a later payment of the same invoice
+    // changes the state too.
+    return (row.linkedInvoices || []).flatMap((id) => (paid.invoices.get(id) || [])
+      .filter((one) => !(at && one.root === at.rootId)).map((one) => `inv:${id}:${one.weekStart}:${one.visitId}`));
   }
 
   // The other visits of the invoices that priced the stop, paid already or the root of a package a pay run fixed.
@@ -1043,6 +1043,8 @@ const rootIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
 const visitIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
   row.visitId,
   ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId, ...row.ledger.job.visits] : []),
+  // every visit of the package of a review row too (an owner-set credit on it is checked against what was paid outside the package)
+  ...(row.packageSlot ? [row.packageSlot.rootId, ...(row.packageSlot.visits || [])] : []),
   ...(row.ledger && row.ledger.invoices ? row.ledger.invoices.flatMap((inv) => inv.members.map((member) => member.id)) : []),
 ]))];
 const paidOf = (conn, rows, weekStart) => paidLedger(conn, visitIdsOf(rows), invoiceIdsOf(rows), rootIdsOf(rows), weekStart);
@@ -1153,8 +1155,10 @@ const overrideSchema = Joi.object({
   reason: Joi.string().trim().min(1).max(500).required().error(new Error('Say why (up to 500 characters)')),
   // The revision of the stored credit the page was showing (its stop's `overrideRevision`): required to replace or clear one.
   revision: Joi.string().max(64).error(new Error('The revision must be text')),
+  // The conflict state of the stop as the page showed it (its row's `conflictBasis`, '' = none): refused (409) when the stop changed since.
+  conflictBasis: Joi.string().allow('').max(64).required().error(new Error('Reload the week: the stop must be sent with its conflict state')),
 });
-const overrideKeySchema = overrideSchema.fork(['technicianId', 'creditCents', 'reason'], (field) => field.optional());
+const overrideKeySchema = overrideSchema.fork(['technicianId', 'creditCents', 'reason', 'conflictBasis'], (field) => field.optional());
 
 // A stored credit is replaced or cleared only by the page that saw it: no revision, or another one, is refused.
 function requireSameRevision(stored, revision) {
@@ -1204,6 +1208,8 @@ async function setStopOverride(input, actor, conn = db) {
     const rows = await creditsOfWeek(trx, technicianId, v.weekStart, await settingsFor(trx, technicianId, v.weekStart), { skipOverrides: true });
     const now = rows.find((row) => canonicalId(row.visitId) === visitId);
     if (!now) throw new PayrollError(400, 'That stop is not a completed stop of this technician in that week.');
+    // The stop the owner opened is the stop under the lock: its conflict state (invoices, package, what was paid elsewhere) is the same.
+    if ((now.conflictBasis || '') !== v.conflictBasis) throw new PayrollError(409, 'The stop changed since you opened it. Reload the week and look at it again.');
     if (MANUAL_CREDIT_INELIGIBLE.has(now.kind)) throw new PayrollError(409, 'This stop cannot be credited by hand: its work was not done or confirmed, or a pay run already paid it.');
     if (!now.needsReview && !owned) throw new PayrollError(409, 'This stop no longer needs review.');
     await trx('production_share_stop_overrides').insert({
