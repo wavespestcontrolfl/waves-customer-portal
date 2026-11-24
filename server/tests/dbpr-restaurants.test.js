@@ -99,24 +99,22 @@ describe('parseInspectionRows', () => {
     expect(counts).toEqual({ malformed: 5, valid: 1 });
   });
 
-  test('keeps only code-35 visits in the three counties outside Punta Gorda and the held places (Port Charlotte and Englewood are served again), with trimmed headers and a plain date', () => {
+  test('keeps only code-35 visits in the three counties outside Punta Gorda, with trimmed headers and a plain date', () => {
     const rows = parseDbprCsv(inspCsv([
       inspRow({ visit: '9001' }),
       inspRow({ visit: '9002', county: 'Sarasota' }),
-      // Port Charlotte is served again (owner "ok do this", 2026-11-23); its shared ZIP 33981 and Rotonda West are held
-      // until a second technician is hired.
       inspRow({ visit: '9003', county: 'Charlotte', city: 'PORT CHARLOTTE', zip: '33952' }),
-      inspRow({ visit: '9012', county: 'Charlotte', city: '', zip: '33981' }),
-      inspRow({ visit: '9014', county: 'Charlotte', city: 'ROTONDA WEST', zip: '33947' }),
-      inspRow({ visit: '9013', county: 'Sarasota', city: 'NORTH PORT', zip: '34287' }),
       inspRow({ visit: '9004', county: 'Hillsborough' }),
       inspRow({ visit: '9005', v35: 0 }),
       inspRow({ visit: '9006', date: 'not a date' }),
       // Punta Gorda is not served (owner ruling 2026-10-22): by city name, or by a ZIP only Punta Gorda uses.
       inspRow({ visit: '9007', county: 'Charlotte', city: 'PUNTA GORDA', zip: '33983' }),
       inspRow({ visit: '9008', county: 'Charlotte', city: '', zip: '33950' }),
-      // A NUL inside the city is cleaned before the check, as it is before storing.
+      // A NUL inside the city is cleaned before the check, as it is before storing: 33983 alone does not exclude.
       inspRow({ visit: '9011', county: 'Charlotte', city: 'PUNTA\0GORDA', zip: '33983' }),
+      // A ZIP Punta Gorda shares with a served town: no city is unknowable (left out of the prospect list), a served city is kept.
+      inspRow({ visit: '9012', county: 'Charlotte', city: '', zip: '33982' }),
+      inspRow({ visit: '9013', county: 'Charlotte', city: 'PORT CHARLOTTE', zip: '33983' }),
       // The shared county test (call-triage-flags.js): any case, with or without the word County.
       inspRow({ visit: '9009', county: 'SARASOTA COUNTY' }),
       inspRow({ visit: '9010', county: 'Lee County' }),

@@ -35,7 +35,7 @@ const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks'
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { isInDesotoExclusion, isServedSouthHillsboroughTown } = require('./service-area');
-const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip, isPortCharlotteLocality, hasUsableZip } = require('./excluded-localities');
+const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip, sharedZipNeedsCity } = require('./excluded-localities');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -1024,7 +1024,7 @@ const CONFIRM_REASON_TEXT = {
   missing_unit_number: 'address is a multi-unit building (condo/townhome) given without a unit — ask which unit number before dispatch',
   address_recovered: 'street name was garbled in transcription — matched to a single validated address; read it back to the caller',
   out_of_service_area: 'address resolves outside the service area — verify the county',
-  service_area_unverified: 'the service area could not be confirmed (the address on file could not be read, or a Port Charlotte address has no ZIP) — confirm the address, ZIP and county before booking',
+  service_area_unverified: 'the service area could not be confirmed (the address on file could not be read, or a ZIP shared with Punta Gorda has no city) — confirm the address, city and county before booking',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
   missing_first_name: "no first name on file for this customer — get the account holder's first name",
@@ -2165,8 +2165,8 @@ function agreedOneTimeJobCardPrice(v2Extraction, bookedService) {
 //      positive AV verdict (which may describe a different, V2 address) and
 //      of any served-town exemption (Riverview + 34266 cannot launder it).
 //      Punta Gorda (city, or a Punta Gorda-only ZIP) vetoes at the same point,
-//      on the call or on file, and so do the not-yet-served places of owner
-//      ruling 2026-11-23 (excluded-localities.js).
+//      on the call or on file, and so do any not-yet-served places
+//      (excluded-localities.js; none is held now).
 //   2. a positive Address Validation verdict (inServiceArea === true) then
 //      clears the rest, including a model-stated county NAME of DeSoto.
 //   3. an AV out_of_service_area / inServiceArea false verdict, or a county
@@ -2181,9 +2181,9 @@ function agreedOneTimeJobCardPrice(v2Extraction, bookedService) {
 //      on-file read FAILED (onFile.lookupFailed), the booking fails closed to
 //      review (reason on_file_address_unavailable) instead of passing on no
 //      evidence.
-// The skip reason a geographic veto files under: an unreadable on-file address, or a Port Charlotte address with no ZIP
-// tied to it, is UNVERIFIED (staff confirm the address and ZIP); every other veto is out of area.
-const geoVetoSkipReason = (veto) => (veto?.reason === 'on_file_address_unavailable' || veto?.reason === 'port_charlotte_zip_unknown'
+// The skip reason a geographic veto files under: an unreadable on-file address, or a shared ZIP with no city, is UNVERIFIED
+// (staff confirm the address); every other veto is out of area.
+const geoVetoSkipReason = (veto) => (veto?.reason === 'on_file_address_unavailable' || veto?.reason === 'shared_zip_city_unknown'
   ? 'service_area_unverified'
   : 'out_of_service_area');
 function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, extracted = null, onFile = null } = {}) {
@@ -2232,37 +2232,24 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
     || onFileCities.some(isPuntaGordaLocality) || onFileZips.some(isPuntaGordaZip)) {
     return { reason: 'punta_gorda_locality', county: 'Charlotte' };
   }
-  // The places held until a second technician is hired (owner ruling 2026-11-23: Rotonda, Placida, Boca Grande,
-  // Babcock Ranch, Gulf Cove, El Jobean, Charlotte Harbor, Deep Creek) veto the same way. No county is named.
-  // Englewood and Port Charlotte were held for a few hours and are served again.
+  // Places held until a second technician is hired (excluded-localities.js; none is held now) veto the same way.
+  // No county is named.
   if (cities.some(isNotYetServedLocality) || zips.some(isNotYetServedZip)
     || onFileCities.some(isNotYetServedLocality) || onFileZips.some(isNotYetServedZip)) {
     return { reason: 'not_yet_served_locality', county: null };
   }
-  // Port Charlotte is served, but ZIPs 33980 / 33981 / 33983 hold by ZIP and carry the name too: a Port Charlotte address with
-  // no ZIP tied to it cannot be told from a held one, so it is UNVERIFIED (staff review, never out of area, never auto-booked).
-  // Only a ZIP of the address the visit will use clears it, never a ZIP on the call for another property:
-  //  - the call names Port Charlotte: every extraction that names it carries its own ZIP, or else the on-file address
-  //    (which the booking keeps) is a Port Charlotte one with its own ZIP;
-  //  - the call names no Port Charlotte but the stored address does (the booking can retain it): that stored ZIP must exist,
-  //    whatever the call said about another town.
-  // A ZIP counts only when it is five digits or ZIP+4: a fragment on file ("3398") clears nothing.
-  // ZIP evidence is bound to its own source: each extraction (V1, V2, address validation) that names Port Charlotte must
-  // carry its own usable ZIP. A ZIP from another extraction never clears it, because the legacy branch can book V1's
-  // address while V2 or address validation describes a different street (Codex #8402).
-  const statedPortCharlotteSources = [
-    [extracted?.city, extracted?.zip],
-    [svc?.city, svc?.postal_code],
-    [av?.normalized?.city, av?.normalized?.postal_code],
-  ].filter(([city]) => isPortCharlotteLocality(lower(city)));
-  const statedPortCharlotte = statedPortCharlotteSources.length > 0;
-  const onFilePortCharlotte = onFileCities.some(isPortCharlotteLocality);
-  const statedZipMissing = statedPortCharlotteSources.some(([, zip]) => !hasUsableZip(zip));
-  const onFileUsableZip = !!onFile && !onFile.lookupFailed && hasUsableZip(onFile.zip);
-  if (statedPortCharlotte
-    ? (statedZipMissing && !(onFilePortCharlotte && onFileUsableZip))
-    : (onFilePortCharlotte && !onFileUsableZip)) {
-    return { reason: 'port_charlotte_zip_unknown', county: null };
+  // A ZIP Punta Gorda shares with a served town (33980 / 33982 / 33983) with no city beside it cannot be told from Punta Gorda,
+  // so it is UNVERIFIED (staff review, never out of area, never auto-booked) and a positive AV verdict cannot clear it. ZIP
+  // evidence is bound to its own source: V1, V2, address validation and the stored address (the booking can keep any of them).
+  const sources = [
+    [extracted?.city, extracted?.zip], [svc?.city, svc?.postal_code], [av?.normalized?.city, av?.normalized?.postal_code],
+  ];
+  // Trade-off (accepted): a stored shared-ZIP city may be only the one the lead webhook inferred from the ZIP, so it must differ
+  // from the ZIP's own city. A real stored Babcock Ranch / 33982 therefore goes to review (service_area_unverified) on every call,
+  // even when address validation agrees, until staff confirm the address. It fails closed rather than auto-booking a possible Punta Gorda.
+  if (sources.some(([city, zip]) => sharedZipNeedsCity(city, zip))
+    || (onFile && !onFile.lookupFailed && sharedZipNeedsCity(onFile.city, onFile.zip, { trustInferred: false }))) {
+    return { reason: 'shared_zip_city_unknown', county: null };
   }
   if (av && av.inServiceArea === true) return null;
   if (countyKey === 'desoto') {
