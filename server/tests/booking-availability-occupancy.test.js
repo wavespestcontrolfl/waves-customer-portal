@@ -205,7 +205,7 @@ describe('buildBookingAvailability — commit-gate occupancy mirror', () => {
     // gate-independent (see the travel-gap describe block above).
     expect(listOccupiedWindows).toHaveBeenCalledWith({
       dateFrom: D, dateTo: D, excludeServiceIds: [],
-      withCoords: true,
+      withCoords: true, includeClaimedReservations: true,
     });
   });
 

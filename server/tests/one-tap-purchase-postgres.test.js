@@ -66,6 +66,7 @@ const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const { gates } = require('../config/feature-gates');
 const { PURCHASE_FAMILIES } = require('../services/service-report/cross-sell');
+const slotReservation = require('../services/slot-reservation');
 const oneTap = require('../services/one-tap-purchase');
 
 postgres('one-tap purchase against migrated PostgreSQL', () => {
@@ -168,9 +169,10 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     return slotId;
   }
 
-  // The whole flow a customer walks: tap a service in the My Plan list, pick
-  // a time, confirm.
-  async function buy(serviceKey) {
+  // The first two steps a customer walks: tap a service in the My Plan list,
+  // then pick a time. Kept separate so stale-checkout regressions can race
+  // real office scheduling against confirm without first completing it.
+  async function reservePurchase(serviceKey) {
     const { offers } = await oneTap.listOffers({ customerId: ids.customer });
     const offer = offers.find((candidate) => candidate.serviceKey === serviceKey);
     expect(offer).toMatchObject({ serviceKey, mode: 'priced' });
@@ -181,6 +183,13 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     } });
     const slotId = await offerOpening(init.estimateId);
     await oneTap.reserve({ customerId: ids.customer, purchaseId: init.purchaseId, slotId });
+    return init;
+  }
+
+  // The whole flow a customer walks: tap a service in the My Plan list, pick
+  // a time, confirm.
+  async function buy(serviceKey) {
+    const init = await reservePurchase(serviceKey);
     const done = await oneTap.confirm({ customerId: ids.customer, purchaseId: init.purchaseId,
       termsAccepted: true, ip: '203.0.113.9', userAgent: 'fixture' });
     return { init, done };
@@ -268,5 +277,52 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     // The new service is still a full series at its own discounted price.
     expect(init.pricing.newService.discountPct).toBeGreaterThan(0);
     expect(await trx('scheduled_services').where({ source_estimate_id: init.estimateId })).toHaveLength(init.visitsPerYear);
+  });
+
+  test('a stale reserved checkout cannot convert a held appointment staff already linked to the same customer', async () => {
+    await seedOwnedService('pest_control');
+    const init = await reservePurchase('lawn_care');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    expect(purchase).toMatchObject({ status: 'reserved', estimate_id: init.estimateId });
+
+    // Staff claim this still-held appointment for the same customer. Once
+    // its hold expires, the real cleanup sweep preserves the office row and
+    // clears the stray hold timestamp instead of deleting the appointment.
+    await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).update({
+      customer_id: ids.customer,
+      status: 'confirmed',
+      estimated_price: 73,
+      reservation_expires_at: trx.raw("NOW() - INTERVAL '1 minute'"),
+    });
+    await slotReservation.releaseExpiredReservations();
+
+    const officeRow = await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first();
+    expect(officeRow).toMatchObject({
+      id: purchase.scheduled_service_id,
+      customer_id: ids.customer,
+      source_estimate_id: init.estimateId,
+      status: 'confirmed',
+      estimated_price: '73.00',
+      reservation_expires_at: null,
+    });
+    const reminderCalls = require('../services/appointment-reminders').registerAppointment.mock.calls.length;
+
+    await expect(oneTap.confirm({
+      customerId: ids.customer,
+      purchaseId: init.purchaseId,
+      termsAccepted: true,
+      ip: '203.0.113.9',
+      userAgent: 'stale-fixture',
+    })).rejects.toMatchObject({ status: 409, code: 'SLOT_UNAVAILABLE' });
+
+    // The office-owned appointment remains byte-for-byte as cleanup left it;
+    // the stale checkout neither converts the draft nor completes its ledger.
+    expect(await trx('scheduled_services').where({ id: officeRow.id }).first()).toEqual(officeRow);
+    expect(await trx('scheduled_services').where({ source_estimate_id: init.estimateId })).toHaveLength(1);
+    expect(await trx('estimates').where({ id: init.estimateId }).first('status')).toEqual({ status: 'draft' });
+    expect((await trx('one_tap_purchases').where({ id: init.purchaseId }).first('status')).status).not.toBe('completed');
+    expect(require('../services/appointment-reminders').registerAppointment).toHaveBeenCalledTimes(reminderCalls);
+    expect(await trx('invoices').where({ customer_id: ids.customer })).toHaveLength(0);
+    expect(await trx('payments').where({ customer_id: ids.customer })).toHaveLength(0);
   });
 });

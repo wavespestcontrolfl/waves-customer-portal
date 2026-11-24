@@ -2023,7 +2023,7 @@ async function reserveSlot({
 }
 
 /**
- * Commit a reservation. Sets customer_id + payment_method_preference,
+ * Commit an unclaimed hold. Sets customer_id + payment_method_preference,
  * optionally stamps estimated_price, and clears reservation_expires_at.
  * Intended to run inside the accept
  * handler's existing transaction — pass trx explicitly when doing so.
@@ -2197,8 +2197,7 @@ async function commitReservation({
       )
       .forUpdate()
       .first();
-    // A staff claim can leave a hold timestamp or clear it before checkout
-    // resumes. Only its owner may graduate the row or receive a replay.
+    // Keep another customer's visit indistinguishable from a missing hold.
     if (!row || (row.customer_id != null && row.customer_id !== customerId)) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
@@ -2210,10 +2209,11 @@ async function commitReservation({
       err.code = 'RESERVATION_EXPIRED';
       throw err;
     }
-    if (!row.reservation_expires_at) {
-      // Already committed. Idempotent — return the existing row rather
-      // than throw; a double-click on accept shouldn't fail.
-      return row;
+    // Cleanup also clears the expiry on a staff-booked visit. Completed
+    // purchases and accepted estimates replay from their own records before
+    // reaching this write. A pending checkout can only convert an unclaimed hold.
+    if (row.customer_id != null || !row.reservation_expires_at) {
+      throw capacityError('reservation_already_booked');
     }
     // A make-room hold refreshed or re-assigned since the pre-read: same recoverable code as the capacity technician check.
     requireMakeRoomUnchanged(row, preRow, preparedCapacity);
@@ -2224,10 +2224,7 @@ async function commitReservation({
     }
     // Self-serve notice window (owner ruling 2026-09-23): a hold reserved
     // just outside the window can cross the boundary during checkout. The
-    // LOCKED hold's own start is re-checked here — after the
-    // already-committed replay above (an accepted visit is never un-accepted
-    // by this rule) — so what the generator would no longer offer cannot be
-    // graduated either. Same recoverable code the other slot-side rejects use.
+    // locked hold's own start must still satisfy the notice window.
     if (visitInsideNoticeWindow(row)) {
       const err = new Error('slot start is inside the booking notice window');
       err.code = 'SLOT_UNAVAILABLE';

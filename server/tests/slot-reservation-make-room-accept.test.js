@@ -269,10 +269,10 @@ describe('commitReservation — a make-room hold moves the stops at accept (mode
     expect(update.update).not.toHaveBeenCalled();
   });
 
-  test('an already-committed row returns at once: no proof, no writes, no after-commit work', async () => {
+  test('an already-booked row is refused at once: no proof, no writes, no after-commit work', async () => {
     const done = heldRow({ reservation_expires_at: null, customer_id: 'customer-1' });
     const { trx } = commitTrx({ pre: done, locked: done, skipChain: true });
-    await expect(accept(trx)).resolves.toMatchObject({ id: 'hold-1' });
+    await expect(accept(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'reservation_already_booked' });
     expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
     expect(apply._internals.writeMoves).not.toHaveBeenCalled();
   });

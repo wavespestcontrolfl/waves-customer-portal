@@ -209,6 +209,34 @@ postgres('hold grace + extend (real Postgres)', () => {
       });
     });
 
+    test.each([60, -30])('a stale checkout from the booked customer preserves the office price and visit (%i seconds to expiry)', async ttl => {
+      await withHold({ committed: true, expiresInSeconds: ttl }, async ({ trx, holdId, customerId }) => {
+        await trx('scheduled_services').where({ id: holdId }).update({
+          estimated_price: 73, estimated_duration_minutes: 60, service_type: 'Lawn Care',
+        });
+        const stored = () => trx('scheduled_services').where({ id: holdId }).first();
+        const before = await stored();
+        await expect(slotReservation.commitReservation({
+          scheduledServiceId: holdId, customerId, estimatedPrice: 1, durationMinutes: 30, trx,
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect(await stored()).toEqual(before);
+      });
+    });
+
+    test('after cleanup the booked customer’s old hold still cannot change the office visit', async () => {
+      await withHold({ committed: true, expiresInSeconds: -30 }, async ({ trx, holdId, customerId }) => {
+        const visit = () => trx('scheduled_services').where({ id: holdId });
+        await visit().update({ estimated_price: 73, status: 'confirmed' });
+        await slotReservation.releaseExpiredReservations();
+        const booked = await visit().first();
+        expect(booked.reservation_expires_at).toBeNull();
+        await expect(slotReservation.commitReservation({
+          scheduledServiceId: holdId, customerId, estimatedPrice: 1, durationMinutes: 30, trx,
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect(await visit().first()).toEqual(booked);
+      });
+    });
+
     test('checkout cannot claim a competing hold after staff booked the same hour', async () => {
       await withHold({ windowStart: '10:00', windowEnd: '11:00' }, async ({ trx, holdId, customerId, date }) => {
         const otherCustomer = randomUUID();

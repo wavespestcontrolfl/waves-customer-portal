@@ -2226,7 +2226,11 @@ ASAP expansion. At reservation and confirmation, a visit linked to a customer
 still occupies its booked time after its original hold expires. An unclaimed
 hold releases that time at expiry. A checkout presenting another customer's
 booked reservation ID receives the existing missing-reservation response,
-including after cleanup clears the timestamp. Zone and estimate pickers remove
+including after cleanup clears the timestamp. If staff booked the visit for the
+same customer while checkout was open, using the old hold returns
+`SLOT_UNAVAILABLE` even after cleanup clears its expiry. A retry of an accepted
+estimate or a completed one-tap purchase returns the stored booking from its
+own record. Zone and estimate pickers remove
 the occupied hour. Public booking also counts the visit when simulating travel
 to later stops. A cached estimate checks travel gaps and remaining capacity
 locally. A new booking can invalidate a proposed move on the same route.

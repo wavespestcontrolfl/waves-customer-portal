@@ -19,7 +19,7 @@ describe('loadPackingAnchors', () => {
     listOccupiedWindows.mockResolvedValue([]);
     await loadPackingAnchors({ dateFrom: '2099-01-01', dateTo: '2099-01-02' });
     expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({
-      dateFrom: '2099-01-01', dateTo: '2099-01-02', withCoords: true,
+      dateFrom: '2099-01-01', dateTo: '2099-01-02', withCoords: true, includeClaimedReservations: true,
     }));
   });
 
