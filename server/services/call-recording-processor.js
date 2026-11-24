@@ -4264,59 +4264,26 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 }
 
 // The same-call booking confirmation for the people the caller named for THIS visit (GATE_CALL_GIVEN_VISIT_TEXTS,
-// owner 2026-11-24 "yes, visit only"; call-visit-recipient.js decides who is owed it). One text per recipient per
-// visit slot (the recipient's delivery claim), and a number that already holds this visit's confirmation (the slot
-// fan-out, an earlier pass) is not texted again. Never throws. Returns false only when this pass lost its claim.
-async function sendVisitOnlyConfirmations({ scheduledServiceId, customerId, call, excludePhones, blocked, claimStillOwned, visit }) {
+// owner 2026-11-24 "yes, visit only"). call-visit-recipient.js decides who is owed it, writes its informational copy
+// (no appointment-page or tracker link), honors the person's existing declines and the send window (no
+// customer-initiated exemption: the person did not call), and persists a text the window held. A number that already
+// holds this visit's confirmation (the slot fan-out, an earlier pass) is skipped. Never throws. Returns false only
+// when this pass lost its claim.
+async function sendVisitOnlyConfirmations({ scheduledServiceId, excludePhones, blocked, claimStillOwned }) {
   const visitRecipients = require('./call-visit-recipient');
-  if (blocked || !visitRecipients.gateLive()) return true;
-  try {
-    const AppointmentReminders = require('./appointment-reminders');
-    const contacts = await visitRecipients.contactsForVisit(scheduledServiceId, 'confirmation', { excludePhones });
-    for (const contact of contacts) {
-      if (!(await claimStillOwned())) return false;
-      const heldPhone = { scheduledServiceId, phone: contact.phone };
-      if (await AppointmentReminders.confirmationLoggedForVisitPhone(heldPhone).catch(() => false)) continue;
-      const contactFirst = String(contact.name || '').trim().split(/\s+/)[0] || visit.firstName;
-      const body = await AppointmentReminders.renderAppointmentPageTemplate('appointment_confirmation',
-        async () => {
-          const { buildAppointmentLink } = require('./appointment-link');
-          const apptLink = await buildAppointmentLink(scheduledServiceId, { customerId });
-          const window = await AppointmentReminders.confirmationArrivalWindow({ scheduledServiceId });
-          return {
-            first_name: contactFirst, service_type: visit.serviceType, date: visit.parsedDate, time: visit.parsedTime, window, appointment_line: apptLink.line,
-          };
-        },
-        {
-          first_name: contactFirst, service_type: visit.serviceType, date_time: visit.preferredDateTime, date: visit.parsedDate, time: visit.parsedTime, reschedule_line: '',
-        },
-        { workflow: 'call_booking_confirmation', entity_type: 'customer', entity_id: customerId });
-      if (!body) continue;
-      const at = visit.scheduledDate
-        ? parseETDateTime(`${require('../utils/date-only').dateOnlyString(visit.scheduledDate)}T${visit.windowStart ? String(visit.windowStart).slice(0, 5) : '08:00'}`)
-        : null;
-      const sent = await visitRecipients.sendOnce(contact, () => sendCustomerMessage({
-        to: contact.phone,
-        body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'appointment_confirmation',
-        customerId,
-        appointmentId: scheduledServiceId,
-        ...(at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {}),
-        // Not a service-contact slot: phone_matches_customer, so no contact-login check applies.
-        identityTrustLevel: 'phone_matches_customer',
-        ...(isFreshInboundCall(call) ? { customerInitiated: true } : {}),
-        metadata: { original_message_type: 'confirmation', appointment_contact_role: visitRecipients.ROLE },
-      }));
-      if (sent.skipped) logger.info(`[call-proc] visit-only confirmation skipped (${sent.reason}) for visit ${scheduledServiceId}`);
-      else if (!sent.result?.sent) logger.warn(`[call-proc] visit-only confirmation not sent for visit ${scheduledServiceId}: ${sent.result?.code || sent.result?.reason || 'unknown'}`);
-      else logger.info(`[call-proc] visit-only confirmation sent for visit ${scheduledServiceId}`);
-    }
-  } catch (err) {
-    logger.warn(`[call-proc] visit-only confirmation skipped for visit ${scheduledServiceId}: ${err.code || err.name || 'error'}`);
-  }
-  return true;
+  if (blocked) return true;
+  const AppointmentReminders = require('./appointment-reminders');
+  return visitRecipients.notifyVisitRecipients({
+    scheduledServiceId,
+    kind: 'confirmation',
+    excludePhones,
+    gate: async (contact) => {
+      if (!(await claimStillOwned())) return 'abort';
+      const asked = { scheduledServiceId, phone: contact.phone };
+      const alreadyHeld = await AppointmentReminders.confirmationLoggedForVisitPhone(asked).catch(() => false);
+      return alreadyHeld ? 'skip' : 'send';
+    },
+  });
 }
 
 // Persist a call's secondary contact into the customer's first EMPTY
@@ -24596,12 +24563,9 @@ const CallRecordingProcessor = {
                   // canonical send reaches the recipient through safeSendAppointment).
                   if (!(await sendVisitOnlyConfirmations({
                     scheduledServiceId,
-                    customerId,
-                    call,
                     excludePhones: [smsPhone, smsRecipient],
                     blocked: confirmationRearmed || v2SmsBlocked || v2DoNotContact,
                     claimStillOwned,
-                    visit: { serviceType, firstName, parsedDate, parsedTime, preferredDateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog },
                   }))) return false;
                   return primaryOk;
                 },

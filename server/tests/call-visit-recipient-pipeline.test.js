@@ -11,23 +11,14 @@ jest.mock('../config/twilio-numbers', () => ({
   findByNumber: jest.fn(() => null),
   getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
 }));
-jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/appointment-reminders', () => ({
   confirmationLoggedForVisitPhone: jest.fn(async () => false),
-  renderAppointmentPageTemplate: jest.fn(async (key, factory, fallback) => `Hi ${fallback.first_name}, confirmed`),
-  confirmationArrivalWindow: jest.fn(async () => '9-11 AM'),
 }));
-jest.mock('../services/appointment-link', () => ({ buildAppointmentLink: jest.fn(async () => ({ line: 'link' })) }));
 jest.mock('../services/call-visit-recipient', () => {
   const actual = jest.requireActual('../services/call-visit-recipient');
-  return {
-    ...actual,
-    contactsForVisit: jest.fn(async () => []),
-    sendOnce: jest.fn(async (contact, send) => ({ skipped: false, result: await send() })),
-  };
+  return { ...actual, notifyVisitRecipients: jest.fn(async () => true) };
 });
 
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const Reminders = require('../services/appointment-reminders');
 const VisitRecipient = require('../services/call-visit-recipient');
 const { _test } = require('../services/call-recording-processor');
@@ -38,97 +29,51 @@ const gateBefore = process.env[GATE];
 afterAll(() => { if (gateBefore === undefined) delete process.env[GATE]; else process.env[GATE] = gateBefore; });
 
 const BOB = '+19415550002';
-const CONTACT = { phone: BOB, name: 'Bob Roe', role: VisitRecipient.ROLE, visitRecipientId: 'vtr-1', claimKey: 'confirmation:2026-12-01T09:00' };
 const base = (over = {}) => ({
   scheduledServiceId: 'ss-1',
-  customerId: 'cust-1',
-  call: { id: 'call-1', direction: 'inbound', created_at: new Date().toISOString() },
   excludePhones: ['+19415550001', '+19415550001'],
   blocked: false,
   claimStillOwned: jest.fn(async () => true),
-  visit: {
-    serviceType: 'Pest Control', firstName: 'Phyllis', parsedDate: 'Tuesday, December 1', parsedTime: '9:00 AM',
-    preferredDateTime: '2026-12-01T09:00', scheduledDate: '2026-12-01', windowStart: '09:00',
-  },
   ...over,
 });
 
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env[GATE];
-  VisitRecipient.contactsForVisit.mockResolvedValue([CONTACT]);
-  sendCustomerMessage.mockResolvedValue({ sent: true });
 });
 
 describe('sendVisitOnlyConfirmations', () => {
-  test('gate off: nothing is read and nobody is texted', async () => {
-    await expect(sendVisitOnlyConfirmations(base())).resolves.toBe(true);
-    expect(VisitRecipient.contactsForVisit).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  test('a blocked call (SMS blocked, do-not-contact, or the re-armed sweep owns the confirmation) hands nothing over', async () => {
+    process.env[GATE] = 'true';
+    await expect(sendVisitOnlyConfirmations(base({ blocked: true }))).resolves.toBe(true);
+    expect(VisitRecipient.notifyVisitRecipients).not.toHaveBeenCalled();
   });
 
-  test('gate on: the recipient gets this visit\'s confirmation with their own first name, as a non-contact', async () => {
+  test('the confirmation goes to the one recipient sender: this visit, the confirmation kind, the numbers already texted', async () => {
     process.env[GATE] = 'true';
     await expect(sendVisitOnlyConfirmations(base())).resolves.toBe(true);
-    expect(VisitRecipient.contactsForVisit).toHaveBeenCalledWith('ss-1', 'confirmation', { excludePhones: ['+19415550001', '+19415550001'] });
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
-      to: BOB,
-      body: 'Hi Bob, confirmed',
-      purpose: 'appointment_confirmation',
-      customerId: 'cust-1',
-      appointmentId: 'ss-1',
-      identityTrustLevel: 'phone_matches_customer',
-      customerInitiated: true,
-      metadata: { original_message_type: 'confirmation', appointment_contact_role: VisitRecipient.ROLE },
+    expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledWith({
+      scheduledServiceId: 'ss-1', kind: 'confirmation', excludePhones: ['+19415550001', '+19415550001'], gate: expect.any(Function),
     });
-    expect(sendCustomerMessage.mock.calls[0][0].renderedSlotMs).toEqual(expect.any(Number));
   });
 
-  test.each([
-    ['the call SMS is blocked, do-not-contact, or the re-armed sweep owns the confirmation', { blocked: true }],
-  ])('gate on: nobody is texted when %s', async (_label, over) => {
+  test('the per-recipient gate sends, skips a number that already holds this visit\'s confirmation, and aborts when the pass lost its claim', async () => {
+    const gateFor = async (over, held = false) => {
+      Reminders.confirmationLoggedForVisitPhone.mockResolvedValueOnce(held);
+      await sendVisitOnlyConfirmations(base(over));
+      return VisitRecipient.notifyVisitRecipients.mock.calls.at(-1)[0].gate({ phone: BOB });
+    };
     process.env[GATE] = 'true';
-    await expect(sendVisitOnlyConfirmations(base(over))).resolves.toBe(true);
-    expect(VisitRecipient.contactsForVisit).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-  });
-
-  test('gate on: a number that already holds this visit\'s confirmation (the slot fan-out, an earlier pass) is not texted again', async () => {
-    process.env[GATE] = 'true';
-    Reminders.confirmationLoggedForVisitPhone.mockResolvedValueOnce(true);
-    await sendVisitOnlyConfirmations(base());
+    await expect(gateFor({})).resolves.toBe('send');
     expect(Reminders.confirmationLoggedForVisitPhone).toHaveBeenCalledWith({ scheduledServiceId: 'ss-1', phone: BOB });
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    await expect(gateFor({}, true)).resolves.toBe('skip');
+    await expect(gateFor({ claimStillOwned: jest.fn(async () => false) })).resolves.toBe('abort');
   });
 
-  test('gate on: a pass that lost its claim stops and tells the caller to abandon', async () => {
+  test('a pass that lost its claim tells the caller to abandon', async () => {
     process.env[GATE] = 'true';
-    await expect(sendVisitOnlyConfirmations(base({ claimStillOwned: jest.fn(async () => false) }))).resolves.toBe(false);
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-  });
-
-  test('gate on: a failure never throws into the booking', async () => {
-    process.env[GATE] = 'true';
-    VisitRecipient.contactsForVisit.mockRejectedValue(new Error('boom'));
-    await expect(sendVisitOnlyConfirmations(base())).resolves.toBe(true);
-    VisitRecipient.contactsForVisit.mockResolvedValue([CONTACT]);
-    sendCustomerMessage.mockRejectedValue(new Error('twilio down'));
-    await expect(sendVisitOnlyConfirmations(base())).resolves.toBe(true);
-  });
-
-  test('gate on: a send the layer blocks (STOP, suppression, window) is logged and does not throw', async () => {
-    process.env[GATE] = 'true';
-    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SUPPRESSED' });
-    await expect(sendVisitOnlyConfirmations(base())).resolves.toBe(true);
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-  });
-
-  test('gate on: a template that renders nothing sends nothing', async () => {
-    process.env[GATE] = 'true';
-    Reminders.renderAppointmentPageTemplate.mockResolvedValueOnce(null);
-    await sendVisitOnlyConfirmations(base());
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    VisitRecipient.notifyVisitRecipients.mockResolvedValueOnce(false);
+    await expect(sendVisitOnlyConfirmations(base())).resolves.toBe(false);
   });
 });
 
@@ -143,7 +88,7 @@ describe('recordForCall (the booking step)', () => {
     q.returning = jest.fn(async () => [{ id: 'vtr-1' }]);
     return q;
   };
-  const bob = { first_name: 'Bob', last_name: 'Roe', phone_e164: BOB, role: 'spouse_partner', wants_notifications: true };
+  const bob = { first_name: 'Bob', last_name: 'Roe', phone_e164: BOB, role: 'spouse_partner', wants_appointment_texts: true };
   const callArgs = (over = {}) => ({
     scheduledServiceId: 'ss-1',
     customerId: 'cust-1',

@@ -17,18 +17,28 @@
 const SKIP = !process.env.DATABASE_URL;
 jest.setTimeout(60000);
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
+// The provider is the one thing stubbed: the database, the send-window answer and every read are real.
+jest.mock('../services/messaging/send-customer-message', () => ({
+  ...jest.requireActual('../services/messaging/send-customer-message'),
+  sendCustomerMessage: jest.fn(),
+}));
+// A service contact's own text choices need the contact-login tables; pass through, with a hook to force a decline.
+jest.mock('../services/contact-notification-prefs', () => {
+  const actual = jest.requireActual('../services/contact-notification-prefs');
+  return { ...actual, contactPhoneDeclinesText: jest.fn((...args) => actual.contactPhoneDeclinesText(...args)) };
+});
 
 const GATE = 'GATE_CALL_GIVEN_VISIT_TEXTS';
-// Ten digits unique to this run: area code 941, a random exchange and line.
-const run = String(Math.floor(1000000 + Math.random() * 8999999));
-const phone = (n) => `+1941${run.slice(0, 3)}${String(1000 + n).slice(-4)}`;
+// Ten digits unique to this run: area code 941, five random digits, then a two-digit index.
+const run = String(Math.floor(10000 + Math.random() * 89999));
+const phone = (n) => `+1941${run}${String(100 + n).slice(-2)}`;
 const HOLDER = phone(1);
 const BOB = phone(2);
 const ANI = phone(10);
 const OUR_LINE = phone(11);
 
 const entry = (over = {}) => ({
-  first_name: 'Bob', last_name: 'Roe', phone_e164: BOB, role: 'spouse_partner', wants_notifications: true, ...over,
+  first_name: 'Bob', last_name: 'Roe', phone_e164: BOB, role: 'spouse_partner', wants_appointment_texts: true, ...over,
 });
 const extraction = (...entries) => ({ secondary_contacts: entries });
 
@@ -49,7 +59,10 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
   });
 
   const cleanup = async () => {
-    if (customerId) await db('customers').where({ id: customerId }).del(); // visits, then their recipient rows, cascade
+    if (customerId) {
+      await db('sms_log').where({ customer_id: customerId, to_phone: BOB }).del();
+      await db('customers').where({ id: customerId }).del();
+    } // visits, then their recipient rows, cascade
     if (callLogId) {
       await db('disclaimed_number_holds').where({ source_call_log_id: callLogId }).del();
       await db('call_log').where({ id: callLogId }).del();
@@ -79,8 +92,8 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
   });
 
   const suppress = async (number, active = true) => {
-    suppressed.push(number);
     await db('messaging_suppression').insert({ phone: number, active, reason: 'stop' });
+    suppressed.push(number); // only a row THIS test inserted is ever deleted
   };
   const record = (extra = {}, ...entries) => VisitRecipient.recordForVisit({
     scheduledServiceId: visitId,
@@ -144,8 +157,8 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(await rows()).toEqual([]);
     });
 
-    test('an entry with no request, a flag on another entry, or an impossible number records nothing', async () => {
-      await record({}, entry({ wants_notifications: false }), entry({ phone_e164: null }), entry({ phone_e164: '+11735550100' }));
+    test('a report-only or presence-only entry, a flag on another entry, or an impossible number records nothing', async () => {
+      await record({}, entry({ wants_appointment_texts: false, wants_notifications: true }), entry({ wants_appointment_texts: false, on_site: true }), entry({ phone_e164: null }), entry({ phone_e164: '+11735550100' }));
       expect(await rows()).toEqual([]);
     });
   });
@@ -215,7 +228,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(Object.keys((await rows())[0].deliveries)).toEqual([contact.claimKey]);
       await VisitRecipient.sendOnce(contact, send);
       expect(send).toHaveBeenCalledTimes(1);
-      await db('visit_text_recipients').update({ deliveries: {} });
+      await db('visit_text_recipients').where({ id: contact.visitRecipientId }).update({ deliveries: {} });
       await VisitRecipient.sendOnce(contact, async () => ({ sent: false, deliveryOutcome: 'uncertain' }));
       expect(Object.keys((await rows())[0].deliveries)).toEqual([contact.claimKey]);
     });
@@ -241,11 +254,160 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     });
   });
 
+  describe('notifyVisitRecipients (real database, stubbed provider)', () => {
+    let sendCustomerMessage;
+    let contactPhoneDeclinesText;
+    const HELD = {
+      sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, retryable: true, nextAllowedAt: '2026-12-01T12:00:00.000Z',
+    };
+    const notify = (kind, extra = {}) => VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind, excludePhones: [HOLDER], ...extra });
+    const sentTo = () => sendCustomerMessage.mock.calls.map(([input]) => input.to);
+    const queued = () => db('sms_log').where({ customer_id: customerId, to_phone: BOB, status: 'scheduled' });
+
+    beforeEach(async () => {
+      process.env[GATE] = 'true';
+      ({ sendCustomerMessage } = require('../services/messaging/send-customer-message'));
+      ({ contactPhoneDeclinesText } = require('../services/contact-notification-prefs'));
+      sendCustomerMessage.mockReset();
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+      await record();
+    });
+    afterEach(() => { delete process.env[GATE]; });
+
+    test('Bob gets the informational confirmation once: no link, no customer-initiated exemption, no push routing, the visit named', async () => {
+      await notify('confirmation');
+      await notify('confirmation');
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const input = sendCustomerMessage.mock.calls[0][0];
+      expect(input).toMatchObject({
+        to: BOB, channel: 'sms', purpose: 'appointment_confirmation', customerId, appointmentId: visitId, identityTrustLevel: 'phone_matches_customer',
+        metadata: { original_message_type: 'confirmation', appointment_contact_role: 'visit_text_recipient' },
+      });
+      expect(input.customerInitiated).toBeUndefined();
+      expect(input.metadata.useCustomerChannel).toBeUndefined();
+      expect(input.body).toContain('Hi Bob,');
+      expect(input.body).toContain('December 1');
+      expect(input.body).not.toMatch(/https?:|www\.|reschedule|track/i);
+    });
+
+    test('each kind is its own text; the reminder purposes and the en-route text carry no link either', async () => {
+      for (const kind of ['confirmation', 'reminder_72h', 'reminder_24h']) await notify(kind);
+      await notify('en_route', { context: { techName: 'Pat', etaMinutes: 12, trackUrl: 'https://x.test/track/abc' } });
+      expect(sendCustomerMessage.mock.calls.map(([i]) => i.purpose)).toEqual([
+        'appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h', 'tech_en_route',
+      ]);
+      for (const [input] of sendCustomerMessage.mock.calls) expect(input.body).not.toMatch(/https?:|track|reschedule/i);
+      expect(sendCustomerMessage.mock.calls[3][0].body).toContain('Pat is on the way, about 12 minutes away.');
+    });
+
+    test('Bob gets nothing for another visit on the account, a cancelled visit, or when the sender already texts his number', async () => {
+      await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: otherVisitId, kind: 'confirmation', excludePhones: [HOLDER] });
+      await notify('confirmation', { excludePhones: [HOLDER, BOB] });
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+      await notify('confirmation');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('an existing decline is honored by every sender: a recipient_optin decline, STOP or suppression, and his own text choices', async () => {
+      const optinRow = { customer_id: customerId, phone_key: BOB.slice(-10), phone_e164: BOB };
+      await db('recipient_optin').insert({ ...optinRow, status: 'declined' });
+      await notify('confirmation');
+      await db('recipient_optin').where({ customer_id: customerId }).del();
+      await suppress(BOB);
+      await notify('reminder_72h');
+      await db('messaging_suppression').where({ phone: BOB }).del();
+      contactPhoneDeclinesText.mockResolvedValueOnce(true);
+      await notify('en_route');
+      expect(contactPhoneDeclinesText).toHaveBeenCalledWith(customerId, BOB, 'tech_en_route', expect.any(Object));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      // A pending Reply-YES ask is NOT a decline: this is the permission that does not wait for the YES.
+      await db('recipient_optin').insert({ ...optinRow, status: 'pending' });
+      await notify('reminder_24h');
+      expect(sentTo()).toEqual([BOB]);
+    });
+
+    test('a text with an unknown fate keeps its claim and is never resent; a blocked text gives the claim back', async () => {
+      sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain' });
+      await notify('confirmation');
+      await notify('confirmation');
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'NON_MOBILE_SMS_RECIPIENT' });
+      await notify('reminder_72h');
+      await notify('reminder_72h');
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(3);
+    });
+
+    test('a confirmation or 72 h reminder held for the send window is persisted for the replay, and not resent meanwhile', async () => {
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      await notify('confirmation');
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const [row] = await queued();
+      expect(row).toMatchObject({ to_phone: BOB, message_type: 'confirmation', customer_id: customerId });
+      expect(row.scheduled_for).toEqual(new Date(HELD.nextAllowedAt));
+      expect(row.message_body).toContain('Hi Bob,');
+      expect(row.metadata).toMatchObject({
+        entry_point: 'visit_text_recipient_deferred', scheduled_service_id: visitId, kind: 'confirmation',
+        replay_purpose: 'appointment_confirmation', requires_registered_dispatch: true, slot_scheduled_date: '2026-12-01', slot_window_start: '09:00',
+      });
+      expect(row.metadata.refresh_customer_phone).toBeUndefined();
+      // The replay's fresh check: owed now; gate off, a moved slot, a decline or a cancelled visit each suppress it.
+      const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toEqual({ eligible: true });
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', { ...meta, slot_scheduled_date: '2026-12-02' })).toMatchObject({ eligible: false });
+      await db('recipient_optin').insert({ customer_id: customerId, phone_key: BOB.slice(-10), phone_e164: BOB, status: 'declined' });
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toMatchObject({ eligible: false, reason: 'recipient-not-owed' });
+      await db('recipient_optin').where({ customer_id: customerId }).del();
+      delete process.env[GATE];
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toMatchObject({ eligible: false });
+      process.env[GATE] = 'true';
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toMatchObject({ eligible: false });
+    });
+
+    test('a replay that ends without a send gives the claim back, so a later sender still owes the text', async () => {
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [row] = await queued();
+      await notify('confirmation');
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const { onTerminalDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      await onTerminalDeferredReplay('visit_text_recipient_deferred', { ...row.metadata, to_phone: BOB, customer_id: customerId });
+      await notify('confirmation');
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+    });
+
+    test('a held 24 h reminder or en-route text is dropped, not queued, and stays owed to a later sender', async () => {
+      sendCustomerMessage.mockResolvedValue(HELD);
+      await notify('reminder_24h');
+      await notify('en_route', { context: { techName: 'Pat' } });
+      expect(await queued()).toEqual([]);
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+      await notify('reminder_24h');
+      await notify('en_route', { context: { techName: 'Pat' } });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(4);
+    });
+
+    test('an aborting gate stops the loop; a skipping gate sends nothing for that person', async () => {
+      await expect(notify('confirmation', { gate: async () => 'skip' })).resolves.toBe(true);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      await expect(notify('confirmation', { gate: async () => 'abort' })).resolves.toBe(false);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('with the gate off nothing is read or sent', async () => {
+      delete process.env[GATE];
+      await expect(notify('confirmation')).resolves.toBe(true);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
   describe('scope', () => {
     test('the row goes with its visit', async () => {
       await record();
       await db('scheduled_services').where({ id: visitId }).del();
-      expect(await db('visit_text_recipients').select('id')).toEqual([]);
+      expect(await db('visit_text_recipients').where({ scheduled_service_id: visitId }).select('id')).toEqual([]);
     });
 
     test('the customer row is never written: no consent stamp, no slot, no preferences', async () => {

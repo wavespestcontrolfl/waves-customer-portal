@@ -6,19 +6,26 @@
  * booking confirmation, its reminders and its en-route text. Nothing else. Anything beyond those
  * three still goes through the Reply-YES flow, unchanged.
  *
- * The permission lives on a visit_text_recipients row tied to the visit. This module never reads or
- * writes customers.service_contacts_consent_at, the service-contact slots, recipient_optin or contact
- * login: an earlier build that made the number an account-wide consented contact leaked into login,
- * review asks, email and the YES flow.
+ * The permission lives on a visit_text_recipients row tied to the visit. This module never writes
+ * customers.service_contacts_consent_at, the service-contact slots, recipient_optin or contact
+ * login: an earlier build that made the number an account-wide consented contact leaked into
+ * login, review asks, email and the YES flow. It READS the person's existing declines (their own
+ * text choices, a recipient_optin decline, STOP / suppression) and honors every one.
  *
- * This is the ONE place that decides who is eligible and who is owed a text for a visit. Every sender
- * asks it:
- *   - the call pipeline records the number when it books the visit (recordForVisit) and texts the
- *     same-call confirmation (contactsForVisit + sendOnce);
+ * This is the ONE place that decides who is eligible, who is owed a text, what the text says and
+ * how it is sent. Every sender asks it:
+ *   - the call pipeline records the number when it books the visit (recordForCall) and sends the
+ *     same-call confirmation (notifyVisitRecipients);
  *   - appointment-reminders.js safeSendAppointment, for the confirmation and the 72 h / 24 h reminders;
  *   - twilio.js sendTechEnRoute.
- * The send layer (sendCustomerMessage) still enforces STOP, suppression, a disclaimed number, the send
- * window and the line type on every text.
+ *
+ * What the person receives is informational copy built here, never the holder's template: no
+ * reschedule, confirm or move link (the appointment page link carries the visit's management token)
+ * and no tracker link (the tracker token also opens the visit's report, invoice and review cards
+ * after completion). The text goes through the same send layer as every other text, with no
+ * "customer-initiated" exemption: the send window applies, and a text held for it is persisted and
+ * replayed (visit_text_recipient_deferred in messaging/deferred-replay-registry.js) after a fresh
+ * visit, gate and decline check.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -30,23 +37,24 @@ const SOURCE = 'call_caller_provided';
 const CONSENT_VERSION = 'owner-ruling-2026-11-24-visit-only';
 const ROLE = 'visit_text_recipient';
 const TABLE = 'visit_text_recipients';
+const DEFERRED_ENTRY_POINT = 'visit_text_recipient_deferred';
 
-// The only texts a visit-only recipient gets, keyed by the sender's messageType and its policy purpose.
-// A reschedule, cancellation, no-show, arrival, completion, review or any other text is not on this
-// list, so it never reaches the recipient. A reschedule keeps the same visit row, so the recipient
-// stays; the reminders the new slot arms reach the recipient again.
-const KIND_BY_SEND = {
-  confirmation: { purpose: 'appointment_confirmation', kind: 'confirmation' },
-  reminder_72h: { purpose: 'appointment_reminder_72h', kind: 'reminder_72h' },
-  appointment_reminder: { purpose: 'appointment_reminder_24h', kind: 'reminder_24h' },
+// The only texts a visit-only recipient gets. `purpose` is the send layer's policy purpose (it also
+// names the person's own text choice for that purpose); `byMessageType` is how safeSendAppointment names
+// the same notice. A reschedule, cancellation, no-show, arrival, completion, review or any other text
+// is not here, so it never reaches the recipient. A reschedule keeps the same visit row, so the
+// recipient stays; the reminders the new slot arms reach the recipient again. `deferrable`: a text held
+// for the send window is worth sending the next morning (a 24 h reminder would land on the visit day
+// and an en-route text would be stale, so those are dropped, as for the account contacts).
+const KINDS = {
+  confirmation: { purpose: 'appointment_confirmation', messageType: 'confirmation', byMessageType: 'confirmation', deferrable: true },
+  reminder_72h: { purpose: 'appointment_reminder_72h', messageType: 'reminder_72h', byMessageType: 'reminder_72h', deferrable: true },
+  reminder_24h: { purpose: 'appointment_reminder_24h', messageType: 'appointment_reminder', byMessageType: 'appointment_reminder', deferrable: false },
+  en_route: { purpose: 'tech_en_route', messageType: 'tech_en_route', byMessageType: null, deferrable: false },
 };
 
 // A recipient gets no text about a visit that is over or cancelled.
 const LIVE_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route'];
-
-// On-site roles whose appointment-text flag counts as a request to text that person
-// (same set as the call pipeline's on-site opt-in ask).
-const ON_SITE_ROLES = new Set(['spouse_partner', 'home_buyer', 'home_seller', 'tenant', 'family_member']);
 
 const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
 
@@ -56,23 +64,17 @@ function gateLive() {
   return typeof gates.callGivenVisitTextsLive === 'function' && gates.callGivenVisitTextsLive() === true;
 }
 
-/** The kind of text a sender is about to send, or null when a visit-only recipient is owed none. */
+/** The kind of text safeSendAppointment is about to send, or null when a visit-only recipient is owed none. */
 function kindForSend(messageType, purpose) {
-  const entry = KIND_BY_SEND[String(messageType || '')];
-  return entry && entry.purpose === purpose ? entry.kind : null;
-}
-
-/** The caller asked to text this person: the notify request, or an on-site role with the appointment-text or on-site flag. */
-function askedToText(entry) {
-  if (entry.wants_notifications === true) return true;
-  const role = String(entry.role || '').trim().toLowerCase();
-  return (entry.wants_appointment_texts === true || entry.on_site === true) && ON_SITE_ROLES.has(role);
+  return Object.keys(KINDS).find((kind) => KINDS[kind].byMessageType === messageType && KINDS[kind].purpose === purpose) || null;
 }
 
 /**
- * The V2 extraction's own entries, each judged ALONE: the phone and the ask must sit on the same
- * entry. The merged V1/V2 contact is never used, so one person's flag cannot move onto another
- * person's number. Pure.
+ * The V2 extraction's own entries, each judged ALONE: the phone and the request must sit on the same
+ * entry, and the request is wants_appointment_texts: the caller agreed this person gets the appointment
+ * texts, reminders and en-route text. wants_notifications alone (a report or invoice sent to someone) and
+ * on_site alone (a person who will be at the property) never qualify. The merged V1/V2 contact is never
+ * used, so one person's flag cannot move onto another person's number. Pure.
  */
 function eligibleEntries(v2Extraction, { excludePhones = [] } = {}) {
   const taken = new Set(excludePhones.map(lastTen).filter(Boolean));
@@ -80,7 +82,7 @@ function eligibleEntries(v2Extraction, { excludePhones = [] } = {}) {
   const out = [];
   for (const rawEntry of raw) {
     const entry = mapSecondaryContactToLegacy(rawEntry);
-    if (!entry || !isValidNanpNumber(entry.phone) || !askedToText(entry)) continue;
+    if (!entry || !isValidNanpNumber(entry.phone) || entry.wants_appointment_texts !== true) continue;
     const key = lastTen(entry.phone);
     if (taken.has(key)) continue;
     taken.add(key);
@@ -115,10 +117,10 @@ async function suppressedNumber(phoneKey, conn) {
 /**
  * Record the people the caller asked to text for the visit the call booked. Idempotent: a retry of
  * the call processing finds the row and changes nothing. Never throws on a refused number; a database
- * error propagates so the caller can retry the pass.
+ * error propagates (recordForCall swallows it).
  *
  * `blocked`: the call-level SMS verdict (do-not-contact, the TCPA gate, a disclaimed caller number).
- * `excludePhones`: the call legs and the caller's own numbers (callerNumbers) plus the account holder's.
+ * `excludePhones`: the call legs and the caller's own numbers (callerNumbers).
  */
 async function recordForVisit({ scheduledServiceId, callLogId = null, v2Extraction, excludePhones = [], blocked = false, conn = db }) {
   const result = { recorded: [], skipped: [] };
@@ -169,42 +171,91 @@ async function recordForCall({ scheduledServiceId, customerId, call, contactPhon
 }
 
 /**
- * The visit-only recipients owed a text of `kind` for this visit right now, as contacts a sender can
- * text. Empty for a visit that is cancelled or over, a number the account holder already gets, or
- * anything in `excludePhones` (the numbers the sender is already texting). Fails closed: a read error
- * answers nobody.
+ * Has this person declined, by any existing route? Their own text choices as a service contact (this
+ * purpose or texts altogether), a recipient_optin decline on the account, STOP or any active
+ * suppression. Read only. Throws on an unreadable answer; callers fail closed.
  */
-async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], conn = db } = {}) {
-  if (!scheduledServiceId || !kind) return [];
+async function declinedByRecipient({ customerId, phoneKey, phoneE164, purpose, conn = db }) {
+  const { contactPhoneDeclinesText } = require('./contact-notification-prefs');
+  if (await contactPhoneDeclinesText(customerId, phoneE164, KINDS_BY_PURPOSE[purpose]?.prefsColumn ?? null, { dbh: conn })) return true;
+  const optin = await conn('recipient_optin').where({ customer_id: customerId, phone_key: phoneKey, status: 'declined' }).first('status');
+  if (optin) return true;
+  return suppressedNumber(phoneKey, conn);
+}
+// The send layer's own prefsColumn per purpose: the person's "do not send me this notice" choice is read from it.
+const KINDS_BY_PURPOSE = {
+  appointment_confirmation: { prefsColumn: 'appointment_confirmation' },
+  appointment_reminder_72h: { prefsColumn: 'service_reminder_72h' },
+  appointment_reminder_24h: { prefsColumn: 'service_reminder_24h' },
+  tech_en_route: { prefsColumn: 'tech_en_route' },
+};
+
+/**
+ * The visit-only recipients owed a text of `kind` for this visit right now, as contacts a sender can
+ * text. Empty for a visit that is cancelled or over, a number the account holder (or the sender) already
+ * texts, anything in `excludePhones`, and anyone who has declined (declinedByRecipient). Fails closed: a
+ * read error answers nobody (`throwOnError` re-throws it for the replay, which retries instead).
+ */
+async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], conn = db, throwOnError = false } = {}) {
+  if (!scheduledServiceId || !KINDS[kind]) return [];
   try {
-    const visit = await conn('scheduled_services').where({ id: scheduledServiceId }).first('id', 'status', 'scheduled_date', 'window_start', 'customer_id');
+    const visit = await conn('scheduled_services').where({ id: scheduledServiceId }).first('id', 'status', 'scheduled_date', 'window_start', 'customer_id', 'service_type');
     if (!visit || !LIVE_STATUSES.includes(String(visit.status || ''))) return [];
     const rows = await conn(TABLE).where({ scheduled_service_id: scheduledServiceId }).orderBy('created_at', 'asc');
     if (!rows.length) return [];
     const holder = await conn('customers').where({ id: visit.customer_id }).first('phone');
     const taken = new Set([...excludePhones, holder?.phone].map(lastTen).filter(Boolean));
-    const slot = `${dateOnlyString(visit.scheduled_date) || ''}T${visit.window_start ? String(visit.window_start).slice(0, 5) : ''}`;
-    return rows
-      .filter((row) => !taken.has(row.phone_key))
-      .map((row) => ({
-        phone: row.phone_e164,
-        email: null,
-        name: [row.first_name, row.last_name].filter(Boolean).join(' '),
-        // Not a service-contact role: the send runs at phone_matches_customer trust, so the contact-login
-        // check (which needs a contact slot) never applies. This person has no slot and no login.
-        role: ROLE,
-        visitRecipientId: row.id,
-        claimKey: `${kind}:${slot}`,
-      }));
+    const contacts = [];
+    for (const row of rows) {
+      const contact = taken.has(row.phone_key) ? null : await ownedContact(row, visit, kind, conn);
+      if (contact) contacts.push(contact);
+    }
+    return contacts;
   } catch (err) {
+    if (throwOnError) throw err;
     logger.warn(`[call-visit-recipient] recipients unreadable for visit ${scheduledServiceId}: ${err.code || err.name || 'db_error'}`);
     return [];
   }
 }
 
+// One recipient row as a contact a sender can text, or null when they have declined.
+async function ownedContact(row, visit, kind, conn) {
+  if (await declinedByRecipient({ customerId: visit.customer_id, phoneKey: row.phone_key, phoneE164: row.phone_e164, purpose: KINDS[kind].purpose, conn })) return null;
+  const windowStart = visit.window_start ? String(visit.window_start).slice(0, 5) : null;
+  const scheduledDate = dateOnlyString(visit.scheduled_date);
+  return {
+    phone: row.phone_e164,
+    email: null,
+    name: [row.first_name, row.last_name].filter(Boolean).join(' '),
+    // Not a service-contact role: the send runs at phone_matches_customer trust. This person has no slot and no login.
+    role: ROLE,
+    visitRecipientId: row.id,
+    claimKey: `${kind}:${scheduledDate || ''}T${windowStart || ''}`,
+    visit: { id: visit.id, customerId: visit.customer_id, serviceType: visit.service_type, scheduledDate, windowStart },
+  };
+}
+
+/**
+ * The text itself: informational, with no link of any kind (see the header). Pure.
+ * `facts`: { label, day, date, window } for a visit text; { techName, etaMinutes } for en route.
+ */
+function informationalBody(kind, firstName, facts = {}) {
+  const hi = `Hi ${firstName || 'there'},`;
+  const visit = `${facts.label || 'Your service'} is scheduled for ${facts.day}, ${facts.date}, arriving ${facts.window}.`;
+  const stop = 'Reply STOP to opt out.';
+  if (kind === 'confirmation') return `${hi} Waves Pest Control here. ${visit} We will text you a reminder before the visit and again when the technician is on the way. ${stop}`;
+  if (kind === 'en_route') {
+    const eta = facts.etaMinutes ? `, about ${facts.etaMinutes} minutes away` : '';
+    return `${hi} Waves Pest Control here. ${facts.techName || 'Your technician'} is on the way${eta}. ${stop}`;
+  }
+  return `${hi} a reminder from Waves Pest Control. ${visit} ${stop}`;
+}
+
+/** A send that was accepted, or reached the provider with an unknown fate, or is queued for the replay: the claim stays. */
 function deliveryAccepted(result) {
   if (typeof result === 'boolean') return result;
   if (!result) return false;
+  if (result.visitRecipientQueued === true) return true;
   const { classifyDeliveryCertainty } = require('./messaging/send-customer-message');
   const certainty = typeof classifyDeliveryCertainty === 'function' ? classifyDeliveryCertainty(result) : null;
   if (certainty === 'sent') return true;
@@ -229,20 +280,149 @@ async function sendOnce(contact, send, { conn = db } = {}) {
     return { skipped: true, reason: 'claim_failed' };
   }
   if (!claimed) return { skipped: true, reason: 'already_sent' };
-  const release = () => conn(TABLE)
-    .where({ id: contact.visitRecipientId })
-    .update({ deliveries: conn.raw('deliveries - ?::text', [contact.claimKey]) })
-    .catch((err) => logger.warn(`[call-visit-recipient] claim release failed for ${contact.claimKey}: ${err.code || err.name || 'db_error'}`));
   let result;
   try {
     result = await send();
   } catch (err) {
     // A throw may have reached the provider: keep the claim (no double text) unless the error proves it did not.
-    if (!deliveryAccepted(err && err.providerOutcome) && err && err.providerOutcome) await release();
+    if (err && err.providerOutcome && !deliveryAccepted(err.providerOutcome)) await releaseClaim(contact.visitRecipientId, contact.claimKey, conn);
     throw err;
   }
-  if (!deliveryAccepted(result)) await release();
+  if (!deliveryAccepted(result)) await releaseClaim(contact.visitRecipientId, contact.claimKey, conn);
   return { skipped: false, result };
+}
+
+function releaseClaim(visitRecipientId, claimKey, conn = db) {
+  return conn(TABLE)
+    .where({ id: visitRecipientId })
+    .update({ deliveries: conn.raw('deliveries - ?::text', [claimKey]) })
+    .catch((err) => logger.warn(`[call-visit-recipient] claim release failed for ${claimKey}: ${err.code || err.name || 'db_error'}`));
+}
+
+/**
+ * Persist a text the send window held, to replay it later (deferred-replay-registry visit_text_recipient_deferred).
+ * The row belongs to the recipient's own number and is frozen to the visit slot it describes. Returns true when queued.
+ */
+async function queueDeferred({ contact, kind, body, result, conn = db }) {
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  const row = {
+    customer_id: contact.visit.customerId,
+    direction: 'outbound',
+    from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+    to_phone: contact.phone,
+    message_body: body,
+    status: 'scheduled',
+    scheduled_for: new Date(result.nextAllowedAt),
+    message_type: KINDS[kind].messageType,
+    metadata: JSON.stringify({
+      entry_point: DEFERRED_ENTRY_POINT,
+      scheduled_service_id: contact.visit.id,
+      visit_recipient_id: contact.visitRecipientId,
+      claim_key: contact.claimKey,
+      kind,
+      appointment_contact_role: ROLE,
+      original_block_code: 'QUIET_HOURS_HOLD',
+      replay_purpose: KINDS[kind].purpose,
+      slot_scheduled_date: contact.visit.scheduledDate,
+      ...(contact.visit.windowStart ? { slot_window_start: contact.visit.windowStart } : {}),
+      resolve_from_by_customer: true,
+      requires_registered_dispatch: true,
+    }),
+  };
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await conn('sms_log').insert(row);
+      return true;
+    } catch (err) {
+      if (attempt === 3) logger.error(`[call-visit-recipient] held ${kind} text not queued for visit ${contact.visit.id}: ${err.code || err.name || 'error'}`);
+      else await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+    }
+  }
+  return false;
+}
+
+/**
+ * Text the visit-only recipients of this visit for one kind of notice: the ONE function every sender calls.
+ * `excludePhones`: the numbers the sender already texts. `context`: en route only, { techName, etaMinutes }.
+ * `gate(contact)`: optional per-recipient check by the sender, 'send' (default), 'skip' or 'abort'
+ * (the pipeline lost its claim). Never throws into the sender. Returns false only when a gate aborted.
+ */
+async function notifyVisitRecipients({ scheduledServiceId, kind, excludePhones = [], context = {}, gate = null, conn = db }) {
+  if (!gateLive() || !KINDS[kind] || !scheduledServiceId) return true;
+  try {
+    const contacts = await contactsForVisit(scheduledServiceId, kind, { excludePhones, conn });
+    for (const contact of contacts) {
+      const verdict = gate ? await gate(contact) : 'send';
+      if (verdict === 'abort') return false;
+      if (verdict === 'skip') continue;
+      await sendToRecipient({ contact, kind, context, conn });
+    }
+  } catch (err) {
+    logger.warn(`[call-visit-recipient] ${kind} for visit ${scheduledServiceId} skipped: ${err.code || err.name || 'error'}`);
+  }
+  return true;
+}
+
+async function buildBody(contact, kind, context) {
+  const firstName = String(contact.name || '').trim().split(/\s+/)[0] || null;
+  if (kind === 'en_route') return informationalBody(kind, firstName, context);
+  const { buildServiceLabel, confirmationArrivalWindow } = require('./appointment-reminders');
+  const { parseETDateTime, formatETDay, formatETDate } = require('../utils/datetime-et');
+  const at = parseETDateTime(`${contact.visit.scheduledDate}T${contact.visit.windowStart || '12:00'}`);
+  if (!at || Number.isNaN(at.getTime())) return null;
+  return informationalBody(kind, firstName, {
+    label: await buildServiceLabel(contact.visit.id, contact.visit.serviceType),
+    day: formatETDay(at),
+    date: formatETDate(at),
+    window: await confirmationArrivalWindow({ scheduledServiceId: contact.visit.id }),
+  });
+}
+
+async function sendToRecipient({ contact, kind, context, conn }) {
+  const body = await buildBody(contact, kind, context);
+  if (!body) return;
+  const { sendCustomerMessage } = require('./messaging/send-customer-message');
+  const { parseETDateTime } = require('../utils/datetime-et');
+  const slotAt = kind === 'en_route' ? null : parseETDateTime(`${contact.visit.scheduledDate}T${contact.visit.windowStart || '08:00'}`);
+  const outcome = await sendOnce(contact, async () => {
+    // No customerInitiated: this text goes to someone who did not call, so the send window applies.
+    const result = await sendCustomerMessage({
+      to: contact.phone,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: KINDS[kind].purpose,
+      customerId: contact.visit.customerId,
+      appointmentId: contact.visit.id,
+      ...(slotAt && !Number.isNaN(slotAt.getTime()) ? { renderedSlotMs: slotAt.getTime() } : {}),
+      identityTrustLevel: 'phone_matches_customer',
+      metadata: { original_message_type: KINDS[kind].messageType, appointment_contact_role: ROLE },
+    });
+    if (!result.sent && result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt && KINDS[kind].deferrable) {
+      if (await queueDeferred({ contact, kind, body, result, conn })) return { ...result, visitRecipientQueued: true };
+    }
+    return result;
+  }, { conn });
+  if (outcome.skipped) logger.info(`[call-visit-recipient] ${kind} skipped (${outcome.reason}) for visit ${contact.visit.id}`);
+  else if (outcome.result.visitRecipientQueued) logger.info(`[call-visit-recipient] ${kind} held for the send window, queued for visit ${contact.visit.id}`);
+  else if (!deliveryAccepted(outcome.result)) logger.warn(`[call-visit-recipient] ${kind} not sent for visit ${contact.visit.id}: ${outcome.result.code || outcome.result.reason || 'unknown'}`);
+}
+
+/**
+ * The replay's fresh check, before a queued text goes out: the gate is on, the visit is live, the recipient
+ * is still on it, owed this slot's text, and has not declined since. Throws on an unreadable answer (the
+ * replay holds the row and retries); true / false otherwise.
+ */
+async function recipientStillOwedDeferred(meta, { conn = db } = {}) {
+  if (!gateLive()) return false;
+  const contacts = await contactsForVisit(meta.scheduled_service_id, meta.kind, { conn, throwOnError: true });
+  return contacts.some((contact) => contact.visitRecipientId === meta.visit_recipient_id && contact.claimKey === meta.claim_key);
+}
+
+/** A replay that ended without sending gives the claim back, so a later sender can still owe the text. */
+function releaseDeferredClaim(meta, { conn = db } = {}) {
+  if (!meta || !meta.visit_recipient_id || !meta.claim_key) return Promise.resolve();
+  return releaseClaim(meta.visit_recipient_id, meta.claim_key, conn);
 }
 
 module.exports = {
@@ -250,13 +430,19 @@ module.exports = {
   SOURCE,
   CONSENT_VERSION,
   ROLE,
+  DEFERRED_ENTRY_POINT,
   LIVE_STATUSES,
   kindForSend,
   eligibleEntries,
   callerNumbers,
   recordForVisit,
   recordForCall,
+  declinedByRecipient,
   contactsForVisit,
+  informationalBody,
+  notifyVisitRecipients,
   sendOnce,
   deliveryAccepted,
+  recipientStillOwedDeferred,
+  releaseDeferredClaim,
 };

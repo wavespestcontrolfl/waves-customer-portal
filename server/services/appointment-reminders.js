@@ -2444,30 +2444,19 @@ function recordFailedRecipient(sharedOutcome, contact, sent, { heldIsFailure = f
 }
 
 // GATE_CALL_GIVEN_VISIT_TEXTS (owner 2026-11-24, "yes, visit only"): a person the caller named on the call that booked THIS
-// visit gets this visit's confirmation and 72 h / 24 h reminders, and nothing else. The recipient is read from the visit's own
-// row (call-visit-recipient.js decides who is eligible and who is owed the text); no customer, slot, consent stamp or opt-in
-// row is read or written. Sent AFTER the account contacts, with a throwaway outcome: the recipient's send never decides
-// whether the notice counts as delivered, held or failed for the account holder. Never throws into the holder's send.
-async function sendToVisitOnlyRecipients({ customer, renderBody, messageType, purpose, metaExtra, sendOptions, allowedContacts }) {
+// visit gets this visit's confirmation and 72 h / 24 h reminders, and nothing else. call-visit-recipient.js decides who is
+// owed the text, writes its informational copy (no reschedule or tracker link), honors their existing declines and the
+// send window, and persists a held text; no customer, slot, consent stamp or opt-in row is written. Runs AFTER the account
+// contacts and never touches their outcome. Never throws into the holder's send.
+async function sendToVisitOnlyRecipients({ messageType, purpose, metaExtra, allowedContacts }) {
   const visitRecipients = require('./call-visit-recipient');
-  if (!visitRecipients.gateLive()) return;
-  const scheduledServiceId = metaExtra?.scheduled_service_id;
-  const kind = visitRecipients.kindForSend(messageType, purpose);
-  if (!scheduledServiceId || !kind) return;
-  try {
-    const contacts = await visitRecipients.contactsForVisit(scheduledServiceId, kind, {
-      excludePhones: allowedContacts.map((contact) => contact.phone),
-    });
-    for (const contact of contacts) {
-      const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
-      await visitRecipients.sendOnce(contact, () => safeSend(
-        customer.id, contact.phone, body, messageType, purpose, 'phone_matches_customer', metaExtra,
-        sendOptions.preDispatchCheck || null, {}, sendOptions.operatorInitiated === true, false,
-      ));
-    }
-  } catch (err) {
-    logger.warn(`[appt-remind] visit-only recipient ${messageType} for visit ${scheduledServiceId} skipped: ${err.code || err.name || 'error'}`);
-  }
+  const kind = visitRecipients.gateLive() && metaExtra?.scheduled_service_id ? visitRecipients.kindForSend(messageType, purpose) : null;
+  if (!kind) return;
+  await visitRecipients.notifyVisitRecipients({
+    scheduledServiceId: metaExtra.scheduled_service_id,
+    kind,
+    excludePhones: allowedContacts.map((contact) => contact.phone),
+  });
 }
 
 async function safeSendAppointment(customer, prefs, renderBody, messageType = 'appointment_reminder', purpose = 'appointment', metaExtra = {}, sendOptions = {}) {
@@ -2647,7 +2636,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     await queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra });
   }
   if (!callbackHeldAppLegOnly) {
-    await sendToVisitOnlyRecipients({ customer, renderBody, messageType, purpose, metaExtra, sendOptions, allowedContacts });
+    await sendToVisitOnlyRecipients({ messageType, purpose, metaExtra, allowedContacts });
   }
   return sentAny;
 }
