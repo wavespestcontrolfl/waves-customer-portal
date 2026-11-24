@@ -528,6 +528,10 @@ export default function PipelineAnalytics({
     const NEVER_WINNABLE = ["invalid_lead", "expired_unsent"];
     const resolvedInRange = activeRows.filter((e) => {
       if (NEVER_WINNABLE.includes(e.disposition)) return false;
+      // The code on any row but an expired one is not a booked win: it leaves
+      // the denominator, as the server's excludedFromRatesRow does.
+      if (e.disposition === "converted_other_path" && !isBookedOtherWayEstimate(e))
+        return false;
       const resolvedAt = resolutionDate(e);
       return (
         resolvedAt != null && withinDateRange(resolvedAt, selectedRange, nowMs)

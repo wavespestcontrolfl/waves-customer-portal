@@ -510,6 +510,19 @@ describe("PipelineAnalytics", () => {
     expect(screen.getByText("1 declined · 1 expired")).toBeInTheDocument();
   });
 
+  it("keeps a declined row carrying converted_other_path out of the close rate, as the server does", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "late", status: "expired", expiresAt: daysAgo(30), disposition: "converted_other_path" }),
+        estimate({ id: "stray", status: "declined", declinedAt: daysAgo(2), disposition: "converted_other_path" }),
+      ],
+    });
+    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(
+      screen.getByText("1 accepted of 1 resolved (incl. 1 booked another way)"),
+    ).toBeInTheDocument();
+  });
+
   it("counts archived wins in MRR won but keeps them out of every other metric", () => {
     renderAnalytics({
       estimates: [

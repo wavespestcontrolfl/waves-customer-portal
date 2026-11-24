@@ -392,6 +392,35 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect((await row(earlierQuoteId)).disposition).toBe('expired_viewed');
   });
 
+  test('(p) a booking made between the draft and its send was not caused by the quote: draft -> booking -> send -> completion is not reclaimed', async () => {
+    const early = await customer(mockTransaction);
+    // Created day 0, sent day 10; the visit was booked day 5 and completed day 30.
+    const earlyId = await expiredEstimate(mockTransaction, early, { sent_at: sentPlus(10) });
+    await completedVisit(mockTransaction, early, sentPlus(30), sentPlus(5));
+    // Control: booked day 15, after the send, completed day 30.
+    const ok = await customer(mockTransaction);
+    const okId = await expiredEstimate(mockTransaction, ok, { sent_at: sentPlus(10) });
+    await completedVisit(mockTransaction, ok, sentPlus(30), sentPlus(15));
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(earlyId)).disposition).toBe('expired_viewed');
+    expect((await row(okId)).disposition).toBe('converted_other_path');
+  });
+
+  test('(q) two offers delivered at the SAME instant compete: neither is reclaimed', async () => {
+    const cust = await customer(mockTransaction);
+    const same = sentPlus(0); // one Date: the two offers share the exact instant
+    const a = await expiredEstimate(mockTransaction, cust, { sent_at: same });
+    const b = await expiredEstimate(mockTransaction, cust, { sent_at: same });
+    await paidInvoice(mockTransaction, cust, { paidAt: sentPlus(30) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(a)).disposition).toBe('expired_viewed');
+    expect((await row(b)).disposition).toBe('expired_viewed');
+  });
+
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {
     const cust = await customer(mockTransaction);
     const id = await expiredEstimate(mockTransaction, cust, { status: 'sent', expires_at: null, disposition: null, disposition_source: null, disposition_at: null });

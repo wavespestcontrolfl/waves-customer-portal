@@ -229,8 +229,13 @@ function whereConversionEligibilitySignal(query, narrowing = {}) {
  *    would expire mid-courtship and be counted lost forever). Same-day
  *    therefore reads as NOT-before; the transactional guards above still
  *    catch a genuine same-day pre-estimate conversion.
+ *
+ * `anchorSql` (SQL text from code constants) replaces estimates.created_at as
+ * the instant evidence must predate. The sweeps keep the default; the expired
+ * reclaim passes max(created_at, delivery anchor), so a booking or invoice
+ * made between the draft and its send (not caused by the quote) disqualifies.
  */
-function whereNoConversionBeforeEstimate(query) {
+function whereNoConversionBeforeEstimate(query, anchorSql = "estimates.created_at") {
   return query
     .whereNotExists(function () {
       this.select(db.raw("1"))
@@ -238,7 +243,7 @@ function whereNoConversionBeforeEstimate(query) {
         .whereRaw("invoices.customer_id = estimates.customer_id")
         .where("invoices.status", "paid")
         .whereRaw(
-          "LEAST(invoices.created_at, COALESCE(invoices.paid_at, invoices.created_at)) < estimates.created_at",
+          `LEAST(invoices.created_at, COALESCE(invoices.paid_at, invoices.created_at)) < ${anchorSql}`,
         );
     })
     .whereNotExists(function () {
@@ -256,7 +261,7 @@ function whereNoConversionBeforeEstimate(query) {
           "scheduled_services.status",
           NON_LIVE_APPOINTMENT_STATUSES,
         )
-        .whereRaw("scheduled_services.created_at < estimates.created_at");
+        .whereRaw(`scheduled_services.created_at < ${anchorSql}`);
     })
     .whereNotExists(function () {
       this.select(db.raw("1"))
@@ -264,7 +269,7 @@ function whereNoConversionBeforeEstimate(query) {
         .whereRaw("scheduled_services.customer_id = estimates.customer_id")
         .where("scheduled_services.status", "completed")
         .whereRaw(
-          "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamp AT TIME ZONE 'America/New_York') < estimates.created_at",
+          `COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamp AT TIME ZONE 'America/New_York') < ${anchorSql}`,
         );
     })
     .whereNotExists(function () {
@@ -273,7 +278,7 @@ function whereNoConversionBeforeEstimate(query) {
         .whereRaw("service_records.customer_id = estimates.customer_id")
         .where("service_records.status", "completed")
         .whereRaw(
-          "service_records.service_date::timestamp AT TIME ZONE 'America/New_York' < estimates.created_at",
+          `service_records.service_date::timestamp AT TIME ZONE 'America/New_York' < ${anchorSql}`,
         );
     })
     .whereNotExists(function () {
@@ -282,7 +287,7 @@ function whereNoConversionBeforeEstimate(query) {
         .whereRaw("customers.id = estimates.customer_id")
         .whereIn("customers.pipeline_stage", CUSTOMER_STAGES)
         .whereRaw(
-          "COALESCE(customers.member_since, (customers.created_at AT TIME ZONE 'America/New_York')::date) < (estimates.created_at AT TIME ZONE 'America/New_York')::date",
+          `COALESCE(customers.member_since, (customers.created_at AT TIME ZONE 'America/New_York')::date) < (${anchorSql} AT TIME ZONE 'America/New_York')::date`,
         );
     });
 }
@@ -417,7 +422,8 @@ function whereNoCompetingEstimate(query) {
         .from("estimates as other")
         .whereRaw("other.customer_id = estimates.customer_id")
         .whereRaw("other.id <> estimates.id")
-        .whereRaw(`(${other} > ${mine} OR (${other} = ${mine} AND other.id > estimates.id))`)
+        // At or after: a sibling delivered at the SAME instant competes too (no id tie-break).
+        .whereRaw(`${other} >= ${mine}`)
         .whereRaw(`${other} <= (?)`, [earliestConversionSignal()]);
     });
 }
@@ -452,7 +458,8 @@ function expiredConvertedEstimatesQuery() {
     })
     // The FIRST signal must be inside the window: none before delivery.
     .whereNot((q) => whereConversionEligibilitySignal(q, { before: delivered }))
-    .modify(whereNoConversionBeforeEstimate)
+    // Evidence before the quote was DELIVERED, not just created, was not caused by it.
+    .modify(whereNoConversionBeforeEstimate, `GREATEST(estimates.created_at, ${delivered})`)
     .modify(whereNoCompetingEstimate);
 }
 
