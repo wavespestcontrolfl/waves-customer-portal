@@ -5,6 +5,8 @@ const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 const { randomUUID } = require('node:crypto');
 
+// The application pool the real renewal service opens; jest.resetModules below discards every later reference.
+const appDb = require('../models/db');
 const { paidEstimateVisitsQuery } = require('../services/assessment-booking');
 const { createTermForAnnualPrepay } = require('../services/annual-prepay-renewals');
 const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
@@ -63,7 +65,10 @@ postgres('public annual-prepay renewal anchor (real PostgreSQL)', () => {
     jest.dontMock('../services/estimate-converter');
     jest.dontMock('../routes/admin-customers');
   });
-  afterAll(async () => { await database?.destroy(); });
+  afterAll(async () => {
+    await database?.destroy();
+    await appDb?.destroy?.();
+  });
 
   async function visit(overrides = {}) {
     const id = randomUUID();

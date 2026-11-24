@@ -1156,7 +1156,7 @@ async function applyAnnualPrepayOptions(trx, ctx, updatedEstimate, annualPrepayA
     convertOptions.coverageCadence = annualPrepayCoverage.coverageCadence;
   }
   const booked = updatedEstimate.customer_id && await paidEstimateVisitsQuery(trx, {
-    estimateId: updatedEstimate.id, customerId: updatedEstimate.customer_id,
+    estimateId: updatedEstimate.id, customerId: updatedEstimate.customer_id, lock: true,
   }).first('scheduled_services.scheduled_date');
   const termStart = dateOnlyString(booked?.scheduled_date) || annualPrepayTermStart || etDateString();
   const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;

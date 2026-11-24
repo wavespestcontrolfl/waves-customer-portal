@@ -13761,6 +13761,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         const reservedStartRow = await paidEstimateVisitsQuery(trx, {
           estimateId: estimate.id,
           customerId,
+          lock: true,
         }).first('scheduled_services.scheduled_date');
         const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
         const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;

@@ -6633,7 +6633,7 @@ const EstimateConverter = {
     // start nor be priced as a plan visit, and the normal auto-schedule path
     // runs when it was the only stamped row.
     const reservedRows = linkedVisitCount > 0
-      ? await paidEstimateVisitsQuery(database, { estimateId, customerId })
+      ? await paidEstimateVisitsQuery(database, { estimateId, customerId, lock: true })
       : [];
     const reservationRowsExist = reservedRows.length > 0;
     const capacitySnapshot = VisitCapacity.capacityFromReservation(reservedRows[0]);

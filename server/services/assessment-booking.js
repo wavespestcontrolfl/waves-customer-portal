@@ -84,7 +84,9 @@ function excludeAssessmentBookings(query, bookingAlias = 'scheduled_services', s
 // its appointment even when an old reservation stamp remains, while an
 // unclaimed hold, another customer's row, retained history, and a free Waves
 // Assessment can never anchor the paid plan.
-function paidEstimateVisitsQuery(database, { estimateId, customerId }) {
+// `lock` row-locks the visits (FOR UPDATE, scheduled_services only) inside a transaction, so dispatch cannot move or
+// cancel the visit a renewal term start was derived from before that transaction commits.
+function paidEstimateVisitsQuery(database, { estimateId, customerId, lock = false }) {
   const query = database('scheduled_services')
     .leftJoin('services', 'services.id', 'scheduled_services.service_id')
     .where({
@@ -94,9 +96,14 @@ function paidEstimateVisitsQuery(database, { estimateId, customerId }) {
     .whereNotNull('scheduled_services.customer_id')
     .whereRaw('scheduled_services.is_callback IS NOT TRUE')
     .whereNotIn('scheduled_services.status', RETAINED_HISTORY_STATUSES);
-  return excludeAssessmentBookings(query)
+  const ordered = excludeAssessmentBookings(query)
+    // Same-day visits tie-break on start time then id, as the public appointment lookup does, so every caller
+    // takes the same first visit (the converter seeds follow-ups from it).
     .orderBy('scheduled_services.scheduled_date', 'asc')
+    .orderBy('scheduled_services.window_start', 'asc')
+    .orderBy('scheduled_services.id', 'asc')
     .select('scheduled_services.*');
+  return lock && database.isTransaction ? ordered.forUpdate().of('scheduled_services') : ordered;
 }
 
 // Drops assessment visits from loaded scheduled_services rows (no catalog
