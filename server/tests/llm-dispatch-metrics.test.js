@@ -453,6 +453,23 @@ describe('llm-dispatch-metrics', () => {
       expect(out[0].detail).toMatch(/silent for \d\+ days/);
     });
 
+    it('gives callResearch the quiet-days grace: a night with no new call to mine is not an outage', () => {
+      // 11-23 ET: the 03:05 miner ran OK but 11-22 had 0 inbound calls, so
+      // callResearch (~5 a day) read "ZERO calls yesterday".
+      const { detectExceptions, EVENT_DRIVEN_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
+      expect(EVENT_DRIVEN_POLICIES.has('callResearch')).toBe(true);
+      const live = [{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }];
+      const priorWeek = [
+        { policy: 'callResearch', total: 37, activeDays: DAILY_CADENCE_MIN_DAYS + 1 },
+        { policy: 'report', total: 200, activeDays: 7 },
+      ];
+      expect(detectExceptions(live, priorWeek, null, true, new Set(['callResearch', 'report']))).toEqual([]);
+      const out = detectExceptions(live, priorWeek, null, true, new Set(['report']));
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({ policy: 'callResearch', kind: 'gone_silent' });
+      expect(out[0].detail).toMatch(/silent for \d\+ days/);
+    });
+
     it('never flags a retired policy as gone silent — its provider call was removed on purpose', () => {
       const { detectExceptions, RETIRED_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
       expect([...RETIRED_POLICIES]).toEqual(expect.arrayContaining(['visitBrief', 'jobCardParagraph']));
