@@ -937,7 +937,7 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
 // resolve against this process's rows. Outside the production deployment
 // that is exactly the hosts the app builds links on: the short-link base and
 // publicPortalUrl(). The production deployment (isDeployedProduction) also
-// owns every host its portal origin env values name (utils/portal-url.js
+// owns every port-less host its portal origin env values name (utils/portal-url.js
 // reads only the first one set, and production's CLIENT_URL still holds the
 // raw Railway service host; RAILWAY_PUBLIC_DOMAIN is a bare host) and the
 // branded portal host, in every configuration (also when its env values
@@ -965,10 +965,16 @@ function portalHostOf(value) {
     return null;
   }
 }
+// A host the production deployment owns besides its link bases: port-less only. Production serves its hosts on the
+// default port, so a value with an explicit port names a dev or test setup and adds nothing.
+function productionAliasHostOf(value) {
+  const host = portalHostOf(value);
+  return host && !/:\d+$/.test(host) ? host : null;
+}
 function ownedPortalHosts() {
-  const values = [require('./short-url').shortLinkBaseUrl(), publicPortalUrl()];
-  if (isDeployedProduction()) values.push(BRANDED_PORTAL_HOST, ...PORTAL_HOST_ENV_NAMES.map((name) => process.env[name]));
-  return [...new Set(values.map(portalHostOf).filter(Boolean).map(ownedHostKey))];
+  const hosts = [require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map(portalHostOf);
+  if (isDeployedProduction()) hosts.push(BRANDED_PORTAL_HOST, ...PORTAL_HOST_ENV_NAMES.map((name) => productionAliasHostOf(process.env[name])));
+  return [...new Set(hosts.filter(Boolean).map(ownedHostKey))];
 }
 // Every owned-portal-host link in an outbound body that is NOT already an
 // /l/<code> short link — the recognition the SMS link-wrap seam
@@ -1095,8 +1101,7 @@ function wrappedOwnedLinkIn(body) {
       return true;
     }
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return true;
-    // url.host, port included, as every other owned-host check compares it: an owned host on another port is foreign.
-    if (!hosts.includes(ownedHostKey(url.host))) return true;
+    if (!hosts.includes(ownedHostKey(url.hostname))) return true;
     if (url.username || url.password) return true;
     return nestedOwnedLinkRuns(`${url.pathname}${url.search}${url.hash}`).length > 0;
   });
