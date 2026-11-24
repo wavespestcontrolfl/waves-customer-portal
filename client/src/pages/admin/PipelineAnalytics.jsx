@@ -135,7 +135,9 @@ export function resolutionDate(estimate) {
 // card): the customer opened it from the portal, and it carries a
 // zero-follow-up contract.
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.undeliveredSelfServe) return false;
+  // An archived row (a booked-another-way win rides along in the page list)
+  // is never a follow-up.
+  if (estimate?.undeliveredSelfServe || estimate?.archivedAt) return false;
   if (estimate?.status === "sent" && !estimate.viewedAt && estimate.sentAt) {
     const sentAt = new Date(estimate.sentAt).getTime();
     return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
@@ -163,7 +165,11 @@ export function isSentGroupEstimate(estimate) {
 // offer crosses into follow-up-overdue too — so this is the complement slice,
 // disjoint from isFollowUpOverdueEstimate.
 export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status !== "viewed" || estimate.undeliveredSelfServe)
+  if (
+    estimate?.status !== "viewed" ||
+    estimate.undeliveredSelfServe ||
+    estimate.archivedAt
+  )
     return false;
   const last = lastEngagementMs(estimate);
   if (last == null) return false;
@@ -608,12 +614,10 @@ export default function PipelineAnalytics({
     const wonMrr = won
       .filter((e) => e.status === "accepted")
       .reduce((sum, e) => sum + amount(e), 0);
-    const declinedCount = activeRows.filter(
-      (e) => e.status === "declined",
-    ).length;
-    const expiredCount = activeRows.filter(
-      (e) => e.status === "expired",
-    ).length;
+    // The Lost tile's parts come from the rows classified lost, so a reclaimed
+    // expired row (classified won) is in neither subtotal.
+    const declinedCount = lost.filter((e) => e.status === "declined").length;
+    const expiredCount = lost.filter((e) => e.status === "expired").length;
 
     const followUpOverdue = activeRows.filter((e) =>
       isFollowUpOverdueEstimate(e, nowMs),

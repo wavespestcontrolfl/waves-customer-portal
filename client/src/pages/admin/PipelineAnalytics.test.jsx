@@ -524,6 +524,33 @@ describe("PipelineAnalytics", () => {
     expect(screen.getByText("1 new accounts")).toBeInTheDocument();
   });
 
+  it("keeps an archived booked-another-way row out of Going cold and Follow-up overdue", () => {
+    const archivedWin = {
+      status: "viewed",
+      archivedAt: daysAgo(3),
+      disposition: "converted_other_path",
+      viewedAt: daysAgo(5),
+      lastViewedAt: daysAgo(5),
+      sentAt: daysAgo(6),
+    };
+    expect(isGoingColdEstimate(archivedWin, NOW.getTime())).toBe(false);
+    expect(isFollowUpOverdueEstimate({ ...archivedWin, lastViewedAt: daysAgo(10), viewedAt: daysAgo(10) }, NOW.getTime())).toBe(false);
+    // The same row un-archived is still listed: the guard is the archive.
+    expect(isGoingColdEstimate({ ...archivedWin, archivedAt: null }, NOW.getTime())).toBe(true);
+  });
+
+  it("builds the Lost tile's declined and expired parts from the rows classified lost", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "d", status: "declined", declinedAt: daysAgo(2) }),
+        estimate({ id: "e", status: "expired", expiresAt: daysAgo(3), disposition: "expired_viewed" }),
+        estimate({ id: "late", status: "expired", expiresAt: daysAgo(30), disposition: "converted_other_path" }),
+      ],
+    });
+    // The reclaimed expired row is a win, so it is in neither part.
+    expect(screen.getByText("1 declined · 1 expired")).toBeInTheDocument();
+  });
+
   it("classifies an archived booked-another-way row as won, other archived rows as archived", () => {
     expect(
       classifyEstimate({ status: "viewed", archivedAt: daysAgo(1), disposition: "converted_other_path" }),

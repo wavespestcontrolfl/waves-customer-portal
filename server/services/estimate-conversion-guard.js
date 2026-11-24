@@ -41,6 +41,7 @@ const db = require("../models/db");
 const logger = require("./logger");
 const { CUSTOMER_STAGES } = require("./customer-stages");
 const { excludeAssessmentBookings } = require("./assessment-booking");
+const { sentAtSql, whereNotUndeliveredSelfServe } = require("./self-serve-estimates");
 
 // Appointment rows that leave NO live booking behind — the repo's terminal
 // convention (waveguard-existing-services TERMINAL_STATUSES) minus
@@ -96,6 +97,57 @@ async function customerConvertedSince(est) {
   }
 }
 
+// The two signal sources, each on a builder already `.from()` its table and
+// correlated to `estimates.customer_id`. The ONE definition of "conversion
+// signal", shared by the existence check, the reclaim's none-before-delivery
+// guard and the reclaim's earliest-signal stamp.
+const PAID_INVOICE_TIME_SQL = "COALESCE(invoices.paid_at, invoices.created_at)";
+const COMPLETED_VISIT_TIME_SQL =
+  "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamp AT TIME ZONE 'America/New_York')";
+
+function paidInvoiceSignal(query) {
+  return query
+    .whereRaw("invoices.customer_id = estimates.customer_id")
+    .where("invoices.status", "paid");
+}
+
+// status='completed' alone is the signal — legacy rows (pre 20260422000009)
+// carry a NULL completed_at, and the none-before disqualifier times them via
+// scheduled_date. Requiring completed_at would leave a legacy-only customer
+// permanently ineligible, so their converted estimate would fall through to
+// expiration instead of being archived.
+//
+// A completed Waves Assessment is NOT a conversion (owner ruling 2026-09-08,
+// assessment-booking.js): it is a free consultation, not a sale. Catalog
+// identity wins and legacy rows with no service_id fall back to the
+// service_type snapshot (excludeAssessmentBookings). The sibling
+// whereNoConversionBeforeEstimate stays deliberately broad and still counts an
+// assessment that PREDATES the estimate: that fails toward KEEPING the
+// estimate, never toward archiving it.
+function completedVisitSignal(query) {
+  return excludeAssessmentBookings(
+    query
+      .leftJoin("services", "services.id", "scheduled_services.service_id")
+      .whereRaw("scheduled_services.customer_id = estimates.customer_id")
+      .where("scheduled_services.status", "completed"),
+  );
+}
+
+// Raw time condition on a signal's own time, or null for no narrowing.
+//  - during: { from, days } — the signal lands in [from, from + days]
+//  - before: SQL instant     — the signal lands strictly before it
+// `from`/`before` are SQL text built from code constants, never input.
+function signalTimeCondition(timeSql, { during = null, before = null }) {
+  if (during) {
+    return [
+      `${timeSql} >= ${during.from} AND ${timeSql} <= ${during.from} + make_interval(days => ?)`,
+      [during.days],
+    ];
+  }
+  if (before) return [`${timeSql} < ${before}`, []];
+  return null;
+}
+
 /**
  * The sweep's NARROW positive-evidence pair (knex `.modify` helper on an
  * `estimates` query): a paid invoice or a completed service for the
@@ -103,50 +155,25 @@ async function customerConvertedSince(est) {
  * counts pending bookings and customer stage, fine for suppressing
  * outreach but not for CLASSIFYING a conversion) — exported so the admin
  * archive route classifies with exactly the sweep's criteria.
+ *
+ * Optional time narrowing for the expired-estimate reclaim (`during`,
+ * `before`, see signalTimeCondition), judged on the same two sources.
  */
-function whereConversionEligibilitySignal(query, { withinDaysOfSent = null } = {}) {
-  // Optional window (the expired-estimate reclaim): the signal must land
-  // within N days of the estimate's sent_at. Judged on the same signal
-  // sources, so there is still ONE definition of "conversion signal".
-  const windowSql = (timeSql) =>
-    withinDaysOfSent == null
-      ? null
-      : [`${timeSql} <= estimates.sent_at + make_interval(days => ?)`, [withinDaysOfSent]];
+function whereConversionEligibilitySignal(query, narrowing = {}) {
+  const narrow = (builder, timeSql) => {
+    const cond = signalTimeCondition(timeSql, narrowing);
+    return cond ? builder.whereRaw(...cond) : builder;
+  };
   return query.where((q) =>
     q
       .whereExists(function () {
-        const paid = this.select(db.raw("1"))
-          .from("invoices")
-          .whereRaw("invoices.customer_id = estimates.customer_id")
-          .where("invoices.status", "paid");
-        const w = windowSql("COALESCE(invoices.paid_at, invoices.created_at)");
-        if (w) paid.whereRaw(...w);
+        narrow(paidInvoiceSignal(this.select(db.raw("1")).from("invoices")), PAID_INVOICE_TIME_SQL);
       })
       .orWhereExists(function () {
-        // status='completed' alone is the signal — legacy rows (pre
-        // 20260422000009) carry a NULL completed_at, and the none-before
-        // disqualifier times them via scheduled_date. Requiring
-        // completed_at would leave a legacy-only customer permanently
-        // ineligible, so their converted estimate would fall through to
-        // expiration instead of being archived.
-        //
-        // A completed Waves Assessment is NOT a conversion (owner ruling
-        // 2026-09-08, assessment-booking.js): it is a free consultation, not
-        // a sale. Catalog identity wins and legacy rows with no service_id
-        // fall back to the service_type snapshot (excludeAssessmentBookings).
-        // The sibling whereNoConversionBeforeEstimate stays deliberately
-        // broad and still counts an assessment that PREDATES the estimate:
-        // that fails toward KEEPING the estimate, never toward archiving it.
-        const completedVisit = this.select(db.raw("1"))
-          .from("scheduled_services")
-          .leftJoin("services", "services.id", "scheduled_services.service_id")
-          .whereRaw("scheduled_services.customer_id = estimates.customer_id")
-          .where("scheduled_services.status", "completed");
-        const w = windowSql(
-          "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamp AT TIME ZONE 'America/New_York')",
+        narrow(
+          completedVisitSignal(this.select(db.raw("1")).from("scheduled_services")),
+          COMPLETED_VISIT_TIME_SQL,
         );
-        if (w) completedVisit.whereRaw(...w);
-        excludeAssessmentBookings(completedVisit);
       }),
   );
 }
@@ -341,23 +368,50 @@ async function archiveConvertedOpenEstimates() {
 // inside 90 days.
 const BOOKED_WON_WINDOW_DAYS = 90;
 
+// The instant an estimate counts as delivered: a delivered self-serve quote's
+// firstDeliveredAt (its sent_at is only the mint stamp), any other row's
+// sent_at (self-serve-estimates.js sentAtSql).
+const DELIVERED_AT_SQL = sentAtSql("estimates");
+
 // Expired estimates whose customer's first-ever paid invoice or completed
-// visit landed within BOOKED_WON_WINDOW_DAYS of sent_at, with no conversion
-// evidence predating the estimate (same two helpers as the open sweep).
+// visit landed within BOOKED_WON_WINDOW_DAYS AFTER delivery, with no
+// conversion evidence predating the estimate and no qualifying signal
+// between its creation and delivery (same signal helpers as the open sweep).
 // Only the system's own expiry classification (or none) may be replaced:
-// a staff reason or a customer decline is never overwritten.
+// a staff reason or a customer decline is never overwritten. A self-serve
+// quote nobody delivered never reaches the customer, so it never qualifies.
 function expiredConvertedEstimatesQuery() {
   return db("estimates")
     .where("status", "expired")
     .whereNull("archived_at")
     .whereNotNull("customer_id")
     .whereNotNull("sent_at")
+    .where(whereNotUndeliveredSelfServe("estimates"))
     .where((q) =>
       q.whereNull("disposition").orWhereIn("disposition", ["expired_viewed", "expired_unviewed"]),
     )
     .where((q) => q.whereNull("disposition_source").orWhere("disposition_source", "system"))
-    .modify(whereConversionEligibilitySignal, { withinDaysOfSent: BOOKED_WON_WINDOW_DAYS })
+    .modify(whereConversionEligibilitySignal, {
+      during: { from: DELIVERED_AT_SQL, days: BOOKED_WON_WINDOW_DAYS },
+    })
+    // The FIRST signal must be inside the window: none before delivery.
+    .whereNot((q) =>
+      whereConversionEligibilitySignal(q, { before: DELIVERED_AT_SQL }),
+    )
     .modify(whereNoConversionBeforeEstimate);
+}
+
+// The earliest qualifying signal time (payment or completion) for the row's
+// customer, as a correlated subquery over the same signal sources: the win
+// is dated when the customer converted, not when the daily pass noticed.
+function earliestConversionSignalSql(fallback) {
+  const paid = paidInvoiceSignal(
+    db("invoices").select(db.raw(`MIN(${PAID_INVOICE_TIME_SQL})`)),
+  );
+  const visit = completedVisitSignal(
+    db("scheduled_services").select(db.raw(`MIN(${COMPLETED_VISIT_TIME_SQL})`)),
+  );
+  return db.raw("COALESCE(LEAST((?), (?)), ?)", [paid, visit, fallback]);
 }
 
 /**
@@ -365,8 +419,9 @@ function expiredConvertedEstimatesQuery() {
  * customer converted is a WIN routed around the estimate, so win/loss
  * reports count it as won (group 'won_elsewhere'). Stamps the disposition
  * only: status, archived_at, expires_at and deposits stay untouched, and
- * nothing is sent to the customer. One set-based UPDATE on estimates; it
- * never row-locks visits or invoices.
+ * nothing is sent to the customer. disposition_at is the customer's
+ * earliest conversion signal (cohort timing reads it); updated_at is now.
+ * One set-based UPDATE on estimates; it never row-locks visits or invoices.
  */
 async function reclaimExpiredConvertedEstimates() {
   const now = new Date();
@@ -374,7 +429,7 @@ async function reclaimExpiredConvertedEstimates() {
     .update({
       disposition: "converted_other_path",
       disposition_source: "system",
-      disposition_at: now,
+      disposition_at: earliestConversionSignalSql(now),
       updated_at: now,
     })
     .returning(["id"]);

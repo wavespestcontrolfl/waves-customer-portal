@@ -207,6 +207,69 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect((await row(archivedId)).disposition).toBe('expired_viewed');
   });
 
+  test('(g) the FIRST signal must land after delivery: a payment between creation and delivery blocks it', async () => {
+    const early = await customer(mockTransaction);
+    const earlyId = await expiredEstimate(mockTransaction, early, { sent_at: daysAgo(SENT_DAYS_AGO - 10) });
+    await paidInvoice(mockTransaction, early, { paidAt: daysAgo(SENT_DAYS_AGO - 5) });
+    // Control: the same shape with the payment after delivery is reclaimed.
+    const ok = await customer(mockTransaction);
+    const okId = await expiredEstimate(mockTransaction, ok, { sent_at: daysAgo(SENT_DAYS_AGO - 10) });
+    await paidInvoice(mockTransaction, ok, { paidAt: daysAgo(SENT_DAYS_AGO - 20) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(earlyId)).disposition).toBe('expired_viewed');
+    expect((await row(okId)).disposition).toBe('converted_other_path');
+  });
+
+  test('(h) self-serve quotes: undelivered never qualifies; delivered is windowed from firstDeliveredAt, not the mint stamp', async () => {
+    const mint = daysAgo(SENT_DAYS_AGO);
+    const delivered = (daysFromMint) => JSON.stringify({ deliveryState: { firstDeliveredAt: sentPlus(daysFromMint).toISOString() } });
+
+    const undeliveredCust = await customer(mockTransaction);
+    const undeliveredId = await expiredEstimate(mockTransaction, undeliveredCust, { source: 'plan_start', sent_at: mint });
+    await paidInvoice(mockTransaction, undeliveredCust, { paidAt: sentPlus(30) });
+
+    // Paid 20 days after the mint but 20 days BEFORE the real delivery (day 40).
+    const beforeCust = await customer(mockTransaction);
+    const beforeId = await expiredEstimate(mockTransaction, beforeCust, { source: 'plan_start', sent_at: mint, estimate_data: delivered(40) });
+    await paidInvoice(mockTransaction, beforeCust, { paidAt: sentPlus(20) });
+
+    // Paid 100 days after the mint: past 90 days of the mint, inside 90 of the real delivery (day 40).
+    const afterCust = await customer(mockTransaction);
+    const afterId = await expiredEstimate(mockTransaction, afterCust, { source: 'plan_start', sent_at: mint, estimate_data: delivered(40) });
+    await paidInvoice(mockTransaction, afterCust, { paidAt: sentPlus(100) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(undeliveredId)).disposition).toBe('expired_viewed');
+    expect((await row(beforeId)).disposition).toBe('expired_viewed');
+    expect((await row(afterId)).disposition).toBe('converted_other_path');
+  });
+
+  test('(i) the win is dated by the customer\'s EARLIEST signal, not the day the pass ran, so cohorts read it right', async () => {
+    const { _private } = require('../services/estimate-winloss');
+    const cust = await customer(mockTransaction);
+    // Sent 35 days ago, expired at day 6; paid at day 10; reclaimed today (day 35).
+    const sent = daysAgo(35);
+    const id = await expiredEstimate(mockTransaction, cust, {
+      sent_at: sent, created_at: daysAgo(36), expires_at: daysAgo(29), disposition_at: daysAgo(29),
+    });
+    await paidInvoice(mockTransaction, cust, { paidAt: daysAgo(25) });
+    // A later payment must not move the date.
+    await paidInvoice(mockTransaction, cust, { paidAt: daysAgo(5) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    const after = await row(id);
+    expect(Math.abs(new Date(after.disposition_at).getTime() - daysAgo(25).getTime())).toBeLessThan(60 * 1000);
+    const cohorts = _private.sentCohorts([after], { days: 30, nowMs: Date.now() }).cohorts;
+    const at = (m) => cohorts.find((c) => c.maturityDays === m);
+    expect(at(7)).toMatchObject({ sent: 1, won: 0, lost: 1 });
+    expect(at(14)).toMatchObject({ sent: 1, won: 1, lost: 0 });
+    expect(at(30)).toMatchObject({ sent: 1, won: 1, lost: 0 });
+  });
+
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {
     const cust = await customer(mockTransaction);
     const id = await expiredEstimate(mockTransaction, cust, { status: 'sent', expires_at: null, disposition: null, disposition_source: null, disposition_at: null });
