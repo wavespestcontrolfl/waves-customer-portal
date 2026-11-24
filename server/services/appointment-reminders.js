@@ -2674,7 +2674,8 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // callers' own defer/skip paths re-fire the whole notice, so queueing
   // here too would double-text — rows are queued only on partial success.
   if (sentAny && heldContacts.length) {
-    await queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra });
+    // A contact whose held text was QUEUED is served too: the visit-only leg must not text the same number again.
+    sharedOutcome.servedPhones.push(...(await queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra })));
   }
   return sentAny;
 }
@@ -2690,7 +2691,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
 async function queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra }) {
   if (purpose === 'appointment_reminder_24h') {
     logger.info(`[appt-remind] ${heldContacts.length} held 24h-reminder contact(s) for customer ${customer.id} SKIPPED — an 8AM replay would land on the visit's own day`);
-    return;
+    return [];
   }
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
   // Which visit state the notice DESCRIBES (codex r22). A confirmation or
@@ -2741,6 +2742,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
       logger.warn(`[appt-remind] slot snapshot read failed for ${metaExtra.scheduled_service_id} — queueing without one: ${slotErr.message}`);
     }
   }
+  const queuedPhones = [];
   for (const held of heldContacts) {
     const heldRow = {
       customer_id: customer.id,
@@ -2788,6 +2790,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
     }
     if (queued) {
       logger.info(`[appt-remind] ${messageType} to ${held.contact.role || 'contact'} held outside the 8AM-8PM ET send window — queued for ${held.nextAllowedAt}`);
+      queuedPhones.push(held.contact.phone);
       continue;
     }
     logger.error(`[appt-remind] held ${messageType} requeue failed for ${held.contact.role || 'contact'} (customer ${customer.id}) after 3 attempts: ${lastErr?.message}`);
@@ -2812,6 +2815,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
       logger.error(`[appt-remind] held-notice exception alert failed for customer ${customer.id}: ${notifyErr.message}`);
     }
   }
+  return queuedPhones;
 }
 
 // ── Get customer + tech info ──

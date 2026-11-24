@@ -68,7 +68,8 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
 
   const cleanup = async () => {
     if (customerId) {
-      await db('sms_log').where({ customer_id: customerId, to_phone: BOB }).del();
+      await db('sms_log').where({ customer_id: customerId }).del();
+      await db('messaging_audit_log').where({ customer_id: customerId }).del();
       await db('customers').where({ id: customerId }).del();
     } // visits, then their recipient rows, cascade
     if (callLogId) {
@@ -504,6 +505,92 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(await check({ channel: 'sms' })).toMatchObject({ ok: false, code: 'CALLBACK_NUMBER_HOLD' });
       await db('disclaimed_number_holds').where({ source_call_log_id: callLogId }).del();
       expect(await check({ channel: 'sms' })).toEqual({ ok: true });
+    });
+
+    test('the claim holds a token: a replay releases only ITS claim, a repeat of the hook after another sender claimed the slot deletes nothing, and a failed release throws', async () => {
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [row] = await queued();
+      const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
+      expect(typeof meta.claim_token).toBe('string');
+      expect((await rows())[0].deliveries[meta.claim_key]).toBe(meta.claim_token);
+      await VisitRecipient.releaseDeferredClaim(meta);
+      expect((await rows())[0].deliveries).toEqual({});
+      // Another sender claims the same kind and slot and delivers; the hook runs again (a worker crashed before clearing it).
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+      await notify('confirmation');
+      const [{ deliveries }] = await rows();
+      expect(deliveries[meta.claim_key]).toBeDefined();
+      await VisitRecipient.releaseDeferredClaim(meta);
+      expect((await rows())[0].deliveries[meta.claim_key]).toBe(deliveries[meta.claim_key]);
+      // A row queued before tokens existed proves no ownership: nothing is released.
+      await VisitRecipient.releaseDeferredClaim({ ...meta, claim_token: undefined });
+      expect((await rows())[0].deliveries[meta.claim_key]).toBe(deliveries[meta.claim_key]);
+      // A failed release is thrown to the worker, which retries the hook.
+      const failing = jest.fn(() => { const q = { where: () => q, whereRaw: () => q, update: () => Promise.reject(new Error('db down')) }; return q; });
+      failing.raw = db.raw.bind(db);
+      await expect(VisitRecipient.releaseDeferredClaim(meta, { conn: failing })).rejects.toThrow('db down');
+    });
+
+    test('a failed callback-hold read is retried, never read as a hold: the handoff check says retry and the replay holds the row', async () => {
+      const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [row] = await queued();
+      const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
+      const spy = jest.spyOn(Holds, 'disclaimedNumberHeldForVisit').mockRejectedValue(new Error('read failed'));
+      try {
+        await expect(VisitRecipient.recipientStillOwed(meta)).rejects.toThrow('read failed');
+        expect(await VisitRecipient.providerCheck(meta)).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', retryable: true });
+        expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toMatchObject({ eligible: false, retryable: true });
+      } finally { spy.mockRestore(); }
+    });
+
+    test('a queued day-only text is revalidated at the replay handoff (the 24 h reminder switched off, a later promise delivered); a fresh send is not asked again', async () => {
+      const Reminders = require('../services/appointment-reminders');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('reminder_72h', { dayOnly: true });
+      const [row] = await queued();
+      const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
+      const spy = jest.spyOn(Reminders, 'revalidateDelayedDaySend');
+      try {
+        spy.mockResolvedValue('day');
+        expect(await VisitRecipient.providerCheck({ ...meta, replay: true })).toEqual({ ok: true });
+        spy.mockResolvedValue('window');
+        expect(await VisitRecipient.providerCheck({ ...meta, replay: true })).toMatchObject({ ok: false, code: 'VISIT_DAY_PROMISE_STALE' });
+        spy.mockResolvedValue('suppress');
+        expect(await VisitRecipient.providerCheck({ ...meta, replay: true })).toMatchObject({ ok: false, reason: 'day-promise-superseded' });
+        spy.mockClear();
+        expect(await VisitRecipient.providerCheck(meta)).toEqual({ ok: true });
+        expect(spy).not.toHaveBeenCalled();
+      } finally { spy.mockRestore(); }
+    });
+
+    test('the holder-recovery evidence lookups of the call processor (audit + sms_log) leave out a visit-only delivery', async () => {
+      // The audit ledger: a visit-only row carries its role in metadata.
+      await db('messaging_audit_log').insert([
+        { body_hash: 'b1', to_hash: 'h1', to_last4: '0002', customer_id: customerId, appointment_id: visitId, audience: 'customer', purpose: 'appointment_confirmation', channel: 'sms', validators_passed: [], validators_failed: [], sent_at: new Date(), metadata: { appointment_contact_role: 'visit_text_recipient', scheduled_service_id: visitId } },
+      ]);
+      const evidence = () => db('messaging_audit_log')
+        .where({ appointment_id: String(visitId), purpose: 'appointment_confirmation' })
+        .whereNotNull('sent_at')
+        .whereRaw("COALESCE(metadata->>'appointment_contact_role', '') <> 'visit_text_recipient'")
+        .first('id');
+      expect(await evidence()).toBeUndefined();
+      await db('messaging_audit_log').insert({ body_hash: 'b2', to_hash: 'h2', to_last4: '0001', customer_id: customerId, appointment_id: visitId, audience: 'customer', purpose: 'appointment_confirmation', channel: 'sms', validators_passed: [], validators_failed: [], sent_at: new Date(), metadata: { scheduled_service_id: visitId } });
+      expect(await evidence()).toBeDefined();
+      await db('messaging_audit_log').where({ customer_id: customerId }).del();
+      // The sms_log fallback: Bob's accepted confirmation is not the holder's.
+      await db('sms_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: phone(50), to_phone: BOB, message_type: 'confirmation', twilio_sid: 'SM1234567890', message_body: 'x', status: 'delivered' });
+      const smsEvidence = () => db('sms_log')
+        .where({ customer_id: customerId, message_type: 'confirmation', direction: 'outbound' })
+        .whereRaw("twilio_sid ~ '^(SM|MM)'")
+        .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) NOT IN (SELECT phone_key FROM visit_text_recipients WHERE scheduled_service_id = ?)", [visitId])
+        .first('id');
+      expect(await smsEvidence()).toBeUndefined();
+      await db('sms_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: phone(50), to_phone: HOLDER, message_type: 'confirmation', twilio_sid: 'SM1234567891', message_body: 'x', status: 'delivered' });
+      expect(await smsEvidence()).toBeDefined();
+      await db('sms_log').where({ customer_id: customerId, to_phone: HOLDER }).del();
     });
 
     test('with the gate off nothing is read or sent', async () => {

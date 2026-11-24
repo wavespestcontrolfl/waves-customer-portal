@@ -347,6 +347,31 @@ describe('deliverAppointmentNotice dispatches the visit-only leg once per notice
   });
 });
 
+// A held 72 h reminder to an account contact is QUEUED for the replay, so that contact is served: the visit-only leg must not
+// text the same number a second time the next morning.
+describe('safeSendAppointment reports who it really served', () => {
+  const HELD = { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', retryable: true, deferred: true, nextAllowedAt: '2026-12-02T13:00:00.000Z' };
+  const send = (messageType, purpose, sendOutcome) => AppointmentReminders.safeSendAppointment(
+    CUSTOMER, {}, async () => 'Hi', messageType, purpose, { scheduled_service_id: 'ss-1' }, { sendOutcome },
+  );
+
+  test('an accepted contact and a queued held contact are both served; a failed one is not; a held 24 h reminder is dropped, not served', async () => {
+    getAppointmentContacts.mockReturnValue([PRIMARY, { phone: BOB, role: 'service_contact', name: 'Bob Roe' }]);
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true }).mockResolvedValueOnce(HELD);
+    const queuedOutcome = {};
+    await send('reminder_72h', 'appointment_reminder_72h', queuedOutcome);
+    expect(queuedOutcome.servedPhones).toEqual([HOLDER, BOB]);
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true }).mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED' });
+    const failedOutcome = {};
+    await send('reminder_72h', 'appointment_reminder_72h', failedOutcome);
+    expect(failedOutcome.servedPhones).toEqual([HOLDER]);
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true }).mockResolvedValueOnce(HELD);
+    const dayBeforeOutcome = {};
+    await send('appointment_reminder', 'appointment_reminder_24h', dayBeforeOutcome);
+    expect(dayBeforeOutcome.servedPhones).toEqual([HOLDER]);
+  });
+});
+
 // --- sendTechEnRoute --------------------------------------------------------------------------------------
 
 describe('sendTechEnRoute hands the en-route text to the visit-only recipients', () => {

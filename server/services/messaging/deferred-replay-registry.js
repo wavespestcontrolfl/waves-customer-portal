@@ -1744,7 +1744,7 @@ const REGISTRY = {
     },
     // The same fresh read at the true provider boundary (the permission, the callback-number hold, the slot and the quoted arrival).
     providerPreSendCheck(meta) {
-      return () => require('../call-visit-recipient').providerCheck(meta);
+      return () => require('../call-visit-recipient').providerCheck({ ...meta, replay: true });
     },
     async onTerminal(meta) {
       await require('../call-visit-recipient').releaseDeferredClaim(meta);

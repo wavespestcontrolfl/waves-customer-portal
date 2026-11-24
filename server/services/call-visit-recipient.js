@@ -28,6 +28,7 @@
  * replayed (visit_text_recipient_deferred in messaging/deferred-replay-registry.js) after a fresh
  * visit, gate and decline check.
  */
+const { randomUUID } = require('node:crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { toE164, isValidNanpNumber } = require('../utils/phone');
@@ -284,12 +285,14 @@ function deliveryAccepted(result) {
  * when the claim was already taken or could not be written (fail closed: no claim, no text).
  */
 async function sendOnce(contact, send, { conn = db } = {}) {
+  // The claim value is a token, so a release (this send's own, or a queued replay's) removes ONLY the claim it made.
+  const claimToken = randomUUID();
   let claimed;
   try {
     claimed = await conn(TABLE)
       .where({ id: contact.visitRecipientId })
       .whereRaw('NOT jsonb_exists(deliveries, ?)', [contact.claimKey])
-      .update({ deliveries: conn.raw('deliveries || jsonb_build_object(?::text, now()::text)', [contact.claimKey]) });
+      .update({ deliveries: conn.raw('deliveries || jsonb_build_object(?::text, ?::text)', [contact.claimKey, claimToken]) });
   } catch (err) {
     logger.warn(`[call-visit-recipient] claim failed for ${contact.claimKey}: ${err.code || err.name || 'db_error'}`);
     return { skipped: true, reason: 'claim_failed' };
@@ -297,28 +300,32 @@ async function sendOnce(contact, send, { conn = db } = {}) {
   if (!claimed) return { skipped: true, reason: 'already_sent' };
   let result;
   try {
-    result = await send();
+    result = await send(claimToken);
   } catch (err) {
     // A throw may have reached the provider: keep the claim (no double text) unless the error proves it did not.
-    if (err && err.providerOutcome && !deliveryAccepted(err.providerOutcome)) await releaseClaim(contact.visitRecipientId, contact.claimKey, conn);
+    if (err && err.providerOutcome && !deliveryAccepted(err.providerOutcome)) await releaseClaim(contact.visitRecipientId, contact.claimKey, claimToken, conn);
     throw err;
   }
-  if (!deliveryAccepted(result)) await releaseClaim(contact.visitRecipientId, contact.claimKey, conn);
+  if (!deliveryAccepted(result)) await releaseClaim(contact.visitRecipientId, contact.claimKey, claimToken, conn);
   return { skipped: false, result };
 }
 
-function releaseClaim(visitRecipientId, claimKey, conn = db) {
-  return conn(TABLE)
+// Removes the claim only while it still holds `claimToken` (never another sender's newer claim). Best-effort for a send's own
+// release; `throwOnError` is for the replay's terminal hook, which the worker retries.
+async function releaseClaim(visitRecipientId, claimKey, claimToken, conn = db, { throwOnError = false } = {}) {
+  const release = conn(TABLE)
     .where({ id: visitRecipientId })
-    .update({ deliveries: conn.raw('deliveries - ?::text', [claimKey]) })
-    .catch((err) => logger.warn(`[call-visit-recipient] claim release failed for ${claimKey}: ${err.code || err.name || 'db_error'}`));
+    .whereRaw('deliveries ->> ? = ?', [claimKey, String(claimToken || '')])
+    .update({ deliveries: conn.raw('deliveries - ?::text', [claimKey]) });
+  if (throwOnError) return release;
+  return release.catch((err) => logger.warn(`[call-visit-recipient] claim release failed for ${claimKey}: ${err.code || err.name || 'db_error'}`));
 }
 
 /**
  * Persist a text the send window held, to replay it later (deferred-replay-registry visit_text_recipient_deferred).
  * The row belongs to the recipient's own number and is frozen to the visit slot it describes. Returns true when queued.
  */
-async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, recheckMeta = {}, conn = db }) {
+async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, recheckMeta = {}, claimToken = null, conn = db }) {
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
   const row = {
     customer_id: contact.visit.customerId,
@@ -334,6 +341,7 @@ async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, re
       scheduled_service_id: contact.visit.id,
       visit_recipient_id: contact.visitRecipientId,
       claim_key: contact.claimKey,
+      claim_token: claimToken,
       kind,
       appointment_contact_role: ROLE,
       original_block_code: 'QUIET_HOURS_HOLD',
@@ -433,7 +441,7 @@ async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
     ...(dayOnly ? { promise_level: 'day' } : {}),
     ...(arrivalStart && !dayOnly ? { arrival_start: arrivalStart } : {}),
   };
-  const outcome = await sendOnce(contact, async () => {
+  const outcome = await sendOnce(contact, async (claimToken) => {
     // No customerInitiated: this text goes to someone who did not call, so the send window applies.
     const result = await sendCustomerMessage({
       to: contact.phone,
@@ -452,7 +460,7 @@ async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
       metadata: { original_message_type: KINDS[kind].messageType, appointment_contact_role: ROLE, scheduled_service_id: contact.visit.id, ...promiseMeta },
     });
     if (!result.sent && result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt && KINDS[kind].deferrable) {
-      if (await queueDeferred({ contact, kind, body, result, promiseMeta, recheckMeta, conn })) return { ...result, visitRecipientQueued: true };
+      if (await queueDeferred({ contact, kind, body, result, promiseMeta, recheckMeta, claimToken, conn })) return { ...result, visitRecipientQueued: true };
     }
     return result;
   }, { conn });
@@ -475,7 +483,8 @@ const claimDate = (claimKey) => String(claimKey || '').slice(String(claimKey || 
 async function recipientStillOwed(meta, { conn = db } = {}) {
   const no = (code, reason) => ({ ok: false, code, reason });
   if (!gateLive()) return no('VISIT_TEXT_GATE_OFF', 'gate-off');
-  if (await require('./appointment-reminders').callbackNumberHoldActiveForVisit({ scheduledServiceId: meta.scheduled_service_id })) {
+  // The raw reader THROWS on a failed read (the boolean wrapper turns it into "held"): a failed read retries, never drops the text.
+  if (await require('./disclaimed-number-holds').disclaimedNumberHeldForVisit({ scheduledServiceId: meta.scheduled_service_id }, conn)) {
     return no('CALLBACK_NUMBER_HOLD', 'callback-number-hold');
   }
   const contacts = await contactsForVisit(meta.scheduled_service_id, meta.kind, { conn, throwOnError: true });
@@ -484,6 +493,12 @@ async function recipientStillOwed(meta, { conn = db } = {}) {
   const sameSlot = meta.promise_level === 'day' ? claimDate(mine.claimKey) === claimDate(meta.claim_key) : mine.claimKey === meta.claim_key;
   if (!sameSlot) return no('VISIT_SLOT_MOVED', 'slot-moved');
   if (meta.arrival_start && (await arrivalSnapshot(mine.visit, conn)).hhmm !== meta.arrival_start) return no('VISIT_ARRIVAL_MOVED', 'arrival-moved');
+  // A queued day-only text is frozen: it may go only while the day promise still stands (the 24-hour reminder still on, no later
+  // promise delivered). A fresh send just made that decision with the holder's, so only a replay re-asks.
+  if (meta.replay && meta.promise_level === 'day') {
+    const verdict = await require('./appointment-reminders').revalidateDelayedDaySend({ customerId: mine.visit.customerId, scheduledServiceId: meta.scheduled_service_id });
+    if (verdict !== 'day') return no('VISIT_DAY_PROMISE_STALE', verdict === 'suppress' ? 'day-promise-superseded' : 'day-promise-no-longer-valid');
+  }
   return { ok: true };
 }
 
@@ -499,13 +514,14 @@ async function providerCheck(meta, { conn = db } = {}) {
 
 /** The replay's fresh check, before a queued text goes out. True when still owed; throws on an unreadable answer. */
 async function recipientStillOwedDeferred(meta, { conn = db } = {}) {
-  return (await recipientStillOwed(meta, { conn })).ok === true;
+  return (await recipientStillOwed({ ...meta, replay: true }, { conn })).ok === true;
 }
 
-/** A replay that ended without sending gives the claim back, so a later sender can still owe the text. */
+/** A replay that ended without sending gives ITS claim back (matched by its token), so a later sender can still owe the text. A
+ *  repeat of this hook after another sender has claimed the slot deletes nothing. A failed release throws: the worker retries it. */
 function releaseDeferredClaim(meta, { conn = db } = {}) {
-  if (!meta || !meta.visit_recipient_id || !meta.claim_key) return Promise.resolve();
-  return releaseClaim(meta.visit_recipient_id, meta.claim_key, conn);
+  if (!meta || !meta.visit_recipient_id || !meta.claim_key || !meta.claim_token) return Promise.resolve();
+  return releaseClaim(meta.visit_recipient_id, meta.claim_key, meta.claim_token, conn, { throwOnError: true });
 }
 
 module.exports = {

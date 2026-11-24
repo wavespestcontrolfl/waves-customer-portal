@@ -23357,9 +23357,12 @@ const CallRecordingProcessor = {
                     // sms_log (no visit id there — key by customer + type
                     // since THIS visit's row was created; a cross-visit match
                     // skips the re-arm, failing toward silence).
+                    // A visit-only recipient's confirmation (call-visit-recipient.js) is NOT the holder's: its delivery is no
+                    // evidence the holder was reached, in either ledger below.
                     let confirmationDelivered = await db('messaging_audit_log')
                       .where({ appointment_id: String(svc.id), purpose: 'appointment_confirmation' })
                       .whereNotNull('sent_at')
+                      .whereRaw("COALESCE(metadata->>'appointment_contact_role', '') <> 'visit_text_recipient'")
                       .first('id');
                     if (!confirmationDelivered) {
                       confirmationDelivered = await db('customer_interactions')
@@ -23379,6 +23382,7 @@ const CallRecordingProcessor = {
                         // customer was reached. Same genuine-SID pattern the
                         // cancellation-notice worker uses.
                         .whereRaw("twilio_sid ~ '^(SM|MM)'")
+                        .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) NOT IN (SELECT phone_key FROM visit_text_recipients WHERE scheduled_service_id = ?)", [svc.id])
                         .first('id');
                     }
                     if (!confirmationDelivered) {
