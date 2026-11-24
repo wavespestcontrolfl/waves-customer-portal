@@ -216,5 +216,16 @@ describe('recordRun', () => {
     const score = await rainMode.scoreDay(row, { fetchRain: wet, now: new Date('2026-11-26T20:00:00Z') });
     expect(score).toMatchObject({ wet_day: true, hit: true, cutoff_hit: false });
   });
+
+  test('a Sunday morning call for Monday is not the cutoff; the Sunday 2 PM call is', async () => {
+    const conn = fakeConn({ campaigns });
+    const sundayMorning = new Date('2026-11-29T15:00:00Z'); // Sunday 10 AM ET, sells Monday 11-30
+    await rainMode.recordRun({ now: sundayMorning, conn, read: readerFor('2026-11-30', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn() });
+    expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-30']).toMatchObject({ call: 'dry' });
+    expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-30'].cutoff_call).toBeUndefined();
+    const sundayTwo = new Date('2026-11-29T19:00:00Z'); // Sunday 2 PM ET
+    await rainMode.recordRun({ now: sundayTwo, conn, read: readerFor('2026-11-30', [9, 9, 9, 9, 0, 0]), fetchRain: jest.fn() });
+    expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-30']).toMatchObject({ call: 'rain', cutoff_call: 'rain', cutoff_at: sundayTwo.toISOString() });
+  });
 });
 

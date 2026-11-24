@@ -245,10 +245,10 @@ async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) 
     // The day's latest settled call stands. A call already scored is never rewritten.
     if (forecast.call !== 'unknown' && !days[day]?.score) {
       const prior = days[day] || {};
-      // The cutoff call is the first settled call made before the day (from 2 PM the day before): the one the ads
-      // act on. It is never rewritten; the latest call is kept beside it, and the score grades both.
+      // The cutoff call is the first settled call made from 2 PM the day before (a Sunday run sells Monday all day;
+      // only its 2 PM and later calls count): the one the ads act on. It is never rewritten; the latest call is kept beside it, and the score grades both.
       const cutoff = prior.cutoff_call ? { cutoff_call: prior.cutoff_call, cutoff_at: prior.cutoff_at }
-        : future ? { cutoff_call: forecast.call, cutoff_at: run.at } : {};
+        : future && etParts(now).hour >= 14 ? { cutoff_call: forecast.call, cutoff_at: run.at } : {};
       days[day] = { ...prior, day, call: forecast.call, at: run.at, ...cutoff, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) };
     }
     scored = await scorePastDays(days, now, { fetchRain });
