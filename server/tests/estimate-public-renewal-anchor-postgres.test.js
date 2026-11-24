@@ -7,7 +7,7 @@ const { randomUUID } = require('node:crypto');
 
 // The application pool the real renewal service opens; jest.resetModules below discards every later reference.
 const appDb = require('../models/db');
-const { paidEstimateVisitsQuery } = require('../services/assessment-booking');
+const { paidEstimateVisitsQuery, orderPaidVisits } = require('../services/assessment-booking');
 const { createTermForAnnualPrepay } = require('../services/annual-prepay-renewals');
 const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
 
@@ -101,6 +101,56 @@ postgres('public annual-prepay renewal anchor (real PostgreSQL)', () => {
     expect(rows.map((row) => row.id)).toEqual([paid]);
     expect(dateOnly(rows[0].scheduled_date)).toBe('2098-02-10');
     expect(dateOnly(rows[0].scheduled_date) > '2098-01-31').toBe(true);
+  });
+
+  test('a visit a concurrent reschedule moves ahead while the locked read waits becomes the first visit (two transactions)', async () => {
+    const cid = randomUUID();
+    const eid = randomUUID();
+    const later = randomUUID();
+    const earlier = randomUUID();
+    await database('customers').insert({
+      id: cid, first_name: 'Synthetic', last_name: 'Reorder', email: `${cid}@example.invalid`, phone: `fixture-${cid.slice(0, 8)}`,
+      address_line1: '1 Synthetic Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer',
+    });
+    await database('estimates').insert({ id: eid, customer_id: cid, status: 'sent', service_interest: 'Quarterly Pest Control' });
+    const base = {
+      customer_id: cid, source_estimate_id: eid, service_type: 'Quarterly Pest Control Service',
+      status: 'confirmed', window_start: '09:00', window_end: '10:00',
+    };
+    await database('scheduled_services').insert([
+      { ...base, id: earlier, scheduled_date: '2098-03-01' },
+      { ...base, id: later, scheduled_date: '2098-04-01' },
+    ]);
+    try {
+      const mover = await database.transaction();
+      // The reschedule holds the later visit's row lock and moves it ahead of the first one, uncommitted.
+      await mover('scheduled_services').where({ id: later }).forUpdate().first('id');
+      await mover('scheduled_services').where({ id: later }).update({ scheduled_date: '2098-02-01' });
+      const reader = database.transaction(async (readTrx) => orderPaidVisits(
+        await paidEstimateVisitsQuery(readTrx, { estimateId: eid, customerId: cid, lock: true }),
+      ));
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await mover.commit();
+      const rows = await reader;
+      expect(rows.map((row) => row.id)).toEqual([later, earlier]);
+      expect(dateOnly(rows[0].scheduled_date)).toBe('2098-02-01');
+    } finally {
+      await database('scheduled_services').where({ source_estimate_id: eid }).del();
+      await database('estimates').where({ id: eid }).del();
+      await database('customers').where({ id: cid }).del();
+    }
+  }, 30000);
+
+  test('an unflagged completed re-service never anchors the term; the next paid visit does', async () => {
+    await visit({
+      scheduled_date: '2098-01-20', status: 'completed', is_callback: false,
+      service_type: 'Pest Control Re-Service',
+    });
+    const paid = await visit({ scheduled_date: '2098-02-10' });
+
+    const rows = await paidEstimateVisitsQuery(trx, { estimateId, customerId });
+
+    expect(rows.map((row) => row.id)).toEqual([paid]);
   });
 
   test('excludes another customer, unclaimed holds, assessment, and retained history', async () => {

@@ -20,6 +20,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
+const { RE_SERVICE_SERVICE_KEYS } = require('./re-service');
+const { dateOnlyString } = require('../utils/date-only');
 
 const ASSESSMENT_DISPLAY_NAME = 'Waves Assessment';
 const ASSESSMENT_NAME_RE = /^waves assessment$/i;
@@ -97,6 +99,13 @@ function paidEstimateVisitsQuery(database, { estimateId, customerId, lock = fals
     })
     .whereNotNull('scheduled_services.customer_id')
     .whereRaw('scheduled_services.is_callback IS NOT TRUE')
+    // A re-service completed before the callback flag shipped keeps is_callback=false: it is a free visit and never
+    // anchors a paid term. Same classifier as annual-prepay-renewals (catalog key, then the re-service label).
+    .whereRaw(
+      `NOT (COALESCE(services.service_key, '') = ANY(?)
+        OR (COALESCE(services.name, '') || ' ' || COALESCE(scheduled_services.service_type, '')) ~* ?)`,
+      [Array.from(RE_SERVICE_SERVICE_KEYS), '\\mre-?service\\M'],
+    )
     .whereNotIn('scheduled_services.status', RETAINED_HISTORY_STATUSES);
   const ordered = excludeAssessmentBookings(query)
     // Same-day visits tie-break on start time then id, as the public appointment lookup does, so every caller
@@ -106,6 +115,20 @@ function paidEstimateVisitsQuery(database, { estimateId, customerId, lock = fals
     .orderBy('scheduled_services.id', 'asc')
     .select('scheduled_services.*');
   return lock && database.isTransaction ? ordered.forUpdate('scheduled_services') : ordered;
+}
+
+// The locked read orders its rows before it waits on a row lock a concurrent reschedule holds, so a visit moved while
+// we waited comes back with its new date in its old place. Re-order the returned rows by their current date, start
+// time and id before taking the first as the anchor.
+function orderPaidVisits(rows) {
+  const key = (row) => [dateOnlyString(row?.scheduled_date) || '', String(row?.window_start || ''), String(row?.id || '')];
+  return [...(Array.isArray(rows) ? rows : [])].sort((a, b) => {
+    const [ka, kb] = [key(a), key(b)];
+    for (let i = 0; i < ka.length; i += 1) {
+      if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
+    }
+    return 0;
+  });
 }
 
 // Drops assessment visits from loaded scheduled_services rows (no catalog
@@ -174,6 +197,7 @@ async function hadCompletedAssessmentLook(conn, estimate) {
 
 module.exports = {
   hadCompletedAssessmentLook,
+  orderPaidVisits,
   ASSESSMENT_DISPLAY_NAME,
   ASSESSMENT_NAME_RE,
   ASSESSMENT_SERVICE_KEY,

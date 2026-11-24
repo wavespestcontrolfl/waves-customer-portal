@@ -16,7 +16,7 @@ const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
 const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
-const { paidEstimateVisitsQuery } = require('./assessment-booking');
+const { paidEstimateVisitsQuery, orderPaidVisits } = require('./assessment-booking');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, areaAddOnConfig } = require('./pricing-engine/constants');
 const { estimateLawnFloorArmed, lawnRowsShowFloorEnforcement } = require('./estimate-floor-signal-replay');
 // Canonical service-key tier membership (aliased: this module's local
@@ -6633,7 +6633,7 @@ const EstimateConverter = {
     // start nor be priced as a plan visit, and the normal auto-schedule path
     // runs when it was the only stamped row.
     const reservedRows = linkedVisitCount > 0
-      ? await paidEstimateVisitsQuery(database, { estimateId, customerId, lock: true })
+      ? orderPaidVisits(await paidEstimateVisitsQuery(database, { estimateId, customerId, lock: true }))
       : [];
     const reservationRowsExist = reservedRows.length > 0;
     const capacitySnapshot = VisitCapacity.capacityFromReservation(reservedRows[0]);
