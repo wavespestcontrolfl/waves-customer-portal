@@ -30,6 +30,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
+const { discountStackingLive } = require('../config/feature-gates');
 const BillingLane = require('./billing-lane');
 const InvoiceCandidate = require('./completion-invoice-candidate');
 
@@ -459,6 +460,12 @@ function invoiceStates(f) {
     states.push({ code: 'annual_prepay_unconfirmed', text: 'the annual prepay coverage could not be confirmed for this visit' });
   }
   const anyInvoice = history.length > 0 || !!invoices.existing;
+  // GATE_DISCOUNT_STACKING: InvoiceService.create() re-resolves a service-scoped stamp against the invoice's own lines
+  // (computeStackedDocumentDiscountLines), so a stamp whose service left the visit bills $0, not the frozen amount
+  // the builder returns. The preview does not run that resolution.
+  if (discountStackingLive() && (visit.discount_service_key_filter || visit.discount_service_category_filter)) {
+    states.push({ code: 'service_scoped_discount', text: 'a discount scoped to one service is stamped on this visit: the invoice re-checks it against the billed lines, so its amount may differ' });
+  }
   if (coverage.annualVerdict === true && (f.addonsOwed || anyInvoice)) {
     states.push({ code: 'annual_prepay_addons_or_invoice', text: 'the visit is annual-prepay covered and has add-ons owed or an invoice on it: the close-out may bill the add-ons or hand them to the office' });
   }

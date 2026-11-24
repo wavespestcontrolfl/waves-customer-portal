@@ -197,6 +197,32 @@ describe('get_closeout_bill_preview: every off-plain-path state is uncertain, ne
     expect(out.notes.join(' ')).not.toMatch(/undefined/);
   });
 
+  // Codex #8422 r5: with GATE_DISCOUNT_STACKING the invoice re-resolves a service-scoped stamp against its own
+  // lines (a stamp whose service left the visit bills $0), which the preview does not run.
+  describe('a service-scoped discount stamp', () => {
+    const saved = process.env.GATE_DISCOUNT_STACKING;
+    afterEach(() => { if (saved === undefined) delete process.env.GATE_DISCOUNT_STACKING; else process.env.GATE_DISCOUNT_STACKING = saved; });
+
+    test('is uncertain while discount stacking is on', async () => {
+      process.env.GATE_DISCOUNT_STACKING = 'true';
+      const out = await run(facts({ ...priced, discount_dollars: 12, discount_service_key_filter: 'mosquito' }, {}));
+      expect(out.prediction).toBe('uncertain');
+      expect(out.off_path).toContain('service_scoped_discount');
+    });
+
+    test('an unscoped discount stays on the plain path', async () => {
+      process.env.GATE_DISCOUNT_STACKING = 'true';
+      const out = await run(facts({ ...priced, discount_dollars: 12 }, {}));
+      expect(out.off_path || []).not.toContain('service_scoped_discount');
+    });
+
+    test('with stacking off the scoped stamp is billed frozen, so it is not this state', async () => {
+      process.env.GATE_DISCOUNT_STACKING = 'false';
+      const out = await run(facts({ ...priced, discount_dollars: 12, discount_service_key_filter: 'mosquito' }, {}));
+      expect(out.off_path || []).not.toContain('service_scoped_discount');
+    });
+  });
+
   test('an uncertain visit that would mint shows its ordinary invoice only as before office handling', async () => {
     const out = await run(facts(priced, { invoices: { history: [{ id: 'i', status: 'void' }] } }));
     expect(out.will_invoice).toBeNull();
