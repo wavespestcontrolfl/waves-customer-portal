@@ -198,6 +198,22 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
     expect(line).not.toMatch(/Black Friday|Christmas Eve|Eve\b|Easter|Presidents|Martin Luther/);
     expect(hasBannedCustomerCopy(line)).toBeFalsy();
   });
+  test('the holidays line names exactly FACT_CLOSED_HOLIDAY_KEYS, so the Settings drift alarm and the line cannot disagree', () => {
+    const { HOLIDAYS } = require('../services/scheduling/holidays');
+    const { FACT_CLOSED_HOLIDAY_KEYS, closedHolidaysMatchFactsLine } = require('../services/sms-company-facts');
+    const named = COMPANY_FACTS[6].split('closed on ')[1].split('. ')[0].split(/, | and /).map((n) => n.replace(/^the /, ''));
+    const keysNamed = named.map((n) => HOLIDAYS.find((h) => h.name === n)?.key);
+    expect(keysNamed.every(Boolean)).toBe(true);
+    expect([...keysNamed].sort()).toEqual([...FACT_CLOSED_HOLIDAY_KEYS].sort());
+    expect(FACT_CLOSED_HOLIDAY_KEYS).toHaveLength(6);
+    // the matcher: exactly that set, in any order
+    expect(closedHolidaysMatchFactsLine([...FACT_CLOSED_HOLIDAY_KEYS].reverse())).toBe(true);
+    expect(closedHolidaysMatchFactsLine(new Set(FACT_CLOSED_HOLIDAY_KEYS))).toBe(true);
+    expect(closedHolidaysMatchFactsLine([...FACT_CLOSED_HOLIDAY_KEYS, 'black_friday'])).toBe(false);
+    expect(closedHolidaysMatchFactsLine(FACT_CLOSED_HOLIDAY_KEYS.slice(1))).toBe(false);
+    expect(closedHolidaysMatchFactsLine([])).toBe(false);
+    expect(closedHolidaysMatchFactsLine(null)).toBe(false);
+  });
   test('the holidays line states the observed-weekday rule, and holidays.js closes exactly those days (Christmas 2027 is a Saturday)', () => {
     const { holidaysBetween } = require('../services/scheduling/holidays');
     const line = COMPANY_FACTS[6];

@@ -30077,6 +30077,8 @@ router.get('/blackout-dates', requireAdmin, async (req, res, next) => {
       // The 14 holidays, each open until the owner closes it (owner 2026-10-22).
       holidays: upcomingHolidays(etDateString(new Date()))
         .map((holiday) => ({ ...holiday, closed: closedHolidays.has(holiday.key) })),
+      // False when the closed holidays differ from the six the agents' facts line names (sms-company-facts.js).
+      factsLineMatches: require('../services/sms-company-facts').closedHolidaysMatchFactsLine(closedHolidays),
     });
   } catch (err) { next(err); }
 });
@@ -30125,6 +30127,28 @@ router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
 // each open until the owner closes it. Stored like weekly days off — a
 // system_settings key holding the closed keys — and enforced through the same
 // blackout-dates helpers, every year. Whole-array PUT, like the weekly chips.
+// One office alert when the saved closed holidays differ from the agents' static facts line. The save never fails over it,
+// and no customer channel is touched. A plain dedupeKey per closed set: the same set saved again stays one row.
+async function raiseHolidayFactsLineDrift(closed) {
+  try {
+    await require('../services/admin-alert-compose').raiseAdminAlert('system', {
+      area: 'Schedule',
+      action: 'Agents\' holiday line differs from Settings',
+      why: 'Texting, voice and chat still name the six closed holidays, so tell Claude to update the facts line.',
+      severity: 'needs-you',
+      link: '/admin/settings?tab=blackout-days',
+      subject: { type: 'check', id: 'agents-holiday-line' },
+      doneWhen: 'holiday_line_matches',
+      who: 'person',
+    }, {
+      dedupeKey: `agents-holiday-line:${closed.join(',') || 'none'}`,
+      metadata: { source: 'holiday-closures-save', closedHolidays: closed },
+    });
+  } catch (err) {
+    logger.warn(`[schedule] holiday facts-line alert failed (the save stands): ${err.message}`);
+  }
+}
+
 router.put('/blackout-dates/holidays', requireAdmin, async (req, res, next) => {
   try {
     const raw = Array.isArray(req.body?.closed) ? req.body.closed : null;
@@ -30157,7 +30181,11 @@ router.put('/blackout-dates/holidays', requireAdmin, async (req, res, next) => {
     logger.info(`[schedule] holiday closures set to [${closed.join(',')}]`);
     flushEstimateSlotCaches();
     await refreshQualityForBlackoutChange(holidayBlackoutRefreshDates(previous, closed));
-    res.json({ success: true, closedHolidays: closed });
+    // Drift alarm (owner 2026-11-24): the texting, voice and chat agents carry a static line naming six closed holidays
+    // (sms-company-facts.js FACT_CLOSED_HOLIDAY_KEYS). A saved set that differs from it raises ONE office alert, deduped per set.
+    const factsLineMatches = require('../services/sms-company-facts').closedHolidaysMatchFactsLine(closed);
+    if (!factsLineMatches) await raiseHolidayFactsLineDrift(closed);
+    res.json({ success: true, closedHolidays: closed, factsLineMatches });
   } catch (err) { next(err); }
 });
 
@@ -30387,6 +30415,7 @@ router._test = {
   resetDiscountProvenanceColumnCache,
   weeklyBlackoutRefreshDates,
   holidayBlackoutRefreshDates,
+  raiseHolidayFactsLineDrift,
   blackoutDateString,
   registerSpawnedVisitReminder,
   adminMoveProbeExcludeIds,

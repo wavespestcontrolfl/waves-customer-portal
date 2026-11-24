@@ -15,6 +15,17 @@ const { WAVES_BRAND_NAME, WAVES_ADDRESS_LINE } = require('../constants/business'
 
 const COMPANY_FACTS_HEADER = 'COMPANY FACTS (owner-approved; state these plainly):';
 
+// The holidays the closed-days line (COMPANY_FACTS[6]) names, as scheduling/holidays.js keys (owner 2026-11-24). The line is static on
+// purpose: the voice agent renders this section when its module loads and the sealed exam pins the render by hash, so it cannot follow
+// the editable `schedule_holiday_closures` setting. PUT /admin/schedule/blackout-dates/holidays raises one admin alert when a saved
+// closed set differs from this list, and sms-company-facts.test.js checks that the line names exactly these.
+const FACT_CLOSED_HOLIDAY_KEYS = Object.freeze(['new_years_day', 'memorial_day', 'independence_day', 'labor_day', 'thanksgiving', 'christmas']);
+/** True when `closedKeys` (any iterable of holiday keys) is exactly the set the facts line names. Pure. */
+function closedHolidaysMatchFactsLine(closedKeys) {
+  const closed = new Set(closedKeys || []);
+  return closed.size === FACT_CLOSED_HOLIDAY_KEYS.length && FACT_CLOSED_HOLIDAY_KEYS.every((key) => closed.has(key));
+}
+
 const COMPANY_FACTS = Object.freeze([
   'On a residential general pest plan that includes inside service (not mosquito service), the first visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask. A customer who chose exterior-only service can ask the office to add inside service back. Commercial accounts follow their sold service scope.',
   'The customer does not need to be home for the exterior treatment. For the inside spray, someone needs to be home, or the customer leaves us access.',
@@ -338,6 +349,8 @@ module.exports = {
   hasExactLabelFacts,
   exactLabelFactsSection,
   COMPANY_FACTS,
+  FACT_CLOSED_HOLIDAY_KEYS,
+  closedHolidaysMatchFactsLine,
   RETIRED_COMPANY_FACT_LINES, OLDER_RETIRED_COMPANY_FACT_LINES,
   moneyPolicyFacts,
   COMPANY_FACTS_HEADER,

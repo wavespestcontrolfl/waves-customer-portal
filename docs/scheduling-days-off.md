@@ -22,9 +22,7 @@ closure** stops one technician and leaves the others working.
 ### One-off blackout dates and weekly days off
 
 A one-off date closes that calendar day for everyone. Weekly days off close every matching
-weekday. Waves works Sundays, so `schedule_weekly_days_off` is empty. Do not add Sunday to it.
-With `GATE_AUTO_DISPATCH_DAY_RULES` on, auto-dispatch already ranks a Sunday slot after every
-Monday to Saturday slot.
+weekday. Owner 2026-11-24: Sundays are work days, so Sunday is not a weekly day off.
 
 ### Yearly holiday closures (`server/services/scheduling/holidays.js`)
 
@@ -45,9 +43,9 @@ The owner closed the **Big 6** on 2026-11-24. The setting is written in producti
 
 A fixed-date holiday (New Year's Day, 4th of July, Christmas) on a weekend also closes the
 observed weekday: Saturday closes the Friday before, Sunday closes the Monday after. Christmas
-2027 is a Saturday, so Friday 2027-12-24 is closed too. The customer-facing line says this. Every other holiday in the file stays open:
+2027 is a Saturday, so Friday 2027-12-24 is closed too. The agents' line says this. Every other holiday in the file stays open:
 Black Friday, Christmas Eve, New Year's Eve, Martin Luther King Jr. Day, Presidents' Day,
-Easter and the rest are normal work days.
+Easter and the rest stay open unless the owner closes them.
 
 ### Technician birthday (owner policy)
 
@@ -62,59 +60,85 @@ Until that ships, the office keeps a technician's birthday clear by hand (the te
 
 ### Technician out (`technician_absences`)
 
-An uncleared row marks one technician out for one date. The tech-out flow
-(`tech-out.js`, `tech-out-auto-move.js`) also parks and moves the visits the technician
-already held.
+An uncleared row marks one technician out for one date. The tech-out flow (`tech-out.js`)
+also parks the technician's open stops on that day as alerts.
 
 ## Who reads each layer
 
-Business closures go through `server/services/scheduling/blackout-dates.js`
-(`isBlackoutDate`, `getBlackoutDates`, `getBlackoutLayers`). Customer-facing readers fail
-open: an unreadable list reads as "open" so an outage never blocks booking. The
-auto-dispatch readers pass `{ strict: true }`, so an unreadable list stops a move instead.
+Business closures are read through `server/services/scheduling/blackout-dates.js`
+(`isBlackoutDate`, `getBlackoutDates`, `getBlackoutLayers`). By default a failed read returns "open"
+(`{ strict: true }` makes it throw instead). Technician closures are read through
+`absentTechDays` and `assertAssignableTechnician` in `server/services/technician-eligibility.js`.
 
-| Reader | Business closures | Technician closures (technician out) |
+| Reader | Business closures | Technician out |
 | --- | --- | --- |
-| Find a time and booking (`scheduling/find-time.js`, the `/book` page, reschedule, estimate slots, AI searches) | Skips the date | `absentTechDays` skips the technician on that date. If every technician is out, no slot. |
-| Slot hold and confirm (`slot-reservation.js`, `routes/booking.js /confirm`) | Re-checked at redemption, so an offer minted before a closure cannot be booked | `assertAssignableTechnician` with the date refuses the technician |
-| Recurring seeder (`recurring-appointment-seeder.js`) | Nudges a child visit off a closed day | A child on a day its technician is out is seeded with no technician. The office or auto-dispatch places it. |
-| Office assignment (`dispatch-assignment.js`, board drag, `admin-dispatch.js /technicians?date=`) | Not applicable | Refused with a 422. The picker does not offer the technician for that date. |
-| Series children (`admin-schedule.js assignableRecurringTemplateTechnicianId`) | Not applicable | The child is created with no technician |
-| Auto-dispatch candidate slots (`auto-dispatch/candidate-slots.js`, via find-time) | Skips the date | Skips the technician on that date |
-| Fixed-time technician picker (`scheduling/pick-technician.js`) | **Not checked.** It ranks routes with `includeBlackoutDates=true`, so it can return a technician for a closed date. The caller must check business closures first. | Skips the technician on that date |
-| Ads capacity, route check, open-blocks alert, annual prepay series | Not applicable | Count the technician as away |
+| Offer search (`scheduling/find-time.js`) and estimate slots (`estimate-slot-availability.js`) | Skips the date | `absentTechDays` skips the technician on that date |
+| Recurring seeder (`recurring-appointment-seeder.js`) | Nudges a child visit off a closed day | A child on a day its technician is out is seeded with no technician |
+| Series children (`admin-schedule.js assignableRecurringTemplateTechnicianId`) | Not read | The child is created with no technician |
+| Office assignment (`dispatch-assignment.js`) and the picker (`admin-dispatch.js GET /technicians?date=`) | Not read | The save is refused (422); the picker does not list the technician |
+| Auto-dispatch candidate slots (`auto-dispatch/candidate-slots.js`, through `findAvailableSlots`) | Skips the date | Skips the technician on that date |
+| Fixed-time technician picker (`scheduling/pick-technician.js`) | **Not read.** It measures drive detours with `includeBlackoutDates: true` and does not check business closures itself. | Skips the technician on that date |
+| Day re-plan route check (`day-replan/route-check.js`) and open-blocks alert (`day-replan/open-blocks-alert.js`) | `getBlackoutDates(..., { strict: true })`: closed dates are excluded, and an unreadable list throws | Counts the technician as away |
+| Annual prepay series seeding (`annual-prepay-series-slot.js`) | Not read | The technician is dropped on that date |
+
+### The closure-state lock
+
+The shared closure-state lock is `lockClosureState` in `blackout-dates.js`.
+
+- **Exclusive (the four writers in `routes/admin-schedule.js`):** `PUT /blackout-dates/weekly`,
+  `PUT /blackout-dates/holidays`, `POST /blackout-dates` and `DELETE /blackout-dates/:id`.
+- **Shared, then a fresh read of the closed days:**
+  - the capacity-mode commit check, `assertCapacityEligibility` in `scheduling/arrival-route.js`
+    (reached through `verifyArrivalCapacity`, which runs only with capacity mode on or `preserveCapacity`);
+  - `rescheduleSeries` in `rebooker.js` (`assertClosedDaysUnchanged`);
+  - auto-dispatch `apply.js` (`fenceSourceConflict`), for a `closed_day` source conflict.
+- **A date re-check only, no closure lock:**
+  - `createSelfBooking` in `routes/booking.js` calls `isBlackoutDate` before its write transaction opens;
+  - `reserveSlot`, `commitReservation` and `extendReservation` in `slot-reservation.js` call
+    `isBlackoutDate`. `commitReservation` and `extendReservation` read on their own transaction.
+
+So a closure saved at the same moment as one of the second group is serialized with it. A path in the
+third group can still commit in the gap between its date check and its write.
 
 ### Auto-dispatch and a closed day
 
-With `GATE_AUTO_DISPATCH_CONFLICT_MOVES` on, a visit that sits on a business closure is a
-`closed_day` conflict (`auto-dispatch/current-conflict.js`). It moves to the nearest legal
-slot, even when the move saves little drive. A conflict move does **not** skip these
-guards, which still apply:
+With `GATE_AUTO_DISPATCH_CONFLICT_MOVES` on, `auto-dispatch/current-conflict.js` reports a `closed_day`
+conflict when `isBlackoutDate(date, db, { strict: true })` is true for a visit that has an arrival window.
+A read failure throws, so the visit is not evaluated. The conflict only lifts the score bar and the drive
+floor for that visit (`move-rules.js`). Every other guard still applies, among them:
 
-- a customer-confirmed visit stays,
-- a visit a person placed stays,
-- a visit inside the reminder freeze stays. The nightly run passes `lock24h=true`: the freeze is a
-  24.25-hour band in route-tier mode and 25 hours in flex mode, so a visit 48 hours away can move,
-- a fixed visit stays: the customer's app preference, mowing days, the customer's own time request,
-  or the auto-dispatch-off box (owner ruling 2026-11-22).
+- eligibility: a recurring child visit, not locked or excluded by staff, an active customer
+  (`auto-dispatch/eligibility.js`);
+- the day lock for the active mode (route tiers, flex tier, or the flat lock window);
+- the reminder freeze: 24.25 hours in route-tier mode, 25 hours in flex mode (`auto-dispatch/index.js`
+  `reminderFreezeHours`);
+- the fixed-visit rule (`eligibility.js`, owner 2026-11-22): the customer asked for this time, the
+  customer placed the visit, or staff locked it.
 
-A visit that stays on a closed day raises a needs-a-person notice. The nightly path reads
-the closed days with `strict`, so an unreadable list stops the move.
+A staff placement and a customer confirmation alone do not hold a visit any more (owner 2026-11-22).
+A visit that cannot move stays on the closed day. `auto-dispatch/needs-person-notice.js` can name it
+("is on a closed day").
 
 ## How the office changes things
 
-- **A closed day, a weekly day off or a holiday:** Settings, Scheduling, Blackouts
-  (`/admin/settings?tab=blackout-days`). Holiday switches are there too. Adding a closure
-  takes the closure-state lock, so a hold in flight cannot slip onto the new closed day.
+- **A closed day, a weekly day off or a holiday:** the Blackouts tab, `/admin/settings?tab=blackout-days`.
 - **A technician birthday:** set the date of birth on the technician's payroll profile (Time
   Tracking, Team, Edit Technician, Show Payroll & personal info). Scheduling does not read it yet.
 - **A technician out:** the tech-out flow on the dispatch board.
+
+### The agents' holiday line
+
+The texting, voice and chat agents carry one static line naming the six closed holidays
+(`COMPANY_FACTS[6]` in `server/services/sms-company-facts.js`, keys in `FACT_CLOSED_HOLIDAY_KEYS`).
+It is static because the voice agent renders it when its module loads and the sealed exam pins the
+render by hash. It does not follow the Settings list. When `PUT /admin/schedule/blackout-dates/holidays`
+saves a closed set that differs from `FACT_CLOSED_HOLIDAY_KEYS`, the response carries
+`factsLineMatches: false`, the Blackouts tab shows a one-line warning, and one office alert is raised
+(one per distinct set). Changing the line takes a code change: edit the line and `FACT_CLOSED_HOLIDAY_KEYS`
+together.
 
 ## Tests
 
 - `server/tests/schedule-holidays.test.js`: the 14 yearly rules and the observed-weekday rule.
 - `server/tests/technician-eligibility.test.js`: absences and work days through the shared seam.
-- `server/tests/sms-company-facts.test.js`: the customer-facing line about closed days.
-
-The texting agent, the phone agent and the portal chat all read the same company-facts line
-(`server/services/sms-company-facts.js`, line 6). Change the owner's closed days there too.
+- `server/tests/sms-company-facts.test.js`: the closed-days line, and that it names exactly `FACT_CLOSED_HOLIDAY_KEYS`.

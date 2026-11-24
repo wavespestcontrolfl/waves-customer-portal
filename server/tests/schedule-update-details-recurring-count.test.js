@@ -1132,6 +1132,52 @@ describe('update-details wiring (source guards)', () => {
     expect(src.slice(getStart, src.indexOf('\n});', getStart))).toContain('getClosedHolidays(db, { strict: true })');
   });
 
+  test('the holiday closures PUT answers factsLineMatches and raises the drift alert only when the saved set differs (owner 2026-11-24)', () => {
+    const start = src.indexOf("router.put('/blackout-dates/holidays'");
+    const put = src.slice(start, src.indexOf('\n});', start));
+    const write = put.indexOf("await trx('system_settings')");
+    const check = put.indexOf('closedHolidaysMatchFactsLine(closed)');
+    expect(check).toBeGreaterThan(write); // after the save, never before it
+    expect(put).toContain('if (!factsLineMatches) await raiseHolidayFactsLineDrift(closed);');
+    expect(put).toContain('res.json({ success: true, closedHolidays: closed, factsLineMatches });');
+    // the settings list carries the same flag, so the page can warn on load
+    const getStart = src.indexOf("router.get('/blackout-dates'");
+    expect(src.slice(getStart, src.indexOf('\n});', getStart))).toContain('factsLineMatches: require(\'../services/sms-company-facts\').closedHolidaysMatchFactsLine(closedHolidays)');
+  });
+
+  test('the drift alert is one deduped office alert, no customer channel, and a failure never fails the save', async () => {
+    const compose = require('../services/admin-alert-compose');
+    const { raiseHolidayFactsLineDrift } = adminScheduleRouter._test;
+    const spec = {
+      area: 'Schedule',
+      action: "Agents' holiday line differs from Settings",
+      why: 'Texting, voice and chat still name the six closed holidays, so tell Claude to update the facts line.',
+      severity: 'needs-you',
+      link: '/admin/settings?tab=blackout-days',
+      subject: { type: 'check', id: 'agents-holiday-line' },
+      doneWhen: 'holiday_line_matches',
+      who: 'person',
+    };
+    // the spec passes the notification rules (headline 60, why 110 and one sentence, admin link)
+    expect(compose.composeAdminAlert(spec).headline).toBe("Schedule — Agents' holiday line differs from Settings");
+    const raise = jest.spyOn(compose, 'raiseAdminAlert').mockResolvedValue({ id: 'n1' });
+    try {
+      await raiseHolidayFactsLineDrift(['christmas']);
+      expect(raise).toHaveBeenCalledTimes(1);
+      const [category, sentSpec, opts] = raise.mock.calls[0];
+      expect(category).toBe('system');
+      expect(sentSpec).toEqual(spec);
+      expect(opts).toMatchObject({ dedupeKey: 'agents-holiday-line:christmas' });
+      expect(opts.dedupeOpenOnly).toBeUndefined(); // a plain dedupe: no RERING row needed
+      await raiseHolidayFactsLineDrift([]);
+      expect(raise.mock.calls[1][2].dedupeKey).toBe('agents-holiday-line:none');
+      raise.mockRejectedValueOnce(new Error('bell down'));
+      await expect(raiseHolidayFactsLineDrift(['christmas'])).resolves.toBeUndefined();
+    } finally {
+      raise.mockRestore();
+    }
+  });
+
   test('a holiday closure change refreshes only the toggled holidays inside the 30-day horizon', () => {
     const { holidayBlackoutRefreshDates } = adminScheduleRouter._test;
     // Tuesday 2026-11-10 08:00 ET: horizon = 2026-11-11 .. 2026-12-10.
