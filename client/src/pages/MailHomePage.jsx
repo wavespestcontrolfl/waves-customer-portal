@@ -414,6 +414,7 @@ export default function MailHomePage() {
   useEffect(() => {
     let alive = true;
     setStatus('loading');
+    setPriceStale(false); // a price_changed answer belongs to the home it was for, not the next link
     fetch(`${API_BASE}/public/home/${encodeURIComponent(token)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((json) => {
