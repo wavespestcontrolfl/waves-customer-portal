@@ -277,7 +277,13 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
     expect(legacyGeographicVeto({ addressValidation: { ...av, normalized: { city: 'Venice', postal_code: '34285' } }, extracted: {}, onFile: { city: 'Port Charlotte' } })).toEqual(unknown);
     // a ZIP tied to the address clears it: stated, address-validation normalized, or the stored Port Charlotte address's own
     expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Port Charlotte', zip: '33952' } })).toBeNull();
-    expect(legacyGeographicVeto({ addressValidation: { ...av, normalized: { city: 'Port Charlotte', postal_code: '33948' } }, extracted: { city: 'Port Charlotte' } })).toBeNull();
+    // ZIP evidence is bound to its own extraction (Codex #8402): V1 naming Port Charlotte with no ZIP stays unknown even when
+    // V2 or address validation carries a ZIP, because the legacy branch can book V1's street.
+    expect(legacyGeographicVeto({ addressValidation: { ...av, normalized: { city: 'Port Charlotte', postal_code: '33948' } }, extracted: { city: 'Port Charlotte' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ v2Extraction: { property: { service_address: { city: 'Venice', postal_code: '34285' } } }, extracted: { city: 'Port Charlotte' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ addressValidation: { ...av, normalized: { city: 'Venice', postal_code: '34285' } }, extracted: { city: 'Port Charlotte' } })).toEqual(unknown);
+    // every source that names Port Charlotte carries its own ZIP: cleared
+    expect(legacyGeographicVeto({ addressValidation: { ...av, normalized: { city: 'Port Charlotte', postal_code: '33948' } }, extracted: { city: 'Port Charlotte', zip: '33948' } })).toBeNull();
     expect(legacyGeographicVeto({ extracted: { city: 'Port Charlotte' }, onFile: { city: 'Port Charlotte', zip: '33954' } })).toBeNull();
     expect(legacyGeographicVeto({ extracted: {}, onFile: { city: 'Port Charlotte', zip: '33954' } })).toBeNull();
     expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Port Charlotte', zip: '33948' } })).toBeNull();

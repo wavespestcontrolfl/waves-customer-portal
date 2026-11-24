@@ -2242,17 +2242,25 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   // Port Charlotte is served, but ZIPs 33980 / 33981 / 33983 hold by ZIP and carry the name too: a Port Charlotte address with
   // no ZIP tied to it cannot be told from a held one, so it is UNVERIFIED (staff review, never out of area, never auto-booked).
   // Only a ZIP of the address the visit will use clears it, never a ZIP on the call for another property:
-  //  - the call names Port Charlotte: a ZIP the call stated (or address validation normalized), or else the on-file address
-  //    being a Port Charlotte one with its own ZIP;
+  //  - the call names Port Charlotte: every extraction that names it carries its own ZIP, or else the on-file address
+  //    (which the booking keeps) is a Port Charlotte one with its own ZIP;
   //  - the call names no Port Charlotte but the stored address does (the booking can retain it): that stored ZIP must exist,
   //    whatever the call said about another town.
   // A ZIP counts only when it is five digits or ZIP+4: a fragment on file ("3398") clears nothing.
-  const statedPortCharlotte = statedCities.some(isPortCharlotteLocality);
+  // ZIP evidence is bound to its own source: each extraction (V1, V2, address validation) that names Port Charlotte must
+  // carry its own usable ZIP. A ZIP from another extraction never clears it, because the legacy branch can book V1's
+  // address while V2 or address validation describes a different street (Codex #8402).
+  const statedPortCharlotteSources = [
+    [extracted?.city, extracted?.zip],
+    [svc?.city, svc?.postal_code],
+    [av?.normalized?.city, av?.normalized?.postal_code],
+  ].filter(([city]) => isPortCharlotteLocality(lower(city)));
+  const statedPortCharlotte = statedPortCharlotteSources.length > 0;
   const onFilePortCharlotte = onFileCities.some(isPortCharlotteLocality);
-  const statedUsableZips = [extracted?.zip, svc?.postal_code, av?.normalized?.postal_code].filter(hasUsableZip);
+  const statedZipMissing = statedPortCharlotteSources.some(([, zip]) => !hasUsableZip(zip));
   const onFileUsableZip = !!onFile && !onFile.lookupFailed && hasUsableZip(onFile.zip);
   if (statedPortCharlotte
-    ? (!statedUsableZips.length && !(onFilePortCharlotte && onFileUsableZip))
+    ? (statedZipMissing && !(onFilePortCharlotte && onFileUsableZip))
     : (onFilePortCharlotte && !onFileUsableZip)) {
     return { reason: 'port_charlotte_zip_unknown', county: null };
   }
