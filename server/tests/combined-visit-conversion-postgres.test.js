@@ -573,7 +573,7 @@ postgres('combined capacity conversion on the migrated application schema', () =
     // Converts pest (the reserved visit, 09:00 to 10:00) with termite bait (90 minutes, so 09:00 to 10:30), in a
     // transaction that is rolled back. Bait: the converter takes its length from the catalog (pest, lawn and
     // tree & shrub are booked flat at 60). 90 and not 60: a row with no stored length is judged as one hour.
-    const convert = async ({ gate, shift }) => {
+    const convert = async ({ gate, shift, reservedStart = '09:00' }) => {
       const trx = await mockPg.transaction();
       const saved = GATES.map((name) => process.env[name]);
       delete process.env.GATE_SCHEDULING_CAPACITY;
@@ -592,7 +592,8 @@ postgres('combined capacity conversion on the migrated application schema', () =
         const f = await fixture(trx, selected);
         // An hour-mode hold: one hour for the reserved program, no combined allocation.
         await trx('scheduled_services').where({ id: f.anchor.id }).update({ customer_id: f.customerId, reservation_expires_at: null,
-          reservation_policy_version: null, reservation_service_mix: null, estimated_duration_minutes: 60, window_end: '10:00' });
+          reservation_policy_version: null, reservation_service_mix: null, estimated_duration_minutes: 60,
+          window_start: reservedStart, window_end: '10:00' });
         await trx('technicians').where({ id: f.anchor.technician_id }).update({ shift_start: shift[0], shift_end: shift[1] });
         await converter.convertEstimate(f.estimateId, { ...options, database: trx });
         const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId }).whereNull('recurring_parent_id');
@@ -632,6 +633,14 @@ postgres('combined capacity conversion on the migrated application schema', () =
       expect(second).toMatchObject({ technician_id: null, window_start: '09:00:00', window_end: '10:30:00', estimated_duration_minutes: 90 });
       expect(later.length).toBeGreaterThan(0);
       expect(later.every((row) => row.technician_id === null)).toBe(true);
+    });
+
+    test('a copied hour with seconds is a block no shift holds: the program is inserted unassigned, as the movers refuse such a time', async () => {
+      // The shift holds 09:00 to 10:30 by the minute. The check does not read 09:00:30 exactly, so it trusts no block.
+      const { technicianId, count, reserved, second } = await convert({ gate: true, shift: ['08:00', '18:00'], reservedStart: '09:00:30' });
+      expect(count).toBe(2);
+      expect(reserved).toMatchObject({ technician_id: technicianId, window_start: '09:00:30' });
+      expect(second).toMatchObject({ technician_id: null, window_start: '09:00:30', estimated_duration_minutes: 90 });
     });
 
     test('gate off: the same shift is not read and the program keeps the technician', async () => {
