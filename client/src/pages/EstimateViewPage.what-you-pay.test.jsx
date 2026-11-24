@@ -127,7 +127,9 @@ describe('estimate page: what you pay and when', () => {
     // AGENTS.md: no combined plan total ($X/yr) on a customer estimate; units are "application", never "visit".
     expect(t).not.toMatch(/year total|first year|\$495|\$1,098|\$702/i);
     expect(t).not.toMatch(/visits? a year|each visit/i);
-    expect(t).toContain('The $99.00 setup fee is a one-time charge to start a plan with one recurring service. Plans with two or more recurring services do not pay it. It is also waived if you prepay the year.');
+    expect(t).toContain('This plan has a one-time $99.00 setup fee. It is waived if you prepay the year.');
+    // It describes this plan, never the general rule, and says nothing about when the fee is billed.
+    expect(t).not.toMatch(/two or more|one recurring service|charged with your first visit/i);
     // Inside the price section, with the price it explains.
     expect(container.querySelector('#estimate-price-section').contains(box(container))).toBe(true);
   });
@@ -162,8 +164,16 @@ describe('estimate page: what you pay and when', () => {
     payload.pricing.annualPrepayEligible = false;
     const { container } = await renderPage(payload);
     await waitFor(() => expect(box(container)).not.toBeNull());
-    expect(text(container)).toContain('Plans with two or more recurring services do not pay it.');
+    expect(text(container)).toContain('This plan has a one-time $99.00 setup fee.');
     expect(text(container)).not.toMatch(/waived/i);
+  });
+
+  it('a legacy split estimate (page shows pest + $99 under a bundle category): no box', async () => {
+    const payload = pestOnly();
+    payload.estimate = { ...payload.estimate, serviceCategory: 'bundle' };
+    const { container } = await renderPage(payload);
+    await waitFor(() => expect(container.querySelector('[data-price-follow-ups]')).not.toBeNull());
+    expect(box(container)).toBeNull();
   });
 
   it('never prints a price as a monthly bill: no "/mo" and no "about"', async () => {
@@ -207,8 +217,8 @@ describe('buildWhatYouPay', () => {
     services: services.map(([key, label, perApplication, visits]) => ({ key, label, perApplication, visits, monthly: 0 })),
   });
   const pest = model([['pest_control', 'Pest Control', 99, 4]]);
-  const input = (extra = {}) => ({ model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, ...extra });
-  const FEE_SENTENCE = 'The $99.00 setup fee is a one-time charge to start a plan with one recurring service. Plans with two or more recurring services do not pay it.';
+  const input = (extra = {}) => ({ model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, serviceCategory: 'pest_control', ...extra });
+  const FEE_SENTENCE = 'This plan has a one-time $99.00 setup fee.';
 
   it('the annual prepay choice renders no box (the Reserve your spot box owns payment timing and prepay)', () => {
     expect(buildWhatYouPay(input({ paymentPreference: 'prepay_annual', annualPrepayOffered: true }))).toBeNull();
@@ -216,14 +226,14 @@ describe('buildWhatYouPay', () => {
   });
 
   it('the waiver clause needs both the page offering prepay and the server marking the fee waivable', () => {
-    expect(buildWhatYouPay(input({ annualPrepayOffered: true })).setupSentence).toBe(`${FEE_SENTENCE} It is also waived if you prepay the year.`);
+    expect(buildWhatYouPay(input({ annualPrepayOffered: true })).setupSentence).toBe(`${FEE_SENTENCE} It is waived if you prepay the year.`);
     expect(buildWhatYouPay(input({ annualPrepayOffered: false })).setupSentence).toBe(FEE_SENTENCE);
     const notWaivable = { ...setupFee, waivedWithPrepay: false };
     expect(buildWhatYouPay(input({ fees: [notWaivable], annualPrepayOffered: true })).setupSentence).toBe(FEE_SENTENCE);
   });
 
   it('prints no plan total and no payment-timing or prepay field', () => {
-    const result = buildWhatYouPay(input({ annualPrepayOffered: true, monthlyShown: true }));
+    const result = buildWhatYouPay(input({ annualPrepayOffered: true }));
     expect(Object.keys(result).sort()).toEqual(['firstVisitTotal', 'lines', 'setup', 'setupSentence']);
     expect(result.firstVisitTotal).toBe(198);
   });
@@ -237,5 +247,18 @@ describe('buildWhatYouPay', () => {
     const both = model([['pest_control', 'Pest Control', 99, 4], ['lawn_care', 'Lawn Care', 78, 9]]);
     expect(buildWhatYouPay(input({ model: both, invoiceFirstVisit: 177 }))).toBeNull();
     expect(buildWhatYouPay(input({ model: both, fees: [], invoiceFirstVisit: 177 })).firstVisitTotal).toBe(177);
+  });
+
+  // A legacy split estimate keeps a root and a result recurring block: the page can show one pest section
+  // (and the $99 fee) while acceptance also sees lawn and waives the setup. The page cannot prove the plan
+  // is solo there, so it shows no box whenever a setup fee would print.
+  it.each([
+    ['the estimate category names more than the lone section', { serviceCategory: 'bundle' }],
+    ['the estimate category is missing', { serviceCategory: undefined }],
+    ['a combined plan block rides beside the one section', { combinedRecurring: { monthlySubtotal: 113.1 } }],
+  ])('a setup fee over one displayed section with an ambiguous plan shape: no box (%s)', (_label, extra) => {
+    expect(buildWhatYouPay(input(extra))).toBeNull();
+    // Without a fee there is nothing to overstate, so the same shape still shows its prices.
+    expect(buildWhatYouPay(input({ ...extra, fees: [] })).firstVisitTotal).toBe(99);
   });
 });

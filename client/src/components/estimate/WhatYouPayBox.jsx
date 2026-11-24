@@ -27,10 +27,22 @@ const positiveFees = (fees) => (Array.isArray(fees) ? fees : []).filter((fee) =>
 
 const applicationsText = (visits) => (visits === 1 ? 'once a year' : `${visits} applications a year, counting the first`);
 
-// The waiver clause only when the page offers the annual prepay and the server marks this fee waivable with it.
+// This plan's own fee, not the general rule: the converter charges the setup only for a solo pest or
+// mosquito plan and the lanes differ on when it is billed, so the sentence names neither. The waiver
+// clause only when the page offers the annual prepay and the server marks this fee waivable with it.
 function setupFeeSentence(fee, prepayWaivable) {
-  const base = `The ${fmtMoney(fee.amount)} setup fee is a one-time charge to start a plan with one recurring service. Plans with two or more recurring services do not pay it.`;
-  return prepayWaivable ? `${base} It is also waived if you prepay the year.` : base;
+  const base = `This plan has a one-time ${fmtMoney(fee.amount)} setup fee.`;
+  return prepayWaivable ? `${base} It is waived if you prepay the year.` : base;
+}
+
+// A setup fee is shown only when the page can prove the plan is one service. Acceptance reads the whole
+// stored plan (a legacy split estimate keeps a root and a result recurring block), and a second recurring
+// service there waives the fee while the page shows one section. So the lone displayed section must also
+// be the estimate's own category and no combined plan block may exist; otherwise the box stays away.
+function soloPlanProven(input) {
+  const { model } = input;
+  return model.services.length === 1 && !model.multi && !input.combinedRecurring
+    && !!input.serviceCategory && input.serviceCategory === model.services[0].key;
 }
 
 // The plan the box describes: recurring, per application, billed by card, nothing else on the first bill.
@@ -42,8 +54,7 @@ function describablePlan(input) {
   const charged = positiveFees(input.fees);
   // Another first-visit fee (the initial cockroach treatment): the first bill is more than the lines here.
   if (charged.some((fee) => !isSetupFee(fee))) return false;
-  // The setup fee is charged on a one-service plan only; a bundle that carries one is not a plan this box describes.
-  return !(charged.length > 0 && model.multi);
+  return charged.length === 0 || soloPlanProven(input);
 }
 
 // Everything the box prints, or null when the first bill is not proven to be these figures.
@@ -61,7 +72,6 @@ export function buildWhatYouPay(input = {}) {
     setup: setupFee ? { amount: feeAmount } : null,
     firstVisitTotal: round2(firstApplications + feeAmount),
     setupSentence: setupFee ? setupFeeSentence(setupFee, prepayWaivable) : null,
-    // The page also shows a monthly figure; say once that it is the year averaged, not a bill.
   };
 }
 

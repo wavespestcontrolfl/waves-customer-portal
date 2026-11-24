@@ -9878,7 +9878,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     invoiceFirstVisit: confirmStepFirstVisitAmount({ serviceMode, paymentPreference: 'pay_at_visit', siteConfirmationHold: !!estimate.siteConfirmationHold, selectedFrequency: combinedFrequency }),
     paymentPreference,
     annualPrepayOffered: annualPrepayEligibleEffective && !estimate.billByInvoice,
-    monthlyShown: !!monthlyAverage,
+    serviceCategory: estimate.serviceCategory,
+    combinedRecurring: pricing.combinedRecurring || null,
   });
 
   // Service/price cards — shared by the live configurator (below) and the
