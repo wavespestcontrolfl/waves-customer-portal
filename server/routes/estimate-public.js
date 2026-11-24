@@ -10940,9 +10940,15 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     }
     // A page that showed a hold must never adopt a booking staff claimed
     // before this lookup. A claim after the lookup is checked under the lock
-    // by commitReservation.
-    if (existingAppointmentRow && req.body?.existingAppointmentWasHold === true
-      && !isReservationHeldAppointment(existingAppointmentRow)) {
+    // by commitReservation. A tab opened before this field existed sends no
+    // boolean: for a visit made from this very estimate's hold and now booked,
+    // that cannot be told from a hold the page showed, so it re-reads first.
+    const shownAsHold = req.body?.existingAppointmentWasHold;
+    if (existingAppointmentRow && !isReservationHeldAppointment(existingAppointmentRow)
+      && (shownAsHold === true
+        || (typeof shownAsHold !== 'boolean' && existingAppointmentRow.customer_id != null
+          && existingAppointmentRow.source_estimate_id != null
+          && String(existingAppointmentRow.source_estimate_id) === String(estimate.id)))) {
       return res.status(409).json({ code: 'SLOT_UNAVAILABLE', error: 'slot no longer available — re-pick a slot' });
     }
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };

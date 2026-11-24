@@ -275,10 +275,22 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect(await mockTransaction('estimates').where({ id: estimateId }).first()).toEqual(estimateBeforeHeldRetry);
     expect(await mockTransaction('invoices').where({ customer_id: customerId })).toHaveLength(0);
 
-    // The same explicit appointment id without the resumed-hold intent is
-    // the normal office-booking adoption contract the fresh page rendered.
+    // A tab opened before the booked-or-held field existed sends no boolean.
+    // For this booked visit made from the estimate's own hold that cannot be
+    // told from a hold the page showed, so it is refused untouched.
+    const legacyTab = await putAccept(token, {
+      existingAppointmentId: lawnId,
+      paymentMethodPreference: 'pay_at_visit',
+    });
+    expect(legacyTab.status).toBe(409);
+    expect(await legacyTab.json()).toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(await mockTransaction('scheduled_services').where({ id: lawnId }).first()).toEqual(beforeHeldRetry);
+
+    // The explicit booked state the fresh page sends is the normal
+    // office-booking adoption contract.
     const res = await putAccept(token, {
       existingAppointmentId: lawnId,
+      existingAppointmentWasHold: false,
       paymentMethodPreference: 'pay_at_visit',
     });
     expect(res.status).toBe(200);

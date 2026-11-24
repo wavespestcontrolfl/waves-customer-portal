@@ -66,6 +66,8 @@ describe('recheckCachedCapacitySlots', () => {
     technicianEligibility.loadTechShifts.mockResolvedValue(() => ({ startMin: 480, endMin: 17 * 60 }));
     expect(await run([slot('09:00')], connReturning(AFFECTED))).toHaveLength(1);
     expect(evaluate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ shiftEndMin: 17 * 60 }));
+    // The customer booking close bounds the offered window, not the whole route's return drive.
+    expect(evaluate.mock.calls[0][1]).not.toHaveProperty('dayEndMin');
     // The simulation refuses an hour that runs past the shift: the card goes.
     evaluate.mockReturnValue({ feasible: false, reason: 'shift_end' });
     expect(await run([slot('09:00')], connReturning(AFFECTED))).toEqual([]);
@@ -104,5 +106,13 @@ describe('recheckCachedCapacitySlots', () => {
     // Mode off reads nothing of the chain.
     const off = (makeRoom.bookingMakeRoomMode.mockReturnValue('off'), await run([slot('10:00'), slot('11:00')], connReturning(AFFECTED, live)));
     expect(off.map((s) => s.windowStart)).toEqual(['10:00', '11:00']);
+  });
+
+  test('a warm fixed-hour make-room card is also checked against live rival holds\' move destinations', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'estimate-slot-availability.js'), 'utf8');
+    const at = src.indexOf('filterUnchangedMakeRoomSlots(makeRoom, makeRoomProofs');
+    const call = src.slice(at, src.indexOf('keptFixedIds', at));
+    expect(call).toContain('dropLiveMakeRoomDestinations(unchanged');
+    expect(call).toContain('ownEstimateId: estimateId');
   });
 });

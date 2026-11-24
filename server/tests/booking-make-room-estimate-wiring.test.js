@@ -73,6 +73,12 @@ function mockDb() {
         whereBetween: jest.fn().mockReturnThis(),
         whereNotIn: jest.fn().mockReturnThis(),
         andWhere: jest.fn().mockReturnThis(),
+        // The warm list's live make-room destination read (dropLiveMakeRoomDestinations).
+        where: jest.fn().mockReturnThis(),
+        whereNull: jest.fn().mockReturnThis(),
+        whereNotNull: jest.fn().mockReturnThis(),
+        whereRaw: jest.fn().mockReturnThis(),
+        modify: jest.fn().mockReturnThis(),
         select: jest.fn().mockResolvedValue([]),
       };
     }

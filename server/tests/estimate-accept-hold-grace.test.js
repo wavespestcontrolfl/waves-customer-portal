@@ -323,6 +323,20 @@ describe('accept maps a missing hold at commit to the coded expiry', () => {
 // is idempotent for its owner, so the normal picker (with its own countdown)
 // is the correct surface there.
 describe('a booked visit survives its old hold timestamp', () => {
+  test('an accept naming a booked visit made from this estimate\'s own hold needs the page\'s explicit booked state', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    const at = src.indexOf('const shownAsHold = req.body?.existingAppointmentWasHold;');
+    expect(at).toBeGreaterThan(0);
+    const guard = src.slice(at, src.indexOf('SLOT_UNAVAILABLE', at));
+    // A tab opened before the field existed sends no boolean: the booked row
+    // made from this estimate's hold is refused until the page re-reads it.
+    expect(guard).toContain("typeof shownAsHold !== 'boolean'");
+    expect(guard).toContain('existingAppointmentRow.customer_id != null');
+    expect(guard).toContain('String(existingAppointmentRow.source_estimate_id) === String(estimate.id)');
+    // An explicit false (the fresh page showing a booked visit) is never refused here.
+    expect(guard).toContain('shownAsHold === true');
+  });
+
   test('the linked-appointment lookup keeps the customer\'s own booked row on every read, not only an accept', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
     const start = src.indexOf('async function findLinkedUpcomingAppointment');

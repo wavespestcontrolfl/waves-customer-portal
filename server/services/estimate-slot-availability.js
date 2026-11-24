@@ -2038,7 +2038,9 @@ async function recheckCachedCapacitySlots(slots, {
       windowEnd: slot.windowEnd,
       durationMinutes: slotMinutes,
       bufferMinutes: 0,
-      dayEndMin: currentDayEndMinutes(),
+      // No customer-close bound on the route: cold find-time keeps that cutoff on the
+      // offered window (already admitted when the card was built) and simulates the
+      // route, return drive included, to the shift end.
       ...(slotShift ? { shiftEndMin: slotShift.endMin } : {}),
     });
     const arrivalGrace = require('../utils/slot-offer-token').splitSignedSlotId(slot.slotId)?.arrivalGrace || 0;
@@ -2752,11 +2754,15 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
                 candidateExpectedMinutes: cached.occupancyContext?.candidateExpectedMinutes,
                 ownEstimateId: estimateId,
               }),
+              // An expiry-only extension revives a rival hold without touching its
+              // timestamps, so its move destinations are checked against the live rows too.
               filterUnchangedMakeRoomSlots(makeRoom, makeRoomProofs, {
                 dateFrom: cachedDates[0],
                 dateTo: cachedDates[cachedDates.length - 1],
                 cachedAt: cached.occupancyContext?.readAt,
-              }),
+              }).then((unchanged) => dropLiveMakeRoomDestinations(unchanged, {
+                conn: db, dateFrom: cachedDates[0], dateTo: cachedDates[cachedDates.length - 1], ownEstimateId: estimateId,
+              })),
             ]);
             const keptFixedIds = new Set([...ordinaryKept, ...makeRoomKept].map((slot) => slot.slotId));
             kept = cachedSlots.filter((slot) => keptFixedIds.has(slot.slotId));

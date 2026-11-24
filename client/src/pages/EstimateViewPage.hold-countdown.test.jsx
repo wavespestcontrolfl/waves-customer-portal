@@ -503,7 +503,7 @@ describe('hold countdown bar', () => {
     // When this tab submits the appointment ID, the server must know the
     // customer saw a hold so a later staff claim sends them back to the picker.
     const accept = sliceBetween('const performAccept = useCallback', 'const handleConfirm = useCallback');
-    expect(accept).toContain('existingAppointmentWasHold: existingAppointment?.isHold || undefined');
+    expect(accept).toContain('existingAppointmentWasHold: existingAppointment ? !!existingAppointment.isHold : undefined');
     expect(eff).toContain('scheduledServiceId: held.id,');
     expect(eff).toContain('adoptedHold: true,');
     // Re-seeding the same hold+expiry would restart the countdown; a live
