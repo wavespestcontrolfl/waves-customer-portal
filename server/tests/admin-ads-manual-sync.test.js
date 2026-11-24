@@ -33,6 +33,8 @@ const mockGoogle = {
   syncSearchTerms: jest.fn(),
 };
 jest.mock('../services/ads/google-ads', () => mockGoogle);
+const mockLinkCampaigns = jest.fn();
+jest.mock('../services/ads/campaign-link', () => ({ linkCampaigns: (...a) => mockLinkCampaigns(...a) }));
 const mockMeta = {
   isConfigured: jest.fn(),
   syncCampaigns: jest.fn(),
@@ -116,6 +118,7 @@ beforeEach(() => {
   mockGoogle.syncCampaigns.mockResolvedValue([{}]);
   mockGoogle.syncDailyPerformance.mockResolvedValue([{}, {}]);
   mockGoogle.syncSearchTerms.mockResolvedValue([{}, {}, {}]);
+  mockLinkCampaigns.mockResolvedValue({ checked: 2, linked: { gclid_click_view: 1, only_campaign_with_spend: 1 }, unlinked: 0 });
   mockMeta.isConfigured.mockReturnValue(true);
   mockMeta.syncCampaigns.mockResolvedValue([{}, {}]);
   mockMeta.syncDailyPerformance.mockResolvedValue([{}, {}, {}, {}, {}]);
@@ -125,12 +128,13 @@ describe('POST /sync (Google)', () => {
   test("runs the cron's job under its lock and job_health row; every step throws on error", async () => {
     const res = await call('POST', '/sync');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ success: true, synced: { campaigns: 1, performanceRows: 2, searchTerms: 3 } });
+    expect(res.body).toEqual({ success: true, synced: { campaigns: 1, performanceRows: 2, searchTerms: 3, campaignLinks: 2 } });
     expect(mockRunExclusive).toHaveBeenCalledWith('google-ads-sync', expect.any(Function));
     expect(mockOutcomes['google-ads-sync']).toBe('success');
     expect(mockGoogle.syncCampaigns).toHaveBeenCalledWith({ throwOnError: true });
     expect(mockGoogle.syncDailyPerformance).toHaveBeenCalledWith(7, { throwOnError: true });
     expect(mockGoogle.syncSearchTerms).toHaveBeenCalledWith(30, { throwOnError: true });
+    expect(mockLinkCampaigns).toHaveBeenCalledWith({ googleAds: mockGoogle });
     expect(mockSyncOwnerWords).not.toHaveBeenCalled(); // GATE_ADS_NEGATIVES off
   });
 
@@ -143,18 +147,26 @@ describe('POST /sync (Google)', () => {
     expect(res.body.failed).toEqual(['campaigns', 'performanceRows']);
     expect(res.body.error).toMatch(/Campaigns not synced: PERMISSION_DENIED/);
     expect(res.body.error).toMatch(/Performance not synced: quota exceeded/);
-    expect(res.body.synced).toEqual({ campaigns: 0, performanceRows: 0, searchTerms: 3 });
+    expect(res.body.synced).toEqual({ campaigns: 0, performanceRows: 0, searchTerms: 3, campaignLinks: 2 });
     expect(mockGoogle.syncSearchTerms).toHaveBeenCalled();
     expect(mockOutcomes['google-ads-sync']).toBe('failed: PERMISSION_DENIED');
   });
 
-  test("the owner's negative word list runs as the fourth step while GATE_ADS_NEGATIVES is on", async () => {
+  test('a Google refusal while linking campaigns fails that step by name', async () => {
+    mockLinkCampaigns.mockRejectedValue(new Error('click_view: PERMISSION_DENIED'));
+    const res = await call('POST', '/sync');
+    expect(res.status).toBe(502);
+    expect(res.body.failed).toEqual(['campaignLinks']);
+    expect(res.body.error).toMatch(/Campaign links not synced: click_view: PERMISSION_DENIED/);
+  });
+
+  test("the owner's negative word list runs as the fifth step while GATE_ADS_NEGATIVES is on", async () => {
     mockNegativesLive.mockReturnValue(true);
     mockSyncOwnerWords.mockResolvedValue({ pushed: 2, failed: 0, removed: 1, googleFailed: 0 });
     const res = await call('POST', '/sync');
     expect(res.status).toBe(200);
     expect(res.body.synced).toEqual({
-      campaigns: 1, performanceRows: 2, searchTerms: 3,
+      campaigns: 1, performanceRows: 2, searchTerms: 3, campaignLinks: 2,
       negativeWords: { pushed: 2, failed: 0, removed: 1, googleFailed: 0 },
     });
     expect(mockSyncOwnerWords).toHaveBeenCalledTimes(1);

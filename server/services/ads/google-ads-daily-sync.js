@@ -1,5 +1,5 @@
 // The Google Ads daily sync: campaigns, 7 days of performance, 30 days of search
-// terms, then the owner's negative word list. The 6 AM cron and the admin
+// terms, ad lead campaign links, then the owner's negative word list. The 6 AM cron and the admin
 // POST /api/admin/ads/sync both run it under runExclusive('google-ads-sync'), so
 // the two never overlap (ad_campaigns has no unique (platform,
 // platform_campaign_id); overlapping first-time syncs could insert one campaign
@@ -26,6 +26,11 @@ const STEPS = [
   { key: 'campaigns', label: 'Campaigns', run: (g) => g.syncCampaigns({ throwOnError: true }) },
   { key: 'performanceRows', label: 'Performance', run: (g) => g.syncDailyPerformance(7, { throwOnError: true }) },
   { key: 'searchTerms', label: 'Search terms', run: (g) => g.syncSearchTerms(30, { throwOnError: true }) },
+  // After campaigns + performance: links ad leads that carry a Google click id to their campaign (ads/campaign-link.js).
+  { key: 'campaignLinks', label: 'Campaign links', run: async (g) => {
+    const { linked } = await require('./campaign-link').linkCampaigns({ googleAds: g });
+    return linked.gclid_click_view + linked.only_campaign_with_spend;
+  } },
   { key: 'negativeWords', label: 'Negative words', run: () => syncNegativeWords() },
 ];
 
