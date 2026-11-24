@@ -231,12 +231,26 @@ function parseToldWindow(text) {
   return { start: at(m[1], m[2], m[3]), end: at(m[4], m[5], m[6]) };
 }
 
-// The arrival window a planned block is held to: { label: "window 8–10", outside }.
-//  - the promise the customer was told (feed `told`, hour level, for this
-//    day) is the window, and a planned arrival outside it is the alert;
-//  - a day-only promise has no hour: no chip, no alert;
-//  - no recorded promise (none, unreadable, another day, a technician's feed):
-//    the booked start plus 2 hours as a chip only, never the red edge.
+// "5–7 PM" / "11 AM–1 PM" for the tooltips.
+function windowSpanText(start, end) {
+  const ap = (m) => (m < 12 * 60 || m >= 24 * 60 ? 'AM' : 'PM');
+  const h = (m) => windowHour(m % (24 * 60));
+  return ap(start) === ap(end) ? `${h(start)}–${h(end)} ${ap(end)}` : `${h(start)} ${ap(start)}–${h(end)} ${ap(end)}`;
+}
+
+// "8:15 PM" for the tooltips.
+function clockWithAp(min) {
+  return `${plannedClock(min)} ${min < 12 * 60 ? 'AM' : 'PM'}`;
+}
+
+// The arrival window a planned block is held to:
+// { label: "window 8–10", range: "8–10 AM", outside, side, source }.
+//  - source 'told': the promise the customer was told (feed `told`, hour
+//    level, for this day); a planned arrival outside it is the alert;
+//  - a day-only promise has no hour: null (no chip, no alert);
+//  - source 'booked': no recorded promise (none, unreadable, another day, a
+//    technician's feed): the booked start plus 2 hours as a chip only, never
+//    the red edge.
 function plannedWindow(svc, plannedStart) {
   const told = svc.told;
   if (told?.level === 'day') return null;
@@ -245,12 +259,36 @@ function plannedWindow(svc, plannedStart) {
   if (recorded && sameDay) {
     return {
       label: `window ${windowHour(recorded.start)}–${windowHour(recorded.end)}`,
+      range: windowSpanText(recorded.start, recorded.end),
       outside: plannedStart < recorded.start || plannedStart > recorded.end,
+      side: plannedStart < recorded.start ? 'before' : 'after',
+      source: 'told',
     };
   }
   const ws = parseHHMM(svc.windowStart);
   if (ws == null) return null;
-  return { label: `window ${windowHour(ws)}–${windowHour(ws + ARRIVAL_WINDOW_MIN)}`, outside: false };
+  return {
+    label: `window ${windowHour(ws)}–${windowHour(ws + ARRIVAL_WINDOW_MIN)}`,
+    range: windowSpanText(ws, ws + ARRIVAL_WINDOW_MIN),
+    outside: false,
+    source: 'booked',
+  };
+}
+
+// A planned time the grid cannot draw (before 6 AM or from 8 PM): the block
+// keeps its booked spot, but the promise is still checked against this time.
+function offGridPlannedStart(svc) {
+  const at = svc?.plannedArrivalMin;
+  const mins = svc?.plannedMinutes;
+  return Number.isFinite(at) && Number.isFinite(mins) && mins > 0 ? at : null;
+}
+
+// Tooltip line for a block drawn at its booked spot with a planned time off the grid.
+function offGridTitleLine(at, promise) {
+  if (promise?.outside) {
+    return `\nPlanned ${clockWithAp(at)}, ${promise.side} the ${promise.range} promise`;
+  }
+  return `\nPlanned ${clockWithAp(at)} (off the grid)`;
 }
 
 // Square-style flat color blocks. Default/scheduled → blue-500;
@@ -450,6 +488,17 @@ function driveInLabel(service) {
   return `~${service.driveFromPrevMin} min drive in`;
 }
 
+// The promise check of a block: against the planned stop arrival when the
+// block is drawn at its planned time, else (planned time off the grid) against
+// that time with the block kept at its booked spot.
+function blockPromise(service, planned) {
+  const offGridAt = planned ? null : offGridPlannedStart(service);
+  const checkedAt = planned ? planned.start : offGridAt;
+  if (checkedAt == null) return { promise: null, offGridAt };
+  const at = Number.isFinite(service.plannedStopArrivalMin) ? service.plannedStopArrivalMin : checkedAt;
+  return { promise: plannedWindow(service, at), offGridAt };
+}
+
 // Tooltip line for a planned block.
 function plannedTitleLine(planned, promise) {
   const outside = promise?.outside ? ` — outside the ${promise.label}` : '';
@@ -459,7 +508,7 @@ function plannedTitleLine(planned, promise) {
 // A planned block's head row: route number (one-line blocks only), planned
 // arrival, and the promised-window chip at the right. A one-line block also
 // carries the name, service and minutes on this row.
-function PlannedHeadline({ service, planned, promise, oneLine, routeOrder, gutter, nameRow }) {
+function PlannedHeadline({ service, planned, promise, promiseTitle, oneLine, routeOrder, gutter, nameRow }) {
   return (
     <div className="flex items-center gap-1 min-w-0" style={{ paddingRight: gutter }}>
       {oneLine && routeOrder != null && (
@@ -479,7 +528,7 @@ function PlannedHeadline({ service, planned, promise, oneLine, routeOrder, gutte
         <span
           className="shrink-0 ml-auto rounded-xs bg-white/20 px-1 u-nums opacity-90 whitespace-nowrap"
           style={{ fontSize: 14 }}
-          title="Promised arrival window"
+          title={promiseTitle}
         >{promise.label}</span>
       )}
     </div>
@@ -517,8 +566,9 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
   // window moves to a chip, and a short block is one line.
   // The promise is kept or missed when the van reaches the stop (a group's
   // later service starts after earlier ones, still inside the same promise).
-  const promise = planned ? plannedWindow(service, Number.isFinite(service.plannedStopArrivalMin) ? service.plannedStopArrivalMin : planned.start) : null;
+  const { promise, offGridAt } = blockPromise(service, planned);
   const outsideWindow = promise?.outside === true;
+  const promiseTitle = promise?.source === 'told' ? 'Promised arrival window' : 'Booked arrival window (no promise on record)';
   const oneLine = planned != null && compact;
   // A 15-minute stop is drawn at its real 16px: one text line, small buttons.
   const tiny = planned != null && effectiveHeight < SLOT_HEIGHT - 2;
@@ -641,7 +691,7 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
         borderLeft: outsideWindow ? `3px solid ${OUTSIDE_WINDOW_EDGE}` : accent ? `3px solid ${accent}` : undefined,
         ...dragStyle,
       }}
-      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}${planned ? plannedTitleLine(planned, promise) : ''}${drive ? `\nDrive: ${drive}` : ''}\nShift+click to select for bulk actions`}
+      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}${planned ? plannedTitleLine(planned, promise) : (offGridAt != null ? offGridTitleLine(offGridAt, promise) : '')}${drive ? `\nDrive: ${drive}` : ''}\nShift+click to select for bulk actions`}
     >
       {routeOrder != null && !oneLine && (
         <div
@@ -714,6 +764,7 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
             service={service}
             planned={planned}
             promise={promise}
+            promiseTitle={promiseTitle}
             oneLine={oneLine}
             routeOrder={routeOrder}
             gutter={actionGutter}
@@ -802,7 +853,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart, takesNew = true }) {
   // hour: a same-day move on the same technician is not an assignment, and
   // the server accepts it.
   const laneOpen = takesNew || (activeSvc != null && activeSvc.technicianId === techId);
-  const bookable = laneOpen && isBookableSlotIdx(slotIdx, activeSvc ? effectiveDuration(activeSvc) : 60);
+  const bookable = laneOpen && isBookableSlotIdx(slotIdx, activeSvc ? bookedLength(activeSvc) : 60);
   // Registered whenever the lane takes the visit: whether the visit fits
   // the day is decided in onDragEnd, once the gesture is known (a block
   // dragged straight across keeps its booking and needs no fit). `bookable`
@@ -1454,7 +1505,7 @@ export default function TimeGridDay({
   const [dragging, setDragging] = useState(null);
   const { fits: dragFits, best: bestFit } = useBoardOpenTimes({
     service: dragging,
-    durationOf: effectiveDuration,
+    durationOf: bookedLength,
     dates: [date],
   });
 
@@ -1516,10 +1567,10 @@ export default function TimeGridDay({
     const toMin = keepBooked ? fromMin : Math.floor(drop.slotMin / 60) * 60;
     // Past-day-end landings are disabled droppables; belt-and-braces for a
     // stale drop payload — the server would 422 it anyway.
-    if (!keepBooked && toMin + effectiveDuration(svc) > DAY_END_HOUR * 60) return;
+    if (!keepBooked && toMin + bookedLength(svc) > DAY_END_HOUR * 60) return;
     if (dropRefused(fromTech, toTech, fromMin, toMin, techList.find((lane) => lane.id === toTech))) return;
 
-    const dur = effectiveDuration(svc);
+    const dur = bookedLength(svc);
     const newWindow = `${minutesToHHMM(toMin)}-${minutesToHHMM(toMin + dur)}`;
     const newWindowDisplay = `${minutesToLabel(toMin)} – ${minutesToLabel(toMin + dur)}`;
 
@@ -1943,7 +1994,7 @@ export default function TimeGridDay({
         serviceId={pending?.svc?.id}
         toWindow={pending?.newWindow}
         customerId={pending?.svc?.customerId || pending?.svc?.customer_id}
-        durationMinutes={pending?.svc ? effectiveDuration(pending.svc) : undefined}
+        durationMinutes={pending?.svc ? bookedLength(pending.svc) : undefined}
         technicianId={pending?.toTech && pending.toTech !== '__unassigned__' ? pending.toTech : undefined}
         pickTimes
         onConfirm={commitReschedule}

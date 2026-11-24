@@ -40,6 +40,10 @@ function visit(id, name, windowStart, extra = {}) {
 // What the customer was told: an hour-level promise on the day.
 const toldAt = (window) => ({ level: 'hour', dayOnly: false, date: '2026-11-25', window });
 
+const drag = (svc, over, delta) => act(() => {
+  dnd.props.onDragEnd({ active: { data: { current: { service: svc } } }, over: { data: { current: over } }, delta });
+});
+
 function renderDay(services, props = {}) {
   return render(<TimeGridDay date="2026-11-25" services={services} technicians={TECHS} {...props} />);
 }
@@ -253,9 +257,6 @@ describe('TimeGridDay planned blocks', () => {
   });
 
   describe('dragging a block drawn away from its booked hour', () => {
-    const drag = (svc, over, delta) => act(() => {
-      dnd.props.onDragEnd({ active: { data: { current: { service: svc } } }, over: { data: { current: over } }, delta });
-    });
     beforeEach(() => localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' })));
 
     const TWO = [...TECHS, { id: 'tech-2', name: 'Bo Tech' }];
@@ -325,6 +326,50 @@ describe('TimeGridDay planned blocks', () => {
       renderDay([visit('g2', 'Second Si', '09:00', { visitId: 'v1', told, plannedArrivalMin: 12 * 60 + 5, plannedMinutes: 35, plannedStopArrivalMin: 11 * 60 + 30 })]);
       expect(block('Second Si').style.borderLeft).toContain('220, 38, 38');
     });
+  });
+
+  it('keeps the promise check and a planned-time tooltip when the planned arrival is off the grid', () => {
+    // Booked 17:00, told 5-7 PM, but the route reaches it at 8:15 PM: off the grid.
+    renderDay([visit('a', 'Night Ned', '17:00', {
+      plannedArrivalMin: 20 * 60 + 15, plannedMinutes: 35, scheduledDate: '2026-11-25',
+      told: { level: 'hour', dayOnly: false, date: '2026-11-25', window: '5:00 PM - 7:00 PM' },
+    })]);
+    const el = block('Night Ned');
+    // Still drawn at its booked spot...
+    expect(parseFloat(el.style.top)).toBeCloseTo(topOf(17 * 60));
+    expect(parseFloat(el.style.height)).toBeCloseTo(64);
+    // ...with the alert and the planned time.
+    expect(el.style.borderLeft).toContain('220, 38, 38');
+    expect(el.getAttribute('title')).toMatch(/Planned 8:15 PM, after the 5–7 PM promise/);
+  });
+
+  it('labels the window chip by its source: promised, or booked with no promise on record', () => {
+    renderDay([
+      visit('a', 'Told Tom', '10:00', { plannedArrivalMin: 10 * 60 + 30, plannedMinutes: 35, scheduledDate: '2026-11-25', told: toldAt('10:00 AM - 12:00 PM') }),
+      visit('b', 'Bare Bo', '14:00', { plannedArrivalMin: 14 * 60 + 30, plannedMinutes: 35 }),
+    ]);
+    expect(screen.getByText('window 10–12')).toHaveAttribute('title', 'Promised arrival window');
+    expect(screen.getByText('window 2–4')).toHaveAttribute('title', 'Booked arrival window (no promise on record)');
+  });
+
+  it('drops a 09:00-10:30 booking carrying the feed\'s 60-minute estimate at 13:00 as 13:00-14:30', () => {
+    const svc = visit('a', 'Ninety Nan', '09:00', { windowEnd: '10:30', estimatedDuration: 60, plannedArrivalMin: 9 * 60 + 15, plannedMinutes: 35 });
+    renderDay([svc]);
+    drag(svc, { techId: 'tech-1', slotMin: 13 * 60 }, { x: 0, y: 256 });
+    expect(modal.props.open).toBe(true);
+    expect(modal.props.toWindow).toBe('13:00-14:30');
+    expect(modal.props.durationMinutes).toBe(90);
+  });
+
+  it('checks the day end and the drop hint against the booked length, not the estimate', () => {
+    // 18:00-19:30 booked (estimate 60): 19:00 would end at 20:30.
+    const svc = visit('a', 'Long Len', '18:00', { windowEnd: '19:30', estimatedDuration: 60 });
+    dndState.active = { data: { current: { service: svc } } };
+    const { container } = render(<TimeGridDay date="2026-11-25" services={[svc]} technicians={TECHS} />);
+    expect(container.querySelectorAll('[data-slot-min="1140"]')[0].getAttribute('aria-disabled')).toBe('true');
+    expect(container.querySelectorAll('[data-slot-min="1080"]')[0].getAttribute('aria-disabled')).toBeNull();
+    drag(svc, { techId: 'tech-1', slotMin: 19 * 60 }, { x: 0, y: 64 });
+    expect(modal.props.open).toBeFalsy();
   });
 
   it('resizes from the booked window span when the feed filled a 60-minute estimate', async () => {

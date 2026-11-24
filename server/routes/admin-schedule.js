@@ -7359,8 +7359,16 @@ router.get('/', async (req, res, next) => {
     if (plannedTechs.length) {
       const departureMin = await require('../services/scheduling/departure-time').dayDepartureMinutes(db);
       const startPoints = await loadTechStartPoints(db, plannedTechs.map((tech) => tech.technicianId)).catch(() => new Map());
+      // Tech unavailability (capacity mode), one read for the day: the route
+      // runs around it as arrival-route.js does. A failed read plans without.
+      const arrivalRoute = require('../services/scheduling/arrival-route');
+      const dayBlocks = await arrivalRoute.loadDayScheduleBlocks(db, date).catch(() => []);
       plannedTechs.forEach((tech) => require('../services/scheduling/planned-blocks')
-        .attachPlannedBlocks(tech.services, { departureMin, home: homeFromMap(startPoints, tech.technicianId) }));
+        .attachPlannedBlocks(tech.services, {
+          departureMin,
+          home: homeFromMap(startPoints, tech.technicianId),
+          blockedIntervals: arrivalRoute.blockedIntervalsFor(dayBlocks, tech.technicianId),
+        }));
     }
 
     // Calculate tech summaries

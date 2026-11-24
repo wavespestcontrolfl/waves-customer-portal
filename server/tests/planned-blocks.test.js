@@ -168,6 +168,36 @@ describe('attachPlannedBlocks', () => {
     expect(by.next.plannedArrivalMin).toBe(10 * 60 + 60 + Math.max(1, driveMin(A, B)));
   });
 
+  it('runs the route around the tech\'s unavailable time', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    const { blockedIntervalsFor } = require('../services/scheduling/arrival-route');
+    const blocks = [
+      { technician_id: 't1', start_time: '08:00:00', end_time: '09:00:00' },
+      { technician_id: null, start_time: '12:00:00', end_time: '12:30:00' },
+      { technician_id: 't2', start_time: '10:00:00', end_time: '11:00:00' },
+    ];
+    // The arrival-route.js helper: this tech's rows and every tech's, in minutes.
+    expect(blockedIntervalsFor(blocks, 't1')).toEqual([{ startMin: 480, endMin: 540 }, { startMin: 720, endMin: 750 }]);
+    const services = [row('a', '08:00', A)];
+    attachPlannedBlocks(services, { ...EARLY, blockedIntervals: blockedIntervalsFor(blocks, 't1') });
+    // 08:00 is blocked: the stop starts when the block ends.
+    expect(services[0]).toMatchObject({ plannedArrivalMin: 9 * 60, plannedMinutes: 35 });
+  });
+
+  it('reads the day\'s schedule blocks only in capacity mode, in one query', async () => {
+    const { loadDayScheduleBlocks } = require('../services/scheduling/arrival-route');
+    const query = { where: jest.fn().mockReturnThis(), whereNot: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue([{ id: 1 }]) };
+    const conn = jest.fn(() => query);
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    await expect(loadDayScheduleBlocks(conn, '2026-11-25')).resolves.toEqual([]);
+    expect(conn).not.toHaveBeenCalled();
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    await expect(loadDayScheduleBlocks(conn, '2026-11-25')).resolves.toEqual([{ id: 1 }]);
+    expect(conn).toHaveBeenCalledTimes(1);
+    expect(query.where).toHaveBeenCalledWith({ date: '2026-11-25' });
+    expect(query.whereNot).toHaveBeenCalledWith('block_type', 'available');
+  });
+
   it('stamps nulls on every row of an empty or unplaceable day', () => {
     const services = [row('a', '08:00', A, { status: 'cancelled' })];
     attachPlannedBlocks(services);

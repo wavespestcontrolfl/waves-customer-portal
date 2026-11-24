@@ -49,7 +49,7 @@ function isPlaceable(s) {
 
 // The day's route as the drive lines plan it, run from the departure at the
 // tech's start point. Null when it cannot be run (no pin on the first stop).
-function simulateDay(rows, { departureMin, home }) {
+function simulateDay(rows, { departureMin, home, blockedIntervals }) {
   const stops = buildStops(rows.filter((s) => !NOT_A_STOP.has(s.status) && Number.isFinite(minutesOf(s.windowStart))));
   if (!stops.length || !hasGeo(stops[0].anchor)) return null;
   const legs = stops.slice(1).map((st, i) => legBetween(stops[i], st));
@@ -63,6 +63,7 @@ function simulateDay(rows, { departureMin, home }) {
     origin: home,
     end: home,
     reportLate: true,
+    blockedIntervals,
     legMinutes: (_prev, stop) => (stop.id === firstId ? firstLeg : route.legIn.get(stop.id) ?? 0),
   });
   return sim ? { sim, membersOf: route.membersOf, pieceOf: route.pieceOf } : null;
@@ -88,9 +89,10 @@ function memberSlots(piece, arrival, members) {
  * Sets `plannedArrivalMin` / `plannedMinutes` (whole minutes or null) in
  * place on one technician's services. `departureMin` is the van's departure
  * (departure-time.js dayDepartureMinutes); `home` its start point
- * (tech-start-point.js, the office by default).
+ * (tech-start-point.js, the office by default); `blockedIntervals` the tech's
+ * unavailable time (arrival-route.js blockedIntervalsFor).
  */
-function attachPlannedBlocks(services, { departureMin = DEFAULT_DEPARTURE_MIN, home = RouteOptimizer.HQ } = {}) {
+function attachPlannedBlocks(services, { departureMin = DEFAULT_DEPARTURE_MIN, home = RouteOptimizer.HQ, blockedIntervals = [] } = {}) {
   clearPlanned(services);
   const rows = (services || []).filter(isPlaceable);
   if (!rows.length) return;
@@ -98,7 +100,7 @@ function attachPlannedBlocks(services, { departureMin = DEFAULT_DEPARTURE_MIN, h
   // keep null fields and draw as before.
   let day = null;
   try {
-    day = simulateDay(services, { departureMin, home });
+    day = simulateDay(services, { departureMin, home, blockedIntervals });
   } catch {
     day = null;
   }
