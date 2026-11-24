@@ -63,27 +63,44 @@ function planOf(service) {
 
 // The physical stops of one technician's day, in route order. The services
 // of one stop (a visit group, or two services at one address) share the
-// route model's `plannedStopKey`, or a visit id where the route could not
-// place them: one number, each service its own line. A stop sorts by its
-// earliest planned arrival, else booked start; the day list's own order
-// breaks ties; a stop with no time at all goes last.
+// route model's `plannedStopKey`: one number, each service its own line.
+//  - Keyed stops keep the server's own route order (stop-<index> from the
+//    physical-stop grouping), whatever their times say: a delayed stop planned
+//    for 11:00 still comes before the unplanned 10:00 stop after it.
+//  - A row with no key but a visit the route knows joins that visit's stop
+//    (a skipped, cancelled or untimed member does not add a number).
+//  - Only a row outside the route (no key, no known visit) is placed by its
+//    booked start, after the last routed stop that starts no later; the day
+//    list's display order, then feed position, break ties.
 function routeStops(services) {
+  const keyOfVisit = new Map();
+  for (const s of services) {
+    if (s.plannedStopKey && s.visitId && !keyOfVisit.has(s.visitId)) keyOfVisit.set(s.visitId, s.plannedStopKey);
+  }
   const stops = new Map();
   services.forEach((service, index) => {
-    const key = service.plannedStopKey || (service.visitId ? `visit-${service.visitId}` : `row-${service.id}`);
-    if (!stops.has(key)) stops.set(key, { key, services: [], index });
+    const routed = service.plannedStopKey || (service.visitId && keyOfVisit.get(service.visitId)) || null;
+    const key = routed || (service.visitId ? `visit-${service.visitId}` : `row-${service.id}`);
+    if (!stops.has(key)) stops.set(key, { key, routed: Boolean(routed), services: [], index });
     stops.get(key).services.push(service);
   });
   const timeOf = (s) => planOf(s)?.start ?? parseHHMM(s.windowStart) ?? Infinity;
+  const orderOf = (s) => s.displayOrder ?? Infinity;
   const list = [...stops.values()];
   for (const stop of list) {
-    stop.services.sort((a, b) => timeOf(a) - timeOf(b) || (a.displayOrder ?? Infinity) - (b.displayOrder ?? Infinity));
+    stop.services.sort((a, b) => timeOf(a) - timeOf(b) || orderOf(a) - orderOf(b));
     stop.at = timeOf(stop.services[0]);
-    stop.order = Math.min(...stop.services.map((s) => s.displayOrder ?? Infinity));
+    stop.order = Math.min(...stop.services.map(orderOf));
   }
-  // The feed's own display order (the day list's tie-proximity order) breaks a
-  // tie in time; feed position only after that.
-  return list.sort((a, b) => a.at - b.at || a.order - b.order || a.index - b.index);
+  const stopIndex = (stop) => Number(String(stop.key).match(/(\d+)$/)?.[1]);
+  const route = list.filter((st) => st.routed).sort((a, b) => stopIndex(a) - stopIndex(b));
+  const loose = list.filter((st) => !st.routed).sort((a, b) => a.at - b.at || a.order - b.order || a.index - b.index);
+  for (const stop of loose) {
+    let at = 0;
+    route.forEach((st, i) => { if (st.at <= stop.at) at = i + 1; });
+    route.splice(at, 0, stop);
+  }
+  return route;
 }
 
 // Planned minutes of the day and its finish (the last planned departure).

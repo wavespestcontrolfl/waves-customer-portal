@@ -213,4 +213,31 @@ describe('RouteListDay', () => {
     render(<RouteListDay technicians={TECHS} services={[stop('a', 'Late Lou', '23:00', { plannedArrivalMin: 1430, plannedMinutes: 20 })]} />);
     expect(card('Alex Tech').querySelector('header')).toHaveTextContent('Planned finish 12:10 AM (+1 day)');
   });
+
+  it('keeps keyed stops in the server\'s route order, whatever their times, and places only rows outside the route by booked time', () => {
+    render(<RouteListDay technicians={TECHS} services={[
+      // Stop 1 is unplanned (booked 10:00) and comes after stop 0, delayed to 11:00.
+      stop('late', 'Delayed Dee', '09:00', { plannedStopKey: 'stop-0', plannedArrivalMin: 11 * 60, plannedMinutes: 35 }),
+      stop('next', 'Unplanned Una', '10:00', { plannedStopKey: 'stop-1' }),
+      // Outside the route (no key): by booked start.
+      stop('early', 'Early Ed', '09:30', { status: 'cancelled' }),
+      stop('after', 'After Al', '10:30', { status: 'cancelled' }),
+    ]} />);
+    expect(lines(card('Alex Tech')).map((b) => b.textContent)).toEqual([
+      expect.stringContaining('Early Ed'), expect.stringContaining('Delayed Dee'),
+      expect.stringContaining('Unplanned Una'), expect.stringContaining('After Al'),
+    ]);
+    expect(numbers('Alex Tech')).toEqual(['1', '2', '3', '4']);
+  });
+
+  it('joins a skipped, cancelled or untimed member of a keyed visit to its stop instead of adding a number', () => {
+    render(<RouteListDay technicians={TECHS} services={[
+      stop('p', 'Pair Pia', '09:00', { visitId: 'v1', plannedStopKey: 'stop-0', plannedArrivalMin: 540, plannedMinutes: 35 }),
+      stop('s', 'Pair Pia', '09:00', { visitId: 'v1', status: 'skipped' }),
+      stop('x', 'Pair Pia', '09:00', { visitId: 'v1', status: 'cancelled', windowStart: null, windowEnd: null }),
+    ]} />);
+    expect(numbers('Alex Tech')).toEqual(['1']);
+    expect(card('Alex Tech').querySelector('header')).toHaveTextContent('1 stop');
+    expect(within(within(card('Alex Tech')).getByTestId('stop')).getAllByRole('button')).toHaveLength(3);
+  });
 });
