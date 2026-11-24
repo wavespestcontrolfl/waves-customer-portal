@@ -3,33 +3,31 @@
 **Summary:** Core routing logic for daily dispatch optimization in Southwest Florida. Covers cluster grouping, re-optimization triggers, drive time targets, and job ordering principles.
 
 **Category:** protocols
-**Tags:** routing, dispatch, optimization, clusters, drive-time, zone, territory
+**Tags:** routing, dispatch, optimization, drive-time, service-line-split
 
 ---
 
-## Territory Clusters
+## Who Covers What (owner rulings 2026-11-21 / 11-22, FINAL)
 
-**North cluster (Adam primary):**
-- Parrish: 34219, 34221
-- Bradenton: 34208, 34209, 34210, 34211
-- Lakewood Ranch: 34202, 34240
+Waves has **one technician today: Adam (the owner)**. Adam covers every service line in every served ZIP.
 
-**South cluster (Tech 2 primary):**
-- Sarasota: 34229, 34231, 34232, 34233, 34234, 34235, 34237, 34238, 34239, 34241, 34242
-- Venice: 34285, 34292, 34293
-- North Port: 34286, 34287, 34288, 34289 (Tech 3)
-- Port Charlotte: 33948, 33952, 33980, 33981 (Tech 3)
+When the second technician is hired, the split is **by service line, not by ZIP or territory**:
+- **Second tech:** pest control and termite work, in every served ZIP. Exceptions that stay with Adam: Aggressive Colony Surcharge stinging-insect jobs, and the exclusion line (the first rodent visit, the rodent inspection, sealing and exclusion work).
+- **Adam:** lawn care, tree & shrub, and exclusion, in every served ZIP; fills in on pest when needed.
+
+Do not split work between techs by ZIP cluster. Group a day's stops by geography for drive time only.
+Home and cover techs per service line live in `service_line_techs`, edited on the Time Tracking roster's Service Lines card (the territory card is a read-only ZIP view). This page only summarizes the rulings.
 
 ## Route Building Order
 
-1. Group all jobs for the day by tech territory
+1. Group all jobs for the day by the tech who does that service line, then by geography
 2. Score each job using the job scoring formula
 3. Anchor first stop: highest-score job nearest to tech's home zip
 4. Subsequent stops: maximize cluster density × job score — minimize backtracking
 5. Place high-score jobs (≥80) at natural positions — never bury them after low-score stops
 6. Recurring jobs form the backbone; one-time jobs slot into geographic gaps
 7. Inspection/estimate jobs get dedicated time blocks — never back-to-back with full service jobs
-8. Maximum 10 stops per tech per day
+8. A full day is 12 stops per tech (owner 2026-11-22); 16 is a stretch day only
 
 ## Drive Time Targets
 
@@ -47,13 +45,13 @@
 
 ## Recurring vs One-Time Routing
 
-- **Recurring days:** Anchor on density clusters, 6–8 stops per tech, tight geography
-- **One-time days:** Score-first ordering, accept wider geography, 4–6 stops per tech
+- **Recurring days:** Anchor on dense neighborhoods, up to 12 stops per tech, tight geography
+- **One-time days:** Score-first ordering, accept wider geography, fewer stops per tech
 - **Mixed days (default):** Recurring stops as backbone, one-time jobs fill in gaps by zone
 
 ## Shift Structure
 
 - Start: 7:30–8:00 AM first stop
-- Break window: 11:30 AM–12:30 PM — avoid scheduling stops 11:45–12:15
-- End: Last stop no later than 5:00 PM
+- No lunch break is scheduled (owner 2026-11-24); every clocked minute is paid. Do not hold a midday gap.
+- End: auto-dispatch places no stop that ends after 5:00 PM (`DAY_CLOSE`); the paid day runs to about 6:00 PM
 - Estimates/inspections: prefer 9–11 AM or 2–4 PM (customers more available)

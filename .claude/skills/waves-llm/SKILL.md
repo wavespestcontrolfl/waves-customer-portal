@@ -127,9 +127,14 @@ the `ROUTES` map in `models.js`, dispatched through
 Responses / Gemini generateContent / Anthropic SDK).
 
 Currently live:
-- **GPT-5.5** (`MODEL_OPENAI_BEST`): lead-triage classification
-  (`lead-triage.js`), knowledge-base Q&A (`knowledge-bridge.js`), estimate
-  assistant (`estimate-assistant.js`).
+- **`OPENAI_BALANCED`** (code default `gpt-5.6-terra`; env `MODEL_OPENAI_BALANCED`, legacy
+  alias `MODEL_OPENAI_BEST`): knowledge-base Q&A (`knowledge-bridge.js`,
+  `ROUTES.knowledgeAnswer`), estimate assistant (`estimate-assistant.js`,
+  `ROUTES.estimateAssistant`).
+- **`OPENAI_FAST`** (env `MODEL_OPENAI_FAST`, code default `gpt-5.6-luna`;
+  production has overridden it, GPT-6.1 Sol since 2026-10-25 per the
+  `models.js` note): lead-triage classification (`lead-triage.js`,
+  `ROUTES.leadClassify`). Read the live variable before you name the model.
 - **Lawn visit read + paired recheck** (`MODEL_GEMINI_LAWN_ASSESSMENT`, default
   `gemini-3.8-flash`, owner 2026-10-24): their own Gemini selector, so the lawn
   read does not follow `MODEL_GEMINI_VISION`.
