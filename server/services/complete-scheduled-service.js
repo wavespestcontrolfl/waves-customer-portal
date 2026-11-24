@@ -12778,18 +12778,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // Orphaned claim from a dead worker. The durable truth is the
             // invoice itself: does any non-void series invoice already
             // carry the setup line?
-            const lineExists = await db('invoices')
-              .whereIn('scheduled_service_id', db('scheduled_services').select('id').where(function series() {
-                this.where({ id: setupParentId }).orWhere({ recurring_parent_id: setupParentId });
-              }))
-              // Only COLLECTIBLE-or-settled invoices prove the fee is
-              // billed (Codex #2980 r3): a voided/cancelled/refunded
-              // invoice collects nothing, so treating it as proof would
-              // clear the claim and the customer permanently skips the
-              // selected fee.
-              .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
-              .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
-              .first('id');
+            const lineExists = await require('../services/setup-fee-obligation').seriesCarriesSetupFeeLine(db, setupParentId);
             if (lineExists) {
               // Backfill the immutable claim record before healing: a
               // worker that died between the mint commit and the record
@@ -16904,6 +16893,7 @@ module.exports.isPestStockAdvisoryCompletion = isPestStockAdvisoryCompletion;
 module.exports.isLawnTsStockAdvisoryCompletion = isLawnTsStockAdvisoryCompletion;
 module.exports.isStockAdvisoryCompletion = isStockAdvisoryCompletion;
 module.exports.vetProductAmounts = vetProductAmounts;
+module.exports.SETUP_FEE_CLAIM_LEASE_MS = SETUP_FEE_CLAIM_LEASE_MS;
 module.exports.canonicalizeProductLines = canonicalizeProductLines;
 module.exports.exceedsVisitLimit = exceedsVisitLimit;
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;

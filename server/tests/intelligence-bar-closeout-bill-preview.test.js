@@ -6,6 +6,9 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { previewCloseoutBill } = require('../services/closeout-bill-preview');
+const { _private: preview } = require('../services/closeout-bill-preview');
+const AnnualPrepay = require('../services/annual-prepay-renewals');
+const SetupFee = require('../services/setup-fee-obligation');
 const registry = require('../services/intelligence-bar/action-registry');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 
@@ -41,9 +44,10 @@ function facts(visitOverrides = {}, rest = {}) {
     flags: require('../services/billing-lane').completionLaneFlags(visit(visitOverrides).cust_billing_mode),
     billing: { autopay_active: false, payer_billed: false, ...(rest.billing || {}) },
     invoices: { existing: null, terminal: null, liveBeside: null, ...(rest.invoices || {}) },
-    coverage: { annualVerdict: null, duesCollected: false, ...(rest.coverage || {}) },
-    setup: { obligation: null, parkedElsewhere: false, claimAmount: null, detectorError: false, ...(rest.setup || {}) },
+    coverage: { annualVerdict: null, annualUnavailable: false, duesCollected: false, ...(rest.coverage || {}) },
+    setup: { obligation: null, parkedElsewhere: false, claim: null, detectorError: false, ...(rest.setup || {}) },
     profile: { known: true, billingType: '' },
+    coveredExtras: rest.coveredExtras || null,
   };
 }
 
@@ -114,7 +118,7 @@ describe('get_closeout_bill_preview', () => {
   test('a queued plan-choice setup fee rides the first invoice as its own line', async () => {
     const f = facts(
       { estimated_price: 60, cust_billing_mode: 'per_application', is_recurring: true },
-      { setup: { claimAmount: 99 } },
+      { setup: { claim: { amount: 99, state: 'queued' } } },
     );
     const out = await run(f);
     expect(out.will_invoice).toBe(true);
@@ -160,6 +164,105 @@ describe('get_closeout_bill_preview', () => {
   test('unknown visit id', async () => {
     const out = await previewCloseoutBill(SERVICE_ID, { gather: async () => null });
     expect(out).toEqual({ found: false });
+  });
+});
+
+describe('covered visits, annual prepay add-ons and orphaned setup-fee claims', () => {
+  const coveredVisit = { estimated_price: 90, create_invoice_on_complete: true };
+  const addonRead = {
+    kind: 'bill',
+    extras: { total: 25, lines: [{ description: 'Mosquito add-on', amount: 30 }, { description: 'Add-on discount', amount: -5 }] },
+  };
+  const savedAddonGate = process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING;
+  afterEach(() => {
+    if (savedAddonGate === undefined) delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING;
+    else process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = savedAddonGate;
+    jest.restoreAllMocks();
+  });
+
+  test('an unstamped termite renewal grace visit is covered: the completion check (annualPrepayCoversVisit) decides, not the prediction verdict', async () => {
+    const covers = jest.spyOn(AnnualPrepay, 'annualPrepayCoversVisit').mockResolvedValue(true);
+    const prediction = jest.spyOn(AnnualPrepay, 'annualCoverageVerdictForPrediction');
+    const v = visit(coveredVisit);
+    const coverage = await preview.loadCoverage({}, v, { payer_billed: false, autopay_active: false }, { perApplicationBilling: false, annualPrepayBilling: false, explicitMembershipLane: false });
+    expect(covers).toHaveBeenCalledWith(v, {}, { throwOnError: true });
+    expect(prediction).not.toHaveBeenCalled();
+    expect(coverage.annualVerdict).toBe(true);
+    const out = await run(facts(coveredVisit, { coverage: { annualVerdict: true } }));
+    expect(out.will_invoice).toBe(false);
+    expect(out.reason_code).toBe('covered_by_annual_prepay');
+  });
+
+  test('a stamp the term no longer backs is false, an unstamped uncovered visit is null', async () => {
+    jest.spyOn(AnnualPrepay, 'annualPrepayCoversVisit').mockResolvedValue(false);
+    const flags = { perApplicationBilling: false, annualPrepayBilling: false, explicitMembershipLane: false };
+    const stamped = await preview.loadCoverage({}, visit({ prepaid_method: AnnualPrepay.ANNUAL_PREPAY_PREPAID_METHOD }), { payer_billed: false }, flags);
+    const bare = await preview.loadCoverage({}, visit(), { payer_billed: false }, flags);
+    expect(stamped.annualVerdict).toBe(false);
+    expect(bare.annualVerdict).toBeNull();
+  });
+
+  test('covered visit with priced add-ons and the add-on gate on: the add-ons bill alone', async () => {
+    process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'true';
+    const out = await run(facts(coveredVisit, { coverage: { annualVerdict: true }, coveredExtras: addonRead }));
+    expect(out.will_invoice).toBe(true);
+    expect(out.reason_code).toBe('annual_prepay_addons_billed');
+    expect(out.lines).toEqual([{ description: 'Mosquito add-on', amount: 30 }]);
+    expect(out.discounts).toEqual([{ name: 'Add-on discount', amount: 5 }]);
+    expect(out.total).toBe(25);
+    expect(out.gates.GATE_ANNUAL_PREPAY_ADDON_BILLING).toBe(true);
+  });
+
+  test('covered visit with add-ons and the add-on gate off: nothing bills, and the note says why', async () => {
+    delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING;
+    const out = await run(facts(coveredVisit, { coverage: { annualVerdict: true }, coveredExtras: addonRead }));
+    expect(out.will_invoice).toBe(false);
+    expect(out.notes.join(' ')).toMatch(/GATE_ANNUAL_PREPAY_ADDON_BILLING is off/);
+  });
+
+  test('covered visit whose add-ons need the office (unpriced add-on) collects nothing and says so', async () => {
+    process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'true';
+    const out = await run(facts(coveredVisit, { coverage: { annualVerdict: true }, coveredExtras: { kind: 'unpriced' } }));
+    expect(out.will_invoice).toBe(false);
+    expect(out.reason_code).toBe('covered_by_annual_prepay');
+    expect(out.notes.join(' ')).toMatch(/an add-on has no price yet.*office alert/);
+  });
+
+  function claimDb(pending, updatedAt) {
+    return () => ({ where: () => ({ first: async () => ({ pending_setup_fee: pending, updated_at: updatedAt }) }) });
+  }
+  const { SETUP_FEE_CLAIM_LEASE_MS } = require('../services/complete-scheduled-service');
+  const oldClaim = new Date(Date.now() - SETUP_FEE_CLAIM_LEASE_MS - 60000);
+
+  test('orphaned negative claim past its lease with no invoice line: adopted, the fee rides', async () => {
+    jest.spyOn(SetupFee, 'seriesCarriesSetupFeeLine').mockResolvedValue(undefined);
+    const claim = await preview.loadQueuedSetupClaim(claimDb(-99, oldClaim), visit({ is_recurring: true }));
+    expect(claim).toEqual({ amount: 99, state: 'adopted_orphan' });
+    const out = await run(facts({ estimated_price: 60, cust_billing_mode: 'per_application', is_recurring: true }, { setup: { claim } }));
+    expect(out.will_invoice).toBe(true);
+    expect(out.lines.map((l) => l.amount)).toEqual([60, 99]);
+    expect(out.total).toBe(159);
+    expect(out.setup_fee.rides_on_this_invoice).toBe(99);
+  });
+
+  test('orphaned claim inside its lease: held while the other completion mints', async () => {
+    jest.spyOn(SetupFee, 'seriesCarriesSetupFeeLine').mockResolvedValue(undefined);
+    const claim = await preview.loadQueuedSetupClaim(claimDb(-99, new Date()), visit({ is_recurring: true }));
+    expect(claim).toEqual({ amount: 99, state: 'in_flight' });
+    const out = await run(facts({ estimated_price: 60, cust_billing_mode: 'per_application', is_recurring: true }, { setup: { claim } }));
+    expect(out.will_invoice).toBe(false);
+    expect(out.reason_code).toBe('setup_fee_claim_in_flight');
+    expect(out.setup_fee.claim_state).toBe('in_flight');
+  });
+
+  test('orphaned claim whose fee a live series invoice already carries: nothing rides', async () => {
+    jest.spyOn(SetupFee, 'seriesCarriesSetupFeeLine').mockResolvedValue({ id: 'inv-9' });
+    const claim = await preview.loadQueuedSetupClaim(claimDb(-99, oldClaim), visit({ is_recurring: true }));
+    expect(claim).toEqual({ amount: 99, state: 'already_on_invoice' });
+    const out = await run(facts({ estimated_price: 60, cust_billing_mode: 'per_application', is_recurring: true }, { setup: { claim } }));
+    expect(out.will_invoice).toBe(true);
+    expect(out.total).toBe(60);
+    expect(out.setup_fee.rides_on_this_invoice).toBeNull();
   });
 });
 

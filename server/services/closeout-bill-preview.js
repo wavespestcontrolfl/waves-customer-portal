@@ -37,6 +37,7 @@ function gateStates() {
   return {
     GATE_UNMINTED_SETUP_FEE_PARK: process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true',
     GATE_AUTOINVOICE_PRICED_VISITS: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
+    GATE_ANNUAL_PREPAY_ADDON_BILLING: !!gates.gateEnvValue('GATE_ANNUAL_PREPAY_ADDON_BILLING'),
     GATE_COMPLETION_AUTOPAY_CHARGE: gates.gates?.completionAutopayCharge === true,
     GATE_INVOICE_ESTIMATE_DISCOUNT_LINES: typeof gates.invoiceEstimateDiscountLinesLive === 'function'
       ? gates.invoiceEstimateDiscountLinesLive() === true
@@ -90,11 +91,18 @@ async function loadInvoiceState(database, visit) {
 
 async function loadCoverage(database, visit, billing, flags) {
   const AnnualPrepay = require('./annual-prepay-renewals');
+  // The completion's own coverage check (termite renewal grace, held and deferred year, stamped term), not the
+  // prediction's narrower verdict. true = covered; false = a stamp the term no longer backs; null = no annual coverage.
   let annualVerdict = null;
+  let annualUnavailable = false;
   try {
-    const deferred = await AnnualPrepay.deferredPrepayHoldCustomerIds(database, [visit.customer_id]);
-    annualVerdict = await AnnualPrepay.annualCoverageVerdictForPrediction(visit, database, { deferredCustomerIds: deferred });
+    const covered = billing.payer_billed === true
+      ? false
+      : await AnnualPrepay.annualPrepayCoversVisit(visit, database, { throwOnError: true });
+    if (covered) annualVerdict = true;
+    else if (visit.prepaid_method === AnnualPrepay.ANNUAL_PREPAY_PREPAID_METHOD) annualVerdict = false;
   } catch (err) {
+    annualUnavailable = true;
     logger.warn(`[closeout-bill-preview] annual prepay verdict unavailable for ${visit.id}: ${err.message}`);
   }
   let duesCollected = false;
@@ -111,7 +119,7 @@ async function loadCoverage(database, visit, billing, flags) {
       logger.warn(`[closeout-bill-preview] dues lookup unavailable for ${visit.id}: ${err.message}`);
     }
   }
-  return { annualVerdict, duesCollected };
+  return { annualVerdict, annualUnavailable, duesCollected };
 }
 
 // Setup fee facts. The detector the completion parks on, plus whether another
@@ -134,20 +142,31 @@ async function loadUnmintedObligation(database, visit) {
   return { obligation: found, parkedElsewhere: !!prior && String(meta?.scheduledServiceId || '') !== String(visit.id) };
 }
 
-// The secure plan-choice fee that rides the first mint as its own line
-// (pending_setup_fee on the series parent), as the completion claims it.
+// The secure plan-choice fee (pending_setup_fee on the series parent), judged as the completion claims it
+// (complete-scheduled-service.js, the setup-fee claim block). state: 'queued' (a positive stamp: rides the first
+// mint), 'already_on_invoice' (a negative stamp whose fee a live series invoice already carries: the completion
+// heals it, nothing rides), 'adopted_orphan' (a negative stamp past its lease with no invoice line: the completion
+// adopts it and the fee rides) or 'in_flight' (a negative stamp inside its lease: another completion is minting and
+// this one is released for retry). Returns null when no fee applies.
 async function loadQueuedSetupClaim(database, visit) {
+  const SetupFee = require('./setup-fee-obligation');
   const parentId = visit.recurring_parent_id || visit.id;
-  const parent = await database('scheduled_services').where({ id: parentId }).first('pending_setup_fee');
-  const raw = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : 0;
+  const parent = await database('scheduled_services').where({ id: parentId }).first('pending_setup_fee', 'updated_at');
+  const rawFee = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
   const boosterUnderPlan = !!visit.recurring_parent_id && !visit.is_recurring;
-  if (!(raw > 0) || boosterUnderPlan || visit.is_callback) return null;
-  const { prepayWaivesDeferredSetupFee } = require('./setup-fee-obligation');
-  return (await prepayWaivesDeferredSetupFee(database, { seriesId: parentId, visit })) ? null : money(raw);
+  if (!rawFee || boosterUnderPlan || visit.is_callback) return null;
+  const amount = money(Math.abs(rawFee));
+  if (rawFee > 0) {
+    return (await SetupFee.prepayWaivesDeferredSetupFee(database, { seriesId: parentId, visit })) ? null : { amount, state: 'queued' };
+  }
+  if (await SetupFee.seriesCarriesSetupFeeLine(database, parentId)) return { amount, state: 'already_on_invoice' };
+  const { SETUP_FEE_CLAIM_LEASE_MS } = require('./complete-scheduled-service');
+  const lapsed = new Date(parent.updated_at).getTime() < Date.now() - SETUP_FEE_CLAIM_LEASE_MS;
+  return { amount, state: lapsed ? 'adopted_orphan' : 'in_flight' };
 }
 
 async function loadSetupFee(database, visit) {
-  const out = { obligation: null, parkedElsewhere: false, claimAmount: null, detectorError: false };
+  const out = { obligation: null, parkedElsewhere: false, claim: null, detectorError: false };
   const attempt = async (label, read) => {
     try { await read(); } catch (err) {
       out.detectorError = true;
@@ -155,7 +174,7 @@ async function loadSetupFee(database, visit) {
     }
   };
   if (visit.source_estimate_id) await attempt('check', async () => Object.assign(out, await loadUnmintedObligation(database, visit)));
-  await attempt('claim read', async () => { out.claimAmount = await loadQueuedSetupClaim(database, visit); });
+  await attempt('claim read', async () => { out.claim = await loadQueuedSetupClaim(database, visit); });
   return out;
 }
 
@@ -183,7 +202,11 @@ async function gatherFacts(serviceId, database = db) {
     loadSetupFee(database, visit),
     loadProfileBillingType(database, visit),
   ]);
-  return { visit, flags, billing, invoices, coverage, setup, profile };
+  // A covered visit can still bill its add-ons (annual-prepay-addon-billing.js): read what they owe, as the closeout does.
+  const covered = billing.payer_billed !== true && coverage.annualVerdict === true;
+  const { coveredVisitExtrasRead } = require('./annual-prepay-addon-billing');
+  const coveredExtras = covered ? await coveredVisitExtrasRead(visit, database) : null;
+  return { visit, flags, billing, invoices, coverage, setup, profile, coveredExtras };
 }
 
 function invoiceRef(inv) {
@@ -288,15 +311,22 @@ function sheetPrediction(f, autopayCoversVisit) {
   });
 }
 
+// The fee that rides this invoice as its own line: a queued claim, or an orphaned claim the completion adopts.
+function ridingSetupFee(f) {
+  const claim = f.setup.claim;
+  return claim && ['queued', 'adopted_orphan'].includes(claim.state) ? claim.amount : null;
+}
+
 function setupFeeSummary(f, setupHold, gates) {
-  const { obligation, claimAmount, detectorError } = f.setup;
+  const { obligation, detectorError } = f.setup;
   const owed = obligation ? money(obligation.setupFee) : null;
   return {
     never_invoiced: !!obligation,
     amount: owed,
     held_for_manual_billing: setupHold,
     park_gate_on: gates.GATE_UNMINTED_SETUP_FEE_PARK,
-    rides_on_this_invoice: claimAmount,
+    rides_on_this_invoice: ridingSetupFee(f),
+    claim_state: f.setup.claim?.state || null,
     check_unavailable: detectorError || undefined,
   };
 }
@@ -305,6 +335,9 @@ function setupFeeSummary(f, setupHold, gates) {
 function noInvoiceReason(f, ctx) {
   const { invoices } = f;
   const { setupHold, flags: cover, prediction } = ctx;
+  if (ctx.claimInFlight) {
+    return { code: 'setup_fee_claim_in_flight', text: `held: another completion has claimed the $${money(f.setup.claim.amount).toFixed(2)} setup fee and is minting it; this closeout is released for retry once that claim's lease runs out` };
+  }
   if (invoices.existing) {
     const ref = invoiceRef(invoices.existing);
     return { code: 'already_invoiced', text: `already invoiced ${ref.invoice_number || ref.id} (${ref.status}); the completion reuses it and cuts no second invoice` };
@@ -361,9 +394,12 @@ async function priceBlock(f, amount, deps, database) {
   }
   const { lines, discounts } = splitLines(lineItems);
   if (!lines.length && amount > 0) lines.push({ description: f.visit.service_type || 'Service', amount: money(amount) });
-  const setupLine = f.setup.claimAmount != null && !f.invoices.existing
-    ? { description: 'One-time setup fee', amount: f.setup.claimAmount } : null;
-  if (setupLine) lines.push(setupLine);
+  const riding = ridingSetupFee(f);
+  if (riding != null && !f.invoices.existing) lines.push({ description: 'One-time setup fee', amount: riding });
+  return finishPrice(f, { lines, discounts, notes }, deps, database);
+}
+
+async function finishPrice(f, { lines, discounts, notes }, deps, database) {
   const subtotal = money(lines.reduce((s, l) => s + l.amount, 0));
   const discountTotal = money(discounts.reduce((s, d) => s + d.amount, 0));
   const net = money(subtotal - discountTotal);
@@ -387,6 +423,7 @@ function previewNotes(f, ctx) {
   const { gates, obligation, prepaidCovered } = ctx;
   const notes = [];
   if (!OPEN_VISIT_STATUSES.includes(f.visit.status)) notes.push(`This visit is ${f.visit.status}, not open; the answer shows what the completion rule says now.`);
+  if (f.coverage.annualUnavailable) notes.push('The annual prepay coverage check failed; the completion would hold and retry.');
   if (f.profile.known === false) notes.push('The completion type could not be read; a one-time billing profile would add a mint trigger.');
   if (obligation && !gates.GATE_UNMINTED_SETUP_FEE_PARK && !f.invoices.existing) {
     notes.push(`The park gate is off, so the completion invoices this application without the $${money(obligation.setupFee).toFixed(2)} setup fee and the fee stays unbilled.`);
@@ -423,7 +460,7 @@ async function invoicePayload(f, ctx, deps, database) {
 
 function noInvoicePayload(f, ctx) {
   const why = noInvoiceReason(f, {
-    setupHold: ctx.setup_fee.held_for_manual_billing, flags: ctx.cover, prediction: ctx.prediction,
+    setupHold: ctx.setup_fee.held_for_manual_billing, flags: ctx.cover, prediction: ctx.prediction, claimInFlight: ctx.claimInFlight,
   });
   const out = {
     will_invoice: false,
@@ -440,8 +477,65 @@ function noInvoicePayload(f, ctx) {
   return out;
 }
 
+// What a covered visit's add-ons do at completion (annual-prepay-addon-billing.js run()): with the gate on and no
+// invoice on the visit they are billed alone; with an invoice on the visit, or an add-on awaiting its price or a
+// visit-wide discount, the office gets an alert and nothing is collected; with the gate off nothing is billed.
+function coveredAddonOutcome(f, gates) {
+  const read = f.coveredExtras;
+  if (!read || read.kind === 'none') return null;
+  const owed = ['bill', 'unpriced', 'ambiguous', 'unbuildable'].includes(read.kind);
+  if (read.kind === 'error') return { mode: 'unavailable' };
+  if (!owed) return null;
+  if (!gates.GATE_ANNUAL_PREPAY_ADDON_BILLING) return { mode: 'gate_off' };
+  if (f.invoices.existing || f.invoices.terminal) return { mode: 'office', why: 'the visit already has an invoice' };
+  if (read.kind === 'bill') return { mode: 'bill', extras: read.extras };
+  const why = {
+    unpriced: 'an add-on has no price yet',
+    ambiguous: 'a visit-wide discount makes the add-ons\' share unclear',
+    unbuildable: 'the add-on lines could not be built',
+  }[read.kind];
+  return { mode: 'office', why };
+}
+
+function addonNote(outcome) {
+  const notes = {
+    unavailable: 'The add-on check for this covered visit could not be read; the completion would hold and retry.',
+    gate_off: 'This covered visit has add-ons, but GATE_ANNUAL_PREPAY_ADDON_BILLING is off, so the completion bills none of them.',
+  };
+  if (notes[outcome.mode]) return notes[outcome.mode];
+  return `This covered visit has add-ons the completion does not bill itself (${outcome.why}); it raises an office alert and collects nothing.`;
+}
+
+async function addonBillPayload(f, ctx, extras, deps, database) {
+  const { lines, discounts } = splitLines(extras.lines);
+  const price = await finishPrice(f, { lines, discounts, notes: [] }, {
+    previewTax: deps.previewTax || defaultPreviewTax,
+  }, database);
+  return {
+    will_invoice: true,
+    reason_code: 'annual_prepay_addons_billed',
+    reason: 'the visit itself is covered by the annual prepay and bills nothing; the completion cuts an invoice for its add-ons alone',
+    collection: 'invoice',
+    lines: price.lines,
+    discounts: price.discounts,
+    subtotal: price.subtotal,
+    discount_total: price.discount_total,
+    net_before_tax: price.net,
+    tax: price.tax,
+    total: price.tax ? price.tax.total : price.net,
+    setup_fee: ctx.setup_fee,
+    notes: [...ctx.notes, ...price.notes],
+  };
+}
+
 function dayOf(value) {
   return String(value instanceof Date ? value.toISOString() : value).slice(0, 10);
+}
+
+async function previewBody({ willMint, claimInFlight, addon }, f, ctx, deps, database) {
+  if (addon?.mode === 'bill') return addonBillPayload(f, ctx, addon.extras, deps, database);
+  if (willMint && !claimInFlight) return invoicePayload(f, ctx, deps, database);
+  return noInvoicePayload(f, { ...ctx, claimInFlight });
 }
 
 async function previewCloseoutBill(serviceId, deps = {}) {
@@ -465,14 +559,17 @@ async function previewCloseoutBill(serviceId, deps = {}) {
     setup_fee: setupFeeSummary(f, holdWanted && wouldMintWithoutHold, gates),
     notes: previewNotes(f, { gates, obligation, prepaidCovered }),
   };
+  const claimInFlight = willMint && f.setup.claim?.state === 'in_flight';
+  const addon = !willMint && annualPrepayCovered ? coveredAddonOutcome(f, gates) : null;
+  if (addon) ctx.notes.push(addonNote(addon));
   const base = {
     found: true,
     service_id: f.visit.id,
     visit: { status: f.visit.status, service_type: f.visit.service_type, scheduled_date: dayOf(f.visit.scheduled_date) },
     gates,
-    sources: ['shouldAutoInvoiceCompletion', 'buildLineItemsForScheduledService', 'predictCompletionBilling', 'findUnmintedSetupFeeObligation'],
+    sources: ['shouldAutoInvoiceCompletion', 'annualPrepayCoversVisit', 'coveredVisitExtrasRead', 'buildLineItemsForScheduledService', 'predictCompletionBilling', 'findUnmintedSetupFeeObligation'],
   };
-  return { ...base, ...(willMint ? await invoicePayload(f, ctx, deps, database) : noInvoicePayload(f, ctx)) };
+  return { ...base, ...(await previewBody({ willMint, claimInFlight, addon }, f, ctx, deps, database)) };
 }
 
-module.exports = { previewCloseoutBill, gatherFacts, OPEN_VISIT_STATUSES };
+module.exports = { previewCloseoutBill, gatherFacts, OPEN_VISIT_STATUSES, _private: { loadCoverage, loadQueuedSetupClaim } };
