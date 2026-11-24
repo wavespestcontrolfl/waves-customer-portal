@@ -25,8 +25,9 @@ jest.mock('../services/logger', () => ({
 const { winLossSlices, _private } = require('../services/estimate-winloss');
 
 // Both reads (resolved rows, then the sent-cohort read) hit the same mock;
-// pass `sentRows` to feed the cohort read something different.
-function estimatesTable(rows, sentRows = []) {
+// pass `sentRows` to feed the cohort read something different, and
+// `customers` to answer the customer lead-source read.
+function estimatesTable(rows, sentRows = [], customers = []) {
   let call = 0;
   const make = (result) => {
     const builder = {
@@ -38,7 +39,7 @@ function estimatesTable(rows, sentRows = []) {
     };
     return builder;
   };
-  return () => make(call++ === 0 ? rows : sentRows);
+  return (table) => (table === 'customers' ? make(customers) : make(call++ === 0 ? rows : sentRows));
 }
 
 const NOW = Date.now();
@@ -251,10 +252,12 @@ describe('winLossSlices — audit slices', () => {
 
   test('why-we-lose counts stamped dispositions and derives unstamped ones; dead leaves the rates', async () => {
     mockDbHandler = estimatesTable([
-      row({ id: 'w', lead_source: 'Google', waveguard_tier: 'silver', estimate_data: lawnData }),
+      // Its own column wins over the customer's source.
+      row({ id: 'w', lead_source: 'Google', customer_id: 'c-w', waveguard_tier: 'silver', estimate_data: lawnData }),
       row({ id: 'x', status: 'expired', accepted_at: null, expires_at: daysAgo(2), disposition: 'expired_unviewed', lead_source: 'google', service_interest: 'Pest Control' }),
       // Unstamped expired row with an open signal → derived expired_viewed.
-      row({ id: 'y', status: 'expired', accepted_at: null, expires_at: daysAgo(2), view_count: 3, lead_source: null, service_interest: 'Mosquito' }),
+      // No source on the estimate: the customer's source fills it.
+      row({ id: 'y', status: 'expired', accepted_at: null, expires_at: daysAgo(2), view_count: 3, lead_source: null, customer_id: 'c-y', service_interest: 'Mosquito' }),
       // Unstamped declined row with a legacy label → derived code.
       row({ id: 'z', status: 'declined', accepted_at: null, declined_at: daysAgo(1), decline_reason: 'Too expensive', lead_source: 'referral', estimate_data: lawnData }),
       // Never winnable: counted in "why we lose", excluded from every rate.
@@ -268,7 +271,7 @@ describe('winLossSlices — audit slices', () => {
       // "why we lose", COUNTED in excludedFromRates even though archived
       // (GH codex P2), out of every rate as on main.
       row({ id: 'conv', status: 'sent', accepted_at: null, archived_at: daysAgo(3), disposition: 'converted_other_path', disposition_at: daysAgo(3) }),
-    ]);
+    ], [], [{ id: 'c-w', lead_source: 'square' }, { id: 'c-y', lead_source: ' Referral ' }]);
 
     const result = await winLossSlices({ days: 90 });
 
@@ -292,7 +295,9 @@ describe('winLossSlices — audit slices', () => {
     expect(result.byServiceLine.find((s) => s.key === 'mosquito')).toMatchObject({ lost: 1 });
 
     expect(result.byLeadSource.find((s) => s.key === 'google')).toMatchObject({ won: 1, lost: 1, total: 2 });
-    expect(result.byLeadSource.find((s) => s.key === 'unknown')).toMatchObject({ lost: 2 }); // mosquito row + wizard row
+    expect(result.byLeadSource.find((s) => s.key === 'referral')).toMatchObject({ lost: 2, total: 2 }); // declined row + mosquito row via its customer
+    expect(result.byLeadSource.find((s) => s.key === 'unknown')).toMatchObject({ lost: 1, total: 1 }); // wizard row: no source anywhere
+    expect(result.byLeadSource.find((s) => s.key === 'square')).toBeUndefined(); // the estimate's own column wins
     expect(result.byLeadSource.find((s) => s.key === 'thumbtack')).toBeUndefined(); // dead row left the rates
 
     // Column wins; falls back to the persisted recurring.tier; else "none".
@@ -645,5 +650,15 @@ describe('still-deciding signal (soft exit)', () => {
     };
     const out = await winLossSlices({ days: 30 });
     expect(out.stillDeciding).toEqual({ signaled: 0, wonAfter: 0, wonBookedAfter: 0, lostAfter: 0, expiredViewedAfter: 0 });
+  });
+
+  test('a customers read failure leaves blank-source rows unknown, never a failed slice', async () => {
+    const estimates = estimatesTable([row({ id: 'blank', lead_source: null, customer_id: 'c-1' })], []);
+    mockDbHandler = (table) => {
+      if (table === 'customers') { const b = { whereIn: () => b, select: async () => { throw new Error('down'); } }; return b; }
+      return estimates(table);
+    };
+    const out = await winLossSlices({ days: 30 });
+    expect(out.byLeadSource).toEqual([expect.objectContaining({ key: 'unknown', won: 1, total: 1 })]);
   });
 });

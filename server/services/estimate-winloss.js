@@ -337,8 +337,29 @@ const SLICE_COLUMNS = [
   // Disposition / cohort / slice inputs (estimator audit 2026-08-29).
   'sent_at', 'viewed_at', 'last_viewed_at', 'view_count',
   'lead_source', 'source', 'waveguard_tier', 'disposition', 'disposition_at',
-  'decline_reason', 'service_interest', 'notes',
+  'decline_reason', 'service_interest', 'notes', 'customer_id',
 ];
+
+// Most create paths (the admin estimator, call drafts, the estimator engine)
+// never copy the lead source onto the estimate; it lives on the customer.
+// estimate id -> its lead source: the estimate's own column, else the
+// customer's, so "by lead source" stops reading those rows as unknown.
+// Best-effort: a customer read failure leaves them unknown, never a failed
+// slice build.
+async function leadSourcesByEstimateId(rows) {
+  const own = (r) => String(r.lead_source || '').trim();
+  const customerIds = [...new Set(rows.filter((r) => !own(r) && r.customer_id).map((r) => String(r.customer_id)))];
+  let customerSource = new Map();
+  if (customerIds.length) {
+    try {
+      const customers = await db('customers').whereIn('id', customerIds).select('id', 'lead_source');
+      customerSource = new Map((customers || []).map((c) => [String(c.id), String(c.lead_source || '').trim()]));
+    } catch (err) {
+      logger.warn(`[estimate-winloss] customer lead source read skipped: ${err.message}`);
+    }
+  }
+  return new Map(rows.map((r) => [r.id, own(r) || customerSource.get(String(r.customer_id)) || '']));
+}
 
 // The customer's "still deciding" signal per estimate: id -> the EARLIEST signal
 // time in ms (null when the row carries none readable). Best-effort: an
@@ -472,6 +493,7 @@ async function winLossSlices({ days = 90 } = {}) {
   const stillDeciding = { signaled: 0, wonAfter: 0, wonBookedAfter: 0, lostAfter: 0, expiredViewedAfter: 0 };
   const byServiceLine = new Map();
   const byLeadSource = new Map();
+  const leadSources = await leadSourcesByEstimateId(rows);
   const byWaveguardTier = new Map();
   let wonBookedOtherWay = 0;
   let bookedCodeNotWinCount = 0;
@@ -517,7 +539,7 @@ async function winLossSlices({ days = 90 } = {}) {
     // One estimate can carry several lines; each line records the outcome
     // of the estimate it rode on (a bundle loss is a loss for every line).
     for (const key of new Set(lines.map((l) => l.key || 'unknown'))) tallyKeyed(byServiceLine, key, isWon);
-    tallyKeyed(byLeadSource, String(row.lead_source || '').trim().toLowerCase() || 'unknown', isWon);
+    tallyKeyed(byLeadSource, String(leadSources.get(row.id) || '').toLowerCase() || 'unknown', isWon);
     // Quote-wizard drafts omit the column and persist the calculated tier
     // at engineResult.waveGuard.tier (GH codex P2) — read every shape.
     const tier = String(
