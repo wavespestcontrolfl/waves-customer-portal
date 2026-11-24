@@ -19,6 +19,7 @@ const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-c
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
+const { newLeadDripStop, isNewLeadDripStep, NEW_LEAD_DRIP_STEP_IDS } = require('./new-lead-drip-stops');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
@@ -315,8 +316,18 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     const stop = await estimateSentStop(enrollment, step);
     if (stop) return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
   }
+  if (isNewLeadDripStep(template.key, step)) return newLeadDripBlock({ enrollment, sendId, recipient });
   if (template.key === 'referral_nudge') return referralNudgeBlock({ enrollment, sendId, nudge });
   return null;
+}
+
+// The new_lead drip's later steps (GATE_NEW_LEAD_DRIP_STEPS), read at delivery: a stop ends the enrollment with nothing sent; a
+// doubt (a read failed) leaves the step due for a later tick and never sends.
+async function newLeadDripBlock({ enrollment, sendId, recipient }) {
+  const stop = await newLeadDripStop(enrollment, recipient);
+  if (!stop) return null;
+  if (stop.defer) return deferPaymentFailedForHold({ enrollment, sendId, reason: stop.reason });
+  return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
 }
 
 const REFERRAL_NUDGE_STOPS = Object.freeze({
@@ -533,8 +544,8 @@ function renderAutomationStepContent({ template, htmlBody, textBody, customer, a
  * sender runs; if no, Beehiiv handles it (legacy fallback).
  */
 async function hasLocalContent(templateKey) {
-  const row = await db('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
+  // The same gated step list the runner sends (new_lead's two drip steps count only while GATE_NEW_LEAD_DRIP_STEPS is on).
+  const row = await enabledSequenceSteps(templateKey)
     .where(function () { this.whereNotNull('html_body').orWhereNotNull('text_body'); })
     .where(function () { this.whereRaw("coalesce(html_body,'') <> ''").orWhereRaw("coalesce(text_body,'') <> ''"); })
     .first();
@@ -560,9 +571,7 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
   // termite bond (see the post-lock check in runEnrollment).
   if (requiresTermiteBond(templateKey) && !customer.id) return { enrolled: false, reason: 'not_termite_bond' };
 
-  const steps = await dbh('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
-    .orderBy('step_order', 'asc');
+  const steps = await enabledSequenceSteps(templateKey, dbh);
   if (!steps.length) return { enrolled: false, reason: 'no steps' };
 
   const leadId = await enrollmentLeadIdFor({ templateKey, customer, normalizedEmail, context });
@@ -827,11 +836,26 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
 // step"). An enrollment last advanced before this change has no metadata cursor:
 // its place is the enabled step just before current_step, which is the step it
 // would have sent next anyway.
-function enabledSequenceSteps(templateKey) {
-  return db('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
-    .orderBy('step_order', 'asc')
-    .orderBy('id', 'asc');
+//
+// GATE_NEW_LEAD_DRIP_STEPS (owner 2026-11-24): the new_lead sequence has two seeded steps (1 and 2, found by id) that migration
+// 20261124140100 stores with enabled=false, so a runner from before this change, or a revert of it, never selects them. Gate on:
+// they are loaded whatever their enabled flag says (the gate is their switch; their copy is still editable in Admin). Gate off:
+// they are never loaded, even if someone set enabled=true, so an enrollment completes after step 0 exactly as before (one that
+// was waiting on step 1 when the gate was switched off completes without a send). A step the owner adds by hand follows the
+// ordinary enabled rule either way. Read at call time; a suite that mocks the whole gates module has no function there.
+// `client` lets enrollCustomer read through its own transaction.
+function enabledSequenceSteps(templateKey, client = db) {
+  let query;
+  if (templateKey !== 'new_lead') {
+    query = client('automation_steps').where({ template_key: templateKey, enabled: true });
+  } else if (require('../config/feature-gates').newLeadDripStepsLive?.() === true) {
+    query = client('automation_steps').where({ template_key: templateKey })
+      .where((own) => own.where('enabled', true).orWhereIn('id', NEW_LEAD_DRIP_STEP_IDS));
+  } else {
+    query = client('automation_steps').where({ template_key: templateKey, enabled: true })
+      .where((rest) => rest.whereNotIn('id', NEW_LEAD_DRIP_STEP_IDS));
+  }
+  return query.orderBy('step_order', 'asc').orderBy('id', 'asc');
 }
 
 const stepKey = (step) => [Number(step.step_order), String(step.id)];
@@ -879,10 +903,7 @@ function nextSequenceStep(enrollment, steps) {
  * customer's prep-send lock, so no tick can be mid-send on this enrollment. Returns true when the enrollment was rewound.
  */
 async function rewindEnrollmentToStep({ enrollment, stepId, email, metadata = {} }, client = db) {
-  const steps = await client('automation_steps')
-    .where({ template_key: enrollment.template_key, enabled: true })
-    .orderBy('step_order', 'asc')
-    .orderBy('id', 'asc');
+  const steps = await enabledSequenceSteps(enrollment.template_key, client);
   const step = steps.find((s) => String(s.id) === String(stepId));
   if (!step) return false;
   const { anchor, passedIds } = sequenceCursor(enrollment, steps);
@@ -1426,9 +1447,7 @@ async function processDueSteps() {
 async function testSequence({ templateKey, toEmail }) {
   const template = await db('automation_templates').where({ key: templateKey }).first();
   if (!template) throw new Error('template not found');
-  const steps = await db('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
-    .orderBy('step_order', 'asc');
+  const steps = await enabledSequenceSteps(templateKey);
   if (!steps.length) throw new Error('no steps to send');
 
   const asmGroupId = automationAsmGroupId(template);
