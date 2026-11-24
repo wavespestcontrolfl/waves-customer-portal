@@ -178,6 +178,23 @@ describe('deriveStatus: places held until a second technician is hired (owner ru
     expect(deriveStatus(placeResult('', '34295'), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
   });
 
+  // A Port Charlotte address with no ZIP could sit on a held shared ZIP (33980 / 33981 / 33983): the area is unknown,
+  // never validated_accept and never out of area (owner ruling 2026-11-23).
+  test('Port Charlotte with no ZIP is unverified: confirm_needed, area unknown', () => {
+    for (const county of ['Charlotte County', 'Sarasota County']) {
+      const r = deriveStatus(placeResult('Port Charlotte', ''), county);
+      expect(r.status).toBe(STATUSES.CONFIRM_NEEDED);
+      expect(r.inServiceArea).toBeNull();
+    }
+    expect(deriveStatus(placeResult('port charlotte', ''), 'Charlotte County').status).toBe(STATUSES.CONFIRM_NEEDED);
+    // with a served ZIP it is accepted, with a held one it is out, and a county outside the area stays out
+    expect(deriveStatus(placeResult('Port Charlotte', '33948'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('Port Charlotte', '33981'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    expect(deriveStatus(placeResult('Port Charlotte', ''), 'Lee County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    // other towns with no ZIP are unchanged
+    expect(deriveStatus(placeResult('Venice', ''), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+  });
+
   test('North Port and Venice stay served', () => {
     expect(deriveStatus(placeResult('North Port', '34287'), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
     expect(deriveStatus(placeResult('North Port', '34291'), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);

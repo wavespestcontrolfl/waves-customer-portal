@@ -8803,7 +8803,8 @@ Charlotte, a second lookup, `reverseGeocodeLocality`, reads the locality and
 ZIP Google places on the coordinate: an excluded locality or ZIP (including a
 bare 33980 / 33982 / 33983, which are held whole) is out, a 422 `out_of_area`,
 even when the submitted address names none, and a failed or empty lookup, or a "Port Charlotte"
-locality with no ZIP (the held shared ZIPs 33980 / 33981 / 33983 carry that name too), is 503
+locality with no ZIP, or, with no Google key, a submitted "Port Charlotte" address with no ZIP (the held shared
+ZIPs 33980 / 33981 / 33983 carry that name too), is 503
 `{ error: 'service_area_unavailable' }`, recoverable; no Sarasota booking makes
 the lookup), else the explicit
 no-key fallback: outside the coarse box is out; inside the DeSoto exclusion

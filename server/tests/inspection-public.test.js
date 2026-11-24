@@ -4485,6 +4485,9 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null });
       mockLocality.mockImplementation(async () => ({ city: 'Englewood', zip: null }));
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: true, county: 'Charlotte' });
+      // Google names no city and no ZIP, and the address says Port Charlotte: still unknowable
+      mockLocality.mockImplementation(async () => ({ city: null, zip: null }));
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St', city: 'Port Charlotte' })).toEqual({ ok: false, county: null, unavailable: true });
     });
 
     test('North Port (34286-34291) stays served', async () => {
@@ -4535,6 +4538,11 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
       try {
         expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Punta Gorda' })).toEqual({ ok: false, county: null });
         expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33980' })).toEqual({ ok: false, county: null });
+        // no key: a Port Charlotte address with no ZIP cannot be told from a held shared ZIP: unavailable, before the box fallback
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte' })).toEqual({ ok: false, county: null, unavailable: true });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '  ' })).toEqual({ ok: false, county: null, unavailable: true });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33948' })).toEqual({ ok: true, county: null });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: true, county: null });
       } finally {
         if (savedA !== undefined) process.env.GOOGLE_API_KEY = savedA;
         if (savedB !== undefined) process.env.GOOGLE_MAPS_API_KEY = savedB;

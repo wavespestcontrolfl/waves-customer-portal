@@ -260,19 +260,42 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
     })).toBeNull();
   });
 
-  // Port Charlotte is served, but its shared ZIPs 33980 / 33981 / 33983 hold by ZIP: no ZIP anywhere means review.
-  test('a Port Charlotte address with no ZIP anywhere is held for review; any ZIP clears the name', () => {
+  // Port Charlotte is served, but its shared ZIPs 33980 / 33981 / 33983 hold by ZIP: a Port Charlotte address with no ZIP
+  // tied to it is UNVERIFIED (staff review), and only a ZIP of the address the visit will use clears it.
+  test('a Port Charlotte address with no ZIP tied to it is held for review; a ZIP of the same address clears it', () => {
     const av = { status: 'validated_accept', inServiceArea: true, county: 'Charlotte County' };
-    const held = { reason: 'port_charlotte_zip_unknown', county: null };
-    expect(legacyGeographicVeto({ extracted: { city: 'Port Charlotte' } })).toEqual(held);
-    expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Port Charlotte' } })).toEqual(held);
-    expect(legacyGeographicVeto({ extracted: {}, onFile: { city: 'Port Charlotte', zip: '' } })).toEqual(held);
-    expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Port Charlotte' } })).toBeNull();
+    const unknown = { reason: 'port_charlotte_zip_unknown', county: null };
+    // no ZIP anywhere
+    expect(legacyGeographicVeto({ extracted: { city: 'Port Charlotte' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Port Charlotte' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ extracted: {}, onFile: { city: 'Port Charlotte', zip: '' } })).toEqual(unknown);
+    // the call states Port Charlotte with no ZIP; the stored address is another town or has no ZIP: still unknown
+    expect(legacyGeographicVeto({ extracted: { city: 'Port Charlotte' }, onFile: { city: 'Venice', zip: '34285' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ extracted: { city: 'Port Charlotte' }, onFile: { city: 'Port Charlotte' } })).toEqual(unknown);
+    // a ZIP on the call for ANOTHER property never clears a stored Port Charlotte address with no ZIP
+    expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Port Charlotte' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ addressValidation: { ...av, normalized: { city: 'Venice', postal_code: '34285' } }, extracted: {}, onFile: { city: 'Port Charlotte' } })).toEqual(unknown);
+    // a ZIP tied to the address clears it: stated, address-validation normalized, or the stored Port Charlotte address's own
     expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Port Charlotte', zip: '33952' } })).toBeNull();
+    expect(legacyGeographicVeto({ addressValidation: { ...av, normalized: { city: 'Port Charlotte', postal_code: '33948' } }, extracted: { city: 'Port Charlotte' } })).toBeNull();
     expect(legacyGeographicVeto({ extracted: { city: 'Port Charlotte' }, onFile: { city: 'Port Charlotte', zip: '33954' } })).toBeNull();
+    expect(legacyGeographicVeto({ extracted: {}, onFile: { city: 'Port Charlotte', zip: '33954' } })).toBeNull();
+    expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Port Charlotte', zip: '33948' } })).toBeNull();
     // the shared ZIPs hold by ZIP whatever the city says
     expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Port Charlotte', zip: '33981' } }))
       .toEqual({ reason: 'not_yet_served_locality', county: null });
+  });
+
+  test('the unknown ZIP is filed as service_area_unverified, every other veto as out_of_service_area, in both handlers', () => {
+    const { geoVetoSkipReason } = CallRecordingProcessor._test;
+    expect(geoVetoSkipReason({ reason: 'port_charlotte_zip_unknown' })).toBe('service_area_unverified');
+    expect(geoVetoSkipReason({ reason: 'on_file_address_unavailable' })).toBe('service_area_unverified');
+    for (const reason of ['not_yet_served_locality', 'punta_gorda_locality', 'desoto_locality', 'address_validation_out_of_service_area', 'county_out_of_service_area']) {
+      expect(geoVetoSkipReason({ reason })).toBe('out_of_service_area');
+    }
+    // the pre-fence handler and the fenced (locked-row) handler both file through it
+    expect(source).toContain('const geoSkipReason = geoVetoSkipReason(legacyGeoVeto);');
+    expect(source).toContain('const fencedSkipReason = geoVetoSkipReason(schedErr.fencedGeoVeto);');
   });
 
   test('North Port and Venice are served', () => {
@@ -339,9 +362,10 @@ describe('legacy booking branch wiring', () => {
     expect(branchHead).toContain('canCreateAppointmentFromCall');
     expect(branchHead).not.toMatch(/CALL_EXTRACTION_V2_(ENABLED|DRIVES_ROUTING)/);
     const branch = source.slice(vetoAt, bookAt);
-    expect(branch).toContain("legacyGeoVeto.reason === 'on_file_address_unavailable'");
-    expect(branch).toContain("? 'service_area_unverified'");
-    expect(branch).toContain(": 'out_of_service_area'");
+    // on_file_address_unavailable and port_charlotte_zip_unknown file as service_area_unverified (geoVetoSkipReason)
+    expect(branch).toContain('geoVetoSkipReason(legacyGeoVeto)');
+    expect(source).toContain("? 'service_area_unverified'");
+    expect(source).toContain(": 'out_of_service_area'");
     expect(branch).toContain('skippedReason: geoSkipReason');
     expect(branch).toContain('bridgeNeedsConfirmation.push(geoSkipReason)');
     expect(branch).toContain('await fileSkippedBookingCard({');

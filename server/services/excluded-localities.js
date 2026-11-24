@@ -89,6 +89,11 @@ function isPuntaGordaLocality(city) {
 function isPuntaGordaZip(zip) {
   return PUNTA_GORDA_ZIPS.has(zip5(zip));
 }
+// Port Charlotte is served, but the held shared ZIPs 33980 / 33981 / 33983 carry the name too (owner ruling
+// 2026-11-23): a "Port Charlotte" address with no usable ZIP is UNVERIFIED, never out of area and never auto-accepted.
+function isPortCharlotteLocality(city) {
+  return normalizeLocality(city) === 'port charlotte';
+}
 function isNotYetServedLocality(city) {
   return NOT_YET_SERVED_LOCALITIES.has(normalizeLocality(city));
 }
@@ -109,6 +114,6 @@ module.exports = {
   NOT_YET_SERVED_LOCALITIES, NOT_YET_SERVED_ZIPS,
   normalizeLocality,
   isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip,
-  isNotYetServedLocality, isNotYetServedZip,
+  isNotYetServedLocality, isNotYetServedZip, isPortCharlotteLocality,
   isExcludedLocality, isExcludedZip,
 };
