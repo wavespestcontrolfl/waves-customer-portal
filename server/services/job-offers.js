@@ -1716,10 +1716,11 @@ const FIRST_DAYS_ITEMS = [
   { key: 'license', label: "Driver's license check", inBell: "the driver's license check" },
   // Owner 2026-11-24 *fix checklist*: no workers' comp policy for the first technician (workers-comp skip ruling),
   // so that item is gone; a mark stored under it stays in job_offers.checklist and no longer shows. Form W-4 (none on
-  // file withholds as single) and the signed direct-deposit form (F.S. 532.04: pay by direct deposit needs the
-  // employee's written consent) are due before the first day.
+  // file withholds as single) and the signed pay method form are due before the first day. The form records the
+  // hire's choice: direct deposit (F.S. 532.04: it needs the employee's written consent) or a paper check, which
+  // payroll also pays, so the item is done either way.
   { key: 'w4', label: 'Form W-4', inBell: 'Form W-4' },
-  { key: 'direct_deposit', label: 'Direct deposit form signed', inBell: 'the direct deposit form' },
+  { key: 'pay_method', label: 'Pay method form (direct deposit or check)', inBell: 'the pay method form' },
   { key: 'i9', label: 'Form I-9', inBell: 'Form I-9', afterStart: true },
 ];
 // The hire's login (owner 2026-11-22 "press"): a person turns it on with the Team tab's Hired button, on a row with a

@@ -1921,7 +1921,7 @@ jest.setTimeout(120000);
         const NONE = { rung: 0, closed: 0, failed: 0 };
         const ring = (clock) => JobOffers.ringDueChecklists(clock);
         const byHand = () => ({ done_at: new Date(), done_by: owner.id, resolution: 'Closed by hand' });
-        const LABELS = ['Driving record copy', "Driver's license check", 'Form W-4', 'Direct deposit form signed', 'Form I-9'];
+        const LABELS = ['Driving record copy', "Driver's license check", 'Form W-4', 'Pay method form (direct deposit or check)', 'Form I-9'];
         // A clock at an Eastern wall time of one day.
         const at = (ymd, hm) => () => parseETDateTime(`${ymd}T${hm}:00`);
         const shiftDay = (ymd, days) => {
@@ -1964,7 +1964,7 @@ jest.setTimeout(120000);
           // items are done and their bells are closed. Only rows of the suite's own applications are written.
           const mark = { at: '2026-01-01T00:00:00.000Z' };
           await root('job_offers').whereIn('application_id', suiteApplications).where({ status: 'accepted' }).update({
-            checklist: root.raw('checklist || ?::jsonb', [JSON.stringify({ driving_record: mark, license: mark, w4: mark, direct_deposit: mark, i9: mark, google_login: mark })]),
+            checklist: root.raw('checklist || ?::jsonb', [JSON.stringify({ driving_record: mark, license: mark, w4: mark, pay_method: mark, i9: mark, google_login: mark })]),
           });
           // The bell rows are real (the alert writer's own rules decide a ring, a rewrite and a close).
           await root('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [suiteApplications.map((id) => `job-offer-checklist:${id}`)])
@@ -1986,7 +1986,7 @@ jest.setTimeout(120000);
               { key: 'driving_record', label: LABELS[0], ...before },
               { key: 'license', label: LABELS[1], ...before },
               { key: 'w4', label: LABELS[2], ...before },
-              { key: 'direct_deposit', label: LABELS[3], ...before },
+              { key: 'pay_method', label: LABELS[3], ...before },
               { key: 'i9', label: LABELS[4], due: `Due ${dayOf(thursday)}, 3 business days after the first day`, dueOn: thursday, doneAt: null, doneByName: null },
             ],
           });
@@ -2072,7 +2072,7 @@ jest.setTimeout(120000);
             link: `/admin/recruiting?application=${made.app.id}`, done_at: null,
           });
           expect(bells[0].metadata).toMatchObject({
-            doneWhen: 'checklist_done', applicationId: made.app.id, offerId: made.offer.id, itemKeys: ['direct_deposit', 'driving_record', 'license', 'w4'],
+            doneWhen: 'checklist_done', applicationId: made.app.id, offerId: made.offer.id, itemKeys: ['driving_record', 'license', 'pay_method', 'w4'],
           });
           // The later runs of the day write nothing.
           expect(await ring(morning(1, '07:15'))).toEqual(NONE);
@@ -2094,7 +2094,7 @@ jest.setTimeout(120000);
           // The mark that leaves no item due closes the row, in the write (Form I-9 is not due before the first day).
           await mark(made, 'license', true, morning(1, '09:00')());
           expect(await openBellsOf(made.app.id)).toHaveLength(1);
-          await mark(made, 'direct_deposit', true, morning(1, '09:02')());
+          await mark(made, 'pay_method', true, morning(1, '09:02')());
           expect(await openBellsOf(made.app.id)).toHaveLength(1);
           await mark(made, 'w4', true, morning(1, '09:05')());
           [row] = await bellsOf(made.app.id);
@@ -2106,7 +2106,7 @@ jest.setTimeout(120000);
 
         test('Form I-9 rings on the first day, on its due day and the morning after it; the last mark ends the row, and an undo brings it back', async () => {
           const made = await hire();
-          for (const key of ['driving_record', 'license', 'w4', 'direct_deposit']) await mark(made, key);
+          for (const key of ['driving_record', 'license', 'w4', 'pay_method']) await mark(made, key);
           // Before the first day nothing is due.
           expect(await ring(at(shiftDay(made.firstDay, -1), '09:00'))).toEqual(NONE);
           expect(await bellsOf(made.app.id)).toHaveLength(0);
@@ -2168,7 +2168,7 @@ jest.setTimeout(120000);
           let rows = await bellsOf(made.app.id);
           expect(rows).toHaveLength(1);
           expect(rows[0]).toMatchObject({ id: row.id, done_at: null, body: `4 of 5 items are open; next: the driving record copy, was due before ${JobOffers.fmtDay(made.firstDay)}.` });
-          expect(rows[0].metadata.itemKeys).toEqual(['direct_deposit', 'direct_deposit:late', 'driving_record', 'driving_record:late', 'i9', 'license', 'license:late']);
+          expect(rows[0].metadata.itemKeys).toEqual(['driving_record', 'driving_record:late', 'i9', 'license', 'license:late', 'pay_method', 'pay_method:late']);
           // A ring moves the row to the top of the bell.
           expect(new Date(rows[0].created_at).getTime()).toBeGreaterThan(Date.parse('2026-06-01T00:00:00Z'));
           expect(await ring(at(made.firstDay, '07:15'))).toEqual(NONE);
@@ -2210,7 +2210,7 @@ jest.setTimeout(120000);
           await root('notifications').where({ id: row.id }).update(byHand());
           // A mark and its undo with no run between them: the item is due again, and the next run rings the row.
           await mark(made, 'license', true, morning(1, '08:00')());
-          expect((await bellsOf(made.app.id).first()).metadata.itemKeys).toEqual(['direct_deposit', 'driving_record', 'w4']);
+          expect((await bellsOf(made.app.id).first()).metadata.itemKeys).toEqual(['driving_record', 'pay_method', 'w4']);
           expect(await openBellsOf(made.app.id)).toHaveLength(0);
           await mark(made, 'license', false, morning(1, '08:05')());
           expect(await ring(morning(1, '08:15'))).toEqual({ ...NONE, rung: 1 });
@@ -2223,7 +2223,7 @@ jest.setTimeout(120000);
           expect(await ring(morning(1, '08:30'))).toEqual(NONE);
           expect(await bellsOf(made.app.id)).toMatchObject([{ id: row.id, done_at: null, title: "Leads — finish An applicant's first-days checklist" }]);
           // It still closes with the last due mark and comes back with an undo.
-          for (const key of ['driving_record', 'license', 'w4', 'direct_deposit']) await mark(made, key, true, morning(1, '09:00')());
+          for (const key of ['driving_record', 'license', 'w4', 'pay_method']) await mark(made, key, true, morning(1, '09:00')());
           expect(await bellsOf(made.app.id)).toMatchObject([{ id: row.id, done_by: 'episodes', resolution: 'No first-days item is due today' }]);
           await mark(made, 'w4', false, morning(1, '09:05')());
           expect(await ring(morning(1, '09:15'))).toEqual({ ...NONE, rung: 1 });
@@ -2238,7 +2238,7 @@ jest.setTimeout(120000);
           await mark(made, 'license');
           expect(await ring(morning(1))).toEqual({ ...NONE, rung: 1 });
           const [row] = await bellsOf(made.app.id);
-          expect(row.metadata).toMatchObject({ offerId: made.offer.id, itemKeys: ['direct_deposit', 'driving_record', 'w4'] });
+          expect(row.metadata).toMatchObject({ offerId: made.offer.id, itemKeys: ['driving_record', 'pay_method', 'w4'] });
           await root('notifications').where({ id: row.id }).update({ read_at: new Date() });
 
           const second = await signAgain(made, { hourlyRate: 24 });
@@ -2254,7 +2254,7 @@ jest.setTimeout(120000);
           let rows = await bellsOf(made.app.id);
           expect(rows).toHaveLength(1);
           expect(rows[0]).toMatchObject({ id: row.id, title: row.title, body: row.body, done_at: null });
-          expect(rows[0].metadata).toMatchObject({ offerId: second.id, itemKeys: ['direct_deposit', 'driving_record', 'w4'] });
+          expect(rows[0].metadata).toMatchObject({ offerId: second.id, itemKeys: ['driving_record', 'pay_method', 'w4'] });
           expect(rows[0].read_at).not.toBeNull();
 
           // A card read before the second signature writes nothing.
@@ -2271,12 +2271,12 @@ jest.setTimeout(120000);
           expect(await ring(morning(2))).toEqual({ ...NONE, rung: 1 });
           rows = await bellsOf(made.app.id);
           expect(rows).toHaveLength(1);
-          expect(rows[0].metadata).toMatchObject({ offerId: second.id, itemKeys: ['direct_deposit', 'driving_record', 'license', 'w4'] });
+          expect(rows[0].metadata).toMatchObject({ offerId: second.id, itemKeys: ['driving_record', 'license', 'pay_method', 'w4'] });
         });
 
         test('a first day moved later closes the row of an item that is no longer due, and the new first day rings again', async () => {
           const made = await hire();
-          for (const key of ['driving_record', 'license', 'w4', 'direct_deposit']) await mark(made, key);
+          for (const key of ['driving_record', 'license', 'w4', 'pay_method']) await mark(made, key);
           expect(await ring(at(made.firstDay, '07:00'))).toEqual({ ...NONE, rung: 1 });
           const [first] = await openBellsOf(made.app.id);
           // The owner moves the first day one week later on the Team tab: Form I-9 is not due yet. The next run closes.
@@ -2334,7 +2334,7 @@ jest.setTimeout(120000);
           test('the item comes first and is marked by hand; with sign-in off the checklist has five items and keeps the mark', async () => {
             const made = await hire();
             const keys = async () => (await checklistOf(made.app)).items.map((item) => item.key);
-            expect(await keys()).toEqual(['google_login', 'driving_record', 'license', 'w4', 'direct_deposit', 'i9']);
+            expect(await keys()).toEqual(['google_login', 'driving_record', 'license', 'w4', 'pay_method', 'i9']);
             expect((await checklistOf(made.app)).items[0]).toEqual({
               key: 'google_login', label: 'Waves Google login', note: 'On the Team tab, link the Waves Google address, and press Hired if the row shows it.',
               due: `Due before the first day, ${JobOffers.fmtDay(made.firstDay, { year: true })}`, dueOn: made.firstDay, doneAt: null, doneByName: null,
@@ -2348,7 +2348,7 @@ jest.setTimeout(120000);
 
             // Sign-in off: five items, the login item takes no mark, and a mark of another item keeps the stored one.
             process.env.GATE_STAFF_GOOGLE_SIGNIN = 'false';
-            expect(await keys()).toEqual(['driving_record', 'license', 'w4', 'direct_deposit', 'i9']);
+            expect(await keys()).toEqual(['driving_record', 'license', 'w4', 'pay_method', 'i9']);
             await expect(mark(made, 'google_login')).rejects.toMatchObject({ status: 400, code: 'INVALID_CHECKLIST_ITEM' });
             await mark(made, 'license');
             expect((await offerRow(made.offer.id)).checklist.google_login.at).toBe(when.toISOString());
@@ -2366,11 +2366,11 @@ jest.setTimeout(120000);
             // The five other items are done before any bell: the run still finds this hire, for the login alone.
             const stamp = { at: '2026-01-01T00:00:00.000Z' };
             await root('job_offers').where({ id: made.offer.id })
-              .update({ checklist: root.raw('checklist || ?::jsonb', [JSON.stringify({ driving_record: stamp, license: stamp, w4: stamp, direct_deposit: stamp, i9: stamp })]) });
+              .update({ checklist: root.raw('checklist || ?::jsonb', [JSON.stringify({ driving_record: stamp, license: stamp, w4: stamp, pay_method: stamp, i9: stamp })]) });
             expect(await ring(morning(1))).toEqual({ ...NONE, rung: 2 });
             const [first] = await bellsOf(fresh.app.id);
             expect(first).toMatchObject({ done_at: null, body: `6 of 6 items are open; next: the Waves Google login on the Team tab, due before ${before}.` });
-            expect(first.metadata.itemKeys).toEqual(['direct_deposit', 'driving_record', 'google_login', 'license', 'w4']);
+            expect(first.metadata.itemKeys).toEqual(['driving_record', 'google_login', 'license', 'pay_method', 'w4']);
             const [row] = await bellsOf(made.app.id);
             expect(row).toMatchObject({ done_at: null, body: `1 of 6 items is open; next: the Waves Google login on the Team tab, due before ${before}.` });
             expect(row.metadata.itemKeys).toEqual(['google_login']);
