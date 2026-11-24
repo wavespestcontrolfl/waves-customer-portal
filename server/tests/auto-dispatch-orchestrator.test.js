@@ -2356,3 +2356,16 @@ describe('dry time audit (GATE_AUTO_DISPATCH_DRY_TIME_ORDER)', () => {
     expect(result.audit.constraints.dry_time).not.toHaveProperty('shadow_best');
   });
 });
+
+describe('pass 2 keeps the pass-1 placement fence', () => {
+  test('a live re-evaluation that sees an operator edit supersedes the move instead of adopting it', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'auto-dispatch', 'index.js'), 'utf8');
+    const at = src.indexOf('const freshService = serviceSnapshotOf(fresh, pm.service);');
+    expect(at).toBeGreaterThan(0);
+    const block = src.slice(at, src.indexOf('noteEvaluation(run, pm.service, fresh, pm.ctx);', at));
+    expect(block).toContain('placementChanged(freshService, pm.service)');
+    expect(block).toContain("reason_code: 'SUPERSEDED_DURING_RUN'");
+    // The adopted row only replaces the pass-1 one after the drift check.
+    expect(block.indexOf('placementChanged')).toBeLessThan(block.indexOf('pm.service = freshService;'));
+  });
+});

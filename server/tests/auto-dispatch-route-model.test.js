@@ -352,6 +352,19 @@ describe('routeCost: co-visits vs visit groups', () => {
     expect(cost.neighbours).toEqual({ prev: FAR, stop: NEAR_HQ, next: FAR });
     expect(cost.routeTimeWithMinutes - cost.driveWithMinutes).toBe(150);
   });
+
+  test('a mover sharing a physical stop with an allocation peer adds no detour and no road legs to price', () => {
+    const mix = { version: 2, allocatedServiceIds: ['p', 'mover'] };
+    const peer = coVisitRow('p', { scheduled_date: '2026-08-06', technician_id: 't1', reservation_service_mix: mix, route_order: 1 });
+    const mover = { ...coVisitRow('mover', { scheduled_date: '2026-08-06', technician_id: 't1', reservation_service_mix: mix, route_order: 2 }) };
+    const cost = routeCost([peer], mover);
+    expect(cost.detourMinutes).toBe(0);
+    // The peer still needs the same trip: the road check must not charge the mover a round trip.
+    expect(cost.neighbours).toBeNull();
+    // A mover at its own stop keeps its three legs.
+    expect(routeCost([peer], { id: 'solo', geo: NEAR_HQ, window_start: '11:00', route_order: 3 }).neighbours)
+      .toEqual({ prev: FAR, stop: NEAR_HQ, next: HQ });
+  });
 });
 
 describe('clusterShare', () => {
@@ -384,6 +397,14 @@ describe('clusterShare', () => {
     expect(clusterShare(stops, NEAR_HQ)).toBe(0.5); // without mover: one A plus far
     expect(clusterShare(stops, NEAR_HQ, mover)).toBeCloseTo(2 / 3, 5); // with mover: A, mover, A, far
   });
+  test('a stationary allocation peer merged with the mover stays in the clustering score', () => {
+    const mix = { version: 2, allocatedServiceIds: ['p', 'mover'] };
+    const peer = { id: 'p', geo: NEAR_HQ, window_start: '09:00', route_order: 1, scheduled_date: '2026-08-06', technician_id: 't1', reservation_service_mix: mix };
+    const mover = { id: 'mover', geo: NEAR_HQ, window_start: '09:00', route_order: 2, scheduled_date: '2026-08-06', technician_id: 't1', reservation_service_mix: mix };
+    // The day's only other job is at the mover's own address: fully clustered.
+    expect(clusterShare([peer], NEAR_HQ, mover)).toBe(1);
+  });
+
   test('CLUSTER_RADIUS_MILES is a small, documented local radius', () => {
     expect(CLUSTER_RADIUS_MILES).toBeGreaterThan(0);
     expect(CLUSTER_RADIUS_MILES).toBeLessThanOrEqual(10);

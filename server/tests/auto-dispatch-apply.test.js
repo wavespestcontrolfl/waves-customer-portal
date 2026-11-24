@@ -1452,3 +1452,29 @@ test('a confirmation after scoring no longer stops the move of any visit (owner 
   expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
   expect(SmartRebooker.reschedule.mock.calls[0][5].expect).not.toHaveProperty('customer_confirmed');
 });
+
+describe('placementChanged (pass-2 identity read vs the pass-1 placement)', () => {
+  const { placementChanged } = require('../services/auto-dispatch/apply');
+  const pass1 = {
+    scheduled_date: '2026-08-06', window_start: '09:00:00', window_end: '10:00:00', technician_id: 't1',
+    recurring_dispatch_due_date: null, service_address_line1: '1 Palm Way',
+  };
+
+  test('the same placement, however the clock is formatted, is unchanged', () => {
+    expect(placementChanged({ ...pass1, window_start: '09:00', window_end: '10:00' }, pass1)).toBe(false);
+  });
+
+  test.each([
+    ['window', { window_start: '13:00:00' }],
+    ['day', { scheduled_date: '2026-08-07' }],
+    ['technician', { technician_id: 't2' }],
+    ['due date', { recurring_dispatch_due_date: '2026-08-10' }],
+    ['address', { service_address_line1: '9 Oak Ave' }],
+  ])('an operator edit of the %s is a change', (_label, edit) => {
+    expect(placementChanged({ ...pass1, ...edit }, pass1)).toBe(true);
+  });
+
+  test('a field the fresh row does not carry is not compared', () => {
+    expect(placementChanged({ id: 's1' }, pass1)).toBe(false);
+  });
+});

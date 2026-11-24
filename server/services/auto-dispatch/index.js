@@ -24,7 +24,7 @@ const southDayKept = require('./south-day-kept');
 const { resolveGeo } = require('./geo');
 const { scoreAppointmentPlacement } = require('./scoring');
 const {
-  applyAutoDispatchMove, revalidatePlacement, unitMoveSize, previewGroupMove,
+  applyAutoDispatchMove, revalidatePlacement, placementChanged, unitMoveSize, previewGroupMove,
 } = require('./apply');
 const { startPointRefusal } = require('./start-point-fence');
 const { techChangeRefusal } = require('./keep-tech');
@@ -1483,7 +1483,15 @@ async function applyPlannedMove(pm, run, attempt) {
 
   const fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
   attempt.fresh = fresh;
-  pm.service = serviceSnapshotOf(fresh, pm.service);
+  const freshService = serviceSnapshotOf(fresh, pm.service);
+  // The identity read can see an edit made after the supersession check above.
+  // Keep the pass-1 placement as the expected one: adopting the edit would let
+  // the write-side drift check compare against the operator's row.
+  if (freshService !== pm.service && placementChanged(freshService, pm.service)) {
+    noteUnmoved(run, pm.service, 'SUPERSEDED_DURING_RUN');
+    return audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'SUPERSEDED_DURING_RUN', reason_description: 'Superseded by an operator during the run — placement changed during the live re-evaluation', ...pm.result.audit });
+  }
+  pm.service = freshService;
   noteEvaluation(run, pm.service, fresh, pm.ctx);
   if (fresh.kind !== 'move') {
     // Re-scoring against the live schedule no longer clears the bar (an

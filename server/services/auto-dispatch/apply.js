@@ -83,17 +83,23 @@ async function revalidatePlacement(service) {
   if (!['pending', 'confirmed'].includes(String(fresh.status))) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: `Visit status changed to '${fresh.status}' after scoring` };
   }
-  const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
-    || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
-    || norm(fresh.window_start) !== norm(service.window_start)
-    || norm(fresh.window_end) !== norm(service.window_end)
-    || String(fresh.technician_id || '') !== String(service.technician_id || '');
-  const locationChanged = LOCATION_FIELDS.some((field) =>
-    String(fresh[field] ?? '') !== String(service[field] ?? ''));
-  if (changed || locationChanged) {
+  if (placementChanged(fresh, service)) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Placement changed since it was scored' };
   }
   return { ok: true, fresh, code: null, reason: null };
+}
+
+// Whether `fresh` carries a different placement from the scored `service`: due
+// date, day, window, technician or any stored location field. A field the
+// fresh row does not carry is not compared.
+function placementChanged(fresh, service) {
+  const has = (field) => Object.prototype.hasOwnProperty.call(fresh, field);
+  return (has('recurring_dispatch_due_date') && toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date))
+    || (has('scheduled_date') && toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date))
+    || (has('window_start') && norm(fresh.window_start) !== norm(service.window_start))
+    || (has('window_end') && norm(fresh.window_end) !== norm(service.window_end))
+    || (has('technician_id') && String(fresh.technician_id || '') !== String(service.technician_id || ''))
+    || LOCATION_FIELDS.some((field) => has(field) && String(fresh[field] ?? '') !== String(service[field] ?? ''));
 }
 
 /**
@@ -1243,7 +1249,7 @@ async function previewGroupMove(service, best, config, conn = db) {
 }
 
 module.exports = {
-  applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard, makeMoveGuard, previewGroupMove,
+  applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, placementChanged, unitMoveSize, makeMemberGuard, makeMoveGuard, previewGroupMove,
   // Exported for direct unit tests of the flex-tier apply-time guards (Codex
   // pre-push P1) — otherwise only reachable through the full member/move
   // guard closures.

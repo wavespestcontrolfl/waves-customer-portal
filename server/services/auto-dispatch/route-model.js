@@ -222,7 +222,10 @@ function routeCost(otherStops, visit, home = HQ) {
   const detourMinutes = Math.max(0, driveWithMinutes - driveWithoutMinutes);
   return {
     driveWithoutMinutes, driveWithMinutes, detourMinutes, routeTimeWithoutMinutes, routeTimeWithMinutes,
-    neighbours: neighboursOf(chain, visit, home),
+    // A mover that shares a physical stop with a peer adds no road leg: the
+    // peer still needs the same trip, so a road check has nothing to price.
+    neighbours: chain.filter((s) => s.geo).length === without.filter((s) => s.geo).length
+      ? null : neighboursOf(chain, visit, home),
   };
 }
 
@@ -259,7 +262,13 @@ function clusterShare(otherStops, geo, visit = null) {
   if (!geo || !otherStops || !otherStops.length) return 0;
   // Use the same WITH sequence as route cost, then remove the mover's
   // physical unit. Allocation neighbours remain split when it lies between.
-  const stops = visit ? chainWithVisit(otherStops, visit).filter((stop) => !represents(stop, visit)) : physicalStops(otherStops);
+  // A merged stop holding work outside the moving unit stays: its stationary
+  // peers are real work at that place.
+  const moving = visit ? new Set([visit.id, ...(visit.unitMembers || []).map((m) => m.id)].map(String)) : null;
+  const stopIds = (stop) => [stop.id, ...(stop.memberIds || []), ...(stop.coIds || [])].map(String);
+  const stops = visit
+    ? chainWithVisit(otherStops, visit).filter((stop) => stopIds(stop).some((id) => !moving.has(id)))
+    : physicalStops(otherStops);
   if (!stops.length) return 0;
   const nearby = stops.filter((s) => s.geo && haversine(s.geo.lat, s.geo.lng, geo.lat, geo.lng) <= CLUSTER_RADIUS_MILES).length;
   return Math.max(0, Math.min(1, nearby / stops.length));
