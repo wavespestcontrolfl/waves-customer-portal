@@ -54,8 +54,8 @@ birthday off, one paid day. The date of birth lives in `technicians.dob` (Time T
 Edit Technician, Payroll & personal info, Date of birth).
 
 The scheduler does **not** enforce this yet. Enforcement is coming in a separate change that
-writes a birthday as an ordinary `technician_absences` row, so every reader in the table
-below, the dispatch board and the locked rechecks treat it exactly like a technician out.
+writes a birthday as an ordinary `technician_absences` row, so every reader of a technician
+out treats it the same way.
 Until that ships, the office keeps a technician's birthday clear by hand (the tech-out flow).
 
 ### Technician out (`technician_absences`)
@@ -63,61 +63,18 @@ Until that ships, the office keeps a technician's birthday clear by hand (the te
 An uncleared row marks one technician out for one date. The tech-out flow (`tech-out.js`)
 also parks the technician's open stops on that day as alerts.
 
-## Who reads each layer
+## Where the code reads them
 
-Business closures are read through `server/services/scheduling/blackout-dates.js`
-(`isBlackoutDate`, `getBlackoutDates`, `getBlackoutLayers`). By default a failed read returns "open"
-(`{ strict: true }` makes it throw instead). Technician closures are read through
-`absentTechDays` and `assertAssignableTechnician` in `server/services/technician-eligibility.js`.
+- Business closures: `server/services/scheduling/blackout-dates.js` (`isBlackoutDate`, `getBlackoutDates`,
+  `getBlackoutLayers`). Each helper's header states how it handles a failed read; callers choose their own fallback.
+- Technician out: `absentTechDays` and `assertAssignableTechnician` in `server/services/technician-eligibility.js`.
+- Auto-dispatch: with `GATE_AUTO_DISPATCH_CONFLICT_MOVES` on, `auto-dispatch/current-conflict.js` marks a visit
+  on a closed day as a `closed_day` conflict and tries to move it. Its usual guards still apply
+  (`auto-dispatch/eligibility.js`, the day lock and the reminder freeze in `auto-dispatch/index.js`). A visit that
+  cannot move stays, and `auto-dispatch/needs-person-notice.js` can name it.
 
-| Reader | Business closures | Technician out |
-| --- | --- | --- |
-| Offer search (`scheduling/find-time.js`) and estimate slots (`estimate-slot-availability.js`) | Skips the date | `absentTechDays` skips the technician on that date |
-| Recurring seeder (`recurring-appointment-seeder.js`) | Nudges a child visit off a closed day | A child on a day its technician is out is seeded with no technician |
-| Series children (`admin-schedule.js assignableRecurringTemplateTechnicianId`) | Not read | The child is created with no technician |
-| Office assignment (`dispatch-assignment.js`) and the picker (`admin-dispatch.js GET /technicians?date=`) | Not read | The save is refused (422); the picker does not list the technician |
-| Auto-dispatch candidate slots (`auto-dispatch/candidate-slots.js`, through `findAvailableSlots`) | Skips the date | Skips the technician on that date |
-| Fixed-time technician picker (`scheduling/pick-technician.js`) | **Not read.** It measures drive detours with `includeBlackoutDates: true` and does not check business closures itself. | Skips the technician on that date |
-| Day re-plan route check (`day-replan/route-check.js`) and open-blocks alert (`day-replan/open-blocks-alert.js`) | `getBlackoutDates(..., { strict: true })`: closed dates are excluded, and an unreadable list throws | Counts the technician as away |
-| Annual prepay series seeding (`annual-prepay-series-slot.js`) | Not read | The technician is dropped on that date |
-
-### The closure-state lock
-
-The shared closure-state lock is `lockClosureState` in `blackout-dates.js`.
-
-- **Exclusive (the four writers in `routes/admin-schedule.js`):** `PUT /blackout-dates/weekly`,
-  `PUT /blackout-dates/holidays`, `POST /blackout-dates` and `DELETE /blackout-dates/:id`.
-- **Shared, then a fresh read of the closed days:**
-  - the capacity-mode commit check, `assertCapacityEligibility` in `scheduling/arrival-route.js`
-    (reached through `verifyArrivalCapacity`, which runs only with capacity mode on or `preserveCapacity`);
-  - `rescheduleSeries` in `rebooker.js` (`assertClosedDaysUnchanged`);
-  - auto-dispatch `apply.js` (`fenceSourceConflict`), for a `closed_day` source conflict.
-- **A date re-check only, no closure lock:**
-  - `createSelfBooking` in `routes/booking.js` calls `isBlackoutDate` before its write transaction opens;
-  - `reserveSlot`, `commitReservation` and `extendReservation` in `slot-reservation.js` call
-    `isBlackoutDate`. `commitReservation` and `extendReservation` read on their own transaction.
-
-So a closure saved at the same moment as one of the second group is serialized with it. A path in the
-third group can still commit in the gap between its date check and its write.
-
-### Auto-dispatch and a closed day
-
-With `GATE_AUTO_DISPATCH_CONFLICT_MOVES` on, `auto-dispatch/current-conflict.js` reports a `closed_day`
-conflict when `isBlackoutDate(date, db, { strict: true })` is true for a visit that has an arrival window.
-A read failure throws, so the visit is not evaluated. The conflict only lifts the score bar and the drive
-floor for that visit (`move-rules.js`). Every other guard still applies, among them:
-
-- eligibility: a recurring child visit, not locked or excluded by staff, an active customer
-  (`auto-dispatch/eligibility.js`);
-- the day lock for the active mode (route tiers, flex tier, or the flat lock window);
-- the reminder freeze: 24.25 hours in route-tier mode, 25 hours in flex mode (`auto-dispatch/index.js`
-  `reminderFreezeHours`);
-- the fixed-visit rule (`eligibility.js`, owner 2026-11-22): the customer asked for this time, the
-  customer placed the visit, or staff locked it.
-
-A staff placement and a customer confirmation alone do not hold a visit any more (owner 2026-11-22).
-A visit that cannot move stays on the closed day. `auto-dispatch/needs-person-notice.js` can name it
-("is on a closed day").
+Read those files before you change a booking path, the recurring seeder or auto-dispatch. This page does not
+restate their behavior, so the code stays the one source.
 
 ## How the office changes things
 
@@ -143,5 +100,4 @@ and to `FACT_CLOSED_HOLIDAY_KEYS` together.
 ## Tests
 
 - `server/tests/schedule-holidays.test.js`: the 14 yearly rules and the observed-weekday rule.
-- `server/tests/technician-eligibility.test.js`: absences and work days through the shared seam.
 - `server/tests/sms-company-facts.test.js`: the closed-days line, and that it names exactly `FACT_CLOSED_HOLIDAY_KEYS`.
