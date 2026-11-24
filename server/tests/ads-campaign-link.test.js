@@ -185,3 +185,37 @@ test('an exact match found before a later day fails is kept for the next run', a
   expect(saved.m2).toEqual({ at: NOW.toISOString() });
 });
 
+test('a campaign Google already named still links after the lead leaves the click window', async () => {
+  const conn = fakeConn({
+    leads: [{ id: 'n1', gclid: GCLID_OLD, lead_date: '2026-07-01' }],
+    campaigns,
+    tried: { n1: { at: '2026-11-22T11:00:00.000Z', google_campaign_id: '22594274874' } },
+  });
+  const g = googleAdsWith({});
+  expect((await linkCampaigns({ now: NOW, conn, googleAds: g })).linked.gclid_click_view).toBe(1);
+  expect(conn.updates[0]).toMatchObject({ id: 'n1', campaign_id: 'local-gbp' });
+  expect(g.query).not.toHaveBeenCalled();
+});
+
+test('a saved match links even when another lead\'s lookup fails, then the step fails', async () => {
+  const conn = fakeConn({
+    leads: [{ id: 'p1', gclid: `${GCLID_NEW}p1`, lead_date: '2026-11-20' }, { id: 'p2', gclid: `${GCLID_NEW}p2`, lead_date: '2026-11-20' }],
+    campaigns,
+    tried: { p1: { at: '2026-11-22T11:00:00.000Z', google_campaign_id: '22594274874' } },
+  });
+  const query = jest.fn(async () => { throw new Error('RESOURCE_EXHAUSTED'); });
+  await expect(linkCampaigns({ now: NOW, conn, googleAds: { getCustomer: () => ({ query }) } })).rejects.toThrow('RESOURCE_EXHAUSTED');
+  expect(conn.updates).toEqual([{ id: 'p1', campaign_id: 'local-gbp', campaign_link_basis: 'gclid_click_view', updated_at: 'now()' }]);
+});
+
+test('two leads sharing a gclid: a click goes only to the lead whose days hold it', async () => {
+  const conn = fakeConn({
+    leads: [{ id: 's-new', gclid: GCLID_NEW, lead_date: '2026-11-20' }, { id: 's-old', gclid: GCLID_NEW, lead_date: '2026-11-05' }],
+    campaigns,
+  });
+  const query = jest.fn(async (q) => (q.includes("'2026-11-10'") ? [{ click_view: { gclid: GCLID_NEW }, campaign: { id: 22594274874 } }] : []));
+  await linkCampaigns({ now: NOW, conn, googleAds: { getCustomer: () => ({ query }) } });
+  expect(conn.updates.map((u) => u.id)).toEqual(['s-new']);
+  expect(query.mock.calls.some(([q]) => q.includes("'2026-08-25'"))).toBe(true); // the older lead keeps searching to the window start
+});
+

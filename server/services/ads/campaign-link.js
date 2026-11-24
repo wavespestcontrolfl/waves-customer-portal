@@ -41,42 +41,46 @@ function daysBack(day, n) {
 const GCLID_RE = /^[A-Za-z0-9_-]{10,200}$/;
 
 /**
- * Google campaign ids by gclid from click_view. `spans` maps each gclid to the days it may have been clicked; one
- * query per day asks every gclid still open on it (click_view takes one day a query), newest day first, so a run is at
- * most CLICK_BACK_DAYS + 1 queries whatever the number of leads. Fills and returns `found` (gclid -> Google campaign id),
- * so the matches of the days already asked survive a later failed query.
+ * Google campaign ids by lead from click_view. `spans` maps each lead id to { gclid, days } (the days its click may be
+ * on). One query per day asks every gclid of a lead still open on it (click_view takes one day a query), newest day
+ * first, so a run is at most CLICK_BACK_DAYS + 1 queries whatever the number of leads. A match on a day goes only to
+ * the leads whose own span holds that day (two leads can share a gclid). Fills `found` (lead id -> Google campaign
+ * id), so the matches of the days already asked survive a later failed query.
  */
-async function clickViewCampaigns(customer, spans, found = new Map()) {
-  const days = [...new Set([...spans.values()].flat())].sort().reverse();
+async function clickViewCampaigns(customer, spans, found) {
+  const days = [...new Set([...spans.values()].flatMap((s) => s.days))].sort().reverse();
   for (const day of days) {
-    const open = [...spans].filter(([gclid, span]) => !found.has(gclid) && span.includes(day)).map(([gclid]) => gclid);
+    const open = [...spans].filter(([id, s]) => !found.has(id) && s.days.includes(day));
     if (!open.length) continue;
+    const gclids = [...new Set(open.map(([, s]) => s.gclid))];
     const rows = await customer.query(
-      `SELECT click_view.gclid, campaign.id FROM click_view WHERE segments.date = '${day}' AND click_view.gclid IN (${open.map((g) => `'${g}'`).join(', ')})`,
+      `SELECT click_view.gclid, campaign.id FROM click_view WHERE segments.date = '${day}' AND click_view.gclid IN (${gclids.map((g) => `'${g}'`).join(', ')})`,
     );
     for (const r of rows) {
       const gclid = r?.click_view?.gclid;
-      if (gclid && r?.campaign?.id != null && open.includes(gclid)) found.set(gclid, String(r.campaign.id));
+      if (!gclid || r?.campaign?.id == null) continue;
+      for (const [id, s] of open) if (s.gclid === gclid) found.set(id, String(r.campaign.id));
     }
     if (found.size === spans.size) break;
   }
-  return found;
 }
 
-/** gclid -> the days its click may be on that Google still keeps, for the leads still needing an exact lookup. */
+/** Lead id -> { gclid, days Google still keeps that its click may be on }, for the leads still needing a lookup. */
 function clickSpans(rows, tried, windowStart) {
   const spans = new Map();
   for (const row of rows) {
     const day = dayString(row.lead_date);
     if (tried[row.id]?.google_campaign_id || day < windowStart) continue;
-    spans.set(row.gclid, Array.from({ length: CLICK_BACK_DAYS + 1 }, (_, back) => daysBack(day, back)).filter((d) => d >= windowStart));
+    const days = Array.from({ length: CLICK_BACK_DAYS + 1 }, (_, back) => daysBack(day, back)).filter((d) => d >= windowStart);
+    spans.set(row.id, { gclid: row.gclid, days });
   }
   return spans;
 }
 
 /**
  * Marks every lead of the run tried (so a Google failure still moves the next run on), then asks click_view for the
- * leads that need it, batched by day. An exact match is kept with its try even when a later day's query failed.
+ * leads that need it, batched by day. Every match found is kept with its try. Returns the Google error, if any, so
+ * the caller links the matches it has before failing the step.
  */
 async function lookupClicks(customer, rows, tried, { at, windowStart }) {
   for (const row of rows) {
@@ -84,13 +88,15 @@ async function lookupClicks(customer, rows, tried, { at, windowStart }) {
     tried[row.id] = { at, ...(known ? { google_campaign_id: known } : {}) };
   }
   const spans = clickSpans(rows, tried, windowStart);
-  const clicks = new Map();
+  const found = new Map();
+  let error = null;
   try {
-    if (spans.size) await clickViewCampaigns(customer, spans, clicks);
-  } finally {
-    for (const row of rows) if (clicks.has(row.gclid)) tried[row.id].google_campaign_id = clicks.get(row.gclid);
+    if (spans.size) await clickViewCampaigns(customer, spans, found);
+  } catch (err) {
+    error = err;
   }
-  return clicks;
+  for (const [id, googleId] of found) tried[id].google_campaign_id = googleId;
+  return error;
 }
 
 function parseTried(v) {
@@ -109,15 +115,16 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
   const out = { checked: 0, linked: { gclid_click_view: 0 }, unlinked: 0 };
   if (!customer) return out;
   const windowStart = etDateString(addETDays(now, -CLICK_VIEW_DAYS));
+  const triedRow = await conn('system_settings').where({ key: TRIED_KEY }).first();
+  const tried = parseTried(triedRow?.value);
   // The whole waiting set (a handful of rows), so ordering by last try reaches every lead.
   const eligible = (await conn('ad_service_attribution')
     .where('lead_source', 'google_ads')
     .whereNotNull('gclid').whereNull('campaign_id').whereNotNull('lead_date')
     .orderBy('lead_date', 'desc')
     .select('id', 'gclid', 'lead_date'))
-    .filter((r) => GCLID_RE.test(String(r.gclid)) && dayString(r.lead_date) >= windowStart);
-  const triedRow = await conn('system_settings').where({ key: TRIED_KEY }).first();
-  const tried = parseTried(triedRow?.value);
+    // A lead past the click window stays only when Google already named its campaign (it waits for the local row).
+    .filter((r) => GCLID_RE.test(String(r.gclid)) && (dayString(r.lead_date) >= windowStart || tried[r.id]?.google_campaign_id));
   const triedAt = (id) => String(tried[id]?.at || '');
   const rows = [...eligible].sort((a, b) => triedAt(a.id).localeCompare(triedAt(b.id))).slice(0, BATCH);
   out.checked = rows.length;
@@ -127,10 +134,9 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
   const at = now.toISOString();
 
   try {
-    const clicks = await lookupClicks(customer, rows, tried, { at, windowStart });
+    const lookupError = await lookupClicks(customer, rows, tried, { at, windowStart });
     for (const row of rows) {
-      const googleId = tried[row.id].google_campaign_id || clicks.get(row.gclid) || null;
-      if (googleId) tried[row.id].google_campaign_id = googleId;
+      const googleId = tried[row.id].google_campaign_id || null;
       const basis = 'gclid_click_view';
       const campaignId = googleId ? localId.get(googleId) || null : null;
       if (!campaignId) { out.unlinked += 1; continue; }
@@ -138,6 +144,8 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
         .update({ campaign_id: campaignId, campaign_link_basis: basis, updated_at: conn.fn.now() });
       if (n) out.linked[basis] += 1;
     }
+    // Matches are linked first; then the step fails with Google's reason.
+    if (lookupError) throw lookupError;
   } finally {
     // Keep tries only for leads still waiting, also when Google failed mid-run.
     const waiting = new Set(eligible.map((r) => r.id));
