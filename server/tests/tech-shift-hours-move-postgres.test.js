@@ -73,6 +73,32 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
     expect(await rowOf(id)).toMatchObject({ day: f.date, window_start: '11:00:00', window_end: '12:00:00' });
   });
 
+  test('a new start or end the shift check cannot read as a clock time is refused, on the same day too: the write would still store it', async () => {
+    // PostgreSQL reads "4:05 PM" as 16:05 and "1:00 PM" as 13:00, and holds 24:00 as a start. The shift check reads none of them.
+    for (const window of [{ start: '4:05 PM', end: '5:05 PM' }, { start: '24:00', end: '24:00' }, { start: '10:00', end: '1:00 PM' }]) {
+      const id = await seed();
+      await expect(move(id, nextDay, window)).rejects.toMatchObject(refused);
+      expect(await rowOf(id)).toEqual(asSeeded);
+      await f.db('scheduled_services').del();
+    }
+    // "09:00 PM" begins like the stored 09:00, and "10:00 PM" like the stored 10:00. On the same day each is still a change of hours.
+    const id = await seed();
+    await expect(move(id, f.date, { start: '09:00 PM', end: '10:00 PM' })).rejects.toMatchObject(refused);
+    await expect(move(id, f.date, { start: '09:00', end: '10:00 PM' })).rejects.toMatchObject(refused);
+    expect(await rowOf(id)).toEqual(asSeeded);
+    // The same hours with seconds are the same hours: nothing is placed, nothing is judged.
+    await f.db('scheduled_services').where({ id }).update({ window_start: '12:00', window_end: '13:00' });
+    expect(await move(id, f.date, { start: '12:00:00', end: '13:00:00' })).toMatchObject({ success: true });
+    // The office is not checked, and a technician with no set hours is not judged: the same request lands as before.
+    expect(await move(id, f.date, { start: '09:00 PM', end: '10:00 PM' }, 'admin', { overlapAdvisory: true })).toMatchObject({ success: true });
+    expect(await rowOf(id)).toMatchObject({ day: f.date, window_start: '21:00:00', window_end: '22:00:00' });
+    await f.db('scheduled_services').del();
+    await setShift(null, null);
+    const noHours = await seed();
+    expect(await move(noHours, f.date, { start: '09:00 PM', end: '10:00 PM' })).toMatchObject({ success: true });
+    expect(await rowOf(noHours)).toMatchObject({ day: f.date, window_start: '21:00:00', window_end: '22:00:00' });
+  });
+
   // On main a same-day, same-technician move asks nothing about the technician. With the gate on it asks
   // about the shift, and only that: the technician's day off (GATE_TECH_WORK_DAYS) still does not refuse it.
   test('a move that changes only the hours is judged on the shift alone: the technician\'s day off does not refuse it', async () => {
@@ -676,6 +702,12 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
         expect(await daysOf(ids)).toEqual(seeded);
         await f.db('scheduled_services').del();
       }
+      // "09:00 PM" begins like the stored 09:00, and "10:00 PM" like the stored 10:00. On the same day each is still a change of hours.
+      const kept = await seedSeries();
+      await expect(sameDay(kept, { start: '09:00 PM', end: '10:00 PM' })).rejects.toMatchObject(refused);
+      await expect(sameDay(kept, { start: '09:00', end: '10:00 PM' })).rejects.toMatchObject(refused);
+      expect(await rowOf(kept[0])).toEqual(asSeeded);
+      await f.db('scheduled_services').del();
       // The office is not checked, and a technician with no set hours is not judged: the same request lands as before.
       const office = await seedSeries();
       expect(await moveSeries(office, { start: '10:00', end: '1:00 PM' }, 'admin', { sourceSurface: 'dispatch_board', overlapAdvisory: true })).toMatchObject({ success: true, occurrencesRescheduled: 3 });
@@ -687,9 +719,9 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       expect(await rowOf(ids[0])).toMatchObject({ day: nextDay, window_start: '10:00:00', window_end: '13:00:00' });
     });
 
-    // Today's shift follows the clock-in; every other day's is the set hours. So a later visit that leaves today
-    // can sit inside its technician's shift today and outside it on the day it lands.
-    describe('a later visit that leaves today', () => {
+    // Today's shift follows the clock-in; every other day's is the set hours. So a later visit that leaves today,
+    // or lands on it, can sit inside its technician's shift on one day and outside it on the other.
+    describe('a later visit that leaves today, or lands on it', () => {
       const { etDateString, parseETDateTime } = require('../utils/datetime-et');
       let today;
       // The fixture's day is two weeks out: the tapped visit is six weeks overdue and the next visit is today's.
@@ -738,6 +770,25 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
         const again = await seedAroundToday();
         expect(await moveSeries(again, fits)).toMatchObject({ success: true, occurrencesRescheduled: 3 });
         expect(await daysOf(again)).toEqual(landed);
+      });
+
+      // A visit moved off its cadence day (a date exception) keeps its distance from the tapped visit. One that sits on
+      // tomorrow lands on today when the tapped visit moves one day back.
+      test('one that lands on today is judged the same way: refused when the set hours hold it and today\'s shift does not', async () => {
+        const tomorrow = new Date(Date.parse(`${today}T12:00:00Z`) + 86400000).toISOString().slice(0, 10);
+        // The tapped visit sits two days after the fixture's day, so the move to `nextDay` takes the plan one day back.
+        const seedBeforeToday = (hours) => seedSeries({ 1: { scheduled_date: tomorrow, date_exception: true, date_exception_cadence_date: plusDays(44), ...hours } }, 2);
+        // 13:00 to 14:00 sits inside the set hours and ends after today's shift.
+        const held = await seedBeforeToday({ window_start: '13:00', window_end: '14:00' });
+        const before = await daysOf(held);
+        expect(before[1]).toBe(tomorrow);
+        await expect(moveSeries(held, fits)).rejects.toMatchObject(refused);
+        expect(await daysOf(held)).toEqual(before);
+        await f.db('scheduled_services').del();
+        // 21:00 to 22:00 is outside the set hours: the office's placement. It lands on today and keeps its hours.
+        const placed = await seedBeforeToday({ window_start: '21:00', window_end: '22:00' });
+        expect(await moveSeries(placed, fits)).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+        expect(await rowOf(placed[1])).toMatchObject({ day: today, window_start: '21:00:00', window_end: '22:00:00' });
       });
 
       test('a grouped partner at today\'s stop is judged the same way: refused when today\'s shift holds it and the set hours do not', async () => {

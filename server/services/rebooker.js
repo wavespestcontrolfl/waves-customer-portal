@@ -21,10 +21,21 @@ const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gate
 // leave it: its window and its stored length. The caller passes it only for a
 // move that must obey the hours (reschedule: `shiftLive`). A kept technician
 // whose shift that day does not hold the block is refused the same way.
+//
+// shiftBlockMinutes: the block a shift judges, in minutes. A start or an end
+// that is there but is no clock time (unreadableBound, the unit mover's rule)
+// gives no block to read, and the write can still store it: PostgreSQL reads
+// "4:05 PM" as 16:05. Such a row is judged as the whole day, which no set
+// shift holds.
+const WHOLE_DAY = { window_start: '00:00', window_end: '24:00' };
+function shiftBlockMinutes(block) {
+  const { rowBlockMinutes, unreadableBound } = require('./scheduling/window-rules');
+  return rowBlockMinutes(unreadableBound(block.window_start) || unreadableBound(block.window_end, true) ? WHOLE_DAY : block);
+}
 async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null, shiftOnly = false } = {}) {
   const staffMove = initiatedBy === 'admin';
   try {
-    const hours = block ? require('./scheduling/window-rules').rowBlockMinutes(block) : undefined;
+    const hours = block ? shiftBlockMinutes(block) : undefined;
     // shiftOnly: a move that changes only the hours. It keeps the day and the
     // technician dispatch gave the visit, so it is judged on the shift alone
     // (shiftExcluding), not on the day's other rules, and refused the same way.
@@ -143,13 +154,14 @@ function hhmm(value) {
   return value ? String(value).slice(0, 5) : null;
 }
 
-// Does this write change the row's hours (start or end, to the minute)?
+// Does this write change the row's hours (start or end, to the minute)? Each value is read as its
+// clock minute. One that is no clock time stays text, and text never equals a minute: PostgreSQL can
+// still store "10:00 PM", which begins like a stored "10:00" and is 22:00.
 function hoursChangedBy(update, row) {
-  return hhmm(update.window_start) !== hhmm(row.window_start) || hhmm(update.window_end) !== hhmm(row.window_end);
+  const { parseHHMM } = require('./scheduling/window-rules');
+  const read = (value) => parseHHMM(value) ?? hhmm(value);
+  return read(update.window_start) !== read(row.window_start) || read(update.window_end) !== read(row.window_end);
 }
-
-// A bound that is no clock time gives no block to read: the row is judged as the whole day.
-const WHOLE_DAY = { window_start: '00:00', window_end: '24:00' };
 
 // GATE_TECH_SHIFT_HOURS (D4 part 3b-2c): the shift check for one row of a stop a series move judges,
 // the plan's visit there or a grouped partner. `row` is the row as read and `update` its write:
@@ -160,20 +172,17 @@ const WHOLE_DAY = { window_start: '00:00', window_end: '24:00' };
 //   - A later stop keeps its hours and changes its day only. It is refused only when the move takes
 //     it from inside the shift to outside it: a block the shift did not hold on the day it leaves is
 //     the office's placement, and stays the office's.
-// A bound that is there but is no clock time (unreadableBound, the unit mover's rule) gives no block,
-// and the write still stores it: the row is judged as the whole day, which no set shift holds.
 // Judged on the shift alone (shiftOnly): the day's other rules are asked where they were. A landing
-// with no window has no hours to judge.
+// with no window has no hours to judge, and a time that is no clock time is the whole day
+// (shiftBlockMinutes).
 async function assertSeriesRowInsideShift(trx, { live, tapped, row, update, dateStr, dayChanges, initiatedBy }) {
   if (!live) return;
   const landed = { ...row, ...update };
   const technicianId = landed.technician_id || null;
   if (!dayChanges && !hoursChangedBy(update, row) && technicianId === (row.technician_id || null)) return;
-  const { rowBlockMinutes, unreadableBound } = require('./scheduling/window-rules');
-  const block = unreadableBound(landed.window_start) || unreadableBound(landed.window_end, true) ? WHOLE_DAY : landed;
   const leftDay = dateOnlyString(row.scheduled_date);
-  if (!tapped && await require('./technician-eligibility').shiftExcluding(trx, technicianId, leftDay, rowBlockMinutes(block))) return;
-  await assertAssignableSlotTechnician(technicianId, trx, dateStr, { initiatedBy, shiftOnly: true, block });
+  if (!tapped && await require('./technician-eligibility').shiftExcluding(trx, technicianId, leftDay, shiftBlockMinutes(landed))) return;
+  await assertAssignableSlotTechnician(technicianId, trx, dateStr, { initiatedBy, shiftOnly: true, block: landed });
 }
 
 // Did this single move change the slot (the date or the window start)? Only then does it record an intent (moveIntentColumns).
@@ -4124,16 +4133,6 @@ class SmartRebooker {
         }
         const occurrenceIndex = i - startIdx;
         const isAnchor = occurrenceIndex === 0;
-        // GATE_TECH_SHIFT_HOURS: an automatic series move places the tapped
-        // stop, so that stop obeys the shift. A later visit keeps its hours
-        // and its technician and changes its day only (the date-only contract
-        // below). A technician's set hours are the same every day and only
-        // today's follow a clock-in (loadTechShifts), and a later visit lands
-        // after the tapped one, never today. So only a later stop that leaves
-        // today can sit inside the shift where it is and outside it where it
-        // lands: that stop is judged too. Any other later visit is not, and
-        // one the office placed outside the shift does not stop the plan.
-        const stopShiftLive = seriesShiftLive && (isAnchor || dateOnly(sib.scheduled_date) === shiftToday);
         // Memoized deduped projection — identical to what the collision
         // probe above locked and probed (codex #3509).
         const date = isAnchor
@@ -4147,6 +4146,18 @@ class SmartRebooker {
             ? sib.scheduled_date.toISOString()
             : sib.scheduled_date || '').slice(0, 10);
         const sibRewound = isLiveAnchor || (sibDateChanges && needsLifecycleRewind(sib));
+        // GATE_TECH_SHIFT_HOURS: an automatic series move places the tapped
+        // stop, so that stop obeys the shift. A later visit keeps its hours
+        // and its technician and changes its day only (the date-only contract
+        // below). A technician's set hours are the same every day and only
+        // today's follow a clock-in (loadTechShifts). So only a later stop
+        // that leaves today, or lands on it (a date exception keeps its
+        // distance from the tapped visit, so one can), can sit inside the
+        // shift on one day and outside it on the other: that stop is judged
+        // too. Any other later visit is not, and one the office placed
+        // outside the shift does not stop the plan.
+        const stopShiftLive = seriesShiftLive
+          && (isAnchor || [dateOnly(sib.scheduled_date), String(date).split('T')[0]].includes(shiftToday));
         // A series move mutates the DATE dimension it owns (owner ruling
         // 2026-08-28): the anchor takes the caller's window and lands on
         // 'confirmed' like any reschedule; every sibling KEEPS its own
