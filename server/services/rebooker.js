@@ -21,21 +21,22 @@ const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gate
 // leave it: its window and its stored length. The caller passes it only for a
 // move that must obey the hours (reschedule: `shiftLive`). A kept technician
 // whose shift that day does not hold the block is refused the same way.
-//
-// shiftBlockMinutes: the block a shift judges, in minutes. A start or an end
-// that is there but is no clock time the check reads exactly (unreadableBound,
-// the unit mover's rule) gives no block to trust, and the write can still
-// store it: PostgreSQL reads "4:05 PM" as 16:05 and keeps the seconds of
-// "12:00:30". Such a row is judged as the whole day, which no set shift holds.
-const WHOLE_DAY = { window_start: '00:00', window_end: '24:00' };
-function shiftBlockMinutes(block) {
-  const { rowBlockMinutes, unreadableBound } = require('./scheduling/window-rules');
-  return rowBlockMinutes(unreadableBound(block.window_start) || unreadableBound(block.window_end, true) ? WHOLE_DAY : block);
-}
+// The block is judged through shiftBlockMinutes (window-rules.js): PostgreSQL
+// reads "4:05 PM" as 16:05 and keeps the seconds of "12:00:30", so a time the
+// check cannot read exactly is a block no shift holds.
+const slotNoLongerAvailable = () => Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
+  statusCode: 409,
+  status: 409,
+  isOperational: true,
+  code: 'SLOT_TAKEN',
+});
+// Is this a move that obeys the shift hours (GATE_TECH_SHIFT_HOURS)? An automatic
+// one: the office's own move does not, the office decides.
+const automaticShiftLive = (initiatedBy) => initiatedBy !== 'admin' && techShiftHoursLive();
 async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null, shiftOnly = false } = {}) {
   const staffMove = initiatedBy === 'admin';
   try {
-    const hours = block ? shiftBlockMinutes(block) : undefined;
+    const hours = block ? require('./scheduling/window-rules').shiftBlockMinutes(block) : undefined;
     // shiftOnly: a move that changes only the hours. It keeps the day and the
     // technician dispatch gave the visit, so it is judged on the shift alone
     // (shiftExcluding), not on the day's other rules, and refused the same way.
@@ -52,12 +53,7 @@ async function assertAssignableSlotTechnician(technicianId, trx, date, { initiat
     }
   } catch (err) {
     if (err.code !== NOT_ASSIGNABLE) throw err;
-    throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
-      statusCode: 409,
-      status: 409,
-      isOperational: true,
-      code: 'SLOT_TAKEN',
-    });
+    throw slotNoLongerAvailable();
   }
 }
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
@@ -172,18 +168,18 @@ function hoursChangedBy(update, row) {
 //     hold its block (its hours and its stored length).
 //   - A later stop keeps its hours and changes its day only. It is refused only when the move takes
 //     it from inside the shift to outside it: a block the shift did not hold on the day it leaves is
-//     the office's placement, and stays the office's.
+//     the office's placement, and stays the office's (shiftLostByDayChange, the rule a call-booked
+//     follow-up that moves with its visit is judged by too).
 // Judged on the shift alone (shiftOnly): the day's other rules are asked where they were. A landing
-// with no window has no hours to judge, and a time that is no clock time is the whole day
-// (shiftBlockMinutes).
+// with no window has no hours to judge, and a time that is no clock time is refused wherever the
+// technician has a shift (shiftBlockMinutes).
 async function assertSeriesRowInsideShift(trx, { live, tapped, row, update, dateStr, dayChanges, initiatedBy }) {
   if (!live) return;
   const landed = { ...row, ...update };
   const technicianId = landed.technician_id || null;
   if (!dayChanges && !hoursChangedBy(update, row) && technicianId === (row.technician_id || null)) return;
-  const leftDay = dateOnlyString(row.scheduled_date);
-  if (!tapped && await require('./technician-eligibility').shiftExcluding(trx, technicianId, leftDay, shiftBlockMinutes(landed))) return;
-  await assertAssignableSlotTechnician(technicianId, trx, dateStr, { initiatedBy, shiftOnly: true, block: landed });
+  if (tapped) return assertAssignableSlotTechnician(technicianId, trx, dateStr, { initiatedBy, shiftOnly: true, block: landed });
+  if (await require('./technician-eligibility').shiftLostByDayChange(trx, technicianId, landed, dateOnlyString(row.scheduled_date), dateStr)) throw slotNoLongerAvailable();
 }
 
 // Did this single move change the slot (the date or the window start)? Only then does it record an intent (moveIntentColumns).
@@ -1090,13 +1086,13 @@ async function planCarriedFollowUps(conn, carryPartners, siblings, projectedById
 
 // Shift those follow-ups inside the sweep's transaction, only for a partner
 // that actually landed on the day it was planned for, against the locked plan.
-async function shiftCarriedFollowUps(conn, partnerPlans, carriedMembers, report) {
+async function shiftCarriedFollowUps(conn, partnerPlans, carriedMembers, report, shiftLive) {
   const landed = new Map(carriedMembers.map((k) => [String(k.id), dateOnly(k.date)]));
   for (const p of partnerPlans) {
     if (landed.get(p.partnerId) !== p.toDate) continue;
     await shiftCallFollowUpsForParentMove({
       conn, parentServiceId: p.partnerId, fromDate: p.fromDate, toDate: p.toDate,
-      occupancyHeld: true, suppressTechNotice: true, plan: p.plan, report,
+      occupancyHeld: true, suppressTechNotice: true, plan: p.plan, report, shiftLive,
     });
   }
 }
@@ -2490,7 +2486,7 @@ class SmartRebooker {
       // day and the technician are the same, but the new hours may be outside
       // the shift.
       const techChangeForEligibility = Object.prototype.hasOwnProperty.call(updates, 'technician_id');
-      const shiftLive = initiatedBy !== 'admin' && options.skipVisitSeam !== true && techShiftHoursLive();
+      const shiftLive = options.skipVisitSeam !== true && automaticShiftLive(initiatedBy);
       const hoursMoveForShift = shiftLive && hoursChangedBy(updates, service);
       const dayOrTechMove = techChangeForEligibility || !sameDayTarget;
       const eligibilityChecked = dayOrTechMove || hoursMoveForShift;
@@ -2830,6 +2826,8 @@ class SmartRebooker {
         // Reported so the route refresh below covers the child's own two
         // days, not just the parent's (codex #4295 r1 P2).
         report: followUpReport,
+        // A grouped stop's member too (skipVisitSeam): its follow-up is its own row.
+        shiftLive: automaticShiftLive(initiatedBy),
       });
       if (shifted > 0) {
         logger.info(`[rebooker] shifted ${shifted} call-created follow-up visit(s) with parent ${serviceId} (-> ${newDateStr})`);
@@ -2975,7 +2973,7 @@ class SmartRebooker {
     // move obeys the shift hours for the stop it places, as a single visit's
     // move does (reschedule: shiftLive). The office's own series move does
     // not: the office decides.
-    const seriesShiftLive = initiatedBy !== 'admin' && techShiftHoursLive();
+    const seriesShiftLive = automaticShiftLive(initiatedBy);
     // Today (Eastern): the one day whose shift follows a clock-in (the sweep's stopShiftLive).
     const shiftToday = etDateString();
     // Customer intent reserves the selected visit only. Future cadence dates
@@ -4675,6 +4673,7 @@ class SmartRebooker {
         // unlocked day (codex r12 P1).
         plan: followUpPlan,
         report: followUpReport,
+        shiftLive: seriesShiftLive,
       });
       if (followUpsShifted > 0) {
         logger.info(`[rebooker] shifted ${followUpsShifted} call-created follow-up visit(s) with series anchor ${serviceId} (-> ${seriesDateStr})`);
@@ -4682,7 +4681,7 @@ class SmartRebooker {
       // Same shift for each carried partner that landed on its planned day
       // (one that did not move, or moved elsewhere, keeps its follow-ups);
       // shifted and skipped children join the same report.
-      await shiftCarriedFollowUps(trx, partnerFollowUpPlans, carriedMembers, followUpReport);
+      await shiftCarriedFollowUps(trx, partnerFollowUpPlans, carriedMembers, followUpReport, seriesShiftLive);
       // Shifted call follow-ups ride the operation so the durable effects
       // pass syncs THEIR reminder rows too (codex r19 P1) — never part of
       // the cadence set (counts, ack, close, text).
@@ -4693,7 +4692,8 @@ class SmartRebooker {
       const followUpOccurrences = (followUpReport.shifted || []).map((k) => ({ id: k.id, date: k.date, windowStart: k.windowStart, windowEnd: k.windowEnd }));
       seriesFollowUpDates.push(...(followUpReport.shifted || []).flatMap((k) => [k.previousDate, k.date]));
       const followUpWarnings = (followUpReport.skipped || []).map((k) => (
-        `The call-booked follow-up visit on ${k.day} kept its date — its shifted slot on ${k.newDay} is already booked; set it from dispatch`
+        `The call-booked follow-up visit on ${k.day} kept its date — ${k.reason === 'shift'
+          ? `its technician's shift on ${k.newDay} does not hold it` : `its shifted slot on ${k.newDay} is already booked`}; set it from dispatch`
       ));
 
       // One operation row per shift — the audit boundary, the idempotency

@@ -217,6 +217,16 @@ function unreadableBound(value, isEnd = false) {
   return parseHHMM(text) == null || !WHOLE_MINUTE.test(text);
 }
 
+// The block a shift judges for a row a move writes (GATE_TECH_SHIFT_HOURS), in minutes. A start or an
+// end that is there but is no clock time the check reads exactly (unreadableBound) gives no block to
+// trust, and the write can still store it. Such a row is judged as a block no shift holds: one minute
+// longer than a day (a shift can be the whole day: a midnight clock-in on the March clock-change
+// Sunday with 23 set hours).
+const NO_SHIFT_HOLDS = { startMin: 0, endMin: 24 * 60 + 1 };
+function shiftBlockMinutes(row) {
+  return unreadableBound(row.window_start) || unreadableBound(row.window_end, true) ? NO_SHIFT_HOLDS : rowBlockMinutes(row);
+}
+
 function rowBlockMinutes(row, minutes = null) {
   const startMin = parseHHMM(row?.window_start);
   if (startMin == null) return { startMin: null, endMin: null };
@@ -257,6 +267,7 @@ module.exports = {
   parseHHMM,
   occupancyBlockFor,
   rowBlockMinutes,
+  shiftBlockMinutes,
   unreadableBound,
   seriesCandidateDateClashRows,
   minutesToHHMM,

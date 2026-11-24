@@ -1082,8 +1082,12 @@ not refuse the customer's move. One exception: a later visit that keeps its
 hours and leaves today, or lands on today, is refused, with the same 409, when
 the shift held it on the day it leaves and does not hold it on the day it
 lands (today's shift follows the technician's clock-in). No new status, field
-or code. Not yet checked
-at a commit: the day as the route would run it (capacity mode). Gate off:
+or code. A call-booked follow-up that moves with the visit a public reschedule
+moves is judged the same way (D4 part 3b-2d): it keeps its date when the shift
+held it on its day and does not hold it on the new day. The customer's move
+still lands with the same body; the office gets the card it gets for a
+follow-up whose new slot is booked. No new status, field or code. Not yet
+checked at a commit: the day as the route would run it (capacity mode). Gate off:
 byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the
 browse horizon answers `400 { error: 'date is beyond the booking horizon',

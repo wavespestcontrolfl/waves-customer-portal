@@ -1733,6 +1733,26 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     expect(log.wheres).not.toContainEqual({ id: 'kid-1' });
   });
 
+  // The report's reminder sync and the technician's notice both read the window the child keeps.
+  test('a shifted child is reported with the window it keeps: to the caller, after what the report already holds, and to its technician', async () => {
+    const notice = jest.spyOn(require('../services/tech-visit-notifications'), 'notifyVisitRescheduled').mockResolvedValue(undefined);
+    try {
+      const kid = { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 };
+      const { conn } = fakeConn({ kids: [kid], updatedCount: 1 });
+      const earlier = { id: 'kid-0', previousDate: '2026-07-09', date: '2026-07-12', windowStart: null, windowEnd: null };
+      const report = { shifted: [earlier] };
+      expect(await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', report })).toBe(1);
+      expect(report).toEqual({ shifted: [earlier, { id: 'kid-1', previousDate: '2026-07-16', date: '2026-07-19', windowStart: '09:00:00', windowEnd: '10:00:00' }] });
+      expect(notice.mock.calls).toEqual([[expect.objectContaining({
+        visitId: 'kid-1', technicianId: 't1',
+        previous: { date: '2026-07-16', windowStart: '09:00:00', windowEnd: '10:00:00' },
+        snapshot: { date: '2026-07-19', windowStart: '09:00:00', windowEnd: '10:00:00' },
+      })]]);
+    } finally {
+      notice.mockRestore();
+    }
+  });
+
   test.each([null, '09:00:00'])('rebases or clears a shifted child dispatch marker with window %s', async (windowStart) => {
     const { conn, log } = fakeConn({ kids: [{
       id: 'kid-1', day: '2026-07-16', new_day: '2026-07-19',
@@ -1789,11 +1809,43 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     occupancy.findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
     const shifted = await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
     expect(shifted).toBe(0);
-    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining('2026-07-16 → 2026-07-19'), expect.objectContaining({
+    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining('(2026-07-16 → 2026-07-19 — slot booked)'), expect.objectContaining({
       // Opens the follow-up that kept its date, on that day.
       link: '/admin/dispatch?tab=schedule&date=2026-07-16&appointment=kid-1',
       metadata: expect.objectContaining({ parentServiceId: 'svc-parent' }),
     }));
+  });
+
+  // GATE_TECH_SHIFT_HOURS (D4): an automatic move passes shiftLive; the office's own move does not.
+  test('shiftLive: a child the change of day takes out of its technician\'s shift keeps its date, reason "shift"; without the option the shift is not read', async () => {
+    const eligibility = require('../services/technician-eligibility');
+    const { notifyAdmin } = require('../services/notification-service');
+    const kid = { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 };
+    const lost = jest.spyOn(eligibility, 'shiftLostByDayChange');
+    const run = (answer, options = { shiftLive: true }) => {
+      lost.mockReset().mockResolvedValue(answer);
+      const { conn } = fakeConn({ kids: [kid] });
+      const report = {};
+      return shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', report, ...options })
+        .then((shifted) => ({ shifted, report }));
+    };
+    try {
+      notifyAdmin.mockClear();
+      const kept = await run({ startMin: 600, endMin: 1200 });
+      expect(kept).toEqual({ shifted: 0, report: { skipped: [{ id: 'kid-1', day: '2026-07-16', newDay: '2026-07-19', reason: 'shift' }] } });
+      // The rule is asked of the child's own row and technician, from its day to its new day.
+      expect(lost.mock.calls.map((call) => call.slice(1))).toEqual([['t1', kid, '2026-07-16', '2026-07-19']]);
+      expect(occupancy.findConflictingVisits).not.toHaveBeenCalled();
+      expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining("(2026-07-16 → 2026-07-19 — outside the technician's shift)"), expect.objectContaining({
+        link: '/admin/dispatch?tab=schedule&date=2026-07-16&appointment=kid-1',
+      }));
+      // The shift holds it on the new day, or did not hold it where it was: it moves.
+      expect((await run(null)).shifted).toBe(1);
+      expect((await run({ startMin: 600, endMin: 1200 }, {})).shifted).toBe(1);
+      expect(lost).not.toHaveBeenCalled();
+    } finally {
+      lost.mockRestore();
+    }
   });
 
   test('the card links a follow-up proven to still sit on its day, never a "changed" entry that sorts first', async () => {
