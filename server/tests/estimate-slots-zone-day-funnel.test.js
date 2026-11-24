@@ -318,11 +318,10 @@ describe('isFunnelZone / zone matching', () => {
     expect(techs).toEqual(new Map([['2027-05-20', new Set(['tech-1', null])], ['2027-05-21', new Set(['tech-2'])]]));
   });
 
-  // Pre-push P1s on b4fc39b372 and e61d2e4cc0. Fleet-wide there is no check under the date lock, and the lists keep
-  // main's offer-side hold rule (#7993), as the estimate page's collision and packing reads do. Per truck they read
-  // holds as that check does (a visit staff booked counts whatever its hold time), so they offer a truck only the days
-  // the check admits.
-  test('the lists count a hold only while unexpired fleet-wide, and per truck read holds as the check does', async () => {
+  // A visit staff booked counts as a zone stop whatever its hold time says, fleet-wide and per truck, and the lists
+  // read it as the check under the date lock does, so they offer a truck only the days that check admits. An unclaimed
+  // hold counts only while unexpired, by the real clock.
+  test('the lists count a booked visit that keeps an old hold time and an unclaimed hold by the real clock, as the check does', async () => {
     const prev = process.env.GATE_MULTI_TECH_CONFIRM;
     const holdRuleOf = async (read) => {
       const chain = scheduledServicesChain([]);
@@ -336,15 +335,16 @@ describe('isFunnelZone / zone matching', () => {
       expect(q.whereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
       return q.orWhereRaw.mock.calls;
     };
+    const bookedByRealClock = [
+      ['scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > clock_timestamp()'],
+    ];
     try {
       delete process.env.GATE_MULTI_TECH_CONFIRM;
-      expect(sqlOf(await listRule())).toEqual([['scheduled_services.reservation_expires_at > clock_timestamp()']]);
+      expect(sqlOf(await listRule())).toEqual(bookedByRealClock);
       process.env.GATE_MULTI_TECH_CONFIRM = 'true';
       const checkRule = await holdRuleOf((dbc) => truckMayTakeDate(dbc, { estimateZone: VENICE_ZONE, date: '2027-05-20', technicianId: 'tech-1' }));
       expect(await listRule()).toBe(checkRule);
-      expect(sqlOf(checkRule)).toEqual([
-        ['scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > clock_timestamp()'],
-      ]);
+      expect(sqlOf(checkRule)).toEqual(bookedByRealClock);
     } finally {
       if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
     }

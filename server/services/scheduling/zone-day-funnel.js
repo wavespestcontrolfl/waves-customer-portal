@@ -72,8 +72,8 @@
  * row is gone is checked in the same funneled pool). A hold that list did not
  * funnel (no stamp: its estimate in no zone when held) is not checked. The stop read
  * counts a hold by the real clock (clock_timestamp), not the writer's
- * transaction start; under the date lock it also counts a visit staff booked
- * that keeps its old hold time (zoneStopDays). The
+ * transaction start, and it counts a visit staff booked that keeps its old hold
+ * time (zoneStopDays). The
  * assessment link's list and its booking resolve the zone from the one booking
  * address the same way (slot-zone.js leadBookingZone: its city decides, its text
  * only without one, else the customer's own city on file when the list knows the
@@ -213,24 +213,17 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 // unassigned — either means a truck is in the zone that day) matching the
 // estimate's zone. `techs`: each of those dates -> the technician ids of its
 // stops (null = an unassigned stop).
-// Holds follow main's split by side (occupancy.js occupiedHoldFilter, #7993). The check under the date lock
-// (`includeClaimedReservations`, truckMayTakeDate) also counts a visit staff booked that keeps its old hold time, as
-// the reservation and confirmation checks do: that visit is its truck's stop until the cleanup job clears the time
-// (pre-push P1 on 5061a1da2b). Fleet-wide there is no such check, and the lists count a hold only while unexpired, as
-// the estimate page's collision and packing reads and the booking lists do (pre-push P1 on b4fc39b372); per truck
-// they read holds as the check does (getZoneFunnelDays). Both read the real clock, not NOW() (the transaction's
-// start): a writer reads this under its date lock after waiting for it, and an unclaimed hold that ran out meanwhile
-// no longer holds the day (owner rule B).
-function liveHoldByRealClock(q) {
-  q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > clock_timestamp()');
-}
-
-async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo, { includeClaimedReservations = false } = {}) {
+// A visit staff booked counts whatever its hold time says, as the reservation, confirmation and offer reads do: that
+// visit is its truck's stop until the cleanup job clears the time. An unclaimed hold counts only while unexpired.
+// Both the lists (fleet-wide and per truck) and the check under the date lock (truckMayTakeDate) read the real clock,
+// not NOW() (the transaction's start): a writer reads this under its date lock after waiting for it, and an unclaimed
+// hold that ran out meanwhile no longer holds the day (owner rule B).
+async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo) {
   const rows = await dbc('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-    .andWhere(includeClaimedReservations ? bookedVisitOrLiveHoldByRealClock : liveHoldByRealClock)
+    .andWhere(bookedVisitOrLiveHoldByRealClock)
     .select(
       'scheduled_services.scheduled_date',
       'scheduled_services.zone',
@@ -270,10 +263,10 @@ async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo, { includeClaime
 async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo }) {
   if (!isFunnelZone(estimateZone)) return { days: null, techDays: null, failed: false };
   try {
-    // Per truck, the lists read holds as the check under the date lock does (truckMayTakeDate), so they offer a
-    // truck only the days that check admits (pre-push P1 on e61d2e4cc0).
+    // The lists read holds as the check under the date lock does (truckMayTakeDate), so they offer a truck only
+    // the days that check admits.
     const perTruck = perTruckLive();
-    const { dates, techs } = await zoneStopDays(dbc, estimateZone, dateFrom, dateTo, { includeClaimedReservations: perTruck });
+    const { dates, techs } = await zoneStopDays(dbc, estimateZone, dateFrom, dateTo);
     return { days: dates, techDays: perTruck ? techs : null, failed: false };
   } catch (err) {
     logger.warn(`[zone-day-funnel] zone-stop lookup failed (failing open): ${err.message}`);
@@ -334,7 +327,7 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = 
 // does not apply (gate off, fleet view, no technician, no funneled zone), with no read. A query failure throws, so the writer's transaction fails closed like its other reads.
 async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
   if (technicianId == null || !perTruckLive() || !isFunnelZone(estimateZone)) return true;
-  const { dates, techs } = await zoneStopDays(conn, estimateZone, date, date, { includeClaimedReservations: true });
+  const { dates, techs } = await zoneStopDays(conn, estimateZone, date, date);
   return !dates.has(date) || onZoneDay(date, technicianId, dates, techs);
 }
 
