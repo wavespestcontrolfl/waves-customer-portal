@@ -9,6 +9,7 @@ jest.mock('../services/weather-forecast', () => ({ getNwsHourlyRain: jest.fn() }
 jest.mock('../services/mrms-qpe', () => ({ fetchMrmsDailyRain: jest.fn() }));
 
 const rainMode = require('../services/ads/rain-mode');
+const { soldDay } = require('../services/ads/budget-manager');
 const { ZONE_COORDS } = require('../services/scheduling/forecast-zones');
 
 const ZONES = Object.keys(ZONE_COORDS);
@@ -52,9 +53,9 @@ const AFTER_TWO = new Date('2026-11-24T20:00:00Z');
 
 describe('soldDay', () => {
   test('before 2 PM ET the ads sell today, from 2 PM tomorrow, on Sunday Monday', () => {
-    expect(rainMode.soldDay(new Date('2026-11-24T18:59:00Z'))).toBe('2026-11-24');
-    expect(rainMode.soldDay(new Date('2026-11-24T19:00:00Z'))).toBe('2026-11-25');
-    expect(rainMode.soldDay(new Date('2026-11-22T14:00:00Z'))).toBe('2026-11-23');
+    expect(soldDay(new Date('2026-11-24T18:59:00Z'))).toBe('2026-11-24');
+    expect(soldDay(new Date('2026-11-24T19:00:00Z'))).toBe('2026-11-25');
+    expect(soldDay(new Date('2026-11-22T14:00:00Z'))).toBe('2026-11-23');
   });
 });
 

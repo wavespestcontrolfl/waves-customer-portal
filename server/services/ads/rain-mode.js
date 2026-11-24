@@ -20,7 +20,7 @@
  *   3. decides, for each Google campaign, what the rule would set: an 'outdoor' campaign stops (the budget run's 1%
  *      floor) on a rain day, an 'indoor' campaign runs at its base on a rain day and stops on a dry day, and any other
  *      campaign (the brand campaign) is left alone. A campaign's class is ad_campaigns.metadata.rain_class
- *      ('indoor' | 'outdoor'); a campaign marked with a route line (pest, lawn: ads/route-fill.js) is outdoor.
+ *      ('indoor' | 'outdoor'); a campaign marked with a route line (ads/route-fill.js routeLineOf) is outdoor.
  *   4. writes the run to system_settings 'ads.rain_mode.last' and 'ads.rain_mode.history' (last HISTORY_MAX), and the
  *      day's latest call to 'ads.rain_mode.days' (one row per sold day, kept DAYS_MAX), the record the ad results
  *      report joins on.
@@ -36,7 +36,10 @@ const { getNwsHourlyRain } = require('../weather-forecast');
 const { fetchMrmsDailyRain } = require('../mrms-qpe');
 const { ZONE_COORDS } = require('../scheduling/forecast-zones');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
-const { etDateString, etParts, addETDays } = require('../../utils/datetime-et');
+const { etDateString, etParts } = require('../../utils/datetime-et');
+// One sold-day rule for the budget run and this record; one route-line classifier with ads/route-fill.js.
+const { soldDay } = require('./budget-manager');
+const { routeLineOf } = require('./route-fill');
 
 const LAST_KEY = 'ads.rain_mode.last';
 const HISTORY_KEY = 'ads.rain_mode.history';
@@ -61,18 +64,12 @@ function parseJson(v, fallback) {
   try { return JSON.parse(v) ?? fallback; } catch { return fallback; }
 }
 
-/** The day the ads sell at `now` (budget-manager.js adjustBudgets): Sunday -> Monday, < 2 PM -> today, else tomorrow. */
-function soldDay(now) {
-  const { dayOfWeek, hour } = etParts(now);
-  if (dayOfWeek === 0 || hour >= 14) return etDateString(addETDays(now, 1));
-  return etDateString(now);
-}
 
 /** The campaign's rain class: 'indoor' | 'outdoor' | null (left alone). */
 function rainClassOf(campaign) {
   const meta = parseJson(campaign?.metadata, {});
   if (meta && ['indoor', 'outdoor'].includes(meta.rain_class)) return meta.rain_class;
-  if (meta && ['pest', 'lawn'].includes(meta.route_line)) return 'outdoor';
+  if (routeLineOf(campaign)) return 'outdoor';
   return null;
 }
 
@@ -290,7 +287,6 @@ module.exports = {
   RAIN_PCT,
   RAIN_HOURS,
   WET_INCHES,
-  soldDay,
   rainClassOf,
   countWetHours,
   forecastDay,
