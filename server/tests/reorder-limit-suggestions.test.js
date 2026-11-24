@@ -126,6 +126,8 @@ describe('script output', () => {
     products: [
       { name: 'CrossCheck', unit: 'gal', status: 'ok', suggestedThreshold: 1, note: null },
       { name: 'Unused, "old"', unit: 'lb', status: 'no_usage', note: 'No use' },
+      { name: 'Uncounted', unit: null, status: 'no_unit', usageRecords: 0, note: null },
+      { name: 'Used uncounted', unit: null, status: 'no_unit', usageRecords: 3, note: null },
     ],
   };
 
@@ -135,7 +137,10 @@ describe('script output', () => {
   });
 
   test('table hides no-usage rows unless --all; csv quotes', () => {
-    expect(render(result, { format: 'table', all: false })).not.toContain('Unused');
+    const table = render(result, { format: 'table', all: false });
+    expect(table).not.toContain('Unused');
+    expect(table).not.toContain('Uncounted');
+    expect(table).toContain('Used uncounted');
     const csv = render(result, { format: 'csv', all: true });
     expect(csv).toContain('"Unused, ""old"""');
   });

@@ -39,6 +39,7 @@ const DEFAULTS = Object.freeze({
 
 const exact = (n) => Number(Number(n).toPrecision(12));
 const round2 = (n) => Math.round(n * 100) / 100;
+const round4 = (n) => Math.round(n * 10000) / 10000;
 
 function num(v) {
   if (v == null || v === '') return null;
@@ -165,7 +166,7 @@ function suggestLimitsForProduct({ product, usage = [], forecastDemand = null, t
   if (isBlackoutFertilizer(product.name)) {
     const { inBlackout, daysToJune1 } = blackoutWindow(today);
     if (inBlackout) {
-      return { ...base, dailyUse: round2(daily), basis: best.basis, status: 'blackout_hold', note: 'N/P fertilizer: county blackout June 1 - Sept 30. Hold; do not reorder.' };
+      return { ...base, dailyUse: round4(daily), basis: best.basis, status: 'blackout_hold', note: 'N/P fertilizer: county blackout June 1 - Sept 30. Hold; do not reorder.' };
     }
     const usableBeforeJune = daily * daysToJune1;
     if (usableBeforeJune < threshold + reorderRaw) {
@@ -187,7 +188,7 @@ function suggestLimitsForProduct({ product, usage = [], forecastDemand = null, t
 
   return {
     ...base,
-    dailyUse: round2(daily),
+    dailyUse: round4(daily),
     basis: best.basis,
     suggestedThreshold: round2(threshold),
     suggestedReorder: round2(reorder),
@@ -261,8 +262,10 @@ async function buildReorderLimitSuggestions({ knex, today, options = {}, forecas
     const unit = p.inventory_unit;
     const usage = [];
     let unconverted = 0;
+    let usageRecords = 0;
     for (const m of movements) {
       if (m.product_id !== p.id) continue;
+      usageRecords += 1;
       const qty = unit ? convertInventoryQuantity(Math.abs(Number(m.quantity)), m.unit, unit) : null;
       if (qty == null) { unconverted += 1; continue; }
       usage.push({ daysAgo: daysBetween(day, m.created_at), qty });
@@ -296,6 +299,7 @@ async function buildReorderLimitSuggestions({ knex, today, options = {}, forecas
       today: day,
       options: o,
     });
+    suggestion.usageRecords = usageRecords;
     if (unconverted) suggestion.note = [suggestion.note, `${unconverted} usage rows in another unit were skipped.`].filter(Boolean).join(' ');
     return suggestion;
   });

@@ -40,22 +40,26 @@ const cell = (v) => (v == null ? '' : typeof v === 'boolean' ? (v ? 'yes' : 'no'
 const csvCell = (v) => { const s = cell(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 
 function render(result, { format, all }) {
-  const rows = all ? result.products : result.products.filter((r) => r.status !== 'no_usage');
+  // Hidden by default: nothing to suggest and nothing recorded (no use, or no
+  // stock unit and no usage rows either).
+  const idle = (r) => r.status === 'no_usage' || (r.status === 'no_unit' && !r.usageRecords);
+  const rows = all ? result.products : result.products.filter((r) => !idle(r));
   if (format === 'json') return JSON.stringify({ ...result, products: rows }, null, 2);
   if (format === 'csv') return [COLUMNS.map((c) => c[1]).join(','), ...rows.map((r) => COLUMNS.map(([k]) => csvCell(r[k])).join(','))].join('\n');
   const tableCols = COLUMNS.filter(([k]) => k !== 'note');
   const widths = tableCols.map(([k, h]) => Math.min(36, Math.max(h.length, ...rows.map((r) => cell(r[k]).length))));
+  const dash = (v) => (v === '' ? '-' : v);
   const line = (vals) => vals.map((v, i) => v.slice(0, widths[i]).padEnd(widths[i])).join('  ');
   const o = result.options;
   const head = [
     `Suggested reorder limits, ${result.today} (lead ${o.leadDays} d, buffer ${o.bufferDays} d, reorder ${o.reorderDays} d). Read only.`,
     result.forecastError ? `Lawn forecast: ${result.forecastError}` : null,
-    `${rows.length} products shown; ${result.products.length - rows.length} with no use hidden (--all shows them).`,
+    `${rows.length} products shown; ${result.products.length - rows.length} with no use or no stock unit hidden (--all shows them).`,
     '',
     line(tableCols.map((c) => c[1])),
   ].filter((x) => x != null);
   const notes = rows.filter((r) => r.note).map((r) => `- ${r.name}: ${r.note}`);
-  return [...head, ...rows.map((r) => line(tableCols.map(([k]) => cell(r[k])))), '', ...(notes.length ? ['Notes:', ...notes] : [])].join('\n');
+  return [...head, ...rows.map((r) => line(tableCols.map(([k]) => dash(cell(r[k]))))), '', ...(notes.length ? ['Notes:', ...notes] : [])].join('\n');
 }
 
 async function main() {
