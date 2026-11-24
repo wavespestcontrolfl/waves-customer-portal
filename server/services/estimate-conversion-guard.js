@@ -423,6 +423,8 @@ function whereNoCompetingEstimate(query) {
         .whereRaw("other.customer_id = estimates.customer_id")
         .whereRaw("other.id <> estimates.id")
         // At or after: a sibling delivered at the SAME instant competes too (no id tie-break).
+        // Ambiguous on purpose: a later-sent quote blocks the earlier one even if the customer
+        // converted on the earlier; that case stays lost (fail closed), never double-counted.
         .whereRaw(`${other} >= ${mine}`)
         .whereRaw(`${other} <= (?)`, [earliestConversionSignal()]);
     });

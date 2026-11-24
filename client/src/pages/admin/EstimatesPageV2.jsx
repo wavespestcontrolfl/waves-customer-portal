@@ -35,6 +35,7 @@ import {
   classifyEstimateForPipeline,
   getUrgencyIndicator,
   detectCompetitor,
+  isBookedOtherWayEstimate,
 } from "./EstimatePage";
 import { LeadsSection } from "./LeadsTabs";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -513,7 +514,7 @@ export function CallOutcomeButtons({ estimate, onPick, saving = false, className
     </div>
   );
 }
-function v3ChipMatches(e, chip) {
+export function v3ChipMatches(e, chip) {
   if (chip === "all") return true;
   if (Object.hasOwn(CALL_LIST_MATCHERS, chip)) return CALL_LIST_MATCHERS[chip](e);
   if (chip === "pricing_risk") return !!e.pricingRisk?.hasRisk;
@@ -527,13 +528,18 @@ function v3ChipMatches(e, chip) {
     return (
       e.status === "scheduled" || e.status === "sent" || e.status === "viewed"
     );
+  // Closed also holds an expired offer whose customer booked another way (a win).
   if (chip === "closed")
-    return e.status === "accepted" || e.status === "declined";
+    return (
+      e.status === "accepted" ||
+      e.status === "declined" ||
+      isBookedOtherWayEstimate(e)
+    );
   if (chip === "action") {
     // Never a self-serve quote nobody delivered (undeliveredSelfServe): the
     // zero-follow-up contract.
     if (e.undeliveredSelfServe) return false;
-    if (e.status === "expired") return true;
+    if (e.status === "expired") return !isBookedOtherWayEstimate(e);
     if (e.status === "viewed" && e.viewedAt) {
       const hrs = (Date.now() - new Date(e.viewedAt).getTime()) / 3.6e6;
       return hrs >= 48;
