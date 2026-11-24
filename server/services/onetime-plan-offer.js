@@ -167,6 +167,9 @@ function defaultDeps() {
     closePriceSettingsAlert,
     raiseOfficeItem,
     planStartAcceptRefusal,
+    // The offer pricer's own account proof (plan-start-eligibility.js, which buildStartOffer asks): 'has_plan',
+    // 'commercial' or 'not_live', or null for an account that may start a plan.
+    planStartBlocker: (...args) => require('./plan-start-eligibility').planStartBlocker(...args),
     assertPlanStartAcceptEligible: (...args) => require('./cancellation-resolution/restart').assertPlanStartAcceptEligible(...args),
   };
 }
@@ -1081,7 +1084,15 @@ async function liveJob(job, { now, deps, priceSettings }) {
   const result = outcome.verdict === 'sample' ? await mintAndSend(ctx, outcome.option) : outcome;
   // A home the app cannot price gets one office item: a person prices it by hand. A failed write fails the job, so
   // the next morning raises it again (the item's key makes it one item per job).
-  if (result.verdict === 'office') await deps.raiseOfficeItem({ job, customer: ctx.customer, offerDay: ctx.offerDay, reason: result.reason });
+  if (result.verdict === 'office') {
+    // The pricer's `premises` covers a confirmed commercial or closed account as well as an address it cannot prove.
+    // The first is no home to quote (owner 2026-11-21, homes only): held, no item. Only the second goes to the office.
+    if (result.reason === 'premises') {
+      const blocker = await deps.planStartBlocker(deps.db, job.customer_id);
+      if (blocker) return { verdict: 'held', reason: blocker };
+    }
+    await deps.raiseOfficeItem({ job, customer: ctx.customer, offerDay: ctx.offerDay, reason: result.reason });
+  }
   return result;
 }
 
@@ -1090,7 +1101,7 @@ async function liveJob(job, { now, deps, priceSettings }) {
 // One item per job (the dedupe key holds every row, open or done, so a later morning never raises a second one; it
 // refreshes the one row's terms). It closes by itself once the customer has an estimate made after the item, once the
 // offer's last day has passed, or once the customer is no longer one the offer may go to: opted out of offers, or no
-// longer a live customer (closeOfficeItems). A shadow run raises none: shadow sends nothing to anyone but the office samples.
+// longer a live customer (closeOfficeItems, which every run asks, shadow included, after its jobs). A shadow run raises none: shadow sends nothing to anyone but the office samples.
 const OFFICE_ITEM_PREFIX = 'onetime-plan-offer:office:';
 const OFFICE_REASON_WORDS = Object.freeze({
   no_setup_fee: 'The plan price for this home has no setup fee, so the offer\'s "$0 setup" line would not be true.',
@@ -1152,13 +1163,47 @@ async function planStartAcceptRefusal(database, estimate) {
   }
 }
 
-// The customer the item names is no longer one the offer may go to: not a live customer any more, or opted out of
+// The customer the item names is no longer one the offer may go to: not a live customer any more, on a plan now, or opted out of
 // Waves offers (the job's own opt-out read, optOutReason). The sentence that closes the item, or null.
-async function officeItemWithdrawn(customerId, deps) {
+// The email division's verdicts that mean "do not contact this customer" for good, not "not today" (the caps and
+// recent human contact are not here): staff do-not-contact, email turned off, a suppression, no address.
+const WITHDRAWN_VERDICTS = Object.freeze([
+  EMAIL_VERDICT.CUSTOMER_MISSING, EMAIL_VERDICT.CUSTOMER_DELETED, EMAIL_VERDICT.NO_EMAIL, EMAIL_VERDICT.STAFF_DNC,
+  EMAIL_VERDICT.EMAIL_SUPPRESSED_GLOBAL, EMAIL_VERDICT.EMAIL_SUPPRESSED_GROUP, EMAIL_VERDICT.EMAIL_SWITCH_OFF,
+  EMAIL_VERDICT.STREAM_FLAG_OFF, EMAIL_VERDICT.STREAM_CHANNEL_NOT_EMAIL,
+]);
+const BLOCKER_WORDS = Object.freeze({
+  has_plan: 'The customer has a plan now',
+  commercial: 'The account reads as commercial',
+  not_live: 'The customer is no longer active',
+});
+async function officeItemWithdrawn({ customerId, jobId }, { now, deps }) {
   const account = () => deps.db('customers').where({ id: customerId });
   const customer = await account().whereNull('deleted_at').first('id', 'email', 'active');
   if (!customer || customer.active === false || !(await whereLiveCustomer(account()).first('id'))) return 'The customer is no longer active';
-  return (await optOutReason(deps.db, { customerId, email: customer.email, deps })) ? 'The customer turned off offers' : null;
+  // The contact restrictions first: a failure of the plan proof below must never keep open an item that an opt-out
+  // or a staff do-not-contact already withdraws.
+  if (await optOutReason(deps.db, { customerId, email: customer.email, deps })) return 'The customer turned off offers';
+  // The division's own contact checks, as the job's emailAllowed asks them. A failed read keeps the item open.
+  const verdict = await deps.eligibleForEmail({
+    customerId, stream: OFFER_STREAM, emailKey: OFFER_TEMPLATE, now, conn: deps.db, completedVisitId: jobId || null,
+  });
+  if (!verdict.ok && WITHDRAWN_VERDICTS.includes(verdict.reason)) return 'The customer may not be contacted';
+  const blocker = await deps.planStartBlocker(deps.db, customerId);
+  return blocker ? (BLOCKER_WORDS[blocker] || 'The account may not start a plan') : null;
+}
+
+// The offer as the job reads TODAY: an included follow-up done after the item moves the offer day, and a shadow or an
+// unpublished live morning never prices the job again to rewrite the item. `{ offerDay, lastDay }`, or `{ gone: true }`
+// for a job that no longer qualifies for this customer (cancelled, its service record taken back): no offer stands on
+// it. An item with no job (none is raised so) keeps its stored day.
+async function currentOffer(database, meta) {
+  if (!meta.jobId) return { offerDay: null, lastDay: meta.lastDay || null };
+  const row = await qualifyingJobs(database).where('s.id', meta.jobId).where('s.customer_id', meta.customerId)
+    .first(database.raw(`${OFFER_DAY_SQL} AS service_day`));
+  if (!row) return { gone: true };
+  const offerDay = dateOnlyString(row.service_day);
+  return { offerDay, lastDay: offerTerms(offerDay).lastDay };
 }
 
 // The open office items, closed when their job is handled: an estimate of the customer made after the item (a person
@@ -1173,16 +1218,33 @@ async function closeOfficeItems({ now, deps }) {
     .select('id', 'created_at', 'metadata');
   const episodes = require('./admin-alert-episodes');
   for (const row of rows) {
-    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-    let done = null;
-    if (meta.lastDay && today > meta.lastDay) done = 'The plan offer ended';
-    else if (meta.customerId) {
-      const quoted = await deps.db('estimates').where({ customer_id: meta.customerId })
-        .where('created_at', '>', row.created_at).first('id');
-      if (quoted) done = 'The customer has a new estimate';
-      else done = await officeItemWithdrawn(meta.customerId, deps);
+    // One item's failure never stops the sweep: it is logged, and the next run reads it again.
+    try {
+      await closeOrRefreshOfficeItem(row, { today, now, deps, episodes });
+    } catch (err) {
+      logger.warn(`[onetime-plan-offer] office item ${row.id} check failed (code=${err?.code || 'none'})`);
     }
-    if (done) await episodes.closeAdminAlertKeys(deps.db, [meta.dedupeKey], 'plan_offer_quoted', { now, resolution: done });
+  }
+}
+
+async function closeOrRefreshOfficeItem(row, { today, now, deps, episodes }) {
+  const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+  let done = null;
+  const offer = await currentOffer(deps.db, meta);
+  if (offer.gone) done = 'The one-time job no longer qualifies for the offer';
+  else if (offer.lastDay && today > offer.lastDay) done = 'The plan offer ended';
+  else if (meta.customerId) {
+    const quoted = await deps.db('estimates').where({ customer_id: meta.customerId })
+      .where('created_at', '>', row.created_at).first('id');
+    if (quoted) done = 'The customer has a new estimate';
+    else done = await officeItemWithdrawn(meta, { now, deps });
+  }
+  if (done) await episodes.closeAdminAlertKeys(deps.db, [meta.dedupeKey], 'plan_offer_quoted', { now, resolution: done });
+  // An item that stays open shows the offer's current terms: a moved offer day rewrites its text and last day
+  // quietly (raiseOfficeItem's refresh), so staff never read an older deadline than the one the close uses.
+  else if (offer.offerDay && offer.lastDay !== meta.lastDay) {
+    const customer = await deps.db('customers').where({ id: meta.customerId }).first('id', 'first_name', 'last_name');
+    if (customer) await deps.raiseOfficeItem({ job: { id: meta.jobId }, customer, offerDay: offer.offerDay, reason: meta.reason });
   }
 }
 
@@ -1445,10 +1507,24 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
   const summary = { mode, jobs: 0, sample: 0, office: 0, held: 0, done: 0, failed: 0, reasons: {} };
   if (mode !== 'shadow' && mode !== 'live') return summary;
   const deps = { ...defaultDeps(), ...overrides };
+  // The office items are closed on every run, whatever the mode and the templates say: an item raised on a live
+  // morning must not stay actionable while the offer is paused (shadow, or the words taken back). A run that reads
+  // jobs closes them AFTER the jobs: a home priced today gets its estimate first, and a job whose offer day moved
+  // refreshes its item's last day first, so neither item is judged on yesterday's facts. Sends nothing.
+  const closeItems = async () => {
+    try {
+      await closeOfficeItems({ now, deps });
+    } catch (err) {
+      logger.warn(`[onetime-plan-offer] office item close failed (code=${err?.code || 'none'})`);
+    }
+  };
   if (mode === 'live') {
     summary.sent = 0;
     // The owner's publish of the offer template is his approval of the words. Until then no job is read.
-    if (!(await offerWordsPublished(deps))) return { ...summary, words_not_approved: true };
+    if (!(await offerWordsPublished(deps))) {
+      await closeItems();
+      return { ...summary, words_not_approved: true };
+    }
   }
   const run = { mode, now, deps, priceSettings: { refused: 0, priced: 0 } };
   const today = etDateString(now);
@@ -1459,16 +1535,12 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
     page = page.length < PAGE_SIZE ? [] : await dueJobsPage(deps.db, today, page[page.length - 1]);
   }
   await reportPriceSettings(run, run.priceSettings);
+  await closeItems();
   if (mode === 'live') {
     try {
       await reconcileOfferDeliveries(run);
     } catch (err) {
       logger.warn(`[onetime-plan-offer] delivery reconcile failed (code=${err?.code || 'none'})`);
-    }
-    try {
-      await closeOfficeItems(run);
-    } catch (err) {
-      logger.warn(`[onetime-plan-offer] office item close failed (code=${err?.code || 'none'})`);
     }
     summary.reminder = await runReminders(run);
   }
