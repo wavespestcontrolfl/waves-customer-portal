@@ -5947,7 +5947,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     // service list, so the notice shows only while the booking has no lines.
                     const settled = bookingPropertyState === 'ready' || bookingPropertyState === 'hidden';
                     if (linkedEstimate || saving || partialCommitLocked || !settled || services.length > 0) return null;
-                    const notice = openEstimateLinkNotice({ estimates: visibleScheduleEstimates, customerId: selectedCustomer?.id });
+                    // Only a quote for the address the booking will use: with one active
+                    // property the picker is hidden and the list holds every property's
+                    // quotes, so keep an address-free quote or one for that property.
+                    const activeId = propertyPickerActive ? String(selectedPropertyId || '')
+                      : (bookingProperties.length === 1 ? String(bookingProperties[0].id) : '');
+                    const forThisAddress = visibleScheduleEstimates.filter((e) => !e.propertyId || String(e.propertyId) === activeId);
+                    const notice = openEstimateLinkNotice({ estimates: forThisAddress, customerId: selectedCustomer?.id });
                     if (!notice) return null;
                     return (
                       <div data-testid="open-estimate-link-notice" style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', fontSize: 14, color: D.text }}>

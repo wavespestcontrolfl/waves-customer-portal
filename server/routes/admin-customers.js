@@ -3392,10 +3392,8 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         sentAt: estimate.sent_at || null,
         // Would a staff booking accept this quote? Same row refusals as POST
         // /admin/schedule (plan-start, unwon bill-by-invoice proposal, gated or
-        // dropped add-ons, retired T&S cadence). Only an open quote matters.
-        bookable: estimate.status === 'accepted'
-          ? true
-          : require('../services/estimate-staff-booking-eligibility').estimateBookableByStaff(estimate),
+        // dropped add-ons, retired T&S cadence). An accepted row runs the helper's accepted branch.
+        bookable: require('../services/estimate-staff-booking-eligibility').estimateBookableByStaff(estimate),
         monthlyTotal,
         annualTotal,
         onetimeTotal,

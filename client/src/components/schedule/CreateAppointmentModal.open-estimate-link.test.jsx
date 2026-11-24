@@ -245,6 +245,22 @@ describe('the New Appointment form for a customer with an open estimate', () => 
     expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
   });
 
+  it('with one active property (picker hidden) a quote for another address gives no notice; an address-free or matching quote does', async () => {
+    installFetch({ estimates: [quote({ propertyId: 'old-address' })], properties: [propertyRow('prop-1', true)] });
+    mount();
+    await waitFor(() => expect(document.querySelector('option[value="est-1"]')).not.toBeNull());
+    await waitFor(() => expect(screen.queryByText('Loading estimates...')).toBeNull());
+    expect(screen.queryByTestId('open-estimate-link-notice')).toBeNull();
+    cleanup();
+    installFetch({ estimates: [quote({ propertyId: 'prop-1' })], properties: [propertyRow('prop-1', true)] });
+    mount();
+    expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
+    cleanup();
+    installFetch({ estimates: [quote({ propertyId: null })], properties: [propertyRow('prop-1', true)] });
+    mount();
+    expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
+  });
+
   it('is hidden while the appointment is saving', async () => {
     const hold = {};
     hold.promise = new Promise((resolve) => { hold.resolve = resolve; });

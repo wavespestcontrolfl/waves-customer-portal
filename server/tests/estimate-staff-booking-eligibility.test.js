@@ -90,6 +90,18 @@ describe('estimateBookableByStaff (real accept-on-book predicates)', () => {
     expect(estimateBookableByStaff(open({ category: 'RESIDENTIAL' }))).toBe(true);
   });
 
+  test('an accepted row runs the helper too: a gated or dropped add-on makes it not bookable, an ordinary one is', () => {
+    const manual = require('../services/estimate-manual-acceptance');
+    const spy = jest.spyOn(manual, 'persistedAddOnRefusal').mockReturnValue({ code: 'ADDON_GATED', message: 'gated' });
+    try {
+      expect(estimateBookableByStaff(open({ status: 'accepted' }))).toBe(false);
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ status: 'accepted' }), expect.objectContaining({ checkRecurring: false }));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(estimateBookableByStaff(open({ status: 'accepted' }))).toBe(true);
+  });
+
   test('a retired tree-and-shrub cadence is not', () => {
     mockRetired.mockReturnValue(true);
     expect(estimateBookableByStaff(open())).toBe(false);
