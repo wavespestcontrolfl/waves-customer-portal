@@ -160,11 +160,12 @@ function isBookedOtherWay(disposition) {
   return dispositionGroup(disposition) === 'won_elsewhere';
 }
 
-// The open sweep ARCHIVES the live offers of customers who converted another
-// way. Those rows stay out of every rate and cohort exactly as before (the
-// archive-symmetric rule): only an unarchived one counts as won.
+// The open sweep ARCHIVES the live (sent/viewed) offers of customers who
+// converted another way. Those rows stay out of every rate and cohort exactly
+// as before (the archive-symmetric rule). An EXPIRED row the reclaim stamped
+// and staff archived later keeps its timed outcome in the cohorts.
 function isArchivedBookedOtherWay(row, disposition) {
-  return Boolean(row.archived_at) && isBookedOtherWay(disposition);
+  return Boolean(row.archived_at) && ['sent', 'viewed'].includes(row.status) && isBookedOtherWay(disposition);
 }
 
 function median(values) {
@@ -390,6 +391,8 @@ async function winLossSlices({ days = 90 } = {}) {
     .where((q) => q
       .whereNotNull('sent_at')
       .orWhereNotNull('accepted_at')
+      // A viewed-only delivery (no sent_at) still anchors the cohort: sentAnchorMs reads viewed_at.
+      .orWhereNotNull('viewed_at')
       .orWhereIn('status', ['sent', 'viewed', 'accepted'])
       .orWhereRaw("estimate_data #>> '{deliveryState,firstDeliveredAt}' IS NOT NULL"))
     .where((q) => q

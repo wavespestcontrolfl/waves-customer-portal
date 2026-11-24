@@ -443,6 +443,9 @@ function expiredConvertedEstimatesQuery() {
       q.whereNull("disposition").orWhereIn("disposition", ["expired_viewed", "expired_unviewed"]),
     )
     .where((q) => q.whereNull("disposition_source").orWhere("disposition_source", "system"))
+    // The signal may land at any time after delivery, including while the offer
+    // is still open: that is a booked-another-way win too (the open sweep
+    // normally archives such a row before it can expire).
     .modify(whereConversionEligibilitySignal, {
       during: { from: delivered, days: BOOKED_WON_WINDOW_DAYS },
     })

@@ -245,6 +245,21 @@ const STAFF_LOSS_CLEARED_UPDATES = Object.freeze({
 // SQL twin of isStaffLossRow for set-based revives (siblings): true on the pre-update row.
 const STAFF_LOSS_ROW_SQL = "disposition_source = 'staff'";
 
+// The daily expired-estimate reclaim stamps a SYSTEM converted_other_path on an
+// expired row (a late booking). If the offer is revived (extension, fixed-bid
+// revival) the stamp is stale: the offer is live again, so it must go, or the
+// reports count a live offer as won. A staff or customer stamp is not this.
+function isSystemBookedRow(row) {
+  return row?.disposition === 'converted_other_path' && row?.disposition_source === 'system';
+}
+const SYSTEM_BOOKED_ROW_SQL = "(disposition = 'converted_other_path' AND disposition_source = 'system')";
+const SYSTEM_BOOKED_CLEARED_UPDATES = Object.freeze({
+  disposition: null,
+  disposition_source: null,
+  disposition_at: null,
+  disposition_note: null,
+});
+
 // Customer-facing soft-exit reasons (GATE_ESTIMATE_SOFT_EXIT). The chip keys
 // are the public API contract; each maps onto the SAME normalized codes the
 // staff decline modal writes, so win/loss analytics read one vocabulary
@@ -315,6 +330,9 @@ module.exports = {
   isStaffLossRow,
   STAFF_LOSS_CLEARED_UPDATES,
   STAFF_LOSS_ROW_SQL,
+  isSystemBookedRow,
+  SYSTEM_BOOKED_ROW_SQL,
+  SYSTEM_BOOKED_CLEARED_UPDATES,
   dispositionGroup,
   dispositionLabel,
   dispositionFromDeclineReason,

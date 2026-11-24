@@ -336,6 +336,41 @@ describe('winLossSlices — audit slices', () => {
     expect(cohorts.every((c) => c.sent === 0)).toBe(true);
   });
 
+  test('an archived EXPIRED reclaimed row keeps its timed cohort outcome; only an archived sent/viewed sweep row is excluded', () => {
+    const base = { sent_at: daysAgo(35), created_at: daysAgo(36), accepted_at: null, expires_at: daysAgo(29), disposition: 'converted_other_path', disposition_at: daysAgo(25), archived_at: daysAgo(10) };
+    const cohorts = (rows) => _private.sentCohorts(rows, { days: 30, nowMs: NOW }).cohorts;
+    const at = (list, m) => list.find((c) => c.maturityDays === m);
+    const expired = cohorts([row({ ...base, id: 'x', status: 'expired' })]);
+    expect(at(expired, 14)).toMatchObject({ sent: 1, won: 1, lost: 0 });
+    expect(at(expired, 7)).toMatchObject({ sent: 1, won: 0, lost: 1 });
+    const swept = cohorts([row({ ...base, id: 'y', status: 'viewed' })]);
+    expect(swept.every((c) => c.sent === 0)).toBe(true);
+  });
+
+  test('a viewed-only delivery (no sent_at) reaches the cohort query and its timed outcome', async () => {
+    const viewedOnly = row({
+      id: 'v', status: 'expired', accepted_at: null, sent_at: null, viewed_at: daysAgo(34), created_at: daysAgo(36),
+      expires_at: daysAgo(29), disposition: 'converted_other_path', disposition_at: daysAgo(22),
+    });
+    let call = 0;
+    const calls = [];
+    mockDbHandler = () => {
+      const isCohortRead = call++ === 1;
+      const recorder = new Proxy({}, { get: (_t, m) => (...args) => { calls.push([m, args[0]]); return recorder; } });
+      const builder = {
+        whereIn: () => builder, whereNotNull: () => builder, whereNull: () => builder,
+        where: (fn) => { if (isCohortRead && typeof fn === 'function') fn(recorder); return builder; },
+        select: async () => (isCohortRead ? [viewedOnly] : []),
+      };
+      return builder;
+    };
+    const { sentCohorts } = await winLossSlices({ days: 30 });
+    // The cohort read admits a row whose only delivery evidence is viewed_at...
+    expect(calls).toContainEqual(['orWhereNotNull', 'viewed_at']);
+    // ...and outcomeTimes reads it: won once the payment landed, lost before.
+    expect(sentCohorts.cohorts.find((c) => c.maturityDays === 14)).toMatchObject({ sent: 1, won: 1 });
+  });
+
   test('a reclaimed expired row resolves at its expiry, so the window it counts in never moves', () => {
     expect(_private.resolutionDateMs({
       status: 'expired', expires_at: '2026-09-01T00:00:00Z', disposition: 'converted_other_path',
