@@ -19649,6 +19649,25 @@ function firstVisitRequestState(estimate, estData) {
   return stored ? { offered: true, requestPending: true, days: stored.days, window: stored.window } : { offered: true };
 }
 
+// True when the estimate is in a blocking state (quote required, termite trenching review, contact_review park) or the state
+// cannot be established. The quote requirement is recomputed from `row` (the locked row on the second call), never trusted from
+// an earlier read; `database` + `lock` run the park's candidate read FOR SHARE on the writing transaction.
+async function firstVisitRequestBlocked(row, estData, { database = null } = {}) {
+  try {
+    const supplemented = withSupplementedRecurringServices(estData) || estData;
+    const quoteRequirement = resolveEstimateQuoteRequirement(
+      await buildPricingBundle(supplemented === estData ? row : { ...row, estimate_data: supplemented }), estData,
+    );
+    const state = await estimatePublicBlockingState(row, {
+      estData, quoteRequirement, ...(database ? { database, lock: true, fresh: true } : {}),
+    });
+    return !!state;
+  } catch (err) {
+    logger.warn(`[estimate-public] first-visit-request blocking state failed (code=${String(err?.code || err?.name || 'error').slice(0, 40)})`);
+    return true;
+  }
+}
+
 const firstVisitRequestLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
@@ -19675,7 +19694,7 @@ function firstVisitRequestPreGuard(req, res, next) {
 // answers the same generic 404. The body is validated only after that, so a probe cannot read gate state from a 400. The
 // checks are re-run on the estimate row locked in the writing transaction; a change landing in between answers 409
 // REQUEST_UNAVAILABLE and writes nothing. A second request answers 200 with the stored one and writes nothing.
-router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req, res, next) => {
+router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req, res) => {
   stampCommercialAgreementHeaders(res);
   const notFound = () => res.status(404).json({ error: 'Estimate not found' });
   try {
@@ -19685,9 +19704,9 @@ router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req,
     const estData = parseEstimateDataSafe(estimate);
     if (await callSideBlockForEstimateData(db, estData, { estimateStatus: estimate.status })) return notFound();
     if (!firstVisitRequestRowOpen(estimate, estData)) return notFound();
-    const supplemented = withSupplementedRecurringServices(estData) || estData;
-    const pricingBundle = await buildPricingBundle(supplemented === estData ? estimate : { ...estimate, estimate_data: supplemented });
-    if (resolveEstimateQuoteRequirement(pricingBundle).quoteRequired) return notFound();
+    // The one blocking-state decision every public write shares (quote-required, termite trenching review, the B18
+    // contact_review park). A lookup that fails is a refusal: the request fails closed.
+    if (await firstVisitRequestBlocked(estimate, estData)) return notFound();
     if (await findLinkedUpcomingAppointment(estimate, estData, { serviceModes: adoptionServiceModesForContract(estimate, estData) })) return notFound();
 
     const parsed = firstVisitRequestService.normalizeFirstVisitRequest(req.body);
@@ -19699,6 +19718,9 @@ router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req,
       // The gate is read again after the lock: a kill switch thrown while this waited writes nothing.
       if (!featureGates.estimateApprovePreferredTimeLive() || !firstVisitRequestRowOpen(locked, lockedData)) return { refused: true };
       if (await estimateCallLinkageBlockedFor(trx, locked)) return { refused: true };
+      // The blocking state again from the LOCKED row: the quote requirement recomputed from it, and the contact_review park
+      // judged FOR SHARE on the same transaction.
+      if (await firstVisitRequestBlocked(locked, lockedData, { database: trx })) return { refused: true };
       if (await findLinkedUpcomingAppointment(locked, lockedData, { serviceModes: adoptionServiceModesForContract(locked, lockedData), database: trx })) return { refused: true };
       return firstVisitRequestService.storeFirstVisitRequest({ trx, locked, request: parsed.value });
     });
@@ -19709,9 +19731,10 @@ router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req,
       success: true, requestPending: true, days: outcome.request.days, window: outcome.request.window,
     });
   } catch (err) {
-    // err.code only, never err.message (PG constraint errors can quote customer data).
-    logger.warn(`[estimate-public] first-visit-request failed (code=${err?.code || 'none'})`);
-    next(err);
+    // err.code only, never err.message (PG constraint errors can quote the bound token and the customer's note), and the raw
+    // error is never passed on to the global handler, which would log it.
+    logger.warn(`[estimate-public] first-visit-request failed (code=${String(err?.code || 'none').slice(0, 40)})`);
+    return res.status(500).json({ error: 'Something went wrong. Please try again, or call or text us.' });
   }
 });
 
@@ -31918,6 +31941,8 @@ async function composeEstimateDataPayload(estimate, {
         logger.warn(`[estimate-data] phone-contradiction lookup failed for estimate ${estimate.id}: ${parkErr.message}`);
       }
     }
+    // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: a parked estimate is held for the office, so the page offers no first-visit request.
+    if (phoneReviewHold && acceptance?.preferredTime) delete acceptance.preferredTime;
 
     const membership = await buildEstimateMembershipContext(estimate);
 

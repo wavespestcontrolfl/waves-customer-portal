@@ -8068,6 +8068,8 @@ function initScheduledJobs() {
       await require('./estimate-stuck-alert').closeSettledStuckAlerts();
       // And the no-time-soon bells (estimate-no-time-soon-check.js; no picker run, never throws).
       await require('./estimate-no-time-soon-check').closeSettledNoTimeSoonAlerts();
+      // And the first-visit request bells (GATE_ESTIMATE_APPROVE_PREFERRED_TIME) once their estimate is accepted, declined, expired or archived (never throws).
+      await require('./estimate-first-visit-request').closeSettledRequestBells();
     } catch (err) {
       logger.error(`[est-engage] cron failed: ${err.message}`);
     }

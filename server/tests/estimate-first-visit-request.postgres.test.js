@@ -28,6 +28,30 @@ jest.mock('../models/db', () => {
 });
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The expiry sweep also sweeps stranded deposits (a real Stripe refund) and fires outbound expiry notifications and emails:
+// none of that may leave this suite. The deposit sweep and the Stripe refund are seams; the notification and automation
+// emitters are stubbed (the sweep's own estimate flips run for real).
+const mockDepositSweep = jest.fn(async () => ({}));
+jest.mock('../services/estimate-deposits', () => ({
+  ...jest.requireActual('../services/estimate-deposits'),
+  sweepTerminalEstimateDeposits: (...args) => mockDepositSweep(...args),
+}));
+const mockRefundPaymentIntent = jest.fn(async () => ({}));
+jest.mock('../services/stripe', () => ({
+  ...jest.requireActual('../services/stripe'),
+  refundPaymentIntent: (...args) => mockRefundPaymentIntent(...args),
+}));
+const mockTriggerNotification = jest.fn(async () => ({}));
+jest.mock('../services/notification-triggers', () => ({
+  ...jest.requireActual('../services/notification-triggers'),
+  triggerNotification: (...args) => mockTriggerNotification(...args),
+}));
+const mockEmitExpired = jest.fn(async () => ({}));
+jest.mock('../services/email-template-automation-emitters', () => ({
+  ...jest.requireActual('../services/email-template-automation-emitters'),
+  recordAutomationIntents: jest.fn(async () => []),
+  emitEstimateExpired: (...args) => mockEmitExpired(...args),
+}));
 // The route's 10-per-hour limiter would 429 a suite that posts a few dozen times from one address.
 jest.mock('express-rate-limit', () => () => (req, res, next) => next());
 const mockSendCustomerMessage = jest.fn(async () => ({ sent: true }));
@@ -94,6 +118,7 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
     });
     mockSendCustomerMessage.mockClear();
     mockSendTemplate.mockClear();
+    [mockDepositSweep, mockRefundPaymentIntent, mockTriggerNotification, mockEmitExpired].forEach((m) => m.mockClear());
     process.env[GATE] = 'true';
   });
   afterEach(async () => {
@@ -231,6 +256,23 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
     expect(await bells(estimateId)).toHaveLength(0);
   });
 
+  test('a failure answers a generic 500 and never forwards the raw error (which can quote the bound token and the note)', async () => {
+    const compose = require('../services/admin-alert-compose');
+    const secret = 'raw db error quoting the note: Dogs in the yard';
+    jest.spyOn(compose, 'raiseAdminAlert').mockRejectedValueOnce(Object.assign(new Error(secret), { code: '23505' }));
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    const { token } = await estimateFixture(mockTransaction);
+    const res = await post(token);
+    expect(res.status).toBe(500);
+    const text = await res.text();
+    expect(text).not.toContain('Dogs in the yard');
+    expect(text).toContain('Something went wrong');
+    const logged = JSON.stringify([...logger.warn.mock.calls, ...logger.error.mock.calls]);
+    expect(logged).not.toContain('Dogs in the yard');
+    expect(logged).toContain('code=23505');
+  });
+
   test('a malformed body is a 400 only after the token is eligible, and writes nothing', async () => {
     const { estimateId, token } = await estimateFixture(mockTransaction);
     const res = await post(token, { days: ['sun'], window: 'morning' });
@@ -276,6 +318,23 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
       await untouched(estimateId);
     });
 
+    test('a contact_review park (a lone phone owner whose email and address both differ)', async () => {
+      const { estimateId, token } = await estimateFixture(mockTransaction);
+      const phone = (await row(estimateId)).customer_phone;
+      await mockTransaction('customers').insert({
+        id: randomUUID(), first_name: 'Synthetic', last_name: 'Otherperson', phone, email: 'someone-else@example.test',
+        address_line1: '9 Elsewhere Rd', city: 'Venice', state: 'FL', zip: '34285', active: true,
+      });
+      expect((await post(token)).status).toBe(404);
+      await untouched(estimateId);
+    });
+
+    test('a quote-required estimate (an authored commercial proposal)', async () => {
+      const { estimateId, token } = await estimateFixture(mockTransaction, {}, { ...RECURRING_DATA, proposal: { enabled: true } });
+      expect((await post(token)).status).toBe(404);
+      await untouched(estimateId);
+    });
+
     test('an unknown token', async () => {
       expect((await post('f'.repeat(32))).status).toBe(404);
     });
@@ -315,6 +374,29 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
       await untouched(estimateId);
     });
 
+    test('a quote-required verdict that only the LOCKED row carries answers 409 and writes nothing', async () => {
+      const { estimateId, token } = await estimateFixture(mockTransaction);
+      // An authored commercial proposal is a custom quote: accept refuses it online, so the request must too.
+      changeAtTransactionOpen(estimateId, (trx) => trx('estimates').where({ id: estimateId })
+        .update({ estimate_data: JSON.stringify({ ...RECURRING_DATA, proposal: { enabled: true } }) }));
+      const res = await post(token);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('REQUEST_UNAVAILABLE');
+      await untouched(estimateId);
+    });
+
+    test('a contact_review park that only appears under the lock answers 409 and writes nothing', async () => {
+      const { estimateId, token } = await estimateFixture(mockTransaction);
+      const phone = (await row(estimateId)).customer_phone;
+      changeAtTransactionOpen(estimateId, (trx) => trx('customers').insert({
+        id: randomUUID(), first_name: 'Synthetic', last_name: 'Otherperson', phone, email: 'someone-else@example.test',
+        address_line1: '9 Elsewhere Rd', city: 'Venice', state: 'FL', zip: '34285', active: true,
+      }));
+      const res = await post(token);
+      expect(res.status).toBe(409);
+      await untouched(estimateId);
+    });
+
     test('an acceptance landing in between answers 409 and writes nothing', async () => {
       const { estimateId, token } = await estimateFixture(mockTransaction);
       changeAtTransactionOpen(estimateId, (trx) => trx('estimates').where({ id: estimateId }).update({ status: 'accepted', accepted_at: new Date() }));
@@ -322,6 +404,25 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
       expect(res.status).toBe(409);
       await untouched(estimateId);
     });
+  });
+
+  test('the settle pass closes the request bell once the estimate is accepted (booked by the office), and only then', async () => {
+    const { closeSettledRequestBells } = require('../services/estimate-first-visit-request');
+    const booked = await estimateFixture(mockTransaction);
+    const waiting = await estimateFixture(mockTransaction);
+    expect((await post(booked.token)).status).toBe(201);
+    expect((await post(waiting.token)).status).toBe(201);
+    const first = await closeSettledRequestBells({ conn: mockTransaction });
+    expect(first.closed).toBe(0);
+    await mockTransaction('estimates').where({ id: booked.estimateId }).update({ status: 'accepted', accepted_at: new Date() });
+    const second = await closeSettledRequestBells({ conn: mockTransaction });
+    expect(second).toMatchObject({ ran: true, closed: 1 });
+    const [closedRow] = await bells(booked.estimateId);
+    expect(closedRow.done_at).toBeTruthy();
+    expect(closedRow.metadata.autoCleared).toBe(true);
+    expect(closedRow.metadata.autoClearedReason).toBe('estimate accepted');
+    const [openRow] = await bells(waiting.estimateId);
+    expect(openRow.done_at).toBeNull();
   });
 
   test('expiry holds: the 6am sweep flips a lapsed estimate with no request, and leaves one with a pending request', async () => {
@@ -336,5 +437,11 @@ suite('first-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME)', () => {
     await runEstimateExpiration();
     expect((await row(control.estimateId)).status).toBe('expired');
     expect((await row(withRequest.estimateId)).status).toBe('sent');
+    // Nothing outbound: the deposit sweep ran as a seam, no Stripe refund, and only the control row was announced.
+    expect(mockDepositSweep).toHaveBeenCalledTimes(1);
+    expect(mockRefundPaymentIntent).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_expired', expect.objectContaining({ estimateId: control.estimateId }));
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 });

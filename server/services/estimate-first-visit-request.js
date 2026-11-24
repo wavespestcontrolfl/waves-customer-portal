@@ -106,7 +106,46 @@ async function storeFirstVisitRequest({ trx, locked, request, now = new Date() }
   return { deduped: false, request: stored };
 }
 
+// Close the request bell once the estimate settled (accepted = the office booked it, declined, expired, archived or gone), so a
+// booked customer's task does not stand. The same settle pass the stuck and hot-view bells use: the key set is read, each close
+// re-reads the estimate under the per-key lock, and only while alert episodes are live (closeAdminAlertKeys stamps autoCleared).
+// Called from the scheduler's 5-minute estimate tick; never throws.
+const KEY_PREFIX = 'estimate-first-visit-request:';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function settledReason(row) {
+  if (!row) return 'estimate gone';
+  const status = String(row.status || '').toLowerCase();
+  if (['accepted', 'declined', 'expired'].includes(status)) return `estimate ${status}`;
+  return row.archived_at ? 'estimate archived' : null;
+}
+async function closeSettledRequestBells({ now = new Date(), conn = require('../models/db') } = {}) {
+  const result = { ran: false, open: 0, closed: 0 };
+  try {
+    if (!require('../config/feature-gates').alertEpisodesLive()) return result;
+    result.ran = true;
+    const episodes = require('./admin-alert-episodes');
+    const keys = await episodes.openAdminAlertKeys(conn, KEY_PREFIX);
+    result.open = keys.length;
+    for (const key of keys) {
+      const id = key.slice(KEY_PREFIX.length);
+      if (!UUID_RE.test(id)) continue;
+      const closed = await conn.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${key}`]);
+        const why = settledReason(await trx('estimates').where({ id }).first('id', 'status', 'archived_at'));
+        if (!why) return 0;
+        return Number(await episodes.closeAdminAlertKeys(trx, [key], why, { now, resolution: `${why.charAt(0).toUpperCase()}${why.slice(1)}` })) || 0;
+      });
+      if (closed > 0) result.closed += 1;
+    }
+    return result;
+  } catch (err) {
+    require('./logger').warn(`[estimate-first-visit-request] settle pass failed: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
+    return result;
+  }
+}
+
 module.exports = {
+  closeSettledRequestBells, KEY_PREFIX,
   DAYS, WINDOWS, MAX_NOTE_CHARS, HOLD_DAYS,
   normalizeFirstVisitRequest, describeRequest, storedRequest, storeFirstVisitRequest, raiseFirstVisitRequestBell,
 };
