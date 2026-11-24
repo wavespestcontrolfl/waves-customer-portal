@@ -740,6 +740,23 @@ router.get('/health', async (req, res, next) => {
   } catch (err) { return next(err); }
 });
 
+// GET /api/admin/ads/results?period=30d|90d|180d — the read-only Ad results card (owner 2026-11-23, plan v2): per
+// campaign and ET day, spend, leads, paid customers (plan or one-time), 90-day paid, cancels and the rain-day call.
+// The window covers today and the days before it, like /service-lines.
+const RESULTS_PERIOD_DAYS = { '30d': 30, '90d': 90, '180d': 180 };
+router.get('/results', async (req, res, next) => {
+  try {
+    const days = RESULTS_PERIOD_DAYS[req.query.period || '90d'];
+    if (!days) return res.status(400).json({ error: 'period must be 30d, 90d or 180d' });
+    const now = new Date();
+    const out = await require('../services/ads/ad-results').adResults({
+      since: etDateString(addETDays(now, -(days - 1))),
+      until: etDateString(now),
+    });
+    return res.json({ period: `${days}d`, ...out });
+  } catch (err) { return next(err); }
+});
+
 // =========================================================================
 // GOOGLE ADS CALL REPORTING BRIDGE
 // =========================================================================
