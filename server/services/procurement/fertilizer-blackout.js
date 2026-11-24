@@ -35,6 +35,9 @@ const NPK_IN_NAME = /\b\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\s*-\s*\d+/;
 // (potash, micronutrients). Shared with the suggested-limits report.
 function isNpFertilizer(product) {
   if (!product) return false;
+  // A nonzero N or P column always counts: an empty or partial
+  // fertilizer_analysis must not hide it from the classifier.
+  if (Number(product.analysis_n || 0) > 0 || Number(product.analysis_p || 0) > 0) return true;
   const explicitZero = product.analysis_n != null && product.analysis_p != null
     && Number(product.analysis_n) === 0 && Number(product.analysis_p) === 0;
   if (explicitZero && !product.fertilizer_analysis && !NPK_IN_NAME.test(String(product.name || ''))) return false;

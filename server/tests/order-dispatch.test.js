@@ -1285,3 +1285,9 @@ test('in the fertilizer blackout a pre-submit "order manually" bell waits; a dis
   expect(r.rung).toEqual(['ledger-post']);
 });
 
+test('in the fertilizer blackout the claim holds a product whose N shows only in analysis_n (empty analysis record)', async () => {
+  mockState.product = { ...sticker, name: 'Synthetic granular', fertilizer_analysis: {}, analysis_n: 24, analysis_p: 0 };
+  const r = await run(mockAdapter(), { now: new Date('2026-07-15T14:00:00Z') });
+  expect(r.skipped).toBe('fertilizer_blackout');
+});
+

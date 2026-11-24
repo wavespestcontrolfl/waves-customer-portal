@@ -31,3 +31,8 @@ test('explicit zero N and P with no N-P-K in the name is not held, even in a fer
   expect(fertilizerBlackoutHold({ name: 'Synthetic 16-4-8', category: 'fertilizer', analysis_n: 0, analysis_p: 0 }, july)).toBe(true);
 });
 
+test('a nonzero N or P column holds even when fertilizer_analysis is an empty record', () => {
+  const july = new Date('2026-07-01T15:00:00Z');
+  expect(fertilizerBlackoutHold({ name: 'Synthetic granular', fertilizer_analysis: {}, analysis_n: 24, analysis_p: 0 }, july)).toBe(true);
+});
+

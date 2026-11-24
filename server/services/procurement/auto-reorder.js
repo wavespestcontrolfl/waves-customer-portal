@@ -49,7 +49,7 @@ const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 const { findLiveRestockRequest, LIVE_RESTOCK_STATUSES } = require('./live-restock-request');
 const { fitAction } = require('../admin-alert-names');
 const { raiserFor, ringOnRefreshAfterConversion } = require('../admin-alert-injected');
-const { FERTILIZER_COLUMNS, HOLD_RESOLUTION, fertilizerBlackoutHold, isNpFertilizer } = require('./fertilizer-blackout');
+const { FERTILIZER_COLUMNS, HOLD_RESOLUTION, fertilizerBlackoutHold } = require('./fertilizer-blackout');
 
 const GATE = 'GATE_AUTO_REORDER';
 const SOURCE = 'auto_reorder';
@@ -220,39 +220,71 @@ async function refreshOpenRequest(ctx, p, existing) {
     // June 1 - Sept 30 N/P fertilizer: read under the lock, acted on in
     // handleLiveRequest (holdOpenRequest).
     if (fertilizerBlackoutHold(fresh, ctx.now)) return { ...request, held: true };
-    // An N/P fertilizer outside the window: its hand-off may need the bell a hold closed reopened.
-    const npFertilizer = isNpFertilizer(fresh);
     const learned = learnedVendorFields(request, await lockedVendor(trx, p, fresh));
-    if (!learned) return { ...request, npFertilizer };
+    if (!learned) return request;
     await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ vendor: learned.vendor, metadata: JSON.stringify(learned.metadata), updated_at: new Date() });
     ctx.result.refreshed.push({ productId: p.id, requestId: request.id });
-    return { ...request, ...learned, npFertilizer };
+    return { ...request, ...learned };
   });
 }
 
 // A still-open auto request whose bell failed earlier would otherwise sit
 // unworked forever: re-ring (the request-id dedupeKey makes a landed bell a
 // no-op). Requests of other sources, and ordered ones, are left alone.
-// June 1 - Sept 30, an open N/P fertilizer request: an automatic or emailed
-// order already out keeps its reconciliation bells. Otherwise the request's
-// "order manually" bells close (resolution HOLD_RESOLUTION) and nothing
-// rings until the first sweep after Sept 30 reopens them.
+// The "order manually" bells of one request: its hand-off bell
+// (auto-reorder:<request>, unless handoff is false) and a PRE-SUBMIT park's
+// ledger bell (auto-order:<ledger>[:<v>], placed_at null). A dispatched
+// order's reconciliation bell never matches.
+function requestOrderBells(conn, requestId, { handoff = true } = {}) {
+  const ledger = "EXISTS (SELECT 1 FROM vendor_orders vo WHERE vo.restock_request_id = ? AND vo.placed_at IS NULL AND (metadata->>'dedupeKey' = 'auto-order:' || vo.id OR metadata->>'dedupeKey' LIKE 'auto-order:' || vo.id || ':%'))";
+  return handoff
+    ? conn('notifications').whereRaw(`(metadata->>'dedupeKey' = ? OR ${ledger})`, [`auto-reorder:${requestId}`, requestId])
+    : conn('notifications').whereRaw(ledger, [requestId]);
+}
+
+// Run fn(trx) under the claim paths' lock order (pricing lock, then the
+// request row) while the request still needs a person: open, no automatic
+// order out, no order emailed to the vendor. Returns the reason it did not
+// run, or null.
+async function whileManualLocked(ctx, p, requestId, fn) {
+  return ctx.conn.transaction(async (trx) => {
+    await lockProductPricing(trx, p.id);
+    const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first('status', 'source');
+    if (!request || request.status !== 'open' || request.source !== SOURCE) return 'request_closed';
+    const dispatch = require('./order-dispatch');
+    if (await dispatch.findLiveAutoOrder(trx, p.id)) return 'auto_order_live';
+    if (await dispatch.emailOrderOutFor(trx, requestId)) return 'email_order_out';
+    await fn(trx);
+    return null;
+  });
+}
+
+// June 1 - Sept 30, an open N/P fertilizer request: its OPEN "order
+// manually" bells close with resolution HOLD_RESOLUTION; the rows and the
+// ledger's saved bell stay, and nothing rings. An order already out keeps
+// its reconciliation bells.
 async function holdOpenRequest(ctx, p, request) {
-  const dispatch = require('./order-dispatch');
-  if (await dispatch.findLiveAutoOrder(ctx.conn, p.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'auto_order_live' }); return; }
-  if (await dispatch.emailOrderOutFor(ctx.conn, request.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'email_order_out' }); return; }
-  if (!(await settleParkedLedgerBell(ctx, p, request))) return;
   const ns = require('../notification-service')._private;
-  await ns.openToCloser(ctx.conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${request.id}`]), 'procurement')
-    .update(ns.doneColumns({ by: 'procurement', resolution: HOLD_RESOLUTION, keepExisting: true, conn: ctx.conn }));
+  const skipped = await whileManualLocked(ctx, p, request.id, (trx) => requestOrderBells(trx, request.id).whereNull('done_at')
+    .update(ns.doneColumns({ by: 'procurement', resolution: HOLD_RESOLUTION, conn: trx })));
+  if (skipped) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: skipped }); return; }
   ctx.result.held.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'fertilizer_blackout' });
 }
 
-// After the blackout: the bells holdOpenRequest closed open again, so the
-// hand-off is visible (a same-text re-ring alone leaves a closed row closed).
-function reopenHeldBell(conn, requestId) {
-  return conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).where('resolution', HOLD_RESOLUTION)
-    .update({ read_at: null, done_at: null, done_by: null, resolution: null }); // notifications has no updated_at
+// Outside the hold (after Sept 30, or a catalog fix that ended it): the bells
+// the hold closed open again, whatever the product's class is now, under the
+// same locks and checks. When the dispatcher now orders from the request's
+// vendor, its generic hand-off stays closed (the claim owns it); only a
+// pre-submit ledger bell reopens. A plain read first, so a request with
+// nothing held writes nothing. The quiet-hold stamp gives a reopened bell
+// the normal 72-hour window (admin-alert-retention.js quietHoldFrom).
+async function reopenHeldBells(ctx, p, request) {
+  if (!(await requestOrderBells(ctx.conn, request.id).where('resolution', HOLD_RESOLUTION).first('id'))) return;
+  const { vendorId } = parseMeta(request.metadata);
+  const handoff = !(vendorId && await dispatcherOrders(ctx.conn, vendorId));
+  const stamp = JSON.stringify({ quietHoldFrom: (ctx.now || new Date()).toISOString() });
+  await whileManualLocked(ctx, p, request.id, (trx) => requestOrderBells(trx, request.id, { handoff }).where('resolution', HOLD_RESOLUTION)
+    .update({ read_at: null, done_at: null, done_by: null, resolution: null, metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [stamp]) })); // notifications has no updated_at
 }
 
 async function handleLiveRequest(ctx, p, existing) {
@@ -261,6 +293,7 @@ async function handleLiveRequest(ctx, p, existing) {
   const request = await refreshOpenRequest(ctx, p, existing);
   if (!request) return;
   if (request.held) { await holdOpenRequest(ctx, p, request); return; }
+  await reopenHeldBells(ctx, p, request);
   // The dispatcher only ever claims a request whose OWN metadata names an
   // auto-orderable vendor (findDispatchable). A request that could not
   // establish a vendor id (pinned to a vendor the product has since left)
@@ -286,7 +319,6 @@ async function handleLiveRequest(ctx, p, existing) {
   // fails, stand down — the ledger bell, re-rung by the dispatcher, still
   // owns the request (Codex r31 P2).
   if (!(await settleParkedLedgerBell(ctx, p, request))) return;
-  if (request.npFertilizer) await reopenHeldBell(ctx.conn, request.id);
   await bellOrWarn(ctx, p, request, 'renotified');
 }
 

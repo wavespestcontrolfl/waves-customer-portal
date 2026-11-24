@@ -24,6 +24,7 @@ jest.mock('../models/db', () => {
     q.forUpdate = () => { if (!mockState.raws.some((r) => /pg_advisory_xact_lock/.test(r))) throw new Error('row lock taken before the pricing advisory lock'); mockState.locked = true; return q; };
     q.first = async () => {
       if (table === 'product_restock_requests') return mockState.existing;
+      if (table === 'notifications') return mockState.heldBell || null; // a bell a fertilizer hold closed
       if (table === 'vendors') return mockState.vendorRow === undefined ? { name: 'Gemplers', active: true } : mockState.vendorRow;
       if (table === 'vendor_pricing') {
         if (mockState.pricingThrows) throw new Error('relation "vendor_pricing" does not exist');
@@ -95,6 +96,7 @@ beforeEach(() => {
   mockState.raws = [];
   mockState.pricingThrows = false;
   mockState.vendorRow = undefined;
+  mockState.heldBell = null;
 });
 afterAll(() => { delete process.env.GATE_AUTO_REORDER; });
 
@@ -600,14 +602,16 @@ describe('fertilizer blackout', () => {
     expect(mockState.updates.filter((u) => u.table === 'notifications')).toHaveLength(1);
   });
 
-  test('after Sept 30 the open request held bell reopens and the hand-off rings again', async () => {
+  test('after Sept 30 (or a catalog fix) the bells the hold closed reopen and the hand-off rings again', async () => {
     mockState.candidates = [fert];
+    mockState.heldBell = { id: 'n-held' };
     mockState.existing = { id: 'req-open', status: 'open', source: 'auto_reorder', product_id: 'prod-fert', requested_quantity: '650', unit: 'lb', metadata: {} };
     const notify = jest.fn(async () => ({ id: 'n' }));
     const res = await runSuppliesAutoReorderSweep({ notify, now: OCT1 });
     expect(res.held).toEqual([]);
-    expect(mockState.updates.filter((u) => u.table === 'notifications').map((u) => u.row)).toContainEqual({ read_at: null, done_at: null, done_by: null, resolution: null });
+    expect(mockState.updates.filter((u) => u.table === 'notifications').map((u) => u.row)).toContainEqual(expect.objectContaining({ read_at: null, done_at: null, done_by: null, resolution: null }));
     expect(notify).toHaveBeenCalledTimes(1);
+    mockState.heldBell = null;
   });
 
   test('the window is the ET date: 11:30 PM May 31 ET still orders; Oct 1 orders again', async () => {
@@ -629,6 +633,19 @@ describe('fertilizer blackout', () => {
     expect(mockState.inserted).toEqual([]);
     expect(notify).not.toHaveBeenCalled();
     expect(res.held).toEqual([{ productId: 'prod-sign', name: 'Synthetic product (unnamed)', requestId: null, reason: 'fertilizer_blackout' }]);
+  });
+
+  test('a held bell is NOT reopened while an order is emailed to the vendor (sending or sent)', async () => {
+    mockState.candidates = [fert];
+    mockState.heldBell = { id: 'n-held' };
+    mockState.existing = { id: 'req-open', status: 'open', source: 'auto_reorder', product_id: 'prod-fert', requested_quantity: '650', unit: 'lb', metadata: {} };
+    mockState.emailOut = { id: 'email-1', status: 'sending' };
+    try {
+      const notify = jest.fn(async () => ({ id: 'n' }));
+      await runSuppliesAutoReorderSweep({ notify, now: OCT1 });
+      expect(mockState.updates.filter((u) => u.table === 'notifications')).toEqual([]);
+      expect(notify).not.toHaveBeenCalled();
+    } finally { mockState.emailOut = null; }
   });
 });
 
