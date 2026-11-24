@@ -4275,7 +4275,8 @@ async function sendVisitOnlyConfirmations({ scheduledServiceId, customerId, call
     const contacts = await visitRecipients.contactsForVisit(scheduledServiceId, 'confirmation', { excludePhones });
     for (const contact of contacts) {
       if (!(await claimStillOwned())) return false;
-      if (await AppointmentReminders.confirmationLoggedForVisitPhone({ scheduledServiceId, phone: contact.phone }).catch(() => false)) continue;
+      const heldPhone = { scheduledServiceId, phone: contact.phone };
+      if (await AppointmentReminders.confirmationLoggedForVisitPhone(heldPhone).catch(() => false)) continue;
       const contactFirst = String(contact.name || '').trim().split(/\s+/)[0] || visit.firstName;
       const body = await AppointmentReminders.renderAppointmentPageTemplate('appointment_confirmation',
         async () => {
