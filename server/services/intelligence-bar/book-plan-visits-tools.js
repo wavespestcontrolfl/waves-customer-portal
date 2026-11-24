@@ -27,8 +27,9 @@
  *     be active); an older row with no property stamp does not qualify and is sent to the estimate;
  *   - no inspection-credit offer is open (paused ones included): a booking would record it and can mint credit;
  *   - no other visit holds any planned slot (any overlap refuses, probed at the service's real duration);
- *   - the earlier series' per-visit price and discounts equal today's catalog price (owner 2026-11-24, option A); otherwise
- *     "the price changed since the last plan; restart through an estimate" (price_changed_since_last_plan);
+ *   - the earlier plan (the newest qualifying series) already bills what this booking stamps, fact by fact
+ *     (services/prior-series-billing.js PRIOR_SERIES_BILLING_FIELDS: price, discounts, add-ons, invoice-on-completion setting,
+ *     payer, prepay and setup fields, separate-program marker); otherwise "restart through an estimate" (owner 2026-11-24, option A);
  *   - no price, discount, add-on, booster, tier, monthly-rate or prepay change: the body carries no pricing
  *     field, a priced discount or add-on line refuses, a customer on annual prepay refuses, and a booking whose
  *     tier / monthly-rate sync would write the customer row refuses;
@@ -48,6 +49,7 @@ const { ibBookPlanVisitsLive } = require('../../config/feature-gates');
 const { validScheduleDate, sameDayWindowElapsed, deriveWindowEnd } = require('../../utils/datetime-et');
 const { resolveBillingLane } = require('../billing-lane');
 const { dateOnlyString } = require('../../utils/date-only');
+const { newestQualifyingPriorSeries, priorSeriesBillingMismatches } = require('../prior-series-billing');
 
 const MAX_VISIT_COUNT = 12;
 const LAWN_ROUNDS_PATTERN = 'lawn_rounds_9';
@@ -132,26 +134,6 @@ async function resolveService(serviceType) {
     return refuse(`"${row.name}" is not a recurring plan service with a set cadence in the catalog. ${ESTIMATE_PATH}`, 'not_a_plan_service');
   }
   return { row, bookedType: row.name };
-}
-
-// Does this customer already have (or had) a recurring series for the same service family at the booking property? The
-// duplicate-series guard's own family classifier (duplicateGuardFamilyKey) decides the family, over every series parent in any
-// status, so a cancelled or run-out series counts. The parent's STAMPED property_id must equal the booking property (active,
-// resolved by resolveProperty); a legacy row with no property stamp does not qualify. Returns the qualifying parent
-// ({ id, family }), or null; the card pins it and the handler re-reads it under lock.
-async function hadPlanForService(customerId, catalogRow, bookingProperty) {
-  const { duplicateGuardFamilyKey } = require('../recurring-appointment-seeder');
-  const target = duplicateGuardFamilyKey(catalogRow.name);
-  const parents = await db('scheduled_services')
-    .where({ customer_id: customerId, is_recurring: true })
-    .whereNull('recurring_parent_id')
-    .select('id', 'service_id', 'service_type', 'property_id');
-  const prior = (parents || []).find((p) => {
-    const sameFamily = (p.service_id != null && String(p.service_id) === String(catalogRow.id))
-      || (p.service_type && duplicateGuardFamilyKey(p.service_type) === target);
-    return !!sameFamily && !!p.property_id && String(p.property_id) === String(bookingProperty.property_id);
-  });
-  return prior ? { id: String(prior.id), family: target } : null;
 }
 
 // An open series for the service (the handler's duplicate-series guard, asked now so no card is made).
@@ -316,7 +298,7 @@ async function priceFor({ customer, catalogRow, scheduledDate, bookingProperty }
   if (price == null && !duesCovered) {
     return { refusal: refuse(`"${catalogRow.name}" has no catalog price, so what each visit bills (for example a per-application fee) is not on the card. The bar books plan visits only at a catalog price or under monthly dues.`, 'no_catalog_price') };
   }
-  return { price, duesCovered, finalPrice: Number(pricing.finalPrice) || 0 };
+  return { price, duesCovered, finalPrice: Number(pricing.finalPrice) || 0, primaryBase: pricing.primaryBase == null ? null : Number(pricing.primaryBase) };
 }
 
 // The request body for createScheduleBooking: no pricing field, no estimate, no override.
@@ -360,6 +342,21 @@ async function planSyncRefusal({ customerId, catalogRow, dates }) {
   const verdict = await bookingWouldChangeCustomerPlan({ customerId, newRows });
   if (!verdict.writes) return null;
   return refuse('Booking this series would also change the customer\'s WaveGuard tier or monthly rate. The bar books plan visits only when billing stays as it is. Change the plan from the estimate or the customer page.', 'billing_would_change');
+}
+
+// The refusal for an earlier series whose billing differs from what this booking stamps. One reason is worded: add-ons first,
+// then the invoice setting, then price and discounts, then any other billing fact.
+const BILLING_REFUSALS = [
+  ['addons', 'plan_had_addons', 'The last plan had add-ons; restart through an estimate.'],
+  ['billing_setting', 'billing_setting_differs', 'The billing setting differs from the last plan; restart through an estimate.'],
+  ['price', 'price_changed_since_last_plan', 'The price changed since the last plan; restart through an estimate. The bar books a plan again only at the price and discounts it last billed.'],
+];
+function billingRefusal(billing) {
+  if (billing.gone) return refuse('The last plan is no longer there to restart; restart through an estimate.', 'last_plan_gone');
+  for (const [group, code, text] of BILLING_REFUSALS) {
+    if (billing.mismatches.some((m) => m.group === group)) return refuse(text, code, { fields: billing.mismatches.filter((m) => m.group === group).map((m) => m.field) });
+  }
+  return refuse(`The billing on the last plan differs (${billing.mismatches.map((m) => m.field).join(', ')}); restart through an estimate.`, 'billing_differs_from_last_plan', { fields: billing.mismatches.map((m) => m.field) });
 }
 
 // The full card for one call, or { error, code } the model relays. Reads only.
@@ -410,7 +407,12 @@ async function planBooking(input) {
   if (property.refusal) return refuse(property.refusal.error.replace(/ Nothing was (proposed|booked)\.?$/, ''), property.refusal.code, property.refusal.properties ? { properties: property.refusal.properties } : {});
   const bookingProperty = property.stamp;
 
-  const priorSeries = await hadPlanForService(customerId, catalogRow, bookingProperty);
+  // The earlier plan: the NEWEST series of this service family stamped with the booking property (newest visit, then created_at,
+  // then id). It is pinned, and the handler's transaction confirms it is still the newest qualifying one.
+  const { duplicateGuardFamilyKey } = require('../recurring-appointment-seeder');
+  const priorSeries = await newestQualifyingPriorSeries(db, {
+    customerId, serviceId: catalogRow.id, family: duplicateGuardFamilyKey(catalogRow.name), propertyId: bookingProperty.property_id,
+  });
   if (!priorSeries) {
     return refuse(`${privateName(customer)} has no earlier ${catalogRow.name} plan, so this would be a brand-new program. ${ESTIMATE_PATH}`, 'new_program');
   }
@@ -433,14 +435,13 @@ async function planBooking(input) {
   if (visitCount != null && (visitCount < 2 || visitCount > MAX_VISIT_COUNT)) return refuse(`visit_count must be 2 to ${MAX_VISIT_COUNT}.`, 'invalid_input');
   const priced = await priceFor({ customer, catalogRow, scheduledDate: dateStr, bookingProperty });
   if (priced.refusal) return priced.refusal;
-  // Owner ruling 2026-11-24 (option A): the plan restarts only at the price it last billed. If the earlier series' per-visit
-  // price, or a discount stamped on it, differs from today's catalog price, the price changed since the last plan and
-  // the restart goes through an estimate. The prior price is pinned and the handler's transaction re-reads it.
-  const priorFacts = await require('../recurring-template-overrides').seriesEffectivePriceFacts(db, priorSeries.id);
-  const centsOf = (v) => (v == null ? null : Math.round(Number(v) * 100));
-  if (!priorFacts || priorFacts.discounted || centsOf(priorFacts.price) !== centsOf(priced.price)) {
-    return refuse('The price changed since the last plan; restart through an estimate. The bar books a plan again only at the price and discounts it last billed.', 'price_changed_since_last_plan');
-  }
+  // Owner ruling 2026-11-24 (option A) and the audit's generalization: the plan restarts only when EVERY billing fact of the
+  // earlier series (PRIOR_SERIES_BILLING_FIELDS: price, discounts, add-ons, the invoice-on-completion setting, payer and prepay
+  // fields, separate-program marker, ...) already equals what this booking stamps. Otherwise it goes through an estimate.
+  // What this booking stamps is pinned, and the handler's transaction re-reads the same facts under lock.
+  const expected = { price: priced.price, primaryBase: priced.primaryBase, createInvoice: !priced.duesCovered };
+  const billing = await priorSeriesBillingMismatches(db, priorSeries.id, expected);
+  if (billing.gone || billing.mismatches.length) return billingRefusal(billing);
   const body = bodyFor({
     input: { ...input, scheduled_date: dateStr }, catalogRow, cadence, windowStart,
     technicianId: tech.tech?.id || null, propertyId: bookingProperty.property_id, visitCount, sendTexts,
@@ -461,7 +462,7 @@ async function planBooking(input) {
   const cadenceLabel = effectivePattern === LAWN_ROUNDS_PATTERN ? 'nine lawn rounds a year' : cadence.label;
   const pins = {
     effective_pattern: effectivePattern,
-    prior_series: { ...priorSeries, price: priorFacts.price },
+    prior_series: { ...priorSeries, expected },
     body,
     dates: planned.dates,
     price: priced.price,
@@ -503,7 +504,7 @@ async function planBooking(input) {
       // The eligibility facts the card judged; the handler compares them with the locked customer row before inserting.
       customer: pins.customer,
       // The earlier series that made this a rebook; the handler re-reads it under lock.
-      priorSeries: { id: priorSeries.id, family: priorSeries.family, serviceId: String(catalogRow.id), price: priorFacts.price },
+      priorSeries: { id: priorSeries.id, family: priorSeries.family, serviceId: String(catalogRow.id), expected },
       address: { line1: bookingProperty.service_address_line1, line2: bookingProperty.service_address_line2, city: bookingProperty.service_address_city, state: bookingProperty.service_address_state, zip: bookingProperty.service_address_zip },
     },
   };

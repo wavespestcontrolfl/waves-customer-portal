@@ -748,4 +748,4 @@ async function executeRepriceVisitsTool(toolName, input = {}, actionContext = {}
   }
 }
 
-module.exports = { REPRICE_VISITS_TOOLS, executeRepriceVisitsTool, cardLines, MAX_VISITS, hasStoredDiscount, repriceVisitsLive: ibRepriceVisitsLive };
+module.exports = { REPRICE_VISITS_TOOLS, executeRepriceVisitsTool, cardLines, MAX_VISITS, repriceVisitsLive: ibRepriceVisitsLive };

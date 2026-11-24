@@ -8684,25 +8684,22 @@ async function assertApprovedCustomer(trx, customerId, approved) {
   if ((await refreshableTermsForCustomer(customerId, trx)).length) throw approvedBookingChanged('An annual prepay term would be refreshed by this booking.');
 }
 
-// The earlier series that made this a rebook (not a brand-new program), re-read under lock: it must still belong to this
-// customer, still be the same service family, and still be stamped with the booking property.
+// The earlier series that made this a rebook, re-read under lock through the same functions the card used
+// (services/prior-series-billing.js): it must still be the newest qualifying series of this customer (same service family, the
+// booking property), still a live series root, and every billing fact on its list (PRIOR_SERIES_BILLING_FIELDS) must still equal
+// what this booking stamps.
 async function assertApprovedPriorSeries(trx, customerId, approved) {
   const prior = approved.priorSeries;
-  const row = prior?.id
-    ? await trx('scheduled_services').where({ id: prior.id }).forShare().first('id', 'customer_id', 'service_id', 'service_type', 'property_id')
+  const { newestQualifyingPriorSeries, priorSeriesBillingMismatches } = require('../services/prior-series-billing');
+  const newest = prior?.id
+    ? await newestQualifyingPriorSeries(trx, { customerId, serviceId: prior.serviceId, family: prior.family, propertyId: approved.propertyId, lock: true })
     : null;
-  const { duplicateGuardFamilyKey } = require('../services/recurring-appointment-seeder');
-  const sameFamily = !!row && ((row.service_id != null && String(row.service_id) === String(prior.serviceId))
-    || (!!row.service_type && duplicateGuardFamilyKey(row.service_type) === prior.family));
-  if (!row || String(row.customer_id) !== String(customerId) || !sameFamily
-    || String(row.property_id || '') !== String(approved.propertyId || '')) {
+  if (!newest || String(newest.id) !== String(prior.id)) {
     throw approvedBookingChanged('The earlier plan this rebook relies on changed since the card was shown.');
   }
-  // The earlier plan's price (and that it carried no discount) is what the card judged equal to today's catalog price.
-  const facts = await require('../services/recurring-template-overrides').seriesEffectivePriceFacts(trx, prior.id, { lock: true });
-  const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
-  if (!facts || facts.discounted || cents(facts.price) !== cents(prior.price)) {
-    throw approvedBookingChanged('The price of the earlier plan changed since the card was shown.');
+  const check = await priorSeriesBillingMismatches(trx, prior.id, prior.expected, { lock: true });
+  if (check.gone || check.mismatches.length) {
+    throw approvedBookingChanged(`The billing of the earlier plan changed since the card was shown${check.gone ? '' : ` (${check.mismatches.map((m) => m.field).join(', ')})`}.`);
   }
 }
 
@@ -30627,6 +30624,7 @@ module.exports.createScheduleBooking = createScheduleBooking;
 // The create handler's own series-date plan, price builder and lawn-rounds pattern rewrite — consumed lazily by the IB
 // book_plan_visits card so its dates and per-visit price are the ones the handler will write.
 module.exports.planCreateSeriesDates = planCreateSeriesDates;
+module.exports.resolveSeriesCreateInvoiceOnComplete = resolveSeriesCreateInvoiceOnComplete;
 module.exports.seriesMonthAnchorOpts = seriesMonthAnchorOpts;
 module.exports.lawnRoundsSeriesForBooking = lawnRoundsSeriesForBooking;
 module.exports.bookingCreatesWaveGuardCoverage = bookingCreatesWaveGuardCoverage;

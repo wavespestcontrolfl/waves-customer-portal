@@ -149,7 +149,8 @@ describe('createScheduleBooking approvedBooking (the transaction asserts what th
   const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
   const { duplicateGuardFamilyKey } = require('../services/recurring-appointment-seeder');
   // The earlier series the card relied on: the harness's own visit row (customer cust-1, 'General Pest Control').
-  const priorSeries = { id: 'svc-1', serviceId: 'not-the-visit-service-id', family: duplicateGuardFamilyKey('General Pest Control') };
+  const expected = { price: 89, primaryBase: 89, createInvoice: true };
+  const priorSeries = { id: 'svc-1', serviceId: 'not-the-visit-service-id', family: duplicateGuardFamilyKey('General Pest Control'), expected };
   const approved = { dates: ['2099-07-03'], price: 89, propertyId: null, technicianId: 'tech-1', priorSeries };
   let refreshable;
   beforeEach(() => {
@@ -162,6 +163,17 @@ describe('createScheduleBooking approvedBooking (the transaction asserts what th
       if (table === 'scheduled_services') c.columnInfo = jest.fn().mockResolvedValue({ source_action: {}, estimated_price: {}, technician_id: {} });
       return c;
     });
+    // The earlier series the harness reads under lock bills what a new booking stamps (price, line price, invoice on completion).
+    const seriesRow = { ...SVC, estimated_price: 89, primary_line_price: 89, create_invoice_on_complete: true };
+    const trxBase = db.transaction.getMockImplementation();
+    db.transaction = jest.fn(async (cb) => trxBase((trxFn) => cb(Object.assign((table) => {
+      const c = trxFn(table);
+      if (table === 'scheduled_services') {
+        c.first = jest.fn().mockResolvedValue(seriesRow);
+        c.then = (resolve, reject) => Promise.resolve([seriesRow]).then(resolve, reject);
+      }
+      return c;
+    }, trxFn))));
     const baseTrx = db.transaction.getMockImplementation();
     db.transaction = jest.fn(async (cb) => baseTrx(cb));
   });
@@ -297,12 +309,14 @@ describe('createScheduleBooking approvedBooking (the transaction asserts what th
     expect(result.json.error).toMatch(/earlier plan/);
   });
 
-  test('the earlier plan\'s price, re-read under lock, rolls the booking back when it is no longer the one the card judged', async () => {
-    const result = await book({ ...approved, priorSeries: { ...priorSeries, price: 79 } });
+  test.each([
+    ['price', { ...expected, price: 79 }, /billing of the earlier plan changed/],
+    ['line price', { ...expected, primaryBase: 79 }, /primary_line_price/],
+    ['invoice-on-completion setting', { ...expected, createInvoice: false }, /create_invoice_on_complete/],
+  ])('the earlier plan\'s %s, re-read under lock, rolls the booking back when it no longer equals what the card judged', async (_label, drifted, message) => {
+    const result = await book({ ...approved, priorSeries: { ...priorSeries, expected: drifted } });
     expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
-    expect(result.json.error).toMatch(/price of the earlier plan/);
-    const ok = await book({ ...approved, priorSeries: { ...priorSeries, price: null } });
-    expect(ok.status).toBe(201);
+    expect(result.json.error).toMatch(message);
   });
 
   test('a booking approved without its earlier series is refused (fail closed)', async () => {

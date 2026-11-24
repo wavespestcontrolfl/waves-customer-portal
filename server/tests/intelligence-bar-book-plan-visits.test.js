@@ -83,7 +83,8 @@ function seed(overrides = {}) {
   // The earlier series: a finished parent for the same service.
   tables.scheduled_services = overrides.series || [{
     id: 'old-parent', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID,
-    service_type: 'Quarterly Pest Control Service', property_id: PROPERTY_ID, status: 'completed', scheduled_date: '2098-11-02', estimated_price: 89,
+    service_type: 'Quarterly Pest Control Service', property_id: PROPERTY_ID, status: 'completed', scheduled_date: '2098-11-02',
+    estimated_price: 89, primary_line_price: 89, create_invoice_on_complete: true, created_at: '2098-01-01T00:00:00Z',
   }];
   tables.customer_properties = overrides.properties || [{
     id: PROPERTY_ID, customer_id: CUSTOMER_ID, active: true, is_primary: true,
@@ -205,7 +206,7 @@ describe('the card', () => {
   test('a dues-covered member\'s series shows no per-visit price', async () => {
     // A dues-covered member's earlier series carries no per-visit price either.
     seed({ customer: { billing_mode: 'monthly_membership', monthly_rate: 59, waveguard_tier: 'Gold' } });
-    tables.scheduled_services[0].estimated_price = null;
+    Object.assign(tables.scheduled_services[0], { estimated_price: null, create_invoice_on_complete: false });
     const card = await propose();
     expect(card.price_per_visit).toBeNull();
     expect(card.price_note).toMatch(/monthly dues/);
@@ -345,7 +346,7 @@ describe('refusals (nothing is booked, nothing is carded)', () => {
     expect(result.error).toMatch(/per-application fee/);
     // A dues-covered member's series carries no per-visit price by design, so it still gets a card.
     seed({ customer: { billing_mode: 'monthly_membership', monthly_rate: 59, waveguard_tier: 'Gold' } });
-    tables.scheduled_services[0].estimated_price = null;
+    Object.assign(tables.scheduled_services[0], { estimated_price: null, primary_line_price: null, create_invoice_on_complete: false });
     expect((await propose()).preview).toBe(true);
   });
 });
@@ -380,7 +381,8 @@ describe('refusals that read the handler\'s own helpers', () => {
     ];
     const parent = (extra = {}) => ({
       id: 'old', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID,
-      service_type: 'Quarterly Pest Control Service', property_id: PROPERTY_ID, status: 'completed', scheduled_date: '2098-11-02', estimated_price: 89, ...extra,
+      service_type: 'Quarterly Pest Control Service', property_id: PROPERTY_ID, status: 'completed', scheduled_date: '2098-11-02',
+      estimated_price: 89, primary_line_price: 89, create_invoice_on_complete: true, created_at: '2098-01-01T00:00:00Z', ...extra,
     });
     beforeEach(() => {
       const CustomerProperties = require('../services/customer-properties');
@@ -481,7 +483,7 @@ describe('overlaps, credit and the same-slot rules', () => {
 describe('the lawn cadence the plan really follows', () => {
   test('a residential six-week lawn service shows and pins the nine lawn rounds, not "every 6 weeks"', async () => {
     seed({ services: [{ id: SERVICE_ID, name: '6-Week Lawn Care Service', service_key: 'lawn_care', category: 'lawn', billing_type: 'recurring', frequency: 'every_6_weeks', base_price: 55, is_active: true }],
-      series: [{ id: 'old-lawn', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID, service_type: '6-Week Lawn Care Service', property_id: PROPERTY_ID, status: 'completed', scheduled_date: '2098-11-02', estimated_price: 55 }] });
+      series: [{ id: 'old-lawn', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID, service_type: '6-Week Lawn Care Service', property_id: PROPERTY_ID, status: 'completed', scheduled_date: '2098-11-02', estimated_price: 55, primary_line_price: 55, create_invoice_on_complete: true }] });
     jest.spyOn(AdminSchedule, 'lawnRoundsSeriesForBooking').mockResolvedValue({ pattern: 'lawn_rounds_9', intervalDays: undefined });
     pricing = { ...pricing, finalPrice: 55, primaryBase: 55 };
     const card = await propose({ ...INPUT, service_type: '6-Week Lawn Care Service' });
@@ -514,10 +516,10 @@ describe('the price the plan last billed (owner 2026-11-24, option A)', () => {
     const card = await propose();
     expect(card.preview).toBe(true);
     expect(card.price_per_visit).toBe('$89.00');
-    expect(card._approved.priorSeries.price).toBe(89);
+    expect(card._approved.priorSeries.expected).toEqual({ price: 89, primaryBase: 89, createInvoice: true });
     const result = await propose(confirmedInput(card));
     expect(result.success).toBe(true);
-    expect(AdminSchedule.createScheduleBooking.mock.calls[0][0].approvedBooking.priorSeries).toMatchObject({ id: 'old-parent', price: 89 });
+    expect(AdminSchedule.createScheduleBooking.mock.calls[0][0].approvedBooking.priorSeries).toMatchObject({ id: 'old-parent', expected: { price: 89, primaryBase: 89, createInvoice: true } });
   });
 
   test('a different price refuses (a legacy lower price, or a catalog price that has since moved)', async () => {
@@ -534,8 +536,8 @@ describe('the price the plan last billed (owner 2026-11-24, option A)', () => {
     await refusedPrice();
   });
 
-  test('a series template price override is the earlier plan\'s price', async () => {
-    jest.spyOn(require('../services/recurring-template-overrides'), 'seriesEffectivePriceFacts').mockResolvedValue({ price: 74, discounted: false });
+  test('a series template price override on the earlier plan refuses', async () => {
+    tables.scheduled_services[0].recurring_template_overrides = { estimated_price: 89 };
     await refusedPrice();
   });
 
@@ -553,6 +555,108 @@ describe('the price the plan last billed (owner 2026-11-24, option A)', () => {
   });
 });
 
+describe('every billing fact of the earlier plan must equal what the new booking stamps (PRIOR_SERIES_BILLING_FIELDS)', () => {
+  const { PRIOR_SERIES_BILLING_FIELDS } = require('../services/prior-series-billing');
+  const refusedWith = async (code, fields) => {
+    const result = await propose();
+    expect(result.code).toBe(code);
+    expect(result.preview).toBeUndefined();
+    if (fields) expect(result.fields).toEqual(expect.arrayContaining(fields));
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+    return result;
+  };
+
+  test('the list is one table naming every fact once, each with a kind, a read and a group', () => {
+    const names = PRIOR_SERIES_BILLING_FIELDS.map((e) => e.field);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toEqual(expect.arrayContaining([
+      'estimated_price', 'primary_line_price', 'discount_id', 'line_discount_id', 'recurring_template_overrides', 'create_invoice_on_complete',
+      'scheduled_service_addons', 'payer_id', 'self_pay_override', 'prepaid_amount', 'annual_prepay_term_id', 'paf_held_term_id', 'pending_setup_fee',
+      'separate_program_marker', 'booster_months', 'is_callback']));
+    for (const e of PRIOR_SERIES_BILLING_FIELDS) {
+      expect(['money', 'bool', 'empty']).toContain(e.kind);
+      expect(['row', 'price', 'cioc', 'overrides', 'addons', 'separate']).toContain(e.read);
+      expect(['price', 'billing_setting', 'addons', 'billing']).toContain(e.group);
+      if (e.kind !== 'empty') expect(typeof e.expect).toBe('function');
+    }
+  });
+
+  test('a plan that billed exactly what the new booking stamps restarts', async () => {
+    expect((await propose()).preview).toBe(true);
+  });
+
+  test('an earlier plan with add-on lines refuses: "the last plan had add-ons; restart through an estimate"', async () => {
+    tables.scheduled_service_addons = [{ id: 'a1', scheduled_service_id: 'old-parent', service_name: 'Mosquito add-on' }];
+    try {
+      const result = await refusedWith('plan_had_addons', ['scheduled_service_addons']);
+      expect(result.error).toMatch(/last plan had add-ons; restart through an estimate/i);
+    } finally { delete tables.scheduled_service_addons; }
+  });
+
+  test('an invoice-on-completion setting that is not what this booking stamps refuses: "billing setting differs from the last plan"', async () => {
+    tables.scheduled_services[0].create_invoice_on_complete = false;
+    const result = await refusedWith('billing_setting_differs', ['create_invoice_on_complete']);
+    expect(result.error).toMatch(/billing setting differs from the last plan; restart through an estimate/i);
+    tables.scheduled_services[0].create_invoice_on_complete = null;
+    await refusedWith('billing_setting_differs');
+  });
+
+  test.each([
+    ['a payer override', { payer_id: 'payer-1' }, 'payer_id'],
+    ['a self-pay override', { self_pay_override: true }, 'self_pay_override'],
+    ['a prepaid stamp', { prepaid_amount: 120, prepaid_at: new Date('2098-10-01T00:00:00Z') }, 'prepaid_amount'],
+    ['an annual prepay term link', { annual_prepay_term_id: 'term-1' }, 'annual_prepay_term_id'],
+    ['a held prepay term', { paf_held_term_id: 'term-2' }, 'paf_held_term_id'],
+    ['a setup fee stamp', { pending_setup_fee: 99 }, 'pending_setup_fee'],
+    ['a first-application invoice', { first_application_invoice_id: 'inv-1' }, 'first_application_invoice_id'],
+    ['booster months', { booster_months: '[6,7]' }, 'booster_months'],
+    ['a callback flag', { is_callback: true }, 'is_callback'],
+    ['a line discount', { line_discount_id: 'ld-1' }, 'line_discount_id'],
+    ['a primary line price that differs', { primary_line_price: 95 }, 'primary_line_price'],
+  ])('%s on the earlier plan refuses', async (_label, patch, field) => {
+    Object.assign(tables.scheduled_services[0], patch);
+    const result = await propose();
+    expect(result.preview).toBeUndefined();
+    expect(result.fields).toContain(field);
+    expect(result.error).toMatch(/restart through an estimate/);
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('a separate-program marker on the earlier plan refuses', async () => {
+    tables.activity_log = [{ id: 'log-1', action: 'separate_recurring_program_created' }];
+    try { await refusedWith('billing_differs_from_last_plan', ['separate_program_marker']); } finally { delete tables.activity_log; }
+  });
+
+  test('empty-looking values (0, false, [], {}) are not billing differences', async () => {
+    Object.assign(tables.scheduled_services[0], { discount_amount: 0, is_callback: false, booster_months: '[]', self_pay_override: false, recurring_template_overrides: {} });
+    expect((await propose()).preview).toBe(true);
+  });
+});
+
+describe('the earlier plan is the NEWEST qualifying series, pinned and rechecked', () => {
+  const newer = { id: 'newer-parent', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID,
+    service_type: 'Quarterly Pest Control Service', property_id: PROPERTY_ID, status: 'completed', scheduled_date: '2098-12-02',
+    estimated_price: 89, primary_line_price: 89, create_invoice_on_complete: true, created_at: '2098-06-01T00:00:00Z' };
+
+  test('the series with the newest visit wins (then created_at, then id) and is the one pinned', async () => {
+    tables.scheduled_services = [tables.scheduled_services[0], newer];
+    const card = await propose();
+    expect(card._approved.priorSeries.id).toBe('newer-parent');
+    // Same newest date: the later-created one wins; same created_at too: the larger id.
+    tables.scheduled_services = [{ ...newer, id: 'b-parent', scheduled_date: '2098-11-02' }, { ...newer, id: 'a-parent', scheduled_date: '2098-11-02' }];
+    expect((await propose())._approved.priorSeries.id).toBe('b-parent');
+  });
+
+  test('a series that becomes the newest qualifying one between the card and Confirm is a stale card', async () => {
+    const card = await propose();
+    expect(card._approved.priorSeries.id).toBe('old-parent');
+    tables.scheduled_services = [tables.scheduled_services[0], newer];
+    const result = await propose(confirmedInput(card));
+    expect(result.preview_changed).toBe(true);
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+  });
+});
+
 describe('Confirm', () => {
   test('makes exactly one createScheduleBooking call with exactly the pinned body, as the confirming admin', async () => {
     tables.technicians = [{ id: 'staff-1', name: 'Test Admin' }];
@@ -566,7 +670,7 @@ describe('Confirm', () => {
       dates: QUARTERLY_DATES, price: 89, propertyId: PROPERTY_ID, technicianId: null,
       address: { line1: '1 Example Way', line2: '', city: 'Bradenton', state: 'FL', zip: '34205' },
       // The earlier series that made this a rebook; the handler re-reads it under lock.
-      priorSeries: { id: 'old-parent', family: require('../services/recurring-appointment-seeder').duplicateGuardFamilyKey('Quarterly Pest Control Service'), serviceId: SERVICE_ID, price: 89 },
+      priorSeries: { id: 'old-parent', family: require('../services/recurring-appointment-seeder').duplicateGuardFamilyKey('Quarterly Pest Control Service'), serviceId: SERVICE_ID, expected: { price: 89, primaryBase: 89, createInvoice: true } },
       // The eligibility facts the handler compares with the locked customer row.
       customer: { id: CUSTOMER_ID, active: true, billing_mode: 'per_visit', payer_id: null, monthly_rate: null, waveguard_tier: null },
     });
