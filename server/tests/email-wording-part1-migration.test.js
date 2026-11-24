@@ -35,6 +35,13 @@ describe('visit_done_line', () => {
     expect(visitDoneLine({ technicianName: '', serviceLabel: 'Lawn Care', serviceDate: '' })).toBe('We finished your Lawn Care.');
     expect(visitDoneLine({})).toBe('We finished your visit.');
   });
+  test('a visit that did not finish never says "finished"', () => {
+    for (const visitOutcome of ['inspection_only', 'customer_declined', 'incomplete']) {
+      expect(visitDoneLine({ technicianName: 'Jose', serviceLabel: 'Quarterly Pest Control Service', serviceDate: 'Tuesday, December 2', visitOutcome }))
+        .toBe('Jose stopped by for your Quarterly Pest Control Service on Tuesday, December 2.');
+    }
+    expect(visitDoneLine({ technicianName: 'Jose', serviceLabel: 'Lawn Care', visitOutcome: 'completed' })).toBe('Jose finished your Lawn Care.');
+  });
   test('the report payload carries it', () => {
     const p = serviceReportTemplatePayload({
       recipient: { name: 'Sample Example' },
@@ -43,6 +50,13 @@ describe('visit_done_line', () => {
       serviceLabel: 'Quarterly Pest Control Service',
     });
     expect(p.visit_done_line).toMatch(/^Jose finished your Quarterly Pest Control Service on .+\.$/);
+    const declined = serviceReportTemplatePayload({
+      recipient: { name: 'Sample Example' },
+      data: { serviceType: 'Pest', applications: [], advisory: {}, metrics: [], findings: [], technicianName: 'Jose', visitOutcome: 'customer_declined' },
+      reportUrl: 'https://example.test/r',
+      serviceLabel: 'Quarterly Pest Control Service',
+    });
+    expect(declined.visit_done_line).toBe('Jose stopped by for your Quarterly Pest Control Service.');
   });
 });
 

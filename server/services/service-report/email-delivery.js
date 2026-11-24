@@ -98,15 +98,21 @@ function countLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+// Outcomes where the service was not (fully) performed: the visit happened, the
+// work did not finish (pest-recap.js NON_PERFORMED_VISIT_OUTCOMES).
+const NOT_FINISHED_OUTCOMES = new Set(['inspection_only', 'customer_declined', 'incomplete']);
+
 // The report email's opening line (owner 2026-11-24, email wording change 1):
-// who finished which visit, and when. Built here so a visit with no
-// technician name or no date still reads as a whole sentence.
-function visitDoneLine({ technicianName, serviceLabel, serviceDate }) {
+// who came for which visit, and when. Built here so a visit with no
+// technician name or no date still reads as a whole sentence, and only a
+// completed visit says "finished".
+function visitDoneLine({ technicianName, serviceLabel, serviceDate, visitOutcome }) {
   const who = String(technicianName || '').trim() || 'We';
   const label = String(serviceLabel || '').trim();
   const what = label ? `your ${label}` : 'your visit';
   const when = serviceDate ? ` on ${serviceDate}` : '';
-  return `${who} finished ${what}${when}.`;
+  const verb = NOT_FINISHED_OUTCOMES.has(String(visitOutcome || '').toLowerCase()) ? 'stopped by for' : 'finished';
+  return `${who} ${verb} ${what}${when}.`;
 }
 
 function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel, pdf, inspectionCreditNote = '', firstReport = false }) {
@@ -141,7 +147,7 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
     service_label: serviceLabel,
     service_date: serviceDate,
     technician_name: technicianName,
-    visit_done_line: visitDoneLine({ technicianName, serviceLabel, serviceDate }),
+    visit_done_line: visitDoneLine({ technicianName, serviceLabel, serviceDate, visitOutcome: data?.visitOutcome }),
     property_address: propertyAddressLine(data),
     // Nothing logged = blank, so the template's "Findings" row drops (a
     // details row with a blank value is not rendered). The row never
