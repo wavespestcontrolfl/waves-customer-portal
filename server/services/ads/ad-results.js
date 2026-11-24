@@ -117,7 +117,7 @@ async function loadCustomers(conn, ids) {
   const out = new Map();
   for (const part of chunks(ids, ID_CHUNK)) {
     const rows = await conn('customers').whereIn('id', part)
-      .select('id', 'first_name', 'last_name', 'phone', 'email', 'waveguard_tier', 'monthly_rate', 'pipeline_stage');
+      .select('id', 'first_name', 'last_name', 'phone', 'email', 'waveguard_tier', 'monthly_rate', 'pipeline_stage', 'created_at');
     for (const r of rows) out.set(String(r.id), r);
   }
   return out;
@@ -282,11 +282,18 @@ async function adResults({ since, until, conn = db } = {}) {
   };
 
   const counted = leads.filter((l) => !isTest(l));
-  // First-touch row per customer. A repeat paid booking (recordPaidRepeatBookingAttribution: a self-booked
-  // appointment with no lead) is a booking, not a lead: it counts in Booked only and never wins first-lead credit.
+  // First-touch row per customer. A self-booking row with no lead is a REPEAT booking when its customer existed
+  // before the booking day (recordPaidRepeatBookingAttribution); it counts in Booked only and never wins first-lead
+  // credit. A booking that created its customer (a new customer, e.g. recordOrganicSelfBookingAttribution) counts
+  // as a lead.
+  const isRepeatBooking = (lead) => {
+    if (!lead.self_booked_appointment_id || lead.lead_id) return false;
+    const created = customers.get(String(lead.customer_id))?.created_at;
+    return !!created && etDateString(new Date(created)) < dateOnlyString(lead.lead_date);
+  };
   const firstLead = new Map();
   for (const lead of counted) {
-    const repeatBooking = !!lead.self_booked_appointment_id && !lead.lead_id;
+    const repeatBooking = isRepeatBooking(lead);
     const key = lead.customer_id && String(lead.customer_id);
     if (key && !repeatBooking && !firstLead.has(key)) firstLead.set(key, lead);
     const row = leadRow(rows, lead, dateOnlyString(lead.lead_date));
