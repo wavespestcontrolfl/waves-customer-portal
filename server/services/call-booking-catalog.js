@@ -953,9 +953,11 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
         });
       if (Number(wrote) === 1) {
         shifted += 1;
-        shiftedRows.push({ id: k.id, previousDate: k.day, date: k.new_day, windowStart: k.window_start || null, windowEnd: k.window_end || null });
+        // The window the visit keeps, read once: for the caller's report and for its technician's notice.
+        const keptWindow = { windowStart: k.window_start || null, windowEnd: k.window_end || null };
+        shiftedRows.push({ id: k.id, previousDate: k.day, date: k.new_day, ...keptWindow });
         // The CAS pinned technician_id, so k.technician_id IS the committed holder.
-        if (k.technician_id) noticeRows.push({ id: k.id, technicianId: k.technician_id, fromDay: k.day, toDay: k.new_day, windowStart: k.window_start || null, windowEnd: k.window_end || null });
+        if (k.technician_id) noticeRows.push({ id: k.id, technicianId: k.technician_id, fromDay: k.day, toDay: k.new_day, ...keptWindow });
       } else {
         skipped.push({ id: k.id, day: k.day, newDay: k.new_day, reason: 'changed' }); // CAS miss = drift too
       }
@@ -965,9 +967,11 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
     // child's OWN source and destination days: a follow-up spaced out from
     // its parent sits on days neither parent date names, and a post-change
     // route refresh has to cover those too (codex #4295 r1 P2).
-    if (report && typeof report === 'object' && shiftedRows.length) report.shifted = (report.shifted || []).concat(shiftedRows);
+    // One guard for both lists: without a caller's report (an object) they go nowhere.
+    const out = report && typeof report === 'object' ? report : {};
+    if (shiftedRows.length) out.shifted = (out.shifted || []).concat(shiftedRows);
     if (skipped.length) {
-      if (report && typeof report === 'object') report.skipped = (report.skipped || []).concat(skipped);
+      out.skipped = (out.skipped || []).concat(skipped);
       // The durable operator card rings for EVERY caller — a report only
       // adds the response warning. A caller that dies after its transaction
       // commits but before returning would otherwise be the only record of

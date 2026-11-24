@@ -1733,6 +1733,26 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     expect(log.wheres).not.toContainEqual({ id: 'kid-1' });
   });
 
+  // The report's reminder sync and the technician's notice both read the window the child keeps.
+  test('a shifted child is reported with the window it keeps: to the caller, after what the report already holds, and to its technician', async () => {
+    const notice = jest.spyOn(require('../services/tech-visit-notifications'), 'notifyVisitRescheduled').mockResolvedValue(undefined);
+    try {
+      const kid = { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 };
+      const { conn } = fakeConn({ kids: [kid], updatedCount: 1 });
+      const earlier = { id: 'kid-0', previousDate: '2026-07-09', date: '2026-07-12', windowStart: null, windowEnd: null };
+      const report = { shifted: [earlier] };
+      expect(await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', report })).toBe(1);
+      expect(report).toEqual({ shifted: [earlier, { id: 'kid-1', previousDate: '2026-07-16', date: '2026-07-19', windowStart: '09:00:00', windowEnd: '10:00:00' }] });
+      expect(notice.mock.calls).toEqual([[expect.objectContaining({
+        visitId: 'kid-1', technicianId: 't1',
+        previous: { date: '2026-07-16', windowStart: '09:00:00', windowEnd: '10:00:00' },
+        snapshot: { date: '2026-07-19', windowStart: '09:00:00', windowEnd: '10:00:00' },
+      })]]);
+    } finally {
+      notice.mockRestore();
+    }
+  });
+
   test.each([null, '09:00:00'])('rebases or clears a shifted child dispatch marker with window %s', async (windowStart) => {
     const { conn, log } = fakeConn({ kids: [{
       id: 'kid-1', day: '2026-07-16', new_day: '2026-07-19',
