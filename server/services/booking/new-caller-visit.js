@@ -18,7 +18,7 @@
 // and metadata writes bump that long after hangup.
 
 const db = require('../../models/db');
-const { isEnabled, techWorkDaysLive } = require('../../config/feature-gates');
+const { isEnabled } = require('../../config/feature-gates');
 const { TERMINAL_CALL_STATUSES, callEndedAt } = require('../../utils/call-timeline');
 const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 // booking-insert-contract.test.js recognizes the contract helper by this path.
@@ -320,9 +320,11 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
     if (v.technicianId) await assertAssignableTechnician(v.technicianId, { conn: trx, date: v.scheduledDate });
     // Work days (GATE_TECH_WORK_DAYS): an office pick of a day the technician
     // does not work saves with a warning line (never blocks).
-    const offDayWarnings = v.technicianId && techWorkDaysLive()
-      ? await require('../technician-eligibility').offDayWarningsFor(v.technicianId, [v.scheduledDate], { conn: trx })
-      : [];
+    // Shift hours (GATE_TECH_SHIFT_HOURS): on a day the technician works, the same
+    // read says when the shift does not hold the visit (dayWarningsFor).
+    const offDayWarnings = await require('../technician-eligibility').dayWarningsFor(v.technicianId, [v.scheduledDate], {
+      conn: trx, block: { ...window, estimated_duration_minutes: durationMinutes },
+    });
     // Job type (GATE_TECH_JOB_TYPE_CHECKS): the technician is set to Off for this service's
     // category. Advisory, never a block ([] with the gate off).
     const jobTypeWarnings = v.technicianId

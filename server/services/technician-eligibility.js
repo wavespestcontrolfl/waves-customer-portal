@@ -119,37 +119,70 @@ function offDayWarning(tech, dateStr) {
   return `${name} does not work on ${DAY_PLURALS[dayOfWeekOfDate(dateStr)]}.`;
 }
 
-/**
- * Warning lines for one technician id across one or more dates: reads the row
- * once (gate on only) and returns offDayWarning for each distinct weekday that
- * is an off day (de-duplicated, in date order). [] when the gate is off, the
- * technician has no work-days list, or the read fails (an advisory line never
- * blocks a save).
- */
-async function offDayWarningsFor(technicianId, dates, { conn = db } = {}) {
-  const list = (Array.isArray(dates) ? dates : [dates]).filter(Boolean);
-  if (!techWorkDaysLive() || !technicianId || !list.length) return [];
-  try {
-    // On a transaction the read rides a savepoint, so a failed read can never
-    // abort the caller's transaction.
-    const read = (c) => c('technicians').where({ id: technicianId }).first('id', 'name', 'work_days');
-    const tech = conn.isTransaction && typeof conn.transaction === 'function'
-      ? await conn.transaction((sp) => read(sp))
-      : await read(conn);
-    const lines = new Set();
-    for (const date of [...list].sort()) {
-      const line = offDayWarning(tech, date);
-      if (line) lines.add(line);
-    }
-    return [...lines];
-  } catch {
-    return [];
-  }
+/** Minutes after midnight as '8:00 AM' (office copy). Pure. */
+function clock12(minutes) {
+  const hour = Math.floor(minutes / 60) % 24;
+  return `${hour % 12 || 12}:${String(minutes % 60).padStart(2, '0')} ${hour < 12 ? 'AM' : 'PM'}`;
 }
 
-/** offDayWarningsFor for one date: the line, or null. */
-async function offDayWarningFor(technicianId, dateStr, { conn = db } = {}) {
-  const [line] = await offDayWarningsFor(technicianId, [dateStr], { conn });
+/**
+ * The plain warning line an office path adds when it puts a visit outside its
+ * technician's shift that day ("Tech One's shift is 8:00 AM to 6:00 PM. This
+ * visit is outside those hours."), or null when the shift holds the visit or
+ * there is no shift (GATE_TECH_SHIFT_HOURS off, or no set hours). `shift` is
+ * shiftOf's answer for the technician and date, `hours` the visit's own block.
+ * The line names the shift, not the visit's hours: two office checks of one
+ * save then give one line. Office paths warn, never block. Pure.
+ */
+function shiftWarning(tech, shift, hours) {
+  if (!shift || !isBlock(hours) || !shiftNotHolding(shift, hours)) return null;
+  const name = (tech && tech.name) || 'This technician';
+  return `${name}'s shift is ${clock12(shift.startMin)} to ${clock12(shift.endMin)}. This visit is outside those hours.`;
+}
+
+/**
+ * Warning lines for one technician id across one or more dates, for an office
+ * path that puts the technician on those dates: the day-off line
+ * (offDayWarning, GATE_TECH_WORK_DAYS) for each distinct weekday that is an
+ * off day, and, on a day that is not one, the shift line (shiftWarning,
+ * GATE_TECH_SHIFT_HOURS) when `block`, the visit's own row as the save leaves
+ * it ({ window_start, window_end, estimated_duration_minutes }), is outside
+ * the technician's shift that day. De-duplicated, in date order.
+ * The block is read to the minute (rowBlockMinutes), not as the movers judge
+ * one (shiftBlockMinutes): a line states a fact, so a time this cannot read
+ * gives no line.
+ * An office path calls this with no gate check of its own. [] and no read:
+ * both gates off, no technician, no date, or only the shift gate on and no
+ * block to ask about. Each read has its own savepoint on a transaction, so a
+ * failed read can never abort the caller's transaction; a failed read gives no
+ * line of its kind and keeps the other kind's (an advisory line never blocks
+ * a save).
+ */
+async function dayWarningsFor(technicianId, dates, { conn = db, block = null } = {}) {
+  const list = (Array.isArray(dates) ? dates : [dates]).filter(Boolean);
+  const hours = techShiftHoursLive() && block ? require('./scheduling/window-rules').rowBlockMinutes(block) : null;
+  if (!(techWorkDaysLive() || isBlock(hours)) || !technicianId || !list.length) return [];
+  const guarded = async (read, failed) => {
+    try {
+      return await (conn.isTransaction && typeof conn.transaction === 'function' ? conn.transaction((sp) => read(sp)) : read(conn));
+    } catch {
+      return failed;
+    }
+  };
+  const tech = await guarded((c) => c('technicians').where({ id: technicianId }).first('id', 'name', 'work_days'), null);
+  const noShift = () => null;
+  const shiftOf = isBlock(hours) ? await guarded((c) => loadTechShifts(c, { technicianIds: [technicianId] }), noShift) : noShift;
+  const lines = new Set();
+  for (const date of [...list].sort()) {
+    const line = offDayWarning(tech, date) || shiftWarning(tech, shiftOf(technicianId, date), hours);
+    if (line) lines.add(line);
+  }
+  return [...lines];
+}
+
+/** dayWarningsFor for one date: its line (the day-off line or the shift line), or null. */
+async function dayWarningFor(technicianId, dateStr, { conn = db, block = null } = {}) {
+  const [line] = await dayWarningsFor(technicianId, [dateStr], { conn, block });
   return line || null;
 }
 
@@ -159,7 +192,7 @@ async function offDayWarningFor(technicianId, dateStr, { conn = db } = {}) {
  * for Lawn, tree & shrub work."), one line per distinct category (GATE_TECH_JOB_TYPE_CHECKS).
  * `services` is the visit's rows: { service_type, service_id?, service_key? };
  * the category comes from the service library first, then the name
- * (technician-capabilities.categoriesForServices). Same shape as offDayWarningsFor:
+ * (technician-capabilities.categoriesForServices). Same shape as dayWarningsFor:
  * [] when the gate is off, nothing is chosen, or the read fails (an advisory line
  * never blocks a save). Needs-review and qualified never warn (owner 2026-09-05:
  * every hire may treat every service); only Off does. Office paths warn, never block.
@@ -434,10 +467,13 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
   if (!techShiftHoursLive() || (Array.isArray(technicianIds) && !technicianIds.length)) return none;
   let query = conn('technicians').whereNotNull('shift_start').whereNotNull('shift_end');
   if (Array.isArray(technicianIds)) query = query.whereIn('id', technicianIds);
+  // A uuid spelled in capitals is the same technician: Postgres takes it and reads it back in
+  // lower case, so both maps are keyed and asked in lower case.
+  const key = (id) => String(id).toLowerCase();
   const shifts = new Map();
   for (const row of await query.select('id', 'shift_start', 'shift_end')) {
     const shift = storedShift(row);
-    if (shift) shifts.set(String(row.id), shift);
+    if (shift) shifts.set(key(row.id), shift);
   }
   if (!shifts.size) return none;
   const today = etDateString(now);
@@ -458,23 +494,23 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
     const rows = await savepointRead(conn, read);
     for (const row of rows) {
       const at = row.clock_in instanceof Date ? row.clock_in : new Date(row.clock_in);
-      const shift = shifts.get(String(row.technician_id));
+      const shift = shifts.get(key(row.technician_id));
       if (!shift || Number.isNaN(at.getTime())) continue;
-      clockIns.set(String(row.technician_id), clockInShift(at, shift));
+      clockIns.set(key(row.technician_id), clockInShift(at, shift));
     }
   } catch (err) {
     logger.warn(`[technician-eligibility] today's clock-ins unread (${err.message}); the set hours stand for today`);
     clockIns.clear();
   }
   return (technicianId, date) => {
-    const shift = shifts.get(String(technicianId));
+    const shift = shifts.get(key(technicianId));
     // A Date (a pg DATE read back) or an exact 'YYYY-MM-DD'; anything else, an
     // invalid Date or a string with a tail included, is no date.
     const day = date instanceof Date
       ? (Number.isNaN(date.getTime()) ? null : dateOnlyString(date))
       : validCalendarDate(date);
     if (!shift || !day) return null;
-    const clockedIn = day === today ? clockIns.get(String(technicianId)) : undefined;
+    const clockedIn = day === today ? clockIns.get(key(technicianId)) : undefined;
     return clockedIn ? { ...clockedIn } : { ...shift, source: 'roster' };
   };
 }
@@ -588,7 +624,8 @@ module.exports = {
   dayOfWeekOfDate,
   isOffDay,
   offDayWarning,
-  offDayWarningFor,
-  offDayWarningsFor,
+  shiftWarning,
+  dayWarningFor,
+  dayWarningsFor,
   capabilityOffWarningsFor,
 };
