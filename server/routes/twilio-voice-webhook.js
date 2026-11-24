@@ -900,16 +900,11 @@ async function screenKnownCaller(from, trialOn) {
   }
 }
 
-async function screenCandidate(from, stirVerstat, { redeliveryOf = null } = {}) {
+async function screenCandidate(from, stirVerstat, { redelivery = false } = {}) {
   const gates = require('../config/feature-gates');
   const trialOn = gates.isEnabled('callPreconnectScreen') && gates.callScreenAllUnknownLive();
-  // A Twilio redelivery of the first request replays the first delivery's
-  // trial challenge before any other read, so one call never gets two
-  // answers. (A redelivery that lands before the first delivery stored its
-  // stamp finds none and rings through: fail open.)
-  if (trialOn && redeliveryOf && await press1ScreenAllUnknown.storedTrialDecision(redeliveryOf)) {
-    return { ...NO_SCREEN, allUnknownTrigger: true };
-  }
+  // A redelivery's stored trial challenge is replayed by the handler, before
+  // the customer match; here a redelivery never runs the trial read.
   const attestationB = /-B$/.test(String(stirVerstat || ''));
   const exchangeHit = !attestationB && await exchangeTriggerHit(from);
   // Nothing to screen, or a failed exchange read (null) on a non-B caller:
@@ -920,7 +915,7 @@ async function screenCandidate(from, stirVerstat, { redeliveryOf = null } = {}) 
   // exchange rule do not already challenge (an exchange hit with its gate off
   // is only a shadow, so the trial still screens it). It fails open inside.
   const exchangeGates = exchangeHit && gates.isEnabled('callScreenExchangeHistory');
-  const allUnknownTrigger = trialOn && !redeliveryOf && !attestationB && !exchangeGates
+  const allUnknownTrigger = trialOn && !redelivery && !attestationB && !exchangeGates
     && await press1ScreenAllUnknown.screenAllUnknownHit(from);
   return { knownCaller: false, exchangeTrigger: Boolean(exchangeHit), allUnknownTrigger: Boolean(allUnknownTrigger) };
 }
@@ -1460,19 +1455,10 @@ router.post('/voice', async (req, res) => {
 
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
 
-    // Match caller to customer. The raw matches are fetched once: a single
-    // match links the call; 2+ matches deliberately do NOT auto-link (shared
-    // number) but still count as a known caller for the screen bypass below.
-    const customerPhoneMatches = await findCustomerPhoneMatches(db, From);
-    let customer = customerPhoneMatches.length === 1 ? customerPhoneMatches[0] : null;
-    if (customerPhoneMatches.length > 1) {
-      logger.warn(`[voice] ${customerPhoneMatches.length} customers share caller phone ${maskPhone(From)}; not auto-linking call_log`);
-    }
-
-    // Pre-connect screen decision (see helpers above). Re-entries from the
-    // challenge TwiML arrive on this same route with ?screened=1 (a key was
-    // pressed) or ?screenfail=1 (both Gathers timed out) — they are never a
-    // first delivery, so the insert/stamp below doesn't double-fire.
+    // Pre-connect screen re-entries. The challenge TwiML comes back to this
+    // same route with ?screened=1 (a key was pressed) or ?screenfail=1 (both
+    // Gathers timed out); they are never a first delivery, so the insert and
+    // stamp below don't double-fire.
     const screenReentry = req.query.screened === '1'
       ? 'passed'
       : (req.query.screenfail === '1' ? 'failed' : null);
@@ -1482,11 +1468,31 @@ router.post('/voice', async (req, res) => {
     // English exactly as the Gather timeout would have.
     const langReentry = req.query.lang === 'menu';
     const spanishChosen = langReentry && spanishSelected(req.body);
+
+    // A Twilio redelivery of the first request replays the first delivery's
+    // all-unknown trial challenge before any other read (the customer match
+    // included), so one call never gets two answers. No stored challenge, or
+    // a failed read: no replay (fail open).
+    const replayedTrialChallenge = !firstDelivery && !screenReentry && !langReentry
+      && isEnabled('callPreconnectScreen') && require('../config/feature-gates').callScreenAllUnknownLive()
+      && await press1ScreenAllUnknown.storedTrialDecision(CallSid);
+
+    // Match caller to customer. The raw matches are fetched once: a single
+    // match links the call; 2+ matches deliberately do NOT auto-link (shared
+    // number) but still count as a known caller for the screen bypass below.
+    // A replayed challenge needs no match: a redelivery logs nothing.
+    const customerPhoneMatches = replayedTrialChallenge ? [] : await findCustomerPhoneMatches(db, From);
+    let customer = customerPhoneMatches.length === 1 ? customerPhoneMatches[0] : null;
+    if (customerPhoneMatches.length > 1) {
+      logger.warn(`[voice] ${customerPhoneMatches.length} customers share caller phone ${maskPhone(From)}; not auto-linking call_log`);
+    }
+
+    // Pre-connect screen decision (see helpers above).
     let knownCaller = customerPhoneMatches.length > 0;
     let exchangeTrigger = false;
-    let allUnknownTrigger = false;
-    if (!knownCaller && !screenReentry && !langReentry) {
-      ({ knownCaller, exchangeTrigger, allUnknownTrigger } = await screenCandidate(From, req.body.StirVerstat, { redeliveryOf: firstDelivery ? null : CallSid }));
+    let allUnknownTrigger = Boolean(replayedTrialChallenge);
+    if (!knownCaller && !allUnknownTrigger && !screenReentry && !langReentry) {
+      ({ knownCaller, exchangeTrigger, allUnknownTrigger } = await screenCandidate(From, req.body.StirVerstat, { redelivery: !firstDelivery }));
     }
     const screenDecision = (screenReentry || langReentry) ? 'none' : preconnectScreenDecision({
       knownCaller,

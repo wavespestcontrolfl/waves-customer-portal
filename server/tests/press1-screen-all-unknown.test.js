@@ -121,7 +121,7 @@ describe('the remembered-caller proof', () => {
   beforeEach(async () => { seen = fakeDb(); await screenAllUnknownHit(CALLER); });
 
   test('a call staff accepted never counts as a message', () => {
-    expect(seen.sql).toContain("metadata->'forward_acceptance' IS NULL");
+    expect(seen.sql.some((q) => q.startsWith("metadata->'forward_acceptance' IS NULL AND COALESCE("))).toBe(true);
   });
 
   test('a message counts only on a call nobody answered, with a finished transcript that holds words', () => {
@@ -138,7 +138,12 @@ describe('the remembered-caller proof', () => {
 
   test('staff talk needs no answered_by (empty when the caller hangs up first)', () => {
     expect(seen.whereIn.some(([col]) => col === 'answered_by')).toBe(true); // the message branch only
-    expect(seen.sql.some((q) => q.includes("forward_acceptance'->>'accepted_at' IS NULL OR"))).toBe(true);
+    expect(seen.sql.some((q) => q.includes("forward_acceptance'->>'accepted_at', metadata->'conference_path'->>'accepted_at') IS NULL OR"))).toBe(true);
+  });
+
+  test('a conference-path acceptance counts as the staff press 1 when the forward stamp is missing', () => {
+    const talk = seen.sql.find((q) => q.includes('make_interval'));
+    expect(talk).toContain("metadata->'conference_path'->>'accepted_at'");
   });
 
   test('staff talk time runs from the staff press 1 to the recorded end', () => {

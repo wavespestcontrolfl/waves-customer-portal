@@ -70,6 +70,10 @@ function liveLeadRows(key) {
 
 // The processor's no-speech markers (missed-call-bell.js NO_SPEECH_MARKER_RE):
 // a message counts only once its transcript holds real words.
+// The staff press 1: the forward stamp, or the conference path's winning claim
+// (written first; the forward stamp after it is best effort).
+const ACCEPTED_AT_SQL = "COALESCE(metadata->'forward_acceptance'->>'accepted_at', metadata->'conference_path'->>'accepted_at')";
+
 const NO_SPEECH_SQL = String.raw`\[(VOICEMAIL|NO SPEECH)\]|\[Recording had no usable speech;[^\]]*\]`;
 
 // Inbound history only: a person the office called back is almost always on
@@ -89,23 +93,23 @@ function rememberedRows(key) {
     // and its transcript then holds Sandy's words.
     .whereRaw("NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END) AS k WHERE k LIKE 'relay\\_%')")
     .where((proof) => proof
-      // Talk time runs from the staff press 1 (forward_acceptance.accepted_at)
+      // Talk time runs from the staff press 1 (ACCEPTED_AT_SQL)
       // to the call's end (metadata.ended_at, Twilio's own end time; the status
       // callback writes it). created_at + duration_seconds is not the end, so a
       // call with no ended_at proves nothing here.
       // The acceptance and end stamps prove the talk on their own: answered_by
       // can stay empty when the caller hangs up first.
       .where((talked) => talked
-        .whereRaw(`CASE WHEN metadata->'forward_acceptance'->>'accepted_at' IS NULL OR metadata->>'ended_at' IS NULL THEN FALSE
+        .whereRaw(`CASE WHEN ${ACCEPTED_AT_SQL} IS NULL OR metadata->>'ended_at' IS NULL THEN FALSE
           ELSE (metadata->>'ended_at')::timestamptz
-            - (metadata->'forward_acceptance'->>'accepted_at')::timestamptz >= make_interval(secs => ?) END`, [TALK_SECONDS]))
+            - (${ACCEPTED_AT_SQL})::timestamptz >= make_interval(secs => ?) END`, [TALK_SECONDS]))
       .orWhere((message) => message
         // answered_by must say nobody answered: an empty one can be a
         // completed (answered) Studio fallback call.
         .whereIn('answered_by', UNANSWERED)
         // A call staff accepted is a conversation, not a message, even when
         // answered_by stayed empty (the caller hung up first): the 30 s rule above.
-        .whereRaw("metadata->'forward_acceptance' IS NULL")
+        .whereRaw(`metadata->'forward_acceptance' IS NULL AND ${ACCEPTED_AT_SQL} IS NULL`)
         .where('recording_duration_seconds', '>', MESSAGE_SECONDS)
         .where((rec) => rec.whereNotNull('recording_sid').orWhereNotNull('recording_url'))
         // Dead air is no message: the transcript must be done and hold words

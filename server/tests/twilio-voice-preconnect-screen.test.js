@@ -186,27 +186,24 @@ describe('screenCandidate (who the screen may challenge)', () => {
       expect(allUnknown.knownCallerWithinLimit).toHaveBeenCalledWith('+19412360303');
     });
 
-    test('a redelivery with no stored challenge never runs the trial read', async () => {
+    test('a redelivery never runs the trial read (the handler replays a stored challenge)', async () => {
       gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
       jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
       const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
-      jest.spyOn(allUnknown, 'storedTrialDecision').mockResolvedValue(false);
       slotRows([]);
-      await expect(screenCandidate('+19412360303', A, { redeliveryOf: 'CA123' })).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
+      await expect(screenCandidate('+19412360303', A, { redelivery: true })).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
       expect(hit).not.toHaveBeenCalled();
     });
 
-    test('a Twilio redelivery repeats the stored trial decision and reads nothing else', async () => {
-      gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
-      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
-      const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(false);
-      const stored = jest.spyOn(allUnknown, 'storedTrialDecision').mockResolvedValue(true);
-      slotRows([]);
-      await expect(screenCandidate('+19412360303', A, { redeliveryOf: 'CA123' })).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: true });
-      expect(stored).toHaveBeenCalledWith('CA123');
-      expect(hit).not.toHaveBeenCalled();
-      expect(missedCallBell.exchangeHangupScreenHit).not.toHaveBeenCalled();
-      expect(db).not.toHaveBeenCalled();
+    test('the handler replays a stored trial challenge before the customer match and the screen reads', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/twilio-voice-webhook.js'), 'utf8');
+      const handler = src.slice(src.indexOf('const replayedTrialChallenge ='));
+      const replay = handler.indexOf('press1ScreenAllUnknown.storedTrialDecision(CallSid)');
+      expect(replay).toBeGreaterThan(-1);
+      expect(replay).toBeLessThan(handler.indexOf('findCustomerPhoneMatches(db, From)'));
+      expect(handler).toMatch(/replayedTrialChallenge \? \[\] : await findCustomerPhoneMatches/);
+      expect(handler).toMatch(/let allUnknownTrigger = Boolean\(replayedTrialChallenge\);/);
+      expect(handler).toMatch(/const replayedTrialChallenge = !firstDelivery && !screenReentry && !langReentry/);
     });
 
     test('a failed customer-slot lookup logs no phone number', async () => {
