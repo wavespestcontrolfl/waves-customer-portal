@@ -1,6 +1,7 @@
 const {
   packInInventoryUnit,
   pickPriceRow,
+  usageHistory,
   isBlackoutFertilizer,
   blackoutWindow,
   weeklyTotals,
@@ -210,5 +211,22 @@ describe('script output', () => {
   test('csv neutralizes formula-prefixed names', () => {
     const csv = render({ ...result, products: [{ name: '=HYPERLINK("x")', status: 'ok' }] }, { format: 'csv', all: true });
     expect(csv).toContain(`"'=HYPERLINK(""x"")"`);
+  });
+});
+
+describe('usageHistory', () => {
+  test('a late close-out counts on the visit date, not the entry date', () => {
+    const rows = [{ quantity: 4, unit: 'fl_oz', created_at: '2026-11-24T15:00:00Z', visit_date: '2026-11-10' }];
+    expect(usageHistory(rows, 'fl_oz', '2026-11-24', 56).usage).toEqual([{ daysAgo: 14, qty: 4 }]);
+  });
+
+  test('an evening ET entry with no visit counts on its ET date', () => {
+    const rows = [{ quantity: 1, unit: 'gal', created_at: '2026-11-24T02:30:00Z' }]; // 9:30 PM ET on 11-23
+    expect(usageHistory(rows, 'gal', '2026-11-24', 56).usage[0].daysAgo).toBe(1);
+  });
+
+  test('rows outside the window are not counted, even as unit mismatches', () => {
+    const rows = [{ quantity: 1, unit: 'lb', created_at: '2026-11-24T15:00:00Z', visit_date: '2026-09-01' }];
+    expect(usageHistory(rows, 'gal', '2026-11-24', 56)).toEqual({ usage: [], unconverted: 0, records: 0 });
   });
 });

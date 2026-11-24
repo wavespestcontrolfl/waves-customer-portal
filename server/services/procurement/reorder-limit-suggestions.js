@@ -33,6 +33,7 @@
 const { convertInventoryQuantity, normalizeInventoryUnit } = require('../inventory-units');
 const { parsePackSize, parsePackCount, countUnitsCompatible, convertToOz } = require('../product-costing');
 const { etDateString } = require('../../utils/datetime-et');
+const { dateOnlyString } = require('../../utils/date-only');
 
 const DEFAULTS = Object.freeze({
   historyDays: 56,
@@ -287,15 +288,26 @@ function pickPriceRow(rows, product) {
 }
 
 // Usage movements (one product) in its stock unit, by ET days ago.
-function usageHistory(rows, unit, day) {
+// A visit-linked movement counts on the visit's date (a late close-out
+// entered days later must not make a false peak week); others on their ET
+// entry date. Rows outside the window are dropped before anything is counted.
+function usageDay(m) {
+  return dateOnlyString(m.visit_date) || etDateString(new Date(m.created_at));
+}
+
+function usageHistory(rows, unit, day, historyDays) {
   const usage = [];
   let unconverted = 0;
+  let records = 0;
   for (const m of rows) {
+    const daysAgo = dateDiffDays(day, usageDay(m));
+    if (daysAgo < 0 || daysAgo >= historyDays) continue;
+    records += 1;
     const qty = unit ? convertInventoryQuantity(Math.abs(Number(m.quantity)), m.unit, unit) : null;
     if (qty == null) { unconverted += 1; continue; }
-    usage.push({ daysAgo: dateDiffDays(day, etDateString(new Date(m.created_at))), qty });
+    usage.push({ daysAgo, qty });
   }
-  return { usage, unconverted, records: rows.length };
+  return { usage, unconverted, records };
 }
 
 // Lawn forecast demand (one product) in its stock unit; unit mismatches count
@@ -369,11 +381,12 @@ async function buildReorderLimitSuggestions({ knex, options = {}, forecast } = {
   // by their ET date below and anything older is ignored.
   const since = new Date(Date.now() - (o.historyDays + 2) * 86400000);
   const movements = ids.length
-    ? await conn('product_inventory_movements')
-      .whereIn('product_id', ids)
-      .where('movement_type', 'usage')
-      .where('created_at', '>=', since)
-      .select('product_id', 'quantity', 'unit', 'created_at')
+    ? await conn('product_inventory_movements as pim')
+      .leftJoin('scheduled_services as ss', 'ss.id', 'pim.scheduled_service_id')
+      .whereIn('pim.product_id', ids)
+      .where('pim.movement_type', 'usage')
+      .where('pim.created_at', '>=', since)
+      .select('pim.product_id', 'pim.quantity', 'pim.unit', 'pim.created_at', 'ss.scheduled_date as visit_date')
     : [];
   const pricing = ids.length
     ? await eligibleVendorPricing(
@@ -386,7 +399,7 @@ async function buildReorderLimitSuggestions({ knex, options = {}, forecast } = {
 
   const rows = products.map((p) => {
     const unit = p.inventory_unit;
-    const history = usageHistory(movements.filter((m) => m.product_id === p.id), unit, day);
+    const history = usageHistory(movements.filter((m) => m.product_id === p.id), unit, day, o.historyDays);
     const f = forecastByProduct.get(String(p.id));
     const lawnDemand = forecastDemandFor(f, unit);
     const unconverted = history.unconverted + lawnDemand.unconverted;
@@ -426,6 +439,7 @@ module.exports = {
   DEFAULTS,
   packInInventoryUnit,
   packReorder,
+  usageHistory,
   isBlackoutFertilizer,
   blackoutWindow,
   weeklyTotals,
