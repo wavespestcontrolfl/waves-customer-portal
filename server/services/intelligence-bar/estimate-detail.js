@@ -284,79 +284,145 @@ function blockedRecord(row) {
 // option as "the price", and called the visits overpriced. The choice lives
 // in estimates.accepted_service_mode + accepted_frequency_key (migration
 // 20260626000002, stamped by the /accept handler as the UI selection key that
-// matches pricing.services[].frequencies[].key). Legacy accepts predate those
-// columns and carry neither, so the choice is then unknown, never implied.
+// matches pricing.services[].frequencies[].key) and, in a bundle, in
+// estimate_data.customerSelection.serviceCadences (service key -> tier key,
+// stamped by the same handler). Legacy accepts carry neither, so a choice that
+// cannot be resolved is reported as unknown, never implied.
 // Rows are marked in place: the page object is this tool's own sanitized copy.
 const ACCEPTED_OPTIONS_NOTE = 'quote this block as what the customer agreed to; options marked accepted:false are offers the customer did not take';
+const hasOwn = (node, field) => !!node && typeof node === 'object' && Object.hasOwn(node, field);
 
-function markOptions(rows, acceptedKey) {
-  for (const row of rows) row.accepted = acceptedKey != null && row.key === acceptedKey;
+function storedServiceCadences(data) {
+  const raw = data?.customerSelection?.serviceCadences || data?.result?.customerSelection?.serviceCadences;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  for (const [service, tier] of Object.entries(raw)) if (typeof tier === 'string' && tier) out[service] = tier;
+  return Object.keys(out).length ? out : null;
+}
+
+// One section's accepted row, from the stored selection that applies to THAT
+// service: its own serviceCadences entry, else the accepted key (pest, or a
+// section mirroring the pest cadence), else the section's only cadence.
+function resolveSectionRow(section, acceptedKey, cadences) {
+  const rows = Array.isArray(section.frequencies) ? section.frequencies : [];
+  const own = cadences?.[section.key];
+  if (own) {
+    const row = rows.find((r) => r.key === own);
+    return row ? { row, basis: 'stored_service_cadence' } : null;
+  }
+  const tierAxis = cadences && section.key !== 'pest_control';
+  const byKey = tierAxis ? null : rows.find((r) => r.key === acceptedKey);
+  if (byKey) return { row: byKey, basis: 'accepted_key' };
+  return rows.length === 1 ? { row: rows[0], basis: 'only_option' } : null;
+}
+
+function discountState(node) {
+  if (!hasOwn(node, 'manualDiscount') && !hasOwn(node, 'manualDiscountSuppressed')) return null;
+  if (node.manualDiscountSuppressed === true) return { suppressed: true, discount: null };
+  return { suppressed: false, discount: node.manualDiscount || null };
 }
 
 function acceptedServiceEntry(section, row, basis) {
-  const perVisit = row.perTreatment ?? row.perVisit ?? null;
   const entry = {
     service_key: section.key, service_label: section.label || section.key,
     frequency_key: row.key, frequency_label: row.label || null, basis,
-    per_visit: perVisit, visits_per_year: row.visitsPerYear ?? null, monthly: row.monthly ?? null,
+    per_visit: row.perTreatment ?? row.perVisit ?? null, visits_per_year: row.visitsPerYear ?? null, monthly: row.monthly ?? null,
   };
   if (row.monthlyBase != null && row.monthly != null && row.monthlyBase !== row.monthly) entry.monthly_before_discount = row.monthlyBase;
+  const state = discountState(row);
+  if (state) { entry.discount = state.discount; if (state.suppressed) entry.discount_suppressed = true; }
   if (row.ranged) entry.price_unavailable = 'this cadence is a confirmed-on-site range; the page shows no exact price';
   else if (row.combined_total_withheld) entry.price_unavailable = 'a combined plan is priced per application; open the estimate link';
   return entry;
 }
 
-// One section's accepted row: the stored key, else the page's own default
-// (what the customer's recap shows), else the section's only cadence.
-function pickAcceptedRow(section, acceptedKey) {
-  const rows = Array.isArray(section.frequencies) ? section.frequencies : [];
-  const byKey = rows.find((row) => row.key === acceptedKey);
-  if (byKey) return { row: byKey, basis: 'accepted_key' };
-  const byDefault = rows.find((row) => row.key === section.defaultFrequencyKey) || (rows.length === 1 ? rows[0] : null);
-  return byDefault ? { row: byDefault, basis: 'section_default' } : null;
+// The matched per-service cadence combination (accept uses the same rule).
+function matchedCombo(pricing, acceptedKey, cadences) {
+  if (!cadences || !Array.isArray(pricing.serviceCadenceCombos)) return null;
+  const wanted = Object.keys(cadences);
+  const isMatch = (combo) => {
+    const sel = combo.selection || {};
+    const nonPest = Object.keys(sel).filter((k) => k !== 'pest_control');
+    if (nonPest.length !== wanted.length || !wanted.every((k) => sel[k] === cadences[k])) return false;
+    return !sel.pest_control || sel.pest_control === acceptedKey;
+  };
+  let found = null;
+  for (const combo of pricing.serviceCadenceCombos) {
+    combo.accepted = isMatch(combo);
+    if (combo.accepted) found = combo;
+  }
+  return found;
 }
 
-function markAcceptedRecurring(pricing, acceptedKey) {
+function markAcceptedRecurring(pricing, acceptedKey, cadences) {
   const services = [];
+  const picked = [];
   for (const section of pricing.services || []) {
     const rows = Array.isArray(section.frequencies) ? section.frequencies : [];
-    if (!section.isRecurring) { markOptions(rows, null); continue; }
-    const picked = pickAcceptedRow(section, acceptedKey);
-    for (const row of rows) row.accepted = !!picked && row === picked.row;
-    if (picked) services.push(acceptedServiceEntry(section, picked.row, picked.basis));
+    if (!section.isRecurring) continue;
+    const hit = resolveSectionRow(section, acceptedKey, cadences);
+    for (const row of rows) row.accepted = hit ? row === hit.row : null;
+    if (hit) { picked.push(hit.row); services.push(acceptedServiceEntry(section, hit.row, hit.basis)); continue; }
+    services.push({ service_key: section.key, service_label: section.label || section.key,
+      accepted_choice_unknown: 'the stored selection does not identify which cadence of this service the customer took' });
   }
-  if (Array.isArray(pricing.frequencies)) markOptions(pricing.frequencies, acceptedKey);
-  return services;
+  if (Array.isArray(pricing.frequencies)) for (const row of pricing.frequencies) row.accepted = row.key === acceptedKey;
+  return { services, picked, combo: matchedCombo(pricing, acceptedKey, cadences) };
 }
 
-function markAllOptions(pricing, value) {
-  for (const section of pricing.services || []) for (const row of section.frequencies || []) row.accepted = value;
-  for (const key of ['frequencies', 'serviceCadenceCombos']) {
-    for (const row of pricing[key] || []) row.accepted = value;
+// The chosen cadence's OWN discount (a lawn minimum can suppress it on that
+// tier while the plan-level credit stays populated). A matched combination
+// that carries no discount fields was stripped by a disclosure rule: say so.
+function acceptedDiscount(pricing, combo, picked) {
+  if (combo) {
+    const state = discountState(combo);
+    if (!state) return { discount: null, discount_unavailable: 'the page shows no per-choice discount for this combined plan; open the estimate link' };
+    return state.suppressed ? { discount: null, discount_suppressed: true } : { discount: state.discount };
   }
+  const states = picked.map(discountState).filter(Boolean);
+  const granted = states.find((state) => state.discount);
+  if (granted) return { discount: granted.discount };
+  if (states.some((state) => state.suppressed)) return { discount: null, discount_suppressed: true };
+  return { discount: pricing.manualDiscount || null };
 }
 
-function acceptedBlock(row, projection) {
-  const page = projection.page;
+// A one-time acceptance: the treatment and price the page displays for it.
+function acceptedOneTime(pricing) {
+  const breakdown = pricing.oneTimeBreakdown;
+  const items = (Array.isArray(breakdown?.items) ? breakdown.items : []).map((item) => ({
+    service: item.service ?? null, label: item.label ?? null, amount: item.amount ?? null, kind: item.kind ?? null,
+  }));
+  const price = pricing.anchorOneTimePrice ?? breakdown?.total ?? null;
+  if (!items.length && price == null) return { price_unavailable: 'the page shows no one-time treatment or price for this estimate' };
+  return { one_time: { price, items } };
+}
+
+function oneTimeAcceptedBlock(block, pricing) {
+  for (const section of pricing.services || []) for (const option of section.frequencies || []) option.accepted = false;
+  for (const field of ['frequencies', 'serviceCadenceCombos']) for (const option of pricing[field] || []) option.accepted = false;
+  return { ...block, services: [], ...acceptedOneTime(pricing), other_options_not_accepted: true, note: ACCEPTED_OPTIONS_NOTE };
+}
+
+function pricingUnavailableReason(projection) {
+  if (projection.page) return 'the page withholds pricing for this estimate';
+  return projection.page_unavailable || 'the estimate page is unavailable';
+}
+
+function acceptedBlock(row, projection, data) {
   if (!row.accepted_at && String(row.status || '').trim().toLowerCase() !== 'accepted') return null;
   const mode = row.accepted_service_mode || null;
   const key = row.accepted_frequency_key || null;
   const block = { at: row.accepted_at || null, service_mode: mode, frequency: key };
-  const pricing = page && page.pricing && !page.pricing.withheld ? page.pricing : null;
   if (!mode && !key) {
     return { ...block, accepted_choice_unknown: 'no accepted service mode or frequency was stored for this acceptance (legacy accept); do not treat any listed option as the agreed one' };
   }
-  if (mode === 'one_time') {
-    if (pricing) markAllOptions(pricing, false);
-    return { ...block, services: [], other_options_not_accepted: true, note: `one-time acceptance: no recurring option was taken. ${ACCEPTED_OPTIONS_NOTE}` };
-  }
-  if (!pricing) {
-    return { ...block, services: [], price_unavailable: (page ? 'the page withholds pricing for this estimate' : (projection.page_unavailable || 'the estimate page is unavailable')), note: ACCEPTED_OPTIONS_NOTE };
-  }
-  const services = markAcceptedRecurring(pricing, key);
+  const pricing = projection.page?.pricing && !projection.page.pricing.withheld ? projection.page.pricing : null;
+  if (!pricing) return { ...block, services: [], price_unavailable: pricingUnavailableReason(projection), note: ACCEPTED_OPTIONS_NOTE };
+  if (mode === 'one_time') return oneTimeAcceptedBlock(block, pricing);
+  const { services, picked, combo } = markAcceptedRecurring(pricing, key, storedServiceCadences(data));
   return {
-    ...block, services, discount: pricing.manualDiscount || null, other_options_not_accepted: true,
-    ...(services.length ? {} : { price_unavailable: 'no recurring option on the page matches the accepted frequency' }),
+    ...block, services, ...acceptedDiscount(pricing, combo, picked), other_options_not_accepted: true,
+    ...(services.some((s) => s.frequency_key) ? {} : { price_unavailable: 'no recurring option on the page matches the accepted selection' }),
     note: ACCEPTED_OPTIONS_NOTE,
   };
 }
@@ -394,7 +460,7 @@ async function shapeEstimate(row) {
     price_locked_at: row.price_locked_at || null,
     ...projection,
     ...(reconciliation_error ? { reconciliation_error } : {}),
-    accepted: acceptedBlock(row, projection),
+    accepted: acceptedBlock(row, projection, data),
     customer_notes: row.notes || null,
     ...links,
     sent_at: row.sent_at,

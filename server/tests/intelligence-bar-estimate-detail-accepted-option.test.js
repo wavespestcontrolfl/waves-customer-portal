@@ -98,7 +98,7 @@ test('accepted bi-monthly among three options: block carries the bi-monthly pric
   expect(shaped.page.pricing.frequencies.find((o) => o.key === 'monthly').accepted).toBe(false);
   // A single-cadence section rides along as the only option the plan can hold.
   expect(shaped.accepted.services.find((s) => s.service_key === 'rodent_bait'))
-    .toMatchObject({ frequency_key: 'recurring', basis: 'section_default', per_visit: 90 });
+    .toMatchObject({ frequency_key: 'recurring', basis: 'only_option', per_visit: 90 });
   // Stored aggregate columns never become the accepted price.
   expect(JSON.stringify(shaped)).not.toMatch(/99999|88888/);
 });
@@ -106,6 +106,7 @@ test('accepted bi-monthly among three options: block carries the bi-monthly pric
 test('one-time acceptance marks every recurring option not accepted', async () => {
   const shaped = await shapeEstimate(row({ accepted_service_mode: 'one_time', accepted_frequency_key: null }));
   expect(shaped.accepted).toMatchObject({ service_mode: 'one_time', services: [], other_options_not_accepted: true });
+  expect(shaped.accepted.price_unavailable).toMatch(/no one-time treatment or price/);
   expect(shaped.page.pricing.services[0].frequencies.every((o) => o.accepted === false)).toBe(true);
 });
 
@@ -128,4 +129,94 @@ test('accepted choice stays visible when the page is unavailable', async () => {
   const shaped = await shapeEstimate(row());
   expect(shaped.accepted).toMatchObject({ frequency: 'bimonthly', services: [] });
   expect(shaped.accepted.price_unavailable).toMatch(/could not be composed/);
+});
+
+// Bundle fixtures: a pest ladder plus a lawn tier ladder, with the stored
+// per-service selection the accept handler writes to customerSelection.
+const lawnTiers = () => [
+  { key: 'basic', label: 'Basic', monthly: 40, perTreatment: 80, visitsPerYear: 6, manualDiscount: null },
+  { key: 'standard', label: 'Standard', monthly: 55, perTreatment: 73, visitsPerYear: 9, manualDiscount: null },
+  { key: 'enhanced', label: 'Enhanced', monthly: 70, perTreatment: 70, visitsPerYear: 12, manualDiscount: { label: 'Neighbor discount', amount: 5 } },
+];
+const neighborCredit = () => ({ label: 'Neighbor discount', amount: 5 });
+const bundlePayload = ({ billsMonthly = true, lawn = lawnTiers(), combos } = {}) => ({
+  estimate: { id: 'est-acc', status: 'accepted' },
+  pricing: {
+    manualDiscount: neighborCredit(),
+    services: [
+      { key: 'pest_control', label: 'Pest Control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: pestFrequencies() },
+      { key: 'lawn_care', label: 'Lawn Care', isRecurring: true, defaultFrequencyKey: 'standard', frequencies: lawn },
+    ],
+    serviceCadenceCombos: combos || [
+      { key: 'p-bimonthly-l-enhanced', selection: { pest_control: 'bimonthly', lawn_care: 'enhanced' }, monthly: 115, manualDiscount: neighborCredit() },
+      { key: 'p-bimonthly-l-standard', selection: { pest_control: 'bimonthly', lawn_care: 'standard' }, monthly: 100, manualDiscount: null },
+      { key: 'p-monthly-l-enhanced', selection: { pest_control: 'monthly', lawn_care: 'enhanced' }, monthly: 142, manualDiscount: null },
+    ],
+  },
+  cta: { canAccept: false, monthlyBilled: billsMonthly },
+});
+const bundleRow = (cadences) => row({ estimate_data: JSON.stringify(cadences ? { customerSelection: { serviceCadences: cadences } } : {}) });
+
+test('bundle: each service resolves from its own stored selection, not the pest key', async () => {
+  mockCompose.mockResolvedValue(bundlePayload());
+  const shaped = await shapeEstimate(bundleRow({ lawn_care: 'enhanced' }));
+  const byKey = (k) => shaped.accepted.services.find((s) => s.service_key === k);
+  expect(byKey('pest_control')).toMatchObject({ frequency_key: 'bimonthly', basis: 'accepted_key' });
+  expect(byKey('lawn_care')).toMatchObject({ frequency_key: 'enhanced', basis: 'stored_service_cadence', per_visit: 70 });
+  const lawnRows = shaped.page.pricing.services[1].frequencies;
+  expect(lawnRows.map((o) => [o.key, o.accepted])).toEqual([['basic', false], ['standard', false], ['enhanced', true]]);
+  expect(shaped.page.pricing.serviceCadenceCombos.map((c) => c.accepted)).toEqual([true, false, false]);
+});
+
+test('bundle: a service the stored selection cannot resolve is unknown, never its default tier', async () => {
+  mockCompose.mockResolvedValue(bundlePayload());
+  const shaped = await shapeEstimate(bundleRow(null));
+  const lawn = shaped.accepted.services.find((s) => s.service_key === 'lawn_care');
+  expect(lawn.accepted_choice_unknown).toMatch(/does not identify/);
+  expect(lawn).not.toHaveProperty('frequency_key');
+  expect(shaped.page.pricing.services[1].frequencies.every((o) => o.accepted === null)).toBe(true);
+  expect(shaped.accepted.services.find((s) => s.service_key === 'pest_control')).toMatchObject({ frequency_key: 'bimonthly' });
+  expect(shaped.page.pricing.serviceCadenceCombos.some((c) => 'accepted' in c)).toBe(false);
+});
+
+test('discount comes from the chosen combination and honors suppression', async () => {
+  mockCompose.mockResolvedValue(bundlePayload());
+  const granted = await shapeEstimate(bundleRow({ lawn_care: 'enhanced' }));
+  expect(granted.accepted.discount).toEqual(neighborCredit());
+
+  // The plan-level credit stays populated, but the chosen combination's lawn minimum suppressed it.
+  mockCompose.mockResolvedValue(bundlePayload({ combos: [
+    { key: 'a', selection: { pest_control: 'bimonthly', lawn_care: 'basic' }, monthly: 90, manualDiscount: null, manualDiscountSuppressed: true },
+    { key: 'b', selection: { pest_control: 'bimonthly', lawn_care: 'enhanced' }, monthly: 115, manualDiscount: neighborCredit() },
+  ] }));
+  const suppressed = await shapeEstimate(bundleRow({ lawn_care: 'basic' }));
+  expect(suppressed.accepted).toMatchObject({ discount: null, discount_suppressed: true });
+
+  // No combination to read: the chosen tier row's own suppression still wins over the plan credit.
+  const tiers = lawnTiers();
+  tiers[0].manualDiscountSuppressed = true;
+  const noCombos = bundlePayload({ lawn: tiers });
+  delete noCombos.pricing.serviceCadenceCombos;
+  mockCompose.mockResolvedValue(noCombos);
+  const rowSuppressed = await shapeEstimate(bundleRow({ lawn_care: 'basic' }));
+  expect(rowSuppressed.accepted).toMatchObject({ discount: null, discount_suppressed: true });
+  expect(rowSuppressed.accepted.services.find((s) => s.service_key === 'lawn_care')).toMatchObject({ discount_suppressed: true });
+});
+
+test('combined residential plan: a stripped combination yields discount_unavailable, not the plan credit', async () => {
+  mockCompose.mockResolvedValue(bundlePayload({ billsMonthly: false }));
+  const shaped = await shapeEstimate(bundleRow({ lawn_care: 'enhanced' }));
+  expect(shaped.accepted.discount).toBeNull();
+  expect(shaped.accepted.discount_unavailable).toMatch(/combined plan/);
+  expect(shaped.page.pricing.serviceCadenceCombos.map((c) => c.accepted)).toEqual([true, false, false]);
+});
+
+test('one-time acceptance carries the accepted treatment and its displayed price', async () => {
+  const withOneTime = payload();
+  withOneTime.pricing.oneTimeBreakdown = { items: [{ service: 'pest_initial_roach', label: 'Initial roach treatment', amount: 185, kind: 'charge', detail: 'x' }], total: 185 };
+  withOneTime.pricing.anchorOneTimePrice = 185;
+  mockCompose.mockResolvedValue(withOneTime);
+  const shaped = await shapeEstimate(row({ accepted_service_mode: 'one_time', accepted_frequency_key: null }));
+  expect(shaped.accepted.one_time).toEqual({ price: 185, items: [{ service: 'pest_initial_roach', label: 'Initial roach treatment', amount: 185, kind: 'charge' }] });
+  expect(shaped.accepted).not.toHaveProperty('price_unavailable');
 });
