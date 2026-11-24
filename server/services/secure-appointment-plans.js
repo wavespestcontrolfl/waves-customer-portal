@@ -1567,6 +1567,8 @@ module.exports = {
   // formula and one service→incentive-class whitelist across both lanes.
   computeSeriesPrepayPricing,
   resolveDirectRodentSetupObligation,
+  // The same obligation for a visit that does not exist yet (a draft row with no id), read only: the IB book_plan_visits card.
+  directRodentSetupForRow,
   authoritativeServiceKey,
   PLAN_CLASS_BY_SERVICE_KEY,
   // Read-side (lock-free) overlap probe, shared rather than re-mirrored: a

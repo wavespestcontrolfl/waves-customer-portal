@@ -5593,6 +5593,9 @@ module.exports = {
   CARD_CANCEL_REFUSED_MESSAGE,
   // Test hook: the bar's one booking pricer (every create path asks it before anything is booked).
   _ibBookingPricing: ibBookingPricing,
+  // The booking helpers the book_plan_visits card shares with create_appointment: the same window parse and rule, the
+  // same close-name catalog resolver, the same clock label.
+  parseTimeWindowStart, ibBookingWindowRefusal, resolveBookingCatalogRowWithClose, clockLabel,
   // Shared with services/customer-name-search.js (picker sound-alikes): one loader and cap for the shared name index.
   nameCandidates, NAME_INDEX_BOOK_CAP,
 };

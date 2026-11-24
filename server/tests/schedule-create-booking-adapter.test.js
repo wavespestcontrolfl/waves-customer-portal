@@ -140,3 +140,213 @@ describe('createScheduleBooking runs the POST / handler', () => {
     await expect(createScheduleBooking({ body: oneOff, actor })).rejects.toThrow('db down');
   });
 });
+
+// The Intelligence Bar's book_plan_visits card pins what it showed, but this handler re-reads and re-decides inside its own
+// transaction. createScheduleBooking's internal `approvedBooking` makes the transaction assert the approved plan right
+// before commit: any difference rolls the booking back (409 APPROVED_BOOKING_CHANGED). Without it (the HTTP path) nothing
+// changes.
+describe('createScheduleBooking approvedBooking (the transaction asserts what the card approved)', () => {
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  const { duplicateGuardFamilyKey } = require('../services/recurring-appointment-seeder');
+  // The earlier series the card relied on: the harness's own visit row (customer cust-1, 'General Pest Control').
+  const expected = { price: 89, primaryBase: 89, createInvoice: true };
+  const priorSeries = { id: 'svc-1', serviceId: 'not-the-visit-service-id', family: duplicateGuardFamilyKey('General Pest Control'), expected };
+  const approved = { dates: ['2099-07-03'], price: 89, propertyId: null, technicianId: 'tech-1', priorSeries };
+  let refreshable;
+  beforeEach(() => {
+    refreshable = [];
+    jest.spyOn(AnnualPrepayRenewals, 'refreshableTermsForCustomer').mockImplementation(async () => refreshable);
+    // The visit table's columns, so the handler stamps the price and technician it would stamp in production.
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const c = base(table);
+      if (table === 'scheduled_services') c.columnInfo = jest.fn().mockResolvedValue({ source_action: {}, estimated_price: {}, technician_id: {} });
+      return c;
+    });
+    // The earlier series the harness reads under lock bills what a new booking stamps (price, line price, invoice on completion).
+    const seriesRow = { ...SVC, estimated_price: 89, primary_line_price: 89, create_invoice_on_complete: true };
+    const trxBase = db.transaction.getMockImplementation();
+    db.transaction = jest.fn(async (cb) => trxBase((trxFn) => cb(Object.assign((table) => {
+      const c = trxFn(table);
+      if (table === 'scheduled_services') {
+        c.first = jest.fn().mockResolvedValue(seriesRow);
+        c.then = (resolve, reject) => Promise.resolve([seriesRow]).then(resolve, reject);
+      }
+      return c;
+    }, trxFn))));
+    const baseTrx = db.transaction.getMockImplementation();
+    db.transaction = jest.fn(async (cb) => baseTrx(cb));
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  const book = (approvedBooking, body = oneOff) => createScheduleBooking({ body, actor, approvedBooking });
+
+  test('the approved dates, price and technician commit as booked', async () => {
+    const result = await book(approved);
+    expect(result.status).toBe(201);
+    expect(inserts.map((d) => [d.scheduled_date, Number(d.estimated_price), d.technician_id])).toEqual([['2099-07-03', 89, 'tech-1']]);
+    // Approved bookings are credit-free: no post-commit credit redemption.
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a drifted price', { ...approved, price: 90 }],
+    ['a drifted date', { ...approved, dates: ['2099-07-04'] }],
+    ['a different technician', { ...approved, technicianId: 'tech-2' }],
+    ['a different property', { ...approved, propertyId: 'prop-other' }],
+  ])('%s rolls the whole booking back with APPROVED_BOOKING_CHANGED and runs no post-commit effect', async (_label, drift) => {
+    const result = await book(drift);
+    expect(result.status).toBe(409);
+    expect(result.json.code).toBe('APPROVED_BOOKING_CHANGED');
+    expect(result.json.error).toMatch(/Nothing was booked/);
+    // The transaction callback threw, so the transaction rejected (the database rolls the inserts back) and nothing after it ran.
+    await expect(db.transaction.mock.results[0].value).rejects.toMatchObject({ code: 'APPROVED_BOOKING_CHANGED' });
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test('a drifted stamped address rolls the booking back (the property id alone is not the address)', async () => {
+    const result = await book({ ...approved, address: { line1: '9 Other Street', line2: '', city: 'Venice', state: 'FL', zip: '34285' } });
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/address/);
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test('an inspection-credit offer (paused ones included) rolls the booking back, read under the credit lock', async () => {
+    const InspectionCredit = require('../services/inspection-credit');
+    jest.spyOn(InspectionCredit, 'projectRedeemableOfferAmount').mockResolvedValue(35);
+    const lock = jest.spyOn(InspectionCredit, 'lockInspectionCreditCustomer').mockResolvedValue(undefined);
+    const result = await book(approved);
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/inspection-credit/);
+    expect(lock).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+    expect(InspectionCredit.projectRedeemableOfferAmount).toHaveBeenCalledWith('cust-1', expect.objectContaining({ includePaused: true }));
+  });
+
+  test('an approved booking is stamped credit-free and the post-commit credit redemption is skipped', async () => {
+    const InspectionCredit = require('../services/inspection-credit');
+    jest.spyOn(InspectionCredit, 'projectRedeemableOfferAmount').mockResolvedValue(0);
+    const mark = jest.spyOn(InspectionCredit, 'markBookingForInspectionCredit').mockResolvedValue(undefined);
+    const result = await book(approved);
+    expect(result.status).toBe(201);
+    expect(mark).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ source: InspectionCredit.CREDIT_FREE_CARD_EVENT_SOURCE }));
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test('another visit now holding the planned slot (the handler\'s own probe, under its date locks) rolls the booking back', async () => {
+    const { findConflictingVisits } = require('../services/scheduling/occupancy');
+    findConflictingVisits.mockResolvedValueOnce([{ id: 'other-visit' }]);
+    const result = await book(approved);
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/holds a planned time/);
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test('without approvedBooking a clashing slot still books with a warning (the HTTP path is unchanged)', async () => {
+    const { findConflictingVisits } = require('../services/scheduling/occupancy');
+    findConflictingVisits.mockResolvedValueOnce([{ id: 'other-visit' }]);
+    const result = await book(null);
+    expect(result.status).toBe(201);
+    expect(result.json.warnings.join(' ')).toMatch(/overlap|already/i);
+  });
+
+  test('a locked duplicate-series guard that cannot run rolls an approved booking back (it only warns on the HTTP path)', async () => {
+    const Seeder = require('../services/recurring-appointment-seeder');
+    jest.spyOn(Seeder, 'checkActiveSeriesLocked').mockResolvedValue({ matches: [], guardError: new Error('guard query failed') });
+    const recurring = { ...oneOff, isRecurring: true, recurringPattern: 'quarterly', recurringCount: 2, createInvoice: true };
+    const result = await book({ ...approved, dates: ['2099-07-03', '2099-10-02'] }, recurring);
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/duplicate-series check could not run/);
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+    // Without approvedBooking the same failed guard is logged and the booking proceeds.
+    const http = await book(null, recurring);
+    expect(http.status).toBe(201);
+  });
+
+  test.each([
+    ['the billing lane', { billing_mode: 'monthly_membership' }],
+    ['the member tier', { waveguard_tier: 'Gold' }],
+    ['the monthly rate', { monthly_rate: 59 }],
+    ['the payer', { payer_id: 'payer-1' }],
+    ['the active flag', { active: true }],
+  ])('a customer whose %s differs from the card\'s, read under the lock, rolls the booking back before any insert', async (_label, customer) => {
+    const result = await book({ ...approved, customer });
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/billing lane, tier or monthly rate/);
+    expect(inserts).toEqual([]);
+  });
+
+  test('a customer that matches the card\'s facts books', async () => {
+    const result = await book({ ...approved, customer: {} });
+    expect(result.status).toBe(201);
+  });
+
+  test('an approved booking defers no prepay-term refresh after commit (the transaction asserted none is due); the HTTP path still does', async () => {
+    // Let the earlier bookings' post-commit effects finish before counting this test's own.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const refresh = jest.spyOn(AnnualPrepayRenewals, 'refreshActiveTermsForCustomer').mockResolvedValue(undefined);
+    expect((await book(approved)).status).toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(refresh).not.toHaveBeenCalled();
+    expect((await book(null)).status).toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(refresh).toHaveBeenCalledWith('cust-1');
+  });
+
+  test.each([
+    ['moved to another service family', { ...priorSeries, family: 'lawn_care' }],
+    ['no longer there', { ...priorSeries, id: 'gone' }],
+  ])('the earlier series the card relied on, %s, is re-read under lock and rolls the booking back', async (_label, prior) => {
+    if (prior.id === 'gone') {
+      const baseTrx = db.transaction.getMockImplementation();
+      db.transaction = jest.fn(async (cb) => baseTrx((trxFn) => cb(Object.assign((table) => {
+        const c = trxFn(table);
+        if (table === 'scheduled_services') c.first = jest.fn().mockResolvedValue(undefined);
+        return c;
+      }, trxFn))));
+    }
+    const result = await book({ ...approved, priorSeries: prior });
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/earlier plan/);
+  });
+
+  test.each([
+    ['price', { ...expected, price: 79 }, /billing of the earlier plan changed/],
+    ['line price', { ...expected, primaryBase: 79 }, /primary_line_price/],
+    ['invoice-on-completion setting', { ...expected, createInvoice: false }, /create_invoice_on_complete/],
+  ])('the earlier plan\'s %s, re-read under lock, rolls the booking back when it no longer equals what the card judged', async (_label, drifted, message) => {
+    const result = await book({ ...approved, priorSeries: { ...priorSeries, expected: drifted } });
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(message);
+  });
+
+  test('a booking approved without its earlier series is refused (fail closed)', async () => {
+    const result = await book({ ...approved, priorSeries: undefined });
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+  });
+
+  test('an approved booking never buys road times (no paid lookup from a card); the HTTP path still does', async () => {
+    const buy = jest.spyOn(require('../services/scheduling/save-road-buy'), 'buyRoadsBeforeSave').mockResolvedValue(undefined);
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'customers'
+      ? chain({ id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null, latitude: 27.4, longitude: -82.5 })
+      : base(table)));
+    expect((await book(approved)).status).toBe(201);
+    expect(buy).not.toHaveBeenCalled();
+    expect((await book(null)).status).toBe(201);
+    expect(buy).toHaveBeenCalledTimes(1);
+  });
+
+  test('a prepay term the post-commit refresh would touch rolls the booking back', async () => {
+    refreshable = [{ id: 'term-1', status: 'active', term_end: '2099-01-01' }];
+    const result = await book(approved);
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/prepay term/);
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test('approvedBooking is internal: one posted in the HTTP body is ignored, and the handler books as before', async () => {
+    const result = await book(null, { ...oneOff, approvedBooking: { dates: ['2000-01-01'], price: 1, technicianId: 'nobody' } });
+    expect(result.status).toBe(201);
+    expect(AnnualPrepayRenewals.refreshableTermsForCustomer).not.toHaveBeenCalled();
+  });
+});
