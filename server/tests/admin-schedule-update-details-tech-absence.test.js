@@ -338,6 +338,13 @@ describe('PUT /:id/update-details — technician shift hours (office paths warn,
   const dayLines = (body) => (body.warnings || []).filter((w) => /shift is|does not work/.test(w));
   const line = (end) => `Test Tech's shift is 8:00 AM to ${end}. This visit is outside those hours.`;
   const stored = () => setup({ svc: baseSvc({ technician_id: TECH_A }), absenceTechId: null, absenceDate: null });
+  // The day lines of one saved Edit of the stored visit (a refused save fails the test).
+  const savedLines = async (body) => {
+    stored();
+    const reply = await put('svc-1', body);
+    expect({ status: reply.status, error: reply.body.error }).toEqual({ status: 200, error: undefined });
+    return dayLines(reply.body);
+  };
 
   // The stored visit is 09:00 to 10:00, sixty minutes.
   test('gate on, a date move that keeps the row\'s hours onto a shift that ends before the visit does: written, and the reply says so', async () => {
@@ -383,13 +390,62 @@ describe('PUT /:id/update-details — technician shift hours (office paths warn,
     expect(dayLines(body)).toEqual([line('9:30 AM')]);
   });
 
-  test('gate on, a save that keeps the day and the technician is not asked (as for the day-off line)', async () => {
+  test('gate on, a save that keeps the day, the technician, the hours and the length is not asked', async () => {
     process.env.GATE_TECH_SHIFT_HOURS = 'true';
     techShift = ['08:00:00', '09:30:00'];
     stored();
-    const { status, body } = await put('svc-1', { scheduledDate: STORED_DATE, notes: 'gate code changed' });
+    // The modal sends the day, the hours and the length it holds with every save.
+    const { status, body } = await put('svc-1', { scheduledDate: STORED_DATE, windowStart: '09:00', windowEnd: '10:00', estimatedDuration: 60, notes: 'gate code changed' });
     expect(status).toBe(200);
     expect(dayLines(body)).toEqual([]);
+  });
+
+  // D4 part 3c: the day and the technician stay, the hours or the length change.
+  test('gate on, a save that changes only the hours is told when the shift does not hold the new hours', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    techShift = ['08:00:00', '12:00:00'];
+    stored();
+    const outside = await put('svc-1', { scheduledDate: STORED_DATE, windowStart: '13:00', windowEnd: '14:00' });
+    expect({ status: outside.status, lines: outside.body.warnings }).toEqual({ status: 200, lines: [line('12:00 PM')] });
+    expect(updateCalls.length).toBeGreaterThan(0);
+    // The hours alone, with no day in the request.
+    expect(await savedLines({ windowStart: '12:00', windowEnd: '13:00' })).toEqual([line('12:00 PM')]);
+    expect(await savedLines({ windowStart: '11:00', windowEnd: '12:00' })).toEqual([]);
+  });
+
+  test('gate on, a save that changes only the length is told when the longer visit ends after the shift', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    techShift = ['08:00:00', '10:30:00'];
+    // 09:00 plus 120 minutes ends at 11:00; plus 90 minutes at 10:30.
+    expect(await savedLines({ estimatedDuration: 120 })).toEqual([line('10:30 AM')]);
+    expect(await savedLines({ estimatedDuration: 90 })).toEqual([]);
+  });
+
+  test('gate on, a save that sends a new start alone is asked about the end it then stores, not the row\'s old end', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    techShift = ['08:00:00', '14:00:00'];
+    // 13:00 with the stored sixty minutes is 13:00 to 14:00. With the row's old 10:00 end the block would read as overnight.
+    expect(await savedLines({ windowStart: '13:00' })).toEqual([]);
+    techShift = ['08:00:00', '13:30:00'];
+    expect(await savedLines({ windowStart: '13:00' })).toEqual([line('1:30 PM')]);
+  });
+
+  // STORED_DATE (2099-07-01) is a Wednesday.
+  test('both gates on, an hours-only save on a day the technician does not work: no line', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    techWorkDays = [1, 2, 4, 5];
+    techShift = ['08:00:00', '12:00:00'];
+    expect(await savedLines({ windowStart: '13:00', windowEnd: '14:00' })).toEqual([]);
+    // The same save on a day the technician works is told.
+    techWorkDays = [1, 2, 3, 4, 5];
+    expect(await savedLines({ windowStart: '13:00', windowEnd: '14:00' })).toEqual([line('12:00 PM')]);
+  });
+
+  test('gate off: an hours-only save reads no technician and gives no line', async () => {
+    techShift = ['08:00:00', '12:00:00'];
+    expect(await savedLines({ windowStart: '13:00', windowEnd: '14:00' })).toEqual([]);
+    expect(trx.mock.calls.some(([table]) => table === 'technicians')).toBe(false);
   });
 
   test('gate off: the set hours are ignored', async () => {

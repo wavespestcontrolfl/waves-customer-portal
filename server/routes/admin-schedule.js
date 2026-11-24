@@ -16258,11 +16258,24 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             // non-null end and the visit went invisible to occupancy.
             updates.window_end = occEnd;
           }
+          const lengthChanged = updates.estimated_duration_minutes !== undefined
+            && Number(updates.estimated_duration_minutes) !== Number(occRow.estimated_duration_minutes);
+          // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): a save that changes the
+          // visit's hours or its length is told when the technician's shift does not
+          // hold the visit as this save leaves it: the locked row with this save's
+          // values. The shift line alone (`shiftOnly`): this save put no one on a new
+          // day, and a save that also changes the day or the technician was told
+          // above (the same line is not added twice). Gate off: no read.
+          if (!slotUnchanged || lengthChanged) {
+            const shiftLine = await require('../services/technician-eligibility').dayWarningFor(savedTechnicianId(updates, occRow), occDate, {
+              conn: trx, block: { ...occRow, ...updates }, shiftOnly: true,
+            });
+            if (shiftLine && !editWarnings.includes(shiftLine)) editWarnings.push(shiftLine);
+          }
           // A longer job or a different technician/order can break arrival
           // promises even when the nominal calendar block is unchanged.
           const arrivalRouteChanged = useArrivalWindows && (assignmentNeedsChange
-            || (updates.estimated_duration_minutes !== undefined
-              && Number(updates.estimated_duration_minutes) !== Number(occRow.estimated_duration_minutes))
+            || lengthChanged
             || (updates.route_order !== undefined && updates.route_order !== occRow.route_order));
           if ((!slotUnchanged || arrivalRouteChanged) && occDate && occStart && occEnd) {
             const adminMoveClash = await findConflictingVisits({
