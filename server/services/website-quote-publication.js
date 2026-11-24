@@ -120,4 +120,19 @@ async function publishInTransaction(trx, { estimateId, leadId, engineInput, engi
   return { token };
 }
 
-module.exports = { publishWebsiteQuote };
+// The provider accepted the text that carries a website quote's link: the customer
+// was reached, which is the delivery evidence the booked-win reclaim anchors on
+// (estimate-conversion-guard.js). Recorded under deliveryState as its OWN key, never
+// firstDeliveredAt: that stamp feeds the lead-reach metrics and the delivery watchers,
+// which read a stamp as a PERSON's real handoff. First text wins; later ones keep it.
+async function recordWebsiteLinkTexted(estimateId, at = new Date(), conn = db) {
+  await conn('estimates').where({ id: estimateId }).update({
+    estimate_data: conn.raw(
+      `jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{deliveryState}', COALESCE(estimate_data->'deliveryState', '{}'::jsonb)
+        || jsonb_build_object('websiteLinkTextedAt', COALESCE(estimate_data #>> '{deliveryState,websiteLinkTextedAt}', ?::text)), true)`,
+      [at.toISOString()],
+    ),
+  });
+}
+
+module.exports = { publishWebsiteQuote, recordWebsiteLinkTexted };

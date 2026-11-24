@@ -114,8 +114,9 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
 
   async function completedVisit(trx, customerId, completedAt, createdAt = completedAt) {
     const paid = await trx('services').whereNot({ service_key: 'lawn_inspection' }).first('id');
+    const visitId = randomUUID();
     await trx('scheduled_services').insert({
-      id: randomUUID(),
+      id: visitId,
       customer_id: customerId,
       service_id: paid.id,
       service_type: 'Lawn Care',
@@ -126,6 +127,7 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
       completed_at: completedAt,
       created_at: createdAt,
     });
+    return visitId;
   }
 
   const row = (id) => mockTransaction('estimates').where({ id }).first();
@@ -559,6 +561,66 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect((await row(lateId)).disposition).toBe('expired_viewed');
     expect((await row(nullId)).disposition).toBe('expired_viewed');
     expect((await row(okId)).disposition).toBe('converted_other_path');
+  });
+
+  test('(y) a completed visit whose closeout says nothing was performed (customer_declined) is not a conversion signal, for the reclaim or the open sweep', async () => {
+    const declinedVisit = async (cust, outcome) => {
+      const visitId = await completedVisit(mockTransaction, cust, sentPlus(30), sentPlus(20));
+      await mockTransaction('service_records').insert({
+        id: randomUUID(), customer_id: cust, scheduled_service_id: visitId, service_date: dateOnly(sentPlus(30)), service_type: 'Pest Control',
+        status: 'completed', structured_notes: JSON.stringify({ visitOutcome: outcome }),
+      });
+    };
+    const declined = await customer(mockTransaction);
+    const declinedId = await expiredEstimate(mockTransaction, declined);
+    await declinedVisit(declined, 'customer_declined');
+    const performed = await customer(mockTransaction);
+    const performedId = await expiredEstimate(mockTransaction, performed);
+    await declinedVisit(performed, 'completed');
+
+    // The open sweep shares the signal: a declined visit does not archive a live estimate as converted.
+    const liveDeclined = await customer(mockTransaction);
+    const liveDeclinedId = await expiredEstimate(mockTransaction, liveDeclined, { status: 'viewed', expires_at: null, disposition: null, disposition_source: null, disposition_at: null });
+    await declinedVisit(liveDeclined, 'inspection_only');
+    const livePerformed = await customer(mockTransaction);
+    const livePerformedId = await expiredEstimate(mockTransaction, livePerformed, { status: 'viewed', expires_at: null, disposition: null, disposition_source: null, disposition_at: null });
+    await declinedVisit(livePerformed, 'completed');
+
+    await guard.reclaimExpiredConvertedEstimates();
+    await guard.archiveConvertedOpenEstimates();
+
+    expect((await row(declinedId)).disposition).toBe('expired_viewed');
+    expect((await row(performedId)).disposition).toBe('converted_other_path');
+    expect((await row(liveDeclinedId)).archived_at).toBeNull();
+    expect((await row(livePerformedId)).archived_at).not.toBeNull();
+  });
+
+  test('(z) a website quote whose link was texted (deliveryState.websiteLinkTextedAt) has its delivery anchor; one never texted has none', async () => {
+    const { recordWebsiteLinkTexted } = require('../services/website-quote-publication');
+    const published = new Date('2026-10-01T12:00:00Z');
+    const mk = async () => {
+      const cust = await customer(mockTransaction);
+      const id = await expiredEstimate(mockTransaction, cust, {
+        source: 'quote_wizard', created_at: published, sent_at: published, expires_at: new Date('2026-10-08T12:00:00Z'),
+      });
+      await paidInvoice(mockTransaction, cust, { paidAt: new Date('2026-10-20T12:00:00Z') });
+      return id;
+    };
+    const texted = await mk();
+    const never = await mk();
+    const textedAt = new Date('2026-10-01T12:01:00Z');
+    await recordWebsiteLinkTexted(texted, textedAt, mockTransaction);
+    // A second text keeps the first time.
+    await recordWebsiteLinkTexted(texted, new Date('2026-10-02T12:00:00Z'), mockTransaction);
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    const stored = await row(texted);
+    expect(stored.estimate_data.deliveryState.websiteLinkTextedAt).toBe(textedAt.toISOString());
+    expect(stored.disposition).toBe('converted_other_path');
+    expect((await row(never)).disposition).toBe('expired_viewed');
+    // The lead-reach stamp is untouched: this is not a person's handoff.
+    expect(stored.estimate_data.deliveryState.firstDeliveredAt).toBeUndefined();
   });
 
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {
