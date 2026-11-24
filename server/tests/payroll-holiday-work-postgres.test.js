@@ -438,6 +438,29 @@ postgres('payroll holiday work premium', () => {
     expect((await holidayWorkByDay(trx, W1, addDays(W1, 6))).get(id).days).toEqual([{ workDate: TUE, minutes: 120 }]);
   });
 
+  it('keeps the meal evidence on the check when the meal takes all the holiday minutes: no premium, premium columns null', async () => {
+    // A 40 minute shift on the holiday that is all one recorded 40 minute meal: nothing is left to earn the premium, yet the
+    // meal the split read is on the frozen check.
+    const id = await tech('Sample Alpha');
+    await approved(id, W1, 0.5);
+    await shift(id, `${W1}T08:00`, `${W1}T08:40`, { meal: 40 });
+    const [meal] = await trx('time_entries').insert({
+      technician_id: id, entry_type: 'break', status: 'completed', duration_minutes: '40.00',
+      clock_in: parseETDateTime(`${W1}T08:00`), clock_out: parseETDateTime(`${W1}T08:40`),
+    }).returning('id');
+    await offDay(id, W1, 10);
+    const created = (await draft(W1)).body.run;
+    const check = byName(created, 'Sample Alpha');
+    expect(check).not.toHaveProperty('holidayWorkPremiumCents');
+    const done = (await finalize(created.id)).body.run;
+    const stored = await trx('payroll_checks').where({ id: byName(done, 'Sample Alpha').id })
+      .first('holiday_work_minutes', 'holiday_work_premium_cents', trx.raw("calc_snapshot->'holidayWorkMeals' AS meals"), trx.raw("calc_snapshot->'holidayWorkDays' AS days"));
+    expect(stored.holiday_work_minutes).toBeNull();
+    expect(stored.holiday_work_premium_cents).toBeNull();
+    expect(stored.days).toBeNull();
+    expect(stored.meals).toEqual([{ workDate: W1, id: meal.id, from: parseETDateTime(`${W1}T08:00`).toISOString(), to: parseETDateTime(`${W1}T08:40`).toISOString(), minutes: 40 }]);
+  });
+
   it('the fallback is per work date: a holiday summary with no shift entries still pays beside a measured shift', async () => {
     const id = await tech('Sample Alpha');
     await approved(id, W1, 12);

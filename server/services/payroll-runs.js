@@ -344,7 +344,8 @@ function buildCheck({
       ...bankSnapshot(tech),
       // The paid minutes worked on each holiday, frozen with the check: Tech Rewards dates the premium by them.
       // and the recorded meals its split read (payroll-holiday-work.js), so the frozen check shows what it used
-      ...(withHolidayWork ? { holidayWorkDays: tech.holiday_work_days, holidayWorkMeals: tech.holiday_work_meals || [] } : {}),
+      ...(withHolidayWork ? { holidayWorkDays: tech.holiday_work_days, holidayWorkMeals: tech.holiday_work_meals || [] }
+        : (withTimeOff && (tech.holiday_work_meals || []).length ? { holidayWorkMeals: tech.holiday_work_meals } : {})),
     }),
     pay_method: tech.pay_method || 'check',
     status: 'draft',
@@ -749,7 +750,9 @@ async function timeOffByTechnician(conn, start, end) {
 function rowWithHolidayWork(row, byTechnician) {
   const found = byTechnician.get(row.technician_id) || { days: [], meals: [] };
   const capped = capHolidayDays(found.days, Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0));
-  return capped.minutes > 0 ? { ...row, holiday_work_minutes: capped.minutes, holiday_work_days: capped.days, holiday_work_meals: found.meals } : row;
+  if (capped.minutes > 0) return { ...row, holiday_work_minutes: capped.minutes, holiday_work_days: capped.days, holiday_work_meals: found.meals };
+  // no premium (a meal took all the holiday minutes): the meals read are still kept on the check as evidence, the premium columns stay null
+  return found.meals.length ? { ...row, holiday_work_meals: found.meals } : row;
 }
 
 // Year-to-date before a pay date, in cents: finalized, non-voided checks of the same calendar

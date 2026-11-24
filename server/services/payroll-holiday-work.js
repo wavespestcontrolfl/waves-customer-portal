@@ -187,7 +187,8 @@ function holidayWorkDetailForWeek({ dates, shifts, breaks = [], daily, holidays 
     for (const part of split.parts) if (part.holiday) add(part.holiday, part.premium);
   }
   const days = [...totals.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([workDate, units]) => ({ workDate, minutes: units / 100 }));
-  return { days, meals: days.length ? meals : [] };
+  // the meals read are kept as evidence whether or not they leave a premium (a meal can take all the holiday minutes of a shift)
+  return { days, meals };
 }
 
 // The holiday minutes alone: [{ workDate, minutes }] (holidayWorkDetailForWeek).
@@ -249,7 +250,7 @@ async function holidayWorkByDay(conn, start, end) {
       daily: new Map(dailyRows.filter((r) => r.technician_id === id).map((r) => [r.work_date, r])),
       holidays: holidays.filter((h) => h.technician_id === id).map((h) => h.work_date),
     });
-    if (detail.days.length) out.set(id, detail);
+    if (detail.days.length || detail.meals.length) out.set(id, detail);
   }
   return out;
 }
