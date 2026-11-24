@@ -53,7 +53,7 @@ function objectAnswerProblem(value) {
 }
 
 async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
-  // Live model — GPT-5.5 (ROUTES.knowledgeAnswer). callClaude's callers
+  // Live model — GPT-5.6 Terra (ROUTES.knowledgeAnswer). callClaude's callers
   // (generateAssessmentRecommendations and the early call it may use,
   // prepareAssessmentRecommendations) strict-JSON.parse the result, so require
   // PARSEABLE JSON here: dispatch with jsonMode and return the normalized JSON string.

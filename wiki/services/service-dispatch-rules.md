@@ -65,7 +65,7 @@
 - **Hard rule:** Arborjet palm injection is Adam only — no exceptions
 
 ## German Roach Treatment
-- **Who:** Adam
+- **Who:** Adam today; the second tech after hire (pest is the second tech's line), Adam as backup
 - **License required:** Pest control
 - **Estimated time:** 60–90 min (full protocol — gel, IGR, crack/crevice)
 - **Recurring:** Book 14-day and 30-day follow-ups immediately at time of first service
@@ -73,7 +73,7 @@
 - **Flag:** Auto-schedule follow-up slot at booking
 
 ## Stinging Insect Removal
-- **Who:** Any tech for standard nests; Adam only for Aggressive Colony Surcharge jobs
+- **Who:** Adam today; after the second tech is hired, the second tech for standard nests and Adam for Aggressive Colony Surcharge jobs
 - **License required:** Pest control
 - **Estimated time:** 30–60 min
 - **Recurring:** No — one-time

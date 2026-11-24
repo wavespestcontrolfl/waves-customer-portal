@@ -73,7 +73,7 @@ function mapTriage(parsed) {
 }
 
 /**
- * AI-powered lead triage. Live model = GPT-5.5 (MODELS.ROUTES.leadClassify); on any
+ * AI-powered lead triage. Live model = GPT-5.6 Luna (MODELS.ROUTES.leadClassify, OPENAI_FAST); on any
  * miss it falls back to Claude (FLAGSHIP) so there is never a gap.
  * Extracts service interest, urgency, pest details, and generates a suggested SMS reply.
  */
