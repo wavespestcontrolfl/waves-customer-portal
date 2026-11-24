@@ -1653,6 +1653,7 @@ class SmartRebooker {
     // or the kept technician's shift does not hold it (outsideKeptShift).
     // A probe failure keeps the candidate (legacy behavior) — the commit-time
     // check still rejects a genuine clash.
+    let probeFailure = null;
     const clashesAt = async (dateStr, windowStart, windowEnd) => {
       if (outsideKeptShift(dateStr, windowStart, windowEnd)) return true;
       try {
@@ -1676,6 +1677,8 @@ class SmartRebooker {
         return clash.length > 0;
       } catch (err) {
         logger.warn(`[rebooker] suggestion occupancy probe failed for ${dateStr}: ${err.message}`);
+        // opts.strict (a read-only caller that must not offer an unchecked day): the failure is the caller's, not a clear day.
+        if (opts.strict === true) { probeFailure = err; throw err; }
         return false;
       }
     };
@@ -1773,6 +1776,8 @@ class SmartRebooker {
         serviceId, service, candidates: eligible, durationMinutes: effDuration,
         caller: opts.caller || null, clashesAt,
       });
+      // The ranker keeps the old list when anything throws, a strict probe failure included.
+      if (probeFailure) throw probeFailure;
       if (ranked) {
         return ranked.slice(0, 3).map((entry) => buildOption(entry.candidate, entry.window, entry.routeChecked
           ? { routeChecked: true, ...(Number.isFinite(Number(entry.slot?.detour_minutes))

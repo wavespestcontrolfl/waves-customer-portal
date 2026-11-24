@@ -123,7 +123,15 @@ const clashes = (taken, tech, date, start, end) => {
 async function dryDayFor(row, hourly, { day, today, dayOptions, taken }) {
   const length = row.visit.reach.endMin - row.visit.reach.startMin;
   // The finder probes the stop's own length, the span the weather check reads.
-  const options = await dayOptions(row.visit.id, length);
+  let options;
+  try {
+    options = await dayOptions(row.visit.id, length);
+  } catch (err) {
+    // The finder could not check the days (its occupancy probe failed, strict): no move can be named. That is the run's
+    // problem, not this visit's: nothing is frozen and the retry decides again.
+    err.planning = true;
+    throw err;
+  }
   for (const option of options || []) {
     const startMin = toMin(option?.suggestedWindow?.start);
     if (!option?.date || startMin == null || option.date <= day || dayOfWeek(option.date) === 0 || !inRainHorizon(option.date, today)) continue;
@@ -138,7 +146,7 @@ async function dryDayFor(row, hourly, { day, today, dayOptions, taken }) {
 // The finder is read-only. No caller: estimates only, never a paid road time. 'admin': a move by the office is not held
 // to the technician's shift, as the dispatch board's rain-out sheet.
 const defaultDayOptions = (serviceId, probeSpanMinutes) => require('../rebooker').findRescheduleOptions(serviceId, 'weather_rain', {
-  probeSpanMinutes, travelGap: true, caller: null, initiatedBy: 'admin',
+  probeSpanMinutes, travelGap: true, caller: null, initiatedBy: 'admin', strict: true,
 });
 
 /**
@@ -193,7 +201,9 @@ async function proposeFor(row, ctx) {
   // a stop over the cap is `cap` only when a valid move exists, else it keeps its true reason.
   const hourly = await read(row.visit.point.lat, row.visit.point.lng);
   if (!Array.isArray(hourly)) return { ...base, decision: 'none', reason: 'unread_forecast' };
-  const { wet } = rainMode.countWetHours(hourly, day);
+  const { wet, missing } = rainMode.countWetHours(hourly, day);
+  // A day whose unread hours could still make it wholly wet is not settled (the ads rain rule's open area): unread, not dry.
+  if (wet < rainMode.RAIN_HOURS && wet + missing >= rainMode.RAIN_HOURS) return { ...base, decision: 'none', reason: 'unread_forecast' };
   if (wet < rainMode.RAIN_HOURS) return { ...base, decision: 'none', reason: 'no_dry_hour' };
   const target = await dryDayFor(row, hourly, ctx);
   if (!target) return { ...base, decision: 'none', reason: 'no_dry_day' };
@@ -219,6 +229,7 @@ async function decideDay(rows, ctx) {
     try {
       proposal = await proposeFor(row, { ...ctx, taken, open: used < MAX_PROPOSALS });
     } catch (err) {
+      if (err.planning) throw err;
       logger.warn(`[schedule-rain-record] visit ${row.visit.id} proposal failed: ${err.message}`);
       proposal = { id: String(row.visit.id), start: row.start, decision: 'none', reason: 'error' };
     }
@@ -262,7 +273,7 @@ async function planDay({ now, conn, day, today, read, deps }) {
   // Every visit that could be read gave no reading: the forecast is down, not dry. A visit with no point is not one
   // that could be read.
   const eligible = decided.proposals.filter((p) => p.reason !== 'no_point').length;
-  const unread = decided.proposals.filter((p) => p.reason === 'unread_forecast').length;
+  const unread = decided.proposals.filter((p) => ['unread_forecast', 'error'].includes(p.reason)).length;
   const problem = eligible > 0 && unread === eligible ? `forecast unread for all ${unread} outdoor visit(s) on ${day}` : null;
   return { ...decided, problem };
 }

@@ -524,4 +524,56 @@ describe('audit fixes', () => {
     expect(daysOf(conn)[WED].score).toBeUndefined();
     expect(JSON.parse(conn.store[record.LAST_KEY]).error).toBe('scoring failed: points down');
   });
+
+  test('a finder that cannot check its days is a planning problem: nothing is frozen, the retry decides again', async () => {
+    const conn = fakeConn();
+    const bad = deps([stop()], { dayOptions: jest.fn(async () => { throw new Error('probe down'); }) });
+    const out = await run({ now: TUE_CUTOFF, conn, deps: bad, read: jest.fn(async () => hoursFor(ALL_DAY)) });
+    expect(out.problems).toEqual(['the run failed: probe down']);
+    expect(daysOf(conn)[WED]).toBeUndefined();
+    n = 0;
+    const good = deps([stop()], { dayOptions: jest.fn(async () => [{ date: THU, suggestedWindow: { start: '09:00' } }]) });
+    const retry = await run({ now: TUE_RETRY, conn, deps: good, read: jest.fn(async () => hoursFor(ALL_DAY)) });
+    expect(retry.problems).toEqual([]);
+    expect(daysOf(conn)[WED].cutoff.proposals[0].decision).toBe('day_move');
+  });
+
+  test('the real finder is asked strictly', async () => {
+    const findRescheduleOptions = jest.fn(async () => []);
+    jest.resetModules();
+    jest.doMock('../services/rebooker', () => ({ findRescheduleOptions }));
+    const fresh = require('../services/scheduling/rain-schedule-record');
+    const conn = fakeConn();
+    const d = deps([stop()]);
+    delete d.dayOptions;
+    await fresh.recordScheduleRain({ now: TUE_CUTOFF, conn, deps: d, read: jest.fn(async () => hoursFor(ALL_DAY)), fetchRain: jest.fn() });
+    jest.dontMock('../services/rebooker');
+    expect(findRescheduleOptions).toHaveBeenCalledWith('v01', 'weather_rain', expect.objectContaining({ strict: true, probeSpanMinutes: 60 }));
+  });
+
+  test('a day whose unread hours could still make it wholly wet is unread, not no_dry_hour', async () => {
+    const d = deps([stop()]);
+    d.rainOut.conflictsForTarget = jest.fn(() => [{ id: 'other' }]); // no open hour
+    // 3 wet work hours and the 16:00 hour unread: 3 + 1 reaches 4.
+    const hours = hoursFor({ [WED]: [13, 14, 15] }).filter((h) => !h.startTime.startsWith(`${WED}T16`));
+    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hours) });
+    expect(out.proposals[0]).toMatchObject({ decision: 'none', reason: 'unread_forecast' });
+    expect(d.dayOptions).not.toHaveBeenCalled();
+  });
+
+  test('a day where every visit failed to plan is a problem and freezes nothing', async () => {
+    const conn = fakeConn();
+    const broken = deps([stop(), stop()], { withCatalogKeys: jest.fn(async () => { throw new Error('catalog down'); }) });
+    const out = await run({ now: TUE_CUTOFF, conn, deps: broken, read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    expect(out.problems[0]).toMatch(/forecast unread for all 2 outdoor visit/);
+    expect(daysOf(conn)[WED]).toBeUndefined();
+    // A visit with no point stays out of the count: one error and one no-point visit is still every readable visit.
+    n = 0;
+    const mixed = deps([stop({ point: null }), stop()], {
+      withCatalogKeys: jest.fn(async (items) => { if (items[0].name === 'boom') throw new Error('x'); return items.map((i) => ({ name: i.name, serviceKey: i.serviceKey, findingsType: null })); }),
+    });
+    mixed.loadStops = jest.fn(async () => rainPass._test.groupStops([stop({ point: null, id: 'p1' }), stop({ id: 'p2', service_type: 'boom' })]));
+    const two = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: mixed, read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    expect(two.problems[0]).toMatch(/forecast unread for all 1 outdoor visit/);
+  });
 });
