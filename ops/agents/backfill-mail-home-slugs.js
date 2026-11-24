@@ -23,6 +23,12 @@ const EXECUTE = process.argv.includes('--execute');
 const server = (p) => path.join(__dirname, '..', '..', 'server', p);
 
 async function main() {
+  // From the Mac the private database host does not resolve: use the public URL the Postgres service provides, and
+  // stop with a clear message when only the private one is set.
+  if (process.env.DATABASE_PUBLIC_URL) process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
+  if (/\.railway\.internal\b/.test(process.env.DATABASE_URL || '')) {
+    throw Object.assign(new Error('only the private database URL is set: run it with the nested Postgres command above'), { code: 'PRIVATE_DB_URL' });
+  }
   const db = require(server('models/db'));
   const { slugCandidates } = require(server('services/mail/home-slug'));
   const { backfillPageSlugs } = require(server('services/mail/prospect-store'));
@@ -53,4 +59,4 @@ async function main() {
   }
 }
 
-main().catch((err) => { console.error(`backfill-mail-home-slugs failed: ${err.code || err.name || 'error'}`); process.exitCode = 1; });
+main().catch((err) => { console.error(`backfill-mail-home-slugs failed: ${err.code || err.name || 'error'}${err.code === 'PRIVATE_DB_URL' ? ` (${err.message})` : ''}`); process.exitCode = 1; });
