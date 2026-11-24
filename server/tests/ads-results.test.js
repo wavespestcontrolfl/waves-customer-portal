@@ -299,6 +299,26 @@ describe('adResults', () => {
     expect(rowOf(out, CAMP, '2026-10-05').paid_customers).toBe(0);
   });
 
+  test('repeat paid bookings count as booked, not as leads, and never take first-lead credit', async () => {
+    const repeat = (id, day) => lead({
+      id, customer_id: 'c1', lead_id: null, self_booked_appointment_id: `appt-${id}`, funnel_stage: 'booked',
+      campaign_id: 'camp-b', lead_date: day,
+    });
+    const conn = fakeConn({
+      ad_service_attribution: [
+        repeat('r1', '2026-10-01'),
+        repeat('r2', '2026-10-02'),
+        lead({ id: 'l1', lead_id: 'lead-1', customer_id: 'c1', lead_date: '2026-10-03' }),
+      ],
+      customers: [customer('c1')],
+      invoices: [invoice('c1', '2026-10-04T15:00:00Z', 10)],
+    });
+    const out = await adResults({ ...WINDOW, conn });
+    expect(rowOf(out, 'camp-b', '2026-10-01')).toMatchObject({ leads: 0, booked: 1, paid_customers: 0 });
+    expect(rowOf(out, 'camp-b', '2026-10-02')).toMatchObject({ leads: 0, booked: 1, paid_customers: 0 });
+    expect(rowOf(out, CAMP, '2026-10-03')).toMatchObject({ leads: 1, paid_customers: 1 });
+  });
+
   test('two leads on one day: the earlier-created lead gets the paid credit', async () => {
     const conn = fakeConn({
       ad_service_attribution: [

@@ -104,7 +104,7 @@ async function loadLeads(conn, since, until) {
       .whereNotNull('asa.campaign_id')
       .orWhere((paid) => wherePaidLead(paid, 'asa')))
     .select(
-      'asa.id', 'asa.campaign_id', 'asa.lead_date', 'asa.lead_source', 'asa.funnel_stage',
+      'asa.id', 'asa.campaign_id', 'asa.lead_date', 'asa.lead_id', 'asa.self_booked_appointment_id', 'asa.lead_source', 'asa.funnel_stage',
       'asa.source_call_id', 'asa.created_at', 'ac.campaign_name', 'ac.platform', 'l.first_name as lead_first_name',
       'l.last_name as lead_last_name', 'l.phone as lead_phone', 'l.email as lead_email',
       // The linked lead's current customer wins (it can be filled first, or reassigned); a row with no lead, or a
@@ -282,19 +282,15 @@ async function adResults({ since, until, conn = db } = {}) {
   };
 
   const counted = leads.filter((l) => !isTest(l));
-  // First-touch row per customer.
+  // First-touch row per customer. A repeat paid booking (recordPaidRepeatBookingAttribution: a self-booked
+  // appointment with no lead) is a booking, not a lead: it counts in Booked only and never wins first-lead credit.
   const firstLead = new Map();
   for (const lead of counted) {
+    const repeatBooking = !!lead.self_booked_appointment_id && !lead.lead_id;
     const key = lead.customer_id && String(lead.customer_id);
-    if (key && !firstLead.has(key)) firstLead.set(key, lead);
-    const day = dateOnlyString(lead.lead_date);
-    const row = rowFor(rows, {
-      campaignId: lead.campaign_id,
-      campaign: lead.campaign_name,
-      platform: lead.campaign_id ? lead.platform : lead.lead_source,
-      date: day,
-    });
-    row.leads += 1;
+    if (key && !repeatBooking && !firstLead.has(key)) firstLead.set(key, lead);
+    const row = leadRow(rows, lead, dateOnlyString(lead.lead_date));
+    if (!repeatBooking) row.leads += 1;
     if (lead.source_call_id) row.calls += 1;
     if (BOOKED_STAGES.includes(lead.funnel_stage)) row.booked += 1;
   }
