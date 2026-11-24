@@ -603,11 +603,11 @@ function jobCredit(stop, job, billed) {
   const unclear = invoiced && invoiced.unallocated.find((one) => !one.members);
   if (unclear) return toReview('multi_visit_job', unclear.reason);
   // A package priced on an invoice that other visits (outside the job) share cannot be credited by rule: its price is one slice of a
-  // split that moves with those visits. Every visit of it is $0 + needs review, and the owner sets the credit by hand.
+  // split that moves with those visits. Every visit of it is $0 + needs review, and the owner sets the credit in the preview.
   const inJob = new Set([job.root.id, ...job.planned]);
   const onInvoices = [...invoiceSharesOf(invoiced), ...((invoiced && invoiced.unallocated) || [])];
   if (onInvoices.some((one) => one.members.some((member) => !inJob.has(member.id)))) {
-    return toReview('multi_visit_job', 'The package is priced on an invoice shared with other visits: set its credit by hand.');
+    return toReview('multi_visit_job', 'The package is priced on an invoice shared with other visits: set its credit in the production share preview.');
   }
   // An invoice linked only to visits of the package IS the package price, once: its whole amount, not the root's share of it.
   const price = onInvoices.length ? onInvoices.reduce((sum, one) => sum + one.totalCents, 0)
@@ -708,7 +708,7 @@ async function weekStops(conn, technicianIds, weekStart) {
  *   ALREADY PAID  a visit already credited on such a check is already_paid ($0 + review).
  *   INVOICE       a stop priced from an invoice that is now linked to ANY visit already credited on such a check of another week (a
  *                 visit that is one of its members, or a paid row that recorded the invoice, so a late invoice or a relink is caught)
- *                 is $0 + review: "set its credit by hand". An invoice shared only by visits of THIS week splits live, as always.
+ *                 is $0 + review: "set its credit in the production share preview". An invoice shared only by visits of THIS week splits live, as always.
  *   PACKAGE       a package's total is FIXED at its first paid row (root visit, total, sold count, slot). A later visit credits
  *                 jobPartCents(fixed total, sold, its slot); a slot already paid or past the sold count is $0 + review. A package
  *                 priced on an invoice that visits OUTSIDE it also share is review for every visit (jobCredit); an invoice linked only
@@ -859,7 +859,7 @@ const review = (row, kind, reason) => ({ ...row, ...toReview(kind, reason) });
  * (the invoice ids linked to its visit, when it credits above $0) and `bases` (a package visit's { basisType: 'job', basisId,
  * totalCents, sold, slot }), and without the working fields.
  */
-function applyLedger(rows, paid) {
+function applyLedger(rows, paid, overrides = new Map()) {
   return rows.map((row) => {
     const done = settle(row);
     const clean = { ...done, invoices: done.creditCents > 0 ? done.linkedInvoices || [] : [], bases: done.bases || [] };
@@ -870,14 +870,22 @@ function applyLedger(rows, paid) {
 
   function settle(row) {
     if (paid.visits.has(row.visitId)) return alreadyPaid(row, paid.visits.get(row.visitId).weekStart);
+    // The owner's credit for this stop and week (stop override) replaces whatever the rules computed, review rows included. The
+    // invoices linked to the visit are still recorded with a paid row, so a later week of another visit of them is caught.
+    const set = overrides.get(row.visitId);
+    if (set) return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: [] };
     const { ledger } = row;
+    // A visit that was the first visit of a package a pay run fixed is that package's: credited on its own it would be paid twice.
+    if (paid.jobs.has(row.visitId) && !(ledger && ledger.job && ledger.job.rootId === row.visitId) && !row.needsReview && row.creditCents > 0) {
+      return review(row, 'package_paid_elsewhere', 'This visit was the first visit of a package a pay run already credited: set its credit in the production share preview.');
+    }
     if (!ledger) return row;
     if (ledger.invoices) {
       const weeks = ledger.invoices.flatMap((inv) => [
         ...(paid.invoices.get(inv.invoiceId) || []).map((one) => one.weekStart),
         ...inv.members.map((member) => (paid.visits.get(member.id) || {}).weekStart),
       ]).filter(Boolean).sort();
-      if (weeks.length) return review(row, 'invoice_paid_elsewhere', `This invoice also covers a visit paid in the week of ${weeks[0]}: set its credit by hand.`);
+      if (weeks.length) return review(row, 'invoice_paid_elsewhere', `This invoice also covers a visit paid in the week of ${weeks[0]}: set its credit in the production share preview.`);
       return row;
     }
     const { job } = ledger;
@@ -888,21 +896,23 @@ function applyLedger(rows, paid) {
       ...job.visits.map((id) => paid.visits.get(id)),
       ...(row.linkedInvoices || []).flatMap((id) => paid.invoices.get(id) || []),
     ].filter((one) => one && one.root !== job.rootId).sort((a, b) => (a.weekStart < b.weekStart ? -1 : 1))[0];
-    if (outside) return review(row, 'package_paid_elsewhere', `This package, or its invoice, was already credited outside the package in the week of ${outside.weekStart}: set its credit by hand.`);
+    if (outside) return review(row, 'package_paid_elsewhere', `This package, or its invoice, was already credited outside the package in the week of ${outside.weekStart}: set its credit in the production share preview.`);
     const was = paid.jobs.get(job.rootId);
     if (!was) {
       if (!(job.price > 0)) return review(row, 'multi_visit_job', "The job's first visit has no price on file.");
       return { ...row, creditCents: jobPartCents(job.price, job.sold, job.nth), bases: [{ basisType: 'job', basisId: job.rootId, totalCents: job.price, sold: job.sold, slot: job.nth }] };
     }
     if (job.nth > was.sold || was.slots.has(job.nth)) {
-      return review(row, 'basis_exhausted', 'This package slot was already credited, or is past the visits the package was sold with: set its credit by hand.');
+      return review(row, 'basis_exhausted', 'This package slot was already credited, or is past the visits the package was sold with: set its credit in the production share preview.');
     }
     return { ...row, creditCents: jobPartCents(was.totalCents, was.sold, job.nth), bases: [{ basisType: 'job', basisId: job.rootId, totalCents: was.totalCents, sold: was.sold, slot: job.nth }] };
   }
 }
 
 const invoiceIdsOf = (rows) => [...new Set(rows.flatMap((row) => [...(row.ledger && row.ledger.invoices ? row.ledger.invoices.map((inv) => inv.invoiceId) : []), ...(row.linkedInvoices || [])]))];
-const rootIdsOf = (rows) => [...new Set(rows.filter((row) => row.ledger && row.ledger.job).map((row) => row.ledger.job.rootId))];
+// Every visit of the week is looked up as a package root too: a visit that is the root of a package a pay run fixed (it may no longer be
+// a package) can never take a standalone credit.
+const rootIdsOf = (rows) => [...new Set(rows.flatMap((row) => [row.visitId, ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId] : [])]))];
 // The visits whose paid state the rules need: this week's, the roots of their packages, and every member visit of the invoices they
 // were priced from (so a member paid some other way is known whichever technicians' stops are read together).
 const visitIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
@@ -925,7 +935,7 @@ async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
   const inForce = settings === undefined ? await settingsFor(conn, technicianId, weekStart) : settings;
   const stops = await weekStops(conn, [technicianId], weekStart);
   const rows = await creditsOfStops(conn, technicianId, stops, inForce);
-  return applyLedger(rows, await paidOf(conn, rows, weekStart));
+  return applyLedger(rows, await paidOf(conn, rows, weekStart), await overridesOf(conn, weekStart));
 }
 
 /**
@@ -961,7 +971,7 @@ async function weekCreditsFor(conn, settingsById, weekStart) {
     }
   }
   const all = [...credits.values()].flatMap((one) => one.rows || []);
-  const done = applyLedger(all, await paidOf(conn, all, weekStart));
+  const done = applyLedger(all, await paidOf(conn, all, weekStart), await overridesOf(conn, weekStart));
   const byVisit = new Map(done.map((row) => [row.visitId, row]));
   for (const [id, one] of credits) if (one.rows) credits.set(id, { rows: one.rows.map((row) => byVisit.get(row.visitId)) });
   return credits;
@@ -975,13 +985,104 @@ async function weekCreditsFor(conn, settingsById, weekStart) {
 async function creditsOfWeek(conn, technicianId, weekStart, settings) {
   const settingsById = new Map();
   for (const id of await conn('technicians').where({ employment_type: 'w2' }).pluck('id')) {
-    const found = await settingsFor(conn, canonicalId(id), weekStart);
-    if (found) settingsById.set(canonicalId(id), found);
+    // Another employee's settings that cannot be read leave that employee out of the preview, not the selected one.
+    try {
+      const found = await conn.transaction((sp) => settingsFor(sp, canonicalId(id), weekStart));
+      if (found) settingsById.set(canonicalId(id), found);
+    } catch { /* not the selected employee: the run reports it */ }
   }
   settingsById.set(technicianId, settings);
-  const one = (await weekCreditsFor(conn, settingsById, weekStart)).get(technicianId);
+  let one = (await weekCreditsFor(conn, settingsById, weekStart)).get(technicianId);
+  // The shared facts are read for everyone together, so one unrelated employee's stop can fail them all. The selected employee is then
+  // read alone, as the pay run reads a week after fixing that employee's problem; a shared invoice across employees is split by the run.
+  if (one.error && settingsById.size > 1) one = (await weekCreditsFor(conn, new Map([[technicianId, settings]]), weekStart)).get(technicianId);
   if (one.error) throw new PayrollError(500, `The production share could not be worked out: ${one.error}`);
   return one.rows;
+}
+
+// ---------------------------------------------------------------- stop credit overrides
+
+/** The owner's credits for the stops of a pay week: Map of visit id -> { creditCents, reason }. */
+async function overridesOf(conn, weekStart) {
+  const rows = await conn('production_share_stop_overrides').where({ week_start: weekStart }).select('visit_id', 'credit_cents', 'reason');
+  return new Map(rows.map((row) => [canonicalId(row.visit_id), { creditCents: Number(row.credit_cents), reason: row.reason }]));
+}
+
+const overrideSchema = Joi.object({
+  technicianId: Joi.string().pattern(UUID_RE).required().error(new Error('Choose a technician')),
+  visitId: Joi.string().pattern(UUID_RE).required().error(new Error('Choose a stop')),
+  weekStart: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required().error(new Error('The week must be a date, YYYY-MM-DD')),
+  creditCents: Joi.number().integer().min(0).max(MAX_CENTS).required().error(new Error('Enter the credit as whole cents, $0 or more')),
+  reason: Joi.string().trim().min(1).max(500).required().error(new Error('Say why (up to 500 characters)')),
+});
+const overrideKeySchema = overrideSchema.fork(['creditCents', 'reason'], (field) => field.optional());
+
+async function guardOverride(trx, input) {
+  requireWeek(input.weekStart);
+  const technicianId = canonicalId(input.technicianId);
+  if (!(await trx('technicians').where({ id: technicianId }).first('id'))) throw new PayrollError(404, 'Technician not found.');
+  // Like the settings: a week a finalized check covers keeps the credits it was paid with.
+  const covered = await trx('payroll_checks as c').join('payroll_runs as r', 'r.id', 'c.run_id')
+    .where({ 'c.status': 'finalized', 'r.status': 'finalized', 'c.technician_id': technicianId, 'c.week_start': input.weekStart }).first('c.id');
+  if (covered) throw new PayrollError(409, 'This week is already paid. A paid week keeps the credits it was paid with: void the run to change them.');
+  return technicianId;
+}
+
+/**
+ * Sets the credit the owner decides for one stop in one pay week (the owner account's alone; the route checks it), replacing an earlier
+ * one. The stop must be a completed stop of that technician in that week. Refused with 409 once a finalized check covers the week.
+ * Under the payroll mutation lock, with a critical audit event.
+ */
+async function setStopOverride(input, actor, conn = db) {
+  const { value: v, error } = overrideSchema.validate(input || {}, { abortEarly: true, convert: true, allowUnknown: false });
+  if (error) throw new PayrollError(400, error.details ? error.details[0].message : error.message);
+  const actorId = (actor && typeof actor === 'object' ? actor.id : actor) || null;
+  const { recordAuditEvent } = require('./audit-log');
+  const { lockPayrollMutations } = require('./payroll-runs');
+  return conn.transaction(async (trx) => {
+    await lockPayrollMutations(trx);
+    const technicianId = await guardOverride(trx, v);
+    const visitId = canonicalId(v.visitId);
+    const stops = await weekStops(trx, [technicianId], v.weekStart);
+    if (!stops.some((stop) => canonicalId(stop.id) === visitId)) throw new PayrollError(400, 'That stop is not a completed stop of this technician in that week.');
+    const before = await trx('production_share_stop_overrides').where({ visit_id: visitId, week_start: v.weekStart }).first('credit_cents', 'reason');
+    await trx('production_share_stop_overrides').insert({
+      technician_id: technicianId, visit_id: visitId, week_start: v.weekStart, credit_cents: v.creditCents, reason: v.reason,
+      created_by: actorId, created_at: trx.fn.now(),
+    }).onConflict(['visit_id', 'week_start']).merge(['technician_id', 'credit_cents', 'reason', 'created_by', 'created_at']);
+    await recordAuditEvent({
+      trx, critical: true, actor_type: 'admin', actor_id: actorId,
+      action: 'payroll.production_share_stop_override_set', resource_type: 'production_share_stop_override', resource_id: visitId,
+      metadata: {
+        technician_id: technicianId, visit_id: visitId, week_start: v.weekStart, credit_cents: v.creditCents, reason: v.reason,
+        ...(before ? { before_credit_cents: Number(before.credit_cents), before_reason: before.reason } : {}),
+      },
+    });
+    return { technicianId, visitId, weekStart: v.weekStart, creditCents: v.creditCents, reason: v.reason };
+  });
+}
+
+/** Removes the owner's credit for a stop and week: the stop goes back to the rules. Same guards and audit as setStopOverride. */
+async function clearStopOverride(input, actor, conn = db) {
+  const { value: v, error } = overrideKeySchema.validate(input || {}, { abortEarly: true, convert: true, allowUnknown: false });
+  if (error) throw new PayrollError(400, error.details ? error.details[0].message : error.message);
+  const actorId = (actor && typeof actor === 'object' ? actor.id : actor) || null;
+  const { recordAuditEvent } = require('./audit-log');
+  const { lockPayrollMutations } = require('./payroll-runs');
+  return conn.transaction(async (trx) => {
+    await lockPayrollMutations(trx);
+    const technicianId = await guardOverride(trx, v);
+    const visitId = canonicalId(v.visitId);
+    const before = await trx('production_share_stop_overrides').where({ visit_id: visitId, week_start: v.weekStart }).first('credit_cents', 'reason');
+    if (!before) throw new PayrollError(404, 'No credit was set for that stop.');
+    await trx('production_share_stop_overrides').where({ visit_id: visitId, week_start: v.weekStart }).del();
+    await recordAuditEvent({
+      trx, critical: true, actor_type: 'admin', actor_id: actorId,
+      action: 'payroll.production_share_stop_override_cleared', resource_type: 'production_share_stop_override', resource_id: visitId,
+      metadata: { technician_id: technicianId, visit_id: visitId, week_start: v.weekStart, before_credit_cents: Number(before.credit_cents), before_reason: before.reason },
+    });
+    return { technicianId, visitId, weekStart: v.weekStart };
+  });
 }
 
 /**
@@ -1020,5 +1121,5 @@ async function previewWeek(technicianId, weekStart, conn = db) {
 
 module.exports = {
   allocateCents, BAR_TYPES, OWN_CALLBACK_DAYS, shareForWeek, jobPartCents, shiftDays, settingsFor, settingsHistory, saveSettings, weekCredits, weekCreditsFor, weekStops, creditsOfStops, paidLedger, applyLedger, loadCreditFacts,
-  previewWeek,
+  previewWeek, overridesOf, setStopOverride, clearStopOverride,
 };

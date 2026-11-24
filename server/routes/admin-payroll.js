@@ -61,6 +61,8 @@
  * PUT    /technicians/:id/week-minimum           { hours | null } the minimum paid hours of a full workweek (owner account).
  * GET    /production-share/preview?technicianId=&weekStart=   the week's production share credit, stop by stop (owner account; pays nothing).
  * PUT    /production-share/settings              { technicianId | null, fromWeek?, rateBps, barType, barCents, callbackStopValueCents } (owner account).
+ * PUT    /production-share/stop-override         { technicianId, visitId, weekStart, creditCents, reason } the owner's credit for a stop (owner account; 409 once the week is paid).
+ * DELETE /production-share/stop-override         { technicianId, visitId, weekStart } (body or query) the stop goes back to the rules.
  *                                    The allowance only warns; it never blocks an entry.
  * PUT    /technicians/:id/pto-payout-week        { weekStart | null, shownWeekStart | null, shownState }
  *                                    "Pay out the bank": the pay run for that week pays every hour the time-off
@@ -221,6 +223,19 @@ router.put('/production-share/settings', requireFullAccess, async (req, res) => 
   try {
     res.json({ settings: await productionShare.saveSettings(req.body, req.technicianId) });
   } catch (err) { fail(res, 'save the production share settings', err); }
+});
+
+// The owner sets the credit of a stop the rules cannot credit (a review row of the preview). 409 once the week is paid.
+router.put('/production-share/stop-override', requireFullAccess, async (req, res) => {
+  try {
+    res.json({ override: await productionShare.setStopOverride(req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set the credit of a stop', err); }
+});
+
+router.delete('/production-share/stop-override', requireFullAccess, async (req, res) => {
+  try {
+    res.json({ cleared: await productionShare.clearStopOverride({ ...req.query, ...(req.body || {}) }, req.technicianId) });
+  } catch (err) { fail(res, 'clear the credit of a stop', err); }
 });
 
 // A payout decides an employee's last wages (the handbook's two exceptions need the owner's judgment), so it

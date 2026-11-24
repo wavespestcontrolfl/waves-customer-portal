@@ -171,4 +171,58 @@ describe('Production share preview', () => {
     expect(previews()).toBe(1);
     expect(screen.queryByLabelText('Week summary')).toBeNull();
   });
+
+  describe('the credit the owner sets for a stop', () => {
+    const forms = (stops) => async () => {
+      const call = vi.fn(async (path) => (path.startsWith('/production-share/preview') ? answerFor(path, { stops }) : {}));
+      render(<ProductionSharePanel call={call} technicians={TECHS} />);
+      open();
+      await show(call);
+      return call;
+    };
+
+    it('a review row gets a Set credit form that sends cents and the reason, then reloads the week', async () => {
+      const call = await forms(PREVIEW.stops)();
+      // only the review stop has the form
+      expect(screen.getAllByRole('form', { name: 'Set the credit of this stop' })).toHaveLength(1);
+      const set = screen.getByRole('button', { name: 'Set credit' });
+      expect(set).toBeDisabled();
+      fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '45.50' } });
+      expect(set).toBeDisabled(); // a reason is required
+      fireEvent.change(screen.getByLabelText('Reason'), { target: { value: ' checked the invoice ' } });
+      fireEvent.click(set);
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', expect.anything()));
+      expect(call.mock.calls.find(([path]) => path === '/production-share/stop-override')[1]).toEqual({
+        method: 'PUT', body: { technicianId: 'tech-a', visitId: 'v2', weekStart: '2026-09-14', creditCents: 4550, reason: 'checked the invoice' },
+      });
+      await waitFor(() => expect(call).toHaveBeenLastCalledWith('/production-share/preview?technicianId=tech-a&weekStart=2026-09-14'));
+    });
+
+    it('shows the server refusal (a paid week) and keeps the form', async () => {
+      const call = vi.fn(async (path) => {
+        if (path === '/production-share/stop-override') throw new Error('This week is already paid.');
+        return answerFor(path);
+      });
+      render(<ProductionSharePanel call={call} technicians={TECHS} />);
+      open();
+      await show(call);
+      fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '10' } });
+      fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'why' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Set credit' }));
+      expect(await screen.findByText('This week is already paid.')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Set credit' })).toBeInTheDocument();
+    });
+
+    it('a stop the owner set shows Clear; a stop a pay run already paid shows no form', async () => {
+      const call = await forms([
+        { visitId: 'v3', workDate: '2026-09-15', serviceType: 'Pest Control', kind: 'owner_set', creditCents: 4550, reason: 'Set by the owner: checked', needsReview: false, refundCents: 0 },
+        { visitId: 'v4', workDate: '2026-09-16', serviceType: 'Pest Control', kind: 'already_paid', creditCents: 0, reason: 'Already paid in the week of 2026-09-07', needsReview: true, refundCents: 0 },
+      ])();
+      expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Clear the credit I set' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
+        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v3', weekStart: '2026-09-14' },
+      }));
+    });
+  });
 });

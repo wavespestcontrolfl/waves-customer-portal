@@ -109,7 +109,7 @@ postgres('production share pay line', () => {
   const api = async (method, path, { body, raw = false } = {}) => {
     const response = await fetch(`${baseUrl}${path}`, {
       method,
-      headers: { 'content-type': 'application/json', 'x-test-admin': ADMIN_ID },
+      headers: { 'content-type': 'application/json', 'x-test-admin': ADMIN_ID, 'x-test-email': 'contact@wavespestcontrol.com' },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (raw) return { status: response.status, text: await response.text() };
@@ -328,6 +328,146 @@ postgres('production share pay line', () => {
     // 4 shifts: $4,280.00 - $3,600.00 = $680.00 above; 15% = $102.00
     expect(byName(fresh, 'Sample Alpha').productionShareCents).toBe(10200);
     expect((await finalize(created.id)).body.run.status).toBe('finalized');
+  });
+
+  describe('the credit the owner sets for a stop (stop override)', () => {
+    const override = (body) => api('PUT', '/production-share/stop-override', { body });
+    const world = async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id);
+      await worked(id, W1, 40);
+      await stop(id, W1, '1260.00');
+      await stop(id, addDays(W1, 1), '1260.00');
+      const unpriced = await stop(id, addDays(W1, 2), null); // no price on file: review, $0
+      return { id, unpriced, key: { technicianId: id, visitId: unpriced, weekStart: W1 } };
+    };
+
+    it('a review stop credits what the owner set: the share, the snapshot and the stale draft follow, and a paid week refuses a change', async () => {
+      const { id, unpriced, key } = await world();
+      const created = (await draft(W1)).body.run;
+      expect(byName(created, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 252000 });
+      expect(byName(created, 'Sample Alpha').productionShareCents).toBe(0);
+      const shown = (await api('GET', `/runs/${created.id}`)).body.run;
+      const set = await override({ ...key, creditCents: 126000, reason: 'Checked the invoice by hand' });
+      expect(set.status).toBe(200);
+      expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced })).toEqual([
+        expect.objectContaining({ technician_id: id, credit_cents: '126000', reason: 'Checked the invoice by hand', created_by: ADMIN_ID }),
+      ]);
+      expect(await trx('audit_log').where({ action: 'payroll.production_share_stop_override_set' })).toHaveLength(1);
+      // the draft read before the change is stale, and finalize with its token is refused
+      expect((await api('GET', `/runs/${created.id}`)).body.run.stale).toBe(true);
+      expect((await finalize(created.id, shown.token)).status).toBe(409);
+      const fresh = byName((await api('GET', `/runs/${created.id}`)).body.run, 'Sample Alpha');
+      // 3 shifts: $3,780.00 - $2,700.00 = $1,080.00 above; 15% = $162.00
+      expect(fresh).toMatchObject({ productionShareCents: 16200 });
+      expect(fresh.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 378000 });
+      const snapshot = (await trx('payroll_checks').where({ id: fresh.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(snapshot.stops.find((row) => row.visitId === unpriced)).toMatchObject({ kind: 'owner_set', creditCents: 126000, needsReview: false });
+      expect((await finalize(created.id)).body.run.status).toBe('finalized');
+      // the week is paid: neither a change nor a clear is accepted
+      expect((await override({ ...key, creditCents: 1, reason: 'late' })).status).toBe(409);
+      expect((await api('DELETE', '/production-share/stop-override', { body: key })).status).toBe(409);
+      expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced }).first('credit_cents')).toMatchObject({ credit_cents: '126000' });
+    });
+
+    it('a cleared credit sends the stop back to the rules; overtime follows the share the credit makes', async () => {
+      const { key } = await world();
+      await override({ ...key, creditCents: 126000, reason: 'Checked' });
+      expect((await api('DELETE', '/production-share/stop-override', { body: key })).status).toBe(200);
+      expect(await trx('audit_log').where({ action: 'payroll.production_share_stop_override_cleared' })).toHaveLength(1);
+      expect((await api('DELETE', `/production-share/stop-override?${new URLSearchParams(key)}`)).status).toBe(404); // nothing left to clear
+      const back = byName((await draft(W1)).body.run, 'Sample Alpha');
+      expect(back.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 252000 });
+    });
+
+    it('refuses what is not a completed stop of that technician and week, a bad credit and a missing reason', async () => {
+      const { id, key } = await world();
+      const other = await tech('Sample Bravo');
+      expect((await override({ ...key, technicianId: other, creditCents: 100, reason: 'x' })).status).toBe(400);
+      expect((await override({ ...key, weekStart: addDays(W1, 7), creditCents: 100, reason: 'x' })).status).toBe(400);
+      expect((await override({ ...key, weekStart: addDays(W1, 1), creditCents: 100, reason: 'x' })).status).toBe(400); // not a Monday
+      expect((await override({ ...key, creditCents: -1, reason: 'x' })).status).toBe(400);
+      expect((await override({ ...key, creditCents: 10.5, reason: 'x' })).status).toBe(400);
+      expect((await override({ ...key, creditCents: 100, reason: '   ' })).status).toBe(400);
+      expect((await override({ ...key, technicianId: randomUUID(), creditCents: 100, reason: 'x' })).status).toBe(404);
+      expect(await trx('production_share_stop_overrides').where({ technician_id: id })).toEqual([]);
+    });
+
+    it('never beats a visit a pay run already paid: that stays already paid', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id);
+      await worked(id, W1, 40);
+      await threeShifts(id);
+      await finalize((await draft(W1)).body.run.id);
+      const paidVisit = (await trx('scheduled_services').where({ technician_id: id }).first('id')).id;
+      // the same visit comes up in another week with a credit the owner set there: the paid week still wins
+      const direct = productionShare.applyLedger(
+        [{ visitId: paidVisit, workDate: addDays(W1, 8), kind: 'priced', creditCents: 100, needsReview: false, ledger: null, linkedInvoices: [] }],
+        { visits: new Map([[paidVisit, { weekStart: W1, root: null }]]), invoices: new Map(), jobs: new Map() },
+        new Map([[paidVisit, { creditCents: 5000, reason: 'try' }]]),
+      );
+      expect(direct[0]).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true });
+    });
+  });
+
+  it('AUDIT :874: a visit that was the root of a package a pay run fixed, and is no longer a package, cannot take a standalone credit', async () => {
+    const id = await tech('Sample Alpha');
+    await settings(id, { bar_cents: 10000 });
+    const weeks = [W1, addDays(W1, 7)];
+    for (const week of weeks) await worked(id, week, 40);
+    const customerId = await customer();
+    const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+    // week 1: the package's FOLLOW-UP is completed first and fixes the package basis (root R, $2,000.00 total)
+    const root = await stop(id, weeks[1], '2000.00', customerId, pkg);
+    await stop(id, W1, '0.00', customerId, { ...pkg, followup_included: true, followup_source_service_id: root });
+    await trx('scheduled_services').where({ id: root }).update({ status: 'confirmed' });
+    await finalize((await draft(W1)).body.run.id);
+    // the root is done later and its package link is gone: it is a plain priced visit now
+    await trx('scheduled_services').where({ id: root }).update({ status: 'completed', service_type: 'General Pest Control', service_key_snapshot: 'pest_control' });
+    await trx('scheduled_services').where({ followup_source_service_id: root }).update({ followup_source_service_id: null, followup_included: false });
+    const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
+    expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+    const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+    expect(snapshot.stops.find((row) => row.visitId === root)).toMatchObject({ kind: 'package_paid_elsewhere', creditCents: 0, needsReview: true });
+  });
+
+  describe('AUDIT :977: the preview of one employee is not broken by another employee', () => {
+    const world = async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id);
+      await worked(id, W1, 40);
+      await threeShifts(id);
+      await settings(await tech('Sample Bravo'));
+      return id;
+    };
+    // The connection the service reads through, with its transaction() refusing the first `times` calls whose callback mentions `marker`.
+    const failing = (marker, times) => {
+      const original = trx.transaction.bind(trx);
+      let left = times;
+      mockConnection = new Proxy(trx, {
+        get: (target, key) => (key === 'transaction'
+          ? (work, ...rest) => (typeof work === 'function' && work.toString().includes(marker) && left-- > 0
+            ? Promise.reject(new Error('another employee cannot be read'))
+            : original(work, ...rest))
+          : Reflect.get(target, key)),
+      });
+    };
+
+    it('another employee whose settings cannot be read is left out of the preview', async () => {
+      const id = await world();
+      failing('settingsFor', 99); // every read of ANY employee's settings in the loop fails; the selected one is read before it
+      const shown = await api('GET', `/production-share/preview?technicianId=${id}&weekStart=${W1}`);
+      expect(shown.status).toBe(200);
+      expect(shown.body).toMatchObject({ creditedCents: 378000, shareCents: 16200 });
+    });
+
+    it('facts that cannot be read for everyone fall back to the selected employee alone, instead of failing the preview', async () => {
+      const id = await world();
+      failing('loadCreditFacts', 1); // the grouped read fails once; the selected employee is read alone
+      const shown = await api('GET', `/production-share/preview?technicianId=${id}&weekStart=${W1}`);
+      expect(shown.status).toBe(200);
+      expect(shown.body).toMatchObject({ creditedCents: 378000, shareCents: 16200 });
+    });
   });
 
   it('a stop that moves to another price with the same share still makes the draft stale', async () => {
@@ -806,7 +946,7 @@ postgres('production share pay line', () => {
       const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
       expect(snapshot.stops.find((row) => row.visitId === followUp)).toMatchObject({ kind: 'multi_visit_job', creditCents: 0, needsReview: true });
       const locked = await productionSharePay.readInputsUnderLock(trx, W2);
-      expect(locked.get(id).stops.find((row) => row.visitId === followUp).reason).toContain('set its credit by hand');
+      expect(locked.get(id).stops.find((row) => row.visitId === followUp).reason).toContain('set its credit in the production share preview');
     });
 
     it('AUDIT :86: the draft (grouped read in one snapshot), the read under the lock and the preview compute the same rows for two technicians sharing an invoice', async () => {

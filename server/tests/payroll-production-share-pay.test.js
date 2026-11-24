@@ -326,7 +326,7 @@ describe('the credit rules (applyLedger)', () => {
   test('INVOICE: an invoice that a paid row recorded (a relink, a second visit of it) makes the stop $0 + review', () => {
     const out = one(plain('visit-2', ['inv-1']), paidOf({ invoices: { 'inv-1': '2026-09-14' } }));
     expect(out).toMatchObject({ kind: 'invoice_paid_elsewhere', creditCents: 0, needsReview: true, invoices: [], bases: [] });
-    expect(out.reason).toBe('This invoice also covers a visit paid in the week of 2026-09-14: set its credit by hand.');
+    expect(out.reason).toBe('This invoice also covers a visit paid in the week of 2026-09-14: set its credit in the production share preview.');
   });
 
   test('AUDIT :854 INVOICE: a LATE invoice covering a visit already credited from its own price is caught by that member visit', () => {
@@ -356,7 +356,7 @@ describe('the credit rules (applyLedger)', () => {
     const paid = paidOf({ jobs: { root: [200000, 2, [1, 2]] } });
     const out = one(job('replacement', 2), paid);
     expect(out).toMatchObject({ kind: 'basis_exhausted', creditCents: 0, needsReview: true });
-    expect(out.reason).toContain('set its credit by hand');
+    expect(out.reason).toContain('set its credit in the production share preview');
     expect(one(job('third', 3), paidOf({ jobs: { root: [200000, 2, [1]] } })).kind).toBe('basis_exhausted');
   });
 
@@ -403,6 +403,42 @@ describe('the credit rules (applyLedger)', () => {
     expect(one(job('followup', 2, { price: 0 }), paidOf({ jobs: { root: [200000, 2, [1, 2]] }, visits: { root: ['2026-09-14', 'root'] } })).kind).toBe('basis_exhausted');
     // with nothing fixed, no price is still review
     expect(one(job('root', 1, { price: 0 }))).toMatchObject({ kind: 'multi_visit_job', creditCents: 0, needsReview: true });
+  });
+
+  test('AUDIT :874 PACKAGE: a visit that was the root of a package a pay run fixed cannot take a standalone credit', () => {
+    const paid = paidOf({ jobs: { 'visit-7': [200000, 2, [2]] } }); // the follow-up was paid first; the root never was
+    const standalone = { visitId: 'visit-7', workDate: '2026-09-21', kind: 'priced', creditCents: 80000, needsReview: false, ledger: null, linkedInvoices: [] };
+    expect(one(standalone, paid)).toMatchObject({ kind: 'package_paid_elsewhere', creditCents: 0, needsReview: true });
+    // an invoice-priced one too
+    expect(one(plain('visit-7', ['inv-1']), paid).kind).toBe('package_paid_elsewhere');
+    // still a package: the package rule credits slot 1 of the fixed total
+    expect(one(job('visit-7', 1, { rootId: 'visit-7', visits: ['visit-7', 'followup'] }), paid)).toMatchObject({ kind: 'multi_visit_job', creditCents: 100000, needsReview: false });
+    // a $0 or review row is left alone, and a visit that is nobody's root is not touched
+    expect(one({ ...standalone, creditCents: 0 }, paid).kind).toBe('priced');
+    expect(one({ ...standalone, visitId: 'visit-8' }, paid)).toMatchObject({ kind: 'priced', creditCents: 80000 });
+  });
+
+  test('STOP OVERRIDE: the credit the owner set replaces the computed or review row, records the visit invoices, and never beats already paid', () => {
+    const set = new Map([['visit-2', { creditCents: 45000, reason: 'Checked the invoice' }]]);
+    const run = (row, paid = paidOf()) => productionShare.applyLedger([row], paid, set)[0];
+    // a review row (an invoice paid elsewhere) takes the owner's credit
+    expect(run(plain('visit-2', ['inv-1']), paidOf({ invoices: { 'inv-1': '2026-09-14' } }))).toMatchObject({
+      kind: 'owner_set', creditCents: 45000, needsReview: false, reason: 'Set by the owner: Checked the invoice', invoices: ['inv-1'], bases: [],
+    });
+    // a computed credit too, and $0 records no invoice
+    expect(run(plain('visit-2', ['inv-1']))).toMatchObject({ kind: 'owner_set', creditCents: 45000 });
+    expect(productionShare.applyLedger([plain('visit-2', ['inv-1'])], paidOf(), new Map([['visit-2', { creditCents: 0, reason: 'none' }]]))[0])
+      .toMatchObject({ kind: 'owner_set', creditCents: 0, invoices: [] });
+    // another visit is untouched
+    expect(run(plain('visit-3', ['inv-1']))).toMatchObject({ kind: 'priced', creditCents: 100000 });
+    // a visit a pay run already paid stays already paid
+    expect(run(plain('visit-2', ['inv-1']), paidOf({ visits: { 'visit-2': '2026-09-14' } }))).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true });
+  });
+
+  test('STOP OVERRIDE: the revision and the review token change with the credit the owner set, and with its kind alone', () => {
+    const base = (stop) => share.revisionOf(new Map([['tech-a', { settings: SETTINGS, stops: [{ ...stops([['v1', '2026-09-14', 100000]])[0], ...stop }] }]]));
+    expect(base({})).not.toBe(base({ kind: 'owner_set' }));
+    expect(base({ kind: 'owner_set' })).not.toBe(base({ kind: 'owner_set', creditCents: 90000 }));
   });
 
   test('a row that is already $0 and needs review, and a credit no invoice or job priced, are left alone', () => {

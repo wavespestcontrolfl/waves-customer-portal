@@ -20,6 +20,8 @@ const KIND_WORDS = {
   callback_own: 'Callback, own work', callback_other: "Callback, another technician's work", callback_review: 'Callback',
   free_assessment: 'Free assessment', free_visit: 'Free visit', unpriced: 'No price',
   not_performed: 'No work performed', unverified: 'No closeout record',
+  owner_set: 'Set by the owner', already_paid: 'Already paid', invoice_paid_elsewhere: 'Invoice paid elsewhere',
+  package_paid_elsewhere: 'Package paid elsewhere', basis_exhausted: 'Package visit used',
 };
 
 // '15' -> 1500, '12.5' -> 1250. Anything else -> null.
@@ -108,6 +110,43 @@ function SettingsForm({ call, technicians, technicianId, weekStart, current, gen
   </form>;
 }
 
+// The owner sets the credit of a stop the rules cannot credit, with a reason; a pay run uses it for that stop in that week. A paid week refuses.
+function StopCreditForm({ call, technicianId, weekStart, stop, onChanged }) {
+  const [credit, setCredit] = useState('');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const cents = dollarsToCents(credit);
+  const body = { technicianId, visitId: stop.visitId, weekStart };
+
+  async function run(method, payload) {
+    setBusy(true); setError('');
+    try {
+      await call('/production-share/stop-override', { method, body: payload });
+      onChanged();
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+  if (stop.kind === 'owner_set') {
+    return <div className="mt-1 flex flex-wrap items-center gap-2">
+      <Button type="button" variant="secondary" disabled={busy} onClick={() => run('DELETE', body)}>Clear the credit I set</Button>
+      {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+    </div>;
+  }
+  if (!stop.needsReview || stop.kind === 'already_paid') return null;
+  return <form className="mt-1 flex flex-wrap items-end gap-2" aria-label="Set the credit of this stop"
+    onSubmit={event => { event.preventDefault(); run('PUT', { ...body, creditCents: cents, reason: reason.trim() }); }}>
+    <Field label="Credit ($)">
+      <Input inputMode="decimal" autoComplete="off" value={credit} onChange={event => setCredit(event.target.value)} />
+    </Field>
+    <Field label="Reason">
+      <Input autoComplete="off" value={reason} onChange={event => setReason(event.target.value)} />
+    </Field>
+    <Button type="submit" variant="secondary" disabled={busy || cents == null || !reason.trim()}>Set credit</Button>
+    {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+  </form>;
+}
+
 function PreviewNotes({ preview }) {
   return <>
         {!preview.configured && <p className="m-0 text-ui-caption text-ink-secondary">No numbers are set for this week, so the share shows $0.</p>}
@@ -118,7 +157,7 @@ function PreviewNotes({ preview }) {
           Refunds of {centsToDollars(preview.unallocatedRefundCents)} are on shared invoices that cannot be split across their visits. They are not in any stop above.
         </p>}
         {preview.needsReview.length > 0 && <p role="status" className="m-0 text-ui-caption text-warn-fg">
-          {preview.needsReview.length} stop{preview.needsReview.length === 1 ? '' : 's'} need review. Each shows $0 until the office fixes it, so pay is never guessed.
+          {preview.needsReview.length} stop{preview.needsReview.length === 1 ? '' : 's'} need review. Each shows $0 until you set its credit below, so pay is never guessed.
         </p>}
   </>;
 }
@@ -204,7 +243,11 @@ export default function ProductionSharePanel({ call, technicians }) {
                 <TD>{stop.serviceType}</TD>
                 <TD>{KIND_WORDS[stop.kind] || stop.kind}</TD>
                 <TD nums align="right">{centsToDollars(stop.creditCents)}</TD>
-                <TD>{stop.needsReview && <span className="text-warn-fg">Needs review: </span>}{stop.reason}</TD>
+                <TD>
+                  {stop.needsReview && <span className="text-warn-fg">Needs review: </span>}{stop.reason}
+                  <StopCreditForm key={`${stop.visitId}:${stop.kind}:${stop.creditCents}`} call={call} technicianId={preview.technician.id}
+                    weekStart={preview.weekStart} stop={stop} onChanged={() => load(preview.technician.id, preview.weekStart)} />
+                </TD>
                 <TD nums align="right">{stop.refundCents > 0 ? centsToDollars(stop.refundCents) : ''}</TD>
               </TR>)}
             </TBody>
