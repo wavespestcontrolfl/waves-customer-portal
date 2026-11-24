@@ -64,6 +64,8 @@ describe('rainClassOf and decideCampaign', () => {
     expect(rainMode.rainClassOf({ metadata: { rain_class: 'indoor' } })).toBe('indoor');
     expect(rainMode.rainClassOf({ metadata: JSON.stringify({ route_line: 'pest' }) })).toBe('outdoor');
     expect(rainMode.rainClassOf({ metadata: {} })).toBeNull();
+    // A hand-set rain_class wins over a route line.
+    expect(rainMode.rainClassOf({ metadata: { route_line: 'pest', rain_class: 'indoor' } })).toBe('indoor');
     expect(rainMode.decideCampaign('outdoor', 'rain')).toBe('stop');
     expect(rainMode.decideCampaign('outdoor', 'dry')).toBe('base');
     expect(rainMode.decideCampaign('indoor', 'rain')).toBe('base');

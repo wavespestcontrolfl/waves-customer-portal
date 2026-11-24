@@ -20,7 +20,8 @@
  *   3. decides, for each Google campaign, what the rule would set: an 'outdoor' campaign stops (the budget run's 1%
  *      floor) on a rain day, an 'indoor' campaign runs at its base on a rain day and stops on a dry day, and any other
  *      campaign (the brand campaign) is left alone. A campaign's class is ad_campaigns.metadata.rain_class
- *      ('indoor' | 'outdoor'); a campaign marked with a route line (ads/route-fill.js routeLineOf) is outdoor.
+ *      ('indoor' | 'outdoor'), set by hand and always winning; with no rain_class, a campaign marked with a route
+ *      line (ads/route-fill.js routeLineOf) is outdoor.
  *   4. writes the run to system_settings 'ads.rain_mode.last' and 'ads.rain_mode.history' (last HISTORY_MAX), and the
  *      day's latest call to 'ads.rain_mode.days' (one row per sold day, kept DAYS_MAX), the record the ad results
  *      report joins on.
