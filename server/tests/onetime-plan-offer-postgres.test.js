@@ -1452,6 +1452,36 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
       });
 
+      test('a plan rate added between the morning check and the send: the handoff refuses, no reminder leaves', async () => {
+        await publishOffer();
+        await publishReminder();
+        const { customer, job } = await seedJob();
+        expect((await run({})).sent).toBe(1);
+        // The real transport runs the ledger's last check before its request (sendgrid-mail.js sendOne); the
+        // replacement does the same.
+        const providerRequest = jest.fn();
+        Sendgrid.sendOne.mockImplementationOnce(async ({ database, providerBoundaryCheck }) => {
+          await providerBoundaryCheck({ database });
+          providerRequest();
+          return { messageId: 'sg-sample' };
+        });
+        const realSend = require('../services/email-division/ledger').sendWithLedger;
+        // The rate lands after the reservation, on the handoff's own connection, right before the job's last check.
+        const summary = await runAt(dayAt(16), {
+          sendWithLedger: (args) => realSend({
+            ...args,
+            boundaryGuard: async (handoff) => {
+              await handoff('customers').where({ id: customer.id }).update({ monthly_rate: 35 });
+              return args.boundaryGuard(handoff);
+            },
+          }),
+        });
+        expect(summary.reminder).toMatchObject({ jobs: 1, held: 1, sent: 0, reasons: { account_changed: 1 } });
+        expect(providerRequest).not.toHaveBeenCalled();
+        const mail = await reminderMail(job.id);
+        expect(mail?.sent_at ?? null).toBeNull();
+      });
+
       test('the reminder template still a draft: the offer goes, and no reminder is read', async () => {
         await publishOffer();
         const { job } = await seedJob();
@@ -1487,6 +1517,19 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         rows = await officeRows(job.id);
         expect(rows).toHaveLength(1);
         expect(rows[0].metadata.autoCleared).toBe(true);
+      });
+
+      test('the customer turns off offers: the next morning withdraws the item', async () => {
+        await publishOffer();
+        const { customer, job } = await seedJob();
+        expect(await run(unpriced())).toMatchObject({ office: 1 });
+        const prefs = await trx('notification_prefs').where({ customer_id: customer.id }).first('customer_id');
+        if (prefs) await trx('notification_prefs').where({ customer_id: customer.id }).update({ marketing_offers: false });
+        else await trx('notification_prefs').insert({ customer_id: customer.id, marketing_offers: false });
+        // The job is held now (offers_off), and the open item closes.
+        expect(await runAt(tomorrow, unpriced())).toMatchObject({ office: 0, held: 1 });
+        const [row] = await officeRows(job.id);
+        expect(row.metadata.autoCleared).toBe(true);
       });
 
       test('shadow raises none', async () => {

@@ -167,6 +167,7 @@ function defaultDeps() {
     closePriceSettingsAlert,
     raiseOfficeItem,
     planStartAcceptRefusal,
+    assertPlanStartAcceptEligible: (...args) => require('./cancellation-resolution/restart').assertPlanStartAcceptEligible(...args),
   };
 }
 
@@ -935,11 +936,28 @@ async function autoPayGuard(trx, { customer, now, deps }) {
 
 // Every refusal the offer owns at the provider handoff, in the order the transaction reads them: the kill switch
 // (no lock), the estimate (takes the customer-comms lock, the last wait), Auto Pay, the opt-outs.
-async function handoffGuard(trx, { customer, jobId, estimateId, now, deps }) {
+// `accountGuard` (the reminder's) runs after the estimate's locks and before the Auto Pay read, the accept's own lock
+// order: comms key, then the preferences key and the customer row.
+async function handoffGuard(trx, { customer, jobId, estimateId, now, deps, accountGuard = null }) {
   if (!liveModeOn()) return { reason: OFFER_GATE_OFF, retryable: true };
   return (await offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps }))
+    || (accountGuard ? await accountGuard(trx) : null)
     || (await autoPayGuard(trx, { customer, now, deps }))
     || optedOutGuard(trx, { customer, deps });
+}
+
+// The plan-start accept's bar at the reminder's handoff, on the handoff's transaction: a plan rate or tier added
+// between the morning's check and the send holds the email. A refusal is held; a failed read settles the reservation
+// `failed`, and the job fails for the morning (the next one asks again).
+const ACCOUNT_CHANGED = 'ACCOUNT_CHANGED';
+async function acceptGuard(trx, { estimate, deps }) {
+  try {
+    await deps.assertPlanStartAcceptEligible(trx, estimate);
+    return null;
+  } catch (err) {
+    if (err?.code === 'PLAN_START_STATE_CHANGED') return { reason: ACCOUNT_CHANGED, retryable: true };
+    return { reason: 'ACCOUNT_RECHECK_FAILED', retryable: true };
+  }
 }
 
 // The opt-outs of Waves marketing again (notOptedOut), on the ledger's own transaction. The division's checks
@@ -964,7 +982,7 @@ async function optedOutGuard(trx, { customer, deps }) {
 // later morning, never "offered". `reserved` is a send in flight, or one a crash left: the ledger settles it on
 // a later morning. Any other row (sent) is the offer.
 // The handoff's own refusals (boundaryGuard): the job is held, whatever the ledger settled the row as.
-const HANDOFF_HOLDS = ['OFFER_ESTIMATE_GONE', 'OFFER_GATE_OFF', 'AUTOPAY_PAUSED', 'AUTOPAY_OFF', 'NO_CUSTOMER'];
+const HANDOFF_HOLDS = ['OFFER_ESTIMATE_GONE', 'OFFER_GATE_OFF', 'AUTOPAY_PAUSED', 'AUTOPAY_OFF', 'NO_CUSTOMER', 'ACCOUNT_CHANGED'];
 const EARLIER_ATTEMPT = Object.freeze({ skipped: 'send_dropped', reserved: 'send_in_flight' });
 async function settleOfferSend(out, { deps }) {
   if (HANDOFF_HOLDS.includes(out.reason)) return { verdict: 'held', reason: out.reason.toLowerCase() };
@@ -1069,9 +1087,10 @@ async function liveJob(job, { now, deps, priceSettings }) {
 
 // ---- The office item: a home the app cannot price (live only). ----
 // The job sends no email for such a home. The office prices it by hand and sends the plan quote, or decides not to.
-// One item per job (the dedupe key holds every row, open or done, so a later morning never raises it again). It
-// closes by itself once the customer has an estimate made after the item, or once the offer's last day has passed
-// (closeOfficeItems). A shadow run raises none: shadow sends nothing to anyone but the office samples.
+// One item per job (the dedupe key holds every row, open or done, so a later morning never raises a second one; it
+// refreshes the one row's terms). It closes by itself once the customer has an estimate made after the item, once the
+// offer's last day has passed, or once the customer is no longer one the offer may go to: opted out of offers, or no
+// longer a live customer (closeOfficeItems). A shadow run raises none: shadow sends nothing to anyone but the office samples.
 const OFFICE_ITEM_PREFIX = 'onetime-plan-offer:office:';
 const OFFICE_REASON_WORDS = Object.freeze({
   no_setup_fee: 'The plan price for this home has no setup fee, so the offer\'s "$0 setup" line would not be true.',
@@ -1108,6 +1127,10 @@ async function raiseOfficeItem({ job, customer, offerDay, reason }) {
     ].join(' '),
     bell: true,
     dedupeKey: officeItemKey(job.id),
+    // A later morning can list the job with another offer day (an included follow-up was done since): the row's text
+    // and its last day follow, quietly. Unchanged text changes nothing, and a done row stays done.
+    refreshOnDedupe: true,
+    ringOnRefresh: () => false,
     metadata: {
       source: 'onetime-plan-offer', kind: 'plan_offer_office', customerId: customer.id, jobId: String(job.id), lastDay, reason,
     },
@@ -1129,6 +1152,15 @@ async function planStartAcceptRefusal(database, estimate) {
   }
 }
 
+// The customer the item names is no longer one the offer may go to: not a live customer any more, or opted out of
+// Waves offers (the job's own opt-out read, optOutReason). The sentence that closes the item, or null.
+async function officeItemWithdrawn(customerId, deps) {
+  const account = () => deps.db('customers').where({ id: customerId });
+  const customer = await account().whereNull('deleted_at').first('id', 'email', 'active');
+  if (!customer || customer.active === false || !(await whereLiveCustomer(account()).first('id'))) return 'The customer is no longer active';
+  return (await optOutReason(deps.db, { customerId, email: customer.email, deps })) ? 'The customer turned off offers' : null;
+}
+
 // The open office items, closed when their job is handled: an estimate of the customer made after the item (a person
 // quoted the plan, or any other estimate went out), or the offer's last day is over. Sends nothing. A failure never
 // fails the run: the next morning reads the same rows.
@@ -1148,6 +1180,7 @@ async function closeOfficeItems({ now, deps }) {
       const quoted = await deps.db('estimates').where({ customer_id: meta.customerId })
         .where('created_at', '>', row.created_at).first('id');
       if (quoted) done = 'The customer has a new estimate';
+      else done = await officeItemWithdrawn(meta.customerId, deps);
     }
     if (done) await episodes.closeAdminAlertKeys(deps.db, [meta.dedupeKey], 'plan_offer_quoted', { now, resolution: done });
   }
@@ -1252,7 +1285,9 @@ async function reminderJob(job, { now, deps }) {
     now,
     expectedRecipientEmail: customer.email,
     guard: (trx) => optedOutGuard(trx, { customer, deps }),
-    boundaryGuard: (trx) => handoffGuard(trx, { customer, jobId: job.id, estimateId: estimate.id, now, deps }),
+    boundaryGuard: (trx) => handoffGuard(trx, {
+      customer, jobId: job.id, estimateId: estimate.id, now, deps, accountGuard: (handoff) => acceptGuard(handoff, { estimate, deps }),
+    }),
     template: { templateKey: REMINDER_TEMPLATE, payload, categories: [REMINDER_CATEGORY], linkEstimateId: estimate.id },
   });
   return settleOfferSend(out, ctx);

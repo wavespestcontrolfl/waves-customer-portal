@@ -144,6 +144,7 @@ function world({ tables = {}, jobs = [JOB], reminderJobs = [], ...deps } = {}) {
     closePriceSettingsAlert: jest.fn(async () => 0),
     raiseOfficeItem: jest.fn(async () => ({ id: 'n-office' })),
     planStartAcceptRefusal: jest.fn(async () => null),
+    assertPlanStartAcceptEligible: jest.fn(async () => undefined),
     ...deps,
   };
 }
@@ -1950,8 +1951,11 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
           subject: { type: 'customer', id: 'cust-1' },
         },
       });
-      // Raised once per job: a done row keeps its key, so a later morning never raises it again.
+      // Raised once per job: a done row keeps its key, so a later morning never raises a second one. A later morning
+      // with other terms (a moved offer day) rewrites the one row quietly.
       expect(options).not.toHaveProperty('dedupeOpenOnly');
+      expect(options.refreshOnDedupe).toBe(true);
+      expect(options.ringOnRefresh()).toBe(false);
       expect(options.detail).toContain('not below what the one-time job cost');
       expect(options.detail).toContain('good through Thu, Apr 4');
       expect(options.detail).toContain('No email went to the customer.');
@@ -1998,6 +2002,19 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       ]);
       const [read] = deps.db.queriesOf('estimates');
       expect(called(read, 'where', 'created_at', '>', '2030-03-08T14:00:00Z')).toBe(true);
+    });
+
+    test.each([
+      ['turned off offers', { notification_prefs: [{ marketing_offers: false }] }, 'The customer turned off offers'],
+      ['is no longer a customer', { customers: [] }, 'The customer is no longer active'],
+      ['was made inactive', { customers: [{ ...CUSTOMER, active: false }] }, 'The customer is no longer active'],
+    ])('the customer %s: the instruction is withdrawn', async (_name, change, resolution) => {
+      const deps = liveWorld({
+        jobs: [],
+        tables: { notifications: [item('open', { lastDay: '2030-04-04' })], estimates: [], ...change },
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys, , opts]) => [keys, opts.resolution])).toEqual([[[_test.officeItemKey('open')], resolution]]);
     });
 
     test('a failed read never fails the run', async () => {
@@ -2154,6 +2171,55 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(summary.sent).toBe(1);
       expect(summary.reminder).toEqual({ jobs: 0, sent: 0, held: 0, done: 0, failed: 0, reasons: {}, words_not_approved: true });
       expect(deps.db.queriesOf('scheduled_services as s').some(isReminderPageRead)).toBe(false);
+    });
+
+    describe('the accept check again at the provider handoff', () => {
+      const handoff = async (deps, estimate = ESTIMATE) => {
+        await run(deps);
+        const trx = fakeDb({ estimates: [estimate], customers: [CUSTOMER] });
+        return { verdict: await sendOf(deps).boundaryGuard(trx), trx };
+      };
+
+      test('on the handoff transaction, after the estimate is read: an account that still passes lets the email go', async () => {
+        const deps = remindWorld();
+        const { verdict, trx } = await handoff(deps);
+        expect(verdict).toBeNull();
+        expect(deps.assertPlanStartAcceptEligible).toHaveBeenCalledWith(trx, expect.objectContaining({ id: 'est-r' }));
+      });
+
+      test('a plan added after the morning check: held, retryable', async () => {
+        const deps = remindWorld({
+          assertPlanStartAcceptEligible: jest.fn(async () => { throw Object.assign(new Error('changed'), { code: 'PLAN_START_STATE_CHANGED' }); }),
+        });
+        expect((await handoff(deps)).verdict).toEqual({ reason: 'ACCOUNT_CHANGED', retryable: true });
+      });
+
+      test('a failed read: retryable, so the reservation settles failed and the next morning asks again', async () => {
+        const deps = remindWorld({
+          assertPlanStartAcceptEligible: jest.fn(async () => { throw Object.assign(new Error('busy'), { code: 'PLAN_START_RECHECK_RETRY' }); }),
+        });
+        expect((await handoff(deps)).verdict).toEqual({ reason: 'ACCOUNT_RECHECK_FAILED', retryable: true });
+      });
+
+      test('an estimate gone at the handoff answers first; the account is not read', async () => {
+        const deps = remindWorld();
+        expect((await handoff(deps, { ...ESTIMATE, archived_at: '2030-03-12T00:00:00Z' })).verdict).toEqual({ reason: 'OFFER_ESTIMATE_GONE', retryable: true });
+        expect(deps.assertPlanStartAcceptEligible).not.toHaveBeenCalled();
+      });
+
+      test('the ledger reports the refusal: the reminder is held', async () => {
+        const deps = remindWorld({
+          sendWithLedger: jest.fn(async () => ({ ok: false, sent: false, reason: 'ACCOUNT_CHANGED', row: { id: 'led-r' }, duplicate: false })),
+        });
+        expect(reminderOf(await run(deps))).toEqual({ ...R0, held: 1, reasons: { account_changed: 1 } });
+      });
+
+      test('the offer email has no account guard at its handoff', async () => {
+        const deps = liveWorld();
+        await run(deps);
+        await sendOf(deps).boundaryGuard(fakeDb({ estimates: [MINTED_ROW], customers: [CUSTOMER] }));
+        expect(deps.assertPlanStartAcceptEligible).not.toHaveBeenCalled();
+      });
     });
 
     test('the provider handoff refuses an estimate the customer can no longer open: held', async () => {
