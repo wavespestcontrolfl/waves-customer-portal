@@ -1223,7 +1223,7 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     const ledgerRow = (jobId) => trx('marketing_email_ledger').where({ idempotency_key: offerKey(jobId) }).first();
     const estimatesOf = (customer) => trx('estimates').where({ customer_id: customer.id }).orderBy('created_at', 'asc');
     const tomorrow = new Date(NOW.getTime() + 24 * HOUR);
-    const runAt = (at) => Offer.runOnetimePlanOfferJob({ now: at, deps: {} });
+    const runAt = (at, deps = {}) => Offer.runOnetimePlanOfferJob({ now: at, deps });
 
     // A job's offer terms by hand: the job's service was done `daysAgo` ET days ago.
     const { parseETDateTime } = require('../utils/datetime-et');
@@ -1800,7 +1800,10 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         const state = await stateOf(customer);
         expect(state.firstDeliveredAt).toBe(new Date(mail.sent_at).toISOString());
         expect(state.deliveredAt).toEqual([new Date(mail.sent_at).toISOString()]);
-        await runAt(new Date(NOW.getTime() + 21 * 24 * HOUR));
+        // A recorded delivery is filtered out in SQL: a later run finds nothing to write.
+        const writes = jest.fn(Offer._test.defaultDeps().writeOfferDelivery);
+        await runAt(new Date(NOW.getTime() + 21 * 24 * HOUR), { writeOfferDelivery: writes });
+        expect(writes).not.toHaveBeenCalled();
         expect(await stateOf(customer)).toEqual(state);
         expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
       });
@@ -1823,8 +1826,9 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         const offerAt = new Date(mail.sent_at).toISOString();
         expect(state).toMatchObject({ firstDeliveredAt: offerAt, lastDeliveredAt: resentAt, deliveredAt: [offerAt, resentAt] });
         expect(state.sentChannels.sort()).toEqual(['email', 'sms']);
-        // The staff resend stays the latest attempt's detail.
-        expect(state.channels?.email).toBeUndefined();
+        // The email's result joins the channel results; the staff resend stays the latest attempt.
+        expect(state.channels.email).toMatchObject({ ok: true, providerAccepted: true });
+        expect(state.attemptedAt).toBeUndefined();
       });
 
       test('a quote minted after the email left (a replacement for the same job) is not stamped: the email linked the first one', async () => {

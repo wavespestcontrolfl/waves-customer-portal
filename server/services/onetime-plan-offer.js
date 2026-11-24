@@ -837,11 +837,10 @@ async function writeOfferDelivery(database, {
     const newest = !prior.lastDeliveredAt || at > prior.lastDeliveredAt;
     const deliveryState = {
       ...prior,
-      // The latest attempt's details stay when a recovered handoff is an older one.
-      ...(newest ? {
-        attemptedAt: at,
-        channels: { ...prior.channels, email: { ok: true, providerAttempted: true, providerAccepted: true, provider: OFFER_TEMPLATE } },
-      } : {}),
+      // The email's own result joins the channel results (an SMS result stays beside it). An older handoff
+      // does not move the time of the latest attempt.
+      ...(newest ? { attemptedAt: at } : {}),
+      channels: { ...prior.channels, email: { ok: true, providerAttempted: true, providerAccepted: true, provider: OFFER_TEMPLATE } },
       sentChannels: [...new Set([...(prior.sentChannels || []), 'email'])],
       failedChannels: prior.failedChannels || [],
       firstDeliveredAt: earliest(prior.firstDeliveredAt, at),
@@ -1033,9 +1032,10 @@ async function mintAndSend(ctx, option) {
     // or write here never changes the verdict (the next morning finds the send confirmed and records it).
     try {
       const mail = await alreadyOffered(deps.db, job.id);
-      if (mail?.sent_at) {
+      // The estimate the accepted message linked, which an earlier attempt's message can name instead of this run's.
+      if (mail?.sent_at && mail.estimate_id) {
         await recordOfferDelivery(deps, {
-          customerId: customer.id, jobId: job.id, estimateId: minted.estimateId, deliveredAt: new Date(mail.sent_at),
+          customerId: customer.id, jobId: job.id, estimateId: mail.estimate_id, deliveredAt: new Date(mail.sent_at),
         });
       }
     } catch (err) {
@@ -1069,6 +1069,10 @@ async function reconcileOfferDeliveries({ now, deps }) {
     .where('m.template_key', OFFER_TEMPLATE)
     .whereNotNull('m.sent_at')
     .where('m.sent_at', '>', since)
+    // Not yet in the estimate's history, so the limit never counts the rows already recorded. The instant is spelled
+    // as toISOString spells it.
+    .whereRaw(`NOT jsonb_exists(COALESCE(e.estimate_data->'deliveryState'->'deliveredAt', '[]'::jsonb),
+      to_char(m.sent_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))`)
     .orderBy('m.sent_at', 'desc')
     .limit(RECONCILE_LIMIT)
     .select('m.estimate_id', 'm.sent_at', 'e.customer_id', 'e.estimate_data');

@@ -1508,7 +1508,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
     };
 
     test('a send the provider took: recorded on the minted estimate, with the provider\'s acceptance time', async () => {
-      const deps = liveWorld({ tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT }) } });
+      const deps = liveWorld({ tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT, estimate_id: 'est-1' }) } });
       expect(liveCounts(await run(deps))).toEqual({ ...ZERO, sent: 1 });
       expect(deps.writeOfferDelivery).toHaveBeenCalledTimes(1);
       expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, {
@@ -1518,11 +1518,23 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
 
     test('a send an earlier attempt owns and the ledger settled sent: recorded only when unstamped', async () => {
       const deps = liveWorld({
-        tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT }) },
+        tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT, estimate_id: 'est-1' }) },
         sendWithLedger: jest.fn(async () => ({ ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'sent' }, duplicate: true })),
       });
       expect(liveCounts(await run(deps))).toEqual({ ...ZERO, done: 1 });
       expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, expect.objectContaining({ estimateId: 'est-1' }));
+    });
+
+    test('the estimate is the one the accepted message linked (an earlier attempt\'s), not this run\'s; a message with no link records nothing', async () => {
+      const duplicate = jest.fn(async () => ({ ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'sent' }, duplicate: true }));
+      const earlier = liveWorld({
+        tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT, estimate_id: 'est-0' }) }, sendWithLedger: duplicate,
+      });
+      await run(earlier);
+      expect(earlier.writeOfferDelivery).toHaveBeenCalledWith(earlier.db, expect.objectContaining({ estimateId: 'est-0' }));
+      const unlinked = liveWorld({ tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT }) }, sendWithLedger: duplicate });
+      await run(unlinked);
+      expect(unlinked.writeOfferDelivery).not.toHaveBeenCalled();
     });
 
     test('a handoff that started and was lost (no acceptance time) is no confirmed delivery: nothing is recorded', async () => {
@@ -1545,7 +1557,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
 
     test('a failed record never fails the job: the email is out', async () => {
       const deps = liveWorld({
-        tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT }) },
+        tables: { email_messages: mailAfterSend({ id: 'm-1', sent_at: MAIL_SENT_AT, estimate_id: 'est-1' }) },
         writeOfferDelivery: jest.fn(async () => { throw new Error('write failed'); }),
       });
       expect(liveCounts(await run(deps))).toEqual({ ...ZERO, sent: 1 });
@@ -1594,6 +1606,8 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
         expect(called(read, 'where', 'm.template_key', OFFER_TEMPLATE)).toBe(true);
         expect(called(read, 'whereNotNull', 'm.sent_at')).toBe(true);
         expect(called(read, 'where', 'm.sent_at', '>', new Date(NOW.getTime() - 30 * 24 * HOUR))).toBe(true);
+        // Rows already recorded are filtered in SQL, before the limit.
+        expect(read.calls.some(([method, sql]) => method === 'whereRaw' && String(sql).includes('jsonb_exists'))).toBe(true);
         expect(called(read, 'orderBy', 'm.sent_at', 'desc')).toBe(true);
         expect(called(read, 'limit', 200)).toBe(true);
       });
