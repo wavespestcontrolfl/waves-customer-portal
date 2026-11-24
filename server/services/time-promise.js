@@ -496,7 +496,10 @@ function composeStartAt(row) {
 async function loadTimeDisplay(conn, rows, now = new Date()) {
   const out = new Map();
   const list = Array.isArray(rows) ? rows.filter((r) => r && r.id != null) : [];
-  const verdicts = await dayOnlyEligibility(conn, list.map((r) => r.id), now);
+  // Each row is pinned to the date it renders (pre-push Codex P1): a visit moved between the screen's read and this one
+  // keeps its hour, and an hour told for the rendered date is never dropped against a newer date.
+  const onDate = new Map(list.map((r) => [String(r.id), dateOnlyString(r.scheduled_date)]).filter(([, d]) => d));
+  const verdicts = await dayOnlyEligibility(conn, list.map((r) => r.id), now, { onDate });
   for (const r of list) {
     const { eligible, level, failed } = verdicts.get(r.id) || { eligible: false, level: 'hour' };
     const hours = hoursUntil(composeStartAt(r), now);

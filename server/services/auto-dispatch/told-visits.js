@@ -51,7 +51,7 @@ async function loadStopMembers(conn, ids) {
 function visitDateOf(value) {
   try {
     if (value == null || value === '') return null;
-    const day = require('../../utils/datetime-et').dateOnlyString(value);
+    const day = require('../../utils/date-only').dateOnlyString(value);
     return typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
   } catch {
     return null;
@@ -92,8 +92,11 @@ async function resolvePromises(conn, ids, now, { sameDateOnly = false } = {}) {
   // `sameDateOnly` may be the EXPECTED date (the date a confirmation replay renders, time-promise
   // dayOnlyReplayDecision): the filter then uses that date, and a visit observed on another date (or none) answers an
   // unknown-window promise, read as 'hour' (fail closed: the stale body is suppressed). Pre-push Codex P1, 2026-11-24.
-  const expected = typeof sameDateOnly === 'string' ? sameDateOnly : null;
+  // It may also be a Map<id, date> (a customer screen's rows, each rendered on its own date).
+  const expectedOf = (id) => (typeof sameDateOnly === 'string' ? sameDateOnly
+    : sameDateOnly instanceof Map ? sameDateOnly.get(String(id)) || null : null);
   return new Map(ids.map((id) => {
+    const expected = expectedOf(id);
     const stop = stopOf.get(String(id)) || [];
     if (expected && dateOf.get(String(id)) !== expected) {
       return [id, { visit_id: id, start_at: null, communicated_at: null, date_mismatch: true }];

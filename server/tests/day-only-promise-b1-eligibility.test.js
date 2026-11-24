@@ -345,19 +345,25 @@ describe('loadTimeDisplay', () => {
 
   describe('judged by the reads', () => {
     test('an eligible visit far out: the day only', async () => {
-      const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')] });
+      const conn = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-20' })], reminders: [office('s1')] });
       const out = await loadTimeDisplay(conn, [row('s1', '2026-11-20')], NOW);
       expect(out.get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
     });
 
+    test('a row rendered on a date the visit has left keeps the hour told for that date (codex P1)', async () => {
+      const told = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: Date.parse('2026-11-20T14:00:00Z') } };
+      const moved = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-21' })], reminders: [office('s1')], messages: [told] });
+      expect((await loadTimeDisplay(moved, [row('s1', '2026-11-20')], NOW)).get('s1')).toMatchObject({ showHour: true, level: 'hour' });
+    });
+
     test('an eligible visit inside the cutoff: the hour', async () => {
-      const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')] });
+      const conn = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-11' })], reminders: [office('s1')] });
       const out = await loadTimeDisplay(conn, [row('s1', '2026-11-11', '08:00:00')], NOW); // 18 h out (ET 08:00 = 13:00Z)
       expect(out.get('s1')).toMatchObject({ showHour: true, eligible: true });
     });
 
     test('an ineligible visit: the hour', async () => {
-      const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1', 'booking_new')] });
+      const conn = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-20' })], reminders: [office('s1', 'booking_new')] });
       const out = await loadTimeDisplay(conn, [row('s1', '2026-11-20')], NOW);
       expect(out.get('s1')).toEqual({ showHour: true, level: 'none', eligible: false });
     });
@@ -388,7 +394,7 @@ describe('loadTimeDisplay', () => {
 
     test('one bulk read for many rows', async () => {
       const ids = ['s1', 's2', 's3', 's4'];
-      const conn = fakeConn({ services: ids.map((id) => svc(id)), reminders: ids.map((id) => office(id)) });
+      const conn = fakeConn({ services: ids.map((id) => svc(id, { scheduled_date: '2026-11-20' })), reminders: ids.map((id) => office(id)) });
       const out = await loadTimeDisplay(conn, ids.map((id) => row(id, '2026-11-20')), NOW);
       expect([...out.values()].every((v) => v.showHour === false)).toBe(true);
       expect(conn.calls.appointment_reminders).toBe(1);
