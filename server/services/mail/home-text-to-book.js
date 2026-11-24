@@ -39,7 +39,6 @@ const { buildBaseSlug, hasUnitPart, streetWords, SLUG_RE, MAX_SLUG_LENGTH, STREE
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
 const { findOnlyKnownCallerCustomer, KNOWN_CALLER_PHONE_COLS } = require('../../utils/known-caller-phone');
 const { phoneIdentityKey } = require('../../utils/phone');
-const { contactPhoneSmsTrust } = require('../contact-notification-prefs');
 const { publicPortalUrl } = require('../../utils/portal-url');
 
 const LIST_KEY = 'new_home'; // services/mail/new-home-list.js LIST_KEY
@@ -187,29 +186,26 @@ function replyBody({ address, slug }) {
   return `Here's your Waves page for ${address}: ${publicPortalUrl()}/nh/${slug}\n\nReply STOP to opt out.`;
 }
 
-// The sender's customer, for the opt-out and consent checks. The webhook matches phones on their last ten digits, and so do the
-// helpers that classify a number as the holder's or a contact's and re-read the contact's own choice at the provider handoff
-// (contact-notification-prefs.js contactPhoneSmsTrust / contactPhoneDeclinesText). A customer therefore counts only when one of
-// its stored numbers IS the sender's NANP number (phoneIdentityKey: the same ten digits) AND no stored number merely shares those
-// last ten digits (an international holder or contact whose digits collide would be classified as the wrong person, skipping a
-// contact's opt-out): any such collision is refused. The webhook's primary match is verified first; otherwise (`knownContact`: a
-// record has the number as a secondary or service-contact phone, or the webhook's own match failed the check) the ONE customer
-// owning it is read and held to the same rule. null = no record claims the number (a lead). false = a record claims it that cannot
-// be confirmed as the sender's alone (two owners, a different or colliding number, or a failed read): no reply, consent unknown.
+// Who the sender is, for the opt-out and consent checks. Postcards go to new homeowners, so only two senders are answered:
+// a lead (no customer record claims the number) and a customer texting from its PRIMARY phone. A number that only a secondary
+// or service-contact slot holds, a failed or ambiguous lookup (two owners, a different owner than the webhook's match), or a
+// primary phone that another stored number of the customer merely shares the last ten digits with (an international number
+// would be classified as the wrong person) all get no reply and no claim: the text takes the ordinary path. The webhook
+// matches on the last ten digits, so the primary phone must equal the sender's NANP number (phoneIdentityKey) exactly.
+// null = a lead. false = no reply. Otherwise the customer's id.
 async function senderCustomerId(from, customer, knownContact) {
+  if (!customer) return knownContact ? false : null;
   const key = phoneIdentityKey(from);
-  const held = customer && phoneIdentityKey(customer.phone) === key;
-  if (!held && !customer && !knownContact) return null;
-  const row = held ? customer : await findOnlyKnownCallerCustomer(db, from, ['id', ...KNOWN_CALLER_PHONE_COLS]);
-  const stored = row ? KNOWN_CALLER_PHONE_COLS.map((col) => row[col]).filter(Boolean) : [];
-  const same = (number) => phoneIdentityKey(number) === key;
-  const collides = (number) => !same(number) && phoneIdentityKey(number) !== null && String(number).replace(/\D/g, '').slice(-10) === key.slice(-10);
-  return stored.some(same) && !stored.some(collides) ? row.id : false;
+  if (phoneIdentityKey(customer.phone) !== key) return false;
+  const row = await findOnlyKnownCallerCustomer(db, from, ['id', ...KNOWN_CALLER_PHONE_COLS]);
+  if (!row || row.id !== customer.id || phoneIdentityKey(row.phone) !== key) return false;
+  const collides = (number) => number && phoneIdentityKey(number) !== key && String(number).replace(/\D/g, '').slice(-10) === key.slice(-10);
+  return KNOWN_CALLER_PHONE_COLS.some((col) => collides(row[col])) ? false : row.id;
 }
 
 /**
- * Answer a postcard text. `customer` is the webhook's matched customer for the sender, `knownContact` says the webhook found a
- * customer record that has the number as a secondary or service-contact phone, and `standAside` is an async predicate that
+ * Answer a postcard text. `customer` is the webhook's primary-phone match for the sender, `knownContact` says the webhook found a
+ * customer record for the number through any phone column (or its lookup failed), and `standAside` is an async predicate that
  * makes the reply stand down. Resolves { handled: true } when a reply was handed to the provider (sent, uncertain or threw
  * with no outcome: it may have gone, so the claim stays and nothing is retried), so the webhook can keep the AI auto-reply
  * from answering the same text; every other outcome is { handled: false } and the text goes on through the normal inbound
@@ -230,11 +226,10 @@ async function handleHomeTextToBook({ from, to, body, customer, knownContact, st
     // question waiting on its answer comes first, and a known contact must resolve to one customer whose consent is read.
     const customerId = await senderCustomerId(from, customer, knownContact);
     if (customerId === false || await standAside()) return { handled: false };
-    // A known customer's SMS opt-out and consent are checked as for every other known-customer auto-reply; no match is a
-    // lead. A number in a service-contact slot is 'service_contact_authorized' (contactPhoneSmsTrust), so the sender re-reads
-    // THAT contact's own SMS choice at the provider handoff, not only the holder's.
+    // A customer texting from its primary phone has its SMS opt-out and consent checked as for every other known-customer
+    // auto-reply; no match is a lead.
     const who = customerId
-      ? { customerId, identityTrustLevel: await contactPhoneSmsTrust(customerId, from) }
+      ? { customerId, identityTrustLevel: 'phone_matches_customer' }
       : { identityTrustLevel: 'phone_provided_unverified' };
 
     const claim = await claimReply({ from, to, prospectId: home.id });
