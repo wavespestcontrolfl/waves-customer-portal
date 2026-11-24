@@ -1529,6 +1529,7 @@ function BlackoutDaysTab() {
       });
       if (d?.error) throw new Error(d.error);
       setWeeklyDaysOff(d.weeklyDaysOff || next);
+      if (typeof d.factsLineMatches === "boolean") setFactsLineMatches(d.factsLineMatches);
       rereadIfStale();
     } catch (e) {
       setWeeklyDaysOff(prev);
@@ -1555,7 +1556,7 @@ function BlackoutDaysTab() {
       if (d?.error) throw new Error(d.error);
       const closed = new Set(d.closedHolidays || []);
       setHolidays(next.map((h) => ({ ...h, closed: closed.has(h.key) })));
-      setFactsLineMatches(d.factsLineMatches !== false);
+      if (typeof d.factsLineMatches === "boolean") setFactsLineMatches(d.factsLineMatches);
       rereadIfStale();
     } catch (e) {
       setHolidays(prev);
@@ -1681,7 +1682,7 @@ function BlackoutDaysTab() {
       </p>
       {!factsLineMatches && (
         <p className="mt-1 text-ui-body text-ink-secondary" role="status">
-          Texting, voice and chat still name the six closed holidays. Tell Claude to update the facts line.
+          Texting, voice and chat still name the six closed holidays and open Sundays. Tell Claude to update the facts line.
         </p>
       )}
       <div className="mb-6 mt-2 divide-y divide-zinc-200">

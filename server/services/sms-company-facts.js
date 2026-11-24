@@ -20,6 +20,13 @@ const COMPANY_FACTS_HEADER = 'COMPANY FACTS (owner-approved; state these plainly
 // the editable `schedule_holiday_closures` setting. PUT /admin/schedule/blackout-dates/holidays raises one admin alert when a saved
 // closed set differs from this list, and sms-company-facts.test.js checks that the line names exactly these.
 const FACT_CLOSED_HOLIDAY_KEYS = Object.freeze(['new_years_day', 'memorial_day', 'independence_day', 'labor_day', 'thanksgiving', 'christmas']);
+/**
+ * True when Settings still says what the closed-days line says: the closed holidays are exactly the six AND Sunday is not a weekly
+ * day off (the line says "We work Sundays"). The line names no other weekday. `weeklyDaysOff`: any iterable of 0 to 6, 0 = Sunday. Pure.
+ */
+function factsLineMatchesSettings({ closedHolidays, weeklyDaysOff } = {}) {
+  return closedHolidaysMatchFactsLine(closedHolidays) && !new Set(weeklyDaysOff || []).has(0);
+}
 /** True when `closedKeys` (any iterable of holiday keys) is exactly the set the facts line names. Pure. */
 function closedHolidaysMatchFactsLine(closedKeys) {
   const closed = new Set(closedKeys || []);
@@ -351,6 +358,7 @@ module.exports = {
   COMPANY_FACTS,
   FACT_CLOSED_HOLIDAY_KEYS,
   closedHolidaysMatchFactsLine,
+  factsLineMatchesSettings,
   RETIRED_COMPANY_FACT_LINES, OLDER_RETIRED_COMPANY_FACT_LINES,
   moneyPolicyFacts,
   COMPANY_FACTS_HEADER,

@@ -88,7 +88,7 @@ function fixtureFor(url, options = {}) {
       ],
     };
   }
-  if (path === "/admin/schedule/blackout-dates/weekly") return { weeklyDaysOff: [0, 6] };
+  if (path === "/admin/schedule/blackout-dates/weekly") return { weeklyDaysOff: [0, 6], factsLineMatches: false };
   if (path === "/admin/schedule/blackout-dates/holidays") return { success: true, closedHolidays: JSON.parse(options.body).closed, factsLineMatches: false };
   if (path.startsWith("/admin/schedule/blackout-dates/")) return { ok: true };
   if (path === "/admin/schedule/departure-time") {
@@ -183,6 +183,8 @@ describe("Settings new UI foundation", () => {
       url === "/api/admin/schedule/blackout-dates/weekly"
       && options?.method === "PUT"
       && options.body === JSON.stringify({ daysOff: [0, 6] }))).toBe(true));
+    // the weekly save answers too: the agents' line says Sundays are open
+    expect(await screen.findByText(/still name the six closed holidays and open Sundays/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Blackout date"), { target: { value: "2026-12-31" } });
     fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Office closed" } });
@@ -241,7 +243,7 @@ describe("Settings new UI foundation", () => {
       && options.body === JSON.stringify({ closed: ["thanksgiving"] }))).toBe(true));
     expect(await screen.findByRole("button", { name: "Thanksgiving closed" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "4th of July open" })).toBeInTheDocument();
-    expect(screen.getByText("Texting, voice and chat still name the six closed holidays. Tell Claude to update the facts line.")).toBeInTheDocument();
+    expect(screen.getByText("Texting, voice and chat still name the six closed holidays and open Sundays. Tell Claude to update the facts line.")).toBeInTheDocument();
   });
 
   it("keeps service-report toggles and the visit-timeline save contracts", async () => {

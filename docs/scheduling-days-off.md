@@ -128,14 +128,18 @@ A visit that cannot move stays on the closed day. `auto-dispatch/needs-person-no
 
 ### The agents' holiday line
 
-The texting, voice and chat agents carry one static line naming the six closed holidays
-(`COMPANY_FACTS[6]` in `server/services/sms-company-facts.js`, keys in `FACT_CLOSED_HOLIDAY_KEYS`).
-It is static because the voice agent renders it when its module loads and the sealed exam pins the
-render by hash. It does not follow the Settings list. When `PUT /admin/schedule/blackout-dates/holidays`
-saves a closed set that differs from `FACT_CLOSED_HOLIDAY_KEYS`, the response carries
-`factsLineMatches: false`, the Blackouts tab shows a one-line warning, and one office alert is raised
-(one per distinct set). Changing the line takes a code change: edit the line and `FACT_CLOSED_HOLIDAY_KEYS`
-together.
+The texting, voice and chat agents carry one static line naming the six closed holidays and saying
+"We work Sundays" (`COMPANY_FACTS[6]` in `server/services/sms-company-facts.js`, keys in
+`FACT_CLOSED_HOLIDAY_KEYS`). It is static because the voice agent renders it when its module loads and
+the sealed exam pins the render by hash, so it does not follow Settings.
+
+After a save of either `PUT /admin/schedule/blackout-dates/holidays` or `PUT /admin/schedule/blackout-dates/weekly`,
+`syncHolidayFactsLineAlert` (in `routes/admin-schedule.js`) reads both settings. They match the line when the
+closed holidays are exactly `FACT_CLOSED_HOLIDAY_KEYS` and Sunday is not a weekly day off. The response carries
+`factsLineMatches`, and the Blackouts tab shows a one-line warning when it is false. On a mismatch one office alert is
+raised (one per distinct pair of settings, and raised again if the same pair comes back after a fix); a newer pair closes
+the older alert. When the settings match again every open alert of this kind is closed (`admin-alert-episodes.js`).
+Changing the line takes a code change: edit the line and `FACT_CLOSED_HOLIDAY_KEYS` together.
 
 ## Tests
 
