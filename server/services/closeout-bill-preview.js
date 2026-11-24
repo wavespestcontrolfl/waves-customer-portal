@@ -29,6 +29,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const BillingLane = require('./billing-lane');
 const InvoiceCandidate = require('./completion-invoice-candidate');
 
@@ -120,7 +121,7 @@ async function loadCoverage(database, visit, billing, flags) {
   if (!billing.autopay_active && !billing.payer_billed && !flags.perApplicationBilling
     && !flags.annualPrepayBilling && membershipLane) {
     try {
-      const day = String(visit.scheduled_date instanceof Date ? visit.scheduled_date.toISOString() : visit.scheduled_date).slice(0, 10);
+      const day = dateOnlyString(visit.scheduled_date);
       duesCollected = await BillingLane.monthlyDuesCollected(database, visit.customer_id, new Date(`${day}T12:00:00Z`), {
         excludeScheduledServiceId: visit.id,
       });
@@ -579,7 +580,7 @@ async function uncertainPayload(f, ctx, states, deps, database) {
 }
 
 function dayOf(value) {
-  return String(value instanceof Date ? value.toISOString() : value).slice(0, 10);
+  return dateOnlyString(value);
 }
 
 async function previewCloseoutBill(serviceId, deps = {}) {
