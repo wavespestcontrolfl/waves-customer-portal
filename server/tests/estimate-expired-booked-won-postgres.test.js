@@ -637,6 +637,18 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect(await recordWebsiteLinkTexted(texted, { result: accepted, url, at: textedAt, conn: mockTransaction })).toBe(true);
     // A second text keeps the first time (atomic: the write only fires while the key is absent).
     expect(await recordWebsiteLinkTexted(texted, { result: accepted, url, at: new Date('2026-10-02T12:00:00Z'), conn: mockTransaction })).toBe(false);
+    // The link must be COMPLETE in the sent text: embedded in another URL's path or query, or extended, is not it.
+    const bare = url.replace(/^https?:\/\//, '');
+    const embedded = await mk();
+    const extended = await mk();
+    const whole = await mk();
+    const sentWith = (sentBody) => ({ sent: true, deliveryOutcome: 'accepted', sentBody });
+    expect(await recordWebsiteLinkTexted(embedded, { result: sentWith(`See evil.example/go?u=${bare} now`), url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(embedded, { result: sentWith(`See https://evil.example/${bare}/x`), url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(extended, { result: sentWith(`See ${bare}&extra=1 now`), url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(extended, { result: sentWith(`See ${bare}.pdf`), url, conn: mockTransaction })).toBe(false);
+    // Whole: after a space or '(', before the end, a space, ')' or sentence punctuation.
+    expect(await recordWebsiteLinkTexted(whole, { result: sentWith(`Your quote (${bare}).`), url, conn: mockTransaction })).toBe(true);
     // Suppressed / blocked, a text without the link, and an uncertain handoff record nothing.
     expect(await recordWebsiteLinkTexted(suppressed, { result: { sent: false, blocked: true, deliveryOutcome: 'not_sent', sentBody: accepted.sentBody }, url, conn: mockTransaction })).toBe(false);
     expect(await recordWebsiteLinkTexted(noLink, { result: { ...accepted, sentBody: 'Thanks for your quote request!' }, url, conn: mockTransaction })).toBe(false);
@@ -655,7 +667,7 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect(stored.estimate_data.deliveryState?.firstDeliveredAt).toBeUndefined();
   });
 
-  test('(aa) texted in Oct, resent in Nov: a staff send merges top-level and never touches the receipt; the reclaim and the cohort both anchor on Oct', async () => {
+  test('(aa) texted in Oct, resent in Nov: a staff send merges top-level and never touches the receipt; only the reclaim reads it (cohort reporting stays as on main)', async () => {
     const { recordWebsiteLinkTexted } = require('../services/website-quote-publication');
     const { _private } = require('../services/estimate-winloss');
     const oct = new Date('2026-10-01T12:00:00Z');
@@ -676,9 +688,9 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
 
     const after = await row(id);
     expect(after.estimate_data.websiteLinkText.at).toBe('2026-10-01T12:01:00.000Z');
-    // Cohort anchor (JS) is the Oct text, not the Nov resend.
-    expect(_private.sentAnchorMs(after)).toBe(Date.parse('2026-10-01T12:01:00.000Z'));
-    // Reclaim anchor (SQL) agrees: a payment 19 days after the Oct text is inside its window.
+    // Cohort reporting is unchanged from main: the Nov resend still anchors it.
+    expect(_private.sentAnchorMs(after)).toBe(nov.getTime());
+    // The reclaim's SQL anchor reads the receipt: a payment 19 days after the Oct text is inside its window.
     await guard.reclaimExpiredConvertedEstimates();
     expect((await row(id)).disposition).toBe('converted_other_path');
   });

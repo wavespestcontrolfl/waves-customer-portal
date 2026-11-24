@@ -132,10 +132,19 @@ async function publishInTransaction(trx, { estimateId, leadId, engineInput, engi
 // that) and never firstDeliveredAt (lead-reach and the watchers read it as a person's
 // handoff). One atomic write that only fires while the key is absent: first text wins.
 // Returns whether it recorded.
+// The link as a COMPLETE link: at the start, or after whitespace or '(', and followed by the end,
+// whitespace, ')' or sentence punctuation that itself ends the word. Never inside another URL's
+// path or query (a longer URL that merely starts with, or contains, this one).
+function carriesLinkWhole(body, bare) {
+  const escaped = bare.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[\\s(])${escaped}(?=$|[\\s)]|[.,;:!]($|[\\s)]))`).test(String(body || ''));
+}
+
 async function recordWebsiteLinkTexted(estimateId, { result, url, at = new Date(), conn = db } = {}) {
   const accepted = result?.sent === true && result.deliveryOutcome === 'accepted' && result.deduped !== true;
   const bare = stripSmsUrlScheme(String(url || ''));
-  if (!accepted || !bare || !String(result.sentBody || '').includes(bare)) return false;
+  if (!accepted || !bare || !carriesLinkWhole(result.sentBody, bare)) return false;
+  // No receipt on any error path (a thrown write included): the quote then has no anchor, which fails closed.
   const updated = await conn('estimates')
     .where({ id: estimateId })
     .whereRaw("(estimate_data -> 'websiteLinkText') IS NULL")
