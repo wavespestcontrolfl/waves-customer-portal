@@ -2,23 +2,23 @@
  * First-visit request from the estimate page (GATE_ESTIMATE_APPROVE_PREFERRED_TIME, owner 2026-11-23 "do all").
  *
  * Under the time picker, a customer whose offered times do not work gives the days (Mon to Sat) and the part of the day
- * that suit them, plus an optional note. This is a REQUEST, never an acceptance: the estimate keeps its status, nothing
- * is converted, invoiced, scheduled or charged, no card step runs and no customer text or email goes out. The office books
- * the visit with the existing accept-on-book from the estimate, which does the acceptance, the invoice and the card step.
+ * that suit them, plus an optional note. This is a REQUEST, never an acceptance, and it is STATELESS: the estimate row is not
+ * written at all (no status, no estimate_data, no expiry), nothing is converted, invoiced, scheduled or charged, no card step
+ * runs and no customer text or email goes out. The only effect is ONE office bell (days, window, masked note, the estimate's
+ * expiry date), deduped open-only on `estimate-first-visit-request:<estimateId>`: while that bell is open a repeat request
+ * rings nothing; once the office has closed it, a new request rings a new one. The office books the visit with the existing
+ * accept-on-book from the estimate, which does the acceptance, the invoice and the card step.
  *
- * One transaction (the caller's, estimate row locked) writes two things together, so a crash can lose neither:
- *   1. estimate_data.firstVisitRequest = { days, window, note?, at }   (no migration: a jsonb key)
- *   2. ONE office bell, written on the same transaction (notifyAdmin's `trx` option), keyed by estimate AND request time
- * The request does NOT extend the estimate: its expiry is untouched, and the bell says when it expires. A second request
- * while one is pending changes nothing and raises nothing. Once the settle pass has closed the bell (the estimate was
- * accepted, declined, expired or archived) it stamps `settledAt` on the request; a settled request counts as absent, so a
- * reopened estimate takes a fresh request and rings a fresh bell.
+ * The settle pass closes the open bell once the estimate is no longer open (status not sent or viewed, archived, past its
+ * expiry date, or gone). Nothing else is stamped.
  */
 
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const DAY_LABELS = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat' };
 const WINDOWS = ['morning', 'afternoon', 'either'];
 const MAX_NOTE_CHARS = 300;
+const KEY_PREFIX = 'estimate-first-visit-request:';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const INVALID_MESSAGE = 'Please pick at least one day that works for you, and whether mornings or afternoons are better.';
 
@@ -44,18 +44,11 @@ function describeRequest({ days = [], window = 'either' } = {}) {
   return `${dayText}, ${part}`;
 }
 
-// The PENDING request, or null: none stored, or the stored one is settled (its bell was closed with the estimate).
-function storedRequest(estimateData) {
-  const req = estimateData && typeof estimateData === 'object' ? estimateData.firstVisitRequest : null;
-  return req && Array.isArray(req.days) && req.days.length && !req.settledAt ? req : null;
-}
-
-// One bell per request: the key carries the request's own time, so a fresh request after a reopen is a fresh bell.
-const KEY_PREFIX = 'estimate-first-visit-request:';
-const requestKey = (estimateId, request) => `${KEY_PREFIX}${estimateId}:${Date.parse(request.at) || 0}`;
-
-// The ONE office bell, written on the caller's transaction. Errors propagate so the request and its bell commit together or
-// not at all; the caller owns the rollback.
+/**
+ * The ONE office bell, written on the caller's transaction (errors propagate so the caller rolls back and the customer can
+ * retry). Open-only dedupe: while the estimate's bell is open this rings nothing and answers { deduped: true }.
+ * Returns { deduped: boolean }.
+ */
 async function raiseFirstVisitRequestBell({ estimate, request, trx }) {
   const { fitAction, redactedWords, shortDateET } = require('./admin-alert-names');
   const { raiseAdminAlert, cutAtWord } = require('./admin-alert-compose');
@@ -85,43 +78,28 @@ async function raiseFirstVisitRequestBell({ estimate, request, trx }) {
   }, {
     bell: true,
     trx,
-    dedupeKey: requestKey(estimate.id, request),
+    dedupeKey: `${KEY_PREFIX}${estimate.id}`,
+    dedupeOpenOnly: true,
     detail,
     metadata: { estimateId: String(estimate.id), source: 'estimate_first_visit_request' },
   });
   if (!filed || filed.id == null || filed.suppressed === true) throw new Error('first-visit request bell was not written');
+  return { deduped: filed.deduped === true };
 }
 
-/**
- * Store the request on the LOCKED estimate row (`locked` was read FOR UPDATE inside `trx`) and raise the one bell.
- * Returns { deduped: false, request } for a fresh request, or { deduped: true, request } when one is already pending
- * (nothing is written and no second bell rings).
- */
-async function storeFirstVisitRequest({ trx, locked, request, now = new Date() }) {
-  const raw = typeof locked.estimate_data === 'string' ? JSON.parse(locked.estimate_data) : locked.estimate_data;
-  const existing = storedRequest(raw);
-  if (existing) return { deduped: true, request: existing };
-  const stored = { ...request, at: now.toISOString() };
-  await trx('estimates').where({ id: locked.id }).update({
-    estimate_data: trx.raw("jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{firstVisitRequest}', ?::jsonb)", [JSON.stringify(stored)]),
-    updated_at: trx.fn.now(),
-  });
-  await raiseFirstVisitRequestBell({ estimate: locked, request: stored, trx });
-  return { deduped: false, request: stored };
-}
-
-// Close the request bell once the estimate settled (accepted = the office booked it, declined, expired, archived or gone), so a
-// booked customer's task does not stand, and stamp `settledAt` on that request in the same transaction so a reopened
-// estimate takes a fresh request. The same settle pass the stuck and hot-view bells use: the key set is read, each close
-// re-reads the estimate under the per-key lock, and only while alert episodes are live (closeAdminAlertKeys stamps
-// autoCleared). Called from the scheduler's 5-minute estimate tick; never throws.
-const KEY_RE = /^estimate-first-visit-request:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):(\d+)$/i;
-function settledReason(row) {
+// Why the estimate no longer takes a request (so its open bell is done), or null while it is open. `now` is the pass's clock.
+function settledReason(row, now) {
   if (!row) return 'estimate gone';
+  if (row.archived_at) return 'estimate archived';
   const status = String(row.status || '').toLowerCase();
-  if (['accepted', 'declined', 'expired'].includes(status)) return `estimate ${status}`;
-  return row.archived_at ? 'estimate archived' : null;
+  if (status !== 'sent' && status !== 'viewed') return `estimate ${status || 'closed'}`;
+  if (row.expires_at && new Date(row.expires_at) < now) return 'estimate expired';
+  return null;
 }
+
+// Close the open request bell once its estimate is no longer open. The same settle pass the stuck and hot-view bells use: the key
+// set is read, each close re-reads the estimate under the per-key lock, and only while alert episodes are live (closeAdminAlertKeys
+// stamps autoCleared). Called from the scheduler's 5-minute estimate tick; never throws.
 async function closeSettledRequestBells({ now = new Date(), conn = require('../models/db') } = {}) {
   const result = { ran: false, open: 0, closed: 0 };
   try {
@@ -131,22 +109,12 @@ async function closeSettledRequestBells({ now = new Date(), conn = require('../m
     const keys = await episodes.openAdminAlertKeys(conn, KEY_PREFIX);
     result.open = keys.length;
     for (const key of keys) {
-      const match = KEY_RE.exec(key);
-      if (!match) continue;
-      const [, id, atMs] = match;
+      const id = key.slice(KEY_PREFIX.length);
+      if (!UUID_RE.test(id)) continue;
       const closed = await conn.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${key}`]);
-        const row = await trx('estimates').where({ id }).forUpdate().first('id', 'status', 'archived_at', 'estimate_data');
-        const why = settledReason(row);
+        const why = settledReason(await trx('estimates').where({ id }).first('id', 'status', 'archived_at', 'expires_at'), now);
         if (!why) return 0;
-        // Settle the request this bell was for (not a newer one a reopen took), in the same transaction as the close.
-        const data = row && (typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data);
-        const stored = data && data.firstVisitRequest;
-        if (row && stored && !stored.settledAt && String(Date.parse(stored.at) || 0) === atMs) {
-          await trx('estimates').where({ id }).update({
-            estimate_data: trx.raw("jsonb_set(estimate_data, '{firstVisitRequest,settledAt}', to_jsonb(?::text))", [now.toISOString()]),
-          });
-        }
         return Number(await episodes.closeAdminAlertKeys(trx, [key], why, { now, resolution: `${why.charAt(0).toUpperCase()}${why.slice(1)}` })) || 0;
       });
       if (closed > 0) result.closed += 1;
@@ -159,7 +127,6 @@ async function closeSettledRequestBells({ now = new Date(), conn = require('../m
 }
 
 module.exports = {
-  closeSettledRequestBells, KEY_PREFIX,
-  DAYS, WINDOWS, MAX_NOTE_CHARS, requestKey,
-  normalizeFirstVisitRequest, describeRequest, storedRequest, storeFirstVisitRequest, raiseFirstVisitRequestBell,
+  DAYS, WINDOWS, MAX_NOTE_CHARS, KEY_PREFIX,
+  normalizeFirstVisitRequest, describeRequest, raiseFirstVisitRequestBell, settledReason, closeSettledRequestBells,
 };

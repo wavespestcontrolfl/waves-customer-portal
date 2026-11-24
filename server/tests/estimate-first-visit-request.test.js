@@ -1,14 +1,12 @@
 /**
  * First-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME), no database.
  *
- * Pins: the body is validated and normalized (unknown days refused, week order, note cut); the one office bell obeys the
- * admin-notification rules, names the customer and the days, carries "Book it from the estimate so it counts as accepted.",
- * and is written on the caller's transaction (errors propagate so the request rolls back with it); storing is idempotent
- * (a pending request writes nothing and rings nothing, a settled one counts as absent); the request never touches the
- * estimate's expiry (the bell shows it); and /data's state is gated and eligibility-limited (gate off = the acceptance
- * contract is byte-identical, a pending request reads as pending, a settled one does not).
- * The route itself (one transaction, no acceptance, locked re-check, expiry sweep) is in
- * estimate-first-visit-request.postgres.test.js.
+ * Pins: the body is validated and normalized (unknown days refused, week order, note cut); the ONE office bell obeys the
+ * admin-notification rules, names the customer, the days, the masked note and the estimate's expiry date, carries "Book it from
+ * the estimate so it counts as accepted.", is written on the caller's transaction with an OPEN-ONLY dedupe (a repeat while it is
+ * open answers deduped and rings nothing; errors propagate), and the request is stateless; the settle pass's reason for an
+ * estimate that is no longer open; and /data's state ({ offered: true } or nothing; gate off = byte-identical contract).
+ * The route itself (no estimate write, locked recheck, settle pass) is in estimate-first-visit-request.postgres.test.js.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -19,7 +17,7 @@ jest.mock('../services/notification-service', () => ({
 }));
 
 const {
-  normalizeFirstVisitRequest, describeRequest, storedRequest, storeFirstVisitRequest, MAX_NOTE_CHARS,
+  normalizeFirstVisitRequest, describeRequest, raiseFirstVisitRequestBell, settledReason, MAX_NOTE_CHARS,
 } = require('../services/estimate-first-visit-request');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 
@@ -50,47 +48,22 @@ describe('normalizeFirstVisitRequest', () => {
   });
 });
 
-describe('describeRequest / storedRequest', () => {
+describe('describeRequest', () => {
   test('reads for the office', () => {
     expect(describeRequest({ days: ['mon', 'wed', 'fri'], window: 'morning' })).toBe('Mon, Wed, Fri, mornings');
     expect(describeRequest({ days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat'], window: 'either' })).toBe('Any day Mon to Sat, mornings or afternoons');
   });
-  test('only a stored request with days counts', () => {
-    expect(storedRequest({ firstVisitRequest: { days: ['mon'], window: 'either' } })).toBeTruthy();
-    expect(storedRequest({ firstVisitRequest: { days: [] } })).toBeNull();
-    // A settled request (its bell closed with the estimate) counts as absent.
-    expect(storedRequest({ firstVisitRequest: { days: ['mon'], window: 'either', settledAt: '2026-12-02T00:00:00.000Z' } })).toBeNull();
-    expect(storedRequest({})).toBeNull();
-    expect(storedRequest(null)).toBeNull();
-  });
 });
 
-// A transaction double: records the update, so the order (request, hold, bell) and the SQL are visible.
-function fakeTrx() {
-  const updates = [];
-  const trx = (table) => ({ where: () => ({ update: async (patch) => { updates.push({ table, patch }); return 1; } }) });
-  trx.raw = (sql, bindings) => ({ sql, bindings });
-  trx.fn = { now: () => 'NOW' };
-  trx.updates = updates;
-  return trx;
-}
-
-describe('storeFirstVisitRequest', () => {
-  const locked = { id: 'est-1', customer_name: 'Synthetic Person', estimate_data: {}, expires_at: new Date('2026-12-09T17:00:00Z') };
+describe('raiseFirstVisitRequestBell', () => {
+  const estimate = { id: 'est-1', customer_name: 'Synthetic Person', expires_at: new Date('2026-12-09T17:00:00Z') };
   const request = { days: ['tue', 'thu'], window: 'afternoon', note: 'Gate is on the left. Call 941-555-0100 first.' };
+  const trx = { marker: 'trx' };
   beforeEach(() => mockNotifyAdmin.mockClear());
 
-  test('writes the request and the hold, then ONE needs-you bell on the SAME transaction', async () => {
-    const trx = fakeTrx();
-    const out = await storeFirstVisitRequest({ trx, locked, request, now: new Date('2026-12-01T15:00:00Z') });
-    expect(out.deduped).toBe(false);
-    expect(trx.updates).toHaveLength(1);
-    const { patch } = trx.updates[0];
-    expect(patch.estimate_data.sql).toMatch(/jsonb_set\(COALESCE\(estimate_data, '\{\}'::jsonb\), '\{firstVisitRequest\}'/);
-    expect(JSON.parse(patch.estimate_data.bindings[0])).toMatchObject({ days: ['tue', 'thu'], window: 'afternoon', at: '2026-12-01T15:00:00.000Z' });
-    // The request does NOT extend the estimate: its expiry is not written.
-    expect(patch).not.toHaveProperty('expires_at');
-
+  test('files ONE needs-you row on the caller\'s transaction with an OPEN-ONLY dedupe on the estimate', async () => {
+    const out = await raiseFirstVisitRequestBell({ estimate, request, trx });
+    expect(out).toEqual({ deduped: false });
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, why, opts] = mockNotifyAdmin.mock.calls[0];
     expect(category).toBe('estimate');
@@ -99,7 +72,8 @@ describe('storeFirstVisitRequest', () => {
     expect(why).toMatch(/Tue, Thu, afternoons/);
     expect(opts.trx).toBe(trx);
     expect(opts.bell).toBe(true);
-    expect(opts.dedupeKey).toBe(`estimate-first-visit-request:est-1:${Date.parse('2026-12-01T15:00:00Z')}`);
+    expect(opts.dedupeKey).toBe('estimate-first-visit-request:est-1');
+    expect(opts.dedupeOpenOnly).toBe(true);
     expect(opts.link).toBe('/admin/estimates?estimateId=est-1');
     expect(opts.metadata).toMatchObject({ estimateId: 'est-1', source: 'estimate_first_visit_request', severity: 'needs-you', doneWhen: 'visit_booked', contact: true });
     expect(opts.detail).toMatch(/has NOT accepted/);
@@ -109,8 +83,18 @@ describe('storeFirstVisitRequest', () => {
     expect(opts.detail).not.toMatch(/941-555-0100/);
   });
 
+  test('a repeat while the bell is open comes back deduped (the route answers 200 and nothing rings)', async () => {
+    mockNotifyAdmin.mockResolvedValueOnce({ id: 7, deduped: true });
+    expect(await raiseFirstVisitRequestBell({ estimate, request, trx })).toEqual({ deduped: true });
+  });
+
+  test('an estimate with no expiry date says nothing about one', async () => {
+    await raiseFirstVisitRequestBell({ estimate: { ...estimate, expires_at: null }, request, trx });
+    expect(mockNotifyAdmin.mock.calls[0][3].detail).not.toMatch(/expires/);
+  });
+
   test('the bell obeys the admin-notification rules (headline, why, link, subject)', async () => {
-    await storeFirstVisitRequest({ trx: fakeTrx(), locked, request });
+    await raiseFirstVisitRequestBell({ estimate, request, trx });
     const [, title, why, opts] = mockNotifyAdmin.mock.calls[0];
     const composed = composeAdminAlert({
       area: 'Schedule', action: title.replace('Schedule — ', ''), why, severity: 'needs-you', link: opts.link,
@@ -120,36 +104,37 @@ describe('storeFirstVisitRequest', () => {
   });
 
   test('a long name keeps the headline inside the limit', async () => {
-    await storeFirstVisitRequest({ trx: fakeTrx(), locked: { ...locked, customer_name: 'A Very Long Customer Name That Goes On And On Forever' }, request });
+    await raiseFirstVisitRequestBell({ estimate: { ...estimate, customer_name: 'A Very Long Customer Name That Goes On And On Forever' }, request, trx });
     expect(mockNotifyAdmin.mock.calls[0][1].length).toBeLessThanOrEqual(60);
   });
 
-  test('a settled request counts as absent: a new one is stored with a NEW bell key', async () => {
-    const trx = fakeTrx();
-    const settled = { days: ['sat'], window: 'either', at: '2026-11-30T10:00:00.000Z', settledAt: '2026-12-02T00:00:00.000Z' };
-    const out = await storeFirstVisitRequest({ trx, locked: { ...locked, estimate_data: { firstVisitRequest: settled } }, request, now: new Date('2026-12-05T15:00:00Z') });
-    expect(out.deduped).toBe(false);
-    expect(trx.updates).toHaveLength(1);
-    expect(mockNotifyAdmin.mock.calls[0][3].dedupeKey).toBe(`estimate-first-visit-request:est-1:${Date.parse('2026-12-05T15:00:00Z')}`);
-  });
-
-  test('a pending request is returned as it is: nothing written, no second bell', async () => {
-    const trx = fakeTrx();
-    const stored = { days: ['sat'], window: 'either', at: '2026-11-30T10:00:00.000Z' };
-    const out = await storeFirstVisitRequest({ trx, locked: { ...locked, estimate_data: JSON.stringify({ firstVisitRequest: stored }) }, request });
-    expect(out).toEqual({ deduped: true, request: stored });
-    expect(trx.updates).toHaveLength(0);
-    expect(mockNotifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('a bell that fails propagates, so the caller rolls the request back with it', async () => {
+  test('a bell that fails propagates, so the caller rolls back and the customer can retry', async () => {
     mockNotifyAdmin.mockRejectedValueOnce(new Error('db down'));
-    await expect(storeFirstVisitRequest({ trx: fakeTrx(), locked, request })).rejects.toThrow('db down');
+    await expect(raiseFirstVisitRequestBell({ estimate, request, trx })).rejects.toThrow('db down');
   });
 
-  test('a bell that wrote no row also fails the request (it must not be silently lost)', async () => {
+  test('a bell that wrote no row is a failure too (the request must not be silently lost)', async () => {
     mockNotifyAdmin.mockResolvedValueOnce(null);
-    await expect(storeFirstVisitRequest({ trx: fakeTrx(), locked, request })).rejects.toThrow(/bell was not written/);
+    await expect(raiseFirstVisitRequestBell({ estimate, request, trx })).rejects.toThrow(/bell was not written/);
+  });
+});
+
+describe('settledReason (when the open bell is done)', () => {
+  const now = new Date('2026-12-05T12:00:00Z');
+  const open = { status: 'sent', archived_at: null, expires_at: new Date('2026-12-09T00:00:00Z') };
+  test('an open estimate keeps its bell', () => {
+    expect(settledReason(open, now)).toBeNull();
+    expect(settledReason({ ...open, status: 'viewed', expires_at: null }, now)).toBeNull();
+  });
+  test.each([
+    ['gone', null, 'estimate gone'],
+    ['archived', { ...open, archived_at: new Date() }, 'estimate archived'],
+    ['accepted', { ...open, status: 'accepted' }, 'estimate accepted'],
+    ['declined', { ...open, status: 'declined' }, 'estimate declined'],
+    ['expired by status', { ...open, status: 'expired' }, 'estimate expired'],
+    ['expired by date', { ...open, expires_at: new Date('2026-12-04T00:00:00Z') }, 'estimate expired'],
+  ])('%s closes it', (_n, row, why) => {
+    expect(settledReason(row, now)).toBe(why);
   });
 });
 
@@ -180,17 +165,10 @@ describe('what /data tells the page', () => {
     });
   });
 
-  test('gate on: a stored request reads as pending (for a reopened link), with only days and window', () => {
+  test('gate on: only { offered: true } is ever served (no request state: nothing is stored)', () => {
     process.env.GATE_ESTIMATE_APPROVE_PREFERRED_TIME = 'true';
     const { firstVisitRequestState } = route();
-    const data = { ...recurringData, firstVisitRequest: { days: ['mon', 'wed'], window: 'morning', note: 'private note', at: '2026-12-01T00:00:00.000Z' } };
-    expect(firstVisitRequestState(sent({}, data), data)).toEqual({ offered: true, requestPending: true, days: ['mon', 'wed'], window: 'morning' });
-  });
-
-  test('gate on: a settled request is not shown as pending (the page offers a fresh one)', () => {
-    process.env.GATE_ESTIMATE_APPROVE_PREFERRED_TIME = 'true';
-    const { firstVisitRequestState } = route();
-    const data = { ...recurringData, firstVisitRequest: { days: ['mon'], window: 'morning', at: '2026-12-01T00:00:00.000Z', settledAt: '2026-12-02T00:00:00.000Z' } };
+    const data = { ...recurringData, firstVisitRequest: { days: ['mon', 'wed'], window: 'morning', note: 'private note' } };
     expect(firstVisitRequestState(sent({}, data), data)).toEqual({ offered: true });
   });
 

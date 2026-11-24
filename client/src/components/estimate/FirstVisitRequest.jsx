@@ -10,7 +10,8 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
  * The time picker stays the first choice. This is the quiet second path: the customer gives the days (Mon to Sat) and
  * the part of the day that suit them, plus an optional note, and taps one button. It is a REQUEST, not an approval: nothing
  * is accepted, booked, billed or charged, and the page says so in plain words. The office calls or texts to set the first
- * visit and finish the approval. `pending` ({ days, window }) comes from /data, so a reopened link shows the same state.
+ * visit and finish the approval. `pending` ({ days, window }) is this tab's own state right after sending: nothing is stored, so a
+ * reopened link shows the picker and this link again.
  */
 
 export const REQUEST_DAYS = [

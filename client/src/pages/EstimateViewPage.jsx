@@ -6341,8 +6341,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
   const [selectedSlotId, setSelectedSlotId] = useState(null);
-  // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the first-visit request this tab just sent ({ days, window }); a reopened link gets
-  // the same pending state from /data (acceptance.preferredTime.requestPending).
+  // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the first-visit request this tab just sent ({ days, window }). Nothing is stored, so a
+  // reopened link shows the normal picker and the request link again.
   const [sentFirstVisitRequest, setSentFirstVisitRequest] = useState(null);
   // Website flow: counts customer time picks. The payment choices mount under
   // the slot list, far below a phone screen, so a pick scrolls to them. A
@@ -6742,8 +6742,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // the team schedules after approval.
   const manualScheduleAccept = acceptance.mode === 'commercial_site_confirmation';
   const firstVisitRequestOffered = acceptance.preferredTime?.offered === true && !restartQuote;
-  const pendingFirstVisitRequest = sentFirstVisitRequest
-    || (acceptance.preferredTime?.requestPending ? { days: acceptance.preferredTime.days, window: acceptance.preferredTime.window } : null);
+  const pendingFirstVisitRequest = sentFirstVisitRequest;
   const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(data?.pricing, services, selected), [data?.pricing, services, selected]);
   // Per-service cadence (bundles): the precomputed combo matching every section's
   // independent selection, plus the non-pest selection map sent on accept.

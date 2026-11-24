@@ -19640,13 +19640,11 @@ function firstVisitRequestRowOpen(row, estData) {
     && !estimateTrenchingReviewRequired(estData);
 }
 
-// What /data tells the page: null (gate off or not eligible, so /data is byte-identical), { offered: true } or, once a
-// request is stored, { offered: true, requestPending: true, days, window } so a reopened link shows the pending state.
-// A linked visit or a quote-required estimate never reaches here: their acceptance modes ignore it.
+// What /data tells the page: null (gate off or not eligible, so /data is byte-identical) or { offered: true }. Nothing about an
+// earlier request is stored or served: a reopened link shows the normal picker and the request link again.
 function firstVisitRequestState(estimate, estData) {
   if (!featureGates.estimateApprovePreferredTimeLive() || !firstVisitRequestRowOpen(estimate, estData)) return null;
-  const stored = firstVisitRequestService.storedRequest(parseEstimateDataSafe(estimate));
-  return stored ? { offered: true, requestPending: true, days: stored.days, window: stored.window } : { offered: true };
+  return { offered: true };
 }
 
 // True when the estimate is in a blocking state (quote required, termite trenching review, contact_review park) or the state
@@ -19668,22 +19666,27 @@ async function firstVisitRequestBlocked(row, estData, { database = null } = {}) 
   }
 }
 
-// A plain check, not the adoption lookup (which filters by service family and misses a recurring visit on a mixed estimate): ANY
-// scheduled_services row that is not cancelled and is tied to this estimate (source_estimate_id, or the id the estimate data
-// names), including a live hold (a lapsed hold does not count). One is enough to refuse: the office books or the customer picks.
+// True when the estimate already has a visit, by two checks. (1) A plain one, because the adoption lookup filters by service family
+// and misses a recurring visit on a mixed estimate: ANY scheduled_services row tied to this estimate (source_estimate_id, or the id
+// the estimate data names) that is not cancelled (a rescheduled row still counts), including a live hold (a lapsed hold does not).
+// (2) The customer-wide adoption lookup the page's own acceptance contract uses (an upcoming visit the customer could adopt).
 async function firstVisitRequestHasVisit(row, estData, { database = null } = {}) {
   const conn = database || db;
   const linkedId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(estData?.scheduled_service_id || ''))
     ? String(estData.scheduled_service_id) : null;
   const found = await conn('scheduled_services')
-    .whereRaw("status NOT IN ('cancelled', 'canceled', 'rescheduled')")
+    .whereRaw("status NOT IN ('cancelled', 'canceled')")
     .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
     .where(function () {
       this.where('source_estimate_id', row.id);
       if (linkedId) this.orWhere('id', linkedId);
     })
     .first('id');
-  return !!found;
+  if (found) return true;
+  return !!(await findLinkedUpcomingAppointment(row, estData, {
+    serviceModes: adoptionServiceModesForContract(row, estData),
+    ...(database ? { database } : {}),
+  }));
 }
 
 // What /data's acceptance contract carries: the state above, minus an estimate that already has a visit tied to it.
@@ -19722,7 +19725,8 @@ function firstVisitRequestPreGuard(req, res, next) {
 // one-time-only, invoice-mode, commercial, trenching review, quote required, a linked visit, call-side block, staff preview)
 // answers the same generic 404. The body is validated only after that, so a probe cannot read gate state from a 400. The
 // checks are re-run on the estimate row locked in the writing transaction; a change landing in between answers 409
-// REQUEST_UNAVAILABLE and writes nothing. A second request answers 200 with the stored one and writes nothing.
+// REQUEST_UNAVAILABLE and writes nothing. The route is stateless: the estimate row is never written, the only effect is ONE
+// office bell, deduped open-only per estimate, so a repeat while it is open answers 200 and rings nothing.
 router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req, res) => {
   stampCommercialAgreementHeaders(res);
   const notFound = () => res.status(404).json({ error: 'Estimate not found' });
@@ -19751,13 +19755,14 @@ router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req,
       // judged FOR SHARE on the same transaction.
       if (await firstVisitRequestBlocked(locked, lockedData, { database: trx })) return { refused: true };
       if (await firstVisitRequestHasVisit(locked, lockedData, { database: trx })) return { refused: true };
-      return firstVisitRequestService.storeFirstVisitRequest({ trx, locked, request: parsed.value });
+      // The one write: the office bell, on this transaction, right after the last recheck.
+      return firstVisitRequestService.raiseFirstVisitRequestBell({ estimate: locked, request: parsed.value, trx });
     });
     if (outcome.refused) {
       return res.status(409).json({ error: 'This estimate was just updated. Please reload the page.', code: 'REQUEST_UNAVAILABLE' });
     }
     return res.status(outcome.deduped ? 200 : 201).json({
-      success: true, requestPending: true, days: outcome.request.days, window: outcome.request.window,
+      success: true, requestPending: true, days: parsed.value.days, window: parsed.value.window,
     });
   } catch (err) {
     // err.code only, never err.message (PG constraint errors can quote the bound token and the customer's note), and the raw

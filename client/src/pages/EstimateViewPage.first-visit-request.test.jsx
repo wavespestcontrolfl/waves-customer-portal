@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // GATE_ESTIMATE_APPROVE_PREFERRED_TIME on the estimate page: under the time picker a customer can send a first-visit REQUEST.
 // It never accepts: nothing is reserved, the accept route is not called, and the page says the office will call or text.
-// A reopened link shows the same pending state from /data. With /data not offering it (gate off) the page is unchanged.
+// A reopened link shows the picker and the request link again (nothing is stored). With /data not offering it (gate off) the page is unchanged.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -85,13 +85,13 @@ describe('first-visit request on the estimate page', () => {
     expect(screen.queryByText(/You're booked|You're approved/)).toBeNull();
   });
 
-  it('a reopened link shows the pending state from /data', async () => {
+  it('a reopened link shows the normal picker and the request link again (nothing is stored)', async () => {
     stubLocalStorage();
-    vi.stubGlobal('fetch', makeFetch(payload({ preferredTime: { offered: true, requestPending: true, days: ['tue'], window: 'afternoon' } })));
+    vi.stubGlobal('fetch', makeFetch(payload()));
     render(<EstimateViewPage />);
-    const card = await screen.findByTestId('first-visit-request-pending');
-    expect(card).toHaveTextContent('Tue, afternoons');
-    expect(screen.queryByRole('button', { name: /None of these times work/ })).toBeNull();
+    expect(await screen.findByRole('button', { name: /None of these times work/ })).toBeInTheDocument();
+    expect(screen.queryByTestId('first-visit-request-pending')).toBeNull();
+    expect((await screen.findAllByRole('button', { name: /^Choose / })).length).toBeGreaterThan(0);
   });
 
   it('a picked time hides the request option (the normal booking flow takes over)', async () => {
