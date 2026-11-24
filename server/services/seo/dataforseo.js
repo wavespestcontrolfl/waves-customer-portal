@@ -61,7 +61,7 @@ function resolvePoisonedParam() {
 // site_url = the breadcrumb base URL (path segments are truncated text, not real paths) and
 // domain_from_breadcrumb = true. `url` keeps the wrapper (it still leads to the page). Items with no usable
 // breadcrumb host (social posts: "5 comments") and non-goto items stay as they are.
-const BREADCRUMB_BASE_RE = /^(https?:\/\/)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(?::\d+)?$/i;
+const BREADCRUMB_BASE_RE = /^(https?:\/\/)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(?::\d+)?\/?$/i;
 
 function isGotoItem(item) {
   if (!item || item.type !== 'organic' || typeof item.url !== 'string') return false;

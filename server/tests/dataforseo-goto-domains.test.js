@@ -46,6 +46,13 @@ describe('serpOrganic google /goto wrapper normalization', () => {
     expect(item.url).toBe(GOTO);
   });
 
+  test('breadcrumb origin with a trailing slash still restores the domain', async () => {
+    response = serp([organic({ breadcrumb: 'https://www.wavespestcontrol.com/' })]);
+    const [item] = itemsOf(await dataforseo.serpOrganic('pest control', 'Bradenton,Florida,United States'));
+    expect(item.domain).toBe('www.wavespestcontrol.com');
+    expect(item.site_url).toBe('https://www.wavespestcontrol.com');
+  });
+
   test('breadcrumb with no host ("5 comments") leaves the item unchanged', async () => {
     response = serp([organic({ breadcrumb: '5 comments' })]);
     const [item] = itemsOf(await dataforseo.serpOrganic('pest control'));
