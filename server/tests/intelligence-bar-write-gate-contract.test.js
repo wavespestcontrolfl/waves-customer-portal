@@ -74,6 +74,7 @@ beforeAll(() => {
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
+  process.env.GATE_IB_SEND_ESTIMATE = 'true';
   process.env.GATE_IB_LEAD_CONVERT = 'true';
   process.env.GATE_IB_VOID_INVOICE = 'true';
   process.env.GATE_IB_PREPAY_SWITCH = 'true';
@@ -98,6 +99,7 @@ afterAll(() => {
   delete process.env.GATE_IB_RECORD_PAYMENT;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
+  delete process.env.GATE_IB_SEND_ESTIMATE;
   delete process.env.GATE_IB_LEAD_CONVERT;
   delete process.env.GATE_IB_VOID_INVOICE;
   delete process.env.GATE_IB_PREPAY_SWITCH;
@@ -192,6 +194,7 @@ const WRITE_TWO_STEP = [
   'remove_saved_payment_method',
   'correct_invoice_address',
   'accept_estimate',
+  'send_estimate',
   'send_invoice',
   'record_payment',
   'void_invoice',
@@ -793,6 +796,15 @@ const UNCONFIRMED_CALLS = [
       customers: [{ id: '00000000-0000-0000-0000-00000000e002', first_name: 'Accept', last_name: 'Fixture', email: 'accept@example.com', pipeline_stage: 'lead', monthly_rate: 0 }],
       scheduled_services: [],
     }],
+    // send_estimate reads the estimate and the estimate page's own send preview (spied below; the route's preview is
+    // covered by admin-estimates-reviewed-send.test.js, the card by intelligence-bar-send-estimate.test.js). It writes nothing.
+    ['estimate-send-tools', 'executeEstimateSendTool', 'send_estimate', { estimate_id: '00000000-0000-0000-0000-00000000e101' }, {
+      estimates: [{
+        id: '00000000-0000-0000-0000-00000000e101', token: 'sendfixture1', status: 'draft', customer_id: null, customer_name: 'Send Fixture',
+        monthly_total: 49, annual_total: 588, onetime_total: 0, waveguard_tier: 'Bronze', estimate_group_id: null,
+        sent_at: null, scheduled_at: null, archived_at: null, price_locked_at: null, estimate_data: {},
+      }],
+    }],
     // send_invoice reads the invoice, the hold, the payer ownership and the recipients (the route helpers
     // are spied below — their own paths are covered by intelligence-bar-invoice-actions.test.js). It writes nothing.
     ['invoice-action-tools', 'executeInvoiceActionTool', 'send_invoice', { invoice_id: '00000000-0000-0000-0000-00000000f101' }, {
@@ -1155,6 +1167,19 @@ const UNCONFIRMED_CALLS = [
           ],
         },
       }) : null;
+    // send_estimate's card is the estimate page's own send preview, run through the route handler; here the
+    // tool itself must send and write nothing, so the preview answers a canned message.
+    const sendEstimatePreview = toolName === 'send_estimate'
+      ? jest.spyOn(require('../routes/admin-estimates'), 'estimateSendPreviewForBar').mockResolvedValue({
+        status: 200,
+        json: {
+          id: '00000000-0000-0000-0000-00000000e101', status: 'draft', editVersion: 'edit-v1', messageVersion: 'msg-v1',
+          customerName: 'Send Fixture', customerPhone: '+19415550177', customerEmail: 'send@example.com', address: '1 Fixture Way',
+          smsBlockReason: null, uncertainAttempt: false, messages: { sms: 'Your estimate is ready.', email: { provider: 'sendgrid', subject: 'Your estimate', text: 'Ready.' } },
+        },
+      }) : null;
+    const sendEstimateSend = toolName === 'send_estimate'
+      ? jest.spyOn(require('../routes/admin-estimates'), 'sendEstimateFromBar').mockResolvedValue({ status: 200, json: { success: true, sent: true } }) : null;
     const receiptResolvers = toolName === 'resend_receipt'
       ? [
         jest.spyOn(require('../services/invoice-email'), 'resolveReceiptEmailRecipient')
@@ -1217,6 +1242,9 @@ const UNCONFIRMED_CALLS = [
       repriceCoverage?.mockRestore();
       prepaySwitchPreview?.mockRestore();
       acceptDryRun?.mockRestore();
+      sendEstimatePreview?.mockRestore();
+      expect(sendEstimateSend?.mock.calls || []).toEqual([]);
+      sendEstimateSend?.mockRestore();
       if (outsideFixture) {
         for (const [key, value] of Object.entries(savedEnv)) {
           if (value === undefined) delete process.env[key];
@@ -1363,6 +1391,6 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // The Agent Review draft cards (_sideEffects): their confirmed runs text the customer (approve, revise) or record the draft ignored.
     // resolve_dispatch_alert / unblock_sender (_sideEffects): their confirmed runs resolve an Action Queue card / remove a blocklist entry and its Gmail filter.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'switch_visit_to_annual_prepay', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'resolve_dispatch_alert', 'unblock_sender', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_estimate', 'send_invoice', 'record_payment', 'void_invoice', 'switch_visit_to_annual_prepay', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'resolve_dispatch_alert', 'unblock_sender', 'propose_admin_edit']);
   });
 });

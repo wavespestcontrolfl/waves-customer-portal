@@ -3175,3 +3175,40 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
     });
   });
 });
+
+// The Intelligence Bar's send_estimate runs these same handlers without an HTTP request
+// (sendEstimateFromBar / estimateSendPreviewForBar, the createScheduleBooking pattern): same
+// replies as the registered routes, same review pins, same refusals.
+describe('the Intelligence Bar adapters run the routes\' own handlers', () => {
+  test('the preview adapter answers what GET /:id/send-preview answers', async () => {
+    row.status = 'draft';
+    const viaRoute = await invoke('/:id/send-preview', 'get');
+    const viaBar = await router.estimateSendPreviewForBar({ estimateId: row.id });
+    expect(viaBar.status).toBe(200);
+    expect(viaBar.json).toEqual(viaRoute.body);
+    expect(viaBar.json.editVersion).toEqual(expect.any(String));
+    expect(viaBar.json.messageVersion).toEqual(expect.any(String));
+  });
+
+  test('the send adapter sends exactly as POST /:id/send does, pinned to the reviewed versions', async () => {
+    row.status = 'draft';
+    const { editVersion, messageVersion } = (await router.estimateSendPreviewForBar({ estimateId: row.id })).json;
+    const body = { sendMethod: 'email', expectedEditVersion: editVersion, messageVersion, idempotencyKey: 'bar-op-parity' };
+    const reply = await router.sendEstimateFromBar({ estimateId: row.id, body });
+    expect(reply.status).toBe(200);
+    expect(reply.json).toMatchObject({ success: true, sent: true });
+    expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(dataOf().manualSendAttempts.find((entry) => entry.key === 'bar-op-parity')).toBeTruthy();
+  });
+
+  test('the route\'s refusals come back as { status, json } in its own words', async () => {
+    row.status = 'draft';
+    const stale = await router.sendEstimateFromBar({ estimateId: row.id, body: { sendMethod: 'email', expectedEditVersion: 'old-version' } });
+    expect(stale.status).toBe(409);
+    expect(stale.json.code).toBe('ESTIMATE_REVIEW_STALE');
+    const badMethod = await router.sendEstimateFromBar({ estimateId: row.id, body: { sendMethod: 'pigeon' } });
+    expect(badMethod).toEqual({ status: 400, json: { error: 'Invalid sendMethod' } });
+    expect((await router.sendEstimateFromBar({ estimateId: 'missing', body: {} })).status).toBe(404);
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+});

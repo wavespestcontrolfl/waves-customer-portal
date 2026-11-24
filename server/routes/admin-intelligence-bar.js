@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibOpenaiBackupLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibSendEstimateLive, ibOpenaiBackupLive } = require('../config/feature-gates');
 const ModelFailure = require('../services/intelligence-bar/model-failure');
 const { dictatedAmountsNote } = require('../utils/spoken-money');
 const IbOpenaiBackup = require('../services/intelligence-bar/ib-openai-backup');
@@ -941,6 +941,11 @@ const PINNED_DISPLAY_BUILDERS = {
     : null),
   // accept_estimate names the customer and the estimate, never raw ids; the
   // plan, bill, visits and messages ride the contract's curated lines.
+  // send_estimate: the card names the estimate, the customer (first name and last initial), the channel and the masked
+  // recipients; the exact message and totals ride the contract's curated lines.
+  send_estimate: (params, preview) => (preview?.preview === true && preview.tool === 'send_estimate'
+    ? { estimate: preview.estimate.label, customer: preview.customer_name, send_by: preview.channels, to: [preview.recipients.text, preview.recipients.email].filter(Boolean), sends_now: 'yes, once' }
+    : null),
   accept_estimate: (params, preview) => (preview?.preview === true && preview.estimate
     ? { customer: preview.customer_name || preview.customer_id, estimate: `${preview.estimate.label} (${preview.estimate.status})` }
     : null),
@@ -1074,6 +1079,9 @@ const VERIFIED_VERSION_PARAMS = {
   // send_invoice binds the invoice state, the recipients and the total the card
   // showed (invoice-action-tools.js _version).
   send_invoice: '_verified_invoice_send_version',
+  // send_estimate binds the saved estimate's edit version, the exact message version and the channel the card showed
+  // (estimate-send-tools.js _version); the route's own review pins re-check them on its read.
+  send_estimate: '_verified_estimate_send_version',
   // record_payment binds the invoice state, the amount due and the method the card showed.
   record_payment: '_verified_record_payment_version',
   // convert_lead binds the lead, the customer and the request body the card showed.
@@ -3879,6 +3887,12 @@ Dependent steps must use verified outputs from their prerequisites. Stop depende
     if (platformEnabled && context !== 'tech' && context !== 'agent_estimate' && ibAcceptEstimateLive()) {
       systemPrompt += `\n\nACCEPTED QUOTES:
 When the operator says a customer accepted a quote ("he accepted", "she said yes to the estimate", "set him up recurring from the estimate"), find that customer's sent or viewed estimate and prepare accept_estimate for it (load it with discover_capabilities if it is not listed). It does what the estimate page's Mark accepted does. Never use update_customer or create_appointment to record an acceptance. If the customer has more than one open estimate, ask which one.`;
+    }
+    // Offered only while GATE_IB_SEND_ESTIMATE is on (owner 2026-11-24); appended after the shared blocks so off is
+    // byte-identical and the cacheable prefix is unchanged.
+    if (platformEnabled && context !== 'tech' && context !== 'agent_estimate' && ibSendEstimateLive()) {
+      systemPrompt += `\n\nSENDING A BUILT ESTIMATE:
+When the operator says to send a quote that is already built ("send her the estimate", "text him the quote"), find that customer's unsent DRAFT estimate and prepare send_estimate for it (load it with discover_capabilities if it is not listed). It does what the estimate page's Send dialog does for an immediate send. It never sends later, never resends one already sent, and never builds or edits an estimate. If the customer has more than one draft, ask which one. Relay a refusal as it is.`;
     }
     // Write-confirmation guidance (#1568, structural since W0/W0B): the only
     // mechanism is the confirmation card — there is no conversational mode.

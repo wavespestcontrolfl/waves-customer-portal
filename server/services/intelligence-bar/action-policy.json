@@ -2047,6 +2047,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "send_estimate": {
+    "module": "estimate-send-tools.js",
+    "domain": "estimate",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "send_invoice": {
     "module": "invoice-action-tools.js",
     "domain": "customers",

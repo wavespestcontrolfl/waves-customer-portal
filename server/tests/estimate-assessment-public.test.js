@@ -247,27 +247,16 @@ describe('GET /:token', () => {
     expect(await router._internals.assessmentFirstFor(estimate(), { open: true })).toBeNull();
   });
 
-  // Owner ruling 2026-11-23: these places are held until a second technician is hired (Englewood and Port Charlotte
-  // were held for a few hours and are served again; Port Charlotte on shared ZIPs 33980 / 33981 / 33983 stays held).
+  // The 2026-11-23 hold (a second technician was hired, so it ended): every place on it is offered the assessment again.
   test.each([
     [{ city: 'Port Charlotte', zip: '33981' }], [{ city: 'Gulf Cove' }], [{ city: 'Deep Creek' }], [{ city: 'Charlotte Harbor' }],
     [{ city: 'Rotonda West' }], [{ city: 'Placida' }],
     [{ city: 'Boca Grande' }], [{ city: 'Babcock Ranch' }], [{ city: null, zip: '33947' }], [{ city: '', zip: '33983' }],
-  ])('a held place %j is gone before any location work, and /data never offers it', async (place) => {
-    // the estimate and the customer name the same property, so only the area rule can answer "gone"
+    [{ city: 'Port Charlotte', zip: '33948' }], [{ city: 'Englewood', zip: '34223' }], [{ city: null, zip: '33952' }], [{ city: '', zip: '34224' }],
+  ])('a place held on 2026-11-23 %j is served again: offered the assessment', async (place) => {
     const zip = place.zip || '34205';
     customerRow = { ...CUSTOMER, zip, ...place };
     estimateRow = estimate({ address: `100 Sample Way, ${place.city || 'Somewhere'}, FL ${zip}` });
-    expect((await call(TOKEN)).body).toEqual({ state: 'gone' });
-    expect(mockBookingInternals.customerBookingLocation).not.toHaveBeenCalled();
-    expect(await router._internals.assessmentFirstFor(estimateRow, { open: true })).toBeNull();
-  });
-
-  test.each([
-    [{ city: 'Port Charlotte', zip: '33948' }], [{ city: 'Englewood', zip: '34223' }], [{ city: null, zip: '33952' }], [{ city: '', zip: '34224' }],
-  ])('Englewood and Port Charlotte %j are served again: offered the assessment', async (place) => {
-    customerRow = { ...CUSTOMER, ...place };
-    estimateRow = estimate({ address: `100 Sample Way, ${place.city || 'Somewhere'}, FL ${place.zip}` });
     expect((await call(TOKEN)).body).not.toEqual({ state: 'gone' });
     expect(mockBookingInternals.customerBookingLocation).toHaveBeenCalled();
   });
