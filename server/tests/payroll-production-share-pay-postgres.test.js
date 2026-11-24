@@ -580,6 +580,127 @@ postgres('production share pay line', () => {
       expect(again.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 50000 });
     });
 
+    it('PER INVOICE: a visit with a frozen shared invoice ($100.00) and its own separate $50.00 invoice credits $150.00, and the snapshot keeps both', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 5000 });
+      const W2 = addDays(W1, 7);
+      await worked(id, W1, 40);
+      await worked(id, W2, 40);
+      const customerId = await customer();
+      const v1 = await stop(id, W1, '100.00', customerId);
+      const v2 = await stop(id, W2, '100.00', customerId);
+      const invoiceFor = async (total, patch = {}) => (await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: total, discount_amount: '0.00', tax_amount: '0.00', total, ...patch,
+      }).returning('id'))[0].id;
+      const shared = await invoiceFor('200.00');
+      const [sv] = await trx('service_visits').insert({ customer_id: customerId, scheduled_date: W1, stop_base_key: 'k-pi', created_by: 'test' }).returning('id');
+      const [packet] = await trx('visit_completion_packets').insert({ visit_id: sv.id, idempotency_key: 'k-pi', request_hash: 'h', payload: {} }).returning('id');
+      for (const visitId of [v1, v2]) {
+        await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-pi-${visitId}`, invoice_id: shared });
+      }
+      const week1 = (await draft(W1)).body.run;
+      expect(byName(week1, 'Sample Alpha').productionShareCents).toBeGreaterThan(0); // $100.00 credited over a $50.00 bar
+      await finalize(week1.id);
+      // V2 also gets its own $50.00 invoice, and the shared invoice is repriced to $150.00 / $50.00 after week 1 was paid
+      const own = await invoiceFor('50.00', { scheduled_service_id: v2 });
+      await reprice({ v1, v2 }, '150.00', '50.00');
+      const check = byName((await draft(W2)).body.run, 'Sample Alpha');
+      // frozen $100.00 of the shared invoice + the live $50.00 of its own invoice
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 15000 });
+      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      const row = snapshot.stops.find((one) => one.visitId === v2);
+      expect(row).toMatchObject({ kind: 'frozen_basis', creditCents: 15000 });
+      expect(row.bases.map((basis) => [basis.basisId, basis.allocation[v2]])).toEqual([[shared, 10000], [own, 5000]]);
+    });
+
+    it('a package paid first also freezes the invoice allocation under its root: the other visit of that invoice credits its frozen cents', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const W2 = addDays(W1, 7);
+      await worked(id, W1, 40);
+      await worked(id, W2, 40);
+      const customerId = await customer();
+      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+      const root = await stop(id, W1, '1000.00', customerId, pkg);
+      const other = await stop(id, W2, '1000.00', customerId);
+      const [inv] = await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: '2000.00', discount_amount: '0.00', tax_amount: '0.00', total: '2000.00',
+      }).returning('id');
+      const [sv] = await trx('service_visits').insert({ customer_id: customerId, scheduled_date: W1, stop_base_key: 'k-pj', created_by: 'test' }).returning('id');
+      const [packet] = await trx('visit_completion_packets').insert({ visit_id: sv.id, idempotency_key: 'k-pj', request_hash: 'h', payload: {} }).returning('id');
+      for (const visitId of [root, other]) {
+        await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-pj-${visitId}`, invoice_id: inv.id });
+      }
+      const week1 = (await draft(W1)).body.run;
+      // the root is priced $1,000.00 from the shared invoice, and the package splits it in two: $500.00 now
+      expect(byName(week1, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 50000 });
+      await finalize(week1.id);
+      const frozen = (await trx('payroll_checks').where({ run_id: week1.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops[0];
+      expect(frozen.bases.map((basis) => basis.basisType)).toEqual(['job', 'invoice']);
+      expect(frozen.bases[1].allocation).toEqual({ [root]: 100000, [other]: 100000 });
+      // the invoice split moves, and the other visit still credits the frozen $1,000.00
+      await reprice({ v1: root, v2: other }, '3000.00', '1000.00');
+      const check = byName((await draft(W2)).body.run, 'Sample Alpha');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
+    });
+
+    it('a package root priced from a frozen shared invoice credits its part of the FROZEN amount, not the whole amount', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const W2 = addDays(W1, 7);
+      await worked(id, W1, 40);
+      await worked(id, W2, 40);
+      const customerId = await customer();
+      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+      const other = await stop(id, W1, '1000.00', customerId);
+      const root = await stop(id, W2, '1000.00', customerId, pkg);
+      const [inv] = await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: '2000.00', discount_amount: '0.00', tax_amount: '0.00', total: '2000.00',
+      }).returning('id');
+      const [sv] = await trx('service_visits').insert({ customer_id: customerId, scheduled_date: W1, stop_base_key: 'k-pk', created_by: 'test' }).returning('id');
+      const [packet] = await trx('visit_completion_packets').insert({ visit_id: sv.id, idempotency_key: 'k-pk', request_hash: 'h', payload: {} }).returning('id');
+      for (const visitId of [other, root]) {
+        await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-pk-${visitId}`, invoice_id: inv.id });
+      }
+      await finalize((await draft(W1)).body.run.id);
+      // the root's price moves on the invoice ($1,500.00 now); $1,000.00 of it was frozen with week 1
+      await reprice({ v1: other, v2: root }, '500.00', '1500.00');
+      const check = byName((await draft(W2)).body.run, 'Sample Alpha');
+      // half of the frozen $1,000.00, not the whole $1,000.00 and not half of the live $1,500.00
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 50000 });
+    });
+
+    it('THREE-CREDIT CASE: a two-visit package paid in two weeks (root, then follow-up) cannot credit a replacement follow-up a third time', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const W2 = addDays(W1, 7);
+      const W3 = addDays(W1, 14);
+      for (const week of [W1, W2, W3]) await worked(id, week, 40);
+      const customerId = await customer();
+      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+      const root = await stop(id, W1, '2000.00', customerId, pkg);
+      await finalize((await draft(W1)).body.run.id);
+      // week 2 pays the follow-up (slot 2 of the frozen $2,000.00 package)
+      const followUp = await stop(id, W2, '0.00', customerId, { ...pkg, followup_included: true, followup_source_service_id: root });
+      const week2 = (await draft(W2)).body.run;
+      expect(byName(week2, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 100000 });
+      await finalize(week2.id);
+      // the follow-up is cancelled and replaced by another one, done in week 3: the package was sold with two visits
+      await trx('scheduled_services').where({ id: followUp }).update({ status: 'cancelled' });
+      const replacement = await stop(id, W3, '0.00', customerId, { ...pkg, followup_included: true, followup_source_service_id: root });
+      const check = byName((await draft(W3)).body.run, 'Sample Alpha');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(snapshot.stops.find((row) => row.visitId === replacement)).toMatchObject({ kind: 'joined_basis', creditCents: 0, needsReview: true });
+      // the merged frozen job holds both paid slots, with the price the first payment fixed
+      const merged = await productionShare.frozenBases(trx, [replacement], [root], W3);
+      expect(merged).toHaveLength(1);
+      expect(merged[0].basis).toMatchObject({ basisType: 'job', totalCents: 200000, sold: 2, slots: { [root]: 1, [followUp]: 2 }, allocation: { [root]: 100000, [followUp]: 100000 } });
+    });
+
     it('AUDIT CASE: a package whose root is repriced $2,000 -> $1,200 after half was paid: the follow-up still credits $1,000.00', async () => {
       const id = await tech('Sample Alpha');
       await settings(id, { bar_cents: 10000 });

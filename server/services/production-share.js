@@ -702,17 +702,21 @@ async function weekStops(conn, technicianIds, weekStart) {
  * Voiding the paying run takes its checks out of the queries, so the freeze is released.
  */
 
-// What a credit was priced from, as bases: a job part carries its job; an invoice-priced stop carries every invoice that priced it,
-// with the invoice's full allocation (also an invoice held whole by one visit: a visit that JOINS it later is then a changed basis).
-// Any other credit (own price, prepaid slice, callback value, free visit, a review row) carries none.
-function basesOf(credit, invoiced) {
+// The invoices behind a billedByVisit entry, as bases (each with the invoice's full allocation, also an invoice held whole by one
+// visit: a visit that JOINS it later is then a changed basis). Nothing when no invoice priced the visit.
+const invoiceBasesOf = (entry) => (entry && entry.billedCents !== null && entry.billedCents !== undefined ? entry.allocations || [] : []).map((one) => ({
+  basisType: 'invoice', basisId: one.invoiceId, allocation: one.allocation,
+  totalCents: Object.values(one.allocation).reduce((sum, value) => sum + Number(value), 0),
+}));
+
+// What a credit was priced from, as bases: a job part carries its job AND the invoices its root was priced from (a package paid
+// first freezes the invoice allocation under it too, so the other visits of that invoice read it); an invoice-priced stop carries
+// every invoice that priced it. Any other credit (own price, prepaid slice, callback value, free visit, a review row) carries none.
+function basesOf(credit, invoiced, rootInvoiced) {
   if (credit.needsReview || !(credit.creditCents > 0)) return [];
-  if (credit.basis) return [credit.basis];
+  if (credit.basis) return [credit.basis, ...invoiceBasesOf(rootInvoiced)];
   if (credit.kind !== 'priced' || !invoiced || !(invoiced.billedCents > 0)) return [];
-  return (invoiced.allocations || []).map((one) => ({
-    basisType: 'invoice', basisId: one.invoiceId, allocation: one.allocation,
-    totalCents: Object.values(one.allocation).reduce((sum, value) => sum + Number(value), 0),
-  }));
+  return invoiceBasesOf(invoiced);
 }
 
 /**
@@ -765,7 +769,7 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
       refundCents: (invoiced.refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
       // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
       unallocatedRefunds: invoiced.unallocated || [],
-      bases: basesOf(credit, invoiced),
+      bases: basesOf(credit, invoiced, job && job.root ? billed.get(job.root.id) : null),
     });
   }
   return rows;
@@ -801,7 +805,7 @@ async function paidElsewhere(conn, visitIds, weekStart) {
 /**
  * The bases a finalized run froze that touch this week: every basis whose allocation LISTS one of `visitIds`, or whose id is one of
  * `basisIds` (a visit that joined a frozen basis lives on it), from the same checks as paidElsewhere. One query.
- * Returns [{ weekStart, basis }], one per basis (the earliest paid week wins).
+ * Returns [{ weekStart, basis }], one per basis, merged over every paying week (see below).
  */
 async function frozenBases(conn, visitIds, basisIds, weekStart) {
   if (!visitIds.length && !basisIds.length) return [];
@@ -812,10 +816,22 @@ async function frozenBases(conn, visitIds, basisIds, weekStart) {
     ${FROZEN_STOPS_WHERE_SQL}
       AND (b.value->>'basisId' = ANY(?::text[]) OR jsonb_exists_any(b.value->'allocation', ?::text[]))
     ORDER BY c.week_start, c.id`, [weekStart, basisIds, visitIds]);
+  // One basis per key. The price, the sold count and the total are the EARLIEST paid week's (the first payment fixed them); the
+  // allocation and the slots are the union over every paying week, earliest first on a clash: a job paid in two weeks (its root,
+  // then its follow-up) has both slots occupied, so a visit that replaces the follow-up cannot be credited a third time.
   const seen = new Map();
   for (const row of rows.rows) {
-    const key = `${row.basis.basisType}:${row.basis.basisId}`;
-    if (!seen.has(key)) seen.set(key, { weekStart: row.week_start, basis: row.basis });
+    const key = baseKey(row.basis);
+    const was = seen.get(key);
+    if (!was) { seen.set(key, { weekStart: row.week_start, basis: row.basis }); continue; }
+    seen.set(key, {
+      weekStart: was.weekStart,
+      basis: {
+        ...was.basis,
+        allocation: { ...(row.basis.allocation || {}), ...(was.basis.allocation || {}) },
+        ...(was.basis.slots || row.basis.slots ? { slots: { ...(row.basis.slots || {}), ...(was.basis.slots || {}) } } : {}),
+      },
+    });
   }
   return [...seen.values()];
 }
@@ -827,6 +843,63 @@ const PRICE_DERIVED_KINDS = new Set(['priced', 'multi_visit_job', 'unpriced']);
 const baseKey = (basis) => `${basis.basisType}:${basis.basisId}`;
 const alreadyPaid = (row, week) => ({ ...row, bases: [], ...toReview('already_paid', `Already paid in the week of ${week}: a pay run already credited this visit.`) });
 
+const frozenRow = (row, cents, reason, bases) => ({ ...row, kind: 'frozen_basis', creditCents: cents, needsReview: false, reason, bases });
+const sumOf = (list, id) => list.reduce((sum, one) => sum + Number(one.basis.allocation[id]), 0);
+const joinedRow = (row, was) => ({ ...row, bases: [], ...toReview('joined_basis', `This visit joined, after the week of ${was.weekStart} was paid, the ${was.basis.basisType === 'job' ? 'job' : 'shared invoice'} that week was paid from. It is not in the split that week froze.`) });
+
+// A job part. In order: the frozen job lists the visit (its frozen cents); the visit joined a frozen job (a free planned slot of the
+// FROZEN job price, else review); the job's price came from an invoice a finalized week froze for the root (the job split is taken
+// from the FROZEN amount, so a part is a part of that amount and never the whole amount). null = nothing frozen touches it.
+function frozenJobPart(row, liveJob, own, frozen, byKey) {
+  const id = row.visitId;
+  const eligible = PRICE_DERIVED_KINDS.has(row.kind);
+  const frozenJobs = own.filter((one) => one.basis.basisType === 'job');
+  if (frozenJobs.length && eligible) {
+    return frozenRow(row, sumOf(frozenJobs, id), `Credit frozen with the week of ${frozenJobs[0].weekStart}: the job it was paid from keeps the price and split that week was paid with.`, frozenJobs.map((one) => one.basis));
+  }
+  const was = byKey.get(baseKey(liveJob));
+  const nth = Number((liveJob.slots || {})[id]);
+  if (was) {
+    const used = new Set(Object.values(was.basis.slots || {}).map(Number));
+    if (was.basis.sold && nth >= 1 && nth <= was.basis.sold && !used.has(nth)) {
+      const cents = jobPartCents(was.basis.totalCents, was.basis.sold, nth);
+      return frozenRow(row, cents, `Part ${nth} of ${was.basis.sold} of the job price frozen with the week of ${was.weekStart}.`,
+        [{ ...was.basis, allocation: { ...was.basis.allocation, [id]: cents }, slots: { ...(was.basis.slots || {}), [id]: nth } }]);
+    }
+    return joinedRow(row, was);
+  }
+  const fed = frozen.filter((one) => one.basis.basisType === 'invoice' && Object.hasOwn(one.basis.allocation || {}, liveJob.basisId));
+  if (fed.length && eligible && nth >= 1 && nth <= liveJob.sold) {
+    const price = sumOf(fed, liveJob.basisId);
+    const allocation = Object.fromEntries(Object.entries(liveJob.slots || {}).map(([visit, slot]) => [visit, jobPartCents(price, liveJob.sold, Number(slot))]));
+    return frozenRow(row, jobPartCents(price, liveJob.sold, nth),
+      `Part ${nth} of ${liveJob.sold} of the job price, taken from the invoice amount frozen with the week of ${fed[0].weekStart}.`,
+      [{ ...liveJob, totalCents: price, allocation }, ...fed.map((one) => one.basis)]);
+  }
+  return null;
+}
+
+// A visit priced by invoices (or by nothing now). PER INVOICE: an invoice a finalized week froze for the visit credits its frozen
+// cents, an invoice nobody froze credits its live cents, and a visit that joined a frozen invoice it is not in makes the row $0 and
+// named. A frozen job that lists the visit (the job link is gone) credits its frozen cents.
+function frozenInvoiceParts(row, own, byKey) {
+  const id = row.visitId;
+  const eligible = PRICE_DERIVED_KINDS.has(row.kind);
+  const frozenJobs = own.filter((one) => one.basis.basisType === 'job');
+  if (frozenJobs.length && eligible) {
+    return frozenRow(row, sumOf(frozenJobs, id), `Credit frozen with the week of ${frozenJobs[0].weekStart}: the job it was paid from keeps the price and split that week was paid with.`, frozenJobs.map((one) => one.basis));
+  }
+  const frozenInvoices = own.filter((one) => one.basis.basisType === 'invoice');
+  const liveInvoices = (row.bases || []).filter((one) => one.basisType === 'invoice');
+  const joined = liveInvoices.map((live) => byKey.get(baseKey(live))).find((was) => was && !frozenInvoices.includes(was));
+  if (joined) return joinedRow(row, joined);
+  if (!frozenInvoices.length || !eligible) return null;
+  const unfrozen = liveInvoices.filter((live) => !frozenInvoices.some((one) => baseKey(one.basis) === baseKey(live)));
+  const cents = sumOf(frozenInvoices, id) + unfrozen.reduce((sum, live) => sum + Number(live.allocation[id] || 0), 0);
+  return frozenRow(row, cents, `Credit frozen with the week of ${frozenInvoices[0].weekStart}: each shared invoice keeps the split it was paid with.`,
+    [...frozenInvoices.map((one) => one.basis), ...unfrozen]);
+}
+
 /**
  * The credit rows of a pay week with the freeze applied (see FREEZING above). `paid`: Map visit id -> week (paidElsewhere);
  * `frozen`: [{ weekStart, basis }] (frozenBases). Pure.
@@ -837,34 +910,9 @@ function applyFrozen(rows, paid, frozen) {
   return rows.map((row) => {
     if (paid.has(row.visitId)) return alreadyPaid(row, paid.get(row.visitId));
     if (row.kind === 'already_paid') return row;
-    const id = row.visitId;
-    const listing = frozen.filter((one) => Object.hasOwn(one.basis.allocation || {}, id));
-    if (listing.length && PRICE_DERIVED_KINDS.has(row.kind)) {
-      const cents = listing.reduce((sum, one) => sum + Number(one.basis.allocation[id]), 0);
-      return {
-        ...row, kind: 'frozen_basis', creditCents: cents, needsReview: false,
-        reason: `Credit frozen with the week of ${listing[0].weekStart}: the invoice or job it was paid from keeps the split that week was paid with.`,
-        bases: listing.map((one) => one.basis),
-      };
-    }
-    // Not listed. A credit priced from a basis a finalized week froze, by a visit that is not in it: it joined after.
-    const joined = (row.bases || []).map((live) => ({ live, was: byKey.get(baseKey(live)) })).find(({ was }) => was && !listing.includes(was));
-    if (!joined) return row;
-    const { live, was } = joined;
-    if (was.basis.basisType === 'job' && was.basis.sold) {
-      // A job's later visit takes a free planned slot of the FROZEN job price.
-      const nth = Number((live.slots || {})[id]);
-      const used = new Set(Object.values(was.basis.slots || {}).map(Number));
-      if (nth >= 1 && nth <= was.basis.sold && !used.has(nth)) {
-        const cents = jobPartCents(was.basis.totalCents, was.basis.sold, nth);
-        return {
-          ...row, kind: 'frozen_basis', creditCents: cents, needsReview: false,
-          reason: `Part ${nth} of ${was.basis.sold} of the job price frozen with the week of ${was.weekStart}.`,
-          bases: [{ ...was.basis, allocation: { ...was.basis.allocation, [id]: cents }, slots: { ...(was.basis.slots || {}), [id]: nth } }],
-        };
-      }
-    }
-    return { ...row, bases: [], ...toReview('joined_basis', `This visit joined, after the week of ${was.weekStart} was paid, the ${was.basis.basisType === 'job' ? 'job' : 'shared invoice'} that week was paid from. It is not in the split that week froze.`) };
+    const own = frozen.filter((one) => Object.hasOwn(one.basis.allocation || {}, row.visitId));
+    const liveJob = (row.bases || []).find((one) => one.basisType === 'job');
+    return (liveJob ? frozenJobPart(row, liveJob, own, frozen, byKey) : frozenInvoiceParts(row, own, byKey)) || row;
   });
 }
 

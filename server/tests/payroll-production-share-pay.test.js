@@ -356,6 +356,28 @@ describe('the first finalized payment freezes the credit basis (applyFrozen)', (
     expect(productionShare.applyFrozen([followUp(60000, 3)], none, [{ weekStart: '2026-09-14', basis: jobBasis }])[0]).toMatchObject({ kind: 'joined_basis', creditCents: 0 });
   });
 
+  test('PER INVOICE: a frozen shared invoice credits its frozen cents and the visit\'s own separate invoice its live cents, and both stay on the row', () => {
+    // visit-2: $100.00 of the shared invoice (frozen, though it now splits $150 / $50) plus its own $50.00 invoice
+    const own = { basisType: 'invoice', basisId: 'inv-own', totalCents: 5000, allocation: { 'visit-2': 5000 } };
+    const row = live(10000, [invoiceBasis(15000, 5000), own]);
+    const out = productionShare.applyFrozen([{ ...row, creditCents: 10000 }], none, frozenInvoice(invoiceBasis(10000, 10000)))[0];
+    expect(out).toMatchObject({ kind: 'frozen_basis', creditCents: 15000, needsReview: false });
+    expect(out.bases).toEqual([invoiceBasis(10000, 10000), own]);
+    // a lost shared link leaves only the own invoice live: frozen $100.00 + live $50.00 all the same
+    expect(productionShare.applyFrozen([live(5000, [own])], none, frozenInvoice(invoiceBasis(10000, 10000)))[0]).toMatchObject({ creditCents: 15000 });
+  });
+
+  test('a job part whose root price came from an invoice a finalized week froze takes its part of the FROZEN amount, never the whole', () => {
+    // visit-1 is the root of a two-treatment package; it was priced $1,500.00 from a shared invoice now, $1,000.00 was frozen for it
+    const liveJob = { basisType: 'job', basisId: 'visit-1', totalCents: 150000, sold: 2, allocation: { 'visit-1': 75000 }, slots: { 'visit-1': 1 } };
+    const root = { visitId: 'visit-1', workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: 75000, needsReview: false, bases: [liveJob] };
+    const frozenInv = [{ weekStart: '2026-09-14', basis: { basisType: 'invoice', basisId: 'inv-9', totalCents: 200000, allocation: { 'visit-1': 100000, 'visit-9': 100000 } } }];
+    const out = productionShare.applyFrozen([root], none, frozenInv)[0];
+    expect(out).toMatchObject({ kind: 'frozen_basis', creditCents: 50000 });
+    expect(out.bases[0]).toMatchObject({ basisType: 'job', totalCents: 100000, allocation: { 'visit-1': 50000 } });
+    expect(out.bases[1].basisId).toBe('inv-9');
+  });
+
   test('no frozen basis changes nothing, and a row with no basis behind it is left alone', () => {
     const row = live(60000);
     expect(productionShare.applyFrozen([row], none, [])[0]).toBe(row);
