@@ -29976,6 +29976,22 @@ async function estimateCustomerPreservesMonthlyBilling(estimate) {
   }
 }
 
+// The billing lane for a caller that must NOT guess (the "What you pay" box): true = monthly member, false =
+// per application, null = a lookup failed. The display resolvers answer a failure as per application, which is
+// the wrong direction here; they are left alone (estimate-per-month-copy pins their single raw caller).
+async function estimateMonthlyBillingLaneKnown(estimate) {
+  try {
+    if (!(await perApplicationBillingColumnsExist())) return true;
+    if (!estimate?.customer_id && !estimate?.customer_phone) return false;
+    const customer = estimate.customer_id
+      ? await db('customers').where({ id: estimate.customer_id }).first()
+      : (await matchAcceptCustomerByPhone(estimate)).match;
+    return customer ? BillingCadence.customerPreservesMonthlyMembership(customer) : false;
+  } catch {
+    return null;
+  }
+}
+
 // The monthly-billed identity for DISPLAY (the SSR hero fork and its /data
 // mirror) — one resolver, so the two surfaces can't drift.
 //
@@ -31741,15 +31757,18 @@ function whatYouPayTierBillsPerApplication({ estData, frequency, lines }) {
 }
 
 // The estimate shapes the box never describes: not open, held, invoiced, monthly-billed, commercial, a frozen offer.
-function whatYouPayEstimateIsStandard({ estimate, estData, invoiceMode, siteConfirmationHold, monthlyBilled, quoteRequired }) {
-  if (invoiceMode || siteConfirmationHold || monthlyBilled || quoteRequired) return false;
+// `monthlyBilled` must be exactly false (a resolved per-application lane) and `pendingDeposit` exactly 0 (no paid,
+// unconsumed deposit the accept would credit against the first invoice): null, true or an amount all mean no box.
+function whatYouPayEstimateIsStandard({ estimate, estData, invoiceMode, siteConfirmationHold, monthlyBilled, pendingDeposit, quoteRequired }) {
+  if (invoiceMode || siteConfirmationHold || monthlyBilled !== false || pendingDeposit !== 0 || quoteRequired) return false;
   if (!isEstimateAcceptActive(estimate) || estimate.price_locked_at || frozenOfferRefusal(estimate)) return false;
   return !(isCommercialAutoAcceptEstimate(estimate) || isCommercialOneTimePricedEstimate(estimate) || estimateHasCommercialScope(estData));
 }
 
-// The accept's recurring service list for this estimate.
+// The accept's recurring service list for this estimate: the accept reads the SUPPLEMENTED data first (a legacy
+// plan keeps services in both the result block and the root block).
 function whatYouPayServices(estimate, estData) {
-  const services = acceptanceServiceLists(estData).recurringSvcList;
+  const services = acceptanceServiceLists(withSupplementedRecurringServices(estData) || estData).recurringSvcList;
   const pestOnly = services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
   return estimate.show_one_time_option && pestOnly.length ? pestOnly : services;
 }
@@ -31784,9 +31803,29 @@ function whatYouPaySetupFee({ estimate, estData, frequency, services, lineCount 
   return {
     amount,
     waivedWithPrepay: acceptPrepayAvailable({
-      selectedFrequency: frequency, recurringSvcList: services, oneTimeList: acceptanceServiceLists(estData).oneTimeList, estData, estimate,
+      selectedFrequency: frequency, recurringSvcList: services, oneTimeList: acceptanceServiceLists(withSupplementedRecurringServices(estData) || estData).oneTimeList, estData, estimate,
     }) === true,
   };
+}
+
+// The paid, unconsumed deposit the accept would credit against the first invoice: 0 = none, an amount = some,
+// null = the ledger could not be read. Same ledger reads the accept transaction makes.
+async function whatYouPayPendingDeposit(estimate) {
+  try {
+    const Deposits = require('../services/estimate-deposits');
+    const own = await Deposits.pendingDepositCredit(estimate.id);
+    const customer = estimate.customer_id ? await Deposits.pendingDepositCreditForCustomer(estimate.customer_id) : null;
+    return Math.round(((Number(own?.amount) || 0) + (Number(customer?.amount) || 0)) * 100) / 100;
+  } catch (err) {
+    logger.warn(`[estimate-data] whatYouPay deposit lookup failed for estimate ${estimate?.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// The two live lookups the accept depends on, resolved together for `whatYouPayForData`.
+async function whatYouPayAcceptLookups(estimate) {
+  const [monthlyBilled, pendingDeposit] = await Promise.all([estimateMonthlyBillingLaneKnown(estimate), whatYouPayPendingDeposit(estimate)]);
+  return { monthlyBilled, pendingDeposit };
 }
 
 function whatYouPayForData(input = {}) {
@@ -31927,6 +31966,8 @@ async function composeEstimateDataPayload(estimate, {
     // the page or in Ask Waves, may state them.
     const noEstimateWideGuarantee = !estimateCarriesPlanTerms(estimateDataForIntelligence, pricingBundle);
     const effectiveInvoiceMode = estimate.bill_by_invoice === true || guaranteeOnlyAccept;
+    // Live lookups the "What you pay" box must resolve (an unresolved lane or deposit ledger means no box).
+    const whatYouPayLookups = await whatYouPayAcceptLookups(estimate);
     const intelligence = isRegulatedCertificateSurface
       ? null
       : buildWaveGuardIntelligencePayload(
@@ -32947,7 +32988,7 @@ async function composeEstimateDataPayload(estimate, {
         pricingBundle,
         invoiceMode: effectiveInvoiceMode,
         siteConfirmationHold,
-        monthlyBilled: monthlyBilledEstimate,
+        ...whatYouPayLookups,
         quoteRequired: quoteRequirement?.quoteRequired === true,
       }),
       cta: {
@@ -33627,6 +33668,8 @@ module.exports.findLinkedUpcomingAppointment = findLinkedUpcomingAppointment;
 module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.whatYouPayForData = whatYouPayForData;
+module.exports.whatYouPayAcceptLookups = whatYouPayAcceptLookups;
+module.exports.estimateMonthlyBillingLaneKnown = estimateMonthlyBillingLaneKnown;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
 module.exports.estimateClosedOnline = estimateClosedOnline;
 module.exports.estimateLinkageInvalidated = estimateLinkageInvalidated;

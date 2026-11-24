@@ -22,6 +22,8 @@ const lawnSection = { key: 'lawn_care', label: 'Lawn Care', isRecurring: true, d
 
 const pestOnly = () => ({
   estimate: estimateRow(),
+  monthlyBilled: false,
+  pendingDeposit: 0,
   estData: dataFor([recurringRow('pest_control', 'Pest Control')]),
   pricingBundle: {
     services: [pestSection],
@@ -32,6 +34,8 @@ const pestOnly = () => ({
 });
 const bundle = () => ({
   estimate: estimateRow(),
+  monthlyBilled: false,
+  pendingDeposit: 0,
   estData: dataFor([recurringRow('pest_control', 'Pest Control'), recurringRow('lawn_care', 'Lawn Care')]),
   pricingBundle: {
     services: [pestSection, lawnSection],
@@ -44,6 +48,8 @@ const bundle = () => ({
 });
 const lawnOnly = () => ({
   estimate: estimateRow(),
+  monthlyBilled: false,
+  pendingDeposit: 0,
   estData: dataFor([recurringRow('lawn_care', 'Lawn Care')]),
   pricingBundle: {
     services: [lawnSection],
@@ -129,6 +135,46 @@ describe('whatYouPayForData', () => {
     const input = pestOnly();
     mutate(input);
     expect(whatYouPayForData(input)).toBeNull();
+  });
+
+  describe('the accept reads the supplemented plan: a legacy plan keeps services in two recurring blocks', () => {
+    // pest in result.recurring.services, lawn only in the root recurring.services.
+    const legacy = () => {
+      const input = pestOnly();
+      input.estData = {
+        result: { recurring: { services: [recurringRow('pest_control', 'Pest Control')] } },
+        recurring: { services: [recurringRow('lawn_care', 'Lawn Care')] },
+      };
+      return input;
+    };
+
+    test('the frequency prices pest only: null, never a pest-only box', () => {
+      expect(whatYouPayForData(legacy())).toBeNull();
+    });
+
+    test('the frequency prices both services: both lines, never one', () => {
+      const input = legacy();
+      input.pricingBundle = bundle().pricingBundle;
+      const out = whatYouPayForData(input);
+      expect(out.lines.map((line) => line.key)).toEqual(['pest_control', 'lawn_care']);
+      expect(out.setupFee).toBeNull();
+    });
+  });
+
+  describe('live lookups the accept depends on', () => {
+    test.each([
+      ['an unresolved billing lane (lookup failed)', { monthlyBilled: null }],
+      ['a lane that was not looked up', { monthlyBilled: undefined }],
+      ['a paid, unconsumed deposit the accept credits', { pendingDeposit: 49 }],
+      ['an unresolved deposit ledger (lookup failed)', { pendingDeposit: null }],
+      ['a deposit that was not looked up', { pendingDeposit: undefined }],
+    ])('%s: null', (_label, extra) => {
+      expect(whatYouPayForData({ ...pestOnly(), ...extra })).toBeNull();
+    });
+
+    test('a resolved per-application lane and an empty deposit ledger: the box is built', () => {
+      expect(whatYouPayForData({ ...pestOnly(), monthlyBilled: false, pendingDeposit: 0 })).not.toBeNull();
+    });
   });
 
   describe('with a one-time option on the estimate', () => {
