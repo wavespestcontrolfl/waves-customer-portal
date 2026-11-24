@@ -170,7 +170,7 @@ function CheckMark() {
 
 // Shown for a home that has a price. onNeedCall(true) tells the page this card carries the call button, so the page
 // does not show a second one.
-function FirstVisitPicker({ token, price, address, onNeedCall }) {
+function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged }) {
   const [times, setTimes] = useState({ status: 'loading', offers: [] }); // loading | ready | call
   const [day, setDay] = useState(null);
   const [picked, setPicked] = useState(null);
@@ -263,6 +263,8 @@ function FirstVisitPicker({ token, price, address, onNeedCall }) {
       } else if (body.error === 'invalid_contact' && FIELD_ERRORS[body.field]) {
         setFieldErrors({ [body.field]: FIELD_ERRORS[body.field] });
       } else {
+        // A changed price: the card above stops showing the old one (the parent swaps it for "Call us for your price").
+        if (body.error === 'price_changed' && onPriceChanged) onPriceChanged();
         setCallNotice(CALL_NOTICES[body.error] || GENERIC_NOTICE);
       }
     } catch {
@@ -406,6 +408,7 @@ export default function MailHomePage() {
   const [data, setData] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ready | unavailable
   const [pickerHasCall, setPickerHasCall] = useState(false);
+  const [priceStale, setPriceStale] = useState(false);
   useGlassSurface(true);
 
   useEffect(() => {
@@ -435,7 +438,9 @@ export default function MailHomePage() {
   const line1 = addressCase(data.address.line1) || null;
   const city = addressCase(data.address.city) || null;
   const price = data.price;
-  const setupFee = price && Number(price.setupFee) > 0 ? Number(price.setupFee) : null;
+  // The price card shows no price once a booking answered price_changed; the picker keeps the price it was opened with.
+  const cardPrice = priceStale ? null : price;
+  const setupFee = cardPrice && Number(cardPrice.setupFee) > 0 ? Number(cardPrice.setupFee) : null;
 
   return (
     <CustomerColumn column="flow">
@@ -450,18 +455,18 @@ export default function MailHomePage() {
       )}
 
       <BrandCard style={{ marginTop: SP.xl, textAlign: 'center' }}>
-        {price ? (
+        {cardPrice ? (
           <>
             {/* AGENTS.md "Per application" price copy: the per-application price is the price; the month average sits
                 beneath it, smaller. A quarterly plan is 4 applications a year. */}
             <div data-testid="application-price" style={{ fontSize: 44, fontWeight: FW.bold, lineHeight: LH.display, color: DOC.ink, letterSpacing: '-0.02em' }}>
-              {formatMoney(perApplication(price.annual))}
+              {formatMoney(perApplication(cardPrice.annual))}
             </div>
             <p style={{ margin: `${SP.xs}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink }}>
               per application, 4 a year
             </p>
             <p data-testid="monthly-price" style={{ margin: `${SP.xs}px 0 0`, fontSize: FS.body, lineHeight: LH.body, color: DOC.muted }}>
-              About {formatMoney(price.monthly)} a month
+              About {formatMoney(cardPrice.monthly)} a month
             </p>
             <p style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
               Quarterly pest control{line1 ? ` for ${line1}` : ''}
@@ -484,7 +489,7 @@ export default function MailHomePage() {
         )}
       </BrandCard>
 
-      {price ? <FirstVisitPicker token={token} price={price} address={data.address} onNeedCall={setPickerHasCall} /> : null}
+      {price ? <FirstVisitPicker token={token} price={price} address={data.address} onNeedCall={setPickerHasCall} onPriceChanged={() => setPriceStale(true)} /> : null}
 
       <BrandCard style={{ marginTop: SP.md }}>
         <h2 style={{ ...docHeading(3), marginBottom: SP.sm }}>What the plan includes</h2>

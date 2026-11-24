@@ -188,7 +188,8 @@ it.each([
     return response(200, PAGE);
   });
   expect(await screen.findByRole('heading', { name: 'Call us to pick a time' })).toBeInTheDocument();
-  expect(screen.getAllByRole('link', CALL_LINK)).toHaveLength(1);
+  // The parent hides its own call link in a later render (onNeedCall): wait for that, not the first paint.
+  await waitFor(() => expect(screen.getAllByRole('link', CALL_LINK)).toHaveLength(1));
   expect(screen.queryByRole('button', { name: /AM/ })).not.toBeInTheDocument();
 });
 
@@ -319,6 +320,17 @@ it.each([
   expect(await screen.findByText(text)).toBeInTheDocument();
   expect(screen.getAllByRole('link', CALL_LINK)).toHaveLength(1);
   expect(screen.queryByRole('button', { name: 'Book this visit' })).not.toBeInTheDocument();
+});
+
+it('stops showing the old price once a booking answers price_changed', async () => {
+  renderPage(pageFetch({ book: response(409, { error: 'price_changed' }) }));
+  expect(await screen.findByTestId('application-price')).toBeInTheDocument();
+  await pickFirstTime();
+  fillAndSubmit();
+
+  expect(await screen.findByText('Your price was updated — call us.')).toBeInTheDocument();
+  expect(screen.queryByTestId('application-price')).not.toBeInTheDocument();
+  expect(screen.getByText('Call us for your price')).toBeInTheDocument();
 });
 
 it('says something went wrong when the booking request fails', async () => {
