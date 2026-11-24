@@ -7394,11 +7394,31 @@ const EstimateConverter = {
               // the reserve), insert it unassigned; FOR SHARE on this trx so the
               // change cannot commit underneath. Insert line below is frozen by
               // the booking insert-site contract and stays untouched.
+              // GATE_TECH_SHIFT_HOURS (D4): the accept judged the reserved visit's own block
+              // (slot-reservation.js). This program copies that visit's hour and technician and
+              // runs for its own length (its window end, set above), so it can end after that
+              // technician's shift (a copied time the check cannot read exactly, one with seconds,
+              // is a block no shift holds, as for the movers: shiftBlockMinutes). A shift that
+              // does not hold its block never assigns: the
+              // program is inserted unassigned at the same hour, for the office to place, as
+              // for a technician who cannot take work. The read has its own savepoint: a failed
+              // read must not abort this transaction and lose the program, and hours that cannot
+              // be read never assign. Gate off: nothing runs (no savepoint, no read). A combined
+              // visit's member is not judged here: the accept judged the whole block, and a
+              // member without the anchor's technician refuses the accept (assertCapacityServices).
               if (standaloneRow.technician_id) {
                 const parentTech = await trx('technicians').where({ id: standaloneRow.technician_id }).forShare()
                   .first('id', 'employment_status', 'field_dispatchable');
                 if (!isAssignable(parentTech)) {
                   logger.warn(`[estimate-converter] technician ${standaloneRow.technician_id} is not assignable; inserting standalone parent unassigned`);
+                  delete standaloneRow.technician_id;
+                } else if (!combinedCapacity && require('../config/feature-gates').techShiftHoursLive?.() && await trx.transaction((shiftSp) => require('./technician-eligibility')
+                  .shiftExcluding(shiftSp, standaloneRow.technician_id, unitDate, require('./scheduling/window-rules').shiftBlockMinutes(standaloneRow)))
+                  .catch((shiftErr) => {
+                    logger.warn(`[estimate-converter] shift hours read failed for technician ${standaloneRow.technician_id}: ${shiftErr.message}`);
+                    return true;
+                  })) {
+                  logger.warn(`[estimate-converter] technician ${standaloneRow.technician_id} is outside the shift for this program on ${unitDate}, or its hours are unread; inserting standalone parent unassigned`);
                   delete standaloneRow.technician_id;
                 }
               }
