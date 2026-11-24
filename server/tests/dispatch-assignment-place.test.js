@@ -206,6 +206,16 @@ describe('assignDispatchJob day line: what the assign asks', () => {
       conn: db, block: { window_start: '10:00:00', window_end: '12:00:00', estimated_duration_minutes: 90 },
     });
     expect(out.warnings).toEqual([LINE, 'Tech Two is set to Off for Lawn work.']);
+    // The day line alone, for a grouped stop's move (visit-groups alignMemberTechnician).
+    expect(out.dayWarning).toBe(LINE);
+  });
+
+  test('a job-type line and no day line: no dayWarning key', async () => {
+    withJob(TIMED);
+    capabilityOffWarningsFor.mockResolvedValueOnce(['Tech Two is set to Off for Lawn work.']);
+    const out = await assign();
+    expect(out.warnings).toEqual(['Tech Two is set to Off for Lawn work.']);
+    expect('dayWarning' in out).toBe(false);
   });
 
   test('no line: no warnings key', async () => {

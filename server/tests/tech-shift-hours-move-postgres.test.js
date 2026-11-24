@@ -230,11 +230,11 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
     }
   });
 
-  // A visit group moves each member through reschedule (skipVisitSeam) and may name a technician
+  // A visit group moves each member through reschedule (shiftAskedByUnit: the unit judges it) and may name a technician
   // that call does not see. The group is judged as one unit, so a member is not judged alone here.
   test('a visit group\'s member move is not judged alone here', async () => {
     const id = await seed();
-    expect(await move(id, nextDay, { start: '13:00', end: '14:00' }, 'customer', { visitPolicy: 'single', skipVisitSeam: true })).toMatchObject({ success: true });
+    expect(await move(id, nextDay, { start: '13:00', end: '14:00' }, 'customer', { visitPolicy: 'single', skipVisitSeam: true, shiftAskedByUnit: true })).toMatchObject({ success: true });
     expect(await rowOf(id)).toMatchObject({ day: nextDay, window_start: '13:00:00', window_end: '14:00:00' });
   });
 
@@ -565,24 +565,21 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
         expect(await rowOf(stop.b)).toMatchObject(whereSeeded[1]);
       });
 
-      // The office's line was about the length the plan read: that service's own write pins it too.
-      test('the office\'s own move: the first service made longer after the plan ends the move as a concurrent change, and neither service moves', async () => {
+      // The office's own move: each service that keeps its technician is told by its own move, which reads the row
+      // in its own transaction and pins the technician and the length its line was about (as one visit's move does).
+      test('the office\'s own move: the first service made longer after its move read it ends the move as a concurrent change, and neither service moves', async () => {
         const stop = await seedStop();
         await expect(move(stop.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', lengthen(stop.a))).rejects.toMatchObject({ statusCode: 409 });
-        expect(await stopOf(stop)).toMatchObject([{ ...whereSeeded[0] }, whereSeeded[1]]);
+        expect(await stopOf(stop)).toMatchObject(whereSeeded);
       });
 
-      test('the office\'s own move: the second service made longer after the plan does not move, and the move reports it; gate off it moves', async () => {
+      test('the office\'s own move: the second service made longer after the plan moves, and the office is told about the length it has', async () => {
         const stop = await seedStop();
+        // Both services fit for 60 minutes (10:00 and 11:00). The second, at 240 minutes, ends at 15:00.
         const out = await move(stop.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', lengthen(stop.b));
-        expect(out.visitMove.moved).toEqual([stop.a]);
-        expect(out.visitMove.failed.map((x) => x.id)).toEqual([stop.b]);
-        expect(await rowOf(stop.b)).toMatchObject(whereSeeded[1]);
-        await f.db('scheduled_services').del();
-        await f.db('service_visits').del();
-        delete process.env.GATE_TECH_SHIFT_HOURS;
-        const off = await seedStop();
-        expect((await move(off.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', lengthen(off.b))).visitMove).toMatchObject({ moved: [off.a, off.b], failed: [] });
+        expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+        expect(shiftLines(out)).toEqual([OFFICE_LINE]);
+        expect(await rowOf(stop.b)).toMatchObject({ day: nextDay, window_start: '11:00:00' });
       });
 
       // A caller's own fence drops the plan's fence of the first service. A move of the day alone carries the
@@ -797,12 +794,15 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
           });
         });
 
-        test('the office\'s own move is not judged at the assignment', async () => {
+        test('the office\'s own move is not judged at the assignment: it is told there, about the row the assignment writes', async () => {
           const stop = await seedStop();
+          // Both services fit the named technician's shift as planned. The first is made 240 minutes long after its
+          // move and before its assignment: 10:00 to 14:00, after the 12:00 shift end.
           lengthenAtAssignment(stop.a);
           const out = await move(stop.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', { overlapAdvisory: true, technicianId: f.ids.otherTech });
           expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
           expect((await stopOf(stop)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
+          expect(shiftLines(out)).toEqual([OFFICE_LINE]);
         });
       });
 

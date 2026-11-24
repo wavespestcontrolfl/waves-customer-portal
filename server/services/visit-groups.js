@@ -313,7 +313,7 @@ async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = f
   // not a staff row — the customer moving the stop online — so their own
   // move stays silent and the card never says "by the office" for a
   // customer move (codex r9 P2).
-  await assignDispatchJob({
+  const assigned = await assignDispatchJob({
     jobId: rowId, technicianId, actorId, emit: true, trx: t, skipVisitSeam,
     ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}),
     // GATE_TECH_SHIFT_HOURS: an automatic unit move asks the assignment to judge the shift too.
@@ -321,6 +321,10 @@ async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = f
     ...(noticeActorId !== undefined ? { noticeActorId } : {}),
     ...(noticePrevious ? { noticePrevious } : {}),
   });
+  // The assignment's own day-off or shift line, about the row it wrote on the
+  // technician who gets it. The office's own unit move returns it with the
+  // shift gate on (unitWarnings, D4 part 3c); no other caller reads it.
+  return assigned.dayWarning;
 }
 
 /**
@@ -1784,31 +1788,18 @@ function memberOutsideShift(shiftOf, date, landings, judged = {}) {
 }
 
 /**
- * GATE_TECH_SHIFT_HOURS (D4 part 3c): what the office is told about its own move
- * of a grouped stop. One answer for the unit, at the plan and under the stop
- * lock: for each member that will change, on the technician it will carry (the
- * named one, else its own), the day-off line, or, on a day that technician
- * works, the shift line when the shift does not hold the member as the move
- * leaves it (technician-eligibility dayWarningFor). A member the move leaves on
- * its day and its technician (`from`) is asked the shift alone. A member's
- * own move through the rebooker then states nothing (officeSlotTechnician): it
- * runs on the technician the member has, which the unit's move may change.
- * `read` takes the stored length each line was about; that member's own write
- * pins it (shiftPin). Gate off: no read here, and the members' own moves state
- * the day-off line as before.
+ * GATE_TECH_SHIFT_HOURS (D4 part 3c): the warnings a unit move returns. The
+ * office's own move of a grouped stop is told the day off or the shift by the
+ * writes themselves: a member that keeps its technician by its own move (the
+ * rebooker's office line, in `warnings` with that move's other lines), a
+ * member the unit hands to another technician by that assignment
+ * (`assignmentLines`, alignMemberTechnician). Two members can state the same
+ * line, so each line is returned once. Gate off, or a move the office did not
+ * start: `warnings` as it is, as before (the assignments' lines are dropped).
  */
-async function unitOfficeLines(t, date, landings, read) {
-  if (!require('../config/feature-gates').techShiftHoursLive()) return [];
-  const lines = new Set();
-  for (const landing of landings.filter((x) => x.technicianId)) {
-    const line = await require('./technician-eligibility').dayWarningFor(landing.technicianId, date, {
-      conn: t, block: { window_start: landing.start, window_end: landing.end, estimated_duration_minutes: landing.durationMinutes },
-      shiftOnly: landing.from.date === date && landing.from.technicianId === landing.technicianId,
-    });
-    read[landing.id] = landing.durationMinutes ?? null;
-    if (line) lines.add(line);
-  }
-  return [...lines];
+function unitWarnings(warnings, assignmentLines, initiatedBy) {
+  if (initiatedBy !== 'admin' || !require('../config/feature-gates').techShiftHoursLive()) return warnings;
+  return [...new Set([...warnings, ...assignmentLines])].filter(Boolean);
 }
 
 /**
@@ -2212,28 +2203,20 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // does not hold refuses the whole unit as a clash does (SLOT_TAKEN),
         // so no group is moved in part. The office's own move is not checked.
         // Gate off: loadTechShifts answers "no shift" before any read.
-        // shiftJudgedLengths: the length each member's verdict, or the office's
-        // line, used, read here under the stop lock. That member's own move
-        // pins it.
+        // shiftJudgedLengths: the length each judged member's verdict used,
+        // read here under the stop lock. That member's own move pins it.
         const shiftJudgedLengths = {};
-        // A member's own move takes its new window as a range in minutes
-        // (the rebooker's parseWindow reads no other range string); for any
-        // other range string it keeps the row's stored hours, as on main (a
-        // requested time sent with seconds, "09:00:00"). So such a member
-        // is judged where its write leaves it: at its stored hours.
-        const keepsStored = (index) => typeof targets[index].window === 'string' && !/^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/.test(targets[index].window);
-        const landings = members.map((m, index) => ({
-          id: m.id, start: keepsStored(index) ? m.window_start : planned[index].start, end: keepsStored(index) ? m.window_end : planned[index].end, durationMinutes: m.estimated_duration_minutes,
-          technicianId: options.technicianId !== undefined ? (options.technicianId || null) : (m.technician_id || null),
-          // Where the member is now: the office's line needs it (unitOfficeLines).
-          from: { date: dateOnly(m.scheduled_date), technicianId: m.technician_id || null },
-        })).filter((landing, index) => !targets[index].alreadyAtTarget);
-        const dayLines = [];
-        if (initiatedBy === 'admin') {
-          // The office's own move is told, never refused (D4 part 3c): one
-          // answer for the unit, on the technician each member will carry.
-          dayLines.push(...await unitOfficeLines(t, newDateStr, landings, shiftJudgedLengths));
-        } else {
+        if (initiatedBy !== 'admin') {
+          // A member's own move takes its new window as a range in minutes
+          // (the rebooker's parseWindow reads no other range string); for any
+          // other range string it keeps the row's stored hours, as on main (a
+          // requested time sent with seconds, "09:00:00"). So such a member
+          // is judged where its write leaves it: at its stored hours.
+          const keepsStored = (index) => typeof targets[index].window === 'string' && !/^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/.test(targets[index].window);
+          const landings = members.map((m, index) => ({
+            id: m.id, start: keepsStored(index) ? m.window_start : planned[index].start, end: keepsStored(index) ? m.window_end : planned[index].end, durationMinutes: m.estimated_duration_minutes,
+            technicianId: options.technicianId !== undefined ? (options.technicianId || null) : (m.technician_id || null),
+          })).filter((landing, index) => !targets[index].alreadyAtTarget);
           const shiftOf = await require('./technician-eligibility').loadTechShifts(t, { technicianIds: [...new Set(landings.map((x) => x.technicianId).filter(Boolean).map(String))] });
           const outside = memberOutsideShift(shiftOf, newDateStr, landings, shiftJudgedLengths);
           if (outside != null) {
@@ -2262,7 +2245,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         }
         return {
           visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
-          customerId: visit.customer_id, propertyId: visit.property_id, techClashWarnings, dayLines, shiftJudgedLengths,
+          customerId: visit.customer_id, propertyId: visit.property_id, techClashWarnings, shiftJudgedLengths,
           targets, memberIds: members.map((m) => m.id),
           anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
           primary,
@@ -2542,7 +2525,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   };
   const moved = [];
   const failed = [];
-  const warnings = [...(plan.techClashWarnings || []), ...plan.dayLines];
+  const warnings = [...(plan.techClashWarnings || [])];
+  const assignmentLines = new Set();
   let primaryResult = null;
   // technicianId is NOT forwarded to sibling moves (codex r15 P1): the
   // rebooker writes technician_id directly, bypassing the canonical
@@ -2636,9 +2620,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // move of the day alone carries them to the new day, and the other
     // members shift by the first service's stored start. A sibling's fence
     // has them already; the first service's loses them when the caller sends
-    // a fence of its own. The office's own move pins the same for each member
-    // its line was about (unitOfficeLines). Not judged and not told (gate off,
-    // no set hours on an automatic move): no key is added.
+    // a fence of its own. Not judged (gate off, the office's move, no set
+    // hours): no key is added.
     const shiftPin = Object.prototype.hasOwnProperty.call(plan.shiftJudgedLengths, target.id)
       ? { window_start: target.expect.window_start, window_end: target.expect.window_end, estimated_duration_minutes: plan.shiftJudgedLengths[target.id] } : {};
     const primaryExpect = {
@@ -2678,7 +2661,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // first tell the old tech "visit moved" (tech-visit-notifications.js).
     const unitTechChanges = Object.prototype.hasOwnProperty.call(options, 'technicianId')
       && (options.technicianId || null) !== (target.expect.technician_id || null);
-    const noticeOpts = unitTechChanges ? { suppressTechNotice: true } : {};
+    // GATE_TECH_SHIFT_HOURS, shiftAskedByUnit: the member's own move reads no
+    // shift and states no line, because the unit answers for it. An automatic
+    // move: always (the plan's verdict above). The office's own move (told,
+    // D4 part 3c): only for a member the unit hands to another technician,
+    // where the assignment that follows tells the office about the row it
+    // writes (alignMember). A member that keeps its technician is told by its
+    // own move, as one visit's office move is.
+    const noticeOpts = unitTechChanges
+      ? { suppressTechNotice: true, shiftAskedByUnit: true }
+      : { shiftAskedByUnit: initiatedBy !== 'admin' };
     // Second technician: a member's rebooker probe is scoped to the row's
     // CURRENT technician when the move keeps it, but a unit move that names a
     // technician strips it from the member calls and re-points the row after
@@ -2720,7 +2712,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           // from the LOCKED plan is the baseline — an operator reassignment
           // that landed after the sibling's move is newer and wins; this
           // member is then reported failed/stale, never overwritten.
-          await db.transaction(async (t) => {
+          // The transaction answers the assignment's day-off or shift line
+          // (alignMemberTechnician), kept once it committed.
+          assignmentLines.add(await db.transaction(async (t) => {
             // The destination technician's slot-reserve lock (the rebooker's
             // and slot-reservation's key shape) serializes this check with
             // every scheduling writer on that tech-day; the tech lock is
@@ -2777,7 +2771,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
                 await options.moveGuard({ trx: t, technicianId: options.technicianId, service: memberRow || { id: target.id } });
               }
             }
-            await alignMemberTechnician(t, target.id, options.technicianId || null, {
+            return alignMemberTechnician(t, target.id, options.technicianId || null, {
               skipVisitSeam: true,
               expectTechnicianId: target.expect.technician_id || null,
               // GATE_TECH_SHIFT_HOURS (D4 part 3b-2b): the plan judged this
@@ -2802,7 +2796,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               // today/tomorrow change; Codex #5786 P2).
               noticePrevious: { date: target.expect.scheduled_date, windowStart: target.expect.window_start, windowEnd: target.expect.window_end },
             });
-          });
+          }));
           return;
         } catch (err) {
           lastErr = err;
@@ -3142,7 +3136,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     .filter(Boolean).map((v) => String(v).slice(0, 5)).sort();
   const visitStart = representedStarts[0] || null;
   const visitMove = { visitId: plan.visitId, moved, failed, members, unchanged, visitStart, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
-  return { ...(primaryResult || { success: true, newDate }), visitMove, ...(warnings.length ? { warnings } : {}) };
+  const lines = unitWarnings(warnings, assignmentLines, initiatedBy);
+  return { ...(primaryResult || { success: true, newDate }), visitMove, ...(lines.length ? { warnings: lines } : {}) };
 }
 
 module.exports = {
