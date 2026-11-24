@@ -39,10 +39,10 @@ describe('update-details spawn branch guards (source)', () => {
     expect(spawnBlock).toContain('spawning a new series from a child visit');
   });
 
-  test('refuses non-pending/confirmed or past-dated anchors (ET date compare)', () => {
-    expect(spawnBlock).toContain("!['pending', 'confirmed'].includes(parent.status)");
+  test('refuses cancelled/rescheduled/skipped or past-dated anchors; a same-day live or completed visit may anchor (ET date compare)', () => {
+    expect(spawnBlock).toContain("!['pending', 'confirmed', 'en_route', 'on_site', 'completed'].includes(parent.status)");
     expect(spawnBlock).toContain('spawnAnchorDate < etDateString()');
-    expect(spawnBlock).toContain('upcoming pending or confirmed visit');
+    expect(spawnBlock).toContain('dated today or later that is not cancelled');
   });
 
   test('seeds the dedupe set from the DB (whole series, cancelled rows excluded)', () => {
