@@ -17516,16 +17516,19 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           //    series — spawning from it creates grandchildren under a second
           //    parent inside one family. The shipped UI can't send this, but
           //    the API accepted it.
-          //  - A completed/cancelled/terminal or past-dated row anchors the
+          //  - A cancelled/rescheduled/skipped or past-dated row anchors the
           //    children to a stale date, back-filling phantom visits.
+          //  - A visit dated today that is en route, on site or completed is a
+          //    live anchor (owner 2026-11-24: the plan is set up at the door):
+          //    children are dated from its date and always land after today.
           // Throwing here rolls the whole edit back (still inside the trx):
           // better a clean 400 than a committed edit plus a refused spawn.
           if (parent.recurring_parent_id) {
             throw httpError(400, 'This visit is part of an existing recurring series — edit the series parent to change the schedule instead of spawning a new series from a child visit.');
           }
           const spawnAnchorDate = dateOnly(parent.scheduled_date);
-          if (!['pending', 'confirmed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
-            throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from an upcoming pending or confirmed visit.`);
+          if (!['pending', 'confirmed', 'en_route', 'on_site', 'completed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
+            throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from a visit dated today or later that is not cancelled, rescheduled or skipped.`);
           }
           // Customer row lock: taken up front in this transaction's
           // comms-lock section (Codex #4716 r2 P1 — moved off its original
