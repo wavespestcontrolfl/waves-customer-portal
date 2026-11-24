@@ -30,10 +30,9 @@ function setupIntentSavesOnly(setupIntent) {
 // makeDefault is "no autopay default", the webhook's is false), and no enrollment follows to settle it. One rule
 // settles it either way, under the customer row lock: a card is the default when the customer has no other usable
 // default. Resolves the method row as it now stands.
-async function settleDefault(trx, customer, method) {
+async function settleDefault(trx, customer, rows, method) {
   const customerId = customer.id;
-  const rows = await trx('payment_methods').where({ customer_id: customerId });
-  const self = rows.find((row) => String(row.id) === String(method.id)) || method;
+  const self = rows.find((row) => String(row.id) === String(method.id));
   const otherUsableDefault = rows.some((row) => String(row.id) !== String(method.id)
     && row.is_default === true && isUsableSavedMethod(row, customer));
   const shouldBeDefault = !otherUsableDefault;
@@ -68,16 +67,24 @@ async function recordSaveOnlyEvent(trx, customerId, method, { consentTextVersion
 
 /**
  * Complete a save-only add: the audit record of what the customer saw, and the default role. Never enrolls Auto Pay and
- * never writes a consent row. `method` is the payment_methods row just saved. Resolves the row as it now stands.
+ * never writes a consent row. `method` is the payment_methods row just saved. Resolves the row as it now stands, or
+ * null when the method was removed in the meantime (nothing is recorded).
  */
 async function finishSaveOnlyAdd({ customerId, method, consentTextVersion = null, ip = null, userAgent = null, via }) {
   const settled = await db.transaction(async (trx) => {
     // The customer row lock comes first: the browser save and the webhook finish at about the same time, and the audit
     // check and the default role must each be decided by whichever of them holds it.
     const customer = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'ach_status');
+    // A removal that committed after the caller read the method leaves nothing to record or promote.
+    const rows = await trx('payment_methods').where({ customer_id: customerId });
+    if (!rows.some((row) => String(row.id) === String(method.id))) return null;
     await recordSaveOnlyEvent(trx, customerId, method, { consentTextVersion, ip, userAgent, via });
-    return settleDefault(trx, customer, method);
+    return settleDefault(trx, customer, rows, method);
   });
+  if (!settled) {
+    logger.warn(`[portal-save-only-card] pm ${method.id} was removed before the save-only add finished for customer ${customerId}`);
+    return null;
+  }
   logger.info(`[portal-save-only-card] save-only add completed for customer ${customerId}: pm ${method.id} via ${via}, Auto Pay untouched`);
   return settled;
 }

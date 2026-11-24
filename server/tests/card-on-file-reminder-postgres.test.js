@@ -378,13 +378,19 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
   });
 
-  test('(f) an address with an active suppression is not emailed, and nothing is queued for it', async () => {
+  test('(f) an address with any active suppression, an unsubscribe included, is not emailed, and nothing is queued for it', async () => {
     process.env.GATE_CARD_ON_FILE_REMINDER = 'true';
-    const id = await dueCustomer();
-    await db('email_suppressions').insert({ email: `cof-${id}@example.invalid`, suppression_type: 'bounce', status: 'active', source: 'test' });
-    expect(await run(id)).toMatchObject({ sent: 0, skipped: { email_suppressed: 1 } });
-    expect(await emails(id)).toHaveLength(0);
+    const bounced = await dueCustomer();
+    await db('email_suppressions').insert({ email: `cof-${bounced}@example.invalid`, suppression_type: 'bounce', status: 'active', source: 'test' });
+    const unsubscribed = await dueCustomer();
+    await db('email_suppressions').insert({ email: `cof-${unsubscribed}@example.invalid`, suppression_type: 'unsubscribe', status: 'active', source: 'test' });
+    expect(await sweep.runCardOnFileReminderSweep({ now: NOW, customerIds: [bounced, unsubscribed] })).toMatchObject({ sent: 0, skipped: { email_suppressed: 2 } });
+    expect(await emails(bounced)).toHaveLength(0);
+    expect(await emails(unsubscribed)).toHaveLength(0);
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    // A released suppression no longer counts.
+    await db('email_suppressions').where({ email: `cof-${unsubscribed}@example.invalid` }).update({ status: 'released' });
+    expect(await run(unsubscribed)).toMatchObject({ sent: 1 });
   });
 
   test('a customer who chose the app (push) in the old billing reminder setting is not emailed; a text default or an explicit email choice is', async () => {

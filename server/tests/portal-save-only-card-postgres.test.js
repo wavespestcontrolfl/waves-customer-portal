@@ -118,6 +118,16 @@ maybeDescribe('finishSaveOnlyAdd (real schema)', () => {
     expect(await defaults(healthy)).toEqual([verifiedBank.id]);
   });
 
+  test('a card removed before the add finished is neither recorded nor promoted, and no default is cleared for it', async () => {
+    const id = await customer();
+    const existing = await card(id, { is_default: true });
+    const gone = await card(id, { is_default: false });
+    await db('payment_methods').where({ id: gone.id }).del();
+    expect(await finish(id, gone)).toBeNull();
+    expect(await db('audit_log').where({ action: 'customer.payment_method.saved_card_only', resource_id: gone.id })).toHaveLength(0);
+    expect(await defaults(id)).toEqual([existing.id]);
+  });
+
   test('another usable default keeps the role; an expired default gives it up to the new card', async () => {
     const keeper = await customer();
     const existing = await card(keeper, { is_default: true });

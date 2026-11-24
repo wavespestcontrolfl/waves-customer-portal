@@ -47,7 +47,6 @@ const { propertyDisplayLabel } = require('../utils/property-display');
 const { isUsableSavedMethod, isBankMethodType } = require('./autopay-eligibility');
 
 const TEMPLATE_KEY = 'payment.card_on_file_reminder';
-const TRANSACTIONAL_GROUP = 'transactional_required';
 const DUE_AFTER_DAYS = 3;
 // Still sent this long after the event (missed passes, restarts); an older event is history and never fires.
 const GRACE_DAYS = 7;
@@ -222,8 +221,10 @@ async function emailVerdict(customer) {
   if (!recipient) return { ok: false, reason: 'missing_email' };
   const loaded = await EmailTemplateLibrary.loadTemplateByKey(TEMPLATE_KEY);
   if (!loaded?.template || loaded.template.status !== 'active' || !loaded.activeVersion) return { ok: false, reason: 'template_inactive' };
-  const suppression = await EmailTemplateLibrary.activeSuppressionFor(loaded.template, recipient.email, TRANSACTIONAL_GROUP);
-  if (suppression) return { ok: false, reason: 'email_suppressed' };
+  // ANY active suppression row stops this reminder, an unsubscribe included: the library lets a required account
+  // notice through an unsubscribe, but a reminder to add a card is not one.
+  const suppressions = await EmailTemplateLibrary.activeSuppressionRows(recipient.email);
+  if (suppressions.length) return { ok: false, reason: 'email_suppressed' };
   return { ok: true };
 }
 

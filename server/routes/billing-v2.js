@@ -501,6 +501,7 @@ router.post('/cards', async (req, res, next) => {
         userAgent: req.get('user-agent') || null,
         via: 'portal_add_card',
       });
+      if (!settled) return res.status(409).json({ code: 'payment_method_removed', error: 'That payment method was just removed. Add it again.' });
       return res.json({ success: true, enrolled: false, enrollReason: 'save_only', card: savedCardPayload(settled) });
     }
     const ConsentService = require('../services/payment-method-consents');
