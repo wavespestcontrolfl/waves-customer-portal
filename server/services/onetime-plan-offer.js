@@ -1173,14 +1173,16 @@ async function officeItemWithdrawn({ customerId, jobId }, { now, deps }) {
   const account = () => deps.db('customers').where({ id: customerId });
   const customer = await account().whereNull('deleted_at').first('id', 'email', 'active');
   if (!customer || customer.active === false || !(await whereLiveCustomer(account()).first('id'))) return 'The customer is no longer active';
-  const blocker = await deps.planStartBlocker(deps.db, customerId);
-  if (blocker) return BLOCKER_WORDS[blocker] || 'The account may not start a plan';
+  // The contact restrictions first: a failure of the plan proof below must never keep open an item that an opt-out
+  // or a staff do-not-contact already withdraws.
   if (await optOutReason(deps.db, { customerId, email: customer.email, deps })) return 'The customer turned off offers';
   // The division's own contact checks, as the job's emailAllowed asks them. A failed read keeps the item open.
   const verdict = await deps.eligibleForEmail({
     customerId, stream: OFFER_STREAM, emailKey: OFFER_TEMPLATE, now, conn: deps.db, completedVisitId: jobId || null,
   });
-  return !verdict.ok && WITHDRAWN_VERDICTS.includes(verdict.reason) ? 'The customer may not be contacted' : null;
+  if (!verdict.ok && WITHDRAWN_VERDICTS.includes(verdict.reason)) return 'The customer may not be contacted';
+  const blocker = await deps.planStartBlocker(deps.db, customerId);
+  return blocker ? (BLOCKER_WORDS[blocker] || 'The account may not start a plan') : null;
 }
 
 // The offer as the job reads TODAY: an included follow-up done after the item moves the offer day, and a shadow or an

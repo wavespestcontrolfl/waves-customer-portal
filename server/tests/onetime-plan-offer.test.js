@@ -2143,6 +2143,18 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       }
     });
 
+    test('an opt-out closes the item even when the plan proof fails', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        planStartBlocker: jest.fn(async () => { throw new Error('bad json'); }),
+        ...emailVerdict('STAFF_DNC'),
+        tables: { notifications: [item('job-1', { lastDay: '2030-04-04', jobId: 'job-1' })], estimates: [] },
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, , , opts]) => opts.resolution)).toEqual(['The customer may not be contacted']);
+      expect(deps.planStartBlocker).not.toHaveBeenCalled();
+    });
+
     test('one item that fails never stops the others', async () => {
       process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
       const deps = liveWorld({
