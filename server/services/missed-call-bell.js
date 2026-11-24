@@ -721,7 +721,13 @@ async function isRepeatSilentCaller(row) {
   return Boolean(await repeatSilentCaller(row));
 }
 
-const spamGateOn = (name) => require('../config/feature-gates').isEnabled(name);
+// A rule's gate is one gate name or a list (any one on turns the rule on). A gate
+// with a call-time reader (`<name>Live`) is read through it, so unsetting it
+// takes effect without a restart.
+function spamGateOn(name) {
+  const gates = require('../config/feature-gates');
+  return [].concat(name).some((n) => (typeof gates[`${n}Live`] === 'function' ? gates[`${n}Live`]() : gates.isEnabled(n)));
+}
 
 // What the recording processor writes when a recording holds no speech: the
 // rejected-transcription sentinel (call-recording-processor.js
@@ -918,7 +924,8 @@ function leaseStale(token, now = Date.now()) {
 //  - Burst: stamped 'burst_quiet'.
 //  - A repeat silent caller with GATE_MISSED_CALL_SPAM_REPEAT on: stamped 'repeat_quiet'.
 //  - An unknown caller who failed the press-1 screen (no key; owner 2026-11-16
-//    "build") with GATE_CALL_SCREEN_EXCHANGE_HISTORY on: stamped 'screen_quiet'.
+//    "build") with GATE_CALL_SCREEN_EXCHANGE_HISTORY or GATE_CALL_SCREEN_ALL_UNKNOWN
+//    (owner 2026-11-24 "trial") on: stamped 'screen_quiet'.
 //    Since October 12 of 16 such calls pushed; the screen kept them off the
 //    staff phones but not off the admin app.
 //  - A flagged repeat or screen call whose gate is off rings as before, stamped with the
@@ -930,7 +937,7 @@ const QUIET_RULES = [
   { flag: 'block', quiet: 'block_quiet' },
   { flag: 'burst', quiet: 'burst_quiet' },
   { flag: 'repeat', gate: 'missedCallSpamRepeat', quiet: 'repeat_quiet', shadow: 'missed_call_spam_repeat_shadow' },
-  { flag: 'screen', gate: 'callScreenExchangeHistory', quiet: 'screen_quiet', shadow: 'missed_call_screen_quiet_shadow' },
+  { flag: 'screen', gate: ['callScreenExchangeHistory', 'callScreenAllUnknown'], quiet: 'screen_quiet', shadow: 'missed_call_screen_quiet_shadow' },
 ];
 // The stamps one pass writes: the quiet marker and each gated rule's shadow.
 const PASS_STAMP_KEYS = ['missed_call_spam_wave', ...QUIET_RULES.filter((rule) => rule.shadow).map((rule) => rule.shadow)];
