@@ -497,7 +497,7 @@ async function billedByVisit(conn, visitIds) {
   // the latest. One row per visit and invoice.
   const links = await conn.raw(`
     SELECT DISTINCT s.id AS visit_id, i.id AS invoice_id, i.line_items, i.subtotal, i.discount_amount, i.total, i.tax_amount,
-      i.status = ANY(?::text[]) AS not_charged,
+      COALESCE(i.status = ANY(?::text[]), true) AS not_charged,
       ${rr.depositCreditSql('i')} AS deposit_credit,
       ${refundOf} AS refunded
     FROM scheduled_services s
@@ -854,6 +854,10 @@ async function paidLedger(conn, visitIds, invoiceIds, rootIds, weekStart) {
   return ledger;
 }
 
+// A stop whose work was not done or not confirmed, or that a pay run paid: never credited by the owner's hand (saving a credit refuses
+// it, and an earlier credit is ignored when the stop turns into one).
+const MANUAL_CREDIT_INELIGIBLE = new Set(['not_performed', 'unverified', 'already_paid']);
+
 const alreadyPaid = (row, week) => ({ ...row, ...toReview('already_paid', `Already paid in the week of ${week}: a pay run already credited this visit.`) });
 const review = (row, kind, reason) => ({ ...row, ...toReview(kind, reason) });
 
@@ -876,27 +880,41 @@ function applyLedger(rows, paid, overrides = new Map()) {
     if (paid.visits.has(row.visitId)) return alreadyPaid(row, paid.visits.get(row.visitId).weekStart);
     // The owner's credit for this stop and week (stop override) replaces whatever the rules computed, review rows included. The
     // invoices linked to the visit are still recorded with a paid row, so a later week of another visit of them is caught.
-    const set = overrides.get(row.visitId);
-    // An override belongs to the technician who held the stop when the owner set it: a stop reassigned since is review, not credited.
-    if (set && set.technicianId !== row.technicianId) {
-      return review(row, 'owner_override_reassigned', 'This stop was reassigned since the owner set its credit: clear that credit, then set it again in the production share preview.');
-    }
-    if (set) return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: [] };
+    if (overrides.has(row.visitId)) return withOverride(row, overrides.get(row.visitId));
     const { ledger } = row;
     // A visit that was the first visit of a package a pay run fixed is that package's: credited on its own it would be paid twice.
     if (paid.jobs.has(row.visitId) && !(ledger && ledger.job && ledger.job.rootId === row.visitId) && !row.needsReview && row.creditCents > 0) {
       return review(row, 'package_paid_elsewhere', 'This visit was the first visit of a package a pay run already credited: set its credit in the production share preview.');
     }
     if (!ledger) return row;
-    if (ledger.invoices) {
-      const weeks = ledger.invoices.flatMap((inv) => [
-        ...(paid.invoices.get(inv.invoiceId) || []).map((one) => one.weekStart),
-        ...inv.members.map((member) => (paid.visits.get(member.id) || {}).weekStart),
-      ]).filter(Boolean).sort();
-      if (weeks.length) return review(row, 'invoice_paid_elsewhere', `This invoice also covers a visit paid in the week of ${weeks[0]}: set its credit in the production share preview.`);
-      return row;
+    if (ledger.invoices) return settleInvoice(row, ledger);
+    return settlePackage(row, ledger.job);
+  }
+
+  // An override belongs to the technician who held the stop when the owner set it, and to a stop whose work is still confirmed.
+  function withOverride(row, set) {
+    if (set.technicianId !== row.technicianId) {
+      return review(row, 'owner_override_reassigned', 'This stop was reassigned since the owner set its credit: clear that credit, then set it again in the production share preview.');
     }
-    const { job } = ledger;
+    if (MANUAL_CREDIT_INELIGIBLE.has(row.kind)) {
+      return review(row, 'owner_override_closeout_changed', 'The closeout of this stop changed since the owner set its credit (its work is no longer confirmed): clear that credit in the production share preview.');
+    }
+    return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: [] };
+  }
+
+  function settleInvoice(row, ledger) {
+    const weeks = ledger.invoices.flatMap((inv) => [
+      ...(paid.invoices.get(inv.invoiceId) || []).map((one) => one.weekStart),
+      ...inv.members.map((member) => (paid.visits.get(member.id) || {}).weekStart),
+    ]).filter(Boolean).sort();
+    if (weeks.length) return review(row, 'invoice_paid_elsewhere', `This invoice also covers a visit paid in the week of ${weeks[0]}: set its credit in the production share preview.`);
+    // A visit of the invoice that was the first visit of a package a pay run fixed: the invoice is that package's, shared with this stop.
+    const packageWeek = ledger.invoices.flatMap((inv) => inv.members.map((member) => paid.jobs.get(member.id))).filter(Boolean).map((one) => one.weekStart).sort()[0];
+    if (packageWeek) return review(row, 'package_paid_elsewhere', `This invoice also covers the first visit of a package credited in the week of ${packageWeek}: set its credit in the production share preview.`);
+    return row;
+  }
+
+  function settlePackage(row, job) {
     // A package that was, or whose invoice was, credited OUTSIDE it is not credited again: a visit of it paid on its own (no package
     // basis, or another package's), or an invoice linked to it that a paid row of another package or of no package recorded. Reusing the
     // invoice is only for a remaining slot of THIS package (the same root basis).
@@ -920,7 +938,11 @@ function applyLedger(rows, paid, overrides = new Map()) {
 const invoiceIdsOf = (rows) => [...new Set(rows.flatMap((row) => [...(row.ledger && row.ledger.invoices ? row.ledger.invoices.map((inv) => inv.invoiceId) : []), ...(row.linkedInvoices || [])]))];
 // Every visit of the week is looked up as a package root too: a visit that is the root of a package a pay run fixed (it may no longer be
 // a package) can never take a standalone credit.
-const rootIdsOf = (rows) => [...new Set(rows.flatMap((row) => [row.visitId, ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId] : [])]))];
+const rootIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
+  row.visitId,
+  ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId] : []),
+  ...(row.ledger && row.ledger.invoices ? row.ledger.invoices.flatMap((inv) => inv.members.map((member) => member.id)) : []),
+]))];
 // The visits whose paid state the rules need: this week's, the roots of their packages, and every member visit of the invoices they
 // were priced from (so a member paid some other way is known whichever technicians' stops are read together).
 const visitIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
@@ -1015,9 +1037,6 @@ async function overridesOf(conn, weekStart) {
   const rows = await conn('production_share_stop_overrides').where({ week_start: weekStart }).select('visit_id', 'technician_id', 'credit_cents', 'reason');
   return new Map(rows.map((row) => [canonicalId(row.visit_id), { technicianId: canonicalId(row.technician_id), creditCents: Number(row.credit_cents), reason: row.reason }]));
 }
-
-// A stop whose work was not done or not confirmed, or that a pay run paid: never credited by the owner's hand.
-const MANUAL_CREDIT_INELIGIBLE = new Set(['not_performed', 'unverified', 'already_paid']);
 
 const overrideSchema = Joi.object({
   technicianId: Joi.string().pattern(UUID_RE).required().error(new Error('Choose a technician')),
