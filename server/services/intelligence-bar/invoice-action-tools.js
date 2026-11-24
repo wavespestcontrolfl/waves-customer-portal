@@ -605,7 +605,9 @@ async function commitSend(input, actionContext) {
           || (await annualPlanRefusalText(claimed, database))
           || (await channelRefusalText(claimed, database, pinned.billing_channels, plan.channel))
           || (await totalsRefusalText(claimed, database, pinned.totals))
-          || scheduledSendClaimRefusal(claimed),
+          || scheduledSendClaimRefusal(claimed)
+          // A non-bar caller's own check on the claimed row (setup-fee-bill-button.js): refusal text or null.
+          || (typeof input._callerVerify === 'function' ? await input._callerVerify(claimed, database) : null),
         // Run by the send claim on the claimed row: the post-delivery effects the card listed must be unchanged.
         verifyEffects: async (claimed, database) => (await planSendEffects(claimed, await database('customers').where({ id: claimed.customer_id }).first(), { database, requestReview: false })).digest === pinned.effects,
       },
@@ -668,4 +670,10 @@ module.exports = {
   executeInvoiceActionTool,
   invoiceActionsLive,
   cardLines,
+  // The send card's own plan and commit, for a confirmed step outside the bar (setup-fee-bill-button.js: the bell's
+  // Bill and send). The caller owns the admin check and its own gate; the plan pin and the send claim are this card's.
+  planInvoiceSend: buildSendPlan,
+  billingChannelState,
+  messagingHold,
+  commitInvoiceSend: commitSend,
 };
