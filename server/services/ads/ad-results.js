@@ -108,7 +108,7 @@ async function loadLeads(conn, since, until) {
     .select(
       'asa.id', 'asa.campaign_id', 'asa.customer_id', 'asa.lead_date', 'asa.lead_source', 'asa.funnel_stage',
       'asa.source_call_id', 'asa.created_at', 'ac.campaign_name', 'ac.platform', 'l.first_name as lead_first_name',
-      'l.last_name as lead_last_name',
+      'l.last_name as lead_last_name', 'l.phone as lead_phone', 'l.email as lead_email',
     );
 }
 
@@ -116,7 +116,7 @@ async function loadCustomers(conn, ids) {
   const out = new Map();
   for (const part of chunks(ids, ID_CHUNK)) {
     const rows = await conn('customers').whereIn('id', part)
-      .select('id', 'first_name', 'last_name', 'waveguard_tier', 'monthly_rate', 'pipeline_stage');
+      .select('id', 'first_name', 'last_name', 'phone', 'email', 'waveguard_tier', 'monthly_rate', 'pipeline_stage');
     for (const r of rows) out.set(String(r.id), r);
   }
   return out;
@@ -185,7 +185,7 @@ async function creditPaid(conn, rows, firstLead, customers) {
   for (const c of await netCollections(conn, [...firstLead.keys()], from)) {
     const key = String(c.customer_id);
     if (!collected.has(key)) collected.set(key, []);
-    collected.get(key).push({ day: etDateString(new Date(c.at)), net: Number(c.net) || 0 });
+    collected.get(key).push({ day: c.day, net: c.net });
   }
   const byCustomer = new Map();
   for (const inv of invoices) {
@@ -253,8 +253,13 @@ async function adResults({ since, until, conn = db } = {}) {
   // Both the lead's name and the linked customer's name are checked, as the channel report does.
   const isTest = (lead) => {
     const c = lead.customer_id ? customers.get(String(lead.customer_id)) : null;
-    if (isInternalTestContact({ customerId: lead.customer_id, firstName: lead.lead_first_name, lastName: lead.lead_last_name })) return true;
-    return !!c && isInternalTestContact({ customerId: lead.customer_id, firstName: c.first_name, lastName: c.last_name });
+    if (isInternalTestContact({
+      customerId: lead.customer_id, firstName: lead.lead_first_name, lastName: lead.lead_last_name,
+      phone: lead.lead_phone, email: lead.lead_email,
+    })) return true;
+    return !!c && isInternalTestContact({
+      customerId: lead.customer_id, firstName: c.first_name, lastName: c.last_name, phone: c.phone, email: c.email,
+    });
   };
 
   const counted = leads.filter((l) => !isTest(l));

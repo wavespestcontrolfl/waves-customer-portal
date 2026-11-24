@@ -13,6 +13,9 @@
  * read it for a customer's revenue.
  */
 
+const { dateOnlyString } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
+
 // One paid payments row, net of refunds; one estimate deposit, net of refunds (see the header). Both
 // LIFETIME_REVENUE_SQL and netCollections read these, so a lifetime and a windowed sum never disagree.
 const PAYMENT_NET_SQL = 'p.amount - COALESCE(p.refund_amount, 0)';
@@ -37,7 +40,8 @@ async function lifetimeRevenueFor(knex, customerId) {
 
 /**
  * Each net collection of these customers on or after `from` (a Date): the same paid payments and deposits as
- * LIFETIME_REVENUE_SQL, dated (payment_date / received_at). Returns [{ customer_id, at, net }].
+ * LIFETIME_REVENUE_SQL, dated by ET day. payment_date is a pg DATE (kept as written, never shifted to ET);
+ * received_at is a timestamp (its ET day). Returns [{ customer_id, day: 'YYYY-MM-DD', net }].
  */
 async function netCollections(knex, customerIds, from) {
   if (!customerIds.length) return [];
@@ -53,7 +57,10 @@ async function netCollections(knex, customerIds, from) {
     .where('d.received_at', '>=', from)
     .select(knex.raw('COALESCE(d.customer_id, e.customer_id) AS customer_id'), 'd.received_at as at',
       knex.raw(`(${DEPOSIT_NET_SQL})::float AS net`));
-  return [...payments, ...deposits];
+  return [
+    ...payments.map((r) => ({ customer_id: r.customer_id, day: dateOnlyString(r.at), net: Number(r.net) || 0 })),
+    ...deposits.map((r) => ({ customer_id: r.customer_id, day: etDateString(new Date(r.at)), net: Number(r.net) || 0 })),
+  ];
 }
 
 module.exports = { LIFETIME_REVENUE_SQL, lifetimeRevenueFor, netCollections };

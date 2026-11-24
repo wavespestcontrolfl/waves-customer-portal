@@ -225,6 +225,42 @@ describe('adResults', () => {
     expect(out.totals).toMatchObject({ paid_customers: 1, paid90: 60 });
   });
 
+  test('a payment DATE on the lead day and on day 90 counts; day 91 does not', async () => {
+    // node-postgres hands a DATE back as UTC midnight; an ET shift would move it to the day before.
+    const conn = fakeConn({
+      ad_service_attribution: [lead({ customer_id: 'c1' })],
+      customers: [customer('c1')],
+      invoices: [invoice('c1', '2026-10-01T15:00:00Z', 100)],
+      payments: [
+        { customer_id: 'c1', at: new Date('2026-10-01T00:00:00Z'), net: 5 },
+        { customer_id: 'c1', at: new Date('2026-12-30T00:00:00Z'), net: 7 },
+        { customer_id: 'c1', at: new Date('2026-12-31T00:00:00Z'), net: 11 },
+      ],
+    });
+    const out = await adResults({ ...WINDOW, conn });
+    expect(out.totals.paid90).toBe(12);
+  });
+
+  test('a test lead is left out by phone or email, under any name', async () => {
+    const saved = process.env.ADAM_PHONE;
+    process.env.ADAM_PHONE = '+19415550100';
+    try {
+      const conn = fakeConn({
+        ad_service_attribution: [
+          lead({ id: 'l1', customer_id: 'c1', lead_phone: '(941) 555-0100' }),
+          lead({ id: 'l2', customer_id: 'c2', lead_email: 'appreview+demo@wavespestcontrol.com' }),
+          lead({ id: 'l3', customer_id: 'c3' }),
+        ],
+        customers: [customer('c1'), customer('c2'), customer('c3', { phone: '9415550100' })],
+        invoices: ['c1', 'c2', 'c3'].map((id) => invoice(id, '2026-10-03T15:00:00Z', 10)),
+      });
+      const out = await adResults({ ...WINDOW, conn });
+      expect(out.totals).toMatchObject({ leads: 0, paid_customers: 0 });
+    } finally {
+      if (saved === undefined) delete process.env.ADAM_PHONE; else process.env.ADAM_PHONE = saved;
+    }
+  });
+
   test('two leads on one day: the earlier-created lead gets the paid credit', async () => {
     const conn = fakeConn({
       ad_service_attribution: [
