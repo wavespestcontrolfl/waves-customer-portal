@@ -322,13 +322,14 @@ postgres('payroll minimum paid week', () => {
     expect((await api('GET', '/technicians?formerBank=1')).body.technicians.map((row) => row.id)).not.toContain(id);
   });
 
-  it('a week of an earlier stay counts all its scheduled days, and no row is blocked', async () => {
+  it('a week before the hire date on file (an earlier stay) gets no minimum, and no row is blocked', async () => {
     // Rehired later: the hire date moved past this week, which has 15 hours of shifts.
     const id = await tech('Sample Alpha', { hired: addDays(W1, 21) });
     await worked(id, W1, 15);
     const run = (await draft(W1)).body.run;
     expect(run.blocked).toEqual([]);
-    expect(byName(run, 'Sample Alpha')).toMatchObject({ regularHours: '15.00', minimumWeekHours: '25.00', grossCents: 88000 });
+    expect(byName(run, 'Sample Alpha')).toMatchObject({ regularHours: '15.00', grossCents: 33000 });
+    expect(byName(run, 'Sample Alpha')).not.toHaveProperty('minimumWeekHours');
   });
 
   it('a day of time off before the hire date is not an earlier stay', async () => {
