@@ -1090,7 +1090,7 @@ async function liveJob(job, { now, deps, priceSettings }) {
 // One item per job (the dedupe key holds every row, open or done, so a later morning never raises a second one; it
 // refreshes the one row's terms). It closes by itself once the customer has an estimate made after the item, once the
 // offer's last day has passed, or once the customer is no longer one the offer may go to: opted out of offers, or no
-// longer a live customer (closeOfficeItems). A shadow run raises none: shadow sends nothing to anyone but the office samples.
+// longer a live customer (closeOfficeItems, which every run asks first, shadow included). A shadow run raises none: shadow sends nothing to anyone but the office samples.
 const OFFICE_ITEM_PREFIX = 'onetime-plan-offer:office:';
 const OFFICE_REASON_WORDS = Object.freeze({
   no_setup_fee: 'The plan price for this home has no setup fee, so the offer\'s "$0 setup" line would not be true.',
@@ -1154,11 +1154,23 @@ async function planStartAcceptRefusal(database, estimate) {
 
 // The customer the item names is no longer one the offer may go to: not a live customer any more, or opted out of
 // Waves offers (the job's own opt-out read, optOutReason). The sentence that closes the item, or null.
-async function officeItemWithdrawn(customerId, deps) {
+// The email division's verdicts that mean "do not contact this customer" for good, not "not today" (the caps and
+// recent human contact are not here): staff do-not-contact, email turned off, a suppression, no address.
+const WITHDRAWN_VERDICTS = Object.freeze([
+  EMAIL_VERDICT.CUSTOMER_MISSING, EMAIL_VERDICT.CUSTOMER_DELETED, EMAIL_VERDICT.NO_EMAIL, EMAIL_VERDICT.STAFF_DNC,
+  EMAIL_VERDICT.EMAIL_SUPPRESSED_GLOBAL, EMAIL_VERDICT.EMAIL_SUPPRESSED_GROUP, EMAIL_VERDICT.EMAIL_SWITCH_OFF,
+  EMAIL_VERDICT.STREAM_FLAG_OFF, EMAIL_VERDICT.STREAM_CHANNEL_NOT_EMAIL,
+]);
+async function officeItemWithdrawn({ customerId, jobId }, { now, deps }) {
   const account = () => deps.db('customers').where({ id: customerId });
   const customer = await account().whereNull('deleted_at').first('id', 'email', 'active');
   if (!customer || customer.active === false || !(await whereLiveCustomer(account()).first('id'))) return 'The customer is no longer active';
-  return (await optOutReason(deps.db, { customerId, email: customer.email, deps })) ? 'The customer turned off offers' : null;
+  if (await optOutReason(deps.db, { customerId, email: customer.email, deps })) return 'The customer turned off offers';
+  // The division's own contact checks, as the job's emailAllowed asks them. A failed read keeps the item open.
+  const verdict = await deps.eligibleForEmail({
+    customerId, stream: OFFER_STREAM, emailKey: OFFER_TEMPLATE, now, conn: deps.db, completedVisitId: jobId || null,
+  });
+  return !verdict.ok && WITHDRAWN_VERDICTS.includes(verdict.reason) ? 'The customer may not be contacted' : null;
 }
 
 // The open office items, closed when their job is handled: an estimate of the customer made after the item (a person
@@ -1180,7 +1192,7 @@ async function closeOfficeItems({ now, deps }) {
       const quoted = await deps.db('estimates').where({ customer_id: meta.customerId })
         .where('created_at', '>', row.created_at).first('id');
       if (quoted) done = 'The customer has a new estimate';
-      else done = await officeItemWithdrawn(meta.customerId, deps);
+      else done = await officeItemWithdrawn(meta, { now, deps });
     }
     if (done) await episodes.closeAdminAlertKeys(deps.db, [meta.dedupeKey], 'plan_offer_quoted', { now, resolution: done });
   }
@@ -1445,6 +1457,13 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
   const summary = { mode, jobs: 0, sample: 0, office: 0, held: 0, done: 0, failed: 0, reasons: {} };
   if (mode !== 'shadow' && mode !== 'live') return summary;
   const deps = { ...defaultDeps(), ...overrides };
+  // The office items are closed first, in both modes and whatever the templates say: an item raised on a live morning
+  // must not stay actionable while the offer is paused (shadow, or the words taken back). Sends nothing.
+  try {
+    await closeOfficeItems({ now, deps });
+  } catch (err) {
+    logger.warn(`[onetime-plan-offer] office item close failed (code=${err?.code || 'none'})`);
+  }
   if (mode === 'live') {
     summary.sent = 0;
     // The owner's publish of the offer template is his approval of the words. Until then no job is read.
@@ -1464,11 +1483,6 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
       await reconcileOfferDeliveries(run);
     } catch (err) {
       logger.warn(`[onetime-plan-offer] delivery reconcile failed (code=${err?.code || 'none'})`);
-    }
-    try {
-      await closeOfficeItems(run);
-    } catch (err) {
-      logger.warn(`[onetime-plan-offer] office item close failed (code=${err?.code || 'none'})`);
     }
     summary.reminder = await runReminders(run);
   }

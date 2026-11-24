@@ -928,7 +928,8 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(await run(deps)).toEqual({
         mode: 'live', jobs: 0, ...ZERO, reasons: {}, words_not_approved: true,
       });
-      expect(deps.db.queries).toHaveLength(0);
+      // No job is read. The one read is the office items' close, which runs before the words gate.
+      expect(deps.db.queries.map((query) => query.table)).toEqual(['notifications']);
       expect(deps.mintPlanStartEstimate).not.toHaveBeenCalled();
       expect(deps.sendWithLedger).not.toHaveBeenCalled();
       expect(deps.sendTemplate).not.toHaveBeenCalled();
@@ -2015,6 +2016,49 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       });
       await run(deps);
       expect(closeKeys.mock.calls.map(([, keys, , opts]) => [keys, opts.resolution])).toEqual([[[_test.officeItemKey('open')], resolution]]);
+    });
+
+    test.each([
+      ['staff do-not-contact', 'STAFF_DNC'],
+      ['email turned off for the customer', 'EMAIL_SWITCH_OFF'],
+      ['a suppression of the address', 'EMAIL_SUPPRESSED_GLOBAL'],
+    ])('the email division says %s: the instruction is withdrawn', async (_name, reason) => {
+      const deps = liveWorld({
+        jobs: [],
+        tables: { notifications: [item('open', { lastDay: '2030-04-04', jobId: 'job-1' })], estimates: [] },
+        ...emailVerdict(reason),
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys, , opts]) => [keys, opts.resolution])).toEqual([[[_test.officeItemKey('open')], 'The customer may not be contacted']]);
+      expect(deps.eligibleForEmail).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', emailKey: OFFER_TEMPLATE, completedVisitId: 'job-1' }));
+    });
+
+    test.each([['the same-day cap', 'CAP_SAME_DAY'], ['a failed read', 'LOOKUP_FAILED']])('%s is "not today": the item stays', async (_name, reason) => {
+      const deps = liveWorld({
+        jobs: [],
+        tables: { notifications: [item('open', { lastDay: '2030-04-04' })], estimates: [] },
+        ...emailVerdict(reason),
+      });
+      await run(deps);
+      expect(closeKeys).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['in shadow', 'shadow', {}],
+      ['while the offer template is not published', 'live', { resolveTemplateForSend: jest.fn(async () => { throw Object.assign(new Error('draft'), { code: 'EMAIL_TEMPLATE_DISABLED' }); }) }],
+    ])('the close runs %s too', async (_name, mode, change) => {
+      process.env.GATE_ONETIME_PLAN_OFFER = mode;
+      const deps = liveWorld({ jobs: [], tables: { notifications: [item('ended', { lastDay: '2030-03-11' })] }, ...change });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys]) => keys)).toEqual([[_test.officeItemKey('ended')]]);
+    });
+
+    test('off reads nothing', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'off';
+      const deps = liveWorld({ tables: { notifications: [item('ended', { lastDay: '2030-03-11' })] } });
+      await run(deps);
+      expect(deps.db.queries).toHaveLength(0);
+      expect(closeKeys).not.toHaveBeenCalled();
     });
 
     test('a failed read never fails the run', async () => {

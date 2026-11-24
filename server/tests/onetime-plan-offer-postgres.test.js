@@ -1398,7 +1398,21 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         const price = readPlan(offer.payload_snapshot).price_per_application;
         expect(price).toMatch(/^\$\d/);
 
+        // The ledger's last check reads the real clock, while this run is 16 days ahead: the offer's ledger row moves
+        // back by the same 16 days, as production has it, so it is not "an email today" (CAP_SAME_DAY).
+        await trx('marketing_email_ledger').where({ customer_id: customer.id }).update({
+          sent_at: trx.raw("sent_at - interval '16 days'"), reserved_at: trx.raw("reserved_at - interval '16 days'"),
+        });
+        // The real transport runs the ledger's last check (the job's handoff guard included) before its request; the
+        // replacement does the same, so this send proves the handoff lets a good reminder go.
+        const providerRequest = jest.fn();
+        Sendgrid.sendOne.mockImplementationOnce(async ({ database, providerBoundaryCheck }) => {
+          await providerBoundaryCheck({ database });
+          providerRequest();
+          return { messageId: 'sg-sample' };
+        });
         const summary = await runAt(dayAt(16));
+        expect(providerRequest).toHaveBeenCalledTimes(1);
         expect(summary).toMatchObject({ mode: 'live', jobs: 0, sent: 0, failed: 0 });
         expect(summary.reminder).toEqual({ jobs: 1, sent: 1, held: 0, done: 0, failed: 0, reasons: {} });
         const mail = await reminderMail(job.id);
