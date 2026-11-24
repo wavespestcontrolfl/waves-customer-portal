@@ -218,6 +218,8 @@ describe('loadPromiseFacts', () => {
     test('an unknown visit date, or an unknown window, keeps hour (fail closed)', async () => {
       expect((await facts(fakeConn({ messages: [msg('s1')] }))).s1.level).toBe('hour');
       expect((await facts(fakeConn({ messages: [msg('s1')], members: [row(null)] }))).s1.level).toBe('hour');
+      expect((await facts(fakeConn({ messages: [msg('s1')], members: [row('not a date')] }))).s1.level).toBe('hour');
+      expect((await facts(fakeConn({ messages: [msg('s1')], members: [row(new Date('invalid'))] }))).s1.level).toBe('hour');
       const legacy = msg('s1', { purpose: 'appointment', metadata: { rendered_slot_ms: undefined, original_message_type: 'reschedule_series_confirmation' } });
       expect(await facts(fakeConn({ messages: [legacy], members: [row('2026-11-23')] }))).toEqual({ s1: { level: 'hour', start: null } });
     });
