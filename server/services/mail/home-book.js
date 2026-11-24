@@ -47,6 +47,15 @@ const SERVICE_MINUTES = 60; // the funnel catalog's pest duration (ignored by th
 const RECURRING_PATTERN = 'quarterly';
 const LEAD_SOURCE = 'mail_new_home';
 const LEAD_SOURCE_DETAIL = 'new_home_postcard';
+// The first touch of every /h booking: the visitor came from the printed postcard, whose link is /h/<token>. Sent to
+// createSelfBooking as the booking's attribution, so the booking row keeps it (with the offline source evidence) and
+// attributeSelfBooking writes its funnel row under the 'new_home_postcard' print source (services/print-lead-sources.js,
+// lead_sources row seeded by 20261124150000_print_lead_sources.js). The shape is the browser capture's: utm_source from
+// the print source table, utm_medium print, observed true. No click id, so it can never read as paid.
+const POSTCARD_ATTRIBUTION = Object.freeze({
+  observed: true,
+  utm: Object.freeze({ source: 'new_home_postcard', medium: 'print' }),
+});
 const MAX_OFFERS = 30;
 const CONTACT_ON_FILE = 'CONTACT_ON_FILE';
 const DEAD_VISIT_STATUSES = ['cancelled', 'skipped', 'rescheduled'];
@@ -600,6 +609,7 @@ function bookingPayload({ home, contact, offer, pin, gates, estimate }) {
     duration_minutes: SERVICE_MINUTES,
     recurring_pattern: RECURRING_PATTERN,
     source: LEAD_SOURCE,
+    attribution: { observed: POSTCARD_ATTRIBUTION.observed, utm: { ...POSTCARD_ATTRIBUTION.utm } },
     new_customer: {
       first_name: contact.first,
       last_name: contact.last,

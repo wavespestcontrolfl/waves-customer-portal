@@ -447,6 +447,25 @@ describe('the credit rules (applyLedger)', () => {
     expect(run('tech-a')).not.toHaveProperty('technicianId');
   });
 
+  test('AUDIT :884 STOP OVERRIDE: a stop whose closeout changed to not performed or unconfirmed ignores the owner credit and is review', () => {
+    const set = new Map([['visit-2', { creditCents: 45000, reason: 'Checked' }]]);
+    for (const kind of ['not_performed', 'unverified']) {
+      const row = { visitId: 'visit-2', workDate: '2026-09-21', kind, creditCents: 0, needsReview: kind === 'unverified', ledger: null, linkedInvoices: ['inv-1'] };
+      const out = productionShare.applyLedger([row], paidOf(), set)[0];
+      expect(out).toMatchObject({ kind: 'owner_override_closeout_changed', creditCents: 0, needsReview: true, invoices: [] });
+      expect(out.reason).toContain('closeout of this stop changed since the owner set its credit');
+    }
+  });
+
+  test('AUDIT :894 INVOICE: an invoice whose member is the root of a package a pay run fixed, shared with a stop outside it, is review', () => {
+    // visit-1 (a member of the invoice) was never paid itself, but a follow-up was paid with package basis root = visit-1
+    const out = one(plain('visit-2', ['inv-1']), paidOf({ jobs: { 'visit-1': [200000, 2, [2]] } }));
+    expect(out).toMatchObject({ kind: 'package_paid_elsewhere', creditCents: 0, needsReview: true, invoices: [] });
+    expect(out.reason).toContain('first visit of a package credited in the week of 2026-09-14');
+    // another package's root that is not on the invoice is no obstacle
+    expect(one(plain('visit-2', ['inv-1']), paidOf({ jobs: { 'visit-9': [200000, 2, [2]] } }))).toMatchObject({ kind: 'priced', creditCents: 100000 });
+  });
+
   test('STOP OVERRIDE: the revision and the review token change with the credit the owner set, and with its kind alone', () => {
     const base = (stop) => share.revisionOf(new Map([['tech-a', { settings: SETTINGS, stops: [{ ...stops([['v1', '2026-09-14', 100000]])[0], ...stop }] }]]));
     expect(base({})).not.toBe(base({ kind: 'owner_set' }));

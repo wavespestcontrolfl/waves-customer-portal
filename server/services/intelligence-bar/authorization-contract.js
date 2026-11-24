@@ -95,6 +95,8 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // Accepting locks the estimate's price, starts the plan's billing and may
   // email the customer; no portal path un-accepts an estimate.
   'accept_estimate',
+  // An estimate sent to the customer (text and/or email) cannot be unsent.
+  'send_estimate',
   // The Dispatch board has no Reopen for a resolved Action Queue card.
   'resolve_dispatch_alert',
   // An email cannot be unsent.
@@ -142,6 +144,8 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   // The invoice text (one text with the pay link), or under GATE_IB_INVOICE_EMAIL the invoice email (PDF + pay link) with at most
   // one CC, which the card names.
   'send_invoice',
+  // The confirmed run texts and/or emails the customer the estimate (the card names the channel and the exact message).
+  'send_estimate',
   // The confirmed run texts and/or emails the customer their next payment reminder, or the payment plan confirmation.
   'send_invoice_reminder_now',
   'create_payment_plan',
@@ -153,6 +157,8 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
 // send_invoice: its card lines come from its own preview
 // (invoice-action-tools.js cardLines), never the generic dump; it bills the customer.
 CURATED_PREVIEW_TOOL_NAMES.add('send_invoice');
+// send_estimate: its card lines come from its own preview (estimate-send-tools.js cardLines): the recipient, channel, exact message and totals.
+CURATED_PREVIEW_TOOL_NAMES.add('send_estimate');
 // record_payment: its card lines come from its own preview (record-payment-tools.js cardLines). Money, not a charge.
 CURATED_PREVIEW_TOOL_NAMES.add('record_payment');
 // propose_admin_edit (owner ruling 2026-10-12): its card lines come from its own
@@ -250,6 +256,7 @@ const ACTION_LABELS = {
   trigger_review_request: 'Send a review request',
   resend_receipt: 'Re-send a paid receipt',
   send_invoice: 'Send an invoice to the customer',
+  send_estimate: 'Send a draft estimate to the customer',
   record_payment: 'Record a payment received outside the portal (never charges a card)',
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
@@ -310,11 +317,13 @@ const ACTION_LABELS = {
   correct_invoice_address: 'Correct the address printed on an invoice',
   accept_estimate: 'Mark an estimate accepted (starts the plan)',
   reprice_future_visits: 'Change the price of upcoming visits',
+  book_plan_visits: 'Book a plan\'s visits',
 };
 
 // reprice_future_visits' card lines come from its own preview (one line per
 // visit, old -> new), never the generic one-line-per-preview-key dump.
 CURATED_PREVIEW_TOOL_NAMES.add('reprice_future_visits');
+CURATED_PREVIEW_TOOL_NAMES.add('book_plan_visits');
 
 // A preview whose combined-payment disclosure cancels a PaymentIntent in
 // Stripe: the DB merge may still be undoable, but that cancellation is
@@ -903,6 +912,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'reprice_future_visits' && Array.isArray(preview?.visits)) {
     for (const line of require('./reprice-visits-tools').cardLines(preview)) push(line.kind, line.text);
   }
+  // book_plan_visits: the customer and address, the service and cadence, every planned visit date, the technician, the
+  // price per visit, and whether the first visit's confirmation text goes (book-plan-visits-tools.js cardLines).
+  if (toolName === 'book_plan_visits' && preview?.preview === true && Array.isArray(preview?.visits)) {
+    for (const line of require('./book-plan-visits-tools').cardLines(preview)) push(line.kind, line.text);
+  }
   // repair_closeout: one effect per planned step (server-owned labels), plus
   // the open items the confirm will NOT touch — never a flattened dump of
   // the plan object.
@@ -999,6 +1013,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // unblock_sender: the address or domain, when and why it was blocked, its block count and every effect of the unblock.
   if (toolName === 'unblock_sender' && preview?.preview === true) {
     for (const line of require('./unblock-sender-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // send_estimate: the estimate, the masked recipients, the channel, the exact message and the totals.
+  if (toolName === 'send_estimate' && preview?.preview === true) {
+    for (const line of require('./estimate-send-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {
@@ -1245,6 +1266,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // The membership-started email (and an autosent termite agreement), only
       // when the preview found they will go out; each rides its own comms line.
       || (toolName === 'accept_estimate' && preview?.notifies_customer === true)
+      // The first visit's booking confirmation, unless the card says no texts (its own comms lines say which).
+      || (toolName === 'book_plan_visits' && preview?.notifies_customer === true)
       || tierUpgradeEmail
       || cancelCustomerNotice !== 'none' || cancelTextGoesOut);
   // "Will" only for tools whose whole point is the send; the conditional
@@ -1256,6 +1279,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (toolName === 'remove_saved_payment_method') contactLabel = String(preview?.customer_emails?.summary || contactLabel);
     if (toolName === 'accept_estimate') contactLabel = 'Customer will be emailed (see the Message lines)';
+    if (toolName === 'book_plan_visits') contactLabel = 'Customer will get the first visit\'s booking confirmation (see the Message lines)';
     if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
       // Evidence-independent wording (Codex round-3 P1, fixing a round-3
       // push finding: the FIRST draft of this line asserted precise,

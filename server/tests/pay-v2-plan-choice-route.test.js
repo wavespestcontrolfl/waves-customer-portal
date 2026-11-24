@@ -93,3 +93,24 @@ test('a failure answers a retryable 503 and logs the invoice id, never the link 
   expect(logged).toContain('invoice=inv-1');
   expect(logged).not.toContain(token);
 });
+
+test('an undecodable token answers identically dark and live (the generic noStore 404, never the error path)', async () => {
+  const { rejectUndecodablePath } = require('../middleware/reject-undecodable-path');
+  const app = express();
+  app.use('/api/pay', rejectUndecodablePath);
+  app.use('/api/pay', require('../routes/pay-v2').darkRoutePreGuard);
+  app.use((req, res) => res.status(200).json({ reached: true }));
+  const srv = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const answer = async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.address().port}/api/pay/%E0%A4%A/plan-choice`, { method: 'POST' });
+    return { status: res.status, body: await res.json(), cache: res.headers.get('cache-control'), referrer: res.headers.get('referrer-policy') };
+  };
+  try {
+    isEnabled.mockReturnValue(false);
+    const dark = await answer();
+    isEnabled.mockImplementation((key) => key === 'payPlanChoice');
+    const live = await answer();
+    expect(dark).toEqual(live);
+    expect(dark).toEqual({ status: 404, body: { error: 'Invoice not found' }, cache: 'no-store, no-cache, must-revalidate', referrer: 'no-referrer' });
+  } finally { srv.close(); }
+});

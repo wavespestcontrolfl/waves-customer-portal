@@ -105,6 +105,7 @@ describe('matcher', () => {
     ['GET', '/api/admin/inventory/11111111-2222-4333-8444-555555555555/movements', false],
     ['GET', '/api/admin/inventory/restock-requests/11111111-2222-4333-8444-555555555555/order-evidence', false],
     ['GET', '/api/admin/inventory/unit-review', false],
+    ['GET', '/api/admin/inventory/reorder-suggestions', false],
     ['GET', '/api/admin/job-costs', false],
     ['POST', '/api/admin/job-costs/recalc/11111111-2222-4333-8444-555555555555', false],
     ['POST', '/api/admin/invoices/11111111-2222-4333-8444-555555555555/void', false],

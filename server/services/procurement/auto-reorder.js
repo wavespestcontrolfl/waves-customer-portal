@@ -49,6 +49,7 @@ const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 const { findLiveRestockRequest, LIVE_RESTOCK_STATUSES } = require('./live-restock-request');
 const { fitAction } = require('../admin-alert-names');
 const { raiserFor, ringOnRefreshAfterConversion } = require('../admin-alert-injected');
+const { FERTILIZER_COLUMNS, HOLD_RESOLUTION, fertilizerBlackoutHold } = require('./fertilizer-blackout');
 
 const GATE = 'GATE_AUTO_REORDER';
 const SOURCE = 'auto_reorder';
@@ -80,6 +81,7 @@ async function findLowStockCandidates(conn = db) {
     .select(
       'pc.id', 'pc.name', 'pc.inventory_on_hand', 'pc.inventory_unit', 'pc.low_stock_threshold',
       'pc.reorder_quantity', 'pc.auto_reorder_vendor_id', 'pc.auto_reorder_enabled', 'pc.active',
+      ...FERTILIZER_COLUMNS.map((c) => `pc.${c}`),
       'v.name as vendor_name',
     )
     .orderBy('pc.name');
@@ -213,8 +215,11 @@ async function refreshOpenRequest(ctx, p, existing) {
     await lockProductPricing(trx, p.id);
     const request = await trx('product_restock_requests').where({ id: existing.id }).forUpdate().first();
     if (!request || request.status !== 'open' || request.source !== SOURCE) return null;
-    const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('auto_reorder_vendor_id');
+    const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('auto_reorder_vendor_id', 'name', ...FERTILIZER_COLUMNS);
     if (!fresh) return null;
+    // June 1 - Sept 30 N/P fertilizer: read under the lock, acted on in
+    // handleLiveRequest (holdOpenRequest).
+    if (fertilizerBlackoutHold(fresh, ctx.now)) return { ...request, held: true };
     const learned = learnedVendorFields(request, await lockedVendor(trx, p, fresh));
     if (!learned) return request;
     await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ vendor: learned.vendor, metadata: JSON.stringify(learned.metadata), updated_at: new Date() });
@@ -226,11 +231,75 @@ async function refreshOpenRequest(ctx, p, existing) {
 // A still-open auto request whose bell failed earlier would otherwise sit
 // unworked forever: re-ring (the request-id dedupeKey makes a landed bell a
 // no-op). Requests of other sources, and ordered ones, are left alone.
+// The "order manually" bells of one request: its hand-off bell
+// (auto-reorder:<request>, unless handoff is false) and a PRE-SUBMIT park's
+// ledger bell (auto-order:<ledger>[:<v>], placed_at null). A dispatched
+// order's reconciliation bell never matches.
+function requestOrderBells(conn, requestId, { handoff = true } = {}) {
+  const ledger = "EXISTS (SELECT 1 FROM vendor_orders vo WHERE vo.restock_request_id = ? AND vo.placed_at IS NULL AND (metadata->>'dedupeKey' = 'auto-order:' || vo.id OR metadata->>'dedupeKey' LIKE 'auto-order:' || vo.id || ':%'))";
+  return handoff
+    ? conn('notifications').whereRaw(`(metadata->>'dedupeKey' = ? OR ${ledger})`, [`auto-reorder:${requestId}`, requestId])
+    : conn('notifications').whereRaw(ledger, [requestId]);
+}
+
+// Run fn(trx) under the claim paths' lock order (pricing lock, then the
+// request row) while the request still needs a person: open, no automatic
+// order out, no order emailed to the vendor. Returns the reason it did not
+// run, or null.
+async function whileManualLocked(ctx, p, requestId, fn) {
+  return ctx.conn.transaction(async (trx) => {
+    await lockProductPricing(trx, p.id);
+    const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first('status', 'source');
+    if (!request || request.status !== 'open' || request.source !== SOURCE) return 'request_closed';
+    const dispatch = require('./order-dispatch');
+    if (await dispatch.findLiveAutoOrder(trx, p.id)) return 'auto_order_live';
+    if (await dispatch.emailOrderOutFor(trx, requestId)) return 'email_order_out';
+    await fn(trx);
+    return null;
+  });
+}
+
+// June 1 - Sept 30, an open N/P fertilizer request: its OPEN "order
+// manually" bells close with resolution HOLD_RESOLUTION; the rows and the
+// ledger's saved bell stay, and nothing rings. An order already out keeps
+// its reconciliation bells.
+async function holdOpenRequest(ctx, p, request) {
+  const ns = require('../notification-service')._private;
+  const skipped = await whileManualLocked(ctx, p, request.id, (trx) => requestOrderBells(trx, request.id).whereNull('done_at')
+    .update(ns.doneColumns({ by: 'procurement', resolution: HOLD_RESOLUTION, conn: trx })));
+  if (skipped) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: skipped }); return; }
+  ctx.result.held.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'fertilizer_blackout' });
+}
+
+// Outside the hold (after Sept 30, or a catalog fix that ended it): the bells
+// the hold closed open again, whatever the product's class is now, under the
+// same locks and checks. When the dispatcher now orders from the request's
+// vendor, its generic hand-off stays closed (the claim owns it); only a
+// pre-submit ledger bell reopens. A plain read first, so a request with
+// nothing held writes nothing. The quiet-hold stamp gives a reopened bell
+// the normal 72-hour window (admin-alert-retention.js quietHoldFrom).
+async function reopenHeldBells(ctx, p, request) {
+  if (!(await requestOrderBells(ctx.conn, request.id).where('resolution', HOLD_RESOLUTION).first('id'))) return;
+  // The hand-off stays closed only when the dispatcher will claim this
+  // request itself: an auto-orderable vendor AND no ledger row it would not
+  // re-claim (findDispatchable re-claims only a dry-run park; any other
+  // parked row means the request needs a person).
+  const { vendorId } = parseMeta(request.metadata);
+  const ledgerRow = await ctx.conn('vendor_orders').where({ restock_request_id: request.id })
+    .whereRaw("NOT COALESCE(status = 'needs_review' AND error LIKE 'dry_run:%', false)").first('id');
+  const handoff = Boolean(ledgerRow) || !(vendorId && await dispatcherOrders(ctx.conn, vendorId));
+  const stamp = JSON.stringify({ quietHoldFrom: (ctx.now || new Date()).toISOString() });
+  await whileManualLocked(ctx, p, request.id, (trx) => requestOrderBells(trx, request.id, { handoff }).where('resolution', HOLD_RESOLUTION)
+    .update({ read_at: null, done_at: null, done_by: null, resolution: null, metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [stamp]) })); // notifications has no updated_at
+}
+
 async function handleLiveRequest(ctx, p, existing) {
   ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: existing.id });
   if (existing.source !== SOURCE || existing.status !== 'open') return;
   const request = await refreshOpenRequest(ctx, p, existing);
   if (!request) return;
+  if (request.held) { await holdOpenRequest(ctx, p, request); return; }
+  await reopenHeldBells(ctx, p, request);
   // The dispatcher only ever claims a request whose OWN metadata names an
   // auto-orderable vendor (findDispatchable). A request that could not
   // establish a vendor id (pinned to a vendor the product has since left)
@@ -300,12 +369,14 @@ async function lockedVendor(trx, p, fresh) {
 // raise a stale request that no later sweep would revisit (Codex r3 P2).
 // Runs in one transaction with the insert so a concurrent receive waits on
 // the lock rather than racing past it.
-async function createRequestLocked(conn, p) {
+async function createRequestLocked(conn, p, asOf = new Date()) {
   return conn.transaction(async (trx) => {
     await lockProductPricing(trx, p.id);
     const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate()
-      .first('inventory_on_hand', 'low_stock_threshold', 'auto_reorder_enabled', 'active', 'reorder_quantity', 'auto_reorder_vendor_id', 'inventory_unit');
+      .first('inventory_on_hand', 'low_stock_threshold', 'auto_reorder_enabled', 'active', 'reorder_quantity', 'auto_reorder_vendor_id', 'inventory_unit', 'name', ...FERTILIZER_COLUMNS);
     if (!fresh || !stillLow(fresh)) return { deduped: 'no_longer_low' };
+    // The blackout again on the locked row: a name or analysis edit since the scan counts.
+    if (fertilizerBlackoutHold(fresh, asOf)) return { held: 'fertilizer_blackout' };
     // The SHARED live-request check again, UNDER the lock (pre-push P1,
     // Codex r9 P1): every creation path (staff, forecast, Intelligence Bar,
     // the dispatcher's claim) locks this row first and runs this same read,
@@ -367,11 +438,14 @@ async function sweepProduct(ctx, p) {
   const existing = await findLiveRestockRequest(conn, p.id);
   if (existing) { await handleLiveRequest(ctx, p, existing); return; }
   if (!stillLow(p)) return;
+  // June 1 - Sept 30: never raise a request for N/P fertilizer (owner 2026-11-24).
+  if (fertilizerBlackoutHold(p, ctx.now)) { result.held.push({ productId: p.id, name: p.name, requestId: null, reason: 'fertilizer_blackout' }); return; }
   if (!p.inventory_unit) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_unit' }); return; }
   const reorderQty = num(p.reorder_quantity);
   if (!reorderQty || reorderQty <= 0) { result.unconfigured.push({ productId: p.id, name: p.name, reason: 'no_reorder_quantity' }); return; }
 
-  const outcome = await createRequestLocked(conn, p);
+  const outcome = await createRequestLocked(conn, p, ctx.now);
+  if (outcome.held) { result.held.push({ productId: p.id, name: p.name, requestId: null, reason: outcome.held }); return; }
   if (outcome.deduped) { result.deduped.push({ productId: p.id, name: p.name, requestId: null, reason: outcome.deduped }); return; }
   if (outcome.unconfigured) { result.unconfigured.push({ productId: p.id, name: p.name, reason: outcome.unconfigured }); return; }
   const { request } = outcome;
@@ -383,10 +457,10 @@ async function sweepProduct(ctx, p) {
   await bellOrWarn(ctx, p, request, 'bells');
 }
 
-async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
-  if (!gateEnvValue(GATE)) return { skipped: 'gated', created: [], deduped: [], unconfigured: [] };
-  const result = { created: [], deduped: [], unconfigured: [], errors: [], renotified: [], refreshed: [], bells: [] };
-  const ctx = { conn, notify, result };
+async function runSuppliesAutoReorderSweep({ conn = db, notify = null, now = new Date() } = {}) {
+  if (!gateEnvValue(GATE)) return { skipped: 'gated', created: [], deduped: [], unconfigured: [], held: [] };
+  const result = { created: [], deduped: [], unconfigured: [], held: [], errors: [], renotified: [], refreshed: [], bells: [] };
+  const ctx = { conn, notify, result, now };
 
   const candidates = await findLowStockCandidates(conn);
   for (const p of candidates) {
@@ -397,7 +471,7 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null } = {}) {
       result.errors.push({ productId: p.id, name: p.name, message: err.message });
     }
   }
-  logger.info(`[auto-reorder] sweep: ${result.created.length} created, ${result.deduped.length} deduped, ${result.unconfigured.length} unconfigured, ${result.errors.length} errors`);
+  logger.info(`[auto-reorder] sweep: ${result.created.length} created, ${result.deduped.length} deduped, ${result.unconfigured.length} unconfigured, ${result.held.length} held (fertilizer blackout), ${result.errors.length} errors`);
   return result;
 }
 

@@ -41,6 +41,12 @@ describe("ServiceLineTiles", () => {
     expect(screen.getByText(/could not be loaded right now/)).toBeInTheDocument();
   });
 
+  test("names how many wins were booked another way", () => {
+    const withBooked = { ...data, lines: [{ ...data.lines[0], booked_other_way: 2 }] };
+    render(<ServiceLineTiles data={withBooked} />);
+    expect(screen.getByText("incl. 2 booked another way")).toBeInTheDocument();
+  });
+
   test("shows a dash for null numbers, never a zero", () => {
     render(<ServiceLineTiles data={data} />);
     const termite = screen.getByText("Termite").closest("tr");

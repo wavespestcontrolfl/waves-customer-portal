@@ -53,7 +53,7 @@ test('customer counts bind account/internal scope and preserve response policy t
     customerId,
     excludePhones: [internalPhone],
     humanReplyTypes: ['manual', 'ai_approved', 'ai_revised', 'ai_assistant', 'ai_assistant_reply'],
-    ignoredInboundTypes: ['opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply'],
+    ignoredInboundTypes: ['opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply', 'mail_home_text_to_book'],
   });
 });
 

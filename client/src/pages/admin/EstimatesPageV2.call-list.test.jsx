@@ -24,6 +24,7 @@ import EstimatesPageV2, {
   callOutcomesUnreadNote,
   stillDecidingLine,
   useCallOutcomes,
+  v3ChipMatches,
 } from "./EstimatesPageV2";
 
 const flags = { estimates_v2_status_pills: false };
@@ -732,4 +733,16 @@ it("a held row keeps the rule's row checks; only the answered call and a touch d
   expect(result.current.onCallToday({ ...called, callOutcomeUnknown: true })).toBe(false);
   // Not held: the rule alone.
   expect(result.current.onCallToday({ ...called, id: "h-other" })).toBe(false);
+});
+
+it("sends an expired offer whose customer booked another way to Closed, not Action Required; other expired rows still need action", () => {
+  const booked = { status: "expired", disposition: "converted_other_path" };
+  const lost = { status: "expired", disposition: "expired_viewed" };
+  expect(v3ChipMatches(booked, "closed")).toBe(true);
+  expect(v3ChipMatches(booked, "action")).toBe(false);
+  expect(v3ChipMatches(lost, "action")).toBe(true);
+  expect(v3ChipMatches(lost, "closed")).toBe(false);
+  // The code on a non-expired row is not a booked win.
+  expect(v3ChipMatches({ status: "declined", disposition: "converted_other_path" }, "closed")).toBe(true);
+  expect(v3ChipMatches({ status: "viewed", disposition: "converted_other_path" }, "closed")).toBe(false);
 });

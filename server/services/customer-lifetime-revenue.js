@@ -13,13 +13,21 @@
  * read it for a customer's revenue.
  */
 
-// Correlated on customers.id: select it from a query over the customers table.
-const LIFETIME_REVENUE_SQL = `((SELECT COALESCE(SUM(p.amount - COALESCE(p.refund_amount, 0)), 0)
-    FROM payments p WHERE p.customer_id = customers.id AND p.status = 'paid')
-  + (SELECT COALESCE(SUM(GREATEST(d.amount - COALESCE(d.refunded_amount, 0), 0)
+const { dateOnlyString } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
+
+// One paid payments row, net of refunds; one estimate deposit, net of refunds (see the header). Both
+// LIFETIME_REVENUE_SQL and netCollections read these, so a lifetime and a windowed sum never disagree.
+const PAYMENT_NET_SQL = 'p.amount - COALESCE(p.refund_amount, 0)';
+const DEPOSIT_NET_SQL = `GREATEST(d.amount - COALESCE(d.refunded_amount, 0), 0)
       + COALESCE(CASE WHEN d.refunded_surcharge IS NOT NULL
           THEN GREATEST(COALESCE(d.card_surcharge, 0) - d.refunded_surcharge, 0)
-          ELSE COALESCE(d.card_surcharge, 0) * GREATEST(d.amount - COALESCE(d.refunded_amount, 0), 0) / NULLIF(d.amount, 0) END, 0)), 0)
+          ELSE COALESCE(d.card_surcharge, 0) * GREATEST(d.amount - COALESCE(d.refunded_amount, 0), 0) / NULLIF(d.amount, 0) END, 0)`;
+
+// Correlated on customers.id: select it from a query over the customers table.
+const LIFETIME_REVENUE_SQL = `((SELECT COALESCE(SUM(${PAYMENT_NET_SQL}), 0)
+    FROM payments p WHERE p.customer_id = customers.id AND p.status = 'paid')
+  + (SELECT COALESCE(SUM(${DEPOSIT_NET_SQL}), 0)
     FROM estimate_deposits d LEFT JOIN estimates e ON e.id = d.estimate_id
     WHERE COALESCE(d.customer_id, e.customer_id) = customers.id AND d.received_at IS NOT NULL))`;
 
@@ -30,4 +38,29 @@ async function lifetimeRevenueFor(knex, customerId) {
   return parseFloat(row?.net || 0);
 }
 
-module.exports = { LIFETIME_REVENUE_SQL, lifetimeRevenueFor };
+/**
+ * Each net collection of these customers on or after `from` (a Date): the same paid payments and deposits as
+ * LIFETIME_REVENUE_SQL, dated by ET day. payment_date is a pg DATE (kept as written, never shifted to ET);
+ * received_at is a timestamp (its ET day). Returns [{ customer_id, day: 'YYYY-MM-DD', net }].
+ */
+async function netCollections(knex, customerIds, from) {
+  if (!customerIds.length) return [];
+  const payments = await knex('payments as p')
+    .whereIn('p.customer_id', customerIds)
+    .where('p.status', 'paid')
+    .where('p.payment_date', '>=', from)
+    .select('p.customer_id', 'p.payment_date as at', knex.raw(`(${PAYMENT_NET_SQL})::float AS net`));
+  const deposits = await knex('estimate_deposits as d')
+    .leftJoin('estimates as e', 'e.id', 'd.estimate_id')
+    .whereIn(knex.raw('COALESCE(d.customer_id, e.customer_id)'), customerIds)
+    .whereNotNull('d.received_at')
+    .where('d.received_at', '>=', from)
+    .select(knex.raw('COALESCE(d.customer_id, e.customer_id) AS customer_id'), 'd.received_at as at',
+      knex.raw(`(${DEPOSIT_NET_SQL})::float AS net`));
+  return [
+    ...payments.map((r) => ({ customer_id: r.customer_id, day: dateOnlyString(r.at), net: Number(r.net) || 0 })),
+    ...deposits.map((r) => ({ customer_id: r.customer_id, day: etDateString(new Date(r.at)), net: Number(r.net) || 0 })),
+  ];
+}
+
+module.exports = { LIFETIME_REVENUE_SQL, lifetimeRevenueFor, netCollections };

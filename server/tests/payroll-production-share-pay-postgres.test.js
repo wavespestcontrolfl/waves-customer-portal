@@ -421,6 +421,22 @@ postgres('production share pay line', () => {
       expect(refusal.body.error).toContain('cannot be credited by hand');
     });
 
+    it('AUDIT :884: a credit the owner set is ignored once the stop closeout is declined or removed', async () => {
+      const { unpriced, key } = await world();
+      expect((await override({ ...key, creditCents: 126000, reason: 'Checked' })).status).toBe(200);
+      const stopRow = async (run) => (await trx('payroll_checks').where({ run_id: run.id }).first('calc_snapshot'))
+        .calc_snapshot.productionShare.stops.find((row) => row.visitId === unpriced);
+      // the closeout is declined after the credit was set
+      await trx('service_records').where({ scheduled_service_id: unpriced }).update({ status: 'incomplete' });
+      const declined = (await draft(W1)).body.run;
+      expect(await stopRow(declined)).toMatchObject({ kind: 'owner_override_closeout_changed', creditCents: 0, needsReview: true });
+      await api('POST', `/runs/${declined.id}/void`, { body: { reason: 'test' } });
+      // the closeout record is removed altogether
+      await trx('service_records').where({ scheduled_service_id: unpriced }).del();
+      const removed = (await draft(W1)).body.run;
+      expect(await stopRow(removed)).toMatchObject({ kind: 'owner_override_closeout_changed', creditCents: 0, needsReview: true });
+    });
+
     it('AUDIT :1007: a credit belongs to the technician who held the stop: after a reassignment the stop is review, and clearing works for the new holder', async () => {
       const { unpriced, key } = await world();
       const other = await tech('Sample Bravo');
@@ -958,6 +974,45 @@ postgres('production share pay line', () => {
       await trx('invoices').where({ id: invoiceId }).update({ status: 'sent', scheduled_service_id: second });
       const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
       expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+    });
+
+    it('AUDIT :500: an invoice with no status stays in the invoice history and never in the dollars', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const first = await stop(id, W1, '1000.00', customerId);
+      const second = await stop(id, weeks[1], '1000.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '300.00', { scheduled_service_id: first });
+      await trx('invoices').where({ id: invoiceId }).update({ status: null });
+      const week1 = (await draft(W1)).body.run;
+      expect(byName(week1, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 100000 });
+      await finalize(week1.id);
+      expect((await snapshotStops(week1.id))[0].invoices).toEqual([invoiceId]);
+      await trx('invoices').where({ id: invoiceId }).update({ status: 'sent', scheduled_service_id: second });
+      expect(byName((await draft(weeks[1])).body.run, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+    });
+
+    it('AUDIT :894: an invoice shared with the root of a package a pay run fixed makes the stop outside that package review', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+      // week 1: only the package's follow-up is completed; it fixes the package basis (root R)
+      const root = await stop(id, weeks[1], '2000.00', customerId, { ...pkg, status: 'confirmed' });
+      await stop(id, W1, '0.00', customerId, { ...pkg, followup_included: true, followup_source_service_id: root });
+      await finalize((await draft(W1)).body.run.id);
+      // week 2: R is done, and one invoice covers R and another stop that is no part of the package
+      await trx('scheduled_services').where({ id: root }).update({ status: 'completed' });
+      const other = await stop(id, weeks[1], '500.00', await customer());
+      const invoiceId = await invoiceFor(customerId, '2500.00');
+      await shareInvoice(customerId, invoiceId, [root, other], 'k-894');
+      const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
+      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(snapshot.stops.find((row) => row.visitId === other)).toMatchObject({ kind: 'package_paid_elsewhere', creditCents: 0, needsReview: true });
     });
 
     it('AUDIT :602: an invoice linked only to the package is the package price ONCE: $2,000.00 invoice = $1,000.00 + $1,000.00', async () => {

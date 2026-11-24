@@ -1219,6 +1219,33 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
+    // New-home postcard (GATE_MAIL_HOME_TEXT_BOOK + GATE_MAIL_HOME_PAGE, owner 2026-11-23, mailer step 2d-3): "Text
+    // 101 EXAMPLE to (941) 297-2817". A text to an office location line whose body is a live new home's address
+    // gets one reply with the home's page link (services/mail/home-text-to-book.js). Runs after STOP/HELP/START and
+    // the lead-intake machine, never for the AI line, a tech line or a tracking line (the service checks the line is
+    // an office location line), a staff sender, a reaction, a media text or a reschedule ask. A reply that went out
+    // consumes the text (no AI auto-reply on top; the office thread bell still rings, after the ack); every other outcome falls through untouched.
+    if (Body && inboundMedia.length === 0 && !smsReaction && !staffSender && !complianceCommand && !rescheduleAsk
+      && !pendingTimeAnswer && numberConfig.type === 'location' && !isAiNumber && !TWILIO_NUMBERS.isTechLine(To)) {
+      const homeText = await require('../services/mail/home-text-to-book').handleHomeTextToBook({
+        from: From, to: To, body: Body, customer,
+        // A number a customer record has as a secondary or service-contact phone: its consent is read, or no reply.
+        knownContact: Boolean(knownCallerRecord || knownCallerLookupFailed),
+        // An estimate address question waiting on this sender's answer comes first (handleClarifyReply records it below).
+        standAside: () => require('../services/estimate-clarify-asks').hasAwaitingClarifyAsk({ phone: From }),
+      });
+      if (homeText.handled) {
+        // Only a confirmed handoff leaves the needs-reply queue; an uncertain one consumes the text (no AI reply, no retry) but
+        // the row stays actionable so the office still sees a possibly unanswered request.
+        if (!homeText.uncertain) await retypeConsumedInbound(smsLogEntry.id, 'mail_home_text_to_book', 'mail-home-text-to-book');
+        // Ack Twilio first, then ring the office thread bell the post-ack block below rings for any text to an office line
+        // (a slow push must not hold the webhook open: Twilio retries a late ack). The bell never throws.
+        res.type('text/xml').send('<Response></Response>');
+        void ringConsumedOfficeText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, message: Body, smsLogEntry });
+        return;
+      }
+    }
+
     // Lead call-reply ring (owner 2026-10-24): a lead's bare CALL in
     // answer to our lead text rings Adam's cell with the press-1 bridge,
     // 8 AM-8 PM ET. Keyed on our sent text, not lead_intake_status, so a lead
@@ -1369,8 +1396,7 @@ router.post('/sms', async (req, res) => {
         // suppressed counts as HANDLED: an internal-test/demo customer's
         // inbound must not fall through to the legacy owner-SMS forward —
         // that would re-create the exact alert the suppression removed.
-        knownInboundNotified = Boolean(stats && !stats.error &&
-          (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+        knownInboundNotified = bellLanded(stats);
       } catch (e) {
         if (e.alreadyRead) { knownInboundNotified = true; logger.info('[notifications] sms_reply skipped — thread read before the bell'); }
         else logger.error(`[notifications] sms_reply trigger failed: ${e.message}`);
@@ -1405,23 +1431,7 @@ router.post('/sms', async (req, res) => {
     // suppress (leaving a new thread with no alert at all) — with a strict
     // created_at ordering, at most the later one suppresses. An exact
     // timestamp tie fails open to two alerts, the safe direction.
-    let repeatUnknownSender = false;
-    if (!customer && (Body || inboundMedia.length) && smsLogEntry?.created_at) {
-      try {
-        const prior = await db('sms_log')
-          .where({ direction: 'inbound', from_phone: From })
-          .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
-          .where('created_at', '<', smsLogEntry.created_at)
-          .whereNot('twilio_sid', MessageSid)
-          // An enforced solicitation verdict on the prior row means that
-          // text was silently screened out, not a real prior inbound the
-          // sender had a conversation about — it must not itself consume
-          // the next genuine message's alert quota (codex P1, 2026-09-11).
-          .whereRaw("COALESCE(metadata->'spam_verdict'->>'enforced', 'false') != 'true'")
-          .first('id');
-        repeatUnknownSender = Boolean(prior);
-      } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
-    }
+    const repeatUnknownSender = await isRepeatUnknownSender({ customer, hasContent: Boolean(Body || inboundMedia.length), smsLogEntry, From, MessageSid });
 
     // A staff text to a tracking line gets this forward: the tracking-line bell above skips staff
     // senders (GATE_TECH_STAFF_GUARDS), and the office must still hear about it.
@@ -2036,6 +2046,61 @@ async function retypeConsumedInbound(smsLogId, messageType, label) {
 
 async function ringSmsReplyBell(args) {
   return require('../services/sms-reply-alert-delivery').ringSmsReplyBell(args);
+}
+
+// Per-sender limit for UNKNOWN senders' quiet Activity alert: true when this sender already texted within 4 hours, so the
+// alert for a repeat is skipped (spam robotext threads raised one alert per message, 2026-07). Shared by the post-ack block of
+// POST /sms and ringConsumedOfficeText so a consumed text cannot bypass it. Only rows STRICTLY OLDER than this message's own
+// sms_log row count: two near-simultaneous first texts must not each see the other and both suppress (a new thread with no
+// alert at all); an exact timestamp tie fails open to two alerts, the safe direction. Fails open on a query error.
+async function isRepeatUnknownSender({ customer, hasContent, smsLogEntry, From, MessageSid }) {
+  if (customer || !hasContent || !smsLogEntry?.created_at) return false;
+  try {
+    const prior = await db('sms_log')
+      .where({ direction: 'inbound', from_phone: From })
+      .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
+      .where('created_at', '<', smsLogEntry.created_at)
+      .whereNot('twilio_sid', MessageSid)
+      // An enforced solicitation verdict on the prior row means that text was silently screened out, not a real prior
+      // inbound the sender had a conversation about: it must not itself consume the next genuine message's alert quota
+      // (codex P1, 2026-09-11).
+      .whereRaw("COALESCE(metadata->'spam_verdict'->>'enforced', 'false') != 'true'")
+      .first('id');
+    return Boolean(prior);
+  } catch (e) {
+    logger.warn(`[twilio-webhook] repeat-sender check failed (${e.code || e.name || 'error'})`);
+    return false;
+  }
+}
+
+// Did the sms_reply bell/push land? suppressed counts as HANDLED (an internal-test/demo customer's inbound must not fall
+// through to the legacy owner-SMS forward). One rule for the main post-ack block and ringConsumedOfficeText.
+function bellLanded(stats) {
+  return Boolean(stats && !stats.error && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+}
+
+// The office thread bell for an inbound text a branch consumed and answered itself (the new-home postcard reply), run AFTER
+// the ack. What the post-ack block of POST /sms rings for any text to an office line, in the same order and with the same
+// fallbacks: the unknown-sender bell, the known customer's sms_reply bell, then the quiet Activity row when neither landed,
+// skipped for an unknown sender who texted in the last 4 hours (isRepeatUnknownSender). The caller has excluded reactions and
+// a text to the owner's own phone (the line is an office line). One bell per text, no customer reply. Never throws.
+async function ringConsumedOfficeText(ctx) {
+  const { customer, courtesyOnly, From, MessageSid, message, smsLogEntry } = ctx;
+  try {
+    let notified = await require('../services/sms-reply-alert-delivery').ringUnknownOfficeText({ ...ctx, mediaCount: 0 });
+    if (customer && !courtesyOnly) {
+      try {
+        notified = bellLanded(await ringSmsReplyBell({ customer, From, MessageSid, message }));
+      } catch (e) {
+        if (e.alreadyRead) notified = true;
+        else logger.error(`[notifications] sms_reply trigger failed: ${e.code || e.name}`);
+      }
+    }
+    const repeat = await isRepeatUnknownSender({ customer, hasContent: true, smsLogEntry, From, MessageSid });
+    if (!notified && !repeat) await recordInboundTextAlert({ customer, From, MessageSid, Body: message });
+  } catch (e) {
+    logger.error(`[twilio-webhook] consumed-text bell failed: ${e.code || e.name}`);
+  }
 }
 
 // The "New SMS" alert for a text no thread bell covered (an unknown sender, a staff text, a bell that did

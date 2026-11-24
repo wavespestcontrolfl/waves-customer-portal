@@ -87,6 +87,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "book_plan_visits": {
+    "module": "book-plan-visits-tools.js",
+    "domain": "schedule",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "bulk_update_customers": {
     "module": "tools.js",
     "domain": "customers",
@@ -2042,6 +2050,14 @@
   "send_email_reply": {
     "module": "email-tools.js",
     "domain": "email",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "send_estimate": {
+    "module": "estimate-send-tools.js",
+    "domain": "estimate",
     "kind": "external_action",
     "role": "admin",
     "approval": "ui_confirm",

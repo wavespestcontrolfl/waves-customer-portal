@@ -852,6 +852,7 @@ function validateTreeShrubTypedCompliance({
 }
 
 module.exports = {
+  parseFertilizerAnalysis,
   TREE_SHRUB_SERVICE_LINES,
   TREE_SHRUB_CLOSEOUT_VERSION,
   inferTreeShrubOrdinanceZone,

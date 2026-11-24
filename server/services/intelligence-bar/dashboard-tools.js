@@ -21,6 +21,7 @@ const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etW
 // Shared so the MRR breakdown + snapshot exclude the same accounts this tool does.
 const { INTERNAL_TEST_CUSTOMERS } = require('../internal-test-customers');
 const { whereNotUndeliveredSelfServe, sentAtSql, countableViewAtSql } = require('../self-serve-estimates');
+const { bookedWinSql } = require('../estimate-disposition');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 const { customerVisibleServiceRecordPredicate } = require('../pest-pressure/history-filter');
 const { CANONICAL_SIBLING } = require('../completion-record-invariants');
@@ -818,9 +819,12 @@ async function getEstimateFunnel(input) {
     .select(
       db.raw(`${SERVICE_KEY_SQL} as service`),
       db.raw('COUNT(*) as sent'),
-      db.raw("COUNT(*) FILTER (WHERE e.status = 'accepted') as won"),
-      db.raw("COUNT(*) FILTER (WHERE e.status IN ('declined', 'expired')) as lost"),
-      db.raw("COALESCE(SUM(COALESCE(e.monthly_total,0) + COALESCE(e.onetime_total,0)) FILTER (WHERE e.status = 'accepted'), 0) as won_value"),
+      // won = accepted, or an expired offer whose customer booked another way (the
+      // reclaim's code, estimate-winloss isBookedOtherWayRow); that row is not lost. Dollars
+      // stay accepted-only: the customer did not necessarily buy at this offer's price.
+      db.raw(`COUNT(*) FILTER (WHERE e.status = 'accepted' OR ${bookedWinSql('e')}) as won`),
+      db.raw(`COUNT(*) FILTER (WHERE e.status IN ('declined', 'expired') AND NOT ${bookedWinSql('e')}) as lost`),
+      db.raw(`COALESCE(SUM(COALESCE(e.monthly_total,0) + COALESCE(e.onetime_total,0)) FILTER (WHERE e.status = 'accepted'), 0) as won_value`),
     )
     .groupBy(db.raw(SERVICE_KEY_SQL))
     .orderByRaw('COUNT(*) DESC')

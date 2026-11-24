@@ -514,12 +514,24 @@ const PIPELINE_FILTERS = [
   { key: "archived", label: "Archived", color: C.muted || C.heading },
 ];
 
+// The customer converted another way after the offer expired (the daily pass
+// stamps disposition converted_other_path on it). Archived rows never reach
+// this page's list, as before.
+function isBookedOtherWayEstimate(e) {
+  return e.status === "expired" && e.disposition === "converted_other_path";
+}
+
+// Won = accepted, or booked another way.
+function isWonEstimate(e) {
+  return e.status === "accepted" || isBookedOtherWayEstimate(e);
+}
+
 function classifyEstimate(e) {
   // Archived trumps status for filter bucketing. The list API returns only
   // archived rows when ?archived=only is set, so this mostly affects the
   // filter-count math in the pills.
   if (e.archivedAt) return "archived";
-  if (e.status === "accepted") return "won";
+  if (isWonEstimate(e)) return "won";
   if (e.status === "declined" || e.status === "expired") return "lost";
   if (e.status === "draft" && (!e.monthlyTotal || e.monthlyTotal === 0))
     return "needs_estimate";
@@ -565,6 +577,8 @@ export {
   DECLINE_REASONS,
   declinePayload,
   classifyEstimate,
+  isWonEstimate,
+  isBookedOtherWayEstimate,
   canSendEstimate,
   classifyEstimateForPipeline,
   getUrgencyIndicator,

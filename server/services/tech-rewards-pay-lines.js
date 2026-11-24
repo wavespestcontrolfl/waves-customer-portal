@@ -138,6 +138,7 @@ const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-
 // payroll-runs.js loads this file, so its helpers are read on first use.
 const payrollRuns = () => require('./payroll-runs');
 const timeOffBank = require('./payroll-time-off-bank');
+const holidayWork = require('./payroll-holiday-work');
 // The board is the one home of the pay a stay bonus is worked out from (readBonusPay) and of its 12 months (stayWindow), and of
 // every figure of a season bonus (readSeasonScoreFigures, readSeasonPay, seasonBonusOf). It pulls in the score and review modules, so it loads on
 // first use: a pay run that has no stay bonus and no season bonus to look at never reads it.
@@ -341,9 +342,10 @@ const readTech = ({ hire_on_file: onFile, ...row }) => ({ ...row, hire_date: row
  * (payroll_runs.unpaid_time_off: a time-off bank that paid none of it makes no check, and no later run pays that week);
  * a void of that run opens the week again. Whole weeks are asked, the weeks a line's overtime is priced from.
  */
+// onlyWeeks: only these Mondays are asked, whatever else the range holds.
 // skipClosed: a week whose pay run is final is not in the answer. No second live run can pay it, and no hours
 // enter it (time-tracking.js), so a wait for it would never end (payroll-runs.js payoutWaits asks this way).
-async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo, skipClosed = false }) {
+async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo, skipClosed = false, onlyWeeks = null }) {
   const from = staffWeekStartForWorkDate(coversFrom);
   const lastWeek = staffWeekStartForWorkDate(coversTo);
   const to = addStaffWorkDays(lastWeek, 6);
@@ -360,7 +362,7 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo, skipC
       .where({ technician_id: technicianId }).where('work_date', '>=', from).where('work_date', '<=', to).where('minutes', '>', 0)
       .distinct(trx.raw(`to_char(${payrollRuns().weekStartSql('work_date')}, 'YYYY-MM-DD') AS week_start`))
     : [];
-  const weeks = [...new Set([...withMinutes, ...worked, ...off.map((row) => row.week_start)])];
+  const weeks = [...new Set([...withMinutes, ...worked, ...off.map((row) => row.week_start)])].filter((week) => !onlyWeeks || onlyWeeks.has(week));
   if (!weeks.length) return null;
   const paid = new Set((await trx('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
@@ -375,6 +377,26 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo, skipC
   }
   const decided = new Set(await timeOffBank.unpaidDecisionWeeks(trx, technicianId, open));
   return open.filter((week) => !decided.has(week)).sort()[0] || null;
+}
+
+// The oldest pay week before the run that holds a shift running into a holiday of the technician inside the span (from another
+// pay week than the holiday's own) and still has no finalized check, or null. Asked as oldestUnpaidWeek asks a week.
+// `span` is the line's own span (hire-clipped for a season bonus): its first pay week is where the caller's own earlier-weeks
+// check starts. `earned` is the window the base is worked out from (the full season for a rehire in the middle of it: the base
+// counts the premiums earned before the hire date too), where the holidays are read. Default: the span.
+async function unpaidHolidayShiftWeek(trx, technicianId, span, beforeRun, earned = span) {
+  const holidays = (await trx('payroll_time_off')
+    .where({ technician_id: technicianId, kind: 'holiday' })
+    .where('work_date', '>=', earned.coversFrom).where('work_date', '<=', earned.coversTo)
+    .select(trx.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"))).map((row) => row.work_date);
+  if (!holidays.length) return null;
+  // ONE read of the shifts that start before the span's first pay week and overlap any of the holidays; the weeks
+  // the span itself covers are asked by the caller. Then ONE read of those weeks together (onlyWeeks: no other week between
+  // them is asked).
+  const weeks = (await holidayWork.otherWeeksOfShiftsInto(trx, technicianId, holidays, { before: staffWeekStartForWorkDate(span.coversFrom) }))
+    .filter((week) => week <= beforeRun);
+  if (!weeks.length) return null;
+  return oldestUnpaidWeek(trx, technicianId, { coversFrom: weeks[0], coversTo: weeks[weeks.length - 1], onlyWeeks: new Set(weeks) });
 }
 
 /**
@@ -401,7 +423,7 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo, skipC
  * week there has no work waiting for approval and no automatic clock-out nobody reviewed. A line that passes never makes the
  * run wait, hold a check or block.
  */
-async function spanWaitOf(trx, run, technicianId, span, amountCents) {
+async function spanWaitOf(trx, run, technicianId, span, amountCents, earned = span) {
   if (await payrollRuns().laterFinalCheckExists(trx, run, [technicianId])) return { reason: 'later_check_final', week: null };
   // The check the gift needs would hold the bank of a technician who has one (GATE_PAYROLL_TIME_OFF), also a check for the
   // gift alone. Finalize asks the bank's own order guards of every such check, so the gift waits for the same answer.
@@ -419,9 +441,24 @@ async function spanWaitOf(trx, run, technicianId, span, amountCents) {
   const payoutWeek = (await timeOffBank.payoutsNotFinal(trx, banks, run.week_start)).get(technicianId);
   if (payoutWeek) return { reason: 'bank_payout_not_final', week: payoutWeek };
   const beforeRun = addStaffWorkDays(run.week_start, -1);
-  const earlier = { coversFrom: span.coversFrom, coversTo: beforeRun };
+  // The weeks asked are the window the base is worked out from (`earned`: the span itself, except for a season bonus, whose base
+  // is the FULL season whatever the hire date in the middle of it: readSeasonPay counts every check of the season). The
+  // hire-clipped `span` stays for the line's own overtime allocation (the line guards below).
+  const earlier = { coversFrom: earned.coversFrom, coversTo: beforeRun };
   if (earlier.coversFrom <= earlier.coversTo) {
     const unpaid = await oldestUnpaidWeek(trx, technicianId, earlier);
+    if (unpaid) return { reason: 'week_not_paid', week: unpaid };
+  }
+  // A holiday inside the span makes the base hold the premium of every shift that runs into it, and a shift that started the
+  // night before is paid by the check of ITS week, which can be a week before the span (payroll-holiday-work.js). That week
+  // must be paid too, or the base would be missing the premium.
+  // Asked whenever time off is paid, also when the span starts on the run's own Monday (nothing of the span is before the run
+  // then, but the shift of the Sunday night before it can still run into the span's first day): unpaidHolidayShiftWeek only
+  // looks at weeks before the run.
+  if (timeOffOn()) {
+    // shifts that started before the window's first pay week and run into a holiday inside it (the weeks of the window itself are
+    // asked above)
+    const unpaid = await unpaidHolidayShiftWeek(trx, technicianId, earned, beforeRun);
     if (unpaid) return { reason: 'week_not_paid', week: unpaid };
   }
   const ownWeek = { coversFrom: run.week_start, coversTo: addStaffWorkDays(run.week_start, 6) };
@@ -631,7 +668,9 @@ async function priceSeason(trx, cand, tech, run, { seasonScores, conflict }) {
   const span = seasonSpanOf(season.year, run.week_start, tech.hire_date);
   const lastWeek = scoreboard().seasonLastPayWeek(season.year);
   if (run.week_start <= lastWeek) return { wait: { reason: 'pay_week_too_early', week: lastWeek } };
-  const wait = await spanWaitOf(trx, run, tech.id, span, 1);
+  // the readiness (unpaid weeks and holiday shifts) looks at the FULL season (the base counts every check and premium earned in
+  // it, also before a hire date in the middle of it); the hire-clipped span stays the line's own
+  const wait = await spanWaitOf(trx, run, tech.id, span, 1, { coversFrom: season.start, coversTo: season.end });
   if (wait) return { wait };
   const seasonPay = await scoreboard().readSeasonPay(trx, tech.id, season);
   if (seasonPay.unsplitWeeks.length) return { wait: { reason: 'base_needs_review', week: seasonPay.unsplitWeeks[0] } };
@@ -1103,4 +1142,5 @@ module.exports = {
   stayBonusStatus,
   waitNotes,
   oldestUnpaidWeek,
+  unpaidHolidayShiftWeek,
 };

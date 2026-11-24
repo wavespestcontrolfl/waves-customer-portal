@@ -81,6 +81,19 @@ jest.setTimeout(120000);
     expect(await lifetimeRevenueFor(db, ids.stale)).toBe(109);
   });
 
+  test('netCollections dates the same payments and deposits net (the ad results money)', async () => {
+    const { netCollections } = require('../services/customer-lifetime-revenue');
+    const from = new Date(Date.now() - 3 * 86400000);
+    const rows = await netCollections(db, Object.values(ids), from);
+    const sum = (id) => Math.round(rows.filter((r) => r.customer_id === id).reduce((t, r) => t + Number(r.net), 0) * 100) / 100;
+    expect(sum(ids.paid)).toBe(521.84);
+    expect(sum(ids.stale)).toBe(109);
+    // payment_date is a DATE kept as written (today, as inserted); deposits use their ET day.
+    expect(rows.every((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.day))).toBe(true);
+    expect(rows.filter((r) => r.customer_id === ids.stale).map((r) => r.day)).toContain(today);
+    expect(await netCollections(db, Object.values(ids), new Date(Date.now() + 3 * 86400000))).toEqual([]);
+  });
+
   test('get_customer_detail reports payments net + deposits', async () => {
     const paid = await executeTool('get_customer_detail', { customer_id: ids.paid });
     expect(paid.error).toBeUndefined();

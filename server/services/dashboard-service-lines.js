@@ -3,11 +3,11 @@
  *
  * Four numbers per service line for the selected dashboard period:
  *   1. close rate   - RESOLVED-ONLY denominator, same rule as the client's
- *                     PipelineAnalytics + estimate-winloss.js: won = accepted,
+ *                     PipelineAnalytics + estimate-winloss.js: won = accepted or
+ *                     booked another way (booked_other_way is the latter's count),
  *                     lost = declined or expired, resolution date = accepted_at /
  *                     declined_at / expires_at (same fallback chain) inside the
- *                     window, archived rows out, dead / converted-elsewhere
- *                     dispositions leave the math.
+ *                     window, archived rows out, dead dispositions leave the math.
  *   2. aging7       - live backlog: sent/viewed estimates sent over 7 days ago.
  *                     NOT period-bound.
  *   3. ret90        - first-90-day retention of customers who converted in
@@ -30,7 +30,7 @@ const { PROSPECT_SCOPE_SQL } = require('./lead-statuses');
 const { inferEstimateServiceLines, serviceKeysFromText, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
 // Canonical win/loss helpers (estimate-winloss.js owns the fallback chains and
 // the excluded-disposition rule; this card must never carry its own copy).
-const { sentAnchorMs, resolutionDateMs, effectiveDisposition, excludedFromRates } = require('./estimate-winloss');
+const { sentAnchorMs, resolutionDateMs, effectiveDisposition, excludedFromRatesRow, isBookedOtherWayRow } = require('./estimate-winloss');
 const { parseETDateTime } = require('../utils/datetime-et');
 
 const DAY_MS = 86400000;
@@ -42,7 +42,7 @@ const CHUNK = 500;
 
 const BASE_CAVEATS = [
   'An estimate or customer with several service lines counts once in EACH of its lines, so rows add up to more than the totals.',
-  'Close rate = accepted / (accepted + declined or expired) resolved in the period; open offers and dead or converted-elsewhere rows are left out.',
+  'Close rate = (accepted + booked another way) / (accepted + booked another way + declined or expired) resolved in the period; open offers and dead rows are left out.',
   'Open >7d is the live backlog today (sent or viewed over 7 days ago), not limited to the period.',
   'Cost per new customer = allocated ad spend over every lead in the period (including spam, duplicates and cancels) / distinct customers won from real prospects; organic and referral leads carry no spend.',
 ];
@@ -50,12 +50,6 @@ const BASE_CAVEATS = [
 function labelFor(key) {
   if (key === UNKNOWN_KEY) return 'Other / unclear';
   return SERVICE_LINE_LABELS[key] || key;
-}
-
-// Resolved rows that are not real demand (dead) or that converted through
-// another path leave the close-rate math — the estimate-winloss rule.
-function leavesCloseMath(row) {
-  return excludedFromRates(effectiveDisposition(row));
 }
 
 // Distinct service-line keys of an estimate row; never empty.
@@ -75,40 +69,58 @@ function leadLineKeys(serviceInterest) {
 
 const pct1 = (num, den) => (den >= 1 ? Math.round((num / den) * 1000) / 10 : null);
 
+// First durable delivery evidence, not sent_at alone: an accept that won the
+// in-flight send claim has deliveryState.firstDeliveredAt and no sent_at, and
+// a resend must not reset the age (estimate-winloss rule).
+function tallyDelivery(row, keys, cell, win, agingCutoff) {
+  const sentMs = sentAnchorMs(row);
+  const open = OPEN_STATUSES.includes(row.status);
+  const sentInWindow = sentMs != null && sentMs >= win.fromMs && sentMs < win.toMs;
+  const aging = open && sentMs != null && sentMs < agingCutoff;
+  for (const k of keys) {
+    if (sentInWindow) {
+      cell(k).sent += 1;
+      if (open) cell(k).open += 1;
+    }
+    if (aging) cell(k).aging7 += 1;
+  }
+}
+
+// 'accepted' | 'booked' | 'lost' for a row resolved inside the window, else
+// null. Dead rows leave the math; an expired offer whose customer converted
+// another way (reclaimed) is a win.
+function closeOutcome(row, win) {
+  if (!RESOLVED_STATUSES.includes(row.status)) return null;
+  const disposition = effectiveDisposition(row);
+  if (excludedFromRatesRow(row, disposition)) return null;
+  const booked = isBookedOtherWayRow(row, disposition);
+  const at = resolutionDateMs(row);
+  if (at == null || at < win.fromMs || at >= win.toMs) return null;
+  if (row.status === 'accepted') return 'accepted';
+  return booked ? 'booked' : 'lost';
+}
+
 // ── 1 + 2: close rate, sent, open, aging ─────────────────────────────────
 // win = { fromMs, toMs } with toMs EXCLUSIVE (ET midnight after the last day).
 function buildCloseStats(rows, win, nowMs) {
   const byLine = new Map();
   const cell = (key) => {
-    if (!byLine.has(key)) byLine.set(key, { sent: 0, accepted: 0, lost: 0, open: 0, aging7: 0 });
+    if (!byLine.has(key)) byLine.set(key, { sent: 0, accepted: 0, booked: 0, lost: 0, open: 0, aging7: 0 });
     return byLine.get(key);
   };
   const agingCutoff = nowMs - 7 * DAY_MS;
   for (const row of rows) {
     if (row.archived_at) continue;
     const keys = estimateLineKeys(row);
-    // First durable delivery evidence, not sent_at alone: an accept that won
-    // the in-flight send claim has deliveryState.firstDeliveredAt and no
-    // sent_at, and a resend must not reset the age (estimate-winloss rule).
-    const sentMs = sentAnchorMs(row);
-    const sentInWindow = sentMs != null && sentMs >= win.fromMs && sentMs < win.toMs;
-    if (sentInWindow) {
-      for (const k of keys) {
-        cell(k).sent += 1;
-        if (OPEN_STATUSES.includes(row.status)) cell(k).open += 1;
-      }
-    }
-    if (OPEN_STATUSES.includes(row.status) && sentMs != null && sentMs < agingCutoff) {
-      for (const k of keys) cell(k).aging7 += 1;
-    }
-    if (RESOLVED_STATUSES.includes(row.status) && !leavesCloseMath(row)) {
-      const at = resolutionDateMs(row);
-      if (at != null && at >= win.fromMs && at < win.toMs) {
-        for (const k of keys) {
-          if (row.status === 'accepted') cell(k).accepted += 1;
-          else cell(k).lost += 1;
-        }
-      }
+    tallyDelivery(row, keys, cell, win, agingCutoff);
+    const outcome = closeOutcome(row, win);
+    if (!outcome) continue;
+    for (const k of keys) {
+      // `accepted` is the won count: accepted online plus booked another
+      // way; `booked` says how many of those were booked another way.
+      if (outcome === 'lost') cell(k).lost += 1;
+      else cell(k).accepted += 1;
+      if (outcome === 'booked') cell(k).booked += 1;
     }
   }
   return byLine;
@@ -197,7 +209,7 @@ function assembleLines({ close, retention, cac }) {
   for (const m of [close, retention, cac]) if (m) for (const k of m.keys()) keys.add(k);
   const lines = [];
   for (const key of keys) {
-    const c = close ? (close.get(key) || { sent: 0, accepted: 0, lost: 0, open: 0, aging7: 0 }) : null;
+    const c = close ? (close.get(key) || { sent: 0, accepted: 0, booked: 0, lost: 0, open: 0, aging7: 0 }) : null;
     const r = retention ? (retention.get(key) || { cohort: 0, retained: 0 }) : null;
     const a = cac ? (cac.get(key) || { leads: 0, converted: 0, spend: 0 }) : null;
     const spend = a ? Math.round(a.spend * 100) / 100 : 0;
@@ -206,6 +218,7 @@ function assembleLines({ close, retention, cac }) {
       label: labelFor(key),
       sent: c ? c.sent : null,
       accepted: c ? c.accepted : null,
+      booked_other_way: c ? c.booked : null,
       lost: c ? c.lost : null,
       resolved: c ? c.accepted + c.lost : null,
       open: c ? c.open : null,

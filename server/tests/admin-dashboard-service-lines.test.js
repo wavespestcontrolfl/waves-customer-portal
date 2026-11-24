@@ -94,15 +94,39 @@ describe('computeServiceLines', () => {
     expect(out.caveats.length).toBeGreaterThan(0);
   });
 
-  it('(a2) archived, dead and converted-elsewhere rows leave the math; null close rate with no resolved rows', async () => {
+  it('(a2) archived and dead rows leave the math; null close rate with no resolved rows', async () => {
+    // The converted_other_path row that used to sit here now counts as WON
+    // (2026-11-24), so it moved to (a2b).
     db.__results.estimates = [
       est({ status: 'accepted', accepted_at: '2026-10-02T15:00:00Z', archived_at: '2026-10-03T00:00:00Z' }),
-      est({ status: 'declined', declined_at: '2026-10-03T15:00:00Z', disposition: 'converted_other_path' }),
       est({ status: 'declined', declined_at: '2026-10-03T15:00:00Z', disposition: 'invalid_lead' }),
+      // A booked win is the code AND status expired: a declined row carrying it is excluded.
+      est({ status: 'declined', declined_at: '2026-10-03T15:00:00Z', disposition: 'converted_other_path' }),
     ];
     const out = await computeServiceLines(WIN, { now: NOW });
     expect(pestRow(out.lines).resolved).toBe(0);
     expect(pestRow(out.lines).close_rate).toBeNull();
+  });
+
+  it('(a2b) an expired row booked another way is a win and is counted apart', async () => {
+    db.__results.estimates = [
+      est({ status: 'accepted', accepted_at: '2026-10-02T15:00:00Z' }),
+      est({ status: 'expired', expires_at: '2026-10-03T15:00:00Z', disposition: 'converted_other_path' }),
+      est({ status: 'expired', expires_at: '2026-10-03T15:00:00Z', disposition: 'expired_viewed' }),
+      est({ status: 'expired', expires_at: '2026-10-03T15:00:00Z', disposition: 'invalid_lead' }),
+    ];
+    const pest = pestRow((await computeServiceLines(WIN, { now: NOW })).lines);
+    expect(pest).toMatchObject({ accepted: 2, booked_other_way: 1, lost: 1, resolved: 3, close_rate: 66.7 });
+  });
+
+  it('(a2c) an ARCHIVED booked-another-way row stays out of the close math, as on main', async () => {
+    db.__results.estimates = [
+      est({ status: 'viewed', archived_at: '2026-10-03T00:00:00Z', disposition: 'converted_other_path', disposition_at: '2026-10-03T12:00:00Z' }),
+      est({ status: 'expired', expires_at: '2026-10-03T15:00:00Z', disposition: 'converted_other_path' }),
+      est({ status: 'declined', declined_at: '2026-10-03T15:00:00Z' }),
+    ];
+    const pest = pestRow((await computeServiceLines(WIN, { now: NOW })).lines);
+    expect(pest).toMatchObject({ accepted: 1, booked_other_way: 1, lost: 1, resolved: 2, close_rate: 50, open: 0 });
   });
 
   it('(a3) open estimates sent over 7 days ago count as aging whatever the period', async () => {

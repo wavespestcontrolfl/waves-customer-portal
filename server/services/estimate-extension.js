@@ -24,7 +24,10 @@ const { leadIdForEstimate } = require('./estimate-lead-linkage');
 const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { estimateOptedOutOfEngagement } = require('./estimate-comms-eligibility');
-const { isStaffLossRow, STAFF_LOSS_CLEARED_UPDATES, STAFF_LOSS_ROW_SQL } = require('./estimate-disposition');
+const {
+  isStaffLossRow, STAFF_LOSS_CLEARED_UPDATES, STAFF_LOSS_ROW_SQL,
+  isSystemBookedRow, SYSTEM_BOOKED_CLEARED_UPDATES, SYSTEM_BOOKED_ROW_SQL,
+} = require('./estimate-disposition');
 // Router module doubling as the template helper — same import the
 // estimate-follow-up service uses.
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -305,6 +308,8 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     // after the snapshot was read is cleared as well, and one saved after this lock waits for it and
     // then finds the row live (its write is guarded on status = 'expired') and answers 409.
     if (revivedStatus && isStaffLossRow(anchor)) Object.assign(updates, STAFF_LOSS_CLEARED_UPDATES);
+    // …and a SYSTEM booked-another-way stamp from the daily reclaim: the offer is live again.
+    if (revivedStatus && isSystemBookedRow(anchor)) Object.assign(updates, SYSTEM_BOOKED_CLEARED_UPDATES);
     // The county-roll address block (and every other off-surface marker)
     // is judged on the LOCKED anchor and reasserted on the write: a flag
     // stamped after the public eligibility read must not revive the row
@@ -407,10 +412,10 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           // a revived sibling sheds the sweep's expiry classification.
           // A staff loss reason on a revived (expired) sibling goes the same way, with its competitor
           // fields and legacy label. Every SET expression reads the pre-update row.
-          disposition: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition END`),
-          disposition_source: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition_source END`),
-          disposition_at: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition_at END`),
-          disposition_note: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition_note END`),
+          disposition: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL} OR ${SYSTEM_BOOKED_ROW_SQL}) THEN NULL ELSE disposition END`),
+          disposition_source: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL} OR ${SYSTEM_BOOKED_ROW_SQL}) THEN NULL ELSE disposition_source END`),
+          disposition_at: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL} OR ${SYSTEM_BOOKED_ROW_SQL}) THEN NULL ELSE disposition_at END`),
+          disposition_note: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL} OR ${SYSTEM_BOOKED_ROW_SQL}) THEN NULL ELSE disposition_note END`),
           competitor_name: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE competitor_name END`),
           competitor_price: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE competitor_price END`),
           decline_reason: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE decline_reason END`),

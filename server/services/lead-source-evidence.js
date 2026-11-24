@@ -9,6 +9,7 @@
  * direct.
  */
 const { findAiAssistant, hostnameOf } = require('./ai-referral-sources');
+const { findPrintSource } = require('./print-lead-sources');
 const { SPOKE_SITES } = require('./content-astro/spoke-sites');
 const { findGbpLocationByUtmContent } = require('../config/locations');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
@@ -222,6 +223,14 @@ function classifyAttributionSignals(attribution) {
   const placement = classifyPlacement(p);
   if (placement) return { ...placement, p, referrerHost };
 
+  // A printed piece (business card, yard sign, postcard): its link names it in
+  // utm_source, or utm_medium=print. It sits after GBP/Maps and the paid click
+  // ids and tags above (a paid click on a print-tagged link is still paid), and
+  // before everything that would read the same visit as AI, social, search, a
+  // referrer or just the website it landed on.
+  const print = findPrintSource(p.source, p.medium);
+  if (print) return { bucket: 'print', reason: p.source === print.utmSource ? 'print_source' : 'print_medium', print, p, referrerHost };
+
   const ai = findAiAssistant(p.source, hostnameOf(p.referrer));
   if (ai) return { bucket: 'ai', reason: 'ai_referral', ai, p, referrerHost };
 
@@ -286,6 +295,9 @@ function sourceEvidenceFromAttribution(attribution) {
   }
   if (classified.bucket === 'meta_ads') {
     return evidence('meta_ads', 'Meta Ads', 'Paid social campaign', 'Observed Meta paid-social campaign tags.');
+  }
+  if (classified.bucket === 'print') {
+    return evidence('offline', classified.print.label, 'Printed piece', 'Observed the campaign tag printed on a Waves card, sign or mailer link.');
   }
   if (classified.bucket === 'ai') return aiEvidence(classified.ai);
   if (classified.bucket === 'organic_social') {

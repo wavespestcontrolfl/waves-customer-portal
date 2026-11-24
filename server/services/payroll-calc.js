@@ -367,6 +367,7 @@ function computePaycheck({
   minimumWeekMinutes,
   minimumWeekTargetMinutes,
   minimumWeekPayoutMinutes,
+  holidayWorkMinutes,
   ytdGrossWages = 0,
   w4,
   reemploymentRateBp = FLORIDA_NEW_EMPLOYER_RATE_BP,
@@ -417,6 +418,15 @@ function computePaycheck({
     rateCents, regularHundredths, overtimeHundredths, regularPay, ptoPay, holidayPay,
     ptoMinutes, holidayMinutes, minimumWeekTargetMinutes, minimumWeekPayoutMinutes,
   });
+  // Holiday work premium (owner-approved Technician Terms, Holidays: hours worked on the day a holiday is taken are
+  // paid at 1.5 times, on top of the holiday pay). The worked hours are already in regularPay or overtimePay at the
+  // straight rate, so only the extra half is added here. Its line is in the output only when the caller passed the
+  // minutes, which payroll-runs.js buildCheck does only for a check that has some.
+  // FLSA: this extra half is pay for work on a holiday at not less than 1.5 times the rate, so 29 USC 207(e)(6)
+  // excludes it from the regular rate: it never enters overtimePay, overtimePremium or the pay line overtime. It is
+  // also NOT credited against overtime owed (207(h)(2) would allow that): the owner's rule is "on top", never less.
+  const withHolidayWork = holidayWorkMinutes !== undefined;
+  const holidayWorkPremium = roundDiv(rateCents * nonNegativeCents(holidayWorkMinutes, 'Holiday work minutes'), 12000n);
   // Pay lines ride on the check only when the caller passes them.
   // (wholeCents reads an omitted figure as zero.)
   const withPayLines = payLines != null;
@@ -430,7 +440,7 @@ function computePaycheck({
   // Production share (production-share.js): taxable wages like a commission, earned in the check's own pay week.
   const productionShare = wholeCents(lineFigures.productionShareCents, 'Production share');
   const lineOvertimePremium = wholeCents(lineFigures.lineOvertimePremiumCents, 'Overtime on pay lines');
-  const gross = regularPay + overtimePay + ptoPay + holidayPay + minimumPay
+  const gross = regularPay + overtimePay + ptoPay + holidayPay + minimumPay + holidayWorkPremium
     + reviewBonus + commission + healthAllowance + techRewards + productionShare + lineOvertimePremium;
 
   const ytd = nonNegativeCents(ytdGrossWages, 'Year-to-date wages');
@@ -470,6 +480,7 @@ function computePaycheck({
       overtimePremiumCents: overtimePremium,
       ...(withTimeOff ? { ptoPayCents: ptoPay, holidayPayCents: holidayPay } : {}),
       ...(withMinimum ? { minimumWeekPayCents: minimumPay } : {}),
+      ...(withHolidayWork ? { holidayWorkPremiumCents: holidayWorkPremium } : {}),
       ...(withPayLines ? {
         reviewBonusCents: reviewBonus,
         commissionCents: commission,

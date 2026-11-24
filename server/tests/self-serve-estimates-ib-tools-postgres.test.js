@@ -114,6 +114,44 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect(service).toMatchObject({ sent: 7, won: 1, open: 6 });
   });
 
+  test('a reclaimed booked win (expired + converted_other_path) counts as WON in the funnel by-service and the sales-capture gauge, not as lost or missed', async () => {
+    const SVC = 'Fixture booked-win service';
+    const funnel = () => executeDashboardTool('get_estimate_funnel', { date_from: '2003-02-01', date_to: '2003-02-28' });
+    const salesCapture = async () => {
+      const router = require('../routes/admin-dashboard');
+      const layer = router.stack.find((l) => l.route && l.route.path === '/sales-capture');
+      const handlers = layer.route.stack.map((l) => l.handle);
+      let body;
+      await handlers[handlers.length - 1]({ query: {}, user: {} }, { json: (b) => { body = b; }, status() { return this; } }, (e) => { throw e; });
+      return body;
+    };
+    const before = await funnel();
+    const captureBefore = await salesCapture();
+    const customerId = await insertCustomer();
+    const now = new Date();
+    const base = (status, extra = {}) => ({
+      id: randomUUID(), customer_id: customerId, status, sent_at: AT, viewed_at: AT, service_interest: SVC,
+      monthly_total: 50, onetime_total: 0, estimate_data: {}, ...extra,
+    });
+    await trx('estimates').insert([
+      base('accepted', { accepted_at: now }),
+      base('expired', { expires_at: now, disposition: 'converted_other_path', disposition_source: 'system', disposition_at: now }),
+      base('expired', { expires_at: now, disposition: 'expired_viewed', disposition_source: 'system' }),
+      // An expired row with NO disposition at all is a loss, not a booked win (NULL-safe NOT).
+      base('expired', { expires_at: now }),
+    ]);
+    const after = await funnel();
+    const svc = (r) => r.by_service.find((s) => s.service === SVC) || { won: 0, lost: 0, sent: 0 };
+    expect(svc(after)).toMatchObject({ sent: 4, won: 2, lost: 2, wonValue: 50 });
+    expect(svc(before)).toMatchObject({ sent: 0 });
+    const captureAfter = await salesCapture();
+    expect(captureAfter.wonCount - captureBefore.wonCount).toBe(2);
+    expect(captureAfter.lostCount - captureBefore.lostCount).toBe(2);
+    // Dollars: the accepted row only (a booked win is a win in the count, not in the dollars).
+    expect(captureAfter.captured - captureBefore.captured).toBe(50 * 12);
+    expect(captureAfter.missed - captureBefore.missed).toBe(2 * 50 * 12);
+  });
+
   test('compare_periods counts the same sends; its accepted count still includes a self-serve acceptance', async () => {
     const compare = () => executeDashboardTool('compare_periods', {
       period_a: '2003-02', period_b: '2003-01', metrics: ['estimates_sent', 'estimates_accepted'],

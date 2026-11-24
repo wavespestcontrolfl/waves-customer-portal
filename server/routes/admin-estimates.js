@@ -1653,7 +1653,8 @@ router.get('/:id/group', async (req, res, next) => {
 });
 
 // POST /api/admin/estimates/:id/send — send via SMS and/or email (immediate or scheduled)
-router.get('/:id/send-preview', async (req, res, next) => {
+router.get('/:id/send-preview', sendPreviewHandler);
+async function sendPreviewHandler(req, res, next) {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -1670,9 +1671,10 @@ router.get('/:id/send-preview', async (req, res, next) => {
     if (satellitePalmCount != null) preview.satellitePalmCount = satellitePalmCount;
     res.set('Cache-Control', 'private, no-store').json(preview);
   } catch (err) { next(err); }
-});
+}
 
-router.post('/:id/send', async (req, res, next) => {
+router.post('/:id/send', sendEstimateHandler);
+async function sendEstimateHandler(req, res, next) {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -1965,7 +1967,27 @@ router.post('/:id/send', async (req, res, next) => {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     next(err);
   }
-});
+}
+
+// The estimate page's Send dialog and its preview without an HTTP request: the Intelligence
+// Bar's send_estimate tool (owner 2026-11-24) runs the SAME two handlers, so the bar and the
+// dialog read the same preview and send through the same claim, attempt record, review pins and
+// pricing-authority gate. Each runs its handler with the only request fields it reads
+// (params.id, body) and resolves the reply it would send: { status, json }. An error the
+// handler passes to next() rejects. The route's own wiring above is unchanged.
+function runEstimateHandler(handler, req) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      set() { return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    handler(req, res, reject).catch(reject);
+  });
+}
+const sendEstimateFromBar = ({ estimateId, body }) => runEstimateHandler(sendEstimateHandler, { params: { id: estimateId }, body });
+const estimateSendPreviewForBar = ({ estimateId }) => runEstimateHandler(sendPreviewHandler, { params: { id: estimateId }, body: {} });
 
 // Send-time "lead with one service" (GATE_ESTIMATE_LEAD_SERVICE_SEND).
 // Scope, all deliberate: NEW residential customers only (no membership
@@ -5455,6 +5477,9 @@ router.put('/:id/proposal', async (req, res, next) => {
       // the LOCKED row: a Pick reason saved after the pre-read must not ride into the live offer.
       ...(revivingBid && require('../services/estimate-disposition').isStaffLossRow(locked)
         ? require('../services/estimate-disposition').STAFF_LOSS_CLEARED_UPDATES : {}),
+      // A SYSTEM booked-another-way stamp (the daily reclaim's) goes too: the revived offer is live again.
+      ...(revivingBid && require('../services/estimate-disposition').isSystemBookedRow(locked)
+        ? require('../services/estimate-disposition').SYSTEM_BOOKED_CLEARED_UPDATES : {}),
       updated_at: db.fn.now(),
     });
     if (!count) return { updatedCount: 0 };
@@ -6813,3 +6838,6 @@ module.exports.clearGroupSiblingDeliveryClaims = clearGroupSiblingDeliveryClaims
 
 // Same handler as POST /:id/mark-accepted — see markEstimateAcceptedAsStaff above.
 module.exports.markEstimateAcceptedAsStaff = markEstimateAcceptedAsStaff;
+// Same handlers as POST /:id/send and GET /:id/send-preview — see sendEstimateFromBar above.
+module.exports.sendEstimateFromBar = sendEstimateFromBar;
+module.exports.estimateSendPreviewForBar = estimateSendPreviewForBar;

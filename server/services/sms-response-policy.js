@@ -19,6 +19,9 @@ const NON_ACTIONABLE_INBOUND_TYPES = Object.freeze([
   'sms_reaction',
   'help_request',
   'reschedule_reply',
+  // A new-home postcard text the portal answered itself with the home's link (routes/twilio-webhook.js, services/mail/
+  // home-text-to-book.js): the automated reply is not a human answer, so the text must not sit in the needs-reply queue.
+  'mail_home_text_to_book',
 ]);
 
 function phoneIdentitySql(column) {

@@ -23,6 +23,11 @@
  * and a time-off edit cannot interleave. Saving the yearly hours takes it too:
  * that setting turns a bank on or off, and a finalize must read one answer.
  *
+ * A holiday also decides the holiday work premium of any shift that runs into its date, and a shift that started the night
+ * before is paid by the check of ITS week. So a holiday is also refused (added, removed, or changed to or from paid time off) once a final check of the
+ * technician for another pay week holds a shift that overlaps the date (refuseWhenShiftPaid). A holiday with no such shift
+ * is not refused by it.
+ *
  * Recording time off here does not mark the technician out on the schedule
  * (technician_absences is a separate record).
  */
@@ -34,6 +39,7 @@ const { lockPayrollMutations } = require('./payroll-runs');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 const bank = require('./payroll-time-off-bank');
+const holidayWork = require('./payroll-holiday-work');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KINDS = ['pto', 'holiday'];
@@ -41,6 +47,7 @@ const MAX_NOTE = 500;
 const MAX_DAYS_AWAY = 400;
 const MAX_ALLOWANCE_HOURS = 400;
 const LOCKED_MESSAGE = "This week's pay run is final. Void it first to change its pay.";
+const HOLIDAY_SHIFT_PAID = 'A final pay run already paid a shift that runs into that day. Void that pay run first to change its pay.';
 const KIND_WORDS = { pto: 'Paid time off', holiday: 'Holiday' };
 
 function validate(schema, input) {
@@ -354,6 +361,19 @@ async function refuseWhenPaid(trx, workDate) {
   if (paid) throw new PayrollError(409, LOCKED_MESSAGE);
 }
 
+// A holiday on a date changes the holiday work premium of every shift that runs into it, and a shift paid in ANOTHER pay
+// week (it started the night before, in the week before) is paid by that week's check (payroll-holiday-work.js). So adding or
+// taking off a holiday is refused once a final check of the technician holds such a shift. A holiday with no such shift is
+// not refused by this. The caller has taken the finalize lock.
+async function refuseWhenShiftPaid(trx, technicianId, workDate) {
+  const weeks = await holidayWork.otherWeeksOfShiftsInto(trx, technicianId, [workDate]);
+  if (!weeks.length) return;
+  const paid = await trx('payroll_checks as c').join('payroll_runs as r', 'r.id', 'c.run_id')
+    .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
+    .whereIn('c.week_start', weeks).first('c.id');
+  if (paid) throw new PayrollError(409, HOLIDAY_SHIFT_PAID);
+}
+
 async function createTimeOff(input, actor, conn = db) {
   const v = validate(createSchema, input);
   const technicianId = requireUuid(v.technicianId, 'Technician');
@@ -368,6 +388,7 @@ async function createTimeOff(input, actor, conn = db) {
       if (!tech) throw new PayrollError(404, 'Technician not found.');
       if (tech.employment_type !== 'w2') throw new PayrollError(409, 'Paid time off is for W-2 employees.');
       await refuseWhenPaid(trx, workDate);
+      if (v.kind === 'holiday') await refuseWhenShiftPaid(trx, technicianId, workDate);
       const [inserted] = await trx('payroll_time_off').insert({
         technician_id: technicianId, work_date: workDate, kind: v.kind, minutes: minutesText(v.hours),
         note: v.note || null, illness: v.illness, created_by: actorId,
@@ -391,9 +412,11 @@ async function updateTimeOff(id, input, actor, conn = db) {
   return conn.transaction(async (trx) => {
     await lockPayrollMutations(trx);
     const row = await trx('payroll_time_off as o').where('o.id', id).forUpdate('o')
-      .first('o.technician_id', 'o.illness', trx.raw("to_char(o.work_date, 'YYYY-MM-DD') as work_date"));
+      .first('o.technician_id', 'o.illness', 'o.kind', trx.raw("to_char(o.work_date, 'YYYY-MM-DD') as work_date"));
     if (!row) throw new PayrollError(404, 'Time off entry not found.');
     await refuseWhenPaid(trx, row.work_date);
+    // Only a change that adds or takes off holiday status moves a premium: hours or a note on a holiday that stays one do not.
+    if ((row.kind === 'holiday') !== (v.kind === 'holiday')) await refuseWhenShiftPaid(trx, row.technician_id, row.work_date);
     // With no illness field sent, a paid time off day keeps its mark. A holiday has none.
     const illness = v.kind === 'pto' ? (v.illness ?? row.illness) : false;
     await trx('payroll_time_off').where({ id }).update({
@@ -417,6 +440,7 @@ async function deleteTimeOff(id, actor, conn = db) {
       .first('o.technician_id', 'o.kind', trx.raw("to_char(o.work_date, 'YYYY-MM-DD') as work_date"));
     if (!row) throw new PayrollError(404, 'Time off entry not found.');
     await refuseWhenPaid(trx, row.work_date);
+    if (row.kind === 'holiday') await refuseWhenShiftPaid(trx, row.technician_id, row.work_date);
     await trx('payroll_time_off').where({ id }).del();
     await audit(trx, actorId, 'payroll.time_off_removed', id, {
       technician_id: row.technician_id, entry_id: id, work_date: row.work_date, kind: row.kind,
