@@ -2,15 +2,18 @@
  * Links ad leads to their Google campaign. Owner 2026-11-23 ("lets fix these"): ad leads carried the Google click id
  * (gclid) but no campaign_id, so no report could say which campaign earned which customer.
  *
- * A step of the 6 AM Google Ads daily sync (ads/google-ads-daily-sync.js). For ad_service_attribution rows with a
- * well-formed gclid, a lead_date and no campaign_id (up to BATCH a run, least recently tried first; the try times are
- * kept in system_settings TRIED_KEY so every lead gets a turn):
- *   - when the lead day or the day before is still inside Google's click window (CLICK_VIEW_DAYS, checked per day):
- *     Google's click_view for those days names the campaign of that exact click -> basis 'gclid_click_view'. No
- *     answer yet = tried again on a later run, until no day is left in the window.
- *   - when neither day is in the window (Google no longer keeps the click): Google's own campaign metrics for the
- *     two days (kept long after click records; never the local copy, which can miss a sync day) -> when exactly one
- *     campaign had spend, that campaign -> basis 'only_campaign_with_spend'. Two or more, or none: left unlinked.
+ * A step of the 6 AM Google Ads daily sync (ads/google-ads-daily-sync.js). For ad_service_attribution rows of
+ * lead_source 'google_ads' (an organic lead can keep a stale gclid) with a well-formed gclid, a lead_date and no
+ * campaign_id (up to BATCH a run, least recently tried first; the try times are kept in system_settings TRIED_KEY so
+ * every lead gets a turn). The click can come days before the lead (lead_date is the form or call day), so the
+ * search covers the CLICK_DAYS days up to the lead day:
+ *   - the days of that span still inside Google's click window (CLICK_VIEW_DAYS, checked per day): Google's
+ *     click_view names the campaign of that exact click -> basis 'gclid_click_view'. No answer yet = tried again on a
+ *     later run, until no day of the span is left in the window.
+ *   - no day of the span in the window (Google no longer keeps the click): Google's own campaign metrics (kept long
+ *     after click records; never the local copy, which can miss a sync day) over the SPEND_DAYS days up to the lead
+ *     day, the longest a click can come before its lead -> exactly one campaign with spend in that whole span = that
+ *     campaign -> basis 'only_campaign_with_spend'. Two or more, or none: left unlinked.
  * A campaign Google names that is not in ad_campaigns is left unlinked (the campaigns step syncs it first).
  * Writes only campaign_id + campaign_link_basis, only where campaign_id is still NULL. Read-only toward Google.
  */
@@ -20,8 +23,12 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 // Google answers click_view for the last 90 days.
 const CLICK_VIEW_DAYS = 90;
+// Days up to the lead day searched for the exact click.
+const CLICK_DAYS = 7;
+// Days up to the lead day in which only one campaign may have spent, for an older click (Google's click attribution
+// window is at most 90 days).
+const SPEND_DAYS = 90;
 const BATCH = 50;
-const ELIGIBLE_MAX = 1000;
 const TRIED_KEY = 'ads.campaign_link.tried';
 
 function dayString(v) {
@@ -30,8 +37,8 @@ function dayString(v) {
   return String(v).slice(0, 10);
 }
 
-function dayBefore(day) {
-  return new Date(Date.parse(`${day}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+function daysBack(day, n) {
+  return new Date(Date.parse(`${day}T00:00:00Z`) - n * 86400000).toISOString().slice(0, 10);
 }
 
 // gclids are URL-safe base64; anything else never reaches the query.
@@ -48,10 +55,10 @@ async function clickViewCampaign(customer, gclid, days) {
   return null;
 }
 
-/** The one Google campaign id with spend on `days`, read from Google's campaign metrics, or null (none or several). */
-async function onlyCampaignWithSpend(customer, days) {
+/** The one Google campaign id with spend from `from` to `to`, read from Google's campaign metrics, or null. */
+async function onlyCampaignWithSpend(customer, from, to) {
   const rows = await customer.query(
-    `SELECT campaign.id, metrics.cost_micros FROM campaign WHERE segments.date BETWEEN '${days[days.length - 1]}' AND '${days[0]}' AND metrics.cost_micros > 0`,
+    `SELECT campaign.id, metrics.cost_micros FROM campaign WHERE segments.date BETWEEN '${from}' AND '${to}' AND metrics.cost_micros > 0`,
   );
   const ids = [...new Set(rows.map((r) => String(r?.campaign?.id)).filter((id) => id && id !== 'undefined'))];
   return ids.length === 1 ? ids[0] : null;
@@ -72,9 +79,11 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
   const customer = googleAds.getCustomer();
   const out = { checked: 0, linked: { gclid_click_view: 0, only_campaign_with_spend: 0 }, unlinked: 0 };
   if (!customer) return out;
+  // The whole waiting set (a handful of rows), so ordering by last try reaches every lead.
   const eligible = (await conn('ad_service_attribution')
+    .where('lead_source', 'google_ads')
     .whereNotNull('gclid').whereNull('campaign_id').whereNotNull('lead_date')
-    .orderBy('lead_date', 'desc').limit(ELIGIBLE_MAX)
+    .orderBy('lead_date', 'desc')
     .select('id', 'gclid', 'lead_date'))
     .filter((r) => GCLID_RE.test(String(r.gclid)));
   const triedRow = await conn('system_settings').where({ key: TRIED_KEY }).first();
@@ -89,16 +98,16 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
 
   for (const row of rows) {
     const day = dayString(row.lead_date);
-    const days = [day, dayBefore(day)];
-    const inWindow = days.filter((d) => d >= windowStart);
+    const span = Array.from({ length: CLICK_DAYS }, (_, i) => daysBack(day, i));
+    const inWindow = span.filter((d) => d >= windowStart);
     tried[row.id] = at;
     const googleId = inWindow.length
       ? await clickViewCampaign(customer, row.gclid, inWindow)
-      : await onlyCampaignWithSpend(customer, days);
+      : await onlyCampaignWithSpend(customer, daysBack(day, SPEND_DAYS - 1), day);
     const basis = inWindow.length ? 'gclid_click_view' : 'only_campaign_with_spend';
     const campaignId = googleId ? localId.get(googleId) || null : null;
     if (!campaignId) { out.unlinked += 1; continue; }
-    const n = await conn('ad_service_attribution').where({ id: row.id }).whereNull('campaign_id')
+    const n = await conn('ad_service_attribution').where({ id: row.id, lead_source: 'google_ads' }).whereNull('campaign_id')
       .update({ campaign_id: campaignId, campaign_link_basis: basis, updated_at: conn.fn.now() });
     if (n) out.linked[basis] += 1;
   }
@@ -112,4 +121,4 @@ async function linkCampaigns({ now = new Date(), conn = db, googleAds = require(
   return out;
 }
 
-module.exports = { linkCampaigns, CLICK_VIEW_DAYS, _internals: { dayBefore, GCLID_RE } };
+module.exports = { linkCampaigns, CLICK_VIEW_DAYS, _internals: { daysBack, GCLID_RE } };

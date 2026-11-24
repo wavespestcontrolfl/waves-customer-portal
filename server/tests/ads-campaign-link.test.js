@@ -23,13 +23,14 @@ function fakeConn({ leads, campaigns, tried = {} }) {
       whereNull() { return q; },
       orderBy() { return q; },
       limit() { return q; },
-      where(a) {
+      where(a, b) {
         if (typeof a === 'object') q._where = a;
+        if (a === 'lead_source') q._source = b;
         if (table === 'ad_campaigns' && a === 'platform') return { select: async () => campaigns };
         return q;
       },
       first: async () => (settings[q._where.key] != null ? { value: settings[q._where.key] } : undefined),
-      select: async () => leads,
+      select: async () => leads.filter((l) => !q._source || (l.lead_source || 'google_ads') === q._source),
       update: async (patch) => { updates.push({ id: q._where.id, ...patch }); return 1; },
       insert: (row) => ({ onConflict: () => ({ merge: async () => { settings[row.key] = row.value; } }) }),
     };
@@ -68,7 +69,7 @@ test('a recent click Google has no record of yet stays unlinked for the next run
   const out = await linkCampaigns({ now: NOW, conn, googleAds: g });
   expect(out.unlinked).toBe(1);
   expect(conn.updates).toEqual([]);
-  expect(g.query).toHaveBeenCalledTimes(2); // the lead day and the day before
+  expect(g.query).toHaveBeenCalledTimes(7); // the lead day and the 6 days before: a click can come days earlier
 });
 
 test('an older click takes the one campaign Google says had spend that day; two campaigns = unlinked', async () => {
@@ -77,7 +78,7 @@ test('an older click takes the one campaign Google says had spend that day; two 
   const g1 = googleAdsWith({}, ['22594274874']);
   expect((await linkCampaigns({ now: NOW, conn: one, googleAds: g1 })).linked.only_campaign_with_spend).toBe(1);
   expect(one.updates[0]).toMatchObject({ campaign_id: 'local-gbp', campaign_link_basis: 'only_campaign_with_spend' });
-  expect(g1.query.mock.calls[0][0]).toMatch(/FROM campaign WHERE segments.date BETWEEN '2026-06-30' AND '2026-07-01'/);
+  expect(g1.query.mock.calls[0][0]).toMatch(/FROM campaign WHERE segments.date BETWEEN '2026-04-03' AND '2026-07-01'/);
 
   const two = fakeConn({ leads: [lead], campaigns });
   const g2 = googleAdsWith({}, ['22594274874', '24535212391']);
@@ -128,3 +129,19 @@ test('a Google refusal fails the run with its reason', async () => {
   const g = { getCustomer: () => ({ query: jest.fn().mockRejectedValue(new Error('PERMISSION_DENIED')) }) };
   await expect(linkCampaigns({ now: NOW, conn, googleAds: g })).rejects.toThrow('PERMISSION_DENIED');
 });
+
+test('a click days before the form is found; an organic lead that kept a gclid is never linked', async () => {
+  const conn = fakeConn({
+    leads: [
+      { id: 'e1', gclid: GCLID_NEW, lead_date: '2026-11-13' },
+      { id: 'e2', gclid: GCLID_OLD, lead_date: '2026-11-13', lead_source: 'google_business' },
+    ],
+    campaigns,
+  });
+  const query = jest.fn(async (gaql) => (gaql.includes("'2026-11-10'") && gaql.includes(GCLID_NEW) ? [{ campaign: { id: 22594274874 } }] : []));
+  const out = await linkCampaigns({ now: NOW, conn, googleAds: { getCustomer: () => ({ query }) } });
+  expect(out).toMatchObject({ checked: 1, linked: { gclid_click_view: 1 } });
+  expect(conn.updates).toEqual([{ id: 'e1', campaign_id: 'local-gbp', campaign_link_basis: 'gclid_click_view', updated_at: 'now()' }]);
+  expect(query.mock.calls.some(([q]) => q.includes(GCLID_OLD))).toBe(false);
+});
+
