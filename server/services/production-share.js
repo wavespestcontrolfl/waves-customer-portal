@@ -596,6 +596,12 @@ function jobCredit(stop, job, billed) {
   if (!sold) return toReview('multi_visit_job', 'The number of visits this job was sold with cannot be established (only the two-treatment packages are known).');
   const invoiced = billed.get(job.root.id);
   if (invoiced && invoiced.unallocated.length) return toReview('multi_visit_job', invoiced.unallocated[0].reason);
+  // A package priced on an invoice that other visits (outside the job) share cannot be credited by the ledger: its price is one slice of a
+  // split that moves with those visits. Every visit of it is $0 + needs review, and the owner sets the credit by hand.
+  const inJob = new Set([job.root.id, ...job.planned]);
+  if (invoiceSharesOf(invoiced).some((one) => one.members.some((member) => !inJob.has(member.id)))) {
+    return toReview('multi_visit_job', 'The package is priced on an invoice shared with other visits: set its credit by hand.');
+  }
   const price = invoiced && invoiced.billedCents !== null ? invoiced.billedCents : cents(job.root.estimated_price);
   const nth = job.planned.indexOf(stop.id) + 1;
   if (!(price > 0)) return toReview('multi_visit_job', "The job's first visit has no price on file.");
@@ -634,10 +640,11 @@ function ownPriceCredit(stop, invoiced) {
   if (invoiced && invoiced.unallocated.length) return toReview('unpriced', invoiced.unallocated[0].reason);
   // What the visit's invoice charged, before tax, whether or not it is paid; a fee change later never moves it.
   if (invoiced && invoiced.billedCents !== null) {
-    if (invoiced.billedCents > 0) return credited('priced', invoiced.billedCents, "Pre-tax amount of the visit's invoice");
+    // `invoiceBased`: an invoice priced this credit (also at $0 after the split), so the credit ledger follows it (see ledgerOf).
+    if (invoiced.billedCents > 0) return { ...credited('priced', invoiced.billedCents, "Pre-tax amount of the visit's invoice"), invoiceBased: true };
     return isConsultationServiceType(stop.service_type)
-      ? credited('free_assessment', 0, 'A free assessment')
-      : credited('free_visit', 0, "The visit's invoice charges $0");
+      ? { ...credited('free_assessment', 0, 'A free assessment'), invoiceBased: true }
+      : { ...credited('free_visit', 0, "The visit's invoice charges $0"), invoiceBased: true };
   }
   // No invoice names the price: the price recorded on the visit itself. Never today's fee for the customer (the per-application
   // fee and the monthly dues are CURRENT settings: raising a fee must not move a past week's credit), so those are left out.
@@ -702,15 +709,13 @@ async function weekStops(conn, technicianIds, weekStart) {
 const invoiceSharesOf = (entry) => (entry && entry.billedCents !== null && entry.billedCents !== undefined ? entry.shares || [] : []);
 
 // What the credit ledger needs to recompute a credit once something was paid (applyLedger); null for a credit that no invoice or job
-// priced (own price, prepaid slice, callback value, free visit, a review row). `invoices`: the shared invoices that priced the visit
-// (a job's root counts through its own invoices: they set the job's price). `job`: the job part's price, sold count and slot.
-function ledgerOf(stop, credit, invoiced, job, billed) {
-  if (credit.needsReview || !(credit.creditCents > 0)) return null;
-  if (credit.job) {
-    const root = job.root.id === stop.id ? invoiceSharesOf(invoiced) : invoiceSharesOf(billed.get(job.root.id));
-    return { job: credit.job, rootInvoices: root, invoices: job.root.id === stop.id ? root : [], planned: job.planned };
-  }
-  if (credit.kind !== 'priced' || !(invoiced && invoiced.billedCents > 0)) return null;
+// priced (own price, prepaid slice, callback value, free visit type, a review row). `invoices`: the shared invoices that priced the visit,
+// whatever the visit's live share came to (a share that rounds to $0 still takes what is left of the invoice). `job`: the job part's
+// price, sold count and slot.
+function ledgerOf(credit, invoiced) {
+  if (credit.needsReview) return null;
+  if (credit.job) return { job: credit.job };
+  if (!credit.invoiceBased) return null;
   const invoices = invoiceSharesOf(invoiced);
   return invoices.length ? { invoices } : null;
 }
@@ -760,12 +765,13 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
     const invoiced = billed.get(stop.id) || {};
     const shown = { ...credit };
     delete shown.job;
+    delete shown.invoiceBased;
     rows.push({
       visitId: stop.id, workDate: stop.work_date, serviceType: stop.service_type, ...shown,
       refundCents: (invoiced.refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
       // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
       unallocatedRefunds: invoiced.unallocated || [],
-      ledger: ledgerOf(stop, credit, invoiced, job, billed),
+      ledger: ledgerOf(credit, invoiced),
     });
   }
   return rows;
@@ -836,7 +842,7 @@ function invoiceLedger(rows, paid) {
   const groups = new Map();
   for (const row of rows) {
     if (!row.ledger) continue;
-    for (const inv of row.ledger.invoices) {
+    for (const inv of row.ledger.invoices || []) {
       if (!groups.has(inv.invoiceId)) groups.set(inv.invoiceId, { inv, rows: [] });
       groups.get(inv.invoiceId).rows.push({ row, inv });
     }
@@ -851,7 +857,8 @@ function invoiceLedger(rows, paid) {
     const open = group.inv.members.filter((member) => !paidVisits.has(member.id));
     // The last open member takes what is left, whatever its weight; several share it by their live weights, to the cent.
     const parts = !(touched && remaining > 0 && open.length) ? null
-      : open.length === 1 ? new Map([[open[0].id, remaining]]) : allocateCents(remaining, open);
+      : open.length === 1 ? new Map([[open[0].id, remaining]])
+        : allocateCents(remaining, open) || allocateCents(remaining, open.map((member) => ({ id: member.id, weight: 1 })));
     for (const { row, inv } of group.rows) {
       const key = `${row.visitId}|${invoiceId}`;
       if (!touched) shares.set(key, { cents: Number(inv.shareCents) || 0, exhausted: false });
@@ -880,11 +887,8 @@ function applyLedger(rows, paid) {
   for (const [rootId, group] of jobs) {
     group.sort((a, b) => a.ledger.job.nth - b.ledger.job.nth);
     const { sold } = group[0].ledger.job;
-    // The root's own invoice share (a root done this week) sets the price when the invoice was adjusted; else the live price.
-    const root = group.find((row) => row.visitId === rootId);
-    const price = root && root.ledger.invoices.length
-      ? root.ledger.invoices.reduce((sum, inv) => sum + shares.get(`${root.visitId}|${inv.invoiceId}`).cents, 0)
-      : group[0].ledger.job.price;
+    // A job priced on an invoice shared with other visits never gets here (it is a review row, jobCredit); its price is live.
+    const { price } = group[0].ledger.job;
     const was = paid.byBasis.get(`job:${rootId}`);
     const touched = was && (was.cents > 0 || was.visits.size > 0);
     const slotsLeft = sold - (was ? was.visits.size : 0);
@@ -897,15 +901,7 @@ function applyLedger(rows, paid) {
       if (!touched) cents = jobPartCents(price, sold, nth);
       else if (parts && index < slotsLeft) cents = parts.get(index);
       else { out.set(row.visitId, exhausted(row, 'package')); return; }
-      const bases = [{ basisType: 'job', basisId: rootId, cents }];
-      // The first payment of a job also takes the root's invoice share out of the invoice (the job reserves it for its two visits).
-      if (!touched && index === 0) {
-        for (const inv of row.ledger.rootInvoices) {
-          const adjusted = shares.get(`${rootId}|${inv.invoiceId}`);
-          bases.push({ basisType: 'invoice', basisId: inv.invoiceId, cents: adjusted ? adjusted.cents : Number(inv.shareCents) || 0 });
-        }
-      }
-      out.set(row.visitId, { ...row, creditCents: cents, ledger: null, bases });
+      out.set(row.visitId, { ...row, creditCents: cents, ledger: null, bases: [{ basisType: 'job', basisId: rootId, cents }] });
     });
   }
   return base.map((row) => {
@@ -922,19 +918,27 @@ function applyLedger(rows, paid) {
     const mine = row.ledger.invoices.map((inv) => ({ inv, share: shares.get(`${row.visitId}|${inv.invoiceId}`) }));
     const cents = mine.reduce((sum, one) => sum + one.share.cents, 0);
     if (!(cents > 0) && mine.some((one) => one.share.exhausted)) return exhausted(row, 'invoice');
+    // What is left of the invoice can reach a visit whose live share rounded to $0: it is a priced credit then.
+    const classified = cents > 0 && row.kind !== 'priced'
+      ? { kind: 'priced', needsReview: false, reason: "What is left of the visit's invoice, before tax" } : {};
     return {
-      ...row, creditCents: cents, ledger: null,
+      ...row, ...classified, creditCents: cents, ledger: null,
       bases: mine.filter((one) => one.share.cents > 0).map((one) => ({ basisType: 'invoice', basisId: one.inv.invoiceId, cents: one.share.cents })),
     };
   }
 }
 
 const keysOf = (rows) => [...new Set(rows.flatMap((row) => (row.ledger ? [
-  ...row.ledger.invoices.map((inv) => `invoice:${inv.invoiceId}`),
-  ...(row.ledger.rootInvoices || []).map((inv) => `invoice:${inv.invoiceId}`),
+  ...(row.ledger.invoices || []).map((inv) => `invoice:${inv.invoiceId}`),
   ...(row.ledger.job ? [`job:${row.ledger.job.rootId}`] : []),
 ] : [])))];
-const visitIdsOf = (rows) => [...new Set(rows.flatMap((row) => [row.visitId, ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId] : [])]))];
+// The visits whose paid state the ledger needs: this week's, the roots of their jobs, and every member visit of the invoices they draw
+// from (so a member paid some other way is known whichever technicians' stops are read together).
+const visitIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
+  row.visitId,
+  ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId] : []),
+  ...(row.ledger && row.ledger.invoices ? row.ledger.invoices.flatMap((inv) => inv.members.map((member) => member.id)) : []),
+]))];
 
 /**
  * The credit of every route stop the technician completed in a pay week (Monday `weekStart` to Sunday), one row per
@@ -992,6 +996,23 @@ async function weekCreditsFor(conn, settingsById, weekStart) {
 }
 
 /**
+ * The credit rows of one technician for a pay week, from the same grouped read the pay run uses (weekCreditsFor over every W-2
+ * technician with settings in force, plus this one): the credits of a basis shared with another technician's stops are split once, so
+ * the preview shows what a pay run draws. Throws the read's own error for this technician.
+ */
+async function creditsOfWeek(conn, technicianId, weekStart, settings) {
+  const settingsById = new Map();
+  for (const id of await conn('technicians').where({ employment_type: 'w2' }).pluck('id')) {
+    const found = await settingsFor(conn, canonicalId(id), weekStart);
+    if (found) settingsById.set(canonicalId(id), found);
+  }
+  settingsById.set(technicianId, settings);
+  const one = (await weekCreditsFor(conn, settingsById, weekStart)).get(technicianId);
+  if (one.error) throw new PayrollError(500, `The production share could not be worked out: ${one.error}`);
+  return one.rows;
+}
+
+/**
  * Everything the preview shows for one technician and week: the credit rows, the shifts, the settings in force, the
  * share it would be, the stops to review and the refund total. A preview only: nothing is stored or paid.
  */
@@ -1003,7 +1024,9 @@ async function previewWeek(technicianId, weekStart, conn = db) {
   // From here on the id is the one the database holds (lowercase), whatever the caller typed.
   const id = canonicalId(technician.id);
   const settings = await settingsFor(conn, id, weekStart);
-  const stops = await weekCredits(conn, id, weekStart, { settings });
+  // The week as the pay run works it out: every W-2 technician with numbers in force is read together (an invoice or a package shared
+  // by two technicians is split once), and this technician's rows are returned.
+  const stops = await creditsOfWeek(conn, id, weekStart, settings);
   const days = shiftDays(stops);
   const result = shareForWeek({ credits: stops, shifts: days.length, settings });
   return {

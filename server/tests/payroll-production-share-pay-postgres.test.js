@@ -676,20 +676,20 @@ postgres('production share pay line', () => {
       expect(check.productionShare.needsReview.map((row) => row.visitId)).toEqual([orphan]);
     });
 
-    it('AUDIT CASE: a package root paid from an invoice whose link was removed since: the follow-up still credits what the package has left', async () => {
+    it('a package priced on its own unshared invoice stays on the package ledger; the invoice itself draws nothing', async () => {
       const world = await packageWorld();
       const invoiceId = await invoiceFor(world.customerId, '2000.00');
       const links = await shareInvoice(world.customerId, invoiceId, [world.root], 'k-pl');
       const week1 = (await draft(W1)).body.run;
       await finalize(week1.id);
-      expect((await snapshotStops(week1.id))[0].bases).toEqual([{ basisType: 'job', basisId: world.root, cents: 100000 }, { basisType: 'invoice', basisId: invoiceId, cents: 200000 }]);
+      expect((await snapshotStops(week1.id))[0].bases).toEqual([{ basisType: 'job', basisId: world.root, cents: 100000 }]);
       await links.unlink(world.root);
       await followUpOf(world, world.weeks[1]);
       // the root is priced $2,000.00 on its own now: $1,000.00 of the package is left
       expect(byName((await draft(world.weeks[1])).body.run, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
     });
 
-    it('the first payment of a package takes its invoice share out of the invoice: another visit of that invoice takes what remains', async () => {
+    it('AUDIT CASE (nested): a package priced on an invoice SHARED with a visit outside it is $0 + needs review for every visit of the package', async () => {
       const id = await tech('Sample Alpha');
       await settings(id, { bar_cents: 10000 });
       const W2 = addDays(W1, 7);
@@ -698,37 +698,77 @@ postgres('production share pay line', () => {
       const customerId = await customer();
       const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
       const root = await stop(id, W1, '1000.00', customerId, pkg);
-      const other = await stop(id, W2, '1000.00', customerId);
+      const other = await stop(id, W1, '1000.00', customerId);
+      const followUp = await stop(id, W2, '0.00', customerId, { ...pkg, followup_included: true, followup_source_service_id: root });
       const invoiceId = await invoiceFor(customerId, '2000.00');
-      await shareInvoice(customerId, invoiceId, [root, other], 'k-pj');
-      const week1 = (await draft(W1)).body.run;
-      // the root is priced $1,000.00 from the shared invoice, and the package splits it in two: $500.00 now
-      expect(byName(week1, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 50000 });
-      await finalize(week1.id);
-      expect((await snapshotStops(week1.id))[0].bases).toEqual([{ basisType: 'job', basisId: root, cents: 50000 }, { basisType: 'invoice', basisId: invoiceId, cents: 100000 }]);
-      // the invoice split moves, and the other visit still takes the $1,000.00 left of the invoice
-      await reprice({ v1: root, v2: other }, '3000.00', '1000.00');
-      expect(byName((await draft(W2)).body.run, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
+      await shareInvoice(customerId, invoiceId, [root, other], 'k-nest');
+      const run1 = (await draft(W1)).body.run;
+      const week1 = byName(run1, 'Sample Alpha');
+      // the root is review, $0: only the other visit of the invoice credits (its live $1,000.00 share)
+      expect(week1.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 100000 });
+      expect(week1.productionShare.needsReview).toEqual([{ visitId: root, workDate: W1 }]);
+      await finalize(run1.id);
+      const check = byName((await draft(W2)).body.run, 'Sample Alpha');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(snapshot.stops.find((row) => row.visitId === followUp)).toMatchObject({ kind: 'multi_visit_job', creditCents: 0, needsReview: true });
+      const locked = await productionSharePay.readInputsUnderLock(trx, W2);
+      expect(locked.get(id).stops.find((row) => row.visitId === followUp).reason).toContain('set its credit by hand');
     });
 
-    it('AUDIT CASE: a package root priced from an invoice another visit was paid from takes half of what the invoice has LEFT', async () => {
+    it('AUDIT :708: a live share that rounds to $0 still takes what is left of the invoice', async () => {
       const id = await tech('Sample Alpha');
-      await settings(id, { bar_cents: 10000 });
+      await settings(id, { bar_cents: 100 });
       const W2 = addDays(W1, 7);
       await worked(id, W1, 40);
       await worked(id, W2, 40);
       const customerId = await customer();
-      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
-      const other = await stop(id, W1, '1000.00', customerId);
-      const root = await stop(id, W2, '1000.00', customerId, pkg);
-      const invoiceId = await invoiceFor(customerId, '2000.00');
-      await shareInvoice(customerId, invoiceId, [other, root], 'k-pk');
-      await finalize((await draft(W1)).body.run.id);
-      // the root's price moves on the invoice ($1,500.00 now); $1,000.00 of the invoice was paid to the other visit
-      await reprice({ v1: other, v2: root }, '500.00', '1500.00');
+      const v1 = await stop(id, W1, '100000.00', customerId);
+      const v2 = await stop(id, W2, '0.01', customerId);
+      const invoiceId = await invoiceFor(customerId, '1000.00');
+      await shareInvoice(customerId, invoiceId, [v1, v2], 'k-round');
+      const week1 = (await draft(W1)).body.run;
+      expect(byName(week1, 'Sample Alpha').productionShareCents).toBeGreaterThan(0);
+      await finalize(week1.id);
+      const paid = (await snapshotStops(week1.id))[0].bases[0].cents;
+      // the invoice is raised to $2,000.00 after week 1: V2's own live share is still $0, and it takes everything that is left
+      await trx('invoices').where({ id: invoiceId }).update({ subtotal: '2000.00', total: '2000.00' });
       const check = byName((await draft(W2)).body.run, 'Sample Alpha');
-      // half of the $1,000.00 left, not the whole $1,000.00 and not half of the live $1,500.00
-      expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 50000 });
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 200000 - paid });
+      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(snapshot.stops.find((row) => row.visitId === v2)).toMatchObject({ kind: 'priced', creditCents: 200000 - paid });
+    });
+
+    it('AUDIT :86: the draft (grouped read in one snapshot), the read under the lock and the preview compute the same rows for two technicians sharing an invoice', async () => {
+      const a = await tech('Sample Alpha');
+      const b = await tech('Sample Bravo');
+      await settings(a, { bar_cents: 10000 });
+      await settings(b, { bar_cents: 10000 });
+      const W2 = addDays(W1, 7);
+      for (const who of [a, b]) { await worked(who, W1, 40); await worked(who, W2, 40); }
+      const customerId = await customer();
+      const v1 = await stop(a, W1, '1000.00', customerId);
+      const v2 = await stop(b, W2, '1000.00', customerId);
+      const v3 = await stop(a, W2, '1000.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '3000.00');
+      await shareInvoice(customerId, invoiceId, [v1, v2, v3], 'k-two');
+      const week1 = (await draft(W1)).body.run;
+      await finalize(week1.id);
+      await reprice({ v1, v2 }, '1000.00', '3000.00');
+      const run = (await draft(W2)).body.run;
+      // the same data read the two ways: one revision, so finalize never refuses a draft of unchanged data
+      const early = await productionSharePay.readInputs(trx, W2);
+      const locked = await productionSharePay.readInputsUnderLock(trx, W2);
+      expect(productionSharePay.revisionOf(early)).toBe(productionSharePay.revisionOf(locked));
+      expect((await finalize(run.id)).body.run.status).toBe('finalized');
+      // the invoice's $3,000.00 is credited once over the three visits
+      const total = [a, b].reduce((sum, who) => sum + locked.get(who).stops.reduce((s2, row) => s2 + row.creditCents, 0), 0);
+      expect(total).toBe(200000);
+      // and the preview shows each technician the rows the pay run drew
+      for (const who of [a, b]) {
+        const preview = await productionShare.previewWeek(who, W2, trx);
+        expect(preview.stops.map((row) => [row.visitId, row.creditCents])).toEqual(locked.get(who).stops.map((row) => [row.visitId, row.creditCents]));
+      }
     });
   });
 
@@ -750,10 +790,22 @@ postgres('production share pay line', () => {
     await settings(a);
     await settings(b);
     await threeShifts(a);
-    const real = productionShare.weekCredits;
-    const spy = jest.spyOn(productionShare, 'weekCredits').mockImplementation(async (conn, id, week, options) => {
-      if (id === b) await conn.raw('SELECT 1/0');
-      return real(conn, id, week, options);
+    const real = productionShare.weekCreditsFor;
+    // conn.transaction calls inside weekCreditsFor: 1 = the shared facts, then one per technician in id order; the failing one is b's
+    const failing = [a, b].sort().indexOf(b) + 2;
+    const spy = jest.spyOn(productionShare, 'weekCreditsFor').mockImplementation((conn, settingsById, week) => {
+      let calls = 0;
+      const wrapped = new Proxy(conn, {
+        get(target, key) {
+          if (key !== 'transaction') return Reflect.get(target, key);
+          return (handler) => {
+            calls += 1;
+            const at = calls;
+            return target.transaction(async (sp) => { if (at === failing) await sp.raw('SELECT 1/0'); return handler(sp); });
+          };
+        },
+      });
+      return real(wrapped, settingsById, week);
     });
     let inputs;
     try { inputs = await productionSharePay.readInputs(trx, W1); } finally { spy.mockRestore(); }

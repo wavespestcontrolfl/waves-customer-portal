@@ -100,9 +100,23 @@ postgres('production share credit snapshot (two real connections)', () => {
     });
   };
 
-  it('a stop moved between two technicians mid-run is credited to exactly one of them (one REPEATABLE READ snapshot)', async () => {
+  it('a stop moved between two technicians mid-run is credited to exactly one of them (one REPEATABLE READ snapshot, grouped read)', async () => {
     const world = await setup();
-    moveAfterFirstRead(world);
+    const real = productionShare.weekCreditsFor;
+    jest.spyOn(productionShare, 'weekCreditsFor').mockImplementation((conn, settingsById, week) => {
+      // the move is committed (another connection) right after the list statement, before each technician's credits are worked out
+      let moved = false;
+      const wrapped = new Proxy(conn, {
+        get(target, key) {
+          if (key !== 'transaction') return Reflect.get(target, key);
+          return async (handler) => {
+            if (!moved) { moved = true; await database('scheduled_services').where({ id: world.moving }).update({ technician_id: world.first }); }
+            return target.transaction(handler);
+          };
+        },
+      });
+      return real(wrapped, settingsById, week);
+    });
     const mine = new Set([world.first, world.second]);
     const inputs = await productionSharePay.readInputs(database, W);
     const credited = [...inputs.entries()].filter(([id]) => mine.has(id)).flatMap(([, input]) => input.stops.map((row) => row.visitId));
@@ -111,6 +125,7 @@ postgres('production share credit snapshot (two real connections)', () => {
     expect(inputs.get(world.second).stops.map((row) => row.visitId)).toContain(world.moving);
     expect(inputs.get(world.first).stops).toHaveLength(1);
     // the move did commit, and a read made now sees it
+    jest.restoreAllMocks();
     expect((await productionShare.weekCredits(database, world.first, W)).map((row) => row.visitId)).toContain(world.moving);
     expect(idsIn(inputs)).toContain(world.moving);
   });

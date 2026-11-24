@@ -62,8 +62,10 @@ function snapshotOf({ weekStart, settings, result, stops }) {
 
 /**
  * The credit inputs of EVERY W-2 technician with settings in force for the pay week, read in ONE REPEATABLE READ, read-only
- * transaction: Map of technician id -> { settings, stops } (stops = weekCredits rows), or { error } for one that could not be
- * read. One snapshot for the whole run, so a visit reassigned from one technician to another while the run reads is credited
+ * transaction: Map of technician id -> { settings, stops } (stops = the credit rows), or { error } for one that could not be
+ * read. The credits of all of them are worked out TOGETHER (production-share.js weekCreditsFor: one stop list, one read of the invoices
+ * and jobs, one ledger), by the same function the read under the payroll lock uses (collectInputs), so a draft and the finalize that
+ * checks it always compute the same rows from the same data. One snapshot for the whole run, so a visit reassigned from one technician to another while the run reads is credited
  * to exactly one of them, never to both or neither, and a price edited between two technicians' reads cannot split them.
  * Empty with the gate off (nothing is read).
  *
@@ -73,24 +75,8 @@ function snapshotOf({ weekStart, settings, result, stops }) {
  * run on it as they are; the pay run does not do that.
  */
 async function readInputs(conn, weekStart) {
-  const inputs = new Map();
-  if (!shareOn()) return inputs;
-  await conn.transaction(async (trx) => {
-    const ids = await trx('technicians').where({ employment_type: 'w2' }).orderBy('id').pluck('id');
-    for (const id of ids) {
-      // Each technician in a savepoint of its own: a failed read (a statement error aborts a Postgres transaction) is rolled
-      // back to the savepoint and caught, so the reads of the other technicians go on in the same snapshot.
-      try {
-        await trx.transaction(async (sp) => {
-          const settings = await productionShare.settingsFor(sp, id, weekStart);
-          if (settings) inputs.set(id, { settings, stops: await productionShare.weekCredits(sp, id, weekStart, { settings }) });
-        });
-      } catch (err) {
-        inputs.set(id, { error: `The production share could not be worked out: ${(err && err.message) || 'unknown problem'}` });
-      }
-    }
-  }, { isolationLevel: 'repeatable read', readOnly: true });
-  return inputs;
+  if (!shareOn()) return new Map();
+  return conn.transaction((trx) => collectInputs(trx, weekStart), { isolationLevel: 'repeatable read', readOnly: true });
 }
 
 /**
@@ -101,9 +87,8 @@ async function readInputs(conn, weekStart) {
  * statement, never to both and never to neither; the reads after it are keyed by visit. Each technician's reads are in a
  * savepoint, so a failed read marks that technician and does not abort the pay run's transaction.
  */
-async function readInputsUnderLock(trx, weekStart) {
+async function collectInputs(trx, weekStart) {
   const inputs = new Map();
-  if (!shareOn()) return inputs;
   const ids = await trx('technicians').where({ employment_type: 'w2' }).orderBy('id').pluck('id');
   const settingsById = new Map();
   for (const id of ids) {
@@ -124,6 +109,8 @@ async function readInputsUnderLock(trx, weekStart) {
   }
   return inputs;
 }
+
+const readInputsUnderLock = (trx, weekStart) => (shareOn() ? collectInputs(trx, weekStart) : Promise.resolve(new Map()));
 
 /**
  * A revision of what readInputs returned: the same string for the same settings and the same credit rows (visit, date, kind,

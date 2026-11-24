@@ -197,10 +197,9 @@ describe('buildCheck with a share', () => {
 
 describe('one snapshot for the whole run', () => {
   const productionShare = require('../services/production-share');
-  const reads = [];
-  // A stand-in connection: transaction() hands its handler one fake trx and records the options.
+  const calls = [];
+  // A stand-in connection: transaction() hands its handler one fake trx (which also hands out savepoints) and records the options.
   const fakeConn = () => {
-    // trx.transaction() is the savepoint of one technician's reads: it hands its handler a fake savepoint that knows its parent.
     const trx = () => ({ where: () => ({ orderBy: () => ({ pluck: async () => ['tech-a', 'tech-b', 'tech-c'] }) }) });
     trx.transaction = jest.fn(async (handler) => handler(Object.assign(() => {}, { parent: trx })));
     const conn = { transaction: jest.fn(async (handler, options) => { conn.options = options; return handler(trx); }), trx };
@@ -208,29 +207,25 @@ describe('one snapshot for the whole run', () => {
   };
   beforeEach(() => {
     process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'true';
-    reads.length = 0;
-    jest.spyOn(productionShare, 'settingsFor').mockImplementation(async (c, id) => {
-      reads.push(['settings', c, id]);
-      return id === 'tech-c' ? null : SETTINGS;
-    });
-    jest.spyOn(productionShare, 'weekCredits').mockImplementation(async (c, id) => {
-      reads.push(['credits', c, id]);
-      return id === 'tech-a' ? WEEK_STOPS : stops([['v9', '2026-09-14', 1000]]);
+    calls.length = 0;
+    jest.spyOn(productionShare, 'settingsFor').mockImplementation(async (c, id) => (id === 'tech-c' ? null : SETTINGS));
+    jest.spyOn(productionShare, 'weekCreditsFor').mockImplementation(async (c, settingsById, week) => {
+      calls.push([c, [...settingsById.keys()], week]);
+      return new Map([...settingsById.keys()].map((id) => [id, { rows: id === 'tech-a' ? WEEK_STOPS : stops([['v9', '2026-09-14', 1000]]) }]));
     });
   });
   afterEach(() => { jest.restoreAllMocks(); delete process.env.GATE_PAYROLL_PRODUCTION_SHARE; });
 
-  test('every technician is read on the same connection, inside one REPEATABLE READ read-only transaction', async () => {
+  test('every technician is worked out TOGETHER (one grouped call) on the one REPEATABLE READ read-only transaction', async () => {
     const conn = fakeConn();
     const inputs = await share.readInputs(conn, WEEK);
     expect(conn.transaction).toHaveBeenCalledTimes(1);
     expect(conn.options).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
-    // 3 settings reads and 2 credit reads (tech-c has no settings), each technician in a savepoint of the one trx, none on the pool
-    expect(reads.map(([, c]) => c)).toHaveLength(5);
-    expect(new Set(reads.map(([, c]) => c.parent))).toEqual(new Set([conn.trx]));
-    expect(conn.trx.transaction).toHaveBeenCalledTimes(3);
-    expect(conn.transaction).toHaveBeenCalledTimes(1);
+    // one call for everyone with numbers in force, on the transaction itself (never on the pool), the same function the read under the lock uses
+    expect(calls).toEqual([[conn.trx, ['tech-a', 'tech-b'], WEEK]]);
     expect([...inputs.keys()].sort()).toEqual(['tech-a', 'tech-b']);
+    expect(inputs.get('tech-a').settings).toBe(SETTINGS);
+    expect(share.revisionOf(inputs)).toBe(share.revisionOf(await share.readInputsUnderLock(conn.trx, WEEK)));
   });
 
   test('the shares are worked out from those inputs alone: a visit credited to one technician is not credited to another', () => {
@@ -244,7 +239,7 @@ describe('one snapshot for the whole run', () => {
   });
 
   test('a technician whose read fails is an error row for that technician only', async () => {
-    productionShare.weekCredits.mockImplementation(async (c, id) => { if (id === 'tech-b') throw new Error('boom'); return WEEK_STOPS; });
+    productionShare.weekCreditsFor.mockImplementation(async () => new Map([['tech-a', { rows: WEEK_STOPS }], ['tech-b', { error: 'boom' }]]));
     const inputs = await share.readInputs(fakeConn(), WEEK);
     const shares = share.sharesFor(inputs, ['tech-a', 'tech-b'], WEEK);
     expect(shares.get('tech-a').shareCents).toBe(7800);
@@ -300,9 +295,9 @@ describe('the credit ledger (applyLedger)', () => {
   const plain = (visitId, invoices) => ({
     visitId, workDate: '2026-09-21', kind: 'priced', creditCents: invoices.reduce((sum, inv) => sum + inv.shareCents, 0), needsReview: false, ledger: { invoices },
   });
-  const job = (visitId, nth, { price = 200000, sold = 2, rootId = 'root', root = [] } = {}) => ({
+  const job = (visitId, nth, { price = 200000, sold = 2, rootId = 'root' } = {}) => ({
     visitId, workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: productionShare.jobPartCents(price, sold, nth), needsReview: false,
-    ledger: { job: { rootId, price, sold, nth }, rootInvoices: root, invoices: visitId === rootId ? root : [] },
+    ledger: { job: { rootId, price, sold, nth } },
   });
   // what finalized pay runs paid: byBasis = { 'invoice:inv-1': [cents, ['visit-1']] }, visits = { visitId: week }
   const paidOf = (byBasis = {}, visits = {}) => ({
@@ -380,23 +375,15 @@ describe('the credit ledger (applyLedger)', () => {
     expect(rows.map((row) => [row.kind, row.creditCents])).toEqual([['multi_visit_job', 100000], ['basis_exhausted', 0]]);
   });
 
-  test('the first payment of a package also draws the root\'s invoice share out of that invoice; later visits draw none', () => {
-    const root = [invoice('inv-9', 200000, [['root', 100000], ['visit-9', 100000]], 100000)];
-    const [first, second] = productionShare.applyLedger([job('root', 1, { price: 100000, root }), job('followup', 2, { price: 100000, root })], paidOf());
-    expect(first.bases).toEqual([{ basisType: 'job', basisId: 'root', cents: 50000 }, { basisType: 'invoice', basisId: 'inv-9', cents: 100000 }]);
-    expect(second.bases).toEqual([{ basisType: 'job', basisId: 'root', cents: 50000 }]);
-    // after it was paid, the other visit of the invoice sees $1,000 gone
-    const later = one([plain('visit-9', [invoice('inv-9', 200000, [['root', 100000], ['visit-9', 100000]], 150000)])], paidOf({ 'invoice:inv-9': [100000, ['root']] }));
-    expect(later.creditCents).toBe(100000);
-  });
-
-  test('a package root priced from an invoice others were paid from takes the REMAINING of the invoice as its price', () => {
-    const root = [invoice('inv-9', 200000, [['root', 100000], ['visit-9', 100000]], 150000)];
-    const paid = paidOf({ 'invoice:inv-9': [100000, ['visit-9']] });
-    // $1,000.00 of the $2,000.00 invoice remains for the root: half of it now, not half of the live $1,500.00 share
-    const out = one([job('root', 1, { price: 150000, root })], paid);
-    expect(out.creditCents).toBe(50000);
-    expect(out.bases).toEqual([{ basisType: 'job', basisId: 'root', cents: 50000 }, { basisType: 'invoice', basisId: 'inv-9', cents: 100000 }]);
+  test('AUDIT :708: a live share that rounds to $0 still takes what is left of the invoice (classified priced after)', () => {
+    const paid = paidOf({ 'invoice:inv-1': [99999, ['visit-1']] });
+    // visit-2 weighs one cent against $1,000.00: its live share is $0 ('free_visit'), but the invoice was raised to $2,000.00 since
+    const members = [['visit-1', 10000000], ['visit-2', 1]];
+    const row = { visitId: 'visit-2', workDate: '2026-09-21', kind: 'free_visit', creditCents: 0, needsReview: false, ledger: { invoices: [invoice('inv-1', 200000, members, 0)] } };
+    const out = one([row], paid);
+    expect(out).toMatchObject({ kind: 'priced', creditCents: 100001, needsReview: false, bases: [{ basisType: 'invoice', basisId: 'inv-1', cents: 100001 }] });
+    // nothing paid from the invoice: the $0 share stays $0 and stays what it was
+    expect(one([row])).toMatchObject({ kind: 'free_visit', creditCents: 0, bases: [] });
   });
 
   test('a row that is already $0 and needs review, and a credit no invoice or job priced, are left alone', () => {
