@@ -382,7 +382,9 @@ async function getHourlyRainOutlook(lat, lng, { budgetMs = TOTAL_BUDGET_MS, nwsB
 // reader cached is not used, and no backup read is made. An NWS answer is cached for the other readers.
 // `fetchTimeoutMs` (the ads rain-mode record, 2026-11-24): a cron with no one waiting lets each NWS fetch run longer than
 // the 2.5 s default; its first prod ticks lost 4 of 6 areas to that timeout at the busy top of the hour.
-async function getNwsHourlyRain(lat, lng, { fetchTimeoutMs = FETCH_TIMEOUT_MS } = {}) {
+async function getNwsHourlyRain(lat, lng, { fetchTimeoutMs: askedMs } = {}) {
+  // Only ever longer than the default: a shorter wait would cut a read other callers share.
+  const fetchTimeoutMs = Math.max(FETCH_TIMEOUT_MS, Number(askedMs) || 0);
   if (lat == null || lng == null || lat === '' || lng === '') return null;
   const latNum = Number(lat);
   const lngNum = Number(lng);
