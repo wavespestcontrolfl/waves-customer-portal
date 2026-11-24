@@ -40,7 +40,10 @@ function printedPriceOf(row) {
     try { snap = JSON.parse(snap); } catch { snap = null; }
   }
   if (!snap || ![snap.annual, snap.monthly, snap.setupFee].every((n) => Number.isFinite(n))) return null;
-  return { monthly: snap.monthly, annual: snap.annual, setupFee: snap.setupFee, pricedAt: snap.pricedAt || null };
+  // pricedAt leaves only as an ISO time string; any other stored value (an object, a bad date) reads as null.
+  const pricedTime = typeof snap.pricedAt === 'string' ? new Date(snap.pricedAt) : null;
+  const pricedAt = pricedTime && Number.isFinite(pricedTime.getTime()) ? pricedTime.toISOString() : null;
+  return { monthly: snap.monthly, annual: snap.annual, setupFee: snap.setupFee, pricedAt };
 }
 
 /** The Eastern calendar day the hold ends, "YYYY-MM-DD": PRICE_HOLD_DAYS after the day the label was marked. */

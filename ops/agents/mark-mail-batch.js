@@ -140,8 +140,17 @@ async function main() {
       // A new 0600 file renamed into place: an existing file keeps its old permissions when it is written over, and this one
       // holds buyer names and page tokens.
       const tmp = `${labelsPath}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, `${JSON.stringify(labels, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-      fs.renameSync(tmp, labelsPath);
+      let created = false;
+      try {
+        const fd = fs.openSync(tmp, 'wx', 0o600);
+        created = true;
+        try { fs.writeFileSync(fd, `${JSON.stringify(labels, null, 2)}\n`); } finally { fs.closeSync(fd); }
+        fs.renameSync(tmp, labelsPath);
+        created = false; // renamed into place: nothing left to clean up
+      } finally {
+        // A failed write or rename must not leave buyer names and page tokens in a stray temp file.
+        if (created) fs.rmSync(tmp, { force: true });
+      }
       console.log(`Wrote ${labels.length} label row(s) for batch "${batch}".`);
       if (nameCheck.length) console.log(`  Look at the name of ${nameCheck.length} home(s) before printing: ${nameCheck.join(', ')}`);
       if (officeByDefault.length) console.log(`  No city or ZIP named an office for ${officeByDefault.length} home(s) (Lakewood Ranch line used): ${officeByDefault.join(', ')}`);

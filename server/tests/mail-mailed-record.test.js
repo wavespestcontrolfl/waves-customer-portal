@@ -91,4 +91,13 @@ describe('markBatch input', () => {
     await expect(markBatch({ batch: 'ok', ids: [] })).rejects.toThrow(TypeError);
     await expect(markBatch({ batch: 'ok', ids: ['nope'] })).rejects.toThrow(TypeError);
   });
+
+  test('printedPriceOf passes pricedAt only as an ISO time', () => {
+    const base = { mailed_at: new Date('2026-11-24T15:00:00Z') };
+    const snap = (pricedAt) => ({ ...base, mailed_price: { plan: 'pest_quarterly', annual: 600, monthly: 50, setupFee: 0, pricedAt } });
+    expect(printedPriceOf(snap('2026-11-22T22:00:00Z')).pricedAt).toBe('2026-11-22T22:00:00.000Z');
+    expect(printedPriceOf(snap({ evil: 1 })).pricedAt).toBeNull();
+    expect(printedPriceOf(snap('not a date')).pricedAt).toBeNull();
+    expect(printedPriceOf(snap(12345)).pricedAt).toBeNull();
+  });
 });
