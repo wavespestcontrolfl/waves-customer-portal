@@ -3,7 +3,7 @@
 // 'none' / 'day' / 'hour' (unknown window = 'hour', fail closed) plus an anyPromise "told anything" set.
 // The detector runs for real over a fake knex; only the rows are fed in. Synthetic ids only.
 const detector = require('../services/no-show-detector');
-const { loadToldVisitIds, loadPromiseLevels } = require('../services/auto-dispatch/told-visits');
+const { loadToldVisitIds, loadPromiseLevels, loadPromiseFacts } = require('../services/auto-dispatch/told-visits');
 
 const NOW = new Date('2026-11-10T09:00:00Z');
 const SLOT = Date.parse('2026-11-12T14:00:00Z');
@@ -170,5 +170,28 @@ describe('loadToldVisitIds anyPromise', () => {
 
   test('a failed read throws with anyPromise too', async () => {
     await expect(loadToldVisitIds(fakeConn({ failOn: 'messaging_audit_log as a' }), ['s1'], NOW, { anyPromise: true })).rejects.toThrow('read failed');
+  });
+});
+
+// The day re-plan's 2-hour told shift (owner 2026-11-24) reads the level and the told slot's start from ONE read.
+describe('loadPromiseFacts', () => {
+  const facts = async (conn, ids = ['s1']) => Object.fromEntries(await loadPromiseFacts(conn, ids, NOW));
+
+  test('a known slot: hour with its start; a day promise, an unknown window and no promise: no start', async () => {
+    const out = await facts(fakeConn({ messages: [msg('s1')] }));
+    expect(out.s1.level).toBe('hour');
+    expect(out.s1.start).toBeInstanceOf(Date);
+    expect(await facts(fakeConn({ messages: [dayMsg('s1')] }))).toEqual({ s1: { level: 'day', start: null } });
+    const legacy = msg('s1', { purpose: 'appointment', metadata: { rendered_slot_ms: undefined, original_message_type: 'reschedule_series_confirmation' } });
+    expect(await facts(fakeConn({ messages: [legacy] }))).toEqual({ s1: { level: 'hour', start: null } });
+    expect(await facts(fakeConn())).toEqual({ s1: { level: 'none', start: null } });
+  });
+
+  test('loadPromiseLevels is its level, from the same single read', async () => {
+    const spy = jest.spyOn(detector, 'loadPromiseEvents');
+    const conn = fakeConn({ messages: [msg('s1')] });
+    expect(Object.fromEntries(await loadPromiseLevels(conn, ['s1'], NOW))).toEqual({ s1: 'hour' });
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
   });
 });

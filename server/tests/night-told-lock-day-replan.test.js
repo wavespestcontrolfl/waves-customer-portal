@@ -15,16 +15,17 @@ jest.mock('../services/day-replan/planner', () => {
 jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' }, CUSTOMER_PREMISE_ALIASES: [{ customer_address_line1: 'customers.address_line1' }] }));
-// loadPromiseLevels answers from the same `loadToldVisitIds` fake: a told id reads 'hour', any other 'none'.
+// loadPromiseFacts answers from the same `loadToldVisitIds` fake: a told id reads 'hour', any other 'none'; the told
+// slot starts (owner 2026-11-24 2-hour shift) come from the `toldStarts` fake, none unless a test sets them.
 jest.mock('../services/auto-dispatch/told-visits', () => {
   const loadToldVisitIds = jest.fn();
-  const loadPromiseLevels = jest.fn(async (...args) => {
+  const toldStarts = jest.fn(async () => new Map());
+  const loadPromiseFacts = jest.fn(async (...args) => {
     const told = await loadToldVisitIds(...args);
-    return new Map(args[1].map((id) => [id, told.has(id) ? 'hour' : 'none']));
+    const starts = await toldStarts();
+    return new Map(args[1].map((id) => [id, { level: told.has(id) ? 'hour' : 'none', start: starts.get(id) || null }]));
   });
-  // The told slot starts (owner 2026-11-24 2-hour shift): none unless a test sets them.
-  const loadToldStarts = jest.fn(async () => new Map());
-  return { loadToldVisitIds, loadPromiseLevels, loadToldStarts };
+  return { loadToldVisitIds, loadPromiseFacts, toldStarts };
 });
 jest.mock('../services/time-promise', () => ({
   ...jest.requireActual('../services/time-promise'),
@@ -40,7 +41,7 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
 const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
 const { getCustomerSchedulingPreferences } = require('../services/auto-dispatch/preferences');
 const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
-const { loadToldVisitIds, loadToldStarts } = require('../services/auto-dispatch/told-visits');
+const { loadToldVisitIds, toldStarts: loadToldStarts } = require('../services/auto-dispatch/told-visits');
 const { runDayReplanIfEnabled, _internals } = require('../services/day-replan');
 
 const NOW = new Date('2026-11-03T12:00:00Z'); // 07:00 ET; DST has ended, ET = UTC-5
@@ -337,7 +338,7 @@ describe('reminder_24h_off', () => {
 });
 
 // Owner 2026-11-24: "we give a 2 hr window, so if we move it back two hrs, this is fine".
-describe('2-hour told shift: a stop told an hour may change it by up to 2 hours from the told slot', () => {
+describe('2-hour told shift: a stop told an hour may start up to 2 hours later than the told slot', () => {
   // Two days out, so a 7:00 start is past the 24-hour reach.
   const base = (extra = {}) => ({
     dateStr: '2026-11-05', now: NOW, visitCounts: new Map(), customerCounts: new Map(), sent24: new Set(),
@@ -348,11 +349,13 @@ describe('2-hour told shift: a stop told an hour may change it by up to 2 hours 
     is_recurring: true, recurring_parent_id: 'p1', customer_confirmed: false, ...extra,
   });
 
-  test('told 9:00: any start from 7:00 to 11:00 is movable; past 2 hours it is time_told', () => {
-    for (const start of ['07:00:00', '08:00:00', '09:00:00', '10:00:00', '11:00:00']) {
+  test('told 9:00: any start from 9:00 to 11:00 is movable; earlier, or past 2 hours later, it is time_told', () => {
+    for (const start of ['09:00:00', '10:00:00', '11:00:00']) {
       expect(_internals.fixedReason(stop(start), base())).toBeNull();
     }
-    expect(_internals.fixedReason(stop('06:59:00'), base())).toBe('time_told');
+    // Never earlier than the told slot: the customer may not be home yet (the window is start to +2 hours).
+    expect(_internals.fixedReason(stop('08:00:00'), base())).toBe('time_told');
+    expect(_internals.fixedReason(stop('08:59:00'), base())).toBe('time_told');
     expect(_internals.fixedReason(stop('11:01:00'), base())).toBe('time_told');
     expect(_internals.fixedReason(stop('12:00:00'), base())).toBe('time_told');
   });
@@ -365,6 +368,7 @@ describe('2-hour told shift: a stop told an hour may change it by up to 2 hours 
   test('a first or one-time visit told an hour gets the same 2 hours; outside them it stays first_or_one_time', () => {
     expect(_internals.fixedReason(stop('10:00:00', { is_recurring: false }), base())).toBeNull();
     expect(_internals.fixedReason(stop('12:00:00', { is_recurring: false }), base())).toBe('first_or_one_time');
+    expect(_internals.fixedReason(stop('08:00:00', { is_recurring: false }), base())).toBe('first_or_one_time');
     expect(_internals.fixedReason(stop('10:00:00', { recurring_parent_id: null }), base({ toldStart: new Map() }))).toBe('first_or_one_time');
   });
 
@@ -373,7 +377,7 @@ describe('2-hour told shift: a stop told an hour may change it by up to 2 hours 
     expect(_internals.fixedReason(stop('09:00:00'), base({ askRecorded: true, setTime: new Map([['s1', 'set_time']]) }))).toBe('set_time');
   });
 
-  test('limitToldShift: the planner may only use hours within 2 hours of the told slot, inside any preference', () => {
+  test('limitToldShift: the planner may only use hours from the told slot to 2 hours later, inside any preference', () => {
     const entries = [
       { row: { id: 'a' }, why: null, pref: null },
       { row: { id: 'b' }, why: null, pref: { startMin: 10 * 60, endMin: 17 * 60 } },
@@ -383,7 +387,7 @@ describe('2-hour told shift: a stop told an hour may change it by up to 2 hours 
     ];
     const starts = new Map([['a', 9 * 60], ['b', 9 * 60], ['c', 9 * 60], ['d', 9 * 60]]);
     _internals.limitToldShift(entries, starts);
-    expect(entries[0]).toMatchObject({ why: null, pref: { startMin: 7 * 60, endMin: 11 * 60 + 1 } });
+    expect(entries[0]).toMatchObject({ why: null, pref: { startMin: 9 * 60, endMin: 11 * 60 + 1 } });
     expect(entries[1]).toMatchObject({ why: null, pref: { startMin: 10 * 60, endMin: 11 * 60 + 1 } });
     expect(entries[2].why).toBe('time_told'); // the preference and the 2 hours do not overlap
     expect(entries[3]).toMatchObject({ why: 'staff_lock', pref: null });
