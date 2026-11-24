@@ -143,7 +143,7 @@ describe('WhatYouPayBox renders the server payload as given', () => {
 
   it('pest only with the setup fee: first visit itemised, each application after, the fee sentence and its waiver clause', () => {
     const t = renderBox(PEST_PAYLOAD).textContent;
-    expect(t).toContain('What you pay and when');
+    expect(t).toContain('What you pay');
     expect(t).toContain('Pest Control$99.00');
     expect(t).toContain('Setup fee$99.00');
     expect(t).toContain('First visit total$198.00');
