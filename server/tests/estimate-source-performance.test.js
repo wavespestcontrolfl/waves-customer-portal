@@ -115,7 +115,7 @@ describe('sourcePerformance', () => {
     expect(report.resolved).toBe(3);
   });
 
-  test('an expired estimate booked another way is a win in the source win rate; dead rows stay out', async () => {
+  test('an expired or sweep-archived estimate booked another way is a win in the source win rate; dead rows stay out', async () => {
     mockQueues.estimates = [
       [],
       [
@@ -123,12 +123,14 @@ describe('sourcePerformance', () => {
         { id: 'late', source: 'estimator_engine', status: 'expired', expires_at: daysAgo(20), updated_at: daysAgo(1), created_at: daysAgo(30), disposition: 'converted_other_path' },
         { id: 'lost', source: 'estimator_engine', status: 'expired', expires_at: daysAgo(5), updated_at: daysAgo(5), created_at: daysAgo(12), disposition: 'expired_viewed' },
         { id: 'dead', source: 'estimator_engine', status: 'expired', expires_at: daysAgo(5), updated_at: daysAgo(5), created_at: daysAgo(12), disposition: 'invalid_lead' },
+        // The sweep's shape: archived live row, resolved by its classification.
+        { id: 'swept', source: 'estimator_engine', status: 'viewed', archived_at: daysAgo(2), disposition: 'converted_other_path', disposition_at: daysAgo(2), updated_at: daysAgo(2), created_at: daysAgo(9) },
       ],
     ];
     mockQueues.estimate_learning_events = [[]];
     const engine = (await sourcePerformance({ days: 90 })).sources.find((s) => s.source === 'estimator_engine');
-    expect(engine).toMatchObject({ resolved: 3, won: 2 });
-    expect(engine.winRatePct).toBe(66.7);
+    expect(engine).toMatchObject({ resolved: 4, won: 3 });
+    expect(engine.winRatePct).toBe(75);
   });
 
   test('report click-mints count as sent ONLY on real delivery — never the publish-without-delivery stamp (audit on 65af7c027 P1)', async () => {

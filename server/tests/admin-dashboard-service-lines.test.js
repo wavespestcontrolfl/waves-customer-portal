@@ -117,6 +117,18 @@ describe('computeServiceLines', () => {
     expect(pest).toMatchObject({ accepted: 2, booked_other_way: 1, lost: 1, resolved: 3, close_rate: 66.7 });
   });
 
+  it('(a2c) an archived booked-another-way row is a resolved win; other archived rows (even open or unresolved) stay out', async () => {
+    db.__results.estimates = [
+      est({ status: 'viewed', archived_at: '2026-10-03T00:00:00Z', disposition: 'converted_other_path', disposition_at: '2026-10-03T12:00:00Z' }),
+      est({ status: 'viewed', archived_at: '2026-10-03T00:00:00Z', disposition: 'archived_unresolved', disposition_at: '2026-10-03T12:00:00Z' }),
+      est({ status: 'expired', expires_at: '2026-10-03T15:00:00Z', archived_at: '2026-10-04T00:00:00Z', disposition: 'expired_viewed' }),
+      est({ status: 'declined', declined_at: '2026-10-03T15:00:00Z' }),
+    ];
+    const pest = pestRow((await computeServiceLines(WIN, { now: NOW })).lines);
+    // sent/open/aging ignore archived rows; the declined row still counts.
+    expect(pest).toMatchObject({ accepted: 1, booked_other_way: 1, lost: 1, resolved: 2, close_rate: 50, open: 0 });
+  });
+
   it('(a3) open estimates sent over 7 days ago count as aging whatever the period', async () => {
     db.__results.estimates = [
       est({ status: 'sent', sent_at: '2026-09-10T15:00:00Z' }),

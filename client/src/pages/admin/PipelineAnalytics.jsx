@@ -8,7 +8,11 @@ import {
   ShieldCheck,
   Trees,
 } from "lucide-react";
-import { classifyEstimateForPipeline, isWonEstimate } from "./EstimatePage";
+import {
+  classifyEstimateForPipeline,
+  isBookedOtherWayEstimate,
+  isWonEstimate,
+} from "./EstimatePage";
 import { Button, Card } from "../../components/ui";
 import { etParts } from "../../lib/timezone";
 // The "Call today" rule lives in shared/estimate-call-today.cjs so the 9 AM push counts the same list.
@@ -115,6 +119,10 @@ export function resolutionDate(estimate) {
     return estimate.declinedAt || estimate.updatedAt || estimate.createdAt;
   if (estimate?.status === "expired")
     return estimate.expiresAt || estimate.updatedAt || estimate.createdAt;
+  // A live offer the sweep archived because the customer converted another
+  // way resolved when it was classified (server resolutionDateMs).
+  if (estimate?.archivedAt && isBookedOtherWayEstimate(estimate))
+    return estimate.dispositionAt || estimate.archivedAt;
   return null;
 }
 
@@ -521,7 +529,12 @@ export default function PipelineAnalytics({
     // through another path (converted_other_path, incl. after the estimate
     // expired) is a WIN, as on the server (estimate-winloss.js).
     const NEVER_WINNABLE = ["invalid_lead", "expired_unsent"];
-    const resolvedInRange = activeRows.filter((e) => {
+    // Archived rows stay out, except a customer who converted another way:
+    // that is a resolved win (the server readers keep it too).
+    const closeRows = estimates.filter(
+      (e) => !e.archivedAt || isBookedOtherWayEstimate(e),
+    );
+    const resolvedInRange = closeRows.filter((e) => {
       if (NEVER_WINNABLE.includes(e.disposition)) return false;
       const resolvedAt = resolutionDate(e);
       return (

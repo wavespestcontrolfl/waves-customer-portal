@@ -565,6 +565,8 @@ function estimateMatchesFilter(e, filter) {
   // funnel/MRR stats; the Archived tab (its own fetch) is where archived
   // rows are browsed, so keep them out of All.
   if (filter === "all") return !e.archivedAt;
+  // An archived booked-another-way row is classed "won" but browsed here too.
+  if (filter === "archived") return !!e.archivedAt;
   if (filter === "won")
     return e._class === "won" || (!!e.archivedAt && e.status === "accepted");
   if (filter === "drafts")
@@ -2262,15 +2264,25 @@ function EstimatePipelineViewV2({
       // isn't lost — the Won funnel / MRR-won KPI depend on these archived wins.
       fetches.push(
         adminFetch("/admin/estimates?archived=only&status=accepted&limit=all"),
+        // Archived booked-another-way rows are resolved wins too (no status filter: the sweep keeps their sent/viewed status).
+        adminFetch(
+          "/admin/estimates?archived=only&disposition=converted_other_path&limit=all",
+        ),
       );
     }
     Promise.all(fetches)
-      .then(([pipeline, archived = {}]) => {
+      .then(([pipeline, archived = {}, booked = {}]) => {
         if (requestId !== estimatesRequestRef.current) return;
         setEstimates(
-          mergeEstimateRows(pipeline.rows, archived.estimates || []),
+          mergeEstimateRows(
+            pipeline.rows,
+            archived.estimates || [],
+            booked.estimates || [],
+          ),
         );
-        setEstimatesTruncated(!!pipeline.truncated || !!archived.truncated);
+        setEstimatesTruncated(
+          !!pipeline.truncated || !!archived.truncated || !!booked.truncated,
+        );
         setError(null);
         setLoading(false);
       })

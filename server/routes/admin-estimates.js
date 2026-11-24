@@ -4323,6 +4323,8 @@ router.get('/', async (req, res, next) => {
       archived,
     });
     if (search) query = applyEstimateSearchFilter(query, search);
+    // The Pipeline KPIs load archived booked-another-way rows (resolved wins) with ?disposition=converted_other_path.
+    if (req.query.disposition === 'converted_other_path') query = query.where('estimates.disposition', 'converted_other_path');
 
     let estimates;
     if (limit === 'all') {
@@ -4618,6 +4620,7 @@ router.get('/', async (req, res, next) => {
           declineReason: e.decline_reason,
           disposition: e.disposition || null,
           dispositionSource: e.disposition_source || null,
+          dispositionAt: e.disposition_at || null,
           dispositionNote: e.disposition_note || null,
           competitorName: e.competitor_name || null,
           competitorPrice: e.competitor_price != null ? parseFloat(e.competitor_price) : null,

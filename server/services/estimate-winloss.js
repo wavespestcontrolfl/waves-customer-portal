@@ -455,7 +455,9 @@ async function winLossSlices({ days = 90 } = {}) {
     // losses and wins leave together — same reasoning as PipelineAnalytics'
     // activeRows), but their classification above stays in "why we lose":
     // archiving no longer erases a loss from the story (codex pre-push P1).
-    if (row.archived_at) continue;
+    // The one archived row that stays: a customer who converted another way
+    // (the sweep archives them) is a resolved win, dated by resolutionDateMs.
+    if (row.archived_at && !bookedOtherWay) continue;
     // Dead rows are counted in "why we lose" above but leave every RATE
     // denominator — they were never a winnable offer.
     if (disposition && excludedFromRates(disposition)) continue;

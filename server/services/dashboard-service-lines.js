@@ -52,13 +52,6 @@ function labelFor(key) {
   return SERVICE_LINE_LABELS[key] || key;
 }
 
-// Resolved rows that are not real demand (dead) leave the close-rate math —
-// the estimate-winloss rule. A row that converted through another path stays
-// in it, as a win (isBookedOtherWay).
-function leavesCloseMath(row) {
-  return excludedFromRates(effectiveDisposition(row));
-}
-
 // Distinct service-line keys of an estimate row; never empty.
 function estimateLineKeys(row) {
   let lines = [];
@@ -76,6 +69,38 @@ function leadLineKeys(serviceInterest) {
 
 const pct1 = (num, den) => (den >= 1 ? Math.round((num / den) * 1000) / 10 : null);
 
+// First durable delivery evidence, not sent_at alone: an accept that won the
+// in-flight send claim has deliveryState.firstDeliveredAt and no sent_at, and
+// a resend must not reset the age (estimate-winloss rule).
+function tallyDelivery(row, keys, cell, win, agingCutoff) {
+  const sentMs = sentAnchorMs(row);
+  const open = OPEN_STATUSES.includes(row.status);
+  const sentInWindow = sentMs != null && sentMs >= win.fromMs && sentMs < win.toMs;
+  const aging = open && sentMs != null && sentMs < agingCutoff;
+  for (const k of keys) {
+    if (sentInWindow) {
+      cell(k).sent += 1;
+      if (open) cell(k).open += 1;
+    }
+    if (aging) cell(k).aging7 += 1;
+  }
+}
+
+// 'accepted' | 'booked' | 'lost' for a row resolved inside the window, else
+// null. Dead rows leave the math. An archived row counts only when the
+// customer converted another way (the sweep archives those): a resolved win.
+function closeOutcome(row, win) {
+  const disposition = effectiveDisposition(row);
+  if (excludedFromRates(disposition)) return null;
+  const booked = isBookedOtherWay(disposition);
+  const eligible = row.archived_at ? booked : RESOLVED_STATUSES.includes(row.status);
+  if (!eligible) return null;
+  const at = resolutionDateMs(row);
+  if (at == null || at < win.fromMs || at >= win.toMs) return null;
+  if (row.status === 'accepted') return 'accepted';
+  return booked ? 'booked' : 'lost';
+}
+
 // ── 1 + 2: close rate, sent, open, aging ─────────────────────────────────
 // win = { fromMs, toMs } with toMs EXCLUSIVE (ET midnight after the last day).
 function buildCloseStats(rows, win, nowMs) {
@@ -86,33 +111,18 @@ function buildCloseStats(rows, win, nowMs) {
   };
   const agingCutoff = nowMs - 7 * DAY_MS;
   for (const row of rows) {
-    if (row.archived_at) continue;
     const keys = estimateLineKeys(row);
-    // First durable delivery evidence, not sent_at alone: an accept that won
-    // the in-flight send claim has deliveryState.firstDeliveredAt and no
-    // sent_at, and a resend must not reset the age (estimate-winloss rule).
-    const sentMs = sentAnchorMs(row);
-    const sentInWindow = sentMs != null && sentMs >= win.fromMs && sentMs < win.toMs;
-    if (sentInWindow) {
-      for (const k of keys) {
-        cell(k).sent += 1;
-        if (OPEN_STATUSES.includes(row.status)) cell(k).open += 1;
-      }
-    }
-    if (OPEN_STATUSES.includes(row.status) && sentMs != null && sentMs < agingCutoff) {
-      for (const k of keys) cell(k).aging7 += 1;
-    }
-    if (RESOLVED_STATUSES.includes(row.status) && !leavesCloseMath(row)) {
-      const at = resolutionDateMs(row);
-      if (at != null && at >= win.fromMs && at < win.toMs) {
-        for (const k of keys) {
-          // `accepted` is the won count: accepted online plus booked another
-          // way; `booked` says how many of those were booked another way.
-          if (row.status === 'accepted') cell(k).accepted += 1;
-          else if (isBookedOtherWay(effectiveDisposition(row))) { cell(k).accepted += 1; cell(k).booked += 1; }
-          else cell(k).lost += 1;
-        }
-      }
+    // Archived rows leave sent/open/aging, as before; only an archived
+    // booked-another-way win reaches the close math below.
+    if (!row.archived_at) tallyDelivery(row, keys, cell, win, agingCutoff);
+    const outcome = closeOutcome(row, win);
+    if (!outcome) continue;
+    for (const k of keys) {
+      // `accepted` is the won count: accepted online plus booked another
+      // way; `booked` says how many of those were booked another way.
+      if (outcome === 'lost') cell(k).lost += 1;
+      else cell(k).accepted += 1;
+      if (outcome === 'booked') cell(k).booked += 1;
     }
   }
   return byLine;
@@ -276,7 +286,9 @@ async function fetchEstimateRows(win, nowMs) {
   const agingTs = new Date(nowMs - 7 * DAY_MS).toISOString();
   const qb = db({ e: 'estimates' })
     .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-    .whereNull('e.archived_at')
+    // Un-archived rows, plus archived rows a customer converted another way
+    // (the sweep archives those; they are resolved wins).
+    .where((q) => q.whereNull('e.archived_at').orWhere('e.disposition', 'converted_other_path'))
     .where(function coarseWindow() {
       // Sent/open/aging anchor on the first delivery evidence (sentAnchorMs):
       // superset prefilter on sent_at, viewed_at, accepted_at and the durable
@@ -288,11 +300,15 @@ async function fetchEstimateRows(win, nowMs) {
           `(e.status IN ('accepted','declined','expired') AND (${RESOLVED_AT_SQL}) >= ${ET_TS} AND (${RESOLVED_AT_SQL}) < ${ET_TS})`,
           [fromTs, toTs],
         )
+        .orWhereRaw(
+          `(e.archived_at IS NOT NULL AND (COALESCE(e.disposition_at, e.archived_at)) >= ${ET_TS} AND (COALESCE(e.disposition_at, e.archived_at)) < ${ET_TS})`,
+          [fromTs, toTs],
+        )
         .orWhereRaw(`(e.status IN ('sent','viewed') AND (e.sent_at < ? OR e.viewed_at < ? OR ${FIRST_DELIVERED_SQL} < ?))`, [agingTs, agingTs, agingTs]);
     });
   return excludeInternalEstimateRows(qb).select(
     'e.id', 'e.status', 'e.sent_at', 'e.accepted_at', 'e.declined_at', 'e.expires_at',
-    'e.created_at', 'e.updated_at', 'e.archived_at', 'e.disposition', 'e.decline_reason',
+    'e.created_at', 'e.updated_at', 'e.archived_at', 'e.disposition', 'e.disposition_at', 'e.decline_reason',
     'e.viewed_at', 'e.view_count', 'e.last_viewed_at', 'e.source',
     'e.estimate_data', 'e.service_interest', 'e.notes',
   );
