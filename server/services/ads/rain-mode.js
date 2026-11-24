@@ -27,7 +27,8 @@
  *   5. scores past days: a day whose call is recorded and not yet scored reads the measured radar rain (mrms-qpe.js)
  *      at each area, least recently tried first. An area with WET_INCHES or more was wet; a wet day has half or more
  *      of all areas wet. A radar gap that could flip that waits (SCORE_GIVE_UP_DAYS, then the areas read decide,
- *      marked partial). The score is kept on the day's row: the areas measured wet, wet_day, and hit.
+ *      marked partial). The score is kept on the day's row: the areas measured wet, wet_day, hit (the latest call)
+ *      and cutoff_hit (the first call made before the day, from 2 PM the day before: the one the ads act on).
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -158,6 +159,7 @@ async function scoreDay(row, { fetchRain = fetchMrmsDailyRain, now = new Date() 
     wet_areas: wetAreas,
     wet_day: wetDay,
     hit: row.call === 'unknown' ? null : (row.call === 'rain') === wetDay,
+    cutoff_hit: row.cutoff_call ? (row.cutoff_call === 'rain') === wetDay : null,
   };
 }
 
@@ -227,8 +229,13 @@ async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) 
         would: decideCampaign(rainClass, call),
       };
     });
-  // NWS down = a failed tick. Areas only open (hours already over on the sold day's morning) are not a fault.
-  if (forecast.areas.length < MIN_AREAS) problems.push(`forecast unread for ${day}: ${forecast.areas.length} of ${Object.keys(ZONE_COORDS).length} areas read`);
+  // A future day must settle: no settled call for it is a failed tick. On the sold day itself hours already over drop
+  // out of the feed, so open areas are expected there; only NWS down (too few areas answered) fails that tick.
+  const future = day > etDateString(now);
+  if (future ? forecast.call === 'unknown' : forecast.areas.length < MIN_AREAS) {
+    problems.push(`forecast unsettled for ${day}: ${forecast.areas.filter((a) => a.rain !== null).length} settled, `
+      + `${forecast.areas.length} of ${Object.keys(ZONE_COORDS).length} areas read`);
+  }
   if (!campaigns.some((c) => c.rain_class === 'indoor')) logger.info('[ads-rain-mode] no indoor campaign is marked yet');
 
   // mode: this module only records ("shadow"), so later live runs can be told apart.
@@ -237,7 +244,12 @@ async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) 
   try {
     // The day's latest settled call stands. A call already scored is never rewritten.
     if (forecast.call !== 'unknown' && !days[day]?.score) {
-      days[day] = { day, call: forecast.call, at: run.at, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) };
+      const prior = days[day] || {};
+      // The cutoff call is the first settled call made before the day (from 2 PM the day before): the one the ads
+      // act on. It is never rewritten; the latest call is kept beside it, and the score grades both.
+      const cutoff = prior.cutoff_call ? { cutoff_call: prior.cutoff_call, cutoff_at: prior.cutoff_at }
+        : future ? { cutoff_call: forecast.call, cutoff_at: run.at } : {};
+      days[day] = { ...prior, day, call: forecast.call, at: run.at, ...cutoff, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) };
     }
     scored = await scorePastDays(days, now, { fetchRain });
     await saveRun(conn, run, days, now);

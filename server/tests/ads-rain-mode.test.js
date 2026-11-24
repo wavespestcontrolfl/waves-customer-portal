@@ -116,7 +116,7 @@ describe('recordRun', () => {
   test('an unknown forecast is a problem and the record throws for job_health', async () => {
     const conn = fakeConn({ campaigns });
     await expect(rainMode.recordRainMode({ now: AFTER_TWO, conn, read: jest.fn(async () => null), fetchRain: jest.fn() }))
-      .rejects.toThrow(/forecast unread for 2026-11-25/);
+      .rejects.toThrow(/forecast unsettled for 2026-11-25/);
   });
 
   test('scores a past day against measured rain once, and never rewrites a scored day', async () => {
@@ -195,6 +195,26 @@ describe('recordRun', () => {
     expect(run.scored).toEqual(['2026-11-21']);
     const days = JSON.parse(conn.store[rainMode.DAYS_KEY]);
     expect(days['2026-11-18'].score_tried_at).toBe(AFTER_TWO.toISOString());
+  });
+
+  test('a future day with only open areas fails the tick and keeps nothing new', async () => {
+    const conn = fakeConn({ campaigns });
+    const oneHour = jest.fn(async () => hours('2026-11-25', 0).slice(0, 1)); // one dry hour per area: all open
+    await expect(rainMode.recordRainMode({ now: AFTER_TWO, conn, read: oneHour, fetchRain: jest.fn() }))
+      .rejects.toThrow(/forecast unsettled for 2026-11-25: 0 settled, 6 of 6 areas read/);
+    expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25']).toBeUndefined();
+  });
+
+  test('the 2 PM call is kept beside later calls, and the score grades both', async () => {
+    const conn = fakeConn({ campaigns });
+    await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn() });
+    const morning = new Date('2026-11-25T13:00:00Z'); // 8 AM ET on the day: now rain
+    await rainMode.recordRun({ now: morning, conn, read: readerFor('2026-11-25', [9, 9, 9, 9, 9, 9]), fetchRain: jest.fn() });
+    const row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25'];
+    expect(row).toMatchObject({ call: 'rain', cutoff_call: 'dry', cutoff_at: AFTER_TWO.toISOString() });
+    const wet = jest.fn(async ({ start }) => ({ days: [{ date: start, inches: 1 }] }));
+    const score = await rainMode.scoreDay(row, { fetchRain: wet, now: new Date('2026-11-26T20:00:00Z') });
+    expect(score).toMatchObject({ wet_day: true, hit: true, cutoff_hit: false });
   });
 });
 
