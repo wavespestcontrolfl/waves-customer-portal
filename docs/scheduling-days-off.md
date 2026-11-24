@@ -80,7 +80,8 @@ auto-dispatch readers pass `{ strict: true }`, so an unreadable list stops a mov
 | Recurring seeder (`recurring-appointment-seeder.js`) | Nudges a child visit off a closed day | A child on a day its technician is out is seeded with no technician. The office or auto-dispatch places it. |
 | Office assignment (`dispatch-assignment.js`, board drag, `admin-dispatch.js /technicians?date=`) | Not applicable | Refused with a 422. The picker does not offer the technician for that date. |
 | Series children (`admin-schedule.js assignableRecurringTemplateTechnicianId`) | Not applicable | The child is created with no technician |
-| Auto-dispatch candidate slots (`auto-dispatch/candidate-slots.js`, via find-time) and `scheduling/pick-technician.js` | Skips the date | Skips the technician on that date |
+| Auto-dispatch candidate slots (`auto-dispatch/candidate-slots.js`, via find-time) | Skips the date | Skips the technician on that date |
+| Fixed-time technician picker (`scheduling/pick-technician.js`) | **Not checked.** It ranks routes with `includeBlackoutDates=true`, so it can return a technician for a closed date. The caller must check business closures first. | Skips the technician on that date |
 | Ads capacity, route check, open-blocks alert, annual prepay series | Not applicable | Count the technician as away |
 
 ### Auto-dispatch and a closed day
@@ -92,7 +93,10 @@ guards, which still apply:
 
 - a customer-confirmed visit stays,
 - a visit a person placed stays,
-- a visit inside 73 hours (the reminder freeze) stays.
+- a visit inside the reminder freeze stays. The nightly run passes `lock24h=true`: the freeze is a
+  24.25-hour band in route-tier mode and 25 hours in flex mode, so a visit 48 hours away can move,
+- a fixed visit stays: the customer's app preference, mowing days, the customer's own time request,
+  or the auto-dispatch-off box (owner ruling 2026-11-22).
 
 A visit that stays on a closed day raises a needs-a-person notice. The nightly path reads
 the closed days with `strict`, so an unreadable list stops the move.

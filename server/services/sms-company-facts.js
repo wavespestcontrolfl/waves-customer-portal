@@ -25,7 +25,7 @@ const COMPANY_FACTS = Object.freeze([
   // Owner 2026-11-24: Waves is closed on the Big 6 holidays (scheduling/holidays.js keys new_years_day,
   // memorial_day, independence_day, labor_day, thanksgiving, christmas); every other day works. The three fixed-date ones
   // (New Year's Day, 4th of July, Christmas) also close the observed weekday when they fall on a weekend (holidays.js).
-  'We are closed on New Year\'s Day, Memorial Day, the 4th of July, Labor Day, Thanksgiving and Christmas. When New Year\'s Day, the 4th of July or Christmas falls on a Saturday, we are also closed the Friday before. When one falls on a Sunday, we are also closed the Monday after. We work Sundays and all other holidays.',
+  'We are closed on New Year\'s Day, Memorial Day, the 4th of July, Labor Day, Thanksgiving and Christmas. When New Year\'s Day, the 4th of July or Christmas falls on a Saturday, we are also closed the Friday before. When one falls on a Sunday, we are also closed the Monday after. We work Sundays and all other holidays. For a given date, the open times we offer are the final word.',
   'Rain: a treatment needs to dry and bond to surfaces; after that it holds up to weather.',
   'Lawn program: fertilizer, weed control and insect control only. No mowing. Treatments follow a seasonal rotation. Never name product brands.',
   'Watering advice you may give: follow the county\'s watering days, water early in the morning, and water deeply and less often.',
