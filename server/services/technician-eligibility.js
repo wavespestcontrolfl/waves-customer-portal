@@ -467,10 +467,13 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
   if (!techShiftHoursLive() || (Array.isArray(technicianIds) && !technicianIds.length)) return none;
   let query = conn('technicians').whereNotNull('shift_start').whereNotNull('shift_end');
   if (Array.isArray(technicianIds)) query = query.whereIn('id', technicianIds);
+  // A uuid spelled in capitals is the same technician: Postgres takes it and reads it back in
+  // lower case, so both maps are keyed and asked in lower case.
+  const key = (id) => String(id).toLowerCase();
   const shifts = new Map();
   for (const row of await query.select('id', 'shift_start', 'shift_end')) {
     const shift = storedShift(row);
-    if (shift) shifts.set(String(row.id), shift);
+    if (shift) shifts.set(key(row.id), shift);
   }
   if (!shifts.size) return none;
   const today = etDateString(now);
@@ -491,23 +494,23 @@ async function loadTechShifts(conn, { technicianIds = null, now = new Date() } =
     const rows = await savepointRead(conn, read);
     for (const row of rows) {
       const at = row.clock_in instanceof Date ? row.clock_in : new Date(row.clock_in);
-      const shift = shifts.get(String(row.technician_id));
+      const shift = shifts.get(key(row.technician_id));
       if (!shift || Number.isNaN(at.getTime())) continue;
-      clockIns.set(String(row.technician_id), clockInShift(at, shift));
+      clockIns.set(key(row.technician_id), clockInShift(at, shift));
     }
   } catch (err) {
     logger.warn(`[technician-eligibility] today's clock-ins unread (${err.message}); the set hours stand for today`);
     clockIns.clear();
   }
   return (technicianId, date) => {
-    const shift = shifts.get(String(technicianId));
+    const shift = shifts.get(key(technicianId));
     // A Date (a pg DATE read back) or an exact 'YYYY-MM-DD'; anything else, an
     // invalid Date or a string with a tail included, is no date.
     const day = date instanceof Date
       ? (Number.isNaN(date.getTime()) ? null : dateOnlyString(date))
       : validCalendarDate(date);
     if (!shift || !day) return null;
-    const clockedIn = day === today ? clockIns.get(String(technicianId)) : undefined;
+    const clockedIn = day === today ? clockIns.get(key(technicianId)) : undefined;
     return clockedIn ? { ...clockedIn } : { ...shift, source: 'roster' };
   };
 }

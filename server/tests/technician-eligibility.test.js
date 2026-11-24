@@ -986,6 +986,19 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
         expect(await dayWarningFor('tech-1', TOMORROW, { conn: commitConn().conn, block: visit('09:00', '10:00') })).toBeNull();
       });
 
+      test('a technician id spelled in capitals is the same technician: the shift is found, on the set hours and on a clock-in day', async () => {
+        gateOn();
+        // Postgres takes a uuid in capitals and reads it back in lower case, as these rows are.
+        const asked = (block, opts = {}) => dayWarningsFor('TECH-1', opts.dates || [TOMORROW], { conn: (opts.made || commitConn()).conn, block });
+        expect(await asked(visit('17:30', '18:30'))).toEqual([LINE]);
+        expect(await asked(visit('09:00', '10:00'))).toEqual([]);
+        const shiftOf = await loadTechShifts(commitConn({ clockRows: [{ technician_id: 'TECH-1', clock_in: new Date(`${TODAY}T12:30:00Z`) }] }).conn, { now: NOW });
+        expect(shiftOf('Tech-1', TOMORROW)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+        expect(shiftOf('Tech-1', TODAY)).toEqual({ startMin: 450, endMin: 1050, source: 'clock_in' });
+        const capitals = await loadTechShifts(commitConn({ shiftRows: [{ ...DAY_TECH, id: 'TECH-1' }] }).conn, { now: NOW });
+        expect(capitals('tech-1', TOMORROW)).toEqual({ startMin: 480, endMin: 1080, source: 'roster' });
+      });
+
       test('a time with seconds is read to the minute, and a time that is no clock time asks nothing (a line states a fact)', async () => {
         gateOn();
         expect(await told(visit('17:00:30', '18:00:30'))).toEqual([]);

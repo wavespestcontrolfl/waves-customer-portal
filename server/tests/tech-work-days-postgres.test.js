@@ -327,6 +327,8 @@ postgres('technician work days (real Postgres)', () => {
       // 11:00 for 90 minutes ends at 12:30, after the shift; for 60 minutes it ends with it.
       expect((await book(WED2, '11:00', 90)).warnings).toEqual([line()]);
       expect((await book(THU2, '11:00', 60)).warnings).toEqual([]);
+      // A technician id spelled in capitals is the same technician: Postgres reads it back in lower case.
+      expect((await book(THU2, '15:00', 60, morning.id.toUpperCase())).warnings).toEqual([line()]);
     });
 
     test('gate off: the same create has no line; both gates on, a day off gives the day-off line alone', async () => {
