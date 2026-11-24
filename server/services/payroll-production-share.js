@@ -91,6 +91,14 @@ async function readInputs(conn, weekStart) {
 }
 
 /**
+ * The connection the read under the payroll lock (payroll-runs.js shareInputsUnderLock) runs on: the pool, so the read is a
+ * separate connection with its own REPEATABLE READ snapshot that starts after the lock is held. A function of its own only as a
+ * seam for the test harness, whose whole database is one connection (a second transaction on it waits for the open one):
+ * the pay run tests give back the finalize transaction here. Production always answers the pool.
+ */
+const lockReadConnection = (pool) => pool;
+
+/**
  * A revision of what readInputs returned: the same string for the same settings and the same credit rows (visit, date, kind,
  * credit, review mark), whatever the order. The pay run's finalize reads the inputs again under the payroll lock and compares
  * revisions, so credits that changed between its first read and the lock are never frozen onto a check. Pure.
@@ -191,4 +199,4 @@ function reviewNote(name, count) {
   return `${name}: ${count} ${count === 1 ? 'stop needs' : 'stops need'} review for the production share. ${count === 1 ? 'It pays' : 'They pay'} $0 in the share until fixed. Open the production share preview for the week, fix ${count === 1 ? 'it' : 'them'}, then recompute.`;
 }
 
-module.exports = { KIND, shareOn, readInputs, revisionOf, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };
+module.exports = { KIND, shareOn, readInputs, lockReadConnection, revisionOf, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };

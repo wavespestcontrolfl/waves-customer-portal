@@ -1216,11 +1216,17 @@ async function readShareInputsOfRun(conn, runId) {
   return run ? productionSharePay.readInputs(conn, run.week_start) : null;
 }
 
-// The share inputs finalize works from, under the payroll lock: the ones read before the lock when a read of now (on the run's own
-// transaction) agrees with them, else the read of now. null when the gate is off or nothing was read before.
+// The share inputs finalize works from, under the payroll lock: the ones read before the lock when an authoritative read made now
+// agrees with them, else the read made now. null when the gate is off or nothing was read before.
+// The authoritative read is made on a SEPARATE pool connection, in its own REPEATABLE READ read-only transaction (readInputs on
+// the pool), not on the finalize transaction: that one is READ COMMITTED, so each technician's query would see its own snapshot and
+// a stop moved from one technician to another between two reads would be missed by both. The snapshot of the separate transaction
+// starts after the payroll lock is held, so it sees every commit made before this finalize took the lock. A plain read never waits
+// on the payroll advisory lock or on a row lock in PostgreSQL, so it cannot wait on this transaction. (It does need a free pool
+// connection; the payroll lock lets one pay run write at a time, so this is one extra connection for the run.)
 async function shareInputsUnderLock(trx, run, earlier) {
   if (!earlier || !productionSharePay.shareOn()) return earlier;
-  const now = await productionSharePay.readInputs(trx, run.week_start);
+  const now = await productionSharePay.readInputs(productionSharePay.lockReadConnection(db, trx), run.week_start);
   return productionSharePay.revisionOf(now) === productionSharePay.revisionOf(earlier) ? earlier : now;
 }
 
@@ -1336,8 +1342,8 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await syncCommission(trx, run.week_start, actorId);
     await applyDueSteps(trx);
     await syncTechRewards(trx, run, actorId, seasonScores);
-    // The credit inputs were read before the payroll lock (one snapshot, no second connection under the lock). The pay run may
-    // have waited for the lock, so they are read again here, on this connection, and compared: credits that changed in between
+    // The credit inputs were read before the payroll lock (one snapshot). The pay run may have waited for the lock, so they are
+    // read again here, in a snapshot taken after the lock (shareInputsUnderLock), and compared: credits that changed in between
     // are never frozen from the old read. The fresh read is used instead, the checks are saved from it, and the token check
     // below answers with the usual stale-run refusal when the owner has not seen those numbers.
     const evaluation = await evaluate(trx, run, { lock: true, shareInputs: await shareInputsUnderLock(trx, run, shareInputs) });

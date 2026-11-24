@@ -265,6 +265,14 @@ describe('the revision of the inputs', () => {
   });
 });
 
+describe('the read under the payroll lock', () => {
+  test('runs on the pool, a separate connection with its own REPEATABLE READ snapshot, never on the finalize transaction', () => {
+    const pool = { name: 'pool' };
+    const finalizeTrx = { name: 'finalize transaction' };
+    expect(share.lockReadConnection(pool, finalizeTrx)).toBe(pool);
+  });
+});
+
 describe('the run CSV header of the overtime column', () => {
   const rowOf = (made) => {
     const { check } = build(made ? { production_share: made } : {});
@@ -289,16 +297,24 @@ describe('the down guard migration', () => {
   const fakeKnex = (stored) => {
     const calls = [];
     const knex = (table) => ({ whereNotNull: () => ({ first: async () => { calls.push(`read ${table}`); return stored ? { id: 1 } : undefined; } }) });
-    knex.raw = async (sql) => { calls.push(sql.trim().split('\n')[0]); };
+    knex.raw = async (sql) => { calls.push(sql.trim()); };
     knex.schema = { hasColumn: async () => true };
     return { knex, calls };
   };
 
-  test('sorts after the migration that adds the column, and its up changes nothing', async () => {
+  test('sorts after the migration that adds the column, and its up adds what is missing and nothing more', async () => {
     expect('20261124130000_payroll_production_share_down_guard' > '20261124070000_payroll_production_share').toBe(true);
-    const { knex, calls } = fakeKnex(false);
-    await migration.up(knex);
-    expect(calls).toEqual([]);
+    const missing = fakeKnex(false);
+    missing.knex.schema.hasColumn = async () => false;
+    await migration.up(missing.knex);
+    expect(missing.calls.map((sql) => sql.replace(/\s+/g, ' '))).toEqual([
+      'ALTER TABLE payroll_checks ADD COLUMN production_share_cents bigint NULL',
+      'ALTER TABLE payroll_checks DROP CONSTRAINT IF EXISTS payroll_checks_production_share_check',
+      'ALTER TABLE payroll_checks ADD CONSTRAINT payroll_checks_production_share_check CHECK (production_share_cents IS NULL OR production_share_cents >= 0)',
+    ]);
+    const present = fakeKnex(false);
+    await migration.up(present.knex);
+    expect(present.calls.some((sql) => /ADD COLUMN/.test(sql))).toBe(false);
   });
 
   test('takes the table lock BEFORE it looks for a stored share, and refuses when one is there', async () => {

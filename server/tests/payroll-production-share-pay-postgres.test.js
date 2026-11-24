@@ -140,6 +140,9 @@ postgres('production share pay line', () => {
     for (const name of GATES) OLD[name] = process.env[name];
     process.env.GATE_PAYROLL = 'true';
     process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'true';
+    // This harness is ONE connection, where a second transaction waits for the open finalize one: the read under the payroll lock
+    // is given the finalize transaction here. In production it is the pool (a separate connection); see the unit test.
+    jest.spyOn(productionSharePay, 'lockReadConnection').mockImplementation((_pool, finalizeTrx) => finalizeTrx);
     delete process.env.GATE_PAYROLL_PAY_LINES;
     delete process.env.GATE_PAYROLL_TIME_OFF;
     trx = await database.transaction();
@@ -147,6 +150,7 @@ postgres('production share pay line', () => {
     await trx('technicians').insert({ id: ADMIN_ID, name: 'Sample Admin', role: 'admin', employment_type: '1099', employment_status: 'active' });
   });
   afterEach(async () => {
+    jest.restoreAllMocks();
     await trx.rollback();
     for (const name of GATES) { if (OLD[name] === undefined) delete process.env[name]; else process.env[name] = OLD[name]; }
   });
@@ -445,6 +449,28 @@ postgres('production share pay line', () => {
     const column = await trx.raw("SELECT 1 FROM information_schema.columns WHERE table_name = 'payroll_checks' AND column_name = 'production_share_cents'");
     expect(column.rows).toHaveLength(0);
     await trx.raw('ROLLBACK TO SAVEPOINT lockcheck');
+  });
+
+  it('the guard up restores the column and its constraint after a single-step rollback of the guard alone', async () => {
+    const guard = require('../models/migrations/20261124130000_payroll_production_share_down_guard');
+    await trx.raw('SAVEPOINT stepback');
+    await guard.down(trx);
+    await guard.up(trx);
+    const column = await trx.raw("SELECT 1 FROM information_schema.columns WHERE table_name = 'payroll_checks' AND column_name = 'production_share_cents'");
+    const constraint = await trx.raw("SELECT 1 FROM pg_constraint WHERE conname = 'payroll_checks_production_share_check'");
+    expect(column.rows).toHaveLength(1);
+    expect(constraint.rows).toHaveLength(1);
+    // the constraint is the real one: a negative figure is refused
+    const id = await tech('Sample Alpha');
+    await settings(id);
+    await worked(id, W1, 40);
+    await threeShifts(id);
+    await draft(W1);
+    const [runRow] = await trx('payroll_runs').select('id');
+    expect(await refused(() => trx('payroll_checks').where({ run_id: runRow.id }).update({ production_share_cents: -1 }))).toBeDefined();
+    // and running up again on a database that has everything changes nothing
+    await expect(guard.up(trx)).resolves.toBeUndefined();
+    await trx.raw('ROLLBACK TO SAVEPOINT stepback');
   });
 
   it('a rollback runs the guard down first and the older down after it, with no column left and no error', async () => {
