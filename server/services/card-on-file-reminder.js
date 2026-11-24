@@ -41,8 +41,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { propertyDisplayLabel } = require('../utils/property-display');
 const { isUsableSavedMethod, isBankMethodType } = require('./autopay-eligibility');
 
@@ -52,11 +52,11 @@ const DUE_AFTER_DAYS = 3;
 const GRACE_DAYS = 7;
 const REPEAT_DAYS = 30;
 const SENT_ISH = ['sent', 'delivered', 'opened', 'clicked'];
-const DAY_MS = 86400000;
+const DAY_MS = 86400000; // instant windows for the query bounds only; calendar days use plusDays
 
+// Calendar-day arithmetic on an ET date string, through the shared helpers (no second date mechanism).
 function plusDays(dateStr, days) {
-  const base = new Date(`${dateStr}T00:00:00Z`);
-  return new Date(base.getTime() + days * DAY_MS).toISOString().slice(0, 10);
+  return etDateString(addETDays(parseETDateTime(`${dateStr}T12:00`), days));
 }
 
 function isEmailLike(value) {
