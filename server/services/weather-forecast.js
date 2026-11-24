@@ -380,7 +380,9 @@ async function getHourlyRainOutlook(lat, lng, { budgetMs = TOTAL_BUDGET_MS, nwsB
 // NWS only, never the paid backup (the 07:05 notice's rain note, owner 2026-11-19 D3: "$0"): a fresh cached NWS answer,
 // else one NWS read (joining a read already running for the same grid key); null when NWS fails. A backup answer another
 // reader cached is not used, and no backup read is made. An NWS answer is cached for the other readers.
-async function getNwsHourlyRain(lat, lng) {
+// `fetchTimeoutMs` (the ads rain-mode record, 2026-11-24): a cron with no one waiting lets each NWS fetch run longer than
+// the 2.5 s default; its first prod ticks lost 4 of 6 areas to that timeout at the busy top of the hour.
+async function getNwsHourlyRain(lat, lng, { fetchTimeoutMs = FETCH_TIMEOUT_MS } = {}) {
   if (lat == null || lng == null || lat === '' || lng === '') return null;
   const latNum = Number(lat);
   const lngNum = Number(lng);
@@ -389,7 +391,7 @@ async function getNwsHourlyRain(lat, lng) {
   const cached = _hourlyCache.get(key);
   const fromNws = (hours) => Array.isArray(hours) && !hours.some((h) => h.source === 'open-meteo');
   if (cached && Date.now() - cached.at < HOURLY_CACHE_TTL_MS && fromNws(cached.value)) return cached.value;
-  const nws = await nwsHourlyShared(latNum, lngNum, key, Date.now() + TOTAL_BUDGET_MS, false);
+  const nws = await nwsHourlyShared(latNum, lngNum, key, Date.now() + 2 * fetchTimeoutMs, false, fetchTimeoutMs);
   if (nws) cachePut(_hourlyCache, key, { at: Date.now(), value: nws }, HOURLY_CACHE_TTL_MS);
   return nws;
 }
@@ -400,13 +402,13 @@ async function getNwsHourlyRain(lat, lng) {
 // full read is about to answer (Codex #6102 r9). A capped read is never
 // published: an uncapped reader must not inherit its short deadline.
 const _nwsHourlyInFlight = new Map();
-function nwsHourlyShared(latNum, lngNum, key, deadlineAt, capped) {
+function nwsHourlyShared(latNum, lngNum, key, deadlineAt, capped, fetchTimeoutMs = FETCH_TIMEOUT_MS) {
   const pending = _nwsHourlyInFlight.get(key);
   if (pending) {
     const left = deadlineAt - Date.now();
     return left > 0 ? raceDeadline(pending, left) : Promise.resolve(null);
   }
-  const read = nwsHourly(latNum, lngNum, deadlineAt).catch(() => null);
+  const read = nwsHourly(latNum, lngNum, deadlineAt, fetchTimeoutMs).catch(() => null);
   if (capped) return read;
   const shared = read.finally(() => _nwsHourlyInFlight.delete(key));
   _nwsHourlyInFlight.set(key, shared);
@@ -414,17 +416,18 @@ function nwsHourlyShared(latNum, lngNum, key, deadlineAt, capped) {
 }
 
 // Each NWS fetch waits at most its own timeout and never past `deadlineAt`.
-function nwsTimeout(deadlineAt) {
-  return Math.min(FETCH_TIMEOUT_MS, deadlineAt - Date.now());
+function nwsTimeout(deadlineAt, fetchTimeoutMs = FETCH_TIMEOUT_MS) {
+  return Math.min(fetchTimeoutMs, deadlineAt - Date.now());
 }
 
-async function nwsHourly(latNum, lngNum, deadlineAt) {
-  if (nwsTimeout(deadlineAt) <= 0) return null;
-  const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup', nwsTimeout(deadlineAt));
+async function nwsHourly(latNum, lngNum, deadlineAt, fetchTimeoutMs = FETCH_TIMEOUT_MS) {
+  const left = () => nwsTimeout(deadlineAt, fetchTimeoutMs);
+  if (left() <= 0) return null;
+  const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup', left());
   const hourlyUrl = points?.properties?.forecastHourly;
-  if (!hourlyUrl || nwsTimeout(deadlineAt) <= 0) return null;
+  if (!hourlyUrl || left() <= 0) return null;
 
-  const forecast = await fetchJson(hourlyUrl, 'hourly forecast', nwsTimeout(deadlineAt));
+  const forecast = await fetchJson(hourlyUrl, 'hourly forecast', left());
   const periods = forecast?.properties?.periods;
   if (!Array.isArray(periods)) return null;
 

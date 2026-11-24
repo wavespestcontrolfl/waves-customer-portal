@@ -76,6 +76,23 @@ describe('rainClassOf and decideCampaign', () => {
 });
 
 describe('forecastDay', () => {
+  test('an area NWS does not answer is asked once more, with the long wait; a second miss stays unread', async () => {
+    const calls = [];
+    const flaky = jest.fn(async (lat, lng, opts) => {
+      calls.push(opts);
+      return calls.length <= 2 ? null : hours('2026-11-25', 0); // the first two reads fail, then NWS answers
+    });
+    const out = await rainMode.forecastDay('2026-11-25', { read: flaky });
+    expect(calls.every((o) => o && o.fetchTimeoutMs === 10000)).toBe(true);
+    expect(flaky.mock.calls.length).toBe(8); // 6 areas, 2 of them asked twice
+    expect(out.unread).toEqual([]);
+
+    const never = jest.fn(async () => null);
+    const none = await rainMode.forecastDay('2026-11-25', { read: never });
+    expect(never.mock.calls.length).toBe(12);
+    expect(none.unread.length).toBe(6);
+  });
+
   test('an area is wet at 4 work hours at 70%+, not at 3 or at 69%', async () => {
     expect(rainMode.countWetHours(hours('2026-11-25', 4), '2026-11-25').wet).toBe(4);
     expect(rainMode.countWetHours(hours('2026-11-25', 9, 69), '2026-11-25').wet).toBe(0);
