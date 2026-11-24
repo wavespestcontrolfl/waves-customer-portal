@@ -220,6 +220,8 @@ const DEFAULTS = Object.freeze({
   LAWN_CHALLENGE: 'claude-opus-4-8',
   // Live-call upset-caller check (owner 2026-11-16 "use haiku"): a tiny classifier read, Haiku 5.5.
   LIVE_CALL: 'claude-haiku-5-5',
+  // SiteOne deals bell end-date read (owner 2026-11-19 "B"): one small extraction per deal email, Haiku 5.5.
+  DEAL_END_DATE: 'claude-haiku-5-5',
   CALL_RESEARCH_ANTHROPIC: 'claude-opus-4-8',
   CALL_EXTRACTION_ANTHROPIC: 'claude-opus-4-8',
   VOICE_JUDGE: 'claude-opus-4-8',
@@ -243,6 +245,10 @@ const DEFAULTS = Object.freeze({
   // since that day) ran past its 5 s share on 2 of 2 production voice fills,
   // where Luna had answered 22 of 22 at about 2.3 s.
   OPENAI_FAST_INTERACTIVE: 'gpt-5.6-luna',
+  // Speech-to-speech model for the Sandy GPT-Live trial on the sandbox test number
+  // (GATE_VOICE_GPT_LIVE_TEST, owner 2026-11-19). Its backend reasoning model is
+  // OPENAI_FAST_INTERACTIVE above. Override: MODEL_OPENAI_VOICE_LIVE.
+  OPENAI_VOICE_LIVE: 'gpt-live-1.1',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
   OPENAI_FRONTIER: 'gpt-6-astra',
   OPENAI_ESTIMATE_VISION: 'gpt-6-sol',
@@ -359,6 +365,11 @@ const LAWN_CHALLENGE = process.env.MODEL_LAWN_CHALLENGE || process.env.LAWN_CHAL
 // the owner chose Haiku 5.5 for it (2026-11-16). Override via MODEL_LIVE_CALL.
 const LIVE_CALL = process.env.MODEL_LIVE_CALL || DEFAULTS.LIVE_CALL;
 
+// SiteOne deals bell end-date read (services/procurement/siteone-deal-end-date.js, GATE_SITEONE_DEAL_AI_END_DATE).
+// Pinned here, not on a tier: the owner chose Haiku 5.5 for it on the 2026-11-19 scope page (FAST is Sonnet 5,
+// about 19 times the price in the trial). Override via MODEL_DEAL_END_DATE.
+const DEAL_END_DATE = process.env.MODEL_DEAL_END_DATE || DEFAULTS.DEAL_END_DATE;
+
 // Call-research miner's Anthropic leg (fallback by default). Pinned here per
 // the registry convention rather than riding FLAGSHIP: extraction-model
 // changes must be deliberate (they mix corpus provenance without a
@@ -405,6 +416,7 @@ const OPENAI_BALANCED      = process.env.MODEL_OPENAI_BALANCED
 const OPENAI_FAST          = process.env.MODEL_OPENAI_FAST          || DEFAULTS.OPENAI_FAST;
 // Never derived from OPENAI_FAST: see DEFAULTS.OPENAI_FAST_INTERACTIVE.
 const OPENAI_FAST_INTERACTIVE = process.env.MODEL_OPENAI_FAST_INTERACTIVE || DEFAULTS.OPENAI_FAST_INTERACTIVE;
+const OPENAI_VOICE_LIVE = process.env.MODEL_OPENAI_VOICE_LIVE || DEFAULTS.OPENAI_VOICE_LIVE;
 // Backwards-compatible export for older callers/env configuration. New routes
 // should select BALANCED or FAST explicitly instead of treating one model as
 // universally "best".
@@ -903,6 +915,7 @@ module.exports = {
   VISION,
   LAWN_CHALLENGE,
   LIVE_CALL,
+  DEAL_END_DATE,
   CALL_RESEARCH_ANTHROPIC,
   CALL_EXTRACTION_ANTHROPIC,
   VOICE_JUDGE,
@@ -916,6 +929,7 @@ module.exports = {
   OPENAI_BALANCED,
   OPENAI_FAST,
   OPENAI_FAST_INTERACTIVE,
+  OPENAI_VOICE_LIVE,
   OPENAI_REPORT_WRITER,
   OPENAI_FRONTIER,
   OPENAI_ESTIMATE_VISION,

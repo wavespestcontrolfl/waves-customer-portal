@@ -56,7 +56,7 @@ function makeRequest({ reportFlow = false, asks = { enabled: true, lane: 'pest',
     calls.push({ path, body: options?.body ? JSON.parse(options.body) : null });
     const bare = path.split('?')[0];
     if (bare.endsWith('/pest-recap/context')) {
-      return { ok: true, eligible: true, ...(reportFlow ? { reportFlow: true } : {}), service: VISIT, products: CATALOG, existingRecord: null };
+      return { ok: true, eligible: true, taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 }, ...(reportFlow ? { reportFlow: true } : {}), service: VISIT, products: CATALOG, existingRecord: null };
     }
     if (bare.endsWith('/reservice-asks')) {
       askReads += 1;
@@ -177,7 +177,7 @@ describe('the report flow', () => {
   const FLAGGED = { ...REPORT_SERVICE, reserviceAsksEnabled: true };
   async function openReport(request, service = FLAGGED) {
     render(<FastCompleteSheet service={service} request={request} onClose={() => {}} onCompleted={() => {}} />);
-    await screen.findByText(/Taurus SC 4 fl oz/);
+    await screen.findByText(/Taurus SC 1.6 fl oz/);
   }
   async function generate() {
     fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Ghost ants on the counter, light. Baited the counter edge.' } });

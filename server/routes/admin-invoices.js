@@ -1669,9 +1669,10 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
         // The same paid-closeout retry as the single resend below (GitHub r7
         // P2 #4127): a payment-triggered closeout that committed but left its
         // post-commit work pending is finished here too, ahead of both legs.
+        // GATE_REPORT_AFTER_PAY: like the single resend, it records no hold.
         {
           const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
-          await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null });
+          await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null, recordHold: false });
         }
 
         emailRes = (await sendReceiptEmail(invoiceId).catch((err) => ({ ok: false, error: err.message }))) || null;

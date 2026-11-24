@@ -1,5 +1,5 @@
 /**
- * normalizeSpokenMoney (GATE_DICTATION_MONEY_NORMALIZE): dictated dollar amounts come out right, only
+ * normalizeSpokenMoney: dictated dollar amounts come out right, only
  * where a money cue is next to the number, and nothing else is touched. The table is the contract:
  * every row is a thing a staff mic hears; "same" means the text must come back unchanged.
  */

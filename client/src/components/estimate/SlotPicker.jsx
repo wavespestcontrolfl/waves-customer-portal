@@ -52,6 +52,15 @@ async function bookingLimitFrom(res) {
 }
 
 function PickedDateError({ error, onRetry }) {
+  if (error.firstDate) {
+    const firstDay = new Date(`${error.firstDate}T12:00:00Z`)
+      .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+    return (
+      <div role="alert" style={{ fontSize: 16, color: W.textBody, marginBottom: 12 }}>
+        Your next visit can be on or after {firstDay}. Pick that date or a later one.
+      </div>
+    );
+  }
   if (error.lastDate) {
     const lastDay = new Date(`${error.lastDate}T12:00:00Z`)
       .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -126,6 +135,12 @@ function NoTimeSoonNote({ blocked, searching, answer, slots }) {
 
 // The review shape the slot reads answer for an estimate parked for the office (B18).
 const isContactReview = (body) => body?.reviewBeforeBooking === true && body?.reason === 'contact_review';
+// A response body as JSON, or {} when it has none.
+async function readJsonBody(res) {
+  try { return (await res.json()) || {}; } catch { return {}; }
+}
+// The main list's answer when the page took its refusal (onRefusal): nothing to show here.
+const PAGE_TOOK_REFUSAL = Symbol('page took the refusal');
 
 export default function SlotPicker({
   website = false,
@@ -149,10 +164,21 @@ export default function SlotPicker({
   // B18: the server parked this estimate for the office - its slot reads answer an empty review shape
   // (reviewBeforeBooking + reason 'contact_review'). The page owns the transition to its review state.
   onContactReview = null,
+  // A 409 the page owns (its refused plan-quote banner): every slot read hands the 409 body up first, and shows
+  // nothing more when the page answers true.
+  onRefusal = null,
+  // A plan offer's quote books no visit before its own first day (YYYY-MM-DD), weeks out by design. The date
+  // box starts there, and the "nothing in the next 7 days, call for a sooner visit" line stays off: it would
+  // show on every such quote and offer a visit the quote does not sell.
+  firstVisitFrom = null,
 }) {
   // The page's transition is async: its rejection must never surface as an unhandled one from a slot read.
   const reportContactReview = (body) => {
     try { Promise.resolve(onContactReview?.(body)).catch(() => {}); } catch { /* the page owns the transition */ }
+  };
+  // Never throws into a slot read.
+  const pageTookRefusal = (body) => {
+    try { return onRefusal?.(409, body) === true; } catch { return false; }
   };
   const [data, setData] = useState(null);
   // Report the first open slot date up (hero {date} token).
@@ -214,6 +240,8 @@ export default function SlotPicker({
     pickedDate,
     isStale: (slot) => glass && glassSlotIsStale(slot),
     formatTime: (slot) => String(formatSlotDate(slot.date, slot.windowStart).window).split('–')[0],
+    // Its reads hit the same slot route, so a 409 the page owns goes up from them too (codex pre-push P1).
+    onRefusal: (_status, body) => pageTookRefusal(body),
   });
 
   const selectSlot = (slot) => {
@@ -284,9 +312,17 @@ export default function SlotPicker({
     }
     const query = params.toString();
     fetch(`${API_BASE}/public/estimates/${token}/available-slots${query ? `?${query}` : ''}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('slot fetch failed'))))
+      .then(async (r) => {
+        if (r.ok) return r.json();
+        if (r.status === 409) {
+          const body = await readJsonBody(r);
+          if (!cancelled && pageTookRefusal(body)) return PAGE_TOOK_REFUSAL;
+        }
+        throw new Error('slot fetch failed');
+      })
       .then((body) => {
         if (cancelled) return;
+        if (body === PAGE_TOOK_REFUSAL) { setLoading(false); return; }
         if (isContactReview(body)) { setLoading(false); reportContactReview(body); return; }
         setData(body);
         setLoading(false);
@@ -302,7 +338,8 @@ export default function SlotPicker({
   // ── custom date/time finder ──
   const pad2 = (n) => String(n).padStart(2, '0');
   const toYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-  const browseMin = toYmd(new Date());
+  const browseToday = toYmd(new Date());
+  const browseMin = firstVisitFrom && firstVisitFrom > browseToday ? firstVisitFrom : browseToday;
   const browse = (() => {
     // Mirror of the server's seasonalMaxHorizonDays (codex r19 P2): a
     // seasonal (Feb–Oct) mosquito selection in the Nov–Jan gap may browse
@@ -368,7 +405,10 @@ export default function SlotPicker({
       body: JSON.stringify({ query, serviceMode, selectedFrequency, ...(serviceCadences ? { serviceCadences } : {}) }),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || 'search failed');
+    if (!res.ok) {
+      if (res.status === 409 && pageTookRefusal(body)) return { summary: null };
+      throw new Error(body.error || 'search failed');
+    }
     if (isContactReview(body)) { reportContactReview(body); return { summary: null }; }
     if (glass) body.summary = glassRewriteSlotSummary(body.summary, query);
     latestPickedRequestRef.current += 1;
@@ -406,6 +446,12 @@ export default function SlotPicker({
       setPickedLoading(false);
       return;
     }
+    // A typed date before a plan offer's first visit day never reaches the slots API (it has no time to offer).
+    if (firstVisitFrom && date < browseMin) {
+      setPickedLoading(false);
+      setPickedError({ firstDate: browseMin });
+      return;
+    }
     // A typed date past the box's max never reaches the slots API (it answers 400).
     if (date > browseMax) {
       setPickedLoading(false);
@@ -417,7 +463,11 @@ export default function SlotPicker({
       const p = freqParams();
       p.set('date', date);
       const res = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
-      if (!res.ok) throw Object.assign(new Error('slot fetch failed'), { limit: await bookingLimitFrom(res) });
+      if (!res.ok) {
+        // bookingLimitFrom reads only a 400's body.
+        if (res.status === 409 && pageTookRefusal(await readJsonBody(res))) return;
+        throw Object.assign(new Error('slot fetch failed'), { limit: await bookingLimitFrom(res) });
+      }
       const body = await res.json();
       if (latestPickedRequestRef.current !== requestId) return;
       if (isContactReview(body)) { reportContactReview(body); return; }
@@ -466,7 +516,7 @@ export default function SlotPicker({
   const picker = (
     <>
       {view.notice ? <div style={{ fontSize: 14, color: W.textBody, marginBottom: 12 }}>{view.notice}</div> : null}
-      <NoTimeSoonNote blocked={blocked} searching={!!activePayload} answer={data} slots={shownSlots} />
+      <NoTimeSoonNote blocked={blocked || !!firstVisitFrom} searching={!!activePayload} answer={data} slots={shownSlots} />
       <SchedulePicker
         frame="inner"
         availability={availability}

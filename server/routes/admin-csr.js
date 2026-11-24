@@ -21,8 +21,13 @@ router.post('/score', async (req, res, next) => {
 // GET /api/admin/csr/overview?days=30 — team overview
 router.get('/overview', async (req, res, next) => {
   try {
-    const result = await CSRCoach.getTeamOverview(parseInt(req.query.days || 30));
-    res.json(result);
+    // The week's new-customer call outcomes ride along (counts only; fail-soft, a failed read gives null). The
+    // leaderboard reads getTeamOverview alone, so it never runs that call_log aggregate.
+    const [result, weeklyCallOutcomes] = await Promise.all([
+      CSRCoach.getTeamOverview(parseInt(req.query.days || 30)),
+      CSRCoach.loadWeeklyCallOutcomesFailSoft(),
+    ]);
+    res.json({ weeklyCallOutcomes, ...result });
   } catch (err) { next(err); }
 });
 

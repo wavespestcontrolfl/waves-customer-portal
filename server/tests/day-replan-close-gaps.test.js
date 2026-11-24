@@ -199,7 +199,8 @@ describe('S1 replay of a new booking', () => {
     expect(replay(groups, groups[1]).s1.start).toBe('09:00');
     // With it, the van leaves x after the block, so a 9 AM job arrives after noon and its promise breaks.
     const out = replay(groups, groups[1], { blocks });
-    expect(out.s1.start).toBe('12:00');
+    // Noon is out too: the van leaves the block at noon and still owes the drive clock's per-leg overhead.
+    expect(out.s1.start).toBe('13:00');
   });
 
   test('P1: a planned day a schedule block pushes past a promise is not kept', () => {

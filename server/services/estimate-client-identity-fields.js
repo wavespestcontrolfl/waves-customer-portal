@@ -18,12 +18,16 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'treeShrubPricingKnobs',
   'termitePricingKnobs',
   'mistingPricingKnobs',
+  'preSlabTermiticidePricingKnobs',
+  'trenchingTermiticidePricingKnobs',
   'areaAddOnPricingKnobs',
   'palmAnnualRounding',
   'commercialFloorsArmedServices',
   'commercialFloorsArmed',
   'rodentBaitLegacyReplay',
   'rodentWaveguardPostureReplay',
+  'wholeHomeSealReplay',
+  'roofStyleReplay',
   'catalogPricing',
   // The GATE_LAWN_V13 bahia review exemption: a stored estimate replayed as sold
   // (savedEstimateReplay), minus the service lines that same replay ADDS

@@ -108,9 +108,11 @@ beforeEach(() => {
   // tech-day advisory fence (tech-day-lock.js). Delegate trx → db so each
   // test's db.mockImplementation keeps serving the same query sequence; the
   // fence probes ride trx.raw.
+  // Each stop's reschedule_log row is written inside this transaction under a savepoint (trx.transaction).
   db.transaction = jest.fn(async (cb) => {
     const trx = (table) => db(table);
     trx.raw = (...args) => db.raw(...args);
+    trx.transaction = async (inner) => inner(trx);
     return cb(trx);
   });
   // Default to the real ET comparison so future-date tests resolve to false;
@@ -680,10 +682,9 @@ describe('move_stops_to_day route check', () => {
 });
 
 // GATE_DAY_ONLY_PROMISE part B3: the office's "customer asked for this time" rides each moved stop's OWN UPDATE (inside the move's
-// transaction), never a write after the commit, and (gate on) the stop's reschedule_log row is written in the SAME transaction so the
-// two share now() and the intent reads as current. Gate off: the UPDATE carries neither column and the row is appended after the commit.
+// transaction), never a write after the commit, and the stop's reschedule_log row is written in the SAME transaction so the
+// two share now() and the intent reads as current.
 describe('move_stops_to_day: the intent is written by the move itself', () => {
-  const OLD_GATE = process.env.GATE_DAY_ONLY_PROMISE;
   let inTrx;
   let logAppends;
   let savepoints;
@@ -700,7 +701,6 @@ describe('move_stops_to_day: the intent is written by the move itself', () => {
       try { return await cb(trx); } finally { inTrx = false; }
     });
   });
-  afterEach(() => { if (OLD_GATE === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD_GATE; });
 
   async function confirmedMove(input, { failLogInsert = false } = {}) {
     const listChain = chain({ select: jest.fn().mockResolvedValue([stop('svc-ok', 'confirmed')]) });
@@ -722,16 +722,14 @@ describe('move_stops_to_day: the intent is written by the move itself', () => {
     return { result, payload: update.update.mock.calls[0][0] };
   }
 
-  test('gate on: true when the operator says the customer asked for the time, false (day only) otherwise, with the database clock', async () => {
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+  test('true when the operator says the customer asked for the time, false (day only) otherwise, with the database clock', async () => {
     const asked = await confirmedMove({ customer_asked_time: true });
     expect(asked.result).toMatchObject({ success: true, moved_count: 1 });
     expect(asked.payload).toMatchObject({ scheduled_date: '2099-01-15', customer_asked_time: true, customer_asked_time_at: { sql: 'now()' } });
     expect((await confirmedMove({})).payload).toMatchObject({ customer_asked_time: false, customer_asked_time_at: { sql: 'now()' } });
   });
 
-  test('gate on: the stop\'s reschedule_log row is written INSIDE the batch transaction (under a savepoint), so it shares the intent\'s now()', async () => {
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+  test('the stop\'s reschedule_log row is written INSIDE the batch transaction (under a savepoint), so it shares the intent\'s now()', async () => {
     const { result } = await confirmedMove({ customer_asked_time: true });
     expect(logAppends).toHaveLength(1);
     expect(logAppends[0]).toMatchObject({ inTrx: true, row: { scheduled_service_id: 'svc-ok', new_date: '2099-01-15', initiated_by: 'admin_ib' } });
@@ -739,28 +737,16 @@ describe('move_stops_to_day: the intent is written by the move itself', () => {
     expect(result.warning || '').not.toMatch(/missing their reschedule audit entry/);
   });
 
-  test('gate on: a failed in-transaction append leaves the batch standing and is reported once (no late retry that would age the intent)', async () => {
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+  test('a failed in-transaction append leaves the batch standing and is reported once (no late retry that would age the intent)', async () => {
     const { result } = await confirmedMove({ customer_asked_time: true }, { failLogInsert: true });
     expect(result).toMatchObject({ success: true, moved_count: 1 });
     expect(logAppends).toHaveLength(1);
     expect(result.warning).toMatch(/1 moved stop\(s\) are missing their reschedule audit entry/);
   });
 
-  test('gate off: neither column on the UPDATE, and the row is appended after the commit exactly as before (no savepoint)', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    const { payload } = await confirmedMove({ customer_asked_time: true });
-    expect(payload).not.toHaveProperty('customer_asked_time');
-    expect(payload).not.toHaveProperty('customer_asked_time_at');
-    expect(logAppends).toHaveLength(1);
-    expect(logAppends[0].inTrx).toBe(false);
-    expect(savepoints).toBe(0);
-  });
-
   const { currentIntent } = require('../services/time-promise');
 
   test('A -> IB move with customer_asked_time true: the intent reads TRUE (log row and intent share the transaction time); a later move makes it stale', async () => {
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
     const { payload } = await confirmedMove({ customer_asked_time: true });
     expect(logAppends[0].inTrx).toBe(true);                    // so its created_at is the transaction's now(), the intent's too
     const visit = { row: {} };
@@ -778,13 +764,9 @@ describe('move_stops_to_day: the intent is written by the move itself', () => {
     expect(read()).toBeNull();
   });
 
-  test('the tool schema declares the box and the proposal shows it (gate on only)', async () => {
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+  test('the tool schema declares the box and the proposal shows it', async () => {
     db.mockImplementation(() => chain({ select: jest.fn().mockResolvedValue([stop('svc-ok', 'confirmed')]) }));
     const proposal = await executeScheduleTool('move_stops_to_day', { service_ids: ['svc-ok'], new_date: '2099-01-15', customer_asked_time: true });
     expect(proposal).toMatchObject({ proposal: true, customer_asked_time: true });
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    db.mockImplementation(() => chain({ select: jest.fn().mockResolvedValue([stop('svc-ok', 'confirmed')]) }));
-    expect(await executeScheduleTool('move_stops_to_day', { service_ids: ['svc-ok'], new_date: '2099-01-15', customer_asked_time: true })).not.toHaveProperty('customer_asked_time');
   });
 });

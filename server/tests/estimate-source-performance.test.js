@@ -161,6 +161,25 @@ describe('sourcePerformance', () => {
     expect(out.sources.find((s) => s.source === 'other')).toBeUndefined();
   });
 
+  test('plan_start mints (portal pricing card) get their own bucket and the same real-delivery rule', async () => {
+    const created = daysAgo(5);
+    mockQueues.estimates = [
+      [
+        // Self-serve card tap: sent + sent_at stamped at mint, nothing delivered.
+        { id: 's1', source: 'plan_start', status: 'viewed', created_at: created, sent_at: created, viewed_at: hoursAfter(created, 0.01), cta_first_delivered_at: null },
+        { id: 's2', source: 'plan_start', status: 'sent', created_at: created, sent_at: hoursAfter(created, 50), cta_first_delivered_at: hoursAfter(created, 20) },
+      ],
+      [], // resolved query
+    ];
+    mockQueues.estimate_learning_events = [[]];
+    const out = await sourcePerformance({ windowDays: 30 });
+    const start = out.sources.find((s) => s.source === 'plan_start');
+    expect(start.drafted).toBe(2);
+    expect(start.sent).toBe(1);
+    expect(start.sendLatencyHoursMedian).toBe(20);
+    expect(out.sources.find((s) => s.source === 'other')).toBeUndefined();
+  });
+
   test('empty window returns an empty source list', async () => {
     mockQueues.estimates = [[], []];
     mockQueues.estimate_learning_events = [[]];

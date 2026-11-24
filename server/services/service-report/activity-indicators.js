@@ -4015,6 +4015,22 @@ function frozenCompanionSnapshots(serviceData) {
     : [];
 }
 
+// A frozen card's four-section body (stamped bodyFormat 'four_section' at
+// completion) shows only while GATE_REPORT_WRITER_RULES is on: with it off
+// (the kill switch) the card keeps its headline and drops that body
+// (Codex #5500). A reconcile confirmation frozen beside that body goes with
+// it, so a dropped card approves no summary copy either. Every reader of the
+// summary rule below sees the cards through it, so none can accept a body
+// the web report has dropped.
+function withoutDarkFourSectionBody(snapshot) {
+  const result = snapshot?.todaysResult;
+  if (!result || result.bodyFormat !== 'four_section' || require('../../config/feature-gates').reportWriterRulesLive()) return snapshot;
+  const {
+    body: _body, bodySource: _bodySource, bodyFormat: _bodyFormat, reconcileConfirmed: _reconcileConfirmed, ...rest
+  } = result;
+  return { ...snapshot, todaysResult: rest };
+}
+
 // The governing typed story's verdict on the body. When a typed story
 // GOVERNS the visit (the primary snapshot, or on companion-only profiles
 // any customer-visible companion snapshot), the body may stand only if that
@@ -4087,15 +4103,23 @@ function trapScreenAcceptsBody({ typedSnapshot, companionSnapshots = [], staffVi
 // (context-aggregator.js customerSafeVisitNotes). A completion-time
 // request-context rejection frozen into service_data refuses it (codex
 // r58); so do the governing typed story and the trapping screens above.
-// report-data passes the snapshots it already normalised (its dark
-// four-section transform); everyone else reads them off service_data.
+// report-data passes the snapshots it already normalised (the dark
+// four-section transform above); everyone else reads them off service_data
+// through the same transform. `ownNote`: the body is the technician's own
+// note (structured_notes.reportNote, technician-report-copy.js).
 function technicianReportDrivesSummary({
-  serviceData = {}, body, staffViewer = false, typedSnapshot, companionSnapshots,
+  serviceData = {}, body, staffViewer = false, typedSnapshot, companionSnapshots, ownNote = false,
 } = {}) {
   const sd = serviceData && typeof serviceData === 'object' ? serviceData : {};
   if (!body || sd.technicianReportBodyRejected) return false;
-  const typed = typedSnapshot === undefined ? frozenTypedSnapshot(sd) : typedSnapshot;
-  const companions = companionSnapshots === undefined ? frozenCompanionSnapshots(sd) : companionSnapshots;
+  const typed = typedSnapshot === undefined ? withoutDarkFourSectionBody(frozenTypedSnapshot(sd)) : typedSnapshot;
+  const companions = companionSnapshots === undefined
+    ? frozenCompanionSnapshots(sd).map(withoutDarkFourSectionBody)
+    : companionSnapshots;
+  // The technician's own note stands only on a visit with no frozen typed
+  // card, primary or companion: no card checked that text against its typed
+  // values (stations, counts, activity), so none may approve it.
+  if (ownNote) return !typed && !companions.length;
   return governingStoryAcceptsBody(typed, companions)
     && trapScreenAcceptsBody({ typedSnapshot: typed, companionSnapshots: companions, staffViewer, body });
 }
@@ -4402,6 +4426,7 @@ module.exports = {
   projectPrimaryApplication,
   SCHEMA_VERSION,
   BANNED_CUSTOMER_COPY,
+  REENTRY_VERB_SRC,
   findBannedCustomerCopy,
   COPY_MAP_VERSION,
   SUMMARY_TEMPLATE_VERSION,
@@ -4426,6 +4451,7 @@ module.exports = {
   typedBodyContradictions,
   typedStoryAcceptsBody,
   technicianReportDrivesSummary,
+  withoutDarkFourSectionBody,
   isInitialRodentTrapSetup,
   setupContradictions,
   countContradictions,

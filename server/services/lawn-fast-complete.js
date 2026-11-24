@@ -547,7 +547,7 @@ function programRateFor(item, programRows) {
   return Number(row.ratePer1000) > 0 && row.rateUnit ? { ratePer1000: Number(row.ratePer1000), rateUnit: row.rateUnit } : {};
 }
 
-// Large patch November cut, GATE_LAWN_RECLAIMED_HALF_N: a nitrogen line the plan sized for a reduced target (or left at its full rate on
+// Large patch November cut and reclaimed water: a nitrogen line the plan sized for a reduced target (or left at its full rate on
 // a reclaimed lawn because it carries the pre-emergent or the winter potash) keeps the plan's note on the sheet (the planned row prints its
 // gateNotes). GATE_LAWN_CHINCH_TETRINO_RATE: the Tetrino line the plan sized at the raised chinch rate keeps its note the same way.
 // GATE_LAWN_DEC_LARGE_PATCH_K: so does the potassium bag the plan swapped in. Only those notes are carried: every other planned row is the
@@ -1087,6 +1087,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     // than a guide that claims a clean "no chinch rows staged".
     // GATE_LAWN_SPOT_TARGET: the context also carries the closed lists of a spot fungicide / insecticide row's target (lawn-spot-target.js).
     ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true, ...require('./lawn-spot-target').contextKey() } : {}),
+    // GATE_LAWN_REC_PREPARE: the sheet may start the lawn recommendation call before the Complete tap (the
+    // prepare-recommendations route). The key exists only while the gate is live, so gate off is byte-identical.
+    ...recPrepareContextKey(),
     // The sheet shows its Wrap-up section (a sheet from before the section was permanent still reads this key).
     wrapUp: true,
     // GATE_ESTIMATE_LAWN_LIMITS: the turf profile lists carpetgrass, so a Celsius WG row on the sheet shows
@@ -1498,6 +1501,35 @@ async function assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer, lockedSvc
   }
 }
 
+// GATE_LAWN_REC_PREPARE (report speed plan step 4, owner 2026-11-19): start the completion's lawn recommendation call
+// before the Complete tap, for the products the sheet is about to record. The answer stays in memory and the completion
+// uses it only when the saved rows match (knowledge-bridge.js prepareAssessmentRecommendations). The checks are the
+// treatment guide's: the visit is one the sheet can complete, and the assessment is this visit's, confirmed and usable
+// for its report. Each product reads as the completion saves a sheet row: the catalog's name and category. A product
+// the completion would refuse (not in the catalog, or inactive) fails the request. Writes nothing and sends nothing.
+const recPrepareContextKey = () => (featureGates.lawnRecPrepareLive() ? { recPrepare: true } : {});
+const MAX_PREPARE_PRODUCTS = 40;
+async function prepareLawnRecommendations({ serviceId, assessmentId, productIds, knex = db }) {
+  if (!featureGates.lawnRecPrepareLive()) return { ok: false, reason: 'disabled' };
+  if (!isUuid(assessmentId)) return { ok: false, reason: 'invalid_assessment' };
+  if (!Array.isArray(productIds) || productIds.length > MAX_PREPARE_PRODUCTS || !productIds.every(isUuid)) return { ok: false, reason: 'invalid_products' };
+  const base = await resolveLawnFastEligibility(serviceId, knex, { withVisitType: false });
+  if (!base.ok) return { ok: false, reason: base.reason };
+  if (base.reason) return { ok: false, reason: 'not_eligible' };
+  const { svc } = base;
+  const assessment = await knex('lawn_assessments').where({ id: assessmentId, service_id: svc.id, customer_id: svc.customer_id }).first();
+  if (!assessment) return { ok: false, reason: 'not_found' };
+  if (assessment.confirmed_by_tech !== true) return { ok: false, reason: 'not_confirmed' };
+  if (!(await assessmentUsableForReport(svc, assessment, knex))) return { ok: false, reason: 'not_usable' };
+  const ids = [...new Set(productIds.map((id) => id.toLowerCase()))];
+  const catalog = ids.length ? await knex('products_catalog').whereIn('id', ids).select('id', 'name', 'category', 'active') : [];
+  // The completion's own two refusals: a product the catalog does not hold, and an inactive one.
+  if (catalog.length !== ids.length || catalog.some((product) => product.active === false)) return { ok: false, reason: 'invalid_products' };
+  const planned = catalog.map((product) => ({ product_name: product.name, product_category: product.category || null }));
+  const { started } = await require('./knowledge-bridge').prepareAssessmentRecommendations(assessment.id, planned);
+  return { ok: true, started };
+}
+
 module.exports = {
   LEGACY_PHOTO_FLOOR,
   isUuid,
@@ -1510,6 +1542,7 @@ module.exports = {
   buildLawnFastContext,
   buildLawnFastWateringPreview,
   buildLawnTreatmentGuide,
+  prepareLawnRecommendations,
   takeAllMappedOn,
   group11PassOver,
   guidedProductIds,

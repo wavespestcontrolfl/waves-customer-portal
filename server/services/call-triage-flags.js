@@ -2,11 +2,12 @@ const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-cor
 const { toE164, isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { sameGmailInbox } = require('../utils/email-equivalence');
-const { isPuntaGordaLocality, isPuntaGordaZip } = require('./excluded-localities');
+const { isExcludedLocality, isExcludedZip } = require('./excluded-localities');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
 // Owner ruling 2026-09-30: DeSoto County (Arcadia) is NOT served; owner ruling
-// 2026-10-22: the city of Punta Gorda (inside Charlotte County) is NOT served
+// 2026-10-22: the city of Punta Gorda (inside Charlotte County) is NOT served, and
+// owner ruling 2026-11-23 holds more places until a second technician is hired
 // (services/excluded-localities.js). The three
 // served counties plus the south-Hillsborough towns (config/locations.js
 // SOUTH_HILLSBOROUGH_CITIES, city-keyed, not county-keyed) are the footprint.
@@ -583,9 +584,10 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     }
     if (addr.county && !isInServiceAreaCounty(addr.county)) {
       flags.push('out_of_service_area');
-    } else if (isPuntaGordaLocality(addr.city) || isPuntaGordaZip(addr.postal_code)) {
-      // Punta Gorda is inside served Charlotte County but is not served
-      // (owner ruling 2026-10-22), so the county check alone passes it.
+    } else if (isExcludedLocality(addr.city) || isExcludedZip(addr.postal_code)) {
+      // Punta Gorda (owner ruling 2026-10-22) and Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, El Jobean,
+      // Charlotte Harbor and Deep Creek (owner ruling 2026-11-23, until a second technician is hired) sit inside served counties,
+      // so the county check alone passes them.
       flags.push('out_of_service_area');
     }
     // Validation was attempted with a real address but the API was unreachable.
@@ -3252,8 +3254,7 @@ function applyEmailDisagreementHold(extracted, dictationEmailPayload) {
 }
 
 /**
- * Spelled letters settle a V1/V2 email disagreement (owner 2026-11-04, "A",
- * GATE_CALL_SPELLED_EMAIL_SETTLES). The hold above exists because neither
+ * Spelled letters settle a V1/V2 email disagreement (owner 2026-11-04, "A"). The hold above exists because neither
  * extractor's guess is trusted over the other. The transcript dictation
  * decoder is a third reading of the letters the caller spelled: when it heard
  * exactly ONE spelling, its own adopt (past its ownership gate) already put

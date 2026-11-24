@@ -26,10 +26,15 @@ import {
   rodentBaitWaveguardFlags,
   termiteBaitSelectionLabel,
   termiteBaitSystemLabel,
+  normalizePreSlabProductKey,
+  normalizeTrenchingProductKey,
+  normalizeTrenchingRate,
+  pickedServiceCanReadTreeDensity,
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
+import { hasIncludedReentryGuarantee } from "@estimate-purchased-warranty";
 import { buildLinePriceOverridesPayload, overridableLines } from "../../lib/linePriceOverrides";
 import "../../styles/estimate-workflow.css";
 import { addressAskNotice, filterAddressAsks } from "../../lib/addressAsks";
@@ -47,6 +52,7 @@ import {
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "../../lib/lookupPrefill";
+import { COMMERCIAL_SUITE_SOURCE_LABELS, sizedSuite } from "../../lib/commercialSuiteSize";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import AreaAddOnsGroup, { PerApplicationPrice } from "../../components/admin/AreaAddOnsGroup";
 import { isFootprintFreeSelection } from "../../lib/estimate-footprint";
@@ -64,6 +70,16 @@ import {
 import { formatCalendarDate, moveEstimateForm } from "../../lib/moveEstimateForm";
 import { MISTING_FORM_DEFAULTS, NO_MISTING, defaultMistingLabel, mistingOption, readMistingAvailability } from "../../lib/mosquitoMisting";
 import MistingLayoutDesigner from "../../components/admin/MistingLayoutDesigner";
+import RoofReadPanel, { roofSpotFrom, roofAddressDoubtful } from "../../components/admin/RoofReadPanel";
+
+// The estimate a roof read belongs to: a draft saved this session, or a reopened estimate only while the form
+// still shows that estimate's saved address (an edited address is a different roof). The panel is keyed on the
+// same value, so it restarts exactly when the estimate it writes to changes.
+export function roofReadEstimateIdFor(savedId, editMode, address) {
+  if (savedId) return savedId;
+  if (editMode?.id && String(editMode.address || "").trim() === String(address || "").trim()) return editMode.id;
+  return null;
+}
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
@@ -85,8 +101,8 @@ const GRASS_CHOICES = [
 const TRENCHING_PRODUCT_OPTIONS = [
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
   { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
-  // bifen_it is the same Talak bottle (owner 2026-10-25), so Talak is listed once.
-  { value: "talstar_p", label: "Talak 7.9 F - Bifenthrin, repellent barrier" },
+  // bifen_it is the same bottle as talstar_p (owner 2026-10-25; LESCO Crosscheck Plus since 2026-11-18), so it is listed once.
+  { value: "talstar_p", label: "Crosscheck Plus - Bifenthrin, repellent barrier" },
 ];
 
 const TRENCHING_PRODUCT_META = {
@@ -99,29 +115,87 @@ const TRENCHING_PRODUCT_META = {
     config: "78 oz @ $95 | 0.8 oz / finished gal standard",
   },
   bifen_it: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
-    config: "96 oz @ $41.57 | 1.0 oz / finished gal standard",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    config: "128 oz @ $30.90 | 1.0 oz / finished gal standard",
   },
   talstar_p: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
-    config: "96 oz @ $41.57 | 1.0 oz / finished gal standard",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    config: "128 oz @ $30.90 | 1.0 oz / finished gal standard",
   },
 };
 
 const PRE_SLAB_PRODUCT_OPTIONS = [
   { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
-  // bifen_it is the same Talak bottle (owner 2026-10-25), so Talak is listed once.
-  { value: "talstar_p", label: "Talak 7.9 F - Bifenthrin, repellent barrier" },
+  // bifen_it is the same bottle as talstar_p (owner 2026-10-25; LESCO Crosscheck Plus since 2026-11-18), so it is listed once.
+  { value: "talstar_p", label: "Crosscheck Plus - Bifenthrin, repellent barrier" },
 ];
 
 // A saved estimate that still carries bifen_it keeps one matching entry, so the select shows the
-// product the estimate prices (Talak) instead of falling back to the first option.
-const LEGACY_BIFEN_OPTION = { value: "bifen_it", label: "Talak 7.9 F - Bifenthrin, repellent barrier (saved as Bifen I/T)" };
+// product the estimate prices (Crosscheck Plus) instead of falling back to the first option.
+const LEGACY_BIFEN_OPTION = { value: "bifen_it", label: "Crosscheck Plus - Bifenthrin, repellent barrier (saved as Bifen I/T)" };
 
 export function termiticideProductOptions(kind, selectedKey) {
   const options = kind === "trenching" ? TRENCHING_PRODUCT_OPTIONS : PRE_SLAB_PRODUCT_OPTIONS;
   return selectedKey === "bifen_it" ? [...options, LEGACY_BIFEN_OPTION] : options;
+}
+
+// The bottle the bifenthrin keys name. Since 2026-11-18 talstar_p and bifen_it are LESCO Crosscheck Plus (was Atticus Talak
+// 7.9 F under the same keys), so every form carries this mark and a saved estimate shows which bottle its label checks were
+// made for. An estimate saved without the mark predates the swap: its bifenthrin label check was made for the earlier bottle,
+// so a reopen clears it and the quote asks for the Crosscheck Plus label again (a saved alias such as "talak" resolves to its key
+// first, as the engine resolves it). Choosing another product also clears its label
+// check (the form's set()), so on a marked form a check is always for the product selected.
+export const BIFENTHRIN_LABEL_BOTTLE = "lesco_crosscheck_plus";
+const BIFENTHRIN_OPTION_KEYS = new Set(["talstar_p", "bifen_it"]);
+// A pre-slab ingredient name names no product: the server takes it only from a legacy payload and otherwise holds the quote for
+// review, so a reopen keeps it as saved (trenching takes ingredient names, and they resolve).
+const PRE_SLAB_INGREDIENT_NAMES = new Set(["bifenthrin", "fipronil"]);
+const productToken = (value) => String(value).trim().toLowerCase().replace(/[\s/-]+/g, "_").replace(/_+/g, "_");
+// Each termiticide product field and the label check made for the product it selects.
+const LABEL_CHECKS = [
+  { productField: "preslabProductKey", checkField: "preslabLabelConfirmed", serviceField: "svcPreslab", name: "pre-slab", resolve: normalizePreSlabProductKey, keepAsSaved: PRE_SLAB_INGREDIENT_NAMES },
+  // The trenching box confirms the label rate and trench depth too ("Label rate and trench depth confirmed").
+  { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", serviceField: "svcTrenching", name: "trenching", resolve: normalizeTrenchingProductKey, alsoConfirms: ["trenchingApplicationRate", "trenchingDepthFt"] },
+];
+const LABEL_CHECK_FOR_FIELD = Object.fromEntries(LABEL_CHECKS.flatMap(({ productField, checkField, alsoConfirms = [] }) =>
+  [productField, ...alsoConfirms].map((field) => [field, checkField])));
+
+// The saved fields a reopen canonicalizes: each product field, and the trenching rate (pre-push audit 31).
+const CANONICAL_FIELDS = [
+  ...LABEL_CHECKS.map(({ productField, resolve, keepAsSaved }) => ({ field: productField, resolve, keepAsSaved })),
+  { field: "trenchingApplicationRate", resolve: normalizeTrenchingRate },
+];
+
+// A saved alias becomes its option value, as the server reads it. A product alias ("talak", "Crosscheck Plus") becomes its option
+// key, so the picker shows the product the engine prices and the label panel shows that product's warning. A rate alias
+// ("high_rate", "0.125%") becomes "standard" or "high", so the picker and the label box show the rate the server prices. A blank or
+// unrecognized value, or a pre-slab ingredient name, is left as saved.
+export function canonicalTermiticideFields(form) {
+  let next = form;
+  for (const { field, resolve, keepAsSaved } of CANONICAL_FIELDS) {
+    const value = form[field];
+    if (typeof value !== "string" || !value.trim() || keepAsSaved?.has(productToken(value))) continue;
+    const key = resolve(value, { fallback: null });
+    if (key && key !== value) next = { ...next, [field]: key };
+  }
+  return next;
+}
+
+// savedInputs = the stored form snapshot as saved; form = the form a reopen restores from it. The form it returns always carries
+// today's bottle mark, so a check ticked from here on counts for the bottle it is ticked for: a saved null or an earlier bottle's
+// mark would otherwise ride along, and the server would not count the operator's new check (pre-push audit 22). A deselected
+// service keeps its fields, so its earlier-bottle check is cleared too, but only a selected service's check is named in
+// `cleared`, which sends the estimate back to Generate: the saved price does not include a deselected service (pre-push audit 29).
+export function clearPriorBottleLabelChecks(savedInputs, form) {
+  const marked = form._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE ? form : { ...form, _bifenthrinLabelBottle: BIFENTHRIN_LABEL_BOTTLE };
+  if (!savedInputs || savedInputs._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE) return { form: marked, cleared: [] };
+  const stale = LABEL_CHECKS.filter(({ productField, checkField, resolve }) =>
+    BIFENTHRIN_OPTION_KEYS.has(resolve(form[productField])) && !!form[checkField]);
+  if (stale.length === 0) return { form: marked, cleared: [] };
+  const next = { ...marked };
+  for (const { checkField } of stale) next[checkField] = false;
+  return { form: next, cleared: stale.filter(({ serviceField }) => !!form[serviceField]).map(({ name }) => name) };
 }
 
 const PRE_SLAB_JOB_CONTEXT_OPTIONS = [
@@ -140,12 +214,12 @@ const PRE_SLAB_PRODUCT_META = {
     config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   bifen_it: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.",
-    config: "96 oz @ $41.57 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Confirm the Crosscheck Plus label supports pre-construction subterranean termite treatment.",
+    config: "128 oz @ $30.90 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   talstar_p: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.",
-    config: "96 oz @ $41.57 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Confirm the Crosscheck Plus label supports pre-construction subterranean termite treatment.",
+    config: "128 oz @ $30.90 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
 };
 
@@ -384,18 +458,11 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
 // Home Sq Ft field when the lookup sized a suite instead of the whole
 // building — where the number came from, and the building total for
 // context. Returns null when the lookup carries no suite-size result.
-// Only two sizing sources exist (a web-search leg is never a size source —
-// AGENTS.md: an LLM proposes intent, it never picks a price/size field).
-const COMMERCIAL_SUITE_SOURCE_LABELS = {
-  listing_verified_text: "a public listing for this suite",
-  license_seats: "state restaurant license",
-  verified: "tech-verified measurement",
-  suite_type_default: "typical size for this business type",
-};
-
+// The source labels live in lib/commercialSuiteSize.js, shared with the
+// property card.
 function commercialSuiteSizeNote(enrichedProfile) {
-  const suite = enrichedProfile?.suiteSize;
-  if (!suite || !(Number(suite.value) > 0)) return null;
+  const suite = sizedSuite(enrichedProfile);
+  if (!suite) return null;
   const sourceLabel = COMMERCIAL_SUITE_SOURCE_LABELS[suite.source] || suite.source;
   const seatsNote = suite.source === "license_seats" && suite.seats != null ? ` (${suite.seats} seats)` : "";
   const buildingNote = Number(enrichedProfile?.suiteBuildingTotalSqFt) > 0
@@ -404,6 +471,21 @@ function commercialSuiteSizeNote(enrichedProfile) {
   const nameNote = suite.businessName ? ` — ${suite.businessName}` : "";
   const linkNote = suite.source === "listing_verified_text" && suite.url ? ` Listing: ${suite.url} — confirm on site.` : "";
   return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}${linkNote}`;
+}
+
+// Read-only roof evidence line (owner 2026-11-19): the county's own roof words
+// and the photo's tile-style read, beside the collapsed "TILE roof" above.
+// Nothing here is priced yet. Returns null when the lookup carries neither.
+// Reads the lookup profile the estimate was built from (engineRequest.profile):
+// the engine's echoed E.property does not carry these fields.
+function roofEvidenceLine(property) {
+  const raw = property?.countyRoofRaw;
+  const county = [raw?.material, raw?.structure].filter(Boolean).join(" ");
+  const style = ["BARREL", "FLAT"].includes(property?.roofTileStyle)
+    ? property.roofTileStyle.toLowerCase()
+    : "";
+  const parts = [county && `Roof: ${county}`, style && `photo: ${style}`].filter(Boolean);
+  return parts.length ? parts.join(" \u00b7 ") : null;
 }
 
 function adminFetch(path, options = {}) {
@@ -827,15 +909,14 @@ const DEAD_ANIMAL_ACCESS_OPTIONS = [
   { value: "in_wall", label: "Inside a wall or ceiling (needs an opening) - custom quote" },
 ];
 const DEAD_ANIMAL_ACCESS_VALUES = DEAD_ANIMAL_ACCESS_OPTIONS.map((o) => o.value).filter(Boolean);
-// The four rodent-guarantee eligibility confirmations. They are per-job
+// The three rodent-guarantee eligibility confirmations (sanitation is not required, owner 2026-11-23). They are per-job
 // affirmations (work actually completed for THIS property), so they must reset
 // on a fresh estimate / customer-or-address change / when the guarantee toggle
 // is turned off — and any change must invalidate a generated estimate, since
-// all four gate whether RODENT_GUARANTEE prices at all.
+// all three gate whether RODENT_GUARANTEE prices at all.
 const RODENT_GUARANTEE_ELIGIBILITY_KEYS = [
   "rgTrappingCompleted",
   "rgExclusionCompleted",
-  "rgSanitationBaseline",
   "rgNoActivityAfterFinalCheck",
 ];
 
@@ -1233,6 +1314,132 @@ function SelectV2({ k, options, id = `estimate-${k}`, ...rest }) {
   return <Select id={id} value={form[k] ?? ""} onChange={(e) => set(k, e.target.value)} {...rest}>
     {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
   </Select>;
+}
+
+// Whole-home rodent seal (GATE_EXCLUSION_WHOLE_HOME): the point types the tech looks at.
+// The keys are saved on the estimate as exclusionChecklist; the counts stay in the count fields.
+const EXCLUSION_CHECKLIST_POINTS = [
+  { key: "roof_returns_joints", label: "Roof returns and joints" },
+  { key: "plumbing_vent_stacks", label: "Plumbing vent stacks" },
+  { key: "ac_line_set_wall_penetrations", label: "AC line set and wall penetrations" },
+  { key: "dryer_bath_kitchen_exhaust_j_vents", label: "Dryer, bath and kitchen exhaust vents and J-vents" },
+  { key: "soffit_gaps_soffit_fascia_joints", label: "Soffit gaps and soffit-to-fascia joints" },
+  { key: "gable_ridge_vents", label: "Gable and ridge vents" },
+  { key: "eave_gaps", label: "Eave gaps" },
+  { key: "garage_door_corners_weather_seal", label: "Garage door corners and weather seal" },
+  { key: "chimney_flue", label: "Chimney or flue" },
+  { key: "other_utility_penetrations", label: "Other utility penetrations" },
+];
+
+// A new estimate never inherits the last customer's seal scope or checked points.
+export function exclusionScopeReset() {
+  return { exclSealScope: "spot", exclusionChecklist: [] };
+}
+
+// A saved Whole home pick cannot be regenerated while the server has not confirmed the gate is on
+// (the read is pending or failed, or the gate is off): the request would silently price a spot seal
+// and drop the included guarantee. Returns the reason shown to staff, or "" when generating is fine.
+export function wholeHomeRegenerateBlock(form, available) {
+  if (!form?.svcExclusion || form.exclSealScope !== "whole_home" || available === true) return "";
+  return "Whole home seal is not confirmed available yet, so this estimate would price as a spot seal. Wait for it to load, or change Seal scope to Spot seal.";
+}
+
+// Roof style (GATE_EXCLUSION_ROOF_STYLE_PRICING): the technician's one-tap answer on site. Nothing tapped = today's price.
+// A new estimate, and a new property or customer, never inherits the last one's pick or eave feet.
+export const ROOF_STYLE_OPTIONS = [
+  { value: "", label: "Not confirmed" },
+  { value: "shingle", label: "Shingle" },
+  { value: "flat_tile", label: "Flat tile" },
+  { value: "barrel_tile", label: "Barrel tile" },
+  { value: "metal", label: "Metal" },
+  { value: "other", label: "Other" },
+];
+export function roofStyleReset() {
+  return { exclRoofStyle: "", exclBarrelEaveFt: "" };
+}
+
+// A saved roof style pick cannot be regenerated while the server has not confirmed the gate is on: the request would
+// drop the pick and price as if nothing was tapped. Returns the reason shown to staff, or "" when generating is fine.
+export function roofStyleRegenerateBlock(form, available) {
+  if (!form?.svcExclusion || !form.exclRoofStyle || available === true) return "";
+  return "Roof style pricing is not confirmed available yet, so this estimate would price without the roof style. Wait for it to load, or set Roof style to Not confirmed.";
+}
+
+// The Roof style choice. The county roof words and the photo read show as a suggestion only; they never set a price.
+// Barrel tile also asks for the eave feet; with none entered the closure line is not priced.
+function ExclusionRoofStyle({ evidence = null, blockedReason = "" }) {
+  const { form } = useContext(FormCtx);
+  const barrel = form.exclRoofStyle === "barrel_tile";
+  const needsFeet = barrel && !(Number(form.exclBarrelEaveFt) > 0);
+  return (
+    <>
+      <Field label="Roof style (confirm on site)" id="estimate-exclRoofStyle" className="mb-4">
+        <SelectV2 k="exclRoofStyle" options={ROOF_STYLE_OPTIONS} />
+      </Field>
+      {evidence && <div className="text-14 text-zinc-600" data-testid="exclusion-roof-suggestion">Suggestion only, not used for the price. {evidence}</div>}
+      {blockedReason && <div className="text-14 text-zinc-600" data-testid="exclusion-roof-style-blocked">{blockedReason}</div>}
+      {form.exclRoofStyle === "flat_tile" || barrel ? (
+        <div className="text-14 text-zinc-600" data-testid="exclusion-tile-note">Tile roofs raise roof/high points by the Settings tile rate.</div>
+      ) : null}
+      {barrel && (
+        <Field label="Eave to close — ft ($12/ft, $395 minimum)" id="estimate-exclBarrelEaveFt" className="mb-4">
+          <InputV2 k="exclBarrelEaveFt" type="number" min="0" />
+        </Field>
+      )}
+      {needsFeet && <div className="text-14 text-zinc-600" data-testid="exclusion-barrel-needs-measurement">The barrel closure needs a measurement. Enter the feet of eave, or no closure line is priced.</div>}
+    </>
+  );
+}
+
+// The included re-entry guarantee a generated whole-home quote carries: its yearly renewal price.
+function wholeHomeGuaranteeRenewal(estimate) {
+  const rows = [...(estimate?.oneTime?.items || []), ...(estimate?.oneTime?.specItems || [])];
+  const row = rows.find((r) => hasIncludedReentryGuarantee(r));
+  return row ? { renewal: Number(row.guaranteeRenewalPrice) || null } : null;
+}
+
+// The Seal scope choice and, for Whole home, the point checklist and the included guarantee note.
+function ExclusionSealScope({ estimate, blockedReason = "", commercial = false }) {
+  const { form, set } = useContext(FormCtx);
+  const picked = Array.isArray(form.exclusionChecklist) ? form.exclusionChecklist : [];
+  const guarantee = form.exclSealScope === "whole_home" ? wholeHomeGuaranteeRenewal(estimate) : null;
+  return (
+    <>
+      <Field label="Seal scope" id="estimate-exclSealScope" className="mb-4">
+        <SelectV2
+          k="exclSealScope"
+          options={[
+            { value: "spot", label: "Spot seal — the active points" },
+            { value: "whole_home", label: commercial ? "Whole home" : "Whole home — every point, 1-year re-entry guarantee included" },
+          ]}
+        />
+      </Field>
+      {blockedReason && <div className="text-14 text-zinc-600" data-testid="exclusion-whole-home-blocked">{blockedReason}</div>}
+      {form.exclSealScope === "whole_home" && (
+        <div data-testid="exclusion-whole-home" className="space-y-2">
+          <p className="text-14 text-zinc-400 font-medium">Check these points (enter the counts below)</p>
+          {EXCLUSION_CHECKLIST_POINTS.map(({ key, label }) => (
+            <Checkbox
+              key={key}
+              id={`estimate-exclusionChecklist-${key}`}
+              label={label}
+              checked={picked.includes(key)}
+              onChange={() => set("exclusionChecklist", picked.includes(key) ? picked.filter((k) => k !== key) : [...picked, key])}
+            />
+          ))}
+          {commercial ? (
+            // The engine sends commercial exclusion to a manual quote: no whole-home price or guarantee to promise.
+            <div className="text-14 text-zinc-600" data-testid="exclusion-commercial-note">Commercial: manual quote</div>
+          ) : (
+            <div className="text-14 text-zinc-600" data-testid="exclusion-guarantee-note">
+              1-year re-entry guarantee included
+              {guarantee?.renewal ? ` — renews at $${guarantee.renewal} a year.` : " — the renewal price shows once the estimate is generated."}
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
 }
 
 function CheckboxV2({ k, label }) {
@@ -1764,6 +1971,9 @@ export default function EstimateToolViewV2({
     exclMeshSoftLF: "0",
     exclMeshConcreteLF: "0",
     exclWaive: "NO",
+    exclSealScope: "spot",
+    exclusionChecklist: [],
+    ...roofStyleReset(),
     rodentTrappingEmergency: false,
     sanitationTier: "standard",
     sanitationArea: "",
@@ -1811,6 +2021,8 @@ export default function EstimateToolViewV2({
     trenchingDepthFt: "0.5",
     trenchingWarrantyTier: "one_year_retreat",
     trenchingLabelConfirmed: false,
+    // The bottle the two label checks above are made for when the key is bifenthrin (clearPriorBottleLabelChecks).
+    _bifenthrinLabelBottle: BIFENTHRIN_LABEL_BOTTLE,
     foamPoints: "5",
     foamRecurringPoints: "5",
     foamRecurringFreq: "quarterly",
@@ -1872,7 +2084,6 @@ export default function EstimateToolViewV2({
     svcRodentGuarantee: false,
     rgTrappingCompleted: false,
     rgExclusionCompleted: false,
-    rgSanitationBaseline: false,
     rgNoActivityAfterFinalCheck: false,
     showOneTimeOption: false,
     billByInvoice: false,
@@ -1887,6 +2098,9 @@ export default function EstimateToolViewV2({
       ...EMPTY_PROPERTY_MEASUREMENTS,
       ...Object.fromEntries(PROPERTY_FORM_FIELDS.map((field) => [field, defaults[field] ?? ""])),
       propertyId: "", _manualFields: [], _unitCountEdited: false,
+      // The seal scope and checked points belong to the property they were picked for.
+      ...exclusionScopeReset(),
+      ...roofStyleReset(),
     };
   }
 
@@ -1925,7 +2139,11 @@ export default function EstimateToolViewV2({
         }
       }
       if (initialAddress && initialAddress !== f.address) Object.assign(next, clearedPropertyFields());
-      else if (prefillIdentityChanged) next.measuredTurfSf = "";
+      else if (prefillIdentityChanged) {
+        // A contact-only change (name, phone, email) keeps the roof style; a different linked customer or lead is a different home.
+        const linkChanged = (initialLeadId && f.leadId !== initialLeadId) || (initialCustomerId && f.customerId !== initialCustomerId);
+        Object.assign(next, { measuredTurfSf: "", ...(linkChanged ? roofStyleReset() : {}) });
+      }
       return next;
     });
   }, [
@@ -2264,11 +2482,15 @@ export default function EstimateToolViewV2({
   // out unchanged).
   function reopenEditSource(d) {
     const restored = formFromEditSource(d);
-    const { form: seeded, cleared } = scrubReopenedEstimateForm(restored, d.engineProfile);
+    const { form: scrubbed, cleared } = scrubReopenedEstimateForm(restored, d.engineProfile);
+    const { form: seeded, cleared: labelChecks } = clearPriorBottleLabelChecks(d.inputs, canonicalTermiticideFields(scrubbed));
     const guessedHomeSize = linesPricedOnGuessedHomeSize(d.result).length > 0;
     const notice = [
       cleared.length > 0
         ? `This estimate was saved before a pricing fix. Removed values the lookup filled in: ${cleared.join(", ")}.`
+        : null,
+      labelChecks.length > 0
+        ? `Its ${labelChecks.join(" and ")} label check was for the earlier bifenthrin bottle. The bottle is now LESCO Crosscheck Plus: confirm its label again.`
         : null,
       // An association aggregate's missing input is the story count, as in
       // the Generate guard (codex r1 P2).
@@ -2509,6 +2731,8 @@ export default function EstimateToolViewV2({
           status: d.status,
           editVersion: d.editVersion,
           customerName: d.customerName || "",
+          // The address the estimate was saved with, for the roof read's estimate link.
+          address: seeded.address || "",
           hasInputs: !!d.inputs,
         });
         setMoveEstimate(d.moveEstimate ? { ...d.moveEstimate, estimateId: d.id } : null);
@@ -2665,6 +2889,9 @@ export default function EstimateToolViewV2({
         ...(key === "trenchingPerimeterLF" ? { _trenchingPerimeterAuto: false } : {}),
         ...(key === "boracareSqft" ? { _boracareSqftAuto: false } : {}),
         ...(key === "preslabSqft" ? { _preslabSqftAuto: false } : {}),
+        // A label check is for what its box confirmed when it was ticked (the product; for trenching also the rate and depth):
+        // changing one clears it.
+        ...(LABEL_CHECK_FOR_FIELD[key] ? { [LABEL_CHECK_FOR_FIELD[key]]: false } : {}),
         // palmCount ONLY: the auto flag tracks the PROPERTY count's
           // provenance — a treatment-count edit says nothing about it, and
           // flipping the flag there would leave a stale property prefill
@@ -2981,6 +3208,9 @@ export default function EstimateToolViewV2({
       ...(dropSearchLead && f.leadId === linkedLead.id ? { leadId: "", leadServiceInterest: "" } : {}),
       customerId: c.id || "",
       propertyId: "",
+      // A different link is a different home: the roof style and eave feet were confirmed for the old one, address or not.
+      // Picking the SAME customer again keeps them.
+      ...((c.id || "") !== f.customerId ? roofStyleReset() : {}),
       ...(adoptAddress
         ? { ...(c.address && c.address !== f.address ? clearedPropertyFields() : {}), address: c.address || f.address }
         : {}),
@@ -3025,6 +3255,8 @@ export default function EstimateToolViewV2({
       leadId: lead.id,
       customerId: "",
       propertyId: "",
+      // The same lead picked again keeps the pick; a different lead, or a lead replacing a customer, is a different home.
+      ...(lead.id !== f.leadId || f.customerId ? roofStyleReset() : {}),
       ...(leadAddress && leadAddress !== f.address ? clearedPropertyFields() : {}),
       address: leadAddress || f.address,
       customerName: name || f.customerName || "",
@@ -3571,6 +3803,14 @@ export default function EstimateToolViewV2({
   // Explicit true only: a 404, a transport failure or an older server keeps the choice
   // hidden rather than offering a service the engine would refuse with a 400.
   const [deadAnimalAvailable, setDeadAnimalAvailable] = useState(false);
+  // Whole-home rodent seal (GATE_EXCLUSION_WHOLE_HOME): explicit true from the rodent_waveguard row read below,
+  // so a 404, a failed read or an older server hides the Seal scope choice and sends nothing new.
+  const [exclusionWholeHomeAvailable, setExclusionWholeHomeAvailable] = useState(false);
+  // Staff roof read (GATE_ROOF_ENTRY_READ): explicit true from the same rodent_waveguard row, so a 404, a failed
+  // read or an older server hides the panel. The epoch restarts the panel on Next estimate.
+  const [roofReadAvailable, setRoofReadAvailable] = useState(false);
+  const [roofReadEpoch, setRoofReadEpoch] = useState(0);
+  const [exclusionRoofStyleAvailable, setExclusionRoofStyleAvailable] = useState(false);
   // Bahia as a NEW lawn plan (GATE_LAWN_V13 has no bahia program, so the server parks it for review).
   // Only an explicit false hides the option; an older server or a failed read keeps it, and a
   // reopened estimate that already carries bahia still shows it.
@@ -3679,7 +3919,7 @@ export default function EstimateToolViewV2({
         if (r.status === 404) return { ok: true, data: null };
         if (!r.ok) return { ok: false, data: null };
         const body = await r.json();
-        return { ok: true, data: body?.data ?? null };
+        return { ok: true, data: body?.data ?? null, wholeHome: body?.exclusionWholeHome === true, roofRead: body?.roofEntryRead === true, roofStyle: body?.exclusionRoofStyle === true };
       } catch {
         return { ok: false, data: null };
       }
@@ -3691,6 +3931,9 @@ export default function EstimateToolViewV2({
         fetchRow("rodent_waveguard"),
       ]);
       if (!active) return;
+      setExclusionWholeHomeAvailable(waveguardRow.wholeHome === true);
+      setRoofReadAvailable(waveguardRow.roofRead === true);
+      setExclusionRoofStyleAvailable(waveguardRow.roofStyle === true);
       // ALL THREE rows or nothing (codex #3591 r55 local P1): applying a
       // partial set leaves module defaults beside live values — the sidebar
       // could advertise a Silver/discounted posture the server's disabled
@@ -3898,8 +4141,13 @@ export default function EstimateToolViewV2({
     setForm((f) => ({
       ...f,
       ...clearedPropertyFields(),
-      // Same address, same service property: the link stays.
+      // Same address, same service property: the link and the seal scope stay.
       propertyId: f.propertyId,
+      exclSealScope: f.exclSealScope,
+      exclusionChecklist: f.exclusionChecklist,
+      // The roof style stays; the eave feet were measured for the old scope and must be measured again
+      // (clearedPropertyFields above already emptied them).
+      exclRoofStyle: f.exclRoofStyle,
       _homeSqFtEdited: false,
       _lotSqFtEdited: false,
       _storiesEdited: false,
@@ -4000,6 +4248,9 @@ export default function EstimateToolViewV2({
         campusParcel: data.meta?.campusParcel || null,
         // This lookup's own cage era: a two-size lookup's size is never reclassified.
         poolCageTwoSizes: data.meta?.poolCageTwoSizes === true,
+        // The home's map point and county, for the staff roof read.
+        roofSpot: roofSpotFrom(data),
+        roofAddressDoubt: roofAddressDoubtful(data),
       });
       setCageTwoSizes(data.meta?.poolCageTwoSizes === true);
       setVerifySaveState({});
@@ -4301,6 +4552,12 @@ export default function EstimateToolViewV2({
     if (generating) return null;
     // An open scope question blocks pricing (the server refuses it too).
     if (scopeQuestion) return null;
+    const wholeHomeBlock = wholeHomeRegenerateBlock(form, exclusionWholeHomeAvailable)
+      || roofStyleRegenerateBlock(form, exclusionRoofStyleAvailable);
+    if (wholeHomeBlock) {
+      alert(wholeHomeBlock);
+      return null;
+    }
     // Snapshot the invalidation version. Inputs stay editable while the
     // calculate call is in flight, so an edit that lands mid-flight must make
     // this generate discard its result (it was priced from pre-edit inputs).
@@ -4607,6 +4864,9 @@ export default function EstimateToolViewV2({
         preslabSqft,
         preslabProductKey: form.preslabProductKey || "termidor_sc",
         preslabLabelConfirmed: !!form.preslabLabelConfirmed,
+        // The bottle the form's label checks were made for: the server counts a bifenthrin check only with it, so a request saved
+        // before the Crosscheck Plus swap reprices with its label review back on.
+        bifenthrinLabelBottle: form._bifenthrinLabelBottle,
         preslabWarranty: form.preslabWarranty || "BASIC",
         preslabVolume: form.preslabVolume || "NONE",
         preslabJobContext: resolvePreSlabJobContextForForm(form),
@@ -4630,9 +4890,19 @@ export default function EstimateToolViewV2({
         exclMeshSoftLF: parseInt(form.exclMeshSoftLF, 10) || 0,
         exclMeshConcreteLF: parseInt(form.exclMeshConcreteLF, 10) || 0,
         exclWaiveInspection: form.exclWaive === "YES",
+        // Only for a Whole home pick while the gate is on: every other request is byte-for-byte what it was.
+        ...(exclusionWholeHomeAvailable && form.exclSealScope === "whole_home"
+          ? { exclSealScope: "whole_home", exclusionChecklist: Array.isArray(form.exclusionChecklist) ? form.exclusionChecklist : [] }
+          : {}),
+        // Only for a tapped roof style while the gate is on; nothing tapped is byte-for-byte what it was. Feet only with Barrel tile.
+        ...(exclusionRoofStyleAvailable && form.exclRoofStyle
+          ? {
+            exclRoofStyle: form.exclRoofStyle,
+            ...(form.exclRoofStyle === "barrel_tile" ? { exclBarrelEaveFt: parseFloat(form.exclBarrelEaveFt) || 0 } : {}),
+          }
+          : {}),
         rgTrappingCompleted: !!form.rgTrappingCompleted,
         rgExclusionCompleted: !!form.rgExclusionCompleted,
-        rgSanitationBaseline: !!form.rgSanitationBaseline,
         rgNoActivityAfterFinalCheck: !!form.rgNoActivityAfterFinalCheck,
         rodentTrappingPlan: "standard",
         rodentTrappingEmergency: !!form.rodentTrappingEmergency,
@@ -5137,7 +5407,8 @@ export default function EstimateToolViewV2({
         setAddressUnverified({ source: 'county_roll', reason: 'County records could not confirm this house number. Correct the address on the estimate (or confirm it) before sending — the customer link stays off until then.' });
         setConfirmAddress(false);
       }
-      setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", hasInputs: true });
+      // The address this save persisted, so the roof read stays linked to this estimate through non-address edits.
+      setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", address: String(form.address || "").trim(), hasInputs: true });
       if (!isEditRevision && moveRequestId) {
         const savedMove = moveSeed.data?.move || {};
         setMoveEstimate({ estimateId: id, moveId: moveRequestId, moveOutDate: savedMove.moveOutDate || null, moveInDate: savedMove.moveInDate || null });
@@ -5193,6 +5464,8 @@ export default function EstimateToolViewV2({
     setGroupAnchorId(null);
     // The previous estimate's saved cage size no longer applies to the next estimate.
     setLoadedCageSize("");
+    // The last roof read belongs to the last estimate.
+    setRoofReadEpoch((n) => n + 1);
     setForm((f) => ({
       ...f,
       ...clearedPropertyFields(),
@@ -6066,6 +6339,20 @@ export default function EstimateToolViewV2({
                 </Button>{" "}
               </div>{" "}
               <StatusLine status={satelliteStatus} />
+              {/* Above the property card: for a business inside a shared
+                  parcel the card below is all "Not found" until this is
+                  answered, and read alone it looks like a failed lookup
+                  (owner report 2026-11-19). */}
+              <ScopeQuestionPrompt
+                profile={enrichedProfile}
+                question={scopeQuestion}
+                // Only the answer the server applied reads as chosen; while
+                // the question is open none stands.
+                answer={!scopeQuestion ? (enrichedProfile?.occupancyAnswer || "") : ""}
+                notice={scopeQuestion === SCOPE_STALE_NOTICE ? SCOPE_STALE_NOTICE : ""}
+                busy={lookupStatus.type === "loading"}
+                onAnswer={answerScope}
+              />
               {enrichedProfile && (
                 <PropertyLookupResult
                   profile={enrichedProfile}
@@ -6078,16 +6365,6 @@ export default function EstimateToolViewV2({
                   verification={verifySaveState}
                 />
               )}
-              <ScopeQuestionPrompt
-                profile={enrichedProfile}
-                question={scopeQuestion}
-                // Only the answer the server applied reads as chosen; while
-                // the question is open none stands.
-                answer={!scopeQuestion ? (enrichedProfile?.occupancyAnswer || "") : ""}
-                notice={scopeQuestion === SCOPE_STALE_NOTICE ? SCOPE_STALE_NOTICE : ""}
-                busy={lookupStatus.type === "loading"}
-                onAnswer={answerScope}
-              />
               {enrichedProfile?.fieldVerifyFlags?.length > 0 && (
                 <div className="mb-2.5 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs">
                   {enrichedProfile.fieldVerifyFlags.map((flag, i) => (
@@ -6748,16 +7025,18 @@ export default function EstimateToolViewV2({
                     ]}
                   />
                 </Field>{" "}
-                <Field label="Tree Density" id="estimate-treeDensity" className="mb-4">
-                  <SelectV2
-                    k="treeDensity"
-                    options={[
-                      { value: "LIGHT", label: "Light" },
-                      { value: "MODERATE", label: "Moderate" },
-                      { value: "HEAVY", label: "Heavy" },
-                    ]}
-                  />
-                </Field>{" "}
+                {pickedServiceCanReadTreeDensity(form) && (
+                  <Field label="Tree Density" id="estimate-treeDensity" className="mb-4">
+                    <SelectV2
+                      k="treeDensity"
+                      options={[
+                        { value: "LIGHT", label: "Light" },
+                        { value: "MODERATE", label: "Moderate" },
+                        { value: "HEAVY", label: "Heavy" },
+                      ]}
+                    />
+                  </Field>
+                )}{" "}
                 <Field label="Complexity" id="estimate-landscapeComplexity" className="mb-4">
                   <SelectV2
                     k="landscapeComplexity"
@@ -7730,13 +8009,16 @@ export default function EstimateToolViewV2({
                           label="Estimate trenching perimeter from footprint"
                         />
                       )}
+                      {/* The box confirms the label rate and trench depth, never a volume: the server alone knows whether its
+                          configured dilution reduces the volume, so its line names the label's conditions and stays in review
+                          (pre-push audit at the second push). */}
                       <CheckboxV2
                         k="trenchingLabelConfirmed"
                         label="Label rate and trench depth confirmed"
                       />
                       <div className="text-14 text-zinc-600 leading-snug mb-1">
                         {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).warning}
-                        {form.trenchingApplicationRate === "high" ? " High rate requires label confirmation." : ""}
+                        {normalizeTrenchingRate(form.trenchingApplicationRate) === "high" ? " High rate requires label confirmation." : ""}
                       </div>
                       <div className="text-14 text-zinc-500 leading-snug">
                         Admin config: {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).config}
@@ -8368,12 +8650,33 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcExclusion" label="Rodent Exclusion Service" />
               {form.svcExclusion && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
+                  {(exclusionWholeHomeAvailable || form.exclSealScope === "whole_home") && (
+                    <ExclusionSealScope estimate={estimate} commercial={commercialDetected} blockedReason={wholeHomeRegenerateBlock(form, exclusionWholeHomeAvailable)} />
+                  )}
+                  {roofReadAvailable && (
+                    <RoofReadPanel
+                      // A new estimate id (the draft was saved) also restarts the panel: a read taken before it
+                      // belongs to the pre-draft context, so staff tap again and get this estimate's own copy.
+                      key={`${roofReadEpoch}|${form.address}|${form.customerId || ""}|${form.leadId || ""}|${form.propertyId || ""}|${roofReadEstimateIdFor(savedId, editMode, form.address) || ""}|${lookupMeta?.roofSpot?.lat ?? ""},${lookupMeta?.roofSpot?.lng ?? ""}`}
+                      spot={lookupMeta?.address === String(form.address || "").trim() ? lookupMeta?.roofSpot || null : null}
+                      address={lookupMeta?.address === String(form.address || "").trim() ? lookupMeta?.address || "" : ""}
+                      addressDoubt={lookupMeta?.address === String(form.address || "").trim() && lookupMeta?.roofAddressDoubt === true}
+                      estimateId={roofReadEstimateIdFor(savedId, editMode, form.address)}
+                      customerId={form.customerId || null}
+                    />
+                  )}
+                  {(exclusionRoofStyleAvailable || form.exclRoofStyle) && (
+                    <ExclusionRoofStyle
+                      evidence={roofEvidenceLine(enrichedProfile) || roofEvidenceLine(estimate?.engineRequest?.profile)}
+                      blockedReason={roofStyleRegenerateBlock(form, exclusionRoofStyleAvailable)}
+                    />
+                  )}
                   <p className="text-14 text-zinc-400 font-medium">Wire Mesh Points</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <Field label="Standard — $75/pt" id="estimate-exclStandardWireMesh" className="mb-4">
                       <InputV2 k="exclStandardWireMesh" type="number" min="0" />
                     </Field>
-                    <Field label="Roof/High — $150/pt" id="estimate-exclAdvancedWireMesh" className="mb-4">
+                    <Field label={["flat_tile", "barrel_tile"].includes(form.exclRoofStyle) ? "Roof/High — tile rate applies" : "Roof/High — $150/pt"} id="estimate-exclAdvancedWireMesh" className="mb-4">
                       <InputV2 k="exclAdvancedWireMesh" type="number" min="0" />
                     </Field>
                   </div>
@@ -8413,14 +8716,13 @@ export default function EstimateToolViewV2({
               {form.svcRodentGuarantee && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <p className="text-14 text-zinc-400 font-medium mb-2">
-                    Guarantee Eligibility — all four required
+                    Guarantee Eligibility — all three required
                   </p>
                   <CheckboxV2 k="rgTrappingCompleted" label="Trapping completed" />
                   <CheckboxV2 k="rgExclusionCompleted" label="Exclusion completed" />
-                  <CheckboxV2 k="rgSanitationBaseline" label="Sanitation completed or photo baseline on file" />
                   <CheckboxV2 k="rgNoActivityAfterFinalCheck" label="No activity after final trap check" />
                   <div className="text-14 text-zinc-600 mt-2">
-                    $199–$299/yr by property tier. 12-month re-entry warranty, renewable annually — free re-service during the term. All four boxes must be confirmed or the guarantee will not be added.
+                    $199–$299/yr by property tier. 12-month re-entry warranty, renewable annually — free re-service during the term. All three boxes must be confirmed or the guarantee will not be added.
                   </div>
                 </div>
               )}
@@ -8961,6 +9263,12 @@ export default function EstimateToolViewV2({
                             {E.property?.constructionMaterial} |{" "}
                             {E.property?.foundationType} foundation |{" "}
                             {E.property?.roofType} roof
+                          </>
+                        )}
+                        {roofEvidenceLine(E.engineRequest?.profile) && (
+                          <>
+                            <br />
+                            {roofEvidenceLine(E.engineRequest?.profile)}
                           </>
                         )}
                         {E.property?.estimatedValue && (

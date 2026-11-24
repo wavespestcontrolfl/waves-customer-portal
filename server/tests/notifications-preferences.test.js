@@ -157,8 +157,7 @@ describe('notification preference updates', () => {
       // deliberate delivery-method selection, Text included.
       service_reminder_72h_channel_explicit: true,
       service_reminder_24h_channel: 'sms',
-      // Explicit-Text markers for the other routed notices (GATE_APP_FIRST_ANY_DEVICE,
-      // owner 2026-11-04): a customer write stamps the marker, Text included.
+      // Explicit-Text markers for the other routed notices (owner 2026-11-04): a customer write stamps the marker, Text included.
       service_reminder_24h_channel_explicit: true,
       en_route_channel: 'email',
       en_route_channel_explicit: true,
@@ -293,7 +292,7 @@ describe('account-level channel routing', () => {
       'service_reminder_72h_channel_explicit',
       'service_reminder_24h_channel',
       // Explicit-Text markers for the routed notices travel with their channel
-      // (GATE_APP_FIRST_ANY_DEVICE); the receipt marker is per charged row.
+      // (app first on any device); the receipt marker is per charged row.
       'service_reminder_24h_channel_explicit',
       'en_route_channel',
       'en_route_channel_explicit',

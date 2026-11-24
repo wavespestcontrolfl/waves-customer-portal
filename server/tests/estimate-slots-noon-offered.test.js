@@ -160,6 +160,39 @@ describe('estimate slots — noon is a normal hour', () => {
       }
     });
 
+    test('a plan offer\'s estimate offers no time before its first visit date, with no move read (owner 2026-11-19)', async () => {
+      const { moveForEstimate } = require('../services/customer-moves');
+      const { findAvailableSlots } = require('../services/scheduling/find-time');
+      const original = findAvailableSlots.getMockImplementation();
+      findAvailableSlots.mockImplementation(async (args) => {
+        const all = await original(args);
+        return { ...all, slots: all.slots.filter((slot) => slot.date >= args.dateFrom && slot.date <= args.dateTo) };
+      });
+      const priorData = ESTIMATE_ROW.estimate_data;
+      const stamped = (firstVisitFrom) => JSON.stringify({ planStart: { offer: { jobId: 'job-1', endsAt: '2027-06-10T12:00:00.000Z', firstVisitFrom } } });
+      try {
+        ESTIMATE_ROW.estimate_data = stamped('2027-05-21');
+        expect(await estimateSlotAvailability.estimateMoveInDate(ESTIMATE_ROW)).toBe('2027-05-21');
+        expect(allOffered(await getAvailableSlots('est-lunch-1', opts))).toEqual([]);
+        ESTIMATE_ROW.estimate_data = stamped('2027-05-20');
+        expect(allOffered(await getAvailableSlots('est-lunch-1', opts)).length).toBeGreaterThan(0);
+        // The rolling window opens on the date, as it does on a move-in date.
+        ESTIMATE_ROW.estimate_data = stamped('2027-05-25');
+        const rolling = allOffered(await getAvailableSlots('est-lunch-1', {}));
+        expect(rolling.length).toBeGreaterThan(0);
+        expect(rolling.every((slot) => slot.date >= '2027-05-25')).toBe(true);
+        // The estimate carries no move, so the lookup of a move never runs for it.
+        expect(moveForEstimate).not.toHaveBeenCalled();
+        // A stamp that does not read (no date) limits nothing.
+        ESTIMATE_ROW.estimate_data = JSON.stringify({ planStart: { offer: { jobId: 'job-1', endsAt: '2027-06-10T12:00:00.000Z' } } });
+        expect(await estimateSlotAvailability.estimateMoveInDate(ESTIMATE_ROW)).toBeNull();
+        expect(allOffered(await getAvailableSlots('est-lunch-1', opts)).length).toBeGreaterThan(0);
+      } finally {
+        ESTIMATE_ROW.estimate_data = priorData;
+        findAvailableSlots.mockImplementation(original);
+      }
+    });
+
     // Codex push-audit P1 on #4663: the cache key includes the
     // booking_config-resolved lunch interval/day-end. The resolved bounds
     // refresh on their own 60s TTL, independent of this 5-min offer cache —

@@ -32,7 +32,7 @@
 const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const logger = require('./logger');
-const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
+const { assertAssignableTechnician, shiftExcluding, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
@@ -773,7 +773,15 @@ function slotDateRefusal(date, todayEt, offerArrivalGrace) {
 // (lockMoveForConversion, the rule every accept runs): a stale move books
 // nothing (the stale-call-link answer). The move-in limit applies while
 // GATE_MOVING_ESTIMATE is on. Returns the error to throw, or null.
+// A plan offer's quote (owner 2026-11-19: the one-time job is the first plan visit) books no slot before
+// its own firstVisitFrom, the stamp on the estimate; that is a plain read of the estimate data.
 async function moveBookingRefusal(conn, estimateData, date) {
+  const offerFrom = require('./plan-offer-estimate').planOfferOf(estimateData)?.firstVisitFrom;
+  if (offerFrom && date < offerFrom) {
+    const err = new Error("slot is before the offer's first visit date");
+    err.code = 'SLOT_UNAVAILABLE';
+    return err;
+  }
   if (!estimateData?.move?.moveId) return null;
   let move = null;
   try {
@@ -875,6 +883,26 @@ function slotTaken(slotId) {
   err.code = 'SLOT_UNAVAILABLE';
   if (slotId) err.slotId = slotId;
   return err;
+}
+
+// Owner rule B per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19; zone-day-funnel.js truckMayTakeDate): may a write
+// that keeps an estimate hold (a re-tap, an extend, an accept) keep technician `techId` on `date`? Another truck may
+// have taken this far-south day while the hold was lapsed, or after it ran out while its writer waited on the date
+// lock. The zone is the hold's own stamp: the zone reserveSlot resolved for the estimate (resolveEstimateZone, the zone
+// the estimate page's list funnels by) and stamped (only reserveSlot writes holds). zone-day-funnel.js zoneOfHoldStamp
+// names the zone from it: a far-south stamp is always checked, also after its zone row was renamed or removed. So the
+// check covers exactly the holds that list funneled, and a refused write's next list no longer offers that truck that
+// day. A hold with no stamp (its estimate in no zone when held) is not checked: its list did not funnel it, and a
+// check would refuse a time that list offers again. true when the rule does not apply, with no read: a hold with no
+// stamp or a stamp outside the far south never reads the zone table (isFunnelZone of the stamp's slug: the lists' and
+// the new hold's own test, funnel gate included).
+async function holdKeepsSouthDay(conn, { stamp, date, techId }) {
+  const funnel = require('./scheduling/zone-day-funnel');
+  const slug = String(stamp || '').trim().toLowerCase();
+  if (techId == null || !funnel.perTruckLive() || !funnel.isFunnelZone({ zone_name: slug })) return true;
+  const zones = await conn('service_zones').select('id', 'cities', 'zone_name');
+  const estimateZone = funnel.zoneOfHoldStamp(zones, slug);
+  return funnel.truckMayTakeDate(conn, { estimateZone, date, technicianId: techId });
 }
 
 // A fresh gate read right before a write. A make-room hold whose gate went off while the locks were waited on is the
@@ -1340,6 +1368,16 @@ async function reserveSlot({
         err.code = 'ESTIMATE_NOT_FOUND';
         throw err;
       }
+      // An archived row takes no hold, whatever its source (GATE_PORTAL_PLAN_START pre-push P1): the
+      // route refuses one before this transaction, but the plan-start and plan-restart mints archive
+      // the quote they replace and release its holds, so a reserve that passed the route and waited on
+      // this row lock would re-create a hold no accept can use, tying up the slot until it expires.
+      // Checked first, with the same generic not-found as a missing row, as the route does.
+      if (estimate.archived_at) {
+        const err = new Error('estimate is archived');
+        err.code = 'ESTIMATE_NOT_FOUND';
+        throw err;
+      }
       // The hold's pin, valid only while the LOCKED row still quotes the
       // address the coords were geocoded from (codex #3244 r7) — used by
       // both travel-gap probes and the insert's geo stamp alike, so a slot
@@ -1591,7 +1629,10 @@ async function reserveSlot({
           // hold time — not just accepted and later caught by the identical
           // commit-time re-check (assertAssignableTechnician with `date`,
           // same as the graduate-hold paths below use).
-          activeTech = await assertAssignableTechnician(techId, { conn: trx, date, workDays: true });
+          // `hours` (GATE_TECH_SHIFT_HOURS): the hold's own block against the technician's shift, the
+          // rule the offer was held to (filterCollidingSlots). The office may have changed the hours since.
+          activeTech = await assertAssignableTechnician(techId, { conn: trx, date, workDays: true,
+            hours: { startMin: slotStartMinutes, endMin: slotStartMinutes + effectiveDurationMinutes } });
         } catch (techErr) {
           if (techErr?.code !== NOT_ASSIGNABLE) {
             logger.warn(`[slot-reservation] technician lookup failed for slot ${slotId}: ${techErr.message}`);
@@ -1717,7 +1758,9 @@ async function reserveSlot({
         });
         // Mode on: this hold's hour may have become another customer's make-room destination while it lapsed.
         const refreshDestinationHit = await destinationHitUnderGate(trx, makeRoom, slotId, { date, techId, windowStart, windowEnd, excludeId: sameSlotHold.id });
-        if (refreshClash.length || refreshDestinationHit) {
+        // Owner rule B per truck: another truck may have taken this far-south day while the hold was lapsed.
+        const refreshSouthDayTaken = !(await holdKeepsSouthDay(trx, { stamp: sameSlotHold.zone, date, techId }));
+        if (refreshClash.length || refreshDestinationHit || refreshSouthDayTaken) {
           // Do NOT refresh a doomed hold — supersede it (same narrow
           // still-uncommitted predicate releaseReservation uses) so the
           // window frees beyond the committed visit's own footprint. The
@@ -1731,6 +1774,7 @@ async function reserveSlot({
             slotId,
             scheduledServiceId: sameSlotHold.id,
             conflictIds: refreshClash.map((r) => r.id),
+            southDayTaken: refreshSouthDayTaken,
           });
           return { staleHoldSuperseded: true };
         }
@@ -1784,6 +1828,15 @@ async function reserveSlot({
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
         throw err;
+      }
+      // Owner rule B per truck (zone-day-funnel.js truckMayTakeDate): a new hold never sends a second truck south on a
+      // day another truck already drives there, in the zone it stamps. Two offers for two trucks on one new far-south day
+      // are serialized by the date lock taken first, so the second reads the first one's hold. Read BEFORE the
+      // estimate's other holds are dropped, as the list read the day: a customer changing the hour keeps the truck's
+      // day that the hold being replaced holds (pre-push P1 on 69000b1ef3: read after the delete, a day two trucks
+      // drive refused every other hour the list offered that truck).
+      if (!(await require('./scheduling/zone-day-funnel').truckMayTakeDate(trx, { estimateZone: reserveZone, date, technicianId: techId }))) {
+        throw slotTaken(slotId);
       }
       if ((liveHolds || []).length) {
         await trx('scheduled_services').whereIn('id', liveHolds.map((hold) => hold.id)).del();
@@ -2267,6 +2320,12 @@ async function commitReservation({
       }
     }
 
+    // Owner rule B per truck (holdKeepsSouthDay), on every accept: another truck may have taken this hold's far-south
+    // day while it was lapsed. Same slot-unavailable recovery as the technician check below (the customer re-picks).
+    if (!(await holdKeepsSouthDay(client, { stamp: row.zone, date: lockedDate, techId: row.technician_id }))) {
+      throw slotTaken(`${lockedDate}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id}`);
+    }
+
     // Technician eligibility re-check at COMMIT (FOR SHARE on this txn): the
     // office may have offboarded or de-listed the held tech between the
     // customer's reserve and their accept. Same slot-unavailable recovery the
@@ -2352,6 +2411,17 @@ async function commitReservation({
     if (!serviceProfile?.reservationServiceMix && windowStart && effectiveDurationMinutes
       && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > currentDayEndMinutes()) {
       const err = new Error('slot runs past the end of the working day');
+      err.code = 'SLOT_UNAVAILABLE';
+      err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
+      throw err;
+    }
+    // The technician's shift (GATE_TECH_SHIFT_HOURS) on the FINAL block (rowBlockMinutes: the length resolved
+    // above, else the hold's stored end or length, as the occupancy probes below read it): the office may
+    // have changed the hours since the reserve, or the profile lengthened the job past the shift end.
+    // Same recovery as the technician re-check above (the customer re-picks a time).
+    const { rowBlockMinutes } = require('./scheduling/window-rules');
+    if (await shiftExcluding(client, row.technician_id, scheduledDate, rowBlockMinutes(row, effectiveDurationMinutes))) {
+      const err = new Error('slot technician is not available');
       err.code = 'SLOT_UNAVAILABLE';
       err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
       throw err;
@@ -3047,7 +3117,8 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     // Same error codes, so the route and client recovery are unchanged.
     if (row.technician_id) {
       try {
-        await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate, workDays: true });
+        await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate, workDays: true,
+          hours: require('./scheduling/window-rules').rowBlockMinutes(row) });
       } catch (eligErr) {
         if (eligErr.code !== NOT_ASSIGNABLE) throw eligErr;
         const err = new Error('slot technician is not available');
@@ -3094,10 +3165,14 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
         expectedMinutes: await candidateExpectedMinutesFromRow(trx, row, extendWindowMinutes),
       },
     });
+    // Owner rule B per truck (holdKeepsSouthDay): another truck may have taken this far-south day while the hold was
+    // lapsed. A refused hold can only lose at accept, so it is superseded like a clashing one. Read BEFORE the gate
+    // read below, which must stay the last read ahead of the writes.
+    const southDayTaken = !(await holdKeepsSouthDay(trx, { stamp: row.zone, date: scheduledDate, techId: row.technician_id }));
     // The gate read again right before the writes (Codex pre-push P1): a make-room hold whose gate went off while its
     // proof ran is superseded like one that no longer proves (its probes above skipped the stops it would move).
     const makeRoomGateOff = !!makeRoom && !makeRoomHoldsOn();
-    if (clash.length || makeRoomRefused || makeRoomGateOff) {
+    if (clash.length || makeRoomRefused || makeRoomGateOff || southDayTaken) {
       // Supersede — same narrow still-uncommitted predicate releaseReservation
       // uses — rather than leave a hold extending is guaranteed to lose at
       // commit occupying the window until it eventually expires.
@@ -3196,6 +3271,7 @@ module.exports = {
     catalogLinkForProfile,
     candidateExpectedMinutesFromRow,
     refuseGracedOfferOnRivalHoldConflict,
+    holdKeepsSouthDay,
     makeRoomDestinationClash,
     makeRoomChainClash,
     acceptedWindowOnMakeRoomDestination,

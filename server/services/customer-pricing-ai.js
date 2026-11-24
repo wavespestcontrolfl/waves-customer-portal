@@ -272,7 +272,11 @@ async function safeSelect(db, table, buildQuery) {
   }
 }
 
-async function loadCurrentServiceKeys(db, customer) {
+// strict (strictPriceSettings, a price nobody watches): a failed read of the
+// qualifying services is not "no current services". The reader's own strict
+// form throws where its default reads a failure as "not a member", and the
+// price is then withheld, as for a failed ownership read.
+async function loadCurrentServiceKeys(db, customer, { strict = false } = {}) {
   if (!db || !customer?.id) return { currentServiceKeys: [], ownedServiceKeys: [] };
   try {
     // Scope BOTH sets to the property being priced (codex #3253 r2): this
@@ -296,17 +300,18 @@ async function loadCurrentServiceKeys(db, customer) {
     // undercount earned tiers). ownedSet is unioned with the qualifying keys
     // downstream, so a failed ownership lookup degrades to qualifying-only.
     let currentServiceKeys = [];
+    let ownershipLookupFailed = false;
     try {
       // WaveGuard is count-based across the customer's actual active
       // recurring qualifying services. A tier label alone never identifies
       // which services the customer bought, so it must not seed a
       // Pest/Lawn/Mosquito basket.
-      currentServiceKeys = (await loadExistingQualifyingServiceKeys(db, customer.id, { streetScope })).map(mapKey);
+      currentServiceKeys = (await loadExistingQualifyingServiceKeys(db, customer.id, strict ? { streetScope, strict: true } : { streetScope })).map(mapKey);
     } catch (err) {
+      ownershipLookupFailed = strict;
       logger.warn(`[customer-pricing-ai] qualifying service lookup skipped: ${err.message}`);
     }
     let ownedServiceKeys = [];
-    let ownershipLookupFailed = false;
     try {
       // Ownership is BROADER than qualification (codex #3253 r2): recurring
       // rodent bait monitoring never raises a tier but absolutely means the
@@ -352,7 +357,7 @@ async function withTurfProfileFence(dbOrTrx, customerId, write) {
   });
 }
 
-async function loadTurfProfile(db, customerId, { forUpdate = false } = {}) {
+async function loadTurfProfile(db, customerId, { forUpdate = false, strict = false } = {}) {
   // forUpdate (GitHub #3391 round): the click-to-estimate mint re-reads the
   // turf row under its transaction to compare against the composition's
   // pricing-source stamp, but the admin turf-profile PUT updates the row
@@ -360,7 +365,7 @@ async function loadTurfProfile(db, customerId, { forUpdate = false } = {}) {
   // comparison against values that are already being replaced, publishing a
   // stale lawn price. Locking the active row serializes the mint against
   // that writer (the PUT touches only this table, so no lock cycle).
-  const rows = await safeSelect(db, 'customer_turf_profiles', q => {
+  const activeProfile = (q) => {
     let query = q
       .where({ customer_id: customerId })
       .where(function activeScope() {
@@ -368,7 +373,14 @@ async function loadTurfProfile(db, customerId, { forUpdate = false } = {}) {
       });
     if (forUpdate) query = query.forUpdate();
     return query.first();
-  });
+  };
+  // strict (plan start, codex pre-push P0): a failed query throws instead of reading as no
+  // profile. A lawn price reads its area and track from this row, and the forgiving read would
+  // price on older fallback measurements that a stored zero-lawn profile rules out. A missing
+  // row (or no database) is still no profile.
+  const rows = strict && db
+    ? await activeProfile(db('customer_turf_profiles'))
+    : await safeSelect(db, 'customer_turf_profiles', activeProfile);
   return rows || null;
 }
 
@@ -413,12 +425,60 @@ const SEED_FILLABLE_FIELDS = [
 const {
   lookupBedAreaIsTrustworthy, lookupBedAreaReadIsFlagged,
   lookupFeatureReadIsFlagged, lookupFeaturesAreTrustworthy, hasGlobalVerifyFlag,
+  lookupLawnAreaIsTheOnlyFeatureDoubt,
+  lookupDisputedPhotoFields,
   lookupPropertyTypeIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupDimensionIsTrustworthy,
   lookupTurfEstimateIsTrustworthy, lookupTurfReadIsTrustworthy,
   lookupTurfZeroIsObserved, lookupTreeCountIsTrustworthy,
   structuralFactIsTrustworthy,
   poolFeaturesAreRecordBacked, poolCageIsRecordBacked,
 } = require('./lookup-confidence');
+
+// GATE_PEST_PRICE_PHOTO_FACTS (owner 2026-11-21, "1, 2"): the three photo facts
+// a pest price reads, for a flagged feature read whose only doubt is the lawn
+// area. In the engine's own words, as the trusted branch of
+// resolvePropertyContext would adopt them. A new consumption, so each fact
+// fails closed. It counts only when:
+//   - the photo actually read it (_observed): the lookup fills an unread
+//     density with 'MODERATE' and unread water with 'NONE', and a filled-in
+//     value is not a fact. A profile with no _observed bits keeps none;
+//   - the vision providers did not disagree on it (lookupDisputedPhotoFields,
+//     read off the lookup's aiAnalysis). No aiAnalysis to check keeps none.
+// Undefined when the gate is off, the doubt is wider than the lawn area, or no
+// fact passes.
+// Each fact maps the lookup's own values (the enums of
+// normalizeSatelliteAnalysis in routes/property-lookup-v2.js) to the engine's.
+// A value outside the map is not a read, and the fact is left out: an old
+// cached analysis can carry 'NO' for no water (turfRiskReasons reads it as a
+// negative too) or a word this map has never seen.
+const PEST_PHOTO_FACT_READS = [
+  ['shrubs', 'shrubDensity', { LIGHT: 'light', MODERATE: 'moderate', HEAVY: 'heavy' }],
+  ['complexity', 'landscapeComplexity', { SIMPLE: 'simple', MODERATE: 'moderate', COMPLEX: 'complex' }],
+  ['nearWater', 'nearWater', {
+    NONE: false,
+    NO: false,
+    CANAL_ADJACENT: true,
+    POND_ON_PROPERTY: true,
+    RETENTION_NEARBY: true,
+    LAKE_ADJACENT: true,
+    WETLAND_ADJACENT: true,
+  }],
+];
+function pestPhotoFactsFor(p, lookup) {
+  // Optional call: hundreds of suites mock feature-gates whole.
+  if (require('../config/feature-gates').pestPricePhotoFactsLive?.() !== true) return undefined;
+  if (!lookupLawnAreaIsTheOnlyFeatureDoubt(p)) return undefined;
+  const observed = p._observed;
+  const aiAnalysis = lookup?.aiAnalysis;
+  if (!observed || typeof observed !== 'object' || !aiAnalysis || typeof aiAnalysis !== 'object') return undefined;
+  const disputed = lookupDisputedPhotoFields(aiAnalysis);
+  const facts = {};
+  for (const [fact, field, known] of PEST_PHOTO_FACT_READS) {
+    const word = String(p[field] ?? '').trim().toUpperCase();
+    if (Object.hasOwn(known, word) && observed[field] === true && !disputed.has(field)) facts[fact] = known[word];
+  }
+  return Object.keys(facts).length ? facts : undefined;
+}
 
 async function resolvePropertyContext({ customer, turfProfile, propertyLookup, propertySeed = null }) {
   let source = 'customer_profile';
@@ -502,6 +562,14 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   // the seed path consults this — a rejected dimension with no seed already
   // fails closed to the pricer's own missing-property handling.
   const lookupRejectedFields = new Set();
+  // GATE_PEST_PRICE_PHOTO_FACTS: the photo's shrubs, complexity and near-water
+  // facts for the PEST line alone, set below when the lookup's only doubt is
+  // the lawn area. They ride beside `features` (propertyInput.pestPhotoFacts),
+  // never in it: every other line, and the accepted-estimate seed, keep the
+  // facts the flagged read leaves them. The engine's recurring pest step is
+  // the one reader, so the offer, the card, the plan start and the one-tap
+  // purchase all price the same pest line from this one resolver.
+  let pestPhotoFacts;
   let lookupFootprintUnknown = false;
   let lookupHomeSqFtAdopted = false;
   let lookupStoriesSource = null;
@@ -616,8 +684,12 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       }
       // A flagged stories read keeps the 1-story default — same doctrine as
       // the untrusted vision features: the default stands, the flag's
-      // verification stays a human's job.
-      if (lookupDimensionIsTrustworthy(p, 'stories')) {
+      // verification stays a human's job. So does a count the lookup itself
+      // defaulted (storiesSource 'default': nobody knew, it fell back to 1,
+      // and it raises no flag for that). Adopted, that 1 was graded 'lookup'
+      // below, and the story-sensitive prices carried no stories_estimated
+      // marker. It is a gap, not a rejected read: the seed may fill it.
+      if (lookupDimensionIsTrustworthy(p, 'stories') && p.storiesSource !== 'default') {
         stories = positiveNumber(stories, p.stories, record.stories);
         // The AI stories-fallback stamps full provenance on the record
         // WITHOUT a fieldVerifyFlags entry — the flag check above cannot
@@ -786,6 +858,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
             if (!lookupFeatureKeys.has(key)) lookupRejectedFields.add(key);
           }
         }
+        pestPhotoFacts = pestPhotoFactsFor(p, lookup);
       } else {
         // A field is lookup-backed only when the trusted payload actually
         // carried a value for it — a silent field keeps its default here
@@ -990,6 +1063,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     storiesSource: resolvedStoriesSource,
     propertyType,
     features,
+    pestPhotoFacts,
     bedArea: bedArea || undefined,
     bedAreaSource: bedArea ? bedAreaSource : undefined,
     // A seeded homeSqFt is only as trusted for the Tree & Shrub open-parcel
@@ -1180,11 +1254,112 @@ function buildQuoteOption({
   };
 }
 
+// The refresh of the engine's price settings, right before the engine prices.
 async function maybeSyncPricingEngine(db) {
   if (!db || !db.schema || typeof db.schema.hasTable !== 'function') return;
   if (pricingEngine.needsSync && pricingEngine.needsSync()) {
     await pricingEngine.syncConstantsFromDB(db);
   }
+}
+
+// strictPriceSettings (opt-in, for a caller that prices with nobody watching:
+// the plan offer after a one-time job). It is the price of the standard pest
+// plan for an account that may start a plan, from price settings that are
+// loaded and are the rows' own. Three rules. No caller passes it yet.
+//
+// 1. The account (assertStrictPriceAccount). The bridge can say "from the
+//    rows" for the standard pest price only, and only for a customer who has
+//    no other service: the engine prices the qualifying services a customer
+//    has now too (the current plan, each option's plan total and its tier),
+//    from settings the bridge has no answer for. So strict asks the one
+//    shared answer to "may this account start a plan" (planStartBlocker:
+//    a live account, a home, no record of a plan), and refuses also when the
+//    pricer's own read of the calendar finds a recurring service. The error
+//    carries code PLAN_START_BLOCKED and the blocker, so a caller can tell
+//    the customer's state from its own mistake. A failed read of the shared
+//    answer throws as it is: an outage is never "this account has no plan".
+//    The shared answer reads the account's saved records. The property the
+//    engine prices is resolved after it, and a lookup or an estimate seed can
+//    name a type that no saved record carries. So the resolved property is
+//    asked too (assertStrictPriceProperty), with the blocker 'commercial':
+//    by the engine's own rule on its input (it prices a commercial property
+//    by its commercial rules, from settings the bridge has no answer for),
+//    and by the shared answer's rule for a property type of this account
+//    (resolvedPropertyTypeBlocker: a property manager's condo is a business
+//    there, and a home to the engine).
+// 2. The settings (strictPriceOnOwnSettings). The default answers a failed
+//    refresh with the values the engine had (the in-code defaults on a cold
+//    start), and it shares the bridge's cache: one minute old at most,
+//    loaded on the handle of whoever asked first, stale only in the process
+//    an edit was made in, and complete or not in its rows. Strict hands the
+//    bridge its engine calls (withSettingsForUnattendedPrice): the bridge
+//    loads the committed rows in a refresh of its own, asks whether they are
+//    whole and unedited, and runs the engine calls in that same operation,
+//    before any other refresh can start. A no throws
+//    PRICING_CONFIG_UNAVAILABLE, and the engine is not called. The whole
+//    question of "are these the rows' prices" is the bridge's: the pricer
+//    asks nothing of the cache.
+// 3. The hand check (strictPriceNeedsHandCheck, in the option loop). An
+//    option that needs a hand check is not returned. The test is the pair
+//    the plan-start mint refuses on: the engine's result
+//    (engineResultNeedsReview: a review marker on a line, a footprint the
+//    engine guessed, low confidence, field verification) and the estimate
+//    seed the price was made from (seedRefusesPrice: a seed that carries its
+//    own field-verification mark can still give a clean engine result). The
+//    default returns such an option, marked manualReview: true where the
+//    engine marked it, for a card a person reads. With nobody watching, it
+//    must not go out as a price.
+function priceSettingsUnavailable(message) {
+  return Object.assign(new Error(message), { code: 'PRICING_CONFIG_UNAVAILABLE' });
+}
+const PRICE_SETTINGS_REFUSALS = Object.freeze({
+  not_loaded: 'live price settings could not be loaded',
+  edited: 'the price settings were edited while they were loaded',
+  rows: 'the pest price settings are not complete in their rows',
+});
+async function strictPriceOnOwnSettings(price) {
+  const answer = await require('./pricing-engine/db-bridge').withSettingsForUnattendedPrice(price);
+  if (answer?.priced !== true) throw priceSettingsUnavailable(PRICE_SETTINGS_REFUSALS[answer?.reason] || PRICE_SETTINGS_REFUSALS.not_loaded);
+  return answer.value;
+}
+// strict reads the customer's current services and the account's records.
+// Without a handle or a customer id the first would read as "none": a
+// caller's mistake, never a price.
+function assertStrictPriceCall(db, customer) {
+  if (!db || !customer?.id) throw new Error('strictPriceSettings needs a database handle and a customer id');
+  // The settings are read on the app's connection, one caller at a time. A caller that waits there with a
+  // transaction open keeps a connection of that pool: enough of them leave none for the read.
+  if (db.isTransaction === true) throw new Error('strictPriceSettings needs a database handle that is not a transaction');
+}
+// Rule 3: is this a price the plan-start mint would refuse for a hand check? The mint asks the engine's
+// result and the estimate seed the price was made from (restart.js: engineResultNeedsReview, seedRefusesPrice).
+function strictPriceNeedsHandCheck(estimate, propertySeed, serviceKey) {
+  const restart = require('./cancellation-resolution/restart');
+  return restart.engineResultNeedsReview(estimate) || restart.seedRefusesPrice(propertySeed, [restart.pricingKeyFor(serviceKey)]);
+}
+function planStartBlocked(blocker) {
+  return Object.assign(new Error(`strictPriceSettings: the account may not start a plan (${blocker})`), { code: 'PLAN_START_BLOCKED', blocker });
+}
+// The property the engine is about to price. First by the engine's own rule
+// for a commercial property (generateEstimate asks isCommercialProperty of
+// the same input and then prices by its commercial rules). Then by the shared
+// answer's rule for a property type of this account, which knows the client.
+async function assertStrictPriceProperty(db, customer, propertyInput) {
+  const blocker = require('./pricing-engine/commercial-helpers').isCommercialProperty(propertyInput)
+    ? 'commercial'
+    : await require('./plan-start-eligibility').resolvedPropertyTypeBlocker(db, customer.id, propertyInput.propertyType);
+  if (blocker) throw planStartBlocked(blocker);
+}
+// Throws for a strict request the pricer must not price. `ownedSet` is the
+// pricer's own read of the recurring services at the priced property.
+async function assertStrictPriceAccount(db, customer, ownedSet, servicesToPrice) {
+  // A service to price other than pest control: a caller's mistake.
+  if (servicesToPrice.some((key) => key !== 'pest_control')) {
+    throw new Error('strictPriceSettings prices pest control only');
+  }
+  const blocker = (await require('./plan-start-eligibility').planStartBlocker(db, customer.id))
+    || (ownedSet.size ? 'has_plan' : null);
+  if (blocker) throw planStartBlocked(blocker);
 }
 
 // Repeatable purchases: quotable even for a current customer, because they are
@@ -1204,9 +1379,20 @@ async function buildCustomerPricingResponse({
   // context carries raw engine inputs, so no default caller — and no public
   // payload — may ever receive it.
   includeEngineContext = false,
+  // Opt-in ONLY (the portal pricing route, GATE_PORTAL_PLAN_START): compute the plan-start hint.
+  // Its account reads serve the card's book button alone; the report cross-sell and portal-offer
+  // builders would discard it (codex pre-push P1).
+  includePlanStartHint = false,
+  // Opt-in ONLY (a caller that prices with nobody watching): the standard
+  // pest plan's price for an account that may start a plan, from price
+  // settings that are loaded and are the rows' own. It throws where the
+  // default answers from what the engine had (the three rules above
+  // strictPriceOnOwnSettings). No caller passes it yet.
+  strictPriceSettings = false,
 }) {
   const text = String(prompt || '').trim();
-  const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer);
+  if (strictPriceSettings) assertStrictPriceCall(db, customer);
+  const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer, { strict: strictPriceSettings });
   // Two sets on purpose (codex #3253 r2): currentServiceKeys (WaveGuard
   // qualifying) keeps modeling the baseline plan/tier exactly as before;
   // ownedSet is the superset every never-re-price decision reads, so a
@@ -1255,7 +1441,17 @@ async function buildCustomerPricingResponse({
     };
   }
 
-  const turfProfile = await loadTurfProfile(db, customer.id);
+  // The plan-start hint tells a failed profile read from a missing row (codex pre-push P0): the
+  // mint refuses a lawn plan start on an unreadable profile, so the card offers no lawn button
+  // then. Every other caller keeps the forgiving read; the price reads no profile either way.
+  let turfProfile = null;
+  let turfReadFailed = false;
+  try {
+    turfProfile = await loadTurfProfile(db, customer.id, { strict: includePlanStartHint });
+  } catch (err) {
+    turfReadFailed = true;
+    logger.warn(`[customer-pricing-ai] turf profile unreadable for ${customer.id}: ${err.message}`);
+  }
 
   // A service the customer ALREADY has is never re-priced from the property
   // profile — owner ruling 2026-08-06. Their live rate may predate a price
@@ -1273,6 +1469,8 @@ async function buildCustomerPricingResponse({
   // geocoding/AI property lookup (cache writes, provider cost, latency).
   const alreadyIncluded = requestedServices.filter(key => ownedAndNotRepeatable(key, ownedSet));
   const servicesToPrice = requestedServices.filter(key => !alreadyIncluded.includes(key));
+  // Refused before any property lookup and before the refresh.
+  if (strictPriceSettings) await assertStrictPriceAccount(db, customer, ownedSet, servicesToPrice);
 
   let lookupFn = propertyLookup;
   if (!lookupFn && servicesToPrice.length) {
@@ -1299,6 +1497,7 @@ async function buildCustomerPricingResponse({
     propertyLookup: lookupCanInformPricing ? lookupFn : null,
     propertySeed,
   });
+  if (strictPriceSettings) await assertStrictPriceProperty(db, customer, propertyContext.propertyInput);
 
   // Measured AFTER the exclusion: an owned service missing a measurement must
   // not short-circuit the request into PROPERTY_DETAILS_NEEDED — we are not
@@ -1322,85 +1521,108 @@ async function buildCustomerPricingResponse({
     };
   }
 
-  await maybeSyncPricingEngine(db);
-
-  const context = {
-    grassType: propertyContext.grassType,
-    palmCount: propertyContext.palmCount,
-  };
-  const currentServices = currentServiceObjectsFor(currentServiceKeys, context);
-  const currentEstimate = Object.keys(currentServices).length
-    ? pricingEngine.generateEstimate({ ...propertyContext.propertyInput, services: currentServices })
-    : null;
-  const actualMonthly = positiveNumber(customer.monthly_rate);
-  const modeledCurrentMonthly = positiveNumber(currentEstimate?.summary?.recurringMonthlyAfterDiscount);
-  const billingModelMismatch = actualMonthly > 0 && (!modeledCurrentMonthly || Math.abs(actualMonthly - modeledCurrentMonthly) > 1);
-  const currentMonthly = actualMonthly || modeledCurrentMonthly;
-  const quoteBaselineMonthly = modeledCurrentMonthly || 0;
-
-  const options = [];
-  const generic = !text;
   // Composed BEFORE the option loop so every priced option carries the owned
   // half of a mixed request into what staff receive (codex #3253 r2).
   const ownedRequestNote = alreadyIncluded.length
     ? `Customer also asked about ${alreadyIncluded.map(toKeyLabel).join(', ')}, already active on this account — not re-priced in the portal; review that change with them.`
     : '';
-  for (const serviceKey of servicesToPrice) {
-    for (const option of variantsForService(serviceKey, text, generic)) {
-      const targetServices = {
-        ...currentServices,
-        ...optionServices(option, context),
-      };
-      const estimate = pricingEngine.generateEstimate({
-        ...propertyContext.propertyInput,
-        recurringCustomer: currentServiceKeys.length > 0,
-        services: targetServices,
-      });
-      const quoted = buildQuoteOption({
-        option,
-        estimate,
-        currentMonthly: quoteBaselineMonthly,
-        currentServiceKeys,
-        propertyContext,
-        showEstimatedPlanMonthly: !billingModelMismatch,
-        baselineMismatch: billingModelMismatch,
-        ownedRequestNote,
-      });
-      // Belt-and-braces on the money rule, sharing the SAME predicate as the
-      // servicesToPrice filter above (no second definition to drift): if a
-      // future path ever routes an owned service here, no price for it can
-      // still reach the customer.
-      if (ownedAndNotRepeatable(option.serviceKey, ownedSet)) continue;
-      if (includeEngineContext) {
-        // The exact inputs this option's price came from. targetOnlyServices
-        // is the option WITHOUT the modeled current services: an estimate
-        // minted from it prices just the new service, with the combined
-        // WaveGuard tier restored through priorQualifyingServices — the
-        // engine unions those into tierServiceKeys, so the target line's
-        // tier discount matches this combined run (the mint cross-checks
-        // that equality to the cent before anything persists).
-        quoted.engineContext = {
-          propertyInput: propertyContext.propertyInput,
-          targetOnlyServices: optionServices(option, context),
-          currentServiceKeys: [...currentServiceKeys],
-          // The RAW staff-writable price-bearing sources this pricing read
-          // (GitHub #3391 round: address/property_type equality alone
-          // misses these) — the mint re-reads both rows under its lock and
-          // treats any change as offer drift.
-          pricingSourceStamp: {
-            lot_sqft: customer.lot_sqft ?? null,
-            property_sqft: customer.property_sqft ?? null,
-            bed_sqft: customer.bed_sqft ?? null,
-            palm_count: customer.palm_count ?? null,
-            lawn_type: customer.lawn_type ?? null,
-            turf_lawn_sqft: turfProfile?.lawn_sqft ?? null,
-            turf_track_key: turfProfile?.track_key ?? turfProfile?.grass_type ?? null,
-          },
+  // The RAW staff-writable price-bearing sources this pricing read
+  // (GitHub #3391 round: address/property_type equality alone
+  // misses these) — the mint re-reads both rows under its lock and
+  // treats any change as offer drift. The same for every option (each one
+  // carries its own copy), and no engine value is in it.
+  const pricingSourceStamp = {
+    lot_sqft: customer.lot_sqft ?? null,
+    property_sqft: customer.property_sqft ?? null,
+    bed_sqft: customer.bed_sqft ?? null,
+    palm_count: customer.palm_count ?? null,
+    lawn_type: customer.lawn_type ?? null,
+    turf_lawn_sqft: turfProfile?.lawn_sqft ?? null,
+    turf_track_key: turfProfile?.track_key ?? turfProfile?.grass_type ?? null,
+  };
+
+  // Every engine call of this request, and nothing else, in one synchronous function. The default runs it
+  // after the shared refresh. Strict hands it to the bridge, which runs it inside a refresh of its own (rule 2
+  // above strictPriceOnOwnSettings).
+  const priceOptions = () => {
+    const context = {
+      grassType: propertyContext.grassType,
+      palmCount: propertyContext.palmCount,
+    };
+    const currentServices = currentServiceObjectsFor(currentServiceKeys, context);
+    const currentEstimate = Object.keys(currentServices).length
+      ? pricingEngine.generateEstimate({ ...propertyContext.propertyInput, services: currentServices })
+      : null;
+    const actualMonthly = positiveNumber(customer.monthly_rate);
+    const modeledCurrentMonthly = positiveNumber(currentEstimate?.summary?.recurringMonthlyAfterDiscount);
+    const billingModelMismatch = actualMonthly > 0 && (!modeledCurrentMonthly || Math.abs(actualMonthly - modeledCurrentMonthly) > 1);
+    const currentMonthly = actualMonthly || modeledCurrentMonthly;
+    const quoteBaselineMonthly = modeledCurrentMonthly || 0;
+
+    const options = [];
+    // Each option's raw engine result, kept beside the options (never in the answer): the
+    // plan-start hint runs the mint's own review check on it (codex pre-push P1).
+    const engineResults = new Map();
+    const generic = !text;
+    for (const serviceKey of servicesToPrice) {
+      for (const option of variantsForService(serviceKey, text, generic)) {
+        const targetServices = {
+          ...currentServices,
+          ...optionServices(option, context),
         };
+        const estimate = pricingEngine.generateEstimate({
+          ...propertyContext.propertyInput,
+          recurringCustomer: currentServiceKeys.length > 0,
+          services: targetServices,
+        });
+        // strict: a price marked for a hand check is not a price for a caller nobody watches (rule 3).
+        if (strictPriceSettings && strictPriceNeedsHandCheck(estimate, propertySeed, serviceKey)) continue;
+        const quoted = buildQuoteOption({
+          option,
+          estimate,
+          currentMonthly: quoteBaselineMonthly,
+          currentServiceKeys,
+          propertyContext,
+          showEstimatedPlanMonthly: !billingModelMismatch,
+          baselineMismatch: billingModelMismatch,
+          ownedRequestNote,
+        });
+        // Belt-and-braces on the money rule, sharing the SAME predicate as the
+        // servicesToPrice filter above (no second definition to drift): if a
+        // future path ever routes an owned service here, no price for it can
+        // still reach the customer.
+        if (ownedAndNotRepeatable(option.serviceKey, ownedSet)) continue;
+        if (includeEngineContext) {
+          // The exact inputs this option's price came from. targetOnlyServices
+          // is the option WITHOUT the modeled current services: an estimate
+          // minted from it prices just the new service, with the combined
+          // WaveGuard tier restored through priorQualifyingServices — the
+          // engine unions those into tierServiceKeys, so the target line's
+          // tier discount matches this combined run (the mint cross-checks
+          // that equality to the cent before anything persists).
+          quoted.engineContext = {
+            propertyInput: propertyContext.propertyInput,
+            targetOnlyServices: optionServices(option, context),
+            currentServiceKeys: [...currentServiceKeys],
+            pricingSourceStamp: { ...pricingSourceStamp },
+          };
+        }
+        if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) {
+          options.push(quoted);
+          engineResults.set(quoted.id, estimate);
+        }
       }
-      if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) options.push(quoted);
     }
+    return { options, engineResults, currentMonthly };
+  };
+  let priced;
+  if (strictPriceSettings) {
+    priced = await strictPriceOnOwnSettings(priceOptions);
+  } else {
+    await maybeSyncPricingEngine(db);
+    priced = priceOptions();
   }
+  const { options, engineResults, currentMonthly } = priced;
 
   // A mixed prompt ("upgrade my lawn care and add mosquito") must not lose the
   // owned half just because the new half priced (codex r1 P2).
@@ -1425,7 +1647,65 @@ async function buildCustomerPricingResponse({
     property: summarizeProperty(propertyContext),
     currentMonthly: currentMonthly || null,
     options,
+    // Hint only (GATE_PORTAL_PLAN_START, asked for by the portal pricing route): the options
+    // the card may offer as "See my price and book". The start-plan route re-decides under its
+    // locks; absent when not asked for, the gate is off or nothing qualifies, so every other
+    // response stays byte-identical.
+    ...(await planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys, engineResults, {
+      asked: includePlanStartHint, turfReadFailed,
+    })),
   };
+}
+
+// The pricing answer's plan-start fields: { planStart: { optionIds } }, the options the
+// start-plan route can book for this account, or none. It mirrors the mint's bar without
+// its locks: an account with no plan (planStartAccountOpen), no live recurring service
+// of any kind, a stored type that is not commercial, and one provable premises
+// (singlePremisesStreet, strict as the mint runs it: a multi-home account, another profile
+// on the account or a visit whose property link cannot be resolved keeps the request, codex
+// pre-push P1s and r16 P0), and per option an
+// id on today's ladder that the route books
+// (planStartOptionBookable: pest quarterly only), a monthly price, and an engine result the
+// mint's own review check passes (engineResultNeedsReview: review markers, heuristic turf,
+// low confidence, field verification; codex pre-push P1s). A price that reads the turf
+// profile is dropped when that read failed, as the mint refuses it (codex pre-push P0).
+async function planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys, engineResults, { asked, turfReadFailed }) {
+  // Only the portal pricing route asks. Optional call: hundreds of suites mock feature-gates
+  // whole; a bare mock reads as off.
+  if (!asked || require('../config/feature-gates').portalPlanStartLive?.() !== true) return {};
+  const restart = require('./cancellation-resolution/restart');
+  if (!restart.planStartAccountOpen(customer) || currentServiceKeys.length || ownedServiceKeys.length) return {};
+  const bookable = options
+    .filter((option) => restart.PLAN_START_SERVICE_KEYS.includes(option.serviceKey)
+      && Number(option.monthly) > 0
+      && engineResults.has(option.id) && !restart.engineResultNeedsReview(engineResults.get(option.id))
+      && !(turfReadFailed && restart.TURF_PRICED_KEYS.includes(restart.pricingKeyFor(option.serviceKey)))
+      && restart.planStartOptionBookable(option.serviceKey,
+        variantsForService(option.serviceKey, '', false).find((variant) => variant?.id === option.id)));
+  if (!bookable.length) return {};
+  let seed;
+  try {
+    // A stored commercial type: the mint's stored-type guard refuses it (a resolved commercial
+    // type prices commercial lines, which the review check above already drops).
+    if (require('./pricing-engine/commercial-helpers').isCommercialProperty({ propertyType: customer.property_type })) return {};
+    // A live row the pricing loaders skip (a rodent plan, a commercial row) or a prepay
+    // term still covering today owns a plan: no offer.
+    if (await restart.ownsAnyRecurringService(db, customer.id)) return {};
+    const street = await restart.singlePremisesStreet(db, customer, { strict: true });
+    // The mint's own address check (codex pre-push P1): an address that reads back as another
+    // home refuses the mint, so the card offers the request up front, not a button that files it.
+    if (!street || !restart.storedAddressNamesHome(customer, street, addressForCustomer)) return {};
+    // The accepted-estimate seed the mint prices with (codex pre-push P1): its review
+    // markers refuse the mint, so they offer no button. Unreadable fails closed, as the mint does.
+    seed = await require('./service-report/cross-sell').loadEstimateSeed(db, customer.id, street);
+  } catch (err) {
+    logger.warn(`[customer-pricing-ai] plan-start account read failed — no offer: ${err.message}`);
+    return {};
+  }
+  const optionIds = bookable
+    .filter((option) => !restart.seedRefusesPrice(seed, [restart.pricingKeyFor(option.serviceKey)]))
+    .map((option) => option.id);
+  return optionIds.length ? { planStart: { optionIds } } : {};
 }
 
 function summarizeProperty(context) {
@@ -1487,5 +1767,5 @@ module.exports = {
   missingPropertyFor,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
-  _private: { resolvePropertyContext, missingPropertyFor },
+  _private: { resolvePropertyContext, missingPropertyFor, PEST_PHOTO_FACT_READS },
 };

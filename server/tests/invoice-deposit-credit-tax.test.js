@@ -53,6 +53,9 @@ jest.mock('../config/feature-gates', () => ({
   // test in this file; InvoiceService.create reads this directly (slice 5
   // of #4405), independent of isEnabled/mockIsGateEnabled above.
   discountStackingLive: jest.fn(() => false),
+  // GATE_INVOICE_ESTIMATE_DISCOUNT_LINES off (prod default): the visit line
+  // builder asks it for every scheduled replay.
+  invoiceEstimateDiscountLinesLive: jest.fn(() => false),
 }));
 const mockGetOrCreateOpenStatement = jest.fn();
 const mockRollupStatement = jest.fn();

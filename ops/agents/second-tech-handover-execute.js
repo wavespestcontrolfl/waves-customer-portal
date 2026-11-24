@@ -14,7 +14,7 @@
 //     technician change makes (admin-schedule assignScheduleJobs, scope following), so new
 //     children seed to the hire. Dates, weekday, windows and service never change.
 //   - VISITS: each open visit in the plan (dated >= --start, on a --to work day, held by
-//     --from, not grouped, not bait) gets technician_id = --to and route_order = NULL, the
+//     --from, not grouped, not kept as a bait customer) gets technician_id = --to and route_order = NULL, the
 //     exact write of dispatch-assignment applyAssignment (the old technician's running
 //     number must not ride onto the new route). Compare-and-set per row: a row that changed
 //     since the plan was read aborts the whole run.
@@ -36,9 +36,8 @@
 //      tech-day locks, once after) and must equal --plan, or nothing is written.
 //   5. The hire must be assignable on every date a visit moves to (the app's
 //      assertAssignableTechnician: a technician_absences row for that date refuses the run).
-//      The planner also refuses, as a Refusal and before any write: LINES_NEED_ZIPS (termite named
-//      without --zips: termite / WDO series move only in a territory run, owner 2026-10-30) and
-//      TARGET_CAPABILITY_OFF (--to's technician_capabilities row is Off for a line that has a series to move).
+//      The planner also refuses, as a Refusal and before any write: TARGET_CAPABILITY_OFF
+//      (--to's technician_capabilities row is Off for a line that has a series to move).
 //   6. The rollback file is written and synced BEFORE the first update. Ids and counts only.
 //      It carries a run id that the execute audit row records in the same transaction, so a
 //      file left by a run that failed is refused by --rollback (RUN_NOT_COMMITTED).
@@ -226,7 +225,7 @@ function writeRollbackFile(outDir, record) {
   return file;
 }
 
-/** The planner's own refusals (termite without --zips, --to Off for a line) read as the writer's Refusal, before any write. */
+/** The planner's own refusals (--to Off for a line) read as the writer's Refusal, before any write. */
 async function planOrRefuse(db, args) {
   try {
     return await planner.planHandover(db, args);
@@ -343,8 +342,8 @@ async function executeHandover(db, opts) {
   const { from, to, start, planId } = opts;
   const zips = opts.zips || null;
   const weekendMove = opts.weekendMove === true;
-  // A territory run also hands over termite / WDO (owner 2026-10-30); the planner's CLI passes the same default.
-  const lines = opts.lines || (zips ? planner.TERRITORY_MOVABLE_LINES : planner.MOVABLE_LINES);
+  // Every run moves termite / WDO unless --lines leaves it out (owner 2026-11-21); the planner's CLI passes the same default.
+  const lines = opts.lines || planner.MOVABLE_LINES;
   const now = opts.now || new Date();
   const today = opts.today || etDateString(now);
   const outDir = opts.outDir || path.join(os.homedir(), 'handover-runs');

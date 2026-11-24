@@ -33,4 +33,4 @@ function closeoutPerformedForCharge(record, { issuedCloseoutInvoiceId = null } =
     && String(notes?.issuedInvoiceCloseout?.invoiceId || '') === String(issuedCloseoutInvoiceId);
 }
 
-module.exports = { NON_PERFORMED_VISIT_OUTCOMES, visitWasPerformed, closeoutPerformedForCharge };
+module.exports = { NON_CHARGEABLE_CLOSEOUT_OUTCOMES, NON_PERFORMED_VISIT_OUTCOMES, visitWasPerformed, closeoutPerformedForCharge };

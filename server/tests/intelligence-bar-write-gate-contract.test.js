@@ -21,7 +21,6 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-process.env.GATE_EDIT_APPT_ADDRESS = 'true';
 // send_autopay_setup_link's preview runs the Auto Pay service's own eligibility
 // read, which refuses before the channel preflight while the lane is dark.
 process.env.GATE_AUTOPAY_SETUP_LINK = 'true';
@@ -62,11 +61,6 @@ jest.mock('../services/route-optimizer', () => ({
 
 const TOOLS_DIR = path.join(__dirname, '..', 'services', 'intelligence-bar');
 
-// These assertions assume LEGACY drive times (see the mocked haversine above),
-// and the mock deliberately pulls the REAL gate-sensitive estimator. Pin the
-// gate off so the suite does not depend on the ambient environment; the
-// calibrated model is covered by drive-time-calibration.test.js.
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 // cancel_plan (C3) is dark behind GATE_CANCEL_FLOW_V2 — its unconfirmed
 // call 404s (a tool error, not a preview) with the gate off, so pin it ON
 // here: the contract under test is "no mutation without confirmed", which
@@ -76,7 +70,6 @@ const ORIGINAL_PLATFORM_GATE = process.env.GATE_IB_PLATFORM;
 beforeAll(() => {
   // reprice_future_visits is dark behind GATE_IB_REPRICE_VISITS; off, its preview refuses.
   process.env.GATE_IB_REPRICE_VISITS = 'true';
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
@@ -119,8 +112,6 @@ afterAll(() => {
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-  else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
   if (ORIGINAL_CANCEL_GATE === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
   else process.env.GATE_CANCEL_FLOW_V2 = ORIGINAL_CANCEL_GATE;
   delete process.env.GATE_IB_REPRICE_VISITS;
@@ -130,7 +121,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'tool-additions.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js', 'record-payment-fences.js', 'model-context.js', 'series-move.js', 'fast-mode.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'tool-additions.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js', 'record-payment-fences.js', 'model-context.js', 'series-move.js', 'fast-mode.js', 'service-record-facts.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -331,6 +322,7 @@ const READ_ONLY = [
   'query_customers', 'find_overdue_customers', 'get_customer_detail', 'get_schedule_view',
   'query_revenue', 'compare_technicians', 'find_duplicates', 'draft_sms',
   'get_recent_completions',
+  'get_sprinkler_timer_counts',
   'search_ib_history',
   'find_schedule_gaps', 'get_day_summary', 'get_zone_density', 'find_available_slots',
   'cancel_and_reschedule_far_out',
@@ -1077,14 +1069,6 @@ const UNCONFIRMED_CALLS = [
     dbMock.raw.mockImplementation(db.raw);
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
-
-    // The two route optimizers refuse BEFORE their confirmation gate while
-    // drive-time calibration is off — they may not certify an arrival window
-    // on the uncalibrated model (that refusal has its own coverage in
-    // admin-schedule-optimize-window-guard). This contract is about the gate,
-    // so give them the calibrated model and let them reach it.
-    const needsCalibration = String(toolName).startsWith('optimize_');
-    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     // This recorder has no pricing_config rows. Live sync success is a
     // controlled prerequisite here; the real-DB estimate suite tests outages.
@@ -1233,7 +1217,6 @@ const UNCONFIRMED_CALLS = [
       repriceCoverage?.mockRestore();
       prepaySwitchPreview?.mockRestore();
       acceptDryRun?.mockRestore();
-      if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {
         for (const [key, value] of Object.entries(savedEnv)) {
           if (value === undefined) delete process.env[key];
@@ -1313,14 +1296,6 @@ describe('confirmed-endpoint writes are inert without server-derived context.con
     dbMock.raw.mockImplementation(db.raw);
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
-
-    // The two route optimizers refuse BEFORE their confirmation gate while
-    // drive-time calibration is off — they may not certify an arrival window
-    // on the uncalibrated model (that refusal has its own coverage in
-    // admin-schedule-optimize-window-guard). This contract is about the gate,
-    // so give them the calibrated model and let them reach it.
-    const needsCalibration = String(toolName).startsWith('optimize_');
-    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     const result = await executor(toolName, input, context);
 

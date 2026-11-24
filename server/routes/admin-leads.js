@@ -259,6 +259,7 @@ const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-star
 const { ensureCustomerAccount } = require('./admin-customers');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const { applyContactNormalization } = require('../utils/intake-normalize');
+const { loadLeadReachStats } = require('../services/lead-reach-stats');
 
 // Median of an array of numbers (minutes), or null when empty. Robust to the
 // multi-day response-time outliers that skew a mean.
@@ -347,6 +348,17 @@ router.get('/analytics/overview', async (req, res, next) => {
       : null;
     const medianResponseTime = medianMinutes(respondedMinutes);
 
+    // The median above only sees leads someone recorded a response for, so a lead nobody
+    // contacted drops out of it. Beside it, the same cohort judged by real person contact
+    // (services/lead-reach-stats.js). A secondary figure: a failure leaves it null and never
+    // fails the overview.
+    let leadReach = null;
+    try {
+      leadReach = await loadLeadReachStats(leads);
+    } catch (err) {
+      logger.warn('[leads] reach stats unavailable', { code: err?.code || 'unknown' });
+    }
+
     // Speed to Lead: how long leads still awaiting their first response have
     // been waiting, right now. Distinct from avgResponseTime (the historical
     // first-contact -> first-response gap on leads we DID respond to).
@@ -417,7 +429,7 @@ router.get('/analytics/overview', async (req, res, next) => {
     res.json({
       total, won, lost, active, conversionRate,
       avgResponseTime, medianResponseTime, recentMedianResponseTime,
-      avgSpeedToLead, openUnansweredCount,
+      avgSpeedToLead, openUnansweredCount, leadReach,
       speedToLeadSince: SPEED_TO_LEAD_FRESH_START ? SPEED_TO_LEAD_FRESH_START.toISOString() : null,
       costTotal: Math.round(costTotal * 100) / 100,
       revenue: Math.round(revenue * 100) / 100, cpa, roi,
@@ -833,12 +845,16 @@ router.get('/', async (req, res, next) => {
     let query = db('leads')
       .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
       .leftJoin('technicians', 'leads.assigned_to', 'technicians.id')
+      // The initiating call's dialed number, for the website-only-line rule in
+      // lead-source-evidence.js. twilio_call_sid is unique in call_log.
+      .leftJoin('call_log as lead_call', 'lead_call.twilio_call_sid', 'leads.twilio_call_sid')
       .leftJoin('estimates', 'leads.estimate_id', 'estimates.id')
       .select(
         'leads.*',
         'lead_sources.name as source_name',
         'lead_sources.source_type',
         'lead_sources.channel as source_channel',
+        'lead_call.to_phone as call_dialed_phone',
         'estimates.status as estimate_status',
         db.raw("technicians.name as assigned_name"),
       )
@@ -1035,11 +1051,15 @@ router.get('/:id', async (req, res, next) => {
     const lead = await db('leads')
       .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
       .leftJoin('technicians', 'leads.assigned_to', 'technicians.id')
+      // The initiating call's dialed number, for the website-only-line rule in
+      // lead-source-evidence.js. twilio_call_sid is unique in call_log.
+      .leftJoin('call_log as lead_call', 'lead_call.twilio_call_sid', 'leads.twilio_call_sid')
       .select(
         'leads.*',
         'lead_sources.name as source_name',
         'lead_sources.source_type',
         'lead_sources.channel as source_channel',
+        'lead_call.to_phone as call_dialed_phone',
         db.raw("technicians.name as assigned_name"),
       )
       .where('leads.id', req.params.id)
@@ -1668,6 +1688,9 @@ router.post('/:id/send-sms', async (req, res, next) => {
     if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
+    // A website-only line texts only someone who already called or texted it.
+    const websiteLineBlock = await require('../services/website-line-contact').websiteLineRefusal(fromNumber, lead.phone);
+    if (websiteLineBlock) return res.status(400).json({ error: websiteLineBlock, code: 'WEBSITE_LINE_FIRST_CONTACT' });
 
     // A consultation link inserted here can go stale by the time the
     // operator actually sends (gate flipped off, the lead closed/converted,

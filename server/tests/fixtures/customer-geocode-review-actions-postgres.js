@@ -29,6 +29,9 @@ module.exports = async function createActionSchema(trx) {
     table.uuid('customer_id').primary(); table.timestamp('irrigation_home_changed_at', { useTz: true });
     table.jsonb('irrigation_confirmed_fields');
     table.date('sod_laid_on'); table.string('sod_covers', 8); table.string('sod_area', 120); table.date('sod_rooted_on');
+    // The sprinkler timer on file: the move stamp clears it with the sod record (markSprinklerSettingsMoved).
+    table.string('irrigation_controller_brand', 16); table.string('irrigation_controller_model', 16);
+    table.string('irrigation_controller_app', 16);
   });
   await trx.schema.createTable('leads', table => {
     table.uuid('id').primary(); table.uuid('customer_id'); table.string('status');

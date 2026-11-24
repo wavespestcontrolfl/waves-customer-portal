@@ -7,7 +7,7 @@ const {
 } = require('./lawn-visit-input');
 const { validateAssessmentJson, normalizeAssessment, emptyAnalysis } = require('./lawn-visit-result');
 const { withoutNoteInfluencedProse } = require('./lawn-visit-customer-copy');
-const { lawnAssessmentRefereeLive, lawnLightingLive, lawnScoreScaleV2Live } = require('../config/feature-gates');
+const { lawnAssessmentRefereeLive, gateEnvValue, lawnScoreScaleV2Live } = require('../config/feature-gates');
 const { refereeVisit, skippedReferee } = require('./lawn-visit-referee');
 
 // Invalid input fails before a paid call. Provider misses return an explicit
@@ -16,7 +16,7 @@ const { refereeVisit, skippedReferee } = require('./lawn-visit-referee');
 // true widens the photo contract to the eight-shot list (cap 8) and reads the
 // visit under the shot-list prompt variant (shot guide, its own prompt version,
 // server-side evidence rules). Off = unchanged.
-// `lighting` is GATE_LAWN_LIGHTING (owner 2026-10-04), read at call time unless
+// `lighting` (lawn lighting-aware color, owner 2026-10-04) defaults to the visit assessment gate unless
 // the caller decides it: true reads the visit under the lighting variant (the same
 // prompt plus the LIGHT block, and a light read on every photo's quality row, its
 // own prompt version). Off = the prompt, schema, stored run and return shape are
@@ -24,7 +24,7 @@ const { refereeVisit, skippedReferee } = require('./lawn-visit-referee');
 // timeoutMs (optional): the caller's remaining wall-clock budget for both legs
 // together (floored at a second: this is the visit's first and only read, so
 // it always runs); absent, the dispatcher's default chain budget applies.
-async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, shotList = false, lighting = lawnLightingLive(), scale2 = lawnScoreScaleV2Live(), timeoutMs } = {}) {
+async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, shotList = false, lighting = gateEnvValue('GATE_LAWN_VISIT_ASSESSMENT'), scale2 = lawnScoreScaleV2Live(), timeoutMs } = {}) {
   const { error, zones } = validateVisitPhotos(photos, { shotList });
   if (error) throw Object.assign(new Error(error), { code: 'INVALID_VISIT_PHOTOS', statusCode: 400 });
   const context = visionContext || {};

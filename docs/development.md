@@ -177,13 +177,16 @@ and replay, completion, and report redaction. The browser renders the customer
 portal, paid receipt and completed report against that database.
 
 This is application integration coverage with browser journeys. Twilio OTP and
-message delivery and Stripe charge lookup are simulated only in the QA process;
+message delivery, Stripe charge lookup and the saved-card PaymentIntent create are
+simulated only in the QA process (every other Stripe SDK method throws, and each
+simulated call is recorded as `kind: 'stripe'` in the private capture file);
 actual auth, signature verification, settlement and database code execute.
 Provider credentials are excluded and unexpected HTTP/fetch calls are blocked.
 This does not verify real provider delivery, checkout or device hardware.
 
+Each journey is one file in `scripts/qa/journeys/`; `scripts/qa/e2e.js` runs them in a fixed order.
 Screenshots, trace, server log and a commit/step report live in `.tmp/qa/e2e`.
-Credentials and captured OTPs are private files there; never commit or attach
+Credentials, captured OTPs and captured text bodies are private files there; never commit or attach
 them. Traces can contain short-lived synthetic session tokens. CI retains only
 the report, screenshots and trace for seven days, then discards them.
 `qa:seed` leaves a synthetic fixture for local inspection; `qa:cleanup` removes

@@ -32,6 +32,7 @@ beforeEach(() => {
     if (key === "queue") return response({ referrals: [] });
     if (key === "payouts") return response({ payouts: [] });
     if (key === "inbound") return response({ enabled: false, items: [] });
+    if (key === "thank-you-notes") return response({ notes: [], total: 0 });
     throw new Error(`Unexpected fixture request: ${url}`);
   }));
 });

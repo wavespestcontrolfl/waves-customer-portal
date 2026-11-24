@@ -508,3 +508,46 @@ describe('summary helpers', () => {
     expect(day.status).toBe('full');
   });
 });
+
+describe('guardHintStarts: strict, and the snapshot read only for a walked gap', () => {
+  const { guardHintStarts } = require('../services/scheduling/find-time-hints');
+  const GUARD = { today: '2026-09-01', step: 60, spanMin: 60, excluded: [], every: true, perTech: true };
+  const gap = slot('2026-09-01', '09:00', 4, { latest_start_min: 11 * 60 });
+
+  test('a failed snapshot throws under strict (the route check: an unchecked gap is no answer); the box fails open', async () => {
+    loadOccupancy.mockRejectedValue(new Error('snapshot down'));
+    await expect(guardHintStarts([gap], { ...GUARD, strict: true })).rejects.toThrow('snapshot down');
+    // Every staff picker keeps the engine's answer: the gap's every start.
+    const { every } = await guardHintStarts([gap], GUARD);
+    expect(every.map((s) => s.start_time)).toEqual(['09:00', '10:00', '11:00']);
+  });
+
+  test('a strict walk with a readable snapshot vetoes the occupied hour as the box does', async () => {
+    loadOccupancy.mockResolvedValue({
+      ...emptyOccupancy(),
+      rows: [{
+        id: 'unassigned-1', date: '2026-09-01', startMin: 10 * 60, endMin: 11 * 60, customer_id: 'c1',
+        technician_id: null, service_type: 'Pest Control', reservation_expires_at: null,
+      }],
+    });
+    const { every } = await guardHintStarts([gap], { ...GUARD, strict: true });
+    expect(every.map((s) => s.start_time)).toEqual(['09:00', '11:00']);
+  });
+
+  test('arrival-search slots read no snapshot: each is its own checked start, strict or not', async () => {
+    loadOccupancy.mockRejectedValue(new Error('snapshot down'));
+    const arrival = [
+      slot('2026-09-01', '09:00', 4, { route_mode: 'arrival_windows' }),
+      slot('2026-09-01', '13:00', 6, { route_mode: 'arrival_windows' }),
+    ];
+    for (const strict of [true, false]) {
+      const { every } = await guardHintStarts(arrival, { ...GUARD, strict });
+      expect(every.map((s) => s.start_time)).toEqual(['09:00', '13:00']);
+    }
+    expect(loadOccupancy).not.toHaveBeenCalled();
+    // A list with one walked gap reads that gap's date only.
+    loadOccupancy.mockResolvedValue(emptyOccupancy());
+    await guardHintStarts([...arrival, slot('2026-09-02', '09:00', 4)], { ...GUARD, strict: true });
+    expect(loadOccupancy.mock.calls).toEqual([[{ dateFrom: '2026-09-02', dateTo: '2026-09-02' }]]);
+  });
+});

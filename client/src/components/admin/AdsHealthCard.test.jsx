@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 /**
- * Ads -> Dashboard "Ad health" card. The server route ships behind
- * GATE_ADS_HEALTH_CARD, so the card must stay invisible while GET answers 404,
- * and one failed Google section must not hide the others.
+ * Ads -> Dashboard "Ad health" card. One failed Google section must not hide
+ * the others, and a reply without the documented shape renders nothing.
  */
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
@@ -73,8 +72,8 @@ afterEach(() => {
 });
 
 describe('AdsHealthCard', () => {
-  it('renders nothing while the gate is off (404)', async () => {
-    reply({ error: 'ads_health_off' }, 404);
+  it('renders nothing when the reply is not the documented shape', async () => {
+    reply({});
     const { container } = render(<AdsHealthCard />);
     expect(container).toBeEmptyDOMElement();
     await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());

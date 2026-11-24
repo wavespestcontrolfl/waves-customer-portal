@@ -20,7 +20,7 @@ const V13_TROUBLE_N_TARGETS = Object.freeze([
 // The key of the line note a reduced nitrogen bag carries (plan gateNotes), so the Fast Complete sheet can pick that one note out.
 const FUNGUS_NITROGEN_NOTE_KEY = 'activeFungusNitrogen';
 
-// GATE_LAWN_RECLAIMED_HALF_N (owner 2026-10-05 and 2026-10-23): a lawn watered with reclaimed water gets half the nitrogen at every
+// Owner 2026-10-05 and 2026-10-23: a lawn watered with reclaimed water gets half the nitrogen at every
 // N visit. A fraction of the visit's own target, not a table: it applies to every v13 visit that states a nitrogen target above
 // zero, except a visit whose bag is a pre-emergent plus fertilizer (the pre-emergent rate matters, so that bag keeps its rate).
 // When the November large-patch cut also applies, the SMALLER target wins (the two reasons are not added: each caps the same

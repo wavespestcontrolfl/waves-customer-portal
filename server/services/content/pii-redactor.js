@@ -205,6 +205,10 @@ const DOMAIN_TERM_PAIRS = new Set([
   'hammerhead worm', 'hammerhead worms', 'hammerhead flatworm',
   'hammerhead flatworms', 'land planarian', 'land planarians',
   'mud dauber', 'mud daubers',
+  // The palm disease the 2026-11-22 Waves Pest Insider brief PI-P05 is
+  // about. A post on lethal bronzing cannot avoid the name in its title.
+  // Neither word is a name, and each pair is cleared only as written.
+  'lethal bronzing', 'bronzing disease',
 ]);
 
 function looksLikeFalsePositiveName(first, last, allowPairs) {

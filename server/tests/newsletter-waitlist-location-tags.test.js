@@ -53,10 +53,13 @@ function subscribeHandler() {
   const layer = router.stack.find((l) => l.route && l.route.path === '/subscribe' && l.route.methods.post);
   return layer.route.stack[layer.route.stack.length - 1].handle;
 }
+// The original waitlist payload, posted by a browser on a fleet page (an
+// astro form built before the bot check sends no formMs; its Origin lets it
+// through, newsletter-signup-screen.js).
 function post(body) {
   return new Promise((resolve, reject) => {
     const res = { statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { resolve({ status: this.statusCode, body: b }); } };
-    subscribeHandler()({ body }, res, reject);
+    subscribeHandler()({ body, headers: { origin: 'https://www.wavespestcontrol.com' } }, res, reject);
   });
 }
 

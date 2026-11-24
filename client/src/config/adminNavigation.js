@@ -229,13 +229,18 @@ export const ADMIN_NAV_ITEMS = {
     flag: "agent_estimate",
     adminOnly: true,
   },
-  // Bids has two tabs: Open bids (bid invites found in the email table) and Bid kit (the papers and facts
-  // every government bid asks for). The Bid kit tab is always there, so the entry shows to every admin.
+  // Bids has five tabs: Open bids (bid invites found in the email table), Bid kit (the papers and facts
+  // every government bid asks for), Builders (who pulls permits, for the pre-slab termite pitch), Restaurants
+  // (new restaurants, new owners and pest findings from the state files) and Mail (new-home buyers from the county
+  // deed list, for the postcard mailer). The Bid kit tab is always there, so the entry shows to every admin.
   bids: {
     id: "bids",
     keywords: [
       "bid", "bids", "rfp", "rfq", "invitation to bid", "buildingconnected", "procore", "blue book", "proposal",
       "bid desk", "bid kit", "bid documents", "license copy", "insurance certificate", "w-9", "references", "facts sheet", "government bid",
+      "builders", "pool builders", "home builders", "permits", "pre-slab",
+      "restaurants", "new restaurants", "restaurant inspections", "dbpr", "commercial leads",
+      "mail", "postcards", "new homes", "new home buyers", "mailer",
     ],
     path: "/admin/bids",
     label: "Bids",

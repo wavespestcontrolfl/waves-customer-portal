@@ -17,11 +17,9 @@
 // Judged only when the line can be judged. No floor set, or no expected line (last year's months not set):
 // nothing can be below the floor, so an open row closes. A balance that was not read, or only in part: no
 // proof either way, so the row is left as it is.
-//
-// GATE_CASH_FORECAST (strict 'true', read at call time). Off = the daily cron does nothing.
 
 const db = require('../../models/db');
-const { cashForecastLive, alertEpisodesLive } = require('../../config/feature-gates');
+const { alertEpisodesLive } = require('../../config/feature-gates');
 const { composeAdminAlert, raiseAdminAlert } = require('../admin-alert-compose');
 const { shortDateET } = require('../admin-alert-names');
 
@@ -114,13 +112,12 @@ function notJudged(forecast) {
 }
 
 /**
- * Daily cron entry point. Returns { skipped } when the gate is off, otherwise { count, outcome }: raised |
+ * Daily cron entry point. Returns { count, outcome }: raised |
  * refreshed | unchanged | suppressed | closed | clear | not_judged (with reason). A read failure throws
  * (runExclusive records it in job_health) and never closes the row. `load` returns the forecast with its
  * settings; `dedupeKey` is the row's key (tests set both).
  */
-async function runCashForecastLowWeek({ database = db, gateEnabled, load = loadForecast, dedupeKey = DEDUPE_KEY } = {}) {
-  if (!(gateEnabled ?? cashForecastLive())) return { skipped: 'disabled' };
+async function runCashForecastLowWeek({ database = db, load = loadForecast, dedupeKey = DEDUPE_KEY } = {}) {
   const forecast = await load();
   const off = notJudged(forecast);
   if (off) {

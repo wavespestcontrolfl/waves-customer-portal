@@ -331,7 +331,7 @@ function outlineDetailLive() {
 const V13_FULL_OUTLINE_CATEGORIES = [
   [/\bscout\b[^.\n;]*\binsect pressure\b/i, 'Insect scouting', ['inspection'], 'Insect scouting checks current insect pressure and records the target and observations; treatment is only as needed after evidence is found.'],
   [/scout visit|inspect/i, 'Lawn inspection', ['inspection']],
-  [/stonewall 0\.43%|dimension 0\.21%/i, 'Pre-emergent weed control with fertilizer', ['feeding', 'barrier']],
+  [/stonewall 0\.43%|stonewall 0\.37%|dimension 0\.21%/i, 'Pre-emergent weed control with fertilizer', ['feeding', 'barrier']],
   [/stonewall|dimension/i, 'Pre-emergent weed control', ['barrier']],
   [/nutra-tech/i, 'Micronutrients', ['micros']],
   [/(?:^|[^\d.])\d{1,2}-\d{1,2}-\d{1,2}(?!\d)/, 'Fertilizer and nutrition', ['feeding']],

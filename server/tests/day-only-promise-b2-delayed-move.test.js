@@ -32,7 +32,6 @@ const { recheckDeferredReplay } = require('../services/messaging/deferred-replay
 const { promiseMetaOf } = timePromise;
 
 const ENTRY = 'appointment_notice_contact_deferred';
-const OLD_GATE = process.env.GATE_DAY_ONLY_PROMISE;
 let prefsRow;
 
 function chain(first) {
@@ -53,7 +52,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   // Three days before the 9:00 ET visit: outside the 24.25 h cutoff.
   jest.useFakeTimers().setSystemTime(new Date('2026-06-19T14:00:00.000Z'));
-  process.env.GATE_DAY_ONLY_PROMISE = 'true';
   prefsRow = { sms_enabled: true, service_reminder_24h: true };
   db.raw = jest.fn((sql) => sql);
   db.mockImplementation((table) => {
@@ -71,7 +69,6 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.useRealTimers();
-  if (OLD_GATE === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD_GATE;
 });
 
 

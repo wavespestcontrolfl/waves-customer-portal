@@ -28,6 +28,8 @@ const mockCollect = jest.fn();
 jest.mock('../services/ads/data-manager', () => ({
   _private: {
     collectCandidates: (...a) => mockCollect(...a),
+    // Same rule as data-manager.exclusionReason (pinned in data-manager.test.js).
+    exclusionReason: (c) => (c.internalTest ? 'internal_test' : null),
     sha256Hex: (s) => `h:${s}`,
     normalizeEmail: (e) => (e && String(e).includes('@') ? String(e).trim().toLowerCase() : null),
     normalizePhone: (p) => {
@@ -250,5 +252,29 @@ describe('extra match keys (name / location / external_id)', () => {
   });
   test('match-key summary records presence only', () => {
     expect(MetaCapi._private.matchKeySummary(base)).toMatchObject({ email: true, name: true, zip: true, city: true, state: true, externalId: true });
+  });
+});
+
+describe('test records (owner 2026-11-19)', () => {
+  test('an internal test record is skipped with its own reason, before anything else', () => {
+    expect(skipReason(lead({ internalTest: true }))).toBe('internal_test');
+    expect(skipReason(lead({ internalTest: true, email: null, phone: null, fbp: null }))).toBe('internal_test');
+  });
+
+  test('upload skips test records and reports the reason; real ones go out', async () => {
+    process.env.META_CAPI_ALLOW_UPLOADS = 'true';
+    mockCollect.mockResolvedValue([lead({ transactionId: 'waves_qualified_lead:T1', internalTest: true }), lead()]);
+    global.fetch = jest.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ events_received: 1 }) }));
+    const r = await MetaCapi.uploadConversions({ conversionType: 'qualified_lead', validateOnly: false });
+    expect(r.skipped).toEqual([{ event_id: 'waves_qualified_lead:T1', reason: 'internal_test' }]);
+    expect(r.sent).toBe(1);
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(body.data.map((e) => e.event_id)).toEqual(['waves_qualified_lead:L1']);
+  });
+
+  test('readiness counts test records apart from the eligible ones', async () => {
+    mockCollect.mockResolvedValue([lead({ transactionId: 'waves_qualified_lead:T1', internalTest: true }), lead()]);
+    const r = await MetaCapi.buildReadiness();
+    expect(r.conversions.qualified_lead.candidates).toMatchObject({ total: 2, eligible: 1, internalTest: 1 });
   });
 });

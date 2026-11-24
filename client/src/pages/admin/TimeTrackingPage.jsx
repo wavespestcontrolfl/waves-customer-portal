@@ -9,6 +9,9 @@ import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
 import PayGrowth from "../../components/payGrowth/PayGrowth";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import PayrollSettings from "../../components/payroll/PayrollSettings";
+import ProtocolAudit from "../../components/techRewards/ProtocolAudit";
+import Scoreboard, { ScoreboardPreview } from "../../components/techRewards/Scoreboard";
+import useTechScoreboardAvailability from "../../hooks/useTechScoreboardAvailability";
 import ServiceLinesCard from "./ServiceLinesCard";
 import TerritoryReadoutCard from "./TerritoryReadoutCard";
 import usePayrollAvailable from "../../hooks/usePayrollAvailable";
@@ -193,8 +196,11 @@ const STAFF_SECTIONS = [
   { key: "team", label: "Team", Icon: Users },
   { key: "documents", label: "Documents", Icon: FileText },
   { key: "pay-growth", label: "Growth", Icon: BarChart3 },
+  { key: "protocol-audit", label: "Protocol audit", Icon: CheckCircle2 },
   { key: "payroll", label: "Payroll", Icon: Wallet },
   { key: "pay-stubs", label: "Pay stubs", Icon: Receipt },
+  { key: "scoreboard", label: "Scoreboard", Icon: BarChart3 },
+  { key: "scoreboard-preview", label: "Scoreboard preview", Icon: BarChart3 },
 ];
 
 // The 7-tab bar is grouped into parent sections, each revealing its leaf
@@ -206,13 +212,13 @@ const TIMETRACKING_TAB_GROUPS = [
     key: "time",
     label: "Time",
     Icon: Clock,
-    tabs: ["timesheet", "entries", "approvals", "pay-stubs"],
+    tabs: ["timesheet", "entries", "approvals", "pay-stubs", "scoreboard"],
   },
   {
     key: "team",
     label: "Team",
     Icon: Users,
-    tabs: ["team", "documents", "pay-growth", "payroll"],
+    tabs: ["team", "documents", "pay-growth", "protocol-audit", "scoreboard-preview", "payroll"],
   },
   { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
 ];
@@ -224,7 +230,7 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 // Staff page is Dashboard, its own pay stubs and the team roster. Documents is
 // office-only too: its list and upload are admin routes (a technician reads its
 // own documents under Today -> More).
-const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "analytics", "documents"]);
+const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "analytics", "documents", "protocol-audit", "scoreboard-preview"]);
 
 // Resolve the LEAF the page will actually render for a ?tab= deep link.
 // Gate-off or non-admin deep links to pay-growth fall back to the group's
@@ -237,11 +243,12 @@ const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "an
 // The Pay stubs tab (GATE_TECH_PAY_STUBS) is open to every staff role; it falls back to
 // Timesheet (Dashboard for a technician) when off and waits (null) while its one
 // request is pending. A technician's link to an office-only leaf opens Dashboard.
-export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailable = false, payStubsStatus = "off") {
+export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailable = false, payStubsStatus = "off", scoreboardStatus = "off") {
   if (role !== "admin" && OFFICE_ONLY_STAFF_TABS.has(rawTab)) return "dashboard";
-  if (rawTab === "pay-stubs") {
-    if (payStubsStatus === "ready") return "pay-stubs";
-    if (payStubsStatus === "loading") return null;
+  const gatedStatus = new Map([["pay-stubs", payStubsStatus], ["scoreboard", scoreboardStatus]]).get(rawTab);
+  if (gatedStatus !== undefined) {
+    if (gatedStatus === "ready") return rawTab;
+    if (gatedStatus === "loading") return null;
     return role === "admin" ? "timesheet" : "dashboard";
   }
   if (rawTab === "payroll") {
@@ -253,24 +260,38 @@ export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailab
   return payGrowthAvailable === true ? "pay-growth" : null;
 }
 
+// The leaves of a section this viewer can open: a gated leaf needs its gate answer, an office-only one an admin login.
+function openStaffLeaves(group, leafOpen, role) {
+  return group.tabs.filter((key) => (leafOpen[key] ?? true) && (role === "admin" || !OFFICE_ONLY_STAFF_TABS.has(key)));
+}
+
+const AVAILABILITY_WORDS = {
+  payroll: "Checking payroll availability…",
+  "pay-stubs": "Checking pay stub availability…",
+  scoreboard: "Checking scoreboard availability…",
+};
+
 export default function TimeTrackingPage() {
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
   const payGrowthAvailable = usePayGrowthAvailable();
   const payrollAvailable = usePayrollAvailable(readStaffRole() === "admin");
   const payStubs = useTechPayStubs();
+  const scoreboard = useTechScoreboardAvailability();
   const [searchParams, setSearchParams] = useSearchParams();
   const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
   const payGrowthGateOpen = payGrowthAvailable === true && readStaffRole() === "admin";
   // null = pay-growth requested by an admin while availability is still
   // unknown: no leaf renders and no beacon fires until it resolves.
   const payrollGateOpen = payrollAvailable === true && readStaffRole() === "admin";
-  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole(), payrollAvailable, payStubs.status);
+  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole(), payrollAvailable, payStubs.status, scoreboard.status);
   // The leaves this viewer can open in a section; a section with none is not shown.
-  const visibleLeaves = (group) => group.tabs
-    .filter((key) => key !== "pay-growth" || payGrowthGateOpen)
-    .filter((key) => key !== "payroll" || payrollGateOpen)
-    .filter((key) => key !== "pay-stubs" || payStubs.status === "ready")
-    .filter((key) => readStaffRole() === "admin" || !OFFICE_ONLY_STAFF_TABS.has(key));
+  const leafOpen = {
+    "pay-growth": payGrowthGateOpen,
+    payroll: payrollGateOpen,
+    "pay-stubs": payStubs.status === "ready",
+    scoreboard: scoreboard.status === "ready",
+  };
+  const visibleLeaves = (group) => openStaffLeaves(group, leafOpen, readStaffRole());
   // weekStart: the Monday an Approvals link opens (the same ?weekStart= a
   // timesheet bell carries).
   const setTab = (value, weekStart = null) => {
@@ -343,9 +364,12 @@ export default function TimeTrackingPage() {
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
       {tab === "pay-growth" && <PayGrowth manage />}
+      {tab === "protocol-audit" && <ProtocolAudit />}
+      {tab === "scoreboard-preview" && <ScoreboardPreview />}
       {tab === "payroll" && <PayrollSettings />}
       {tab === "pay-stubs" && <TechPayStubs stubs={payStubs} />}
-      {tab === null && <p role="status" style={{ color: "#71717A" }}>{rawTab === "payroll" ? "Checking payroll availability…" : rawTab === "pay-stubs" ? "Checking pay stub availability…" : "Checking pay and growth availability…"}</p>}
+      {tab === "scoreboard" && <Scoreboard />}
+      {tab === null && <p role="status" style={{ color: "#71717A" }}>{AVAILABILITY_WORDS[rawTab] || "Checking pay and growth availability…"}</p>}
       <div
         style={{
           position: "fixed",
@@ -3179,6 +3203,11 @@ const EMPTY_TECH_FORM = {
   // seven = every day (sent as null). Only sent while the server says the
   // gate is on (workDaysEnabled).
   workDays: [0, 1, 2, 3, 4, 5, 6],
+  // GATE_TECH_SHIFT_HOURS: the hours of each work day, "HH:MM" Eastern. Both
+  // empty = no set hours (sent as null). Only sent while the server says the
+  // gate is on (shiftHoursEnabled).
+  shiftStart: "",
+  shiftEnd: "",
 };
 
 // Work-days toggles in display order (Mon to Sun); values are stored 0 = Sunday.
@@ -3226,6 +3255,36 @@ function buildWorkDaysPayload(enabled, workDays) {
   if (!enabled) return {};
   const days = [...new Set(workDays || [])].sort((a, b) => a - b);
   return { workDays: days.length === 7 ? null : days };
+}
+
+// `shiftHours` on the wire: nothing while the gate is off; null when both times
+// are empty (no set hours); otherwise { start, end } as "HH:MM".
+function buildShiftHoursPayload(enabled, shiftStart, shiftEnd) {
+  if (!enabled) return {};
+  if (!shiftStart && !shiftEnd) return { shiftHours: null };
+  return { shiftHours: { start: shiftStart, end: shiftEnd } };
+}
+
+// Why the shift hours cannot be saved yet, or "" when they can: both times or
+// neither, and the end after the start (the server refuses the same cases).
+function shiftHoursProblem(form) {
+  if (!form.shiftStart && !form.shiftEnd) return "";
+  if (!form.shiftStart || !form.shiftEnd) return "Enter both shift times, or clear both";
+  if (form.shiftEnd <= form.shiftStart) return "The shift must end after it starts";
+  return "";
+}
+
+// "8:00 AM–6:00 PM" from stored "HH:MM" times; empty when either is missing.
+function describeShiftHours(start, end) {
+  const label = (value) => {
+    const m = /^(\d{2}):(\d{2})/.exec(value || "");
+    if (!m) return "";
+    const hour = Number(m[1]);
+    return `${hour % 12 || 12}:${m[2]} ${hour < 12 ? "AM" : "PM"}`;
+  };
+  const from = label(start);
+  const to = label(end);
+  return from && to ? `${from}–${to}` : "";
 }
 
 function startPointNeedsPick(form) {
@@ -3282,6 +3341,13 @@ export function TeamTab({ showToast }) {
   // GATE_TECH_WORK_DAYS: the server marks the roster response when the gate is
   // on; off, the Work days row and summary never render and nothing is sent.
   const [workDaysEnabled, setWorkDaysEnabled] = useState(false);
+  // GATE_TECH_SHIFT_HOURS: the server marks the roster response when the gate is
+  // on; off, the Shift hours row and summary never render and nothing is sent.
+  const [shiftHoursEnabled, setShiftHoursEnabled] = useState(false);
+  // The shift hours as the editor opened them: an edit that leaves both times as
+  // loaded sends no shiftHours, so saving another field never overwrites hours
+  // another admin set meanwhile (the API keeps omitted hours).
+  const [shiftLoaded, setShiftLoaded] = useState(null);
   // GATE_SERVICE_LINE_MAP=shadow: the server marks the roster response; off, the
   // Service lines card never renders and nothing is fetched.
   const [serviceLinesEnabled, setServiceLinesEnabled] = useState(false);
@@ -3367,6 +3433,7 @@ export function TeamTab({ showToast }) {
       if (request !== loadRequestRef.current) return;
       setTechs(res.technicians || []);
       setWorkDaysEnabled(res.workDaysEnabled === true);
+      setShiftHoursEnabled(res.shiftHoursEnabled === true);
       setServiceLinesEnabled(res.serviceLinesEnabled === true);
       setTerritoryReadoutEnabled(res.territoryReadoutEnabled === true);
       setGoogleSigninEnabled(res.googleSigninEnabled === true);
@@ -3406,13 +3473,23 @@ export function TeamTab({ showToast }) {
       showToast("Pick at least one work day");
       return;
     }
+    if (shiftHoursEnabled && shiftHoursProblem(form)) {
+      showToast(shiftHoursProblem(form));
+      return;
+    }
     setSaving(true);
     try {
       if (editingId) {
-        const { startMode, startText, startPoint, workDays, googleEmail: _googleEmail, ...rest } = form;
+        const { startMode, startText, startPoint, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
+        const shiftChanged = !shiftLoaded || shiftStart !== shiftLoaded.start || shiftEnd !== shiftLoaded.end;
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
-          body: JSON.stringify({ ...rest, ...buildWorkDaysPayload(workDaysEnabled, workDays), startPoint: buildStartPointPayload(form) }),
+          body: JSON.stringify({
+            ...rest,
+            ...buildWorkDaysPayload(workDaysEnabled, workDays),
+            ...(shiftChanged ? buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd) : {}),
+            startPoint: buildStartPointPayload(form),
+          }),
         });
         // Leaving the dispatch pool through Edit (Employment → Inactive or
         // Prospective, or field eligibility removed) surfaces the same
@@ -3426,10 +3503,14 @@ export function TeamTab({ showToast }) {
         );
         await saveGoogleSignin(editingId);
       } else {
-        const { startMode, startText, startPoint, workDays, googleEmail: _googleEmail, ...rest } = form;
+        const { startMode, startText, startPoint, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
         const created = await adminFetch("/admin/timetracking/technicians", {
           method: "POST",
-          body: JSON.stringify({ ...rest, ...buildWorkDaysPayload(workDaysEnabled, workDays) }),
+          body: JSON.stringify({
+            ...rest,
+            ...buildWorkDaysPayload(workDaysEnabled, workDays),
+            ...buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd),
+          }),
         });
         showToast("Technician added");
         await saveGoogleSignin(created.technician.id);
@@ -3502,11 +3583,22 @@ export function TeamTab({ showToast }) {
     setHiring(true);
     setHireError("");
     try {
-      const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire`, {
-        method: "POST",
-        body: JSON.stringify(fields),
-      });
-      showToast(welcomeToast(res && res.emailed, fields.email.trim()));
+      // The Google press has its own endpoint: a server that does not know it answers 404, and never reads it as
+      // the emailed-link press. (Two literal calls: the Intelligence Bar coverage record keys on each call's text.)
+      const res = fields.googleEmail
+        ? await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire/google`, {
+          method: "POST",
+          body: JSON.stringify(fields),
+        })
+        : await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire`, {
+          method: "POST",
+          body: JSON.stringify(fields),
+        });
+      showToast(
+        res && res.login === "google"
+          ? `Hired. ${fields.name} signs in with Google. No email was sent.`
+          : welcomeToast(res && res.emailed, fields.email.trim()),
+      );
       setHireTech(null);
       load();
     } catch (e) {
@@ -3545,6 +3637,7 @@ export function TeamTab({ showToast }) {
 
   const startEdit = (tech) => {
     setEditingId(tech.id);
+    setShiftLoaded({ start: tech.shift_start || "", end: tech.shift_end || "" });
     setForm({
       name: tech.name,
       phone: tech.phone || "",
@@ -3571,6 +3664,8 @@ export function TeamTab({ showToast }) {
       workDays: Array.isArray(tech.work_days) && tech.work_days.length
         ? tech.work_days.map(Number)
         : [0, 1, 2, 3, 4, 5, 6],
+      shiftStart: tech.shift_start || "",
+      shiftEnd: tech.shift_end || "",
       ...(tech.start_address && tech.start_lat != null && tech.start_lng != null
         ? {
             startMode: "home",
@@ -3866,6 +3961,49 @@ export function TeamTab({ showToast }) {
                 {form.workDays.length === 0 && (
                   <div role="alert" style={{ fontSize: 14, color: D.amber, marginTop: 4 }}>
                     Pick at least one work day
+                  </div>
+                )}
+              </div>
+            )}
+            {/* Shift hours (GATE_TECH_SHIFT_HOURS): the hours of each work day,
+                Eastern time. Both empty = no set hours. */}
+            {shiftHoursEnabled && (
+              <div style={{ gridColumn: "1 / -1" }}>
+                {" "}
+                <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
+                  Shift hours
+                </div>{" "}
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                  <input
+                    id="tech-shift-start"
+                    type="time"
+                    aria-label="Shift start"
+                    value={form.shiftStart}
+                    onChange={(e) => setForm((f) => ({ ...f, shiftStart: e.target.value }))}
+                    style={{ ...sInput, width: 140 }}
+                  />
+                  <span style={{ fontSize: 14, color: D.muted }}>to</span>
+                  <input
+                    id="tech-shift-end"
+                    type="time"
+                    aria-label="Shift end"
+                    value={form.shiftEnd}
+                    onChange={(e) => setForm((f) => ({ ...f, shiftEnd: e.target.value }))}
+                    style={{ ...sInput, width: 140 }}
+                  />
+                  {(form.shiftStart || form.shiftEnd) && (
+                    <button
+                      type="button"
+                      onClick={() => setForm((f) => ({ ...f, shiftStart: "", shiftEnd: "" }))}
+                      style={sBtn("transparent", D.muted)}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>{" "}
+                {shiftHoursProblem(form) && (
+                  <div role="alert" style={{ fontSize: 14, color: D.amber, marginTop: 4 }}>
+                    {shiftHoursProblem(form)}
                   </div>
                 )}
               </div>
@@ -4269,10 +4407,10 @@ export function TeamTab({ showToast }) {
             {" "}
             <button
               onClick={handleSave}
-              disabled={saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0)}
+              disabled={saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0) || (shiftHoursEnabled && !!shiftHoursProblem(form))}
               style={{
                 ...sBtn(D.green, D.white),
-                opacity: saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0) ? 0.5 : 1,
+                opacity: saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0) || (shiftHoursEnabled && !!shiftHoursProblem(form)) ? 0.5 : 1,
               }}
             >
               {saving ? "Saving..." : editingId ? "Update" : "Add"}
@@ -4397,6 +4535,11 @@ export function TeamTab({ showToast }) {
                       {`Works ${describeWorkDays(t.work_days)}`}
                     </div>
                   )}
+                  {shiftHoursEnabled && describeShiftHours(t.shift_start, t.shift_end) && (
+                    <div style={{ fontSize: 14, fontWeight: 400, color: D.muted, marginTop: 2 }}>
+                      {`Shift ${describeShiftHours(t.shift_start, t.shift_end)}`}
+                    </div>
+                  )}
                   {(t.job_title || t.pay_rate) && (
                     <div
                       style={{
@@ -4471,6 +4614,11 @@ export function TeamTab({ showToast }) {
                   {t.hire_action === "resend" && (
                     <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                       {t.hire_link_pending ? "Waiting for first password" : "Link expired or not sent"}
+                    </div>
+                  )}
+                  {t.hire_google_only && (
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                      {GOOGLE_ONLY_LABELS[t.hire_google_only] || GOOGLE_ONLY_LABELS.off}
                     </div>
                   )}
                   {/* Capability counts matter only for someone who takes (or will
@@ -4684,10 +4832,24 @@ export function TeamTab({ showToast }) {
   );
 }
 
+// How a Google-only account stands today (t.hire_google_only, derived on the
+// server from the stored link and the sign-in setup). Each line names its own
+// way out; an unknown state reads as no sign-in.
+const GOOGLE_ONLY_LABELS = {
+  ready: "Signs in with Google",
+  unlinked: "No sign-in. Link a Google address.",
+  bad_address: "No sign-in. Link a company Google address.",
+  off: "No sign-in. Staff Google sign-in is off or not set up.",
+  returning: "Google-only account. Turn it on from the edit form, or clear its Google sign-in first.",
+};
+
 // GATE_HIRED_PACKET: one click turns a prospective placeholder into an active
-// staff account and emails the hire a set-password link. Email and first day
-// are required; the rest is prefilled from the row.
+// staff account. The server says which sign-in the press turns on
+// (tech.hire_login): "google" = the linked company Google address and nothing
+// else, no password and no email; otherwise the hire is emailed a set-password
+// link. Email and first day are required; the rest is prefilled from the row.
 function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
+  const googleLogin = tech.hire_login === "google";
   const dialogRef = useModalFocus(true, () => {
     if (!submitting) onCancel();
   });
@@ -4720,6 +4882,9 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
       payRate: form.payRate.trim(),
       jobTitle: form.jobTitle.trim(),
       employmentType: form.employmentType,
+      // The Google address this form showed as the sign-in (none = the emailed link). The server refuses the
+      // press when the row no longer holds exactly that.
+      ...(googleLogin ? { googleEmail: tech.google_email } : {}),
     });
   };
   const field = (id, label, input, required) => (
@@ -4773,7 +4938,9 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
           Hire {tech.name}
         </div>
         <p style={{ fontSize: 14, lineHeight: 1.55, color: D.text, margin: "12px 0 16px" }}>
-          This makes them an active staff member and emails them a link to set their password. The link works for 7 days.
+          {googleLogin
+            ? `This makes them an active staff member. They sign in with Google as ${tech.google_email}. They get no password and no email is sent.`
+            : "This makes them an active staff member and emails them a link to set their password. The link works for 7 days."}
         </p>
         {field("name", "Name", <input id={`${titleId}-name`} value={form.name} onChange={set("name")} style={sInput} />, true)}
         {field("email", "Email", <input id={`${titleId}-email`} type="email" value={form.email} onChange={set("email")} placeholder="name@example.com" style={sInput} />, true)}
@@ -4811,7 +4978,7 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
             aria-busy={submitting || undefined}
             style={{ ...sBtn(D.teal, D.white), cursor: submitting ? "wait" : "pointer", opacity: submitting ? 0.6 : 1 }}
           >
-            {submitting ? "Hiring…" : "Hire and send link"}
+            {submitting ? "Hiring…" : googleLogin ? "Hire with Google sign-in" : "Hire and send link"}
           </button>
         </div>
       </div>

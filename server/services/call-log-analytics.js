@@ -1,6 +1,7 @@
 const { etParts, parseETDateTime } = require('../utils/datetime-et');
 const { isLikelyE164, isValidNanpNumber, phoneIdentityKey, toE164 } = require('../utils/phone');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { sharedLineNumbers } = require('../config/shared-phone-lines');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 
 const TIME_ZONE = 'America/New_York';
@@ -90,6 +91,12 @@ function recordedSourceEvidence(row) {
     kind: 'google_ads', label: 'Google Ads', detail: location || 'Google Ads call line',
     basis: 'When the call arrived, the dialed number was assigned to this Google Ads call placement.',
   };
+  // The released Local Services line (941) 213-5010 (2026-11-23): a call it
+  // already recorded keeps its Google paid label.
+  if (type === 'google_lsa') return {
+    kind: 'google_ads', label: 'Google LSA', detail: location || 'Local Services call line',
+    basis: 'When the call arrived, the dialed number was assigned to the Google Local Services profile.',
+  };
   if (type === 'facebook') return {
     kind: 'meta_ads', label: 'Meta Ads', detail: location || 'Meta Ads call line',
     basis: 'When the call arrived, the dialed number was assigned to this Meta Ads call placement.',
@@ -133,8 +140,7 @@ function sourceEvidence(row) {
   const registry = registryLine(number);
   const sourceType = String(row?._source_type || '').toLowerCase();
   const name = lineName(row, registry);
-  const sharedNumber = number === TWILIO_NUMBERS.mainLine.number
-    || Object.values(TWILIO_NUMBERS.locations).some((line) => line.number === number);
+  const sharedNumber = sharedLineNumbers(TWILIO_NUMBERS).includes(number);
 
   if (sourceType === 'google_ads' || registry?.type === 'google_ads') {
     return {
@@ -142,6 +148,16 @@ function sourceEvidence(row) {
       label: 'Google Ads',
       detail: secondaryDetail('google_ads', name, row),
       basis: 'The dialed number is currently assigned to this Google Ads call placement.',
+    };
+  }
+  // Only an active row proves the placement: the 2026-11-23 line was released
+  // and its row turned off (20261124000000).
+  if (sourceType === 'google_lsa' && row?._source_is_active === true) {
+    return {
+      kind: 'google_ads',
+      label: 'Google LSA',
+      detail: secondaryDetail('google_ads', name, row),
+      basis: 'The dialed number is currently assigned to the Google Local Services profile.',
     };
   }
   if (sourceType === 'facebook' || registry?.type === 'facebook') {
@@ -226,10 +242,7 @@ function stripPrivateSourceColumns(row) {
 }
 
 function sourceSortExpression(conn, callAlias = 'cl') {
-  const shared = [
-    TWILIO_NUMBERS.mainLine.number,
-    ...Object.values(TWILIO_NUMBERS.locations).map((line) => line.number),
-  ];
+  const shared = sharedLineNumbers(TWILIO_NUMBERS);
   const google = Object.values(TWILIO_NUMBERS.paidTracking).filter((line) => line.source === 'google_ads').map((line) => line.number);
   const meta = Object.values(TWILIO_NUMBERS.paidTracking).filter((line) => line.source === 'facebook').map((line) => line.number);
   const gbp = Object.values(TWILIO_NUMBERS.gbpTracking).map((line) => line.number);
@@ -243,12 +256,14 @@ function sourceSortExpression(conn, callAlias = 'cl') {
     WHEN ${callAlias}.direction = 'outbound' THEN 'Outbound call'
     WHEN NULLIF(BTRIM(${callAlias}.google_ads_call_resource_name), '') IS NOT NULL THEN 'Google Ads'
     WHEN ${callAlias}.metadata->>'numberType' = 'google_ads' THEN 'Google Ads'
+    WHEN ${callAlias}.metadata->>'numberType' = 'google_lsa' THEN 'Google LSA'
     WHEN ${callAlias}.metadata->>'numberType' = 'facebook' THEN 'Meta Ads'
     WHEN ${callAlias}.metadata->>'numberType' = 'gbp_tracking' THEN 'Google Business Profile'
     WHEN ${callAlias}.metadata->>'numberType' = 'van_tracking' THEN 'Offline'
     WHEN ${callAlias}.metadata->>'numberType' IN ('location', 'tech_line', 'unassigned', 'internal_alert', 'customer_chat') THEN 'Source unknown'
     WHEN ${callAlias}.metadata->>'numberType' IN ('domain_tracking', 'pest_domain', 'lawn_domain') THEN 'Website'
     WHEN ${callAlias}.to_phone IN (${marks(google)}) OR call_source.source_type = 'google_ads' THEN 'Google Ads'
+    WHEN call_source.source_type = 'google_lsa' AND call_source.is_active IS TRUE THEN 'Google LSA'
     WHEN ${callAlias}.to_phone IN (${marks(meta)}) OR call_source.source_type = 'facebook' THEN 'Meta Ads'
     WHEN ${callAlias}.to_phone IN (${marks(gbp)}) OR call_source.source_type = 'gbp' THEN 'Google Business Profile'
     WHEN ${callAlias}.to_phone IN (${marks(offline)}) OR call_source.source_type = 'vehicle' THEN 'Offline'

@@ -43,8 +43,8 @@ function v13View({ addOns, swaps }) {
   return views.get(key);
 }
 
-// GATE_LAWN_RECLAIMED_HALF_N: the two reclaimed-water sentences of the recipe (one line in every track's notes and one in its safety_rules) say what the TECH does.
-// The JSON holds the wording that is true with the gate off ("the app does not adjust it yet"); with the gate on, the reader gets the wording
+// The two reclaimed-water sentences of the recipe (one line in every track's notes and one in its safety_rules) say what the TECH does.
+// The JSON holds the older wording ("the app does not adjust it yet"); the v13 reader gets the wording
 // that is true when the app halves the N (and names the two bags that keep their full rate). Swapped by exact sentence, so a recipe edit that
 // rewords one of them fails the test that pins the pair instead of silently serving the old text.
 const RECLAIMED_WORDING = Object.freeze([
@@ -71,7 +71,7 @@ const reclaimedView = (view) => {
 function lawnProtocols() {
   if (!featureGates.lawnV13Live?.()) return protocols.lawn;
   const view = v13View({ addOns: featureGates.lawnBermudaRemovalLive?.() === true, swaps: featureGates.lawnDecLargePatchKLive?.() === true });
-  return featureGates.lawnReclaimedHalfNLive?.() === true ? reclaimedView(view) : view;
+  return reclaimedView(view);
 }
 
 // v13 is one program for every grass, still filed under the three track keys.

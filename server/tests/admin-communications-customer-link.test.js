@@ -96,6 +96,7 @@ jest.mock('../services/composer-customer-links', () => ({
 jest.mock('../services/lead-consultation-link', () => ({
   buildLeadConsultationSmsLine: jest.fn(),
 }));
+jest.mock('../services/invoice-receipt-resend', () => ({ sendInvoiceReceipt: jest.fn() }));
 jest.mock('../services/prep-guide-sender', () => ({
   isSupportedPestType: () => true,
   isSupportedChannel: () => true,
@@ -850,6 +851,63 @@ describe('POST /admin/communications/customer-link', () => {
 
     const badKind = await customerLinkInsert({ phone: '+15551234567', kind: 'nope' });
     expect(badKind.status).toBe(400);
+  });
+
+  // POST /send-latest-receipt — Quick Links "Latest receipt email". The route
+  // picks the newest paid invoice the customer owes nothing through a payer on,
+  // and hands it to the one receipt writer, email only.
+  describe('POST /send-latest-receipt', () => {
+    const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
+    const invoiceQuery = (row, seen = {}) => {
+      const chain = {
+        where: (w) => { seen.where = w; return chain; },
+        whereNull: (c) => { (seen.nulls ||= []).push(c); return chain; },
+        orderByRaw: (o) => { seen.order = o; return chain; },
+        first: async () => row,
+      };
+      return chain;
+    };
+
+    test('emails the newest paid, non-payer invoice through the receipt writer', async () => {
+      const seen = {};
+      db.mockImplementationOnce(() => invoiceQuery({ id: 'inv-1', invoice_number: 'WPC-2026-0534' }, seen));
+      sendInvoiceReceipt.mockResolvedValueOnce({ status: 200, body: { ok: true, email: { ok: true } }, delivery: { email: 'sent' } });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-latest-receipt', { customerId: CUSTOMER_UUID });
+        expect(res.status).toBe(200);
+        expect((await res.json()).message).toBe('Receipt for invoice WPC-2026-0534 emailed.');
+      });
+      expect(seen.where).toEqual({ customer_id: CUSTOMER_UUID, status: 'paid' });
+      expect(seen.nulls).toEqual(['payer_id', 'archived_at']);
+      expect(sendInvoiceReceipt).toHaveBeenCalledWith('inv-1', expect.objectContaining({ via: 'email' }));
+    });
+
+    test('no paid invoice sends nothing; a refusal and an unknown outcome are told apart', async () => {
+      sendInvoiceReceipt.mockClear();
+      db.mockImplementationOnce(() => invoiceQuery(undefined));
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-latest-receipt', { customerId: CUSTOMER_UUID });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/no paid invoice/);
+      });
+      expect(sendInvoiceReceipt).not.toHaveBeenCalled();
+
+      db.mockImplementationOnce(() => invoiceQuery({ id: 'inv-1', invoice_number: 'WPC-1' }));
+      sendInvoiceReceipt.mockResolvedValueOnce({ status: 409, body: { error: 'A receipt for this invoice is being delivered right now' } });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-latest-receipt', { customerId: CUSTOMER_UUID });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/was not sent: A receipt for this invoice is being delivered right now/);
+      });
+
+      db.mockImplementationOnce(() => invoiceQuery({ id: 'inv-1', invoice_number: 'WPC-1' }));
+      sendInvoiceReceipt.mockResolvedValueOnce({ status: 200, body: { ok: false, email: { ok: false, error: 'timeout' } }, delivery: { email: 'unknown' } });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-latest-receipt', { customerId: CUSTOMER_UUID });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/may or may not have gone out/);
+      });
+    });
   });
 
   // POST /send-prep — a zero-confirmed send whose leg the provider MAY have

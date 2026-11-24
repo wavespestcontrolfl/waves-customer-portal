@@ -5,11 +5,11 @@ const product = { id: 'product', name: 'Synthetic liquid', inventory_on_hand: 1,
 const line = { selected: true, product, planMix: { amount: 256, amountUnit: 'fl_oz' } };
 const base = { facts: { serviceId: 'visit' }, now, isToday: true, lines: [line], blocks: [], tank: { calibrated: true }, sprayCheck: { hold: false, verdicts: [{ verdict: 'ok' }] } };
 
-test('weather holds and a stock shortage survive missing readings and a blocked plan', () => {
+test('a weather caution and a stock shortage survive missing readings and a blocked plan', () => {
   const hourly = [{ startTime: now.toISOString(), windMph: 20, temperatureF: null, rainChance: null }];
   const result = dispatchReadiness({ ...base, sprayCheck: buildSprayCheck({ products: [product], hourly, now }), blocks: [{ code: 'inventory_shortage' }] });
   expect(result.issues).toEqual(expect.arrayContaining([
-    { kind: 'weather', status: 'hold', label: 'Weather hold' },
+    { kind: 'weather', status: 'caution', label: 'Wind caution · Synthetic liquid' },
     { kind: 'stock', status: 'hold', label: 'Company stock short' },
     { kind: 'plan', status: 'hold', label: 'Plan blocked' },
   ]));

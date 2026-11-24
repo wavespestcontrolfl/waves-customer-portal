@@ -88,13 +88,16 @@ async function resolveEstimate(token) {
 // Shared with /data's offer (assessmentFirstFor), so the page never offers what this page refuses.
 async function assessmentEligibility(estimate, data, conn = db) {
   if (estimate.estimate_group_id || data?.scheduled_service_id || !estimate.customer_id) return { state: 'gone' };
+  // A customer's own plan quote that staff changed: its accept refuses it and its page books nothing, so no visit is
+  // booked from it here either (codex pre-push P1). Judged on the row this read has: the booking re-check's is locked.
+  if (require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(estimate)) return { state: 'gone' };
   const customer = await conn('customers').where({ id: estimate.customer_id }).whereNull('deleted_at').first(...CUSTOMER_COLUMNS);
   if (!customer?.address_line1) return { state: 'gone' };
   const { sameProperty } = require('../services/estimate-consultation-offer');
   if (!sameProperty(estimate.address, { line1: customer.address_line1, line2: customer.address_line2, zip: customer.zip })) {
     return { state: 'gone' };
   }
-  // An excluded locality (Punta Gorda, owner ruling 2026-10-22) never books, by the address's own city or ZIP: the
+  // An excluded locality (Punta Gorda, owner ruling 2026-10-22; the places held until a second technician is hired, 2026-11-23) never books, by the address's own city or ZIP: the
   // cheap half of the inspection page's service-area check, so /data never offers it. The booking page runs the
   // whole check (bookingSetup).
   const { isExcludedLocality, isExcludedZip } = require('../services/excluded-localities');
@@ -137,9 +140,19 @@ async function bookingLocationFor(customer) {
   return require('./booking')._internals.customerBookingLocation(customer);
 }
 
+// The estimate's OWN lead, for the assessment's service line (owner 2026-11-21, line-technician assessmentLineFor):
+// the one unambiguous lead linked to it (linkedLeadIdFor), else null and the customer's newest lead is read. A
+// customer with a newer inquiry for another service keeps this estimate's line. Read on the request only while the
+// line map is live (the offers and the commit route by it). In shadow only a booking's shadow row needs it, and the
+// recorder reads it after the booking (shadowLeadFor), so a failed lookup never fails a public request.
+async function lineLeadIdFor(estimate, data) {
+  if (!require('../services/scheduling/line-technician').lineMapLive()) return null;
+  return require('../services/estimate-consultation-offer').linkedLeadIdFor(estimate.id, data);
+}
+
 // Everything a request needs once the estimate and customer are eligible: the location, the config, the window and
-// the catalog. `blocked` is the GET-shaped answer when times cannot be offered.
-async function bookingSetup(customer, lead) {
+// the catalog. `blocked` is the GET-shaped answer when times cannot be offered. `leadId` rides along for the line.
+async function bookingSetup(customer, lead, leadId = null) {
   const location = await bookingLocationFor(customer);
   const areaHold = { blocked: { state: 'ok', lead, availability: null, needs_address: false, selfServeNotice: true, service_area_unavailable: true } };
   if (!location) return areaHold;
@@ -156,7 +169,7 @@ async function bookingSetup(customer, lead) {
   if (!catalog.serviceId) {
     return { blocked: { state: 'ok', lead, availability: null, needs_address: false, selfServeNotice: true, booking_unavailable: true } };
   }
-  return { booking, location, config, range, catalog };
+  return { booking, location, config, range, catalog, customer, leadId };
 }
 
 // One request's resolution: the generic 404, a terminal page state, or the eligible estimate, customer and lead.
@@ -168,7 +181,7 @@ async function resolveRequest(token) {
   if (eligibility.state === 'gone') return { body: { state: 'gone' } };
   const lead = customerPayload(eligibility.customer);
   if (eligibility.state === 'already_booked') return { body: await alreadyBookedBody(eligibility.visit, lead) };
-  return { estimate: found.estimate, customer: eligibility.customer, lead };
+  return { estimate: found.estimate, data: found.data, customer: eligibility.customer, lead, leadId: await lineLeadIdFor(found.estimate, found.data) };
 }
 
 // A POST that cannot reach times: the page's terminal state for an estimate that cannot book (gone), else the
@@ -186,11 +199,11 @@ router.get('/:token', readLimiter, async (req, res, next) => {
   try {
     const resolved = await resolveRequest(req.params.token);
     if (resolved.body) return send(res, resolved);
-    const setup = await bookingSetup(resolved.customer, resolved.lead);
+    const setup = await bookingSetup(resolved.customer, resolved.lead, resolved.leadId);
     if (setup.blocked) return res.json(setup.blocked);
     let availability = null;
     try {
-      const built = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes, offer: true });
+      const built = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes, offer: true, customer: setup.customer, leadId: setup.leadId });
       availability = built ? inspection().shapeAvailability(built, setup.range) : null;
     } catch (err) {
       logger.error(`[estimate-assessment] availability failed for estimate ${resolved.estimate.id}: ${err.code || err.name || 'error'}`);
@@ -216,7 +229,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
   try {
     const resolved = await resolveRequest(req.params.token);
     if (resolved.body) return send(res, resolved);
-    const setup = await bookingSetup(resolved.customer, resolved.lead);
+    const setup = await bookingSetup(resolved.customer, resolved.lead, resolved.leadId);
     if (setup.blocked) return sendBlocked(res, setup.blocked);
     const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
     const when = await parseWhen(query, inspection().searchParseOpts(setup.config));
@@ -224,7 +237,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     try {
       availability = await inspection().buildAvailabilityForLead(setup.location, {
         rangeFrom: when.dateFrom, rangeTo: when.dateTo, config: setup.config,
-        duration: setup.catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true,
+        duration: setup.catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, customer: setup.customer, leadId: setup.leadId,
       });
     } catch (err) {
       logger.error(`[estimate-assessment] find-slots availability failed for estimate ${resolved.estimate.id}: ${err.code || err.name || 'error'}`);
@@ -250,7 +263,7 @@ async function sendSlotTaken(res, setup, error) {
   let refreshed = null;
   if (!setup.blocked) {
     try {
-      refreshed = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes });
+      refreshed = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes, customer: setup.customer, leadId: setup.leadId });
     } catch (err) {
       logger.warn(`[estimate-assessment] refresh availability failed: ${err.code || err.name || 'error'}`);
     }
@@ -260,6 +273,15 @@ async function sendSlotTaken(res, setup, error) {
     code: 'SLOT_TAKEN',
     availability: refreshed ? inspection().shapeAvailability(refreshed, setup.range) : null,
   });
+}
+
+// 409 SLOT_TAKEN for the estimate and its linked lead as they are NOW: the link is resolved again, so a relink or a
+// changed service interest during this request never offers the old line's times (a retry would refuse them). An
+// estimate that stopped qualifying answers the page's own state for it.
+async function sendSlotTakenNow(token, res, error) {
+  const again = await resolveRequest(token);
+  if (again.body) return send(res, again);
+  return sendSlotTaken(res, await bookingSetup(again.customer, again.lead, again.leadId), error);
 }
 
 // The booking transaction's re-check of this page's preflight read (AGENTS.md: the commit re-checks it on the locked
@@ -283,6 +305,25 @@ function estimateGuardFor(estimate, customerId) {
   };
 }
 
+// The booking transaction's line re-check (pre-push P0). The slot was built for the line of the lead linked when the
+// request started. The estimate guard holds the estimate row on this transaction; here the link is resolved again on
+// it (the pointing lead rows held: a relink waits) and that lead's line is read on it (inspection
+// assessmentLineUnchanged: strict, the lead row held). Another lead with another line, or a changed interest,
+// refuses the slot: 409 SLOT_TAKEN and fresh times. Not live: no line was read for the build, nothing is read here.
+async function lineUnchangedUnderLock(conn, { estimate, customer, lineScope }) {
+  if (!require('../services/scheduling/line-technician').lineMapLive()) return true;
+  const fresh = await conn('estimates').where({ id: estimate.id }).first('estimate_data');
+  const leadId = await require('../services/estimate-consultation-offer')
+    .linkedLeadIdFor(estimate.id, parseEstimateData(fresh?.estimate_data), conn, { lock: true });
+  return inspection().assessmentLineUnchanged(conn, { lineScope, customer, leadId });
+}
+
+// The lead a booking's shadow row compares with: the request's own (live), else a read the recorder runs after the
+// booking, best-effort (line-technician shadowLeadId).
+function shadowLeadFor(resolved, leadId) {
+  return leadId || (() => require('../services/estimate-consultation-offer').linkedLeadIdFor(resolved.estimate.id, resolved.data));
+}
+
 // The estimate the visit was booked from, for the office (internal notes, never customer-visible).
 function officeNote(estimate, customerNote) {
   const number = String(estimate.estimate_slug || '').replace(/[^A-Za-z0-9-]/g, '') || String(estimate.id).split('-')[0].toUpperCase();
@@ -296,17 +337,19 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   try {
     const resolved = await resolveRequest(req.params.token);
     if (resolved.body) return send(res, resolved);
-    const setup = await bookingSetup(resolved.customer, resolved.lead);
+    const setup = await bookingSetup(resolved.customer, resolved.lead, resolved.leadId);
     if (setup.blocked) return sendBlocked(res, setup.blocked);
     const windowFailure = inspection().commitWindowFailure(date, setup.range, setup.catalog);
     if (windowFailure) return res.status(windowFailure.status).json({ error: windowFailure.error });
 
-    // Anti-forgery: the slot must be in a fresh single-day build at the catalog duration.
+    // Anti-forgery: the slot must be in a fresh single-day build at the catalog duration. The line this commit books
+    // on is read once: the build and the booking transaction's re-check (slotGuard) use it.
+    const lineScope = await inspection().assessmentServiceLines(setup.customer, setup.leadId);
     const day = await inspection().buildAvailabilityForLead(setup.location, {
-      rangeFrom: date, rangeTo: date, config: setup.config, duration: setup.catalog.durationMinutes,
+      rangeFrom: date, rangeTo: date, config: setup.config, duration: setup.catalog.durationMinutes, customer: setup.customer, leadId: setup.leadId, lineScope,
     });
     const slot = inspection().findSlotIn(day, date, time);
-    if (!slot) return sendSlotTaken(res, setup);
+    if (!slot) return sendSlotTakenNow(req.params.token, res);
 
     const result = await inspection().bookAssessmentVisit({
       booking: setup.booking,
@@ -318,6 +361,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       source: SOURCE,
       alertLabel: ALERT_LABEL,
       estimateGuard: estimateGuardFor(resolved.estimate, resolved.customer.id),
+      // The line this slot was built for, read again on the booking transaction for the lead linked THEN: a relink
+      // or a changed service interest since refuses the slot (409 SLOT_TAKEN, fresh times below).
+      slotGuard: (conn) => lineUnchangedUnderLock(conn, { estimate: resolved.estimate, customer: resolved.customer, lineScope }),
+      lineLeadId: shadowLeadFor(resolved, setup.leadId),
     });
     if (!result.ok) {
       if (result.code === 'ESTIMATE_CHANGED') {
@@ -331,8 +378,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         const visit = await inspection().findOpenVisit(db, resolved.customer.id, { assessmentOnly: true });
         if (visit) return res.json(await alreadyBookedBody(visit, resolved.lead));
       }
-      // A slot race, or the customer's pin moved under the booking fence: fresh times at the current pin.
-      if (result.status === 409) return sendSlotTaken(res, await bookingSetup(resolved.customer, resolved.lead), result.error);
+      // A slot race, the customer's pin moved under the booking fence, or the line changed (a relink, a changed
+      // service interest): fresh times at the current pin, for the estimate and its linked lead as they are NOW.
+      if (result.status === 409) return sendSlotTakenNow(req.params.token, res, result.error);
       return res.status(result.status || 500).json({ error: result.error || 'Booking is temporarily unavailable — please text or call us.' });
     }
     return res.json(await inspection().finishCommittedBooking({

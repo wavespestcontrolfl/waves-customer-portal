@@ -297,6 +297,16 @@ async function accountCanOneTap(customerId, conn = db) {
   return customerIsPayerBilled(conn, customerId).then((billed) => !billed).catch(() => false);
 }
 
+// Does the app show this customer the priced offer's purchase button, and
+// with it the per-application price? One answer for the app route's `oneTap`
+// field (routes/property-recommendations.js) and for anything that describes
+// the app's offer elsewhere (the receipt and tracker cards,
+// services/app-link-cards.js). The gate is read at call time.
+async function oneTapShownTo(customerId, conn = db) {
+  if (!require('../config/feature-gates').gateEnvValue('GATE_ONE_TAP_PURCHASE')) return false;
+  return accountCanOneTap(customerId, conn);
+}
+
 // My Plan "Add a service" (owner 2026-11-11): one priced offer for each
 // service the customer does not have. Each is the payload the Home card
 // carries for that family, so init's drift check treats a tap here exactly
@@ -2257,6 +2267,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
 
 module.exports = {
   accountCanOneTap,
+  oneTapShownTo,
   listOffers,
   initPurchase,
   reserve,

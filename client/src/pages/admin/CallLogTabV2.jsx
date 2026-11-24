@@ -42,7 +42,7 @@ import CallTranscriptSync, {
 import CallIntelligencePanel from "../../components/admin/CallIntelligencePanel";
 import LeadSourceCell from "../../components/admin/LeadSourceCell";
 import SourceVisitLinks from "../../components/admin/SourceVisitLinks";
-import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
+import { ALL_NUMBERS, NUMBER_LABEL_MAP, REPLY_LINE_NUMBERS } from "./CommunicationsPage";
 import { describeProcessResult } from "../../lib/callProcessResult";
 import { formatETDate, formatETDateOnly, formatETDateTime, formatETTime } from "../../lib/timezone";
 
@@ -160,9 +160,12 @@ function samePhone(a, b) {
   return !!aKey && aKey === bKey;
 }
 
-const WAVES_PHONE_KEYS = new Set(
-  ALL_NUMBERS.flatMap((group) => group.numbers.map((n) => phoneKey(n.number))),
-);
+// Every Waves line, the reply-only ones included: a callback never targets one.
+const WAVES_NUMBERS = [
+  ...ALL_NUMBERS.flatMap((group) => group.numbers.map((n) => n.number)),
+  ...REPLY_LINE_NUMBERS.map((n) => n.number),
+];
+const WAVES_PHONE_KEYS = new Set(WAVES_NUMBERS.map((number) => phoneKey(number)));
 
 // Transcription sentinels the recording processor writes when a voicemail
 // recording contains no usable speech (see call-recording-processor.js:
@@ -335,10 +338,7 @@ function getCallBackFromNumber(call, fallbackFrom) {
     call?.direction === "outbound"
       ? metadata?.bridgeCallerId || call.from_phone
       : call?.to_phone;
-  const knownNumbers = ALL_NUMBERS.flatMap((group) =>
-    group.numbers.map((n) => n.number),
-  );
-  return knownNumbers.find((number) => samePhone(number, preferred)) || fallbackFrom;
+  return WAVES_NUMBERS.find((number) => samePhone(number, preferred)) || fallbackFrom;
 }
 
 // Human-readable party line ("You (waveslawncare.com) → Scott Currens")

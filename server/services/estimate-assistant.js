@@ -8,9 +8,12 @@ const { dispatch, rejectCall } = require('./llm/call');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { GUARANTEE_COPY, resolveOneTimeServiceCopy } = require('./estimate-one-time-copy');
+const { storedEstimateContainer, exclusionRowsIn } = require('./estimate-result-container');
 const {
   collapseMirroredRows,
   hasPurchasedTrenchingWarranty,
+  hasIncludedReentryGuarantee,
+  includedReentryPurchasedTerms,
   isPreSlabTreatmentItem,
   preSlabExtendedWarrantySelected,
   preSlabSelectedWarrantyPart,
@@ -473,6 +476,22 @@ function purchasedTermsForRow(item) {
   if (!hasPurchasedTrenchingWarranty(item)) return [];
   const copy = resolveOneTimeServiceCopy(item, { noGuaranteeClaims: true });
   return (copy?.includes || []).filter((line) => GUARANTEE_COPY.test(line));
+}
+
+// The included 1-year re-entry guarantee (whole-home exclusion), stated ONLY from the estimate's CURRENT saved result
+// rows (the authoritative container): one entry per flagged saved row, built from THAT row's own renewal price. No
+// pricing-bundle, snapshot or older-root row ever carries it; a saved result with no flagged row (recurring-only, spot
+// seal, exclusion removed) or no saved result at all (inputs-only) states nothing (fail closed).
+function includedReentryEntries(estData) {
+  const container = storedEstimateContainer(estData);
+  const seen = new Set();
+  return (container ? exclusionRowsIn(container) : []).filter(hasIncludedReentryGuarantee).flatMap((row) => {
+    const entry = { service: cleanText(row.label || row.name) || 'Rodent Exclusion', terms: includedReentryPurchasedTerms(row) };
+    const key = `${entry.service}|${entry.terms.join('|')}`.toLowerCase();
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [entry];
+  });
 }
 
 function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
@@ -1064,7 +1083,7 @@ function buildEstimateAssistantContext({
       ? guarantees
       : {
         ...guarantees,
-        serviceTerms: serviceTermsFromRows(
+        serviceTerms: [...serviceTermsFromRows(
           [
             servicesContext, recurringServicesContext, oneTimeItemsContext || [],
             // Termite rows the display merge left out (a raw engine row behind
@@ -1085,7 +1104,7 @@ function buildEstimateAssistantContext({
               return selectedMode === 'recurring' ? [RECURRING_PLAN_TERMS] : [];
             },
           },
-        ),
+        ), ...includedReentryEntries(parsedData)],
       },
     contact: COMPANY,
   };

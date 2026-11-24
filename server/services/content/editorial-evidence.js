@@ -142,6 +142,8 @@ function reviewError(result) {
     ? 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' : 'BLOG_EDITORIAL_REVIEW_FAILED';
   error.findings = findings.length ? findings : [{ severity: 'P0', code: 'EDITORIAL_UNAVAILABLE', message: error.message }];
   error.editorialResult = result;
+  // Only a review that could not run is worth waiting for (the Mac job keeps the draft then).
+  error.transient = error.code === 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' && result?.transient === true;
   return error;
 }
 
@@ -168,15 +170,18 @@ async function refreshReviewFrontmatter(draft, brief) {
   // conversely, applying the review to every refresh would pull service and
   // location pages into a blog-only contract).
   const target = draft.file_path || brief.target_url || brief.page_url || draft.page_url;
+  if (!target) throw reviewError(null);
   let resolved;
   try {
     // Dynamic to avoid the load-time cycle: astro-publisher imports this
     // module for final evidence generation.
     const publisher = require('../content-astro/astro-publisher');
-    if (!target || typeof publisher.resolveExistingAstroFileForTarget !== 'function') throw new Error('refresh target resolver unavailable');
-    resolved = await publisher.resolveExistingAstroFileForTarget(target);
+    if (typeof publisher.resolveExistingAstroFileForTarget !== 'function') throw new Error('refresh target resolver unavailable');
+    // rethrowLookupErrors: a content_registry read that failed is a failed read, not "no file".
+    resolved = await publisher.resolveExistingAstroFileForTarget(target, { rethrowLookupErrors: true });
   } catch {
-    throw reviewError(null);
+    // A read that failed (GitHub, the resolver) may pass later; a target with no file below does not.
+    throw reviewError({ checks: [{ name: 'source_support', status: 'error', findings: [{ action: 'The refresh target could not be read; retry the review.' }] }], transient: true });
   }
   if (!resolved?.path) throw reviewError(null);
   if (!applicable(resolved.path)) return null;
@@ -243,6 +248,13 @@ function notesEvidenceUrls(draft) {
   return [...new Set(urls)];
 }
 
+// A repair whose model did not answer is a review that could not run (transient); any other repair
+// error is thrown as it is (the runner treats it as a review that could not run, not transient).
+function repairError(err) {
+  if (err?.transient !== true) return err;
+  return reviewError({ checks: [{ name: 'editorial_quality', status: 'error', findings: [{ action: `The editorial repair could not run (${err.message}); retry the review.` }] }], transient: true });
+}
+
 async function reviewAndRepairDraft(draft, reviewFrontmatter, brief) {
   const original = fm.stringify(reviewFrontmatter, draft.body || '');
   let document = original;
@@ -261,7 +273,8 @@ async function reviewAndRepairDraft(draft, reviewFrontmatter, brief) {
         // document's domain successfully (it throws otherwise), so this is
         // never null here — recomputed rather than threaded through so
         // repair always reviews under the domain the current bytes declare.
-        title: reviewFrontmatter.title || reviewFrontmatter.metaTitle || '', domain: domainContextFromDocument(document) });
+        title: reviewFrontmatter.title || reviewFrontmatter.metaTitle || '', domain: domainContextFromDocument(document) })
+        .catch((err) => { throw repairError(err); });
       document = typeof repaired === 'string' ? repaired : repaired?.document;
       if (!document || JSON.stringify(fm.parse(document).data) !== JSON.stringify(fm.parse(original).data)) throw reviewError(result);
     }

@@ -18,6 +18,7 @@ const PORTAL_CANCEL_REASON_PREFIX = 'Portal cancellation request';
 // never drift; re-exported below for existing consumers.
 const { CANCELLABLE_STATUSES, LIVE_TRACK_STATES } = require('./cancellation-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { churnCodeForCancelReason, churnClassifierInput } = require('./churn-reason-map');
 // Card-hold outcomes that leave money unresolved: the fee path never throws
 // into the host flow — a decline / ambiguous Stripe outcome / post-charge
 // write failure comes back as a reason code with the hold parked for review.
@@ -941,11 +942,25 @@ async function processCancellationRequest({
   // must never reach those rows. Absent (portal path) the reason is used,
   // byte-identical to the old behavior.
   visitReason = null,
+  // churnReasonCode / churnReasonText (2026-11-19): the v2 cancel reason the
+  // customer or office PICKED (cancellation-resolution/reason-codes.js) and
+  // their own words (portal description, office note). Only the churn
+  // columns read them: the pick maps straight to churn_reason_code
+  // (churn-reason-map.js, no AI call); the customer's words become
+  // churn_reason_detail; the AI reads the words only (churnClassifierInput).
+  // `reason` is left as is: the portal path's "Portal cancellation request
+  // <id>" is the row marker restart.js matches on. Absent = the old
+  // behavior, except that the AI no longer reads the system's own reason
+  // text.
+  churnReasonCode = null,
+  churnReasonText = null,
 } = {}) {
   if (!customerId) throw new Error('processCancellationRequest requires customerId');
   const cancelReason = String(reason || CHURN_REASON).slice(0, 500);
   const rowReason = String(visitReason || cancelReason).slice(0, 500);
   const visitNote = String(historyNote || cancelReason).slice(0, 500);
+  const pickedChurnCode = churnCodeForCancelReason(churnReasonCode);
+  const churnWords = String(churnReasonText ?? '').trim() || null;
   const errors = [];
   const actorType = actor && actor.type ? String(actor.type) : 'customer';
   const actorLabel = actorType === 'admin'
@@ -1099,9 +1114,10 @@ async function processCancellationRequest({
         // Actor rides on the detail (C3): a churn pulled by the office
         // reads differently in the Pareto than one the customer chose.
         update.churn_reason_detail = (actorType === 'customer'
-          ? cancelReason
+          ? (churnWords || cancelReason)
           : `${cancelReason} [${actorLabel}]`).slice(0, 500);
-        update.churn_reason_code = 'unclassified';
+        // A picked reason is the code; no pick starts at 'unclassified'.
+        update.churn_reason_code = pickedChurnCode || 'unclassified';
       }
       // PR E (GATE_CANCEL_FLOW_V2): tier/rate wind-down — the 2026-08-30
       // audit's money leak. Tier alignment only ever PROMOTES
@@ -1830,17 +1846,24 @@ async function processCancellationRequest({
   // AI churn-reason classification — deliberately the LAST step so a slow or
   // broken model can never delay the billing wind-down or the visit sweep,
   // and deliberately OUTSIDE `errors` — a classification miss leaves the row
-  // at 'unclassified' (fail-closed), it is not an operational failure that
-  // should flag the request for manual review.
-  if (churned && !wasChurnedStage) {
+  // at its pick or 'unclassified' (fail-closed), it is not an operational
+  // failure that should flag the request for manual review.
+  // A specific pick needs no AI; otherwise the AI reads the words, never the
+  // system's own reason text (an id can only come back 'unclassified').
+  const churnAiText = churnClassifierInput({ cancelReasonCode: churnReasonCode, words: churnReasonText, reason: cancelReason });
+  if (churned && !wasChurnedStage && churnAiText) {
     try {
       const { classifyChurnReason } = require('./churn-classifier');
-      const { code } = await classifyChurnReason(cancelReason);
-      if (code && code !== 'unclassified') {
-        await db('customers').where({ id: customerId }).update({ churn_reason_code: code });
+      const { code } = await classifyChurnReason(churnAiText);
+      if (code && code !== 'unclassified' && code !== pickedChurnCode) {
+        // Only the churn this run wrote, still at the code it wrote: a
+        // reactivation or a correction while the model ran wins.
+        await db('customers')
+          .where({ id: customerId, churn_episode_id: churnEpisodeId, pipeline_stage: 'churned', churn_reason_code: pickedChurnCode || 'unclassified' })
+          .update({ churn_reason_code: code });
       }
     } catch (err) {
-      logger.warn(`[cancellation-processor] churn classification failed for ${customerId} (left unclassified): ${err.message}`);
+      logger.warn(`[cancellation-processor] churn classification failed for ${customerId} (left ${pickedChurnCode || 'unclassified'}): ${err.message}`);
     }
   }
 

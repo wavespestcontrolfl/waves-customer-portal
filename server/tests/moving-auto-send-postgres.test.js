@@ -37,7 +37,7 @@ const NEW_ADDRESS = '40 Sample Road, Venice, FL 34285';
 const day = (n) => etDateString(addETDays(new Date(), n));
 // An ET wall-clock time, n days from today.
 const at = (time, n = 0) => parseETDateTime(`${day(n)}T${time}:00`);
-const GATES = ['GATE_MOVING_FLOW', 'GATE_MOVING_ESTIMATE', 'GATE_MOVING_AUTO_ESTIMATE', 'GATE_MOVING_AUTO_SEND'];
+const GATES = ['GATE_MOVING_ESTIMATE', 'GATE_MOVING_AUTO_ESTIMATE', 'GATE_MOVING_AUTO_SEND'];
 
 postgres('moving: the app-sent new-home estimate (live Postgres)', () => {
   // The draft's save loads the estimate, pricing and lookup modules; the send loads the send path.

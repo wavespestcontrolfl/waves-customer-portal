@@ -1,7 +1,9 @@
 /**
  * Close-gaps measurement (owner 2026-11-18: "open gaps are times when a tech is on the clock ... fill these with
  * jobs, even front load jobs, so we can fill the jobs with organic leads, or leads from ads"; then "shadow, but i want
- * admin notifications"). Pure, no database. It MEASURES only: nothing here changes a visit, a time or a message.
+ * admin notifications"). Pure, no database. P1 is LIVE since 2026-11-22 (owner): ./index.js writes the pack plan when
+ * the drive rule does not take the day and P1 accepts it. S1 is still measured only: nothing here changes a visit, a
+ * time or a message.
  *
  * The night re-plan (./index.js) stores one record per tech-day in day_replan_plans.close_gaps:
  *   now / packed  The open time of the day as booked, and of the night's best plan, from the app's own simulation:
@@ -11,7 +13,8 @@
  *   p1            "Accept a packed day": the drive rule on the drive-best plan first; when it does not take the day,
  *                 the plan that ends earliest with no more drive (the planner's pack objective, ./index.js packPlan),
  *                 accepted when it keeps every promise, ends no later and makes the biggest open block P1_MIN_GAIN
- *                 minutes bigger. p1.packed is that plan's open time.
+ *                 minutes bigger, and the app's own simulation without the schedule blocks agrees (app_sim_rejects
+ *                 otherwise). p1.packed is that plan's open time; on a packed day the top-level `packed` is the same plan.
  *   s1            "Book into a block": each stop booked in the last 24 hours, replayed over the whole hours of its day
  *                 with the rest of the day as booked (see replayBooking).
  *

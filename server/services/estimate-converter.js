@@ -8949,11 +8949,16 @@ const EstimateConverter = {
           }
           lineItems.push(...mistingInstallInvoiceLines(mistingInstall));
           if (firstApplicationAmount > 0) {
-            lineItems.push({
-              description: 'First service application',
-              quantity: 1,
-              unit_price: firstApplicationAmount,
-            });
+            // GATE_INVOICE_ESTIMATE_DISCOUNT_LINES: the WaveGuard tier and the
+            // estimate's own discount as their own lines (same total).
+            lineItems.push(...await require('./estimate-first-application-invoice').itemizeFirstApplicationDiscounts({
+              estimateId, customerId, scheduledServiceId: firstScheduledServiceId,
+              lines: [{
+                description: 'First service application',
+                quantity: 1,
+                unit_price: firstApplicationAmount,
+              }],
+            }, database));
           }
           // Acceptance deposit credits against this first invoice through
           // create()'s depositCredit param — create() caps the request
@@ -9569,6 +9574,11 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+// The office's manual accept registers, after its commit, the reminders this converter deferred for the visits it
+// seeded inside the accept's transaction (deferFollowUpReminderRegistration; estimate-manual-acceptance.js).
+module.exports.registerSeededFollowUpReminders = registerSeededFollowUpReminders;
+// The phone-yes card's tap (call-phone-yes-accept.js) checks that the plan it priced is on a pest cadence catalog row.
+module.exports.PEST_CADENCE_CATALOG_KEYS = PEST_CADENCE_CATALOG_KEYS;
 module.exports.seedingFamilyKey = seedingFamilyKey;
 module.exports.isCommercialRecurringLine = isCommercialRecurringLine;
 module.exports.seedRecurringFollowUpsForParent = seedRecurringFollowUpsForParent;
@@ -9623,6 +9633,8 @@ module.exports.durationMinutesForRecurringService = durationMinutesForRecurringS
 module.exports.remainingUnitCatalogKey = remainingUnitCatalogKey;
 module.exports.seedFamilyForReservedIdentity = seedFamilyForReservedIdentity;
 module.exports.supportsConverterFollowUpSeeding = supportsConverterFollowUpSeeding;
+// The phone-yes card names the plan by the cadence this rule seeds (call-phone-yes-accept.js planTermsOf).
+module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;

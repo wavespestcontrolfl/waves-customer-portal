@@ -864,7 +864,7 @@ async function hasActiveTroubleArea(knex, service, type, { strict = false, evide
 // The recipe text of a visit whose nitrogen target was cut, so what staff read (the line's `raw`, the visit's primary and notes) agrees
 // with the amount the plan computes. Rewrites only the shapes the v13 recipe uses; a line or note the pattern does not match stays as
 // written (the cut and the line note still apply: the amount and the note are never dependent on this text). `why` is the reason in
-// the words the line states it with: 'active patch mapped' (the November large patch cut) or 'reclaimed water, half' (GATE_LAWN_RECLAIMED_HALF_N).
+// the words the line states it with: 'active patch mapped' (the November large patch cut) or 'reclaimed water, half'.
 const NITROGEN_LINE = /(\d+(?:\.\d+)?) lb per 1,000 sq ft \((\d+(?:\.\d+)?) lb N\)/;
 const NITROGEN_NOTE = /\bN\s+rate:?\s*(\d+(?:\.\d+)?)\s*lb\s*N/i;
 // The line suffix never says "large patch": classifyProtocolLine reads that phrase in a line as a disease-gated line (conditionFlag
@@ -896,12 +896,13 @@ async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Activ
   return rule.targetNPer1000;
 }
 
-// The catalog names of the combination pre-emergent plus fertilizer bags (LESCO Dimension 0.21% 18-0-10 ... Pre-Emergent Plus
-// Fertilizer; Stonewall 15-0-15 ... Pre-Emergent Plus Fertilizer). The bag is sized by the pre-emergent rate, not by its nitrogen.
-const PRE_EMERGENT_BAG = /\bPre-?Emergent Plus Fertilizer\b/i;
+// The catalog names of the combination pre-emergent plus fertilizer bags: LESCO Dimension 0.21% 18-0-10 ... Pre-Emergent Plus
+// Fertilizer (the 9x April step) and LESCO Stonewall 0.37% 18-0-10, whose catalog name does not say "Pre-Emergent Plus Fertilizer"
+// (the October step, owner 2026-11-21). The bag is sized by the pre-emergent rate, not by its nitrogen.
+const PRE_EMERGENT_BAG = /\bPre-?Emergent Plus Fertilizer\b|\bStonewall 0\.37% 18-0-10\b/i;
 const isPreEmergentBag = (text) => PRE_EMERGENT_BAG.test(String(text ?? ''));
 
-// What keeps a bag at its full rate on a reclaimed lawn (GATE_LAWN_RECLAIMED_HALF_N): a bag whose rate is set by something other than its
+// What keeps a bag at its full rate on a reclaimed lawn: a bag whose rate is set by something other than its
 // nitrogen. 'pre_emergent': a pre-emergent plus fertilizer (October and the 9x April Dimension): halving N would halve the pre-emergent.
 // 'potash': a visit that states a potassium target (December 10-0-22): reclaimed water adds N, not K, and the potash is for cold weather and
 // large patch, so halving the bag would halve the K2O. null: an ordinary nitrogen bag, which is halved.
@@ -910,11 +911,11 @@ function keptBagReason({ primary, targetK }) {
   return targetK > 0 ? 'potash' : null;
 }
 
-// GATE_LAWN_RECLAIMED_HALF_N (owner 2026-10-05, 2026-10-23): half of the visit's nitrogen target at a property marked reclaimed
+// Owner 2026-10-05, 2026-10-23: half of the visit's nitrogen target at a property marked reclaimed
 // (lawn-reclaimed-water.js), `{ cut }`; or `{ kept }` (a keptBagReason) when the visit's bag keeps its full rate and the line says so.
-// null = not reclaimed, gate off, not a v13 plan, or a visit with no nitrogen target above zero (no read at all in the last three cases).
+// null = not reclaimed, not a v13 plan, or a visit with no nitrogen target above zero (no read at all in the last two cases).
 async function reclaimedNitrogenCut(knex, service, { targetN, v13Active, keep = null, strict = false }) {
-  if (!v13Active || !featureGates.lawnReclaimedHalfNLive() || !(targetN > 0)) return null;
+  if (!v13Active || !(targetN > 0)) return null;
   if (!(await require('./lawn-reclaimed-water').isReclaimedService(knex, service, { strict }))) return null;
   return keep ? { kept: keep } : { cut: Number((targetN * RECLAIMED_N_FRACTION).toFixed(3)) };
 }
@@ -1162,7 +1163,7 @@ function fungusNitrogenNotes(mix, nitrogenCut) {
   }];
 }
 
-// The reclaimed-water line notes (GATE_LAWN_RECLAIMED_HALF_N): "half nitrogen today" on the bag the halved target sized, and on a
+// The reclaimed-water line notes: "half nitrogen today" on the bag the halved target sized, and on a
 // bag that keeps its rate (pre-emergent plus fertilizer, winter potash) the reason it was not halved. `found` is what visitNutrientTargets returned.
 function reclaimedNitrogenNotes(mix, product, found) {
   if (found?.reclaimedWater === 'half') {
@@ -2294,13 +2295,12 @@ async function visitOnV13Protocol(knex, visit, { trackKey }) {
 // version and window for the visit. The sheet shows the recipe of the REQUESTED month; the plan reads the month of the window the
 // visit is pinned to (under the completion defaults, as selectProtocolVisit does) or else the month of the service date, so the cut
 // applies only to a visit that is on v13 and either unpinned or asked for in the month the plan reads.
-// Is any rule that rewrites a visit's step from the lawn's own data live (the November cut, the reclaimed-water half, the May Tetrino raise,
-// the December swap)? With none live nothing is read, so a reader that projects a visit through visitNutrientTargets can skip it with no query
-// at all. v13 eligibility is decided here and nowhere else, independently of WHICH rule asks: each rule checks its own gate inside
-// visitNutrientTargets, so the answer never depends on another rule's gate.
+// Is any rule that rewrites a visit's step from the lawn's own data live? The reclaimed-water half is live on every v13 plan, so v13 is the
+// whole test: a reader that projects a visit through visitNutrientTargets can skip it with no query at all when v13 is off. v13 eligibility
+// is decided here and nowhere else, independently of WHICH rule asks: each rule checks its own gate inside visitNutrientTargets, so the
+// answer never depends on another rule's gate.
 function visitProjectionLive() {
-  return featureGates.lawnV13Live?.() === true && !!((featureGates.lawnTroubleAreasLive() && featureGates.lawnSpotTargetLive()) || featureGates.lawnReclaimedHalfNLive?.()
-    || featureGates.lawnChinchTetrinoRateLive() || featureGates.lawnDecLargePatchKLive?.());
+  return featureGates.lawnV13Live?.() === true;
 }
 
 async function sheetReadsPlansStep(knex, visit, { trackKey, month }) {
@@ -2562,8 +2562,8 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
-  // The visit the lines are parsed from: the recipe step, or its copy with the cut nitrogen stated (the November large patch cut,
-  // GATE_LAWN_RECLAIMED_HALF_N), the Tetrino rate raised (GATE_LAWN_CHINCH_TETRINO_RATE) or the whole-lawn bag swapped (GATE_LAWN_DEC_LARGE_PATCH_K).
+  // The visit the lines are parsed from: the recipe step, or its copy with the cut nitrogen stated (the November large patch cut and
+  // the reclaimed-water half), the Tetrino rate raised (GATE_LAWN_CHINCH_TETRINO_RATE) or the whole-lawn bag swapped (GATE_LAWN_DEC_LARGE_PATCH_K).
   const nitrogen = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active, strict, scout: options });
   const { visit, targets: nutrientTargets, nitrogenCut, chinchRate, productSwap } = nitrogen;
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
@@ -2993,6 +2993,7 @@ module.exports = {
   fungusNitrogenNotes,
   nitrogenCutNotes,
   nitrogenCutWhy,
+  isPreEmergentBag,
   CUT_WHY_NOTE,
   nitrogenDecision,
   tetrinoScoutDecision,
@@ -3056,4 +3057,5 @@ module.exports = {
   itemIsPgr,
   summarizeOrdinanceStatus,
   summarizeTurfProfileCompleteness,
+  normalizeOptionList,
 };

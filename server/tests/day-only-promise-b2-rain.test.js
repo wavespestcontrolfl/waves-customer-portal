@@ -113,7 +113,7 @@ function wireDb(queues) {
 
 const dayMove = require('../services/day-only-move-notice');
 
-describe('GATE_DAY_ONLY_PROMISE part B2: a rain move names only the day when the visit is far out', () => {
+describe('day-only promise part B2: a rain move names only the day when the visit is far out', () => {
   const FAR = '2099-01-12';
   const wireSingle = () => wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, scheduled_date: '2099-01-05', status: 'confirmed' }) })] });
   const commit = (over = {}) => RainOut.commit({

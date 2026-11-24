@@ -321,7 +321,7 @@ test.each([
     action_type: 'refresh_existing_page',
     target_url: 'https://www.wavespestcontrol.com/pest-control/door/',
   });
-  expect(publisher.resolveExistingAstroFileForTarget).toHaveBeenCalledWith(expectedTarget);
+  expect(publisher.resolveExistingAstroFileForTarget).toHaveBeenCalledWith(expectedTarget, { rethrowLookupErrors: true });
   expect(result.body).toContain('Look for daylight');
   expect(result.frontmatter).toBe(frontmatter);
   expect(reviewer.review).toHaveBeenNthCalledWith(1, expect.objectContaining({ title: 'How to inspect a door' }));
@@ -387,7 +387,7 @@ test('resolves but skips editorial review for a non-blog refresh target', async 
     target_url: 'https://www.wavespestcontrol.com/pest-control-venice-fl/',
   });
   expect(result).toBe(draft);
-  expect(publisher.resolveExistingAstroFileForTarget).toHaveBeenCalledWith('https://www.wavespestcontrol.com/pest-control-venice-fl/');
+  expect(publisher.resolveExistingAstroFileForTarget).toHaveBeenCalledWith('https://www.wavespestcontrol.com/pest-control-venice-fl/', { rethrowLookupErrors: true });
   expect(reviewer.review).not.toHaveBeenCalled();
   expect(reviewer.repair).not.toHaveBeenCalled();
 });
@@ -405,8 +405,19 @@ test.each([
   }, {
     page_type: 'refresh',
     action_type: 'refresh_existing_page',
-  })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+  })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: _label === 'throws' });
   expect(reviewer.review).not.toHaveBeenCalled();
+});
+test('a repair whose model did not answer is a transient outage; any other repair error is not', async () => {
+  const failed = passing();
+  failed.pass = false;
+  failed.checks[0] = { name: 'answer_first', status: 'fail', findings: [{ passage: 'Inspect', action: 'Answer directly.' }] };
+  reviewer.review.mockResolvedValue(failed);
+  const draft = () => ({ frontmatter: { title: 'How to inspect a door' }, body: 'Inspect' });
+  reviewer.repair.mockRejectedValueOnce(Object.assign(new Error('editorial repair failed: all_providers_failed'), { transient: true }));
+  await expect(evidence.prepareDraft(draft(), { page_type: 'supporting-blog' })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: true });
+  reviewer.repair.mockRejectedValueOnce(new Error('editorial repair rejected: body_too_short'));
+  await expect(evidence.prepareDraft(draft(), { page_type: 'supporting-blog' })).rejects.toThrow('editorial repair rejected');
 });
 test('an exhausted repair fails with directives instead of requiring approval', async () => {
   const failed = { ...passing(), pass: false, checks: [{ name: 'source_support', status: 'fail', findings: [{ passage: 'Claim', action: 'Remove unsupported claim.' }] }] };
@@ -492,4 +503,15 @@ test('source extraction preserves a balanced parenthesis inside a URL and trims 
     .toEqual(['https://example.org/report_(2026)']);
   expect(evidence.sourceUrls('(see https://a.org/x)')).toEqual(['https://a.org/x']);
   expect(evidence.sourceUrls('[x](https://a.org/b_(c))')).toEqual(['https://a.org/b_(c)']);
+});
+
+describe('reviewError: only a review that could not run is transient', () => {
+  const errored = (transient) => ({ checks: [{ name: 'source_support', status: 'error', findings: [{ action: 'Retry.' }] }], model: null, transient });
+  test('an outage result is transient; an input refusal, a failed review and an unknown error are not', () => {
+    expect(evidence.reviewError(errored(true))).toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: true });
+    expect(evidence.reviewError(errored(false))).toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: false });
+    expect(evidence.reviewError(null)).toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: false });
+    expect(evidence.reviewError({ checks: [{ name: 'source_support', status: 'fail', findings: [{ action: 'Cite it.' }] }], transient: true }))
+      .toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_FAILED', transient: false });
+  });
 });

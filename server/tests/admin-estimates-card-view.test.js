@@ -119,12 +119,12 @@ const base = (id, over = {}) => ({
   ...over,
 });
 
-function tableDb({ estimates, acceptances = [], single = {}, prepaid = [], customers = [], outlines = [] }) {
+function tableDb({ estimates, acceptances = [], single = {}, prepaid = [], customers = [], outlines = [], outcomes = [], failing = [] }) {
   const queries = [];
   const builderFor = (table) => {
     const b = {};
     const chain = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereILike', 'orWhereIn', 'orWhere',
-      'select', 'orderBy', 'limit', 'offset', 'leftJoin', 'groupBy', 'sum', 'max', 'count', 'distinct'];
+      'select', 'orderBy', 'limit', 'offset', 'leftJoin', 'groupBy', 'sum', 'max', 'count', 'distinct', 'distinctOn'];
     for (const m of chain) {
       b[m] = jest.fn((...args) => {
         queries.push({ table, m, args });
@@ -133,8 +133,14 @@ function tableDb({ estimates, acceptances = [], single = {}, prepaid = [], custo
       });
     }
     b.first = jest.fn(async () => single[table]);
-    const rows = { estimates, estimate_acceptances: acceptances, annual_prepay_terms: prepaid, customers, service_outline_packets: outlines }[table] || [];
-    b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+    const rows = {
+      estimates, estimate_acceptances: acceptances, annual_prepay_terms: prepaid, customers, service_outline_packets: outlines,
+      'activity_log as a': outcomes,
+    }[table] || [];
+    // A table in `failing` rejects its read, as a lost database connection would.
+    b.then = (resolve, reject) => (failing.includes(table)
+      ? Promise.reject(Object.assign(new Error('read failed'), { code: '08006' }))
+      : Promise.resolve(rows)).then(resolve, reject);
     return b;
   };
   db.mockImplementation((table) => builderFor(table));
@@ -365,6 +371,32 @@ describe('GET /admin/estimates list shape', () => {
     });
   });
 
+  // Call today outcomes (owner 2026-11-20, D1 A): one batched read gives each row its newest outcome. A failed read
+  // marks every row callOutcomeUnknown, so the shared rule withholds it from Call today (codex pre-push P1).
+  test('call outcomes: a good read carries each row\'s newest outcome; a failed read marks every row unknown', async () => {
+    const rows = () => [base('e-tapped', { status: 'viewed' }), base('e-plain', { status: 'viewed' })];
+    tableDb({
+      estimates: rows(),
+      outcomes: [{ estimate_id: 'e-tapped', created_at: '2026-11-20T14:00:00.000Z', metadata: { outcome: 'no_answer' }, by_name: 'Virginia Sample' }],
+    });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      expect(estimates.map((e) => [e.id, e.lastCallOutcome, e.callOutcomeUnknown])).toEqual([
+        ['e-tapped', { outcome: 'no_answer', at: '2026-11-20T14:00:00.000Z', by: 'Virginia' }, false],
+        ['e-plain', null, false],
+      ]);
+    });
+    tableDb({ estimates: rows(), failing: ['activity_log as a'] });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      expect(estimates.map((e) => [e.id, e.lastCallOutcome, e.callOutcomeUnknown])).toEqual([
+        ['e-tapped', null, true],
+        ['e-plain', null, true],
+      ]);
+    });
+    expect(require('../services/logger').warn).toHaveBeenCalledWith('[estimates] call-list call outcome read failed (08006)');
+  });
+
   test('staffPreviewable is the /data gate verdict: the row verdicts, then the call-side verdict', async () => {
     mockView.draftPreview = new Set(['e-draft']);
     mockView.customerViewable = new Set(['e-open', 'e-call']);
@@ -386,6 +418,38 @@ describe('GET /admin/estimates list shape', () => {
     });
     // one batched call_log read for the page (callSideBlocksForEstimates), not one per row
     expect(queries.filter((q) => q.table === 'call_log' && q.m === 'whereIn')).toHaveLength(1);
+  });
+
+  test('undeliveredSelfServe marks a portal quote nobody delivered: no follow-up bucket lists it, and its row shows no send (codex pre-push P1)', async () => {
+    const delivered = { deliveryState: { firstDeliveredAt: '2026-10-02T15:00:00Z' } };
+    tableDb({
+      estimates: [
+        base('e-start', { source: 'plan_start', status: 'viewed' }),
+        base('e-restart', { source: 'plan_restart', status: 'viewed' }),
+        base('e-start-sent', { source: 'plan_start', status: 'viewed', estimate_data: delivered }),
+        base('e-staff', { source: 'manual', status: 'viewed' }),
+        base('e-legacy', { source: null, status: 'viewed' }),
+        base('e-garbled', { source: 'plan_start', status: 'viewed', estimate_data: '{not json' }),
+      ],
+    });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      expect(Object.fromEntries(estimates.map((e) => [e.id, e.undeliveredSelfServe]))).toEqual({
+        'e-start': true,
+        'e-restart': true,
+        'e-start-sent': false,
+        'e-staff': false,
+        'e-legacy': false,
+        // Unreadable data carries no delivery proof.
+        'e-garbled': true,
+      });
+      // Its sent_at is the mint stamp, not a send. A delivered one keeps its send, as any estimate does.
+      const sent = '2026-10-01T00:00:00Z';
+      expect(Object.fromEntries(estimates.map((e) => [e.id, e.sentAt ?? null]))).toEqual({
+        'e-start': null, 'e-restart': null, 'e-start-sent': sent, 'e-staff': sent, 'e-legacy': sent, 'e-garbled': null,
+      });
+      expect(estimates.find((e) => e.id === 'e-start-sent').status).toBe('viewed');
+    });
   });
 
   test('bookingLinkEligible mirrors the send-booking-link route\'s row refusals', async () => {

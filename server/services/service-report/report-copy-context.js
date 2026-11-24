@@ -9,6 +9,7 @@
 // API, or a customer with no history must degrade to "less context", never an
 // error. The route always has the technician's notes to fall back on.
 
+const { provenFindingRows } = require('./finding-provenance');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildPressureTrendContext } = require('./pressure-trend');
@@ -269,7 +270,7 @@ function lawnAssessmentEntries(row) {
   ];
 }
 
-// `colorGuard` (GATE_LAWN_LIGHTING, owner 2026-10-04): { comparable } says whether
+// `colorGuard` (owner 2026-10-04): { comparable } says whether
 // the two visits' photos were taken in known, compatible light. The color health
 // delta is given to the writer only then, and only when it is a real move
 // (COLOR_NO_CHANGE_POINTS or more); otherwise the writer gets today's color
@@ -330,10 +331,16 @@ async function loadPriorVisits({
     }).slice(0, limit);
     if (!visibleRows.length) return [];
     const ids = visibleRows.map((r) => r.id);
-    const loaded = await knex('service_findings')
+    const findingRows = await knex('service_findings')
       .whereIn('service_record_id', ids)
-      .select('service_record_id', 'severity', 'title', ...(excludeAutoNoActivity ? ['category'] : []))
+      .select('service_record_id', 'severity', 'title', 'detail', 'recommendation', ...(excludeAutoNoActivity ? ['category'] : []))
       .catch(() => []);
+    // Only the rows a customer may see, each against its own visit's form
+    // snapshot (finding-provenance.js): a bare title can be a line of the raw
+    // technician note, and these titles ground customer copy.
+    const loaded = visibleRows.flatMap((r) => provenFindingRows(
+      findingRows.filter((f) => String(f.service_record_id) === String(r.id)), r.structured_notes,
+    ));
     // Under GATE_REPORT_WRITER_RULES the automatic "No activity observed"
     // row (no-activity-finding.js, stamped whenever a visit recorded no
     // observation) stays out: it reads as a technician finding the tech
@@ -698,10 +705,10 @@ async function buildReportCopyContext({
   // assessment exists, present it as history — never as today's reading.
   if (lawnAssessments?.today) {
     const isBaseline = !!lawnAssessments.today.is_baseline;
-    // GATE_LAWN_LIGHTING, read at call time: the color delta needs both visits'
+    // Lawn lighting-aware color (needs the visit assessment, GATE_LAWN_VISIT_ASSESSMENT): the color delta needs both visits'
     // stored light to be known and compatible. A failed read is unknown light.
     let colorGuard = null;
-    if (!isBaseline && lawnAssessments.prior && require('../../config/feature-gates').lawnLightingLive()) {
+    if (!isBaseline && lawnAssessments.prior && require('../../config/feature-gates').gateEnvValue('GATE_LAWN_VISIT_ASSESSMENT')) {
       let comparable = false;
       try {
         const lights = await loadVisitLights(knex, [lawnAssessments.today.id, lawnAssessments.prior.id], { customerId });

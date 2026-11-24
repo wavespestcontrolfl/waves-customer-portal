@@ -1190,11 +1190,9 @@ jest.setTimeout(30000);
     });
   });
   // Robodialer wave / burst (the bell's classifiers): no spam rule ever stops a
-  // text. The call is only stamped missed_call_text_spam_shadow 'block' | 'burst',
-  // whichever spam gates are on or off.
+  // text. The call is only stamped missed_call_text_spam_shadow 'block' | 'burst'.
   describe('robodialer wave and burst', () => {
     const GBP = '+19413840224';
-    const gatesOff = (...off) => isEnabled.mockImplementation((gate) => !off.includes(gate));
     // Two earlier first-time numbers on the same line, 53 s each, different blocks: a burst.
     async function burstOf(extra = {}) {
       await database('call_log').insert([
@@ -1212,7 +1210,7 @@ jest.setTimeout(30000);
       return call(READY_MINUTES_AGO, { from_phone: '+19415550203', to_phone: GBP, duration_seconds: 28 });
     }
 
-    test('burst, burst gate on: the text still goes (a burst can catch a real prospect), stamped burst for the measure', async () => {
+    test('burst: the text still goes (a burst can catch a real prospect), stamped burst for the measure', async () => {
       const row = await burstOf();
       await database('call_log').insert(row);
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
@@ -1223,7 +1221,7 @@ jest.setTimeout(30000);
       expect(await claimRow()).toMatchObject({ outcome: CLAIM.SENT, call_log_id: row.id });
     });
 
-    test('block wave, wave gate on: the text still goes, stamped block for the measure', async () => {
+    test('block wave: the text still goes, stamped block for the measure', async () => {
       const row = await blockWaveOf();
       await database('call_log').insert(row);
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
@@ -1233,26 +1231,7 @@ jest.setTimeout(30000);
       expect(metadata.missed_call_text_spam_shadow).toBe('block');
     });
 
-    test('burst, burst gate off: the text goes as today, stamped missed_call_text_spam_shadow burst', async () => {
-      gatesOff('missedCallSpamBurst');
-      const row = await burstOf();
-      await database('call_log').insert(row);
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
-      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-      const { metadata } = await stored(row);
-      expect(metadata.missed_call_text_spam_shadow).toBe('burst');
-      expect(metadata.missed_call_text_outcome).toBe('sent');
-    });
-
-    test('block wave, wave gate off: the text goes as today, stamped block (the burst gate does not apply to a block wave)', async () => {
-      gatesOff('missedCallSpamWave');
-      const row = await blockWaveOf();
-      await database('call_log').insert(row);
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
-      expect((await stored(row)).metadata.missed_call_text_spam_shadow).toBe('block');
-    });
-
-    test('an ordinary missed call is texted with no stamp, even with both gates on', async () => {
+    test('an ordinary missed call is texted with no stamp', async () => {
       const row = call(READY_MINUTES_AGO);
       await database('call_log').insert(row);
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
@@ -1279,12 +1258,10 @@ jest.setTimeout(30000);
     });
   });
 
-  describe('failed press-1 screen (GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN, owner ruling 2026-10-24)', () => {
-    const screenGate = (on) => isEnabled.mockImplementation((gate) => (gate === 'missedCallTextSkipFailedScreen' ? on : true));
+  describe('failed press-1 screen (owner ruling 2026-10-24)', () => {
     const REJECTED = '[Recording had no usable speech; an implausible transcription was rejected.]';
 
-    test('gate on: a caller who failed the screen and left no voicemail is not texted; the call settles skipped:screen_failed with no claim', async () => {
-      screenGate(true);
+    test('a caller who failed the screen and left no voicemail is not texted; the call settles skipped:screen_failed with no claim', async () => {
       const row = call(READY_MINUTES_AGO, { duration_seconds: 53, metadata: { preconnect_screen: 'failed' } });
       await database('call_log').insert(row);
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'screen_failed' });
@@ -1295,8 +1272,7 @@ jest.setTimeout(30000);
       expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 0 });
     });
 
-    test('gate on: the common robocall shape (failed screen, then an empty voicemail) is skipped by the sweep too', async () => {
-      screenGate(true);
+    test('the common robocall shape (failed screen, then an empty voicemail) is skipped by the sweep too', async () => {
       const row = call(READY_MINUTES_AGO + 4, {
         duration_seconds: 37,
         answered_by: 'voicemail',
@@ -1316,16 +1292,7 @@ jest.setTimeout(30000);
       expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:screen_failed');
     });
 
-    test('gate off: the same failed-screen call is texted exactly as before', async () => {
-      screenGate(false);
-      const row = call(READY_MINUTES_AGO, { duration_seconds: 53, metadata: { preconnect_screen: 'failed' } });
-      await database('call_log').insert(row);
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
-      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    });
-
-    test('gate on: a caller who pressed 1, a screen that never challenged, a lost pass/fail write and no stamp are all texted', async () => {
-      screenGate(true);
+    test('a caller who pressed 1, a screen that never challenged, a lost pass/fail write and no stamp are all texted', async () => {
       const stamps = ['passed', 'would_gate', 'gated', undefined];
       for (const [i, stamp] of stamps.entries()) {
         const row = call(READY_MINUTES_AGO, { from_phone: `+1941555030${i}`, metadata: stamp ? { preconnect_screen: stamp } : {} });

@@ -21,6 +21,7 @@ const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
 const lineTech = require('../services/scheduling/line-technician');
+const { classifyServiceCategory } = require('../services/auto-dispatch/service-category');
 const { buildBookingAvailability, buildFunnelAvailability, funnelServiceLines } = require('../routes/booking')._internals;
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
@@ -86,7 +87,7 @@ describe('buildBookingAvailability — serviceLines (line map live)', () => {
   test('the home technician wins a start both have, the gap technician fills the start the home lacks, a third technician is dropped', async () => {
     const result = await build(shared(), { serviceLines: ['general'] });
     // The booked address rides along for GATE_TERRITORY_ROUTING (the territory technician leads).
-    expect(lineTech.lineOfferRanking).toHaveBeenCalledWith(db, { lines: ['general'], place: { lat: 27.4, lng: -82.4 } });
+    expect(lineTech.lineOfferRanking).toHaveBeenCalledWith(db, { lines: ['general'], place: { lat: 27.4, lng: -82.4 }, strict: false });
     expect(offers(result)).toEqual(['09:00:tech-home', '11:00:tech-gap']);
   });
 
@@ -112,6 +113,15 @@ describe('buildBookingAvailability — serviceLines (line map live)', () => {
     lineTech.lineOfferRanking.mockRejectedValue(new Error('db down'));
     expect(stripSig(await build(shared(), { serviceLines: ['general'] }))).toEqual(today);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('line map offer ranking unavailable: db down'));
+  });
+
+  test('verifiedOnly (the hourly route check\'s asks): the ranking is read strict, and an unreadable map is no answer', async () => {
+    // An offer of every technician would count a technician the map drops (routes/booking.js availabilityForPin).
+    const result = await build(shared(), { serviceLines: ['general'], verifiedOnly: true });
+    expect(lineTech.lineOfferRanking).toHaveBeenCalledWith(db, { lines: ['general'], place: { lat: 27.4, lng: -82.4 }, strict: true });
+    expect(offers(result)).toEqual(['09:00:tech-home', '11:00:tech-gap']);
+    lineTech.lineOfferRanking.mockRejectedValue(new Error('db down'));
+    await expect(build(shared(), { serviceLines: ['general'], verifiedOnly: true })).rejects.toThrow('line map unread: db down');
   });
 
   test('an empty serviceLines list reads nothing', async () => {
@@ -157,6 +167,16 @@ describe('funnelServiceLines / buildFunnelAvailability', () => {
     expect(funnelServiceLines('lawn_care+tree_shrub')).toEqual(['lawn']);
     expect(funnelServiceLines('pest_control+lawn_care')).toEqual(['general', 'lawn']);
     expect(funnelServiceLines('bora_care')).toEqual(['termite']);
+    // The /book rodent option saves a general "Rodent Control" visit (the first look; the
+    // booking-link text sends a rodent inspection here too): the exclusion line, the same line
+    // the saved visit's name reads, so the offer and the saved visit agree.
+    expect(funnelServiceLines('rodent')).toEqual(['exclusion']);
+    expect(classifyServiceCategory('Rodent Control')).toBe('exclusion');
+    expect(funnelServiceLines('pest_control+rodent')).toEqual(['exclusion', 'general']);
+    // A two-choice booking saves both labels joined by " + ": the saved visit still reads exclusion,
+    // so a later reschedule of it offers the exclusion line, never the trapping line.
+    expect(funnelServiceLines('mosquito+rodent')).toEqual(['exclusion', 'mosquito']);
+    expect(classifyServiceCategory('Mosquito Control + Rodent Control')).toBe('exclusion');
   });
 
   test('not live, no funnel key or an unknown key: no lines', () => {
@@ -170,7 +190,7 @@ describe('funnelServiceLines / buildFunnelAvailability', () => {
     findAvailableSlots.mockResolvedValue({ slots: [slotOf('tech-home', '10:00')], total_feasible: 1 });
     const args = { lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: NOW, serviceKey: 'pest_control' };
     await buildFunnelAvailability(args);
-    expect(lineTech.lineOfferRanking).toHaveBeenCalledWith(db, { lines: ['general'], place: { lat: 27.4, lng: -82.4 } });
+    expect(lineTech.lineOfferRanking).toHaveBeenCalledWith(db, { lines: ['general'], place: { lat: 27.4, lng: -82.4 }, strict: false });
     lineTech.lineOfferRanking.mockClear();
     lineTech.lineMapLive.mockReturnValue(false);
     await buildFunnelAvailability(args);

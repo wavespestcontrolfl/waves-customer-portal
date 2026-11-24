@@ -18,6 +18,8 @@ const { roundStepForPlan } = require('../lawn-program');
 const roundsCatchUp = require('../lawn-rounds-catchup');
 const { sqlZip5 } = require('../stamped-address');
 const { dateOnlyStamp } = require('./time-format');
+const { etDateString } = require('../../utils/datetime-et');
+const octoberStonewall = require('../../models/migrations/20261122120000_lawn_v13_october_stonewall');
 
 async function safeBuild(label, fn) {
   try {
@@ -304,7 +306,76 @@ async function buildLawnProtocolReportContext(record, knex, now) {
   }
 
   const summary = await withCatchUpIfApplied(summarizeProtocolContext(context), { record, knex, catchUp });
-  return attachProtocolOperationalContext(await withoutUnappliedSwapRows(summary, { record, knex }), { completion, assignment });
+  const listed = await withBagAsOfVisit(await withoutUnappliedSwapRows(summary, { record, knex }), { record, completion, knex });
+  return attachProtocolOperationalContext(listed, { completion, assignment });
+}
+
+// The October v13 bag changed IN PLACE on the staged row (migration 20261122120000: the Dimension granular became Stonewall 0.37%), and a
+// report opened later reads that row. A visit made BEFORE the swap keeps the window as it was then, whatever the visit applied, skipped or
+// substituted: the swap's own audit record holds the row's earlier product, the earlier goal and the moment of the swap. A visit after
+// the swap, a protocol never swapped (or rolled back: the record is gone), a row changed since, or another window: the summary as it is
+// (the same object). The reads are not caught: a failed read omits the card for that render (safeBuild) and never names the wrong bag.
+async function withBagAsOfVisit(summary, { record, completion, knex }) {
+  if (summary?.window?.key !== octoberStonewall.OCTOBER_WINDOW || !summary.id || !Array.isArray(summary.products)) return summary;
+  const swap = await knex('lawn_protocol_audit_log').where({ lawn_protocol_id: summary.id, action: octoberStonewall.ACTION })
+    .orderBy('created_at', 'desc').first('created_at', 'after_snapshot');
+  if (!swap || !visitWasBefore(swap.created_at, { record, completion })) return summary;
+  const snapshot = parseJson(swap.after_snapshot, {});
+  const was = swappedRowRecord(snapshot);
+  const row = was && summary.products.find((product) => String(product.id) === String(was.rowId) && product.protocolProductName === was.name.after);
+  if (!row) return summary;
+  const catalog = was.productId.before
+    ? await knex('products_catalog').where({ id: was.productId.before }).first('name', 'frac_group', 'irac_group', 'hrac_group', 'moa_group', 'analysis_n', 'analysis_p', 'analysis_k')
+    : null;
+  const goalMoved = Boolean(snapshot.goalWindowId) && summary.window.goal === snapshot.newGoal;
+  return {
+    ...summary,
+    window: goalMoved ? { ...summary.window, goal: snapshot.oldGoal } : summary.window,
+    products: summary.products.map((product) => (product === row ? rowBeforeSwap(row, was, catalog || {}) : product)),
+  };
+}
+
+// The swap record's one staged row in a flat shape ({ before, after } pairs), or null when the record does not hold what this needs.
+function swappedRowRecord(snapshot) {
+  const recorded = Array.isArray(snapshot.rows) ? snapshot.rows[0] : null;
+  const columns = recorded && recorded.columns;
+  if (!columns || !columns.product_name || !columns.product_id) return null;
+  return { rowId: recorded.rowId, name: columns.product_name, productId: columns.product_id, counter: columns.annual_counter, gateCounter: (recorded.gates || {}).annualCounter };
+}
+
+// The summary's product row as the staged row read before the swap. The swap acted only on a row it had checked column for column
+// (the migration's ROW_SHAPE, ROW_GATES and rate), so those values and the recorded product and counter are the earlier row; nothing
+// is taken from the row as it reads now but its id (a dose the office set for Stonewall later never shows under the Dimension name).
+function rowBeforeSwap(row, was, catalog) {
+  const { ROW_SHAPE, ROW_GATES, OCT_RATE } = octoberStonewall;
+  return {
+    ...row,
+    productId: was.productId.before,
+    productName: catalog.name || was.name.before,
+    protocolProductName: was.name.before,
+    role: ROW_SHAPE.role,
+    applicationMode: ROW_SHAPE.application_mode,
+    ratePer1000: OCT_RATE,
+    rateUnit: ROW_SHAPE.rate_unit,
+    carrierGalPer1000: ROW_SHAPE.carrier_gal_per_1000,
+    defaultInPlan: ROW_SHAPE.default_in_plan,
+    gates: { ...ROW_GATES, annualCounter: was.gateCounter ? was.gateCounter.before : undefined },
+    annualCounter: was.counter ? was.counter.before : row.annualCounter,
+    groups: { frac: catalog.frac_group || null, irac: catalog.irac_group || null, hrac: catalog.hrac_group || null, moa: catalog.moa_group || null },
+    analysis: { n: catalog.analysis_n ?? null, p: catalog.analysis_p ?? null, k: catalog.analysis_k ?? null },
+  };
+}
+
+// Was the visit made before `swappedAt`? Its service day against the swap's day (Eastern); on the swap's own day, only a closeout that
+// was recorded before the swap (the protocol completion row, else the service record itself). A visit with no readable service day is
+// not before.
+function visitWasBefore(swappedAt, { record, completion }) {
+  const serviceDay = dateOnlyStamp(record?.service_date);
+  if (!serviceDay) return false;
+  const swapDay = etDateString(new Date(swappedAt));
+  if (serviceDay !== swapDay) return serviceDay < swapDay;
+  const closedAt = completion?.created_at || record.created_at;
+  return !!closedAt && new Date(closedAt) < new Date(swappedAt);
 }
 
 // The catch-up's product (the March Dimension 2EW row the window read added for an eligible visit) is listed on the CUSTOMER report only when

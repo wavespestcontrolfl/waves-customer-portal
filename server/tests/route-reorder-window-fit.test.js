@@ -76,7 +76,6 @@ let adRunRow;
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_ROUTE_REORDER_WINDOW_FIT;
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   stopsByDate = {};
   ledgerInserts = [];
   trxUpdates = [];
@@ -168,24 +167,8 @@ test('gate OFF: guard violation skips the day exactly as before — no fallback 
   expect(JSON.parse(ledgerInserts[0].constraints).window_fit).toBe(false);
 });
 
-test('gate ON but calibration OFF: fallback stands down — model-authored orders require the calibrated drive-time model', async () => {
-  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
-  // GATE_DRIVE_TIME_CALIBRATION deliberately unset: the legacy 30 mph model
-  // must never author an order (pre-push audit P1 — the fallback's safety
-  // case is the calibrated model's MAE, and killing calibration must also
-  // stand the fallback down).
-  stopsByDate[DAY] = chronologyDay();
-  mockOptimizerOrder(['T2', 'T1', 'U']);
-  const res = await runRouteReorder({ now: NOW });
-  expect(res.applied).toBe(0);
-  const skip = ledger().skips.find((s) => s.date === DAY);
-  expect(skip).toMatchObject({ reason: 'WINDOW_ORDER_CONFLICT', fallback: 'CALIBRATION_OFF' });
-  expect(trxUpdates).toEqual([]);
-});
-
 test('gate ON: chronology conflict falls back to the best LEGAL order and applies it through the same write', async () => {
   process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
-  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   stopsByDate[DAY] = chronologyDay();
   mockOptimizerOrder(['T2', 'T1', 'U']);
   const res = await runRouteReorder({ now: NOW });
@@ -210,7 +193,6 @@ test('gate ON: chronology conflict falls back to the best LEGAL order and applie
 
 test('gate ON: a day with NO feasible legal order keeps its original skip reason plus the fallback tag', async () => {
   process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
-  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   // Promises that cannot both be kept: T1 09:00 (deadline 11:00) and T2
   // 11:00 (deadline 13:00), each 300 minutes of work — whichever runs first
   // pushes the other past its deadline. Google still "saves" 8000 m with an
@@ -230,7 +212,6 @@ test('gate ON: a day with NO feasible legal order keeps its original skip reason
 
 test('gate ON: feasibility (WINDOW_FIT_CONFLICT) rejection also falls back — untimed long job moves AFTER the promised windows', async () => {
   process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
-  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   // Google wedges a 400-minute untimed job between the 09:00 and 13:00
   // promises (chronology passes, day undriveable). Legal order runs it last.
   stopsByDate[DAY] = [
@@ -252,7 +233,6 @@ test('gate ON: feasibility (WINDOW_FIT_CONFLICT) rejection also falls back — u
 
 test('gate ON: a below-floor ILLEGAL Google order still reaches the fallback — the floor applies to the legal order', async () => {
   process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
-  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   // Google's routed-distance pick scores 0 model savings AND runs the 13:00
   // promise before the 09:00 one; exiting on BELOW_MIN_SAVINGS would hide
   // the legal order that saves 18000 m (audit r3 P1). Current U,T2,T1 =
@@ -279,7 +259,6 @@ test('gate ON: a below-floor ILLEGAL Google order still reaches the fallback —
 
 test('gate ON: a legal constrained order below the floor is feasible but not worth rewriting', async () => {
   process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
-  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   // Current U,T2,T1 = 22,500 m. Google and the constrained search both find
   // 22,000 m orders, but Google's order reverses the promised windows. The
   // constrained order is legal and saves 500 m — below the 805 m write floor.
@@ -319,7 +298,6 @@ test('gate OFF: a below-floor illegal Google order still skips BELOW_MIN_SAVINGS
 
 test('gate ON: a LEGAL Google order never consults the fallback — applied as google_routes_api, no unconstrained delta', async () => {
   process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
-  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   // Untimed backtracking day: current B(3),A(1),C(2) = 8000 m; lng-sorted
   // A,C,B = 6000 m, no windows to violate.
   stopsByDate[DAY] = [
@@ -347,7 +325,6 @@ const incompleteDay = (over = {}) => [
 ];
 const enableFallbackGates = () => {
   process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
-  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
 };
 
 describe('complete-order gate', () => {

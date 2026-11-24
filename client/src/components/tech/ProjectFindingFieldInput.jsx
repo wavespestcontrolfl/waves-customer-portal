@@ -621,6 +621,7 @@ function rowChemistryInputs(row = {}) {
     squareFootage: row.square_footage,
     linearFeet: row.linear_feet,
     trenchDepthFt: row.trench_depth_ft,
+    concentrationPct: row.concentration_pct,
   };
 }
 

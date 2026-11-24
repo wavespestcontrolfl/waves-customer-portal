@@ -6,11 +6,18 @@
 // active account renders all of them unchanged.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
   default: {
+    // Billing mounts Home's add-a-service card (owner 2026-11-21).
+    getPropertyRecommendations: vi.fn(async () => ({ available: false })),
+    requestPropertyRecommendation: vi.fn(),
+    saveStripeCard: vi.fn(),
+    oneTapGet: vi.fn(),
+    oneTapRelease: vi.fn(),
+    oneTapConfirm: vi.fn(),
     getSchedule: vi.fn(),
     getNotificationPrefs: vi.fn(),
     getPropertyNotificationPrefs: vi.fn(),
@@ -51,8 +58,8 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
-async function renderBilling(customer) {
-  render(<BillingTab customer={customer} refreshCustomer={vi.fn()} />);
+async function renderBilling(customer, props = {}) {
+  render(<BillingTab customer={customer} refreshCustomer={vi.fn()} {...props} />);
   await waitFor(() => expect(api.getBalance).toHaveBeenCalled());
   // The loading copy also mentions payment history; wait for the section title.
   await screen.findByText(/^Payment History$/i);
@@ -72,6 +79,155 @@ describe('BillingTab — cancelled account is read-only (C4)', () => {
     await renderBilling({ ...baseCustomer, cancelled: false });
     expect(screen.getByText('Payment Methods')).toBeInTheDocument();
     expect(screen.getByText('Billing Preferences')).toBeInTheDocument();
+  });
+});
+
+// Owner 2026-11-21: Billing also carries Home's add-a-service offer (pest or
+// lawn, from the same recommendations read) and a refer-a-friend card. Home's
+// other cards (the mosquito note, irrigation advice) stay on Home, and a
+// cancelled account sees neither card.
+describe('BillingTab — add-a-service and refer cards', () => {
+  const RECS = {
+    available: true,
+    oneTap: false,
+    cards: [
+      { id: 'lawn_offer', kind: 'offer', title: 'Lawn Care', body: 'Not on your plan yet.', serviceKey: 'lawn_care', mode: 'quote_cta', option: null, fingerprint: 'fp', ctaLabel: 'Request a quote' },
+      { id: 'mosquito_note', kind: 'ask', title: 'Mosquito coverage', body: 'Season is here.' },
+    ],
+  };
+
+  // A purchase the server holds for this customer, at its confirm step (what
+  // the card reads back after a return from a bank page).
+  const heldPurchase = () => ({
+    purchaseId: 'p-7', estimateId: 'est-1', status: 'reserved', open: true,
+    serviceKey: 'lawn_care', label: 'Lawn Care', perVisit: 84,
+    cadenceLabel: '9 applications/yr', visitsPerYear: 9,
+    terms: { version: 'v1', text: 'Server terms text.' },
+    hasCardOnFile: true, holdLive: true, holdMinutes: 15,
+    slot: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00', holdExpiresAt: new Date(Date.now() + 900000).toISOString() },
+  });
+
+  it('an active account sees the offer (offers only) and the refer card', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(RECS);
+    const onSwitchTab = vi.fn();
+    render(<BillingTab customer={{ ...baseCustomer, cancelled: false }} refreshCustomer={vi.fn()} onSwitchTab={onSwitchTab} />);
+    expect(await screen.findByText('Lawn Care')).toBeInTheDocument();
+    expect(screen.queryByText('Mosquito coverage')).not.toBeInTheDocument();
+    screen.getByRole('button', { name: 'Refer a friend' }).click();
+    expect(onSwitchTab).toHaveBeenCalledWith('refer');
+    // The request says which tab the customer tapped on, so the office
+    // request names Billing and not Home.
+    screen.getByRole('button', { name: 'Get estimate' }).click();
+    await waitFor(() => expect(api.requestPropertyRecommendation).toHaveBeenCalledWith(
+      expect.objectContaining({ cardId: 'plan_offer', serviceKey: 'lawn_care', surface: 'billing' }),
+    ));
+  });
+
+  // The offer's purchase overlay can save a payment method, and a consented
+  // save can enroll Auto Pay on the server. Billing shows the Payment Methods
+  // list and the Auto Pay controls on the same tab, so both must read again;
+  // Home has neither. Driven here by the return from a bank page, the save
+  // the card component runs by itself at mount.
+  it('a payment method saved from the offer reloads the Billing card list and the Auto Pay controls', async () => {
+    window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_1&redirect_status=succeeded&one_tap_resume=p-7');
+    try {
+      let saved = false;
+      api.getPropertyRecommendations.mockResolvedValue(RECS);
+      api.saveStripeCard.mockImplementation(async () => { saved = true; return {}; });
+      api.getAutopay.mockImplementation(async () => (saved
+        ? { state: 'active', autopay_enabled: true, autopay_selected_method_ids: ['pm-1'] }
+        : { state: 'disabled', autopay_enabled: false, autopay_selected_method_ids: [] }));
+      api.oneTapGet.mockResolvedValue({ open: false });
+      await renderBilling({ ...baseCustomer, cancelled: false }, { onSwitchTab: vi.fn() });
+      await waitFor(() => expect(api.saveStripeCard).toHaveBeenCalledWith(null, 'si_1'));
+      // Once at mount, once after the save.
+      await waitFor(() => expect(api.getCards).toHaveBeenCalledTimes(2));
+      // The Auto Pay controls read the state the save produced: the
+      // "Turn on" button of the off state is gone.
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Turn on Auto Pay' })).not.toBeInTheDocument());
+      expect(screen.getAllByText('Auto Pay is on').length).toBeGreaterThan(0);
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
+
+  // The card owns the return from a bank page for its purchase. Billing has a
+  // loading view and an error view; the return must be resumed in both, or a
+  // failed balance read leaves the held visit time to expire. And the card
+  // must be the same instance when Billing then loads, or the reopened
+  // purchase closes by itself.
+  it('a bank-page return is resumed while Billing fails to load, and stays open when Billing loads', async () => {
+    window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_1&redirect_status=succeeded&one_tap_resume=p-7');
+    try {
+      api.getPropertyRecommendations.mockResolvedValue(RECS);
+      api.saveStripeCard.mockResolvedValue({});
+      api.oneTapGet.mockResolvedValue(heldPurchase());
+      api.getBalance.mockRejectedValueOnce(new Error('balance read failed'));
+      render(<BillingTab customer={{ ...baseCustomer, cancelled: false }} refreshCustomer={vi.fn()} onSwitchTab={vi.fn()} />);
+
+      expect(await screen.findByText('Could not load billing')).toBeInTheDocument();
+      expect(await screen.findByRole('dialog', { name: /Add Lawn Care/ })).toBeInTheDocument();
+      expect(api.saveStripeCard).toHaveBeenCalledWith(null, 'si_1');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+      await screen.findByText(/^Payment History$/i);
+      expect(screen.getByRole('dialog', { name: /Add Lawn Care/ })).toBeInTheDocument();
+      // One instance: the return was read once, and no card unmounted on
+      // the way (an unmounted overlay releases the held purchase).
+      expect(api.oneTapGet).toHaveBeenCalledTimes(1);
+      expect(api.oneTapRelease).not.toHaveBeenCalled();
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
+
+  // Billing shows the plan (tier, discount, services under Plan Charges). A
+  // purchase confirmed from its offer card changes the plan, so Billing
+  // reloads the customer, and reads the offers again so the service just
+  // bought is no longer offered. The confirmation stays open through both.
+  it('a purchase confirmed from the Billing offer reloads the customer and the offers', async () => {
+    window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_1&redirect_status=succeeded&one_tap_resume=p-7');
+    try {
+      // The second read fails: the offer for the service just bought must
+      // still go away, and must not come back.
+      api.getPropertyRecommendations
+        .mockResolvedValueOnce(RECS)
+        .mockRejectedValue(new Error('recommendations read failed'));
+      api.saveStripeCard.mockResolvedValue({});
+      api.oneTapGet.mockResolvedValue(heldPurchase());
+      api.oneTapConfirm.mockResolvedValue({
+        success: true, perVisit: 84, label: 'Lawn Care', emailQueued: true,
+        firstVisit: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00' },
+      });
+      const refreshCustomer = vi.fn();
+      render(<BillingTab customer={{ ...baseCustomer, cancelled: false }} refreshCustomer={refreshCustomer} onSwitchTab={vi.fn()} />);
+      expect(await screen.findByText('Not on your plan yet.')).toBeInTheDocument();
+      expect(refreshCustomer).not.toHaveBeenCalled();
+
+      fireEvent.click(await screen.findByText('Confirm'));
+      expect(await screen.findByText('Lawn Care is confirmed')).toBeInTheDocument();
+      expect(api.oneTapConfirm).toHaveBeenCalledWith('p-7', { termsAccepted: true });
+      expect(refreshCustomer).toHaveBeenCalledTimes(1);
+      // The payment methods and the Auto Pay data (the billing terms Plan
+      // Charges shows) read again: at mount, after the bank-page save, and
+      // after the purchase.
+      await waitFor(() => expect(api.getCards).toHaveBeenCalledTimes(3));
+      await waitFor(() => expect(screen.queryByText('Not on your plan yet.')).not.toBeInTheDocument());
+      expect(api.getPropertyRecommendations).toHaveBeenCalledTimes(2);
+      expect(screen.getByText('Lawn Care is confirmed')).toBeInTheDocument();
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
+
+  it('a cancelled account sees neither and never asks for recommendations', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(RECS);
+    // onSwitchTab is passed, as the page passes it. Without it the refer card
+    // never renders, and this test would pass with the cancelled guard removed.
+    await renderBilling({ ...baseCustomer, cancelled: true, cancelledAt: '2026-08-22' }, { onSwitchTab: vi.fn() });
+    expect(api.getPropertyRecommendations).not.toHaveBeenCalled();
+    expect(screen.queryByText('Lawn Care')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Refer a friend' })).not.toBeInTheDocument();
   });
 });
 

@@ -20,7 +20,7 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
   let technicianId;
   let customerId;
   let ids;
-  const gates = ['GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION', 'GATE_SCHEDULE_QUALITY_MEASUREMENTS'];
+  const gates = ['GATE_ROUTE_REORDER_REPAIR', 'GATE_SCHEDULE_QUALITY_MEASUREMENTS'];
   const now = new Date('2040-09-09T08:00:00Z');
   const date = '2040-09-10';
   beforeAll(() => {

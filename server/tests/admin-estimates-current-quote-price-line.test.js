@@ -17,6 +17,8 @@ jest.mock('../services/estimate-delivery-options', () => ({
   estimateDataHasUnresolvedManagerApproval: jest.fn(() => false),
   commercialRiskTypeReviewNeeded: jest.fn(() => false),
   validateEstimateDeliveryOptions: jest.fn(),
+  // Real: the "no visit needed" email line reads it to tell a home estimate from a commercial one.
+  isCommercialEstimateData: jest.requireActual('../services/estimate-delivery-options').isCommercialEstimateData,
 }));
 jest.mock('../services/estimate-pricing-audit', () => ({
   buildEstimatePricingAudit: jest.fn(),

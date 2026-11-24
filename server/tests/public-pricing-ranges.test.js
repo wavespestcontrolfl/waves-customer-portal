@@ -297,6 +297,15 @@ describe('public pricing ranges', () => {
   });
 });
 
+describe('rodent guarantee note matches the signed agreement (owner 2026-11-23)', () => {
+  test('exclusion guarantee, up to 4 callbacks, trapping + exclusion only; no rodent-free, no sanitation', () => {
+    const note = computePublicPricingRanges({ refresh: true }).services.find((svc) => svc.key === 'rodent_guarantee').notes;
+    expect(note).toContain('rodent exclusion guarantee covering up to 4 callbacks and re-sealing of the original exclusion points');
+    expect(note).toContain('eligibility requires completed trapping and completed exclusion');
+    expect(note).not.toMatch(/rodent-free|sanitation|photo baseline|final trap check/i);
+  });
+});
+
 describe('rodent package discount note lists all three live packages (owner 2026-10-30)', () => {
   const { RODENT } = require('../services/pricing-engine/constants');
   const rows = () => computePublicPricingRanges({ refresh: true }).services;

@@ -20,9 +20,9 @@
  *      rule). The module does not re-code them.
  *   2. Every stop in the chain may move under the 4:40 re-plan's own rules: day-replan fixedReason, read again with
  *      the day's full facts (status, hold, staff lock, office review, group, same customer twice, the 24-hour lock,
- *      the 24-hour text, confirmed, first or one-time, person-placed and told
- *      visits). Its customer also has both reminder tiers on and sent BY TEXT (the plan: "the customer gets reminder
- *      texts"), read with the sender's own channel and app routing rules. The lock is the re-plan's 24 hours (owner
+ *      the 24-hour text, confirmed, first or one-time, person-placed and told visits; also (owner 2026-11-22) a stop with a set time (it may not be promised as a day only), or whose answer could not be read, whatever the
+ *      customer was told). Its
+ *      customer also has both reminder tiers on and sent BY TEXT (the plan: "the customer gets reminder texts"), read with the sender's own channel and app routing rules. The lock is the re-plan's 24 hours (owner
  *      2026-11-03): the 24-hour text always carries the new time; a new time inside 72 hours gets no new 72-hour
  *      text, and a stop whose time was already told never moves at all. Its time
  *      preference (the re-plan's loadPref) allows the new hour, and it still ends by the night tools' day close.
@@ -470,21 +470,9 @@ function remindersOn(prefs) {
 }
 
 const TEXT_CHANNELS = new Set(['sms', 'both']);
-// The message types of the 72-hour and the 24-hour reminder (appointment-reminders.js).
-const REMINDER_TYPES = ['reminder_72h', 'appointment_reminder'];
-
-// With the sender's app routing on (push-channel-routing decidePushRoute; app-first for reminders, owner 2026-11-04),
-// a text-led reminder goes in the app INSTEAD of a text when the customer has an app device the sender could reach
-// (its holderPushReach: a reachable or fresh native device). Such a customer never moves. A customer who chose
-// Text in the app is counted here too: the check fails closed.
-async function remindersMayGoInApp(customerId, env, conn) {
-  if (!REMINDER_TYPES.some((messageType) => env.pushRouteFor(customerId, messageType) === 'push_first')) return false;
-  const status = await env.appDeviceStatus(customerId, conn);
-  return !status || (status.enabled === true && (status.reachable === true || status.fresh === true));
-}
 
 // ...and both go out by text: the channels the reminder sender itself uses (resolve72hChannel for the 72-hour leg,
-// which can promote a one-time visit to email; the stored 24-hour channel), and, for a text-only leg, not the app.
+// which can promote a one-time visit to email; the stored 24-hour channel).
 // TIMED_OUT when the budget ran out before one of its reads.
 async function remindersByText(prefs, row, env, conn, budget = NO_LIMIT) {
   if (budget.spent()) return TIMED_OUT;
@@ -495,10 +483,7 @@ async function remindersByText(prefs, row, env, conn, budget = NO_LIMIT) {
     conn,
   });
   if (!TEXT_CHANNELS.has(channel72) || !TEXT_CHANNELS.has(prefs.reminder24hChannel)) return false;
-  // 'both' adds an email leg the app never replaces; only a text-only leg can turn into an app message.
-  if (channel72 !== 'sms' && prefs.reminder24hChannel !== 'sms') return true;
-  if (budget.spent()) return TIMED_OUT;
-  return !(await remindersMayGoInApp(row.customer_id, env, conn));
+  return true;
 }
 
 // Why one moved stop may not move after all, from the day's full facts, or null. TIMED_OUT when the budget ran out
@@ -669,7 +654,6 @@ function defaultDeps({ writeProof = false } = {}) {
   const occupancy = require('./occupancy');
   const eligibility = require('../technician-eligibility');
   const reminders = require('../appointment-reminders');
-  const pushRouting = require('../messaging/push-channel-routing');
   const policy = require('./policy');
   return {
     loadDayStops: (conn, dateStr) => replan.loadDayStops(conn, dateStr, writeProof),
@@ -696,8 +680,6 @@ function defaultDeps({ writeProof = false } = {}) {
     zoneRouteDaysLive: require('../../config/feature-gates').zoneRouteDaysLive,
     readZoneRouteDays: require('./zone-route-days').readZoneRouteDays,
     inactiveCapabilities: require('../technician-capabilities').inactiveCapabilitiesForServices,
-    pushRouteFor: (customerId, messageType) => pushRouting.decidePushRoute({ gateOn: pushRouting.gatePushRoutingOn(), customerId, messageType }),
-    appDeviceStatus: (customerId, conn) => require('../push-notifications').customerStatus(customerId, conn, { withReachable: true }),
     techBlind: () => !occupancy.techScopedConfirmActive(),
     closeMin: require('../auto-dispatch/candidate-slots').DAY_CLOSE,
     ownHoldIds: (conn, estimateId) => ownHoldIds(conn, estimateId, writeProof),

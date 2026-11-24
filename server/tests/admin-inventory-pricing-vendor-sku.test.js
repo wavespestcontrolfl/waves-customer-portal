@@ -107,3 +107,17 @@ test('a blank or over-long vendorSku is a 400 before any write', async () => {
   expect(writes).toEqual([]);
   expect(db.transaction).not.toHaveBeenCalled();
 });
+
+// The delivered ranking (scoreVendorRows) adds the vendor's shipping rule to a row that states no
+// shipping. An entered 0 states free shipping, so it must be stored as 0 and not as a blank.
+test('an entered shipping of 0 is stored as 0; a blank or omitted one is stored as null', async () => {
+  for (const [shippingCost, stored] of [[0, 0], [undefined, null], ['', null], [12.5, 12.5]]) {
+    const writes = wire(null);
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, { shippingCost });
+      expect(res.status).toBe(200);
+    });
+    const ins = writes.find((w) => w.kind === 'insert' && 'shipping_cost' in w.body);
+    expect({ cost: ins.body.shipping_cost, estimate: ins.body.shipping_estimate }).toEqual({ cost: stored, estimate: stored });
+  }
+});

@@ -29,7 +29,7 @@ const {
 } = _test;
 // ONE shared resolver + formatter for the processor gate and the engine
 // backstop (codex #4815 r6 P2).
-const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../utils/call-agreed-price');
+const { resolveCallAgreedPrice, resolveStatedOneTimeCallPrice, resolveAgreedOneTimeJobPrice, formatAgreedPriceLabel } = require('../utils/call-agreed-price');
 const { flatView, mapAdditionalPropertiesToLegacy } = require('../utils/extraction-compat');
 const { validateModelOutput } = require('../schemas/validate-extraction');
 const { canAutoRoute, ADVISORY_TRIAGE_FLAGS } = require('../services/call-triage-flags');
@@ -521,5 +521,127 @@ describe('bookingPreDraftAssessmentDrafted', () => {
 
   test('a rejected promise (belt-and-braces — the tracked promise never actually rejects) never blocks the sweep', async () => {
     expect(await bookingPreDraftAssessmentDrafted(Promise.reject(new Error('unexpected')))).toBe(false);
+  });
+});
+
+// 2026-11-21: staff said "One-time service is $250, but it varies" and the caller booked for
+// the same day. The hedge kept quoted_price_usd null, so the visit carried no price, and the
+// office was not told which number the call held. resolveStatedOneTimeCallPrice reads that entry for
+// the call booking check's price bell. It is never a price to bill.
+describe('resolveStatedOneTimeCallPrice', () => {
+  const stated = (over = {}) => ({ amount_usd: 250, amount_max_usd: null, unit: 'one_time', accepted: true, stated_by: 'agent', ...over });
+  const call = (prices, svc = {}) => ({ service_request: { quoted_price_usd: null, price: prices[0] || null, prices, ...svc } });
+
+  test('the one accepted one-time price staff stated is the price', () => {
+    expect(resolveStatedOneTimeCallPrice(call([stated()]))).toBe(250);
+    // An older extraction carries only `price`, with no prices[] array.
+    expect(resolveStatedOneTimeCallPrice({ service_request: { price: stated() } })).toBe(250);
+  });
+
+  test('a strict agreed price keeps its own path, a $0 one too', () => {
+    expect(resolveStatedOneTimeCallPrice(call([stated()], { quoted_price_usd: 250 }))).toBeNull();
+    // The schema allows a $0 total: a free booking never takes the stated price.
+    expect(resolveStatedOneTimeCallPrice(call([stated()], { quoted_price_usd: 0 }))).toBeNull();
+  });
+
+  test('every term counts before the one-price rule: a waived fee, a term with no number, a malformed range', () => {
+    // Staff also stated a $0 fee: two staff terms, and nothing here can tell which one the visit carries.
+    expect(resolveStatedOneTimeCallPrice(call([stated(), stated({ amount_usd: 0, accepted: false })]))).toBeNull();
+    expect(resolveStatedOneTimeCallPrice(call([stated(), stated({ amount_usd: 0 })]))).toBeNull();
+    // A second accepted term with no number is still a second agreed term.
+    expect(resolveStatedOneTimeCallPrice(call([stated(), stated({ amount_usd: null, stated_by: 'caller' })]))).toBeNull();
+    // A range field under the low end is malformed, not an exact price.
+    expect(resolveStatedOneTimeCallPrice(call([stated({ amount_max_usd: 200 })]))).toBeNull();
+    // An entry with every field null is "no price", as the schema says, and does not count.
+    expect(resolveStatedOneTimeCallPrice(call([stated(), { amount_usd: null, amount_max_usd: null, unit: null, accepted: null, stated_by: null }]))).toBe(250);
+  });
+
+  test('not accepted, a range, a plan rate or a price with no unit is not a visit price', () => {
+    expect(resolveStatedOneTimeCallPrice(call([stated({ accepted: false })]))).toBeNull();
+    expect(resolveStatedOneTimeCallPrice(call([stated({ accepted: null })]))).toBeNull();
+    expect(resolveStatedOneTimeCallPrice(call([stated({ amount_max_usd: 300 })]))).toBeNull();
+    expect(resolveStatedOneTimeCallPrice(call([stated({ unit: 'per_quarter' })]))).toBeNull();
+    expect(resolveStatedOneTimeCallPrice(call([stated({ unit: 'unknown' })]))).toBeNull();
+    expect(resolveStatedOneTimeCallPrice(call([stated({ amount_usd: 0 })]))).toBeNull();
+  });
+
+  test('a one-time fee the reading ties to a plan tier or an annual prepay is the plan\'s fee', () => {
+    expect(resolveStatedOneTimeCallPrice(call([stated({ tier_mentioned: 'silver' })]))).toBeNull();
+    expect(resolveStatedOneTimeCallPrice(call([stated({ prepay_term: 'annual' })]))).toBeNull();
+    // A prepay the call ruled out is no plan mark.
+    expect(resolveStatedOneTimeCallPrice(call([stated({ prepay_term: 'none', tier_mentioned: null })]))).toBe(250);
+  });
+
+  test('two staff prices on one call: nothing here can tell which one stands', () => {
+    expect(resolveStatedOneTimeCallPrice(call([stated(), stated({ amount_usd: 150, accepted: false })]))).toBeNull();
+    // A price nobody is named for could be a second staff price.
+    expect(resolveStatedOneTimeCallPrice(call([stated(), stated({ amount_usd: 99, stated_by: null, accepted: false })]))).toBeNull();
+    expect(resolveStatedOneTimeCallPrice(call([stated({ stated_by: null })]))).toBeNull();
+  });
+
+  test("the caller's own number is never the price, and does not hide the staff price", () => {
+    expect(resolveStatedOneTimeCallPrice(call([stated({ stated_by: 'caller' })]))).toBeNull();
+    expect(resolveStatedOneTimeCallPrice(call([stated(), stated({ amount_usd: 400, stated_by: 'caller', accepted: false })]))).toBe(250);
+  });
+
+  test('a second accepted term, whoever stated it, is an agreement this rule cannot split', () => {
+    // "$99 to start, then $31 a month": the plan rate was accepted too.
+    expect(resolveStatedOneTimeCallPrice(call([stated({ amount_usd: 99 }), stated({ amount_usd: 31, unit: 'per_month', stated_by: 'caller' })]))).toBeNull();
+    expect(resolveStatedOneTimeCallPrice(call([stated({ amount_usd: 99 }), stated({ amount_usd: 150, stated_by: 'caller' })]))).toBeNull();
+  });
+
+  test('no extraction, no price', () => {
+    expect(resolveStatedOneTimeCallPrice(null)).toBeNull();
+    expect(resolveStatedOneTimeCallPrice({})).toBeNull();
+    expect(resolveStatedOneTimeCallPrice({ service_request: {} })).toBeNull();
+  });
+});
+
+// The call booker's agreed-one-time-job hold (GATE_CALL_AGREED_ONE_TIME_JOB) asks whether staff priced
+// ONE one-time job on the call. This is evidence for the hold; the visit never takes it as its price.
+describe('resolveAgreedOneTimeJobPrice', () => {
+  const stated = (over = {}) => ({ amount_usd: 250, amount_max_usd: null, unit: 'one_time', accepted: true, stated_by: 'agent', ...over });
+  const call = (prices, svc = {}) => ({ service_request: { quoted_price_usd: null, price: prices[0] || null, prices, ...svc } });
+
+  test('the price staff stated and the caller accepted, or the strict total with its one-time entry', () => {
+    expect(resolveAgreedOneTimeJobPrice(call([stated()]))).toBe(250);
+    expect(resolveAgreedOneTimeJobPrice(call([stated()], { quoted_price_usd: 250 }))).toBe(250);
+    // The strict total is the agreed total even when the caller named the number.
+    expect(resolveAgreedOneTimeJobPrice(call([stated({ stated_by: 'caller' })], { quoted_price_usd: 250 }))).toBe(250);
+  });
+
+  test('not one exact one-time number: null', () => {
+    expect(resolveAgreedOneTimeJobPrice(call([stated({ amount_max_usd: 300 })]))).toBeNull(); // a range
+    expect(resolveAgreedOneTimeJobPrice(call([stated(), stated({ amount_usd: 99 })]))).toBeNull(); // two agreed terms
+    expect(resolveAgreedOneTimeJobPrice(call([stated({ amount_usd: 99 }), stated({ amount_usd: 31, unit: 'per_month' })]))).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(call([stated({ unit: 'per_quarter' })]))).toBeNull(); // a plan rate
+    expect(resolveAgreedOneTimeJobPrice(call([stated({ unit: 'unknown' })]))).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(call([], { quoted_price_usd: 250 }))).toBeNull(); // a strict total with no unit
+    // The strict total and the accepted entry disagree: the total has no unit of its own.
+    expect(resolveAgreedOneTimeJobPrice(call([stated({ amount_usd: 200 })], { quoted_price_usd: 250 }))).toBeNull();
+    // A strict $0 total is a free booking, whatever the accepted entry says.
+    expect(resolveAgreedOneTimeJobPrice(call([stated()], { quoted_price_usd: 0 }))).toBeNull();
+    // A waived fee next to the price, accepted or not; a second accepted term with no number; a malformed range.
+    expect(resolveAgreedOneTimeJobPrice(call([stated(), stated({ amount_usd: 0, accepted: false })]))).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(call([stated(), stated({ amount_usd: 0 })]))).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(call([stated(), stated({ amount_usd: 0 })], { quoted_price_usd: 250 }))).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(call([stated(), stated({ amount_usd: null })]))).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(call([stated({ amount_max_usd: 200 })]))).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(call([stated({ amount_max_usd: 200 })], { quoted_price_usd: 250 }))).toBeNull();
+  });
+
+  test('a price a plan claims is not a one-time job price, with or without a strict total', () => {
+    for (const svc of [{}, { quoted_price_usd: 250 }]) {
+      expect(resolveAgreedOneTimeJobPrice(call([stated({ tier_mentioned: 'silver' })], svc))).toBeNull();
+      expect(resolveAgreedOneTimeJobPrice(call([stated({ prepay_term: 'annual' })], svc))).toBeNull();
+      expect(resolveAgreedOneTimeJobPrice(call([stated({ prepay_term: 'none', tier_mentioned: null })], svc))).toBe(250);
+    }
+  });
+
+  test('nothing agreed, or only the caller\'s own number: null', () => {
+    expect(resolveAgreedOneTimeJobPrice(call([stated({ accepted: false })]))).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(call([stated({ stated_by: 'caller' })]))).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(null)).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice({ service_request: {} })).toBeNull();
   });
 });
