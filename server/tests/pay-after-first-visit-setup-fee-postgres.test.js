@@ -267,8 +267,8 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
         await Button.customerPreLock(facts)(trx);
         await Button.coverageRecheck(facts)(trx);
       })).resolves.toBeUndefined();
-      // The send claim's check, on a real transaction: it passes with nothing else billed, and while its transaction
-      // is open a second connection cannot take the KEY SHARE a new invoice's foreign key needs on the customer.
+      // The send claim's check, on a real transaction: it passes with nothing else billed, and it leaves the
+      // customer row free for the text's sms_log insert on another connection (KEY SHARE on the customer).
       const check = Button.sendVerify(facts);
       const sendTrx = await mockPg.transaction();
       try {
@@ -278,7 +278,7 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
         await expect(mockPg.transaction(async (other) => {
           await other.raw("SET LOCAL lock_timeout = '300ms'");
           await other.raw('SELECT 1 FROM customers WHERE id = ? FOR KEY SHARE', [f.customerId]);
-        })).rejects.toMatchObject({ code: '55P03' });
+        })).resolves.toBeUndefined();
       } finally { await sendTrx.rollback(); }
     } finally { await cleanup(f); }
   });

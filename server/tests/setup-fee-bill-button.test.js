@@ -40,7 +40,8 @@ jest.mock('../services/billing-lane', () => ({
 }));
 let mockTemplateOn = true;
 let mockDisposition = null;
-jest.mock('../services/billing-recovery-bill', () => ({ currentDisposition: jest.fn(async () => mockDisposition) }));
+let mockHold = null;
+jest.mock('../services/billing-recovery-bill', () => ({ currentDisposition: jest.fn(async () => mockDisposition), liveCardHoldForVisit: jest.fn(async () => mockHold) }));
 jest.mock('../routes/admin-sms-templates', () => ({ isTemplateActive: jest.fn(async () => mockTemplateOn) }));
 jest.mock('../services/customer-credit', () => ({ autoApplyWouldApply: jest.fn(async () => mockWouldDraw) }));
 let mockDeposit = null;
@@ -118,6 +119,7 @@ beforeEach(() => {
   mockPrefs = null;
   mockTemplateOn = true;
   mockDisposition = null;
+  mockHold = null;
   mockSuppressed = null;
 });
 
@@ -372,6 +374,19 @@ test('the send carries a credit check that runs under its claim', async () => {
   mockVisit = { ...mockVisit, prepaid_amount: null };
   mockDisposition = { disposition: 'intentionally_free', stale: false };
   expect(await verify({ id: INV, customer_id: CUST }, database)).toMatch(/Billing Recovery already handled/);
+  mockDisposition = null;
+  mockHold = { id: 'h1', status: 'charge_review' };
+  expect(await verify({ id: INV, customer_id: CUST }, database)).toMatch(/card hold is open/);
+});
+
+test('a send plan with an effect the prompt does not name (a lead marked won) is not sent', async () => {
+  Send.planInvoiceSend.mockResolvedValueOnce({
+    channel: 'text', _version: { total_cents: APP + FEE, invoice_version: EDITED.getTime() },
+    effects: [{ key: 'delivery', text: 'Texts the invoice' }, { key: 'lead_conversion', text: 'Sending this invoice also marks lead 1234 won' }],
+  });
+  const out = await tap();
+  expect(Send.commitInvoiceSend).not.toHaveBeenCalled();
+  expect(out.message).toMatch(/marks lead 1234 won/);
 });
 
 test('a send refused because coverage changed says to reconcile, never to send it by hand', async () => {

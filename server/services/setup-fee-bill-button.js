@@ -158,6 +158,8 @@ async function applicationCoverageRefusal(trx, facts, visit) {
     return 'The visit price changed since the visit was completed';
   }
   if (await trx('scheduled_service_addons').where({ scheduled_service_id: facts.visitId }).first('id')) return 'The visit has add-ons';
+  // A card hold on the visit (held, charging, or a charge whose outcome is in review) may already collect it.
+  if (await require('./billing-recovery-bill').liveCardHoldForVisit(facts.visitId, trx)) return 'A card hold is open on this visit';
   // Billing Recovery handled the visit (Mark free, Bill, Billed elsewhere): a live disposition refuses.
   const disposition = await require('./billing-recovery-bill').currentDisposition(trx, facts.visitId);
   if (disposition && !disposition.stale) return 'Billing Recovery already handled this visit';
@@ -344,9 +346,9 @@ function sendVerify(facts) {
     try {
       others = await database.transaction(async (sp) => {
         await sp.raw("SET LOCAL lock_timeout = '3s'");
-        // The customer row FOR UPDATE first: a new invoice for this customer (its foreign key takes KEY SHARE on
-        // the row) cannot commit until this send's transaction ends. The released savepoint keeps the lock.
-        await sp('customers').where({ id: claimed.customer_id }).forUpdate().first('id');
+        // Never the customer row FOR UPDATE here: the provider handoff holds this lock through dispatch, and the
+        // text's sms_log insert (another connection) needs KEY SHARE on that row. A brand-new invoice committed
+        // between this read and dispatch is the known limit (docs/gates-and-env.md).
         const rows = await sp('invoices').where({ customer_id: claimed.customer_id }).whereNot('id', claimed.id)
           .whereNotIn('status', ['void', 'cancelled', 'canceled']).orderBy('id').forUpdate()
           .select('id', 'notes', 'line_items', 'scheduled_service_id', 'service_record_id');
@@ -378,6 +380,10 @@ async function sendInvoice(invoiceId, technicianId, facts) {
   // A pay-link text already scheduled owns the delivery: keep that answer.
   if (plan.code === 'invoice_send_queued') return { code: 'invoice_send_queued' };
   if (plan.error) return { error: plan.error };
+  // Only the effects the confirm prompt names: the text, its payment reminders, the visit's closeout. Anything else
+  // (a lead marked won) was never shown, so the draft stays for the Invoices page card.
+  const extra = (plan.effects || []).filter((e) => !['delivery', 'followups', 'closeout'].includes(e.key));
+  if (extra.length) return { error: `this send would also ${extra.map((e) => String(e.text || e.key).replace(/^Sending this invoice also /i, '')).join('; ')}` };
   if (!(await draftUnchanged(invoiceId, plan, facts))) {
     const inv = await db('invoices').where({ id: invoiceId }).first('status', 'sent_at');
     // Someone else may have sent or edited it: never ask for a blind resend.
@@ -490,7 +496,7 @@ function billButtons({ applicationCents, feeCents, visit }) {
     items: [{
       id: 'bill_send',
       label: `Bill and send $${total}`,
-      prompt: 'Create one invoice for the visit and the setup fee, then send it to the customer?',
+      prompt: 'Bill the visit and setup fee on one invoice, then text it with payment reminders?',
       args: { applicationCents, feeCents, priceCents: priceCents(visit.estimated_price), primaryCents: priceCents(visit.primary_line_price) },
     }],
   };
