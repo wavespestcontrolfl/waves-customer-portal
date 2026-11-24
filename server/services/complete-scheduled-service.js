@@ -5623,9 +5623,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // never fall back to the monthly rate, and per-application precedence is
     // explicit visit price → acceptance fee → nothing (see
     // completionInvoiceAmount in billing-lane.js).
-    const {
-      perApplicationBilling, annualPrepayBilling, explicitMembershipLane, explicitPerVisitLane,
-    } = completionLaneFlags(svc.cust_billing_mode);
+    const laneFlags = completionLaneFlags(svc.cust_billing_mode);
+    const perApplicationBilling = laneFlags.perApplicationBilling;
+    const annualPrepayBilling = laneFlags.annualPrepayBilling;
+    const explicitMembershipLane = laneFlags.explicitMembershipLane;
+    const explicitPerVisitLane = laneFlags.explicitPerVisitLane;
     const invoiceAmount = reviewedVisitPrice ? reviewedPriceAmount : completionInvoiceAmount({
       estimatedPrice: svc.estimated_price,
       isCallback: svc.is_callback,
