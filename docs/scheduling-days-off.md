@@ -89,7 +89,7 @@ Monday 2027-07-05 is the observed closed day. The closed days come through
 
 A holiday row clears (a system clear, as for a birthday) when Settings reopens that holiday, when the
 technician's `work_days` changes, or when the technician leaves. The job recomputes the wanted set under
-the tech-day lock before it clears. If the closure settings cannot be read, the job writes no holiday
+the tech-day lock before it clears. A holiday-only row is also rechecked under the tech-day lock and the shared closure-state lock before it is written, so a holiday the office reopens between the pass's read and the write writes nothing. If the closure settings cannot be read, or the stored closure list is not a JSON array (a strict read of `schedule_holiday_closures` throws on it; the default fail-open read is unchanged), the job writes no holiday
 row and clears none in that pass, and counts the read as a failure so the cron health shows it.
 Birthdays still run. The job reads the settings only when some technician has `work_days`. No gate
 covers it: it sends nothing, charges nothing, writes no pay and deletes nothing. The owner's only active

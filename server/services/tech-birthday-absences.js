@@ -39,7 +39,10 @@
  * A holiday-taken row is an ordinary row of the same source and reason as a birthday row; a date that is both is one row.
  * If the closure settings cannot be read, no holiday row is written and none is cleared in that pass (a row of a
  * technician who still has a birthday that day, or who is no longer assignable, is handled as usual); the read failure
- * counts in `failed`, so the cron health shows it. Birthdays always proceed. The settings are read only when some
+ * counts in `failed`, so the cron health shows it (a stored value that is not a JSON array reads as unreadable too: the strict
+ * read throws). A write for a date wanted only as a holiday taken day is rechecked under the tech-day lock and the shared
+ * closure-state lock, settings read through the transaction, so a holiday reopened since the pass's read writes nothing; a recheck
+ * read that fails writes nothing and counts a failure. Birthdays always proceed. The settings are read only when some
  * technician has a work_days list.
  *
  * Rules:
@@ -85,7 +88,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays, dateOnlyString, validCalendarDate } = require('../utils/datetime-et');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
-const { getClosedHolidays, getBlackoutDates } = require('./scheduling/blackout-dates');
+const { getClosedHolidays, getBlackoutDates, lockClosureState } = require('./scheduling/blackout-dates');
 const { HOLIDAYS, holidayDays } = require('./scheduling/holidays');
 const { normalizeWorkDays, dayOfWeekOfDate } = require('./technician-eligibility');
 
@@ -189,28 +192,37 @@ function wantedDates(tech, today, horizon, holidayCtx) {
 /** A row the sync cleared itself and may follow with a new episode: its source, a system clear, no office clearer. Pure. */
 const isOwnSystemCleared = (row) => row.source === SOURCE && row.cleared_at != null && row.system_cleared_at != null && row.cleared_by == null;
 
-/** One technician-day: write the row (a new episode when the sync's own system clears are all there is), announced after the commit. Never throws. */
-async function syncOneDay(conn, tech, date, result) {
+/**
+ * One technician-day: write the row (a new episode when the sync's own system clears are all there is), announced after the commit. Never throws.
+ * `holidayOnly`: the date is wanted only as a holiday taken day, so its wanted set is recomputed under the lock, closure settings read
+ * through the transaction under the shared closure-state lock, before anything is written (an office edit between the pass's read and the
+ * lock must not write a row). A recheck that reads nothing wanted writes nothing and is not counted; a recheck whose read fails writes
+ * nothing and counts a failure.
+ */
+async function syncOneDay(conn, tech, date, result, { holidayOnly = false, today, horizon } = {}) {
   try {
     const done = await conn.transaction(async (trx) => {
       await lockTechDays(trx, [{ techId: tech.id, date }]);
       // ANY row for the day, cleared or not: an uncleared one means already out, a cleared one is the office's call.
       const rows = await trx('technician_absences').where({ technician_id: tech.id, absence_date: date })
         .forUpdate().select('id', 'source', 'cleared_at', 'cleared_by', 'system_cleared_at');
-      if (!rows.length) {
-        const [row] = await trx('technician_absences')
-          .insert({ technician_id: tech.id, absence_date: date, reason: ABSENCE_REASON, source: SOURCE }).returning('id');
-        return { id: (row && row.id) || row || null, kind: 'written' };
+      if (rows.length && !rows.every(isOwnSystemCleared)) return null;
+      if (holidayOnly) {
+        // Lock order as the capacity reservation uses: tech-day fence first, then the closure state SHARED (closure edits take it exclusive).
+        await lockClosureState(trx);
+        const current = await trx('technicians').where({ id: tech.id })
+          .first('employment_status', 'field_dispatchable', 'work_days', trx.raw("to_char(dob, 'YYYY-MM-DD') AS dob"));
+        if (!current || !(await rowWantedState({ ...current, date }, today, horizon, () => loadHolidayContext(trx, today, horizon)))) {
+          return { kind: 'stale' };
+        }
       }
-      // Every row on the day is one the sync cleared itself: a new episode, never a reopened row (see the header).
-      if (rows.every(isOwnSystemCleared)) {
-        const [row] = await trx('technician_absences')
-          .insert({ technician_id: tech.id, absence_date: date, reason: ABSENCE_REASON, source: SOURCE }).returning('id');
-        return { id: (row && row.id) || row || null, kind: 'reopened' };
-      }
-      return null;
+      // No row on the day: write it. Every row on the day is one the sync cleared itself: a new episode, never a reopened row (see the header).
+      const [row] = await trx('technician_absences')
+        .insert({ technician_id: tech.id, absence_date: date, reason: ABSENCE_REASON, source: SOURCE }).returning('id');
+      return { id: (row && row.id) || row || null, kind: rows.length ? 'reopened' : 'written' };
     });
     if (!done) { result.skipped += 1; return; }
+    if (done.kind === 'stale') return;
     result[done.kind] += 1;
     // After the commit, best-effort (it never throws): flush the slot cache and refresh the board, as a tech-out mark does.
     require('./tech-out').emitAbsenceChange({ technicianId: tech.id, date, out: true, absenceId: done.id });
@@ -309,8 +321,9 @@ async function syncTechDaysOff({ now, conn = db, horizonDays = HORIZON_DAYS, tec
   };
   for (const tech of techs) {
     const ctx = normalizeWorkDays(tech.work_days) ? await getCtx() : null;
+    const birthdays = new Set(birthdayDatesBetween(tech.dob, today, horizon));
     for (const date of wantedDates(tech, today, horizon, ctx)) {
-      await syncOneDay(conn, tech, date, result);
+      await syncOneDay(conn, tech, date, result, { holidayOnly: !birthdays.has(date), today, horizon });
     }
   }
   await reconcileOwnRows(conn, { today, horizon, technicianIds, result, getCtx });

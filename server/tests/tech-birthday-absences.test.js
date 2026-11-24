@@ -9,10 +9,10 @@ jest.mock('../services/tech-out', () => ({
   resolveOverflowAlerts: jest.fn(async () => []),
 }));
 
-jest.mock('../services/scheduling/blackout-dates', () => ({ getClosedHolidays: jest.fn(), getBlackoutDates: jest.fn() }));
+jest.mock('../services/scheduling/blackout-dates', () => ({ getClosedHolidays: jest.fn(), getBlackoutDates: jest.fn(), lockClosureState: jest.fn(async () => {}) }));
 
 const logger = require('../services/logger');
-const { getClosedHolidays, getBlackoutDates } = require('../services/scheduling/blackout-dates');
+const { getClosedHolidays, getBlackoutDates, lockClosureState } = require('../services/scheduling/blackout-dates');
 const { lockTechDays } = require('../services/scheduling/tech-day-lock');
 const { emitAbsenceChange, resolveOverflowAlerts } = require('../services/tech-out');
 const {
@@ -513,13 +513,16 @@ describe('syncTechDaysOff: holiday taken days (knex double)', () => {
     id: `own-${date}`, technician_id: 't1', date, employment_status: 'active', field_dispatchable: true, dob: null, work_days: MON_THU, ...extra,
   });
 
+  // the technician as the locked re-read of a holiday write sees it
+  const LIVE = { employment_status: 'active', field_dispatchable: true, work_days: MON_THU, dob: null };
+
   beforeEach(() => {
     getClosedHolidays.mockReset().mockResolvedValue(BIG6);
     getBlackoutDates.mockReset().mockResolvedValue(CLOSED_DATES);
   });
 
   test('writes the taken Thursdays for a Monday to Thursday technician, through blackout-dates, as ordinary rows', async () => {
-    const { conn, inserted } = makeConn({ techs: [{ id: 't1', dob: null, work_days: MON_THU }] });
+    const { conn, inserted } = makeConn({ techs: [{ id: 't1', dob: null, work_days: MON_THU }], liveTech: LIVE });
     const out = await syncTechDaysOff({ now: NOW, conn });
     expect(inserted).toEqual([
       { technician_id: 't1', absence_date: '2026-12-24', reason: 'other', source: 'tech_days_off' },
@@ -540,7 +543,7 @@ describe('syncTechDaysOff: holiday taken days (knex double)', () => {
   });
 
   test('a birthday on the same date as a holiday taken day is one row', async () => {
-    const { conn, inserted } = makeConn({ techs: [{ id: 't1', dob: '1990-12-24', work_days: MON_THU }] });
+    const { conn, inserted } = makeConn({ techs: [{ id: 't1', dob: '1990-12-24', work_days: MON_THU }], liveTech: { ...LIVE, dob: '1990-12-24' } });
     await syncTechDaysOff({ now: NOW, conn });
     expect(inserted.map((r) => r.absence_date)).toEqual(['2026-12-24', '2026-12-31']);
   });
@@ -577,6 +580,7 @@ describe('syncTechDaysOff: holiday taken days (knex double)', () => {
     getClosedHolidays.mockResolvedValue(new Set(['christmas', 'new_years_day']));
     const second = makeConn({
       techs: [{ id: 't1', dob: null, work_days: [1, 2, 3] }],
+      liveTech: { ...LIVE, work_days: [1, 2, 3] },
       absences: [own('2026-12-24'), own('2026-12-31')],
       owned: [joinedRow('2026-12-24', { work_days: [1, 2, 3] }), joinedRow('2026-12-31', { work_days: [1, 2, 3] })],
     });
@@ -599,6 +603,7 @@ describe('syncTechDaysOff: holiday taken days (knex double)', () => {
     getClosedHolidays.mockRejectedValue(Object.assign(new Error('secret db text'), { code: 'ECONNRESET' }));
     const { conn, absences, inserted } = makeConn({
       techs: [{ id: 't1', dob: '1990-12-02', work_days: MON_THU }, { id: 't2', dob: null, work_days: MON_THU }],
+      liveTech: { ...LIVE, dob: '1990-12-02' },
       absences: [own('2026-12-24')],
       owned: [joinedRow('2026-12-24')],
     });
@@ -643,5 +648,42 @@ describe('syncTechDaysOff: holiday taken days (knex double)', () => {
     }));
     expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ cleared: 0, failed: 1 });
     expect(absences[0].cleared_at).toBeNull();
+  });
+
+  test('the write rechecks under the lock: a holiday reopened between the pass read and the lock writes nothing and counts nothing', async () => {
+    // the pass read sees Christmas closed; the read inside the transaction sees it reopened
+    getClosedHolidays.mockReset().mockResolvedValueOnce(new Set(['christmas'])).mockResolvedValue(new Set());
+    getBlackoutDates.mockReset().mockResolvedValue(new Set());
+    const { conn, inserted } = makeConn({ techs: [{ id: 't1', dob: null, work_days: MON_THU }], liveTech: LIVE });
+    const out = await syncTechDaysOff({ now: NOW, conn });
+    expect(inserted).toEqual([]);
+    expect(out).toMatchObject({ written: 0, reopened: 0, skipped: 0, failed: 0 });
+    expect(emitAbsenceChange).not.toHaveBeenCalled();
+    // the recheck read through the same transaction, under the shared closure-state lock taken after the tech-day fence
+    expect(lockClosureState).toHaveBeenCalledWith(conn);
+    expect(getClosedHolidays).toHaveBeenLastCalledWith(conn, { strict: true });
+    expect(lockTechDays.mock.invocationCallOrder[0]).toBeLessThan(lockClosureState.mock.invocationCallOrder[0]);
+  });
+
+  test('the write recheck also sees work_days changed since the scan', async () => {
+    const { conn, inserted } = makeConn({
+      techs: [{ id: 't1', dob: null, work_days: MON_THU }],
+      liveTech: { ...LIVE, work_days: [1, 2, 3, 4, 5] }, // now works Fridays: the Christmas Thursday is not taken
+    });
+    expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ written: 0, failed: 0 });
+    expect(inserted).toEqual([]);
+  });
+
+  test('a failed recheck read writes nothing and counts a failure, with no dates in the log; a birthday day takes no recheck', async () => {
+    getClosedHolidays.mockReset().mockResolvedValueOnce(BIG6).mockRejectedValue(Object.assign(new Error('secret'), { code: '57014' }));
+    getBlackoutDates.mockReset().mockResolvedValue(CLOSED_DATES);
+    const { conn, inserted } = makeConn({ techs: [{ id: 't1', dob: '1990-12-24', work_days: MON_THU }], liveTech: { ...LIVE, dob: '1990-12-24' } });
+    const out = await syncTechDaysOff({ now: NOW, conn });
+    // 12-24 is also the birthday: written without a recheck; 12-31 is holiday-only: its recheck fails
+    expect(inserted.map((r) => r.absence_date)).toEqual(['2026-12-24']);
+    expect(out).toMatchObject({ written: 1, failed: 1 });
+    const logged = logger.error.mock.calls.map(([m]) => m).join('\n');
+    expect(logged).toMatch(/\[tech-days-off\].*t1.*57014/);
+    expect(logged).not.toMatch(/2026|2027|secret|holiday|birth/i);
   });
 });

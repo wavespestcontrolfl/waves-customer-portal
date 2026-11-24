@@ -439,6 +439,22 @@ postgres('technician days off (real Postgres, rolled back)', () => {
       expect(await openDates(back.id)).toEqual(['2026-12-31']);
     });
 
+    test('a malformed stored closure list is an unreadable setting: no holiday row is written or cleared, one failure is counted', async () => {
+      await setClosures(['christmas']);
+      const tech = await makeTech('Synthetic Malformed', { work_days: MON_THU, dob: '1990-12-02' });
+      await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] });
+      expect(await openDates(tech.id)).toEqual(['2026-12-02', '2026-12-24']);
+      await trx('system_settings').where({ key: 'schedule_holiday_closures' }).update({ value: '{not json' });
+      await trx('technician_absences').where({ technician_id: tech.id, absence_date: '2026-12-02' }).del();
+      const out = await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] });
+      expect(out).toMatchObject({ written: 1, cleared: 0, failed: 1 });
+      expect(await openDates(tech.id)).toEqual(['2026-12-02', '2026-12-24']); // the holiday row is still there
+      // the default read is unchanged: fail open
+      const { getClosedHolidays } = require('../services/scheduling/blackout-dates');
+      expect((await getClosedHolidays(trx)).size).toBe(0);
+      await expect(getClosedHolidays(trx, { strict: true })).rejects.toMatchObject({ code: 'MALFORMED_SETTING' });
+    });
+
     test('an unreadable closure setting writes no holiday row and clears none, counts a failure, and birthdays still run', async () => {
       await setClosures(['christmas']);
       const tech = await makeTech('Synthetic Failing', { work_days: MON_THU, dob: '1990-12-02' });
