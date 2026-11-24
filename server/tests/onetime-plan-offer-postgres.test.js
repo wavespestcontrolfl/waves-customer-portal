@@ -1376,6 +1376,116 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       expect(await estimatesOf(customer)).toHaveLength(1);
     });
 
+    // The owner's publish of the reminder template, the same way as the offer's.
+    async function publishReminder() {
+      const template = await trx('email_templates').where({ template_key: REMINDER }).first('id');
+      const version = await trx('email_template_versions').where({ template_id: template.id }).orderBy('version_number', 'desc').first('id');
+      await trx('email_template_versions').where({ id: version.id }).update({ status: 'active' });
+      await trx('email_templates').where({ id: template.id }).update({ status: 'active', active_version_id: version.id });
+    }
+    const reminderMail = (jobId) => trx('email_messages').where({ idempotency_key: `onetime-plan-offer:reminder:${jobId}` }).first();
+    // The job was done 5 days ago, so its day 21 is 16 days from now.
+    const dayAt = (n) => addETDays(NOW, n);
+
+    describe('the day-21 reminder', () => {
+      test('one reminder for the offer the provider took: the same estimate, the price the offer stated; the next morning sends nothing more', async () => {
+        await publishOffer();
+        await publishReminder();
+        const { customer, job } = await seedJob();
+        expect((await run({})).sent).toBe(1);
+        const [estimate] = await estimatesOf(customer);
+        const offer = await offerMail(job.id);
+        const price = readPlan(offer.payload_snapshot).price_per_application;
+        expect(price).toMatch(/^\$\d/);
+
+        const summary = await runAt(dayAt(16));
+        expect(summary).toMatchObject({ mode: 'live', jobs: 0, sent: 0, failed: 0 });
+        expect(summary.reminder).toEqual({ jobs: 1, sent: 1, held: 0, done: 0, failed: 0, reasons: {} });
+        const mail = await reminderMail(job.id);
+        expect(mail).toMatchObject({
+          template_key: REMINDER, status: 'sent', recipient_email_snapshot: customer.email, recipient_type: 'customer', estimate_id: estimate.id,
+        });
+        expect(mail.html_snapshot).toContain(`/estimate/${estimate.token}`);
+        expect(mail.html_snapshot).not.toMatch(/\{\{/);
+        expect(mail.text_snapshot).toContain(price);
+        expect(await trx('marketing_email_ledger').where({ idempotency_key: `onetime-plan-offer:reminder:${job.id}` }).first())
+          .toMatchObject({ email_key: REMINDER, status: 'sent', stream: 'nurture', marketing_class: 'marketing' });
+        expect(Sendgrid.sendOne).toHaveBeenCalledTimes(2);
+        // Still one estimate: the reminder makes none.
+        expect(await estimatesOf(customer)).toHaveLength(1);
+
+        expect((await runAt(dayAt(17))).reminder).toMatchObject({ jobs: 1, done: 1, sent: 0 });
+        expect(Sendgrid.sendOne).toHaveBeenCalledTimes(2);
+      });
+
+      test('day 20 is too early, and no reminder is read for a job whose offer never went out', async () => {
+        await publishOffer();
+        await publishReminder();
+        const { job } = await seedJob();
+        expect((await run({})).sent).toBe(1);
+        expect((await runAt(dayAt(15))).reminder).toMatchObject({ jobs: 0, sent: 0 });
+        // Another job, 21 days ago, never offered (its offer email row does not exist).
+        await seedJob({ daysAgo: 21 });
+        expect((await runAt(dayAt(15))).reminder).toMatchObject({ jobs: 0 });
+        expect(await reminderMail(job.id)).toBeUndefined();
+      });
+
+      test('the customer accepted the offer: no reminder', async () => {
+        await publishOffer();
+        await publishReminder();
+        const { customer, job } = await seedJob();
+        expect((await run({})).sent).toBe(1);
+        await trx('estimates').where({ customer_id: customer.id }).update({ status: 'accepted' });
+        expect((await runAt(dayAt(16))).reminder).toMatchObject({ jobs: 1, held: 1, sent: 0, reasons: { offer_ended: 1 } });
+        expect(await reminderMail(job.id)).toBeUndefined();
+        expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      });
+
+      test('the reminder template still a draft: the offer goes, and no reminder is read', async () => {
+        await publishOffer();
+        const { job } = await seedJob();
+        expect((await run({})).sent).toBe(1);
+        expect((await runAt(dayAt(16))).reminder).toMatchObject({ jobs: 0, words_not_approved: true });
+        expect(await reminderMail(job.id)).toBeUndefined();
+      });
+    });
+
+    describe('a home the app cannot price: one office item', () => {
+      const officeRows = (jobId) => trx('notifications').where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [`onetime-plan-offer:office:${jobId}`]);
+      const unpriced = () => ({ buildStartOffer: jest.fn(async () => ({ option: null, reason: 'not_priced' })) });
+
+      test('one row for a person, never a second one; no estimate and no email; it closes once the offer has ended', async () => {
+        await publishOffer();
+        const { customer, job } = await seedJob();
+        expect(await run(unpriced())).toMatchObject({ jobs: 1, office: 1, sent: 0, failed: 0 });
+        let rows = await officeRows(job.id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ category: 'estimate', title: 'Estimates — quote Jordan Example the plan by hand', done_at: null });
+        expect(rows[0].link).toBe(`/admin/customers?customerId=${customer.id}`);
+        expect(rows[0].metadata).toMatchObject({ who: 'person', severity: 'needs-you', doneWhen: 'plan_offer_quoted', lastDay: day(25) });
+        expect(await estimatesOf(customer)).toEqual([]);
+        expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+
+        // The next morning: still one row.
+        expect(await runAt(tomorrow, unpriced())).toMatchObject({ office: 1 });
+        expect(await officeRows(job.id)).toHaveLength(1);
+
+        // The day after the offer's last day, the row closes by itself.
+        await runAt(dayAt(26), unpriced());
+        rows = await officeRows(job.id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].metadata.autoCleared).toBe(true);
+      });
+
+      test('shadow raises none', async () => {
+        process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+        const { job } = await seedJob();
+        expect(await run(unpriced())).toMatchObject({ office: 1 });
+        expect(await officeRows(job.id)).toEqual([]);
+      });
+    });
+
     describe('one offer per customer per 12 months', () => {
       const earlierOffer = (customer, { daysAgo, status = 'sent', key = `onetime-plan-offer:offer:${crypto.randomUUID()}`, emailKey = OFFER }) => trx('marketing_email_ledger').insert({
         customer_id: customer.id, stream: 'nurture', marketing_class: 'marketing', email_key: emailKey, idempotency_key: key,
