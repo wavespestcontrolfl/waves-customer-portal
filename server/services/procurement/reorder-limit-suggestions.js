@@ -274,10 +274,54 @@ function suggestLimitsForProduct(input) {
 function pickPriceRow(rows, product) {
   if (product.auto_reorder_vendor_id) {
     const own = rows.filter((r) => r.vendor_id === product.auto_reorder_vendor_id);
-    return { row: own.find((r) => r.is_best_price) || own[0] || null, vendorName: product.vendor_name };
+    return { row: own.find((r) => r.is_best_price) || own[0] || null, vendorName: product.vendor_name, vendor: { code: product.vendor_code, name: product.vendor_name } };
   }
-  const row = rows.find((r) => r.is_best_price) || rows[0] || null;
-  return { row, vendorName: row ? `${row.vendor_name} (best price, no vendor set)` : null };
+  // No vendor set: only the catalog's current best-price winner. The catalog
+  // clears the flag when prices go stale, so no winner = no pack, not a guess.
+  const row = rows.find((r) => r.is_best_price) || null;
+  return {
+    row,
+    vendorName: row ? `${row.vendor_name} (best price, no vendor set)` : null,
+    vendor: row ? { code: row.vendor_code, name: row.vendor_name } : null,
+  };
+}
+
+// Usage movements (one product) in its stock unit, by ET days ago.
+function usageHistory(rows, unit, day) {
+  const usage = [];
+  let unconverted = 0;
+  for (const m of rows) {
+    const qty = unit ? convertInventoryQuantity(Math.abs(Number(m.quantity)), m.unit, unit) : null;
+    if (qty == null) { unconverted += 1; continue; }
+    usage.push({ daysAgo: dateDiffDays(day, etDateString(new Date(m.created_at))), qty });
+  }
+  return { usage, unconverted, records: rows.length };
+}
+
+// Lawn forecast demand (one product) in its stock unit; unit mismatches count
+// as unconverted so the row is flagged, not shown as no use.
+function forecastDemandFor(f, unit) {
+  if (!f) return { demand: null, unconverted: 0 };
+  let unconverted = Number(f.unitMismatchCount || 0);
+  const qty = num(f.committedDemand);
+  let demand = null;
+  if (qty > 0) {
+    demand = unit ? convertInventoryQuantity(qty, f.inventoryUnit || f.demandUnit, unit) : null;
+    if (demand == null) unconverted += (f.appointments || []).length || 1;
+  }
+  return { demand, unconverted };
+}
+
+// Pack and ordering mode from the chosen price row's vendor. A count-ordering
+// vendor needs stock kept in each (the dispatcher's count_unit_required).
+function packFor({ row, vendorName, vendor }, unit) {
+  const byCount = vendorOrdersByCount(vendor);
+  if (!unit) return { vendorName, pack: null, countOrder: false };
+  if (byCount && normalizeInventoryUnit(unit) !== 'each') {
+    return { vendorName, countOrder: false, pack: { error: 'count_unit_required', message: `${vendor.name} orders by item count, but stock is kept in ${unit}; set the unit to each.` } };
+  }
+  if (byCount) return { vendorName, pack: null, countOrder: true };
+  return { vendorName, pack: row ? packInInventoryUnit(row.quantity, unit) : null, countOrder: false };
 }
 
 async function readLawnForecast(conn, o, forecast) {
@@ -301,10 +345,12 @@ async function readLawnForecast(conn, o, forecast) {
  * `forecast` is injectable for tests; by default the lawn WaveGuard forecast
  * over forecastDays is read and a failure there only drops that signal.
  */
-async function buildReorderLimitSuggestions({ knex, today, options = {}, forecast } = {}) {
+// Always today (ET): the movement window and the lawn forecast both read the
+// live clock, so a back-dated label would mix seasons.
+async function buildReorderLimitSuggestions({ knex, options = {}, forecast } = {}) {
   const conn = knex || require('../../models/db');
   const o = { ...DEFAULTS, ...options };
-  const day = today || etDateString();
+  const day = etDateString();
   const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 
   const products = await conn('products_catalog as pc')
@@ -332,7 +378,7 @@ async function buildReorderLimitSuggestions({ knex, today, options = {}, forecas
   const pricing = ids.length
     ? await eligibleVendorPricing(
       conn('vendor_pricing').leftJoin('vendors as pv', 'pv.id', 'vendor_pricing.vendor_id').whereIn('vendor_pricing.product_id', ids),
-    ).select('vendor_pricing.product_id', 'vendor_pricing.vendor_id', 'vendor_pricing.quantity', 'vendor_pricing.is_best_price', 'pv.name as vendor_name')
+    ).select('vendor_pricing.product_id', 'vendor_pricing.vendor_id', 'vendor_pricing.quantity', 'vendor_pricing.is_best_price', 'pv.name as vendor_name', 'pv.code as vendor_code')
     : [];
 
   const lawn = await readLawnForecast(conn, o, forecast);
@@ -340,29 +386,14 @@ async function buildReorderLimitSuggestions({ knex, today, options = {}, forecas
 
   const rows = products.map((p) => {
     const unit = p.inventory_unit;
-    const usage = [];
-    let unconverted = 0;
-    let usageRecords = 0;
-    for (const m of movements) {
-      if (m.product_id !== p.id) continue;
-      usageRecords += 1;
-      const qty = unit ? convertInventoryQuantity(Math.abs(Number(m.quantity)), m.unit, unit) : null;
-      if (qty == null) { unconverted += 1; continue; }
-      usage.push({ daysAgo: dateDiffDays(day, etDateString(new Date(m.created_at))), qty });
-    }
+    const history = usageHistory(movements.filter((m) => m.product_id === p.id), unit, day);
     const f = forecastByProduct.get(String(p.id));
-    let forecastDemand = null;
-    if (f) {
-      unconverted += Number(f.unitMismatchCount || 0);
-      const qty = num(f.committedDemand);
-      if (qty > 0) {
-        forecastDemand = unit ? convertInventoryQuantity(qty, f.inventoryUnit || f.demandUnit, unit) : null;
-        if (forecastDemand == null) unconverted += (f.appointments || []).length || 1;
-      }
-    }
-    const { row: priceRow, vendorName } = pickPriceRow(pricing.filter((r) => r.product_id === p.id), p);
-    const countOrder = p.auto_reorder_vendor_id ? vendorOrdersByCount({ code: p.vendor_code, name: p.vendor_name }) : false;
-    const pack = unit && priceRow && !countOrder ? packInInventoryUnit(priceRow.quantity, unit) : null;
+    const lawnDemand = forecastDemandFor(f, unit);
+    const unconverted = history.unconverted + lawnDemand.unconverted;
+    const usage = history.usage;
+    const usageRecords = history.records;
+    const forecastDemand = lawnDemand.demand;
+    const { vendorName, pack, countOrder } = packFor(pickPriceRow(pricing.filter((r) => r.product_id === p.id), p), unit);
     const suggestion = suggestLimitsForProduct({
       product: {
         id: p.id,

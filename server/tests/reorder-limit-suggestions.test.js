@@ -48,6 +48,9 @@ describe('price row choice', () => {
     expect(r.row.vendor_name).toBe('Amazon');
     expect(r.vendorName).toMatch(/best price, no vendor set/);
   });
+  test('no vendor and no best-price winner: no pack is guessed', () => {
+    expect(pickPriceRow(rows.slice(1), { auto_reorder_vendor_id: null }).row).toBeNull();
+  });
 });
 
 describe('fertilizer blackout', () => {

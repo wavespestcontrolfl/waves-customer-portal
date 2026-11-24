@@ -10,8 +10,6 @@
  *
  * Rules: server/services/procurement/reorder-limit-suggestions.js
  */
-require('dotenv').config();
-
 const OPTION_FLAGS = { 'lead-days': 'leadDays', 'buffer-days': 'bufferDays', 'reorder-days': 'reorderDays' };
 
 function parseArgs(argv) {
