@@ -3,16 +3,16 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn(async () => []) }));
-jest.mock('../services/admin-alert-compose', () => ({
-  ...jest.requireActual('../services/admin-alert-compose'),
-  raiseAdminAlert: jest.fn(async () => ({ id: 'bell-1' })),
+jest.mock('../services/tech-out', () => ({
+  ...jest.requireActual('../services/tech-out'),
+  emitAbsenceChange: jest.fn(),
 }));
 
 const logger = require('../services/logger');
 const { lockTechDays } = require('../services/scheduling/tech-day-lock');
-const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
+const { emitAbsenceChange } = require('../services/tech-out');
 const {
-  HORIZON_DAYS, ABSENCE_REASON, ALERT_KEY, birthdayDateInYear, birthdayDatesBetween, syncTechDaysOff,
+  HORIZON_DAYS, ABSENCE_REASON, birthdayDateInYear, birthdayDatesBetween, syncTechDaysOff,
 } = require('../services/tech-birthday-absences');
 
 beforeEach(() => {
@@ -72,7 +72,11 @@ function makeConn({ techs = [], absences = [] } = {}) {
       whereNull: jest.fn(() => { openOnly = true; return q; }),
       first: jest.fn(async () => absences.find((a) => a.technician_id === filter.technician_id && a.absence_date === filter.absence_date
         && (!openOnly || !a.cleared_at))),
-      insert: jest.fn(async (row) => { inserted.push(row); absences.push({ ...row }); }),
+      insert: jest.fn((row) => {
+        inserted.push(row);
+        absences.push({ ...row });
+        return { returning: jest.fn(async () => [{ id: `abs-${inserted.length}` }]) };
+      }),
     };
     return q;
   };
@@ -182,73 +186,46 @@ describe('syncTechDaysOff (knex double)', () => {
   });
 });
 
-describe('the office reminder (one admin bell on the day; nothing is written to payroll)', () => {
+describe('announcing each new row (emitAbsenceChange, as a tech-out mark does)', () => {
   const NOW = new Date('2026-11-24T17:00:00Z');
-  const TODAY = '2026-11-24';
-  const tech = (extra = {}) => ({ id: 't1', name: 'Sam Tester', dob: '1990-11-24', ...extra });
-  const plainRow = (extra = {}) => ({ technician_id: 't1', absence_date: TODAY, reason: 'other', note: null, created_by: null, cleared_at: null, ...extra });
 
-  function reminderConn(techs, absences = []) {
-    const { conn, inserted } = makeConn({ techs, absences });
-    return { conn, inserted };
-  }
-
-  test('raises one bell on the day, deduped per technician and date, with a generic reason and no payroll write', async () => {
-    const { conn } = reminderConn([tech()]);
-    const out = await syncTechDaysOff({ now: NOW, conn });
-    expect(out).toMatchObject({ written: 1, reminded: 1, failed: 0 });
-    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
-    const [category, spec, opts] = raiseAdminAlert.mock.calls[0];
-    expect(category).toBe('payroll');
-    expect(spec).toMatchObject({
-      area: 'Billing', severity: 'needs-you', who: 'person', link: '/admin/timetracking?tab=payroll',
-      subject: { type: 'check', id: `tech-day-off-pay:t1:${TODAY}` },
-    });
-    expect(opts).toMatchObject({ dedupeKey: `tech-day-off-pay:t1:${TODAY}`, bellDefault: true });
-    expect(ALERT_KEY('t1', TODAY)).toBe(opts.dedupeKey);
-    // the copy obeys the notification rules, names the technician, and carries no birthday wording
-    const alert = composeAdminAlert(spec);
-    expect(alert.headline).toBe("Billing — record Sam Tester's paid day off");
-    expect(alert.why).toBe('Off today: add 10 paid holiday hours in Payroll, Time off.');
-    expect(`${alert.headline} ${alert.why} ${JSON.stringify(opts)}`).not.toMatch(/birth/i);
-    // payroll is untouched: the only tables read or written are the technician and absence ones
-    expect(conn.mock.calls.every(([table]) => table === 'technicians' || table === 'technician_absences')).toBe(true);
-  });
-
-  test('a long name still fits the headline limit', async () => {
-    const { conn } = reminderConn([tech({ name: 'Bartholomew Maximilian Featherstonehaugh-Cholmondeley' })]);
+  test('every inserted row is announced once, after the commit, with its id and out: true', async () => {
+    const order = [];
+    const { conn } = makeConn({ techs: [{ id: 't1', dob: '1990-12-02' }, { id: 't2', dob: '1990-12-03' }] });
+    conn.transaction.mockImplementation(async (fn) => { const out = await fn(conn); order.push('commit'); return out; });
+    emitAbsenceChange.mockImplementation(() => order.push('emit'));
     await syncTechDaysOff({ now: NOW, conn });
-    expect(() => composeAdminAlert(raiseAdminAlert.mock.calls[0][1])).not.toThrow();
+    expect(emitAbsenceChange).toHaveBeenCalledTimes(2);
+    expect(emitAbsenceChange).toHaveBeenNthCalledWith(1, { technicianId: 't1', date: '2026-12-02', out: true, absenceId: 'abs-1' });
+    expect(emitAbsenceChange).toHaveBeenNthCalledWith(2, { technicianId: 't2', date: '2026-12-03', out: true, absenceId: 'abs-2' });
+    expect(order).toEqual(['commit', 'emit', 'commit', 'emit']);
+    emitAbsenceChange.mockReset();
   });
 
-  test('a birthday still ahead raises nothing yet', async () => {
-    const { conn } = reminderConn([tech({ dob: '1990-12-02' })]);
-    expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ written: 1, reminded: 0 });
-    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  test('a day already set, a cleared day, a failed write and a second tick announce nothing', async () => {
+    const set = makeConn({
+      techs: [{ id: 't1', dob: '1990-12-02' }, { id: 't2', dob: '1990-12-03' }],
+      absences: [
+        { technician_id: 't1', absence_date: '2026-12-02', reason: 'sick', cleared_at: null },
+        { technician_id: 't2', absence_date: '2026-12-03', reason: 'other', cleared_at: new Date() },
+      ],
+    });
+    await syncTechDaysOff({ now: NOW, conn: set.conn });
+    const failing = makeConn({ techs: [{ id: 't3', dob: '1990-12-04' }] });
+    failing.conn.transaction.mockRejectedValue(new Error('db hiccup'));
+    expect(await syncTechDaysOff({ now: NOW, conn: failing.conn })).toMatchObject({ written: 0, failed: 1 });
+    const again = makeConn({ techs: [{ id: 't4', dob: '1990-12-05' }] });
+    await syncTechDaysOff({ now: NOW, conn: again.conn });
+    emitAbsenceChange.mockClear();
+    await syncTechDaysOff({ now: NOW, conn: again.conn });
+    expect(emitAbsenceChange).not.toHaveBeenCalled();
   });
 
-  test('raises nothing for a row the office cleared, or for a sick or noted row on the same date', async () => {
-    for (const row of [plainRow({ cleared_at: new Date() }), plainRow({ reason: 'sick' }), plainRow({ note: 'flu' }), plainRow({ created_by: 'office-1' })]) {
-      const { conn } = reminderConn([tech()], [row]);
-      expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ written: 0, reminded: 0 });
-    }
-    expect(raiseAdminAlert).not.toHaveBeenCalled();
-  });
-
-  test('an existing plain open row from an earlier tick still raises the bell on the day (the dedupe key keeps it to one)', async () => {
-    const { conn } = reminderConn([tech()], [plainRow()]);
-    expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ written: 0, skipped: 1, reminded: 1 });
-  });
-
-  test('a bell that is refused (a dedupe hit writes no row) is not counted, and a thrown error is a failure without birthday wording', async () => {
-    raiseAdminAlert.mockResolvedValueOnce({ id: null });
-    const a = reminderConn([tech()]);
-    expect(await syncTechDaysOff({ now: NOW, conn: a.conn })).toMatchObject({ reminded: 0, failed: 0 });
-    raiseAdminAlert.mockRejectedValueOnce(new Error('bell down'));
-    const b = reminderConn([tech()]);
-    expect(await syncTechDaysOff({ now: NOW, conn: b.conn })).toMatchObject({ reminded: 0, failed: 1 });
+  test('nothing but the technician and absence tables is touched, and no log line carries birthday wording', async () => {
+    const { conn } = makeConn({ techs: [{ id: 't1', dob: '1990-11-24' }] });
+    await syncTechDaysOff({ now: NOW, conn });
+    expect(conn.mock.calls.every(([table]) => table === 'technicians' || table === 'technician_absences')).toBe(true);
     const logged = [...logger.error.mock.calls, ...logger.warn.mock.calls, ...logger.info.mock.calls].map(([m]) => m).join('\n');
-    expect(logged).toMatch(/\[tech-days-off\].*reminder/);
     expect(logged).not.toMatch(/birth/i);
   });
 

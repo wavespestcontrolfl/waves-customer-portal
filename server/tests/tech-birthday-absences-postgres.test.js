@@ -2,8 +2,7 @@
  * Technician days off (owner 2026-11-24) against REAL Postgres, all inside ONE transaction that rolls back:
  * the daily sync writes ordinary absence rows, the partial unique index and cleared rows behave as the
  * service assumes, the existing readers (absentTechDays, assertAssignableTechnician, the board's out_today
- * query shape) honor the row with no new code, and the day-of office reminder is one admin bell per technician
- * and date that writes nothing to payroll.
+ * query shape) honor the row with no new code, and the sync writes nothing to payroll and raises no notification.
  *
  * The suite's db is a proxy onto that transaction, so the sync (including the rows it writes for any other
  * active technician in the database) never commits anything. Runs in the DB-gated CI step (DATABASE_URL on
@@ -155,36 +154,18 @@ postgres('technician days off (real Postgres, rolled back)', () => {
     expect(out.rows[0].out_today).toBe(true);
   });
 
-  describe('the office reminder', () => {
-    const today = etDateString();
-    const bells = (id) => trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`tech-day-off-pay:${id}:${today}`]);
+  test('the sync writes nothing to payroll and raises no notification', async () => {
+    const tech = await makeTech('Synthetic Today', { dob: `1992-${etDateString().slice(5)}` });
+    const notificationsBefore = Number((await trx('notifications').count('* as n').first()).n);
+    expect(await svc.syncTechDaysOff({ technicianIds: [tech.id] })).toMatchObject({ written: 1, failed: 0 });
+    expect(await trx('payroll_time_off').where({ technician_id: tech.id })).toEqual([]);
+    expect(Number((await trx('notifications').count('* as n').first()).n)).toBe(notificationsBefore);
+    expect(await trx('audit_log').whereRaw("metadata->>'technician_id' = ?", [tech.id])).toEqual([]);
+  });
 
-    async function bornToday(name, patch = {}) {
-      return makeTech(name, { dob: `1992-${today.slice(5)}`, ...patch });
-    }
-
-    test('one bell for the day, still one after a second tick, and nothing in payroll', async () => {
-      const tech = await bornToday('Synthetic Today');
-      expect(await svc.syncTechDaysOff({ technicianIds: [tech.id] })).toMatchObject({ written: 1, reminded: 1, failed: 0 });
-      const first = await bells(tech.id);
-      expect(first).toHaveLength(1);
-      expect(first[0]).toMatchObject({ category: 'payroll' });
-      expect(first[0].title).toContain('paid day off');
-      expect(`${first[0].title} ${first[0].body}`).not.toMatch(/birth/i);
-      await svc.syncTechDaysOff({ technicianIds: [tech.id] });
-      expect(await bells(tech.id)).toHaveLength(1);
-      expect(await trx('payroll_time_off').where({ technician_id: tech.id })).toEqual([]);
-      expect(await trx('audit_log').whereRaw("metadata->>'technician_id' = ?", [tech.id])).toEqual([]);
-    });
-
-    test('no bell when the office cleared the row, when the row is a sick day, or for office staff', async () => {
-      const cleared = await bornToday('Synthetic Back');
-      await trx('technician_absences').insert({ technician_id: cleared.id, absence_date: today, reason: 'other', cleared_at: new Date() });
-      const sick = await bornToday('Synthetic Ill');
-      await trx('technician_absences').insert({ technician_id: sick.id, absence_date: today, reason: 'sick' });
-      const office = await bornToday('Synthetic Desk', { role: 'admin', field_dispatchable: false });
-      expect(await svc.syncTechDaysOff({ technicianIds: [cleared.id, sick.id, office.id] })).toMatchObject({ reminded: 0, failed: 0 });
-      for (const tech of [cleared, sick, office]) expect(await bells(tech.id)).toEqual([]);
-    });
+  test('office staff and admins (not field-dispatchable) get no row even on their day', async () => {
+    const office = await makeTech('Synthetic Desk', { dob: `1992-${etDateString().slice(5)}`, role: 'admin', field_dispatchable: false });
+    expect(await svc.syncTechDaysOff({ technicianIds: [office.id] })).toMatchObject({ technicians: 0, written: 0 });
+    expect(await rowsFor(office.id)).toEqual([]);
   });
 });

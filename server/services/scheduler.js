@@ -1629,8 +1629,8 @@ function initScheduledJobs() {
   // DAILY 3:25AM — Technician days off (owner 2026-11-24): writes the technician_absences
   // rows for each active, field-dispatchable technician's day off in the next 120 days
   // (services/tech-birthday-absences.js). Direct writes, nothing parked or sent, never re-creates a
-  // cleared row. On the day it raises one admin bell for the office to record the paid day in
-  // Payroll: nothing here writes pay.
+  // cleared row. Each new row is announced like a tech-out mark (slot cache, board roster). Pay is
+  // recorded by the office (an ops bell outside the portal prompts it): nothing here writes pay.
   // =========================================================================
   cron.schedule('25 3 * * *', async () => {
     try {

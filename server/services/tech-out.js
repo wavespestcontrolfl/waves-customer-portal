@@ -575,6 +575,7 @@ module.exports = {
   getTechOut,
   markTechOut,
   clearTechOut,
+  emitAbsenceChange,
   parkTechDay,
   sweepAbsentTechDays,
   rankBumpOrder,
