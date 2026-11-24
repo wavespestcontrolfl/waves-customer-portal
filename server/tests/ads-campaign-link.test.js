@@ -42,10 +42,9 @@ function fakeConn({ leads, campaigns, tried = {} }) {
   return conn;
 }
 
-// Google: click_view answers by gclid; campaign metrics answer with `spenders` (Google campaign ids).
-function googleAdsWith(answers, spenders = []) {
+// Google: click_view answers by gclid.
+function googleAdsWith(answers) {
   const query = jest.fn(async (gaql) => {
-    if (gaql.includes('FROM campaign ')) return spenders.map((id) => ({ campaign: { id }, metrics: { cost_micros: 1 } }));
     return Object.entries(answers).filter(([gclid]) => gaql.includes(`'${gclid}'`))
       .map(([gclid, id]) => ({ click_view: { gclid }, campaign: { id } }));
   });
@@ -58,7 +57,7 @@ test('a recent click is linked from Google\'s click record, read-only, with its 
   const conn = fakeConn({ leads: [{ id: 'a1', gclid: GCLID_NEW, lead_date: '2026-11-10' }], campaigns });
   const g = googleAdsWith({ [GCLID_NEW]: 24535212391 });
   const out = await linkCampaigns({ now: NOW, conn, googleAds: g });
-  expect(out).toEqual({ checked: 1, linked: { gclid_click_view: 1, only_campaign_with_spend: 0 }, unlinked: 0 });
+  expect(out).toEqual({ checked: 1, linked: { gclid_click_view: 1 }, unlinked: 0 });
   expect(conn.updates).toEqual([{ id: 'a1', campaign_id: 'local-pest', campaign_link_basis: 'gclid_click_view', updated_at: 'now()' }]);
   expect(g.query.mock.calls[0][0]).toMatch(/FROM click_view WHERE segments.date = '2026-11-10'/);
 });
@@ -72,23 +71,17 @@ test('a recent click Google has no record of yet stays unlinked for the next run
   expect(g.query).toHaveBeenCalledTimes(90); // every day Google still keeps, back from the lead day
 });
 
-test('an older click takes the only campaign that ever had spend; two campaigns = unlinked', async () => {
-  const lead = { id: 'b1', gclid: GCLID_OLD, lead_date: '2026-07-01' };
-  const one = fakeConn({ leads: [lead], campaigns });
-  const g1 = googleAdsWith({}, ['22594274874']);
-  expect((await linkCampaigns({ now: NOW, conn: one, googleAds: g1 })).linked.only_campaign_with_spend).toBe(1);
-  expect(one.updates[0]).toMatchObject({ campaign_id: 'local-gbp', campaign_link_basis: 'only_campaign_with_spend' });
-  expect(g1.query.mock.calls[0][0]).toMatch(/FROM campaign WHERE segments.date BETWEEN '2015-01-01' AND '2026-07-01'/);
-
-  const two = fakeConn({ leads: [lead], campaigns });
-  const g2 = googleAdsWith({}, ['22594274874', '24535212391']);
-  expect((await linkCampaigns({ now: NOW, conn: two, googleAds: g2 })).unlinked).toBe(1);
-  expect(two.updates).toEqual([]);
+test('a lead older than Google keeps clicks is never linked or guessed from spend, and costs no query', async () => {
+  const conn = fakeConn({ leads: [{ id: 'b1', gclid: GCLID_OLD, lead_date: '2026-07-01' }], campaigns });
+  const g = googleAdsWith({});
+  expect(await linkCampaigns({ now: NOW, conn, googleAds: g })).toEqual({ checked: 0, linked: { gclid_click_view: 0 }, unlinked: 0 });
+  expect(g.query).not.toHaveBeenCalled();
+  expect(conn.updates).toEqual([]);
 });
 
 test('a lead day still inside the 90-day window is looked up exactly, even when the day before has left it', async () => {
   const conn = fakeConn({ leads: [{ id: 'd1', gclid: GCLID_NEW, lead_date: '2026-08-25' }], campaigns });
-  const g = googleAdsWith({}, ['22594274874']);
+  const g = googleAdsWith({});
   const out = await linkCampaigns({ now: NOW, conn, googleAds: g });
   expect(out.unlinked).toBe(1); // no click record: waits, never guesses from spend
   expect(g.query).toHaveBeenCalledTimes(1);
@@ -115,7 +108,7 @@ test('a campaign Google names that is not in ad_campaigns, or a malformed click 
     ],
     campaigns,
   });
-  const g = googleAdsWith({ [GCLID_NEW]: 999 }, ['22594274874']);
+  const g = googleAdsWith({ [GCLID_NEW]: 999 });
   const out = await linkCampaigns({ now: NOW, conn, googleAds: g });
   expect(out.checked).toBe(1); // the malformed and the placeholder never enter, old or new
   expect(out.unlinked).toBe(1);

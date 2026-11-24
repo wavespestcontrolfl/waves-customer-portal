@@ -118,7 +118,7 @@ beforeEach(() => {
   mockGoogle.syncCampaigns.mockResolvedValue([{}]);
   mockGoogle.syncDailyPerformance.mockResolvedValue([{}, {}]);
   mockGoogle.syncSearchTerms.mockResolvedValue([{}, {}, {}]);
-  mockLinkCampaigns.mockResolvedValue({ checked: 2, linked: { gclid_click_view: 1, only_campaign_with_spend: 1 }, unlinked: 0 });
+  mockLinkCampaigns.mockResolvedValue({ checked: 2, linked: { gclid_click_view: 2 }, unlinked: 0 });
   mockMeta.isConfigured.mockReturnValue(true);
   mockMeta.syncCampaigns.mockResolvedValue([{}, {}]);
   mockMeta.syncDailyPerformance.mockResolvedValue([{}, {}, {}, {}, {}]);

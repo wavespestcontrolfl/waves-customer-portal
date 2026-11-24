@@ -29,7 +29,7 @@ const STEPS = [
   // After campaigns + performance: links ad leads that carry a Google click id to their campaign (ads/campaign-link.js).
   { key: 'campaignLinks', label: 'Campaign links', run: async (g) => {
     const { linked } = await require('./campaign-link').linkCampaigns({ googleAds: g });
-    return linked.gclid_click_view + linked.only_campaign_with_spend;
+    return linked.gclid_click_view;
   } },
   { key: 'negativeWords', label: 'Negative words', run: () => syncNegativeWords() },
 ];
