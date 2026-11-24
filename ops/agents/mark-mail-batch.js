@@ -11,10 +11,10 @@
 //   go in a new batch, so a label export of a batch is always the run that was printed), a mailed home is never touched
 //   again, and the table refuses any later change to its price. The price hold on the label (60 days) counts from this day.
 // - --labels <out.json> (read only unless --execute is also given): writes, for the homes of --batch (or, with no --batch,
-//   the homes a dry run would mark), [{ name, price, slug, token, textNumber, heldUntil }] for the label print tool:
+//   the homes a dry run would mark), [{ name, price, perApplication, slug, token, textNumber, setupFee }] for the label print tool:
 //   name = the buyers as the label shows them, price = the monthly price (whole dollars bare), perApplication = the price
 //   of one application (annual / 4, from whole cents; 4 a year), textNumber = the office line of the home's city or ZIP,
-//   heldUntil = "Mon D". The file holds buyer names and page tokens: it is written 0600; keep it out of the repo.
+//   setupFee = the one-time fee or null. No hold date until booking honors the printed price. The file holds buyer names and page tokens: it is written 0600; keep it out of the repo.
 //   Labels come ONLY from a named batch that is already marked (--labels needs --batch): print what was marked, so a home
 //   priced between a preview and the mark can never be marked mailed without a card, and the hold date matches the label.
 // - No customer comms, no paid calls.
@@ -53,6 +53,19 @@ const value = (name) => {
   return v;
 };
 
+// The label file holds buyer names and page tokens: it must never land inside any git checkout or worktree, where it
+// could be committed. The real path of its folder (symlinks followed) is checked: neither it nor any parent may hold .git.
+function checkLabelsPath(labelsPath) {
+  const outside = 'must point outside any git checkout (it holds buyer names and page tokens), e.g. ~/mail-labels/batch.json';
+  let dir;
+  try { dir = fs.realpathSync(path.dirname(path.resolve(labelsPath))); } catch { throw usage(`--labels folder does not exist: create it first; it ${outside}`); }
+  const repo = fs.realpathSync(path.resolve(__dirname, '..', '..'));
+  for (let d = dir; ; d = path.dirname(d)) {
+    if (d === repo || fs.existsSync(path.join(d, '.git'))) throw usage(`--labels ${outside}`);
+    if (path.dirname(d) === d) break;
+  }
+}
+
 function parseArgs() {
   checkArgs();
   const execute = flag('--execute');
@@ -67,12 +80,7 @@ function parseArgs() {
   if (batch !== undefined && !batch.trim()) throw usage('--batch is empty: give a batch name');
   if (execute && !batch) throw usage('--execute needs --batch <name>');
   if (labelsPath !== undefined && !batch) throw usage('--labels needs --batch <name>: labels are printed from a marked batch only');
-  // The file holds buyer names and page tokens: it must never land inside the checkout, where it could be committed.
-  if (labelsPath !== undefined) {
-    const repo = path.resolve(__dirname, '..', '..');
-    const out = path.resolve(labelsPath);
-    if (out === repo || out.startsWith(`${repo}${path.sep}`)) throw usage('--labels must point outside the repo (it holds buyer names and page tokens), e.g. ~/mail-labels/batch.json');
-  }
+  if (labelsPath !== undefined) checkLabelsPath(labelsPath);
   return { execute, batch, ids, labelsPath };
 }
 

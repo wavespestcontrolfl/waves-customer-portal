@@ -246,22 +246,22 @@ postgres('mailed record on PostgreSQL', () => {
   test('labelsFor: the would-be batch before marking, the batch after (frozen price, hold from mailed_at); office line by city', async () => {
     const lwr = await row({ price_annual: 601.02, recipient_names: JSON.stringify(['TESTER ALEX J', 'TESTER JAMIE']) });
     const venice = await row({ city: 'NORTH PORT', zip: '34286', page_slug: null, price_setup_fee: 99, recipient_names: JSON.stringify(['SAMPLE SAM']) });
-    const before = await labelsFor({ now: NOW });
+    const before = await labelsFor({});
     expect(before.labels).toHaveLength(2);
     const bySlug = (list, slug) => list.find((l) => l.slug === slug);
     const first = (list) => list.find((l) => l.name === 'Alex & Jamie Tester');
     expect(first(before.labels)).toEqual({
       name: 'Alex & Jamie Tester', price: '50.09', perApplication: '150.26', slug: (await stored(lwr)).page_slug, token: (await stored(lwr)).page_token,
-      textNumber: '(941) 318-7612', heldUntil: 'Jan 23', setupFee: null,
+      textNumber: '(941) 318-7612', setupFee: null,
     });
     expect(bySlug(before.labels, null)).toMatchObject({ name: 'Sam Sample', price: '50', perApplication: '150', textNumber: '(941) 297-3337', token: (await stored(venice)).page_token, setupFee: '99' });
     expect((await stored(lwr)).mailed_at).toBeNull(); // read only
 
     await markBatch({ batch: 'b-1', now: NOW });
     await conn('mail_prospects').where({ id: venice }).update({ page_typed_views: 3 });
-    const after = await labelsFor({ batch: 'b-1', now: new Date('2027-03-01T00:00:00Z') });
+    const after = await labelsFor({ batch: 'b-1' });
     expect(after.labels.map((l) => l.price).sort()).toEqual(['50', '50.09']);
-    expect(after.labels.every((l) => l.heldUntil === 'Jan 23')).toBe(true); // counted from mailed_at, not from now
+    expect(after.labels.every((l) => !('heldUntil' in l))).toBe(true); // no hold date until booking honors it
     expect((await labelsFor({ batch: 'no-such-batch' })).labels).toEqual([]);
   });
 
@@ -280,6 +280,11 @@ postgres('mailed record on PostgreSQL', () => {
     await conn('mail_prospects').where({ id: visited }).update({ page_typed_views: 2 });
     await expect(conn.transaction((trx) => keepViewsMigration.down(trx))).rejects.toThrow(/typed-link visit counts/);
     await conn('mail_prospects').where({ id: visited }).update({ page_typed_views: 0 });
+    await conn.transaction((trx) => keepViewsMigration.down(trx));
+    // The guard drops the counter in its own transaction; its up puts it back (a re-run of only the newer migration).
+    await keepViewsMigration.up(conn);
+    expect(await stored(visited)).toMatchObject({ page_typed_views: 0 });
+    await expect(conn('mail_prospects').where({ id: visited }).update({ page_typed_views: -1 })).rejects.toThrow(/page_typed_views_check/);
     await conn.transaction((trx) => keepViewsMigration.down(trx));
     await conn.transaction((trx) => mailedMigration.down(trx));
     const cols = (await conn.raw("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = 'mail_prospects'", [schema])).rows.map((c) => c.column_name);

@@ -26,8 +26,9 @@ describe('mark-mail-batch arguments', () => {
     [['--execute', '--batch', 'run-1', '--ids', 'a', '--ids', 'b'], /--ids is given twice/],
     [['--dry-run'], /unknown argument "--dry-run"/],
     [['--labels', 'out.json'], /--labels needs --batch/],
-    [['--batch', 'run-1', '--labels', 'out.json'], /--labels must point outside the repo/],
-    [['--batch', 'run-1', '--labels', path.join(__dirname, 'labels.json')], /--labels must point outside the repo/],
+    [['--batch', 'run-1', '--labels', 'out.json'], /--labels must point outside any git checkout/],
+    [['--batch', 'run-1', '--labels', path.join(__dirname, 'labels.json')], /--labels must point outside any git checkout/],
+    [['--batch', 'run-1', '--labels', path.join(__dirname, 'no-such-folder', 'labels.json')], /--labels folder does not exist/],
   ])('%j is refused with a usage message and nothing is run', (args, message) => {
     const result = run(...args);
     expect(result.status).toBe(1);
@@ -65,5 +66,20 @@ describe('mark-mail-batch arguments', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/ECONNREFUSED/);
     expect(result.stderr).not.toMatch(/ENOTFOUND/);
+  });
+
+  test('a symlink into another git checkout is refused', () => {
+    const fs = require('node:fs');
+    const os = require('node:os');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'labels-'));
+    const other = path.join(base, 'other-repo');
+    fs.mkdirSync(path.join(other, '.git'), { recursive: true });
+    const link = path.join(base, 'out');
+    fs.symlinkSync(other, link);
+    try {
+      const result = run('--batch', 'run-1', '--labels', path.join(link, 'labels.json'));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/--labels must point outside any git checkout/);
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
   });
 });

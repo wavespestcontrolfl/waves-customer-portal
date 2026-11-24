@@ -183,11 +183,11 @@ async function markBatch({ batch, ids, now = new Date() }, conn = db) {
 }
 
 /**
- * Read only: the label rows [{ name, price, perApplication, slug, token, textNumber, heldUntil, setupFee }] for the homes of `batch`, or (no batch)
+ * Read only: the label rows [{ name, price, perApplication, slug, token, textNumber, setupFee }] for the homes of `batch`, or (no batch)
  * for the homes markBatch would mark at `now`. price is the monthly price the label shows; for a marked home it is the frozen
- * snapshot and heldUntil counts from its mailed_at. Also returns the prospect ids whose name or office needs a look.
+ * snapshot. No hold date: booking does not honor one yet. Also returns the prospect ids whose name or office needs a look.
  */
-async function labelsFor({ batch, ids, now = new Date() } = {}, conn = db) {
+async function labelsFor({ batch, ids } = {}, conn = db) {
   const list = checkIds(ids);
   if (batch !== undefined && batch !== null) checkBatch(batch);
   const columns = [...PRICE_COLUMNS, 'recipient_names', 'page_slug', 'page_token', 'city', 'zip'];
@@ -219,7 +219,8 @@ async function labelsFor({ batch, ids, now = new Date() } = {}, conn = db) {
       slug: row.page_slug || null,
       token: row.page_token,
       textNumber: office.number,
-      heldUntil: heldUntilLabel(heldUntilOf(row.mailed_at || now)),
+      // No hold date yet: booking re-prices live today, so a printed "held until" could not be kept. The booking change
+      // that honors mailed_price adds it back.
       // The one-time setup fee the page shows and booking applies (null when there is none), so the label can say it.
       setupFee: Number(priceNow.setupFee) > 0 ? labelPrice(priceNow.setupFee) : null,
     });
