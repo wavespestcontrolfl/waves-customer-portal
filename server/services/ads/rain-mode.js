@@ -243,13 +243,19 @@ async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) 
   let scored = [];
   try {
     // The day's latest settled call stands. A call already scored is never rewritten.
-    if (forecast.call !== 'unknown' && !days[day]?.score) {
-      const prior = days[day] || {};
-      // The cutoff call is the first settled call made from 2 PM the day before (a Sunday run sells Monday all day;
-      // only its 2 PM and later calls count): the one the ads act on. It is never rewritten; the latest call is kept beside it, and the score grades both.
-      const cutoff = prior.cutoff_call ? { cutoff_call: prior.cutoff_call, cutoff_at: prior.cutoff_at }
-        : future && etParts(now).hour >= 14 ? { cutoff_call: forecast.call, cutoff_at: run.at } : {};
-      days[day] = { ...prior, day, call: forecast.call, at: run.at, ...cutoff, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) };
+    if (!days[day]?.score) {
+      const next = { ...(days[day] || {}), day };
+      // The latest call moves only when the forecast settles.
+      if (forecast.call !== 'unknown') {
+        Object.assign(next, { call: forecast.call, at: run.at, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) });
+      }
+      // The cutoff call is the call in force at the first run from 2 PM the day before (a Sunday run sells Monday all
+      // day; only its 2 PM and later runs count), kept or settled: the one the ads act on. It is never rewritten, and
+      // the score grades it beside the latest call.
+      if (!next.cutoff_call && future && etParts(now).hour >= 14 && call !== 'unknown') {
+        Object.assign(next, { cutoff_call: call, cutoff_at: run.at });
+      }
+      if (next.call) days[day] = next;
     }
     scored = await scorePastDays(days, now, { fetchRain });
     await saveRun(conn, run, days, now);

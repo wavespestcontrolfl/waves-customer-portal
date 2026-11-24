@@ -227,5 +227,15 @@ describe('recordRun', () => {
     await rainMode.recordRun({ now: sundayTwo, conn, read: readerFor('2026-11-30', [9, 9, 9, 9, 0, 0]), fetchRain: jest.fn() });
     expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-30']).toMatchObject({ call: 'rain', cutoff_call: 'rain', cutoff_at: sundayTwo.toISOString() });
   });
+
+  test('rain at 10 AM, unknown at 2 PM, dry at 4 PM: the cutoff is the rain call in force at 2 PM', async () => {
+    const conn = fakeConn({ campaigns });
+    const at = (h) => new Date(`2026-11-29T${String(h + 5).padStart(2, '0')}:00:00Z`); // Sunday, ET hour h
+    await rainMode.recordRun({ now: at(10), conn, read: readerFor('2026-11-30', [9, 9, 9, 9, 0, 0]), fetchRain: jest.fn() });
+    const open = jest.fn(async () => hours('2026-11-30', 0).slice(0, 1));
+    await rainMode.recordRainMode({ now: at(14), conn, read: open, fetchRain: jest.fn() }).catch(() => {});
+    await rainMode.recordRun({ now: at(16), conn, read: readerFor('2026-11-30', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn() });
+    expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-30']).toMatchObject({ call: 'dry', cutoff_call: 'rain', cutoff_at: at(14).toISOString() });
+  });
 });
 
