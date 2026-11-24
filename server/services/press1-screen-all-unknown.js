@@ -76,6 +76,11 @@ const ACCEPTED_AT_SQL = "COALESCE(metadata->'forward_acceptance'->>'accepted_at'
 
 const NO_SPEECH_SQL = String.raw`\[(VOICEMAIL|NO SPEECH)\]|\[Recording had no usable speech;[^\]]*\]`;
 
+// A phone carrier's voicemail greeting (a staff leg's recording, not the
+// caller's message to the Waves recorder): 18 of 230 Waves-voicemail rows on
+// prod 2026-11-24 held one. Those prove nothing.
+const CARRIER_GREETING_SQL = String.raw`forwarded to (an automated voice messaging system|voice ?mail)|(person|party) you('re| are) (trying to reach|calling) is (not available|unavailable)|is not available\. at the tone|at the tone,? please record`;
+
 // Inbound history only: a person the office called back is almost always on
 // a lead, and the lead check already lets them through.
 function rememberedRows(key) {
@@ -120,7 +125,8 @@ function rememberedRows(key) {
         // Dead air is no message: the transcript must be done and hold words
         // once the no-speech markers are removed.
         .where('transcription_status', 'completed')
-        .whereRaw("regexp_replace(COALESCE(transcription, ''), ?, '', 'gi') ~ '[[:alnum:]]'", [NO_SPEECH_SQL])));
+        .whereRaw("regexp_replace(COALESCE(transcription, ''), ?, '', 'gi') ~ '[[:alnum:]]'", [NO_SPEECH_SQL])
+        .whereRaw("COALESCE(transcription, '') !~* ?", [CARRIER_GREETING_SQL])));
 }
 
 /**

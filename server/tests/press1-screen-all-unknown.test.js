@@ -152,6 +152,14 @@ describe('the remembered-caller proof', () => {
     expect(seen.sql.some((q) => q.includes("forward_acceptance'->>'accepted_at'") && q.includes("(metadata->>'ended_at')::timestamptz"))).toBe(true);
   });
 
+  test('a phone carrier greeting is no message from the caller', () => {
+    expect(seen.sql).toContain("COALESCE(transcription, '') !~* ?");
+    const pattern = new RegExp(seen.bindings.find((b) => typeof b === 'string' && b.includes('automated voice messaging')), 'i');
+    expect(pattern.test("Your call has been forwarded to an automated voice messaging system. ########## is not available.")).toBe(true);
+    expect(pattern.test("Your call has been forwarded to voicemail. The person you're trying to reach is not available. At the tone, please record your message.")).toBe(true);
+    expect(pattern.test('Hi, this is a homeowner in Venice, I have ants in the kitchen, please call me back.')).toBe(false);
+  });
+
   test('a Sandy sandbox or tech-voice row is never caller history', () => {
     expect(seen.sql.filter((q) => q === "COALESCE(??, '') <> ?")).toHaveLength(2);
     expect(seen.bindings).toEqual(expect.arrayContaining(['source']));
