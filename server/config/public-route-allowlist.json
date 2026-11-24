@@ -226,6 +226,16 @@
       ]
     },
     {
+      "router": "server/routes/mail-home-go.js",
+      "mount": "/go",
+      "reason": "The short typed address printed on the new-home postcard (mailer step 2d-2, owner 2026-11-23): GET /go/101-example is a 302 to that home's page /h/<token>, or to https://www.wavespestcontrol.com/ for everything else (gate GATE_MAIL_HOME_PAGE off, bad slug shape, unknown slug, a home that is not live, a failed lookup). Not an open redirect: both targets are fixed (the marketing site, or a path built from a stored 32-hex token); nothing in the request names them. The slug is not a credential (house number + street name, guessing is accepted by the owner); the Location it returns is the home's bearer link, so every answer carries no-store, noindex and no-referrer. Mounted before the outside-link router on the same /go root and hands that router its 20-hex codes (next('router')). Per-route limiter 60 a minute per IP",
+      "routes": [
+        "GET /go/:slug",
+        "USE /go (inline function#61c51dbf)",
+        "USE /go (express-rate-limit({ handler#4df7abdf }))"
+      ]
+    },
+    {
       "router": "server/routes/well-known.js",
       "mount": "/.well-known",
       "reason": "Apple app-site-association + Android assetlinks — the platforms fetch these anonymously by contract; security.txt (RFC 9116) is static public disclosure-contact text",

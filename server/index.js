@@ -270,6 +270,10 @@ app.use('/api/public/watering-plan', (req, res, next) => {
 // for any method but GET/HEAD and for a path that is not one page token) runs first, then its own 60-a-minute limiter.
 // The page is same-origin (/h/:token), so it needs no CORS.
 app.use('/api/public/home', require('./routes/mail-home-public').preLimiterGuard, require('./routes/mail-home-public'));
+// The short typed address of a new home (GET /go/<101-example>, printed on the postcard): 302 to /h/<token>, or to the
+// marketing site for anything else. Mounted here, ahead of the outside-link /go router further down, which it hands
+// the 20-hex outside-link codes (next('router')). Gate off: the same redirect to the site.
+app.use('/go', require('./routes/mail-home-go'));
 // Public, embeddable endpoints must be CORS-open to ANY origin and must answer
 // their own preflights BEFORE the credentialed allowlist below — the cors()
 // middleware terminates OPTIONS for non-allowlisted origins without an
