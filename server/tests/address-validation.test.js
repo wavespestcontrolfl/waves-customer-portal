@@ -147,6 +147,18 @@ describe('deriveStatus: Punta Gorda is not served (owner ruling 2026-10-22)', ()
     expect(deriveStatus(pgResult('', '33982'), 'Lee County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
   });
 
+  test('on a shared ZIP only a known town counts: USA, Unknown, N/A go to review', () => {
+    for (const city of ['USA', 'Unknown', 'N/A', 'United States', 'Somewhere Else']) {
+      const r = deriveStatus(pgResult(city, '33982'), 'Charlotte County');
+      expect(r.status).toBe(STATUSES.CONFIRM_NEEDED);
+      expect(r.inServiceArea).toBeNull();
+    }
+    const { sharedZipNeedsCity } = require('../services/excluded-localities');
+    expect(sharedZipNeedsCity('Harbour Heights', '33983')).toBe(false);
+    expect(sharedZipNeedsCity('Unknown', '33983')).toBe(true);
+    expect(sharedZipNeedsCity('Unknown', '33948')).toBe(false);
+  });
+
   test('a Punta Gorda-only ZIP is out even when the locality is missing', () => {
     expect(deriveStatus(pgResult('', '33950'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
   });

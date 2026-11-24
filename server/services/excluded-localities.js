@@ -106,9 +106,16 @@ function namesTown(city) {
 // that an address parse took for a city is not one. `trustInferred: false` (a stored address, or a reader with no lookup to
 // place the pin) also refuses a city that is just what the ZIP maps to: the lead webhook fills a cityless submission from the
 // ZIP, so that city proves nothing about which town the address is in.
+// On a shared ZIP only a KNOWN town on that ZIP counts (an allow-list, not a deny-list): "USA", "Unknown", "N/A" or any
+// other odd parse never clears the guard, and an unusual real town name goes to review, which fails closed. Punta Gorda is
+// listed so the reader's own exclusion check refuses it, not this guard.
+const SHARED_ZIP_TOWNS = Object.freeze(new Set([
+  'port charlotte', 'charlotte harbor', 'deep creek', 'harbour heights', 'babcock ranch', 'murdock', 'solana', 'cleveland',
+  'punta gorda', 'punta gorda isles',
+]));
 function sharedZipNeedsCity(city, zip, { trustInferred = true } = {}) {
   if (!isPuntaGordaSharedZip(zip)) return false;
-  return !namesTown(city) || (!trustInferred && townNamed(city) === normalizeLocality(zipToCity(zip)));
+  return !namesTown(city) || !SHARED_ZIP_TOWNS.has(townNamed(city)) || (!trustInferred && townNamed(city) === normalizeLocality(zipToCity(zip)));
 }
 function isNotYetServedLocality(city) {
   return NOT_YET_SERVED_LOCALITIES.has(normalizeLocality(city)) || NOT_YET_SERVED_LOCALITIES.has(townNamed(city));
@@ -127,7 +134,7 @@ function isExcludedZip(zip) {
 
 module.exports = {
   DESOTO_LOCALITIES, DESOTO_ZIPS, PUNTA_GORDA_LOCALITIES, PUNTA_GORDA_ZIPS, PUNTA_GORDA_SHARED_ZIPS,
-  NOT_YET_SERVED_LOCALITIES, NOT_YET_SERVED_ZIPS,
+  NOT_YET_SERVED_LOCALITIES, NOT_YET_SERVED_ZIPS, SHARED_ZIP_TOWNS,
   normalizeLocality,
   isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isPuntaGordaSharedZip, sharedZipNeedsCity, townNamed, namesTown,
   isNotYetServedLocality, isNotYetServedZip,
