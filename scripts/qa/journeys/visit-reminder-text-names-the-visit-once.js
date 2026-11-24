@@ -2,7 +2,6 @@
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate } = require('../../../server/utils/datetime-et');
-const { spokenArrivalWindow } = require('../../../server/utils/sms-time-format');
 const { insertVisit } = require('../fixtures');
 
 // A visit two days out, booked a week ago, is inside the three-day reminder band. The scheduler's reminder job texts the
@@ -28,7 +27,15 @@ module.exports = {
     const apptTime = parseETDateTime(`${visit.date_text}T${String(visit.window_start).slice(0, 8)}`);
     const hoursAway = (apptTime.getTime() - Date.now()) / 3600000;
     assert.ok(hoursAway > 25 && hoursAway < 72, `The visit sits in the 72-hour reminder band (${hoursAway.toFixed(1)} hours away)`);
-    const expectedWhen = `${formatETDay(apptTime)}, ${formatETDate(apptTime)}, ${spokenArrivalWindow(String(visit.window_start).slice(0, 5))}`;
+    // The arrival window is the start plus two hours (the customer-facing copy rule), written out here rather than
+    // taken from the sender's own helper, so a change to that helper cannot move both sides at once.
+    const clock = (minutes) => {
+      const h = Math.floor(minutes / 60) % 24;
+      return `${h % 12 || 12}:${String(minutes % 60).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
+    };
+    const [startH, startM] = String(visit.window_start).slice(0, 5).split(':').map(Number);
+    const startMinutes = startH * 60 + startM;
+    const expectedWhen = `${formatETDay(apptTime)}, ${formatETDate(apptTime)}, between ${clock(startMinutes)} and ${clock(startMinutes + 120)}`;
 
     // The sweep runs over the whole (private, per-run) QA database. Any reminder it sends for another visit fails the
     // exact counts below, so a stray visit can only fail this journey, never let it pass.
