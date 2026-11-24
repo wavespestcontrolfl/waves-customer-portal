@@ -154,6 +154,65 @@ postgres('technician days off (real Postgres, rolled back)', () => {
     expect(out.rows[0].out_today).toBe(true);
   });
 
+  describe('reconcile (real rows, real fence)', () => {
+    const open = async (id) => (await rowsFor(id)).filter((r) => r.cleared_at === null);
+
+    test('a corrected dob clears the old future row and writes the new one; the clear is a system clear', async () => {
+      const tech = await makeTech('Synthetic Fixed', { dob: '1990-03-05' });
+      await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
+      expect(await dates(tech.id)).toEqual([IN_WINDOW]);
+      await trx('technicians').where({ id: tech.id }).update({ dob: '1990-03-09' });
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 1, cleared: 1, failed: 0 });
+      const rows = await rowsFor(tech.id);
+      expect(rows.map((r) => [r.absence_date.toISOString().slice(0, 10), r.cleared_at !== null])).toEqual([['2031-03-05', true], ['2031-03-09', false]]);
+      expect(rows[0].cleared_by).toBeNull();
+      // the readers now see only the new day
+      await expect(eligibility.assertAssignableTechnician(tech.id, { conn: trx, date: IN_WINDOW })).resolves.toMatchObject({ id: tech.id });
+      await expect(eligibility.assertAssignableTechnician(tech.id, { conn: trx, date: '2031-03-09' })).rejects.toMatchObject({ code: 'TECH_NOT_ASSIGNABLE' });
+      // a second tick changes nothing
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 0, cleared: 0 });
+    });
+
+    test('a technician who became inactive, not field-dispatchable, or lost the dob has the future row cleared', async () => {
+      const a = await makeTech('Synthetic Left', { dob: '1990-03-05' });
+      const b = await makeTech('Synthetic Desk Move', { dob: '1990-03-05' });
+      const c = await makeTech('Synthetic No Dob', { dob: '1990-03-05' });
+      const ids = [a.id, b.id, c.id];
+      await svc.syncTechDaysOff({ now: NOW, technicianIds: ids });
+      await trx('technicians').where({ id: a.id }).update({ employment_status: 'inactive', active: false });
+      await trx('technicians').where({ id: b.id }).update({ field_dispatchable: false });
+      await trx('technicians').where({ id: c.id }).update({ dob: null });
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: ids })).toMatchObject({ written: 0, cleared: 3, failed: 0 });
+      for (const id of ids) expect(await open(id)).toEqual([]);
+    });
+
+    test('rows the office made, rows already cleared and rows in the past are never touched', async () => {
+      const tech = await makeTech('Synthetic Office Rows', { dob: null });
+      const author = await makeTech('Synthetic Author');
+      const insert = (patch) => trx('technician_absences').insert({ technician_id: tech.id, reason: 'other', ...patch });
+      await insert({ absence_date: '2031-02-01', reason: 'sick' });
+      await insert({ absence_date: '2031-02-02', note: 'family' });
+      await insert({ absence_date: '2031-02-03', created_by: author.id });
+      await insert({ absence_date: '2031-02-04', cleared_at: new Date('2031-01-10T15:00:00Z') });
+      await insert({ absence_date: '2031-01-14' }); // yesterday: past, of the sync's own shape
+      await insert({ absence_date: '2031-02-05' }); // own shape, dob null: this one IS cleared
+      const before = await rowsFor(tech.id);
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ cleared: 1, failed: 0 });
+      const after = await rowsFor(tech.id);
+      const changed = after.filter((row, n) => JSON.stringify(row) !== JSON.stringify(before[n]));
+      expect(changed.map((r) => r.absence_date.toISOString().slice(0, 10))).toEqual(['2031-02-05']);
+    });
+
+    test('an office-made row on the new birthday blocks a write, and the old own row still clears', async () => {
+      const tech = await makeTech('Synthetic Same Day', { dob: '1990-03-05' });
+      await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
+      await trx('technicians').where({ id: tech.id }).update({ dob: '1990-03-09' });
+      await trx('technician_absences').insert({ technician_id: tech.id, absence_date: '2031-03-09', reason: 'sick', note: 'office' });
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 0, skipped: 1, cleared: 1 });
+      expect((await open(tech.id)).map((r) => r.reason)).toEqual(['sick']);
+    });
+  });
+
   test('the sync writes nothing to payroll and raises no notification', async () => {
     const tech = await makeTech('Synthetic Today', { dob: `1992-${etDateString().slice(5)}` });
     const notificationsBefore = Number((await trx('notifications').count('* as n').first()).n);

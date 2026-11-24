@@ -31,7 +31,16 @@
  *   - reason is the existing generic 'other' (tech-out's own list: sick, emergency, no_show, other), with no
  *     note, so the tech-out screens and alert cards show a plain "other". Logs say "days off" only.
  *   - Inactive and prospective technicians, office staff and admins (not field-dispatchable), and a NULL dob, get
- *     nothing. A row already written stays if a dob later changes; the office clears it in the tech-out screen.
+ *     nothing.
+ *   - RECONCILE. The same pass clears the future rows it owns that are no longer wanted. A row is the sync's own
+ *     when it is uncleared, dated today or later inside the horizon, and has exactly the shape the sync writes
+ *     (reason 'other', no note, no author). It is cleared (cleared_at set, cleared_by left null as a system clear;
+ *     clearTechOut does the same with no actor) when the technician is no longer active or field-dispatchable, the
+ *     dob is now NULL, or the dob no longer gives that date. The clear runs under the same tech-day fence, re-reads
+ *     the row first, and is announced after its commit with emitAbsenceChange({ out: false }). A row of any other
+ *     shape (the office's), a cleared row and a past row are never touched. So a corrected dob fixes the schedule
+ *     by the next 03:25 run: the old future row clears and the new one is written. A technician who wants to work
+ *     on their day has the office clear it on the day in the existing tech-out screen; the sync never re-creates it.
  *   - Idempotent: a second tick the same day writes nothing and announces nothing.
  * No gate: it sends nothing, charges nothing, writes no pay and deletes nothing.
  */
@@ -99,10 +108,51 @@ async function syncOneDay(conn, tech, date, result) {
   }
 }
 
+/** True when the sync would still write this row: an active, field-dispatchable technician whose dob gives its date. Pure. */
+function rowStillWanted(row, today, horizon) {
+  if (row.employment_status !== 'active' || row.field_dispatchable !== true || !row.dob) return false;
+  return birthdayDatesBetween(row.dob, today, horizon).includes(row.date);
+}
+
+/** The shape the sync writes, on the rows table: uncleared, reason 'other', no note, no author. */
+const ownShape = (q, col) => q.whereNull(`${col}cleared_at`).where(`${col}reason`, ABSENCE_REASON).whereNull(`${col}note`).whereNull(`${col}created_by`);
+
+/** Clear ONE row the sync owns, under the tech-day fence, and announce it after the commit. Counts into `result`; never throws. */
+async function clearOwnRow(conn, row, result) {
+  try {
+    const cleared = await conn.transaction(async (trx) => {
+      await lockTechDays(trx, [{ techId: row.technician_id, date: row.date }]);
+      // Read again under the fence: the office may have cleared it meanwhile. Same shape test, so a row of another shape is never touched.
+      const live = await ownShape(trx('technician_absences').where({ id: row.id }), '').forUpdate().first('id');
+      if (!live) return false;
+      await trx('technician_absences').where({ id: row.id }).update({ cleared_at: trx.fn.now() });
+      return true;
+    });
+    if (!cleared) return;
+    result.cleared += 1;
+    require('./tech-out').emitAbsenceChange({ technicianId: row.technician_id, date: row.date, out: false, absenceId: row.id });
+  } catch (err) {
+    result.failed += 1;
+    logger.error(`[tech-days-off] could not clear a day off for technician ${row.technician_id}: ${err.code || 'clear_failed'}`);
+  }
+}
+
+/** Clear the future rows this sync owns that its roster no longer wants (see the header, RECONCILE). */
+async function reconcileOwnRows(conn, { today, horizon, technicianIds, result }) {
+  const query = ownShape(conn('technician_absences as a').join('technicians as t', 't.id', 'a.technician_id'), 'a.')
+    .where('a.absence_date', '>=', today).where('a.absence_date', '<=', horizon);
+  if (Array.isArray(technicianIds)) query.whereIn('a.technician_id', technicianIds);
+  const rows = await query.select('a.id', 'a.technician_id', 't.employment_status', 't.field_dispatchable',
+    conn.raw("to_char(a.absence_date, 'YYYY-MM-DD') AS date"), conn.raw("to_char(t.dob, 'YYYY-MM-DD') AS dob"));
+  for (const row of rows) {
+    if (!rowStillWanted(row, today, horizon)) await clearOwnRow(conn, row, result);
+  }
+}
+
 /**
- * Write the missing rows. Returns { technicians, written, skipped, failed }. One technician-day
+ * Write the missing rows. Returns { technicians, written, skipped, cleared, failed }. One technician-day
  * per transaction under the tech-day fence (the same fence markTechOut takes), so a concurrent mark-out or
- * assignment queues instead of racing. A failure for one day is logged and does not stop the rest; the caller
+ * assignment queues instead of racing. A failure for one day is logged and does not stop the rest (the roster read and the reconcile read throw); the caller
  * decides what a non-zero `failed` means (the cron throws after the pass). `now` is read once: both ends of the
  * horizon come from that one instant. `technicianIds` limits the pass to those technicians.
  */
@@ -114,14 +164,15 @@ async function syncTechDaysOff({ now, conn = db, horizonDays = HORIZON_DAYS, tec
   const query = conn('technicians').where('employment_status', 'active').where('field_dispatchable', true).whereNotNull('dob');
   if (Array.isArray(technicianIds)) query.whereIn('id', technicianIds);
   const techs = await query.select('id', conn.raw("to_char(dob, 'YYYY-MM-DD') AS dob"));
-  const result = { technicians: techs.length, written: 0, skipped: 0, failed: 0 };
+  const result = { technicians: techs.length, written: 0, skipped: 0, cleared: 0, failed: 0 };
   for (const tech of techs) {
     for (const date of birthdayDatesBetween(tech.dob, today, horizon)) {
       await syncOneDay(conn, tech, date, result);
     }
   }
-  if (result.written || result.failed) {
-    logger.info(`[tech-days-off] ${result.written} day(s) off written, ${result.skipped} already set, ${result.failed} failed`);
+  await reconcileOwnRows(conn, { today, horizon, technicianIds, result });
+  if (result.written || result.cleared || result.failed) {
+    logger.info(`[tech-days-off] ${result.written} day(s) off written, ${result.skipped} already set, ${result.cleared} cleared, ${result.failed} failed`);
   }
   return result;
 }

@@ -55,8 +55,9 @@ describe('date logic (pure)', () => {
   });
 });
 
-// technicians -> `techs`; technician_absences -> the rows already there (any, cleared or not); inserts are recorded.
-function makeConn({ techs = [], absences = [] } = {}) {
+// technicians -> `techs`; technician_absences -> the rows already there (any, cleared or not); inserts are recorded;
+// `owned` is what the reconcile read (technician_absences joined to technicians) returns; updates are applied to `absences`.
+function makeConn({ techs = [], absences = [], owned = [] } = {}) {
   const inserted = [];
   const tableOf = (table) => {
     if (table === 'technicians') {
@@ -65,16 +66,24 @@ function makeConn({ techs = [], absences = [] } = {}) {
       };
       return q;
     }
+    if (table === 'technician_absences as a') {
+      const q = {
+        join: jest.fn(() => q), where: jest.fn(() => q), whereNull: jest.fn(() => q), whereIn: jest.fn(() => q), select: jest.fn(async () => owned),
+      };
+      return q;
+    }
     const filter = {};
-    let openOnly = false;
+    const nulls = [];
+    const matching = () => absences.filter((a) => Object.entries(filter).every(([k, v]) => a[k] === v) && nulls.every((c) => a[c] == null));
     const q = {
-      where: jest.fn((cond) => { Object.assign(filter, cond); return q; }),
-      whereNull: jest.fn(() => { openOnly = true; return q; }),
-      first: jest.fn(async () => absences.find((a) => a.technician_id === filter.technician_id && a.absence_date === filter.absence_date
-        && (!openOnly || !a.cleared_at))),
+      where: jest.fn((col, val) => { if (typeof col === 'object') Object.assign(filter, col); else filter[col] = val; return q; }),
+      whereNull: jest.fn((col) => { nulls.push(col); return q; }),
+      forUpdate: jest.fn(() => q),
+      first: jest.fn(async () => matching()[0]),
+      update: jest.fn(async (patch) => { matching().forEach((row) => Object.assign(row, patch)); }),
       insert: jest.fn((row) => {
         inserted.push(row);
-        absences.push({ ...row });
+        absences.push({ id: `abs-${inserted.length}`, ...row });
         return { returning: jest.fn(async () => [{ id: `abs-${inserted.length}` }]) };
       }),
     };
@@ -82,6 +91,7 @@ function makeConn({ techs = [], absences = [] } = {}) {
   };
   const conn = jest.fn(tableOf);
   conn.raw = jest.fn((sql) => sql);
+  conn.fn = { now: jest.fn(() => 'NOW()') };
   conn.transaction = jest.fn(async (fn) => fn(conn));
   return { conn, inserted, absences };
 }
@@ -105,7 +115,7 @@ describe('syncTechDaysOff (knex double)', () => {
     expect(out).toMatchObject({ technicians: 4, written: 2, skipped: 0, failed: 0 });
     // each row is written under the tech-day fence, never through markTechOut (no alert, no parked stop)
     expect(lockTechDays).toHaveBeenCalledWith(expect.anything(), [{ techId: 't1', date: '2026-12-02' }]);
-    expect(conn.mock.calls.every(([table]) => table === 'technicians' || table === 'technician_absences')).toBe(true);
+    expect(conn.mock.calls.every(([table]) => ['technicians', 'technician_absences', 'technician_absences as a'].includes(table))).toBe(true);
   });
 
   test('today counts: a birthday today is written', async () => {
@@ -226,7 +236,7 @@ describe('announcing each new row (emitAbsenceChange, as a tech-out mark does)',
   test('nothing but the technician and absence tables is touched, and no log line carries birthday wording', async () => {
     const { conn } = makeConn({ techs: [{ id: 't1', dob: '1990-11-24' }] });
     await syncTechDaysOff({ now: NOW, conn });
-    expect(conn.mock.calls.every(([table]) => table === 'technicians' || table === 'technician_absences')).toBe(true);
+    expect(conn.mock.calls.every(([table]) => ['technicians', 'technician_absences', 'technician_absences as a'].includes(table))).toBe(true);
     const logged = [...logger.error.mock.calls, ...logger.warn.mock.calls, ...logger.info.mock.calls].map(([m]) => m).join('\n');
     expect(logged).not.toMatch(/birth/i);
   });
@@ -235,5 +245,93 @@ describe('announcing each new row (emitAbsenceChange, as a tech-out mark does)',
     const { conn } = makeConn({ techs: [] });
     await syncTechDaysOff({ now: NOW, conn });
     expect(conn.mock.results[0].value.where).toHaveBeenCalledWith('field_dispatchable', true);
+  });
+});
+
+describe('reconcile: clear the future rows the sync owns when the roster no longer wants them', () => {
+  const NOW = new Date('2026-11-24T17:00:00Z');
+  // a row of the exact shape the sync writes
+  const own = (extra = {}) => ({
+    id: 'a1', technician_id: 't1', absence_date: '2026-12-02', reason: 'other', note: null, created_by: null, cleared_at: null, ...extra,
+  });
+  // what the reconcile read returns for it
+  const joined = (extra = {}) => ({
+    id: 'a1', technician_id: 't1', date: '2026-12-02', employment_status: 'active', field_dispatchable: true, dob: '1990-12-02', ...extra,
+  });
+
+  test('a corrected dob clears the old future row, writes the new one, and announces both', async () => {
+    const { conn, absences } = makeConn({
+      techs: [{ id: 't1', dob: '1990-12-05' }], // corrected from Dec 2 to Dec 5
+      absences: [own()],
+      owned: [joined({ dob: '1990-12-05' })],
+    });
+    const out = await syncTechDaysOff({ now: NOW, conn });
+    expect(out).toMatchObject({ written: 1, cleared: 1, failed: 0 });
+    expect(absences.find((a) => a.id === 'a1').cleared_at).toBe('NOW()');
+    expect(absences.find((a) => a.id === 'a1').cleared_by).toBeUndefined(); // a system clear: no actor
+    expect(absences.find((a) => a.absence_date === '2026-12-05')).toMatchObject({ reason: 'other' });
+    expect(absences.find((a) => a.absence_date === '2026-12-05').cleared_at).toBeUndefined();
+    expect(lockTechDays).toHaveBeenCalledWith(expect.anything(), [{ techId: 't1', date: '2026-12-02' }]);
+    expect(emitAbsenceChange).toHaveBeenCalledWith({ technicianId: 't1', date: '2026-12-02', out: false, absenceId: 'a1' });
+    expect(emitAbsenceChange).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-12-05', out: true }));
+    expect(logger.info.mock.calls.map(([m]) => m).join('\n')).toMatch(/1 cleared/);
+  });
+
+  test.each([
+    ['the technician is no longer active', { employment_status: 'inactive' }],
+    ['the technician is no longer field-dispatchable', { field_dispatchable: false }],
+    ['the dob is now empty', { dob: null }],
+  ])('clears the row when %s', async (_label, change) => {
+    const { conn, absences } = makeConn({ techs: [], absences: [own()], owned: [joined(change)] });
+    expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ written: 0, cleared: 1 });
+    expect(absences[0].cleared_at).toBe('NOW()');
+  });
+
+  test('a row the dob still gives is kept', async () => {
+    const { conn, absences } = makeConn({ techs: [{ id: 't1', dob: '1990-12-02' }], absences: [own()], owned: [joined()] });
+    expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ written: 0, skipped: 1, cleared: 0 });
+    expect(absences[0].cleared_at).toBeNull();
+    expect(emitAbsenceChange).not.toHaveBeenCalled();
+  });
+
+  test('the read asks only for own-shape, uncleared rows dated today through the horizon', async () => {
+    const { conn } = makeConn({ techs: [], owned: [] });
+    await syncTechDaysOff({ now: NOW, conn, technicianIds: ['t1'] });
+    const q = conn.mock.results.map((r) => r.value).find((v) => v.join);
+    expect(q.whereNull.mock.calls.map(([c]) => c).sort()).toEqual(['a.cleared_at', 'a.created_by', 'a.note']);
+    expect(q.where).toHaveBeenCalledWith('a.reason', 'other');
+    expect(q.where).toHaveBeenCalledWith('a.absence_date', '>=', '2026-11-24');
+    expect(q.where).toHaveBeenCalledWith('a.absence_date', '<=', '2027-03-24');
+    expect(q.whereIn).toHaveBeenCalledWith('a.technician_id', ['t1']);
+  });
+
+  test('the clear re-reads the row under the fence: an office-made row (another shape) or an already cleared one is untouched', async () => {
+    // the read returned them as candidates (a race), but the locked re-read finds them not to be the sync's
+    for (const row of [own({ reason: 'sick' }), own({ note: 'flu' }), own({ created_by: 'office-1' }), own({ cleared_at: new Date() })]) {
+      const { conn, absences } = makeConn({ techs: [], absences: [row], owned: [joined({ dob: null })] });
+      expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ cleared: 0, failed: 0 });
+      expect(absences[0].cleared_by).toBeUndefined();
+      expect(absences[0].cleared_at).toBe(row.cleared_at);
+    }
+    expect(emitAbsenceChange).not.toHaveBeenCalled();
+  });
+
+  test('a failed clear is counted, logged with no date and no error text, and the rest still run', async () => {
+    const { conn } = makeConn({
+      techs: [],
+      absences: [own(), own({ id: 'a2', technician_id: 't2' })],
+      owned: [joined({ dob: null }), joined({ id: 'a2', technician_id: 't2', dob: null })],
+    });
+    let calls = 0;
+    const base = conn.transaction.getMockImplementation();
+    conn.transaction.mockImplementation(async (fn) => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error('secret db text'), { code: '40P01' });
+      return base(fn);
+    });
+    expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ cleared: 1, failed: 1 });
+    const logged = logger.error.mock.calls.map(([m]) => m).join('\n');
+    expect(logged).toMatch(/\[tech-days-off\].*t1.*40P01/);
+    expect(logged).not.toMatch(/2026-12|secret|birth/i);
   });
 });
