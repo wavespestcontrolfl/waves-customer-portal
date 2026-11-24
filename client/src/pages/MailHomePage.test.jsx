@@ -252,7 +252,7 @@ it('posts the exact offer, the typed contact and the shown price, then shows the
   expect(booked).toHaveTextContent('Monday, November 30');
   expect(booked).toHaveTextContent('9:00-11:00 AM');
   expect(booked).toHaveTextContent('101 Example TrlSampleton');
-  expect(booked).toHaveTextContent('We sent the details to your phone and email.');
+  expect(booked).toHaveTextContent('Your confirmation is on its way.');
   expect(screen.queryByRole('button', { name: 'Book this visit' })).not.toBeInTheDocument();
 });
 

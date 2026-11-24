@@ -296,7 +296,7 @@ function FirstVisitPicker({ token, price, address, onNeedCall }) {
           </p>
         ) : null}
         <p style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
-          We sent the details to your phone and email.
+          Your confirmation is on its way.
         </p>
       </BrandCard>
     );
