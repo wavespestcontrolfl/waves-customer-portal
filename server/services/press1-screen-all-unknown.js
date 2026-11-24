@@ -56,25 +56,36 @@ function withinLimit(promise, onTimeout) {
 // Any ACTIVE technician's own phone (not gated on GATE_TECH_STAFF_GUARDS: the
 // trial must never ask a technician to press 1). A failed read throws, so the
 // caller fails open.
-async function activeTechnicianPhone(key) {
+// Time left before `deadline` (ms since epoch); throws once it is spent, so a
+// read never starts after the webhook has moved on.
+function budget(deadline) {
+  const left = deadline - Date.now();
+  if (left <= 0) throw Object.assign(new Error('deadline passed'), { code: 'DEADLINE' });
+  return left;
+}
+
+async function activeTechnicianPhone(key, deadline) {
+  const ms = budget(deadline);
   const row = await db('technicians')
     .where({ employment_status: 'active' })
     .whereRaw(`${phoneKeySql('phone')} = ?`, [key])
-    .timeout(READ_TIMEOUT_MS, { cancel: true })
+    .timeout(ms, { cancel: true })
     .first('id');
   return Boolean(row);
 }
 
-async function onLiveLead(key) {
+async function onLiveLead(key, deadline) {
+  const ms = budget(deadline);
   const row = await db('leads')
     .whereNull('deleted_at')
     .whereRaw(`${phoneKeySql('phone')} = ?`, [key])
-    .timeout(READ_TIMEOUT_MS, { cancel: true })
+    .timeout(ms, { cancel: true })
     .first('id');
   return Boolean(row);
 }
 
-async function rememberedCaller(key) {
+async function rememberedCaller(key, deadline) {
+  const ms = budget(deadline);
   const row = await db('call_log')
     .where((who) => who
       .where((inbound) => inbound
@@ -84,8 +95,18 @@ async function rememberedCaller(key) {
           // Sandy's time counts toward duration_seconds on a transfer, so any
           // call Sandy touched proves nothing here.
           .whereRaw(`COALESCE(call_outcome, '') NOT IN (${AI_OUTCOMES.map(() => '?').join(', ')})`, AI_OUTCOMES)
+          // The webhook's isTransferredRow markers: a Sandy transfer can end
+          // with a voicemail outcome.
+          .whereRaw("NOT COALESCE(jsonb_typeof(metadata->'relay_handoff') = 'object' OR jsonb_exists(metadata, 'relay_transfer_ring_at'), FALSE)")
           .where((proof) => proof
-            .where((talked) => talked.where('answered_by', 'human').where('duration_seconds', '>=', TALK_SECONDS))
+            // Talk time runs from the staff press 1 (forward_acceptance.accepted_at)
+            // to the call's end: duration_seconds alone includes the prompt and
+            // the ringing.
+            .where((talked) => talked
+              .where('answered_by', 'human')
+              .whereRaw(`CASE WHEN metadata->'forward_acceptance'->>'accepted_at' IS NULL THEN FALSE
+                ELSE created_at + make_interval(secs => COALESCE(duration_seconds, 0))
+                  - (metadata->'forward_acceptance'->>'accepted_at')::timestamptz >= make_interval(secs => ?) END`, [TALK_SECONDS]))
             .orWhere((message) => message
               .where((unanswered) => unanswered.whereIn('answered_by', UNANSWERED).orWhereNull('answered_by'))
               .where('recording_duration_seconds', '>', MESSAGE_SECONDS)
@@ -97,7 +118,7 @@ async function rememberedCaller(key) {
         .whereRaw(`${phoneKeySql('to_phone')} = ?`, [key])
         .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
         .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= ? ELSE FALSE END", [TALK_SECONDS])))
-    .timeout(READ_TIMEOUT_MS, { cancel: true })
+    .timeout(ms, { cancel: true })
     .first('id');
   return Boolean(row);
 }
@@ -107,10 +128,10 @@ async function rememberedCaller(key) {
  * with no customer match on a first delivery. Never throws.
  * @returns {Promise<boolean>}
  */
-async function checkReads(key) {
-  if (await activeTechnicianPhone(key)) return false;
-  if (await onLiveLead(key)) return false;
-  return !(await rememberedCaller(key));
+async function checkReads(key, deadline) {
+  if (await activeTechnicianPhone(key, deadline)) return false;
+  if (await onLiveLead(key, deadline)) return false;
+  return !(await rememberedCaller(key, deadline));
 }
 
 async function screenAllUnknownHit(from) {
@@ -118,7 +139,9 @@ async function screenAllUnknownHit(from) {
   if (key.length < 10) return false;
   if (TWILIO_NUMBERS.isInternalNumber(from)) return false;
   try {
-    const verdict = await withinLimit(checkReads(key), 'timeout');
+    const reads = checkReads(key, Date.now() + READ_TIMEOUT_MS);
+    reads.catch(() => {}); // a read that fails after the deadline has no one left to tell
+    const verdict = await withinLimit(reads, 'timeout');
     if (verdict === 'timeout') {
       logger.warn('[preconnect-screen] all-unknown check ran past its limit (failing open, no challenge)');
       return false;

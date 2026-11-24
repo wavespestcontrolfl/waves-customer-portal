@@ -131,3 +131,32 @@ test('withinLimit answers the fallback once the read runs past 1.5 s', async () 
     jest.useRealTimers();
   }
 });
+
+test('once the deadline passes, no later read starts (the lead and call reads never run)', async () => {
+  jest.useFakeTimers();
+  try {
+    const tables = [];
+    db.mockImplementation((table) => {
+      tables.push(table);
+      const b = {};
+      for (const m of ['where', 'whereRaw', 'whereIn', 'whereNull', 'orWhere', 'orWhereNull', 'whereNotNull', 'orWhereNotNull']) b[m] = (arg) => { if (typeof arg === 'function') arg(b); return b; };
+      b.timeout = () => b;
+      // The technician read answers only after the deadline.
+      b.first = () => new Promise((resolve) => setTimeout(() => resolve(null), 2000));
+      return b;
+    });
+    const pending = screenAllUnknownHit(CALLER);
+    await jest.advanceTimersByTimeAsync(2500);
+    await expect(pending).resolves.toBe(false);
+    expect(tables).toEqual(['technicians']);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('a Sandy transfer and the staff talk time are part of the remembered-caller proof', async () => {
+  const seen = fakeDb();
+  await screenAllUnknownHit(CALLER);
+  expect(seen.sql.some((q) => q.includes("jsonb_exists(metadata, 'relay_transfer_ring_at')"))).toBe(true);
+  expect(seen.sql.some((q) => q.includes("forward_acceptance'->>'accepted_at'"))).toBe(true);
+});
