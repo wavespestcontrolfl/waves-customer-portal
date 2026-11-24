@@ -109,6 +109,16 @@ describeDb('New-home mail list (PostgreSQL)', () => {
     expect(rows.map((row) => row.pageSlug)).toEqual(['101-example', null]);
   });
 
+  test('a mailed row carries its mailed time, batch and typed visits', async () => {
+    await mockPg('mail_prospects').insert(prospect({
+      source_ref: 'M1', price_status: 'priced', price_annual: 600, price_setup_fee: 0, price_digest: 'd', priced_at: '2026-11-22T22:00:00Z',
+      mailed_at: '2026-11-24T15:00:00Z', mail_batch: 'b-1', page_typed_views: 4,
+      mailed_price: JSON.stringify({ plan: 'pest_quarterly', annual: 600, monthly: 50, setupFee: 0 }),
+    }));
+    const [row] = (await listMailProspects({ view: 'live' })).rows;
+    expect(row).toMatchObject({ mailedAt: '2026-11-24T15:00:00.000Z', mailBatch: 'b-1', typedViews: 4 });
+  });
+
   test('live is the default view', async () => {
     await seedAll();
     expect((await listMailProspects()).view).toBe('live');
@@ -176,6 +186,9 @@ describeDb('New-home mail list (PostgreSQL)', () => {
       city: 'SAMPLETON',
       zip: '34212',
       pageSlug: null,
+      mailedAt: null,
+      mailBatch: null,
+      typedViews: 0,
       subdivision: 'SAMPLETON ESTATES',
       matchBasis: 'lot_block',
       coDate: null,

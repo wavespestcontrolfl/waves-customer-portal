@@ -84,6 +84,15 @@ export function factsText(price) {
   return parts.join(", ");
 }
 
+// A home marked as mailed: the day, the print batch and how often its typed address was used. Its price no longer changes.
+export function mailedText(row) {
+  if (!row || !row.mailedAt) return "";
+  const parts = [`Mailed ${formatETDate(row.mailedAt, { month: "short", day: "numeric", year: "numeric" })}`];
+  if (row.mailBatch) parts.push(`batch ${row.mailBatch}`);
+  parts.push(`${countText(row.typedViews)} typed ${Number(row.typedViews) === 1 ? "visit" : "visits"}`);
+  return parts.join(" · ");
+}
+
 // The line under the runs: how far the price pass got on the homes that get a card.
 export function priceCountsText(priceCounts) {
   if (!priceCounts) return "";
@@ -182,6 +191,7 @@ function HomesTable({ rows }) {
                     <>
                       <span className="text-ui-body text-zinc-900">{priceText(row.price)}</span>
                       {factsText(row.price) && <div className="text-ui-body text-ink-secondary">{factsText(row.price)}</div>}
+                      {mailedText(row) && <div className="text-ui-body text-ink-secondary">{mailedText(row)}</div>}
                     </>
                   ) : <span className="text-ui-body text-ink-secondary">No card</span>}
                 </TD>
@@ -233,7 +243,7 @@ export default function MailProspectsPage({ embedded = false }) {
       {!embedded && <AdminCommandHeader variant="workspace" title="Mail" icon={Mail} />}
 
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
-        New-home buyers from the county deed list. Nothing is mailed yet, and the prices are shadow prices: nobody sees them.
+        New-home buyers from the county deed list. The prices are shadow prices until a home is marked as mailed; a mailed home's price is frozen.
       </div>
 
       {loading && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading the mail list…</div>}

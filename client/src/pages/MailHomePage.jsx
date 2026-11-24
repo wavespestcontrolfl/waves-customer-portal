@@ -19,6 +19,7 @@ import { BrandButton, BrandCard, BrandInput, CustomerColumn, PublicStateCard } f
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { glassPestInclusions } from '../lib/estimate-glass-copy';
 import { arrivalWindowLabel } from '../lib/estimate-glass-slots';
+import { formatETDateOnly } from '../lib/timezone';
 import { useGlassSurface } from '../glass/glass-engine';
 import { DOC, DOC_EYEBROW, FS, FW, LH, SP, docHeading } from '../theme-doc';
 
@@ -472,6 +473,11 @@ export default function MailHomePage() {
             <p style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
               Quarterly pest control{line1 ? ` for ${line1}` : ''}
             </p>
+            {data.heldUntil ? (
+              <p data-testid="held-until" style={{ margin: `${SP.xs}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
+                Your price is held until {formatETDateOnly(data.heldUntil, { month: 'short', day: 'numeric' })}
+              </p>
+            ) : null}
             {setupFee ? (
               <p style={{ margin: `${SP.xs}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
                 One-time setup: {formatMoney(setupFee)}

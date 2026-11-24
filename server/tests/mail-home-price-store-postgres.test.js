@@ -26,6 +26,7 @@ const detailMigration = require('../models/migrations/20261002220000_constructio
 const mailMigration = require('../models/migrations/20261122160000_mail_prospects');
 const priceMigration = require('../models/migrations/20261122200000_mail_prospects_home_price');
 const attemptsMigration = require('../models/migrations/20261122200100_mail_prospects_price_attempts');
+const mailedMigration = require('../models/migrations/20261124160000_mail_prospects_mailed_record');
 const { dueForPrice, permitFacts, savePriceResult } = require('../services/mail/home-price-store');
 
 jest.setTimeout(60000);
@@ -84,6 +85,7 @@ postgres('home price store on PostgreSQL', () => {
   const upBoth = async () => {
     await priceMigration.up(conn);
     await attemptsMigration.up(conn);
+    await mailedMigration.up(conn); // the store reads mailed_at (a mailed home's price is never written again)
   };
   const checkNames = async () => (await conn.raw(
     "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass(?) AND contype = 'c'", [`${schema}.mail_prospects`],
@@ -139,6 +141,7 @@ postgres('home price store on PostgreSQL', () => {
     const id = await row();
     await upBoth(); // second run: no-op, the row is kept
     expect(await stored(id)).toMatchObject({ price_status: null, price_attempts: 0 });
+    await conn.transaction((trx) => mailedMigration.down(trx)); // newest first; knex runs a down inside a transaction
     await attemptsMigration.down(conn);
     await priceMigration.down(conn);
     const after = await columnNames();
