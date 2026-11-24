@@ -248,7 +248,8 @@ async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) 
     });
   // No call in force (none settled now, none kept from earlier) is a failed tick: every campaign would get nothing.
   // A sold-day morning whose early hours left the feed keeps its earlier settled call and is not a fault.
-  if (call === 'unknown') {
+  // NWS down (too few areas answered) fails the tick too, even while an earlier call is kept for the campaigns.
+  if (call === 'unknown' || forecast.areas.length < MIN_AREAS) {
     problems.push(`forecast unsettled for ${day}: ${forecast.areas.filter((a) => a.rain !== null).length} settled, `
       + `${forecast.areas.length} of ${Object.keys(ZONE_COORDS).length} areas read`);
   }

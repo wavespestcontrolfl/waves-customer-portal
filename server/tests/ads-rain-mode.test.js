@@ -264,5 +264,14 @@ describe('recordRun', () => {
     expect(history.map((e) => e.tick)).toEqual(['2026-11-25T06']);
     expect(history[0].call).toBe('dry');
   });
+
+  test('NWS down fails the tick even while an earlier call is kept for the campaigns', async () => {
+    const settings = { [rainMode.DAYS_KEY]: JSON.stringify({ '2026-11-25': { day: '2026-11-25', call: 'rain', areas: [] } }) };
+    const conn = fakeConn({ campaigns, settings });
+    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: jest.fn(async () => null), fetchRain: jest.fn() });
+    expect(run.call).toBe('rain');
+    expect(run.campaigns.find((c) => c.campaign_id === 3).would).toBe('base');
+    expect(run.problems).toEqual([expect.stringMatching(/forecast unsettled for 2026-11-25: 0 settled, 0 of 6 areas read/)]);
+  });
 });
 
