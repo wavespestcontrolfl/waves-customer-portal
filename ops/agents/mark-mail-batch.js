@@ -27,8 +27,22 @@ const path = require('path');
 
 const server = (p) => path.join(__dirname, '..', '..', 'server', p);
 const args = process.argv.slice(2);
-const flag = (name) => args.includes(name);
 const usage = (message) => Object.assign(new Error(message), { code: 'USAGE' });
+const VALUE_FLAGS = ['--batch', '--ids', '--labels'];
+const BARE_FLAGS = ['--execute'];
+
+// Every argument must be a known flag or the value of one: "--ids=<uuid>" or a misspelled "--id" must never be ignored, or the
+// run would go on without the filter and mark every eligible home.
+function checkArgs() {
+  const seen = new Set();
+  for (let i = 0; i < args.length; i += 1) {
+    if (seen.has(args[i])) throw usage(`${args[i]} is given twice`); // the second would be ignored
+    seen.add(args[i]);
+    if (VALUE_FLAGS.includes(args[i])) i += 1; // its value; value() checks it is there
+    else if (!BARE_FLAGS.includes(args[i])) throw usage(`unknown argument "${args[i].split('=')[0]}": flags are --execute, --batch <name>, --ids <a,b,c>, --labels <file>`);
+  }
+}
+const flag = (name) => args.includes(name);
 const value = (name) => {
   const i = args.indexOf(name);
   if (i < 0) return undefined;
@@ -38,6 +52,7 @@ const value = (name) => {
 };
 
 function parseArgs() {
+  checkArgs();
   const execute = flag('--execute');
   const batch = value('--batch');
   // A flag that is present must carry a real value: an empty one (a shell variable that expanded to nothing) must never read

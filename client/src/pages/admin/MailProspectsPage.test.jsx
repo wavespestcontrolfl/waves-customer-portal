@@ -200,6 +200,15 @@ it("runText names the Eastern day and time, and either half can be missing", () 
   expect(runText({ newestRecordedDate: null, lastCheckedAt: null })).toBe("No run yet.");
 });
 
+it("a mailed home that is no longer eligible still shows its mailing record in the other views", async () => {
+  const mailed = home({ id: "n-9", status: "not_eligible", reason: "company_buyer", mailedAt: "2026-11-24T15:00:00.000Z", mailBatch: "b-1", typedViews: 2 });
+  route({ "/admin/prospects/mail?view=not_eligible": () => reply({ ...NOT_ELIGIBLE, rows: [mailed] }), "/admin/prospects/mail?view=live": () => reply(LIVE) });
+  renderPage();
+  await screen.findByText("TESTER ALEX J, TESTER BEA K");
+  fireEvent.click(screen.getByRole("button", { name: "Not eligible" }));
+  expect(await screen.findByText("Mailed Nov 24, 2026 · batch b-1 · 2 typed visits")).toBeInTheDocument();
+});
+
 it("mailedText says when a home was mailed, in which batch, and how often its typed address was used; nothing before it is mailed", () => {
   expect(mailedText(home())).toBe("");
   expect(mailedText(home({ mailedAt: "2026-11-24T15:00:00.000Z", mailBatch: "2026-11-a", typedViews: 3 }))).toBe("Mailed Nov 24, 2026 · batch 2026-11-a · 3 typed visits");

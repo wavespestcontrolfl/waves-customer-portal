@@ -19,6 +19,12 @@ describe('mark-mail-batch arguments', () => {
     [['--execute'], /--execute needs --batch/],
     [['--labels', ''], /--labels is empty/],
     [['--labels', '--execute'], /--labels needs a value/],
+    [['--execute', '--batch', 'run-1', '--ids=8dbfaef8-a0a9-4d52-b6b0-e8c97318dd09'], /unknown argument "--ids"/],
+    [['--execute', '--batch=run-1'], /unknown argument "--batch"/],
+    [['--execute', '--batch', 'run-1', '--id', '8dbfaef8-a0a9-4d52-b6b0-e8c97318dd09'], /unknown argument "--id"/],
+    [['--execute', '--batch', 'run-1', 'stray'], /unknown argument "stray"/],
+    [['--execute', '--batch', 'run-1', '--ids', 'a', '--ids', 'b'], /--ids is given twice/],
+    [['--dry-run'], /unknown argument "--dry-run"/],
   ])('%j is refused with a usage message and nothing is run', (args, message) => {
     const result = run(...args);
     expect(result.status).toBe(1);

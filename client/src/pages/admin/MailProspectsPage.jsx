@@ -223,7 +223,11 @@ function MissedTable({ rows, label }) {
                 <TD data-label="Recorded" nums className="whitespace-nowrap align-top">{dayText(row.recordedDate)}</TD>
                 <TD data-label="Buyer" className="align-top"><span className="text-ui-body font-medium text-zinc-900">{buyerText(row)}</span></TD>
                 <TD data-label="Lot" className="align-top">{row.legalDescription || "Not listed"}</TD>
-                <TD data-label="Reason" className="align-top">{reasonLabel(row.reason)}</TD>
+                <TD data-label="Reason" className="align-top">
+                  {reasonLabel(row.reason)}
+                  {/* A home mailed earlier can become not eligible later: staff still see that its card went out. */}
+                  {mailedText(row) && <div className="text-ui-body text-ink-secondary">{mailedText(row)}</div>}
+                </TD>
               </TR>
             ))}
           </TBody>
