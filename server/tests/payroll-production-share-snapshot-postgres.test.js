@@ -203,9 +203,9 @@ postgres('production share credit snapshot (two real connections)', () => {
       const credit = (technicianId, visitId) => inputs.get(technicianId).stops.find((row) => row.visitId === visitId).creditCents;
       // both read the split as it was when the invoice and jobs were read: $1,000.00 each, adding up to the invoice
       expect([credit(first, v1), credit(second, v2)]).toEqual([100000, 100000]);
-      // each row drew its half from the one invoice
-      expect(inputs.get(first).stops[0].bases).toEqual([{ basisType: 'invoice', basisId: invoice.id, cents: 100000 }]);
-      expect(inputs.get(second).stops[0].bases).toEqual([{ basisType: 'invoice', basisId: invoice.id, cents: 100000 }]);
+      // each row records the one invoice linked to its visit
+      expect(inputs.get(first).stops[0].invoices).toEqual([invoice.id]);
+      expect(inputs.get(second).stops[0].invoices).toEqual([invoice.id]);
     } finally {
       await trx.rollback();
     }

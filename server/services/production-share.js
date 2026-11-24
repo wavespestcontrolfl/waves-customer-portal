@@ -467,7 +467,8 @@ function invoiceShare(row, members) {
     return { billed: new Map([[row.visit_id, priced.cents]]), refunded: new Map([[row.visit_id, refunded]]), total: priced.cents, members: members.length ? members : [{ id: row.visit_id, weight: 0 }] };
   }
   const parts = allocateCents(priced.cents, members);
-  return parts ? { billed: parts, refunded: allocateCents(refunded, members), total: priced.cents, members } : { unallocated: refunded, reason: UNALLOCATED_REASON };
+  return parts ? { billed: parts, refunded: allocateCents(refunded, members), total: priced.cents, members }
+    : { unallocated: refunded, reason: UNALLOCATED_REASON, total: priced.cents, members };
 }
 
 /**
@@ -479,7 +480,8 @@ function invoiceShare(row, members) {
  * invoice (`unallocated`, with the invoice's whole refund kept visible) and never priced from the visit instead. Draft and void invoices are no charge. The prepay invoice of an annual term
  * is never attributed here: its refunds go to the term's visits (termRefunds).
  * Returns Map visitId -> { billedCents (null = no invoice named the visit's price), refundCents, unallocated: [{ invoiceId, refundCents }],
- * shares: [{ invoiceId, totalCents, members: [{ id, weight }], shareCents }] for each invoice that priced the visit }.
+ * shares: [{ invoiceId, totalCents, members: [{ id, weight }], shareCents }] for each invoice that priced the visit,
+ * invoiceIds: every invoice linked to the visit }.
  */
 async function billedByVisit(conn, visitIds) {
   const out = new Map();
@@ -530,17 +532,18 @@ async function billedByVisit(conn, visitIds) {
   }
   for (const row of links.rows) {
     const share = shares.get(row.invoice_id);
+    const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [], shares: [], invoiceIds: [] };
+    // Every invoice linked to the visit, whatever it names (a pay run records them with a paid stop: see the INVOICE and PACKAGE rules).
+    if (!entry.invoiceIds.includes(row.invoice_id)) entry.invoiceIds.push(row.invoice_id);
+    out.set(row.visit_id, entry);
     if (share.skipped) continue;
-    const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [], shares: [] };
-    if (share.unallocated !== undefined) entry.unallocated.push({ invoiceId: row.invoice_id, refundCents: share.unallocated, reason: share.reason });
+    if (share.unallocated !== undefined) entry.unallocated.push({ invoiceId: row.invoice_id, refundCents: share.unallocated, reason: share.reason, totalCents: share.total, members: share.members });
     else if (share.billed.has(row.visit_id)) {
       entry.billedCents = (entry.billedCents || 0) + share.billed.get(row.visit_id);
       entry.refundCents += (share.refunded && share.refunded.get(row.visit_id)) || 0;
-      // What the ledger needs of the invoice (see CREDIT LEDGER): its whole priced amount, its member visits with their weights, and the
-      // share this visit was billed.
+      // What the rules need of the invoice (see CREDIT RULES): its whole priced amount, its member visits, and the share billed here.
       entry.shares.push({ invoiceId: row.invoice_id, totalCents: share.total, members: share.members, shareCents: share.billed.get(row.visit_id) });
     }
-    out.set(row.visit_id, entry);
   }
   return out;
 }
@@ -595,18 +598,24 @@ function jobCredit(stop, job, billed) {
   const sold = TWO_TREATMENT_PACKAGE_KEYS.has(job.root.service_key) ? 2 : null;
   if (!sold) return toReview('multi_visit_job', 'The number of visits this job was sold with cannot be established (only the two-treatment packages are known).');
   const invoiced = billed.get(job.root.id);
-  if (invoiced && invoiced.unallocated.length) return toReview('multi_visit_job', invoiced.unallocated[0].reason);
-  // A package priced on an invoice that other visits (outside the job) share cannot be credited by the ledger: its price is one slice of a
+  // An invoice that cannot be split across its visits for a reason that is not "a member has no price" (a discount tied to no line) stays
+  // a review row. One that only has a member without a price is no obstacle here: a package takes the invoice's whole amount.
+  const unclear = invoiced && invoiced.unallocated.find((one) => !one.members);
+  if (unclear) return toReview('multi_visit_job', unclear.reason);
+  // A package priced on an invoice that other visits (outside the job) share cannot be credited by rule: its price is one slice of a
   // split that moves with those visits. Every visit of it is $0 + needs review, and the owner sets the credit by hand.
   const inJob = new Set([job.root.id, ...job.planned]);
-  if (invoiceSharesOf(invoiced).some((one) => one.members.some((member) => !inJob.has(member.id)))) {
+  const onInvoices = [...invoiceSharesOf(invoiced), ...((invoiced && invoiced.unallocated) || [])];
+  if (onInvoices.some((one) => one.members.some((member) => !inJob.has(member.id)))) {
     return toReview('multi_visit_job', 'The package is priced on an invoice shared with other visits: set its credit by hand.');
   }
-  const price = invoiced && invoiced.billedCents !== null ? invoiced.billedCents : cents(job.root.estimated_price);
+  // An invoice linked only to visits of the package IS the package price, once: its whole amount, not the root's share of it.
+  const price = onInvoices.length ? onInvoices.reduce((sum, one) => sum + one.totalCents, 0)
+    : invoiced && invoiced.billedCents !== null ? invoiced.billedCents : cents(job.root.estimated_price);
   const nth = job.planned.indexOf(stop.id) + 1;
   if (!(price > 0)) return toReview('multi_visit_job', "The job's first visit has no price on file.");
   if (nth < 1 || nth > sold || job.planned.length > sold) return toReview('multi_visit_job', "This visit is not among the job's sold visits.");
-  // What the credit ledger needs of the job (CREDIT LEDGER): its price, sold count and this visit's slot.
+  // What the package rule needs of the job (CREDIT RULES): its price, sold count and this visit's slot.
   return {
     ...credited('multi_visit_job', jobPartCents(price, sold, nth), `Part ${nth} of ${sold} of the job price`),
     job: { rootId: job.root.id, price, sold, nth },
@@ -692,32 +701,40 @@ async function weekStops(conn, technicianIds, weekStart) {
 }
 
 /*
- * CREDIT LEDGER (one invariant). A BASIS is what a credit is priced from as a whole: a shared invoice (its id) or a multi-visit job
- * (its root visit id). Each credited stop row records what it drew from each basis: stops[].bases = [{ basisType, basisId, cents }].
- *   PAID(basis)  = the cents on such rows of FINALIZED, non-void checks that paid a share above $0, in OTHER weeks
- *   REMAINING    = the basis's live total - PAID(basis), never more than it
- * A basis nobody was paid from yet is credited exactly as it prices live. Once something was paid, this week's stops of the basis
- * share REMAINING by their live weights among the basis's visits NOT yet paid (invoice: its live member visits; job: the sold count
- * less the visits already paid), and REMAINING at or under $0 makes them $0 + needs review ("already credited in full"). So the
- * credits of a basis never add up to more than its live total, whatever was repriced, relinked or replaced in between, and a visit
- * that joins an invoice, or replaces a package visit, after it was credited in full earns nothing from it. A job that fails its own
- * checks stays a review row: nothing here changes a row that is already $0 + needs review. A visit already credited on such a check
- * is already_paid. Voiding the paying run takes its checks out of PAID, so the ledger releases it.
+ * CREDIT RULES. What finalized pay runs already paid decides what a later week may credit. A stop row of a check that paid a share above
+ * $0 records the invoice ids linked to its visit at the time, whatever priced its credit (stops[].invoices), and, for a package visit,
+ * { basisType: 'job', basisId: root, totalCents, sold, slot } (stops[].bases). In every other week:
+ *   ALREADY PAID  a visit already credited on such a check is already_paid ($0 + review).
+ *   INVOICE       a stop priced from an invoice that is now linked to ANY visit already credited on such a check of another week (a
+ *                 visit that is one of its members, or a paid row that recorded the invoice, so a late invoice or a relink is caught)
+ *                 is $0 + review: "set its credit by hand". An invoice shared only by visits of THIS week splits live, as always.
+ *   PACKAGE       a package's total is FIXED at its first paid row (root visit, total, sold count, slot). A later visit credits
+ *                 jobPartCents(fixed total, sold, its slot); a slot already paid or past the sold count is $0 + review. A package
+ *                 priced on an invoice that visits OUTSIDE it also share is review for every visit (jobCredit); an invoice linked only
+ *                 to the package's own visits is the package price once (its whole amount).
+ * A review row stays a review row. Voiding the paying run takes its checks out of the queries, so everything is released.
  */
 
 // The invoice shares behind a billedByVisit entry that priced a visit: [{ invoiceId, totalCents, members, shareCents }].
 const invoiceSharesOf = (entry) => (entry && entry.billedCents !== null && entry.billedCents !== undefined ? entry.shares || [] : []);
 
-// What the credit ledger needs to recompute a credit once something was paid (applyLedger); null for a credit that no invoice or job
-// priced (own price, prepaid slice, callback value, free visit type, a review row). `invoices`: the shared invoices that priced the visit,
-// whatever the visit's live share came to (a share that rounds to $0 still takes what is left of the invoice). `job`: the job part's
-// price, sold count and slot.
+// What the rules need of a credit (applyLedger); null for a credit that no invoice or package priced (own price, prepaid slice, callback
+// value, free visit type, a review row). `invoices`: the invoices that priced the visit, with their member visits (the INVOICE rule,
+// also when the live share rounded to $0). `job`: the job part's price, sold count and slot (the PACKAGE rule).
 function ledgerOf(credit, invoiced) {
   if (credit.needsReview) return null;
   if (credit.job) return { job: credit.job };
   if (!credit.invoiceBased) return null;
-  const invoices = invoiceSharesOf(invoiced);
+  const invoices = invoiceSharesOf(invoiced).map((one) => ({ invoiceId: one.invoiceId, members: one.members }));
   return invoices.length ? { invoices } : null;
+}
+
+// Every invoice linked to the visit, and, for a package visit, to its root (the package's price came from there): recorded with a paid
+// stop row, whatever priced its credit, so a late invoice or a relink to another visit is caught later (the INVOICE rule).
+function linkedInvoicesOf(invoiced, job, billed) {
+  const ids = new Set((invoiced && invoiced.invoiceIds) || []);
+  if (job && job.root) for (const id of (billed.get(job.root.id) || {}).invoiceIds || []) ids.add(id);
+  return [...ids].sort();
 }
 
 /**
@@ -772,6 +789,7 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
       // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
       unallocatedRefunds: invoiced.unallocated || [],
       ledger: ledgerOf(credit, invoiced),
+      linkedInvoices: linkedInvoicesOf(invoiced, job, billed),
     });
   }
   return rows;
@@ -787,158 +805,94 @@ const PAID_FROM_SQL = `FROM payroll_checks c
       AND COALESCE(c.production_share_cents, 0) > 0
       AND COALESCE((stop.value->>'creditCents')::bigint, 0) > 0`;
 const STOP_BASES_SQL = `CASE WHEN jsonb_typeof(stop.value->'bases') = 'array' THEN stop.value->'bases' ELSE '[]'::jsonb END`;
-const DREW_FROM_SQL = `EXISTS (SELECT 1 FROM jsonb_array_elements(${STOP_BASES_SQL}) b
-        WHERE (b.value->>'basisType') || ':' || (b.value->>'basisId') = ANY(?::text[]))`;
-const paidRowsSql = (match) => `SELECT c.id AS check_id, stop.value->>'visitId' AS visit_id, to_char(c.week_start, 'YYYY-MM-DD') AS week_start,
-    ${STOP_BASES_SQL} AS bases ${PAID_FROM_SQL} AND (${match})`;
-
-const baseKey = (basis) => `${basis.basisType}:${basis.basisId}`;
+const STOP_INVOICES_SQL = `CASE WHEN jsonb_typeof(stop.value->'invoices') = 'array' THEN stop.value->'invoices' ELSE '[]'::jsonb END`;
 
 /**
- * What finalized pay runs already paid, for the ledger (CREDIT LEDGER above). `visitIds`: this week's visits and the roots of their
- * jobs; `keys`: the 'type:id' of every basis this week's credits draw from. Returns
- *   visits:   Map visit id -> week, for each of `visitIds` a finalized check already credited (already_paid);
- *   byBasis:  Map 'type:id' -> { cents, visits: Set }, what the paid rows drew from that basis and which visits drew it.
- * The rows are those that name a visit of `visitIds` OR draw from one of `keys`; every basis such a visit's row drew from is read in
- * full too (a basis whose link was removed from the visit since, a package root that was paid from an invoice), so a link that is gone
- * does not hide what was paid from it. Whoever the technician was. Voiding the paying run takes its checks out of these queries.
- * Two queries at most.
+ * What finalized pay runs already paid, for the rules (CREDIT RULES above). `visitIds`: this week's visits, the roots of their
+ * packages and the member visits of the invoices they were priced from; `invoiceIds`: those invoices; `rootIds`: those roots.
+ * Reads the paid stop rows that name one of the visits, record one of the invoices, or carry a package of one of the roots, whoever
+ * the technician was. Returns
+ *   visits:    Map visit id -> the week of the first paid row of that visit;
+ *   invoices:  Map invoice id -> the week of the first paid row that recorded it;
+ *   jobs:      Map root id -> { totalCents, sold, weekStart, slots: Map slot -> visit id }: the total and the sold count are the FIRST
+ *              paid row's (they are fixed there), the slots are those of every paid row.
+ * Voiding the paying run takes its checks out of the query. One query.
  */
-async function paidLedger(conn, visitIds, keys, weekStart) {
-  const ledger = { visits: new Map(), byBasis: new Map() };
-  if (!visitIds.length && !keys.length) return ledger;
+async function paidLedger(conn, visitIds, invoiceIds, rootIds, weekStart) {
+  const ledger = { visits: new Map(), invoices: new Map(), jobs: new Map() };
+  if (!visitIds.length && !invoiceIds.length && !rootIds.length) return ledger;
   const wanted = new Set(visitIds);
-  const seen = new Set();
-  const take = (rows) => {
-    for (const row of rows) {
-      const once = `${row.check_id}:${row.visit_id}`;
-      if (seen.has(once)) continue;
-      seen.add(once);
-      if (wanted.has(row.visit_id) && (!ledger.visits.has(row.visit_id) || row.week_start < ledger.visits.get(row.visit_id))) ledger.visits.set(row.visit_id, row.week_start);
-      for (const basis of row.bases) {
-        const key = baseKey(basis);
-        const entry = ledger.byBasis.get(key) || { cents: 0, visits: new Set() };
-        entry.cents += Number(basis.cents) || 0;
-        entry.visits.add(row.visit_id);
-        ledger.byBasis.set(key, entry);
-      }
+  const rows = (await conn.raw(`SELECT c.id AS check_id, stop.value->>'visitId' AS visit_id, to_char(c.week_start, 'YYYY-MM-DD') AS week_start,
+      ${STOP_INVOICES_SQL} AS invoices, ${STOP_BASES_SQL} AS bases
+    ${PAID_FROM_SQL}
+      AND (stop.value->>'visitId' = ANY(?::text[])
+        OR jsonb_exists_any(${STOP_INVOICES_SQL}, ?::text[])
+        OR EXISTS (SELECT 1 FROM jsonb_array_elements(${STOP_BASES_SQL}) b
+          WHERE b.value->>'basisType' = 'job' AND b.value->>'basisId' = ANY(?::text[])))
+    ORDER BY c.week_start, c.id`, [weekStart, visitIds, invoiceIds, rootIds])).rows;
+  const roots = new Set(rootIds);
+  for (const row of rows) {
+    if (wanted.has(row.visit_id) && !ledger.visits.has(row.visit_id)) ledger.visits.set(row.visit_id, row.week_start);
+    for (const id of row.invoices) if (!ledger.invoices.has(id)) ledger.invoices.set(id, row.week_start);
+    for (const basis of row.bases) {
+      if (basis.basisType !== 'job' || !roots.has(basis.basisId)) continue;
+      const job = ledger.jobs.get(basis.basisId)
+        || { totalCents: Number(basis.totalCents), sold: Number(basis.sold), weekStart: row.week_start, slots: new Map() };
+      job.slots.set(Number(basis.slot), row.visit_id);
+      ledger.jobs.set(basis.basisId, job);
     }
-  };
-  const first = (await conn.raw(paidRowsSql(`stop.value->>'visitId' = ANY(?::text[]) OR ${DREW_FROM_SQL}`), [weekStart, visitIds, keys])).rows;
-  take(first);
-  const known = new Set(keys);
-  const more = [...new Set(first.filter((row) => wanted.has(row.visit_id)).flatMap((row) => row.bases.map(baseKey)))].filter((key) => !known.has(key));
-  if (more.length) take((await conn.raw(paidRowsSql(DREW_FROM_SQL), [weekStart, more])).rows);
+  }
   return ledger;
 }
 
-const alreadyPaid = (row, week) => ({ ...row, bases: [], ledger: null, ...toReview('already_paid', `Already paid in the week of ${week}: a pay run already credited this visit.`) });
-const exhausted = (row, what) => ({ ...row, bases: [], ledger: null, ...toReview('basis_exhausted', `This ${what} was already credited in full by earlier pay weeks, so this visit earns nothing more from it.`) });
-
-// The new share of each invoice this week's rows draw from, by 'visitId|invoiceId' -> { cents, exhausted }. An invoice nothing was paid
-// from keeps its live shares. Otherwise REMAINING (live total less what was paid) is shared by the live weights of the invoice's
-// member visits that are not paid yet, to the cent, and this week's rows take their part.
-function invoiceLedger(rows, paid) {
-  const groups = new Map();
-  for (const row of rows) {
-    if (!row.ledger) continue;
-    for (const inv of row.ledger.invoices || []) {
-      if (!groups.has(inv.invoiceId)) groups.set(inv.invoiceId, { inv, rows: [] });
-      groups.get(inv.invoiceId).rows.push({ row, inv });
-    }
-  }
-  const shares = new Map();
-  for (const [invoiceId, group] of groups) {
-    const was = paid.byBasis.get(`invoice:${invoiceId}`);
-    const paidVisits = new Set([...(was ? was.visits : [])]);
-    for (const member of group.inv.members) if (paid.visits.has(member.id)) paidVisits.add(member.id);
-    const touched = (was && was.cents > 0) || group.inv.members.some((member) => paidVisits.has(member.id));
-    const remaining = group.inv.totalCents - (was ? was.cents : 0);
-    const open = group.inv.members.filter((member) => !paidVisits.has(member.id));
-    // The last open member takes what is left, whatever its weight; several share it by their live weights, to the cent.
-    const parts = !(touched && remaining > 0 && open.length) ? null
-      : open.length === 1 ? new Map([[open[0].id, remaining]])
-        : allocateCents(remaining, open) || allocateCents(remaining, open.map((member) => ({ id: member.id, weight: 1 })));
-    for (const { row, inv } of group.rows) {
-      const key = `${row.visitId}|${invoiceId}`;
-      if (!touched) shares.set(key, { cents: Number(inv.shareCents) || 0, exhausted: false });
-      else if (parts) shares.set(key, { cents: parts.get(row.visitId) || 0, exhausted: false });
-      else shares.set(key, { cents: 0, exhausted: true });
-    }
-  }
-  return shares;
-}
+const alreadyPaid = (row, week) => ({ ...row, ...toReview('already_paid', `Already paid in the week of ${week}: a pay run already credited this visit.`) });
+const review = (row, kind, reason) => ({ ...row, ...toReview(kind, reason) });
 
 /**
- * The credit rows of a pay week through the ledger (CREDIT LEDGER above). `paid` = paidLedger. Pure. Every row comes back with
- * `bases` = what it drew from each basis ([{ basisType, basisId, cents }], none for a credit no invoice or job priced) and no
- * `ledger`.
+ * The credit rows of a pay week through the rules (CREDIT RULES above). `paid` = paidLedger. Pure. Every row comes back with `invoices`
+ * (the invoice ids linked to its visit, when it credits above $0) and `bases` (a package visit's { basisType: 'job', basisId,
+ * totalCents, sold, slot }), and without the working fields.
  */
 function applyLedger(rows, paid) {
-  const base = rows.map((row) => (paid.visits.has(row.visitId) ? alreadyPaid(row, paid.visits.get(row.visitId)) : row));
-  const shares = invoiceLedger(base, paid);
-  const out = new Map();
-  // Job parts, per job: this week's visits in slot order take the REMAINING of the job over the slots not paid yet.
-  const jobs = new Map();
-  for (const row of base) if (row.ledger && row.ledger.job) {
-    if (!jobs.has(row.ledger.job.rootId)) jobs.set(row.ledger.job.rootId, []);
-    jobs.get(row.ledger.job.rootId).push(row);
-  }
-  for (const [rootId, group] of jobs) {
-    group.sort((a, b) => a.ledger.job.nth - b.ledger.job.nth);
-    const { sold } = group[0].ledger.job;
-    // A job priced on an invoice shared with other visits never gets here (it is a review row, jobCredit); its price is live.
-    const { price } = group[0].ledger.job;
-    const was = paid.byBasis.get(`job:${rootId}`);
-    const touched = was && (was.cents > 0 || was.visits.size > 0);
-    const slotsLeft = sold - (was ? was.visits.size : 0);
-    const remaining = price - (was ? was.cents : 0);
-    const parts = touched && remaining > 0 && slotsLeft > 0
-      ? allocateCents(remaining, Array.from({ length: slotsLeft }, (_, k) => ({ id: k, weight: 1 }))) : null;
-    group.forEach((row, index) => {
-      const nth = row.ledger.job.nth;
-      let cents;
-      if (!touched) cents = jobPartCents(price, sold, nth);
-      else if (parts && index < slotsLeft) cents = parts.get(index);
-      else { out.set(row.visitId, exhausted(row, 'package')); return; }
-      out.set(row.visitId, { ...row, creditCents: cents, ledger: null, bases: [{ basisType: 'job', basisId: rootId, cents }] });
-    });
-  }
-  return base.map((row) => {
+  return rows.map((row) => {
     const done = settle(row);
-    const clean = { ...done };
+    const clean = { ...done, invoices: done.creditCents > 0 ? done.linkedInvoices || [] : [], bases: done.bases || [] };
     delete clean.ledger;
+    delete clean.linkedInvoices;
     return clean;
   });
 
   function settle(row) {
-    if (out.has(row.visitId)) return out.get(row.visitId);
-    if (!row.ledger) return { ...row, bases: row.bases || [], ledger: null };
-    if (row.ledger.job) return { ...row, bases: [], ledger: null };
-    const mine = row.ledger.invoices.map((inv) => ({ inv, share: shares.get(`${row.visitId}|${inv.invoiceId}`) }));
-    const cents = mine.reduce((sum, one) => sum + one.share.cents, 0);
-    if (!(cents > 0) && mine.some((one) => one.share.exhausted)) return exhausted(row, 'invoice');
-    // What is left of the invoice can reach a visit whose live share rounded to $0: it is a priced credit then.
-    const classified = cents > 0 && row.kind !== 'priced'
-      ? { kind: 'priced', needsReview: false, reason: "What is left of the visit's invoice, before tax" } : {};
-    return {
-      ...row, ...classified, creditCents: cents, ledger: null,
-      bases: mine.filter((one) => one.share.cents > 0).map((one) => ({ basisType: 'invoice', basisId: one.inv.invoiceId, cents: one.share.cents })),
-    };
+    if (paid.visits.has(row.visitId)) return alreadyPaid(row, paid.visits.get(row.visitId));
+    const { ledger } = row;
+    if (!ledger) return row;
+    if (ledger.invoices) {
+      const weeks = ledger.invoices.flatMap((inv) => [paid.invoices.get(inv.invoiceId), ...inv.members.map((member) => paid.visits.get(member.id))]).filter(Boolean).sort();
+      if (weeks.length) return review(row, 'invoice_paid_elsewhere', `This invoice also covers a visit paid in the week of ${weeks[0]}: set its credit by hand.`);
+      return row;
+    }
+    const { job } = ledger;
+    const was = paid.jobs.get(job.rootId);
+    if (!was) {
+      return { ...row, creditCents: jobPartCents(job.price, job.sold, job.nth), bases: [{ basisType: 'job', basisId: job.rootId, totalCents: job.price, sold: job.sold, slot: job.nth }] };
+    }
+    if (job.nth > was.sold || was.slots.has(job.nth)) {
+      return review(row, 'basis_exhausted', 'This package slot was already credited, or is past the visits the package was sold with: set its credit by hand.');
+    }
+    return { ...row, creditCents: jobPartCents(was.totalCents, was.sold, job.nth), bases: [{ basisType: 'job', basisId: job.rootId, totalCents: was.totalCents, sold: was.sold, slot: job.nth }] };
   }
 }
 
-const keysOf = (rows) => [...new Set(rows.flatMap((row) => (row.ledger ? [
-  ...(row.ledger.invoices || []).map((inv) => `invoice:${inv.invoiceId}`),
-  ...(row.ledger.job ? [`job:${row.ledger.job.rootId}`] : []),
-] : [])))];
-// The visits whose paid state the ledger needs: this week's, the roots of their jobs, and every member visit of the invoices they draw
-// from (so a member paid some other way is known whichever technicians' stops are read together).
+const invoiceIdsOf = (rows) => [...new Set(rows.flatMap((row) => [...(row.ledger && row.ledger.invoices ? row.ledger.invoices.map((inv) => inv.invoiceId) : []), ...(row.linkedInvoices || [])]))];
+const rootIdsOf = (rows) => [...new Set(rows.filter((row) => row.ledger && row.ledger.job).map((row) => row.ledger.job.rootId))];
+// The visits whose paid state the rules need: this week's, the roots of their packages, and every member visit of the invoices they
+// were priced from (so a member paid some other way is known whichever technicians' stops are read together).
 const visitIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
   row.visitId,
   ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId] : []),
   ...(row.ledger && row.ledger.invoices ? row.ledger.invoices.flatMap((inv) => inv.members.map((member) => member.id)) : []),
 ]))];
+const paidOf = (conn, rows, weekStart) => paidLedger(conn, visitIdsOf(rows), invoiceIdsOf(rows), rootIdsOf(rows), weekStart);
 
 /**
  * The credit of every route stop the technician completed in a pay week (Monday `weekStart` to Sunday), one row per
@@ -953,7 +907,7 @@ async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
   const inForce = settings === undefined ? await settingsFor(conn, technicianId, weekStart) : settings;
   const stops = await weekStops(conn, [technicianId], weekStart);
   const rows = await creditsOfStops(conn, technicianId, stops, inForce);
-  return applyLedger(rows, await paidLedger(conn, visitIdsOf(rows), keysOf(rows), weekStart));
+  return applyLedger(rows, await paidOf(conn, rows, weekStart));
 }
 
 /**
@@ -989,7 +943,7 @@ async function weekCreditsFor(conn, settingsById, weekStart) {
     }
   }
   const all = [...credits.values()].flatMap((one) => one.rows || []);
-  const done = applyLedger(all, await paidLedger(conn, visitIdsOf(all), keysOf(all), weekStart));
+  const done = applyLedger(all, await paidOf(conn, all, weekStart));
   const byVisit = new Map(done.map((row) => [row.visitId, row]));
   for (const [id, one] of credits) if (one.rows) credits.set(id, { rows: one.rows.map((row) => byVisit.get(row.visitId)) });
   return credits;

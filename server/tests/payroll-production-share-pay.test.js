@@ -289,109 +289,113 @@ describe('the read under the payroll lock', () => {
   });
 });
 
-describe('the credit ledger (applyLedger)', () => {
+describe('the credit rules (applyLedger)', () => {
   const productionShare = require('../services/production-share');
-  const invoice = (invoiceId, totalCents, members, shareCents) => ({ invoiceId, totalCents, members: members.map(([id, weight]) => ({ id, weight })), shareCents });
-  const plain = (visitId, invoices) => ({
-    visitId, workDate: '2026-09-21', kind: 'priced', creditCents: invoices.reduce((sum, inv) => sum + inv.shareCents, 0), needsReview: false, ledger: { invoices },
+  const members = (...ids) => ids.map((id) => ({ id, weight: 100000 }));
+  // an invoice-priced credit; linked = the invoice ids linked to the visit
+  const plain = (visitId, invoiceIds, cents = 100000, extra = {}) => ({
+    visitId, workDate: '2026-09-21', kind: 'priced', creditCents: cents, needsReview: false,
+    ledger: { invoices: invoiceIds.map((invoiceId) => ({ invoiceId, members: members('visit-1', 'visit-2') })) }, linkedInvoices: invoiceIds, ...extra,
   });
-  const job = (visitId, nth, { price = 200000, sold = 2, rootId = 'root' } = {}) => ({
+  const job = (visitId, nth, { price = 200000, sold = 2, rootId = 'root', linked = [] } = {}) => ({
     visitId, workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: productionShare.jobPartCents(price, sold, nth), needsReview: false,
-    ledger: { job: { rootId, price, sold, nth } },
+    ledger: { job: { rootId, price, sold, nth } }, linkedInvoices: linked,
   });
-  // what finalized pay runs paid: byBasis = { 'invoice:inv-1': [cents, ['visit-1']] }, visits = { visitId: week }
-  const paidOf = (byBasis = {}, visits = {}) => ({
+  // what finalized pay runs paid: visits {visitId: week}, invoices {invoiceId: week}, jobs {rootId: [total, sold, [slots]]}
+  const paidOf = ({ visits = {}, invoices = {}, jobs = {} } = {}) => ({
     visits: new Map(Object.entries(visits)),
-    byBasis: new Map(Object.entries(byBasis).map(([key, [cents, who]]) => [key, { cents, visits: new Set(who) }])),
+    invoices: new Map(Object.entries(invoices)),
+    jobs: new Map(Object.entries(jobs).map(([root, [totalCents, sold, slots]]) => [root, { totalCents, sold, weekStart: '2026-09-14', slots: new Map(slots.map((slot) => [slot, `v${slot}`])) }])),
   });
-  const MEMBERS = [['visit-1', 100000], ['visit-2', 100000]];
-  const one = (rows, paid = paidOf()) => productionShare.applyLedger(rows, paid)[0];
+  const one = (row, paid = paidOf()) => productionShare.applyLedger([row], paid)[0];
 
-  test('nothing paid from a basis: exactly the live credit, with what it drew from each basis, and no ledger left on the row', () => {
-    const out = one([plain('visit-2', [invoice('inv-1', 200000, MEMBERS, 100000)])]);
-    expect(out).toMatchObject({ kind: 'priced', creditCents: 100000, needsReview: false, bases: [{ basisType: 'invoice', basisId: 'inv-1', cents: 100000 }] });
+  test('nothing paid: exactly the live credit; a paid stop would record the invoices linked to its visit and its package slot', () => {
+    const out = one(plain('visit-2', ['inv-1']));
+    expect(out).toMatchObject({ kind: 'priced', creditCents: 100000, needsReview: false, invoices: ['inv-1'], bases: [] });
     expect(out).not.toHaveProperty('ledger');
-    const rootJob = one([job('root', 1)]);
-    expect(rootJob).toMatchObject({ creditCents: 100000, bases: [{ basisType: 'job', basisId: 'root', cents: 100000 }] });
+    expect(out).not.toHaveProperty('linkedInvoices');
+    // a stop paid from its own price records the invoices linked to it too (a late invoice or a relink is caught later)
+    expect(one({ visitId: 'v', workDate: '2026-09-21', kind: 'priced', creditCents: 5000, needsReview: false, ledger: null, linkedInvoices: ['inv-late'] }).invoices).toEqual(['inv-late']);
+    // a $0 stop records none
+    expect(one({ visitId: 'v', workDate: '2026-09-21', kind: 'free_visit', creditCents: 0, needsReview: false, ledger: null, linkedInvoices: ['inv-1'] }).invoices).toEqual([]);
+    expect(one(job('root', 1))).toMatchObject({ creditCents: 100000, bases: [{ basisType: 'job', basisId: 'root', totalCents: 200000, sold: 2, slot: 1 }] });
   });
 
-  test('an invoice credits REMAINING (live total less what was paid), whatever its split is now', () => {
-    const paid = paidOf({ 'invoice:inv-1': [100000, ['visit-1']] });
-    // the split moved to $1,500 / $500 after visit-1 was paid $1,000: visit-2 is the last open member and takes the $1,000 remaining
-    for (const live of [150000, 50000]) {
-      expect(one([plain('visit-2', [invoice('inv-1', 200000, MEMBERS, live)])], paid)).toMatchObject({ creditCents: 100000, bases: [{ cents: 100000 }] });
-    }
-    // reprice the whole invoice to $1,200 after $1,000 was paid: $200 remain
-    expect(one([plain('visit-2', [invoice('inv-1', 120000, MEMBERS, 60000)])], paid).creditCents).toBe(20000);
+  test('INVOICE: an invoice that a paid row recorded (a relink, a second visit of it) makes the stop $0 + review', () => {
+    const out = one(plain('visit-2', ['inv-1']), paidOf({ invoices: { 'inv-1': '2026-09-14' } }));
+    expect(out).toMatchObject({ kind: 'invoice_paid_elsewhere', creditCents: 0, needsReview: true, invoices: [], bases: [] });
+    expect(out.reason).toBe('This invoice also covers a visit paid in the week of 2026-09-14: set its credit by hand.');
   });
 
-  test('REMAINING is shared by the live weights of the member visits not paid yet, never more than REMAINING', () => {
-    const members = [['visit-1', 100000], ['visit-2', 300000], ['visit-3', 100000]];
-    const paid = paidOf({ 'invoice:inv-1': [100000, ['visit-1']] });
-    const rows = productionShare.applyLedger([plain('visit-2', [invoice('inv-1', 300000, members, 180000)])], paid);
-    // $2,000.00 remain over visit-2 (3 parts) and visit-3 (1 part): visit-2 gets $1,500.00 now and visit-3 keeps its part for later
-    expect(rows[0].creditCents).toBe(150000);
+  test('AUDIT :854 INVOICE: a LATE invoice covering a visit already credited from its own price is caught by that member visit', () => {
+    // visit-1 was credited on a finalized check from its estimate (no invoice then); the invoice came after and covers visit-1 and visit-2
+    const out = one(plain('visit-2', ['inv-late']), paidOf({ visits: { 'visit-1': '2026-09-14' } }));
+    expect(out).toMatchObject({ kind: 'invoice_paid_elsewhere', creditCents: 0, needsReview: true });
   });
 
-  test('an invoice credited in full: a visit that joins it later, or a second visit of it, is $0 and needs review', () => {
-    const paid = paidOf({ 'invoice:inv-1': [200000, ['visit-1']] });
-    const out = one([plain('visit-2', [invoice('inv-1', 200000, MEMBERS, 100000)])], paid);
-    expect(out).toMatchObject({ kind: 'basis_exhausted', creditCents: 0, needsReview: true, bases: [] });
-    expect(out.reason).toContain('already credited in full');
-    // credited above the live total (the invoice was reduced after): nothing remains either
-    expect(one([plain('visit-2', [invoice('inv-1', 150000, MEMBERS, 75000)])], paid).kind).toBe('basis_exhausted');
-  });
-
-  test('PER INVOICE: what is left of a shared invoice plus the visit\'s own separate invoice', () => {
-    const paid = paidOf({ 'invoice:inv-1': [10000, ['visit-1']] });
-    const out = one([plain('visit-2', [invoice('inv-1', 20000, [['visit-1', 15000], ['visit-2', 5000]], 5000), invoice('inv-own', 5000, [['visit-2', 5000]], 5000)])], paid);
-    expect(out.creditCents).toBe(15000); // $100.00 remaining of the shared invoice + $50.00 of its own
-    expect(out.bases).toEqual([{ basisType: 'invoice', basisId: 'inv-1', cents: 10000 }, { basisType: 'invoice', basisId: 'inv-own', cents: 5000 }]);
+  test('INVOICE: an invoice whose members are all in this week, or that nothing paid touched, splits live as always', () => {
+    expect(one(plain('visit-2', ['inv-1']), paidOf({ invoices: { 'inv-other': '2026-09-14' }, visits: { 'visit-9': '2026-09-14' } }))).toMatchObject({ kind: 'priced', creditCents: 100000 });
   });
 
   test('a visit already credited on a finalized check is already_paid, before anything else', () => {
-    const out = one([plain('visit-2', [invoice('inv-1', 200000, MEMBERS, 100000)])], paidOf({}, { 'visit-2': '2026-09-14' }));
-    expect(out).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true, bases: [] });
+    expect(one(plain('visit-2', ['inv-1']), paidOf({ visits: { 'visit-2': '2026-09-14' } }))).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true, invoices: [] });
   });
 
-  test('a package: its follow-up credits the job price less what was paid (reprice $2,000 -> $1,200 after $1,000 was paid: $200)', () => {
-    const paid = paidOf({ 'job:root': [100000, ['root']] });
-    expect(one([job('followup', 2, { price: 120000 })], paid)).toMatchObject({ kind: 'multi_visit_job', creditCents: 20000, bases: [{ basisType: 'job', basisId: 'root', cents: 20000 }] });
-    expect(one([job('followup', 2, { price: 200000 })], paid).creditCents).toBe(100000);
-    // the price went UP after: it takes the rest, never a fixed half
-    expect(one([job('followup', 2, { price: 300000 })], paid).creditCents).toBe(200000);
+  test('PACKAGE: the total is fixed at the first paid row; a follow-up credits its slot of THAT total, whatever the live price is now', () => {
+    const paid = paidOf({ jobs: { root: [200000, 2, [1]] } });
+    for (const livePrice of [120000, 200000, 300000]) {
+      expect(one(job('followup', 2, { price: livePrice }), paid)).toMatchObject({
+        kind: 'multi_visit_job', creditCents: 100000, bases: [{ basisType: 'job', basisId: 'root', totalCents: 200000, sold: 2, slot: 2 }],
+      });
+    }
   });
 
-  test('THREE CREDITS: a two-visit package paid for both visits earns a replacement nothing', () => {
-    const paid = paidOf({ 'job:root': [200000, ['root', 'followup']] });
-    const out = one([job('replacement', 2)], paid);
+  test('PACKAGE: a slot already paid (a replacement follow-up) or one past the sold count is $0 + review', () => {
+    const paid = paidOf({ jobs: { root: [200000, 2, [1, 2]] } });
+    const out = one(job('replacement', 2), paid);
     expect(out).toMatchObject({ kind: 'basis_exhausted', creditCents: 0, needsReview: true });
-    expect(out.reason).toContain('package');
+    expect(out.reason).toContain('set its credit by hand');
+    expect(one(job('third', 3), paidOf({ jobs: { root: [200000, 2, [1]] } })).kind).toBe('basis_exhausted');
   });
 
-  test('more visits than sold slots left: the first ones credit, the rest are $0 and need review', () => {
-    const paid = paidOf({ 'job:root': [100000, ['root']] });
-    const rows = productionShare.applyLedger([job('a', 2), job('b', 3)], paid);
-    expect(rows.map((row) => [row.kind, row.creditCents])).toEqual([['multi_visit_job', 100000], ['basis_exhausted', 0]]);
+  test('PACKAGE: visits of one package in the same week, nothing paid, credit their live parts', () => {
+    const rows = productionShare.applyLedger([job('root', 1), job('followup', 2)], paidOf());
+    expect(rows.map((row) => [row.creditCents, row.bases[0].slot])).toEqual([[100000, 1], [100000, 2]]);
   });
 
-  test('AUDIT :708: a live share that rounds to $0 still takes what is left of the invoice (classified priced after)', () => {
-    const paid = paidOf({ 'invoice:inv-1': [99999, ['visit-1']] });
-    // visit-2 weighs one cent against $1,000.00: its live share is $0 ('free_visit'), but the invoice was raised to $2,000.00 since
-    const members = [['visit-1', 10000000], ['visit-2', 1]];
-    const row = { visitId: 'visit-2', workDate: '2026-09-21', kind: 'free_visit', creditCents: 0, needsReview: false, ledger: { invoices: [invoice('inv-1', 200000, members, 0)] } };
-    const out = one([row], paid);
-    expect(out).toMatchObject({ kind: 'priced', creditCents: 100001, needsReview: false, bases: [{ basisType: 'invoice', basisId: 'inv-1', cents: 100001 }] });
-    // nothing paid from the invoice: the $0 share stays $0 and stays what it was
-    expect(one([row])).toMatchObject({ kind: 'free_visit', creditCents: 0, bases: [] });
+  test('AUDIT :904 INVOICE: a package invoice relinked to another visit is caught by the paid package row that recorded it', () => {
+    // the root was paid with invoice inv-9 linked to it; the invoice now belongs to visit-2 (a plain visit): its credit is review
+    expect(one(plain('visit-2', ['inv-9']), paidOf({ invoices: { 'inv-9': '2026-09-14' } })).kind).toBe('invoice_paid_elsewhere');
   });
 
   test('a row that is already $0 and needs review, and a credit no invoice or job priced, are left alone', () => {
     for (const kind of ['prepaid_plan', 'callback_other', 'free_visit', 'not_performed', 'unverified', 'multi_visit_job']) {
-      const row = { visitId: 'visit-2', workDate: '2026-09-21', kind, creditCents: kind === 'prepaid_plan' ? 40000 : 0, needsReview: kind === 'unverified' || kind === 'multi_visit_job', ledger: null };
-      const out = one([row], paidOf({ 'invoice:inv-1': [200000, ['visit-1']], 'job:root': [200000, ['root']] }));
+      const row = { visitId: 'visit-2', workDate: '2026-09-21', kind, creditCents: kind === 'prepaid_plan' ? 40000 : 0, needsReview: kind === 'unverified' || kind === 'multi_visit_job', ledger: null, linkedInvoices: [] };
+      const out = one(row, paidOf({ invoices: { 'inv-1': '2026-09-14' }, jobs: { root: [200000, 2, [1, 2]] } }));
       expect(out).toMatchObject({ kind, creditCents: row.creditCents, needsReview: row.needsReview });
     }
+  });
+});
+
+describe('the recorded invoice ids are in both finalize comparisons too', () => {
+  const rows = (invoices) => stops([['v1', '2026-09-14', 100000], ['v2', '2026-09-15', 110000]]).map((stop, i) => (i === 1 ? { ...stop, invoices } : stop));
+  const rev = (invoices) => share.revisionOf(new Map([['tech-a', { settings: SETTINGS, stops: rows(invoices) }]]));
+
+  test('the revision changes when only the invoices linked to a stop change', () => {
+    expect(rev(['inv-1'])).toBe(rev(['inv-1']));
+    expect(rev(['inv-2', 'inv-1'])).toBe(rev(['inv-1', 'inv-2']));
+    expect(rev(['inv-1'])).not.toBe(rev(['inv-9']));
+    expect(rev([])).not.toBe(rev(['inv-1']));
+  });
+
+  test('the snapshot stores the invoices and the package basis on the stop, and only when it has them', () => {
+    const made = share.snapshotOf({
+      weekStart: WEEK, settings: SETTINGS, result: shareForWeek({ credits: rows(['inv-1']), shifts: 2, settings: SETTINGS }),
+      stops: rows(['inv-1']).map((stop, i) => (i === 0 ? { ...stop, bases: [{ basisType: 'job', basisId: 'root', totalCents: 200000, sold: 2, slot: 1 }] } : stop)),
+    });
+    expect(made.stops[0].bases).toEqual([{ basisType: 'job', basisId: 'root', totalCents: 200000, sold: 2, slot: 1 }]);
+    expect(made.stops[0]).not.toHaveProperty('invoices');
+    expect(made.stops[1].invoices).toEqual(['inv-1']);
   });
 });
 
@@ -457,7 +461,7 @@ describe('the down guard migration', () => {
 });
 
 describe('the credit bases are in both finalize comparisons', () => {
-  const split = (a, b) => [{ basisType: 'invoice', basisId: 'inv-1', cents: a }, { basisType: 'invoice', basisId: 'inv-2', cents: b }];
+  const split = (a, b) => [{ basisType: 'job', basisId: 'root', totalCents: a, sold: 2, slot: 1 }, { basisType: 'job', basisId: 'root-2', totalCents: b, sold: 2, slot: 1 }];
   const withInvoices = (bases) => stops([['v1', '2026-09-14', 100000], ['v2', '2026-09-15', 110000], ['v3', '2026-09-16', 100000], ['v4', '2026-09-17', 102000]])
     .map((stop, i) => (i === 1 ? { ...stop, bases } : stop));
 

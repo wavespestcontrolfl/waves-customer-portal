@@ -53,8 +53,9 @@ function snapshotOf({ weekStart, settings, result, stops }) {
     shareCents: result.shareCents,
     stops: stops.map((stop) => ({
       visitId: stop.visitId, workDate: stop.workDate, kind: stop.kind, creditCents: stop.creditCents, needsReview: Boolean(stop.needsReview),
-      // What this credit drew from each basis (a shared invoice or a multi-visit job): [{ basisType, basisId, cents }]. Every later
-      // week reads the paid cents of a basis from these rows (production-share.js, the credit ledger).
+      // What later weeks read from a paid stop (production-share.js, CREDIT RULES): the invoice ids linked to its visit, and for a
+      // package visit its package { basisType: 'job', basisId, totalCents, sold, slot }.
+      ...(stop.invoices && stop.invoices.length ? { invoices: stop.invoices } : {}),
       ...(stop.bases && stop.bases.length ? { bases: stop.bases } : {}),
     })),
   };
@@ -117,18 +118,22 @@ const readInputsUnderLock = (trx, weekStart) => (shareOn() ? collectInputs(trx, 
  * credit, review mark), whatever the order. The pay run's finalize reads the inputs again under the payroll lock and compares
  * revisions, so credits that changed between its first read and the lock are never frozen onto a check. Pure.
  */
-// The credit bases a stop drew from, in a fixed order: [[type, id, cents], ...] (the credit ledger, production-share.js). The review token
-// and the revision both take it, so a basis that changes after drafting makes the draft stale even when the credits do not move.
-function basesSignature(bases) {
-  return (Array.isArray(bases) ? bases : []).map((one) => [one.basisType, one.basisId, Number(one.cents)])
-    .sort((a, b) => (`${a[0]}:${a[1]}` < `${b[0]}:${b[1]}` ? -1 : 1));
+// What a stop records for the rules in production-share.js, in a fixed order: its package basis [[type, id, total, sold, slot]] and the
+// invoice ids linked to its visit. The review token and the revision both take it, so a link or a package slot that changes after
+// drafting makes the draft stale even when the credits do not move.
+function basesSignature(bases, invoices) {
+  return [
+    (Array.isArray(bases) ? bases : []).map((one) => [one.basisType, one.basisId, Number(one.totalCents), Number(one.sold), Number(one.slot)])
+      .sort((a, b) => (`${a[0]}:${a[1]}` < `${b[0]}:${b[1]}` ? -1 : 1)),
+    (Array.isArray(invoices) ? [...invoices].map(String).sort() : []),
+  ];
 }
 
 function revisionOf(inputs) {
   const rows = [...inputs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([id, input]) => {
     if (input.error) return [id, 'error', input.error];
     const { settings } = input;
-    const stops = input.stops.map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases)])
+    const stops = input.stops.map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases, stop.invoices)])
       .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
     return [id, settings.id, settings.rateBps, settings.barType, settings.barCents, settings.callbackStopValueCents, stops];
   });
@@ -180,7 +185,7 @@ function snapshotOfRow(row) {
 function signature(row) {
   const snapshot = snapshotOfRow(row) || {};
   const stops = (Array.isArray(snapshot.stops) ? snapshot.stops : [])
-    .map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases)])
+    .map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases, stop.invoices)])
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return [
     snapshot.settingsId == null ? null : Number(snapshot.settingsId),

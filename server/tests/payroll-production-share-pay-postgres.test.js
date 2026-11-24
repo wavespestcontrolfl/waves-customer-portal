@@ -503,54 +503,72 @@ postgres('production share pay line', () => {
     };
     const snapshotStops = async (runId) => (await trx('payroll_checks').where({ run_id: runId }).first('calc_snapshot')).calc_snapshot.productionShare.stops;
 
-    it('records on the stop what it drew from each basis, and a later week with the same split credits the same', async () => {
+    it('records the invoices linked to a paid stop; a later week of ANOTHER visit of that invoice is $0 + review (set by hand)', async () => {
       const world = await sharedWorld();
       const week1 = (await draft(W1)).body.run;
-      // V1 is credited $1,000.00 (half the invoice); 1 shift, bar $900.00: share $15.00
+      // V1 is credited $1,000.00 (half the invoice, live: V2 is not paid); 1 shift, bar $900.00: share $15.00
       expect(byName(week1, 'Sample Alpha')).toMatchObject({ productionShareCents: 1500 });
       await finalize(week1.id);
-      expect((await snapshotStops(week1.id))[0].bases).toEqual([{ basisType: 'invoice', basisId: world.inv, cents: 100000 }]);
+      const stopsOf1 = await snapshotStops(week1.id);
+      expect(stopsOf1[0].invoices).toEqual([world.inv]);
       const { check, stop: row } = await week2Stop(world);
-      expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
-      expect(row.bases).toEqual([{ basisType: 'invoice', basisId: world.inv, cents: 100000 }]);
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+      expect(row).toMatchObject({ kind: 'invoice_paid_elsewhere', creditCents: 0, needsReview: true });
+      expect(row).not.toHaveProperty('invoices');
     });
 
-    it('AUDIT CASE: the invoice moved to $1,500.00 / $500.00 after week 1 was paid $1,000.00: V2 takes the $1,000.00 that remains, either way', async () => {
+    it('an invoice whose visits are ALL in the week splits live, as always', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id);
+      await worked(id, W1, 40);
+      const customerId = await customer();
+      const v1 = await stop(id, W1, '1000.00', customerId);
+      const v2 = await stop(id, addDays(W1, 1), '1000.00', customerId);
+      const inv = await invoiceFor(customerId, '2000.00');
+      await shareInvoice(customerId, inv, [v1, v2], 'k-all');
+      const check = byName((await draft(W1)).body.run, 'Sample Alpha');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 200000 });
+    });
+
+    it('AUDIT :854: a LATE invoice covering a visit already credited from its estimate, and another visit, gives the other visit nothing without a review', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id);
+      const W2 = addDays(W1, 7);
+      await worked(id, W1, 40);
+      await worked(id, W2, 40);
+      const customerId = await customer();
+      const a = await stop(id, W1, '1000.00', customerId); // credited from its own $1,000.00 estimate: no invoice exists yet
+      const b = await stop(id, W2, '1000.00', customerId);
+      const week1 = (await draft(W1)).body.run;
+      expect(byName(week1, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 100000 });
+      await finalize(week1.id);
+      // the invoice comes late, for both visits
+      const inv = await invoiceFor(customerId, '2000.00');
+      await shareInvoice(customerId, inv, [a, b], 'k-late');
+      const check = byName((await draft(W2)).body.run, 'Sample Alpha');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(snapshot.stops.find((row) => row.visitId === b)).toMatchObject({ kind: 'invoice_paid_elsewhere', creditCents: 0, needsReview: true });
+    });
+
+    it('the whole invoice repriced or its visits repriced after week 1 changes nothing: the visit of another week is review either way', async () => {
       const world = await sharedWorld();
       await finalize((await draft(W1)).body.run.id);
       await reprice(world, '1500.00', '500.00');
-      expect((await week2Stop(world)).check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
-      await reprice(world, '500.00', '1500.00');
-      expect((await week2Stop(world)).check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
-    });
-
-    it('the whole invoice repriced to $1,200.00 after $1,000.00 was paid: V2 takes the $200.00 that remains', async () => {
-      const world = await sharedWorld();
-      await finalize((await draft(W1)).body.run.id);
+      expect((await week2Stop(world)).check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
       await trx('invoices').where({ id: world.inv }).update({ subtotal: '1200.00', total: '1200.00' });
-      expect((await week2Stop(world)).check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 20000 });
+      expect((await week2Stop(world)).check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
     });
 
-    it('AUDIT CASE: a $1,200.00 split in half (V1 paid $600.00) and V2 keeps its link: V2 takes the $600.00 that remains, whatever it is priced at', async () => {
-      const world = await sharedWorld({ total: '1200.00', bar: 10000 });
-      const week1 = (await draft(W1)).body.run;
-      expect(byName(week1, 'Sample Alpha').productionShareCents).toBeGreaterThan(0);
-      await finalize(week1.id);
-      await reprice(world, '1000.00', '4000.00');
-      const { check } = await week2Stop(world);
-      expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 60000 });
-    });
-
-    it('AUDIT CASE: an invoice credited in FULL cannot be used again: a visit that joins it later is $0 and named', async () => {
+    it('a visit that joins an invoice that was paid whole earlier is $0 + review', async () => {
       const world = await sharedWorld({ linkSecond: false });
       const week1 = (await draft(W1)).body.run;
       await finalize(week1.id);
-      // week 1 paid the whole $2,000.00 invoice to V1
-      expect((await snapshotStops(week1.id))[0].bases).toEqual([{ basisType: 'invoice', basisId: world.inv, cents: 200000 }]);
+      expect((await snapshotStops(week1.id))[0].invoices).toEqual([world.inv]);
       await world.joinSecond();
       const { check, stop: row } = await week2Stop(world);
       expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
-      expect(row).toMatchObject({ kind: 'basis_exhausted', creditCents: 0, needsReview: true });
+      expect(row).toMatchObject({ kind: 'invoice_paid_elsewhere', creditCents: 0, needsReview: true });
     });
 
     it('a credit that is NOT priced from an invoice (a prepaid slice) keeps its own credit', async () => {
@@ -562,35 +580,33 @@ postgres('production share pay line', () => {
       expect(row).not.toHaveProperty('bases');
     });
 
-    it('the paid ledger is read by basis and by visit id from other weeks only', async () => {
+    it('the paid ledger is read by visit id, by invoice id and by package root, from other weeks only', async () => {
       const world = await sharedWorld();
       await finalize((await draft(W1)).body.run.id);
-      const key = `invoice:${world.inv}`;
-      const byBasis = await productionShare.paidLedger(trx, [world.v2], [key], world.W2);
-      expect(byBasis.byBasis.get(key)).toMatchObject({ cents: 100000 });
-      expect([...byBasis.byBasis.get(key).visits]).toEqual([world.v1]);
-      expect(byBasis.visits.size).toBe(0);
-      // a visit that a finalized check credited is named by its visit id, and so is every basis its row drew from, though no live visit shows it
-      const byVisit = await productionShare.paidLedger(trx, [world.v1], [], world.W2);
+      const byInvoice = await productionShare.paidLedger(trx, [world.v2], [world.inv], [], world.W2);
+      expect(byInvoice.invoices.get(world.inv)).toBe(W1);
+      expect(byInvoice.visits.size).toBe(0);
+      const byVisit = await productionShare.paidLedger(trx, [world.v1], [], [], world.W2);
       expect(byVisit.visits.get(world.v1)).toBe(W1);
-      expect(byVisit.byBasis.get(key)).toMatchObject({ cents: 100000 });
+      expect(byVisit.invoices.get(world.inv)).toBe(W1);
       // the week itself is never counted
-      expect((await productionShare.paidLedger(trx, [world.v1], [key], W1)).byBasis.size).toBe(0);
+      const own = await productionShare.paidLedger(trx, [world.v1], [world.inv], [], W1);
+      expect([own.visits.size, own.invoices.size]).toEqual([0, 0]);
     });
 
-    it('voiding the run that paid releases the ledger: the later visit credits from the live split', async () => {
+    it('voiding the run that paid releases it: the later visit credits from the live split', async () => {
       const world = await sharedWorld();
       const week1 = (await draft(W1)).body.run;
       await finalize(week1.id);
       await reprice(world, '1500.00', '500.00');
       const run2 = (await draft(world.W2)).body.run;
-      expect(byName(run2, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
+      expect(byName(run2, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
       expect((await api('POST', `/runs/${week1.id}/void`, { body: { reason: 'sample' } })).status).toBe(200);
       const again = byName((await api('POST', `/runs/${run2.id}/recompute`)).body.run, 'Sample Alpha');
       expect(again.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 50000 });
     });
 
-    it('PER INVOICE: a visit with $100.00 left of a shared invoice and its own separate $50.00 invoice credits $150.00, and the snapshot keeps both', async () => {
+    it('a visit with an invoice paid elsewhere and its own separate invoice is review as a whole (set by hand)', async () => {
       const id = await tech('Sample Alpha');
       await settings(id, { bar_cents: 5000 });
       const W2 = addDays(W1, 7);
@@ -602,17 +618,11 @@ postgres('production share pay line', () => {
       const shared = await invoiceFor(customerId, '200.00');
       await shareInvoice(customerId, shared, [v1, v2], 'k-pi');
       const week1 = (await draft(W1)).body.run;
-      expect(byName(week1, 'Sample Alpha').productionShareCents).toBeGreaterThan(0); // $100.00 credited over a $50.00 bar
+      expect(byName(week1, 'Sample Alpha').productionShareCents).toBeGreaterThan(0);
       await finalize(week1.id);
-      // V2 also gets its own $50.00 invoice, and the shared invoice is repriced to $150.00 / $50.00 after week 1 was paid
-      const own = await invoiceFor(customerId, '50.00', { scheduled_service_id: v2 });
-      await reprice({ v1, v2 }, '150.00', '50.00');
+      await invoiceFor(customerId, '50.00', { scheduled_service_id: v2 });
       const check = byName((await draft(W2)).body.run, 'Sample Alpha');
-      expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 15000 });
-      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
-      const row = snapshot.stops.find((one) => one.visitId === v2);
-      expect(row).toMatchObject({ kind: 'priced', creditCents: 15000 });
-      expect(row.bases.map((basis) => [basis.basisId, basis.cents]).sort()).toEqual([[shared, 10000], [own, 5000]].sort());
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
     });
 
     const packageWorld = async ({ price = '2000.00' } = {}) => {
@@ -628,19 +638,21 @@ postgres('production share pay line', () => {
     const followUpOf = (world, week, status = 'completed') => stop(world.id, week, '0.00', world.customerId, {
       ...world.pkg, followup_included: true, followup_source_service_id: world.root, status });
 
-    it('AUDIT CASE: a package whose root is repriced $2,000 -> $1,200 after half ($1,000) was paid: the follow-up credits the $200.00 that remains', async () => {
+    it('PACKAGE: the total is FIXED at the first paid row: the root repriced $2,000 -> $1,200 after half was paid still gives the follow-up $1,000.00', async () => {
       const world = await packageWorld();
       const week1 = (await draft(W1)).body.run;
       expect(byName(week1, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 100000 });
       expect(byName(week1, 'Sample Alpha').productionShareCents).toBeGreaterThan(0);
       await finalize(week1.id);
-      expect((await snapshotStops(week1.id))[0].bases).toEqual([{ basisType: 'job', basisId: world.root, cents: 100000 }]);
+      expect((await snapshotStops(week1.id))[0].bases).toEqual([{ basisType: 'job', basisId: world.root, totalCents: 200000, sold: 2, slot: 1 }]);
       await trx('scheduled_services').where({ id: world.root }).update({ estimated_price: '1200.00' });
       const followUp = await followUpOf(world, world.weeks[1]);
       const week2 = byName((await draft(world.weeks[1])).body.run, 'Sample Alpha');
-      expect(week2.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 20000 });
+      expect(week2.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
       const snapshot = (await trx('payroll_checks').where({ id: week2.id }).first('calc_snapshot')).calc_snapshot.productionShare;
-      expect(snapshot.stops.find((row) => row.visitId === followUp)).toMatchObject({ kind: 'multi_visit_job', creditCents: 20000, bases: [{ basisType: 'job', basisId: world.root, cents: 20000 }] });
+      expect(snapshot.stops.find((row) => row.visitId === followUp)).toMatchObject({
+        kind: 'multi_visit_job', creditCents: 100000, bases: [{ basisType: 'job', basisId: world.root, totalCents: 200000, sold: 2, slot: 2 }],
+      });
     });
 
     it('a package not repriced: the follow-up credits the second half', async () => {
@@ -676,17 +688,47 @@ postgres('production share pay line', () => {
       expect(check.productionShare.needsReview.map((row) => row.visitId)).toEqual([orphan]);
     });
 
-    it('a package priced on its own unshared invoice stays on the package ledger; the invoice itself draws nothing', async () => {
+    it('AUDIT :602: an invoice linked only to the package is the package price ONCE: $2,000.00 invoice = $1,000.00 + $1,000.00', async () => {
+      const world = await packageWorld({ price: '0.00' });
+      // the root and its follow-up are both on the $2,000.00 invoice; the root's own estimate is not the price
+      const followUp = await followUpOf(world, world.weeks[1]);
+      const invoiceId = await invoiceFor(world.customerId, '2000.00');
+      await shareInvoice(world.customerId, invoiceId, [world.root, followUp], 'k-in');
+      const week1 = (await draft(W1)).body.run;
+      expect(byName(week1, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
+      await finalize(week1.id);
+      const first = (await snapshotStops(week1.id))[0];
+      expect(first.bases).toEqual([{ basisType: 'job', basisId: world.root, totalCents: 200000, sold: 2, slot: 1 }]);
+      expect(first.invoices).toEqual([invoiceId]);
+      expect(byName((await draft(world.weeks[1])).body.run, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
+    });
+
+    it('a package on its own sole-visit invoice: its link removed after the first payment changes nothing (the total is fixed)', async () => {
       const world = await packageWorld();
       const invoiceId = await invoiceFor(world.customerId, '2000.00');
       const links = await shareInvoice(world.customerId, invoiceId, [world.root], 'k-pl');
       const week1 = (await draft(W1)).body.run;
       await finalize(week1.id);
-      expect((await snapshotStops(week1.id))[0].bases).toEqual([{ basisType: 'job', basisId: world.root, cents: 100000 }]);
+      expect((await snapshotStops(week1.id))[0].bases).toEqual([{ basisType: 'job', basisId: world.root, totalCents: 200000, sold: 2, slot: 1 }]);
       await links.unlink(world.root);
       await followUpOf(world, world.weeks[1]);
-      // the root is priced $2,000.00 on its own now: $1,000.00 of the package is left
       expect(byName((await draft(world.weeks[1])).body.run, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
+    });
+
+    it('AUDIT :904: a package invoice RELINKED to another visit after the package was paid: that visit is $0 + review', async () => {
+      const world = await packageWorld();
+      const invoiceId = await invoiceFor(world.customerId, '2000.00');
+      const links = await shareInvoice(world.customerId, invoiceId, [world.root], 'k-rl');
+      const week1 = (await draft(W1)).body.run;
+      await finalize(week1.id);
+      // the invoice moves from the package root to a plain visit of week 2
+      const x = await stop(world.id, world.weeks[1], '1000.00', world.customerId);
+      await links.unlink(world.root);
+      await links.link(x);
+      const check = byName((await draft(world.weeks[1])).body.run, 'Sample Alpha');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(snapshot.stops.find((row) => row.visitId === x)).toMatchObject({ kind: 'invoice_paid_elsewhere', creditCents: 0 });
     });
 
     it('AUDIT CASE (nested): a package priced on an invoice SHARED with a visit outside it is $0 + needs review for every visit of the package', async () => {
@@ -716,29 +758,6 @@ postgres('production share pay line', () => {
       expect(locked.get(id).stops.find((row) => row.visitId === followUp).reason).toContain('set its credit by hand');
     });
 
-    it('AUDIT :708: a live share that rounds to $0 still takes what is left of the invoice', async () => {
-      const id = await tech('Sample Alpha');
-      await settings(id, { bar_cents: 100 });
-      const W2 = addDays(W1, 7);
-      await worked(id, W1, 40);
-      await worked(id, W2, 40);
-      const customerId = await customer();
-      const v1 = await stop(id, W1, '100000.00', customerId);
-      const v2 = await stop(id, W2, '0.01', customerId);
-      const invoiceId = await invoiceFor(customerId, '1000.00');
-      await shareInvoice(customerId, invoiceId, [v1, v2], 'k-round');
-      const week1 = (await draft(W1)).body.run;
-      expect(byName(week1, 'Sample Alpha').productionShareCents).toBeGreaterThan(0);
-      await finalize(week1.id);
-      const paid = (await snapshotStops(week1.id))[0].bases[0].cents;
-      // the invoice is raised to $2,000.00 after week 1: V2's own live share is still $0, and it takes everything that is left
-      await trx('invoices').where({ id: invoiceId }).update({ subtotal: '2000.00', total: '2000.00' });
-      const check = byName((await draft(W2)).body.run, 'Sample Alpha');
-      expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 200000 - paid });
-      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
-      expect(snapshot.stops.find((row) => row.visitId === v2)).toMatchObject({ kind: 'priced', creditCents: 200000 - paid });
-    });
-
     it('AUDIT :86: the draft (grouped read in one snapshot), the read under the lock and the preview compute the same rows for two technicians sharing an invoice', async () => {
       const a = await tech('Sample Alpha');
       const b = await tech('Sample Bravo');
@@ -761,9 +780,11 @@ postgres('production share pay line', () => {
       const locked = await productionSharePay.readInputsUnderLock(trx, W2);
       expect(productionSharePay.revisionOf(early)).toBe(productionSharePay.revisionOf(locked));
       expect((await finalize(run.id)).body.run.status).toBe('finalized');
-      // the invoice's $3,000.00 is credited once over the three visits
+      // the invoice was paid for V1 in week 1: its other visits are review, for both technicians, the same in every read
       const total = [a, b].reduce((sum, who) => sum + locked.get(who).stops.reduce((s2, row) => s2 + row.creditCents, 0), 0);
-      expect(total).toBe(200000);
+      expect(total).toBe(0);
+      expect(locked.get(a).stops[0].kind).toBe('invoice_paid_elsewhere');
+      expect(locked.get(b).stops[0].kind).toBe('invoice_paid_elsewhere');
       // and the preview shows each technician the rows the pay run drew
       for (const who of [a, b]) {
         const preview = await productionShare.previewWeek(who, W2, trx);
