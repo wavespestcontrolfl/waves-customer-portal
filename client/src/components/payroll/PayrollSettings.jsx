@@ -253,6 +253,54 @@ function AllowanceCell({ technician, onSaved }) {
   </form>;
 }
 
+// GATE_PAYROLL_TIME_OFF: the minimum paid hours of a full workweek (offer letter). The pay run tops a week up to
+// it, less the hours of time off the bank could not pay. Empty = none. The last day is typed when the employee
+// leaves: its week pays the scheduled days up to it, and later weeks no minimum. The owner account sets both.
+function WeekMinimumCell({ technician, onSaved }) {
+  const current = technician.paidWeekMinimumHours == null ? '' : String(technician.paidWeekMinimumHours);
+  const currentLast = technician.paidWeekMinimumLastDay || '';
+  const [value, setValue] = useState(current);
+  const [lastDay, setLastDay] = useState(currentLast);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const showLastDay = value.trim() !== '' || currentLast !== '';
+
+  async function save(event) {
+    event.preventDefault();
+    setBusy(true); setError('');
+    try {
+      await call(`/technicians/${technician.id}/week-minimum`, {
+        method: 'PUT',
+        body: {
+          hours: value.trim() === '' ? null : value.trim(),
+          // Only a date box on screen is sent: a hidden one keeps the stored day.
+          ...(showLastDay ? { lastDay: lastDay || null } : {}),
+          // What this page showed: the server refuses the save when another tab changed it since.
+          shown: { hours: technician.paidWeekMinimumHours ?? null, lastDay: technician.paidWeekMinimumLastDay || null },
+        },
+      });
+      onSaved(`Minimum paid hours a week saved for ${technician.name}.`);
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  return <form onSubmit={save} className="flex flex-wrap items-center gap-2">
+    <Input
+      aria-label={`Minimum paid hours a week for ${technician.name}`} className="w-24" inputMode="decimal"
+      autoComplete="off" placeholder="None" value={value} onChange={event => setValue(event.target.value)}
+    />
+    {showLastDay && <label className="flex items-center gap-1 text-ui-caption text-ink-secondary">
+      Last day
+      <Input
+        type="date" aria-label={`Last day for ${technician.name}`} className="w-40"
+        value={lastDay} onChange={event => setLastDay(event.target.value)}
+      />
+    </label>}
+    <Button type="submit" variant="secondary" disabled={busy || (value.trim() === current && lastDay === currentLast)}>Save</Button>
+    {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+  </form>;
+}
+
 // GATE_PAYROLL_PAY_LINES: whether federal overtime law covers the employee. W-2 box 12
 // code TT is filled only when it does. 'unset' = not set yet = no code TT.
 const COVERAGE_VALUES = { true: 'yes', false: 'no' };
@@ -417,8 +465,9 @@ export default function PayrollSettings() {
   const saved = text => { setDialog(null); setMessage(text); load(); };
   // Present only when the server has GATE_PAYROLL_TIME_OFF on.
   const showAllowance = hasField(technicians, 'ptoHoursPerYear');
-  // The yearly hours of every employee as one text: the time-off panel reloads its banks when it changes.
-  const bankKey = (technicians || []).map(tech => `${tech.id}:${tech.ptoHoursPerYear ?? ''}`).join('|');
+  // The yearly hours and the minimum paid week of every employee as one text: the open draft and the time-off
+  // panel's banks reload when it changes, so a draft the setting changed shows as out of date.
+  const bankKey = (technicians || []).map(tech => `${tech.id}:${tech.ptoHoursPerYear ?? ''}:${tech.paidWeekMinimumHours ?? ''}:${tech.paidWeekMinimumLastDay ?? ''}`).join('|');
   // Present only when the server has GATE_PAYROLL_PAY_LINES on.
   const showCoverage = hasField(technicians, 'flsaOvertimeCovered');
   // Present only when the server has GATE_PAYROLL_FAMILY_EMPLOYEE on.
@@ -440,6 +489,7 @@ export default function PayrollSettings() {
         <THead><TR>
           <TH>Employee</TH><TH>Pay rate</TH><TH>Pay method</TH><TH>Current W-4</TH><TH>SIMPLE IRA</TH>
           {showAllowance && <TH>Paid time off hours per year</TH>}
+          {showAllowance && <TH>Minimum paid hours a week</TH>}
           {showCoverage && <TH>Federal overtime law covers</TH>}
           {showFamily && <TH>Family employee</TH>}
           {showMercury && <TH>Mercury recipient id</TH>}
@@ -447,23 +497,32 @@ export default function PayrollSettings() {
         </TR></THead>
         <TBody>
           {technicians.map(tech => <TR key={tech.id}>
-            <TD>{tech.name}{tech.employmentStatus === 'prospective' && <span className="block text-ui-caption text-ink-secondary">Not started</span>}</TD>
+            <TD>
+              {tech.name}
+              {tech.employmentStatus === 'prospective' && <span className="block text-ui-caption text-ink-secondary">Not started</span>}
+              {/* Listed while a minimum paid week is set, so it can be cleared after the last week is paid. */}
+              {tech.notW2
+                ? <span className="block text-ui-caption text-ink-secondary">Not W-2 now: clear the minimum</span>
+                : tech.employmentStatus === 'inactive' && <span className="block text-ui-caption text-ink-secondary">Left: type the last day</span>}
+            </TD>
             <TD nums>{tech.payRate != null ? `${dollars(tech.payRate)}/hr` : 'Not set'}</TD>
             <TD>{payMethodLabel(tech)}</TD>
             <TD><W4Summary w4={tech.currentW4} /></TD>
             <TD><SimpleSummary election={tech.currentSimple} /></TD>
-            {showAllowance && <TD><AllowanceCell key={`${tech.id}:${tech.ptoHoursPerYear}`} technician={tech} onSaved={saved} /></TD>}
-            {showCoverage && <TD><CoverageCell key={`${tech.id}:${tech.flsaOvertimeCovered}`} technician={tech} onSaved={saved} /></TD>}
-            {showFamily && <TD><FamilyCell key={`${tech.id}:${JSON.stringify(tech.familyEmployment)}`} technician={tech} onSaved={saved} /></TD>}
-            {showMercury && <TD><MercuryRecipientCell key={`${tech.id}:${tech.mercuryRecipientId}`} technician={tech} onSaved={saved} /></TD>}
+            {/* A person who is not W-2 now is listed only to clear a minimum: no W-2 setting or action on the row. */}
+            {showAllowance && <TD>{!tech.notW2 && <AllowanceCell key={`${tech.id}:${tech.ptoHoursPerYear}`} technician={tech} onSaved={saved} />}</TD>}
+            {showAllowance && <TD><WeekMinimumCell key={`${tech.id}:${tech.paidWeekMinimumHours}:${tech.paidWeekMinimumLastDay}`} technician={tech} onSaved={saved} /></TD>}
+            {showCoverage && <TD>{!tech.notW2 && <CoverageCell key={`${tech.id}:${tech.flsaOvertimeCovered}`} technician={tech} onSaved={saved} />}</TD>}
+            {showFamily && <TD>{!tech.notW2 && <FamilyCell key={`${tech.id}:${JSON.stringify(tech.familyEmployment)}`} technician={tech} onSaved={saved} />}</TD>}
+            {showMercury && <TD>{!tech.notW2 && <MercuryRecipientCell key={`${tech.id}:${tech.mercuryRecipientId}`} technician={tech} onSaved={saved} />}</TD>}
             <TD>
-              <div className="flex flex-wrap gap-2">
+              {!tech.notW2 && <div className="flex flex-wrap gap-2">
                 <Button onClick={() => setDialog({ kind: 'w4', tech })}>Enter W-4</Button>
                 <Button variant="secondary" onClick={() => setDialog({ kind: 'history', tech })}>History</Button>
                 <SimpleIraButton call={call} technician={tech} onSaved={saved} />
                 <RateStepsButton call={call} technician={tech} onSaved={saved} />
                 <Button variant="secondary" onClick={() => setDialog({ kind: 'pay', tech })}>Pay method</Button>
-              </div>
+              </div>}
             </TD>
           </TR>)}
         </TBody>

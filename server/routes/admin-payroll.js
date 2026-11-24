@@ -58,6 +58,7 @@
  *                                    paid): void the pay run first.
  * GET    /time-off/balance?technicianId=&year=   allowance, hours booked, hours paid, holidays.
  * PUT    /technicians/:id/pto-allowance          { hoursPerYear | null } the yearly allowance.
+ * PUT    /technicians/:id/week-minimum           { hours | null } the minimum paid hours of a full workweek (owner account).
  *                                    The allowance only warns; it never blocks an entry.
  * PUT    /technicians/:id/pto-payout-week        { weekStart | null, shownWeekStart | null, shownState }
  *                                    "Pay out the bank": the pay run for that week pays every hour the time-off
@@ -196,6 +197,13 @@ router.put('/technicians/:id/pto-allowance', timeOffOnly, async (req, res) => {
   try {
     res.json({ technician: await payrollTimeOff.setPtoAllowance(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set time off allowance', err); }
+});
+
+// The minimum paid week raises what a paycheck pays, so it is the owner account's alone, like a payout.
+router.put('/technicians/:id/week-minimum', timeOffOnly, requireFullAccess, async (req, res) => {
+  try {
+    res.json({ technician: await payrollTimeOff.setWeekMinimum(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set minimum paid week', err); }
 });
 
 // A payout decides an employee's last wages (the handbook's two exceptions need the owner's judgment), so it

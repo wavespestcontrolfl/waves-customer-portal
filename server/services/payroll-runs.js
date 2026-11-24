@@ -76,12 +76,14 @@ const { syncPayrollFilingsSafe } = require('./payroll-tax-calendar');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const {
   STAFF_WORK_DATE_SQL,
+  STAFF_DAILY_WORK_SQL,
   addStaffWorkDays,
   staffWeekStartForWorkDate,
 } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
 const { PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY, lockPayrollMutations } = require('./payroll-lock');
 const { applyDueSteps, hasDueSteps, withWeekRates } = require('./payroll-rate-steps');
+const weekMinimum = require('./payroll-week-minimum');
 const { shiftCloseReviewLive, payrollTimeOffLive, payrollBankMatchLive, payrollMercuryStatusLive } = require('../config/feature-gates');
 const {
   payLinesOn, openLinesFor, priceLines, totalsOf, markLinesPaid, reopenLinesOfRun,
@@ -290,6 +292,8 @@ function buildCheck({
   const withLines = payLinesOn();
   const ptoMinutes = tech.pto_minutes || 0;
   const holidayMinutes = tech.holiday_minutes || 0;
+  // The minimum paid week: set by evaluate() only for a technician who has one (payroll-week-minimum.js).
+  const withMinimum = withTimeOff && tech.minimum_week_minutes !== undefined;
   // Open pay lines for this technician and the extra overtime they cause (evaluate()).
   const lines = (withLines && tech.pay_lines) || [];
   const linePremium = (withLines && tech.line_premium) || { extraPremiumCents: 0, weeks: [] };
@@ -302,6 +306,11 @@ function buildCheck({
       regularMinutes: tech.regular_minutes,
       overtimeMinutes: tech.overtime_minutes,
       ...(withTimeOff ? { ptoMinutes, holidayMinutes } : {}),
+      ...(withMinimum ? {
+        minimumWeekMinutes: tech.minimum_week_minutes,
+        minimumWeekTargetMinutes: tech.minimum_week_target_minutes || 0,
+        minimumWeekPayoutMinutes: (tech.pto_bank && tech.pto_bank.payoutMinutes) || 0,
+      } : {}),
       ytdGrossWages: centsText(ytdGrossCents),
       w4,
       ...(withLines ? {
@@ -346,6 +355,10 @@ function buildCheck({
     check.pto_pay_cents = pay.ptoPayCents;
     check.holiday_pay_cents = pay.holidayPayCents;
     Object.assign(check, bankColumns(tech));
+  }
+  if (withMinimum) {
+    check.minimum_week_minutes = tech.minimum_week_minutes;
+    check.minimum_week_pay_cents = pay.minimumWeekPayCents;
   }
   return { check };
 }
@@ -434,6 +447,8 @@ function tokenOf(run, rows, unpaid = [], payouts = []) {
     // The time-off bank: a change of the yearly hours, the hire date, an illness mark or an earlier
     // check after drafting changes what the bank pays or earns, so the draft goes stale.
     ...(storedBank(row) ? [Number(row.pto_earned_minutes).toFixed(2), ptoBankSignature(row)] : []),
+    // The minimum paid week: only on a check that has one, so every other check keeps its token.
+    ...(row.minimum_week_minutes != null ? [`minimum=${Number(row.minimum_week_minutes).toFixed(2)}`, Number(row.minimum_week_pay_cents)] : []),
     // Adding, removing or changing a pay line after drafting changes the token too. A row that
     // stored pay line figures keeps them in the token after the gate is turned off, so a draft
     // that still shows them goes stale instead of finalizing without them.
@@ -457,6 +472,8 @@ function sumRows(rows) {
     netCents: total(['net_cents']),
     employerTaxesCents: total(EMPLOYER_TAX_KEYS),
     ...(timeOffOn() ? { ptoPayCents: total(['pto_pay_cents']), holidayPayCents: total(['holiday_pay_cents']) } : {}),
+    // Present only when a check of the run has a minimum paid week, so every other run keeps its keys.
+    ...(rows.some((row) => row.minimum_week_minutes != null) ? { minimumWeekPayCents: total(['minimum_week_pay_cents']) } : {}),
   };
 }
 
@@ -477,6 +494,8 @@ const checkColumns = (conn) => [
   ...MONEY_KEYS,
   ...(timeOffOn() ? [...TIME_OFF_COLUMNS, 'pto_earned_minutes', conn.raw("calc_snapshot->'ptoBank' as pto_bank")] : []),
   ...PAY_LINE_KEYS, ...UNEMPLOYMENT_COLUMNS, ...SIMPLE_COLUMNS, conn.raw("calc_snapshot->'payLines' as pay_lines"),
+  // The minimum paid week, read whatever the gates are: a check that paid one shows it.
+  'minimum_week_minutes', 'minimum_week_pay_cents',
   'ytd_gross_before_cents', 'w4_election_id', 'pay_method', 'check_number', 'status',
   conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"),
   conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"),
@@ -527,6 +546,12 @@ function serializeCheck(row) {
       holidayPayCents: Number(row.holiday_pay_cents || 0),
     } : {}),
     ...bankView(row),
+    // The minimum paid week (payroll-week-minimum.js): only on a check of a technician who has one.
+    ...(row.minimum_week_minutes != null ? {
+      minimumWeekMinutes: Number(row.minimum_week_minutes),
+      minimumWeekHours: hoursText(row.minimum_week_minutes),
+      minimumWeekPayCents: Number(row.minimum_week_pay_cents),
+    } : {}),
     ...(payLinesOn() || storedLines(row) ? {
       reviewBonusCents: Number(row.review_bonus_cents || 0),
       commissionCents: Number(row.commission_cents || 0),
@@ -568,20 +593,12 @@ async function withPaperPayments(conn, rows) {
 
 // Technicians with worked time in the week, approved or not. Same test as the
 // timesheet approval screen, so "waiting" matches what the office sees there.
-const DAILY_WORK_SQL = `(
-      COALESCE(total_shift_minutes, 0) <> 0
-      OR COALESCE(total_job_minutes, 0) <> 0
-      OR COALESCE(total_drive_minutes, 0) <> 0
-      OR COALESCE(total_break_minutes, 0) <> 0
-      OR COALESCE(total_admin_minutes, 0) <> 0
-      OR COALESCE(job_count, 0) <> 0
-    )`;
 
 async function workedTechnicianIds(conn, start, end) {
   const daily = await conn('time_entry_daily_summary')
     .where('work_date', '>=', start)
     .where('work_date', '<=', end)
-    .whereRaw(DAILY_WORK_SQL)
+    .whereRaw(STAFF_DAILY_WORK_SQL)
     .select('technician_id');
   const entries = await conn('time_entries')
     .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
@@ -603,7 +620,7 @@ async function workedWeeksByTechnician(conn, ids, start, end) {
   if (!ids.length) return byTech;
   const daily = await conn('time_entry_daily_summary')
     .whereIn('technician_id', ids).where('work_date', '>=', start).where('work_date', '<=', end)
-    .whereRaw(DAILY_WORK_SQL)
+    .whereRaw(STAFF_DAILY_WORK_SQL)
     .distinct('technician_id', conn.raw(`to_char(${weekStartSql('work_date')}, 'YYYY-MM-DD') AS week_start`));
   const entries = await conn('time_entries')
     .whereIn('technician_id', ids).where('status', '!=', 'voided')
@@ -915,12 +932,17 @@ async function evaluate(conn, run, { lock = false } = {}) {
     const payoutHolds = await payoutWaits(conn, payouts, start);
     for (const [technicianId, reason] of payoutHolds) bankHolds.set(technicianId, reason);
     unpaidTimeOff = unpaidTimeOff.filter((row) => !payoutHolds.has(row.technicianId));
+    // The minimum paid week of a technician who has one (payroll-week-minimum.js): a week of time off the bank
+    // could not pay in full still gets a check when the minimum adds hours to it.
+    const minimum = await weekMinimum.applyMinimum(conn, banked.rows, { start, end, lock });
+    const settled = minimum.rows;
+    for (const [technicianId, reason] of minimum.holds) if (!bankHolds.has(technicianId)) bankHolds.set(technicianId, reason);
     const needsCheck = (row) => bankHolds.has(row.technician_id) || lineMap.has(row.technician_id)
-      || Number(row.pto_minutes) + Number(row.holiday_minutes) > 0;
+      || Number(row.pto_minutes) + Number(row.holiday_minutes) + Number(row.minimum_week_minutes || 0) > 0;
     const offEnd = withHours.length + timeOffOnlyRows.length;
-    linesOnlyRows = banked.rows.slice(offEnd);
-    timeOffOnlyRows = banked.rows.slice(withHours.length, offEnd).filter(needsCheck);
-    withHours = banked.rows.slice(0, withHours.length);
+    linesOnlyRows = settled.slice(offEnd);
+    timeOffOnlyRows = settled.slice(withHours.length, offEnd).filter(needsCheck);
+    withHours = settled.slice(0, withHours.length);
   }
   // Each check pays the rate of ITS week (payroll-rate-steps.js); with no pay rate step the rows are unchanged.
   const payable = await withWeekRates(conn,
@@ -1048,7 +1070,7 @@ async function listRuns(conn = db) {
     .select(runColumns(conn));
   if (!runs.length) return [];
   const rows = await conn('payroll_checks').whereIn('run_id', runs.map((run) => run.id))
-    .select(['run_id', ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_PAY_COLUMNS : [])]);
+    .select(['run_id', ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_PAY_COLUMNS : []), 'minimum_week_minutes', 'minimum_week_pay_cents']);
   const byRun = new Map();
   for (const row of rows) {
     if (!byRun.has(row.run_id)) byRun.set(row.run_id, []);
@@ -1452,12 +1474,14 @@ async function getStub(checkId, conn = db) {
       regular: c.regularHours,
       overtime: c.overtimeHours,
       ...(timeOffOn() ? { pto: c.ptoHours, holiday: c.holidayHours } : {}),
+      ...(c.minimumWeekHours === undefined ? {} : { minimumWeek: c.minimumWeekHours }),
     },
     hourlyRate: c.hourlyRate,
     earnings: {
       regularPayCents: c.regularPayCents,
       overtimePayCents: c.overtimePayCents,
       ...(timeOffOn() ? { ptoPayCents: c.ptoPayCents, holidayPayCents: c.holidayPayCents } : {}),
+      ...(c.minimumWeekPayCents === undefined ? {} : { minimumWeekPayCents: c.minimumWeekPayCents }),
       ...(withLines ? {
         reviewBonusCents: c.reviewBonusCents,
         commissionCents: c.commissionCents,
@@ -1560,6 +1584,8 @@ const CSV_TIME_OFF_HEADERS = ['PTO Hours', 'PTO Pay', 'Holiday Hours', 'Holiday 
 const CSV_PAY_LINE_HEADERS = ['Review Bonus', 'Commission', 'Health Allowance', 'Overtime On Bonus And Allowance', 'HSA From Waves'];
 // Only when a check in the run holds a season bonus, stay bonus or December gift. It is in Gross Pay.
 const CSV_TECH_REWARDS_HEADERS = ['Tech Rewards Bonus'];
+// Only when a check in the run has a minimum paid week. The pay is in Gross Pay; the hours are not hours worked.
+const CSV_MINIMUM_WEEK_HEADERS = ['Minimum Week Hours', 'Minimum Week Pay'];
 // Last, only when a check in the run has SIMPLE IRA savings. It is in Gross Pay and comes out of Net Pay.
 const CSV_SIMPLE_HEADERS = ['SIMPLE IRA Savings'];
 
@@ -1569,7 +1595,8 @@ function checksToCsv(rows) {
   const withLines = payLinesOn() || rows.some(storedLines);
   const withSimple = rows.some(storedSimple);
   const withTechRewards = withLines && rows.some((row) => row.tech_rewards_cents != null);
-  const lines = [csvRow([...CSV_HEADERS, ...(withTimeOff ? CSV_TIME_OFF_HEADERS : []), ...(withLines ? CSV_PAY_LINE_HEADERS : []), ...(withTechRewards ? CSV_TECH_REWARDS_HEADERS : []), ...(withSimple ? CSV_SIMPLE_HEADERS : [])])];
+  const withMinimum = rows.some((row) => row.minimum_week_minutes != null);
+  const lines = [csvRow([...CSV_HEADERS, ...(withTimeOff ? CSV_TIME_OFF_HEADERS : []), ...(withLines ? CSV_PAY_LINE_HEADERS : []), ...(withTechRewards ? CSV_TECH_REWARDS_HEADERS : []), ...(withMinimum ? CSV_MINIMUM_WEEK_HEADERS : []), ...(withSimple ? CSV_SIMPLE_HEADERS : [])])];
   for (const row of rows) {
     const c = serializeCheck(row);
     lines.push(csvRow([
@@ -1584,6 +1611,7 @@ function checksToCsv(rows) {
         centsText(c.lineOvertimePremiumCents), centsText(c.hsaEmployerCents),
       ] : []),
       ...(withTechRewards ? [centsText(c.techRewardsCents || 0)] : []),
+      ...(withMinimum ? [c.minimumWeekHours || '0.00', centsText(c.minimumWeekPayCents || 0)] : []),
       ...(withSimple ? [centsText(c.simpleDeferralCents || 0)] : []),
     ]));
   }

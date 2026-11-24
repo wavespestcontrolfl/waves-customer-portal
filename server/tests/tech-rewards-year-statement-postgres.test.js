@@ -50,7 +50,7 @@ postgres('yearly pay statement', () => {
   const addCheck = async (weekStart, payDate, parts = {}, { status = 'finalized', runStatus = status, tech = techId, patch = {} } = {}) => {
     // `lines`: the pay lines the check froze when it was priced, in the shape payroll-pay-lines.js openLinesFor gives buildCheck
     const { lines = null, ...amounts } = parts;
-    const pay = { regular: 100000, overtime: 0, pto: 0, holiday: 0, commission: null, reviewBonus: null, healthAllowance: null, techRewards: null, linePremium: null, ...amounts };
+    const pay = { regular: 100000, overtime: 0, pto: 0, holiday: 0, minimumWeek: null, commission: null, reviewBonus: null, healthAllowance: null, techRewards: null, linePremium: null, ...amounts };
     const gross = Object.values(pay).reduce((total, value) => total + (value || 0), 0);
     const snapshot = lines ? { payLines: lines.map(([kind, amountCents]) => ({ id: randomUUID(), kind, amountCents, earnedWeekStart: weekStart, coversFrom: null, coversTo: null })) } : {};
     const taxes = { federal_income_tax_cents: 10000, social_security_cents: 6200, medicare_cents: 1450, additional_medicare_cents: 0 };
@@ -62,7 +62,9 @@ postgres('yearly pay statement', () => {
       week_start: weekStart, pay_date: payDate,
       hourly_rate: '25.00', regular_minutes: '2400.00', overtime_minutes: '0.00',
       gross_cents: gross, regular_pay_cents: pay.regular, overtime_pay_cents: pay.overtime, overtime_premium_cents: 0,
-      pto_pay_cents: pay.pto, holiday_pay_cents: pay.holiday, commission_cents: pay.commission, review_bonus_cents: pay.reviewBonus,
+      pto_pay_cents: pay.pto, holiday_pay_cents: pay.holiday,
+      ...(pay.minimumWeek == null ? {} : { minimum_week_minutes: '120.00', minimum_week_pay_cents: pay.minimumWeek }),
+      commission_cents: pay.commission, review_bonus_cents: pay.reviewBonus,
       health_allowance_cents: pay.healthAllowance, tech_rewards_cents: pay.techRewards, line_overtime_premium_cents: pay.linePremium,
       ...taxes, net_cents: gross - 17650 - deferral,
       employer_social_security_cents: 6200, employer_medicare_cents: 1450, futa_cents: 600, fl_reemployment_cents: 2700,
@@ -158,20 +160,22 @@ postgres('yearly pay statement', () => {
     await addCheck('2026-03-02', '2026-03-13', { regular: 100000, overtime: 7500, pto: 20000, holiday: 10000, commission: 6000, reviewBonus: 1500, healthAllowance: 30000, linePremium: 450, lines: [['commission', 6000], ['review_bonus', 1500], ['health_allowance', 30000]] }, { patch: { ...simple, hsa_employer_cents: 5000 } });
     await addCheck('2026-09-14', '2026-09-25', { regular: 100000, techRewards: 150000, linePremium: 1200, lines: [['season_bonus', 120000], ['stay_bonus', 30000]] }, { patch: simple });
     await addCheck('2026-12-07', '2026-12-18', { regular: 100000, techRewards: 30000, lines: [['december_gift', 30000]] });
+    // a week the minimum paid week topped up
+    await addCheck('2026-11-02', '2026-11-13', { regular: 95000, minimumWeek: 5000 });
     // checks that must not count: another year's and another person's
     await addCheck('2026-12-28', '2027-01-08', { regular: 100000, techRewards: 5000, lines: [['stay_bonus', 5000]] });
     await addCheck('2026-10-05', '2026-10-16', { regular: 100000, techRewards: 8000, lines: [['season_bonus', 8000]] }, { tech: otherTechId });
 
     const { statement } = (await own()).body;
     expect(statement.pay).toEqual({
-      regularPayCents: 300000, overtimePayCents: 7500, ptoPayCents: 20000, holidayPayCents: 10000,
+      regularPayCents: 395000, overtimePayCents: 7500, ptoPayCents: 20000, holidayPayCents: 10000, minimumWeekPayCents: 5000,
       commissionCents: 6000, reviewBonusCents: 1500, healthAllowanceCents: 30000,
       seasonBonusCents: 120000, stayBonusCents: 30000, decemberGiftCents: 30000,
-      lineOvertimePremiumCents: 1650, otherCents: 0, grossCents: 556650,
+      lineOvertimePremiumCents: 1650, otherCents: 0, grossCents: 656650,
     });
-    expect(Object.entries(statement.pay).filter(([key]) => key !== 'grossCents').reduce((total, [, value]) => total + value, 0)).toBe(556650);
+    expect(Object.entries(statement.pay).filter(([key]) => key !== 'grossCents').reduce((total, [, value]) => total + value, 0)).toBe(656650);
     expect(statement.fromWaves).toEqual({ simpleEmployerCents: 4000, hsaEmployerCents: 5000 });
-    expect(statement.totalCents).toBe(556650 + 4000 + 5000);
+    expect(statement.totalCents).toBe(656650 + 4000 + 5000);
     expect(statement.simpleSavingsCents).toBe(6000);
     expect(statement.pay.grossCents - statement.withheld.totalCents - statement.simpleSavingsCents).toBe(statement.netCents);
     // every year with a paycheck, newest first (and the year the test runs in, whatever it is)

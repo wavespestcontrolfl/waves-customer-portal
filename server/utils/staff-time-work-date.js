@@ -82,9 +82,20 @@ function staffWeekStartForWorkDate(workDate) {
   return answer;
 }
 
+// A time_entry_daily_summary row that holds worked time (payroll: a day with recorded work).
+const STAFF_DAILY_WORK_SQL = `(
+      COALESCE(total_shift_minutes, 0) <> 0
+      OR COALESCE(total_job_minutes, 0) <> 0
+      OR COALESCE(total_drive_minutes, 0) <> 0
+      OR COALESCE(total_break_minutes, 0) <> 0
+      OR COALESCE(total_admin_minutes, 0) <> 0
+      OR COALESCE(job_count, 0) <> 0
+    )`;
+
 module.exports = {
   STAFF_TIME_ZONE,
   STAFF_WORK_DATE_SQL,
+  STAFF_DAILY_WORK_SQL,
   staffWorkDateSql,
   staffWorkDate,
   addStaffWorkDays,

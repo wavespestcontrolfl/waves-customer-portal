@@ -240,9 +240,14 @@ async function setPayMethod(technicianId, input, actor, conn = db) {
 // panel, GATE_PAYROLL_TIME_OFF) adds an employee who has left (employment_status inactive) and still has a
 // time-off bank setting: the owner settles that bank after the employee is marked inactive ("Pay out the
 // bank"), so the panel must still list them.
-const listedEmployees = (query, formerWithBank) => query.where({ employment_type: 'w2' }).where(function listed() {
-  this.whereIn('employment_status', ['active', 'prospective']);
-  if (formerWithBank) this.orWhereNotNull('pto_hours_per_year');
+// With time off on, a person stays listed while a minimum paid week is set, whatever their status or type now (one
+// who has left, or is no longer W-2), so the owner can clear it: a kept value would come back with a W-2 return.
+const listedEmployees = (query, formerWithBank, withMinimum) => query.where(function listed() {
+  this.where({ employment_type: 'w2' }).where(function current() {
+    this.whereIn('employment_status', ['active', 'prospective']);
+    if (formerWithBank) this.orWhereNotNull('pto_hours_per_year');
+  });
+  if (withMinimum) this.orWhereNotNull('paid_week_minimum_hours');
 });
 
 async function listPayrollTechnicians(conn = db, formerWithBank) {
@@ -255,10 +260,11 @@ async function listPayrollTechnicians(conn = db, formerWithBank) {
   const withFamily = typeof payrollFamilyEmployeeLive === 'function' && payrollFamilyEmployeeLive();
   // GATE_PAYROLL_MERCURY_STATUS: the Mercury recipient id rides on each row (null = not entered).
   const withMercury = typeof payrollMercuryStatusLive === 'function' && payrollMercuryStatusLive();
-  const rows = await listedEmployees(conn('technicians'), formerWithBank)
+  // The settings roster only: the Time off panel (formerWithBank) never offers a person kept for their minimum.
+  const rows = await listedEmployees(conn('technicians'), formerWithBank, withTimeOff && !formerWithBank)
     .orderBy('name')
-    .select('id', 'name', 'pay_rate', 'pay_method', 'employment_status',
-      ...(withTimeOff ? ['pto_hours_per_year'] : []),
+    .select('id', 'name', 'pay_rate', 'pay_method', 'employment_status', 'employment_type',
+      ...(withTimeOff ? ['pto_hours_per_year', 'paid_week_minimum_hours', conn.raw("to_char(paid_week_minimum_last_day, 'YYYY-MM-DD') AS paid_week_minimum_last_day")] : []),
       ...(withCoverage ? ['flsa_overtime_covered'] : []),
       ...(withMercury ? ['mercury_recipient_id'] : []),
       ...(withFamily ? ['family_relationship', 'family_employer_entity', conn.raw("to_char(family_exempt_from, 'YYYY-MM-DD') as family_exempt_from")] : []),
@@ -271,10 +277,16 @@ async function listPayrollTechnicians(conn = db, formerWithBank) {
       name: row.name,
       payRate: row.pay_rate,
       employmentStatus: row.employment_status,
+      // Listed only because a minimum paid week is still set (listedEmployees): present only then.
+      ...(row.employment_type === 'w2' ? {} : { notW2: true }),
       payMethod: row.pay_method,
       payMethodConsentOn: row.pay_method_consent_on || null,
       currentW4: await currentW4For(row.id, today, conn),
-      ...(withTimeOff ? { ptoHoursPerYear: row.pto_hours_per_year == null ? null : Number(row.pto_hours_per_year) } : {}),
+      ...(withTimeOff ? {
+        ptoHoursPerYear: row.pto_hours_per_year == null ? null : Number(row.pto_hours_per_year),
+        paidWeekMinimumHours: row.paid_week_minimum_hours == null ? null : Number(row.paid_week_minimum_hours),
+        paidWeekMinimumLastDay: row.paid_week_minimum_last_day || null,
+      } : {}),
       ...(withCoverage ? { flsaOvertimeCovered: row.flsa_overtime_covered == null ? null : row.flsa_overtime_covered } : {}),
       ...(withMercury ? { mercuryRecipientId: row.mercury_recipient_id || null } : {}),
       ...(withFamily ? {

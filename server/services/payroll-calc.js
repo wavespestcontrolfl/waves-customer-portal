@@ -293,6 +293,26 @@ const toNumbers = (obj) => Object.fromEntries(
  * reemploymentRateBp is Florida's rate for Waves in basis points (270 = 2.7%).
  * All returned money is integer cents.
  */
+// Minimum week pay: the guaranteed minutes of the week (`minimumWeekTargetMinutes`, payroll-week-minimum.js) at the
+// straight rate, less the rounded lines that count toward them: worked pay (overtime at the straight rate), paid
+// time off (not the hours a payout paid out) and holiday pay. So the check never falls a cent short of the
+// guarantee, also when the hours on file meet it exactly and each line rounded down. Zero when the lines reach it.
+function minimumWeekPay({
+  rateCents, regularHundredths, overtimeHundredths, regularPay, ptoPay, holidayPay,
+  ptoMinutes, holidayMinutes, minimumWeekTargetMinutes, minimumWeekPayoutMinutes,
+}) {
+  const target = nonNegativeCents(minimumWeekTargetMinutes, 'Minimum week target minutes');
+  if (target === 0n) return 0n;
+  const payout = nonNegativeCents(minimumWeekPayoutMinutes, 'Minimum week payout minutes');
+  const pto = nonNegativeCents(ptoMinutes, 'Paid time off minutes');
+  if (payout > pto) throw new Error('Minimum week payout minutes must not be more than the paid time off minutes');
+  nonNegativeCents(holidayMinutes, 'Holiday minutes');
+  const guarantee = roundDiv(rateCents * target, 6000n);
+  const credited = regularPay + roundDiv(rateCents * overtimeHundredths, 6000n) + ptoPay
+    - roundDiv(rateCents * payout, 6000n) + holidayPay;
+  return guarantee > credited ? guarantee - credited : 0n;
+}
+
 function computePaycheck({
   payDate,
   payFrequency = 'weekly',
@@ -301,6 +321,9 @@ function computePaycheck({
   overtimeMinutes = 0,
   ptoMinutes,
   holidayMinutes,
+  minimumWeekMinutes,
+  minimumWeekTargetMinutes,
+  minimumWeekPayoutMinutes,
   ytdGrossWages = 0,
   w4,
   reemploymentRateBp = FLORIDA_NEW_EMPLOYER_RATE_BP,
@@ -340,6 +363,17 @@ function computePaycheck({
   const withTimeOff = ptoMinutes !== undefined || holidayMinutes !== undefined;
   const ptoPay = roundDiv(rateCents * nonNegativeCents(ptoMinutes, 'Paid time off minutes'), 6000n);
   const holidayPay = roundDiv(rateCents * nonNegativeCents(holidayMinutes, 'Holiday minutes'), 6000n);
+  // Minimum week pay (payroll-week-minimum.js). Its line is in the output only when the caller passed it.
+  const withMinimum = minimumWeekMinutes !== undefined;
+  nonNegativeCents(minimumWeekMinutes, 'Minimum week minutes');
+  // The line and its guarantee come as a pair (payroll-runs.js buildCheck), so no gross is paid without its line.
+  if (withMinimum !== (minimumWeekTargetMinutes !== undefined)) {
+    throw new Error('Minimum week minutes and minimum week target minutes are passed together');
+  }
+  const minimumPay = minimumWeekPay({
+    rateCents, regularHundredths, overtimeHundredths, regularPay, ptoPay, holidayPay,
+    ptoMinutes, holidayMinutes, minimumWeekTargetMinutes, minimumWeekPayoutMinutes,
+  });
   // Pay lines ride on the check only when the caller passes them.
   // (wholeCents reads an omitted figure as zero.)
   const withPayLines = payLines != null;
@@ -351,7 +385,7 @@ function computePaycheck({
   // Season bonus, stay bonus and December gift pay lines (Tech Rewards Plan): taxable wages like a review bonus.
   const techRewards = wholeCents(lineFigures.techRewardsCents, 'Tech rewards');
   const lineOvertimePremium = wholeCents(lineFigures.lineOvertimePremiumCents, 'Overtime on pay lines');
-  const gross = regularPay + overtimePay + ptoPay + holidayPay
+  const gross = regularPay + overtimePay + ptoPay + holidayPay + minimumPay
     + reviewBonus + commission + healthAllowance + techRewards + lineOvertimePremium;
 
   const ytd = nonNegativeCents(ytdGrossWages, 'Year-to-date wages');
@@ -390,6 +424,7 @@ function computePaycheck({
       overtimePayCents: overtimePay,
       overtimePremiumCents: overtimePremium,
       ...(withTimeOff ? { ptoPayCents: ptoPay, holidayPayCents: holidayPay } : {}),
+      ...(withMinimum ? { minimumWeekPayCents: minimumPay } : {}),
       ...(withPayLines ? {
         reviewBonusCents: reviewBonus,
         commissionCents: commission,
