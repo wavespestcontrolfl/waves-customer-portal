@@ -1626,6 +1626,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:25AM — Technician days off (owner 2026-11-24): writes the technician_absences
+  // rows for each active technician's birthday in the next 120 days (services/tech-birthday-absences.js).
+  // Direct writes, nothing parked or sent, never re-creates a cleared row.
+  // =========================================================================
+  cron.schedule('25 3 * * *', async () => {
+    try {
+      await runExclusive('tech-days-off', () => require('./tech-birthday-absences').syncTechDaysOff());
+    } catch (err) {
+      logger.error(`[tech-days-off] daily sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:15AM — Data Hygiene deterministic normalization scan
   // =========================================================================
   cron.schedule('15 3 * * *', async () => {
