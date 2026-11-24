@@ -200,8 +200,8 @@ async function executeTechTool(toolName, input, techContext) {
     const technician = forTech && techContext.techRole !== 'admin';
     switch (toolName) {
       case 'get_my_route': return await getMyRoute(techContext.techId, techContext.techName, input.date, { technician });
-      case 'get_stop_details': return await getStopDetails(input, techId, technician);
-      case 'get_service_history': return await getServiceHistory(input, techId, technician);
+      case 'get_stop_details': return await getStopDetails(input, techId, technician, forTech);
+      case 'get_service_history': return await getServiceHistory(input, techId, technician, forTech);
       case 'get_product_info': return await getProductInfo(input.product_name, { forTech });
       case 'get_protocol': return await getProtocol(input, { technician });
       case 'check_customer_status': return await checkCustomerStatus(input, techId, { technician });
@@ -290,7 +290,7 @@ async function getMyRoute(techId, techName, date, { technician = false } = {}) {
 // caller-ID line quoting the caller); the customer page withholds them from a technician.
 const crmNotesField = (customer, technician) => (technician ? {} : { notes: customer.crm_notes });
 
-async function getStopDetails(input, techId = null, technician = false) {
+async function getStopDetails(input, techId = null, technician = false, forTech = false) {
   // Resolves only a customer this technician is authorized to read; an
   // unauthorized or missing match both return the generic not-found below so a
   // technician can't probe for customers assigned to someone else.
@@ -302,7 +302,7 @@ async function getStopDetails(input, techId = null, technician = false) {
     .where({ customer_id: customer.id, status: 'completed' })
     .orderBy('service_date', 'desc').limit(3)
     .select(SERVICE_RECORD_COLUMNS);
-  const historyFacts = await loadServiceRecordFacts(history);
+  const historyFacts = await loadServiceRecordFacts(history, { hideUnit: forTech ? isMlUnit : null });
 
   // Today's scheduled service — tech callers see only THEIR visit for this
   // customer (the same-day row can belong to another technician); admin/
@@ -415,7 +415,7 @@ async function getStopDetails(input, techId = null, technician = false) {
 }
 
 
-async function getServiceHistory(input, techId = null, technician = false) {
+async function getServiceHistory(input, techId = null, technician = false, forTech = false) {
   const { service_type, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 5, 20);
 
@@ -428,7 +428,7 @@ async function getServiceHistory(input, techId = null, technician = false) {
   if (service_type) query = query.whereILike('service_type', `%${service_type}%`);
 
   const records = await query.select(SERVICE_RECORD_COLUMNS);
-  const facts = await loadServiceRecordFacts(records);
+  const facts = await loadServiceRecordFacts(records, { hideUnit: forTech ? isMlUnit : null });
 
   return {
     customer: `${customer.first_name} ${customer.last_name}`,

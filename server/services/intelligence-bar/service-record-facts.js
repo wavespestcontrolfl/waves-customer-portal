@@ -29,18 +29,21 @@ function amountText(value, unit) {
   return unit ? `${n} ${unit}` : String(n);
 }
 
-function productLine(row) {
+// hideUnit(unit) true drops that figure (the tech rail never shows an mL
+// figure, owner ruling: nothing a technician reads is in mL).
+function productLine(row, hideUnit) {
+  const shown = (value, unit) => (hideUnit && unit && hideUnit(unit) ? null : amountText(value, unit));
   return {
     name: row.product_name,
     category: row.product_category || null,
-    rate: amountText(row.application_rate, row.rate_unit),
-    amount: amountText(row.total_amount, row.amount_unit),
+    rate: shown(row.application_rate, row.rate_unit),
+    amount: shown(row.total_amount, row.amount_unit),
   };
 }
 
 // The products and technician name for a set of service records, in two reads.
 // Returns lookups keyed by record id / technician id.
-async function loadServiceRecordFacts(records) {
+async function loadServiceRecordFacts(records, { hideUnit = null } = {}) {
   const ids = [...new Set((records || []).map((r) => r && r.id).filter(Boolean).map(String))];
   const techIds = [...new Set((records || []).map((r) => r && r.technician_id).filter(Boolean).map(String))];
   const [products, techs] = await Promise.all([
@@ -53,7 +56,7 @@ async function loadServiceRecordFacts(records) {
   for (const row of products || []) {
     const key = String(row.service_record_id);
     if (!productsByRecord.has(key)) productsByRecord.set(key, []);
-    productsByRecord.get(key).push(productLine(row));
+    productsByRecord.get(key).push(productLine(row, hideUnit));
   }
   const techNames = new Map((techs || []).map((t) => [String(t.id), t.name || null]));
   return {

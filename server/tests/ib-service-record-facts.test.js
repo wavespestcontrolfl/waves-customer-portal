@@ -133,3 +133,26 @@ describe('a technician login gets no past-visit notes (they can hold access code
     expect(r.services[0].notes).toMatch(/Gate code/);
   });
 });
+
+describe('the tech rail never shows an mL figure (owner ruling)', () => {
+  beforeEach(() => {
+    state.service_products.push({ service_record_id: 'sr-new', product_name: 'Sample Kelp', product_category: 'biostimulant',
+      application_rate: '30.000', rate_unit: 'ml/gal', total_amount: '120.000', amount_unit: 'ml' });
+    const { etDateString } = require('../utils/datetime-et');
+    state.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: etDateString(new Date()) }];
+  });
+
+  test.each(['get_service_history', 'get_stop_details'])('%s drops the mL rate and amount on the tech rail', async (tool) => {
+    const r = await executeTechTool(tool, { customer_id: 'cust-1' }, { techId: 'tech-1', techRole: 'technician' });
+    const rows = tool === 'get_service_history' ? r.services : r.recent_history;
+    const kelp = rows[0].products.find((p) => p.name === 'Sample Kelp');
+    expect(kelp).toMatchObject({ rate: null, amount: null });
+    expect(rows[0].products.find((p) => p.name === 'Sample Fertilizer 16-0-8').rate).toBe('3 lb/1000sqft');
+    expect(JSON.stringify(r)).not.toMatch(/\bml\b/i);
+  });
+
+  test('an admin read with no tech context keeps the mL figures', async () => {
+    const r = await executeTechTool('get_service_history', { customer_id: 'cust-1' }, null);
+    expect(r.services[0].products.find((p) => p.name === 'Sample Kelp')).toMatchObject({ rate: '30 ml/gal', amount: '120 ml' });
+  });
+});
