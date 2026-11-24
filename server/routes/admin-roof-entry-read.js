@@ -31,9 +31,9 @@
  *
  * Admin only, like the other admin estimate routes. The gate is this router's first middleware, ahead of the staff
  * login that reads the technicians table: gate off = 404 { enabled: false } from the router, with no route-level
- * database read, staff login, image fetch or model call (a non-admin sees the same 404 while it is off). The portal's
- * global API middleware (rate limit, body parsing) runs before the router, so a limiter 429 or a malformed-body 400 can
- * still come first. Nothing here is customer-facing.
+ * database read, staff login, image fetch or model call (a non-admin sees the same 404 while it is off). The same gate is
+ * also mounted in server/index.js before the global API rate limit, so a limiter 429 never comes first while it is off; the
+ * body parsing still runs before the router, so a malformed-body 400 can. Nothing here is customer-facing.
  */
 const express = require('express');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
@@ -156,3 +156,5 @@ router.patch('/:id/tech-count', async (req, res, next) => {
 });
 
 module.exports = router;
+// Also mounted in server/index.js BEFORE the global /api/ limiter, so the dark 404 never reads as a 429.
+module.exports.gateOn = gateOn;

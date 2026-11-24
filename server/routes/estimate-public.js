@@ -30956,6 +30956,8 @@ const dataLimiter = rateLimit({
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
+  // The warranty-comparison and service-details PDFs share this limiter: while their gate is off they skip it (darkEstimateRouteFor).
+  skip: (req) => !!darkEstimateRouteFor(req),
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
@@ -31087,6 +31089,7 @@ const serviceDetailsSendLimiter = rateLimit({
   max: 6,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => !!darkEstimateRouteFor(req),
   message: { error: 'Too many requests. Please try again later.' },
 });
 
@@ -31143,7 +31146,7 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
   try {
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.set('Referrer-Policy', 'no-referrer');
-    if (!serviceDetailsGateOn()) return res.status(404).json({ error: 'Not found' });
+    if (!serviceDetailsGateOn()) return res.status(404).json({ error: 'Estimate not found' });
     if (!SERVICE_DETAILS_TOKEN_RE.test(String(req.params.token || ''))) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -31205,7 +31208,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
   try {
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.set('Referrer-Policy', 'no-referrer');
-    if (!serviceDetailsGateOn()) return res.status(404).json({ error: 'Not found' });
+    if (!serviceDetailsGateOn()) return res.status(404).json({ error: 'Estimate not found' });
     if (!SERVICE_DETAILS_TOKEN_RE.test(String(req.params.token || ''))) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -33722,7 +33725,66 @@ async function handleEstimateAsk(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Dark estimate routes whose gate is read inside the handler, which runs after the global /api/ limiter (and the shared
+// dataLimiter / serviceDetailsSendLimiter): a probe that already used its quota would read a 429 from a route that is
+// meant to be an indistinguishable 404. darkEstimateRouteFor() finds the dark route for a request; the PreGuard below is
+// mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter (like commercialAgreementPreGuard) and
+// answers what a LIVE well-formed unknown token gets on the same route (status, body, headers), and router.param's 404 for a
+// malformed token. A token that does not decode answers the same malformed-token 404, which carries no route headers, as live. The two shared limiters skip the same requests. Raw-path match on one non-slash token segment
+// (Express routing is case-insensitive and takes a trailing slash); the gate is read at call time. Behavior with the
+// gate on is untouched: the guard calls next().
+const DARK_ESTIMATE_PRIVACY_HEADERS = {
+  'Cache-Control': 'no-store', Pragma: 'no-cache', 'X-Robots-Tag': 'noindex', 'Referrer-Policy': 'no-referrer',
+};
+const DARK_ESTIMATE_PDF_HEADERS = { 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Referrer-Policy': 'no-referrer' };
+const DARK_ESTIMATE_ROUTES = [
+  { methods: ['POST'], re: /^\/([^/]+)\/referral-link\/?$/i, dark: () => !featureGates.isEnabled('estimateSuccessReferral') },
+  { methods: ['POST'], re: /^\/([^/]+)\/measurement-review\/?$/i, dark: () => !featureGates.isEnabled('estimateMeasurementReview') },
+  { methods: ['POST'], re: /^\/([^/]+)\/extension-request\/?$/i, dark: () => !featureGates.isEnabled('estimateExtensionRequest') },
+  { methods: ['PUT'], re: /^\/([^/]+)\/service-opt-out\/?$/i, dark: () => !serviceOptOutGateOn() },
+  // The body parser has not run here, so the kind is unknown: dark only while BOTH gates the route can read are off.
+  { methods: ['POST'], re: /^\/([^/]+)\/change-request\/?$/i, dark: () => !featureGates.isEnabled('estimateSoftExit') && !featureGates.isEnabled('websiteQuoteBooking') },
+  { methods: ['POST'], re: /^\/([^/]+)\/promo-code\/?$/i, dark: () => !estimateCodeEntryOn(), headers: DARK_ESTIMATE_PRIVACY_HEADERS },
+  {
+    methods: ['POST'], re: /^\/([^/]+)\/service-details\/send\/?$/i, dark: () => !serviceDetailsGateOn(), headers: DARK_ESTIMATE_PDF_HEADERS,
+  },
+  {
+    methods: ['GET', 'HEAD'], re: /^\/([^/]+)\/service-details\/[^/]+\/pdf\/?$/i, dark: () => !serviceDetailsGateOn(), headers: DARK_ESTIMATE_PDF_HEADERS,
+  },
+  {
+    methods: ['GET', 'HEAD'], re: /^\/([^/]+)\/warranty-comparison\/pdf\/?$/i, dark: () => !require('../services/termite-warranty-comparison').termiteComparisonGateOn(), headers: DARK_ESTIMATE_PDF_HEADERS,
+  },
+];
+function darkEstimateRouteFor(req) {
+  for (const route of DARK_ESTIMATE_ROUTES) {
+    if (!route.methods.includes(req.method)) continue;
+    const m = route.re.exec(req.path || '');
+    if (!m) continue;
+    if (!route.dark()) return null;
+    let token = null;
+    try { token = decodeURIComponent(m[1]); decodeURIComponent(req.path); } catch { token = null; } // any undecodable segment (the PDF's serviceKey too) = malformed, as live
+    return { route, token };
+  }
+  return null;
+}
+function darkEstimateRoutePreGuard(req, res, next) {
+  const hit = darkEstimateRouteFor(req);
+  if (!hit) return next();
+  // Deliberate parity with live (no route headers here): a decodable-but-malformed token answers what router.param answers
+  // live and dark alike, the generic 404 with no headers (the route's are stamped inside each handler, after router.param). A
+  // path that does not decode answers what rejectUndecodablePath answers live: the same generic header pair, never Express's
+  // error path (the error handler logs the raw segment).
+  if (hit.token === null) {
+    require('../middleware/reject-undecodable-path').stampUndecodablePathHeaders(res);
+    return res.status(404).json({ error: 'Estimate not found' });
+  }
+  if (!ESTIMATE_TOKEN_RE.test(hit.token)) return res.status(404).json({ error: 'Estimate not found' });
+  if (hit.route.headers) res.set(hit.route.headers);
+  return res.status(404).json({ error: 'Estimate not found' });
+}
+
 module.exports = router;
+module.exports.darkEstimateRoutePreGuard = darkEstimateRoutePreGuard;
 // Codex round 2 on #4608: exported so estimate-annual-guard.js's content-derivation regex tests can assert exact parity against the canonical token format gate, instead of a hand-copied literal that could silently drift from it.
 module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
 module.exports.mapImagePreGuard = mapImagePreGuard;

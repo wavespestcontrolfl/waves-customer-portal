@@ -35,6 +35,21 @@ const { customerVisibleInvoiceNotes } = require('../services/invoice-notes');
 // Unauthenticated by-token money surface: rate-limit the whole router
 // (defense in depth over the global /api/ limiter) and reject malformed
 // tokens before any DB lookup. Mirrors the pay-statement.js pattern.
+// The two dark-gated POST routes on this router. payRouteDark is true for a request to one of them while its gate is off:
+// payLimiter skips it, and darkRoutePreGuard (mounted in server/index.js on /api/pay BEFORE the global /api/ limiter) answers
+// the generic 404 there, so neither limiter counts a dark probe. Raw-path match, case-insensitive like Express routing.
+const PAY_DARK_ROUTES = [
+  { re: /^\/[^/]+\/plan-choice\/?$/i, gateOn: () => require('../config/feature-gates').isEnabled('payPlanChoice') },
+  { re: /^\/[^/]+\/promo-code\/?$/i, gateOn: () => promoCodeGateOn() },
+];
+function payRouteDark(req) {
+  return req.method === 'POST' && PAY_DARK_ROUTES.some((r) => r.re.test(req.path || '') && !r.gateOn());
+}
+function darkRoutePreGuard(req, res, next) {
+  if (!payRouteDark(req)) return next();
+  return noStore(req, res, () => res.status(404).json({ error: 'Invoice not found' }));
+}
+
 const payLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
@@ -43,8 +58,7 @@ const payLimiter = rateLimit({
   keyGenerator: unauthenticatedAuthLimitKey,
   // AGENTS.md: a dark GATE_* route skips its limiter, so a probe never sees
   // a revealing 429 or spends the caller's quota for the live pay routes.
-  skip: (req) => req.method === 'POST' && /\/plan-choice\/?$/.test(req.path)
-    && !require('../config/feature-gates').isEnabled('payPlanChoice'),
+  skip: payRouteDark,
   message: { error: 'Too many requests — please slow down.' },
 });
 router.use(payLimiter);
@@ -2199,3 +2213,4 @@ module.exports.invoiceCaptureNeeded = invoiceCaptureNeeded;
 module.exports.payPageCombinedBalance = payPageCombinedBalance;
 module.exports.isZelleTransferEligible = isZelleTransferEligible;
 module.exports.payPageZelleVisibility = payPageZelleVisibility;
+module.exports.darkRoutePreGuard = darkRoutePreGuard;
