@@ -6794,9 +6794,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
     setStripeLoading(true);
     setStripeError('');
     api.saveStripeCard(null, returned.setupIntentId)
-      .then(async () => {
+      .then(async (saved) => {
         clearReturnedSetupIntent();
         setShowAddCard(false);
+        setSavedWithoutAutopay(saved?.enrollReason === 'save_only');
         await refreshCards();
         // Same as the inline confirmSetup path (Codex #2507 round-7): a
         // consented save can ENROLL Auto Pay server-side — remount the
@@ -6869,6 +6870,13 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
   useEffect(() => {
     if (!openAddCard || loading || cancelledAccount || openAddCardHandledRef.current) return;
     openAddCardHandledRef.current = true;
+    // Consume the link now: a Stripe redirect (3DS, bank auth) returns to THIS url, and a page that still carried
+    // add_card=1 would open a second form after the save. The router's own location is left as it is.
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('add_card');
+      window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+    } catch { /* a browser without history.replaceState keeps the param; the ref still guards this mount */ }
     handleAddCard({ saveOnly: true });
   }, [openAddCard, loading, cancelledAccount]);
 
@@ -6916,11 +6924,13 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
         setStripeLoading(false);
         return;
       }
+      let saved = null;
       if (setupIntent && setupIntent.payment_method) {
-        await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
+        saved = await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
       }
       setShowAddCard(false);
-      setSavedWithoutAutopay(saveOnlyAdd);
+      // The server answers save_only for a SetupIntent minted by the save-only form: its word, not this tab's state.
+      setSavedWithoutAutopay(saved?.enrollReason === 'save_only');
       paymentElementRef.current = null;
       elementsRef.current = null;
       stripeRef.current = null;

@@ -5651,7 +5651,13 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // the previously failed bank once the pointer is honored again. The
       // pending row stays pending and unconsented; the office is asked to
       // re-collect. Same rule as POST /cards (which refuses before any save).
-      const needsEnrollmentScopedConsent = !(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId));
+      // Save-only form (the "add a card" reminder email link, services/portal-save-only-card.js): the consent it records
+      // is the card-on-file record only (source portal_add_card_save_only, never enrollment authority), so "needs a
+      // consent row" means no row at all, and the record is never an enrollment-scoped one.
+      const saveOnly = require('../services/portal-save-only-card').setupIntentSavesOnly(setupIntent);
+      const needsEnrollmentScopedConsent = saveOnly
+        ? !(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))
+        : !(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId));
       if (needsEnrollmentScopedConsent
         && !(await ConsentService.deferredCaptureConsentVersionCurrent(setupIntent, { context: 'portal add-method webhook', customerId: wavesCustomerId }))) {
         return;
@@ -5688,14 +5694,14 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,
           stripePaymentMethodId: stripePmId,
-          source: isBankMethodType(saved.method_type) ? 'portal_add_bank' : 'portal_add_card',
+          source: saveOnly ? 'portal_add_card_save_only' : (isBankMethodType(saved.method_type) ? 'portal_add_bank' : 'portal_add_card'),
           methodType: saved.method_type || 'card',
         });
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
-      // Save-only form (the "add a card" reminder email link): the method is saved and its consent recorded above, and
-      // Auto Pay is NOT turned on, here or in POST /billing/cards. The customer chooses it on the Auto Pay card.
-      if (require('../services/portal-save-only-card').setupIntentSavesOnly(setupIntent)) {
+      // The method is saved and its consent recorded above, and Auto Pay is NOT turned on, here or in
+      // POST /billing/cards. The customer chooses it on the Auto Pay card.
+      if (saveOnly) {
         logger.info(`[stripe-webhook] portal-add-method save-only completed for customer ${wavesCustomerId}: pm ${stripePmId}, Auto Pay untouched`);
         return;
       }

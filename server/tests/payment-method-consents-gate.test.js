@@ -77,6 +77,13 @@ describe('hasEnrollmentScopedConsent', () => {
     expect(await hasEnrollmentScopedConsent('cust-1', 'pm_x')).toBe(false);
   });
 
+  test('a v8+ portal_add_card_save_only row (the add-a-card email form) alone does NOT qualify: no later workflow can enroll that card', async () => {
+    db.mockImplementation(() => qb([
+      { consent_text_version: 'v12_2026-09-30', source: 'portal_add_card_save_only' },
+    ]));
+    expect(await hasEnrollmentScopedConsent('cust-1', 'pm_x')).toBe(false);
+  });
+
   test('a v8+ consent from any save-and-charge surface qualifies', async () => {
     for (const source of ['pay_page', 'portal_add_card', 'estimate_accept', 'onboarding']) {
       db.mockImplementation(() => qb([{ consent_text_version: 'v9_2026-07-12', source }]));

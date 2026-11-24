@@ -487,21 +487,24 @@ router.post('/cards', async (req, res, next) => {
     // the method sits saved-only. The save above is idempotent, so the
     // customer's retry re-enters here and completes consent + enrollment.
     const ConsentService = require('../services/payment-method-consents');
+    const saveOnly = setupIntentSavesOnly(setupIntent);
     await ConsentService.recordConsent({
       customerId: req.customerId,
       paymentMethodId: card.id,
       stripePaymentMethodId: resolvedPaymentMethodId,
       // Distinct audit source for bank saves (portal ACH lane) — the
-      // snapshot itself is already method-correct via methodType.
-      source: isBankMethodType(card.method_type) ? 'portal_add_bank' : 'portal_add_card',
+      // snapshot itself is already method-correct via methodType. The save-only form's source is the card-on-file
+      // record only: it is never enrollment authority (NON_ENROLLMENT_CONSENT_SOURCES), so Auto Pay later needs the
+      // customer's own checkbox.
+      source: saveOnly ? 'portal_add_card_save_only' : (isBankMethodType(card.method_type) ? 'portal_add_bank' : 'portal_add_card'),
       methodType: card.method_type || 'card',
       ip: req.ip,
       userAgent: req.get('user-agent') || null,
     });
-    // Save-only form (the "add a card" reminder email link): the method is saved and its consent is recorded above,
-    // and Auto Pay is NOT turned on. The stamp is on the SetupIntent itself, so a redirect return and the
-    // portal_add_method webhook answer the same way.
-    if (setupIntentSavesOnly(setupIntent)) {
+    // Save-only form (the "add a card" reminder email link): the method is saved and its card-on-file consent is
+    // recorded above, and Auto Pay is NOT turned on. The stamp is on the SetupIntent itself, so a redirect return and
+    // the portal_add_method webhook answer the same way.
+    if (saveOnly) {
       return res.json({ success: true, enrolled: false, enrollReason: 'save_only', card: savedCardPayload(card) });
     }
     // Payer routing BEFORE enrollment (Codex #3395 r7 P1): a customer whose

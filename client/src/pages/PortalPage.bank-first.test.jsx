@@ -168,19 +168,22 @@ describe('Billing tab Add Payment Method modal — save-only form from the remin
   it('opens by itself, card only, minted with enrollAutopay:false, and says saving does not turn Auto Pay on', async () => {
     api.createSetupIntent.mockResolvedValue({ publishableKey: 'pk_test_1', clientSecret: 'seti_secret', paymentMethodTypes: ['card'] });
     getStripe.mockResolvedValue(fakeStripe());
+    window.history.replaceState({}, '', '/?tab=billing&add_card=1');
     render(<BillingTab customer={customer} openAddCard />);
     const dialog = await screen.findByRole('dialog', { name: 'Add payment method' }, SETTLE);
     expect(api.createSetupIntent).toHaveBeenCalledTimes(1);
     expect(api.createSetupIntent).toHaveBeenCalledWith('card', { enrollAutopay: false });
     expect(dialog).toHaveTextContent('Saving this card does not turn Auto Pay on.');
     expect(screen.getByRole('button', { name: 'Save Card' })).toBeInTheDocument();
+    // The link is consumed on open, so a Stripe redirect that returns to this URL cannot open a second form.
+    expect(window.location.search).toBe('?tab=billing');
   });
 
   it('after the save: the card is saved, Auto Pay is not touched, and the page says it did not turn it on', async () => {
     api.getAutopay.mockResolvedValue({ ...autopay, state: 'disabled', autopay_enabled: false, autopay_payment_method_id: null, autopay_selected_method_ids: [] });
     const confirmSetup = vi.fn(async () => ({ setupIntent: savedSetupIntent }));
     api.createSetupIntent.mockResolvedValue({ publishableKey: 'pk_test_1', clientSecret: 'seti_secret', paymentMethodTypes: ['card'] });
-    api.saveStripeCard.mockResolvedValue({ success: true, enrolled: false, card: { id: 'pm-new' } });
+    api.saveStripeCard.mockResolvedValue({ success: true, enrolled: false, enrollReason: 'save_only', card: { id: 'pm-new' } });
     getStripe.mockResolvedValue({ ...fakeStripe(), confirmSetup });
     render(<BillingTab customer={customer} openAddCard />);
     await screen.findByRole('dialog', { name: 'Add payment method' }, SETTLE);

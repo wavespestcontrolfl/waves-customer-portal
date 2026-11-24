@@ -6,9 +6,10 @@
  *   (a) the customer has NO usable payment method now (same predicate the charge path uses: stripe id present, card not
  *       expired, bank not blocked). A card added before day 3 ends it. A customer who turned Auto Pay off on purpose
  *       and kept a usable card fails here, so that customer is never emailed;
- *   (b) a visit is still scheduled or a self-pay invoice is open;
- *   (c) the customer is active (not deleted, not churned or dormant, not inactive), is not billed to a third-party
- *       payer, and is not on an annual prepay with nothing due;
+ *   (b) a visit billed to the customer is still scheduled or a self-pay invoice is open (a visit billed to a
+ *       third-party payer does not count: its payer is resolved per visit, like the invoice that visit will create);
+ *   (c) the customer is active (not deleted, not churned or dormant, not inactive), is not on a collections dispute
+ *       hold, and is not on an annual prepay with nothing due;
  *   (d) an expired card does not trigger the email when the customer had turned Auto Pay off on purpose (the last
  *       autopay event is a toggle off with no removal source);
  *   (e) at most one such email per customer per 30 days;
@@ -21,6 +22,8 @@
  *   expired  a stripe card whose expiry month ended 3 to 10 days ago. Needs no other gate.
  * The email is due 3 days after the event's ET calendar day and still sent up to 10 days after it, so a missed daily
  * pass or a restart window loses nothing. An older event never fires: flipping the gate does not mail old history.
+ * The trigger is the customer's NEWEST loss of a usable method in the last 10 days: a card removed 5 days ago and the
+ * last card removed yesterday waits until the day after tomorrow, never 2 days early on the older event.
  *
  * Modes (cardOnFileReminderMode): 'shadow' decides and writes one card_on_file_reminders row (outcome shadow) per
  * customer who WOULD get the email, sends nothing; 'true' sends and writes outcome sent. Shadow rows never block the
@@ -77,10 +80,11 @@ function expiredOnDate(method) {
   return `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
 }
 
-// The (year, month) expiry months whose cards can have an event inside today's 3..10 day window.
+// The (year, month) expiry months whose cards can have an event inside today's 0..10 day window (a card that lapsed
+// in the last 2 days is not due yet, but it is still the customer's newest loss and postpones an older event).
 function expiryMonthsInWindow(today) {
   const pairs = new Map();
-  for (let age = DUE_AFTER_DAYS; age <= DUE_AFTER_DAYS + GRACE_DAYS; age += 1) {
+  for (let age = 0; age <= DUE_AFTER_DAYS + GRACE_DAYS; age += 1) {
     const expiredOn = plusDays(today, -age);
     const [year, month] = plusDays(expiredOn, -1).split('-').map(Number);
     pairs.set(`${year}-${month}`, { year, month });
@@ -88,15 +92,16 @@ function expiryMonthsInWindow(today) {
   return [...pairs.values()];
 }
 
-// Events inside the window, newest per customer. Map<customerId, { kind, key, on }>.
+// The customer's NEWEST event inside the 10-day window, kept only when that event is due (3 or more days old).
+// Newer events are read too: they decide whether an older one has waited long enough. Map<customerId, { kind, key, on }>.
 async function collectEvents(today, now) {
   const dueBy = plusDays(today, -DUE_AFTER_DAYS);
   const oldest = plusDays(today, -(DUE_AFTER_DAYS + GRACE_DAYS));
-  const events = new Map();
+  const newest = new Map();
   const consider = (customerId, event) => {
-    if (!customerId || event.on > dueBy || event.on < oldest) return;
-    const known = events.get(String(customerId));
-    if (!known || event.on > known.on) events.set(String(customerId), event);
+    if (!customerId || event.on > today || event.on < oldest) return;
+    const known = newest.get(String(customerId));
+    if (!known || event.on > known.on) newest.set(String(customerId), event);
   };
 
   const removals = await db('email_messages')
@@ -112,8 +117,11 @@ async function collectEvents(today, now) {
   const cards = await db('payment_methods')
     .whereNotNull('stripe_payment_method_id')
     .where((qb) => {
+      // exp_month and exp_year are text columns: Stripe saves '01'..'09', older rows hold '1'..'9' and 2-digit years.
       for (const { year, month } of months) {
-        qb.orWhere((inner) => inner.whereIn('exp_year', [year, year - 2000]).where('exp_month', month));
+        qb.orWhere((inner) => inner
+          .whereIn('exp_year', [String(year), String(year - 2000)])
+          .whereIn('exp_month', [String(month), String(month).padStart(2, '0')]));
       }
     })
     .select('id', 'customer_id', 'method_type', 'exp_month', 'exp_year');
@@ -122,7 +130,9 @@ async function collectEvents(today, now) {
     const on = expiredOnDate(card);
     if (on) consider(card.customer_id, { kind: 'expired', key: `expired:${card.id}`, on });
   }
-  return events;
+  const due = new Map();
+  for (const [customerId, event] of newest) if (event.on <= dueBy) due.set(customerId, event);
+  return due;
 }
 
 // Mirrors the charge path's methodEligibleForCharge (stripe.js): the method a charge could use.
@@ -148,14 +158,26 @@ async function autopayTurnedOffOnPurpose(customer) {
   return last?.event_type === 'autopay_disabled' && !asObject(last.details).source;
 }
 
-async function nextVisit(customerId, today) {
+// How many upcoming visits are read for the first one billed to the customer.
+const VISIT_LOOKAHEAD = 10;
+
+// The soonest upcoming visit that bills the CUSTOMER: each visit's payer is resolved with its own id, because a
+// third-party Bill-To can be set on one visit alone. { visit, payerBilled }: payerBilled says visits existed and every
+// one of them bills someone else. A payer lookup failure throws (the caller fails closed).
+async function nextSelfPayVisit(customerId, today) {
   const { whereVisitRowLive } = require('./customer-lifecycle-guard');
-  return db('scheduled_services')
+  const visits = await db('scheduled_services')
     .where({ customer_id: customerId })
     .where(function liveVisit() { whereVisitRowLive(this, today); })
     .where('scheduled_date', '>=', today)
     .orderBy('scheduled_date', 'asc')
-    .first('id', 'scheduled_date');
+    .limit(VISIT_LOOKAHEAD)
+    .select('id', 'scheduled_date');
+  for (const visit of visits) {
+    const payer = await require('./payer').resolveForInvoice({ customerId, scheduledServiceId: visit.id, throwOnError: true });
+    if (!payer?.payerId) return { visit, payerBilled: false };
+  }
+  return { visit: null, payerBilled: visits.length > 0 };
 }
 
 // The billing email the lifecycle sender would use, and whether anything blocks it (rule f).
@@ -197,25 +219,35 @@ async function liveVerdict(customerId, event, today, now) {
   if (methods.some((method) => methodUsable(method, customer, now))) return { ok: false, reason: 'has_usable_method' };
   if (event.kind === 'expired' && await autopayTurnedOffOnPurpose(customer)) return { ok: false, reason: 'autopay_off_on_purpose' };
 
+  // A collections dispute hold withholds the notice (its link is billing follow-up): decided here, before a shadow row
+  // can count the customer, and read again by the sender at the provider boundary. Fails closed.
+  const held = await require('./collections/collection-hold').messagingHeldByCollectionHold(customerId);
+  if (held.held) return { ok: false, reason: 'collection_hold' };
+
+  let upcoming;
+  let openInvoice;
   try {
-    const payer = await require('./payer').resolveForInvoice({ customerId, throwOnError: true });
-    if (payer?.payerId) return { ok: false, reason: 'payer_billed' };
+    [upcoming, openInvoice] = await Promise.all([
+      nextSelfPayVisit(customerId, today),
+      require('./open-balance').openBalanceExists(customerId),
+    ]);
   } catch (err) {
     logger.warn(`[card-on-file-reminder] payer check failed for ${customerId}: ${err.message}`);
     return { ok: false, reason: 'payer_check_failed' };
   }
-
-  const [visit, openInvoice] = await Promise.all([
-    nextVisit(customerId, today),
-    require('./open-balance').openBalanceExists(customerId),
-  ]);
-  if (!visit && openInvoice !== true) return { ok: false, reason: 'nothing_upcoming' };
+  const visit = upcoming.visit;
+  if (!visit && openInvoice !== true) return { ok: false, reason: upcoming.payerBilled ? 'payer_billed' : 'nothing_upcoming' };
   if (openInvoice !== true && await require('./customer-lifecycle-guard').findActivePrepayTerm(db, customerId)) {
     return { ok: false, reason: 'prepaid_nothing_due' };
   }
   const email = await emailVerdict(customer);
   if (!email.ok) return email;
-  return { ok: true, customer, nextVisitDate: visit ? dateOnlyString(visit.scheduled_date) : null };
+  return {
+    ok: true,
+    customer,
+    nextVisitDate: visit ? dateOnlyString(visit.scheduled_date) : null,
+    propertyLabel: propertyDisplayLabel(customer),
+  };
 }
 
 // Rule (e). Shadow rows count only against shadow runs, so the flip to 'true' still sends what shadow recorded.
@@ -272,15 +304,19 @@ async function decideOne(customerId, event, mode, today, now) {
   const idempotencyKey = `${TEMPLATE_KEY}:${customerId}:${event.key}`;
   const sent = await require('./payment-lifecycle-email').sendCardOnFileReminder({
     customerId,
-    propertyLabel: propertyDisplayLabel(verdict.customer),
+    propertyLabel: verdict.propertyLabel,
     nextVisitDate: verdict.nextVisitDate,
     idempotencyKey,
-    // The last look, right before the provider request: a card added, a visit cancelled or an address suppressed in
-    // the meantime stops the send.
+    // The last look, right before the provider request: a card added or an address suppressed in the meantime stops
+    // the send, and so does a change to what the email says (a visit moved or cancelled, the address edited): the next
+    // daily pass decides again and sends the current facts.
     beforeProviderHandoff: async () => {
       const again = await liveVerdict(customerId, event, today, new Date());
-      if (!again.ok) logger.info(`[card-on-file-reminder] send for customer ${customerId} stopped at the provider handoff: ${again.reason}`);
-      return again.ok;
+      let reason = null;
+      if (!again.ok) reason = again.reason;
+      else if (again.nextVisitDate !== verdict.nextVisitDate || again.propertyLabel !== verdict.propertyLabel) reason = 'details_changed';
+      if (reason) logger.info(`[card-on-file-reminder] send for customer ${customerId} stopped at the provider handoff: ${reason}`);
+      return !reason;
     },
   });
   if (!sent.ok) return { result: 'not_sent', reason: sent.reason || 'email_not_sent' };

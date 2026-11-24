@@ -13,6 +13,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { isDefiniteRejection } = require('./sendgrid-mail');
 const BillingEmailDetails = require('./billing-email-details');
 const { CARD_ON_FILE_REMINDER_CATEGORY } = require('../constants/email-replay-exclusions');
+const { qualifyNotificationLink } = require('./notification-links');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const TRANSACTIONAL_GROUP = 'transactional_required';
@@ -673,7 +674,9 @@ async function sendCardOnFileReminder({
     payload: {
       property_label: clean(propertyLabel) || 'your property',
       next_visit_date: nextVisitDate ? displayDate(nextVisitDate) : '',
-      card_url: `${publicPortalUrl()}/?tab=billing&add_card=1`,
+      // notificationProperty names this profile, so a customer signed into a sibling profile of the same account is
+      // switched to it (App.jsx ProtectedRoute) before the form opens.
+      card_url: `${publicPortalUrl()}${qualifyNotificationLink('/?tab=billing&add_card=1', customerId)}`,
     },
     idempotencyKey,
     // Never re-sent from a stored copy (email-replay-exclusions): the copy is true only while every send-time check holds.

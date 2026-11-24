@@ -51,6 +51,8 @@ jest.mock('../services/stripe', () => ({
 }));
 jest.mock('../services/payment-method-consents', () => ({
   hasEnrollmentScopedConsent: jest.fn(async () => true),
+  hasConsentFor: jest.fn(async () => false),
+  deferredCaptureConsentVersionCurrent: jest.fn(async () => true),
   recordConsent: jest.fn(async () => ({})),
   linkPaymentMethodId: jest.fn(async () => ({})),
 }));
@@ -133,9 +135,18 @@ describe('portal-add-method webhook save-only form', () => {
   test('a stamped SetupIntent is saved and consented, never enrolled, and the payer is not even consulted', async () => {
     const saveOnly = { ...SETUP_INTENT, metadata: { ...SETUP_INTENT.metadata, enroll_autopay: 'false' } };
     await handleSetupIntentSucceeded(saveOnly);
+    // A card-on-file record only (never enrollment authority), written when no consent row exists yet.
+    expect(ConsentService.recordConsent).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_card_save_only', stripePaymentMethodId: 'pm_stripe_1' }));
     expect(ConsentService.linkPaymentMethodId).toHaveBeenCalledWith('pm_stripe_1', 'pm-row-1');
     expect(enrollConsentedMethod).not.toHaveBeenCalled();
     expect(PayerService.resolveForInvoice).not.toHaveBeenCalled();
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a re-delivered event does not record the card-on-file consent twice', async () => {
+    ConsentService.hasConsentFor.mockResolvedValueOnce(true);
+    await handleSetupIntentSucceeded({ ...SETUP_INTENT, metadata: { ...SETUP_INTENT.metadata, enroll_autopay: 'false' } });
+    expect(ConsentService.recordConsent).not.toHaveBeenCalled();
+    expect(enrollConsentedMethod).not.toHaveBeenCalled();
   });
 });

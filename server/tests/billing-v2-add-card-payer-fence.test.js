@@ -208,7 +208,9 @@ describe('POST /cards save-only form', () => {
       const body = await res.json();
       expect(body).toMatchObject({ success: true, enrolled: false, enrollReason: 'save_only' });
       expect(body.card.id).toBe('pm-row-1');
-      expect(ConsentService.recordConsent).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-row-1' }));
+      // The consent row is the card-on-file record only: its source is never enrollment authority, so an office
+      // setup link or a booking auto-satisfy cannot enroll this card later.
+      expect(ConsentService.recordConsent).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-row-1', source: 'portal_add_card_save_only' }));
       expect(enrollConsentedMethod).not.toHaveBeenCalled();
       expect(PayerService.resolveForInvoice).not.toHaveBeenCalled();
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -219,6 +221,7 @@ describe('POST /cards save-only form', () => {
     await withServer(async (baseUrl) => {
       expect((await postCard(baseUrl)).status).toBe(200);
       expect(enrollConsentedMethod).toHaveBeenCalledTimes(1);
+      expect(ConsentService.recordConsent).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_card' }));
     });
   });
 });

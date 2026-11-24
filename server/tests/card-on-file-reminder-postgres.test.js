@@ -99,9 +99,10 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     return row;
   }
   async function visit(customerId, date = '2026-12-02', extra = {}) {
-    await db('scheduled_services').insert({
+    const [row] = await db('scheduled_services').insert({
       customer_id: customerId, scheduled_date: date, service_type: 'Quarterly Pest Control Service', status: 'confirmed', ...extra,
-    });
+    }).returning('id');
+    return row.id;
   }
   async function invoice(customerId) {
     n += 1;
@@ -177,7 +178,7 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     expect(message.text_snapshot).toContain('Hi Sample,');
     expect(message.text_snapshot).toContain('Example Loop, Sarasota, FL 34231 are still on the schedule. Your account has no card on file now.');
     expect(message.text_snapshot).toContain('Next visit: December 2, 2026');
-    expect(message.text_snapshot).toContain('?tab=billing&add_card=1');
+    expect(message.text_snapshot).toContain(`?tab=billing&add_card=1&notificationProperty=${id}`);
     expect(message.text_snapshot).toContain('Adding a card does not turn Auto Pay on.');
     const [row] = await ledger(id);
     expect(row).toMatchObject({ outcome: 'sent', email_message_id: message.id });
@@ -201,6 +202,40 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     expect(await ledger(early)).toHaveLength(0);
     expect(await ledger(stale)).toHaveLength(0);
     expect(await ledger(lastDay)).toHaveLength(1);
+  });
+
+  test('the NEWEST loss decides the timing: an older removal never sends early, and an older one is ignored once a newer one is due', async () => {
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'shadow';
+    const id = await customer();
+    await visit(id);
+    await removalEmail(id, new Date('2026-11-19T15:00:00Z'));
+    await removalEmail(id, new Date('2026-11-23T15:00:00Z'));
+    // Nov 24: the Nov 19 removal is 5 days old, but the last card went yesterday.
+    expect(await run(id)).toMatchObject({ candidates: 0, shadow: 0 });
+    // Nov 26: the newest loss is now 3 days old.
+    expect(await run(id, { now: new Date('2026-11-26T15:00:00Z') })).toMatchObject({ candidates: 1, shadow: 1 });
+    const [row] = await ledger(id);
+    expect(String(row.trigger_on instanceof Date ? row.trigger_on.toISOString() : row.trigger_on)).toContain('2026-11-2');
+    // A card that lapsed yesterday (Dec 1) postpones an older removal the same way.
+    const expiring = await customer();
+    await visit(expiring, '2026-12-20');
+    await removalEmail(expiring, new Date('2026-11-27T15:00:00Z'));
+    await card(expiring, { exp_month: 11, exp_year: 2026 });
+    expect(await run(expiring, { now: new Date('2026-12-02T15:00:00Z') })).toMatchObject({ candidates: 0 });
+    expect(await run(expiring, { now: new Date('2026-12-04T15:00:00Z') })).toMatchObject({ candidates: 1, shadow: 1 });
+  });
+
+  test('a card expiring in Jan-Sep is found whether its month is stored zero-padded (Stripe: 09) or not (9), and with a 2-digit year', async () => {
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'shadow';
+    const at = new Date('2026-10-06T15:00:00Z');
+    const ids = [];
+    for (const [month, year] of [['09', '2026'], ['9', '2026'], ['09', '26']]) {
+      const id = await customer();
+      await visit(id, '2026-10-20');
+      await card(id, { exp_month: month, exp_year: year });
+      ids.push(id);
+    }
+    expect(await sweep.runCardOnFileReminderSweep({ now: at, customerIds: ids })).toMatchObject({ candidates: 3, shadow: 3 });
   });
 
   test('(a) a card added before day 3 ends it; an expired or unverified-bank method does not count as a card', async () => {
@@ -301,13 +336,28 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     expect(await run(prepaid)).toMatchObject({ shadow: 1 });
   });
 
-  test('a customer whose invoices go to a third-party payer is not emailed, and an unreadable payer picture fails closed', async () => {
+  test('a customer whose only visits bill a third-party payer is not emailed, and an unreadable payer picture fails closed', async () => {
     process.env.GATE_CARD_ON_FILE_REMINDER = 'shadow';
     const billed = await dueCustomer();
     const spy = jest.spyOn(payer, 'resolveForInvoice').mockResolvedValue({ payerId: 'payer-1' });
     expect(await run(billed)).toMatchObject({ shadow: 0, skipped: { payer_billed: 1 } });
     spy.mockRejectedValue(new Error('payer lookup down'));
     expect(await run(billed)).toMatchObject({ shadow: 0, skipped: { payer_check_failed: 1 } });
+  });
+
+  test('the payer is resolved per visit: a Bill-To on the first visit alone skips it, and the next self-pay visit is the one named', async () => {
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'true';
+    const id = await customer();
+    await removalEmail(id);
+    const billedVisit = await visit(id, '2026-12-02');
+    await visit(id, '2026-12-09');
+    jest.spyOn(payer, 'resolveForInvoice').mockImplementation(async ({ scheduledServiceId }) => (
+      scheduledServiceId === billedVisit ? { payerId: 'payer-1' } : { payerId: null }
+    ));
+    expect(await run(id)).toMatchObject({ sent: 1 });
+    const [message] = await emails(id);
+    expect(message.text_snapshot).toContain('Next visit: December 9, 2026');
+    expect(message.text_snapshot).not.toContain('December 2, 2026');
   });
 
   test('(e) at most one email per customer per 30 days', async () => {
@@ -356,13 +406,36 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
-  test('a collections dispute hold withholds it and writes no ledger row, so the next pass tries again', async () => {
+  test('the visit named in the email changing before the provider request stops the send; the next pass sends the new facts', async () => {
     process.env.GATE_CARD_ON_FILE_REMINDER = 'true';
+    const id = await customer();
+    await removalEmail(id);
+    const visitId = await visit(id, '2026-12-02');
+    await invoice(id);
+    const real = lifecycle.sendCardOnFileReminder;
+    const stub = jest.spyOn(lifecycle, 'sendCardOnFileReminder').mockImplementationOnce(async (args) => {
+      // The visit is cancelled in between: an invoice is still open, so the customer stays eligible, but the email
+      // would name a visit that is gone.
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+      expect(await args.beforeProviderHandoff()).toBe(false);
+      return { ok: false, reason: 'stopped' };
+    });
+    expect(await run(id)).toMatchObject({ sent: 0, skipped: { stopped: 1 } });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    stub.mockImplementation(real);
+    expect(await run(id)).toMatchObject({ sent: 1 });
+    const [message] = await emails(id);
+    expect(message.text_snapshot).not.toContain('Next visit');
+  });
+
+  test('a collections dispute hold withholds it in live AND shadow mode, writes no ledger row, and the next pass tries again', async () => {
     const id = await dueCustomer();
     const hold = require('../services/collections/collection-hold');
     jest.spyOn(hold, 'messagingHeldByCollectionHold').mockResolvedValue({ held: true, reason: 'dispute' });
-    const result = await run(id);
-    expect(result).toMatchObject({ sent: 0 });
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'shadow';
+    expect(await run(id)).toMatchObject({ shadow: 0, skipped: { collection_hold: 1 } });
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'true';
+    expect(await run(id)).toMatchObject({ sent: 0, skipped: { collection_hold: 1 } });
     expect(await ledger(id)).toHaveLength(0);
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });

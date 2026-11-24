@@ -18,7 +18,7 @@ const {
 } = require('./payment-method-consent-text');
 const { isExpiredCardMethod } = require('./autopay-eligibility');
 
-const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'portal_add_bank', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept', 'appointment_card_request', 'autopay_setup_link', 'portal_autopay_enable', 'portal_set_default']);
+const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'portal_add_bank', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept', 'appointment_card_request', 'autopay_setup_link', 'portal_autopay_enable', 'portal_set_default', 'portal_add_card_save_only']);
 
 // methodType selects which authorization copy to snapshot. Omitted/
 // unknown values default to the card variant via getConsentText().
@@ -140,7 +140,11 @@ async function hasConsentFor(customerId, stripePaymentMethodId) {
  * every future visit). Every other source presented the full
  * save-and-charge card consent text.
  */
-const NON_ENROLLMENT_CONSENT_SOURCES = new Set(['estimate_card_hold']);
+// 'portal_add_card_save_only' (owner 2026-11-24, GATE_CARD_ON_FILE_REMINDER): the card was added from the "add a card"
+// reminder email's save-only form, which says saving it does not turn Auto Pay on. That row is the card-on-file
+// record only: it never authorizes enrollment, so no later workflow (an office Auto Pay setup link, a one-tap purchase,
+// a booking's auto-satisfy) can turn Auto Pay on for the card without the customer ticking the Auto Pay checkbox.
+const NON_ENROLLMENT_CONSENT_SOURCES = new Set(['estimate_card_hold', 'portal_add_card_save_only']);
 
 async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId, { dbh = db } = {}) {
   if (!customerId || !stripePaymentMethodId) return false;
