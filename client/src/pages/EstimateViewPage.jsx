@@ -56,7 +56,7 @@ import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
-import WhatYouPayBox, { buildWhatYouPay } from '../components/estimate/WhatYouPayBox';
+import WhatYouPayBox, { whatYouPayForSelection } from '../components/estimate/WhatYouPayBox';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, firstVisitTotalPreview, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
@@ -9860,30 +9860,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       ? averageModel.services[0].perApplication
       : null,
   });
-  // "What you pay" under the price (owner 2026-11-23). It reads the same per-application figures
-  // as the monthly average (so it is absent on the annual-prepay choice, which hides the average), and
-  // shows only when the first bill is proven to be those figures: the same credit and extra-fee checks as
-  // the first-visit line, plus the "Reserve your spot" box's own first application agreeing to the cent.
-  // Payment timing and the prepay choice stay in that box.
-  const whatYouPay = invoiceOnlyAccept ? null : buildWhatYouPay({
-    model: monthlyAverage?.model || null,
-    fees: (pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee),
-    serviceMode,
-    invoiceMode: !!estimate.billByInvoice,
-    siteConfirmationHold: !!estimate.siteConfirmationHold,
-    commercial: isCommercialEstimate,
-    creditApplies: firstBillCreditApplies,
-    oneTimeExtrasTotal: oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode),
-    upFrontRowCount: rodentSetupInvoiceRows.length,
-    invoiceFirstVisit: confirmStepFirstVisitAmount({ serviceMode, paymentPreference: 'pay_at_visit', siteConfirmationHold: !!estimate.siteConfirmationHold, selectedFrequency: combinedFrequency }),
-    paymentPreference,
-    annualPrepayOffered: annualPrepayEligibleEffective && !estimate.billByInvoice,
-    firstVisit: firstVisitLine,
-    otherFeeRows: [pricing.setupFee, setupFeeEffective],
-    oneTimeItems: pricing.oneTimeBreakdown?.items,
-    showOneTimeOption: !!estimate.showOneTimeOption,
-    treatmentRows: combinedFrequency?.perServiceTreatments,
-  });
+  // "What you pay" under the price (owner 2026-11-23): the server's own figures (/data whatYouPay), printed as
+  // given while the customer is on the selection the server priced. Hidden for the same reasons the first-visit
+  // line hides: a one-time pick, the annual prepay choice (the Reserve your spot box owns it), and a credit, code
+  // or deposit the server cannot see per selection.
+  const whatYouPay = invoiceOnlyAccept || serviceMode !== 'recurring' || paymentPreference === 'prepay_annual' || firstBillCreditApplies
+    ? null
+    : whatYouPayForSelection(data?.whatYouPay, { frequency: selectedFrequency, serviceCadences });
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link

@@ -8,7 +8,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import EstimateViewPage from './EstimateViewPage';
-import { buildWhatYouPay } from '../components/estimate/WhatYouPayBox';
+import WhatYouPayBox, { whatYouPayForSelection } from '../components/estimate/WhatYouPayBox';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
 
 vi.mock('react-router-dom', () => ({ useParams: () => ({ token: 'what-you-pay-token' }) }));
@@ -112,264 +112,149 @@ const renderPage = async (payload) => {
   return view;
 };
 
-describe('estimate page: what you pay and when', () => {
-  it('pest only with the setup fee: first visit itemised, each visit after, first year, and the $99 sentence', async () => {
-    const { container } = await renderPage(pestOnly());
-    await waitFor(() => expect(box(container)).not.toBeNull());
-    const t = text(container);
-    expect(t).toContain('What you pay');
-    expect(t).not.toMatch(/due today|prepay the year in one payment|exact total/i);
+const PEST_PAYLOAD = {
+  selection: { frequency: 'quarterly', serviceCadences: null },
+  lines: [{ key: 'pest_control', label: 'Pest Control', perApplication: 99, applicationsPerYear: 4 }],
+  setupFee: 99,
+  setupWaivedWithPrepay: true,
+  firstVisitTotal: 198,
+};
+const BUNDLE_PAYLOAD = {
+  selection: { frequency: 'quarterly', serviceCadences: null },
+  lines: [
+    { key: 'pest_control', label: 'Pest Control', perApplication: 99, applicationsPerYear: 4 },
+    { key: 'lawn_care', label: 'Lawn Care', perApplication: 78, applicationsPerYear: 9 },
+  ],
+  setupFee: null,
+  setupWaivedWithPrepay: false,
+  firstVisitTotal: 177,
+};
+const LAWN_PAYLOAD = {
+  selection: { frequency: 'standard', serviceCadences: null },
+  lines: [{ key: 'lawn_care', label: 'Lawn Care', perApplication: 78, applicationsPerYear: 9 }],
+  setupFee: null,
+  setupWaivedWithPrepay: false,
+  firstVisitTotal: 78,
+};
+const withPayload = (payload, whatYouPay) => ({ ...payload, whatYouPay });
+
+describe('WhatYouPayBox renders the server payload as given', () => {
+  const renderBox = (payload) => render(<WhatYouPayBox box={payload} />).container;
+
+  it('pest only with the setup fee: first visit itemised, each application after, the fee sentence and its waiver clause', () => {
+    const t = renderBox(PEST_PAYLOAD).textContent;
+    expect(t).toContain('What you pay and when');
     expect(t).toContain('Pest Control$99.00');
     expect(t).toContain('Setup fee$99.00');
     expect(t).toContain('First visit total$198.00');
     expect(t).toContain('Each application after that');
     expect(t).toContain('4 applications a year, counting the first');
-    // AGENTS.md: no combined plan total ($X/yr) on a customer estimate; units are "application", never "visit".
-    expect(t).not.toMatch(/year total|first year|\$495|\$1,098|\$702/i);
-    expect(t).not.toMatch(/visits? a year|each visit/i);
     expect(t).toContain('This plan has a one-time $99.00 setup fee. It is waived if you prepay the year.');
-    // It describes this plan, never the general rule, and says nothing about when the fee is billed.
-    expect(t).not.toMatch(/two or more|one recurring service|charged with your first visit/i);
-    // Inside the price section, with the price it explains.
-    expect(container.querySelector('#estimate-price-section').contains(box(container))).toBe(true);
   });
 
-  it('a bundle: no setup fee line, the first visit is each service added up, the year is the whole plan', async () => {
-    const { container } = await renderPage(bundle());
-    await waitFor(() => expect(box(container)).not.toBeNull());
-    const t = text(container);
+  it('the waiver clause only when the server says the fee is waivable', () => {
+    const t = renderBox({ ...PEST_PAYLOAD, setupWaivedWithPrepay: false }).textContent;
+    expect(t).toContain('This plan has a one-time $99.00 setup fee.');
+    expect(t).not.toMatch(/waived/i);
+  });
+
+  it('a bundle: each service itemised and the server first visit total, no setup line', () => {
+    const t = renderBox(BUNDLE_PAYLOAD).textContent;
     expect(t).toContain('Pest Control$99.00');
     expect(t).toContain('Lawn Care$78.00');
     expect(t).toContain('First visit total$177.00');
     expect(t).toContain('4 applications a year, counting the first');
     expect(t).toContain('9 applications a year, counting the first');
-    expect(t).not.toMatch(/year total|\$1,098/i);
-    expect(t).not.toMatch(/setup fee/i);
-    // The monthly figure is explained as an average, never as the price.
+    expect(t).not.toMatch(/setup/i);
   });
 
-  it('lawn only: the per-application price and the visit count, with no setup fee', async () => {
-    const { container } = await renderPage(lawnOnly());
-    await waitFor(() => expect(box(container)).not.toBeNull());
-    const t = text(container);
+  it('lawn only: the price and the count, with no total row and no setup', () => {
+    const t = renderBox(LAWN_PAYLOAD).textContent;
     expect(t).toContain('Lawn Care$78.00');
     expect(t).toContain('9 applications a year, counting the first');
-    expect(t).not.toMatch(/year total|\$702/i);
-    expect(t).not.toMatch(/setup fee/i);
-    expect(t).not.toContain('First visit total');
+    expect(t).not.toMatch(/first visit total|setup/i);
   });
 
-  it('pest only where prepay is not offered: the fee sentence does not promise a waiver', async () => {
-    const payload = pestOnly();
-    payload.pricing.annualPrepayEligible = false;
-    const { container } = await renderPage(payload);
-    await waitFor(() => expect(box(container)).not.toBeNull());
-    expect(text(container)).toContain('This plan has a one-time $99.00 setup fee.');
-    expect(text(container)).not.toMatch(/waived/i);
+  it('one application a year reads "once a year"', () => {
+    const lines = [{ key: 'pest_control', label: 'Pest Control', perApplication: 120, applicationsPerYear: 1 }];
+    expect(renderBox({ ...LAWN_PAYLOAD, lines }).textContent).toContain('once a year');
   });
 
-  it('the first-visit total is the existing first-visit line figure, never another one', async () => {
-    const { container } = await renderPage(pestOnly());
-    await waitFor(() => expect(box(container)).not.toBeNull());
-    await waitFor(() => expect(container.querySelector('[data-first-visit-line]')).not.toBeNull());
-    expect(container.querySelector('[data-first-visit-line]').textContent).toContain('$198.00');
-    expect(text(container)).toContain('First visit total$198.00');
-  });
-
-  // The fee row comes only from the existing first-visit line. A fee that sits only in the one-time
-  // breakdown (a frozen bundle) or under a category the page cannot trust has no such line: the box must
-  // not print a plan without its fee, so it shows nothing.
-  it('a bundle whose only setup row is in the one-time breakdown: no box (the fee is never omitted)', async () => {
-    const payload = bundle();
-    payload.pricing.oneTimeBreakdown = setupBreakdown;
-    const { container } = await renderPage(payload);
-    await waitFor(() => expect(container.querySelector('[data-price-follow-ups]')).not.toBeNull());
-    expect(box(container)).toBeNull();
-  });
-
-  it('a legacy split estimate (one pest section + $99 under a bundle category): the box agrees with the existing line or is absent', async () => {
-    const payload = pestOnly();
-    payload.estimate = { ...payload.estimate, serviceCategory: 'bundle' };
-    const { container } = await renderPage(payload);
-    await waitFor(() => expect(container.querySelector('[data-price-follow-ups]')).not.toBeNull());
-    const line = container.querySelector('[data-first-visit-line]');
-    if (box(container)) {
-      expect(line).not.toBeNull();
-      expect(text(container)).toContain('First visit total$198.00');
+  it('prints no plan total, no due-today or prepay offer, no per-visit unit and no monthly figure', () => {
+    for (const payload of [PEST_PAYLOAD, BUNDLE_PAYLOAD, LAWN_PAYLOAD]) {
+      const t = renderBox(payload).textContent;
+      expect(t).not.toMatch(/year total|first year|due today|exact total|visits? a year|each visit|\/\s?mo|a month|about/i);
     }
   });
 
-  it('page: a frozen bundle with a bait-station setup row in the breakdown, and a fee row with no amount: no box', async () => {
-    const withRodent = bundle();
-    withRodent.pricing.oneTimeBreakdown = { total: 150, items: [{ service: 'rodent_bait_setup', label: 'Bait Station Setup', amount: 150, kind: 'charge' }] };
-    const first = await renderPage(withRodent);
-    await waitFor(() => expect(first.container.querySelector('[data-price-follow-ups]')).not.toBeNull());
-    expect(box(first.container)).toBeNull();
-    cleanup();
-    const noAmount = pestOnly();
-    noAmount.pricing.setupFee = { service: 'waveguard_setup', label: 'WaveGuard setup', price: 99, priceAfterDiscount: 99, waivedWithPrepay: true };
-    const second = await renderPage(noAmount);
-    await waitFor(() => expect(second.container.querySelector('[data-price-follow-ups]')).not.toBeNull());
-    expect(box(second.container)).toBeNull();
-  });
-
-  it('page: a one-time option beside the plan (its alternate one-time row in the breakdown) still shows the box', async () => {
-    const payload = pestOnly();
-    payload.estimate = { ...payload.estimate, showOneTimeOption: true };
-    payload.pricing.anchorOneTimePrice = 249;
-    payload.pricing.oneTimeBreakdown = { total: 348, items: [{ service: 'one_time_pest', label: 'One-time pest visit', amount: 249, kind: 'charge' }, ...setupBreakdown.items] };
-    const { container } = await renderPage(payload);
-    await waitFor(() => expect(box(container)).not.toBeNull());
-    expect(text(container)).toContain('First visit total$198.00');
-  });
-
-  it('never prints a price as a monthly bill: no "/mo" and no "about"', async () => {
-    const { container } = await renderPage(bundle());
-    await waitFor(() => expect(box(container)).not.toBeNull());
-    expect(text(container)).not.toMatch(/\/\s?mo|\/month|about/i);
-  });
-
-  it('a plan credit takes the box away: the first bill is not the printed figures', async () => {
-    const credit = { label: 'Courtesy credit', amount: 0.48, recurringAmount: 0.48 };
-    const payload = pestOnly();
-    payload.pricing.services = [pestSection(99, 4, 33, { monthly: 32.96, annual: 395.52, manualDiscount: credit })];
-    payload.pricing.frequencies = payload.pricing.services[0].frequencies;
-    const { container } = await renderPage(payload);
-    await waitFor(() => expect(container.querySelector('[data-price-follow-ups]')).not.toBeNull());
-    expect(box(container)).toBeNull();
-  });
-
-  it('another first-visit fee (initial cockroach treatment) takes the box away', async () => {
-    const payload = pestOnly();
-    const roachFee = { service: 'pest_initial_roach', amount: 150, label: 'Cockroach Treatment Service', waivedWithPrepay: false };
-    payload.estimate = { ...payload.estimate, showOneTimeOption: true };
-    payload.pricing = { ...payload.pricing, firstVisitFees: [setupFee, roachFee] };
-    const { container } = await renderPage(payload);
-    await waitFor(() => expect(container.querySelector('[data-price-follow-ups]')).not.toBeNull());
-    expect(box(container)).toBeNull();
-  });
-
-  it('an invoice-billed estimate gets no box', async () => {
-    const payload = pestOnly();
-    payload.estimate = { ...payload.estimate, billByInvoice: true };
-    const { container } = await renderPage(payload);
-    await waitFor(() => expect(container.querySelector('[data-price-follow-ups]')).not.toBeNull());
-    expect(box(container)).toBeNull();
+  it('renders nothing for a null payload', () => {
+    expect(renderBox(null).querySelector('[data-what-you-pay]')).toBeNull();
   });
 });
 
-describe('buildWhatYouPay', () => {
-  const model = (services) => ({
-    planMonthly: 0, credit: null, multi: services.length > 1,
-    services: services.map(([key, label, perApplication, visits]) => ({ key, label, perApplication, visits, monthly: 0 })),
-  });
-  const pest = model([['pest_control', 'Pest Control', 99, 4]]);
-  const both = model([['pest_control', 'Pest Control', 99, 4], ['lawn_care', 'Lawn Care', 78, 9]]);
-  const line = { firstApplication: 99, setup: 99, total: 198 };
-  // Pest only with the page's first-visit line, as the page builds it.
-  const input = (extra = {}) => ({
-    model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, firstVisit: line, oneTimeItems: [{ service: 'waveguard_setup', amount: 99, kind: 'charge' }],
-    treatmentRows: [{ service: 'pest_control', displayPrice: 99 }], ...extra,
-  });
-  // A plan with no setup charge anywhere and so no first-visit line (bundle, lawn only).
-  const noFee = (extra = {}) => input({ model: both, fees: [], invoiceFirstVisit: 177, firstVisit: null, oneTimeItems: [],
-    treatmentRows: [{ service: 'pest_control', displayPrice: 99 }, { service: 'lawn_care', displayPrice: 78 }], ...extra });
-  const FEE_SENTENCE = 'This plan has a one-time $99.00 setup fee.';
-
-  it('the annual prepay choice renders no box (the Reserve your spot box owns payment timing and prepay)', () => {
-    expect(buildWhatYouPay(input({ paymentPreference: 'prepay_annual', annualPrepayOffered: true }))).toBeNull();
-    expect(buildWhatYouPay(input({ paymentPreference: 'pay_at_visit' }))).not.toBeNull();
-  });
-
-  it('the waiver clause needs both the page offering prepay and the server marking the fee waivable', () => {
-    expect(buildWhatYouPay(input({ annualPrepayOffered: true })).setupSentence).toBe(`${FEE_SENTENCE} It is waived if you prepay the year.`);
-    expect(buildWhatYouPay(input({ annualPrepayOffered: false })).setupSentence).toBe(FEE_SENTENCE);
-    const notWaivable = { ...setupFee, waivedWithPrepay: false };
-    expect(buildWhatYouPay(input({ fees: [notWaivable], annualPrepayOffered: true })).setupSentence).toBe(FEE_SENTENCE);
-  });
-
-  it('with the first-visit line: the fee and the total ARE the line figures; no plan total, timing or prepay field', () => {
-    const result = buildWhatYouPay(input({ annualPrepayOffered: true }));
-    expect(Object.keys(result).sort()).toEqual(['firstVisitTotal', 'lines', 'setup', 'setupSentence']);
-    expect(result.setup.amount).toBe(99);
-    expect(result.firstVisitTotal).toBe(198);
+describe('whatYouPayForSelection: only while the page is on the selection the server priced', () => {
+  it('the same frequency key and cadences: the payload as given', () => {
+    expect(whatYouPayForSelection(PEST_PAYLOAD, { frequency: 'quarterly' })).toBe(PEST_PAYLOAD);
+    const combo = { ...BUNDLE_PAYLOAD, selection: { frequency: 'quarterly', serviceCadences: { lawn_care: 'standard', tree_shrub: 'light' } } };
+    expect(whatYouPayForSelection(combo, { frequency: 'quarterly', serviceCadences: { tree_shrub: 'light', lawn_care: 'standard' } })).toBe(combo);
   });
 
   it.each([
-    ['the line application differs from the prices', { firstVisit: { ...line, firstApplication: 100, total: 199 } }],
-    ['the line total is not application + fee', { firstVisit: { ...line, total: 200 } }],
-    ['the line carries no fee', { firstVisit: { firstApplication: 99, setup: 0, total: 99 } }],
-    ['the line sits over two displayed services (a legacy split plan)', { model: both, invoiceFirstVisit: 177, firstVisit: { firstApplication: 177, setup: 99, total: 276 } }],
-    ['the box first application differs', { invoiceFirstVisit: 100 }],
-    ['no first application', { invoiceFirstVisit: null }],
-  ])('any mismatch returns null: %s', (_label, extra) => {
-    expect(buildWhatYouPay(input(extra))).toBeNull();
+    ['another frequency', { frequency: 'monthly' }],
+    ['no frequency', { frequency: null }],
+    ['a cadence the server did not price', { frequency: 'quarterly', serviceCadences: { lawn_care: 'standard' } }],
+  ])('%s: null', (_label, selection) => {
+    expect(whatYouPayForSelection(PEST_PAYLOAD, selection)).toBeNull();
   });
 
-  it('no first-visit line: a fee row with a positive amount anywhere (fee list or stored fee) means no box, never a plan without its fee', () => {
-    expect(buildWhatYouPay(noFee({ fees: [setupFee] }))).toBeNull();
-    expect(buildWhatYouPay(noFee({ otherFeeRows: [setupFee] }))).toBeNull();
-    expect(buildWhatYouPay(noFee({ model: pest, invoiceFirstVisit: 99, fees: [setupFee] }))).toBeNull();
+  it('a different cadence map: null', () => {
+    const combo = { ...BUNDLE_PAYLOAD, selection: { frequency: 'quarterly', serviceCadences: { lawn_care: 'standard' } } };
+    expect(whatYouPayForSelection(combo, { frequency: 'quarterly', serviceCadences: { lawn_care: 'monthly' } })).toBeNull();
+    expect(whatYouPayForSelection(combo, { frequency: 'quarterly', serviceCadences: null })).toBeNull();
   });
 
-  // Fail closed on frozen and legacy shapes (round 6).
+  it('no payload, or no lines: null', () => {
+    expect(whatYouPayForSelection(null, { frequency: 'quarterly' })).toBeNull();
+    expect(whatYouPayForSelection({ ...PEST_PAYLOAD, lines: [] }, { frequency: 'quarterly' })).toBeNull();
+    expect(whatYouPayForSelection(undefined)).toBeNull();
+  });
+});
+
+describe('estimate page: what you pay and when', () => {
+  it('pest only: shows the server payload inside the price section, next to the existing first-visit line', async () => {
+    const { container } = await renderPage(withPayload(pestOnly(), PEST_PAYLOAD));
+    await waitFor(() => expect(box(container)).not.toBeNull());
+    expect(text(container)).toContain('First visit total$198.00');
+    expect(container.querySelector('#estimate-price-section').contains(box(container))).toBe(true);
+    await waitFor(() => expect(container.querySelector('[data-first-visit-line]')).not.toBeNull());
+    expect(container.querySelector('[data-first-visit-line]').textContent).toContain('$198.00');
+  });
+
+  it('bundle and lawn only: show the server payload', async () => {
+    const first = await renderPage(withPayload(bundle(), BUNDLE_PAYLOAD));
+    await waitFor(() => expect(box(first.container)).not.toBeNull());
+    expect(text(first.container)).toContain('First visit total$177.00');
+    cleanup();
+    const second = await renderPage(withPayload(lawnOnly(), LAWN_PAYLOAD));
+    await waitFor(() => expect(box(second.container)).not.toBeNull());
+    expect(text(second.container)).toContain('Lawn Care$78.00');
+  });
+
   it.each([
-    ['a fee row with price and priceAfterDiscount but no amount (fee list)', { fees: [{ service: 'waveguard_setup', price: 99, priceAfterDiscount: 99 }] }],
-    ['a stored setup fee with a price but a zero amount', { otherFeeRows: [{ service: 'waveguard_setup', price: 99, amount: 0 }] }],
-    ['a stored setup fee with a price and a non-numeric amount', { otherFeeRows: [{ service: 'waveguard_setup', priceAfterDiscount: 99, amount: 'n/a' }] }],
-  ])('unreadable fee row, even with a first-visit line: no box (%s)', (_label, extra) => {
-    expect(buildWhatYouPay(input(extra))).toBeNull();
-    expect(buildWhatYouPay(noFee(extra))).toBeNull();
+    ['no whatYouPay in /data (the server could not resolve it)', undefined],
+    ['a null whatYouPay', null],
+    ['a payload priced for another selection', { ...PEST_PAYLOAD, selection: { frequency: 'monthly', serviceCadences: null } }],
+  ])('%s: no box', async (_label, payload) => {
+    const { container } = await renderPage(withPayload(pestOnly(), payload));
+    await waitFor(() => expect(container.querySelector('[data-price-follow-ups]')).not.toBeNull());
+    expect(box(container)).toBeNull();
   });
 
-  it.each([
-    ['a bait-station setup row (frozen bundle)', [{ service: 'rodent_bait_setup', amount: 150, kind: 'charge' }]],
-    ['an add-on charge row', [{ service: 'flea_treatment', amount: 85, kind: 'charge' }]],
-    ['a discount row', [{ service: 'courtesy', amount: -10, kind: 'discount' }]],
-    ['a setup row beside another row', [{ service: 'waveguard_setup', amount: 99 }, { service: 'rodent_bait_setup', amount: 150 }]],
-    ['a setup row whose amount is not the first-visit line fee', [{ service: 'waveguard_setup', amount: 49 }]],
-  ])('any other one-time breakdown row: no box (%s)', (_label, oneTimeItems) => {
-    expect(buildWhatYouPay(input({ oneTimeItems }))).toBeNull();
-    expect(buildWhatYouPay(noFee({ oneTimeItems }))).toBeNull();
-  });
-
-  it('with a one-time option the breakdown is the alternate price: it does not hide the box, while real recurring charges still do', () => {
-    const alternate = [{ service: 'one_time_pest', amount: 249, kind: 'charge' }, { service: 'waveguard_setup', amount: 99 }];
-    expect(buildWhatYouPay(input({ showOneTimeOption: true, oneTimeItems: alternate })).firstVisitTotal).toBe(198);
-    expect(buildWhatYouPay(input({ oneTimeItems: alternate }))).toBeNull();
-    // A cockroach first-visit fee, or a bait-station row beside the plan, still blocks it.
-    const roach = { service: 'pest_initial_roach', amount: 150, waivedWithPrepay: false };
-    expect(buildWhatYouPay(input({ showOneTimeOption: true, oneTimeItems: alternate, fees: [setupFee, roach] }))).toBeNull();
-    expect(buildWhatYouPay(input({ showOneTimeOption: true, oneTimeItems: alternate, upFrontRowCount: 1 }))).toBeNull();
-  });
-
-  // The page's first application falls back to a same-day total when a row is unpriced; the box must not
-  // print lines for a bundle the accept does not fully price.
-  it.each([
-    ['a displayed service has no row in the selected frequency', [{ service: 'pest_control', displayPrice: 99 }]],
-    ['a displayed service row is unpriced', [{ service: 'pest_control', displayPrice: 99 }, { service: 'lawn_care' }]],
-    ['a row names another service', [{ service: 'pest_control', displayPrice: 99 }, { service: 'mosquito', displayPrice: 78 }]],
-    ['an extra row beside the displayed services', [{ service: 'pest_control', displayPrice: 99 }, { service: 'lawn_care', displayPrice: 78 }, { service: 'mosquito', displayPrice: 60 }]],
-    ['no rows at all', undefined],
-  ])('a partly priced bundle: no box (%s)', (_label, treatmentRows) => {
-    expect(buildWhatYouPay(noFee({ treatmentRows }))).toBeNull();
-    expect(buildWhatYouPay(noFee()).firstVisitTotal).toBe(177);
-  });
-
-  it('a setup row in the breakdown with no first-visit line to prove it: no box', () => {
-    expect(buildWhatYouPay(noFee({ oneTimeItems: [{ service: 'waveguard_setup', amount: 99 }] }))).toBeNull();
-  });
-
-  it('the one breakdown row the first-visit line itself proves (its own setup) is allowed', () => {
-    expect(buildWhatYouPay(input()).firstVisitTotal).toBe(198);
-    expect(buildWhatYouPay(input({ oneTimeItems: [] })).firstVisitTotal).toBe(198);
-  });
-
-  it('no first-visit line and no setup charge anywhere: the prices alone, with no fee row', () => {
-    const result = buildWhatYouPay(noFee());
-    expect(result.setup).toBeNull();
-    expect(result.setupSentence).toBeNull();
-    expect(result.firstVisitTotal).toBe(177);
-    expect(buildWhatYouPay(noFee({ model: pest, invoiceFirstVisit: 99, treatmentRows: [{ service: 'pest_control', displayPrice: 99 }] })).firstVisitTotal).toBe(99);
+  it('a code the page can see applied hides the box', async () => {
+    const payload = withPayload(pestOnly(), PEST_PAYLOAD);
+    payload.promoCode = { canEnter: false, applied: { code: 'NEIGHBOR', credited: false } };
+    const { container } = await renderPage(payload);
+    await waitFor(() => expect(container.querySelector('[data-price-follow-ups]')).not.toBeNull());
+    expect(box(container)).toBeNull();
   });
 });
