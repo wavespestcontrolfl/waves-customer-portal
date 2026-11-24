@@ -660,13 +660,15 @@ const SEND_RULES = [
   noComplaint, offerNotEnded, noLiveEstimate, emailAllowed,
 ];
 
+const PRICER_HOLDS = Object.freeze(['has_plan', 'commercial', 'not_live']);
 // The plan price, or the reason this home goes to the office to price by hand. The pricer gets the job: it
 // answers only for a visit of this customer, on an account whose every visit is at the home it prices. It is
 // given the app's own connection, never a transaction: its strict price refuses one. A failed read throws
 // (countJob), so an outage never reads as "this home cannot be priced".
 async function pricePlan(ctx) {
   const { option, reason } = await ctx.deps.buildStartOffer(ctx.job.customer_id, ctx.deps.db, PLAN_FAMILY, { visitId: ctx.job.id });
-  if (reason === 'has_plan') return { verdict: 'held', reason };
+  // A plan, a business (the account or the priced property) or a closed account: no home for the offer. Held.
+  if (PRICER_HOLDS.includes(reason)) return { verdict: 'held', reason };
   if (!option) return { verdict: 'office', reason };
   // A price came back: the price settings loaded whole this morning (reportPriceSettings).
   ctx.priceSettings.priced += 1;
@@ -1109,8 +1111,8 @@ const OFFICE_REASON_WORDS = Object.freeze({
   mint_pricing_unavailable: 'The server could not price the plan estimate for this home.',
   // The pricer's `premises`: a commercial or closed account, or no one service address it can prove. The offer is
   // for homes only (owner 2026-11-21), so the office checks the account before any quote.
-  premises: 'Check the account first: the app could not prove one residential service address for it (a commercial or '
-    + 'closed account, or no clear service address). Quote the plan only for a home.',
+  premises: 'Check the account first: the app could not prove one service address for it (no clear service address, '
+    + 'or visits at more than one home). Quote the plan only for a home.',
   not_priced: 'The app has no saved home size or property type it may price this home with, or the price needs a hand check.',
 });
 const officeItemKey = (jobId) => `${OFFICE_ITEM_PREFIX}${jobId}`;

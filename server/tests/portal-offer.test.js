@@ -407,21 +407,21 @@ describe('buildStartOffer', () => {
   });
 
   // The pricer refuses the account with PLAN_START_BLOCKED and the proof's answer. This function owns the
-  // reason the job reads: a plan is 'has_plan'; an account that is not a live home is 'premises'.
+  // reason the job reads, the proof's own word: 'has_plan', 'commercial', 'not_live'.
   describe("the proof's answer about the account", () => {
     test.each([
       ['has_plan', 'has_plan'],
-      ['commercial', 'premises'],
-      ['not_live', 'premises'],
+      ['commercial', 'commercial'],
+      ['not_live', 'not_live'],
     ])('%s is the reason %s, and nothing is priced', async (blocker, reason) => {
       accountBlocker.mockResolvedValue(blocker);
       expect(await start()).toEqual(refused(reason));
       expect(ownSettings).not.toHaveBeenCalled();
     });
 
-    test("its answer about the resolved property type is 'premises'", async () => {
+    test("its answer about the resolved property type keeps its word: 'commercial'", async () => {
       propertyBlocker.mockResolvedValue('commercial');
-      expect(await start()).toEqual(refused('premises'));
+      expect(await start()).toEqual(refused('commercial'));
       expect(ownSettings).not.toHaveBeenCalled();
     });
 

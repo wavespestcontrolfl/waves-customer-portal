@@ -910,13 +910,13 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
   test.each([
     ['the account is a business', async (customer) => trx('customers').where({ id: customer.id }).update({ building_use: 'nonresidential' }), {}],
     ['the job itself was a commercial service, under a one-time pest key', async () => {}, { service_type: 'Commercial One-Time Pest Control' }],
-  ])('the real offer pricing: %s, so the home is not priced; it is counted for the office', async (_name, arrange, visit) => {
+  ])('the real offer pricing: %s, so the home is not priced; it is held as commercial, never an office item', async (_name, arrange, visit) => {
     const { customer } = await seedJob(visit);
     await arrange(customer);
     Lookup.performPropertyLookup.mockResolvedValue(SAVED_LOOKUP);
     const summary = await run({});
-    expect(summary).toMatchObject({ sample: 0, office: 1, held: 0, failed: 0 });
-    expect(summary.reasons).toEqual({ premises: 1 });
+    expect(summary).toMatchObject({ sample: 0, office: 0, held: 1, failed: 0 });
+    expect(summary.reasons).toEqual({ commercial: 1 });
     expect(Sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
