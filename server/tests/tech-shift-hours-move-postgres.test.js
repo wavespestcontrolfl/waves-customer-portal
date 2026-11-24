@@ -645,9 +645,12 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       // 09:00:30 to 10:00:30: its minutes are inside both shifts. 13:00:30 to 14:00:30 ends after today's shift.
       const kept = await seedFollowUp(parent, today, { window_start: '09:00:30', window_end: '10:00:30' });
       const placed = await seedFollowUp(parent, today, { window_start: '13:00:30', window_end: '14:00:30' });
+      // Between two days that are not today the set hours are the same: the same stored time moves (the fixture's day is two weeks out).
+      const later = await seedFollowUp(parent, dayAfter(nextDay), { window_start: '09:00:30', window_end: '10:00:30' });
       expect(await move(parent, nextDay, to)).toMatchObject({ success: true });
       expect(await rowOf(kept)).toMatchObject({ day: today, window_start: '09:00:30' });
       expect(await rowOf(placed)).toMatchObject({ day: dayAfter(today), window_start: '13:00:30', window_end: '14:00:30' });
+      expect(await rowOf(later)).toMatchObject({ day: dayAfter(dayAfter(nextDay)), window_start: '09:00:30', window_end: '10:00:30' });
     });
 
     test('one that lands on today is judged the same way: it keeps its date when the set hours hold it and today\'s shift does not', async () => {

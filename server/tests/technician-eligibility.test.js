@@ -890,8 +890,15 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
         // 16:30 to 17:30 is after today's shift; 19:00 to 20:00 is outside both shifts.
         expect((await lost(visit('16:30', '17:30'), TODAY, TOMORROW)).answer).toBeNull();
         expect((await lost(visit('19:00', '20:00'), TODAY, TOMORROW)).answer).toBeNull();
-        // Two days with the same hours never differ.
-        expect((await lost(visit('06:30', '07:30'), TOMORROW, '2031-03-06')).answer).toBeNull();
+      });
+
+      test('between two days that are not today nothing is read and the answer is null: the set hours are the same on both', async () => {
+        // 06:30 is before the set hours on both days; 09:00:30 is a time the movers cannot read exactly.
+        for (const row of [visit('06:30', '07:30'), visit('09:00', '10:00'), visit('09:00:30', '10:00:30')]) {
+          const future = await lost(row, TOMORROW, '2031-03-06');
+          expect(future.answer).toBeNull();
+          expect(future.conn).not.toHaveBeenCalled();
+        }
       });
 
       test('a stored time the movers cannot read exactly is one no shift holds on the new day, unless the shift did not hold its minutes where it was', async () => {
@@ -905,7 +912,9 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
         expect(await shiftLostByDayChange(made.conn, null, visit('06:30', '07:30'), TODAY, TOMORROW)).toBeNull();
         expect(made.conn).not.toHaveBeenCalled();
         expect((await lost({ window_start: null, window_end: null, estimated_duration_minutes: 60 }, TODAY, TOMORROW)).conn).not.toHaveBeenCalled();
-        expect((await lost(visit('06:30', '07:30'), TODAY, TOMORROW, { shiftRows: [] })).answer).toBeNull();
+        for (const row of [visit('06:30', '07:30'), visit('09:00:30', '10:00:30')]) {
+          expect((await lost(row, TODAY, TOMORROW, { shiftRows: [] })).answer).toBeNull();
+        }
         delete process.env.GATE_TECH_SHIFT_HOURS;
         const off = await lost(visit('06:30', '07:30'), TODAY, TOMORROW);
         expect(off.answer).toBeNull();

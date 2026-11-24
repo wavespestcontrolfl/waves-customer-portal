@@ -546,9 +546,12 @@ function shiftNotHolding(shift, { startMin, endMin }) {
  *     minutes (rowBlockMinutes) outside the old day's shift.
  *   - The new day must hold the block the movers judge (shiftBlockMinutes): a
  *     stored time they cannot read exactly is one no shift holds.
- *   - One read of the hours judges both days. Set hours are the same every day
- *     and only today's follow a clock-in, so the two days differ only when one
- *     of them is today, never because the hours were saved between two reads.
+ *   - Set hours are the same every day and only today's follow a clock-in
+ *     (loadTechShifts). So a visit can lose its shift only when it leaves
+ *     today (Eastern) or lands on it. Between two other days nothing is read
+ *     and the answer is null, also for a stored time with seconds.
+ *   - One read of the hours judges both days, so a save of the hours between
+ *     two reads cannot make them differ.
  * null too when the gate is off (no read), without a technician, a day or a
  * window, and for a technician with no set hours. shiftExcluding's notes on
  * the read (a point in time, no lock, a failed read throws) hold here.
@@ -557,8 +560,10 @@ async function shiftLostByDayChange(conn, technicianId, row, fromDate, toDate) {
   const { rowBlockMinutes, shiftBlockMinutes } = require('./scheduling/window-rules');
   const held = rowBlockMinutes(row);
   const landing = shiftBlockMinutes(row);
+  const now = new Date();
   if (!technicianId || !fromDate || !toDate || !isBlock(landing)) return null;
-  const shiftOf = await loadTechShifts(conn, { technicianIds: [technicianId] });
+  if (![fromDate, toDate].map(dateOnlyString).includes(etDateString(now))) return null;
+  const shiftOf = await loadTechShifts(conn, { technicianIds: [technicianId], now });
   if (isBlock(held) && shiftNotHolding(shiftOf(technicianId, fromDate), held)) return null;
   return shiftNotHolding(shiftOf(technicianId, toDate), landing);
 }
