@@ -275,6 +275,8 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
     expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Babcock Ranch', zip: '33982' } })).toEqual(unknown);
     // a state / ZIP tail an address parse took for a city is not a city either
     expect(legacyGeographicVeto({ extracted: { city: 'FL 33982', zip: '33982' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ extracted: { city: 'NE', zip: '33982' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ extracted: { city: 'Punta Gorda FL 33982', zip: '33982' } })).toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
     // a failed on-file read adds no shared-ZIP evidence (its own fail-closed rule applies)
     expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { lookupFailed: true, zip: '33983' } })).toBeNull();
     // Punta Gorda on a shared ZIP is still vetoed as Punta Gorda

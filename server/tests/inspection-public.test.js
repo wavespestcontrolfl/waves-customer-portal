@@ -4520,6 +4520,9 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
         // a state / ZIP tail as the city, or only the city the ZIP maps to (the lead webhook fills it in for a cityless
         // submission), proves nothing: still unavailable
         expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'FL 33982', zip: '33982' })).toEqual({ ok: false, county: null, unavailable: true });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'NE', zip: '33982' })).toEqual({ ok: false, county: null, unavailable: true });
+        // a stored city with a state / ZIP tail still names Punta Gorda
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Punta Gorda FL 33982', zip: '33982' })).toEqual({ ok: false, county: null });
         expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Babcock Ranch', zip: '33982' })).toEqual({ ok: false, county: null, unavailable: true });
         expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33983' })).toEqual({ ok: false, county: null, unavailable: true });
         // a different served town named on the shared ZIP is served; Punta Gorda on it is still refused

@@ -96,6 +96,11 @@ describe('a ZIP Punta Gorda shares, with no city anywhere, is unknown (null), ne
     expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, Apt 4, FL 33982-1234' })).toBe(true); // a ZIP+4 tail is not a city
     expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, Unit 4, FL 33982' })).toBe(true);
     expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, Apt 4, Babcock Ranch FL 33982' })).toBe(false);
+    // an address parse's guess is never city evidence: a street direction, or a city run into the street with no comma
+    expect(namesSharedZipWithoutCity({ text: '9 Sample Rd NE FL 33982' })).toBe(true);
+    expect(namesSharedZipWithoutCity({ text: '9 Sample Rd, NE, FL 33982' })).toBe(true);
+    expect(namesSharedZipWithoutCity({ text: '9 Sample Rd Babcock Ranch FL 33982' })).toBe(true);
+    expect(namesSharedZipWithoutCity({ city: 'NE', zip: '33982' })).toBe(true);
     expect(namesSharedZipWithoutCity({ zip: '33948' })).toBe(false);
     expect(namesSharedZipWithoutCity({})).toBe(false);
     expect(namesSharedZipWithoutCity()).toBe(false);
@@ -107,6 +112,7 @@ describe('a ZIP Punta Gorda shares, with no city anywhere, is unknown (null), ne
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', text: ['9 Sample Rd, Apt 4, FL 33982'] }).inServiceArea).toBeNull();
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', text: ['9 Sample Rd, Apt 4, FL 33982-1234'] }).inServiceArea).toBeNull();
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', text: ['9 Sample Rd, Apt 4, Punta Gorda FL 33982'] }).inServiceArea).toBe(false);
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', text: ['9 Sample Rd NE FL 33982'] }).inServiceArea).toBeNull();
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', city: 'Babcock Ranch' }).inServiceArea).toBe(true);
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33983', text: '1 Sample Way, Port Charlotte, FL 33983' }).inServiceArea).toBe(true);
     expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', zip: '33982', city: 'Punta Gorda' }).inServiceArea).toBe(false);

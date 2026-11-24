@@ -25,6 +25,14 @@ describe('DeSoto locality list', () => {
     },
   );
 
+  test('a city with a state / ZIP tail still reads as its town (Punta Gorda, DeSoto)', () => {
+    expect(isPuntaGordaLocality('Punta Gorda FL 33982')).toBe(true);
+    expect(isPuntaGordaLocality('Punta Gorda, FL 33983-1234')).toBe(true);
+    expect(isDesotoLocality('Arcadia FL 34266')).toBe(true);
+    expect(isExcludedLocality('Punta Gorda FL 33982')).toBe(true);
+    expect(isPuntaGordaLocality('Port Charlotte FL 33983')).toBe(false);
+  });
+
   test('DeSoto ZIPs, ZIP+4 included', () => {
     expect(isDesotoZip('34266')).toBe(true);
     expect(isDesotoZip('34269-1234')).toBe(true);

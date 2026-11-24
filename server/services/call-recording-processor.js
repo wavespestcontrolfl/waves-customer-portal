@@ -2244,7 +2244,9 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   const sources = [
     [extracted?.city, extracted?.zip], [svc?.city, svc?.postal_code], [av?.normalized?.city, av?.normalized?.postal_code],
   ];
-  // The stored address's city may be only the one the lead webhook inferred from its ZIP, so it must differ from the ZIP's own city.
+  // Trade-off (accepted): a stored shared-ZIP city may be only the one the lead webhook inferred from the ZIP, so it must differ
+  // from the ZIP's own city. A real stored Babcock Ranch / 33982 therefore goes to review (service_area_unverified) on every call,
+  // even when address validation agrees, until staff confirm the address. It fails closed rather than auto-booking a possible Punta Gorda.
   if (sources.some(([city, zip]) => sharedZipNeedsCity(city, zip))
     || (onFile && !onFile.lookupFailed && sharedZipNeedsCity(onFile.city, onFile.zip, { trustInferred: false }))) {
     return { reason: 'shared_zip_city_unknown', county: null };
