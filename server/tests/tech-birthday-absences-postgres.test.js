@@ -331,4 +331,126 @@ postgres('technician days off (real Postgres, rolled back)', () => {
     expect(await svc.syncTechDaysOff({ technicianIds: [office.id] })).toMatchObject({ technicians: 0, written: 0 });
     expect(await rowsFor(office.id)).toEqual([]);
   });
+
+  // ---- Holiday taken days (owner 2026-11-24, Employee Handbook: Holidays) --------------------------------------------
+  // 2026-11-24 noon ET; the horizon runs to 2027-03-24, so Christmas 2026 (Fri) and New Year's Day 2027 (Fri) are inside it.
+  describe('holiday taken days', () => {
+    const HOLIDAY_NOW = new Date('2026-11-24T17:00:00Z');
+    const BIG6 = ['new_years_day', 'memorial_day', 'independence_day', 'labor_day', 'thanksgiving', 'christmas'];
+    const MON_THU = [1, 2, 3, 4];
+
+    async function setClosures(keys) {
+      await trx('system_settings').where({ key: 'schedule_holiday_closures' }).del();
+      await trx('system_settings').where({ key: 'schedule_weekly_days_off' }).del();
+      if (keys) await trx('system_settings').insert({ key: 'schedule_holiday_closures', value: JSON.stringify(keys) });
+    }
+    const openRows = async (id) => (await rowsFor(id)).filter((r) => r.cleared_at == null);
+    const openDates = async (id) => (await openRows(id)).map((r) => (r.absence_date instanceof Date ? r.absence_date.toISOString().slice(0, 10) : String(r.absence_date).slice(0, 10)));
+
+    test('a Monday to Thursday technician is off the Thursday before a Friday holiday, and Waves stays open that day', async () => {
+      await setClosures(BIG6);
+      const tech = await makeTech('Synthetic MonThu', { work_days: MON_THU });
+      expect(await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] })).toMatchObject({ written: 2, failed: 0 });
+      expect(await openDates(tech.id)).toEqual(['2026-12-24', '2026-12-31']);
+      const [row] = await rowsFor(tech.id);
+      expect(row).toMatchObject({ reason: 'other', note: null, source: 'tech_days_off', system_cleared_at: null });
+      // the existing readers honor it, with no new code
+      const days = await eligibility.absentTechDays(trx, { dateFrom: '2026-12-20', dateTo: '2026-12-31', technicianIds: [tech.id] });
+      expect(days).toEqual(new Set([`${tech.id}:2026-12-24`, `${tech.id}:2026-12-31`]));
+      const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
+      const closed = await getBlackoutDates('2026-12-20', '2026-12-31', trx);
+      expect(closed.has('2026-12-24')).toBe(false); // Waves is open the Thursday
+      expect(closed.has('2026-12-25')).toBe(true);
+    });
+
+    test('Thanksgiving (a Thursday), a Sunday July 4 (its observed Monday is closed), NULL work_days and an every-day list give no row', async () => {
+      await setClosures(['thanksgiving', 'independence_day']);
+      const monThu = await makeTech('Synthetic MonThu2', { work_days: MON_THU });
+      const nullDays = await makeTech('Synthetic NullDays');
+      const allDays = await makeTech('Synthetic AllDays', { work_days: [0, 1, 2, 3, 4, 5, 6] });
+      expect(await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [monThu.id, nullDays.id] })).toMatchObject({ written: 0, failed: 0 });
+      expect(await rowsFor(monThu.id)).toEqual([]);
+      expect(await rowsFor(nullDays.id)).toEqual([]);
+      expect(await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [allDays.id] })).toMatchObject({ written: 0, failed: 0 });
+      expect(await rowsFor(allDays.id)).toEqual([]);
+      // July 4 2027 (Sunday): the pure rule names Monday 07-05, which the observed closure covers
+      const july = await svc.syncTechDaysOff({ now: new Date('2027-06-20T17:00:00Z'), technicianIds: [monThu.id] });
+      expect(july).toMatchObject({ written: 0, failed: 0 });
+      expect(await rowsFor(monThu.id)).toEqual([]);
+    });
+
+    test('a birthday on the same date as a taken day is one row, and a second tick writes nothing', async () => {
+      await setClosures(['christmas']);
+      const tech = await makeTech('Synthetic Both', { work_days: MON_THU, dob: '1990-12-24' });
+      expect(await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] })).toMatchObject({ written: 1, failed: 0 });
+      expect(await openDates(tech.id)).toEqual(['2026-12-24']);
+      expect(await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] })).toMatchObject({ written: 0, cleared: 0, failed: 0 });
+      // the holiday reopened: the birthday still holds the day
+      await setClosures([]);
+      expect(await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] })).toMatchObject({ cleared: 0, failed: 0 });
+      expect(await openDates(tech.id)).toEqual(['2026-12-24']);
+    });
+
+    test('a holiday reopened in settings clears its row as a system clear and resolves that day\'s parked alerts', async () => {
+      await setClosures(['christmas']);
+      const tech = await makeTech('Synthetic Reopen', { work_days: MON_THU });
+      await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] });
+      expect(await openDates(tech.id)).toEqual(['2026-12-24']);
+      const [alert] = await trx('dispatch_alerts').insert({ type: 'tech_out_overflow', severity: 'warn', tech_id: tech.id, payload: { date: '2026-12-24' } }).returning('id');
+      await setClosures([]);
+      expect(await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] })).toMatchObject({ cleared: 1, written: 0, failed: 0 });
+      const [row] = await rowsFor(tech.id);
+      expect(row.cleared_at).not.toBeNull();
+      expect(row.system_cleared_at).not.toBeNull();
+      expect(row.cleared_by).toBeNull();
+      expect((await trx('dispatch_alerts').where({ id: alert.id || alert }).first('resolved_at')).resolved_at).not.toBeNull();
+      // closed again: a NEW episode (a new id), never the old row reopened
+      await setClosures(['christmas']);
+      expect(await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] })).toMatchObject({ reopened: 1, failed: 0 });
+      const rows = await rowsFor(tech.id);
+      expect(rows).toHaveLength(2);
+      expect(rows[0].id).not.toBe(rows[1].id);
+    });
+
+    test('a work_days change moves the row; NULL work_days clears it', async () => {
+      await setClosures(['christmas']);
+      const tech = await makeTech('Synthetic Moves', { work_days: MON_THU });
+      await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] });
+      expect(await openDates(tech.id)).toEqual(['2026-12-24']);
+      await trx('technicians').where({ id: tech.id }).update({ work_days: [1, 2, 3] });
+      expect(await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] })).toMatchObject({ cleared: 1, written: 1, failed: 0 });
+      expect(await openDates(tech.id)).toEqual(['2026-12-23']);
+      await trx('technicians').where({ id: tech.id }).update({ work_days: null });
+      expect(await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] })).toMatchObject({ cleared: 1, written: 0, failed: 0 });
+      expect(await openDates(tech.id)).toEqual([]);
+    });
+
+    test('a technician who leaves loses the row; an office clear is never undone', async () => {
+      await setClosures(['christmas', 'new_years_day']);
+      const gone = await makeTech('Synthetic Leaves', { work_days: MON_THU });
+      const back = await makeTech('Synthetic Back', { work_days: MON_THU });
+      await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [gone.id, back.id] });
+      await trx('technicians').where({ id: gone.id }).update({ employment_status: 'inactive', active: false });
+      await trx('technician_absences').where({ technician_id: back.id, absence_date: '2026-12-24' })
+        .update({ cleared_at: new Date('2026-11-25T15:00:00Z'), cleared_by: (await trx('technicians').first('id')).id });
+      const out = await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [gone.id, back.id] });
+      expect(out).toMatchObject({ cleared: 2, written: 0, failed: 0 });
+      expect(await openDates(gone.id)).toEqual([]);
+      expect(await openDates(back.id)).toEqual(['2026-12-31']);
+    });
+
+    test('an unreadable closure setting writes no holiday row and clears none, counts a failure, and birthdays still run', async () => {
+      await setClosures(['christmas']);
+      const tech = await makeTech('Synthetic Failing', { work_days: MON_THU, dob: '1990-12-02' });
+      await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] });
+      expect(await openDates(tech.id)).toEqual(['2026-12-02', '2026-12-24']);
+      await setClosures([]);
+      await trx('technician_absences').where({ technician_id: tech.id, absence_date: '2026-12-02' }).del();
+      // A real read failure: the strict blackout read cannot find its table (DDL is transactional, so the rollback restores it).
+      await trx.raw('ALTER TABLE schedule_blackout_dates RENAME TO schedule_blackout_dates_gone');
+      const out = await svc.syncTechDaysOff({ now: HOLIDAY_NOW, technicianIds: [tech.id] });
+      expect(out).toMatchObject({ written: 1, cleared: 0, failed: 1 });
+      expect(await openDates(tech.id)).toEqual(['2026-12-02', '2026-12-24']);
+    });
+  });
 });
