@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TimeGridDay from './TimeGridDay';
 
 const dnd = vi.hoisted(() => ({ props: null }));
-vi.mock('./RescheduleConfirmModal', () => ({ default: () => null }));
+const modal = vi.hoisted(() => ({ props: null }));
+vi.mock('./RescheduleConfirmModal', () => ({ default: (props) => { modal.props = props; return null; } }));
 vi.mock('@dnd-kit/core', () => ({
   DndContext: (props) => { dnd.props = props; return <div>{props.children}</div>; },
   useDndContext: () => ({ active: null }),
@@ -31,6 +32,9 @@ function visit(id, name, windowStart, extra = {}) {
   };
 }
 
+// What the customer was told: an hour-level promise on the day.
+const toldAt = (window) => ({ level: 'hour', dayOnly: false, date: '2026-11-25', window });
+
 function renderDay(services, props = {}) {
   return render(<TimeGridDay date="2026-11-25" services={services} technicians={TECHS} {...props} />);
 }
@@ -44,7 +48,7 @@ beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'test-token');
   global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); modal.props = null; localStorage.removeItem('waves_admin_user'); });
 
 describe('TimeGridDay planned blocks', () => {
   it('draws a planned visit at its planned arrival, as tall as its planned minutes', () => {
@@ -82,8 +86,8 @@ describe('TimeGridDay planned blocks', () => {
 
   it('flags a planned arrival outside the promised window with a red edge and a tooltip', () => {
     renderDay([
-      visit('a', 'Late Lou', '10:00', { plannedArrivalMin: 12 * 60 + 15, plannedMinutes: 35 }),
-      visit('b', 'Fine Fay', '14:00', { plannedArrivalMin: 14 * 60 + 40, plannedMinutes: 35 }),
+      visit('a', 'Late Lou', '10:00', { plannedArrivalMin: 12 * 60 + 15, plannedMinutes: 35, told: toldAt('10:00 AM - 12:00 PM') }),
+      visit('b', 'Fine Fay', '14:00', { plannedArrivalMin: 14 * 60 + 40, plannedMinutes: 35, told: toldAt('2:00 PM - 4:00 PM') }),
     ]);
     const late = block('Late Lou');
     expect(late.style.borderLeft).toBe('3px solid rgb(220, 38, 38)');
@@ -162,7 +166,7 @@ describe('TimeGridDay planned blocks', () => {
 
   it('drops the old plan from a visit moved to another hour while the confirmation is open', () => {
     renderDay([
-      visit('a', 'Moved Mo', '10:00', { plannedArrivalMin: 12 * 60 + 15, plannedMinutes: 35 }),
+      visit('a', 'Moved Mo', '10:00', { plannedArrivalMin: 12 * 60 + 15, plannedMinutes: 35, told: toldAt('10:00 AM - 12:00 PM') }),
       visit('b', 'Stays Stu', '08:00', { plannedArrivalMin: 8 * 60, plannedMinutes: 35 }),
     ]);
     // Before the move it is drawn at its plan, outside its 10-12 window.
@@ -181,5 +185,96 @@ describe('TimeGridDay planned blocks', () => {
     // The rest of the route keeps its plan until the refresh.
     expect(parseFloat(block('Stays Stu').style.top)).toBeCloseTo(topOf(480));
     expect(parseFloat(block('Stays Stu').style.height)).toBeCloseTo((35 / 30) * 32);
+  });
+
+  describe('the promised window', () => {
+    const planned = { plannedArrivalMin: 12 * 60 + 15, plannedMinutes: 35 };
+
+    it('holds an hour-level visit to the window the customer was told, not the booked hour', () => {
+      renderDay([visit('a', 'Told Tom', '10:00', {
+        ...planned, scheduledDate: '2026-11-25',
+        told: { level: 'hour', dayOnly: false, date: '2026-11-25', window: '12:00 PM - 2:00 PM' },
+      })]);
+      const el = block('Told Tom');
+      expect(screen.getByText('window 12–2')).toBeInTheDocument();
+      // 12:15 is inside the told 12-2 window: no alert, even though the booking now reads 10.
+      expect(el.style.borderLeft).not.toContain('220, 38, 38');
+      cleanup();
+      renderDay([visit('a', 'Told Tom', '10:00', {
+        ...planned, plannedArrivalMin: 14 * 60 + 30, scheduledDate: '2026-11-25',
+        told: { level: 'hour', dayOnly: false, date: '2026-11-25', window: '12:00 PM - 2:00 PM' },
+      })]);
+      expect(block('Told Tom').style.borderLeft).toContain('220, 38, 38');
+      expect(block('Told Tom').getAttribute('title')).toMatch(/outside the window 12–2/);
+    });
+
+    it('shows no hour chip and no alert for a day-only promise', () => {
+      renderDay([visit('a', 'Day Dee', '10:00', { ...planned, told: { level: 'day', dayOnly: true, date: null, window: null } })]);
+      expect(screen.queryByText(/^window /)).toBeNull();
+      expect(block('Day Dee').style.borderLeft).not.toContain('220, 38, 38');
+      expect(block('Day Dee').getAttribute('title')).not.toMatch(/outside/);
+    });
+
+    it('shows the booked window as a chip only, never the red edge, when no promise is recorded', () => {
+      renderDay([
+        visit('a', 'None Nan', '10:00', { ...planned, told: { level: 'none', dayOnly: false, date: null, window: null } }),
+        visit('b', 'Bare Bo', '14:00', { plannedArrivalMin: 17 * 60, plannedMinutes: 35 }),
+      ]);
+      expect(screen.getAllByText(/^window /)).toHaveLength(2);
+      expect(block('None Nan').style.borderLeft).not.toContain('220, 38, 38');
+      expect(block('Bare Bo').style.borderLeft).not.toContain('220, 38, 38');
+    });
+  });
+
+  it('draws no Open marker over a visit drawn away from its booked hour', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-25T11:00:00Z')); // 6:00 AM ET
+    // Booked 10:00, planned 11:15: the 11 AM hour is open for booking, but the
+    // visit is drawn there.
+    renderDay(
+      [visit('a', 'Late Lou', '10:00', { plannedArrivalMin: 11 * 60 + 15, plannedMinutes: 35 })],
+      { onCreateSlot: vi.fn() },
+    );
+    vi.useRealTimers();
+    expect(screen.queryByLabelText(/Book open hour 11–12 AM/)).toBeNull();
+    expect(screen.getByLabelText(/Book open hour 12–1 PM/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Book open hour 9–10 AM/)).toBeInTheDocument();
+  });
+
+  describe('dragging a block drawn away from its booked hour', () => {
+    const drag = (svc, over, delta) => act(() => {
+      dnd.props.onDragEnd({ active: { data: { current: { service: svc } } }, over: { data: { current: over } }, delta });
+    });
+    beforeEach(() => localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' })));
+
+    it('keeps the booked start when it is dropped straight across onto another technician', () => {
+      // Drawn at 11:15 (the pointer is in the 11 AM slot), booked at 10:00.
+      const svc = visit('a', 'Across Al', '10:00', { plannedArrivalMin: 11 * 60 + 15, plannedMinutes: 35 });
+      render(<TimeGridDay date="2026-11-25" services={[svc]} technicians={[...TECHS, { id: 'tech-2', name: 'Bo Tech' }]} />);
+      drag(svc, { techId: 'tech-2', slotMin: 11 * 60 }, { x: 200, y: 0 });
+      expect(modal.props.open).toBe(true);
+      expect(modal.props.fromMinutes).toBe(10 * 60);
+      expect(modal.props.toMinutes).toBe(10 * 60);
+      expect(modal.props.technicianChange).toBeTruthy();
+    });
+
+    it('moves the booking by the hours it was dragged', () => {
+      const svc = visit('a', 'Down Dan', '10:00', { plannedArrivalMin: 11 * 60 + 15, plannedMinutes: 35 });
+      renderDay([svc]);
+      drag(svc, { techId: 'tech-1', slotMin: 13 * 60 }, { x: 0, y: 128 }); // two hours down
+      expect(modal.props.open).toBe(true);
+      expect(modal.props.fromMinutes).toBe(10 * 60);
+      expect(modal.props.toMinutes).toBe(12 * 60);
+    });
+  });
+
+  it('sends nothing when an up-drag on a 30-minute booking clamps back to 30 minutes', async () => {
+    renderDay([visit('a', 'Half Hal', '10:00', { windowEnd: '10:30' })]);
+    const handle = screen.getByTitle('Drag to resize');
+    fireEvent.pointerDown(handle, { clientY: 200 });
+    fireEvent(window, new MouseEvent('pointermove', { clientY: 168 }));
+    fireEvent(window, new MouseEvent('pointerup', { clientY: 168 }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

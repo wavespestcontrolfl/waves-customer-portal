@@ -105,15 +105,28 @@ describe('attachPlannedBlocks', () => {
     expect(lone[0].plannedArrivalMin).toBeNull();
   });
 
-  it('plans one stop for the rows of a visit group, which share its arrival and minutes', () => {
+  it('runs the services of a visit group one after another, each drawn at its own start', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'plan';
     const services = [
       row('g1', '10:00', A, { visitId: 'v1' }),
       row('g2', '10:00', A, { visitId: 'v1', serviceTypeRaw: 'Lawn Care' }),
     ];
     attachPlannedBlocks(services, EARLY);
-    expect(services[0]).toMatchObject({ plannedArrivalMin: 10 * 60, plannedMinutes: 70 });
-    expect(services[1]).toMatchObject({ plannedArrivalMin: 10 * 60, plannedMinutes: 70 });
+    expect(services[0]).toMatchObject({ plannedArrivalMin: 10 * 60, plannedMinutes: 35 });
+    expect(services[1]).toMatchObject({ plannedArrivalMin: 10 * 60 + 35, plannedMinutes: 35 });
+  });
+
+  it('draws a group member booked an hour later at its own modeled start, not the group arrival', () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    // 09:00 and 10:00 members, an hour of work each: the second starts at 10:00,
+    // inside its own 10-12 window.
+    const services = [
+      row('g1', '09:00', A, { visitId: 'v1' }),
+      row('g2', '10:00', A, { visitId: 'v1', serviceTypeRaw: 'Lawn Care' }),
+    ];
+    attachPlannedBlocks(services, EARLY);
+    expect(services[0]).toMatchObject({ plannedArrivalMin: 9 * 60, plannedMinutes: 60 });
+    expect(services[1]).toMatchObject({ plannedArrivalMin: 10 * 60, plannedMinutes: 60 });
   });
 
   it('does not add a return trip for a visit group whose members are not next to each other', () => {
@@ -126,7 +139,7 @@ describe('attachPlannedBlocks', () => {
     attachPlannedBlocks(services, EARLY);
     const by = Object.fromEntries(services.map((s) => [s.id, s]));
     expect(by.g1.plannedArrivalMin).toBe(8 * 60);
-    expect(by.g2.plannedArrivalMin).toBe(8 * 60);
+    expect(by.g2.plannedArrivalMin).toBe(8 * 60 + 35);
     // The group is worked once (08:00 + 70), then one drive to the other stop.
     expect(by.mid.plannedArrivalMin).toBe(8 * 60 + 70 + Math.max(1, driveMin(A, B)));
   });

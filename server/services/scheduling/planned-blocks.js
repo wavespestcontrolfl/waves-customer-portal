@@ -25,7 +25,7 @@
 
 const RouteOptimizer = require('../route-optimizer');
 const { driveMin } = require('../auto-dispatch/geo');
-const { simulateArrivalRoute, effectiveWindowRange } = require('../route-reorder-window-fit');
+const { simulateArrivalRoute, effectiveWindowRange, workDuration } = require('../route-reorder-window-fit');
 const {
   buildStops, planRoute, legBetween, hasGeo, minutesOf, NOT_A_STOP,
 } = require('./stop-drive-legs');
@@ -63,7 +63,23 @@ function simulateDay(rows, { departureMin, home }) {
     reportLate: true,
     legMinutes: (_prev, stop) => (stop.id === firstId ? firstLeg : route.legIn.get(stop.id) ?? 0),
   });
-  return sim ? { sim, membersOf: route.membersOf } : null;
+  return sim ? { sim, membersOf: route.membersOf, pieceOf: route.pieceOf } : null;
+}
+
+// Each row of a piece with its modeled start and minutes. A visit group runs
+// its services one after another inside the stop (planRoute sums their work),
+// so each draws at its own start; a co-visit chain is one stretch of work that
+// its rows share.
+function memberSlots(piece, arrival, members) {
+  const total = Math.round(arrival.departureMin - arrival.arrivalMin);
+  if (!piece?.rows || piece.rows.length < 2) return members.map((id) => ({ id, start: arrival.arrivalMin, minutes: total }));
+  let offset = 0;
+  return [...piece.rows].sort((a, b) => minutesOf(a.window_start) - minutesOf(b.window_start)).map((r) => {
+    const minutes = workDuration(r);
+    const slot = { id: r.id, start: arrival.arrivalMin + offset, minutes };
+    offset += minutes;
+    return slot;
+  });
 }
 
 /**
@@ -87,13 +103,13 @@ function attachPlannedBlocks(services, { departureMin = DEFAULT_DEPARTURE_MIN, h
   if (!day) return;
   const byId = new Map(services.map((s) => [s.id, s]));
   for (const a of day.sim.arrivals) {
-    const minutes = Math.round(a.departureMin - a.arrivalMin);
-    if (!Number.isFinite(a.arrivalMin) || !(minutes > 0)) continue;
-    for (const id of day.membersOf.get(a.id) || []) {
-      const s = byId.get(id);
-      if (!s || !isPlaceable(s)) continue;
-      s.plannedArrivalMin = Math.round(a.arrivalMin);
-      s.plannedMinutes = minutes;
+    if (!Number.isFinite(a.arrivalMin) || !(a.departureMin > a.arrivalMin)) continue;
+    const members = day.membersOf.get(a.id) || [];
+    for (const slot of memberSlots(day.pieceOf.get(a.id), a, members)) {
+      const s = byId.get(slot.id);
+      if (!s || !isPlaceable(s) || !(slot.minutes > 0)) continue;
+      s.plannedArrivalMin = Math.round(slot.start);
+      s.plannedMinutes = Math.round(slot.minutes);
     }
   }
 }

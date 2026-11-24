@@ -189,6 +189,7 @@ function planRoute(stops, legs) {
   const piecesOf = new Map();
   // Every row of each piece (reached or not), for the planned-blocks view.
   const membersOf = new Map();
+  const pieceOf = new Map();
   stops.slice(0, upTo).forEach((st, i) => {
     piecesOf.set(st.legs[0].id, []);
     stopPieces(st.members).forEach((p, j) => {
@@ -196,11 +197,12 @@ function planRoute(stops, legs) {
       // Only work the tech has not reached can still run late.
       if (p.open) piecesOf.get(st.legs[0].id).push({ id, ids: p.ids });
       membersOf.set(id, p.all);
+      pieceOf.set(id, p);
       if (j === 0 && i > 0) legIn.set(id, legs[i - 1]);
       seq.push(seqRow(id, p, st));
     });
   });
-  return { seq, legIn, piecesOf, membersOf, startMin: minutesOf(seq[0].window_start) };
+  return { seq, legIn, piecesOf, membersOf, pieceOf, startMin: minutesOf(seq[0].window_start) };
 }
 
 // The last time a visit was touched: en route, check-in or check-out.

@@ -170,11 +170,10 @@ function minutesToTopPx(min) {
   return ((min - DAY_START_HOUR * 60) / SLOT_MIN) * SLOT_HEIGHT;
 }
 
-// The promise to the customer is a 2-hour arrival window from the booked
-// start (server ARRIVAL_WINDOW_MINUTES, the same bound the late check uses),
-// while the booked row stays one hour.
+// The arrival window quoted to a customer is 2 hours from the start (server
+// ARRIVAL_WINDOW_MINUTES), while the booked row stays one hour.
 const ARRIVAL_WINDOW_MIN = 120;
-// Planned arrival outside that window: a genuine alert (red left edge).
+// Planned arrival outside the window the customer was told: a genuine alert (red left edge).
 const OUTSIDE_WINDOW_EDGE = '#DC2626';
 // A hairline across the middle of a 30-minute row (the 15-minute mark).
 const QUARTER_LINE = 'linear-gradient(to bottom, transparent calc(50% - 0.5px), #F7F7F8 calc(50% - 0.5px), #F7F7F8 calc(50% + 0.5px), transparent calc(50% + 0.5px))';
@@ -215,15 +214,34 @@ function windowHour(min) {
   return min % 60 === 0 ? String(h12) : `${h12}:${String(min % 60).padStart(2, '0')}`;
 }
 
-// The promised window of a planned block: { label: "window 8–10", outside }.
+// "9:00 AM - 11:00 AM" (the feed's told.window) as minutes, or null.
+function parseToldWindow(text) {
+  const m = String(text || '').match(/(\d{1,2}):(\d{2})\s*([AP]M)\s*[-–—]\s*(\d{1,2}):(\d{2})\s*([AP]M)/i);
+  if (!m) return null;
+  const at = (h, mm, ap) => ((Number(h) % 12) + (/p/i.test(ap) ? 12 : 0)) * 60 + Number(mm);
+  return { start: at(m[1], m[2], m[3]), end: at(m[4], m[5], m[6]) };
+}
+
+// The arrival window a planned block is held to: { label: "window 8–10", outside }.
+//  - the promise the customer was told (feed `told`, hour level, for this
+//    day) is the window, and a planned arrival outside it is the alert;
+//  - a day-only promise has no hour: no chip, no alert;
+//  - no recorded promise (none, unreadable, another day, a technician's feed):
+//    the booked start plus 2 hours as a chip only, never the red edge.
 function plannedWindow(svc, plannedStart) {
+  const told = svc.told;
+  if (told?.level === 'day') return null;
+  const recorded = told?.level === 'hour' ? parseToldWindow(told.window) : null;
+  const sameDay = !told?.date || !svc.scheduledDate || String(told.date).slice(0, 10) === String(svc.scheduledDate).slice(0, 10);
+  if (recorded && sameDay) {
+    return {
+      label: `window ${windowHour(recorded.start)}–${windowHour(recorded.end)}`,
+      outside: plannedStart < recorded.start || plannedStart > recorded.end,
+    };
+  }
   const ws = parseHHMM(svc.windowStart);
   if (ws == null) return null;
-  const we = ws + ARRIVAL_WINDOW_MIN;
-  return {
-    label: `window ${windowHour(ws)}–${windowHour(we)}`,
-    outside: plannedStart < ws || plannedStart > we,
-  };
+  return { label: `window ${windowHour(ws)}–${windowHour(ws + ARRIVAL_WINDOW_MIN)}`, outside: false };
 }
 
 // Square-style flat color blocks. Default/scheduled → blue-500;
@@ -529,7 +547,10 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
         const baseMin = Number.isFinite(durationMin) && durationMin > 0
           ? durationMin
           : (startHeight / SLOT_HEIGHT) * SLOT_MIN;
-        onResize(service, Math.max(SLOT_MIN, baseMin + slots * SLOT_MIN));
+        const nextMin = Math.max(SLOT_MIN, baseMin + slots * SLOT_MIN);
+        // Dragged up on a 30-minute booking the clamp lands back on the same
+        // length: nothing changed, so nothing is sent.
+        if (nextMin !== baseMin) onResize(service, nextMin);
       }
     };
     window.addEventListener('pointermove', onMove);
@@ -753,6 +774,15 @@ export function isBookableSlotIdx(slotIdx, durationMin = 60) {
   return startMin + dur <= DAY_END_HOUR * 60;
 }
 
+// A drop's new booked start (whole hour). A block drawn at its planned time
+// moves by the hours of vertical drag; any other block takes the slot it
+// was dropped on.
+function droppedStartMin(svc, fromMin, slotMin, delta) {
+  if (!plannedInterval(svc) || fromMin == null) return Math.floor(slotMin / 60) * 60;
+  const hours = Math.round(((delta?.y || 0) / SLOT_HEIGHT) * SLOT_MIN / 60);
+  return fromMin + hours * 60;
+}
+
 function SlotDroppable({ techId, slotIdx, onCreateStart, takesNew = true }) {
   const slotMin = snapSlotIdxToHourMin(slotIdx);
   // The visit being dragged (same payload onDragEnd reads) sizes the fit
@@ -850,6 +880,13 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
   })));
   const freedHours = freedBy(['cancelled', 'skipped']);
   const doneHours = freedBy(['completed', 'no_show']);
+  // An Open marker is opaque and sits above the blocks: never over a visit
+  // drawn at its planned time (the hour stays open for booking, it is just not
+  // advertised on top of that visit).
+  const underPlanned = new Set(openHours.filter((h) => services.some((svc) => {
+    const planned = plannedInterval(svc);
+    return planned && planned.start < (h + 1) * 60 && planned.end > h * 60;
+  })));
 
   const selTop = sel ? Math.min(sel.startIdx, sel.endIdx) * SLOT_HEIGHT : 0;
   const selHeight = sel
@@ -896,7 +933,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             or drag; the button itself is the keyboard / screen-reader way in.
             Over a skipped or cancelled block (which frees its hour) the
             button takes the click itself, so it never opens that visit. */}
-        {openHours.filter((h) => !doneHours.has(h)).map((h) => (
+        {openHours.filter((h) => !doneHours.has(h) && !underPlanned.has(h)).map((h) => (
           <button
             key={`open-${h}`}
             type="button"
@@ -1443,7 +1480,7 @@ export default function TimeGridDay({
 
   const onDragEnd = useCallback((event) => {
     setDragging(null);
-    const { active, over } = event;
+    const { active, over, delta } = event;
     if (!over) return;
     const svc = active.data.current?.service;
     const drop = over.data.current;
@@ -1453,10 +1490,13 @@ export default function TimeGridDay({
     const toTech = drop.techId;
     const fromMin = parseHHMM(svc.windowStart);
     // Rail droppable has no slotMin — keep the original time when unassigning.
-    const toMin = drop.slotMin != null ? Math.floor(drop.slotMin / 60) * 60 : fromMin;
+    // A visit drawn at its PLANNED time is not under the booked hour's slot,
+    // so its hour change is the whole hours the block was dragged vertically
+    // (a sideways or same-place drop keeps the booked start).
+    const toMin = drop.slotMin == null ? fromMin : droppedStartMin(svc, fromMin, drop.slotMin, delta);
     // Past-day-end landings are disabled droppables; belt-and-braces for a
     // stale drop payload — the server would 422 it anyway.
-    if (drop.slotMin != null && toMin + effectiveDuration(svc) > DAY_END_HOUR * 60) return;
+    if (drop.slotMin != null && (toMin < DAY_START_HOUR * 60 || toMin + effectiveDuration(svc) > DAY_END_HOUR * 60)) return;
     if (dropRefused(fromTech, toTech, fromMin, toMin, techList.find((lane) => lane.id === toTech))) return;
 
     const dur = effectiveDuration(svc);
