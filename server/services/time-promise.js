@@ -114,7 +114,8 @@ async function dayOnlyStoredCopyStale(message) {
     // The stored HTML names a DAY: it is still true only while the visit is on that same ET calendar date. A silent move to
     // another eligible date must not let it go, and no promise is read for a mismatch.
     if (!(await storedDateStillHolds(message, scheduledServiceId))) return true;
-    const verdict = await require('./appointment-reminders').revalidateDelayedDaySend({ customerId, scheduledServiceId, ...storedMoveNotice(message) });
+    // The date was just proved (storedDateStillHolds), so the other-date promise rule judges it (occurrenceDate).
+    const verdict = await require('./appointment-reminders').revalidateDelayedDaySend({ customerId, scheduledServiceId, ...storedMoveNotice(message), occurrenceDate: promisedDateFromEmailKey(message.idempotency_key) });
     return verdict !== 'day';
   } catch {
     return true;

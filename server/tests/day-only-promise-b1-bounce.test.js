@@ -107,7 +107,9 @@ function groupedWorld({ metadata, visitDate = '2026-06-22', ungrouped = false })
     notification_prefs: Array.from({ length: 4 }, () => chain({ first: prefsRow })),
     appointment_reminders: [chain({ first: ownerRow }), chain({})],
     // Second read: the shared bounce occurrence check (bouncedDateMoved) reads the visit's current date.
-    scheduled_services: [chain({ first: ungrouped ? { visit_id: null, scheduled_date: visitDate } : { visit_id: 'visit-9' } }), chain({ first: { scheduled_date: visitDate } })],
+    // Then two date reads: the bounce occurrence check (bouncedOccurrenceState) and the delayed-send check's own
+    // occurrence check (revalidateDelayedDaySend occurrenceDate).
+    scheduled_services: [chain({ first: ungrouped ? { visit_id: null, scheduled_date: visitDate } : { visit_id: 'visit-9' } }), chain({ first: { scheduled_date: visitDate } }), chain({ first: { scheduled_date: visitDate } })],
     service_visits: [chain({ first: { id: 'visit-9', scheduled_date: visitDate } })],
     'scheduled_services as ss': [membersChain, labelChain],
     'scheduled_services as s': [chain({ first: null }), chain({ first: null })],
@@ -257,7 +259,7 @@ describe('a delayed bounce of a day-only text is revalidated before it recovers 
       customers: Array.from({ length: 3 }, () => chain({ first: { id: 'c1', phone: '+19415551234', line_type: null } })),
       notification_prefs: Array.from({ length: 4 }, () => chain({ first: prefsRow })),
       appointment_reminders: [chain({ first: { appointment_time: '2026-06-22T13:00:00.000Z', service_type: 'Pest Control' } }), chain({})],
-      scheduled_services: [chain({ first: { scheduled_date: visitDate } })],
+      scheduled_services: [chain({ first: { scheduled_date: visitDate } }), chain({ first: { scheduled_date: visitDate } })],
     });
   };
 
@@ -339,5 +341,41 @@ describe('a delayed bounce of a day-only text is revalidated before it recovers 
     await bounce('SM_window_plain');
     expect(timePromise.loadPromiseLevels).not.toHaveBeenCalled();
     expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Pre-push Codex P1 (2026-11-24): every delayed day-only caller passes the date its body was about.
+describe('revalidateDelayedDaySend occurrenceDate', () => {
+  const run = (occurrenceDate) => AppointmentReminders.revalidateDelayedDaySend({ customerId: 'c9', scheduledServiceId: 'ss-owner', apptTime: new Date(SLOT), occurrenceDate });
+  const levelsByRule = () => timePromise.loadPromiseLevels.mockImplementation(async (_conn, ids, _now, opts = {}) => new Map(ids.map((id) => [id, opts.sameDateOnly ? 'none' : 'hour'])));
+
+  test('the visit moved off that date: suppress, no promise read', async () => {
+    setDbQueues({ scheduled_services: [chain({ first: { scheduled_date: '2026-06-25' } })] });
+    expect(await run('2026-06-22')).toBe('suppress');
+    expect(timePromise.loadPromiseLevels).not.toHaveBeenCalled();
+  });
+
+  test('the date cannot be read: suppress (fail closed)', async () => {
+    const broken = { where: () => broken, first: async () => { throw new Error('read failed'); } };
+    db.mockImplementation(() => broken);
+    expect(await run('2026-06-22')).toBe('suppress');
+  });
+
+  test('same date: the other-date rule, so an older date\'s hour does not suppress it', async () => {
+    levelsByRule();
+    setDbQueues({
+      scheduled_services: [chain({ first: { scheduled_date: '2026-06-22' } })],
+      customers: Array.from({ length: 3 }, () => chain({ first: { id: 'c9', phone: '+19415551234', email: 'c9@example.com', line_type: null } })),
+      notification_prefs: Array.from({ length: 4 }, () => chain({ first: prefsRow })),
+    });
+    expect(await run('2026-06-22')).toBe('day');
+    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: true });
+  });
+
+  test('no date (an undated legacy body): the raw rule, an hour for any date suppresses', async () => {
+    levelsByRule();
+    setDbQueues({});
+    expect(await run(null)).toBe('suppress');
+    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: false });
   });
 });

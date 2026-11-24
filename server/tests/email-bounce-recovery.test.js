@@ -413,7 +413,7 @@ describe('attemptRecovery codex-fix behaviors', () => {
       revalidateDelayedDaySend.mockResolvedValue(verdict);
       const res = await run(bouncedDay());
       expect(res).toEqual({ skipped: 'stored_copy_not_replayed' });
-      expect(revalidateDelayedDaySend).toHaveBeenCalledWith({ customerId: 'c1', scheduledServiceId: 'svc-9' });
+      expect(revalidateDelayedDaySend).toHaveBeenCalledWith({ customerId: 'c1', scheduledServiceId: 'svc-9', occurrenceDate: '2026-11-15' });
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
     });
 
