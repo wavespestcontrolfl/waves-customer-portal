@@ -297,14 +297,16 @@ describe('the credit rules (applyLedger)', () => {
     visitId, workDate: '2026-09-21', kind: 'priced', creditCents: cents, needsReview: false,
     ledger: { invoices: invoiceIds.map((invoiceId) => ({ invoiceId, members: members('visit-1', 'visit-2') })) }, linkedInvoices: invoiceIds, ...extra,
   });
-  const job = (visitId, nth, { price = 200000, sold = 2, rootId = 'root', linked = [] } = {}) => ({
+  const job = (visitId, nth, { price = 200000, sold = 2, rootId = 'root', linked = [], visits = [rootId, 'followup'] } = {}) => ({
     visitId, workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: productionShare.jobPartCents(price, sold, nth), needsReview: false,
-    ledger: { job: { rootId, price, sold, nth } }, linkedInvoices: linked,
+    ledger: { job: { rootId, price, sold, nth, visits } }, linkedInvoices: linked,
   });
-  // what finalized pay runs paid: visits {visitId: week}, invoices {invoiceId: week}, jobs {rootId: [total, sold, [slots]]}
+  // what finalized pay runs paid: visits {visitId: week | [week, package root]}, invoices {invoiceId: week | [week, package root]},
+  // jobs {rootId: [total, sold, [slots]]}. A bare week is a row paid on its own (no package basis).
+  const asRow = (value) => (Array.isArray(value) ? { weekStart: value[0], root: value[1] } : { weekStart: value, root: null });
   const paidOf = ({ visits = {}, invoices = {}, jobs = {} } = {}) => ({
-    visits: new Map(Object.entries(visits)),
-    invoices: new Map(Object.entries(invoices)),
+    visits: new Map(Object.entries(visits).map(([id, value]) => [id, asRow(value)])),
+    invoices: new Map(Object.entries(invoices).map(([id, value]) => [id, [asRow(value)]])),
     jobs: new Map(Object.entries(jobs).map(([root, [totalCents, sold, slots]]) => [root, { totalCents, sold, weekStart: '2026-09-14', slots: new Map(slots.map((slot) => [slot, `v${slot}`])) }])),
   });
   const one = (row, paid = paidOf()) => productionShare.applyLedger([row], paid)[0];
@@ -366,6 +368,41 @@ describe('the credit rules (applyLedger)', () => {
   test('AUDIT :904 INVOICE: a package invoice relinked to another visit is caught by the paid package row that recorded it', () => {
     // the root was paid with invoice inv-9 linked to it; the invoice now belongs to visit-2 (a plain visit): its credit is review
     expect(one(plain('visit-2', ['inv-9']), paidOf({ invoices: { 'inv-9': '2026-09-14' } })).kind).toBe('invoice_paid_elsewhere');
+  });
+
+  test('AUDIT :726 PACKAGE: a pricing invoice that a paid row OUTSIDE the package recorded makes the package review; the same package may reuse it', () => {
+    const linked = { linked: ['inv-9'] };
+    // inv-9 was recorded on a visit paid on its own (no package basis), and on another package's row
+    for (const outside of ['2026-09-14', ['2026-09-14', 'other-root']]) {
+      const out = one(job('root', 1, linked), paidOf({ invoices: { 'inv-9': outside } }));
+      expect(out).toMatchObject({ kind: 'package_paid_elsewhere', creditCents: 0, needsReview: true, bases: [], invoices: [] });
+      expect(out.reason).toContain('already credited outside the package in the week of 2026-09-14');
+    }
+    // a visit of the package that is linked to a paid row outside it: same
+    expect(one(job('followup', 2, { visits: ['root', 'followup'] }), paidOf({ visits: { root: '2026-09-14' } })).kind).toBe('package_paid_elsewhere');
+    // the same package's own earlier row recorded the invoice: a remaining slot reuses it
+    const own = paidOf({ invoices: { 'inv-9': ['2026-09-14', 'root'] }, visits: { root: ['2026-09-14', 'root'] }, jobs: { root: [200000, 2, [1]] } });
+    expect(one(job('followup', 2, linked), own)).toMatchObject({ kind: 'multi_visit_job', creditCents: 100000, needsReview: false });
+  });
+
+  test('AUDIT :876 PACKAGE: no job basis yet, but the root or a planned visit was credited on its own in another week: the whole package is review', () => {
+    for (const visits of [{ root: '2026-09-14' }, { followup: '2026-09-14' }]) {
+      const rows = productionShare.applyLedger([job('root', 1), job('followup', 2)].filter((row) => !visits[row.visitId]), paidOf({ visits }));
+      for (const row of rows) expect(row).toMatchObject({ kind: 'package_paid_elsewhere', creditCents: 0, needsReview: true, bases: [] });
+    }
+    // a visit of another package in the way does not matter
+    expect(one(job('root', 1), paidOf({ visits: { unrelated: '2026-09-14' } })).creditCents).toBe(100000);
+  });
+
+  test('AUDIT :616 PACKAGE: with a job basis paid, a follow-up credits from the fixed total even when the live root price is $0', () => {
+    const paid = paidOf({ jobs: { root: [200000, 2, [1]] }, visits: { root: ['2026-09-14', 'root'] } });
+    expect(one(job('followup', 2, { price: 0 }), paid)).toMatchObject({
+      kind: 'multi_visit_job', creditCents: 100000, needsReview: false, bases: [{ basisType: 'job', basisId: 'root', totalCents: 200000, sold: 2, slot: 2 }],
+    });
+    // the slot is still checked: a taken slot stays review at a $0 live price
+    expect(one(job('followup', 2, { price: 0 }), paidOf({ jobs: { root: [200000, 2, [1, 2]] }, visits: { root: ['2026-09-14', 'root'] } })).kind).toBe('basis_exhausted');
+    // with nothing fixed, no price is still review
+    expect(one(job('root', 1, { price: 0 }))).toMatchObject({ kind: 'multi_visit_job', creditCents: 0, needsReview: true });
   });
 
   test('a row that is already $0 and needs review, and a credit no invoice or job priced, are left alone', () => {

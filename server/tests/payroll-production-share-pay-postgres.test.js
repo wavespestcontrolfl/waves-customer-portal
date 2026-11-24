@@ -584,11 +584,11 @@ postgres('production share pay line', () => {
       const world = await sharedWorld();
       await finalize((await draft(W1)).body.run.id);
       const byInvoice = await productionShare.paidLedger(trx, [world.v2], [world.inv], [], world.W2);
-      expect(byInvoice.invoices.get(world.inv)).toBe(W1);
+      expect(byInvoice.invoices.get(world.inv)).toEqual([expect.objectContaining({ weekStart: W1, visitId: world.v1, root: null })]);
       expect(byInvoice.visits.size).toBe(0);
       const byVisit = await productionShare.paidLedger(trx, [world.v1], [], [], world.W2);
-      expect(byVisit.visits.get(world.v1)).toBe(W1);
-      expect(byVisit.invoices.get(world.inv)).toBe(W1);
+      expect(byVisit.visits.get(world.v1)).toEqual({ weekStart: W1, root: null });
+      expect(byVisit.invoices.get(world.inv)).toEqual([expect.objectContaining({ weekStart: W1 })]);
       // the week itself is never counted
       const own = await productionShare.paidLedger(trx, [world.v1], [world.inv], [], W1);
       expect([own.visits.size, own.invoices.size]).toEqual([0, 0]);
@@ -686,6 +686,57 @@ postgres('production share pay line', () => {
       const check = byName((await draft(world.weeks[1])).body.run, 'Sample Alpha');
       expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
       expect(check.productionShare.needsReview.map((row) => row.visitId)).toEqual([orphan]);
+    });
+
+    it('AUDIT :616: a follow-up credits from the fixed total, and keeps its slot checks, even when the root price is cleared to $0 after week 1', async () => {
+      const world = await packageWorld();
+      await finalize((await draft(W1)).body.run.id);
+      await trx('scheduled_services').where({ id: world.root }).update({ estimated_price: '0.00' });
+      const followUp = await followUpOf(world, world.weeks[1]);
+      const week2 = byName((await draft(world.weeks[1])).body.run, 'Sample Alpha');
+      expect(week2.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 100000 });
+      const snapshot = (await trx('payroll_checks').where({ id: week2.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(snapshot.stops.find((row) => row.visitId === followUp)).toMatchObject({
+        kind: 'multi_visit_job', creditCents: 100000, bases: [{ basisType: 'job', basisId: world.root, totalCents: 200000, sold: 2, slot: 2 }],
+      });
+    });
+
+    it('AUDIT :876: a package whose root was already paid on its own in another week (no package basis) is review as a whole', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+      // week 1: a plain visit, paid from its own price
+      const standalone = await stop(id, W1, '300.00', customerId, { service_type: 'General Pest Control', service_key_snapshot: 'pest_control' });
+      await finalize((await draft(W1)).body.run.id);
+      expect((await snapshotStops((await trx('payroll_runs').where({ week_start: W1 }).first('id')).id))[0].bases || []).toEqual([]);
+      // the same visit later turns out to be the first visit of a package: its follow-up is done in week 2
+      await trx('scheduled_services').where({ id: standalone }).update(pkg);
+      await stop(id, weeks[1], '0.00', customerId, { ...pkg, followup_included: true, followup_source_service_id: standalone });
+      const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(snapshot.stops[0]).toMatchObject({ kind: 'package_paid_elsewhere', creditCents: 0, needsReview: true });
+    });
+
+    it('AUDIT :726: a package priced on an invoice that a paid row OUTSIDE the package recorded is review', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+      const plain = await stop(id, W1, '300.00', customerId, { service_type: 'General Pest Control', service_key_snapshot: 'pest_control' });
+      const invoiceId = await invoiceFor(customerId, '300.00', { scheduled_service_id: plain });
+      await finalize((await draft(W1)).body.run.id);
+      // the invoice is relinked to a package that is first done in week 2
+      await trx('invoices').where({ id: invoiceId }).update({ scheduled_service_id: null });
+      const root = await stop(id, weeks[1], '0.00', customerId, pkg);
+      await trx('invoices').where({ id: invoiceId }).update({ scheduled_service_id: root });
+      const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
     });
 
     it('AUDIT :602: an invoice linked only to the package is the package price ONCE: $2,000.00 invoice = $1,000.00 + $1,000.00', async () => {

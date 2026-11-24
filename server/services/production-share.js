@@ -613,12 +613,13 @@ function jobCredit(stop, job, billed) {
   const price = onInvoices.length ? onInvoices.reduce((sum, one) => sum + one.totalCents, 0)
     : invoiced && invoiced.billedCents !== null ? invoiced.billedCents : cents(job.root.estimated_price);
   const nth = job.planned.indexOf(stop.id) + 1;
-  if (!(price > 0)) return toReview('multi_visit_job', "The job's first visit has no price on file.");
   if (nth < 1 || nth > sold || job.planned.length > sold) return toReview('multi_visit_job', "This visit is not among the job's sold visits.");
-  // What the package rule needs of the job (CREDIT RULES): its price, sold count and this visit's slot.
+  // What the package rule needs of the job (CREDIT RULES): its price, sold count, this visit's slot and the package's visits. A live
+  // price that is missing is NOT decided here: once a pay run fixed the package's total, a follow-up credits from that total whatever the
+  // root is priced at now (applyLedger); with nothing fixed yet, no price is a review row there.
   return {
-    ...credited('multi_visit_job', jobPartCents(price, sold, nth), `Part ${nth} of ${sold} of the job price`),
-    job: { rootId: job.root.id, price, sold, nth },
+    ...credited('multi_visit_job', price > 0 ? jobPartCents(price, sold, nth) : 0, `Part ${nth} of ${sold} of the job price`),
+    job: { rootId: job.root.id, price, sold, nth, visits: [job.root.id, ...job.planned] },
   };
 }
 
@@ -812,8 +813,8 @@ const STOP_INVOICES_SQL = `CASE WHEN jsonb_typeof(stop.value->'invoices') = 'arr
  * packages and the member visits of the invoices they were priced from; `invoiceIds`: those invoices; `rootIds`: those roots.
  * Reads the paid stop rows that name one of the visits, record one of the invoices, or carry a package of one of the roots, whoever
  * the technician was. Returns
- *   visits:    Map visit id -> the week of the first paid row of that visit;
- *   invoices:  Map invoice id -> the week of the first paid row that recorded it;
+ *   visits:    Map visit id -> { weekStart, root } of the first paid row of that visit (root: its package, null when paid on its own);
+ *   invoices:  Map invoice id -> [{ weekStart, visitId, root }] for every paid row that recorded it, earliest first;
  *   jobs:      Map root id -> { totalCents, sold, weekStart, slots: Map slot -> visit id }: the total and the sold count are the FIRST
  *              paid row's (they are fixed there), the slots are those of every paid row.
  * Voiding the paying run takes its checks out of the query. One query.
@@ -832,8 +833,13 @@ async function paidLedger(conn, visitIds, invoiceIds, rootIds, weekStart) {
     ORDER BY c.week_start, c.id`, [weekStart, visitIds, invoiceIds, rootIds])).rows;
   const roots = new Set(rootIds);
   for (const row of rows) {
-    if (wanted.has(row.visit_id) && !ledger.visits.has(row.visit_id)) ledger.visits.set(row.visit_id, row.week_start);
-    for (const id of row.invoices) if (!ledger.invoices.has(id)) ledger.invoices.set(id, row.week_start);
+    // The package a paid row belonged to (null: it was paid on its own, with no package basis).
+    const root = (row.bases.find((basis) => basis.basisType === 'job') || {}).basisId || null;
+    if (wanted.has(row.visit_id) && !ledger.visits.has(row.visit_id)) ledger.visits.set(row.visit_id, { weekStart: row.week_start, root });
+    for (const id of row.invoices) {
+      if (!ledger.invoices.has(id)) ledger.invoices.set(id, []);
+      ledger.invoices.get(id).push({ weekStart: row.week_start, visitId: row.visit_id, root });
+    }
     for (const basis of row.bases) {
       if (basis.basisType !== 'job' || !roots.has(basis.basisId)) continue;
       const job = ledger.jobs.get(basis.basisId)
@@ -863,17 +869,29 @@ function applyLedger(rows, paid) {
   });
 
   function settle(row) {
-    if (paid.visits.has(row.visitId)) return alreadyPaid(row, paid.visits.get(row.visitId));
+    if (paid.visits.has(row.visitId)) return alreadyPaid(row, paid.visits.get(row.visitId).weekStart);
     const { ledger } = row;
     if (!ledger) return row;
     if (ledger.invoices) {
-      const weeks = ledger.invoices.flatMap((inv) => [paid.invoices.get(inv.invoiceId), ...inv.members.map((member) => paid.visits.get(member.id))]).filter(Boolean).sort();
+      const weeks = ledger.invoices.flatMap((inv) => [
+        ...(paid.invoices.get(inv.invoiceId) || []).map((one) => one.weekStart),
+        ...inv.members.map((member) => (paid.visits.get(member.id) || {}).weekStart),
+      ]).filter(Boolean).sort();
       if (weeks.length) return review(row, 'invoice_paid_elsewhere', `This invoice also covers a visit paid in the week of ${weeks[0]}: set its credit by hand.`);
       return row;
     }
     const { job } = ledger;
+    // A package that was, or whose invoice was, credited OUTSIDE it is not credited again: a visit of it paid on its own (no package
+    // basis, or another package's), or an invoice linked to it that a paid row of another package or of no package recorded. Reusing the
+    // invoice is only for a remaining slot of THIS package (the same root basis).
+    const outside = [
+      ...job.visits.map((id) => paid.visits.get(id)),
+      ...(row.linkedInvoices || []).flatMap((id) => paid.invoices.get(id) || []),
+    ].filter((one) => one && one.root !== job.rootId).sort((a, b) => (a.weekStart < b.weekStart ? -1 : 1))[0];
+    if (outside) return review(row, 'package_paid_elsewhere', `This package, or its invoice, was already credited outside the package in the week of ${outside.weekStart}: set its credit by hand.`);
     const was = paid.jobs.get(job.rootId);
     if (!was) {
+      if (!(job.price > 0)) return review(row, 'multi_visit_job', "The job's first visit has no price on file.");
       return { ...row, creditCents: jobPartCents(job.price, job.sold, job.nth), bases: [{ basisType: 'job', basisId: job.rootId, totalCents: job.price, sold: job.sold, slot: job.nth }] };
     }
     if (job.nth > was.sold || was.slots.has(job.nth)) {
@@ -889,7 +907,7 @@ const rootIdsOf = (rows) => [...new Set(rows.filter((row) => row.ledger && row.l
 // were priced from (so a member paid some other way is known whichever technicians' stops are read together).
 const visitIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
   row.visitId,
-  ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId] : []),
+  ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId, ...row.ledger.job.visits] : []),
   ...(row.ledger && row.ledger.invoices ? row.ledger.invoices.flatMap((inv) => inv.members.map((member) => member.id)) : []),
 ]))];
 const paidOf = (conn, rows, weekStart) => paidLedger(conn, visitIdsOf(rows), invoiceIdsOf(rows), rootIdsOf(rows), weekStart);
