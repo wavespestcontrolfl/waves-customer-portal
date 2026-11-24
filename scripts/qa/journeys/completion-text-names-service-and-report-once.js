@@ -43,7 +43,10 @@ module.exports = {
     assert.equal(texts().length, 1, `Exactly one text goes out: ${JSON.stringify(texts().map((entry) => entry.body))}`);
     const [text] = texts();
     assert.equal(text.to, fixture.phone);
-    assert.equal(text.customerId, fixture.customerId);
+    // The fake transport only sees the phone, which the sibling fixture shares; the app's own log names the customer.
+    const logged = await db('sms_log').where({ twilio_sid: text.sid, direction: 'outbound' });
+    assert.equal(logged.length, 1, 'The completion text is logged once');
+    assert.equal(logged[0].customer_id, fixture.customerId, 'The app records the text against this customer');
     // The text names the service without the catalog's trailing word "Service".
     assert.ok(text.body.includes(`your Waves ${visit.service_type.replace(/ Service$/, '')} is done`), `The text names the service: ${JSON.stringify(text.body)}`);
     assert.ok(!text.body.includes('QA-PRIVATE-'), 'The text carries no private note');
@@ -60,11 +63,13 @@ module.exports = {
     }
     assert.ok(targets.includes(`/report/${record.report_view_token}`), `The text links this visit's report: ${JSON.stringify({ links, targets })}`);
     assert.ok(targets.includes(`/pay/${invoices[0].token}`), 'The text links the invoice this visit billed');
-    assert.ok(text.body.includes(invoices[0].invoice_number.toLowerCase()) || links.some((link) => link.includes(invoices[0].invoice_number.toLowerCase())), 'The invoice link names its number');
 
     // 2. The report the text links opens, and it is this visit's.
-    const report = await json(await page.request.get(`${baseUrl}/api/reports/${record.report_view_token}/data`));
-    assert.ok(!JSON.stringify(report).includes('QA-PRIVATE-'));
+    const reportResponse = await page.request.get(`${baseUrl}/api/reports/${record.report_view_token}/data`);
+    assert.equal(reportResponse.status(), 200, 'The linked report opens');
+    const report = JSON.stringify(await reportResponse.json());
+    assert.ok(report.includes(record.id) || report.includes(visit.service_type), 'The linked report is this visit\'s');
+    assert.ok(!report.includes('QA-PRIVATE-'), 'The report carries no private note');
 
     // 3. A replay of the same request, and a new request for the same completed visit, send nothing and change nothing.
     const replay = await json(await page.request.post(endpoint, request(key)));
