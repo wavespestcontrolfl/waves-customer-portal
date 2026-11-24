@@ -12,7 +12,8 @@
  * - A holiday day is [ET midnight of D, ET midnight of D + 1) as instants (datetime-et.js parseETDateTime: DST-safe, a day
  *   is 23 or 25 hours twice a year). Never a fixed offset.
  * - Shifts are chosen by their work date; a shift of any length counts for every holiday it overlaps (a corrected shift from
- *   Monday 11 PM to Wednesday 1 AM overlaps Tuesday and Wednesday). Holidays are read up to 7 days after the week ends.
+ *   Monday 11 PM to Wednesday 1 AM overlaps Tuesday and Wednesday). The holidays read run from the week's start to the day
+ *   the last of the week's shifts ends (their actual clock-outs): no fixed look-ahead.
  * - An entry wholly inside a holiday counts its stored duration_minutes (what the pay run pays); an entry that crosses a
  *   midnight counts the clipped clock span.
  * - The unpaid meal is the shift's work date's unpaid_meal_minutes (what the pay deducts; 0 with GATE_AUTO_LUNCH off).
@@ -26,13 +27,11 @@
  *   other dates of the week keep their measured overlap.
  * All figures are whole hundredths of a minute inside; minutes out are numbers with two decimals.
  */
-const { parseETDateTime } = require('../utils/datetime-et');
-const { addStaffWorkDays, STAFF_WORK_DATE_SQL } = require('../utils/staff-time-work-date');
+const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+const { addStaffWorkDays, staffWeekStartForWorkDate, staffWorkDateSql, STAFF_WORK_DATE_SQL } = require('../utils/staff-time-work-date');
 const { UNPAID_MEAL_MIN_BREAK_MINUTES } = require('../constants/staff-time');
 
 const HUNDREDTHS_PER_MS = 1 / 600; // 1 ms = 1/60000 minute = 1/600 hundredth
-// Holidays after the week ends that a shift of the week can still reach.
-const DAYS_AFTER_WEEK = 7;
 
 const hundredths = (minutes) => Math.round(Number(minutes || 0) * 100);
 
@@ -112,7 +111,20 @@ function holidayWorkForWeek({ dates, shifts, breaks = [], daily, holidays }) {
  * Map of technician id -> [{ workDate, minutes }] in holiday date order, only for a date with minutes. W-2 technicians only.
  */
 async function holidayWorkByDay(conn, start, end) {
-  const reach = addStaffWorkDays(end, DAYS_AFTER_WEEK);
+  const out = new Map();
+  // The week's shifts first: the holidays read run to the day the last of them ends (their clock-outs), never a fixed look-ahead.
+  const shifts = await conn('time_entries as e')
+    .join('technicians as t', 't.id', 'e.technician_id')
+    .where('t.employment_type', 'w2')
+    .where('e.entry_type', 'shift')
+    .whereNot('e.status', 'voided')
+    .where('e.clock_in', '>=', new Date(dayBounds(start).start))
+    .where('e.clock_in', '<', new Date(dayBounds(end).end))
+    .select('e.technician_id', 'e.clock_in', 'e.clock_out', 'e.duration_minutes',
+      conn.raw(`to_char(${staffWorkDateSql('e.clock_in')}, 'YYYY-MM-DD') AS work_date`));
+  const lastEnd = shifts.reduce((latest, row) => (row.clock_out && new Date(row.clock_out) > latest ? new Date(row.clock_out) : latest), new Date(0));
+  // A shift that ends at midnight sharp ends the day before: its last minute is in the day of (clock-out - 1 ms).
+  const reach = lastEnd.getTime() > 0 && etDateString(new Date(lastEnd.getTime() - 1)) > end ? etDateString(new Date(lastEnd.getTime() - 1)) : end;
   const holidays = await conn('payroll_time_off as o')
     .join('technicians as t', 't.id', 'o.technician_id')
     .where('o.kind', 'holiday')
@@ -120,17 +132,8 @@ async function holidayWorkByDay(conn, start, end) {
     .where('o.work_date', '<=', reach)
     .where('t.employment_type', 'w2')
     .select('o.technician_id', conn.raw("to_char(o.work_date, 'YYYY-MM-DD') AS work_date"));
-  const out = new Map();
   if (!holidays.length) return out;
   const ids = [...new Set(holidays.map((row) => row.technician_id))];
-  const shifts = await conn('time_entries')
-    .whereIn('technician_id', ids)
-    .where('entry_type', 'shift')
-    .whereNot({ status: 'voided' })
-    .where('clock_in', '>=', new Date(dayBounds(start).start))
-    .where('clock_in', '<', new Date(dayBounds(end).end))
-    .select('technician_id', 'clock_in', 'clock_out', 'duration_minutes',
-      conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
   // A break still running is not a meal (time-tracking.js dayUnpaidMealUnits).
   const breaks = await conn('time_entries')
     .whereIn('technician_id', ids)
@@ -176,4 +179,30 @@ function capHolidayDays(days, paidMinutes) {
   return { minutes: kept.reduce((sum, d) => sum + hundredths(d.minutes), 0) / 100, days: kept };
 }
 
-module.exports = { holidayWorkForWeek, holidayWorkByDay, capHolidayDays, dayBounds };
+/**
+ * The pay weeks (Mondays) of a technician's completed shifts that run INTO any of the Eastern dates `days` from another pay
+ * week than the date's own, sorted. Such a shift is paid, with its holiday premium, in its own week's check (the rule at the
+ * top), so a holiday added to or taken off that date changes a check of THAT week: the time-off writes refuse it once that
+ * check is final (payroll-time-off.js), and a bonus that counts the holiday waits for it (tech-rewards-pay-lines.js).
+ */
+async function otherWeeksOfShiftsInto(conn, technicianId, days) {
+  const weeks = new Set();
+  for (const day of days) {
+    const bounds = dayBounds(day);
+    const own = staffWeekStartForWorkDate(day);
+    const rows = await conn('time_entries')
+      .where({ technician_id: technicianId, entry_type: 'shift' })
+      .whereNot({ status: 'voided' })
+      .whereNotNull('clock_out')
+      .where('clock_in', '<', new Date(bounds.end))
+      .where('clock_out', '>', new Date(bounds.start))
+      .select(conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
+    for (const row of rows) {
+      const week = staffWeekStartForWorkDate(row.work_date);
+      if (week !== own) weeks.add(week);
+    }
+  }
+  return [...weeks].sort();
+}
+
+module.exports = { holidayWorkForWeek, holidayWorkByDay, capHolidayDays, dayBounds, otherWeeksOfShiftsInto };

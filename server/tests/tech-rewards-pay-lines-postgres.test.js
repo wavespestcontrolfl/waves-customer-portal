@@ -957,6 +957,27 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(dateOf((await lineOf(tech)).covers_from)).toBe('2026-12-10');
     });
 
+    it('waits while an earlier week holds a shift that runs into a holiday inside the span and has no final check', async () => {
+      // hired Monday Sep 7 (a holiday, the span's first day); the week before holds Sunday night's shift into it, approved and unpaid
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      const tech = await readyTech('Sample Alpha', { hire_date: '2026-09-07' });
+      await paidWeek(tech, '2026-09-07'); // the holiday's own week is paid; only the week before is not
+      await trx('payroll_time_off').insert({ technician_id: tech, work_date: '2026-09-07', kind: 'holiday', minutes: '600.00' });
+      await trx('time_entries').insert({
+        technician_id: tech, entry_type: 'shift', status: 'completed', duration_minutes: '240.00',
+        clock_in: new Date('2026-09-07T02:00:00Z'), clock_out: new Date('2026-09-07T06:00:00Z'),
+      });
+      await approvedWeek(tech, '2026-08-31', '240.00');
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(await linesOf(tech)).toHaveLength(0);
+      const stored = await trx('payroll_runs').where({ id: run.id }).first('tech_rewards_waits');
+      expect(stored.tech_rewards_waits).toEqual([{ technician_id: tech, kind: 'december_gift', source_id: `december_gift:${tech}:2026`, reason: 'week_not_paid', week: '2026-08-31' }]);
+      // that week paid: the gift is written
+      await paidWeek(tech, '2026-08-31');
+      expect(checkOf(await recompute(run.id), tech).techRewardsCents).toBe(GIFT);
+    });
+
     it('says what waits when a week has nothing else to pay: no run is kept, and the message carries the note', async () => {
       const tech = await readyTech('Sample Alpha'); // no hours in the gift week
       await approvedWeek(tech, '2026-11-02'); // approved, never paid

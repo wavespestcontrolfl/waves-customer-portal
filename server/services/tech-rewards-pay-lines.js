@@ -138,6 +138,7 @@ const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-
 // payroll-runs.js loads this file, so its helpers are read on first use.
 const payrollRuns = () => require('./payroll-runs');
 const timeOffBank = require('./payroll-time-off-bank');
+const holidayWork = require('./payroll-holiday-work');
 // The board is the one home of the pay a stay bonus is worked out from (readBonusPay) and of its 12 months (stayWindow), and of
 // every figure of a season bonus (readSeasonScoreFigures, readSeasonPay, seasonBonusOf). It pulls in the score and review modules, so it loads on
 // first use: a pay run that has no stay bonus and no season bonus to look at never reads it.
@@ -377,6 +378,22 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo, skipC
   return open.filter((week) => !decided.has(week)).sort()[0] || null;
 }
 
+// The oldest pay week before the run that holds a shift running into a holiday of the technician inside the span (from another
+// pay week than the holiday's own) and still has no finalized check, or null. Asked as oldestUnpaidWeek asks a week.
+async function unpaidHolidayShiftWeek(trx, technicianId, span, beforeRun) {
+  const holidays = (await trx('payroll_time_off')
+    .where({ technician_id: technicianId, kind: 'holiday' })
+    .where('work_date', '>=', span.coversFrom).where('work_date', '<=', span.coversTo)
+    .select(trx.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"))).map((row) => row.work_date);
+  if (!holidays.length) return null;
+  const weeks = (await holidayWork.otherWeeksOfShiftsInto(trx, technicianId, holidays)).filter((week) => week <= beforeRun);
+  for (const week of weeks) {
+    const unpaid = await oldestUnpaidWeek(trx, technicianId, { coversFrom: week, coversTo: week });
+    if (unpaid) return unpaid;
+  }
+  return null;
+}
+
 /**
  * Why the gift cannot go on this run for the technician, as { reason, week }, or null when it can:
  *   later_check_final   a later check of theirs in the tax year is already final: finalize refuses a run that holds a check
@@ -422,6 +439,13 @@ async function spanWaitOf(trx, run, technicianId, span, amountCents) {
   const earlier = { coversFrom: span.coversFrom, coversTo: beforeRun };
   if (earlier.coversFrom <= earlier.coversTo) {
     const unpaid = await oldestUnpaidWeek(trx, technicianId, earlier);
+    if (unpaid) return { reason: 'week_not_paid', week: unpaid };
+  }
+  // A holiday inside the span makes the base hold the premium of every shift that runs into it, and a shift that started the
+  // night before is paid by the check of ITS week, which can be a week before the span (payroll-holiday-work.js). That week
+  // must be paid too, or the base would be missing the premium.
+  if (earlier.coversFrom <= earlier.coversTo && timeOffOn()) {
+    const unpaid = await unpaidHolidayShiftWeek(trx, technicianId, span, beforeRun);
     if (unpaid) return { reason: 'week_not_paid', week: unpaid };
   }
   const ownWeek = { coversFrom: run.week_start, coversTo: addStaffWorkDays(run.week_start, 6) };

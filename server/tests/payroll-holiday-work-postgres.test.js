@@ -289,6 +289,73 @@ postgres('payroll holiday work premium', () => {
     expect(stored.days).toEqual([{ workDate: addDays(W1, 1), minutes: 1440 }, { workDate: WED, minutes: 60 }]);
   });
 
+  it('reads holidays up to the day the shifts actually end, and Tech Rewards reads the frozen holiday dates however far back the check is', async () => {
+    // A shift that starts on W0's Sunday night and ends 9 days later holds the whole of a holiday two weeks after its own week.
+    const W0 = addDays(W1, -7);
+    const holiday = addDays(W0, 15);
+    const id = await tech('Sample Alpha');
+    const minutes = 9 * 24 * 60 + 3 * 60;
+    await approved(id, W0, minutes / 60);
+    await shift(id, `${addDays(W0, 6)}T23:00`, `${addDays(W0, 16)}T02:00`);
+    await offDay(id, holiday, 10);
+    const created = (await draft(W0)).body.run;
+    expect(byName(created, 'Sample Alpha')).toMatchObject({ holidayWorkHours: '24.00', holidayWorkPremiumCents: 26400 });
+    await finalize(created.id);
+    // a window that starts on that holiday: the check is two weeks back, and its own frozen date puts it in
+    expect((await readBonusPay(trx, id, holiday, holiday, addDays(holiday, 6))).cents).toBe(26400);
+    // a window that starts the day after it holds none
+    expect((await readBonusPay(trx, id, addDays(holiday, 1), addDays(holiday, 8), addDays(holiday, 1))).cents).toBe(0);
+  });
+
+  describe('a holiday edit that would change a final check', () => {
+    const W0 = addDays(W1, -7);
+    const post = (technicianId, workDate, kind = 'holiday') => api('POST', '/time-off', { body: { technicianId, workDate, kind, hours: 10 } });
+    // W0's only shift runs Sunday 10 PM to the Monday that opens W1, and W0's run is final.
+    const finalWeek = async (id) => {
+      await approved(id, W0, 4);
+      await shift(id, `${addDays(W0, 6)}T22:00`, `${W1}T02:00`);
+      return (await finalize((await draft(W0)).body.run.id)).body.run;
+    };
+
+    it('refuses a holiday added on a date a final check\'s shift runs into, and takes it once that pay run is void', async () => {
+      const id = await tech('Sample Alpha');
+      const done = await finalWeek(id);
+      const refusedAdd = await post(id, W1);
+      expect([refusedAdd.status, refusedAdd.body.error]).toEqual([409, 'A final pay run already paid a shift that runs into that day. Void that pay run first to change its pay.']);
+      expect(await trx('payroll_time_off').where({ technician_id: id })).toHaveLength(0);
+      expect((await api('POST', `/runs/${done.id}/void`, { body: { reason: 'Sample correction' } })).status).toBe(200);
+      expect((await post(id, W1)).status).toBe(201);
+    });
+
+    it('refuses to change or take off such a holiday once the shift is paid by a final check', async () => {
+      const id = await tech('Sample Alpha');
+      await approved(id, W0, 4);
+      await shift(id, `${addDays(W0, 6)}T22:00`, `${W1}T02:00`);
+      const entry = (await post(id, W1)).body.entry;
+      expect(entry.workDate).toBe(W1);
+      await finalize((await draft(W0)).body.run.id);
+      const changed = await api('PUT', `/time-off/${entry.id}`, { body: { kind: 'pto', hours: 10 } });
+      expect([changed.status, changed.body.error]).toEqual([409, 'A final pay run already paid a shift that runs into that day. Void that pay run first to change its pay.']);
+      const removed = await api('DELETE', `/time-off/${entry.id}`);
+      expect([removed.status, removed.body.error]).toEqual([409, 'A final pay run already paid a shift that runs into that day. Void that pay run first to change its pay.']);
+      expect(await trx('payroll_time_off').where({ id: entry.id })).toHaveLength(1);
+    });
+
+    it('does not refuse a holiday with no such shift, or a pto day, or a holiday the final week\'s shift does not reach', async () => {
+      const id = await tech('Sample Alpha');
+      await approved(id, W0, 10);
+      await shift(id, `${addDays(W0, 1)}T08:00`, `${addDays(W0, 1)}T18:00`);
+      await finalize((await draft(W0)).body.run.id);
+      // W0 is final but no shift of it touches W1's Monday
+      expect((await post(id, W1)).status).toBe(201);
+      // paid time off on a day a final week's shift runs into is not a holiday: no premium is decided by it
+      const other = await tech('Sample Bravo');
+      await approved(other, W0, 4);
+      await shift(other, `${addDays(W0, 6)}T22:00`, `${W1}T02:00`);
+      expect((await post(other, W1, 'pto')).status).toBe(201);
+    });
+  });
+
   it('the fallback is per work date: a holiday summary with no shift entries still pays beside a measured shift', async () => {
     const id = await tech('Sample Alpha');
     await approved(id, W1, 12);

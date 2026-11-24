@@ -500,8 +500,12 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
     .join('payroll_runs as r', 'r.id', 'c.run_id')
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
     // A week before the window can still hold pay earned inside it: the holiday work premium is paid with the shift's own
-    // week and dated by the holiday it overlapped, which can be the Monday after (payroll-holiday-work.js). One week back.
-    .whereRaw('c.week_start + 13 >= ?::date', [from]);
+    // week and dated by the holiday it overlapped, which can be days after that week (payroll-holiday-work.js). The check
+    // names those dates itself (calc_snapshot.holidayWorkDays, frozen with it), so one that names a date on or after the
+    // window's start is read, however far back its week is; no fixed look-back.
+    .whereRaw(`(c.week_start + 6 >= ?::date OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.calc_snapshot->'holidayWorkDays') = 'array'
+        THEN c.calc_snapshot->'holidayWorkDays' ELSE '[]'::jsonb END) AS d WHERE (d->>'workDate')::date >= ?::date))`, [from, from]);
   if (throughWeek) query.whereRaw('c.week_start <= ?::date', [throughWeek]);
   const rows = await query
     .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents', 'c.regular_pay_cents',
