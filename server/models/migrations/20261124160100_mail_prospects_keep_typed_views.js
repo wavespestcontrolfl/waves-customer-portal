@@ -1,7 +1,7 @@
-// Rollback guard for page_typed_views (added by 20261124160000). Typed-link visits are counted before any home is
-// mailed, and that migration's down checks only mailed_at. Knex rolls a batch back newest first, so this down runs
-// first: under one table lock it refuses while any count exists, else drops the counter itself in the same
-// transaction (the earlier down then skips the missing column). Up puts the counter back if it is missing.
+// Rollback check for page_typed_views (added by 20261124160000, whose own down also checks it). Knex rolls a batch
+// back newest first, each migration in its own transaction, so this down runs first. It only checks, under a table
+// lock, and never drops anything: a refusal here, or in the older down, leaves the schema whole. It refuses while any
+// home is marked mailed or has a typed-link visit count. Up puts the counter back if it is missing.
 
 const TABLE = 'mail_prospects';
 const COLUMN = 'page_typed_views';
@@ -14,11 +14,14 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable(TABLE)) || !(await knex.schema.hasColumn(TABLE, COLUMN))) return;
-  // Block writers until the drop commits (knex runs a migration in a transaction), so no visit is counted after the check.
+  if (!(await knex.schema.hasTable(TABLE))) return;
   await knex.raw('LOCK TABLE ?? IN SHARE ROW EXCLUSIVE MODE', [TABLE]);
-  const visited = await knex(TABLE).where(COLUMN, '>', 0).first('id');
-  if (visited) throw new Error('mail_prospects has typed-link visit counts; refusing to roll back');
-  await knex.raw('ALTER TABLE ?? DROP CONSTRAINT IF EXISTS ??', [TABLE, TYPED_CHECK]);
-  await knex.schema.alterTable(TABLE, (t) => { t.dropColumn(COLUMN); });
+  if (await knex.schema.hasColumn(TABLE, 'mailed_at')) {
+    const mailed = await knex(TABLE).whereNotNull('mailed_at').first('id');
+    if (mailed) throw new Error('mail_prospects has homes marked as mailed; refusing to roll back');
+  }
+  if (await knex.schema.hasColumn(TABLE, COLUMN)) {
+    const visited = await knex(TABLE).where(COLUMN, '>', 0).first('id');
+    if (visited) throw new Error('mail_prospects has typed-link visit counts; refusing to roll back');
+  }
 };

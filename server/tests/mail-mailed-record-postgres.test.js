@@ -270,7 +270,9 @@ postgres('mailed record on PostgreSQL', () => {
     await markBatch({ batch: 'kept', now: NOW });
     // knex runs a migration inside a transaction (the down takes a table lock).
     await expect(conn.transaction((trx) => mailedMigration.down(trx))).rejects.toThrow(/refusing to drop/);
-    expect(await stored(id)).toMatchObject({ mail_batch: 'kept' });
+    // The newer down refuses a mailed batch too, before anything is dropped, so the counter stays.
+    await expect(conn.transaction((trx) => keepViewsMigration.down(trx))).rejects.toThrow(/marked as mailed/);
+    expect(await stored(id)).toMatchObject({ mail_batch: 'kept', page_typed_views: 0 });
     // Take the mark off (the trigger blocks an update, so disable it for the test's own setup only), then roll back.
     await conn.raw('ALTER TABLE mail_prospects DISABLE TRIGGER mail_prospects_freeze_mailed_trg');
     await conn('mail_prospects').where({ id }).update({ mailed_at: null, mail_batch: null, mailed_price: null });
@@ -283,11 +285,9 @@ postgres('mailed record on PostgreSQL', () => {
     await expect(conn.transaction((trx) => mailedMigration.down(trx))).rejects.toThrow(/typed-link visit counts/);
     await conn('mail_prospects').where({ id: visited }).update({ page_typed_views: 0 });
     await conn.transaction((trx) => keepViewsMigration.down(trx));
-    // The guard drops the counter in its own transaction; its up puts it back (a re-run of only the newer migration).
-    await keepViewsMigration.up(conn);
+    // The newer down only checks: the counter and its check stay until the older down drops them.
     expect(await stored(visited)).toMatchObject({ page_typed_views: 0 });
     await expect(conn('mail_prospects').where({ id: visited }).update({ page_typed_views: -1 })).rejects.toThrow(/page_typed_views_check/);
-    await conn.transaction((trx) => keepViewsMigration.down(trx));
     await conn.transaction((trx) => mailedMigration.down(trx));
     const cols = (await conn.raw("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = 'mail_prospects'", [schema])).rows.map((c) => c.column_name);
     for (const name of ['mailed_at', 'mail_batch', 'mailed_price', 'page_typed_views']) expect(cols).not.toContain(name);
