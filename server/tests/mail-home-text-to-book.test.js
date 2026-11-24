@@ -54,6 +54,8 @@ jest.mock('../models/db', () => {
   };
   return db;
 });
+const mockLoadHome = jest.fn();
+jest.mock('../services/mail/home-book', () => ({ loadHome: (...a) => mockLoadHome(...a) }));
 const mockSend = jest.fn();
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSend(...a) }));
 
@@ -63,8 +65,9 @@ const { handleHomeTextToBook, _test } = require('../services/mail/home-text-to-b
 
 const PARRISH = TWILIO_NUMBERS.locations.parrish.number; // the line the card prints
 const SENDER = '+12025550101';
-const HOME = { id: 'prospect-1', page_slug: '101-example', address_line1: '101 EXAMPLE TRL', zip: '34219', status: 'eligible', price_status: 'priced', price_annual: 480 };
-const SENT = { sent: true, sid: 'SM123', provider: 'twilio', deliveryOutcome: 'sent' };
+const HOME = { id: 'prospect-1', page_slug: '101-example', page_token: '0123456789abcdef0123456789abcdef', address_line1: '101 EXAMPLE TRL', zip: '34219' };
+// The canonical accepted result (sms-auto-send.js isRealProviderSend): sent, accepted, a real provider message id.
+const SENT = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM123' };
 const BOOK_LINE = "Pick a time and you're booked.";
 const NEUTRAL_LINE = 'See your page, and call us with any questions.';
 
@@ -76,6 +79,7 @@ beforeEach(() => {
   mockGates.mailHomeTextBookLive.mockReturnValue(true);
   Object.assign(mockState, { homes: [{ ...HOME }], claims: [], deleted: [], prospectQueries: 0, claimTxns: 0, lock: Promise.resolve() });
   mockGates.isEnabled.mockImplementation((key) => key === 'selfBooking');
+  mockLoadHome.mockResolvedValue({ row: { id: 'prospect-1' }, facts: {}, price: {} }); // the home's times would answer
   mockSend.mockResolvedValue({ ...SENT });
 });
 
@@ -100,6 +104,7 @@ describe('parseAddressText', () => {
     'hello', 'STOP', 'YES', 'Can you come at 9?', '101', 'EXAMPLE 101', '',
     '   ', 'https://x.com/101-example', '12A Example', '5', null, undefined,
     '101 Example Trl please call me back when you get a chance today',
+    '101 Example Apt 9', '101 Example Unit 4',
   ])('not an address: %j', (body) => {
     expect(_test.parseAddressText(body)).toBeNull();
   });
@@ -137,16 +142,28 @@ describe('handleHomeTextToBook', () => {
   });
 
   test.each([
-    ['a held-back home', { status: 'held_back' }, false],
-    ['a home with no price', { price_status: 'unpriced', price_annual: null }, false],
-    ['a priced home when self-booking is off', {}, true],
-  ])('%s: the reply does not promise a time', async (_label, patch, selfBookingOff) => {
-    mockState.homes = [{ ...HOME, ...patch }];
-    if (selfBookingOff) mockGates.isEnabled.mockReturnValue(false);
+    ['a home whose times endpoint would 404 (held back, no price, or missing home facts: loadHome is null)', () => mockLoadHome.mockResolvedValue(null)],
+    ['a home when the booking check throws', () => mockLoadHome.mockRejectedValue(Object.assign(new Error('db 101 Example Trl'), { code: 'X' }))],
+    ['a home when self-booking is off', () => mockGates.isEnabled.mockReturnValue(false)],
+  ])('%s: the reply does not promise a time', async (_label, arrange) => {
+    arrange();
     expect((await text('101 EXAMPLE')).handled).toBe(true);
     const sent = mockSend.mock.calls[0][0].body;
     expect(sent).toBe(`Here's your Waves page for 101 Example Trl: https://portal.wavespestcontrol.com/nh/101-example\n\n${NEUTRAL_LINE} Reply STOP to opt out.`);
     expect(sent).not.toMatch(/pick a time|booked/i);
+  });
+
+  test('the booking check is home-book loadHome on the home\'s token (the times endpoint\'s own rule)', async () => {
+    await text('101 EXAMPLE');
+    expect(mockLoadHome).toHaveBeenCalledWith('0123456789abcdef0123456789abcdef');
+  });
+
+  test.each([
+    '101 Example Apt 9', '101 EXAMPLE TRL APT 3', '101 Example Unit 4', '101 Example Ste 2', '101 Example Trl Lot 5',
+  ])('a unit in the text is never dropped and matched: %s gets no reply', async (body) => {
+    expect(await text(body)).toEqual({ handled: false });
+    expect(mockState.prospectQueries).toBe(0);
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
   test('every office location line answers from itself', async () => {
@@ -266,6 +283,12 @@ describe('handleHomeTextToBook', () => {
     expect(mockState.deleted).toHaveLength(1);
   });
 
+  test('a suppression sentinel (sent:true with a placeholder id) is not a real send: the claim is released', async () => {
+    mockSend.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'gate-blocked' });
+    expect(await text('101 EXAMPLE')).toEqual({ handled: false });
+    expect(mockState.claims).toHaveLength(0);
+  });
+
   test('a send that threw with no outcome keeps the claim, is not handled and is not retried', async () => {
     mockSend.mockRejectedValue(Object.assign(new Error('boom 101 Example Trl +12025550101'), { code: 'ECONNRESET' }));
     expect(await text('101 EXAMPLE')).toEqual({ handled: false });
@@ -277,10 +300,9 @@ describe('handleHomeTextToBook', () => {
 
   test('an uncertain provider outcome is handled, keeps the claim and is never retried', async () => {
     mockSend.mockResolvedValue({ sent: false, deliveryOutcome: 'uncertain', uncertain: true });
-    const out = await text('101 EXAMPLE');
+    expect(await text('101 EXAMPLE')).toEqual({ handled: true, prospectId: 'prospect-1' });
     expect(mockSend).toHaveBeenCalledTimes(1);
     expect(mockState.claims).toHaveLength(1);
-    expect(typeof out.handled).toBe('boolean');
   });
 
   test('logs carry the prospect id and codes only: no address, no slug, no phone', async () => {

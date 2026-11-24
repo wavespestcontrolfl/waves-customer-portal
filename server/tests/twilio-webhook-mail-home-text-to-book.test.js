@@ -101,7 +101,7 @@ jest.mock('../services/mail/home-text-to-book', () => ({ handleHomeTextToBook: (
 const { EventEmitter } = require('node:events');
 const numbers = require('../config/twilio-numbers');
 const TwilioService = require('../services/twilio');
-const { ringSmsReplyBell } = require('../services/sms-reply-alert-delivery');
+const { ringSmsReplyBell, ringUnknownOfficeText } = require('../services/sms-reply-alert-delivery');
 const handler = require('../routes/twilio-webhook').stack.find((l) => l.route?.path === '/sms').route.stack[0].handle;
 
 const sender = '+12025550101';
@@ -138,14 +138,30 @@ test('an office line text goes to the service with the line, the sender and the 
   expect(mockHomeText.mock.calls[0][0]).toEqual({ from: sender, to: parrishLine, body: '101 EXAMPLE' });
 });
 
-test('a reply that went out consumes the text: empty ack, inbound retyped, no ring, no AI reply', async () => {
-  mockHomeText.mockResolvedValue({ handled: true, slug: '101-example' });
+test('a reply that went out consumes the text: empty ack, inbound retyped, no ring, no AI reply, and the office bell rings once', async () => {
+  mockHomeText.mockResolvedValue({ handled: true, prospectId: 'prospect-1' });
   mockState.customer = { ...CUSTOMER, lead_intake_status: null };
   const res = await receive('101 EXAMPLE');
   expect(res.body).toBe('<Response></Response>');
   expect(mockState.smsRetypes).toContainEqual({ message_type: 'mail_home_text_to_book' });
+  // The same thread bell any text to an office line gets: once, for the known customer.
+  expect(ringSmsReplyBell).toHaveBeenCalledTimes(1);
+  expect(ringSmsReplyBell.mock.calls[0][0]).toMatchObject({ customer: { id: CUSTOMER.id }, message: '101 EXAMPLE' });
+  expect(ringUnknownOfficeText).toHaveBeenCalledTimes(1);
   res.emit('finish');
   expect(mockRing).not.toHaveBeenCalled();
+  expect(mockDispatch).not.toHaveBeenCalled();
+  expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+});
+
+test('a stranger\'s consumed postcard text rings the unknown-sender office bell once and nothing else', async () => {
+  mockHomeText.mockResolvedValue({ handled: true, prospectId: 'prospect-1' });
+  ringUnknownOfficeText.mockResolvedValueOnce(true);
+  const res = await receive('101 EXAMPLE');
+  expect(res.body).toBe('<Response></Response>');
+  expect(ringUnknownOfficeText).toHaveBeenCalledTimes(1);
+  expect(ringUnknownOfficeText.mock.calls[0][0]).toMatchObject({ customer: null, From: sender, To: parrishLine, message: '101 EXAMPLE' });
+  expect(ringSmsReplyBell).not.toHaveBeenCalled();
   expect(mockDispatch).not.toHaveBeenCalled();
   expect(TwilioService.sendSMS).not.toHaveBeenCalled();
 });

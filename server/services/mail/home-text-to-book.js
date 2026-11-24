@@ -15,12 +15,14 @@
  *     A trailing 5-digit ZIP selects the ZIP form ("101-example-34211"); a typed ZIP must be the home's own ZIP on every
  *     match that does not carry the ZIP in its slug. The slug must equal a live row's page_slug exactly (list_key
  *     new_home, status eligible or held_back). A bare address whose home only has the ZIP form is not guessed.
+ *   - A text that names a unit ("101 Example Apt 9") gets no reply: the unit is never silently dropped and matched to
+ *     another unit's home (the card prints house number and street name only).
  *   - Any other text (most of them) costs no database read: the shape check alone turns it away.
  *   - One reply per sender, office line and home per 24 hours. The reply is CLAIMED before the provider call
  *     (mail_home_text_replies, keyed by the home's prospect id, under a per-key advisory lock): two texts at the same
  *     moment send once; a sent or uncertain reply keeps its claim, a provable non-send releases it. sms_log is not the
  *     witness: link wrapping can rewrite the link in the stored body, and an uncertain handoff may have no row.
- *   - The copy promises "pick a time" only for a home whose page offers times (an eligible, priced home, with
+ *   - The copy promises "pick a time" only for a home whose times endpoint would answer (home-book.js loadHome, with
  *     self-booking on); any other home gets a neutral line, as its page shows "call us".
  *   - No lead and no customer is created here; the booking page creates the customer. No counter: no existing column fits.
  *   - Logs carry the prospect id and error codes only, never an address, a slug or a phone.
@@ -30,7 +32,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { mailHomePageLive, mailHomeTextBookLive, isEnabled } = require('../../config/feature-gates');
-const { buildBaseSlug, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES } = require('./home-slug');
+const { buildBaseSlug, hasUnitPart, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES } = require('./home-slug');
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
 const { publicPortalUrl } = require('../../utils/portal-url');
 
@@ -73,6 +75,9 @@ function parseAddressText(body) {
     street = withZip[1];
     zip = withZip[2];
   }
+  // A unit in the text ("101 Example Apt 9") is not the postcard's grammar and buildBaseSlug would drop it, matching the
+  // text to another unit's home: no reply.
+  if (hasUnitPart(street)) return null;
   const stripped = buildBaseSlug(street);
   if (!stripped) return null;
   const exact = buildBaseSlug(street, { keepStreetType: true });
@@ -125,7 +130,7 @@ async function findLiveHome({ candidates, zip, street, fallback }) {
     .where({ list_key: LIST_KEY })
     .whereIn('status', LIVE_STATUSES)
     .whereIn('page_slug', candidates)
-    .select('id', 'page_slug', 'address_line1', 'zip', 'status', 'price_status', 'price_annual');
+    .select('id', 'page_slug', 'page_token', 'address_line1', 'zip');
   const bySlug = new Map(rows.map((row) => [row.page_slug, row]));
   for (const slug of candidates) {
     const row = bySlug.get(slug);
@@ -165,9 +170,16 @@ async function releaseClaim(claimId) {
   }
 }
 
-// Only a home whose page offers times is told to pick one: eligible and priced (home-page.js priceOf), self-booking on.
-function offersTimes(home) {
-  return home.status === 'eligible' && home.price_status === 'priced' && home.price_annual != null && isEnabled('selfBooking') === true;
+// Only a home whose times endpoint would answer is told to pick a time: home-book.js loadHome (an eligible, priced home with
+// the facts the quote needs, the same rule GET /api/public/home/:token/times starts with) and self-booking on.
+async function offersTimes(home) {
+  try {
+    if (isEnabled('selfBooking') !== true || !home.page_token) return false;
+    return Boolean(await require('./home-book').loadHome(home.page_token));
+  } catch (err) {
+    logger.warn(`[mail-home-text-to-book] times check failed for prospect ${home.id} (${errCode(err)})`);
+    return false;
+  }
 }
 
 function replyBody({ address, slug, offerTimes }) {
@@ -203,11 +215,12 @@ async function handleHomeTextToBook({ from, to, body }) {
 
     const { sendCustomerMessage } = require('../messaging/send-customer-message');
     const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../sms-auto-send');
+    const offerTimes = await offersTimes(home);
     let result;
     try {
       result = await sendCustomerMessage({
         to: from,
-        body: replyBody({ address: displayAddress(home.address_line1), slug: home.page_slug, offerTimes: offersTimes(home) }),
+        body: replyBody({ address: displayAddress(home.address_line1), slug: home.page_slug, offerTimes }),
         channel: 'sms',
         audience: 'lead',
         purpose: 'conversational',

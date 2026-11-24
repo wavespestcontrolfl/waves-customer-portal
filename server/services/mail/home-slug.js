@@ -86,6 +86,16 @@ function buildBaseSlug(addressLine1, { keepStreetType = false } = {}) {
   return SLUG_RE.test(slug) && slug.length <= MAX_SLUG_LENGTH ? slug : null;
 }
 
+/**
+ * True when the line has a unit part ("101 EXAMPLE TRL APT 9", "5 MAIN ST #7"): the part buildBaseSlug drops. Text-to-book
+ * (services/mail/home-text-to-book.js) uses it to refuse a text that names a unit, so the unit is never silently
+ * dropped and matched to another unit's home.
+ */
+function hasUnitPart(addressLine1) {
+  const name = tokensOf(addressLine1).slice(1);
+  return name.findIndex((token, i) => token.startsWith('#') || (i >= 1 && UNIT_WORDS.has(token))) >= 0;
+}
+
 const zip5Of = (zip) => (String(zip == null ? '' : zip).match(/\d{5}/) || [null])[0];
 
 /**
@@ -100,4 +110,4 @@ function slugCandidates({ addressLine1, zip } = {}) {
   return withZip && withZip.length <= MAX_SLUG_LENGTH && SLUG_RE.test(withZip) ? [base, withZip] : [base];
 }
 
-module.exports = { buildBaseSlug, slugCandidates, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES };
+module.exports = { buildBaseSlug, hasUnitPart, slugCandidates, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES };

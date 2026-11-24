@@ -1224,12 +1224,14 @@ router.post('/sms', async (req, res) => {
     // gets one reply with the home's page link (services/mail/home-text-to-book.js). Runs after STOP/HELP/START and
     // the lead-intake machine, never for the AI line, a tech line or a tracking line (the service checks the line is
     // an office location line), a staff sender, a reaction, a media text or a reschedule ask. A reply that went out
-    // consumes the text (no AI auto-reply on top); every other outcome falls through untouched.
+    // consumes the text (no AI auto-reply on top; the office thread bell still rings); every other outcome falls through untouched.
     if (Body && inboundMedia.length === 0 && !smsReaction && !staffSender && !complianceCommand && !rescheduleAsk
       && !pendingTimeAnswer && numberConfig.type === 'location' && !isAiNumber && !TWILIO_NUMBERS.isTechLine(To)) {
       const homeText = await require('../services/mail/home-text-to-book').handleHomeTextToBook({ from: From, to: To, body: Body });
       if (homeText.handled) {
         await retypeConsumedInbound(smsLogEntry.id, 'mail_home_text_to_book', 'mail-home-text-to-book');
+        // The office still sees the text: the same thread bell the post-ack block below rings for any text to an office line.
+        await ringConsumedOfficeText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, Body });
         return res.type('text/xml').send('<Response></Response>');
       }
     }
@@ -2051,6 +2053,30 @@ async function retypeConsumedInbound(smsLogId, messageType, label) {
 
 async function ringSmsReplyBell(args) {
   return require('../services/sms-reply-alert-delivery').ringSmsReplyBell(args);
+}
+
+// The office thread bell for an inbound text a branch consumed and answered itself (the new-home postcard reply): what the
+// post-ack block of POST /sms rings for any text to an office line, in the same order and with the same fallbacks (the
+// unknown-sender bell, the known customer's sms_reply bell, the quiet Activity row when neither landed). One bell per text,
+// no customer reply. Never throws.
+async function ringConsumedOfficeText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, Body }) {
+  try {
+    let notified = await require('../services/sms-reply-alert-delivery').ringUnknownOfficeText({
+      customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, message: Body, mediaCount: 0,
+    });
+    if (customer && !smsReaction && !courtesyOnly) {
+      try {
+        const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body });
+        notified = Boolean(stats && !stats.error && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+      } catch (e) {
+        if (e.alreadyRead) notified = true;
+        else logger.error(`[notifications] sms_reply trigger failed: ${e.code || e.name || 'error'}`);
+      }
+    }
+    if (!notified) await recordInboundTextAlert({ customer, From, MessageSid, Body });
+  } catch (e) {
+    logger.error(`[twilio-webhook] consumed-text bell failed: ${e.code || e.name || 'error'}`);
+  }
 }
 
 // The "New SMS" alert for a text no thread bell covered (an unknown sender, a staff text, a bell that did
