@@ -1770,10 +1770,7 @@ describe('follow-up SLA helpers (Codex r3): a promised follow-up is detectable, 
   test('the module and the drafter export the same helpers, and SLA_PHRASES is exactly what followupSlaPhrase can emit', () => {
     expect(direct.replyPromisesFollowup).toBe(replyPromisesFollowup);
     expect(direct.slaPhraseStatus).toBe(slaPhraseStatus);
-    // the three clock phrases, plus the untimed one a closed day (or an unreadable closure read) gives
-    const reopen = followupSlaPhrase(new Date('2026-11-26T15:00:00Z'), new Set(['2026-11-26'])); // Thanksgiving 10 AM ET
-    expect(reopen).toBe('as soon as the office reopens');
-    expect(new Set(SLA_PHRASES)).toEqual(new Set([followupSlaPhrase(DAY), followupSlaPhrase(NIGHT), followupSlaPhrase(DAWN), reopen]));
+    expect(new Set(SLA_PHRASES)).toEqual(new Set([followupSlaPhrase(DAY), followupSlaPhrase(NIGHT), followupSlaPhrase(DAWN)]));
   });
 
   test('replyPromisesFollowup: any SLA phrase, case-insensitive; nothing else', () => {

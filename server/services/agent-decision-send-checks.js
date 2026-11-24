@@ -71,12 +71,9 @@ async function openTimesBlock({ decision, outgoingBody }) {
 // FOLLOW-UP PROMISE: an escalated real-answers draft's timing phrase must
 // still match the current ET window, and an edit may not turn it into
 // timing copy the phrase list does not know.
-async function followupBlock({ decision, outgoingBody }) {
-  const { followupPromiseBlockReason, slaDraftedAt, replyPromisesFollowup, loadFollowupClosedDates } = require('./sms-followup-sla');
-  // The phrase a draft quotes can name the next open day when Waves is closed: read the closed days only for a body that carries one.
-  const closedDates = replyPromisesFollowup(outgoingBody) ? await loadFollowupClosedDates(new Date()) : null;
+function followupBlock({ decision, outgoingBody }) {
+  const { followupPromiseBlockReason, slaDraftedAt } = require('./sms-followup-sla');
   const reason = followupPromiseBlockReason({
-    closedDates,
     inputSnapshot: decision.input_snapshot,
     promptVersion: decision.prompt_version,
     originalBody: decision.suggested_message,
@@ -657,7 +654,7 @@ async function scheduledOpenLoopsBlockReason({ agentDecisionId, dbh }) {
  */
 async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
   return (await openTimesBlock({ decision, outgoingBody }))
-    || (await followupBlock({ decision, outgoingBody }))
+    || followupBlock({ decision, outgoingBody })
     || (await labelFactsBlock({ decision, outgoingBody }))
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
