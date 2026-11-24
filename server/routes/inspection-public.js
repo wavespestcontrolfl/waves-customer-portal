@@ -808,6 +808,9 @@ async function checkServiceArea(location, address = null) {
   // address's own ZIP proves a served locality (isInServiceAreaBox). With a
   // key the reverse-geocoded county decides below and wins over the rectangle.
   if (!key) {
+    // No lookup can place the pin, so a ZIP Punta Gorda shares with a served town, with no submitted city, is unknowable:
+    // unavailable (recoverable), the same answer the keyed path gives for it, never served.
+    if (!String(address?.city || '').trim() && isPuntaGordaSharedZip(address?.zip)) return { ok: false, county: null, unavailable: true };
     return { ok: isInServiceAreaBox(location.lat, location.lng, { zip: address?.zip }), county: null };
   }
   let county = null;

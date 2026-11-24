@@ -4512,6 +4512,15 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
         expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33980' })).toEqual({ ok: true, county: null });
         expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte' })).toEqual({ ok: true, county: null });
         expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: true, county: null });
+        // a ZIP Punta Gorda shares with a served town, with no submitted city: unknowable, recoverable (the keyed path answers the same)
+        for (const zip of ['33980', '33982', '33983']) {
+          expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { zip })).toEqual({ ok: false, county: null, unavailable: true });
+          expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: '  ', zip })).toEqual({ ok: false, county: null, unavailable: true });
+        }
+        // with a served city on the shared ZIP it is served; Punta Gorda on it is still refused
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33983' })).toEqual({ ok: true, county: null });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Babcock Ranch', zip: '33982' })).toEqual({ ok: true, county: null });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Punta Gorda', zip: '33982' })).toEqual({ ok: false, county: null });
       } finally {
         if (savedA !== undefined) process.env.GOOGLE_API_KEY = savedA;
         if (savedB !== undefined) process.env.GOOGLE_MAPS_API_KEY = savedB;

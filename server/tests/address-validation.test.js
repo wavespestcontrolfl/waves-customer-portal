@@ -132,6 +132,21 @@ describe('deriveStatus: Punta Gorda is not served (owner ruling 2026-10-22)', ()
     expect(deriveStatus(pgResult('Punta Gorda', '33982'), 'Charlotte County').inServiceArea).toBe(false);
   });
 
+  test('a shared ZIP (33980 / 33982 / 33983) with no locality is unknown: confirm_needed, never validated_accept', () => {
+    for (const zip of ['33980', '33982', '33983']) {
+      const r = deriveStatus(pgResult('', zip), 'Charlotte County');
+      expect(r.status).toBe(STATUSES.CONFIRM_NEEDED);
+      expect(r.inServiceArea).toBeNull();
+    }
+    // a served city on the shared ZIP is accepted; Punta Gorda on it is still out; a ZIP that is not shared needs no city
+    expect(deriveStatus(pgResult('Port Charlotte', '33983'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(pgResult('Babcock Ranch', '33982'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(pgResult('Punta Gorda', '33982'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    expect(deriveStatus(pgResult('', '33948'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    // a county outside the area stays out whatever the ZIP says
+    expect(deriveStatus(pgResult('', '33982'), 'Lee County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+  });
+
   test('a Punta Gorda-only ZIP is out even when the locality is missing', () => {
     expect(deriveStatus(pgResult('', '33950'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
   });

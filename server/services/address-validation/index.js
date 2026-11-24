@@ -28,7 +28,7 @@
 
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
-const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
+const { isExcludedLocality, isExcludedZip, isPuntaGordaSharedZip } = require('../excluded-localities');
 const { normalizeState, normalizeStreetLine, parseRawAddress } = require('../../utils/address-normalizer');
 
 // Google address calls are fail-open by design — a HUNG call must fail the
@@ -148,7 +148,10 @@ function deriveStatus(result, county) {
   // technician is hired (services/excluded-localities.js; none is held now): the validated city, or a ZIP that
   // belongs only to such a place, is out.
   const heldPlace = isExcludedLocality(normalized.city) || isExcludedZip(normalized.postal_code);
-  const inServiceArea = county ? (isInServiceAreaCounty(county) && !heldPlace) : null;
+  let inServiceArea = county ? (isInServiceAreaCounty(county) && !heldPlace) : null;
+  // 33980 / 33982 / 33983 are shared between Punta Gorda (not served) and a served town: with no validated city the ZIP
+  // cannot tell them apart, so the area is unknown (null), which lands on confirm_needed below, never validated_accept.
+  if (inServiceArea === true && !normalized.city && isPuntaGordaSharedZip(normalized.postal_code)) inServiceArea = null;
 
   const base = {
     inServiceArea,
