@@ -8,6 +8,7 @@
 // stamp. STOP, do-not-contact, suppression and a disclaimed number are not decided here: the send layer enforces them.
 
 const db = require('../models/db');
+const logger = require('./logger');
 
 // The consent stamp is ACCOUNT-WIDE, so a caller-given phone may
 // stamp (or ride) it only when no other contact phone on the row is left uncovered: the row has no contact phones yet, or it is
@@ -47,9 +48,12 @@ function callGivenConsentWrite({ callGivenConsent, contact, customer, slots, con
         [givenKey, givenKey],
       ),
     },
+    // The blob must be an object (a string or array blob would take the slot and the stamp but not the call_given_phone_keys
+    // restriction, since `||` on a non-object builds an array), as well as the coverage this decision used.
     guard: (q) => slots.reduce(
       (out, slot) => out.whereRaw('?? IS NOT DISTINCT FROM ?', [slot.phone, customer[slot.phone] ?? null]),
-      q.whereRaw(stamped ? 'service_contacts_consent_at IS NOT NULL' : 'service_contacts_consent_at IS NULL'),
+      q.whereRaw(stamped ? 'service_contacts_consent_at IS NOT NULL' : 'service_contacts_consent_at IS NULL')
+        .whereRaw("jsonb_typeof(COALESCE(service_preferences, '{}'::jsonb)) = 'object'"),
     ),
   };
 }
@@ -64,6 +68,7 @@ async function holdCallGivenFallback(customerId, phone, conn = db) {
   }).onConflict(['customer_id', 'phone_key']).ignore();
   // One statement: a YES that landed since the pending read leaves a confirmed row, and the phone is then not put back on the list.
   await conn('customers').where({ id: customerId })
+    .whereRaw("jsonb_typeof(COALESCE(service_preferences, '{}'::jsonb)) = 'object'")
     .whereRaw("NOT EXISTS (SELECT 1 FROM recipient_optin WHERE customer_id = ? AND phone_key = ? AND status = 'confirmed')", [customerId, key])
     .update({
     service_preferences: conn.raw(
@@ -77,24 +82,41 @@ const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
 // An opt-in row for this phone on this account: no row, or a confirmed one, lets caller-given consent stand. Any other row
 // (declined, pending, ask_failed) keeps today's path: filterRecipientsByOptin blocks every non-confirmed row, so consenting
 // over it would leave the phone blocked while both ask paths were skipped. A decline stays blocked; a failed or pending ask
-// stays recoverable through the old ask. Fail closed: an unreadable table reads as a row (a missing table is no row).
+// stays recoverable through the old ask. THREE answers: true, false, and null when the read failed twice (a missing table is no
+// row). A caller that would change state (the fallback hold) must tell false from null; a caller that only grants consent treats
+// null as "not allowed" (fail closed).
+async function readWithOneRetry(label, fn) {
+  try {
+    return { ok: true, value: await fn() };
+  } catch (first) {
+    if (first && first.code === '42P01') return { ok: true, value: null };
+    try {
+      return { ok: true, value: await fn() };
+    } catch (second) {
+      if (second && second.code === '42P01') return { ok: true, value: null };
+      logger.warn(`[call-given-consent] ${label} read failed twice (${(second && (second.code || second.name)) || 'error'}) — state left unchanged`);
+      return { ok: false, value: null };
+    }
+  }
+}
+
 async function optinRowAllowsCallGiven(customerId, phone, conn = db) {
   const key = lastTen(phone);
   if (!customerId || !key) return false;
-  try {
-    const row = await conn('recipient_optin').where({ customer_id: customerId, phone_key: key }).first('status');
-    return !row || row.status === 'confirmed';
-  } catch (err) {
-    return !!err && err.code === '42P01';
-  }
+  const read = await readWithOneRetry('opt-in row', () => conn('recipient_optin').where({ customer_id: customerId, phone_key: key }).first('status'));
+  if (!read.ok) return null;
+  return !read.value || read.value.status === 'confirmed';
 }
 
 // The committed outcome of a caller-given consent: the phone sits in the row's call_given_phone_keys, the row is stamped, no
 // later hold (the unconsented list) names it, and no non-confirmed opt-in row blocks it. Read from the rows, never from a
-// decision made before the write.
+// decision made before the write. true / false, or null when a read failed twice: the caller then leaves the state unchanged
+// (no fallback hold) instead of reading an unreadable result as a verified fallback.
 async function callGivenConsentPersisted(customerId, phone, conn = db) {
   const { callGivenPhoneKeys, unconsentedSlotPhoneKeys } = require('./customer-contact');
-  const row = await conn('customers').where({ id: customerId }).first('service_preferences', 'service_contacts_consent_at');
+  const read = await readWithOneRetry('consent row', () => conn('customers').where({ id: customerId }).first('service_preferences', 'service_contacts_consent_at'));
+  if (!read.ok) return null;
+  const row = read.value;
   const key = lastTen(phone);
   if (!(row && row.service_contacts_consent_at && key && callGivenPhoneKeys(row).has(key) && !unconsentedSlotPhoneKeys(row).has(key))) return false;
   return optinRowAllowsCallGiven(customerId, phone, conn);
@@ -105,12 +127,14 @@ async function callGivenConsentPersisted(customerId, phone, conn = db) {
 // confirmation ACTUALLY went to: when implied consent redirected it to the inbound caller (smsRecipient), a caller-given contact
 // that is the resolved customer phone (smsPhone) never received it and still gets its own. Every other contact keeps the
 // original comparison against smsPhone, so the gate off is unchanged. A claim-failed phone fails closed (no row is not
-// grandfathered here).
-function confirmationFanOutKeep(contact, { smsPhone, smsRecipient, v2SmsConsentExplicit, callGivenConsentPhones, optinClaimFailedPhones }) {
+// grandfathered here). `primarySent` is whether the primary confirmation actually went out: when it was skipped (implied consent
+// held for a non-caller recipient) or blocked, nobody was texted at smsRecipient, so a caller-given contact is kept even when it
+// is that number.
+function confirmationFanOutKeep(contact, { smsPhone, smsRecipient, v2SmsConsentExplicit, callGivenConsentPhones, optinClaimFailedPhones, primarySent = true }) {
   const key = lastTen(contact.phone);
   if (!key) return false;
   const given = callGivenConsentPhones.has(key);
-  if (key === lastTen(given ? smsRecipient : smsPhone)) return false;
+  if (given ? (primarySent && key === lastTen(smsRecipient)) : key === lastTen(smsPhone)) return false;
   return (v2SmsConsentExplicit || given) && !optinClaimFailedPhones.has(key);
 }
 

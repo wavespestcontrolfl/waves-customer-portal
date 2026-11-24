@@ -32,7 +32,7 @@ const staffSenderPhones = require('./staff-sender-phones');
 const { isLikelyE164, isImpossibleNanpPhone, phoneIdentityKey } = require('../utils/phone');
 const { rejectImpossibleSpokenPhones } = require('./call-spoken-phone-guard');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
-const { callStartedAt } = require('../utils/call-timeline');
+const { callStartedAt, callEndedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { isInDesotoExclusion, isServedSouthHillsboroughTown } = require('./service-area');
 const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip, sharedZipNeedsCity } = require('./excluded-localities');
@@ -4286,11 +4286,12 @@ function callGivenConsentApplies(contact, { doNotContact = false, phoneFromV2 = 
   const key = String(contact.phone).replace(/\D/g, '').slice(-10);
   return !heldPhoneKeys.some((held) => String(held || '').replace(/\D/g, '').slice(-10) === key);
 }
-// The call's end (start + duration), else now: the moment the caller gave the number.
+// The moment the caller gave the number = the call's recorded end (callEndedAt: Twilio's own ended_at stamp first, else start +
+// length). Only when no end can be known does the row's created_at stand in, and only with nothing at all, now: never the
+// reprocess time when a recorded end exists.
 function callGivenConsentAt(call) {
-  const start = callStartedAt(call) || (call.created_at ? new Date(call.created_at) : null);
-  const secs = recordingDurationSeconds(call);
-  const at = start && secs && !Number.isNaN(new Date(start).getTime()) ? new Date(new Date(start).getTime() + secs * 1000) : null;
+  const created = call.created_at ? new Date(call.created_at) : null;
+  const at = callEndedAt(call) || (created && !Number.isNaN(created.getTime()) ? created : null);
   return at && at.getTime() <= Date.now() ? at : new Date();
 }
 
@@ -17637,7 +17638,8 @@ const CallRecordingProcessor = {
         const callGivenConsentApplied = (callGivenConsent || callGivenRetained)
           && (result === 'written' || String(result).startsWith('skipped_phone_on_record'))
           && await callGivenConsentPersisted(customerId, secondaryEntry.phone);
-        if (callGivenConsent && result === 'written' && !callGivenConsentApplied) await holdCallGivenFallback(customerId, secondaryEntry.phone);
+        // null = the read failed twice: leave the state unchanged (no hold) rather than read it as a verified fallback.
+        if (callGivenConsent && result === 'written' && callGivenConsentApplied === false) await holdCallGivenFallback(customerId, secondaryEntry.phone);
         if (callGivenConsentApplied && lastTen(secondaryEntry.phone)) callGivenConsentPhones.add(lastTen(secondaryEntry.phone));
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         // Re-added phone that already confirmed its own opt-in here: restore
@@ -24316,7 +24318,7 @@ const CallRecordingProcessor = {
                         getAppointmentContacts(freshCustomer || {}, prefsRow), customerId
                       ).then((optedIn) => require('./contact-notification-prefs')
                         .filterContactsByOwnPrefs(optedIn, customerId, 'appointment_confirmation', { channel: 'sms' }))
-                      ).filter((c) => confirmationFanOutKeep(c, { smsPhone, smsRecipient, v2SmsConsentExplicit, callGivenConsentPhones, optinClaimFailedPhones }));
+                      ).filter((c) => confirmationFanOutKeep(c, { smsPhone, smsRecipient, v2SmsConsentExplicit, callGivenConsentPhones, optinClaimFailedPhones, primarySent: primaryOk }));
                       for (const contact of extraContacts) {
                         // Re-armed sweep owns the WHOLE phone fan-out
                         // (codex r47): once the primary's MOVE_HOLD re-armed

@@ -136,12 +136,20 @@ describe('callGivenConsentRowCovered', () => {
   });
 });
 
-describe('callGivenConsentAt', () => {
-  test('call end = start + duration; falls back to now', () => {
-    const start = new Date(Date.now() - 3600 * 1000);
+describe('callGivenConsentAt: the recorded call end', () => {
+  const start = new Date(Date.now() - 3600 * 1000);
+  test('Twilio\'s own ended_at stamp wins over any duration arithmetic', () => {
+    const ended = new Date(start.getTime() + 95 * 1000);
+    const row = { created_at: start.toISOString(), duration_seconds: 120, metadata: { ended_at: ended.toISOString() } };
+    expect(callGivenConsentAt(row).getTime()).toBe(ended.getTime());
+  });
+  test('no stamp: start + length', () => {
     expect(callGivenConsentAt({ created_at: start.toISOString(), duration_seconds: 120 }).getTime()).toBe(start.getTime() + 120000);
-    const now = Date.now();
-    expect(Math.abs(callGivenConsentAt({}).getTime() - now)).toBeLessThan(5000);
+  });
+  test('a post-call row with no stamp uses its created_at, never the reprocess time; with nothing at all, now', () => {
+    const row = { created_at: start.toISOString(), duration_seconds: 0, metadata: { source: 'status_callback' } };
+    expect(callGivenConsentAt(row).getTime()).toBe(start.getTime());
+    expect(Math.abs(callGivenConsentAt({}).getTime() - Date.now())).toBeLessThan(5000);
   });
 });
 
@@ -179,6 +187,12 @@ describe('persistCallSecondaryContact with callGivenConsent', () => {
     expect(stamped.whereRaws.map(([sql]) => sql)).toContain('service_contacts_consent_at IS NOT NULL');
     const phoneBinds = stamped.whereRaws.filter(([sql]) => sql === '?? IS NOT DISTINCT FROM ?').map(([, b]) => b);
     expect(phoneBinds).toContainEqual(['service_contact_phone', '+15550100777']);
+  });
+
+  test('the consent UPDATE only lands on an object preferences blob (a string or array blob would take the slot and stamp but not the restriction key)', async () => {
+    const writes = makeDb(bareCustomer);
+    await persistCallSecondaryContact('cust-1', spouse, { callGivenConsent: true, consentAt });
+    expect(writes.whereRaws.map(([sql]) => sql)).toContain("jsonb_typeof(COALESCE(service_preferences, '{}'::jsonb)) = 'object'");
   });
 
   test('without the option the UPDATE carries no coverage pin (gate off)', async () => {
@@ -262,7 +276,7 @@ describe('call-site wiring (source contract)', () => {
     expect(src).toContain('if (onSitePreAsk && !callGivenConsent) {');
     expect(src).toContain('const callGivenConsentApplied = (callGivenConsent || callGivenRetained)');
     expect(src).toContain('&& await callGivenConsentPersisted(customerId, secondaryEntry.phone);');
-    expect(src).toContain("if (callGivenConsent && result === 'written' && !callGivenConsentApplied) await holdCallGivenFallback(customerId, secondaryEntry.phone);");
+    expect(src).toContain("if (callGivenConsent && result === 'written' && callGivenConsentApplied === false) await holdCallGivenFallback(customerId, secondaryEntry.phone);");
     expect(src).toContain('if (onSiteDecision.ask && secondaryEntry?.phone && !callGivenConsentApplied) {');
     expect(src).toContain("&& onSiteDecision.reason !== 'phone_not_from_v2' && !callGivenConsentApplied) {");
     expect(src).toContain("callGivenConsentApplied ? 'not_sent:call_given_consent' : optinAskState");
@@ -270,7 +284,7 @@ describe('call-site wiring (source contract)', () => {
 
   test('same-call confirmation reaches a caller-given phone without the caller\'s own explicit consent; nobody else', () => {
     expect(src).toContain('const extraContacts = (!v2SmsConsentExplicit && !callGivenConsentPhones.size) ? [] : (await filterRecipientsByOptin(');
-    expect(src).toContain('.filter((c) => confirmationFanOutKeep(c, { smsPhone, smsRecipient, v2SmsConsentExplicit, callGivenConsentPhones, optinClaimFailedPhones }));');
+    expect(src).toContain('.filter((c) => confirmationFanOutKeep(c, { smsPhone, smsRecipient, v2SmsConsentExplicit, callGivenConsentPhones, optinClaimFailedPhones, primarySent: primaryOk }));');
   });
 
   test('a retry reads the persisted provenance of a phone already on record, and the save does not need a live opt-in rail for it', () => {
@@ -323,11 +337,35 @@ describe('callGivenConsentPersisted: the committed outcome, read from the row', 
     }
     rowDb(row, null);
     expect(await optinRowAllowsCallGiven('c', '+15550100123')).toBe(true);
-    // Fail closed on an unreadable table; a missing table (un-migrated env) is no row.
-    rowDb(row, Object.assign(new Error('boom'), { code: '57014' }));
-    expect(await optinRowAllowsCallGiven('c', '+15550100123')).toBe(false);
+    // A missing table (un-migrated env) is no row.
     rowDb(row, Object.assign(new Error('missing'), { code: '42P01' }));
     expect(await optinRowAllowsCallGiven('c', '+15550100123')).toBe(true);
+  });
+
+  test('a read that fails twice is UNKNOWN (null), never a verified fallback; one transient failure is retried', async () => {
+    const row = { service_contacts_consent_at: stamp, service_preferences: prefs({ call_given_phone_keys: ['5550100123'] }) };
+    rowDb(row, Object.assign(new Error('boom'), { code: '57014' }));
+    expect(await optinRowAllowsCallGiven('c', '+15550100123')).toBeNull();
+    expect(await callGivenConsentPersisted('c', '+15550100123')).toBeNull();
+    // The consent row itself unreadable twice.
+    db.mockImplementation(() => ({ where: () => ({ first: async () => { throw Object.assign(new Error('boom'), { code: '57014' }); } }) }));
+    expect(await callGivenConsentPersisted('c', '+15550100123')).toBeNull();
+    // One failure, then success: retried once, answer stands.
+    let calls = 0;
+    db.mockImplementation((table) => {
+      const b = { where: () => b, first: async () => {
+        calls += 1;
+        if (table === 'recipient_optin' && calls === 2) throw Object.assign(new Error('blip'), { code: '57014' });
+        return table === 'recipient_optin' ? null : row;
+      } };
+      return b;
+    });
+    expect(await callGivenConsentPersisted('c', '+15550100123')).toBe(true);
+  });
+
+  test('the call site leaves state unchanged on an unknown outcome: the fallback hold runs only on a verified false', () => {
+    const src = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain("if (callGivenConsent && result === 'written' && callGivenConsentApplied === false) await holdCallGivenFallback(");
   });
 });
 
@@ -349,7 +387,7 @@ describe('holdCallGivenFallback: a write that fell back takes the fail-closed pa
     expect(updated[0].service_preferences.sql).toContain('unconsented_slot_phone_keys');
     expect(updated[0].service_preferences.binds).toEqual(['5550100123']);
     // Single-statement guard: a YES that landed since the read (a confirmed row) means the phone is not put back on the list.
-    expect(guards).toEqual([["NOT EXISTS (SELECT 1 FROM recipient_optin WHERE customer_id = ? AND phone_key = ? AND status = 'confirmed')", ['cust-1', '5550100123']]]);
+    expect(guards).toEqual([["jsonb_typeof(COALESCE(service_preferences, '{}'::jsonb)) = 'object'", undefined], ["NOT EXISTS (SELECT 1 FROM recipient_optin WHERE customer_id = ? AND phone_key = ? AND status = 'confirmed')", ['cust-1', '5550100123']]]);
   });
 });
 
@@ -383,6 +421,16 @@ describe('contact login (contactSlotMayLogIn): caller-given consent covers texts
     expect(contactSlotMayLogIn(stamped({ call_given_phone_keys: ['5559990000'] }), KEY)).toBe(true);
     // Another phone's provenance does not touch this one, and this one's provenance does not touch another phone.
     expect(contactSlotMayLogIn(stamped({ call_given_phone_keys: [KEY] }), '5559990000')).toBe(true);
+  });
+
+  test('a stamped slot phone is refused when the preferences blob is present but not an object (it cannot carry the restriction)', () => {
+    for (const bad of ['"just a string"', '[1,2]', 'not json', JSON.stringify(['x'])]) {
+      expect(contactSlotMayLogIn(stamped(bad), KEY)).toBe(false);
+    }
+    // Absent blob is the ordinary empty case; a real object is read as before.
+    expect(contactSlotMayLogIn(stamped(null), KEY)).toBe(true);
+    expect(contactSlotMayLogIn(stamped(undefined), KEY)).toBe(true);
+    expect(contactSlotMayLogIn(stamped({}), KEY)).toBe(true);
   });
 
   test('texts are unaffected: the call-given phone still receives appointment texts', () => {
@@ -493,6 +541,16 @@ describe('same-call confirmation fan-out: deduplicated against the number actual
     // Not caller-given: compared with smsPhone, exactly as before the gate.
     expect(confirmationFanOutKeep({ phone: '+15550100123' }, base({ callGivenConsentPhones: new Set(), v2SmsConsentExplicit: true }))).toBe(false);
     expect(confirmationFanOutKeep(other, base({ callGivenConsentPhones: new Set(), v2SmsConsentExplicit: true }))).toBe(true);
+  });
+
+  test('the primary confirmation was skipped or blocked (implied consent held it): nobody was texted at smsRecipient, so a caller-given contact is kept even when it is that number', () => {
+    const phoneLess = base({ smsPhone: '+15550100123', smsRecipient: '+15550100123' });
+    expect(confirmationFanOutKeep(contact, { ...phoneLess, primarySent: true })).toBe(false);
+    expect(confirmationFanOutKeep(contact, { ...phoneLess, primarySent: false })).toBe(true);
+    // Not caller-given: the original smsPhone comparison, whatever the primary did.
+    expect(confirmationFanOutKeep({ phone: '+15550100123' }, { ...phoneLess, callGivenConsentPhones: new Set(), v2SmsConsentExplicit: true, primarySent: false })).toBe(false);
+    const src = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain('optinClaimFailedPhones, primarySent: primaryOk }));');
   });
 
   test('without explicit consent only caller-given phones get it; a claim-failed phone fails closed', () => {

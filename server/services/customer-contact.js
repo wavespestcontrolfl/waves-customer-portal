@@ -534,10 +534,23 @@ function callGivenPhoneKeys(customer = {}) {
   return new Set((Array.isArray(keys) ? keys : []).map((k) => phoneKeyOf(k)).filter(Boolean));
 }
 
+// A preferences blob that is present but not an object (a JSON string or array) cannot carry the per-phone restrictions this
+// module reads (unconsented, call-given): it reads as empty there, which would let a stamped phone through. Absent (null /
+// not selected) is the ordinary empty case and is unchanged.
+function servicePrefsMalformed(customer = {}) {
+  let prefs = customer.service_preferences;
+  if (prefs === null || prefs === undefined) return false;
+  if (typeof prefs === 'string') {
+    try { prefs = JSON.parse(prefs); } catch { return true; }
+  }
+  return prefs === null || typeof prefs !== 'object' || Array.isArray(prefs);
+}
+
 function contactSlotMayLogIn(customer, phoneKey) {
   const key = phoneKeyOf(phoneKey);
   if (!customer || !key) return false;
   if (!customer.service_contacts_consent_at || unconsentedSlotPhoneKeys(customer).has(key)) return false;
+  if (servicePrefsMalformed(customer)) return false;
   if (callGivenPhoneKeys(customer).has(key) && !loginAttestedPhoneKeys(customer).has(key)) return false;
   if (!require('../config/feature-gates').contactLoginHolderOnlyLive()) return true;
   return loginAttestedPhoneKeys(customer).has(key);

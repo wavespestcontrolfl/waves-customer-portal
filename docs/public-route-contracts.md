@@ -7654,7 +7654,7 @@ phone whether `GATE_CONTACT_LOGIN_HOLDER_ONLY` is on or off, unless the same pho
 (the signed-in holder's own contacts save). The call write drops the phone from `login_attested_phone_keys` in the same UPDATE, so a stale
 attestation of a removed contact never carries over, and a database trigger (migration 20261124150000) cuts `call_given_phone_keys` to the
 phones still stored in a slot. Session effect: send-code sends no code and verify-code answers the same 401 for that number, a live contact
-session for it ends at its next request with the same 401, and push notifications to its devices stop, until the holder attests it.
+session for it ends at its next request with the same 401, and push notifications to its devices stop, until the holder attests it. `contactSlotMayLogIn` also refuses every stamped slot phone while the customer's `service_preferences` is present but not a JSON object (a string or array cannot carry the per-phone restrictions); a missing blob reads as empty, as before.
 A consent stamp written by the call pipeline, the grandfather backfill or a
 recipient YES no longer admits a number by itself: send-code sends no code,
 verify-code answers the same 401, and a live contact session ends at its next
