@@ -9,6 +9,7 @@ const featureGates = require('../config/feature-gates');
 const { applyAssignable, normalizeWorkDays } = require('../services/technician-eligibility');
 const { whereNotSandboxCall } = require('../services/voice-agent/relay-protocol');
 const { computeOpsScoreboard } = require('../services/ops-scoreboard');
+const { bookedWinSql } = require('../services/estimate-disposition');
 const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
@@ -1759,12 +1760,15 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
     };
 
     const [capturedRow, missedRow] = await Promise.all([
-      // Won = accepted, resolved this month. Resolution date matches
-      // estimate-winloss.resolutionDate: accepted_at, else created_at. Bound
-      // ET-midnight so the cutoff doesn't drift at the UTC boundary on Railway.
+      // Won = accepted, resolved this month, plus an expired offer whose customer
+      // booked another way (the daily reclaim's code; estimate-winloss
+      // isBookedOtherWayRow), which resolves at its expiry. Resolution date
+      // matches estimate-winloss.resolutionDate: accepted_at, else created_at.
+      // Bound ET-midnight so the cutoff doesn't drift at the UTC boundary on Railway.
       base()
-        .where('e.status', 'accepted')
-        .whereRaw(`COALESCE(e.accepted_at, e.created_at) >= ${ET_MIDNIGHT_TS}`, [cutoff])
+        .where((q) => q
+          .whereRaw(`(e.status = 'accepted' AND COALESCE(e.accepted_at, e.created_at) >= ${ET_MIDNIGHT_TS})`, [cutoff])
+          .orWhereRaw(`(${bookedWinSql('e')} AND COALESCE(e.expires_at, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS})`, [cutoff]))
         .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
         .first(),
       // Missed = declined/expired, resolved this month. declined → declined_at,
@@ -1773,6 +1777,8 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
       // expires_at) still count instead of dropping to NULL.
       base()
         .whereIn('e.status', ['declined', 'expired'])
+        // An expired offer whose customer booked another way is a win (counted above), never missed.
+        .whereRaw(`NOT ${bookedWinSql('e')}`)
         .whereRaw(
           `COALESCE(CASE WHEN e.status = 'expired' THEN e.expires_at ELSE e.declined_at END, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS}`,
           [cutoff],

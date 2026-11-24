@@ -147,8 +147,12 @@ function sentAtSql(alias) {
 // as sentAnchorMs reads a staff row's stamp; an unzoned stamp reads NULL in
 // SQL so the answer never depends on the session zone.
 function firstDeliveryEvidenceSql(alias) {
+  // A staff quote whose firstDeliveredAt is PRESENT but unreadable in SQL (an unzoned stamp)
+  // has no usable anchor: NULL, never a fallback to sent_at (a resend rewrites it), so the
+  // reclaim fails closed on it.
+  const unreadableStaffStamp = `(${presentStampSql(alias)} IS NOT NULL AND ${deliveryInstantSql(alias, 'firstDeliveredAt')} IS NULL)`;
   return selfServeOr(alias, deliveredAtSql(alias),
-    `LEAST(${deliveryInstantSql(alias, 'firstDeliveredAt')}, ${alias}.sent_at, ${alias}.viewed_at, ${alias}.accepted_at)`);
+    `CASE WHEN ${unreadableStaffStamp} THEN NULL ELSE LEAST(${deliveryInstantSql(alias, 'firstDeliveredAt')}, ${alias}.sent_at, ${alias}.viewed_at, ${alias}.accepted_at) END`);
 }
 
 // The instant a row counts as viewed. A self-serve quote is opened in the

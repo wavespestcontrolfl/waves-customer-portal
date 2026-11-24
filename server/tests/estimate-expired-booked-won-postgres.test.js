@@ -421,6 +421,24 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect((await row(b)).disposition).toBe('expired_viewed');
   });
 
+  test('(r) a staff quote with a PRESENT but unzoned firstDeliveredAt has no usable anchor: it never falls back to sent_at, so it is not reclaimed', async () => {
+    const unzoned = sentPlus(0).toISOString().replace('T', ' ').replace('Z', ''); // '2026-.. 12:00:00.000', no zone
+    const cust = await customer(mockTransaction);
+    const id = await expiredEstimate(mockTransaction, cust, {
+      sent_at: sentPlus(0), estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: unzoned } }),
+    });
+    await paidInvoice(mockTransaction, cust, { paidAt: sentPlus(30) });
+    // Control: the same row with no stamp at all is reclaimed.
+    const plain = await customer(mockTransaction);
+    const plainId = await expiredEstimate(mockTransaction, plain, { sent_at: sentPlus(0) });
+    await paidInvoice(mockTransaction, plain, { paidAt: sentPlus(30) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(id)).disposition).toBe('expired_viewed');
+    expect((await row(plainId)).disposition).toBe('converted_other_path');
+  });
+
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {
     const cust = await customer(mockTransaction);
     const id = await expiredEstimate(mockTransaction, cust, { status: 'sent', expires_at: null, disposition: null, disposition_source: null, disposition_at: null });
