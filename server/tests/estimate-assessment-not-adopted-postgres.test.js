@@ -231,6 +231,119 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect(acceptance.appointment.id).toBe(lawnId);
   });
 
+  test.each([
+    ['stamp stays live', false],
+    ['stamp lapses after GET', true],
+  ])('accept adopts the linked same-customer office booking a fresh page offered when %s', async (_label, lapseAfterGet) => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const lawnId = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: {
+        source_estimate_id: estimateId,
+        estimated_price: 73,
+        reservation_expires_at: mockTransaction.raw("NOW() + INTERVAL '10 minutes'"),
+      },
+    });
+    await mockTransaction('estimates').where({ id: estimateId }).update({
+      estimate_data: JSON.stringify({ ...LAWN_DATA, scheduled_service_id: lawnId }),
+    });
+
+    // This is the exact id the newly loaded page deliberately offers; accept
+    // must use the locked adoption path, not reinterpret the office booking's
+    // leftover timestamp as a customer-owned reservation hold.
+    const acceptance = await getAcceptance(token);
+    expect(acceptance).toMatchObject({ mode: 'existing_appointment', appointment: { id: lawnId } });
+    if (lapseAfterGet) {
+      // The tab accepted exactly what its fresh contract offered. Staff did
+      // not otherwise edit the booking; only the stale hold clock crossed
+      // its deadline between the page read and the explicit accept.
+      await mockTransaction('scheduled_services').where({ id: lawnId }).update({
+        reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 minute'"),
+      });
+    }
+    const beforeHeldRetry = await mockTransaction('scheduled_services').where({ id: lawnId }).first();
+    const estimateBeforeHeldRetry = await mockTransaction('estimates').where({ id: estimateId }).first();
+    const heldRetry = await putAccept(token, {
+      existingAppointmentId: lawnId,
+      existingAppointmentWasHold: true,
+      paymentMethodPreference: 'pay_at_visit',
+    });
+    expect(heldRetry.status).toBe(409);
+    expect(await heldRetry.json()).toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(await mockTransaction('scheduled_services').where({ id: lawnId }).first()).toEqual(beforeHeldRetry);
+    expect(Number(beforeHeldRetry.estimated_price)).toBe(73);
+    expect(await mockTransaction('estimates').where({ id: estimateId }).first()).toEqual(estimateBeforeHeldRetry);
+    expect(await mockTransaction('invoices').where({ customer_id: customerId })).toHaveLength(0);
+
+    // The same explicit appointment id without the resumed-hold intent is
+    // the normal office-booking adoption contract the fresh page rendered.
+    const res = await putAccept(token, {
+      existingAppointmentId: lawnId,
+      paymentMethodPreference: 'pay_at_visit',
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ success: true });
+
+    const adopted = await mockTransaction('scheduled_services').where({ id: lawnId }).first();
+    expect(adopted).toMatchObject({
+      customer_id: customerId,
+      source_estimate_id: estimateId,
+      status: 'confirmed',
+      reservation_expires_at: null,
+      payment_method_preference: 'pay_at_visit',
+    });
+    expect(Number(adopted.estimated_price)).toBe(55);
+
+    // Normal recurring-estimate economics still apply, with the one office
+    // booking as the sole source-linked parent — never a duplicate booking.
+    expect(await mockTransaction('scheduled_services')
+      .where({ source_estimate_id: estimateId })
+      .whereNull('recurring_parent_id')
+      .pluck('id')).toEqual([lawnId]);
+    expect(await mockTransaction('scheduled_services').where({
+      customer_id: customerId,
+      scheduled_date: CHOSEN_DATE,
+      window_start: '09:00',
+    })).toHaveLength(1);
+    const invoices = await mockTransaction('invoices').where({ customer_id: customerId });
+    expect(invoices).toHaveLength(1);
+    expect(invoices[0]).toMatchObject({
+      scheduled_service_id: lawnId,
+      status: 'sent',
+      total: '55.00',
+      amount_paid: '0.00',
+      line_items: [expect.objectContaining({ description: 'First service application', amount: 55 })],
+    });
+    expect(await mockTransaction('estimates').where({ id: estimateId }).first('status', 'annual_total'))
+      .toMatchObject({ status: 'accepted', annual_total: '660.00' });
+  }, 180000);
+
+  test('accept never adopts a future-stamped linked office booking owned by another customer', async () => {
+    const owner = await fixture(mockTransaction);
+    const quoted = await fixture(mockTransaction);
+    const lawnId = await visit(mockTransaction, {
+      customerId: owner.customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: {
+        estimated_price: 73,
+        reservation_expires_at: mockTransaction.raw("NOW() + INTERVAL '10 minutes'"),
+      },
+    });
+    await mockTransaction('estimates').where({ id: quoted.estimateId }).update({
+      estimate_data: JSON.stringify({ ...LAWN_DATA, scheduled_service_id: lawnId }),
+    });
+    const before = await mockTransaction('scheduled_services').where({ id: lawnId }).first();
+
+    expect((await getAcceptance(quoted.token)).mode).not.toBe('existing_appointment');
+    const estimateBeforeReject = await mockTransaction('estimates').where({ id: quoted.estimateId }).first();
+    const res = await putAccept(quoted.token, {
+      existingAppointmentId: lawnId,
+      paymentMethodPreference: 'pay_at_visit',
+    });
+    expect(res.status).toBe(409);
+    expect(await mockTransaction('scheduled_services').where({ id: lawnId }).first()).toEqual(before);
+    expect(await mockTransaction('estimates').where({ id: quoted.estimateId }).first()).toEqual(estimateBeforeReject);
+  });
+
   test('/data: a booked assessment is not offered — the normal slot-picker flow renders', async () => {
     const { customerId, token } = await fixture(mockTransaction);
     await assessmentVisit(mockTransaction, customerId);

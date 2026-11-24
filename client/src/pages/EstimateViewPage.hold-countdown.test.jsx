@@ -500,6 +500,10 @@ describe('hold countdown bar', () => {
     // Hydrating only inside handlePaymentChoice meant a customer could read
     // the estimate for the whole hold with no clock and no 0:00 rescue.
     expect(eff).toContain('existingAppointment?.isHold && existingAppointment?.reservationExpiresAt');
+    // When this tab submits the appointment ID, the server must know the
+    // customer saw a hold so a later staff claim sends them back to the picker.
+    const accept = sliceBetween('const performAccept = useCallback', 'const handleConfirm = useCallback');
+    expect(accept).toContain('existingAppointmentWasHold: existingAppointment?.isHold || undefined');
     expect(eff).toContain('scheduledServiceId: held.id,');
     expect(eff).toContain('adoptedHold: true,');
     // Re-seeding the same hold+expiry would restart the countdown; a live

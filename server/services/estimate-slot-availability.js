@@ -35,7 +35,7 @@ const { bookedVisitOrLiveHold } = require('./scheduling/reservation-occupancy');
 const { capacityEnabled, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
-  violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
+  violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes, isHoldStop,
 } = require('./scheduling/travel-gap');
 const { ensureCatalogLoaded, expectedServiceMinutes, stopExpectedMinutesSync, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -1956,7 +1956,7 @@ async function filterCollidingSlots(slots, {
 // customer detour policy as cold find-time make the final decision; no
 // road/provider preload.
 async function recheckCachedCapacitySlots(slots, {
-  dateFrom, dateTo, estimateId, coords, durationMinutes, prospective, cachedAt, routeDaySlug, conn = db,
+  dateFrom, dateTo, estimateId, coords, durationMinutes, prospective, cachedAt, routeDaySlug, candidateExpectedMinutes, conn = db,
 }) {
   if (!coords) return slots;
   const rows = await conn('scheduled_services')
@@ -1994,6 +1994,10 @@ async function recheckCachedCapacitySlots(slots, {
     ? { date, technicianId, zoneSlug: routeDaySlug, zoneRouteDays }
     : undefined);
   const contexts = new Map();
+  // Cold find-time stops a visit at its technician's shift end (shiftEndMin).
+  const shiftOf = await loadTechShifts(conn);
+  const gapChecked = travelGapEnabled();
+  if (gapChecked) await ensureCatalogLoaded(conn);
   const kept = [];
   for (const slot of slots) {
     const key = `${slot.date}|${slot.techId}`;
@@ -2020,18 +2024,43 @@ async function recheckCachedCapacitySlots(slots, {
     }
     const context = await contexts.get(key);
     if (!context) continue;
+    const slotShift = shiftOf(slot.techId, slot.date);
+    const slotMinutes = Number(slot.durationMinutes) || durationMinutes;
     const fit = arrivalRoute.evaluateArrivalPlacement(context, {
       windowStart: slot.windowStart,
       windowEnd: slot.windowEnd,
-      durationMinutes: Number(slot.durationMinutes) || durationMinutes,
+      durationMinutes: slotMinutes,
       bufferMinutes: 0,
       dayEndMin: currentDayEndMinutes(),
+      ...(slotShift ? { shiftEndMin: slotShift.endMin } : {}),
     });
     const arrivalGrace = require('../utils/slot-offer-token').splitSignedSlotId(slot.slotId)?.arrivalGrace || 0;
-    if (fit?.feasible && !(fit.detourMinutes > capFor(slot.date, slot.techId))
-      && !arrivalRoute._internals.arrivalExceedsGrace(fit, arrivalGrace)) kept.push(slot);
+    if (!(fit?.feasible && !(fit.detourMinutes > capFor(slot.date, slot.techId))
+      && !arrivalRoute._internals.arrivalExceedsGrace(fit, arrivalGrace))) continue;
+    // Reserve refuses a graced offer when a live rival hold sits inside the
+    // strict travel buffer (slot-reservation refuseGracedOfferOnRivalHoldConflict).
+    // A hold made or extended after this card was cached can do that while
+    // the route still fits, so run the same predicate on the current rows.
+    if (arrivalGrace > 0 && gapChecked) {
+      // Lazy: find-time is mocked without _internals in unrelated suites.
+      const { expandRowsWithCredit, capacityNeighbourEntity } = require('./scheduling/find-time')._internals;
+      const startMin = timeToMinutes(slot.windowStart);
+      const candidate = {
+        startMin, endMin: startMin + slotMinutes, lat: coords.lat ?? null, lng: coords.lng ?? null, windowMinutes: slotMinutes,
+        expectedMinutes: Number.isFinite(candidateExpectedMinutes) ? Math.min(candidateExpectedMinutes, slotMinutes) : slotMinutes,
+      };
+      const rivalClash = expandRowsWithCredit(context.rows.filter(row => isHoldStop(row)
+        && (row.technician_id == null || String(row.technician_id) === String(slot.techId)))).some((row) => {
+        const neighbour = capacityNeighbourEntity(row);
+        return neighbour && violatesTravelGap(candidate, [neighbour]);
+      });
+      if (rivalClash) continue;
+    }
+    kept.push(slot);
   }
-  return kept;
+  // A make-room hold revived by an expiry-only extension occupies its moved
+  // stops' destination hours, which the route simulation cannot see.
+  return dropLiveMakeRoomDestinations(kept, { conn, dateFrom, dateTo, ownEstimateId: estimateId });
 }
 
 function timestampAtOrAfter(value, boundary) {
@@ -2196,10 +2225,12 @@ async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null, onStampe
     const dayOf = (d) => (typeof d === 'string' ? d.slice(0, 10) : new Date(d).toISOString().slice(0, 10));
     const scoped = featureGates.multiTechConfirmLive();
     if (scoped || onStampedBooking) {
-      const rows = await query.distinct('scheduled_date', ...(scoped ? ['technician_id'] : []),
+      const rows = await query.distinct('scheduled_date', ...(scoped || onStampedBooking ? ['technician_id'] : []),
         ...(onStampedBooking ? [db.raw('customer_id IS NOT NULL AND reservation_expires_at <= NOW() AS restored_booking')] : []));
-      if (onStampedBooking && rows.some(row => row.restored_booking)) onStampedBooking();
-      return new Set(rows.map(r => r.technician_id ? `${r.technician_id}|${dayOf(r.scheduled_date)}` : dayOf(r.scheduled_date)));
+      if (onStampedBooking) {
+        for (const row of rows) if (row.restored_booking) onStampedBooking(dayOf(row.scheduled_date), row.technician_id);
+      }
+      return new Set(rows.map(r => (scoped && r.technician_id) ? `${r.technician_id}|${dayOf(r.scheduled_date)}` : dayOf(r.scheduled_date)));
     }
     return new Set((await query.distinct('scheduled_date').pluck('scheduled_date')).map(dayOf));
   } catch (err) {
@@ -2693,6 +2724,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
               prospective: cached.occupancyContext?.prospective,
               cachedAt: cached.occupancyContext?.readAt,
               routeDaySlug: cached.occupancyContext?.routeDaySlug,
+              candidateExpectedMinutes: cached.occupancyContext?.candidateExpectedMinutes,
             });
           } else {
             // A make-room offer intentionally overlaps the stop its signed
@@ -2926,9 +2958,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // Pull a generous topN so we can split customer-facing slots post-hoc
   // without a second call. find-time sorts by score (detour + day penalty)
   // ascending, so this includes far more candidates than we'll surface.
-  let restoredBookingUsed = false;
+  // Routes (`date|technician`, or `date|` for every technician that day) whose
+  // stops include a restored booking; an unreadable lookup marks everything.
+  const restoredRoutes = new Set();
+  let restoredEverywhere = false;
   const onStampedBooking = featureGates.gateEnvValue?.('GATE_CUSTOMER_RAIN_RANK')
-    ? () => { restoredBookingUsed = true; } : null;
+    ? (date, techId) => { if (date) restoredRoutes.add(`${date}|${techId ?? ''}`); else restoredEverywhere = true; } : null;
   const [rawLists, asapLists, stopDates] = await Promise.all([
     Promise.all(slotSegments.map(([segFrom, segTo]) => findAvailableSlots({
       lat: coords.lat,
@@ -2941,6 +2976,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // The public estimate surface mirrors the authoritative reservation
       // write: staff-claimed holds remain occupied after their old expiry.
       includeClaimedReservations: true,
+      onRestoredBooking: onStampedBooking ?? undefined,
       // This estimate's own uncommitted hold must not occupy the route it is
       // asking about (codex r16 P1) — the non-capacity collision query
       // already excludes it; capacity generation needs the same.
@@ -2986,11 +3022,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     }))),
     stopDatesInRange(dateFrom, dateTo, estimateId, onStampedBooking),
   ]);
-  // Request-local signal from find-time: at least one route/calendar read
-  // restored a staff-booked visit whose old hold timestamp is already past.
-  // Those rows must shape availability, but must not be the reason this cold
-  // public request starts the conditional hourly forecast/provider ladder.
-  restoredBookingUsed ||= rawLists.some((result) => result?.restored_booking_used === true);
+  // Restored staff-booked visits (old hold timestamp already past) shape
+  // availability, but must not be the reason this cold public request starts
+  // the conditional hourly forecast/provider ladder. Only the routes they sit
+  // on are left out of that trigger (the public booking path's rule).
+  const onRestoredRoute = (slot) => restoredEverywhere
+    || restoredRoutes.has(`${slot.date}|${slot.techId ?? ''}`) || restoredRoutes.has(`${slot.date}|`);
   const raw = { slots: rawLists.flatMap((r) => r?.slots || []) };
   // A date with a committed stop offers ONLY the packed find-time ends — a
   // synthetic hourly ASAP window there is the exact hole-maker the bug
@@ -3088,8 +3125,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // above has no detour data, so its ordering is unchanged either way.
   // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
   // the gate off, no slot inside the next 3 dates, or any failure.
-  const rainTierOf = restoredBookingUsed ? null : await slotRainTierOf(funneledBookable, {
+  const rainTierOf = await slotRainTierOf(funneledBookable, {
     profile: serviceProfile, services: appointmentServicesFor(serviceProfile), point: coords, db,
+    forecastSlots: restoredRoutes.size || restoredEverywhere ? funneledBookable.filter(slot => !onRestoredRoute(slot)) : undefined,
   });
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
     routeFirst: isEnabled('geoSlotRanking'),
@@ -3444,6 +3482,7 @@ module.exports = {
     signCustomerFacingSlots,
     filterCollidingSlots,
     filterUnchangedMakeRoomSlots,
+    recheckCachedCapacitySlots,
     applyLineOfferRule,
     lineOfferRankingFor,
     heldVisitLines,

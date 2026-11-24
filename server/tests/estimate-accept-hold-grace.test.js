@@ -339,7 +339,7 @@ describe('legacy renderer never adopts a live hold', () => {
     const shape = src.slice(shapeAt, src.indexOf("\n// serviceKeyFor's fallback", shapeAt));
     // Spread ONLY for an actual hold, so a committed visit's payload is
     // byte-identical to the pre-PR shape the contract promises (codex r14 P0).
-    expect(shape).toContain('...((!row.customer_id && row.reservation_expires_at)');
+    expect(shape).toContain('...(isReservationHeldAppointment(row)');
     expect(shape).toContain('isHold: true');
     expect(shape).not.toMatch(/isHold: !row\.customer_id/);
   });

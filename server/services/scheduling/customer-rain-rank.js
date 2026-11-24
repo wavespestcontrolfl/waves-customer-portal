@@ -99,13 +99,16 @@ function startCustomerRainRank({ today, lat, lng, ...rest } = {}) {
  * The tier function for estimate slots ({ date, windowStart, windowEnd }),
  * or null (today's order). Same gate, rules, service-area check and budget
  * as the booking builder; nothing is read unless a slot is inside the rain
- * horizon. `services` = the estimate's service profile rows or labels;
+ * horizon (`forecastSlots`, when given, narrows which slots can start that
+ * read; every slot is still tiered). `services` = the estimate's service profile rows or labels;
  * `point` = its coordinates ({ lat, lng }), null when it has none.
  */
-async function slotRainTierOf(slots, { services = [], profile = null, point = null, today, db, deps = {} } = {}) {
+async function slotRainTierOf(slots, { services = [], profile = null, point = null, today, db, deps = {}, forecastSlots } = {}) {
   const todayYmd = etDateString(today || new Date());
   const list = Array.isArray(slots) ? slots : [];
-  if (!list.some((slot) => inRainHorizon(slot?.date, todayYmd))) return null;
+  // forecastSlots: the slots allowed to start the forecast read (default: all of them).
+  const trigger = Array.isArray(forecastSlots) ? forecastSlots : list;
+  if (!trigger.some((slot) => inRainHorizon(slot?.date, todayYmd))) return null;
   const { gateEnvValue } = require('../../config/feature-gates');
   if (!gateEnvValue(GATE)) return null;
   // `services` = the rows this appointment performs (the caller narrows a

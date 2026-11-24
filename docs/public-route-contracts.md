@@ -2233,8 +2233,13 @@ clears the expiry. Estimate acceptance by `slotId` returns 409
 `RESERVATION_EXPIRED` when its first lookup finds the timestamp already cleared
 or past the checkout grace period. When that lookup still finds a hold and
 staff book the visit before the locked write, it returns 409 `SLOT_UNAVAILABLE`.
-A retry of an accepted estimate or a completed one-tap purchase returns the
-stored booking from its own record. Zone and estimate pickers remove
+Accepting a linked
+appointment offered by the estimate uses `existingAppointmentId` and the usual
+ownership and service checks. When the page showed a hold, it also sends
+`existingAppointmentWasHold: true`. If staff have since booked that visit for
+the customer, acceptance returns 409 `SLOT_UNAVAILABLE`. A retry of an accepted
+estimate or a completed one-tap purchase returns the stored booking from its
+own record. Zone and estimate pickers remove
 the occupied hour. Public booking also counts the visit when simulating travel
 to later stops. A cached estimate checks travel gaps and remaining capacity
 locally. A new booking can invalidate a proposed move on the same route.

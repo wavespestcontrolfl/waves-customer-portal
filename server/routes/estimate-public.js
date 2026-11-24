@@ -1333,7 +1333,7 @@ function shapeLinkedAppointment(row) {
     // countdown on a real appointment, 404 its extend, and offer an
     // expired-hold recovery for a booked visit; UNCLAIMED is half the
     // definition for exactly that reason.
-    ...((!row.customer_id && row.reservation_expires_at)
+    ...(isReservationHeldAppointment(row)
       ? {
         isHold: true,
         reservationExpiresAt: new Date(row.reservation_expires_at).toISOString(),
@@ -1855,6 +1855,11 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     .andWhere((builder) => {
       builder.whereNull('scheduled_services.reservation_expires_at')
         .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+      // A booked visit explicitly selected from this estimate remains adoptable
+      // if its old hold timestamp lapses between the page load and acceptance.
+      if (requestedId && estimate.customer_id) {
+        builder.orWhere('scheduled_services.customer_id', estimate.customer_id);
+      }
       if (holdGraceMinutes > 0 && estimate.id) {
         builder.orWhere((own) => {
           own.where('scheduled_services.source_estimate_id', estimate.id)
@@ -10931,6 +10936,13 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       && String(existingAppointmentRow.customer_id) !== String(estimate.customer_id)
     ) {
       return res.status(409).json({ error: 'existing appointment belongs to a different customer' });
+    }
+    // A page that showed a hold must never adopt a booking staff claimed
+    // before this lookup. A claim after the lookup is checked under the lock
+    // by commitReservation.
+    if (existingAppointmentRow && req.body?.existingAppointmentWasHold === true
+      && !isReservationHeldAppointment(existingAppointmentRow)) {
+      return res.status(409).json({ code: 'SLOT_UNAVAILABLE', error: 'slot no longer available — re-pick a slot' });
     }
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
     const pricingBundle = await buildPricingBundle(estimateForPricing);
@@ -22650,7 +22662,7 @@ function validateRecurringSlotPaymentPreference({
 }
 
 function isReservationHeldAppointment(row = {}) {
-  return !!row?.reservation_expires_at;
+  return !!row?.reservation_expires_at && row.customer_id == null;
 }
 
 function assertExistingAppointmentUpdateApplied(updatedCount) {

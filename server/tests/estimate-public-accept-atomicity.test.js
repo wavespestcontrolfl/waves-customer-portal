@@ -462,6 +462,29 @@ beforeEach(() => {
 });
 
 describe('FIX 1 — standard recurring conversion is atomic with acceptance', () => {
+  test('a stale slotId after cleanup returns RESERVATION_EXPIRED and preserves the office booking', async () => {
+    const estimate = recurringPestEstimate({ customer_id: 'cust-office' });
+    resetStore(estimate);
+    const date = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
+    const booked = {
+      id: 'ss-office', source_estimate_id: estimate.id, customer_id: estimate.customer_id,
+      scheduled_date: date, window_start: '10:00:00', window_end: '11:00:00',
+      service_type: 'Pest Control', status: 'confirmed', estimated_price: 73, reservation_expires_at: null,
+    };
+    db.__state.tables.scheduled_services = [{ ...booked }];
+
+    const response = await putAccept(estimate.token, {
+      slotId: `${date}_10-00_unassigned`, paymentMethodPreference: 'pay_at_visit',
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('RESERVATION_EXPIRED');
+    expect(db.__state.tables.scheduled_services).toEqual([booked]);
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
   test('busy deposit ledger rolls back standard acceptance before its invoice mint', async () => {
     resetStore(recurringPestEstimate());
     db.__state.tryDepositLedgerBusy = true;

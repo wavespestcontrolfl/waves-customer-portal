@@ -8357,6 +8357,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         body: JSON.stringify({
           slotId: existingAppointment ? undefined : selectedSlotId,
           existingAppointmentId: existingAppointment?.id,
+          existingAppointmentWasHold: existingAppointment?.isHold || undefined,
           paymentMethodPreference: paymentPreference,
           // Attests which card-hold fee-policy copy THIS TAB RENDERED —
           // render-bound, never a constant: sent only under the same

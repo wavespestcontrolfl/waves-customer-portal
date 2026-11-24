@@ -498,13 +498,16 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
     process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
     jest.setSystemTime(new Date('2027-05-18T15:00:00Z'));
     getHourlyRainOutlook.mockResolvedValue([{ startTime: '2027-05-20T09:00:00-04:00', rainChance: 80 }]);
-    findAvailableSlots.mockResolvedValue({
-      slots: [{
-        date: '2027-05-20', start_time: '09:00', technician: { id: 'tech-1', name: 'Adam Benetti' },
-        detour_minutes: 4, stops_that_day: 3,
-      }],
-      total_feasible: 1,
-      restored_booking_used: true,
+    findAvailableSlots.mockImplementation(async (options) => {
+      options.onRestoredBooking('2027-05-20', 'tech-1');
+      return {
+        slots: [{
+          date: '2027-05-20', start_time: '09:00', technician: { id: 'tech-1', name: 'Adam Benetti' },
+          detour_minutes: 4, stops_that_day: 3,
+        }],
+        total_feasible: 1,
+        restored_booking_used: true,
+      };
     });
 
     const guarded = await getAvailableSlots('est-rain-1', OPTS);
@@ -514,6 +517,7 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
     // An otherwise identical ordinary cold build keeps the existing forecast
     // behavior; the guard is request-local, not a global kill switch.
     estimateSlotAvailability._internals.clearCaches();
+    findAvailableSlots.mockReset();
     findAvailableSlots.mockResolvedValue({
       slots: [{
         date: '2027-05-20', start_time: '09:00', technician: { id: 'tech-1', name: 'Adam Benetti' },
@@ -540,6 +544,41 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
     await getAvailableSlots('est-rain-1', OPTS);
     expect(getHourlyRainOutlook).not.toHaveBeenCalled();
     delete process.env.GATE_CUSTOMER_RAIN_RANK;
+  });
+
+  test('a restored booking on one day leaves an unaffected near-term offer free to start the forecast', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    jest.setSystemTime(new Date('2027-05-18T15:00:00Z'));
+    getHourlyRainOutlook.mockResolvedValue([{ startTime: '2027-05-20T09:00:00-04:00', rainChance: 80 }]);
+    const slot = (date) => ({
+      date, start_time: '09:00', technician: { id: 'tech-1', name: 'Adam Benetti' }, detour_minutes: 4, stops_that_day: 3,
+    });
+    try {
+      // The restored stop sits on 05-20 only; the 05-19 offer is unaffected.
+      findAvailableSlots.mockImplementation(async (options) => {
+        options.onRestoredBooking('2027-05-20', 'tech-1');
+        return { slots: [slot('2027-05-19'), slot('2027-05-20')], total_feasible: 2, restored_booking_used: true };
+      });
+      const wide = { dateFrom: '2027-05-19', dateTo: '2027-05-20' };
+      const result = await getAvailableSlots('est-rain-1', wide);
+      expect([...new Set([...result.primary, ...result.expander].map((s) => s.date))].sort()).toEqual(['2027-05-19', '2027-05-20']);
+      expect(getHourlyRainOutlook).toHaveBeenCalledTimes(1);
+
+      // Every offer on a restored route: nothing may start the forecast.
+      estimateSlotAvailability._internals.clearCaches();
+      getHourlyRainOutlook.mockClear();
+      findAvailableSlots.mockImplementation(async (options) => {
+        options.onRestoredBooking('2027-05-19', 'tech-1');
+        options.onRestoredBooking('2027-05-20', 'tech-1');
+        return { slots: [slot('2027-05-19'), slot('2027-05-20')], total_feasible: 2, restored_booking_used: true };
+      });
+      await getAvailableSlots('est-rain-1', wide);
+      expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_CUSTOMER_RAIN_RANK;
+      findAvailableSlots.mockReset();
+      findAvailableSlots.mockResolvedValue({ slots: [slot('2027-05-20')], evaluated: 1, total_feasible: 1 });
+    }
   });
 
   test('gate flip and buffer change each miss the cache; an unchanged policy hits it', async () => {
