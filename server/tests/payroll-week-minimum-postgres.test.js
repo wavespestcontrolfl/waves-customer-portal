@@ -371,23 +371,36 @@ postgres('payroll minimum paid week', () => {
     expect(created.status === 201 ? created.body.run.checks : []).toEqual([]);
   });
 
-  it('the setting: owner account only, 0 to 40 hours, empty clears it, and a draft read before it goes stale', async () => {
+  it('the setting: owner account only, 0 to 40 hours, changes only while every finished week is paid, and audited', async () => {
     const id = await tech('Sample Alpha', { minimum: null });
     await worked(id, W1, 30);
-    const created = (await draft(W1)).body.run;
-    const shown = (await api('GET', `/runs/${created.id}`)).body.run;
-    expect((await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40' } })).status).toBe(403);
-    expect((await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '41' }, email: OWNER })).status).toBe(400);
-    expect((await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '0' }, email: OWNER })).status).toBe(400);
-    const set = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40' }, email: OWNER });
+    const put = (body, email = OWNER) => api('PUT', `/technicians/${id}/week-minimum`, { body, email });
+    expect((await put({ hours: '40' }, null)).status).toBe(403);
+    expect((await put({ hours: '41' })).status).toBe(400);
+    expect((await put({ hours: '0' })).status).toBe(400);
+    // Week 1 holds work no final run paid: a change now would reach it when it is paid. Refused.
+    const open = await put({ hours: '40' });
+    expect([open.status, open.body.error]).toEqual([409, `The week of ${W1} has work or time off that no final pay run has paid yet. Finalize that pay run first, then change the minimum: a week paid after the change would get the new minimum.`]);
+    expect((await finalize((await draft(W1)).body.run.id)).status).toBe(200);
+    const set = await put({ hours: '40' });
     expect([set.status, set.body]).toEqual([200, { technician: { id, paidWeekMinimumHours: 40, paidWeekMinimumLastDay: null } }]);
-    const stale = await api('POST', `/runs/${created.id}/finalize`, { body: { token: shown.token } });
-    expect(stale.status).toBe(409);
     const listed = (await api('GET', '/technicians')).body.technicians.find((row) => row.id === id);
     expect(listed.paidWeekMinimumHours).toBe(40);
-    const cleared = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '' }, email: OWNER });
-    expect(cleared.body.technician.paidWeekMinimumHours).toBe(null);
+    // An unpaid week blocks clearing too; a last day alone (hours unchanged) is not this guard's.
+    await worked(id, addDays(W1, 7), 20);
+    expect((await put({ hours: '' })).status).toBe(409);
+    const day = await put({ hours: '40', lastDay: addDays(W1, 8) });
+    expect([day.status, day.body.technician.paidWeekMinimumLastDay]).toEqual([200, addDays(W1, 8)]);
     const audit = await trx('audit_log').where({ action: 'payroll.week_minimum_changed', resource_id: id }).count('* as n').first();
     expect(Number(audit.n)).toBe(2);
+  });
+
+  it('a draft read before a last-day change goes stale', async () => {
+    const id = await tech('Sample Alpha');
+    await worked(id, W1, 15);
+    const created = (await draft(W1)).body.run;
+    const shown = (await api('GET', `/runs/${created.id}`)).body.run;
+    expect((await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40', lastDay: addDays(W1, 1) }, email: OWNER })).status).toBe(200);
+    expect((await api('POST', `/runs/${created.id}/finalize`, { body: { token: shown.token } })).status).toBe(409);
   });
 });
