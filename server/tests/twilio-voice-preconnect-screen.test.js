@@ -186,6 +186,16 @@ describe('screenCandidate (who the screen may challenge)', () => {
       expect(allUnknown.knownCallerWithinLimit).toHaveBeenCalledWith('+19412360303');
     });
 
+    test('a redelivery with no stored challenge never runs the trial read', async () => {
+      gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
+      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
+      const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
+      jest.spyOn(allUnknown, 'storedTrialDecision').mockResolvedValue(false);
+      slotRows([]);
+      await expect(screenCandidate('+19412360303', A, { redeliveryOf: 'CA123' })).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
+      expect(hit).not.toHaveBeenCalled();
+    });
+
     test('a Twilio redelivery repeats the stored trial decision and reads nothing else', async () => {
       gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
       jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
@@ -195,6 +205,8 @@ describe('screenCandidate (who the screen may challenge)', () => {
       await expect(screenCandidate('+19412360303', A, { redeliveryOf: 'CA123' })).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: true });
       expect(stored).toHaveBeenCalledWith('CA123');
       expect(hit).not.toHaveBeenCalled();
+      expect(missedCallBell.exchangeHangupScreenHit).not.toHaveBeenCalled();
+      expect(db).not.toHaveBeenCalled();
     });
 
     test('a failed customer-slot lookup logs no phone number', async () => {

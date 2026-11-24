@@ -883,40 +883,46 @@ async function exchangeTriggerHit(from) {
 // screen; checked only when it could change the outcome, so the extra query
 // never runs on ordinary calls. A check failure fails OPEN — never challenge
 // a caller because Postgres hiccupped.
-async function screenCandidate(from, stirVerstat, { redeliveryOf = null } = {}) {
-  const attestationB = /-B$/.test(String(stirVerstat || ''));
-  const exchangeHit = !attestationB && await exchangeTriggerHit(from);
-  const gates = require('../config/feature-gates');
-  const trialOn = gates.isEnabled('callPreconnectScreen') && gates.callScreenAllUnknownLive();
-  if (!attestationB && !exchangeHit && !trialOn) return { knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false };
-  // A failed exchange read (null) on a non-B caller rules out every trigger:
-  // route normally without another read.
-  if (exchangeHit === null) return { knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false };
-  let knownCaller;
+const NO_SCREEN = Object.freeze({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
+
+// The customer-slot check. With the all-unknown trial on it sits in front of
+// most unknown calls, so it gets the trial's bounded read (a timeout counts as
+// known). A failure counts as known too: never challenge on a broken read.
+async function screenKnownCaller(from, trialOn) {
   try {
-    // With the trial on, this read sits in front of most unknown calls, so it
-    // gets the trial's time limit (a timeout counts as known: no challenge).
-    knownCaller = trialOn
+    return trialOn
       ? await press1ScreenAllUnknown.knownCallerWithinLimit(from)
       : await knownCallerPhoneExists(db, from);
   } catch (err) {
     // A code only: a Knex error echoes the bound values, here the caller's number.
     logger.warn(`[preconnect-screen] known-caller check failed (failing open, no challenge): ${err?.code || err?.name || 'error'}`);
-    return { knownCaller: true, exchangeTrigger: false, allUnknownTrigger: false };
+    return true;
   }
-  // The trial's own reads run only for a caller B and the exchange rule do not
-  // already challenge (an exchange hit with its gate off is only a shadow, so
-  // the trial still screens it); screenAllUnknownHit fails open inside.
+}
+
+async function screenCandidate(from, stirVerstat, { redeliveryOf = null } = {}) {
+  const gates = require('../config/feature-gates');
+  const trialOn = gates.isEnabled('callPreconnectScreen') && gates.callScreenAllUnknownLive();
+  // A Twilio redelivery of the first request replays the first delivery's
+  // trial challenge before any other read, so one call never gets two
+  // answers. (A redelivery that lands before the first delivery stored its
+  // stamp finds none and rings through: fail open.)
+  if (trialOn && redeliveryOf && await press1ScreenAllUnknown.storedTrialDecision(redeliveryOf)) {
+    return { ...NO_SCREEN, allUnknownTrigger: true };
+  }
+  const attestationB = /-B$/.test(String(stirVerstat || ''));
+  const exchangeHit = !attestationB && await exchangeTriggerHit(from);
+  // Nothing to screen, or a failed exchange read (null) on a non-B caller:
+  // route normally without another read.
+  if ((!attestationB && !exchangeHit && !trialOn) || exchangeHit === null) return NO_SCREEN;
+  if (await screenKnownCaller(from, trialOn)) return { ...NO_SCREEN, knownCaller: true };
+  // The trial's own read runs only on a first delivery, for a caller B and the
+  // exchange rule do not already challenge (an exchange hit with its gate off
+  // is only a shadow, so the trial still screens it). It fails open inside.
   const exchangeGates = exchangeHit && gates.isEnabled('callScreenExchangeHistory');
-  const trialApplies = trialOn && !knownCaller && !attestationB && !exchangeGates;
-  // A redelivery of the first request repeats the first delivery's decision.
-  let allUnknownTrigger = false;
-  if (trialApplies) {
-    allUnknownTrigger = redeliveryOf
-      ? await press1ScreenAllUnknown.storedTrialDecision(redeliveryOf)
-      : await press1ScreenAllUnknown.screenAllUnknownHit(from);
-  }
-  return { knownCaller, exchangeTrigger: Boolean(exchangeHit) && !knownCaller, allUnknownTrigger };
+  const allUnknownTrigger = trialOn && !redeliveryOf && !attestationB && !exchangeGates
+    && await press1ScreenAllUnknown.screenAllUnknownHit(from);
+  return { knownCaller: false, exchangeTrigger: Boolean(exchangeHit), allUnknownTrigger: Boolean(allUnknownTrigger) };
 }
 
 // Press-1 prompt words. The end of the first prompt lives in ONE constant so

@@ -99,6 +99,9 @@ function rememberedRows(key) {
             - (metadata->'forward_acceptance'->>'accepted_at')::timestamptz >= make_interval(secs => ?) END`, [TALK_SECONDS]))
       .orWhere((message) => message
         .where((unanswered) => unanswered.whereIn('answered_by', UNANSWERED).orWhereNull('answered_by'))
+        // A call staff accepted is a conversation, not a message, even when
+        // answered_by stayed empty (the caller hung up first): the 30 s rule above.
+        .whereRaw("metadata->'forward_acceptance' IS NULL")
         .where('recording_duration_seconds', '>', MESSAGE_SECONDS)
         .where((rec) => rec.whereNotNull('recording_sid').orWhereNotNull('recording_url'))
         // Dead air is no message: the transcript must be done and hold words

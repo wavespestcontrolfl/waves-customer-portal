@@ -120,6 +120,10 @@ describe('the remembered-caller proof', () => {
   let seen;
   beforeEach(async () => { seen = fakeDb(); await screenAllUnknownHit(CALLER); });
 
+  test('a call staff accepted never counts as a message', () => {
+    expect(seen.sql).toContain("metadata->'forward_acceptance' IS NULL");
+  });
+
   test('a message counts only on a call nobody answered, with a finished transcript that holds words', () => {
     expect(seen.whereIn).toContainEqual(['answered_by', ['missed', 'voicemail', 'unknown']]);
     expect(seen.sql.some((q) => q.startsWith("regexp_replace(COALESCE(transcription, ''), ?"))).toBe(true);
