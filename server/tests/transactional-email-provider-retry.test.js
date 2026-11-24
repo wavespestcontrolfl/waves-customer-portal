@@ -201,7 +201,7 @@ describe('transactional email provider retry classification', () => {
       const chain = settlingChain();
       const result = await retry.retryOne(dayMessage());
       expect(result).toMatchObject({ sent: false, stopped: true });
-      expect(revalidateDelayedDaySend).toHaveBeenCalledWith({ customerId: 'cust-1', scheduledServiceId: 'svc-9', occurrenceDate: '2026-11-15' });
+      expect(revalidateDelayedDaySend).toHaveBeenCalledWith({ customerId: 'cust-1', scheduledServiceId: 'svc-9' });
       const patch = chain.update.mock.calls[0][0];
       expect(patch).toMatchObject({ status: 'failed', provider_retry_next_at: null });
       expect(patch.error_message).toMatch(/day-only promise/);

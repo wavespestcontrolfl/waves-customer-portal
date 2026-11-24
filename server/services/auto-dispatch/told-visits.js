@@ -89,8 +89,8 @@ async function resolvePromises(conn, ids, now, { sameDateOnly = false } = {}) {
   const events = await detector.loadPromiseEvents(conn, [...new Set([...wanted, ...memberIds])], { now });
   const latest = detector.latestPromises(events, now);
   const eventsByVisit = detector.byVisit(events);
-  // `sameDateOnly` may be the EXPECTED date (a delayed body's own occurrence, appointment-reminders
-  // revalidateDelayedDaySend): the filter then uses that date, and a visit observed on another date (or none) answers an
+  // `sameDateOnly` may be the EXPECTED date (the date a confirmation replay renders, time-promise
+  // dayOnlyReplayDecision): the filter then uses that date, and a visit observed on another date (or none) answers an
   // unknown-window promise, read as 'hour' (fail closed: the stale body is suppressed). Pre-push Codex P1, 2026-11-24.
   const expected = typeof sameDateOnly === 'string' ? sameDateOnly : null;
   return new Map(ids.map((id) => {
@@ -145,8 +145,8 @@ function promiseLevelOf(promise) {
  *
  *  `sameDateOnly: false` keeps the raw rule (an hour for ANY date counts). Delayed day-only sends use it
  *  (appointment-reminders delayedSendIsStale): every stored body, bounce and queued replay was written for its own date,
- *  and the raw rule suppresses it after a move, as before this change. The worst case is a skipped stale resend; the
- *  re-armed sends for the new date still go out (pre-push Codex, 2026-11-24). */
+ *  and the raw rule suppresses it after a move, as before this change. Owner 11-24 *narrow*: the known gap is that a
+ *  bounced or queued day-only resend for the new date can be skipped; the 24-hour text with the window still goes. */
 async function loadPromiseFacts(conn, ids, now = new Date(), { sameDateOnly = true } = {}) {
   const facts = new Map();
   if (!ids || ids.length === 0) return facts;

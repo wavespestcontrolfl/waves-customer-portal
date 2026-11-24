@@ -114,8 +114,7 @@ async function dayOnlyStoredCopyStale(message) {
     // The stored HTML names a DAY: it is still true only while the visit is on that same ET calendar date. A silent move to
     // another eligible date must not let it go, and no promise is read for a mismatch.
     if (!(await storedDateStillHolds(message, scheduledServiceId))) return true;
-    // The date was just proved (storedDateStillHolds), so the other-date promise rule judges it (occurrenceDate).
-    const verdict = await require('./appointment-reminders').revalidateDelayedDaySend({ customerId, scheduledServiceId, ...storedMoveNotice(message), occurrenceDate: promisedDateFromEmailKey(message.idempotency_key) });
+    const verdict = await require('./appointment-reminders').revalidateDelayedDaySend({ customerId, scheduledServiceId, ...storedMoveNotice(message) });
     return verdict !== 'day';
   } catch {
     return true;
@@ -418,9 +417,11 @@ async function dayOnlyReplayDecision(conn, { id, startAt, now = new Date(), remi
     // Stop-wide, like every other day-only decision: every live member of the visit's stop must be eligible too (a sibling the
     // customer picked blocks it), with the old level ignored (the move replaced the old promise; the check below judges the new date).
     if ((await dayOnlyEligibility(conn, [String(id)], now, { ignoreLevel: true })).get(String(id))?.eligible !== true) return false;
-    // sameDateOnly (pre-push Codex P1, 2026-11-24): an off-date promise does not stand, so in a stop a sibling's hour for
-    // THIS date is never hidden by another member's older-date slot (stopPromise would pick the earlier slot).
-    const promise = (await resolvePromises(conn, [id], now, { sameDateOnly: true })).get(id);
+    // The date being rendered (startAt's ET date) is the expected date (pre-push Codex P1, 2026-11-24): an off-date promise
+    // does not stand, so a sibling's hour for THIS date is never hidden by another member's older-date slot, and a visit
+    // seen on another date answers an unknown window (no day-only text).
+    const renderDate = etDateString(startAt instanceof Date ? startAt : new Date(startAt));
+    const promise = (await resolvePromises(conn, [id], now, { sameDateOnly: renderDate })).get(id);
     if (!promise) return true;
     if (promise.start_at == null) return promise.level === 'day';
     return etDateString(new Date(promise.start_at)) !== etDateString(startAt instanceof Date ? startAt : new Date(startAt));

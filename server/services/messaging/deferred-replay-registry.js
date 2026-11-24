@@ -1952,12 +1952,8 @@ function queuedMoveNotice(meta) {
 
 async function dayPromiseStillValid(meta) {
   try {
-    // The body's own occurrence date (promised_date / guard_slot_ms): checked against the visit's current date even when
-    // the enqueue-time slot snapshot is missing, and then judged by the other-date promise rule (pre-push Codex P1).
-    const reminders = require('../appointment-reminders');
-    const verdict = await reminders.revalidateDelayedDaySend({
+    const verdict = await require('../appointment-reminders').revalidateDelayedDaySend({
       customerId: meta.customer_id, scheduledServiceId: meta.scheduled_service_id, ...queuedMoveNotice(meta),
-      occurrenceDate: typeof reminders.bouncedOccurrenceDate === 'function' ? reminders.bouncedOccurrenceDate(meta) : null,
     });
     if (verdict === 'day') return { eligible: true };
     return { eligible: false, reason: verdict === 'suppress' ? 'day-promise-superseded' : 'day-promise-no-longer-valid' };

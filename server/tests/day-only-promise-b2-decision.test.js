@@ -252,6 +252,11 @@ describe('dayOnlyReplayDecision: a held or merged move notice re-sent as a confi
     });
   });
 
+  test('the visit moved off the rendered date (Monday body, visit now Tuesday): the window copy, never day only (codex P1)', async () => {
+    const conn = fakeConn({ services: [svc('s1', { customer_asked_time: false, scheduled_date: '2026-11-16' })], messages: [hourFor('2026-11-15')] });
+    expect(await replay(conn)).toBe(false);
+  });
+
   test('a set time (true) stays a window; an unrecorded intent (NULL) is today\'s rules, not this one', async () => {
     expect(await replay(fakeConn({ services: [svc('s1', { customer_asked_time: true })] }))).toBe(false);
     expect(await replay(fakeConn({ services: [svc('s1')] }))).toBe(false);

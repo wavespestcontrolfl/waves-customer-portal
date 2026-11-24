@@ -83,7 +83,7 @@ afterEach(() => {
 const SLOT = Date.parse('2026-06-22T13:00:00.000Z');
 const DAY_META = { promise_level: 'day', window_unknown: true, guard_slot_ms: SLOT, promised_date: '2026-06-22' };
 
-function groupedWorld({ metadata, visitDate = '2026-06-22', ungrouped = false }) {
+function groupedWorld({ metadata, visitDate = '2026-06-22' }) {
   const auditChain = chain({
     first: {
       channel: 'sms', purpose: 'appointment_reminder_72h', customer_id: 'c9',
@@ -106,10 +106,7 @@ function groupedWorld({ metadata, visitDate = '2026-06-22', ungrouped = false })
     customers: Array.from({ length: 3 }, () => chain({ first: { id: 'c9', phone: '+19415551234', email: 'c9@example.com', line_type: null } })),
     notification_prefs: Array.from({ length: 4 }, () => chain({ first: prefsRow })),
     appointment_reminders: [chain({ first: ownerRow }), chain({})],
-    // Second read: the shared bounce occurrence check (bouncedDateMoved) reads the visit's current date.
-    // Then two date reads: the bounce occurrence check (bouncedOccurrenceState) and the delayed-send check's own
-    // occurrence check (revalidateDelayedDaySend occurrenceDate).
-    scheduled_services: [chain({ first: ungrouped ? { visit_id: null, scheduled_date: visitDate } : { visit_id: 'visit-9' } }), chain({ first: { scheduled_date: visitDate } }), chain({ first: { scheduled_date: visitDate } })],
+    scheduled_services: [chain({ first: { visit_id: 'visit-9' } })],
     service_visits: [chain({ first: { id: 'visit-9', scheduled_date: visitDate } })],
     'scheduled_services as ss': [membersChain, labelChain],
     'scheduled_services as s': [chain({ first: null }), chain({ first: null })],
@@ -162,25 +159,6 @@ describe('a bounced day-only grouped 72-hour reminder', () => {
   });
 });
 
-// Pre-push Codex P1 (2026-11-24): an UNGROUPED late bounce after a date change is stale too. Before the other-date promise
-// rule, the old date's hour blocked it by accident (delayedSendIsStale); now the occurrence check does it on purpose.
-describe('a bounced day-only UNGROUPED 72-hour reminder', () => {
-  test('after the row moved to another date: no recovery email', async () => {
-    groupedWorld({ metadata: DAY_META, visitDate: '2026-06-25', ungrouped: true });
-    await bounce('SM_day_ungrouped_moved');
-    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('same date: the per-row day-only email, as before', async () => {
-    groupedWorld({ metadata: DAY_META, ungrouped: true });
-    await bounce('SM_day_ungrouped_same');
-    const call = AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0];
-    expect(call.dayOnly).toBe(true);
-    expect(call.serviceLabel).toBe('Quarterly Pest Control');
-  });
-});
-
 describe('a bounced window grouped reminder is unchanged', () => {
   test('rendered_slot_ms still drives the whole-stop copy and the key, and the email carries no dayOnly', async () => {
     groupedWorld({ metadata: { rendered_slot_ms: SLOT } });
@@ -208,7 +186,7 @@ describe('a delayed bounce of a day-only text is revalidated before it recovers 
   test('still early with nothing newer: the day-only email, as before', async () => {
     groupedWorld({ metadata: DAY_META });
     await bounce('SM_early');
-    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: '2026-06-22' });
+    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: false });
     expect(AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0]).toMatchObject({ dayOnly: true });
   });
 
@@ -251,56 +229,6 @@ describe('a delayed bounce of a day-only text is revalidated before it recovers 
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
   });
 
-  // Pre-push Codex P1 (2026-11-24): one shared occurrence check covers confirmations and a failed visit lookup too.
-  const confirmationWorld = (visitDate) => {
-    const auditChain = chain({ first: { channel: 'sms', purpose: 'appointment_confirmation', customer_id: 'c1', metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss1', ...DAY_META } } });
-    setDbQueues({
-      messaging_audit_log: [auditChain],
-      customers: Array.from({ length: 3 }, () => chain({ first: { id: 'c1', phone: '+19415551234', line_type: null } })),
-      notification_prefs: Array.from({ length: 4 }, () => chain({ first: prefsRow })),
-      appointment_reminders: [chain({ first: { appointment_time: '2026-06-22T13:00:00.000Z', service_type: 'Pest Control' } }), chain({})],
-      scheduled_services: [chain({ first: { scheduled_date: visitDate } }), chain({ first: { scheduled_date: visitDate } })],
-    });
-  };
-
-  test('a bounced day-only confirmation after the visit moved: no recovery email', async () => {
-    confirmationWorld('2026-06-25');
-    await bounce('SM_conf_moved');
-    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('moved since the text'));
-  });
-
-  test('a bounced day-only confirmation on the same date still recovers', async () => {
-    confirmationWorld('2026-06-22');
-    await bounce('SM_conf_same');
-    expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
-  });
-
-  test('a bounce proved to be about the current date: an older date\'s hour does not suppress it (codex P1)', async () => {
-    // The raw rule would see the old date's hour; the date rule (the bounce matches the visit's date) does not.
-    timePromise.loadPromiseLevels.mockImplementation(async (_conn, ids, _now, opts = {}) => new Map(ids.map((id) => [id, opts.sameDateOnly ? 'none' : 'hour'])));
-    groupedWorld({ metadata: DAY_META, ungrouped: true });
-    await bounce('SM_day_new_date');
-    expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
-    expect(AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0]).toMatchObject({ dayOnly: true });
-  });
-
-  test('an undated legacy day-only bounce keeps the raw rule: an hour for any date suppresses it', async () => {
-    timePromise.loadPromiseLevels.mockImplementation(async (_conn, ids, _now, opts = {}) => new Map(ids.map((id) => [id, opts.sameDateOnly ? 'none' : 'hour'])));
-    groupedWorld({ metadata: { promise_level: 'day', window_unknown: true }, ungrouped: true });
-    await bounce('SM_day_undated');
-    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
-  });
-
-  test('the visit date cannot be read: no recovery email (fail closed)', async () => {
-    groupedWorld({ metadata: DAY_META, ungrouped: true });
-    const broken = { where: () => broken, first: async () => { throw new Error('read failed'); } };
-    const queues = db.getMockImplementation();
-    db.mockImplementation((table) => (table === 'scheduled_services' ? broken : queues(table)));
-    await bounce('SM_day_unreadable');
-    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
-  });
-
   test('the customer turned the 24-hour reminder OFF between the send and the bounce: window copy', async () => {
     prefsRow = { sms_enabled: true, service_reminder_24h: false };
     groupedWorld({ metadata: DAY_META });
@@ -341,53 +269,5 @@ describe('a delayed bounce of a day-only text is revalidated before it recovers 
     await bounce('SM_window_plain');
     expect(timePromise.loadPromiseLevels).not.toHaveBeenCalled();
     expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
-  });
-});
-
-// Pre-push Codex P1 (2026-11-24): every delayed day-only caller passes the date its body was about.
-describe('revalidateDelayedDaySend occurrenceDate', () => {
-  const run = (occurrenceDate) => AppointmentReminders.revalidateDelayedDaySend({ customerId: 'c9', scheduledServiceId: 'ss-owner', apptTime: new Date(SLOT), occurrenceDate });
-  const levelsByRule = () => timePromise.loadPromiseLevels.mockImplementation(async (_conn, ids, _now, opts = {}) => new Map(ids.map((id) => [id, opts.sameDateOnly ? 'none' : 'hour'])));
-
-  test('the visit moved off that date: suppress, no promise read', async () => {
-    setDbQueues({ scheduled_services: [chain({ first: { scheduled_date: '2026-06-25' } })] });
-    expect(await run('2026-06-22')).toBe('suppress');
-    expect(timePromise.loadPromiseLevels).not.toHaveBeenCalled();
-  });
-
-  test('the date cannot be read: it throws (a queued replay keeps its bounded retry), never a proved move', async () => {
-    const broken = { where: () => broken, first: async () => { throw new Error('read failed'); } };
-    db.mockImplementation(() => broken);
-    await expect(run('2026-06-22')).rejects.toThrow('read failed');
-  });
-
-  test('same date: the other-date rule, so an older date\'s hour does not suppress it', async () => {
-    levelsByRule();
-    setDbQueues({
-      scheduled_services: [chain({ first: { scheduled_date: '2026-06-22' } })],
-      customers: Array.from({ length: 3 }, () => chain({ first: { id: 'c9', phone: '+19415551234', email: 'c9@example.com', line_type: null } })),
-      notification_prefs: Array.from({ length: 4 }, () => chain({ first: prefsRow })),
-    });
-    expect(await run('2026-06-22')).toBe('day');
-    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: '2026-06-22' });
-  });
-
-  test('a move notice whose visit moved between the two reads: suppress, never set aside as older (codex P1)', async () => {
-    const told = require('../services/auto-dispatch/told-visits');
-    const spy = jest.spyOn(told, 'resolvePromises').mockResolvedValue(new Map([['ss-owner', { visit_id: 'ss-owner', start_at: null, communicated_at: null, date_mismatch: true }]]));
-    timePromise.loadPromiseLevels.mockResolvedValue(new Map([['ss-owner', 'hour']]));
-    setDbQueues({ scheduled_services: [chain({ first: { scheduled_date: '2026-06-22' } })] });
-    const verdict = await AppointmentReminders.revalidateDelayedDaySend({
-      customerId: 'c9', scheduledServiceId: 'ss-owner', apptTime: new Date(SLOT), noticeAt: '2026-06-18T14:00:00Z', noticeDate: '2026-06-22', occurrenceDate: '2026-06-22',
-    });
-    expect(verdict).toBe('suppress');
-    spy.mockRestore();
-  });
-
-  test('no date (an undated legacy body): the raw rule, an hour for any date suppresses', async () => {
-    levelsByRule();
-    setDbQueues({});
-    expect(await run(null)).toBe('suppress');
-    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: false });
   });
 });

@@ -781,7 +781,7 @@ async function deliverBouncedMoveNoticeEmail({ kind, audit, customerId, schedule
   const dayText = kind === 'rescheduled' && isDayPromise(meta);
   let dayOnly = false;
   if (dayText) {
-    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt: meta.move_notice_at || audit.created_at, occurrenceDate: bouncedOccurrenceDate(meta) });
+    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt: meta.move_notice_at || audit.created_at });
     if (verdict === 'suppress') {
       logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
       return;
@@ -1416,7 +1416,6 @@ function bouncedOccurrenceDate(metadata) {
  *  (fail closed), as does a promise that cannot be resolved at all. */
 function promiseSupersedesNotice(promise, notice) {
   if (!promise) return true; // the level read said 'hour' but no promise resolves now: unprovable, so it stands
-  if (promise.date_mismatch === true) return true; // the visit moved off the body's date between reads: suppress (Codex P1)
   const at = new Date(promise.communicated_at).getTime();
   if (!Number.isFinite(at)) return true;
   if (at <= notice.at.getTime()) return false;
@@ -1430,18 +1429,16 @@ function promiseSupersedesNotice(promise, notice) {
  *  `notice` ({ at, visitDate }) is given by a MOVE notice's recovery: an hour promise only counts when it supersedes that
  *  notice (promiseSupersedesNotice). One that does not (the old date's confirmation, which the bounced move text had
  *  replaced) is set aside, and notice.setAsideOld is set so the day decision ignores that old level too. */
-async function delayedSendIsStale(scheduledServiceId, notice = null, { sameDateOnly = false } = {}) {
+async function delayedSendIsStale(scheduledServiceId, notice = null) {
   if (!scheduledServiceId) return false;
   try {
     const timePromise = require('./time-promise');
-    // The RAW rule by default, for both reads (told-visits loadPromiseFacts header): a delayed body was written for its own
-    // date, so an hour for any date still suppresses it, exactly as before the other-date rule. `sameDateOnly` only for a
-    // bounce whose own occurrence date was just proved to be the visit's current date (recoverBouncedNotice): there an
-    // old date's hour must not suppress the new date's recovery (pre-push Codex P1, 2026-11-24).
-    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date(), { sameDateOnly });
+    // The RAW rule (sameDateOnly: false): a delayed body may be for an older date, so an hour told for any date still blocks
+    // it (owner 11-24 *narrow*: only fresh decisions drop an off-date hour; told-visits loadPromiseFacts header).
+    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date(), { sameDateOnly: false });
     if (levels.get(scheduledServiceId) !== 'hour') return false;
     if (!notice) return true;
-    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date(), sameDateOnly ? { sameDateOnly } : undefined)).get(scheduledServiceId);
+    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date())).get(scheduledServiceId);
     if (promiseSupersedesNotice(promise, notice)) return true;
     notice.setAsideOld = true;
     return false;
@@ -1466,51 +1463,14 @@ async function delayedSendIsStale(scheduledServiceId, notice = null, { sameDateO
  * made AFTER that notice, for that notice's date, supersedes it. Every delayed move recovery (a bounced text, a queued contact
  * text, a stored move email) passes it; a non-move send passes neither and keeps the plain rule. The old date's confirmation does not: the move replaced it, and its level is ignored.
  */
-async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt, noticeDate, occurrenceDate = null }) {
-  // `occurrenceDate` (pre-push Codex, 2026-11-24): the ET date the delayed day-only body was about. Given, the visit must
-  // still be on it (else, or unreadable: suppress), and then the other-date promise rule judges it (an older date's hour
-  // does not stand for it). Absent (an undated legacy body): the raw rule, exactly as before.
-  // A read failure THROWS (occurrenceStateOf), so a queued replay keeps its bounded retry (failClosed) instead of being
-  // discarded as superseded. The promise read then carries the expected date itself: a move between the two reads makes
-  // it answer 'hour', and the body is suppressed.
-  let sameDateOnly = false;
-  if (occurrenceDate) {
-    if ((await occurrenceStateOf(occurrenceDate, scheduledServiceId)) !== 'same') return 'suppress';
-    sameDateOnly = occurrenceDate;
-  }
+async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt, noticeDate }) {
   const noticeTime = noticeAt ? new Date(noticeAt) : null;
   const visitDate = noticeDate || (apptTime ? etDateString(new Date(apptTime)) : null);
   const notice = noticeTime && !Number.isNaN(noticeTime.getTime()) && visitDate
     ? { at: noticeTime, visitDate, setAsideOld: false } : null;
-  if (await delayedSendIsStale(scheduledServiceId, notice, { sameDateOnly })) return 'suppress';
+  if (await delayedSendIsStale(scheduledServiceId, notice)) return 'suppress';
   const startAt = apptTime || (scheduledServiceId ? await scheduledServiceApptTime(scheduledServiceId) : null);
   return (await dayOnlyNow({ customerId, scheduledServiceId, apptTime: startAt, ignoreLevel: notice?.setAsideOld === true })) ? 'day' : 'window';
-}
-
-/** Did the visit move off the date a bounced text was about? (bouncedOccurrenceDate vs the visit's current date.) */
-/** 'moved' (the visit's date differs from the bounced text's occurrence date, or cannot be read: fail closed), 'same'
- *  (proved: the text was about the visit's current date), or 'undated' (no occurrence date, or no visit id). */
-async function bouncedOccurrenceState(metadata, scheduledServiceId) {
-  try {
-    return await occurrenceStateOf(bouncedOccurrenceDate(metadata), scheduledServiceId);
-  } catch {
-    return 'moved'; // a bounce has no retry path: an unreadable date sends no recovery email (fail closed)
-  }
-}
-
-/** 'moved' / 'same' / 'undated' for a delayed body about `textedDate` (YYYY-MM-DD) against the visit's current date. */
-async function occurrenceStateOf(textedDate, scheduledServiceId) {
-  if (!textedDate || !scheduledServiceId) return 'undated';
-  try {
-    const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
-    const value = row ? row.scheduled_date : null;
-    const current = value instanceof Date ? value.toISOString().slice(0, 10) : (value ? String(value).slice(0, 10) : null);
-    return !current || current !== textedDate ? 'moved' : 'same';
-  } catch (err) {
-    // Not 'moved': a read failure is not a proved move. The caller decides (a queued replay retries; a bounce holds).
-    err.occurrenceReadFailed = true;
-    throw err;
-  }
 }
 
 /** The email recovery of a bounced appointment text. A window text recovers as before. A day-only text goes through the
@@ -1519,17 +1479,7 @@ async function occurrenceStateOf(textedDate, scheduledServiceId) {
 async function recoverBouncedNotice({ audit, kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey }) {
   let dayOnly = false;
   if (isDayPromise(audit.metadata)) {
-    // ONE occurrence check for every day-only bounce (confirmation, 72h, 24h; grouped or not), fail closed (pre-push Codex
-    // P1, 2026-11-24): the date the bounced text was about must still be the visit's date, or the re-armed sends own the
-    // new date. Before the other-date promise rule the old date's hour blocked these by accident in delayedSendIsStale.
-    const occurrence = await bouncedOccurrenceState(audit.metadata, scheduledServiceId);
-    if (occurrence === 'moved') {
-      logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: the visit moved since the text (or its date cannot be read) - recovery email suppressed as stale`);
-      return;
-    }
-    // A text proved to be about the current date is judged by the other-date rule: an older date's hour does not stand
-    // for it. An undated legacy send keeps the raw rule.
-    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, occurrenceDate: occurrence === 'same' ? bouncedOccurrenceDate(audit.metadata) : null });
+    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime });
     if (verdict === 'suppress') {
       logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
       return;
@@ -5755,23 +5705,10 @@ const AppointmentReminders = {
         // was rebuilt before it (each piece beats the owner's own).
         if ((kind === '72h' || kind === '24h') && scheduledServiceId) {
           try {
-            const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id', 'scheduled_date');
+            const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
             const visit = svc?.visit_id
               ? await db('service_visits').where({ id: svc.visit_id }).first('id', 'scheduled_date')
               : null;
-            // An UNGROUPED bounce gets the same occurrence check (pre-push Codex P1, 2026-11-24): the row moved since the
-            // text means the bounced notice is stale and the re-armed reminder owns the new date. Before the other-date
-            // promise rule, the old date's hour happened to block this through delayedSendIsStale; it no longer does.
-            if (!visit && svc) {
-              const textedDate = bouncedOccurrenceDate(audit.metadata);
-              const rowDate = svc.scheduled_date instanceof Date
-                ? svc.scheduled_date.toISOString().slice(0, 10)
-                : String(svc.scheduled_date || '').slice(0, 10);
-              if (textedDate && rowDate && textedDate !== rowDate) {
-                logger.info(`[appt-remind] skipping ${kind} email fallback for ${scheduledServiceId} — moved from ${textedDate} to ${rowDate} since the text; the re-armed reminder owns the new date`);
-                return;
-              }
-            }
             if (visit) {
               // The OCCURRENCE the bounced text represented is its own
               // rendered slot (audit metadata), never the visit's current
@@ -7622,7 +7559,6 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
 AppointmentReminders.closeDayBeforeForBookingText = closeDayBeforeForBookingText;
 AppointmentReminders.sendConfirmationToServiceContact = sendConfirmationToServiceContact;
 AppointmentReminders.revalidateDelayedDaySend = revalidateDelayedDaySend;
-AppointmentReminders.bouncedOccurrenceDate = bouncedOccurrenceDate;
 // GATE_DAY_ONLY_PROMISE part B2: the move-notice senders (services/day-only-move-notice.js) build their day fields with the same helper.
 AppointmentReminders.dayGuardMeta = dayGuardMeta;
 
