@@ -1891,7 +1891,7 @@
     },
     {
       "endpoint": "/admin/prospects/mail",
-      "reviewed": "Handler (admin-prospects.js GET /mail, behind adminAuthenticate + requireAdmin; the router header says it sends nothing, calls no AI service and writes no row) and services/prospects/mail-list.js listMailProspects, read end to end. One read-only REPEATABLE READ transaction (the scan's write:transaction signal; every statement in it is a select: group-by counts over mail_prospects by status and reason, a count of eligible homes by price status, and the newest 300 rows of the chosen view). The Joi schema takes only `view` (live, not_eligible or unmatched; default live); the scan cannot see that key through the schema, so the row lists no query key and the bar reads the default live view. No outside call, no file, no link, no token column. Keep mode: the live list (eligible and held-back new homes) with recorded date, status, reason, recipient names, address, city, ZIP, subdivision, match basis, certificate-of-occupancy date, living square feet and the shadow price block (status, reason, annual, monthly, setup fee, home facts, size source, priced and checked times), the four list counts, the five price counts, the not-eligible and unmatched reason counts, the newest recorded date, the last checked time and the truncated flag. Recipient names and addresses come from the county Clerk's public deed list; the owner sees the same on the Mail tab. Withheld: the legal description, and the sale price, sellers, parcel and permit numbers and instrument number, which the service never selects, and any column added later. The `reason` values are fixed machine codes (company_buyer, lookup_failed, permit_canceled and the like) written by the run, never typed text, so reason is declared content, and so is reasons (the list of those codes with a count; the name only looks like free text).",
+      "reviewed": "Re-read 2026-11-24 (#8423): the read adds rows.*.pageSlug, the home's short postcard address (house number + street name, not a credential); nothing else changed. Handler (admin-prospects.js GET /mail, behind adminAuthenticate + requireAdmin; the router header says it sends nothing, calls no AI service and writes no row) and services/prospects/mail-list.js listMailProspects, read end to end. One read-only REPEATABLE READ transaction (the scan's write:transaction signal; every statement in it is a select: group-by counts over mail_prospects by status and reason, a count of eligible homes by price status, and the newest 300 rows of the chosen view). The Joi schema takes only `view` (live, not_eligible or unmatched; default live); the scan cannot see that key through the schema, so the row lists no query key and the bar reads the default live view. No outside call, no file, no link, no token column. Keep mode: the live list (eligible and held-back new homes) with recorded date, status, reason, recipient names, address, city, ZIP, subdivision, match basis, certificate-of-occupancy date, living square feet and the shadow price block (status, reason, annual, monthly, setup fee, home facts, size source, priced and checked times), the four list counts, the five price counts, the not-eligible and unmatched reason counts, the newest recorded date, the last checked time and the truncated flag. Recipient names and addresses come from the county Clerk's public deed list; the owner sees the same on the Mail tab. Withheld: the legal description, and the sale price, sellers, parcel and permit numbers and instrument number, which the service never selects, and any column added later. The `reason` values are fixed machine codes (company_buyer, lookup_failed, permit_canceled and the like) written by the run, never typed text, so reason is declared content, and so is reasons (the list of those codes with a count; the name only looks like free text).",
       "scope": "broad",
       "keywords": [
         "new home mail list",
@@ -1935,7 +1935,8 @@
         "rows.*.price.stories",
         "rows.*.price.lotSqft",
         "rows.*.price.pricedAt",
-        "rows.*.price.checkedAt"
+        "rows.*.price.checkedAt",
+        "rows.*.pageSlug"
       ],
       "freeText": {
         "reason": "content",
@@ -1951,7 +1952,7 @@
         "routes/admin-prospects.js#mailSchema.validate",
         "services/prospects/mail-list.js#db.transaction"
       ],
-      "hash": "31a7bb8f5d1bc614479655dc7f71323c"
+      "hash": "12813d55178d1b25de6a95ee8f10094e"
     },
     {
       "endpoint": "/admin/protocols/equipment",

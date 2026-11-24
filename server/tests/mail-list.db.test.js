@@ -100,6 +100,15 @@ describeDb('New-home mail list (PostgreSQL)', () => {
     expect(result.truncated).toBe(false);
   });
 
+  test('a live row carries its page slug (or null); a row of another view carries none', async () => {
+    await mockPg('mail_prospects').insert([
+      prospect({ source_ref: 'S1', recorded_date: '2026-11-20', page_slug: '101-example' }),
+      prospect({ source_ref: 'S2', recorded_date: '2026-11-19' }),
+    ]);
+    const { rows } = await listMailProspects({ view: 'live' });
+    expect(rows.map((row) => row.pageSlug)).toEqual(['101-example', null]);
+  });
+
   test('live is the default view', async () => {
     await seedAll();
     expect((await listMailProspects()).view).toBe('live');
@@ -166,6 +175,7 @@ describeDb('New-home mail list (PostgreSQL)', () => {
       addressLine1: expect.stringMatching(/ EXAMPLE TRL$/),
       city: 'SAMPLETON',
       zip: '34212',
+      pageSlug: null,
       subdivision: 'SAMPLETON ESTATES',
       matchBasis: 'lot_block',
       coDate: null,

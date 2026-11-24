@@ -567,6 +567,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "get_closeout_bill_preview": {
+    "module": "closeout-tools.js",
+    "domain": "closeout",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
+  },
   "get_closeout_status": {
     "module": "closeout-tools.js",
     "domain": "closeout",

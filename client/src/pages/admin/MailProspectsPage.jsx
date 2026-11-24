@@ -171,7 +171,10 @@ function HomesTable({ rows }) {
               <TR key={row.id}>
                 <TD data-label="Recorded" nums className="whitespace-nowrap align-top">{dayText(row.recordedDate)}</TD>
                 <TD data-label="Buyer" className="align-top"><span className="text-ui-body font-medium text-zinc-900">{buyerText(row)}</span></TD>
-                <TD data-label="Address" className="align-top">{[row.addressLine1, row.city, row.zip].filter(Boolean).join(", ") || "Not listed"}</TD>
+                <TD data-label="Address" className="align-top">
+                  {[row.addressLine1, row.city, row.zip].filter(Boolean).join(", ") || "Not listed"}
+                  {row.pageSlug && <div className="text-ui-body text-ink-secondary">{`gowavesfl.com/${row.pageSlug}`}</div>}
+                </TD>
                 <TD data-label="Subdivision" className="align-top">{row.subdivision || "Not listed"}</TD>
                 <TD data-label="Group" className="align-top">{GROUP_LABELS[row.status] || row.status}</TD>
                 <TD data-label="Shadow price" className="align-top">
