@@ -20,6 +20,11 @@ jest.mock('../services/lead-from-extraction', () => ({
 }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+// The day-only read is its own suite (day-only-promise-d-voice*.test.js): here every visit keeps its hour.
+jest.mock('../services/day-only-ai-context', () => ({
+  ...jest.requireActual('../services/day-only-ai-context'),
+  loadDayOnlyCheck: jest.fn(async () => () => false),
+}));
 // The canonical identity column set + prior-call summary come FROM the call
 // pipeline (named production exports) — mirror its real column set here.
 jest.mock('../services/call-recording-processor', () => ({

@@ -4,6 +4,11 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })) }));
 jest.mock('../services/cancellation-eligibility', () => ({ hasCancellableWork: jest.fn(async () => true) }));
+// The day-only read has its own suite (day-only-promise-c1-schedule.test.js); its extra reads would shift this file's db call order.
+jest.mock('../services/time-display', () => ({
+  ...jest.requireActual('../services/time-display'),
+  dayOnlyIds: jest.fn(async () => new Set()),
+}));
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, _res, next) => {
     req.customerId = 'cust-1';

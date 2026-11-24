@@ -1,6 +1,6 @@
 /**
  * New-home mail list ticks (server/services/scheduler.js): a night run every day at 9:31 PM ET and a weekday noon run
- * at 12:31 PM ET, both under ONE `mail-new-home-list` lease, plus the deploy-kill retry (the full night read). A failed
+ * at 12:31 PM ET, both under ONE `mail-new-home-list` lease, plus the deploy-kill retry (mode retry: the noon window). A failed
  * run is logged, never thrown out of the tick. Mock baseline copied from scheduler-permit-sync-catch-up-cron.test.js.
  */
 jest.mock('../utils/scheduled-cron', () => ({
@@ -77,14 +77,14 @@ test('a failed run is logged, never thrown out of the tick', async () => {
   expect(logger.error).toHaveBeenCalledWith('Mail new-home list failed: Mail new-home list: 1 of 4 days failed (2026-11-16: http_status)');
 });
 
-test('a run a deploy killed is retried as the full night read, under the same lease', async () => {
+test('a run a deploy killed is retried with the wider noon window (mode retry), under the same lease', async () => {
   isEnabled.mockImplementation((name) => name === 'cronJobs');
   initScheduledJobs();
   const call = registerDeployKillRetry.mock.calls.find(([name]) => name === 'mail-new-home-list');
   expect(call).toBeDefined();
   await call[1]();
   expect(runExclusive).toHaveBeenCalledWith('mail-new-home-list', expect.any(Function));
-  // Night, not noon: the killed run can be the last one that reads its oldest day.
+  // Retry: the noon window (it covers a killed noon or night run), with night last-read rules.
   expect(runNewHomeList).toHaveBeenCalledTimes(1);
-  expect(runNewHomeList).toHaveBeenCalledWith({ mode: 'night' });
+  expect(runNewHomeList).toHaveBeenCalledWith({ mode: 'retry' });
 });

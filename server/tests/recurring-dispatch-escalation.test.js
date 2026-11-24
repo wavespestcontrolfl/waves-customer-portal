@@ -551,7 +551,8 @@ test('missing-pin upkeep closes a standing notice whose visit now has a pin', as
 
 // A lapsed plan gets no placement, and a locked or excluded recurring child is out of
 // auto-dispatch: neither is skipped for its pin (Codex #6208 r18, r21 P2). A visit that is
-// not a recurring child keeps its notice: its pin serves the route check.
+// not a recurring child keeps its notice: its pin serves the route check. A confirmed visit
+// keeps its notice too (owner 2026-11-22): a confirmation no longer holds it, so the run may move it.
 test('missing-pin upkeep closes a standing notice whose plan lapsed or whose visit staff locked or excluded', async () => {
   const audit = require('../services/auto-dispatch/audit');
   existingNoticeKeys = ['v1', 'v2', 'v3', 'v4', 'v5'].map((id) => `auto-dispatch-missing-geo:${id}:2026-08-20`);
@@ -566,6 +567,7 @@ test('missing-pin upkeep closes a standing notice whose plan lapsed or whose vis
   eligibility.lapsedPlanKeys.mockResolvedValue(new Set(['c1:p1']));
   await audit.maintainMissingGeoNotices(new Date('2026-08-01T16:00:00Z'));
   const retireSql = retireStatements[retireStatements.length - 1];
-  expect(retireSql.bindings).toEqual(expect.arrayContaining(['v1', 'v3', 'v4', 'v5']));
+  expect(retireSql.bindings).toEqual(expect.arrayContaining(['v1', 'v3', 'v4']));
   expect(retireSql.bindings).not.toContain('v2');
+  expect(retireSql.bindings).not.toContain('v5');
 });

@@ -1921,7 +1921,9 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       if (g.complex != null) constants.RODENT.guarantee.complex = r(g.complex);
       if (g.estate != null) constants.RODENT.guarantee.estate = r(g.estate);
       if (Array.isArray(g.eligibility_requires)) {
-        constants.RODENT.guarantee.eligibilityRequires = g.eligibility_requires.map(String);
+        // Drop retired flags (sanitation, owner ruling 2026-11-23) so an old stored list cannot re-impose them.
+        const retired = new Set(constants.RODENT.guarantee.retiredEligibilityFlags || []);
+        constants.RODENT.guarantee.eligibilityRequires = g.eligibility_requires.map(String).filter((f) => !retired.has(f));
       }
     }
 

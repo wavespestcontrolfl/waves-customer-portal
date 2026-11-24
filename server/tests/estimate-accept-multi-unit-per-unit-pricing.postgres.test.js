@@ -443,8 +443,8 @@ suite('multi-program no-slot accept — per-unit follow-up pricing + office aler
       // A later pest visit (unstamped, at the customer's own address) prints the same breakdown on its own bill.
       const { pest: series } = await seriesRows(on.estimateId);
       const { acceptedVisitBreakdown } = require('../services/completion-pricing');
-      expect(await acceptedVisitBreakdown(series.children[0], { database: mockTransaction })).toEqual({
-        breakdown: { base: 110, amount: 99, discounts: [{ name: 'WaveGuard Silver', dollars: 11 }] } });
+      expect((await acceptedVisitBreakdown(series.children[0], { database: mockTransaction })).breakdown).toEqual({
+        base: 110, amount: 99, discounts: [{ name: 'WaveGuard Silver', dollars: 11 }] });
     });
 
     test('pest with a Military Discount: the labeled credit keeps its own line and amount beside the tier', async () => {

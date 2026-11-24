@@ -29,7 +29,9 @@ const LIST_KEY = 'new_home';
 const SOURCE = 'manatee_clerk_deed';
 const MIN_PRICE = 150000;
 const NIGHT_DAYS = 6;
-const NOON_DAYS = 2;
+// The noon run reads every day the night run before it read (and today), so a day the night run could not read (the Clerk site sits behind
+// Cloudflare and refused every night day on 11-22) is read again at noon, not lost.
+const NOON_DAYS = NIGHT_DAYS + 1; // one more: the night run before it reached back one calendar day further
 const RETRY_AFTER_MS = 20 * 60 * 60 * 1000;
 const DAY_PAUSE_MS = 4000; // the Clerk site sits behind Cloudflare: one page at a time, slowly
 const PARCEL_PAUSE_MS = 600;
@@ -194,7 +196,8 @@ async function evaluate(candidate, deps) {
 /** Calendar days in America/New_York ending today, weekends removed, newest first (YYYY-MM-DD). */
 function daysToRead(mode, now = Date.now()) {
   const at = new Date(typeof now === 'function' ? now() : now);
-  const count = mode === 'noon' ? NOON_DAYS : NIGHT_DAYS;
+  // 'retry' (a run a deploy cut short) reads the wider noon window, so it never reads less than the run it replaces.
+  const count = mode === 'noon' || mode === 'retry' ? NOON_DAYS : NIGHT_DAYS;
   const days = [];
   for (let back = 0; back < count; back += 1) {
     const day = addETDays(at, -back); // noon UTC on that ET calendar day: clear of the daylight-time seam
@@ -202,6 +205,17 @@ function daysToRead(mode, now = Date.now()) {
     if (dow !== 0 && dow !== 6) days.push(etDateString(day));
   }
   return days;
+}
+
+// A day is on its last read when the next run no longer reads it: after a noon run, tonight's night run; after a night
+// run, tomorrow's noon run (it reads every day tonight's run read), or tomorrow's night run on a weekend.
+// The noon run is weekdays only (scheduler.js), so after a Friday or Saturday night run the next run is the next night.
+// A 'retry' counts as a night run here: it may run after tonight's run, so it never counts on one more read today.
+function daysTheNextRunReads(mode, nowMs) {
+  if (mode === 'noon') return new Set(daysToRead('night', nowMs));
+  const tomorrow = addETDays(new Date(nowMs), 1);
+  const dow = etParts(tomorrow).dayOfWeek;
+  return new Set(daysToRead(dow === 0 || dow === 6 ? 'night' : 'noon', tomorrow));
 }
 
 const sleepFor = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -251,7 +265,9 @@ async function readDays(days, d, summary) {
       summary.daysRead += 1;
     } catch (err) {
       summary.daysFailed += 1;
-      failures.push(`${days[i]}: ${errorCode(err)}`);
+      // The HTTP status number too (a number only, never the page): it tells a Cloudflare refusal from an outage.
+      const status = Number.isInteger(err?.status) ? ` ${err.status}` : '';
+      failures.push(`${days[i]}: ${errorCode(err)}${status}`);
     }
   }
   return { rows, failures };
@@ -353,8 +369,7 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
     mode, days: days.length, daysRead: 0, daysFailed: 0, deeds: 0, skipped: {}, saved: {}, savedByReason: {}, errors: {},
     keptAnswers: 0, mapQueries: 0, mapFailuresInARow: 0, leftOnLastDay: {}, unfilledOnLastDay: {},
   };
-  // A day is on its last read when tomorrow's night run no longer reads it (the noon run reads less).
-  const readTomorrow = new Set(daysToRead('night', addETDays(new Date(nowMs), 1)));
+  const readTomorrow = daysTheNextRunReads(mode, nowMs);
   const { rows, failures } = await readDays(days, d, summary);
   const candidates = collectCandidates(rows, summary, readTomorrow);
   let existingRows = [];

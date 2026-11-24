@@ -303,6 +303,7 @@ describe('fetchDayList', () => {
     expect(err).toBeInstanceOf(ClerkPageError);
     expect(err.reason).toBe('http_status');
     expect(err.message).toMatch(/403/);
+    expect(err.status).toBe(403); // the run's failure line names the number
     expect(seen.signal.aborted).toBe(true);
   });
 

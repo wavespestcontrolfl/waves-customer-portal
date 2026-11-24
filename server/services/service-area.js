@@ -23,6 +23,8 @@
 
 const { isInServiceAreaCounty } = require('./call-triage-flags');
 const { zipToCity } = require('../utils/zip-to-city');
+const { isExcludedLocality, isExcludedZip, normalizeLocality } = require('./excluded-localities');
+const { parseRawAddress } = require('../utils/address-normalizer');
 
 const SERVICE_AREA_BOUNDS = Object.freeze({
   latMin: 26.3,
@@ -66,6 +68,43 @@ function zipFromAddressText(text) {
   if (afterState) return afterState[1];
   const trailing = s.match(/[\s,](\d{5})(?:-\d{4})?\s*(?:,\s*(?:USA|US|United States))?\s*$/i);
   return trailing ? trailing[1] : null;
+}
+
+/**
+ * The part of Sarasota County where a held place can sit behind a pin that names none: Englewood spans Sarasota
+ * and Charlotte counties (owner ruling 2026-11-23, services/excluded-localities.js), so a Sarasota-county pin
+ * there needs the same locality read a Charlotte pin gets. A coarse rectangle over ZIPs 34223 and 34224 (Census
+ * 2020 ZCTA bounds 26.87-27.06 N, -82.45 to -82.26 W) with a small margin; it only decides whether a locality
+ * lookup is worth making, never whether an address is served.
+ */
+const HELD_LOCALITY_PIN_BOX = Object.freeze({ latMin: 26.86, latMax: 27.08, lngMin: -82.48, lngMax: -82.23 });
+
+function isInHeldLocalityPinBox(lat, lng) {
+  const a = Number(lat);
+  const b = Number(lng);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  return a >= HELD_LOCALITY_PIN_BOX.latMin && a <= HELD_LOCALITY_PIN_BOX.latMax
+    && b >= HELD_LOCALITY_PIN_BOX.lngMin && b <= HELD_LOCALITY_PIN_BOX.lngMax;
+}
+
+/**
+ * True when the city, the ZIP or the address text names a place Waves does not serve inside a served county or
+ * box: DeSoto, Punta Gorda, or one of the six places held until a second technician is hired (owner ruling
+ * 2026-11-23). `text` is one address or a list of them, each read on its own, by comma-separated part ("123 Main St, Port Charlotte, FL 33948") and by its
+ * ZIP. The public property lookup's verdict reads it beside the coordinate box, for fresh and cached results.
+ */
+function namesExcludedPlace({ city = null, zip = null, text = null, places = null } = {}) {
+  if (isExcludedLocality(city) || isExcludedZip(zip)) return true;
+  // More geocoded or stored { city, zip } pairs, each read on its own.
+  if ((places || []).some((p) => isExcludedLocality(p?.city) || isExcludedZip(p?.zip))) return true;
+  // Each address text is read on its own, so a served ZIP in one can never mask a held place in another. The parsed
+  // city covers "Babcock Ranch FL" (a city sharing its comma part with the state); the parts cover the rest.
+  return (Array.isArray(text) ? text : [text]).some((one) => {
+    const raw = String(one || '');
+    if (!raw) return false;
+    return isExcludedZip(zipFromAddressText(raw)) || isExcludedLocality(parseRawAddress(raw)?.city)
+      || raw.split(',').some((part) => isExcludedLocality(normalizeLocality(part)));
+  });
 }
 
 function isInDesotoExclusion(lat, lng) {
@@ -139,7 +178,8 @@ function servedSouthHillsborough(county, address) {
 
 module.exports = {
   isServedSouthHillsboroughTown, servedSouthHillsborough,
-  SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION,
+  SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, HELD_LOCALITY_PIN_BOX,
+  isInHeldLocalityPinBox, namesExcludedPlace,
   isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion,
   zipFromAddressText,
 };

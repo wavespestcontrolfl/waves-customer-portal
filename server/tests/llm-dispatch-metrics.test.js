@@ -436,6 +436,23 @@ describe('llm-dispatch-metrics', () => {
       for (const e of out) expect(e.detail).toMatch(/silent for \d\+ days/);
     });
 
+    it('gives callExtraction the quiet-days grace: a day with no recorded call is not an outage', () => {
+      // Sun 2026-11-22: Twilio had 0 inbound calls, so callExtraction (~9 a
+      // day) read "ZERO calls yesterday". It runs once per recorded call.
+      const { detectExceptions, EVENT_DRIVEN_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
+      expect(EVENT_DRIVEN_POLICIES.has('callExtraction')).toBe(true);
+      const live = [{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }];
+      const priorWeek = [
+        { policy: 'callExtraction', total: 66, activeDays: DAILY_CADENCE_MIN_DAYS + 1 },
+        { policy: 'report', total: 200, activeDays: 7 },
+      ];
+      expect(detectExceptions(live, priorWeek, null, true, new Set(['callExtraction', 'report']))).toEqual([]);
+      const out = detectExceptions(live, priorWeek, null, true, new Set(['report']));
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({ policy: 'callExtraction', kind: 'gone_silent' });
+      expect(out[0].detail).toMatch(/silent for \d\+ days/);
+    });
+
     it('never flags a retired policy as gone silent — its provider call was removed on purpose', () => {
       const { detectExceptions, RETIRED_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
       expect([...RETIRED_POLICIES]).toEqual(expect.arrayContaining(['visitBrief', 'jobCardParagraph']));

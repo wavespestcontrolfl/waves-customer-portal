@@ -62,12 +62,10 @@ function setDbQueues(queues) {
 }
 
 let prefsRow;
-const OLD_GATE = process.env.GATE_DAY_ONLY_PROMISE;
 
 beforeEach(() => {
   jest.clearAllMocks();
   prefsRow = { sms_enabled: true, service_reminder_24h: true };
-  process.env.GATE_DAY_ONLY_PROMISE = 'true';
   // The shared decision's cheap rules (live gate is checked by the caller, the cutoff and the 24-hour preference here);
   // the eligibility reads are pinned in day-only-promise-b1-eligibility.test.js.
   timePromise.dayOnlySendDecision.mockImplementation(async (_conn, { startAt, reminder24hEnabled }) => ({
@@ -80,7 +78,6 @@ beforeEach(() => {
 });
 afterEach(() => {
   jest.useRealTimers();
-  if (OLD_GATE === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD_GATE;
 });
 
 const SLOT = Date.parse('2026-06-22T13:00:00.000Z');
@@ -230,16 +227,6 @@ describe('a delayed bounce of a day-only text is revalidated before it recovers 
     });
     await bounce('SM_conf');
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
-  });
-
-  test('the gate was turned OFF between the send and the bounce: window copy, and no promise of a later window', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    groupedWorld({ metadata: DAY_META });
-    await bounce('SM_gate_off');
-    const call = AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0];
-    expect(call).not.toHaveProperty('dayOnly');
-    expect(call).toMatchObject({ kind: '72h', appointmentTime: new Date('2026-06-22T13:00:00.000Z') });
-    expect(timePromise.dayOnlySendDecision).not.toHaveBeenCalled();
   });
 
   test('the customer turned the 24-hour reminder OFF between the send and the bounce: window copy', async () => {

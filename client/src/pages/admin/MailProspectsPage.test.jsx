@@ -8,7 +8,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const { adminFetch } = vi.hoisted(() => ({ adminFetch: vi.fn() }));
 vi.mock("../../lib/adminFetch", () => ({ adminFetch }));
 
-import MailProspectsPage, { runText } from "./MailProspectsPage";
+import MailProspectsPage, { factsText, priceCountsText, priceText, runText } from "./MailProspectsPage";
 
 const reply = (body, { ok = true, status = 200 } = {}) => Promise.resolve({ ok, status, json: async () => body });
 
@@ -20,17 +20,23 @@ const REASONS = [
 ];
 // 4:30 PM on Nov 21 Eastern (standard time) is 21:30 UTC.
 const CHECKED = "2026-11-21T21:30:00.000Z";
-const base = { counts: COUNTS, reasons: REASONS, newestRecordedDate: "2026-11-20", lastCheckedAt: CHECKED, truncated: false };
+const PRICE_COUNTS = { priced: 1, notClean: 0, missingFact: 1, failed: 0, untried: 0 };
+const PRICED = {
+  status: "priced", reason: null, annual: 444, monthly: 37, setupFee: 99, homeSqft: 2340, sizeSource: "permit_plan", stories: 2,
+  lotSqft: 7405, pricedAt: "2026-11-22T21:51:00.000Z", checkedAt: "2026-11-22T21:51:00.000Z",
+};
+const UNPRICED = { ...PRICED, status: "untried", annual: null, monthly: null, setupFee: null, homeSqft: null, sizeSource: null, stories: null, lotSqft: null, pricedAt: null, checkedAt: null };
+const base = { counts: COUNTS, priceCounts: PRICE_COUNTS, reasons: REASONS, newestRecordedDate: "2026-11-20", lastCheckedAt: CHECKED, truncated: false };
 const home = (over) => ({
   id: "m-1", recordedDate: "2026-11-20", status: "eligible", reason: null, recipientNames: ["TESTER ALEX J", "TESTER BEA K"],
   addressLine1: "101 EXAMPLE TRL", city: "SAMPLETON", zip: "34212", subdivision: "SAMPLETON ESTATES", matchBasis: "lot_block",
-  coDate: "2026-10-30", livingSqft: 2100, legalDescription: "LOT 12 SAMPLETON ESTATES PH 2", ...over,
+  coDate: "2026-10-30", livingSqft: 2100, legalDescription: "LOT 12 SAMPLETON ESTATES PH 2", price: PRICED, ...over,
 });
 const LIVE = {
   ...base, view: "live",
   rows: [
     home(),
-    home({ id: "m-2", recordedDate: "2026-11-19", status: "held_back", recipientNames: ["TESTER CAL D"], addressLine1: "102 EXAMPLE TRL", subdivision: null }),
+    home({ id: "m-2", recordedDate: "2026-11-19", status: "held_back", price: UNPRICED, recipientNames: ["TESTER CAL D"], addressLine1: "102 EXAMPLE TRL", subdivision: null }),
   ],
 };
 const NOT_ELIGIBLE = {
@@ -61,7 +67,7 @@ it("opens on Homes with the intro, the four counts, the run line and one row per
   route({ "/admin/prospects/mail?view=live": () => reply(LIVE) });
   renderPage();
   expect(await screen.findByText("TESTER ALEX J, TESTER BEA K")).toBeInTheDocument();
-  expect(screen.getByText("New-home buyers from the county deed list. Nothing is mailed yet.")).toBeInTheDocument();
+  expect(screen.getByText("New-home buyers from the county deed list. Nothing is mailed yet, and the prices are shadow prices: nobody sees them.")).toBeInTheDocument();
   expect(screen.getByText("Get a card").nextSibling).toHaveTextContent("2");
   expect(screen.getByText("Held back", { selector: "div" }).nextSibling).toHaveTextContent("1");
   expect(screen.getByText("No card: the comparison group")).toBeInTheDocument();
@@ -71,14 +77,18 @@ it("opens on Homes with the intro, the four counts, the run line and one row per
   expect(screen.getByRole("button", { name: "Homes" })).toHaveAttribute("aria-pressed", "true");
 
   const table = screen.getByRole("table", { name: "Homes" });
-  expect(within(table).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["Recorded", "Buyer", "Address", "Subdivision", "Group"]);
+  expect(within(table).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["Recorded", "Buyer", "Address", "Subdivision", "Group", "Shadow price"]);
+  expect(screen.getByText("Shadow prices: Priced 1 · waiting for a fact 1")).toBeInTheDocument();
   const card = rowOf(table, "TESTER ALEX J, TESTER BEA K");
   expect(within(card).getByText("Nov 20, 2026")).toBeInTheDocument();
   expect(within(card).getByText("101 EXAMPLE TRL, SAMPLETON, 34212")).toBeInTheDocument();
   expect(within(card).getByText("SAMPLETON ESTATES")).toBeInTheDocument();
   expect(within(card).getByText("Card")).toBeInTheDocument();
+  expect(within(card).getByText("$37.00 a month + $99.00 setup")).toBeInTheDocument();
+  expect(within(card).getByText("2,340 sq ft (permit plan), 2 stories, lot 7,405 sq ft")).toBeInTheDocument();
   const held = rowOf(table, "TESTER CAL D");
   expect(within(held).getByText("Held back")).toBeInTheDocument();
+  expect(within(held).getByText("No card")).toBeInTheDocument();
   expect(within(held).getByText("Not listed")).toBeInTheDocument(); // no subdivision
   // Nothing on the screen changes data, and the live view has no reasons list.
   expect(screen.queryByRole("list", { name: "Reasons" })).toBeNull();
@@ -186,4 +196,28 @@ it("runText names the Eastern day and time, and either half can be missing", () 
   expect(runText({ newestRecordedDate: null, lastCheckedAt: CHECKED })).toBe("Newest deed: none · Last checked: Nov 21, 2026, 4:30 PM");
   expect(runText({ newestRecordedDate: "2026-11-20", lastCheckedAt: null })).toBe("Newest deed: Nov 20, 2026 · Last checked: never");
   expect(runText({ newestRecordedDate: null, lastCheckedAt: null })).toBe("No run yet.");
+});
+
+it("priceText gives the monthly price, or the status and its reason; an unknown code shows as it is", () => {
+  expect(priceText(PRICED)).toBe("$37.00 a month + $99.00 setup");
+  expect(priceText({ ...PRICED, monthly: 37.92, setupFee: 0 })).toBe("$37.92 a month");
+  expect(priceText(UNPRICED)).toBe("Not priced yet");
+  expect(priceText({ ...UNPRICED, status: "missing_fact", reason: "no_home_size" })).toBe("Waiting for a fact: No home size yet");
+  expect(priceText({ ...UNPRICED, status: "not_clean", reason: "member_address" })).toBe("No price: A customer already lives there");
+  expect(priceText({ ...UNPRICED, status: "failed", reason: "odd_code" })).toBe("Will try again: odd_code");
+  expect(priceText({ ...UNPRICED, status: "failed", reason: "permit_page" })).toBe("Will try again: Permit page did not answer");
+  expect(priceText(undefined)).toBe("");
+});
+
+it("factsText names the size and its source, the stories and the lot; no size = no line", () => {
+  expect(factsText({ ...PRICED, sizeSource: "parcel_map", stories: 1, lotSqft: null })).toBe("2,340 sq ft (county map), 1 story");
+  expect(factsText(UNPRICED)).toBe("");
+  expect(factsText(undefined)).toBe("");
+});
+
+it("priceCountsText always shows Priced and only the other counts above zero", () => {
+  expect(priceCountsText({ priced: 0, notClean: 0, missingFact: 0, failed: 0, untried: 4 })).toBe("Shadow prices: Priced 0 · not priced yet 4");
+  expect(priceCountsText({ priced: 3, notClean: 1, missingFact: 2, failed: 1, untried: 0 }))
+    .toBe("Shadow prices: Priced 3 · no price 1 · waiting for a fact 2 · will try again 1");
+  expect(priceCountsText(undefined)).toBe("");
 });

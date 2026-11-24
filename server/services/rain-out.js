@@ -3405,7 +3405,7 @@ async function writeHandOff({ service, dueDate, pickBy, initiatedBy, reasonCode,
       ...handoffFields(dueDate),
       scheduled_date: dueDate,
       status,
-      // A confirmed visit is held out of Auto-Dispatch (eligibility CUSTOMER_CONFIRMED).
+      // The customer confirmed the old date, not the due date this hand-off sets.
       customer_confirmed: false,
       confirmed_at: null,
       customer_pick_by: pickBy,

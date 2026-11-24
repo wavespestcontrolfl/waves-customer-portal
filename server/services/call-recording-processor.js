@@ -35,7 +35,7 @@ const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks'
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { isInDesotoExclusion, isServedSouthHillsboroughTown } = require('./service-area');
-const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip } = require('./excluded-localities');
+const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip } = require('./excluded-localities');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -248,7 +248,7 @@ const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-c
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, mapServiceCategoryToLegacy, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { flagCallBookingRain } = require('./call-booking-rain-flag');
-const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
+const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, callServiceBooksAtPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { isAssessmentServiceRow } = require('./assessment-booking');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -1956,6 +1956,97 @@ function callEmailCheckCardPayload(callEmailCheck) {
 // review-state marker so review_status opens. The two copies differed ONLY
 // in their skippedReason string. One helper, called from both sites — never
 // awaited from inside the caller's own db.transaction (this opens its own).
+// GATE_CALL_AGREED_ONE_TIME_JOB: the office's booking task is ONE admin
+// notification (owner 2026-11-22: "make it an admin notification"; he wants
+// office work off review cards). Short why, every fact staff need in `detail`
+// (the bell's "Show full text"), the call as the link. It rings once per call
+// (the dedupe key holds for good); a person marks it done after booking.
+// `scheduledDate` / `windowStart`: the slot the booker resolved (Eastern),
+// always on the hour (an off-hour start stops at the on-hour guard or V2
+// routing first). `price`: agreedOneTimeJobCardPrice. `followUpPlan`:
+// resolveCallFollowUpPlan's visit 2. `streetLevelAddress`: Google matched only
+// the street. `bookingAddress`: the address the booking resolved (null: none).
+// `billToPayer`: { id, name } of the Bill-To the booking would have stamped.
+// The price line of the notification's detail, by the price's basis (none: no price).
+const AGREED_JOB_PRICE_LINES = Object.freeze({
+  agreed_total: (amount) => `Agreed price: ${amount} one-time, the total the caller accepted on the call.`,
+  stated: (amount) => `Staff said ${amount} one-time. Check the terms on the call before you set the visit's price.`,
+  none: () => 'No price is shown: check the service and its billing terms on the call.',
+});
+
+function buildAgreedOneTimeJobAlert({ call, firstName, serviceType, scheduledDate, windowStart, price, followUpPlan, streetLevelAddress, bookingAddress, billToPayer }) {
+  const { fitAction, tidyName } = require('./admin-alert-names');
+  const { breaksAlertRules } = require('./admin-alert-compose');
+  const { formatAddress } = require('../utils/address-normalizer');
+  const service = String(serviceType || '').trim() || 'one-time service';
+  const when = spokenVisitWhen(scheduledDate, windowStart);
+  const named = `${[service, when].filter(Boolean).join(', ')}: the AI booked no visit and sent no text.`;
+  const why = named.length <= 110 && !breaksAlertRules(named)
+    ? named
+    : 'Staff priced a one-time job on the call, so the AI booked no visit and sent no text.';
+  // Visit 2 is owed either way; its slot is firm only when the call set the hour (a
+  // package's visit 2 never is), and the schedule adds a package's visit 2 by itself.
+  // A time is firm only when the call set it on the hour; any other time is for the
+  // customer to confirm (visits start on the hour).
+  const visitTwo = (plan) => {
+    const slot = spokenVisitWhen(plan.scheduledDate, plan.windowStart);
+    const set = plan.hourStated === true && plan.packageOnly !== true;
+    const firm = set && !offTheHour(plan.windowStart);
+    const unset = `Around ${slot}: the call did not set this time, so confirm it with the customer.`;
+    const offHour = `The call set it for ${slot}, which is not on the hour: confirm an on-hour time with the customer.`;
+    return [
+      plan.packageOnly === true ? 'Visit 2 is owed: it is part of this two-treatment service.' : 'Visit 2 is owed: the call agreed a second visit.',
+      firm ? `The call set it for ${slot}.` : (set ? offHour : unset),
+      'Save visit 1 first, then check the schedule for visit 2: a two-treatment service adds it by itself.',
+      firm ? 'Book visit 2 only if it is missing, and move it to this time if it differs.' : 'Book visit 2 only if it is missing, and book or move it only to the time the customer confirms.',
+    ].join(' ');
+  };
+  const detail = [
+    `The call agreed a one-time job (${service})${when ? ` for ${when} ET` : ''}. The service rule would have booked a plan, so the AI booked no visit and sent no text. Book it from this call.`,
+    AGREED_JOB_PRICE_LINES[price ? price.basis : 'none'](price && `$${Number(price.amount).toFixed(2)}`),
+    bookingAddress?.line1 ? `Book at: ${formatAddress(bookingAddress)}.` : 'No address resolved: confirm the service address with the customer before you book.',
+    typeof streetLevelAddress === 'string' && 'Google matched only the street of this address: confirm the house number with the customer.',
+    billToPayer?.id && `Bill-To: ${billToPayer.name || 'the paying party the caller named'} (payer page: /admin/payers?payer=${encodeURIComponent(billToPayer.id)}). Select this payer as Bill-To when you book, so the invoice goes to them.`,
+    followUpPlan?.scheduledDate && visitTwo(followUpPlan),
+    'Before you book: check the customer\'s schedule. Staff may have booked, moved or cancelled a visit for this call since; never book a second one.',
+  ].filter(Boolean).join('\n');
+  const who = tidyName(firstName) || 'the caller';
+  const link = `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`;
+  return {
+    category: 'schedule',
+    spec: {
+      area: 'Schedule',
+      action: fitAction('Schedule', who, [(n) => `book ${n}'s one-time job`, (n) => `book ${n}'s job`]),
+      why,
+      severity: 'needs-you',
+      link,
+      subject: { type: 'call', id: String(call.id) },
+      doneWhen: 'visit_booked',
+      who: 'person',
+      contact: true,
+    },
+    opts: {
+      bell: true,
+      link,
+      dedupeKey: `${require('./call-one-time-job').AGREED_ONE_TIME_JOB_ALERT_PREFIX}${call.id}`,
+      // A later pass of the same call (the hold applies again while it has no
+      // visit) updates the text quietly: no second ring, read and done kept.
+      refreshOnDedupe: true,
+      ringOnRefresh: () => false,
+      detail,
+      // Ids only: names, the address and the price are in the text the office reads.
+      // Always written: a quiet refresh merges metadata, so a later pass with no payer must clear an older id.
+      metadata: { callLogId: call.id, source: 'call_agreed_one_time_job', payerId: billToPayer?.id ? String(billToPayer.id) : null },
+    },
+  };
+}
+
+// True for an 'HH:MM' start that is not on the hour (visits start on the hour).
+function offTheHour(windowStart) {
+  const minutes = /^\d{1,2}:(\d{2})/.exec(String(windowStart || ''));
+  return !!minutes && minutes[1] !== '00';
+}
+
 async function fileSkippedBookingCard({ call, procToken, customerId, extraction, skippedReason, preferredDateTime, serviceType, bridgeNeedsConfirmation, callSid }) {
   try {
     const filed = await db.transaction(async (ttrx) => {
@@ -2011,6 +2102,56 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
   }
 }
 
+// GATE_CALL_AGREED_ONE_TIME_JOB: does any visit already belong to this call (any
+// status), by the call link or the legacy "Call SID:" notes marker that
+// findExistingCallAppointment reads? Read only when the hold would apply (a few
+// calls a quarter). An unreadable answer counts as no, so the hold applies and
+// the AI never books the plan visit the hold exists to stop; a visit the call
+// does have is still found (and kept) by the booking's own lookups first.
+async function callHasAnyVisit(call) {
+  if (!call?.id) return false;
+  try {
+    const row = await db('scheduled_services')
+      .where((qb) => {
+        qb.where({ source_call_log_id: call.id });
+        if (call.twilio_call_sid) qb.orWhere('notes', 'like', `%Call SID: ${call.twilio_call_sid}%`);
+      })
+      .first('id');
+    return !!row;
+  } catch (err) {
+    logger.warn(`[call-proc] agreed one-time job visit check failed for ${maskSid(call.twilio_call_sid)}: ${err.code || err.name || 'db_error'}`);
+    return false;
+  }
+}
+
+// The price the office notification (buildAgreedOneTimeJobAlert) shows for an
+// agreed one-time job the AI did not book: { amount, basis } or null. Only for
+// the service the call priced: when the booking resolved to another catalog row
+// (a plan customer's free re-service, say), the notification names that row
+// and shows no price, so staff never
+// book one service at another's price. `basis`: 'agreed_total' when the
+// reading's strict total is that amount (the caller accepted it), else
+// 'stated' (staff stated it; the terms are for staff to check on the call).
+function agreedOneTimeJobCardPrice(v2Extraction, bookedService) {
+  const request = v2Extraction?.service_request;
+  const amount = resolveAgreedOneTimeJobPrice(v2Extraction);
+  const { serviceNameKey } = require('./call-one-time-job');
+  if (amount == null || !request || serviceNameKey(bookedService) !== serviceNameKey(request.specific_service_name)) return null;
+  // No strict total: staff stated it (the resolver then needs an agent-stated term).
+  if (request.quoted_price_usd == null) return { amount, basis: 'stated' };
+  // An agreed total needs consistent evidence. When the extraction says the price
+  // is not final, or the caller did not accept it, it is a price to check, shown
+  // as staff's only when staff stated the term (never a caller's number).
+  // Staff not offering it (an agent repeating a competitor's price, say) is a
+  // contradiction too: staff's own term then shows as a price to check, and a
+  // caller's number not at all.
+  const statedBy = require('../utils/call-agreed-price').agreedOneTimeJobPriceStatedBy(v2Extraction);
+  const consistent = request.price_is_final !== false && request.price_accepted_by_caller !== false
+    && request.price_offered_by_staff !== false;
+  if (consistent) return { amount, basis: 'agreed_total' };
+  return statedBy === 'agent' ? { amount, basis: 'stated' } : null;
+}
+
 // Geographic hard veto for the LEGACY (non-enforce) booking path. The V2
 // enforce gate already vetoes out_of_service_area, but with
 // CALL_EXTRACTION_V2_ENABLED off, or V2 in shadow with
@@ -2023,8 +2164,9 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
 //      on-file pin in the DeSoto rectangle — vetoes first, ahead of a
 //      positive AV verdict (which may describe a different, V2 address) and
 //      of any served-town exemption (Riverview + 34266 cannot launder it).
-//      Punta Gorda (city, or a Punta Gorda-only ZIP; Charlotte County is
-//      otherwise served) vetoes at the same point, on the call or on file.
+//      Punta Gorda (city, or a Punta Gorda-only ZIP) vetoes at the same point,
+//      on the call or on file, and so do the not-yet-served places of owner
+//      ruling 2026-11-23 (excluded-localities.js).
 //   2. a positive Address Validation verdict (inServiceArea === true) then
 //      clears the rest, including a model-stated county NAME of DeSoto.
 //   3. an AV out_of_service_area / inServiceArea false verdict, or a county
@@ -2084,6 +2226,12 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   if (cities.some(isPuntaGordaLocality) || zips.some(isPuntaGordaZip)
     || onFileCities.some(isPuntaGordaLocality) || onFileZips.some(isPuntaGordaZip)) {
     return { reason: 'punta_gorda_locality', county: 'Charlotte' };
+  }
+  // The six places held until a second technician is hired (owner ruling 2026-11-23: Rotonda, Englewood, Placida,
+  // Boca Grande, Port Charlotte, Babcock Ranch) veto the same way. Englewood straddles two counties, so no county is named.
+  if (cities.some(isNotYetServedLocality) || zips.some(isNotYetServedZip)
+    || onFileCities.some(isNotYetServedLocality) || onFileZips.some(isNotYetServedZip)) {
+    return { reason: 'not_yet_served_locality', county: null };
   }
   if (av && av.inServiceArea === true) return null;
   if (countyKey === 'desoto') {
@@ -3617,6 +3765,9 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
 // disagree and every log line and bell renders the full agreed terms —
 // range, billing unit, and every accepted component.
 const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../utils/call-agreed-price');
+// The agreed-one-time-job reading (GATE_CALL_AGREED_ONE_TIME_JOB). A line of its own:
+// call-agreed-price-gate.test.js pins the line above as written.
+const { resolveAgreedOneTimeJobPrice } = require('../utils/call-agreed-price');
 
 // codex #4815 r2 P2 (refined r3 P2): whether the post-finalization
 // price-agreed sweep must stand down because the booking-triggered
@@ -10015,7 +10166,80 @@ function recurringIntentEvidence(transcription) {
   return { callerText, acceptedOffer };
 }
 
-function applyRecurringIntentDefault(extracted, transcription, bookableServiceNames = []) {
+// Owner 2026-11-22 ("fix", then "yes" to the service-only cut): a call on which
+// staff priced ONE one-time job keeps the one-time service the V2 extraction
+// named (GATE_CALL_AGREED_ONE_TIME_JOB). On 2026-11-21 a caller booked a
+// same-day one-time ant job at the one-time price staff stated; her only
+// cadence word described the plan another company had sold her that morning
+// ("I just signed up for, like, a monthly service with them now that I don't
+// even need"), and the rule booked Monthly Pest Control. The words of a
+// transcript cannot tell whose plan a cadence word names. The validated
+// extraction says what was agreed, so the hold reads that and nothing in the
+// transcript. All of these, or the rule reads as before:
+//   - the gate is on and V2-primary adoption is on. In shadow mode, and with
+//     the adoption kill switch (CALL_EXTRACTION_V2_PRIMARY=false), V2 does not
+//     drive the service, and the hold is off at every site;
+//   - the V2 extraction names a singular service (one this rule rewrites);
+//   - the reading says the call was about ONE one-time job and nothing else
+//     (readsAsOneOneTimeJob, the rule the call booking check's price bell
+//     uses): a treatment or one-time preventative intent, no plan on the call,
+//     no second service, property or unsettled job;
+//   - the call agreed ONE exact one-time price (resolveAgreedOneTimeJobPrice):
+//     the evidence that staff priced a one-time job. A range, two agreed terms,
+//     a plan rate or a price with no unit is not one, and a reading that says
+//     no price was discussed holds none;
+//   - that service is a one-time catalog row a call booking can price, and
+//     the reading carries that row's own name (callServiceBooksAtPrice).
+// THE AI BOOKS NO VISIT FOR A JOB THE HOLD CHANGED (owner 2026-11-22, "make it
+// an admin notification"). The lead and the stored reading carry the one-time
+// service, but the booking is held for the office (one admin notification,
+// buildAgreedOneTimeJobAlert, with the agreed time): no visit, no text. The office books the visit with its
+// price. Why: a price staff only stated ("$250, but it varies") cannot go on
+// the visit (the extraction marks a hedge and an added charge the same way),
+// and a one-time visit with no price takes a plan's fee at completion if the
+// customer starts a plan first. A call the hold does not change books as
+// before. `services`: the bookable catalog rows (loadBookableCallServices).
+function agreedOneTimeJobLive() {
+  // A test that mocks feature-gates without the reader keeps the default: off.
+  const gates = require('../config/feature-gates');
+  return typeof gates.callAgreedOneTimeJobLive === 'function' && gates.callAgreedOneTimeJobLive();
+}
+
+function callAgreedOneTimeJob(v2Extraction, services) {
+  if (!agreedOneTimeJobLive() || !callExtractionV2PrimaryEnabled() || !isV2Extraction(v2Extraction)) return false;
+  const request = v2Extraction.service_request;
+  if (!request || !RECURRING_OVERRIDE_SOURCES.has(normalizeServiceKey(request.specific_service_name))) return false;
+  if (request.price_discussed === false || !require('./call-one-time-job').readsAsOneOneTimeJob(v2Extraction)) return false;
+  return callServiceBooksAtPrice(services, request.specific_service_name, resolveAgreedOneTimeJobPrice(v2Extraction));
+}
+
+// An agreed one-time job never carries a program label. Before V2-primary
+// adoption, a field of the canonical `extracted` that names a recurring program
+// (written by the rule's first pass, which runs before the V2 extraction
+// exists, or by the V1 model itself) takes the service the V2 extraction named.
+// Adoption keeps a label that is set, and the lead and ai_extraction are
+// persisted after it, so this is the one place where the booking and every
+// stored label still agree. The caller keeps V1's own labels in the
+// pre-adoption view. `agreedJob`: callAgreedOneTimeJob for this extraction.
+// When either label names a recurring program, both labels take the service
+// the extraction named. Returns `extracted` itself when no label names one; a
+// change means the hold changed the service, so the booking is held for the
+// office.
+function adoptAgreedOneTimeService(extracted, v2Extraction, agreedJob) {
+  if (!extracted || agreedJob !== true) return extracted;
+  const service = v2Extraction.service_request.specific_service_name;
+  const namesProgram = (name) => RECURRING_PEST_PROGRAMS.has(normalizeServiceKey(name));
+  if (!namesProgram(extracted.matched_service) && !namesProgram(extracted.specific_service_name)) return extracted;
+  // Both labels take the service the extraction named: adoption keeps a label
+  // that is set, so a second singular label (another job) would stay beside it.
+  return { ...extracted, matched_service: service, specific_service_name: service };
+}
+
+// The rule from the caller's words: `extracted` itself when nothing changes,
+// else a copy with the recurring program. `holdSingular` keeps a field that
+// names a singular service as it is; a field that already names a program
+// still gets the caller's cadence.
+function recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames, holdSingular) {
   if (!extracted || extracted.is_lead !== true) return extracted;
   // specific_service_name outranks matched_service in catalog booking
   // resolution (call-booking-catalog.js), so a singular value THERE would
@@ -10060,7 +10284,7 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
   const programName = (family) => resolveProgramName(family.key, family.fallback, bookableServiceNames);
 
   const retarget = (isSingular, isRecurring, current) => {
-    if (isSingular) return programName(chosen);
+    if (isSingular) return holdSingular ? current : programName(chosen);
     // Already a recurring program: retarget ONLY on one unambiguous caller
     // cadence (the model can default to quarterly over an explicit
     // bi-monthly ask); ambiguity keeps the model's pick.
@@ -10078,8 +10302,33 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
     out.matched_service = out.specific_service_name;
   }
   if (out.matched_service === extracted.matched_service && out.specific_service_name === extracted.specific_service_name) return extracted;
-  logger.info(`[call-proc] recurring-intent default: "${extracted.specific_service_name || extracted.matched_service}" -> "${out.specific_service_name || out.matched_service}"`);
   return out;
+}
+
+// `agreedOneTimeJob`: the caller of this function has a validated V2 extraction
+// and callAgreedOneTimeJob is true for it. The rewrite of each field that names
+// a singular service is then held; a field that already names a program keeps
+// the rule's cadence choice.
+function applyRecurringIntentDefault(extracted, transcription, bookableServiceNames = [], agreedOneTimeJob = false) {
+  const label = (view) => view.specific_service_name || view.matched_service;
+  const out = recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames, false);
+  if (out === extracted) return extracted;
+  if (agreedOneTimeJob !== true) {
+    logger.info(`[call-proc] recurring-intent default: "${label(extracted)}" -> "${label(out)}"`);
+    return out;
+  }
+  const held = recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames, true);
+  logger.info(`[call-proc] recurring-intent default held, staff priced a one-time job on the call: "${label(extracted)}" stays${held === extracted ? '' : `, cadence -> "${label(held)}"`}`);
+  return held;
+}
+
+// Whether the agreed-one-time-job hold changes this view: without it, the
+// rule would turn a field that names a singular service into a program. The
+// booking asks this of its own view; such a booking is held for the office.
+function agreedJobHoldChangesService(extracted, transcription, bookableServiceNames = []) {
+  const out = recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames, false);
+  const held = recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames, true);
+  return out.matched_service !== held.matched_service || out.specific_service_name !== held.specific_service_name;
 }
 
 // ── AI extraction via Gemini ──
@@ -12877,6 +13126,9 @@ const CallRecordingProcessor = {
     // agent's own plan pitch as customer intent. The prompt-driven model,
     // which sees the whole conversation, still applies the rule on outbound
     // calls. Revisit when outbound speaker identity is deterministic.
+    // This first pass runs before the V2 extraction exists, so it cannot know an
+    // agreed one-time job (callAgreedOneTimeJob); adoptAgreedOneTimeService puts
+    // the service right before V2-primary adoption.
     if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
@@ -13045,6 +13297,59 @@ const CallRecordingProcessor = {
     // structure unit waiver must agree with it too (a V1 pick V2 overwrites
     // is a service disagreement, not a WDO).
     const preAdoptionExtracted = { ...extracted };
+    // An agreed one-time job never carries a program label (owner 2026-11-22):
+    // before adoption, and before the lead and ai_extraction are written. Only
+    // the canonical view changes. The pre-adoption view above stays V1's own,
+    // for the checks that need the two extractors to agree (commercial quote
+    // and assessment, whole-structure waiver), and the labels replaced here are
+    // recorded with the fields adoption replaces (pre_adoption_service_fields),
+    // so the offline audits rebuild that same view. No-op unless the gate and
+    // V2-primary adoption are on (callAgreedOneTimeJob). Inbound only: the
+    // recurring-intent rule never runs on an outbound call, so there is nothing
+    // to hold, and an outbound booking reads as before. A label replaced here
+    // (agreedServiceFields not empty) means the hold changed the service: the
+    // booking is then held for the office (agreedJobHeldForOffice).
+    let agreedServiceFields = [];
+    // The hold acts only on a call's FIRST booking: a call that already has a
+    // visit (an earlier pass's or staff's, live or cancelled) runs as before the
+    // gate, so a reprocess never re-labels or re-routes a booking it already made.
+    const agreedJobAtAdoption = !isOutboundCall(call) && v2Result?.status === 'valid'
+      && callAgreedOneTimeJob(v2Result.extraction, bookableCallServices)
+      && !(await callHasAnyVisit(call));
+    if (agreedJobAtAdoption) {
+      const agreedService = adoptAgreedOneTimeService(extracted, v2Result.extraction, agreedJobAtAdoption);
+      if (agreedService !== extracted) {
+        agreedServiceFields = ['matched_service', 'specific_service_name'].filter((key) => agreedService[key] !== extracted[key]);
+        logger.info(`[call-proc] agreed one-time job for ${maskSid(callSid)}: "${extracted.specific_service_name || extracted.matched_service}" -> "${agreedService.specific_service_name || agreedService.matched_service}"`);
+        extracted = agreedService;
+      }
+    }
+    // The rule's later passes for an inbound call. For an agreed one-time job,
+    // when the hold keeps a singular service the rule would rewrite, both
+    // labels take the service the extraction named (a V1 non-lead that adoption
+    // promoted can still carry another job's label), so the lead, the call
+    // record and the office notification name one job. agreedJobRewriteHeld records it:
+    // the booking is then held for the office.
+    // The labels it replaced are recorded with adoption's (pre_adoption_service_fields),
+    // so the offline audits rebuild the V1 view: the pass inside adoption adds them to
+    // serviceFieldsAdopted; a later pass adds them to the record already written
+    // (recorded V1 values are kept).
+    let agreedJobRewriteHeld = false;
+    const agreedJobRewriteFields = new Set();
+    const recurringRulePass = (view) => {
+      if (agreedJobAtAdoption && agreedJobHoldChangesService(view, transcription, bookableServiceNames)) {
+        agreedJobRewriteHeld = true;
+        const service = v2Result.extraction.service_request.specific_service_name;
+        const replaced = ['matched_service', 'specific_service_name'].filter((key) => view[key] !== service);
+        replaced.forEach((key) => agreedJobRewriteFields.add(key));
+        view = { ...view, matched_service: service, specific_service_name: service };
+        const recorded = view.pre_adoption_service_fields;
+        if (replaced.length && recorded && typeof recorded === 'object' && !Array.isArray(recorded)) {
+          view = { ...view, pre_adoption_service_fields: { ...preAdoptionServiceFields(preAdoptionExtracted, replaced), ...recorded } };
+        }
+      }
+      return applyRecurringIntentDefault(view, transcription, bookableServiceNames, agreedJobAtAdoption);
+    };
     let serviceFieldsAdopted = [];
     // The V2 extraction when primary adoption ran for this pass, else null (stampCallerIdReachback).
     let adoptedV2Extraction = null;
@@ -13064,9 +13369,9 @@ const CallRecordingProcessor = {
         // fields (a stub call had nothing to upgrade). Re-assert it over the
         // adopted service labels BEFORE any lead write consumes them, exactly
         // like the enforce path's approved-booking re-assert (codex P2).
-        if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+        if (!isOutboundCall(call)) extracted = recurringRulePass(extracted);
       }
-      serviceFieldsAdopted = adoption.adoptedFields;
+      serviceFieldsAdopted = [...new Set([...adoption.adoptedFields, ...agreedServiceFields, ...agreedJobRewriteFields])];
       adoptedV2Extraction = v2Result.extraction;
     }
     // The V1 values of the service fields adoption replaced ride on the canonical
@@ -13309,7 +13614,8 @@ const CallRecordingProcessor = {
       // promotion — a "wasp nest, and I'd like the quarterly package"
       // voicemail was still is_lead=false then. Re-run it now that the
       // deterministic signals made this a lead (idempotent, no-op otherwise).
-      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+      // agreedJobAtAdoption implies adoption ran for this pass (the same V2-primary checks).
+      if (!isOutboundCall(call)) extracted = recurringRulePass(extracted);
     }
 
     // Skip spam and non-workable voicemail
@@ -13689,6 +13995,10 @@ const CallRecordingProcessor = {
     // do-not-contact beside it): that hold keeps the call's promises, label and one alert.
     let v2OutOfAreaOnlyHold = false;
     let v2ApprovedExtraction = null;
+    // GATE_CALL_AGREED_ONE_TIME_JOB: whether this pass raised the held job's
+    // admin notification (the office's task). The approved-but-unbooked
+    // fallback below files main's generic card only when it did not.
+    let agreedJobAlerted = false;
     let v2UsesOnFileAddress = false;
     let v2StreetLevelHold = null;
     // True when the booking landed on the office-review pending path (street-level web-form address).
@@ -19848,7 +20158,7 @@ const CallRecordingProcessor = {
       // the merged fields; no-op when nothing singular survived.
       const preReassertMatched = extracted.matched_service;
       const preReassertSpecific = extracted.specific_service_name;
-      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+      if (!isOutboundCall(call)) extracted = recurringRulePass(extracted);
       if (extracted.matched_service !== preReassertMatched
         || extracted.specific_service_name !== preReassertSpecific) {
         // ai_extraction and the lead's service_interest were persisted BEFORE
@@ -20400,6 +20710,17 @@ const CallRecordingProcessor = {
               quotedPrice: bookingExtracted.quoted_price,
               catalogRow: callBookingCatalogRow,
             });
+            // GATE_CALL_AGREED_ONE_TIME_JOB (owner 2026-11-22, "make it an admin notification"): the
+            // agreed-one-time-job hold changed this booking's service (a label
+            // at adoption, a rewrite it held at a later pass, or the rule on the
+            // booking's own view), so
+            // the AI books no visit. The office books it with its price from one
+            // admin notification (held in the booking transaction below; raised by
+            // the held-booking handler). Off, or a call the hold does not change,
+            // books as before.
+            const agreedJobHeldForOffice = agreedJobAtAdoption
+              && (agreedServiceFields.length > 0 || agreedJobRewriteHeld || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));
+            const agreedJobCardPrice = agreedJobHeldForOffice ? agreedOneTimeJobCardPrice(v2Result?.extraction, serviceType) : null;
             const smsPhone = customerValidation.details.phone;
             // Implied-consent recipient scope: implied consent is PERSONAL to
             // the caller. When it is the only clearance and the resolved
@@ -22292,6 +22613,26 @@ const CallRecordingProcessor = {
                   logger.warn(`[call-proc] Scheduled date ${scheduledDate} elapsed while the scheduling transaction was in flight; refusing the insert for ${maskSid(callSid)}`);
                   return { __held: { reason: 'arranger_slot_elapsed_pre_insert' } };
                 }
+                // GATE_CALL_AGREED_ONE_TIME_JOB (agreedJobHeldForOffice above):
+                // every booking guard passed and nothing on this path wrote,
+                // so ending here writes nothing. The shared __held handler files
+                // the office's booking card: no visit, no text. A call with a
+                // visit of its own never gets the hold (callHasAnyVisit); a
+                // staff booking at this slot, found above, is kept.
+                if (agreedJobHeldForOffice) {
+                  // A street-only address match (the visit would have booked
+                  // pending with an address card) rides on the office notification.
+                  // So does the address the booking resolved (null: none).
+                  return {
+                    __held: {
+                      reason: 'agreed_one_time_job_office_books',
+                      streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null,
+                      bookingAddress: propertyLinkage.address
+                        ? ['line1', 'line2', 'city', 'state', 'zip'].reduce((out, key) => ({ ...out, [key]: propertyLinkage.address[key] || null }), {})
+                        : null,
+                    },
+                  };
+                }
                 // Make-up move (GATE_CALL_MAKEUP_MOVE, owner 2026-10-22): every
                 // booking guard above passed and this fresh row is about to be
                 // inserted. When the customer has a MISSED recurring visit of
@@ -22479,7 +22820,40 @@ const CallRecordingProcessor = {
                 // operator resolved it, nor outside those locks; when that
                 // writer could not persist its card, the approved-but-
                 // unbooked fallback below files instead (pre-push audit P1).
-                if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')
+                // GATE_CALL_AGREED_ONE_TIME_JOB: the office's booking task is ONE
+                // admin notification (buildAgreedOneTimeJobAlert), not a card. It
+                // carries the price for the priced service only, and visit 2.
+                if (svc.__held.reason === 'agreed_one_time_job_office_books') {
+                  // The Bill-To the booking would have stamped on the visit (a third
+                  // party the caller named): staff select it when they book. Its name
+                  // is display only; a failed read keeps the id.
+                  let billToPayer = null;
+                  if (callBookingPayerId) {
+                    const payerRow = await db('payers').where({ id: callBookingPayerId }).first('display_name').catch(() => null);
+                    billToPayer = { id: String(callBookingPayerId), name: payerRow?.display_name || null };
+                  }
+                  const alert = buildAgreedOneTimeJobAlert({
+                    call, firstName: extracted.first_name, serviceType, scheduledDate, windowStart,
+                    price: agreedJobCardPrice, followUpPlan: callFollowUpPlan,
+                    streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress, billToPayer,
+                  });
+                  // A row id = the task exists (raised now, or by an earlier pass of
+                  // this call). No id (a failed write, a muted preference): the
+                  // fallback below files main's generic card, so the task is never lost.
+                  // Only the call's current worker publishes (or refreshes) the task, under
+                  // the call row's lock: a superseded pass never rewrites a newer pass's
+                  // text, and files nothing (the fallback card's writer is fenced too).
+                  try {
+                    const raised = await db.transaction(async (atrx) => {
+                      const owner = await atrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
+                      if (!owner) return { superseded: true };
+                      return require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, { ...alert.opts, trx: atrx });
+                    });
+                    agreedJobAlerted = !!(raised && (raised.id || raised.superseded));
+                  } catch (alertErr) {
+                    logger.warn(`[call-proc] agreed one-time job alert failed for ${maskSid(callSid)}: ${alertErr.code || alertErr.name || 'error'}`);
+                  }
+                } else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')
                   .insert(buildTriageItem({
                     callLogId: call.id,
                     flag: svc.__held.reason,
@@ -22519,7 +22893,11 @@ const CallRecordingProcessor = {
                 // applies regardless of whether the card insert above
                 // fired (deduped, so on_file_house_number_conflict's own
                 // dedicated push elsewhere is never doubled).
-                if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);
+                // A held one-time job whose admin notification was raised is the
+                // office's task there, not a call review: no review state, no
+                // confirm-before-dispatch note. Without it, the fallback card sets both.
+                const agreedJobTaskRaised = svc.__held.reason === 'agreed_one_time_job_office_books' && agreedJobAlerted;
+                if (!agreedJobTaskRaised && !bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);
               } else if (svc && svc.__makeup) {
                 // The booking transaction found a missed recurring visit and
                 // inserted nothing: move it now, or hold (never a new visit).
@@ -24273,6 +24651,10 @@ const CallRecordingProcessor = {
       // one) — otherwise the fallback card below is the call's only
       // scheduling trace and must file (pre-push audit P1).
       if (houseNumberConflictFiled && !disputeClaimedUnrecorded) heldReasons.add('on_file_house_number_conflict');
+      // The held one-time job's task is its admin notification. Only when that
+      // was not raised does the card below file (main's generic card, as for
+      // any skipped booking), so the office never loses the task.
+      if (agreedJobAlerted) heldReasons.add('agreed_one_time_job_office_books');
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError
@@ -26786,6 +27168,12 @@ CallRecordingProcessor._test = {
   isUsableContactPhone,
   labeledTranscriptPreservesWords,
   applyRecurringIntentDefault,
+  callAgreedOneTimeJob,
+  agreedJobHoldChangesService,
+  adoptAgreedOneTimeService,
+  agreedOneTimeJobCardPrice,
+  offTheHour,
+  buildAgreedOneTimeJobAlert,
   callBookingTimeSanityFlags,
 };
 

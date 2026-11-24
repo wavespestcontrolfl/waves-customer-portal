@@ -645,7 +645,7 @@ function isApiPath(pathname) {
   return pathname.toLowerCase().startsWith('/api/');
 }
 
-// A job-offer link page: its path is the applicant's private signing link.
+// A job-offer link page (its path is the applicant's private signing link) or a new-home postcard page.
 // The page router matches each percent-decoded segment in any case, so the
 // path is read percent-decoded (repeatedly) and in any letter case, and any
 // path that holds "careers/offer/" counts. The browser resolves dot segments
@@ -662,7 +662,9 @@ function isOfferLinkPath(pathname) {
     if (next === text) break;
     text = next;
   }
-  return text.toLowerCase().includes('careers/offer/');
+  const lower = text.toLowerCase();
+  // The new-home postcard page (/h/<token>): its path is that home's bearer link (address and price).
+  return lower.includes('careers/offer/') || /^\/+h\//.test(lower);
 }
 
 // The storage rule. A stored response keeps the URL it came from, and a

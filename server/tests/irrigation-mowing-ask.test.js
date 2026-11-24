@@ -1,6 +1,6 @@
 /**
  * The mowing-days ask in every weekly irrigation email (owner 2026-11-02). The sender fills
- * {{mowing_ask}} / {{mowing_ask_url}} only while autoDispatchMowingDaysMode() is 'true', the
+ * {{mowing_ask}} / {{mowing_ask_url}} only when the
  * customer has nothing saved under Mowing, the ask is due (first 3 sends, then every 27+ days) and
  * the customer is on a recurring lawn program; migration 20261102120000_irrigation_mowing_ask_line
  * places a paragraph and a small text link in each weekly template. These tests pin the predicate,
@@ -9,13 +9,12 @@
  */
 jest.mock('../models/db', () => { const m = jest.fn(); m.raw = jest.fn((e) => e); m.fn = { now: () => 'now()' }; return m; });
 jest.mock('../config/feature-gates', () => ({
-  gateEnvValue: jest.fn(() => false), isEnabled: jest.fn(() => true), autoDispatchMowingDaysMode: jest.fn(() => 'off'),
+  gateEnvValue: jest.fn(() => false), isEnabled: jest.fn(() => true),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
 
 const db = require('../models/db');
-const { autoDispatchMowingDaysMode } = require('../config/feature-gates');
 const { recordAuditEvent } = require('../services/audit-log');
 const EmailTemplates = require('../services/email-template-library');
 const { portalUrl } = require('../utils/portal-url');
@@ -159,26 +158,17 @@ describe('mowingAskLive (the sweep\'s answer for a new decision)', () => {
   const live = (c = customer) => mowingAskLive(c, { weekEnding: '2026-11-01', now: NOW });
 
   beforeEach(() => { db.mockReset(); routeDb(); });
-  afterAll(() => autoDispatchMowingDaysMode.mockReturnValue('off'));
 
-  test('the switch: only \'true\' shows the line; off and shadow read nothing', async () => {
-    for (const mode of ['off', 'shadow']) {
-      autoDispatchMowingDaysMode.mockReturnValue(mode);
-      expect(await live()).toBe(false);
-    }
-    expect(db).not.toHaveBeenCalled();
-    autoDispatchMowingDaysMode.mockReturnValue('true');
+  test('nothing saved, due, on a lawn program: the line shows', async () => {
     expect(await live()).toBe(true);
   });
 
   test('something saved under Mowing: no line, no history read', async () => {
-    autoDispatchMowingDaysMode.mockReturnValue('true');
     expect(await live({ ...customer, mowing_notes: 'Thursdays' })).toBe(false);
     expect(db).not.toHaveBeenCalled();
   });
 
   test('cadence from the history; an unreadable history means no line', async () => {
-    autoDispatchMowingDaysMode.mockReturnValue('true');
     routeDb({ history: { count: '3', lastAskAt: new Date(NOW.getTime() - 7 * DAY) } });
     expect(await live()).toBe(false);
     routeDb({ history: { count: '3', lastAskAt: new Date(NOW.getTime() - 27 * DAY) } });
@@ -188,7 +178,6 @@ describe('mowingAskLive (the sweep\'s answer for a new decision)', () => {
   });
 
   test('a customer in the audience only through the irrigation_email tag (no lawn program) gets no line', async () => {
-    autoDispatchMowingDaysMode.mockReturnValue('true');
     routeDb({ lawn: null });
     expect(await live()).toBe(false);
     routeDb({ lawn: new Error('timeout') });

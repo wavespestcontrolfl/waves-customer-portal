@@ -22188,7 +22188,7 @@ function isStructuralOneTimeOnlyEstimate(estData, estimate = {}) {
 }
 
 // The annual rodent guarantee ($199/$249/$299, 12-month re-entry warranty) is
-// sold AFTER trapping/exclusion/sanitation are complete — a guarantee-only
+// sold AFTER trapping and exclusion are complete — a guarantee-only
 // estimate is a warranty RENEWAL with no service visit to perform. The
 // booking-path machinery (slot picker, APPOINTMENT_REQUIRED, one-time card
 // hold) would force the customer to reserve a Rodent Control visit just to
@@ -33397,6 +33397,7 @@ module.exports.recurringServiceFirstVisitPrice = recurringServiceFirstVisitPrice
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
 module.exports.normalizeManualDiscountSummary = normalizeManualDiscountSummary;
 module.exports.tierDiscountForEstimate = tierDiscountForEstimate;
+module.exports.snapshotTierDiscount = snapshotTierDiscount;
 module.exports.manualDiscountForRecurringBase = manualDiscountForRecurringBase;
 module.exports.applyManualOneTimeDiscountToChoiceRows = applyManualOneTimeDiscountToChoiceRows;
 module.exports.sameDayVisitTotalForPricingFrequency = sameDayVisitTotalForPricingFrequency;

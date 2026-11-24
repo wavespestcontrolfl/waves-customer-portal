@@ -1,5 +1,5 @@
 const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-dispatch-due');
-const { staffEditLockPatch, autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
+const { autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -1562,8 +1562,7 @@ function noticeOptions(options = {}, dateStr, startHHMM) {
 }
 
 // GATE_DAY_ONLY_PROMISE part B2: records the office's choice for a visit's NEW slot on the moved row(s): true = "the customer
-// asked for this time" (a set time, never promised as day only), anything else = day only. Gate off: nothing is written, so
-// every UPDATE stays exactly today's. Throws on a failed write (inside a transaction the move fails with it).
+// asked for this time" (a set time, never promised as day only), anything else = day only. Throws on a failed write (inside a transaction the move fails with it).
 async function recordOfficeMoveIntent(conn, ids, body) {
   return require('../services/time-promise').recordCustomerAskedTime(conn, ids, body?.customerAskedTime === true);
 }
@@ -1571,8 +1570,8 @@ async function recordOfficeMoveIntent(conn, ids, body) {
 // GATE_DAY_ONLY_PROMISE part E: stamps each office row with what the customer was told (`told: { level, dayOnly }`, visits of
 // the next 14 days) and the stored "customer asked for this time" choice (`customerAskedTime`), for the visit card and the
 // edit window, plus whether the customer's 24-hour reminder will go out (`reminder24hOn`, for the phone-script hint). ONE bulk read
-// per fact for the whole payload (time-promise.loadOfficeToldFields), never per row. Gate off: no read and
-// no field. A technician's feed is the field view and gets neither. Never throws: a failed read leaves the payload as is.
+// per fact for the whole payload (time-promise.loadOfficeToldFields), never per row.
+// A technician's feed is the field view and gets neither. Never throws: a failed read leaves the payload as is.
 async function attachOfficeToldFields(req, rows) {
   try {
     if (isTechnicianRequest(req) || !Array.isArray(rows) || !rows.length) return;
@@ -1589,12 +1588,11 @@ async function attachOfficeToldFields(req, rows) {
   }
 }
 
-// GATE_DAY_ONLY_PROMISE part E: { office } for ONE visit (the same fields attachOfficeToldFields stamps on a feed row), or {} with
-// the gate off, for a technician, or when the visit is gone. Never throws: a failed read leaves the reply as it was.
+// GATE_DAY_ONLY_PROMISE part E: { office } for ONE visit (the same fields attachOfficeToldFields stamps on a feed row), or {} for a
+// technician, or when the visit is gone. Never throws: a failed read leaves the reply as it was.
 async function officeFieldsForVisit(id) {
   try {
     const timePromise = require('../services/time-promise');
-    if (!timePromise.dayOnlyPromiseOn()) return {};
     const row = await db('scheduled_services').where({ id }).first('id', 'scheduled_date', 'status');
     if (!row) return {};
     const found = (await timePromise.loadOfficeToldFields(db, [row])).get(row.id);
@@ -1692,7 +1690,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         .catch(() => null);
       const serviceLabel = AppointmentReminders.smsServiceLabelStored(reminderRow?.service_type || svc.service_type) || 'service';
       // GATE_DAY_ONLY_PROMISE part B2: a move to another date more than 24.25 h out promises only the new day, unless the
-      // office marked "customer asked for this time" (options.customerAskedTime). Gate off: false, nothing read.
+      // office marked "customer asked for this time" (options.customerAskedTime).
       const dayMove = require('../services/day-only-move-notice');
       const dayState = { dayOnly: await dayMove.moveNoticeDayOnly({
         serviceId, customerId: customer.id, newStartAt: apptTime, oldDate: options.previousDate, newDate: dateStr,
@@ -12417,8 +12415,8 @@ async function comboTargetElapsed(row, changes, newDate, newWindow) {
 }
 
 // 'together': every refusal comes before any write.
-// { customerAskedTime } for a planner body that moves a shared stop, or {} with the gate off (the body stays exactly today's).
-const comboAskedTimeBody = (body) => (require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: body.customerAskedTime === true } : {});
+// { customerAskedTime } for a planner body that moves a shared stop.
+const comboAskedTimeBody = (body) => ({ customerAskedTime: body.customerAskedTime === true });
 
 async function planComboTogetherMove(req, row, changes, shown) {
   const body = req.body;
@@ -12463,7 +12461,7 @@ async function planComboTogetherMove(req, row, changes, shown) {
       ...(changes.technician ? { technicianId: body.technicianId || null } : {}),
       // GATE_DAY_ONLY_PROMISE part E: the office's "customer asked for this time" for the stop's new slot. The mover writes it in
       // each member's own UPDATE (B3), the only write for this move: the per-row edit below never moves (its date and time keys
-      // are removed), so recordOfficeMoveIntent does not fire a second time. Gate off: the planner body is exactly today's.
+      // are removed), so recordOfficeMoveIntent does not fire a second time.
       ...comboAskedTimeBody(body),
       expectVisit: { id: shown.id, memberIds: shown.memberIds.map(String), liveCount: shown.liveCount, liveMemberIds: shown.liveMemberIds.map(String) },
     },
@@ -12623,6 +12621,9 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        // GATE_DAY_ONLY_PROMISE: the form's "customer asked for this time" box, when it sent one; the series writer records it
+        // on the anchor (a staff placement alone no longer holds a visit, owner 2026-11-22). No field: no key.
+        ...(typeof req.body?.customerAskedTime === 'boolean' ? { customerAskedTime: req.body.customerAskedTime } : {}),
         // Save road buy: this route is requireAdmin; the anchor's hour
         // buys its road times before the series transaction.
         ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
@@ -15976,9 +15977,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       if (occupancyRouteTouched) {
         const occRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
         Object.assign(updates, recurringDispatchDuePatch(occRow, updates));
-        // A staff date/window choice locks the occurrence from auto-dispatch
-        // (this path writes no reschedule_log row the person-placed guard reads).
-        Object.assign(updates, staffEditLockPatch(occRow, updates));
+        // A staff date/window choice no longer locks the occurrence from
+        // auto-dispatch (owner 2026-11-22); only the box does (staff-edit-lock.js).
         if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
           const occDate = updates.scheduled_date !== undefined
             ? dateOnly(updates.scheduled_date)

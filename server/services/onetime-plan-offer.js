@@ -1,13 +1,14 @@
 'use strict';
 
 /**
- * One-time job to plan offer: the SHADOW step (owner 2026-11-19, "build"; GATE_ONETIME_PLAN_OFFER=shadow).
+ * One-time job to plan offer (owner 2026-11-19, "build"). Two modes of one gate, GATE_ONETIME_PLAN_OFFER:
+ * `shadow` = the office gets samples and no customer gets anything; `live` = the customer gets the offer.
  *
  * The offer: a customer with no plan had a one-time general pest or cockroach job. That job counts as the
  * first visit of the Quarterly Pest Control Service plan, so the setup fee is $0 when the plan starts within
  * 30 days. The offer email goes out from day 3 after the job with the plan price, and one reminder on day 21.
  *
- * This file is the first step, and it sends NO customer anything. Its purpose is the WORDS. Each morning it
+ * SHADOW sends NO customer anything. Its purpose is the WORDS. Each morning it
  * reads the jobs whose service was done 3 to 14 days ago, judges each customer by the offer's send rules,
  * prices the plan through the start offer pricing (service-report/cross-sell.js buildStartOffer: saved property
  * data only, no paid lookup, the price settings read whole for each price; it also answers "has a plan" and
@@ -23,8 +24,18 @@
  * is open; an estimate is open or on its way; or the email division says no to the email (staff do-not-contact
  * list, suppressions, the email switch, the same-day cap, recent human contact). A job that passes the rules
  * and whose home the app can price, with a setup fee above $0 and a plan visit price below the job's price,
- * gets its two samples. So a sample means that this customer would get the offer today. The real estimate and
- * the customer email are the next step.
+ * gets its two samples. So a sample means that this customer would get the offer today.
+ *
+ * LIVE (owner 2026-11-20, "i want auto": no person taps Send) does the same judging and pricing, sends no office
+ * sample, and for each job that passes: mints the customer's plan-start estimate for the quarterly plan with the
+ * setup fee at $0 (mintPlanStartEstimate with `offer: { jobId }`; the mint proves the job and takes both dates
+ * from offerTerms), then sends the customer the offer email through the email division's ledger
+ * (sendWithLedger: eligibility, the same-day cap, one reservation per job, the consent check at the provider).
+ * Words gate: the offer template must be published, and the owner's publish is his approval of the words;
+ * until then a live run does nothing. One offer per customer per 12 months (notOfferedBefore). The email says
+ * "You pay after each visit. Nothing is charged today.", which the estimate page says only for a customer on
+ * the card rail: the job asks the page's own two functions and sends nothing to any other customer (the quote
+ * stays on file and the next morning asks again). The day-21 reminder is a later step.
  *
  * An answer of "not today" is not final. The job is read again each morning until day 14, so a home whose
  * property data is saved on day 5 gets its sample on day 5.
@@ -45,10 +56,12 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const { dateOnlyString, formatDateOnly } = require('../utils/date-only');
 const { greetingFirstName } = require('../utils/greeting-first-name');
 const { portalUrl } = require('../utils/portal-url');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { REASONS: EMAIL_VERDICT } = require('./email-division/eligibility');
 const { whereLiveCustomer } = require('./customer-stages');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('./pest-pressure/first-visit');
+const { planOfferOf, samePlanOffer } = require('./plan-offer-estimate');
 
 // The catalog keys of the two one-time jobs the offer follows (owner 2026-11-19: pest and roach only).
 const JOB_SERVICE_KEYS = ['one_time_pest_control', 'cockroach_control'];
@@ -95,6 +108,22 @@ const TEMPLATE_VARIABLES = Object.freeze({
 // Samples carry a real first name, street and price, so they go to the office inbox and nowhere else.
 const SAMPLE_RECIPIENT = 'contact@wavespestcontrol.com';
 const SAMPLE_CATEGORY = 'onetime_plan_offer_sample';
+const OFFER_CATEGORY = 'onetime_plan_offer';
+// One offer per customer per 12 months (owner 2026-11-19, "build"). The guard's reason inside the ledger's
+// reservation; lower-cased it is the send rule's reason too.
+const OFFER_WINDOW_MS = 365 * 24 * 60 * 60 * 1000;
+const OFFERED_BEFORE = 'OFFERED_BEFORE';
+// The estimate's job is not the customer's due one-time job, or the home is not for the plan: the mint's own
+// answers (restart.js RestartUnavailableError codes) and the verdict each one gets in a live run.
+const MINT_REFUSALS = Object.freeze({
+  pricing_unavailable: { verdict: 'office', reason: 'mint_pricing_unavailable' },
+  not_eligible: { verdict: 'held', reason: 'not_eligible' },
+  offer_changed: { verdict: 'held', reason: 'offer_changed' },
+  busy: { verdict: 'held', reason: 'busy' },
+  delivery_in_flight: { verdict: 'held', reason: 'delivery_in_flight' },
+  // Another estimate opened between the job's own check and the mint's locks (heldByOpenEstimate).
+  open_estimate: { verdict: 'held', reason: 'open_estimate' },
+});
 
 function defaultDeps() {
   return {
@@ -118,6 +147,19 @@ function defaultDeps() {
     isInternalTestContact: require('./internal-test-customers').isInternalTestContact,
     activeSuppressionsFor: require('./email-template-library').activeSuppressionsFor,
     sendTemplate: require('./email-template-library').sendTemplate,
+    resolveTemplateForSend: require('./email-template-library').resolveTemplateForSend,
+    sendWithLedger: (...args) => require('./email-division/ledger').sendWithLedger(...args),
+    settleStaleReservations: (...args) => require('./email-division/ledger').settleStaleReservations(...args),
+    mintPlanStartEstimate: (...args) => require('./cancellation-resolution/restart').mintPlanStartEstimate(...args),
+    // The estimate page's own two functions for "is this customer on the card rail" (estimate-public.js, the
+    // pay-after-first-visit wording), and the membership context it hands the first one.
+    buildEstimateMembershipContext: (...args) => require('./estimate-membership-context').buildEstimateMembershipContext(...args),
+    resolveRecurringCardPolicyForEstimate: (...args) => require('./recurring-card-on-file').resolveRecurringCardPolicyForEstimate(...args),
+    payAfterFirstVisitCardRail: (...args) => require('./recurring-card-on-file').payAfterFirstVisitCardRail(...args),
+    // Auto Pay state, by the card lane's own readers (recurring-card-on-file.js, autopay-eligibility.js).
+    writeOfferDelivery,
+    isAutopayPaused: require('./autopay-eligibility').isPaused,
+    explicitAutopayDisable: require('./recurring-card-on-file').explicitAutopayDisable,
     unsubscribeUrl: require('./sendgrid-mail').unsubscribeUrl,
     raisePriceSettingsAlert,
     closePriceSettingsAlert,
@@ -134,6 +176,11 @@ function money(amount) {
 
 function sampleKey(templateKey, jobId) {
   return `onetime-plan-offer:sample:${templateKey}:${jobId}`;
+}
+
+// The idempotency key of the customer's offer email: once per job, in the ledger and in email_messages.
+function offerKey(jobId) {
+  return `onetime-plan-offer:offer:${jobId}`;
 }
 
 // The day the service of a visit was done: the service day of the visit's service record that says the service
@@ -304,13 +351,55 @@ async function customerReachable(ctx) {
 // beside the ones the email division reads for this stream (emailAllowed): offers turned off in the
 // Waves app, marketing asked for by text only, and any active suppression that covers the Waves marketing
 // group (an unsubscribe, a bounce, a spam complaint).
-async function notOptedOut({ job, customer, deps }) {
-  const prefs = await deps.db('notification_prefs').where({ customer_id: job.customer_id })
+// One read, on the handle it is given: the job's own check (notOptedOut), and in a live run the same read
+// again inside the ledger's reservation and at the provider handoff (optedOutGuard).
+async function optOutReason(database, { customerId, email, deps }) {
+  const prefs = await database('notification_prefs').where({ customer_id: customerId })
     .first('marketing_offers', 'marketing_channel');
   if (prefs?.marketing_offers === false) return 'offers_off';
   if (deps.channelFor(prefs, 'marketing_channel') === 'sms') return 'offers_by_text_only';
-  const suppressed = await deps.activeSuppressionsFor(null, customer.email, 'marketing_newsletter', deps.db);
+  const suppressed = await deps.activeSuppressionsFor(null, email, 'marketing_newsletter', database);
   return suppressed.length ? 'email_suppressed' : null;
+}
+
+function notOptedOut({ job, customer, deps }) {
+  return optOutReason(deps.db, { customerId: job.customer_id, email: customer.email, deps });
+}
+
+// One offer per customer per 12 months (owner 2026-11-19, "build"): a real offer email for ANOTHER job, sent or
+// reserved within the last 365 days, holds this job. The email division's ledger is the record: only real
+// customer sends reserve there (the office samples are test sends and never do), and it is the same table the
+// reservation's guard reads under the customer's lock (offeredBeforeGuard), so the rule and the guard cannot
+// disagree. A `failed` row counts too when its email was accepted or its handoff started (below). This job's own key never counts: its own send is not "before".
+async function offeredBefore(database, { customerId, jobId, now }) {
+  const since = new Date(now.getTime() - OFFER_WINDOW_MS);
+  const others = () => database('marketing_email_ledger')
+    .where({ customer_id: customerId, email_key: OFFER_TEMPLATE })
+    .whereNot('idempotency_key', offerKey(jobId));
+  const counted = await others().whereIn('status', ['sent', 'reserved'])
+    .whereRaw('COALESCE(sent_at, reserved_at) > ?', [since]).first('id');
+  if (counted) return counted;
+  // The ledger settles a `failed` row from email_messages for 30 days only. A failed row whose email the provider
+  // took, or whose handoff started (the ledger's own reader, messageStateFor), is an offer that went out, or may
+  // have. The year is measured from that handoff (the message's accepted or last-change time), not from the
+  // reservation: a reservation just over a year old can have been accepted inside the year.
+  const { messageStateFor } = require('./email-division/ledger');
+  const failed = await others().where({ status: 'failed' }).select('id', 'idempotency_key');
+  for (const row of failed) {
+    const { kind, message } = await messageStateFor(database, row.idempotency_key);
+    const at = kind === 'accepted' ? message.sent_at : message?.updated_at;
+    if ((kind === 'accepted' || kind === 'uncertain') && new Date(at) > since) return row;
+  }
+  return null;
+}
+
+// A worker that crashed after it reserved leaves a `reserved` row. The ledger settles it when it is older than
+// RESERVATION_LIFETIME_MS (and completes it as sent when the provider took the message), but only inside a
+// reservation. Settle first, so a dead row does not hold the customer for 365 days.
+async function notOfferedBefore({ job, now, deps }) {
+  await deps.settleStaleReservations(job.customer_id, now);
+  const earlier = await offeredBefore(deps.db, { customerId: job.customer_id, jobId: job.id, now });
+  return earlier ? OFFERED_BEFORE.toLowerCase() : null;
 }
 
 // The invoices that bill the job, by the links invoice.js assertNoOtherLiveVisitInvoice lists for "one visit,
@@ -447,17 +536,37 @@ async function noComplaint({ job, jobDay, deps }) {
 // whose send was late can carry a past expiry and still go out. An estimate held for a new price never goes
 // out as it is (estimate-clarify-asks repricePendingActive): its replacement is a row of its own. A draft may
 // never go out, so it is not a hold.
-async function noLiveEstimate({ job, now, deps }) {
-  const live = await deps.db('estimates')
-    .where({ customer_id: job.customer_id })
+// The one estimate that does not hold the job is the job's OWN offer quote (live mode mints it before it sends):
+// a send the email division denied, or one that failed, leaves that quote on file, and the next morning must
+// get past it and reuse it. Every other estimate holds, an offer quote of another job included.
+// The mint asks this same question again under the customer's locks (heldByOpenEstimate), before it retires a row.
+async function openEstimateBesidesOffer(database, { customerId, jobId, now }, rule) {
+  const live = await database('estimates')
+    .where({ customer_id: customerId })
     .whereNull('archived_at')
     .where((q) => q
-      .where((open) => open.whereIn('status', deps.liveEstimateStatuses)
+      .where((open) => open.whereIn('status', rule.liveEstimateStatuses)
         .where((unexpired) => unexpired.whereNull('expires_at').orWhere('expires_at', '>', now)))
       .orWhere((queued) => queued.where('status', SCHEDULED_ESTIMATE_STATUS).whereNotNull('scheduled_at')
-        .whereRaw(deps.repricePendingAbsentSql)))
-    .first('id');
-  return live ? 'open_estimate' : null;
+        .whereRaw(rule.repricePendingAbsentSql)))
+    .select('id', 'estimate_data');
+  return live.some((row) => planOfferOf(row.estimate_data)?.jobId !== String(jobId));
+}
+
+async function noLiveEstimate({ job, now, deps }) {
+  return (await openEstimateBesidesOffer(deps.db, { customerId: job.customer_id, jobId: job.id, now }, deps)) ? 'open_estimate' : null;
+}
+
+// The rule above for the offer estimate's mint (restart.js mintPlanStartEstimate), which asks it under the
+// customer's locks before it prices, retires or mints. The job's own check ran before those locks: a quote the
+// customer opened in between (a portal tap takes the same locks, so it has committed by then) would be
+// archived by the mint's lineage retire, and its link and slot hold with it. With this answer the mint refuses
+// (`open_estimate`), retires nothing, and the job is held for the morning.
+// An offer the customer ended (offerEnded) holds the mint the same way: it never mints over a decline.
+async function heldByOpenEstimate(database, { customerId, jobId, now }) {
+  const { liveEstimateStatuses, repricePendingAbsentSql } = defaultDeps();
+  return (await openEstimateBesidesOffer(database, { customerId, jobId, now }, { liveEstimateStatuses, repricePendingAbsentSql }))
+    || offerEnded(database, { customerId, jobId });
 }
 
 // The email division's own verdict for a marketing email on the nurture stream (unsubscribe, do-not-contact,
@@ -476,8 +585,67 @@ async function emailAllowed({ job, now, deps }) {
   return String(verdict.reason || 'email_not_allowed').toLowerCase();
 }
 
+// The money sentence of the email ("You pay after each visit. Nothing is charged today.") is true only for a
+// customer on the card rail. The estimate page asks two functions about the estimate before it prints that
+// wording (estimate-public.js): the recurring card policy, then payAfterFirstVisitCardRail. This rule asks them
+// about the account before any estimate exists, so a shadow sample and a live send hold the same customers:
+// payer-billed, Auto Pay paused or off, or the page's gate or the card lane off. The policy reads the estimate
+// for the customer it will land on (its customer_id) and for a visit already linked to it; an offer estimate
+// that is not made yet has no such visit. A plan member who is off the rail is held here; one on Auto Pay goes
+// on, and the pricer holds it (`has_plan`). A live run asks again about the estimate it made (onCardRail). A
+// failed read throws, and the job fails for the morning.
+async function cardRailOf(deps, estimate, more) {
+  const policy = await deps.resolveRecurringCardPolicyForEstimate({
+    estimate, treatAsOneTime: false, billByInvoice: false, paymentMethodPreference: null, ...more,
+  });
+  return deps.payAfterFirstVisitCardRail(policy) === true;
+}
+
+async function paysAfterVisit({ job, deps }) {
+  const onRail = await cardRailOf(deps, { customer_id: job.customer_id }, { membership: null, useLinkedFallback: false });
+  return onRail ? null : 'not_pay_after_visit';
+}
+
+// "You pay after each visit" is the email's promise, and a plan start puts the customer on Auto Pay. The card
+// policy alone does not refuse every account that has said no: with GATE_PAF_EXISTING_CUSTOMERS on, a paused
+// customer still gets a policy that rides the rail (autopayPaused), and the policy resolver reads an explicit
+// Auto Pay turn-off only for plan members. So the account is asked directly, with the card lane's own readers:
+// Auto Pay paused now (isPaused), or turned off by the customer (the latest autopay_log toggle,
+// explicitAutopayDisable). Both hold the job in both modes. A failed read throws, and the job fails for the morning.
+// Asked again at the provider handoff, on the handoff's transaction (autoPayGuard).
+async function autoPayReason(database, { customerId, now, deps, lock = false }) {
+  const read = database('customers').where({ id: customerId });
+  const account = await (lock ? read.forShare() : read).first('id', 'autopay_enabled', 'autopay_paused_until');
+  if (!account) return 'no_customer';
+  if (deps.isAutopayPaused(account, now)) return 'autopay_paused';
+  return (await deps.explicitAutopayDisable(account, database)) ? 'autopay_off' : null;
+}
+
+function autoPayAllowed({ job, now, deps }) {
+  return autoPayReason(deps.db, { customerId: job.customer_id, now, deps });
+}
+
+// The offer's own estimate, once the customer ended it (declined it, or took it). A failed send leaves the quote
+// open, and the customer can decline it before the next morning's retry. That retry must not mint over a
+// "no": the job holds, and the key is never tried again by a mint. The mint asks the same question again under
+// the customer's locks (heldByOpenEstimate). The offer stamp names the job.
+const ENDED_OFFER_STATUSES = Object.freeze(['declined', 'accepted']);
+async function offerEnded(database, { customerId, jobId }) {
+  const ended = await database('estimates')
+    .where({ customer_id: customerId, source: 'plan_start' })
+    .whereIn('status', ENDED_OFFER_STATUSES)
+    .whereRaw("estimate_data->'planStart'->'offer'->>'jobId' = ?", [String(jobId)])
+    .first('id');
+  return Boolean(ended);
+}
+
+async function offerNotEnded({ job, deps }) {
+  return (await offerEnded(deps.db, { customerId: job.customer_id, jobId: job.id })) ? 'offer_ended' : null;
+}
+
 const SEND_RULES = [
-  anotherVisit, customerReachable, notOptedOut, jobPaid, reviewAskClear, noComplaint, noLiveEstimate, emailAllowed,
+  anotherVisit, customerReachable, notOptedOut, notOfferedBefore, jobPaid, paysAfterVisit, autoPayAllowed, reviewAskClear,
+  noComplaint, offerNotEnded, noLiveEstimate, emailAllowed,
 ];
 
 // The plan price, or the reason this home goes to the office to price by hand. The pricer gets the job: it
@@ -505,7 +673,8 @@ async function evaluateJob(ctx) {
   return pricePlan(ctx);
 }
 
-function offerPayload({ customer, offerDay, option }) {
+// `estimateUrl` is the button's link: the sample page in shadow, the customer's own estimate in live.
+function offerPayload({ customer, offerDay, option, estimateUrl }) {
   const noYear = { year: undefined };
   const shortDay = (ymd) => formatDateOnly(ymd, { ...noYear, month: 'short' });
   const terms = offerTerms(offerDay);
@@ -520,8 +689,7 @@ function offerPayload({ customer, offerDay, option }) {
     setup_fee: money(option.setupFee),
     next_visit_window: `${shortDay(terms.firstVisitFrom)} to ${shortDay(terms.firstVisitTo)}`,
     offer_end_date: formatDateOnly(terms.lastDay, noYear),
-    // No estimate exists in shadow, so the button opens the estimate page's "not found" answer.
-    estimate_url: portalUrl('/estimate/sample'),
+    estimate_url: estimateUrl,
   };
 }
 
@@ -564,7 +732,8 @@ async function sentOfferValues(database, jobId) {
 async function sendSamples(ctx, option) {
   assertInternalEmailRecipient(SAMPLE_RECIPIENT);
   const payload = {
-    ...offerPayload({ customer: ctx.customer, offerDay: ctx.offerDay, option }),
+    // No estimate exists in shadow, so the button opens the estimate page's "not found" answer.
+    ...offerPayload({ customer: ctx.customer, offerDay: ctx.offerDay, option, estimateUrl: portalUrl('/estimate/sample') }),
     ...await sentOfferValues(ctx.deps.db, ctx.job.id),
   };
   const note = 'Sample only. No estimate was saved and the customer got no email. This account passed the send rules today,'
@@ -594,8 +763,8 @@ async function alreadySampled(database, jobId) {
   const row = await database('email_messages')
     .where({ idempotency_key: sampleKey(REMINDER_TEMPLATE, jobId) })
     .whereNotNull('sent_at')
-    .first('id');
-  return Boolean(row);
+    .first('id', 'sent_at', 'estimate_id');
+  return row || null;
 }
 
 async function shadowJob(job, { now, deps, priceSettings }) {
@@ -608,6 +777,314 @@ async function shadowJob(job, { now, deps, priceSettings }) {
   const outcome = await evaluateJob(ctx);
   if (outcome.verdict === 'sample') await sendSamples(ctx, outcome.option);
   return outcome;
+}
+
+// ---- Live: the customer's estimate and the customer's email (owner 2026-11-20, "i want auto"). ----
+
+// The words gate. A real send uses the template's active version on an active template, and the owner's publish
+// is his approval of the words (the seed migration leaves both templates drafts). The library decides it
+// (resolveTemplateForSend, the first step of every sendTemplate): its refusal codes mean "no published words",
+// and any other error is an outage and fails the run. A run that reads no job also reserves nothing.
+const WORDS_MISSING_CODES = ['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'];
+async function offerWordsPublished(deps) {
+  try {
+    await deps.resolveTemplateForSend({ templateKey: OFFER_TEMPLATE, database: deps.db });
+    return true;
+  } catch (err) {
+    if (WORDS_MISSING_CODES.includes(err?.code)) return false;
+    throw err;
+  }
+}
+
+// The offer email went out, or may have: the delivery authority (email_messages) shows the provider accepted it,
+// or the handoff started and the answer is unknown. A row that definitely never reached the provider is not an
+// offer: the same key is tried again (the ledger reopens its failed row). Mirrors email-division/ledger.js
+// messageStateFor: sent_at set = accepted, provider_handoff_phase 'started' = uncertain.
+async function alreadyOffered(database, jobId) {
+  const row = await database('email_messages')
+    .where({ idempotency_key: offerKey(jobId) })
+    .where((sent) => sent.whereNotNull('sent_at').orWhere('provider_handoff_phase', 'started'))
+    .first('id', 'sent_at', 'estimate_id');
+  return row || null;
+}
+
+// The confirmed send on the estimate: estimate_data.deliveryState, in the shape sendEstimateNow writes for an email
+// the provider accepted (admin-estimates.js: sentChannels, channels, firstDeliveredAt, lastDeliveredAt, deliveredAt
+// history capped at DELIVERY_HISTORY_MAX). That function sends and stamps in one piece for the office's own sends, so
+// there is no separate writer to call. Staff views, the win/loss report and the click-mint reports read this stamp:
+// without it an emailed offer reads as never delivered. The estimate is the one the email linked
+// (email_messages.estimate_id, set by the send), never a guess. A handoff is merged into whatever the estimate
+// already carries, by its time: deduplicated, the history in time order, firstDeliveredAt the earliest and
+// lastDeliveredAt the latest of all (call-commitments.js reads them as a set of instants). A staff resend before
+// or after it stays. Idempotent: a time already in the history changes nothing. The row is locked for the
+// read-modify-write.
+const DELIVERY_HISTORY_MAX = 25;
+const earliest = (...times) => times.filter(Boolean).sort()[0];
+const latest = (...times) => times.filter(Boolean).sort().pop();
+async function writeOfferDelivery(database, {
+  customerId, jobId, estimateId, deliveredAt,
+}) {
+  const at = deliveredAt.toISOString();
+  return database.transaction(async (trx) => {
+    const row = await trx('estimates').where({ id: estimateId, customer_id: customerId, source: 'plan_start' })
+      .whereRaw("estimate_data->'planStart'->'offer'->>'jobId' = ?", [String(jobId)])
+      .forUpdate().first('id', 'estimate_data');
+    if (!row) return false;
+    const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+    const prior = data.deliveryState || {};
+    const history = Array.isArray(prior.deliveredAt) ? prior.deliveredAt.filter((time) => typeof time === 'string') : [];
+    if (history.includes(at)) return false;
+    const newest = !prior.lastDeliveredAt || at > prior.lastDeliveredAt;
+    const deliveryState = {
+      ...prior,
+      // The email's own result joins the channel results (an SMS result stays beside it). An older handoff
+      // does not move the time of the latest attempt.
+      ...(newest ? { attemptedAt: at } : {}),
+      channels: { ...prior.channels, email: { ok: true, providerAttempted: true, providerAccepted: true, provider: OFFER_TEMPLATE } },
+      sentChannels: [...new Set([...(prior.sentChannels || []), 'email'])],
+      failedChannels: prior.failedChannels || [],
+      firstDeliveredAt: earliest(prior.firstDeliveredAt, at),
+      lastDeliveredAt: latest(prior.lastDeliveredAt, at),
+      deliveredAt: [...history, at].sort().slice(-DELIVERY_HISTORY_MAX),
+    };
+    await trx('estimates').where({ id: row.id }).update({ estimate_data: JSON.stringify({ ...data, deliveryState }) });
+    return true;
+  });
+}
+
+async function recordOfferDelivery(deps, args) {
+  try {
+    await deps.writeOfferDelivery(deps.db, args);
+  } catch (err) {
+    logger.warn(`[onetime-plan-offer] delivery record failed for job ${args.jobId} (code=${err?.code || 'none'})`);
+  }
+}
+
+// The estimate the mint answered with, read once for the two checks below.
+async function mintedEstimate(estimateId, { deps }) {
+  const estimate = await deps.db('estimates').where({ id: estimateId }).first();
+  if (!estimate) throw Object.assign(new Error('the minted estimate could not be read'), { code: 'ESTIMATE_MISSING' });
+  return estimate;
+}
+
+// The email states the offer's last day and the next visit's window from the offer day this run read when it
+// listed the job. The mint reads the offer day again under the customer's locks (dueOfferOfJob), and the
+// estimate carries the mint's dates. They differ when the service record changed in between (staff corrected
+// the performed day, a follow-up was completed). An email whose dates are not its estimate's is never sent:
+// the job is held, and the next morning lists the job with the day the estimate now carries.
+function sameDatesAsEmail(estimate, { job, offerDay }) {
+  const { endsAt, firstVisitFrom } = offerTerms(offerDay);
+  return samePlanOffer(planOfferOf(estimate.estimate_data), { jobId: String(job.id), endsAt, firstVisitFrom });
+}
+
+// The card rail again (paysAfterVisit), now as the estimate page asks it: about the estimate row itself, with
+// its membership context and any visit linked to it.
+async function onCardRail(estimate, { deps }) {
+  return cardRailOf(deps, estimate, { membership: await deps.buildEstimateMembershipContext(estimate) });
+}
+
+// The one-per-12-months rule again, inside the ledger's reservation, under the customer's advisory lock: two
+// runs cannot both pass it. The ledger's guard contract: null to go on, { reason } to deny.
+async function offeredBeforeGuard(trx, { customerId, jobId, now }) {
+  return (await offeredBefore(trx, { customerId, jobId, now })) ? { reason: OFFERED_BEFORE } : null;
+}
+
+// The offer's own estimate, at the provider handoff: the email's button opens it, so the email never leaves
+// for an estimate the customer cannot open. The same customer's next plan-start mint (a tap on another plan
+// option) archives this lineage, and that mint holds the customer-comms advisory lock, so this guard takes
+// that lock first (a mint in flight finishes before the read; a new one waits for this transaction's end) and
+// reads the row with a share lock (staff archiving it waits too). "Can open" is the public estimate page's
+// rule, as in openEstimateBesidesOffer. Retryable: the ledger settles the reservation `failed`, so the next
+// morning's run mints again under the same key. Except when the customer ended the offer themselves (declined
+// or accepted it): that is final, the ledger settles the key `skipped`, and no later morning sends it again.
+const OFFER_ESTIMATE_GONE = 'OFFER_ESTIMATE_GONE';
+// The kill switch (GATE_ONETIME_PLAN_OFFER, read again, never from the run's start): a batch that began live
+// stops sending when the owner turns it off. The job reads it before each job, and the handoff reads it once
+// more, the last read before the email leaves. Retryable: the next live morning sends under the same key.
+const OFFER_GATE_OFF = 'OFFER_GATE_OFF';
+const liveModeOn = () => require('../config/feature-gates').onetimePlanOfferMode?.() === 'live';
+
+async function offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps }) {
+  await lockCustomerComms(trx, customer.id);
+  const estimate = await trx('estimates').where({ id: estimateId }).forShare()
+    .first('customer_id', 'status', 'archived_at', 'expires_at', 'estimate_data');
+  const open = estimate && estimate.customer_id === customer.id && !estimate.archived_at
+    && deps.liveEstimateStatuses.includes(estimate.status)
+    && (!estimate.expires_at || new Date(estimate.expires_at) > now)
+    && planOfferOf(estimate.estimate_data)?.jobId === String(jobId);
+  return open ? null : { reason: OFFER_ESTIMATE_GONE, retryable: !ENDED_OFFER_STATUSES.includes(estimate?.status) };
+}
+
+// The Auto Pay rule again at the handoff: the customer can pause or turn off Auto Pay during the mint, and the
+// card policy asked about the estimate (onCardRail) does not refuse either. Retryable like the estimate guard:
+// the next morning's rule holds the job while it stands, and sends once it lifts.
+async function autoPayGuard(trx, { customer, now, deps }) {
+  // The customer row is read FOR SHARE, to the end of the handoff transaction: a pause or turn-off that commits
+  // later waits for the email's send, and one that committed earlier is read here.
+  const reason = await autoPayReason(trx, { customerId: customer.id, now, deps, lock: true });
+  return reason ? { reason: reason.toUpperCase(), retryable: true } : null;
+}
+
+// Every refusal the offer owns at the provider handoff, in the order the transaction reads them: the kill switch
+// (no lock), the estimate (takes the customer-comms lock, the last wait), Auto Pay, the opt-outs.
+async function handoffGuard(trx, { customer, jobId, estimateId, now, deps }) {
+  if (!liveModeOn()) return { reason: OFFER_GATE_OFF, retryable: true };
+  return (await offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps }))
+    || (await autoPayGuard(trx, { customer, now, deps }))
+    || optedOutGuard(trx, { customer, deps });
+}
+
+// The opt-outs of Waves marketing again (notOptedOut), on the ledger's own transaction. The division's checks
+// for this stream do not read them: offers turned off in the app, marketing by text only, a suppression of the
+// marketing group. The job's check ran before the home was priced and the estimate was made, so a customer
+// who opts out in between is caught here: once inside the reservation (a denial there leaves no row), and
+// once more at the provider handoff, the last read before the email leaves (the ledger settles that
+// reservation `skipped`). The reason goes to the ledger in its own spelling, upper case.
+async function optedOutGuard(trx, { customer, deps }) {
+  const reason = await optOutReason(trx, { customerId: customer.id, email: customer.email, deps });
+  return reason ? { reason: reason.toUpperCase() } : null;
+}
+
+// A send the ledger did not complete. A denial that left no reservation is a verdict about this customer today:
+// the job is held under the division's own reason, and the quote stays for the next morning. A reservation that
+// settled `sent` went out, or may have (handoff started, answer lost): done, never tried again. One that
+// settled `failed` is an outage (the provider, the library, the template): the job fails, and the next morning
+// sends again under the same key. One that settled `skipped` is a refusal at the provider boundary (consent
+// changed, address changed): held.
+// A duplicate is an earlier attempt's row under this job's key, and its status is the answer. `skipped` is the
+// ledger's permanent drop: no offer went out and the key is never sent again, so the job reads held on every
+// later morning, never "offered". `reserved` is a send in flight, or one a crash left: the ledger settles it on
+// a later morning. Any other row (sent) is the offer.
+// The handoff's own refusals (boundaryGuard): the job is held, whatever the ledger settled the row as.
+const HANDOFF_HOLDS = ['OFFER_ESTIMATE_GONE', 'OFFER_GATE_OFF', 'AUTOPAY_PAUSED', 'AUTOPAY_OFF', 'NO_CUSTOMER'];
+const EARLIER_ATTEMPT = Object.freeze({ skipped: 'send_dropped', reserved: 'send_in_flight' });
+async function settleOfferSend(out, { deps }) {
+  if (HANDOFF_HOLDS.includes(out.reason)) return { verdict: 'held', reason: out.reason.toLowerCase() };
+  if (out.sent) return { verdict: 'sent', reason: null };
+  if (out.duplicate) {
+    const reason = EARLIER_ATTEMPT[out.row?.status];
+    return reason ? { verdict: 'held', reason } : { verdict: 'done', reason: null };
+  }
+  if (out.row) {
+    const settled = await deps.db('marketing_email_ledger').where({ id: out.row.id }).first('status');
+    if (settled?.status === 'sent') return { verdict: 'done', reason: null };
+    if (settled?.status === 'failed') throw Object.assign(new Error('offer email was not sent'), { code: 'OFFER_NOT_SENT' });
+  } else if (out.reason === EMAIL_VERDICT.LOOKUP_FAILED) {
+    throw Object.assign(new Error('email division read failed'), { code: 'LOOKUP_FAILED' });
+  }
+  return { verdict: 'held', reason: String(out.reason || 'email_not_allowed').toLowerCase() };
+}
+
+// Priced and allowed: mint first (the nurture stream wants an estimate on file, and the quote is the button's
+// target), then check the estimate's dates against the email's and the money sentence, then send. The mint is
+// told the job and nothing else. It proves the job and takes both dates from offerTerms (dueOfferOfJob), the
+// same function the email's words come from. It reuses this job's quote when one is live with the same dates,
+// so a denied send leaves a quote that the next morning reuses, and the link in the email is always the one
+// the mint answered with on THIS run. It never replaces another estimate the customer can open (open_estimate).
+async function mintAndSend(ctx, option) {
+  const { job, now, deps, customer } = ctx;
+  let minted;
+  try {
+    minted = await deps.mintPlanStartEstimate({
+      customer,
+      serviceKey: 'pest_control',
+      optionId: option.id,
+      shown: {
+        monthly: option.monthly, perVisit: option.perVisit, dueAtStart: option.dueAtStart, oneTime: option.oneTime, setupFee: 0,
+      },
+      offer: { jobId: String(job.id) },
+      now: () => now,
+    });
+  } catch (err) {
+    // A refusal is the customer's or the home's answer. Any other error is a bug in this job (the mint throws a
+    // plain Error for a job that is not this customer's due job) or an outage: it fails the job.
+    const refusal = err?.restartUnavailable === true ? MINT_REFUSALS[err.code] : null;
+    if (refusal) return { ...refusal };
+    throw err;
+  }
+  const estimate = await mintedEstimate(minted.estimateId, ctx);
+  if (!sameDatesAsEmail(estimate, ctx)) return { verdict: 'held', reason: 'offer_day_moved' };
+  if (!(await onCardRail(estimate, ctx))) return { verdict: 'held', reason: 'not_pay_after_visit' };
+
+  const payload = pick(
+    offerPayload({ customer, offerDay: ctx.offerDay, option, estimateUrl: portalUrl(minted.url) }),
+    TEMPLATE_VARIABLES[OFFER_TEMPLATE],
+  );
+  const out = await deps.sendWithLedger({
+    customerId: customer.id,
+    stream: OFFER_STREAM,
+    marketingClass: 'marketing',
+    emailKey: OFFER_TEMPLATE,
+    idempotencyKey: offerKey(job.id),
+    now,
+    // The address the payload was built for: the ledger refuses the send if the customer's address changed.
+    expectedRecipientEmail: customer.email,
+    guard: async (trx) => (await offeredBeforeGuard(trx, { customerId: customer.id, jobId: job.id, now }))
+      || optedOutGuard(trx, { customer, deps }),
+    boundaryGuard: (trx) => handoffGuard(trx, { customer, jobId: job.id, estimateId: minted.estimateId, now, deps }),
+    // linkEstimateId: provenance only (email_messages.estimate_id), the estimate this email links to.
+    template: { templateKey: OFFER_TEMPLATE, payload, categories: [OFFER_CATEGORY], linkEstimateId: minted.estimateId },
+  });
+  const settled = await settleOfferSend(out, ctx);
+  if (settled.verdict === 'sent' || settled.verdict === 'done') {
+    // Confirmed means the provider's acceptance (email_messages.sent_at), and that time is the stamp on every path,
+    // so a run that sends and a run that finds the send record the same instant. The email is out: a failed read
+    // or write here never changes the verdict (the next morning finds the send confirmed and records it).
+    try {
+      const mail = await alreadyOffered(deps.db, job.id);
+      // The estimate the accepted message linked, which an earlier attempt's message can name instead of this run's.
+      if (mail?.sent_at && mail.estimate_id) {
+        await recordOfferDelivery(deps, {
+          customerId: customer.id, jobId: job.id, estimateId: mail.estimate_id, deliveredAt: new Date(mail.sent_at),
+        });
+      }
+    } catch (err) {
+      logger.warn(`[onetime-plan-offer] delivery lookup failed for job ${job.id} (code=${err?.code || 'none'})`);
+    }
+  }
+  return settled;
+}
+
+async function liveJob(job, { now, deps, priceSettings }) {
+  if (await alreadyOffered(deps.db, job.id)) return { verdict: 'done', reason: null };
+  const ctx = {
+    job, now, deps, priceSettings, offerDay: dateOnlyString(job.service_day), jobDay: dateOnlyString(job.job_day),
+  };
+  const outcome = await evaluateJob(ctx);
+  // 'sample' is the shared verdict for "priced and allowed". Live turns it into the customer's offer.
+  return outcome.verdict === 'sample' ? mintAndSend(ctx, outcome.option) : outcome;
+}
+
+// The offers the provider accepted whose estimate does not carry the delivery yet: the stamp write failed, or the run
+// died after the send. Independent of the job's 3 to 14 day window, so a job that has left it is still recorded.
+// Bounded: the messages of the last RECONCILE_DAYS days, newest first, RECONCILE_LIMIT at most, only those that link
+// an estimate (email_messages.estimate_id), whose time is not yet in the estimate's history. Sends nothing, and a
+// failure here never fails the run (the next morning reads the same rows).
+const RECONCILE_DAYS = 30;
+const RECONCILE_LIMIT = 200;
+async function reconcileOfferDeliveries({ now, deps }) {
+  const since = new Date(now.getTime() - RECONCILE_DAYS * 24 * 60 * 60 * 1000);
+  const messages = await deps.db('email_messages as m')
+    .join('estimates as e', 'e.id', 'm.estimate_id')
+    .where('m.template_key', OFFER_TEMPLATE)
+    .whereNotNull('m.sent_at')
+    .where('m.sent_at', '>', since)
+    // Not yet in the estimate's history, so the limit never counts the rows already recorded. The instant is spelled
+    // as toISOString spells it.
+    .whereRaw(`NOT jsonb_exists(COALESCE(e.estimate_data->'deliveryState'->'deliveredAt', '[]'::jsonb),
+      to_char(m.sent_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))`)
+    .orderBy('m.sent_at', 'desc')
+    .limit(RECONCILE_LIMIT)
+    .select('m.estimate_id', 'm.sent_at', 'e.customer_id', 'e.estimate_data');
+  for (const message of messages) {
+    const at = new Date(message.sent_at);
+    const data = typeof message.estimate_data === 'string' ? JSON.parse(message.estimate_data) : message.estimate_data;
+    const stamp = planOfferOf(data);
+    const stamped = Array.isArray(data?.deliveryState?.deliveredAt) && data.deliveryState.deliveredAt.includes(at.toISOString());
+    if (stamp && !stamped) {
+      await recordOfferDelivery(deps, { customerId: message.customer_id, jobId: stamp.jobId, estimateId: message.estimate_id, deliveredAt: at });
+    }
+  }
 }
 
 // ---- The price settings. ----
@@ -668,8 +1145,13 @@ async function reportPriceSettings({ now, deps }, { refused, priced }) {
 // One job's result into the morning's counts. A failure is counted and the job is read again the next morning.
 async function countJob(job, run, summary) {
   summary.jobs += 1;
+  if (run.mode === 'live' && !liveModeOn()) {
+    summary.held += 1;
+    summary.reasons.offer_gate_off = (summary.reasons.offer_gate_off || 0) + 1;
+    return;
+  }
   try {
-    const { verdict, reason } = await shadowJob(job, run);
+    const { verdict, reason } = await (run.mode === 'live' ? liveJob : shadowJob)(job, run);
     summary[verdict] += 1;
     if (reason) summary.reasons[reason] = (summary.reasons[reason] || 0) + 1;
   } catch (err) {
@@ -681,9 +1163,11 @@ async function countJob(job, run, summary) {
 }
 
 /**
- * The daily job. Returns counts only: { mode, jobs, sample, office, held, done, failed, reasons }.
- *   sample = both sample emails went to the office today.   office = the app cannot price this home.
- *   held   = the offer is not for this customer.            done   = sampled on an earlier morning.
+ * The daily job. Returns counts only: { mode, jobs, sample, office, held, done, failed, reasons }, and in live
+ * mode also `sent`, or `words_not_approved: true` when the offer template is not published (nothing is read).
+ *   sample = both sample emails went to the office today (shadow).   sent = the customer got the offer today (live).
+ *   office = the app cannot price this home.   held = the offer is not for this customer today.
+ *   done   = sampled (shadow) or offered (live) on an earlier morning.
  * One job's failure never stops the others; it is counted and read again the next morning.
  * A morning in which the price settings refused a job and no home was priced raises one admin notification
  * (reportPriceSettings).
@@ -691,9 +1175,14 @@ async function countJob(job, run, summary) {
 async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} } = {}) {
   const mode = require('../config/feature-gates').onetimePlanOfferMode?.() || 'off';
   const summary = { mode, jobs: 0, sample: 0, office: 0, held: 0, done: 0, failed: 0, reasons: {} };
-  if (mode !== 'shadow') return summary;
+  if (mode !== 'shadow' && mode !== 'live') return summary;
   const deps = { ...defaultDeps(), ...overrides };
-  const run = { now, deps, priceSettings: { refused: 0, priced: 0 } };
+  if (mode === 'live') {
+    summary.sent = 0;
+    // The owner's publish of the offer template is his approval of the words. Until then no job is read.
+    if (!(await offerWordsPublished(deps))) return { ...summary, words_not_approved: true };
+  }
+  const run = { mode, now, deps, priceSettings: { refused: 0, priced: 0 } };
   const today = etDateString(now);
   let page = await dueJobsPage(deps.db, today, null);
   while (page.length) {
@@ -702,16 +1191,24 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
     page = page.length < PAGE_SIZE ? [] : await dueJobsPage(deps.db, today, page[page.length - 1]);
   }
   await reportPriceSettings(run, run.priceSettings);
+  if (mode === 'live') {
+    try {
+      await reconcileOfferDeliveries(run);
+    } catch (err) {
+      logger.warn(`[onetime-plan-offer] delivery reconcile failed (code=${err?.code || 'none'})`);
+    }
+  }
   return summary;
 }
 
 module.exports = {
   runOnetimePlanOfferJob,
   dueOfferOfJob,
+  heldByOpenEstimate,
   offerTerms,
   JOB_SERVICE_KEYS,
   OFFER_TEMPLATE,
   REMINDER_TEMPLATE,
   TEMPLATE_VARIABLES,
-  _test: { defaultDeps, offerPayload, sampleKey, PRICE_SETTINGS_ALERT_KEY },
+  _test: { defaultDeps, offerPayload, sampleKey, offerKey, PRICE_SETTINGS_ALERT_KEY },
 };

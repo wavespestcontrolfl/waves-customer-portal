@@ -178,7 +178,7 @@ function customerPickByIso(row) {
 
 // GATE_DAY_ONLY_PROMISE (part C1): a visit the customer was told only the DAY for shows no hour. `hidden` is the
 // Set of row ids from ONE dayOnlyIds() call per payload. The server blanks the hour fields (an older app bundle then
-// renders the date alone) and adds day_only + arrival_note. Not in the set (gate off, hour told, inside the 24-hour
+// renders the date alone) and adds day_only + arrival_note. Not in the set (hour told, inside the 24-hour
 // cutoff, any lookup failure): the fields are exactly today's, and no key is added.
 const hourOf = (hidden, row, field) => (hidden.has(String(row.id)) ? null : row[field]);
 

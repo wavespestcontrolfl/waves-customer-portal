@@ -1576,9 +1576,13 @@ const RODENT = {
     eligibilityRequires: [
       'trappingCompleted',
       'exclusionCompleted',
-      'sanitationCompletedOrPhotoBaseline',
       'noActivityAfterFinalTrapCheck',
     ],
+    // Owner ruling 2026-11-23: the guarantee does NOT require sanitation (the signed
+    // agreement service_agreement.rodent_exclusion_guarantee asks for trapping + exclusion).
+    // Flags named here are dropped from any eligibility list, including one a stored
+    // pricing_config row (rodent_guarantee.eligibility_requires) still carries.
+    retiredEligibilityFlags: ['sanitationCompletedOrPhotoBaseline'],
   },
 
   // WaveGuard rules (owner directive 2026-08-29): bait stations are a FULL

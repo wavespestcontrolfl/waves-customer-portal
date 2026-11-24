@@ -270,7 +270,7 @@ function staleAnchorReason(reason, tierMeta) {
   if (reason.code !== 'NO_VALID_SLOT' || !(tierMeta && tierMeta.anchor_stale)) return reason;
   return {
     code: 'DRIFT_ANCHOR_STALE',
-    description: `Day moves are blocked: the visit was re-dated after an earlier auto move and is now more than ${2 * flexTier.FLEX_TIER_RADIUS_DAYS} days from its original date ${tierMeta.anchor}; no same-day re-time found either`,
+    description: `Day moves are blocked: the visit was re-dated after an earlier auto move and is now more than ${2 * (tierMeta.radius_days || flexTier.FLEX_TIER_RADIUS_DAYS)} days from its original date ${tierMeta.anchor}; no same-day re-time found either`,
   };
 }
 
@@ -317,7 +317,7 @@ function noteUnmoved(run, service, reasonCode) {
 // or a person may have changed its slot or freed the stop it overlapped.
 // Returns null when it is no longer an open visit with an arrival time,
 // { clear: true } when it no longer conflicts. A visit whose only conflict is
-// the customer's mowing day (GATE_AUTO_DISPATCH_MOWING_DAYS) needs no person:
+// the customer's mowing day (mowing-days.js) needs no person:
 // it reads clear here, so it raises no notice and closes an older one.
 async function standingConflict(seen, id) {
   const row = await db('scheduled_services').where({ id }).first('*');
@@ -389,7 +389,7 @@ async function settleConflicts(run) {
 
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
-    current, candidates, drops, skipped, search, shadow_candidates: dryShadowCandidates = [], mowing, mowing_shadow_candidates: mowingShadowCandidates = null,
+    current, candidates, drops, skipped, search, shadow_candidates: dryShadowCandidates = [], mowing,
   } = await findSlotsOrSkip(service, prefs, ctx);
   const prefsSnapshot = prefs.raw_snapshot;
   const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
@@ -412,7 +412,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       reason_code: reason.code,
       reason_description: reason.description,
       conflict: (current && current.conflict) || null,
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { service, current, candidates: dryShadowCandidates, shadow: emptyShadow }), ...mowingDays.auditNote(mowing, { service, current }) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { service, current, candidates: dryShadowCandidates, shadow: emptyShadow }), ...mowingDays.auditNote(mowing, { current }) } },
     };
   }
 
@@ -446,10 +446,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const live = ranked.qualifies ? best : null;
   Object.assign(constraints, dryTimeConstraint(prefs, {
     service, current, candidates: shadowPool, live, shadow: dryTimeShadowBest({ service, prefs, current, candidates: shadowPool, scoreCtx, threshold, config }),
-  }), mowingDays.auditNote(mowing, {
-    service, current, live, currentScore, threshold, config, conflictMoves: ctx.conflictMoves,
-    shadowCandidates: mowingShadowCandidates, scoreOf: (cand) => scoreAppointmentPlacement(cand, prefs, scoreCtx),
-  }));
+  }), mowingDays.auditNote(mowing, { current, live }));
 
   // Capped AFTER scoring (Codex r1): with the gate on, findValidCandidateSlots
   // returns every survivor and each was scored above before this cap.
@@ -483,7 +480,7 @@ function dryTimeConstraint(prefs, {
 
 // A placement audit rebuilt around the candidate apply.js tried keeps the
 // evaluation's dry_time block, with live_best following that candidate, and
-// its mowing_days block as it was (GATE_AUTO_DISPATCH_MOWING_DAYS).
+// its mowing_days block as it was (mowing-days.js).
 function carryDryTime(built, evaluation, candidate) {
   const from = (evaluation.audit && evaluation.audit.constraints) || {};
   const note = dryTime.noteForCandidate(from.dry_time, candidate);
@@ -727,18 +724,10 @@ function reminderFreezeHours(guardMode) {
 // the explicit lock24h option, so no other caller's default ever changes. A night
 // run (owner 2026-11-05, "D1 a") also freezes a visit the customer was told a time
 // for (`toldLock`, a known-slot promise).
-// GATE_DAY_ONLY_PROMISE (`dayOnly`, only with toldLock): the option also freezes a visit whose latest promise is a
-// day-only or unknown-window one (opts.anyPromise).
-function freezeReadArgs(guardMode, dayOnly = false) {
+// The option also freezes a visit whose latest promise is a day-only or unknown-window one (opts.anyPromise).
+function freezeReadArgs(guardMode) {
   const hours = reminderFreezeHours(guardMode);
-  return [hours, dayOnly === true ? { lock24h: true, toldLock: true, anyPromise: true } : { lock24h: true, toldLock: true }];
-}
-
-// The run's one read of GATE_DAY_ONLY_PROMISE (config.dayOnlyPromise): a day-only or unknown-window promise then
-// freezes a visit too (loadReminderFreeze opts.anyPromise). Only this config carries it; the rain pass and
-// route-reorder never build it.
-function dayOnlyOf(config) {
-  return !!config && config.dayOnlyPromise === true;
+  return [hours, { lock24h: true, toldLock: true, anyPromise: true }];
 }
 
 // How the skip text names the reminder that froze a visit: the 24-hour reminder, or a time the customer was told.
@@ -750,23 +739,23 @@ function frozenReminderLabel() {
 // Bulk per-run guard context for the active mode. ROUTE-TIERS needs the
 // reminder freeze (its 24.25h band) + drift-anchor evidence; FLEX-TIER needs
 // the reminder freeze (its own, tighter 25h band) + the SAME drift-anchor
-// evidence (its ±5 days are measured from the durable original date too) +
+// evidence (its ±5 or ±7 days are measured from the durable original date too) +
 // each visit's series neighbors. Both FAIL CLOSED: a failed read must
 // freeze/guard-unknown every visit rather than move without the check.
 // Pulled out of runAutoDispatch to keep its complexity budget (see
 // buildPlacementAudit above). Returns { reminderFreeze, anchorMap, neighborMap, degraded }.
-async function loadGuardContext(guardMode, services, nowDate, dayOnly = false) {
+async function loadGuardContext(guardMode, services, nowDate) {
   if (guardMode === 'legacy') {
     return {
       reminderFreeze: null, anchorMap: null, neighborMap: null, degraded: false,
     };
   }
   const ids = services.map((s) => s.id);
-  const reminderFreeze = await routeTiers.loadReminderFreeze(db, ids, nowDate, ...freezeReadArgs(guardMode, dayOnly));
+  const reminderFreeze = await routeTiers.loadReminderFreeze(db, ids, nowDate, ...freezeReadArgs(guardMode));
   // ALL ids, not just change_count>0 — the durable move records (not the
   // best-effort stamp) decide whether a visit has spent drift budget.
   const anchorMap = await routeTiers.loadAnchorMap(db, ids);
-  const neighborMap = guardMode === 'flex' ? await flexTier.loadSeriesNeighbors(db, services) : null;
+  const neighborMap = guardMode === 'flex' ? await flexTier.loadSeriesNeighbors(db, services, { withRadius: true }) : null;
   const degraded = (reminderFreeze && reminderFreeze.failed)
     || anchorMap === null
     || (guardMode === 'flex' && neighborMap === null);
@@ -801,10 +790,10 @@ function frozenSkipReason(service) {
 // from its anchor after an earlier auto move — the two ±radius bands cannot
 // overlap beyond twice the radius). The same-day re-time search still runs on
 // that one-day window; this only records why a day move cannot exist.
-function staleAnchorMeta(window, origDate, anchor) {
+function staleAnchorMeta(window, origDate, anchor, radius = flexTier.FLEX_TIER_RADIUS_DAYS) {
   const orig = toDateStr(origDate);
   const collapsed = window.dateFrom === orig && window.dateTo === orig;
-  const apart = Math.abs(routeTiers.daysBetween(anchor, orig)) > 2 * flexTier.FLEX_TIER_RADIUS_DAYS;
+  const apart = Math.abs(routeTiers.daysBetween(anchor, orig)) > 2 * radius;
   return collapsed && apart ? { anchor_stale: true } : {};
 }
 
@@ -816,8 +805,8 @@ function staleAnchorMeta(window, origDate, anchor) {
 // reminder row at all is invisible to that check, and the flex ctx skips
 // eligibility.js's days-out lock entirely, so the 25h cutoff is ALSO
 // enforced directly from the visit's own canonical arrival (Codex pre-push
-// P1; an unreadable arrival throws, and the run records it). The ±5-day
-// window is anchored to the durable original date (route-tiers'
+// P1; an unreadable arrival throws, and the run records it). The ±5-day (±7 for a
+// plan of 2 months or longer) window is anchored to the durable original date (route-tiers'
 // resolveAnchor), so it is never reset by an earlier move. A null neighbor
 // map is a failed read — skip.degraded, so the caller folds it into the
 // run's health (Codex #4995 r6 P2); a visit merely missing from the map is
@@ -834,13 +823,19 @@ async function flexWindowFor(service, {
   const neighbors = neighborMap.get(service.id);
   if (!neighbors) return skip('SERIES_NEIGHBORS_UNKNOWN', 'Visit missing from its own series read — no move (fail closed)');
   if (!anchor) return skip('DRIFT_ANCHOR_UNKNOWN', 'Recurrence anchor could not be derived — no move (fail closed)');
-  const window = flexTier.flexTierMoveWindow({ origDate: service.scheduled_date, anchorDate: anchor, today, neighbors });
+  // The band is this visit's own (±7 for a plan of 2 months or longer whose nearest live sibling is 56 days away or more, else ±5),
+  // from the pattern THIS series read saw (`neighbors.radiusDays`), never the pass-1 snapshot: the pass-2 recheck
+  // must rank moves by the band the move transaction will enforce (apply.js assertFlexWindows reads the same fact).
+  const radius = flexTier.flexBandRadius({ radiusDays: neighbors.radiusDays, neighbors });
+  const window = flexTier.flexTierMoveWindow({
+    origDate: service.scheduled_date, anchorDate: anchor, today, neighbors, radiusDays: radius,
+  });
   if (!window) {
-    return skip('FLEX_WINDOW_EXHAUSTED', `No legal candidate dates left within ±${flexTier.FLEX_TIER_RADIUS_DAYS} days of the visit's date and its original date ${anchor}, clamped by the series' adjacent occurrence`);
+    return skip('FLEX_WINDOW_EXHAUSTED', `No legal candidate dates left within ±${radius} days of the visit's date and its original date ${anchor}, clamped by the series' adjacent occurrence`);
   }
   return {
     window, meta: {
-      mode: 'flex', radius_days: flexTier.FLEX_TIER_RADIUS_DAYS, anchor, neighbors, window, ...staleAnchorMeta(window, service.scheduled_date, anchor),
+      mode: 'flex', radius_days: radius, anchor, neighbors, window, ...staleAnchorMeta(window, service.scheduled_date, anchor, radius),
     }, skip: null,
   };
 }
@@ -904,9 +899,9 @@ async function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate
 // runAutoDispatch's pass-2 loop for the same complexity-budget reason as
 // resolveDayMoveWindow. Returns { window, meta, skip }; skip.degraded flags
 // a read failure the caller must fold into the run's health status.
-async function recheckDayMoveWindow(guardMode, service, meta, nowDate, dayOnly = false) {
+async function recheckDayMoveWindow(guardMode, service, meta, nowDate) {
   if (guardMode === 'legacy') return { window: null, meta: null, skip: null };
-  const applyFreeze = await routeTiers.loadReminderFreeze(db, [service.id], nowDate, ...freezeReadArgs(guardMode, dayOnly));
+  const applyFreeze = await routeTiers.loadReminderFreeze(db, [service.id], nowDate, ...freezeReadArgs(guardMode));
   if (applyFreeze.failed) {
     return { window: null, meta: null, skip: { code: 'REMINDER_STATUS_UNKNOWN', description: 'Reminder-sent status unreadable at apply time — frozen (fail closed)', degraded: true } };
   }
@@ -916,7 +911,7 @@ async function recheckDayMoveWindow(guardMode, service, meta, nowDate, dayOnly =
   const todayNow = etDateString(nowDate);
   if (guardMode === 'flex') {
     return flexWindowFor(service, {
-      neighborMap: await flexTier.loadSeriesNeighbors(db, [service]), anchor: meta && meta.anchor, today: todayNow, nowDate,
+      neighborMap: await flexTier.loadSeriesNeighbors(db, [service], { withRadius: true }), anchor: meta && meta.anchor, today: todayNow, nowDate,
     });
   }
   const daysOutNow = routeTiers.daysBetween(todayNow, toDateStr(service.scheduled_date));
@@ -1377,7 +1372,7 @@ async function recheckPlannedMove(pm, run) {
   }
   if (!dayMoveGuarded(run.guardMode, pm.service)) return null;
   const recheckNow = new Date();
-  const recheck = await recheckDayMoveWindow(run.guardMode, pm.service, pm.ctx.tierMeta, recheckNow, dayOnlyOf(run.config));
+  const recheck = await recheckDayMoveWindow(run.guardMode, pm.service, pm.ctx.tierMeta, recheckNow);
   if (recheck.skip) {
     if (recheck.skip.degraded) run.guardReadDegraded = true;
     return recheck.skip;
@@ -1745,7 +1740,7 @@ async function runAutoDispatch(opts = {}) {
     // (flex's) series neighbors, one query pair at most. FAIL CLOSED — a
     // failed read freezes/guard-unknowns every visit rather than moving
     // without the check.
-    run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate, dayOnlyOf(config));
+    run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate);
     run.guardReadDegraded = run.guardCtx.degraded;
     await loadRunMoveCounts(run, services);
     await loadRunReminderOff(run, services);
@@ -1809,4 +1804,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict, dayOnlyOf, freezeReadArgs } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict, freezeReadArgs } };

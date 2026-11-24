@@ -331,6 +331,32 @@ describe('the stops', () => {
   });
 });
 
+describe('the run\'s deadline', () => {
+  test('it goes to the permit throttle; a page read it cut is not a failure of the page: the row is left and nothing is counted or stored', async () => {
+    const row = makeRow();
+    let clockNow = NOW;
+    const { deps } = setup({
+      parcel: fullParcel({ livingAreaSqft: null }),
+      fetchPermitPage: jest.fn(async () => { clockNow = NOW + 5000; throw new Error('permit detail run budget spent'); }),
+    });
+    expect(deps.createThrottle.mock.calls[0][0].deadline).toBe(Infinity); // no deadline given: none, as before
+    const ctx = createFactsContext({ deps, clock: () => clockNow, deadline: NOW + 5000 });
+    expect(deps.createThrottle.mock.calls[1][0]).toMatchObject({ gapMs: 2500, deadline: NOW + 5000 });
+    expect(await readHomeFacts(row, blankPermit(row), ctx)).toBe(LEFT);
+    expect(deps.recordPermitResult).not.toHaveBeenCalled();
+    expect(factsSummary(ctx)).toMatchObject({ permitBudgetStop: true, permitPages: 0, permitFailuresInARow: 0, permitStopped: false });
+    expect(factsProblems(ctx)).toEqual([]);
+  });
+
+  test('the same failure before the deadline is a failure of the page', async () => {
+    const row = makeRow();
+    const { deps } = setup({ parcel: fullParcel({ livingAreaSqft: null }), fetchPermitPage: jest.fn(async () => { throw new Error('x'); }) });
+    const ctx = createFactsContext({ deps, clock: () => NOW, deadline: NOW + 5000 });
+    expect(await readHomeFacts(row, blankPermit(row), ctx)).toMatchObject({ failed: 'permit_page' });
+    expect(factsSummary(ctx)).toMatchObject({ permitBudgetStop: false, permitFailuresInARow: 1 });
+  });
+});
+
 describe('pace and defaults', () => {
   test('one call at a time, 0.6 s between map queries (none before the first), the permit throttle at the permit reader\'s gap', async () => {
     const t = setup();

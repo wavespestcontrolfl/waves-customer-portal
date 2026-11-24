@@ -11,7 +11,7 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const timeTracking = require('./time-tracking');
 const timesheetBells = require('./timesheet-approval-bells');
-const { paidLineCoveringWeeks } = require('./payroll-paid-line-weeks');
+const { paidLineCoveringWeeks, finalRunClosesWeeks } = require('./payroll-paid-line-weeks');
 const {
   STAFF_WORK_DATE_SQL,
   staffWeekRange,
@@ -829,6 +829,11 @@ async function unlockWeek({ technicianId, weekStart, adminId, reason, reviewToke
     // when the week had no check of its own. Not behind the gate, like the check above.
     if (await paidLineCoveringWeeks(trx, technicianId, [start])) {
       throw approvalHttpError(409, 'A paid pay line took its overtime from this week. Void the pay run that paid it first.');
+    }
+    // A final pay run closes its week for every W-2 employee, also for one with no check on it. Not
+    // behind a gate, like the checks above.
+    if (await finalRunClosesWeeks(trx, technicianId, [start])) {
+      throw approvalHttpError(409, 'Void the pay run for this week first.');
     }
 
     await trx('time_entries')

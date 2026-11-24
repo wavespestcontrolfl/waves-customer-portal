@@ -323,17 +323,15 @@ async function rescheduleNoticeOptions(svc) {
 
 // GATE_DAY_ONLY_PROMISE part B2: what the customer chose for the new slot, as handleReschedule options. The picker's slots are
 // hour picks, so they pass 'set_time' (a later part adds an "any time that day" choice that passes 'day'); previousDate is the
-// date the visit moved from. Gate off: nothing, so the call keeps today's exact arguments.
+// date the visit moved from.
 function dayPromiseMoveOptions(svc, timePromise) {
-  return require('../services/time-promise').dayOnlyPromiseOn()
-    ? { timePromise, previousDate: apptDateStr(svc.scheduled_date) }
-    : {};
+  return { timePromise, previousDate: apptDateStr(svc.scheduled_date) };
 }
 
 // GATE_DAY_ONLY_PROMISE part B3: the rebooker option that records the customer's own hour for a single move. A later "any time
-// that day" choice (timePromise 'day') passes customerAskedTime: false here instead. Gate off: nothing.
+// that day" choice (timePromise 'day') passes customerAskedTime: false here instead.
 function dayPromiseMoveIntent() {
-  return require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: true } : {};
+  return { customerAskedTime: true };
 }
 
 // handleReschedule's options for a customer move: the repeat-move deferral and the day-promise choice, as a spread (none

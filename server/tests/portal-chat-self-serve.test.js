@@ -137,7 +137,8 @@ describe('portal tools', () => {
 
     const result = await executeToolCall('offer_reschedule_link', {}, 'cust-1', actions, null, {}, turn);
 
-    expect(turn.transaction).toHaveBeenCalledTimes(2);
+    // Two eligibility reads, then the one day-only read for the button label.
+    expect(turn.transaction).toHaveBeenCalledTimes(3);
     expect(actions).toEqual([{ type: 'link', label: 'Reschedule Pest Control, Oct 11', href: '/reschedule/tok_2' }]);
     expect(result.available).toBe(true);
   });

@@ -17,7 +17,6 @@ const routeTiers = require('../services/auto-dispatch/route-tiers');
 const toldVisits = require('../services/auto-dispatch/told-visits');
 const { checkFlexSiblingBounds, checkTiersSiblingBounds, assertNotToldOnMove } = require('../services/auto-dispatch/apply');
 const { getAutoDispatchConfig } = require('../services/auto-dispatch/config');
-const gates = require('../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 const TODAY = etDateString(new Date());
@@ -27,78 +26,46 @@ const sib = { id: 's2', scheduled_date: dayOffset(2), window_start: '09:00:00', 
 const FROZEN = { failed: false, frozen: new Set(['s2']) };
 const realFreeze = jest.requireActual('../services/auto-dispatch/route-tiers').loadReminderFreeze;
 
-afterEach(() => { delete process.env.GATE_DAY_ONLY_PROMISE; });
 beforeEach(() => { jest.clearAllMocks(); });
 
 describe('config', () => {
-  test('dayOnlyPromise is read once per run: off by default, on with the env, overridable, fixed once built', () => {
-    expect(getAutoDispatchConfig().dayOnlyPromise).toBe(false);
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
-    const config = getAutoDispatchConfig();
-    expect(config.dayOnlyPromise).toBe(true);
-    expect(getAutoDispatchConfig({ dayOnlyPromise: false }).dayOnlyPromise).toBe(false);
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    expect(config.dayOnlyPromise).toBe(true); // no mid-run mixing
-  });
-
-  test('the gate reader is strict and exported', () => {
-    for (const v of ['', 'false', '1', 'TRUE']) {
-      process.env.GATE_DAY_ONLY_PROMISE = v;
-      expect(gates.dayOnlyPromiseLive()).toBe(false);
-    }
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
-    expect(gates.dayOnlyPromiseLive()).toBe(true);
+  test('dayOnlyPromise is always recorded on the run config as true', () => {
+    expect(getAutoDispatchConfig().dayOnlyPromise).toBe(true);
   });
 });
 
 describe('checkTiersSiblingBounds / checkFlexSiblingBounds', () => {
-  test('tiers: day-only on passes anyPromise; off passes the told-lock options only', async () => {
+  test('tiers: the freeze read passes anyPromise with the told-lock options', async () => {
     routeTiers.loadReminderFreeze.mockResolvedValue(FROZEN);
     const trx = jest.fn();
-    await expect(checkTiersSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, true, true))
+    await expect(checkTiersSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, true))
       .rejects.toMatchObject({ id: 's2', why: expect.stringContaining('already told its time') });
     expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), undefined, { lock24h: true, toldLock: true, anyPromise: true });
-    await expect(checkTiersSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, true, false)).rejects.toBeTruthy();
-    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), undefined, { lock24h: true, toldLock: true });
-    await expect(checkTiersSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, true)).rejects.toBeTruthy();
-    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), undefined, { lock24h: true, toldLock: true });
   });
 
-  test('flex: 25 h band with anyPromise when day-only is on', async () => {
+  test('flex: 25 h band with anyPromise', async () => {
     routeTiers.loadReminderFreeze.mockResolvedValue(FROZEN);
     const trx = jest.fn();
-    await expect(checkFlexSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, [], true, true)).rejects.toMatchObject({ id: 's2' });
+    await expect(checkFlexSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, [], true)).rejects.toMatchObject({ id: 's2' });
     expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 25, { lock24h: true, toldLock: true, anyPromise: true });
-    await expect(checkFlexSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, [], true, false)).rejects.toBeTruthy();
-    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 25, { lock24h: true, toldLock: true });
   });
 });
 
 describe('assertNotToldOnMove (the moving visit, on its own transaction)', () => {
-  const all = { dayOnlyPromise: true };
-  const pr1 = {};
   const row = { id: 'v1' };
 
-  test('day-only on: reads with anyPromise, and a day-only or unknown promise refuses the move', async () => {
+  test('reads with anyPromise, and a day-only or unknown promise refuses the move', async () => {
     toldVisits.loadToldVisitIds.mockResolvedValue(new Set(['v1']));
     const trx = jest.fn();
-    await expect(assertNotToldOnMove(trx, row, all, refuse)).rejects.toMatchObject({ id: 'v1', why: 'has a time the customer was already told (frozen)' });
+    await expect(assertNotToldOnMove(trx, row, refuse)).rejects.toMatchObject({ id: 'v1', why: 'has a time the customer was already told (frozen)' });
     expect(toldVisits.loadToldVisitIds).toHaveBeenCalledWith(trx, ['v1'], expect.any(Date), { anyPromise: true });
   });
 
-  test('day-only on: no promise at all lets the move go on; a failed read throws (fail closed)', async () => {
+  test('no promise at all lets the move go on; a failed read throws (fail closed)', async () => {
     toldVisits.loadToldVisitIds.mockResolvedValue(new Set());
-    await expect(assertNotToldOnMove(jest.fn(), row, all, refuse)).resolves.toBeUndefined();
+    await expect(assertNotToldOnMove(jest.fn(), row, refuse)).resolves.toBeUndefined();
     toldVisits.loadToldVisitIds.mockRejectedValue(new Error('read failed'));
-    await expect(assertNotToldOnMove(jest.fn(), row, all, refuse)).rejects.toThrow('read failed');
-  });
-
-  test('day-only off: the known-slot call (no options object)', async () => {
-    toldVisits.loadToldVisitIds.mockResolvedValue(new Set());
-    const trx = jest.fn();
-    await assertNotToldOnMove(trx, row, pr1, refuse);
-    expect(toldVisits.loadToldVisitIds).toHaveBeenCalledWith(trx, ['v1'], expect.any(Date));
-    expect(toldVisits.loadToldVisitIds.mock.calls[0]).toHaveLength(3);
+    await expect(assertNotToldOnMove(jest.fn(), row, refuse)).rejects.toThrow('read failed');
   });
 });
 

@@ -6,6 +6,7 @@ const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { buildChannelAttribution, splitFacebookByPaid } = require('../services/channel-attribution');
 const { rankCapitalAllocation } = require('../services/capital-allocation');
+const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
 // Lazy-load heavy Google Ads modules (~87MB) — only loaded on first request
 let _BudgetManager, _CampaignAdvisor, _googleAds;
@@ -241,7 +242,15 @@ router.get('/campaigns', async (req, res, next) => {
       };
     });
 
-    res.json({ campaigns: enriched });
+    // The Local Service Ads card's lead row; null when it cannot be read.
+    const lsaSummary = await require('../services/ads/lsa-summary').lsaSummary(enriched, {
+      since: d30,
+      until: today,
+      // Same lead exclusions as the dashboard's channel ROI (soft-deleted, internal, test).
+      excludeRows: (qb) => applyAttributionExclusions(qb, LSA_SUMMARY_EXCLUDE),
+    });
+
+    res.json({ campaigns: enriched, lsaSummary });
   } catch (err) { next(err); }
 });
 
@@ -1229,6 +1238,10 @@ function applyAttributionExclusions(qb, exclude) {
   return qb;
 }
 
+// The exclusions the dashboard's channel ROI passes to fetchChannelAttribution;
+// the Local Service Ads lead row on the campaigns list uses the same ones.
+const LSA_SUMMARY_EXCLUDE = { deletedLeads: true, internalNames: INTERNAL_TEST_CUSTOMERS };
+
 // Shared channel attribution: completed-lead revenue/GP/customers + TRUE platform
 // spend (ad_performance_daily by platform, so a paid channel-month with spend but
 // zero tracked leads still surfaces, with no cent-rounding drift). Platform values
@@ -1490,3 +1503,5 @@ module.exports = router;
 // dashboard only swaps in its own window semantics (ET calendar periods +
 // attribution fresh-start floor) for this file's trailing-days windows.
 module.exports.fetchChannelAttribution = fetchChannelAttribution;
+module.exports.applyAttributionExclusions = applyAttributionExclusions;
+module.exports.LSA_SUMMARY_EXCLUDE = LSA_SUMMARY_EXCLUDE;

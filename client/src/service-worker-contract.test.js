@@ -418,6 +418,21 @@ describe('service-worker private link pages', () => {
     expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(false);
   });
 
+  it('leaves a new-home postcard page (/h/<token>) to the browser in every mode, online and offline', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);
+    setFetch(serveBuild(['/assets/index-AAA.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    const homeToken = '0123456789abcdef0123456789abcdef';
+    const homePaths = [`/h/${homeToken}`, `/H/${homeToken}/`, `/%68/${homeToken}`, `//h/${homeToken}`];
+    for (const mode of ['navigate', 'cors']) {
+      for (const path of homePaths) expect((await dispatchFetch(path, { mode })).response).toBeUndefined();
+    }
+    setFetch(async () => { throw new TypeError('Failed to fetch'); }); // offline
+    for (const path of homePaths) expect((await dispatchFetch(path, { mode: 'navigate' })).response).toBeUndefined();
+    expect([...cache.store.keys()].some(url => url.includes(homeToken))).toBe(false);
+  });
+
   // The server routes /API/ as /api/, so an offer read in another letter case
   // returns the applicant's offer, with the token in its URL.
   it('leaves an API call in any letter case to the browser', async () => {

@@ -435,7 +435,16 @@ describe('reviewed call reschedule', () => {
     input.v2 = { ...extraction, property: { access_notes: 'Unreviewed extracted instruction' } };
     await expect(applyReviewedCallReschedule(input)).resolves.toMatchObject({ outcome });
     expect(input.guard).toHaveBeenCalledTimes(1);
-    expect(conn.updates.filter(({ table }) => table === 'scheduled_services')).toEqual([]);
+    // A noop (the caller asked for the slot the visit already holds) records only "the customer asked for this time";
+    // an applied move writes through the mover's own UPDATE, never here. Neither writes notes.
+    const visitWrites = conn.updates.filter(({ table }) => table === 'scheduled_services');
+    if (outcome === 'noop') {
+      expect(visitWrites).toHaveLength(1);
+      expect(Object.keys(visitWrites[0].arg).sort()).toEqual(['customer_asked_time', 'customer_asked_time_at']);
+    } else {
+      expect(visitWrites).toEqual([]);
+    }
+    expect(JSON.stringify(conn.updates)).not.toContain('Unreviewed extracted instruction');
     expect(JSON.stringify(conn.inserts)).not.toContain('Unreviewed extracted instruction');
   });
 

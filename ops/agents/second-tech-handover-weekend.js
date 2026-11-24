@@ -490,7 +490,9 @@ async function loadStayStill(db, visits, now) {
     ['grouped', (v) => !!v.visit_id && v.group_status !== 'dissolved'],
     ['date_exception', (v) => v.date_exception === true],
     ['dispatch_handoff', (v) => !!v.recurring_dispatch_due_date && !v.window_start],
-    ['held', (v) => !!heldOutOfAutoDispatch(v)],
+    // A customer confirmation keeps a visit still for this agent, as its execute step re-checks under the locks
+    // (second-tech-handover-execute.js). The night jobs no longer hold it (owner 2026-11-22); this agent's rule is unchanged.
+    ['held', (v) => !!heldOutOfAutoDispatch(v) || v.customer_confirmed === true],
     ['reminder_sent', (v) => freeze.failed || freeze.frozen.has(v.id)],
   ];
   const out = new Map();

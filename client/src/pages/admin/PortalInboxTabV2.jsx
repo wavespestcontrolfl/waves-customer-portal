@@ -227,8 +227,14 @@ function MessageDetails({ item }) {
 // How the customer was told about an answer saved in the portal.
 export function noticeLine(name, notice) {
   if (Number(notice?.pushAccepted) > 0) return `Sent to ${name} in the portal. They got a notice in the Waves app.`;
+  if (notice?.text === "sent") return `Sent to ${name} in the portal. We texted them your answer.`;
+  // The text may or may not have gone out (a provider timeout, a stop mid-send): no second text goes.
+  if (notice?.text === "uncertain") return `Sent to ${name} in the portal. We could not confirm the text went out. Check their texts in Communications before you send another.`;
+  // A retried click while the first try is still sending the text.
+  if (notice?.text === "sending") return `Sent to ${name} in the portal. A text with your answer may be going out now. Check their texts in Communications before you send another.`;
   if (notice?.email === "sent") return `Sent to ${name} in the portal. We emailed them your answer.`;
   if (notice?.pending) return `Sent to ${name} in the portal. Their notice did not go out yet; we try again in a few minutes.`;
+  if (notice?.text) return `Sent to ${name} in the portal, but we could not reach them by text or email.`;
   return `Sent to ${name} in the portal, but we could not reach them by app or email. Reply by text too.`;
 }
 
@@ -236,8 +242,12 @@ export function noticeLine(name, notice) {
 // made for: Send again after a failure, with the same text, is one answer (the
 // server replays it); changed text gets a new id. The box is read-only while it
 // sends.
-function PortalReply({ item, onSent, onCancel }) {
+function PortalReply({ item, answerByText, onSent, onCancel }) {
   const [draft, setDraft] = useState("");
+  // GATE_PORTAL_ANSWER_TEXT: the way this form shows, sent with the answer only when it is the text way (none = the
+  // push way, so a server without the field still takes the answer). The server refuses a new answer whose way
+  // changed since (notice_way_changed); the form then shows the new way, and the staff press Send again.
+  const [shownByText, setShownByText] = useState(Boolean(answerByText));
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const requestRef = useRef(null);
@@ -251,11 +261,12 @@ function PortalReply({ item, onSent, onCancel }) {
     try {
       const res = await adminFetch("/admin/portal-inbox/reply", {
         method: "POST",
-        body: JSON.stringify({ kind: item.kind, id: item.id, body: text, requestId: requestRef.current.id }),
+        body: JSON.stringify({ kind: item.kind, id: item.id, body: text, requestId: requestRef.current.id, ...(shownByText ? { answerByText: true } : {}) }),
       });
       onSent(item, res);
     } catch (err) {
-      // The service's refusals carry a code and words for staff (gone, inactive customer, empty).
+      if (err?.code === "notice_way_changed") setShownByText((shown) => !shown);
+      // The service's refusals carry a code and words for staff (gone, inactive customer, empty, a changed way).
       setError(isRateLimitError(err) ? RATE_LIMITED : err?.code && err.message ? err.message : "Could not send. Try again.");
       setSending(false);
     }
@@ -274,7 +285,10 @@ function PortalReply({ item, onSent, onCancel }) {
         placeholder="Write your answer. The customer reads it in their portal."
       />
       <div className="text-14 text-ink-secondary">
-        They get a notice in the Waves app, or an email with your answer when they don't have the app.
+        {/* GATE_PORTAL_ANSWER_TEXT (the server's answerByText): where the answer's words go, before Send. */}
+        {shownByText
+          ? "We text them your answer as soon as you send it, at any hour. If no text can go, we email it."
+          : "They get a notice in the Waves app, or an email with your answer when they don't have the app."}
       </div>
       <div className="flex flex-wrap gap-2">
         <Button type="button" density="comfortable" variant="primary" disabled={sending || !draft.trim()} onClick={send}>
@@ -293,7 +307,7 @@ function PortalReply({ item, onSent, onCancel }) {
   );
 }
 
-function InboxRow({ item, busy, error, replies, onHandled, onReply, onOpenCustomer, onSent }) {
+function InboxRow({ item, busy, error, replies, answerByText, onHandled, onReply, onOpenCustomer, onSent }) {
   const hasCustomer = Boolean(item.customer?.id);
   const canReply = Boolean(replyHref(item.customer));
   const canPortalReply = replies && hasCustomer && REPLY_KINDS.includes(item.kind);
@@ -325,7 +339,7 @@ function InboxRow({ item, busy, error, replies, onHandled, onReply, onOpenCustom
           {busy ? "Saving…" : "Mark handled"}
         </Button>
       </div>
-      {replying && <PortalReply item={item} onSent={onSent} onCancel={() => setReplying(false)} />}
+      {replying && <PortalReply item={item} answerByText={answerByText} onSent={onSent} onCancel={() => setReplying(false)} />}
       {error && (
         <div role="alert" className="flex items-center gap-2 text-14 text-alert-fg mt-2">
           <AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {error}
@@ -439,6 +453,7 @@ export default function PortalInboxTabV2({ onCount }) {
           total: Number.isFinite(d.total) ? d.total : items.length,
           older: d.older || { chats: 0, requests: 0 },
           replies: d.replies === true,
+          answerByText: d.answerByText === true,
         });
       })
       .catch((err) => {
@@ -567,6 +582,7 @@ export default function PortalInboxTabV2({ onCount }) {
                   busy={busyKeys.has(rowKey(item))}
                   error={rowErrors[rowKey(item)]}
                   replies={data.replies}
+                  answerByText={data.answerByText}
                   onHandled={handle}
                   onReply={reply}
                   onOpenCustomer={openCustomer}
@@ -592,6 +608,7 @@ export default function PortalInboxTabV2({ onCount }) {
                         busy={busyKeys.has(rowKey(item))}
                         error={rowErrors[rowKey(item)]}
                         replies={data.replies}
+                        answerByText={data.answerByText}
                         onHandled={handle}
                         onReply={reply}
                         onOpenCustomer={openCustomer}

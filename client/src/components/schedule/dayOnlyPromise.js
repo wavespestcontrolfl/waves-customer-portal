@@ -1,7 +1,6 @@
-// GATE_DAY_ONLY_PROMISE part E (owner 2026-11-05 "D2 a", 2026-11-06 "office"): the office's words and request fields for
+// Day-only promise part E (owner 2026-11-05 "D2 a", 2026-11-06 "office"): the office's words and request fields for
 // the "Customer asked for this time" box and the "Told: ..." badge. Pure helpers, no styles, so the Tier 1 dialogs and the
-// legacy inline-style windows share one set of words. The gate reaches the client as the `day_only_promise` flag on
-// GET /api/admin/feature-flags (useFeatureFlag). Gate off: no box, no field, no badge.
+// legacy inline-style windows share one set of words.
 import { addETDays, etDateString, etDatetimeLocalToISO } from '../../lib/timezone';
 
 export const ASKED_TIME_LABEL = 'Customer asked for this time';
@@ -65,11 +64,11 @@ export function reminderAnswerFor(answers, customer, propertyId) {
 }
 
 /** The create request field: only a checked box sends it (the server stores true; nothing else is written). */
-export function askedTimeCreateFields(enabled, checked) {
-  return enabled === true && checked === true ? { customerAskedTime: true } : {};
+export function askedTimeCreateFields(checked) {
+  return checked === true ? { customerAskedTime: true } : {};
 }
 
-/** The edit and reschedule request field: with the gate on, a move sends the box as true or false. Gate off: nothing. */
+/** The edit and reschedule request field: while `enabled`, a move sends the box as true or false. Otherwise nothing. */
 export function askedTimeMoveFields(enabled, checked) {
   return enabled === true ? { customerAskedTime: checked === true } : {};
 }

@@ -47,7 +47,7 @@ const DAY = '2097-06-10';
 const HQ = { lat: 27.4330885, lng: -82.4056801 };
 // GATE_REMINDER_72H_EMAIL_FIRST is cleared too: these fixture visits are one-time, and under it their 72-hour reminder
 // goes by email, so they would never move.
-const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_DAY_ONLY_PROMISE', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST', 'GATE_SLOT_TRAVEL_GAP', 'GATE_MAKE_ROOM_EMPTY_HOUR'];
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST', 'GATE_SLOT_TRAVEL_GAP', 'GATE_MAKE_ROOM_EMPTY_HOUR'];
 
 maybeDescribe('make-room accept on real PostgreSQL', () => {
   let database;

@@ -1390,11 +1390,11 @@ function moveProposal(plan) {
     // Surfaced on the confirmation card — the operator must see whether
     // committing will text the customers.
     will_text_customers: notifyCustomers,
-    // GATE_DAY_ONLY_PROMISE part B2: shown on the card so the operator sees which promise the notice makes. Gate off: no key.
-    ...(require('../time-promise').dayOnlyPromiseOn() ? { customer_asked_time: plan.customerAskedTime === true } : {}),
+    // GATE_DAY_ONLY_PROMISE part B2: shown on the card so the operator sees which promise the notice makes.
+    customer_asked_time: plan.customerAskedTime === true,
     stops,
     ...plan.skipped,
-    note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer the new arrival window' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
+    note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer about the move' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
   };
 }
 
@@ -1539,16 +1539,14 @@ async function moveBatchTrx(trx, classified, dateStr, reason, customerAskedTime)
     { techId: c.s.technician_id, date: c.observedDate },
     { techId: c.s.technician_id, date: dateStr },
   ]));
-  // GATE_DAY_ONLY_PROMISE part B3: with the gate on, each stop's reschedule_log row is written in THIS transaction, right after the
+  // GATE_DAY_ONLY_PROMISE part B3: each stop's reschedule_log row is written in THIS transaction, right after the
   // UPDATE that carries the stop's intent, so the intent and its own log row share the transaction's now() (currentIntent reads
-  // the intent as current). A post-commit row would be strictly later and make the intent read stale at once. Gate off: the row is
-  // written after the commit, exactly as before. The flags are reset per attempt (a deadlock retry rolled the rows back).
-  const auditInTrx = require('../time-promise').dayOnlyPromiseOn();
+  // the intent as current). A post-commit row would be strictly later and make the intent read stale at once. The flags are reset per attempt (a deadlock retry rolled the rows back).
   for (const c of classified) {
     c.auditedInTrx = false;
     c.auditFailedInTrx = false;
     await writeMovedStop(trx, c, dateStr, reason, customerAskedTime);
-    if (auditInTrx) await auditMovedStopInTrx(trx, c, dateStr, reason);
+    await auditMovedStopInTrx(trx, c, dateStr, reason);
   }
   // The probe ran on the technician each stop was read with. The CAS does not
   // pin technician_id (the notice follows the stop), so a concurrent

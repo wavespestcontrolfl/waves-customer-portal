@@ -21,6 +21,10 @@
  * fail the run for. Strictly sequential: 0.6 s between map queries, the permit reader's throttle at the reader's own
  * gap (PERMIT_DETAIL_SYNC_MIN_GAP_MS, 2.5 s by default).
  *
+ * The run's deadline (createFactsContext `deadline`, a time in ms) goes to the permit throttle: no request is sent
+ * after it, and the last one is cut at it. One permit page read is up to 14 requests, so without it one home could
+ * pass the run's budget by minutes. A page read the deadline cut is not a failure of the page: the row is left.
+ *
  * This module never touches the database itself (the stored permit row comes in as an argument; recordResult is the
  * permit reader's), calls no paid or AI service, and logs nothing: counts and codes only, never a name, an address, a
  * parcel number or a permit number.
@@ -69,20 +73,22 @@ const REAL = {
 };
 
 /**
- * The context one run reads facts with. `deps` replaces any outside call (tests); `clock` gives the time in ms.
+ * The context one run reads facts with. `deps` replaces any outside call (tests); `clock` gives the time in ms;
+ * `deadline` is the time in ms after which no permit page request is sent (none by default).
  */
-function createFactsContext({ deps = {}, clock = Date.now } = {}) {
+function createFactsContext({ deps = {}, clock = Date.now, deadline = Infinity } = {}) {
   const d = {};
   for (const [name, real] of Object.entries(REAL)) d[name] = deps[name] || real();
   return {
     d,
     clock,
-    polite: d.createThrottle({ gapMs: d.permitGapMs(), sleep: d.sleep, now: clock }),
+    deadline,
+    polite: d.createThrottle({ gapMs: d.permitGapMs(), sleep: d.sleep, now: clock, deadline }),
     state: {
       mapQueries: 0, mapFailures: 0, mapStopped: false, mapDisabled: false,
       // pageCounts and pageStreaks are the shapes the permit reader's countResult folds a page status into.
       pages: 0, pageCounts: { ok: 0, noFields: 0, notFound: 0, errors: 0 }, pageStreaks: { noFields: 0, errors: 0 },
-      pageStopped: false, pageStop: null, pageOff: false, storeErrors: {},
+      pageStopped: false, pageStop: null, pageOff: false, budgetStop: false, storeErrors: {},
     },
   };
 }
@@ -166,6 +172,12 @@ async function fetchAndStorePage(permit, ctx) {
   try {
     page = await d.fetchPermitPage(permit.permit_no, { polite: ctx.polite });
   } catch {
+    // The run's deadline passed inside this read: the throttle sent no further request, or cut the last one at it.
+    // That is the end of the run's budget, not a failure of the page. The row is left as it is.
+    if (ctx.clock() >= ctx.deadline) {
+      state.budgetStop = true;
+      return LEFT;
+    }
     countPage(ctx, 'error');
     return { failed: 'permit_page' };
   }
@@ -192,7 +204,7 @@ async function fetchAndStorePage(permit, ctx) {
  * The permit's facts for a home the map could not fully size: the stored ones when the page was read at the row's CO
  * date (detail_status 'ok', not stale), else the page, unless it was tried in the last 20 hours. A stale row's stored
  * facts are never used. The permit page's own switch is read before each fetch: off, the page is stopped for the run.
- * { permit } | { failed } | LEFT.
+ * A page read the run's deadline cut leaves the row too. { permit } | { failed } | LEFT.
  */
 async function permitForGaps(permit, ctx) {
   const { d, state } = ctx;
@@ -210,7 +222,8 @@ async function permitForGaps(permit, ctx) {
 /**
  * The facts of one home. `permit` is its stored permit row (home-price-store permitFacts, with its detail_stale).
  * Returns
- *   LEFT                          the parcel map or the permit page it needs is stopped for this run;
+ *   LEFT                          the parcel map or the permit page it needs is stopped for this run, or the run's
+ *                                 deadline passed inside its permit page read;
  *   { failed, facts }             a read threw: failed is 'parcel_map' or 'permit_page'; facts are what the map gave;
  *   { facts, missing }            the arbitrated facts { homeSqft, homeSqftSource, stories, lotSqft } and the first
  *                                 missing one (firstMissing), or null when the home has every fact.
@@ -238,6 +251,7 @@ function factsSummary(ctx) {
     mapQueries: state.mapQueries, mapFailuresInARow: state.mapFailures, mapStopped: state.mapStopped, mapDisabled: state.mapDisabled,
     permitPages: state.pages, permitFailuresInARow: state.pageStreaks.errors, permitNoFieldsInARow: state.pageStreaks.noFields,
     permitStopped: state.pageStopped, permitStop: state.pageStop, permitPageOff: state.pageOff,
+    permitBudgetStop: state.budgetStop,
   };
 }
 

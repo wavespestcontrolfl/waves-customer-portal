@@ -171,6 +171,10 @@ describeDb('New-home mail list (PostgreSQL)', () => {
       coDate: null,
       livingSqft: null,
       legalDescription: 'LOT 12 SAMPLETON ESTATES PH 2',
+      price: {
+        status: 'untried', reason: null, annual: null, monthly: null, setupFee: null, homeSqft: null, sizeSource: null,
+        stories: null, lotSqft: null, pricedAt: null, checkedAt: null,
+      },
     });
     const text = JSON.stringify(await listMailProspects({ view: 'live' }));
     expect(text).not.toMatch(/412345|SAMPLE BUILDER|PIN\d|PMT-|REF-|consideration|seller|parcel|permit/i);
@@ -198,7 +202,56 @@ describeDb('New-home mail list (PostgreSQL)', () => {
       lastCheckedAt: null,
       rows: [],
       truncated: false,
+      priceCounts: { priced: 0, notClean: 0, missingFact: 0, failed: 0, untried: 0 },
     });
+  });
+
+  const priced = {
+    price_status: 'priced', price_annual: 444.0, price_setup_fee: 99.0, price_digest: 'sha256:SAMPLEDIGEST',
+    priced_at: '2026-11-22T21:51:00Z', price_checked_at: '2026-11-22T21:51:00Z',
+    home_sqft: 2340, home_sqft_source: 'permit_plan', home_stories: 2, lot_sqft: 7405,
+  };
+
+  test('a priced home carries its shadow price and the facts the price used; the engine digest stays in the table', async () => {
+    await mockPg('mail_prospects').insert(prospect({ source_ref: 'P1', ...priced }));
+    const [row] = (await listMailProspects({ view: 'live' })).rows;
+    expect(row.price).toEqual({
+      status: 'priced', reason: null, annual: 444, monthly: 37, setupFee: 99, homeSqft: 2340, sizeSource: 'permit_plan',
+      stories: 2, lotSqft: 7405, pricedAt: '2026-11-22T21:51:00.000Z', checkedAt: '2026-11-22T21:51:00.000Z',
+    });
+    expect(JSON.stringify(await listMailProspects())).not.toMatch(/SAMPLEDIGEST|digest/i);
+  });
+
+  test('the monthly price is the annual price over 12, to the cent', async () => {
+    await mockPg('mail_prospects').insert(prospect({ source_ref: 'P2', ...priced, price_annual: 455.0 }));
+    const [row] = (await listMailProspects()).rows;
+    expect([row.price.annual, row.price.monthly]).toEqual([455, 37.92]);
+  });
+
+  test('a home with no price says why', async () => {
+    await mockPg('mail_prospects').insert(prospect({
+      source_ref: 'M1', price_status: 'missing_fact', price_reason: 'no_home_size', price_checked_at: '2026-11-22T21:51:00Z',
+    }));
+    const [row] = (await listMailProspects()).rows;
+    expect([row.price.status, row.price.reason, row.price.annual, row.price.monthly]).toEqual(['missing_fact', 'no_home_size', null, null]);
+  });
+
+  test('priceCounts cover the eligible homes of this list only, whatever the view', async () => {
+    await mockPg('mail_prospects').insert([
+      prospect({ source_ref: 'C1', ...priced }),
+      prospect({ source_ref: 'C2', ...priced }),
+      prospect({ source_ref: 'C3', price_status: 'not_clean', price_reason: 'member_address', price_checked_at: '2026-11-22T21:51:00Z' }),
+      prospect({ source_ref: 'C4', price_status: 'missing_fact', price_reason: 'no_home_size', price_checked_at: '2026-11-22T21:51:00Z' }),
+      prospect({ source_ref: 'C5', price_status: 'failed', price_reason: 'engine', price_checked_at: '2026-11-22T21:51:00Z' }),
+      prospect({ source_ref: 'C6' }),
+      // Not counted: a held-back home, a not-eligible deed, another list.
+      prospect({ source_ref: 'C7', status: 'held_back' }),
+      prospect({ source_ref: 'C8', status: 'not_eligible', reason: 'company_buyer' }),
+      prospect({ source_ref: 'C9', list_key: 'other_list', ...priced }),
+    ]);
+    const expected = { priced: 2, notClean: 1, missingFact: 1, failed: 1, untried: 1 };
+    expect((await listMailProspects({ view: 'live' })).priceCounts).toEqual(expected);
+    expect((await listMailProspects({ view: 'unmatched' })).priceCounts).toEqual(expected);
   });
 
   test('the totals and the rows are read in one read-only REPEATABLE READ snapshot', async () => {
