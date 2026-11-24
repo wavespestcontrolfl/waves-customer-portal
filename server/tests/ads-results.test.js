@@ -261,6 +261,19 @@ describe('adResults', () => {
     }
   });
 
+  test('a deposit with no paid invoice yet counts as money in, not as a paid customer', async () => {
+    const conn = fakeConn({
+      ad_service_attribution: [lead({ customer_id: 'c1' })],
+      customers: [customer('c1')],
+      invoices: [],
+      payments: [],
+      estimate_deposits: [{ customer_id: 'c1', at: new Date('2026-10-02T15:00:00Z'), net: 25 }],
+    });
+    const out = await adResults({ ...WINDOW, conn });
+    expect(out.totals).toMatchObject({ paid_customers: 0, paid90: 25 });
+    expect(rowOf(out, CAMP, '2026-10-01').customers).toEqual([]);
+  });
+
   test('two leads on one day: the earlier-created lead gets the paid credit', async () => {
     const conn = fakeConn({
       ad_service_attribution: [

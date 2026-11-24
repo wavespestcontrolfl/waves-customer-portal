@@ -178,7 +178,7 @@ export default function AdsResultsCard() {
       </div>
       <div className="text-ui-body text-ink-secondary [margin:4px_0_12px]">
         Leads from paid ads and what they paid. Paid means a paid invoice on or after the lead day. Plan / one-time
-        is the customer today. Each customer counts once, on their first lead. Calls are leads linked to a call (links start Aug 9, 2026). Rain days follow the 2 PM call that set the ads.
+        is the customer today. Each customer counts once, on their first lead. Calls are leads linked to a call (links start Aug 9, 2026). Rain days use the recorded 2 PM forecast call (test mode: the ads do not change yet).
         Leads are tracked funnel leads: an LSA message or call with no
         funnel record is not counted here.
       </div>

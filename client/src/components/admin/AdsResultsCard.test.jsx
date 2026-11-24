@@ -78,7 +78,7 @@ describe('AdsResultsCard', () => {
     expect(screen.getByText('Newer Campaign')).toBeInTheDocument();
   });
 
-  it('counts the 2 PM call that set the ads, not a later forecast', async () => {
+  it('counts the recorded 2 PM forecast call, not a later forecast', async () => {
     const changed = [
       { ...zero, date: '2026-10-05', campaign_id: 'c', campaign: 'Test Campaign C', platform: 'google_ads', rain_day: { call: 'rain', cutoff_call: 'dry', wet_day: false } },
       { ...zero, date: '2026-10-06', campaign_id: 'c', campaign: 'Test Campaign C', platform: 'google_ads', rain_day: { call: 'rain', cutoff_call: null, wet_day: null } },

@@ -29,6 +29,7 @@ const { dateOnlyString } = require('../../utils/date-only');
 const { isMembershipCustomerRow } = require('../waveguard-existing-services');
 const { isInternalTestContact } = require('../internal-test-customers');
 const { netCollections } = require('../customer-lifetime-revenue');
+const { wherePaidLead } = require('../ad-cost-allocation');
 
 const RAIN_DAYS_KEY = 'ads.rain_mode.days';
 const PAID90_DAYS = 90;
@@ -37,7 +38,6 @@ const NO_CAMPAIGN = '(no campaign)';
 const LIST_MAX = 25;
 const ID_CHUNK = 500;
 const BOOKED_STAGES = ['booked', 'completed'];
-const PAID_SOURCES = ['google_ads', 'google_lsa'];
 
 const cents = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -102,9 +102,7 @@ async function loadLeads(conn, since, until) {
     .whereRaw('(asa.lead_id IS NULL OR l.deleted_at IS NULL)')
     .where((qb) => qb
       .whereNotNull('asa.campaign_id')
-      .orWhereIn('asa.lead_source', PAID_SOURCES)
-      .orWhere((fb) => fb.where('asa.lead_source', 'facebook').where((p) => p
-        .where('asa.is_paid', true).orWhereNotNull('asa.fbclid').orWhereNotNull('asa.fbc'))))
+      .orWhere((paid) => wherePaidLead(paid, 'asa')))
     .select(
       'asa.id', 'asa.campaign_id', 'asa.lead_date', 'asa.lead_source', 'asa.funnel_stage',
       'asa.source_call_id', 'asa.created_at', 'ac.campaign_name', 'ac.platform', 'l.first_name as lead_first_name',
@@ -200,7 +198,12 @@ async function creditPaid(conn, rows, firstLead, customers) {
     const paid = (byCustomer.get(customerId) || [])
       .filter((inv) => inv.day >= leadDay)
       .sort((a, b) => new Date(a.paid_at) - new Date(b.paid_at));
-    if (!paid.length) continue;
+    const lastDay = daysAfter(leadDay, PAID90_DAYS);
+    // Money in counts even before an invoice is paid (an estimate deposit); the customer counts need a paid invoice.
+    const paid90 = cents((collected.get(customerId) || [])
+      .filter((c) => c.day >= leadDay && c.day <= lastDay)
+      .reduce((sum, c) => sum + c.net, 0));
+    if (!paid.length && !paid90) continue;
     const row = rowFor(rows, {
       campaignId: lead.campaign_id,
       campaign: lead.campaign_name,
@@ -210,14 +213,11 @@ async function creditPaid(conn, rows, firstLead, customers) {
     const customer = customers.get(customerId);
     const plan = isMembershipCustomerRow(customer || {});
     const churned = customer?.pipeline_stage === 'churned';
-    const lastDay = daysAfter(leadDay, PAID90_DAYS);
-    const paid90 = cents((collected.get(customerId) || [])
-      .filter((c) => c.day >= leadDay && c.day <= lastDay)
-      .reduce((sum, c) => sum + c.net, 0));
+    row.paid90 = cents(row.paid90 + paid90);
+    if (!paid.length) continue;
     row.paid_customers += 1;
     if (plan) row.plan_customers += 1; else row.one_time_customers += 1;
     if (churned) row.cancels += 1;
-    row.paid90 = cents(row.paid90 + paid90);
     row.customers.push({
       customer_id: customerId,
       first_paid_date: paid[0].day,
