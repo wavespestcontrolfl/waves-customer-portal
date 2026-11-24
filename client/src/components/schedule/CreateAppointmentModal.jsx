@@ -55,7 +55,7 @@ import { formatETDate, formatETTime } from '../../lib/timezone';
 import InPersonCardSheet from './InPersonCardSheet';
 import { AskedTimeBoxLegacy } from './DayOnlyPromiseLegacy';
 import { askedTimeCreateFields, reminderAnswerFor } from './dayOnlyPromise';
-import { openEstimateLinkNotice } from './openEstimateLink';
+import { openEstimateLinkNotice, recentOpenEstimates } from './openEstimateLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -5958,7 +5958,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     const forThisAddress = visibleScheduleEstimates.filter((e) => (e.propertyId
                       ? String(e.propertyId) === activeId
                       : !e.hasQuotedAddress));
-                    const notice = openEstimateLinkNotice({ estimates: forThisAddress, customerId: selectedCustomer?.id });
+                    // Fail closed: an open quote with no property and a street of its own may
+                    // be the one the customer said yes to, so with one present no quote is
+                    // singled out (it would make an address-free quote look like the only one).
+                    const unplacedStreetQuote = recentOpenEstimates(visibleScheduleEstimates, selectedCustomer?.id)
+                      .some((e) => !e.propertyId && e.hasQuotedAddress);
+                    const notice = unplacedStreetQuote ? null : openEstimateLinkNotice({ estimates: forThisAddress, customerId: selectedCustomer?.id });
                     if (!notice) return null;
                     return (
                       <div data-testid="open-estimate-link-notice" style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', fontSize: 14, color: D.text }}>

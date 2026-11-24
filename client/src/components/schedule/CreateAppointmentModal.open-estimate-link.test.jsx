@@ -264,6 +264,18 @@ describe('the New Appointment form for a customer with an open estimate', () => 
     expect(await screen.findByRole('button', { name: 'Link it' })).toBeTruthy();
   });
 
+  it('a street-only quote beside an address-free quote: no notice at all (fail closed)', async () => {
+    installFetch({
+      estimates: [quote({ id: 'est-1' }), quote({ id: 'est-2', propertyId: null, hasQuotedAddress: true })],
+      properties: [propertyRow('prop-1', true)],
+    });
+    mount();
+    await waitFor(() => expect(document.querySelector('option[value="est-1"]')).not.toBeNull());
+    await waitFor(() => expect(screen.queryByText('Loading estimates...')).toBeNull());
+    expect(screen.queryByTestId('open-estimate-link-notice')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Link it' })).toBeNull();
+  });
+
   it('two estimates that qualify give no notice at all', async () => {
     installFetch({ estimates: [quote(), quote({ id: 'est-2' })] });
     mount();
@@ -273,9 +285,9 @@ describe('the New Appointment form for a customer with an open estimate', () => 
     expect(screen.queryByText(/open estimates/)).toBeNull();
   });
 
-  it('one qualifying estimate among others that do not (another address, a street of its own) still gets the notice', async () => {
+  it('one qualifying estimate among quotes for other addresses still gets the notice', async () => {
     installFetch({
-      estimates: [quote({ id: 'est-1' }), quote({ id: 'est-2', propertyId: 'old-address' }), quote({ id: 'est-3', hasQuotedAddress: true })],
+      estimates: [quote({ id: 'est-1' }), quote({ id: 'est-2', propertyId: 'old-address' })],
       properties: [propertyRow('prop-1', true)],
     });
     mount();
