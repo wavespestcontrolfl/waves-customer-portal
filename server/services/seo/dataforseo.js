@@ -67,7 +67,7 @@ function isGotoItem(item) {
   if (!item || item.type !== 'organic' || typeof item.url !== 'string') return false;
   try {
     const u = new URL(item.url);
-    return /^(www\.)?google\.com$/i.test(u.hostname) && u.pathname.startsWith('/goto');
+    return /^(www\.)?google\.com$/i.test(u.hostname) && u.pathname === '/goto';
   } catch { return false; }
 }
 
