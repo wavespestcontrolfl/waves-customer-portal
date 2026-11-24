@@ -147,8 +147,7 @@ async function applyMinimum(conn, rows, { start, end, lock = false }) {
   const unpaidToLastDay = await unpaidOnDays(conn, lastWeekRows, start, end);
   const out = rows.map((row) => {
     const tech = techs.get(row.technician_id);
-    // No minimum, or a week after the last day.
-    if (!tech || (tech.last_day && start > tech.last_day)) return row;
+    if (!tech) return row;
     const bank = row.pto_bank || {};
     const paidOff = Number(row.pto_minutes || 0) - Number(bank.payoutMinutes || 0);
     const paidMinutes = Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0) + paidOff + Number(row.holiday_minutes || 0);
@@ -158,10 +157,13 @@ async function applyMinimum(conn, rows, { start, end, lock = false }) {
     // A check with no work and no time off in the week (a pay line alone, such as a bonus after leaving) is not a
     // week on the job: no minimum.
     if (paidMinutes + unpaidMinutes <= 0) return row;
+    // The hire date first: it says which stay a last day on file belongs to.
     if (!tech.hire_date) {
       holds.set(row.technician_id, NO_HIRE_DATE);
       return row;
     }
+    // A week after the last day of this stay: no minimum.
+    if (tech.last_day && start > tech.last_day) return row;
     // Work before the hire date on file is an earlier stay: its schedule is not known here.
     const first = firstWork.get(row.technician_id);
     const workedMinutes = Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0);

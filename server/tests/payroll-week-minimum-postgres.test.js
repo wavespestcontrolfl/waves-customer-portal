@@ -232,6 +232,13 @@ postgres('payroll minimum paid week', () => {
     expect((await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '38' }, email: OWNER })).status).toBe(409);
   });
 
+  it('no hire date and an old last day on file: the week is held, never paid without the minimum', async () => {
+    const id = await tech('Sample Alpha', { paid_week_minimum_last_day: addDays(W1, -30) });
+    await trx('technicians').where({ id }).update({ hire_date: null });
+    await worked(id, W1, 30);
+    expect((await draft(W1)).body.run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: NO_HIRE_DATE }]);
+  });
+
   it('refuses a new last day before the hire date', async () => {
     const id = await tech('Sample Alpha', { hired: W1 });
     const early = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40', lastDay: addDays(W1, -1) }, email: OWNER });
