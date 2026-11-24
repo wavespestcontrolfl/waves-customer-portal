@@ -524,10 +524,12 @@ describe('etaProviderPreSendCheck / composeProviderPreSendChecks — the provide
 
   test('the scheduler composes it AFTER the entry point\'s own predicate, for decision-linked sends only', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
-    expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, composeProviderPreSendChecks }');
+    expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, followupProviderPreSendCheck, composeProviderPreSendChecks }');
     expect(src).toContain('replayInput.providerPreSendCheck,\n              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
     // PR #5499: the open-loop recheck is composed at the same boundary
     expect(src).toContain('openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id }),');
+    // the follow-up promise is revalidated against the closed days at the same boundary (an unreadable read refuses retryably)
+    expect(src).toContain('followupProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
     // ...and its early queued-send recheck never retires a reply on an unreadable read
     expect(src).toContain("if (rawOpenLoopsReason === 'open_loops_recheck_failed') {");
     expect(src).toContain('} else if (rawOpenLoopsReason != null) {\n                openLoopsReason = rawOpenLoopsReason;\n                openLoopsStale = true;');
