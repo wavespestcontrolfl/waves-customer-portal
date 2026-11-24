@@ -9994,11 +9994,13 @@ async function scheduleCreateHandler(req, res, next) {
       // Work days (GATE_TECH_WORK_DAYS): the office may put a technician on a day
       // they do not work; the save proceeds and the response says so, for the
       // parent date and every child/booster date.
-      if (resolvedTechId && techWorkDaysLive()) {
-        const { offDayWarningsFor } = require('../services/technician-eligibility');
-        const offDayDates = [String(scheduledDate).slice(0, 10), ...[...plannedChildDates, ...plannedBoosterDates].filter(Boolean)];
-        bookingWarnings.push(...await offDayWarningsFor(resolvedTechId, offDayDates, { conn: trx }));
-      }
+      // Shift hours (GATE_TECH_SHIFT_HOURS): on a day the technician works, the same
+      // read says when the shift does not hold the visit (dayWarningsFor). Every
+      // date of the plan carries the parent's hours and length.
+      const offDayDates = [String(scheduledDate).slice(0, 10), ...[...plannedChildDates, ...plannedBoosterDates].filter(Boolean)];
+      bookingWarnings.push(...await require('../services/technician-eligibility').dayWarningsFor(resolvedTechId, offDayDates, {
+        conn: trx, block: { window_start: windowStart, window_end: computedEnd, estimated_duration_minutes: duration },
+      }));
       // Job type (GATE_TECH_JOB_TYPE_CHECKS): the chosen technician is set to Off for this
       // service's category - the same advisory path, never a block ([] with the gate off).
       if (resolvedTechId) {
@@ -15694,11 +15696,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           await assertAssignableTechnician(finalTechnicianId, { conn: trx, date: finalDate });
           // Work days (GATE_TECH_WORK_DAYS): an office save onto a day the
           // technician does not work still goes through; the modal is told.
-          if (techWorkDaysLive()) {
-            const { offDayWarningFor } = require('../services/technician-eligibility');
-            const offDayLine = await offDayWarningFor(finalTechnicianId, finalDate, { conn: trx });
-            if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
-          }
+          const offDayLine = await require('../services/technician-eligibility').dayWarningFor(finalTechnicianId, finalDate, { conn: trx });
+          if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
           // Job type (GATE_TECH_JOB_TYPE_CHECKS): a technician set to Off for this visit's
           // category. Advisory, never a block ([] with the gate off).
           if (finalTechChanging) {

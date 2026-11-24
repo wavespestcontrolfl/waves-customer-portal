@@ -3,6 +3,8 @@
  * (migration 20261025200000), the slot-discovery seam, the commit-time refusal at
  * automatic paths, the office warning, and series upkeep. A mocked knex proves none
  * of the CHECK, the smallint[] round trip or the real queries.
+ * An office booking also says when the technician's shift does not hold the visit
+ * (GATE_TECH_SHIFT_HOURS, D4 part 3c): the last block, on the same real rows.
  *
  * Runs in the DB-gated CI step (DATABASE_URL on the migrated waves_test database) or
  * a local scratch Postgres migrated with `knex migrate:latest`; it skips without one.
@@ -12,6 +14,16 @@ const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The lead booking route is called as the office (the last block).
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (req, _res, next) => {
+    req.technician = { first_name: 'Synthetic', last_name: 'Office' };
+    req.techRole = 'admin';
+    next();
+  },
+  requireAdmin: (_req, _res, next) => next(),
+  requireTechOrAdmin: (_req, _res, next) => next(),
+}));
 // New Appointment's new-caller Book is a real office create; its own gate is on here.
 // techWorkDaysLive stays the real reader (it reads the environment at call time).
 jest.mock('../config/feature-gates', () => {
@@ -32,7 +44,7 @@ const ADDRESS = { line1: '100 Example Way', city: 'Bradenton', state: 'FL', zip:
 postgres('technician work days (real Postgres)', () => {
   let db;
   let eligibility;
-  const made = { techIds: [], visitIds: [], absenceIds: [] };
+  const made = { techIds: [], visitIds: [], absenceIds: [], leads: [] };
   let monThu;
   let everyDay;
 
@@ -65,11 +77,25 @@ postgres('technician work days (real Postgres)', () => {
   afterEach(() => { delete process.env.GATE_TECH_WORK_DAYS; });
 
   afterAll(async () => {
+    // The lead booked in the last block: its visits, then the lead and its customer. Best effort,
+    // on a database made for tests.
+    for (const { leadId, customerId } of made.leads) {
+      const visits = await db('scheduled_services').where({ customer_id: customerId }).pluck('id').catch(() => []);
+      made.visitIds.push(...visits);
+      for (const [table, where] of [['ad_service_attribution', { lead_id: leadId }], ['lead_activities', { lead_id: leadId }],
+        ['customer_interactions', { customer_id: customerId }]]) {
+        await db(table).where(where).del().catch(() => {});
+      }
+    }
     if (made.visitIds.length) {
       await db('activity_log').whereRaw("metadata->>'scheduled_service_id' = ANY(?)", [made.visitIds]).del().catch(() => {});
       await db('scheduled_services').whereIn('id', made.visitIds).del();
     }
     if (made.absenceIds.length) await db('technician_absences').whereIn('id', made.absenceIds).del();
+    for (const { leadId, customerId } of made.leads) {
+      await db('leads').where({ id: leadId }).del().catch(() => {});
+      await db('customers').where({ id: customerId }).del().catch(() => {});
+    }
     if (made.techIds.length) await db('technicians').whereIn('id', made.techIds).del();
     await db.destroy();
   });
@@ -257,6 +283,89 @@ postgres('technician work days (real Postgres)', () => {
       await db.transaction(async (trx) => {
         expect(await seedTechnician(trx, parent(), SAT)).toBeNull();
       });
+    });
+  });
+
+  // GATE_TECH_SHIFT_HOURS (D4 part 3c): an office booking is told when the technician's shift does
+  // not hold the visit. One reader gives both lines (technician-eligibility.dayWarningsFor), so each
+  // path is asked once and never refused.
+  describe('the office is told the shift (GATE_TECH_SHIFT_HOURS)', () => {
+    // The week after WEEK: 2031-03-10 is a Monday. No other block books these days.
+    const [MON2, TUE2, WED2, THU2, FRI2] = ['2031-03-10', '2031-03-11', '2031-03-12', '2031-03-13', '2031-03-14'];
+    let service;
+    let serviceRow;
+    let morning;
+    const line = () => `${morning.name}'s shift is 8:00 AM to 12:00 PM. This visit is outside those hours.`;
+    const shiftLines = (warnings) => (warnings || []).filter((w) => /shift is/.test(w));
+    beforeAll(async () => {
+      service = require('../services/booking/new-caller-visit');
+      serviceRow = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
+      // On shift 08:00 to 12:00, Monday to Thursday.
+      morning = await makeTech('Synthetic Morning', MON_THU);
+      await db('technicians').where({ id: morning.id }).update({ shift_start: '08:00', shift_end: '12:00' });
+    });
+    afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+    const book = async (scheduledDate, windowStart, durationMinutes, technicianId = morning.id) => {
+      const booked = await service.bookNewCallerVisit({
+        input: { scheduledDate, windowStart, durationMinutes, serviceId: serviceRow.id, address: ADDRESS, technicianId },
+      });
+      made.visitIds.push(booked.visit.id);
+      return booked;
+    };
+
+    test('an office create outside the shift is saved on the technician and told; inside it, nothing; the length counts', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const late = await book(MON2, '14:00', 60);
+      expect((await db('scheduled_services').where({ id: late.visit.id }).first('technician_id')).technician_id).toBe(morning.id);
+      expect(late.warnings).toEqual([line()]);
+      expect((await book(TUE2, '09:00', 60)).warnings).toEqual([]);
+      // 11:00 for 90 minutes ends at 12:30, after the shift; for 60 minutes it ends with it.
+      expect((await book(WED2, '11:00', 90)).warnings).toEqual([line()]);
+      expect((await book(THU2, '11:00', 60)).warnings).toEqual([]);
+    });
+
+    test('gate off: the same create has no line; both gates on, a day off gives the day-off line alone', async () => {
+      expect((await book(MON2, '16:00', 60)).warnings).toEqual([]);
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      expect((await book(FRI2, '16:00', 60)).warnings).toEqual([`${morning.name} does not work on Fridays.`]);
+    });
+
+    test('a lead booked from the office outside the shift is saved and told (POST /admin/leads/:id/schedule-appointment)', async () => {
+      const express = require('express');
+      const app = express();
+      app.use(express.json());
+      app.use('/admin/leads', require('../routes/admin-leads'));
+      app.use((err, _req, res, _next) => res.status(err.statusCode || err.status || 500).json({ error: err.message }));
+      const server = app.listen(0, '127.0.0.1');
+      await new Promise((resolve) => server.once('listening', resolve));
+      const lead = { leadId: randomUUID(), customerId: randomUUID() };
+      const phone = `+194155501${String(10 + Math.floor(Math.random() * 90))}`;
+      await db('customers').insert({
+        id: lead.customerId, first_name: 'Synthetic', last_name: 'Lead', active: true,
+        email: `synthetic-lead-${lead.customerId}@example.invalid`, phone,
+      });
+      await db('leads').insert({ id: lead.leadId, customer_id: lead.customerId, first_name: 'Synthetic', phone });
+      made.leads.push(lead);
+      const post = (body) => fetch(`http://127.0.0.1:${server.address().port}/admin/leads/${lead.leadId}/schedule-appointment`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serviceType: 'Pest Control', technicianId: morning.id, ...body }),
+      }).then(async (res) => ({ status: res.status, body: await res.json() }));
+      try {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // 11:00 for 90 minutes ends at 12:30, after the shift.
+        const late = await post({ date: MON2, time: '11:00', durationMinutes: 90 });
+        expect({ status: late.status, error: late.body.error, lines: shiftLines(late.body.warnings) }).toEqual({ status: 200, error: undefined, lines: [line()] });
+        const visit = await db('scheduled_services').where({ customer_id: lead.customerId }).first('technician_id');
+        expect(visit.technician_id).toBe(morning.id);
+        const inside = await post({ date: TUE2, time: '11:00', durationMinutes: 60, rebook: true });
+        expect({ status: inside.status, error: inside.body.error, lines: shiftLines(inside.body.warnings) }).toEqual({ status: 200, error: undefined, lines: [] });
+        delete process.env.GATE_TECH_SHIFT_HOURS;
+        const off = await post({ date: WED2, time: '15:00', durationMinutes: 60, rebook: true });
+        expect({ status: off.status, error: off.body.error, lines: shiftLines(off.body.warnings) }).toEqual({ status: 200, error: undefined, lines: [] });
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
     });
   });
 });

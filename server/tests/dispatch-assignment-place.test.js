@@ -18,7 +18,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/stamped-address', () => ({ stampedDivergesSql: () => 'FALSE', stampedLine2Sql: () => 'NULL' }));
 jest.mock('../services/technician-eligibility', () => ({
   assertAssignableTechnician: jest.fn(async (id) => ({ id, name: 'Tech Two' })),
-  offDayWarningFor: jest.fn(async () => null),
+  dayWarningFor: jest.fn(async () => null),
   capabilityOffWarningsFor: jest.fn(async () => []),
 }));
 jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn(async () => []) }));

@@ -28,7 +28,7 @@ jest.mock('../services/scheduling/window-rules', () => ({
   ADMIN_OCCUPANCY_EXCLUDE_STATUSES: ['cancelled', 'completed', 'skipped', 'no_show'],
 }));
 jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn(async () => []) }));
-jest.mock('../services/technician-eligibility', () => ({ assertAssignableTechnician: jest.fn(async () => true) }));
+jest.mock('../services/technician-eligibility', () => ({ assertAssignableTechnician: jest.fn(async () => true), dayWarningFor: jest.fn(async () => null) }));
 jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-09-28' }));
 jest.mock('../services/booking/create-scheduled-service', () => ({
   completeScheduledServiceInsert: jest.fn(async (data, { source }) => ({ ...data, source_action: source.sourceAction })),
@@ -46,7 +46,7 @@ const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { probeSlotOverlap } = require('../services/scheduling/window-rules');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
-const { assertAssignableTechnician } = require('../services/technician-eligibility');
+const { assertAssignableTechnician, dayWarningFor } = require('../services/technician-eligibility');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 const { resolveAlert } = require('../services/dispatch-alerts');
 const { registerAppointment } = require('../services/appointment-reminders');
@@ -241,6 +241,41 @@ test('rung 1 before rung 6: the overlap probe runs first and a hit is advisory â
   expect(out.status).toBe(200);
   expect(out.body.overlapWarning).toBe('overlap on 2026-10-05');
   expect(writes).toHaveLength(1);
+});
+
+// D4 part 3c: the office's own technician is told about a day off or a shift that does not hold
+// the follow-up (one reader, dayWarningFor; its lines have their cases in the technician-eligibility
+// suites). An inherited technician is not the office's choice: it is checked, not told.
+test('an admin\'s technician: the day line is asked with the follow-up\'s own row and joins the warning; an inherited technician is not asked', async () => {
+  const LINE = "Tech Nine's shift is 8:00 AM to 9:30 AM. This visit is outside those hours.";
+  const { writes } = install();
+  dayWarningFor.mockResolvedValueOnce(LINE);
+  const told = await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: true, technicianId: 'tech-9' });
+  expect(told.status).toBe(200);
+  expect(dayWarningFor).toHaveBeenCalledTimes(1);
+  expect(dayWarningFor).toHaveBeenCalledWith('tech-9', '2026-10-05', {
+    conn: expect.any(Function), block: expect.objectContaining({ technician_id: 'tech-9', window_start: '09:00', window_end: '10:00' }),
+  });
+  expect(writes[0].row).toMatchObject({ technician_id: 'tech-9', window_start: '09:00', window_end: '10:00' });
+  expect(told.body.overlapWarning).toBe(LINE);
+
+  // With a clash on the day too, both lines.
+  install();
+  probeSlotOverlap.mockResolvedValueOnce([{ id: 'other' }]);
+  dayWarningFor.mockResolvedValueOnce(LINE);
+  const both = await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: true, technicianId: 'tech-9' });
+  expect(both.body.overlapWarning).toBe(`overlap on 2026-10-05 ${LINE}`);
+
+  // No line: the answer is as it was.
+  install();
+  const quiet = await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: true, technicianId: 'tech-9' });
+  expect(quiet.body.overlapWarning == null).toBe(true);
+
+  dayWarningFor.mockClear();
+  install();
+  await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: true });
+  await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: false });
+  expect(dayWarningFor).not.toHaveBeenCalled();
 });
 
 test('the write probes with the technician the follow-up is saved with: inherited, or the admin override', async () => {

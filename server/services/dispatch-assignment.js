@@ -5,7 +5,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { stampedDivergesSql, stampedLine2Sql } = require('./stamped-address');
 const { assertAssignableTechnician } = require('./technician-eligibility');
-const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gates');
+const { techShiftHoursLive } = require('../config/feature-gates');
 
 const ADMIN_ROOM = 'dispatch:admins';
 const ADMIN_EVENT = 'dispatch:job_update';
@@ -209,8 +209,8 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // Work days (GATE_TECH_WORK_DAYS): an office assignment or board drag onto a
   // day the technician does not work is allowed; the result carries one plain
   // warning line for the route to return. Gate off: no read, no `warnings` key.
-  const offDayLine = newTechId && (job.technician_id || null) !== newTechId && techWorkDaysLive()
-    ? await require('./technician-eligibility').offDayWarningFor(newTechId, eligibilityDate, { conn })
+  const offDayLine = newTechId && (job.technician_id || null) !== newTechId
+    ? await require('./technician-eligibility').dayWarningFor(newTechId, eligibilityDate, { conn })
     : null;
   // Job type (GATE_TECH_JOB_TYPE_CHECKS): the same office paths also say so when the
   // technician is set to Off for this visit's job type. Warns, never blocks; the helper

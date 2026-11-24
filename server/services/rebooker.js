@@ -47,8 +47,8 @@ async function assertAssignableSlotTechnician(technicianId, trx, date, { initiat
       return;
     }
     await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: !staffMove, hours });
-    if (staffMove && warnings && technicianId && techWorkDaysLive()) {
-      const line = await require('./technician-eligibility').offDayWarningFor(technicianId, String(date).slice(0, 10), { conn: trx });
+    if (staffMove && warnings) {
+      const line = await require('./technician-eligibility').dayWarningFor(technicianId, String(date).slice(0, 10), { conn: trx });
       if (line) warnings.add(line);
     }
   } catch (err) {

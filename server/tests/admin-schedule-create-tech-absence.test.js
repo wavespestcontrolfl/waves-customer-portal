@@ -117,8 +117,19 @@ function chain(row) {
 let techWorkDays = null;
 // technician_capabilities rows that are Off (GATE_TECH_JOB_TYPE_CHECKS); [] = qualified or needs review.
 let capabilityOffCategories = [];
+// The set hours (GATE_TECH_SHIFT_HOURS) as [start, end]; null = none. The hours read asks for a list
+// by id (loadTechShifts): with hours set it answers for each id it names.
+let techShift = null;
+function withSetHours(c) {
+  const rows = c.then;
+  c.then = (resolve, reject) => (techShift
+    ? Promise.resolve(c.whereIn.mock.calls.filter(([column]) => column === 'id').flatMap(([, ids]) => ids)
+      .map((id) => ({ id, shift_start: techShift[0], shift_end: techShift[1] }))).then(resolve, reject)
+    : rows(resolve, reject));
+  return c;
+}
 function chainTechnician(techId) {
-  return chain({ id: techId, name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true, work_days: techWorkDays });
+  return withSetHours(chain({ id: techId, name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true, work_days: techWorkDays }));
 }
 
 // technician_absences: only a hit when where() named THIS tech + THIS date
@@ -154,8 +165,10 @@ beforeEach(() => {
   jest.clearAllMocks();
   inserts = [];
   techWorkDays = null;
+  techShift = null;
   capabilityOffCategories = [];
   delete process.env.GATE_TECH_WORK_DAYS;
+  delete process.env.GATE_TECH_SHIFT_HOURS;
   delete process.env.GATE_TECH_JOB_TYPE_CHECKS;
   findConflictingVisits.mockResolvedValue([]);
   acquireOccupancyLock.mockImplementation(async () => {});
@@ -282,6 +295,82 @@ describe('POST / — admin create — technician work-days warning (office paths
   });
 });
 
+
+// GATE_TECH_SHIFT_HOURS (D4 part 3c): the office create saves and is told when the technician's
+// shift does not hold the visit. The line is next to the day-off line (one reader, dayWarningsFor).
+describe('POST / — admin create — technician shift line (office paths warn, never block)', () => {
+  afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; delete process.env.GATE_TECH_WORK_DAYS; });
+  // The plan of the work-days tests: the parent and two children on Fridays, the booster on a Tuesday, each at 10:00.
+  const recurringBody = {
+    customerId: 'cust-1',
+    scheduledDate: '2099-07-03',
+    windowStart: '10:00',
+    serviceType: 'General Pest Control',
+    sendConfirmationSms: false,
+    technicianId: 'tech-no-absence',
+    isRecurring: true,
+    recurringPattern: 'monthly',
+    recurringCount: 3,
+    boosterMonths: [11],
+    estimatedPrice: 89,
+    createInvoice: true,
+  };
+  const LINE = "Test Tech's shift is 8:00 AM to 10:00 AM. This visit is outside those hours.";
+  const dayLines = (body) => (body.warnings || []).filter((w) => /shift is|does not work/.test(w));
+
+  test('gate on, a shift that ends when the visit starts: every visit is saved on the technician and one shift line comes back', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    techShift = ['08:00:00', '10:00:00'];
+    const { status, body } = await post(recurringBody);
+    expect(status).toBe(201);
+    expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', '2099-08-07', '2099-09-04', '2099-11-03']);
+    expect(inserts.every((d) => d.technician_id === 'tech-no-absence')).toBe(true);
+    expect(dayLines(body)).toEqual([LINE]);
+  });
+
+  test('gate on, a shift that holds the visit, and a technician with no set hours: no line', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    techShift = ['08:00:00', '18:00:00'];
+    expect(dayLines((await post(recurringBody)).body)).toEqual([]);
+    techShift = null;
+    expect(dayLines((await post(recurringBody)).body)).toEqual([]);
+  });
+
+  test('gate on, the visit\'s own length is what the shift must hold', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    // 10:00 for 45 minutes ends at 10:45: a shift to 10:45 holds it, one to 10:44 does not.
+    const timed = { ...recurringBody, estimatedDuration: 45 };
+    techShift = ['08:00:00', '10:45:00'];
+    expect(dayLines((await post(timed)).body)).toEqual([]);
+    techShift = ['08:00:00', '10:44:00'];
+    expect(dayLines((await post(timed)).body)).toEqual(["Test Tech's shift is 8:00 AM to 10:44 AM. This visit is outside those hours."]);
+  });
+
+  test('gate off: the set hours are ignored, no line', async () => {
+    techShift = ['08:00:00', '10:00:00'];
+    const { status, body } = await post(recurringBody);
+    expect(status).toBe(201);
+    expect(dayLines(body)).toEqual([]);
+  });
+
+  test('both gates on, a Monday-to-Thursday tech: the Friday dates give the day-off line, the Tuesday booster the shift line', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    techWorkDays = [1, 2, 3, 4];
+    techShift = ['08:00:00', '10:00:00'];
+    const { status, body } = await post(recurringBody);
+    expect(status).toBe(201);
+    expect(dayLines(body)).toEqual(['Test Tech does not work on Fridays.', LINE]);
+  });
+
+  test('gate on, no technician chosen: nothing to say', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    techShift = ['08:00:00', '10:00:00'];
+    const { status, body } = await post({ ...recurringBody, technicianId: null });
+    expect(status).toBe(201);
+    expect(dayLines(body)).toEqual([]);
+  });
+});
 
 // GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25): an office create left on Auto /
 // unassigned logs the technician the service-line map would pick, after the commit.
