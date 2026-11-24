@@ -100,6 +100,8 @@ describe('computeServiceLines', () => {
     db.__results.estimates = [
       est({ status: 'accepted', accepted_at: '2026-10-02T15:00:00Z', archived_at: '2026-10-03T00:00:00Z' }),
       est({ status: 'declined', declined_at: '2026-10-03T15:00:00Z', disposition: 'invalid_lead' }),
+      // A booked win is the code AND status expired: a declined row carrying it is excluded.
+      est({ status: 'declined', declined_at: '2026-10-03T15:00:00Z', disposition: 'converted_other_path' }),
     ];
     const out = await computeServiceLines(WIN, { now: NOW });
     expect(pestRow(out.lines).resolved).toBe(0);

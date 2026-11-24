@@ -147,25 +147,30 @@ function effectiveDisposition(row) {
 }
 
 // Rows that are not real demand (invalid/duplicate/out-of-area) must not
-// sit in a win-RATE denominator. A customer who converted another way is
-// NOT excluded here: an unarchived such row (an expired offer the daily
-// reclaim stamped) is a win (isBookedOtherWay).
+// sit in a win-RATE denominator.
 function excludedFromRates(disposition) {
   return dispositionGroup(disposition) === 'dead';
 }
 
-// The customer bought some other way after the offer expired: counts as WON
-// in every win rate.
+// The disposition code the customer bought some other way (group
+// won_elsewhere) carries.
 function isBookedOtherWay(disposition) {
   return dispositionGroup(disposition) === 'won_elsewhere';
 }
 
-// The open sweep ARCHIVES the live (sent/viewed) offers of customers who
-// converted another way. Those rows stay out of every rate and cohort exactly
-// as before (the archive-symmetric rule). An EXPIRED row the reclaim stamped
-// and staff archived later keeps its timed outcome in the cohorts.
-function isArchivedBookedOtherWay(row, disposition) {
-  return Boolean(row.archived_at) && ['sent', 'viewed'].includes(row.status) && isBookedOtherWay(disposition);
+// A BOOKED WIN: the code AND status expired (an offer that expired before its
+// customer converted; the daily reclaim stamps it). The ONE server predicate,
+// the same as the client's isBookedOtherWayEstimate. Every other row carrying
+// the code (the open sweep's archived sent/viewed output, a declined row)
+// is not a win: it stays out of every rate and cohort exactly as before.
+function isBookedOtherWayRow(row, disposition) {
+  return row.status === 'expired' && isBookedOtherWay(disposition);
+}
+
+// Rows that never sit in a win-rate denominator or a cohort: dead leads, and
+// any row carrying the booked-another-way code that is not a booked win.
+function excludedFromRatesRow(row, disposition) {
+  return excludedFromRates(disposition) || (isBookedOtherWay(disposition) && !isBookedOtherWayRow(row, disposition));
 }
 
 function median(values) {
@@ -205,7 +210,7 @@ function lostAtMs(row, sentAt, archivedLoss) {
 // won. Only an accept or a decline counts as a "decision" for timing.
 function outcomeTimes(row, disposition, sentAt) {
   const acceptedAt = row.status === 'accepted' ? (ms(row.accepted_at) ?? sentAt) : null;
-  const bookedAt = isBookedOtherWay(disposition)
+  const bookedAt = isBookedOtherWayRow(row, disposition)
     ? (ms(row.disposition_at) ?? ms(row.expires_at) ?? sentAt)
     : null;
   const archivedLoss = Boolean(row.archived_at && disposition) && bookedAt == null;
@@ -239,7 +244,7 @@ function sentCohorts(rows, { days, nowMs }) {
     const sentAt = sentAnchorMs(row);
     if (sentAt == null) continue;
     const disposition = effectiveDisposition(row);
-    if (excludedFromRates(disposition) || isArchivedBookedOtherWay(row, disposition)) continue;
+    if (excludedFromRatesRow(row, disposition)) continue;
     // Archived rows KEEP their historical outcome — dropping them re-wrote
     // past cohort rates every time a row was tidied away (codex pre-push
     // P1, survivorship bias). Only an archived live row with no
@@ -438,7 +443,7 @@ async function winLossSlices({ days = 90 } = {}) {
   const byLeadSource = new Map();
   const byWaveguardTier = new Map();
   let wonBookedOtherWay = 0;
-  let archivedBookedOtherWayCount = 0;
+  let bookedCodeNotWinCount = 0;
 
   for (const row of rows) {
     // This card reports RATES, so archived rows drop symmetrically —
@@ -452,18 +457,18 @@ async function winLossSlices({ days = 90 } = {}) {
     const estimateData = parseEstimateData(row.estimate_data);
 
     const disposition = accepted ? null : effectiveDisposition(row);
-    const archivedWin = isArchivedBookedOtherWay(row, disposition);
-    if (archivedWin) archivedBookedOtherWayCount += 1;
-    const bookedOtherWay = isBookedOtherWay(disposition) && !archivedWin;
+    const bookedOtherWay = isBookedOtherWayRow(row, disposition);
+    const leavesRates = excludedFromRatesRow(row, disposition);
+    if (leavesRates && isBookedOtherWay(disposition)) bookedCodeNotWinCount += 1;
     const isWon = accepted || bookedOtherWay;
     if (disposition) byDispositionCount.set(disposition, (byDispositionCount.get(disposition) || 0) + 1);
     if (stillDecidingIds.has(String(row.id))) {
       stillDeciding.signaled += 1;
       // Only a REAL loss counts as lost — a reclaimed booked-another-way row
-      // is a win; dead and archived converted rows leave every loss metric
+      // is a win; dead and other converted-code rows leave every loss metric
       // (GH codex r3 P2).
       if (isWon) stillDeciding.wonAfter += 1;
-      else if (disposition && !excludedFromRates(disposition) && !archivedWin) stillDeciding.lostAfter += 1;
+      else if (disposition && !leavesRates) stillDeciding.lostAfter += 1;
       if (disposition === 'expired_viewed') stillDeciding.expiredViewedAfter += 1;
     }
     // Archived rows still drop from every RATE symmetrically (archived
@@ -473,7 +478,7 @@ async function winLossSlices({ days = 90 } = {}) {
     if (row.archived_at) continue;
     // Dead rows are counted in "why we lose" above but leave every RATE
     // denominator — they were never a winnable offer.
-    if (disposition && excludedFromRates(disposition)) continue;
+    if (disposition && leavesRates) continue;
     tally(totals, isWon);
     if (bookedOtherWay) wonBookedOtherWay += 1;
 
@@ -547,10 +552,10 @@ async function winLossSlices({ days = 90 } = {}) {
   // not dilute pctOfLosses (codex pre-push P1).
   // The never-winnable count is derived from the disposition counts so
   // ARCHIVED dead rows are counted too (GH codex P2); the archived-row skip
-  // above runs first. It also counts the archived converted-another-way rows
-  // (the open sweep's output), still out of every rate as before; a reclaimed
-  // unarchived one is a win, not excluded.
-  const excludedFromRatesCount = archivedBookedOtherWayCount + DISPOSITIONS
+  // above runs first. It also counts the rows carrying the converted-another-way
+  // code that are not a booked win (the open sweep's archived output), still out
+  // of every rate as before; a reclaimed expired row is a win, not excluded.
+  const excludedFromRatesCount = bookedCodeNotWinCount + DISPOSITIONS
     .filter((d) => d.group === 'dead')
     .reduce((sum, d) => sum + (byDispositionCount.get(d.code) || 0), 0);
   const lossTotal = DISPOSITIONS
@@ -599,6 +604,8 @@ module.exports = {
   effectiveDisposition,
   excludedFromRates,
   isBookedOtherWay,
+  isBookedOtherWayRow,
+  excludedFromRatesRow,
   // Canonical sent anchor (first durable delivery evidence) and resolution
   // date — shared with the dashboard's service-line card so no second copy of
   // the fallback chains can drift from Pipeline Analytics.

@@ -30,7 +30,7 @@ const { PROSPECT_SCOPE_SQL } = require('./lead-statuses');
 const { inferEstimateServiceLines, serviceKeysFromText, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
 // Canonical win/loss helpers (estimate-winloss.js owns the fallback chains and
 // the excluded-disposition rule; this card must never carry its own copy).
-const { sentAnchorMs, resolutionDateMs, effectiveDisposition, excludedFromRates, isBookedOtherWay } = require('./estimate-winloss');
+const { sentAnchorMs, resolutionDateMs, effectiveDisposition, excludedFromRatesRow, isBookedOtherWayRow } = require('./estimate-winloss');
 const { parseETDateTime } = require('../utils/datetime-et');
 
 const DAY_MS = 86400000;
@@ -92,8 +92,8 @@ function tallyDelivery(row, keys, cell, win, agingCutoff) {
 function closeOutcome(row, win) {
   if (!RESOLVED_STATUSES.includes(row.status)) return null;
   const disposition = effectiveDisposition(row);
-  if (excludedFromRates(disposition)) return null;
-  const booked = isBookedOtherWay(disposition);
+  if (excludedFromRatesRow(row, disposition)) return null;
+  const booked = isBookedOtherWayRow(row, disposition);
   const at = resolutionDateMs(row);
   if (at == null || at < win.fromMs || at >= win.toMs) return null;
   if (row.status === 'accepted') return 'accepted';

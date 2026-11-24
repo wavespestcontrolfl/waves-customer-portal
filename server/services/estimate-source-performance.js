@@ -196,7 +196,7 @@ async function sourcePerformance({ days = 90 } = {}) {
       'id', 'source', 'status', 'accepted_at', 'declined_at', 'expires_at',
       'created_at', 'updated_at', 'disposition', 'decline_reason',
     );
-  const { effectiveDisposition, excludedFromRates, isBookedOtherWay } = require('./estimate-winloss');
+  const { effectiveDisposition, excludedFromRatesRow, isBookedOtherWayRow } = require('./estimate-winloss');
   for (const row of resolved) {
     const resolvedAt = resolutionDateMs(row);
     if (resolvedAt == null || resolvedAt < cutoffMs) continue;
@@ -206,10 +206,10 @@ async function sourcePerformance({ days = 90 } = {}) {
     // traffic looks artificially bad. An expired offer whose customer converted
     // another way (reclaimed, un-archived) is a WIN, same as win-loss-slices.
     const disposition = effectiveDisposition(row);
-    if (excludedFromRates(disposition)) continue;
+    if (excludedFromRatesRow(row, disposition)) continue;
     const bucket = buckets.get(sourceKey(row.source));
     bucket.resolved += 1;
-    if (row.status === 'accepted' || isBookedOtherWay(disposition)) bucket.won += 1;
+    if (row.status === 'accepted' || isBookedOtherWayRow(row, disposition)) bucket.won += 1;
     else bucket.lost += 1;
   }
 

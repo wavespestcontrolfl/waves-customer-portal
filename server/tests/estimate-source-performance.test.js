@@ -122,6 +122,7 @@ describe('sourcePerformance', () => {
         { id: 'w', source: 'estimator_engine', status: 'accepted', accepted_at: daysAgo(3), created_at: daysAgo(9) },
         { id: 'late', source: 'estimator_engine', status: 'expired', expires_at: daysAgo(20), updated_at: daysAgo(1), created_at: daysAgo(30), disposition: 'converted_other_path' },
         { id: 'lost', source: 'estimator_engine', status: 'expired', expires_at: daysAgo(5), updated_at: daysAgo(5), created_at: daysAgo(12), disposition: 'expired_viewed' },
+        { id: 'stray', source: 'estimator_engine', status: 'declined', declined_at: daysAgo(4), updated_at: daysAgo(4), created_at: daysAgo(12), disposition: 'converted_other_path' },
         { id: 'dead', source: 'estimator_engine', status: 'expired', expires_at: daysAgo(5), updated_at: daysAgo(5), created_at: daysAgo(12), disposition: 'invalid_lead' },
       ],
     ];

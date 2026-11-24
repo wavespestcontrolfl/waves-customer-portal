@@ -388,7 +388,8 @@ function earliestConversionSignal() {
 
 // One conversion must not win several offers. The customer's other estimates
 // that make this one ambiguous: one accepted at or before the first signal
-// (an upsell accepted months after the conversion does not count) or already
+// (an upsell accepted months after the conversion does not count; with no
+// accepted_at its creation time stands in) or already
 // marked converted another way (the sale is spoken for), and any estimate
 // delivered after this one but no later than the first signal (that one is
 // the offer the customer converted on). Ambiguous stays lost.
@@ -403,9 +404,9 @@ function whereNoCompetingEstimate(query) {
           q.where("other.disposition", "converted_other_path").orWhere((accepted) =>
             accepted
               .where("other.status", "accepted")
-              .where((at) =>
-                at.whereNull("other.accepted_at").orWhereRaw("other.accepted_at <= (?)", [earliestConversionSignal()]),
-              ),
+              // Accepted at (or, with no accepted_at, created at) or before the
+              // first signal: an upsell created and accepted later does not block.
+              .whereRaw("COALESCE(other.accepted_at, other.created_at) <= (?)", [earliestConversionSignal()]),
           ),
         );
     })

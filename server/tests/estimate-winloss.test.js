@@ -320,6 +320,26 @@ describe('winLossSlices — audit slices', () => {
     expect(result.byDisposition.find((d) => d.code === 'converted_other_path')).toMatchObject({ count: 1, pctOfLosses: null });
   });
 
+  test('a booked win is code AND status expired: a declined row carrying the code is excluded, neither won nor lost', async () => {
+    mockDbHandler = estimatesTable([
+      row({ id: 'late', status: 'expired', accepted_at: null, expires_at: daysAgo(30), disposition: 'converted_other_path', disposition_at: daysAgo(1) }),
+      row({ id: 'stray', status: 'declined', accepted_at: null, declined_at: daysAgo(2), disposition: 'converted_other_path' }),
+      row({ id: 'lost', status: 'expired', accepted_at: null, expires_at: daysAgo(3), disposition: 'expired_viewed' }),
+    ]);
+
+    const result = await winLossSlices({ days: 90 });
+
+    expect(result).toMatchObject({ resolved: 2, won: 1, lost: 1, wonBookedOtherWay: 1, excludedFromRates: 1 });
+    const { isBookedOtherWayRow, excludedFromRatesRow } = require('../services/estimate-winloss');
+    expect(isBookedOtherWayRow({ status: 'expired' }, 'converted_other_path')).toBe(true);
+    expect(isBookedOtherWayRow({ status: 'declined' }, 'converted_other_path')).toBe(false);
+    expect(excludedFromRatesRow({ status: 'declined' }, 'converted_other_path')).toBe(true);
+    expect(excludedFromRatesRow({ status: 'expired' }, 'converted_other_path')).toBe(false);
+    // Cohorts agree: the declined row with the code never counts.
+    const cohorts = _private.sentCohorts([row({ id: 's', status: 'declined', accepted_at: null, declined_at: daysAgo(2), sent_at: daysAgo(35), disposition: 'converted_other_path' })], { days: 30, nowMs: NOW }).cohorts;
+    expect(cohorts.every((c) => c.sent === 0)).toBe(true);
+  });
+
   test('an ARCHIVED converted_other_path row stays out of every rate and cohort exactly as before; only a reclaimed unarchived one wins', async () => {
     const archivedConv = row({ id: 'conv', status: 'viewed', accepted_at: null, archived_at: daysAgo(3), disposition: 'converted_other_path', disposition_at: daysAgo(3) });
     mockDbHandler = estimatesTable([
