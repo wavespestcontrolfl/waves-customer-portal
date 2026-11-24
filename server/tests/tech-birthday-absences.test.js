@@ -11,7 +11,7 @@ const { lockTechDays } = require('../services/scheduling/tech-day-lock');
 const { techBirthdayPayLive } = require('../config/feature-gates');
 const { createTimeOff } = require('../services/payroll-time-off');
 const {
-  HORIZON_DAYS, ABSENCE_REASON, PAY_KIND, PAY_HOURS, PAY_NOTE, birthdayDateInYear, birthdayDatesBetween, syncTechDaysOff,
+  HORIZON_DAYS, ABSENCE_REASON, CATCH_UP_DAYS, PAY_KIND, PAY_HOURS, PAY_NOTE, birthdayDateInYear, birthdayDatesBetween, syncTechDaysOff,
 } = require('../services/tech-birthday-absences');
 
 beforeEach(() => {
@@ -227,6 +227,8 @@ describe('the pay half (GATE_TECH_BIRTHDAY_PAY)', () => {
     return { conn, inserted };
   }
 
+  const syncOneTick = (conn) => syncTechDaysOff({ now: NOW, conn });
+
   beforeEach(() => techBirthdayPayLive.mockReturnValue(true));
 
   test('gate off: nothing is recorded for pay, and no pay table is read', async () => {
@@ -248,6 +250,29 @@ describe('the pay half (GATE_TECH_BIRTHDAY_PAY)', () => {
     }, null, conn);
     expect([PAY_KIND, PAY_HOURS, PAY_NOTE]).toEqual(['holiday', 10, 'Paid day off']);
     expect(PAY_NOTE).not.toMatch(/birth/i);
+  });
+
+  test('the entry is written under the tech-day lock, in the transaction that re-reads the open absence', async () => {
+    const { conn } = conn2({ techs: [w2()] });
+    await syncOneTick(conn);
+    // one fence for the absence row, one for the pay transaction; the service call gets the transaction handle
+    expect(lockTechDays).toHaveBeenCalledTimes(2);
+    expect(lockTechDays).toHaveBeenLastCalledWith(conn, [{ techId: 't1', date: TODAY }]);
+    expect(createTimeOff.mock.calls[0][2]).toBe(conn);
+  });
+
+  test('a missed tick is made up for CATCH_UP_DAYS days: a past birthday is paid, no absence row is written for it, and nothing older', async () => {
+    const recent = conn2({ techs: [w2({ dob: '1990-11-20' })], absences: [{ technician_id: 't1', absence_date: '2026-11-20', reason: 'other', cleared_at: null }] });
+    expect(await syncTechDaysOff({ now: NOW, conn: recent.conn })).toMatchObject({ written: 0, paid: 1 });
+    expect(recent.inserted).toEqual([]);
+    expect(createTimeOff).toHaveBeenCalledWith(expect.objectContaining({ workDate: '2026-11-20' }), null, recent.conn);
+    createTimeOff.mockClear();
+    const old = conn2({ techs: [w2({ dob: String(`1990-11-${24 - CATCH_UP_DAYS - 1}`) })], absences: [{ technician_id: 't1', absence_date: `2026-11-${24 - CATCH_UP_DAYS - 1}`, reason: 'other', cleared_at: null }] });
+    expect(await syncTechDaysOff({ now: NOW, conn: old.conn })).toMatchObject({ paid: 0 });
+    expect(createTimeOff).not.toHaveBeenCalled();
+    // a past birthday with no absence row (the tick never wrote one) pays nothing
+    const none = conn2({ techs: [w2({ dob: '1990-11-20' })] });
+    expect(await syncTechDaysOff({ now: NOW, conn: none.conn })).toMatchObject({ written: 0, paid: 0, paySkipped: 1 });
   });
 
   test('a birthday still ahead pays nothing yet', async () => {

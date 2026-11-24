@@ -36,11 +36,16 @@ const NOW = new Date('2031-01-15T17:00:00Z');
 const IN_WINDOW = '2031-03-05';
 const SECOND_WINDOW_DAY = '2031-04-10';
 
-// A finished staff week in 2026 (Monday) and the day inside it a pay-half tick runs on. Pay-half dates sit
-// within payroll time off's 400-day window of the real clock, which the 2031 dates above do not.
-const WEEK = '2026-09-14';
-const PAY_DAY = '2026-09-17';
-const PAY_NOW = new Date('2026-09-17T16:00:00Z');
+// A finished staff week a few weeks back, derived from the real clock (payroll time off refuses a date more than 400
+// days from today, so a fixed date would start failing), and the day inside it a pay-half tick runs on.
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
+
+const WEEK = staffWeekStartForWorkDate(addStaffWorkDays(etDateString(), -21));
+const WEEK_END = addStaffWorkDays(WEEK, 6);
+const PAY_DAY = addStaffWorkDays(WEEK, 3);
+const PAY_NOW = parseETDateTime(`${PAY_DAY}T12:00`);
+const PAY_DOB = `1992-${PAY_DAY.slice(5)}`; // 1992 is a leap year, so any month and day is a real date
 
 postgres('technician days off (real Postgres, rolled back)', () => {
   let database;
@@ -175,13 +180,13 @@ postgres('technician days off (real Postgres, rolled back)', () => {
 
     async function payTech(name, patch = {}) {
       const tech = await makeTech(name, {
-        dob: '1990-09-17', employment_type: 'w2', pay_rate: '22.00', ...patch,
+        dob: PAY_DOB, employment_type: 'w2', pay_rate: '22.00', ...patch,
       });
       await trx('payroll_w4_elections').insert({
-        technician_id: tech.id, form_year: 2026, filing_status: 'single', signed_on: '2026-01-02', effective_on: '2026-01-02',
+        technician_id: tech.id, form_year: Number(WEEK.slice(0, 4)), filing_status: 'single', signed_on: '2026-01-02', effective_on: '2026-01-02',
       });
       await trx('time_weekly_summary').insert({
-        technician_id: tech.id, week_start: WEEK, week_end: '2026-09-20', status: 'approved', regular_minutes: '1800.00', overtime_minutes: '0.00',
+        technician_id: tech.id, week_start: WEEK, week_end: WEEK_END, status: 'approved', regular_minutes: '1800.00', overtime_minutes: '0.00',
       });
       return tech;
     }
@@ -249,9 +254,22 @@ postgres('technician days off (real Postgres, rolled back)', () => {
       expect(await rowsOff(other.id)).toEqual([]);
     });
 
+    test('a tick that did not run is made up by a later one, once', async () => {
+      const tech = await payTech('Synthetic Late');
+      delete process.env.GATE_TECH_BIRTHDAY_PAY;
+      await tickOn([tech.id]); // the absence row is written; the pay half is dark
+      process.env.GATE_TECH_BIRTHDAY_PAY = 'true';
+      const later = new Date(PAY_NOW.getTime() + 3 * 24 * 3600 * 1000);
+      expect(await svc.syncTechDaysOff({ now: later, technicianIds: [tech.id] })).toMatchObject({ paid: 1, written: 0 });
+      expect(await svc.syncTechDaysOff({ now: later, technicianIds: [tech.id] })).toMatchObject({ paid: 0, paySkipped: 1 });
+      const rows = await rowsOff(tech.id);
+      expect(rows).toHaveLength(1);
+      expect(payDate(rows[0])).toBe(PAY_DAY);
+    });
+
     test('an office-cleared absence and a contractor pay nothing', async () => {
       const cleared = await payTech('Synthetic Back');
-      await trx('technician_absences').insert({ technician_id: cleared.id, absence_date: PAY_DAY, reason: 'other', cleared_at: new Date('2026-09-16T12:00:00Z') });
+      await trx('technician_absences').insert({ technician_id: cleared.id, absence_date: PAY_DAY, reason: 'other', cleared_at: new Date() });
       const contractor = await payTech('Synthetic Contract', { employment_type: '1099' });
       const out = await tickOn([cleared.id, contractor.id]);
       expect(out).toMatchObject({ paid: 0, paySkipped: 2 });
