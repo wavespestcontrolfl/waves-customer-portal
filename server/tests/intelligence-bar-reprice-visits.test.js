@@ -509,8 +509,8 @@ describe('one property, one visit', () => {
 
   beforeEach(() => {
     tables.customer_properties = [
-      { id: UNIT_A, customer_id: CUSTOMER_ID, label: 'Unit A', address_line1: '101 Example Ave', city: 'Sampletown' },
-      { id: UNIT_B, customer_id: CUSTOMER_ID, label: 'Unit B', address_line1: '103 Example Ave', city: 'Sampletown' },
+      { id: UNIT_A, customer_id: CUSTOMER_ID, label: 'Unit A', address_line1: '101 Example Ave', city: 'Sampletown', zip: '34200' },
+      { id: UNIT_B, customer_id: CUSTOMER_ID, label: 'Unit B', address_line1: '103 Example Ave', city: 'Sampletown', zip: '34200' },
     ];
     tables.scheduled_services = [
       visit('a-1', '2099-03-10', { property_id: UNIT_A, estimated_price: '95.04' }),
@@ -524,10 +524,10 @@ describe('one property, one visit', () => {
     const card = await preview({ property_id: UNIT_B, new_price: 68.9 });
     expect(card.preview).toBe(true);
     expect(card.visits.map((v) => [v.id, v.old_price, v.new_price])).toEqual([['b-1', '$76.56', '$68.90'], ['b-2', '$76.56', '$68.90']]);
-    expect(card.property_label).toBe('Unit B · 103 Example Ave');
-    expect(cardLines(card)[0].text).toBe("Only visits booked for Unit B · 103 Example Ave. The customer's other properties keep their prices.");
+    expect(card.property_label).toBe('Unit B · 103 Example Ave, Sampletown 34200');
+    expect(cardLines(card)[0].text).toBe("Only visits booked for Unit B · 103 Example Ave, Sampletown 34200. The customer's other properties keep their prices.");
     const contract = buildContract({ toolName: 'reprice_future_visits', params: ask({ property_id: UNIT_B }), displayParams: {}, preview: card });
-    expect(contract.effects.map((e) => e.label)).toContain("Only visits booked for Unit B · 103 Example Ave. The customer's other properties keep their prices.");
+    expect(contract.effects.map((e) => e.label)).toContain("Only visits booked for Unit B · 103 Example Ave, Sampletown 34200. The customer's other properties keep their prices.");
   });
 
   test('the confirmed run saves only the listed property visits', async () => {
@@ -654,11 +654,13 @@ describe('one property, one visit', () => {
     expect(Schedule.updateVisitDetails).not.toHaveBeenCalled();
   });
 
-  test('a property with no visits of that service in range says so', async () => {
+  test('a property with no visits of that service in range says so, and lists visits with no saved property', async () => {
     const res = await preview({ property_id: UNIT_A, from_date: '2099-06-01' });
     expect(res.error).toBeTruthy();
     tables.scheduled_services = tables.scheduled_services.filter((r) => r.property_id !== UNIT_A).concat(visit('n-1', '2099-04-10', { property_id: null }));
-    expect(await preview({ property_id: UNIT_A })).toMatchObject({ code: 'nothing_to_reprice', error: expect.stringMatching(/no upcoming .* visits booked for Unit A · 101 Example Ave/) });
+    const unstamped = await preview({ property_id: UNIT_A });
+    expect(unstamped.code).toBe('nothing_to_reprice');
+    expect(unstamped.left_alone).toEqual([expect.objectContaining({ id: 'n-1', reason: expect.stringMatching(/no saved property/) })]);
   });
 
   test('the version binds the property and range', async () => {

@@ -250,14 +250,15 @@ async function loadCustomer(customerId) {
 // The saved property, only when it belongs to this customer.
 async function loadProperty(customerId, propertyId) {
   return db('customer_properties').where({ id: propertyId, customer_id: customerId })
-    .first('id', 'label', 'address_line1', 'address_line2', 'city');
+    .first('id', 'label', 'address_line1', 'address_line2', 'city', 'zip');
 }
 
 // The saved label AND the street: two units can share one street address.
 function propertyLabel(property) {
   const street = [property.address_line1, property.address_line2].filter(Boolean).join(' ').trim();
+  const place = [street, [property.city, property.zip].filter(Boolean).join(' ').trim()].filter(Boolean).join(', ');
   const label = String(property.label || '').trim();
-  return [label, street].filter(Boolean).join(' · ') || 'the chosen property';
+  return [label, place].filter(Boolean).join(' · ') || `property ${String(property.id)}`;
 }
 
 // The upcoming visits the card judges: from the first date (today at the
@@ -407,18 +408,14 @@ function placeShown(property, visitId, rows) {
   return !property && (Boolean(visitId) || visitsAtSeveralPlaces(rows));
 }
 
-// The service family inside the narrowed scope; with a property, at least one
-// visit of it must be booked for that property.
+// The service family inside the narrowed scope. With a property, visits with
+// no saved property stay in so the card lists them as left alone.
 async function pickScopedFamily({ customer, customerName, service, propertyId, visitId, from, through }) {
   const scoped = await scopedVisits({ customer, customerName, propertyId, visitId, from, through });
   if (scoped.error) return scoped;
   const picked = pickFamily(scoped.rows, service);
   if (picked.error) return { error: picked.error };
-  const { property } = scoped;
-  if (property && !picked.family.rows.some((r) => r.property_id != null)) {
-    return { error: `${customerName} has no upcoming ${picked.family.label} visits booked for ${propertyLabel(property)} in that range. Nothing was changed.`, code: 'nothing_to_reprice' };
-  }
-  return { family: picked.family, property };
+  return { family: picked.family, property: scoped.property };
 }
 
 function unstampedReason(row, property) {
