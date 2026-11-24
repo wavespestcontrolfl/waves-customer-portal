@@ -6,10 +6,10 @@
  * relays) that URLs have been added/updated. Zero auth — just a key
  * file at /{key}.txt on the site root.
  *
- * Per v3.1 plan, this is the ONLY supported indexing submission
- * channel. Google's `urlNotifications.publish` is explicitly out of
- * scope (policy-restricted to JobPosting / BroadcastEvent, unreliable
- * for blog/service content). Google URL Inspection is read-only (see
+ * Per v3.1 plan, this is the only indexing submission channel for
+ * blog/service content. Google's `urlNotifications.publish` is
+ * policy-restricted to JobPosting / BroadcastEvent; only the /careers/
+ * job pages use it (google-index-ping.js). Google URL Inspection is read-only (see
  * index-status-monitor.js).
  *
  * Idempotent: each URL is submitted at most once per 24 hours unless
