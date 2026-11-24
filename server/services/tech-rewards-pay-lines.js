@@ -441,7 +441,10 @@ async function spanWaitOf(trx, run, technicianId, span, amountCents, earned = sp
   const payoutWeek = (await timeOffBank.payoutsNotFinal(trx, banks, run.week_start)).get(technicianId);
   if (payoutWeek) return { reason: 'bank_payout_not_final', week: payoutWeek };
   const beforeRun = addStaffWorkDays(run.week_start, -1);
-  const earlier = { coversFrom: span.coversFrom, coversTo: beforeRun };
+  // The weeks asked are the window the base is worked out from (`earned`: the span itself, except for a season bonus, whose base
+  // is the FULL season whatever the hire date in the middle of it: readSeasonPay counts every check of the season). The
+  // hire-clipped `span` stays for the line's own overtime allocation (the line guards below).
+  const earlier = { coversFrom: earned.coversFrom, coversTo: beforeRun };
   if (earlier.coversFrom <= earlier.coversTo) {
     const unpaid = await oldestUnpaidWeek(trx, technicianId, earlier);
     if (unpaid) return { reason: 'week_not_paid', week: unpaid };
@@ -453,7 +456,9 @@ async function spanWaitOf(trx, run, technicianId, span, amountCents, earned = sp
   // then, but the shift of the Sunday night before it can still run into the span's first day): unpaidHolidayShiftWeek only
   // looks at weeks before the run.
   if (timeOffOn()) {
-    const unpaid = await unpaidHolidayShiftWeek(trx, technicianId, span, beforeRun, earned);
+    // shifts that started before the window's first pay week and run into a holiday inside it (the weeks of the window itself are
+    // asked above)
+    const unpaid = await unpaidHolidayShiftWeek(trx, technicianId, earned, beforeRun);
     if (unpaid) return { reason: 'week_not_paid', week: unpaid };
   }
   const ownWeek = { coversFrom: run.week_start, coversTo: addStaffWorkDays(run.week_start, 6) };
@@ -663,8 +668,8 @@ async function priceSeason(trx, cand, tech, run, { seasonScores, conflict }) {
   const span = seasonSpanOf(season.year, run.week_start, tech.hire_date);
   const lastWeek = scoreboard().seasonLastPayWeek(season.year);
   if (run.week_start <= lastWeek) return { wait: { reason: 'pay_week_too_early', week: lastWeek } };
-  // the holiday readiness looks at the FULL season (the base counts every premium earned in it, also before a hire date in the
-  // middle of it); the hire-clipped span stays the line's own
+  // the readiness (unpaid weeks and holiday shifts) looks at the FULL season (the base counts every check and premium earned in
+  // it, also before a hire date in the middle of it); the hire-clipped span stays the line's own
   const wait = await spanWaitOf(trx, run, tech.id, span, 1, { coversFrom: season.start, coversTo: season.end });
   if (wait) return { wait };
   const seasonPay = await scoreboard().readSeasonPay(trx, tech.id, season);

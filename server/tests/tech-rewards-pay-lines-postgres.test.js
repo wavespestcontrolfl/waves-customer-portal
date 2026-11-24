@@ -2110,6 +2110,31 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect([dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual(['2027-06-14', '2027-08-31']);
     });
 
+    it('waits for an unpaid April week with a daytime shift on a holiday when the technician is rehired in June, then pays: the unpaid-week check starts at the season start', async () => {
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      const tech = await readyTech('Sample Alpha', { hire_date: '2027-06-14' });
+      // Monday Apr 5, a holiday, worked 10 AM to 2 PM (EDT): the shift never crosses a pay-week boundary, so only the unpaid-week
+      // check can see it
+      await trx('payroll_time_off').insert({ technician_id: tech, work_date: '2027-04-05', kind: 'holiday', minutes: '600.00' });
+      await trx('time_entries').insert({
+        technician_id: tech, entry_type: 'shift', status: 'completed', duration_minutes: '240.00',
+        clock_in: new Date('2027-04-05T14:00:00Z'), clock_out: new Date('2027-04-05T18:00:00Z'),
+      });
+      await approvedWeek(tech, '2027-04-05', '240.00'); // never paid
+      await paidWeek(tech, '2027-06-14');
+      await approvedWeek(tech, BONUS_WEEK);
+      const run = await draft(BONUS_WEEK);
+      expect(await linesOf(tech)).toHaveLength(0);
+      const stored = await trx('payroll_runs').where({ id: run.id }).first('tech_rewards_waits');
+      expect(stored.tech_rewards_waits).toEqual([{ technician_id: tech, kind: 'season_bonus', source_id: `season_bonus:${tech}:2027`, reason: 'week_not_paid', week: '2027-04-05' }]);
+      await paidWeek(tech, '2027-04-05');
+      await recompute(run.id);
+      const line = await lineOf(tech);
+      expect(line).toMatchObject({ kind: 'season_bonus', status: 'open' });
+      // the line is still allocated over the hire-clipped span
+      expect([dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual(['2027-06-14', '2027-08-31']);
+    });
+
     it('is the band rate of the score times the pay earned in the season times the multiplier, on the run dated the last Friday of September', async () => {
       const alpha = await readyTech('Sample Alpha'); // hired Jan 10, 2024: 3 full years on Mar 1, 2027, so the multiplier is 1.75
       const bravo = await readyTech('Sample Bravo', { hire_date: '2027-05-10' }); // hired during the season: no year yet, 1.00
