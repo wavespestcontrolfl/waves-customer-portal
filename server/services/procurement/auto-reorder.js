@@ -280,8 +280,14 @@ async function holdOpenRequest(ctx, p, request) {
 // the normal 72-hour window (admin-alert-retention.js quietHoldFrom).
 async function reopenHeldBells(ctx, p, request) {
   if (!(await requestOrderBells(ctx.conn, request.id).where('resolution', HOLD_RESOLUTION).first('id'))) return;
+  // The hand-off stays closed only when the dispatcher will claim this
+  // request itself: an auto-orderable vendor AND no ledger row it would not
+  // re-claim (findDispatchable re-claims only a dry-run park; any other
+  // parked row means the request needs a person).
   const { vendorId } = parseMeta(request.metadata);
-  const handoff = !(vendorId && await dispatcherOrders(ctx.conn, vendorId));
+  const ledgerRow = await ctx.conn('vendor_orders').where({ restock_request_id: request.id })
+    .whereRaw("NOT COALESCE(status = 'needs_review' AND error LIKE 'dry_run:%', false)").first('id');
+  const handoff = Boolean(ledgerRow) || !(vendorId && await dispatcherOrders(ctx.conn, vendorId));
   const stamp = JSON.stringify({ quietHoldFrom: (ctx.now || new Date()).toISOString() });
   await whileManualLocked(ctx, p, request.id, (trx) => requestOrderBells(trx, request.id, { handoff }).where('resolution', HOLD_RESOLUTION)
     .update({ read_at: null, done_at: null, done_by: null, resolution: null, metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [stamp]) })); // notifications has no updated_at

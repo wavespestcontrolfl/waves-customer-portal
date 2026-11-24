@@ -36,3 +36,16 @@ test('a nonzero N or P column holds even when fertilizer_analysis is an empty re
   expect(fertilizerBlackoutHold({ name: 'Synthetic granular', fertilizer_analysis: {}, analysis_n: 24, analysis_p: 0 }, july)).toBe(true);
 });
 
+test('an empty analysis record does not hide a fertilizer category', () => {
+  const july = new Date('2026-07-01T15:00:00Z');
+  expect(fertilizerBlackoutHold({ name: 'Synthetic lawn food', category: 'fertilizer', fertilizer_analysis: {} }, july)).toBe(true);
+  expect(fertilizerBlackoutHold({ name: 'Synthetic lawn food', category: 'fertilizer', fertilizer_analysis: '{}' }, july)).toBe(true);
+});
+
+test('analysis records are read the shared parser\'s way', () => {
+  const july = new Date('2026-07-01T15:00:00Z');
+  expect(fertilizerBlackoutHold({ name: 'Synthetic granular', fertilizer_analysis: { nitrogen: 24 } }, july)).toBe(true);
+  // explicit 0-0 columns with an empty record: potash is not held
+  expect(fertilizerBlackoutHold({ name: 'Synthetic Potash', category: 'fertilizer', analysis_n: 0, analysis_p: 0, fertilizer_analysis: {} }, july)).toBe(false);
+});
+

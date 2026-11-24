@@ -38,11 +38,17 @@ function isNpFertilizer(product) {
   // A nonzero N or P column always counts: an empty or partial
   // fertilizer_analysis must not hide it from the classifier.
   if (Number(product.analysis_n || 0) > 0 || Number(product.analysis_p || 0) > 0) return true;
+  const { productHasNpFertilizer, parseFertilizerAnalysis } = require('../tree-shrub-closeout');
+  // An analysis record with no N and no P value (the shared parser's reading:
+  // n / N / nitrogen, p / P / phosphorus) is no analysis, so the name and
+  // category fallback still applies.
+  const parsed = parseFertilizerAnalysis(product.fertilizer_analysis);
+  const hasNpAnalysis = Boolean(parsed) && (parsed.n != null || parsed.p != null);
+  const normalized = hasNpAnalysis ? product : { ...product, fertilizer_analysis: null };
   const explicitZero = product.analysis_n != null && product.analysis_p != null
     && Number(product.analysis_n) === 0 && Number(product.analysis_p) === 0;
-  if (explicitZero && !product.fertilizer_analysis && !NPK_IN_NAME.test(String(product.name || ''))) return false;
-  const { productHasNpFertilizer } = require('../tree-shrub-closeout');
-  return productHasNpFertilizer(product) === true;
+  if (explicitZero && !hasNpAnalysis && !NPK_IN_NAME.test(String(product.name || ''))) return false;
+  return productHasNpFertilizer(normalized) === true;
 }
 
 // True when automatic ordering must hold this product today. `product` is a
