@@ -201,7 +201,7 @@ async function executeTechTool(toolName, input, techContext) {
     switch (toolName) {
       case 'get_my_route': return await getMyRoute(techContext.techId, techContext.techName, input.date, { technician });
       case 'get_stop_details': return await getStopDetails(input, techId, technician);
-      case 'get_service_history': return await getServiceHistory(input, techId);
+      case 'get_service_history': return await getServiceHistory(input, techId, technician);
       case 'get_product_info': return await getProductInfo(input.product_name, { forTech });
       case 'get_protocol': return await getProtocol(input, { technician });
       case 'check_customer_status': return await checkCustomerStatus(input, techId, { technician });
@@ -405,7 +405,9 @@ async function getStopDetails(input, techId = null, technician = false) {
     recent_history: history.map(h => ({
       date: h.service_date,
       type: h.service_type,
-      notes: historyFacts.notesFor(h),
+      // A technician login gets no past-visit notes: they can hold gate or
+      // lockbox codes from another visit, outside the visit-facts guard.
+      ...(technician ? {} : { notes: historyFacts.notesFor(h) }),
       products: historyFacts.productsFor(h),
       tech: historyFacts.technicianFor(h),
     })),
@@ -413,7 +415,7 @@ async function getStopDetails(input, techId = null, technician = false) {
 }
 
 
-async function getServiceHistory(input, techId = null) {
+async function getServiceHistory(input, techId = null, technician = false) {
   const { service_type, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 5, 20);
 
@@ -434,7 +436,7 @@ async function getServiceHistory(input, techId = null) {
       date: r.service_date,
       type: r.service_type,
       tech: facts.technicianFor(r),
-      notes: facts.notesFor(r),
+      ...(technician ? {} : { notes: facts.notesFor(r) }),
       products: facts.productsFor(r),
       duration: r.labor_hours ? `${(parseFloat(r.labor_hours) * 60).toFixed(0)} min` : null,
     })),

@@ -27,6 +27,8 @@ jest.mock('../models/db', () => {
       orderBy() { return api; },
       orderByRaw() { return api; },
       limit() { return api; },
+      distinct() { return api; },
+      pluck(col) { return api.then((rows) => rows.map((r) => r[col])); },
       leftJoin() { return api; },
       select(cols) { selects.push([table, cols]); return api; },
       first() {
@@ -104,5 +106,30 @@ describe('get_stop_details', () => {
       expect(cols).not.toEqual(expect.arrayContaining(['products_used']));
       expect(cols).not.toEqual(expect.arrayContaining(['technician_name']));
     }
+  });
+});
+
+describe('a technician login gets no past-visit notes (they can hold access codes)', () => {
+  beforeEach(() => {
+    state.service_records[0].technician_notes = 'Gate code 4821, lockbox on the side door.';
+    // tech-1 is on today's route for this customer, so both reads are authorized.
+    const { etDateString } = require('../utils/datetime-et');
+    state.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: etDateString(new Date()) }];
+  });
+  const techLogin = { techId: 'tech-1', techName: 'Sam Tech', techRole: 'technician' };
+
+  test.each(['get_service_history', 'get_stop_details'])('%s withholds notes and keeps products', async (tool) => {
+    const r = await executeTechTool(tool, { customer_id: 'cust-1' }, techLogin);
+    expect(r.error).toBeUndefined();
+    const rows = tool === 'get_service_history' ? r.services : r.recent_history;
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) expect(row).not.toHaveProperty('notes');
+    expect(JSON.stringify(r)).not.toContain('4821');
+    expect(rows[0].products.map((p) => p.name)).toContain('Sample Fertilizer 16-0-8');
+  });
+
+  test('the owner reading through the tech rail still sees the notes', async () => {
+    const r = await executeTechTool('get_service_history', { customer_id: 'cust-1' }, { techId: 'tech-1', techRole: 'admin' });
+    expect(r.services[0].notes).toMatch(/Gate code/);
   });
 });
