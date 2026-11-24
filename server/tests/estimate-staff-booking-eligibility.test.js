@@ -76,6 +76,20 @@ describe('estimateBookableByStaff (real accept-on-book predicates)', () => {
     expect(rowQuarantineRefusal({}, null)).toBeNull();
   });
 
+  test('an open row with price_locked_at set is not bookable', () => {
+    expect(estimateBookableByStaff(open({ price_locked_at: '2026-11-20T15:00:00Z' }))).toBe(false);
+    expect(estimateBookableByStaff(open({ price_locked_at: null }))).toBe(true);
+  });
+
+  test('a commercial estimate or proposal is not bookable, even a Net-30 proposal with invoice mode off', () => {
+    expect(estimateBookableByStaff(open({ category: 'COMMERCIAL' }))).toBe(false);
+    expect(estimateBookableByStaff(open({ category: 'commercial' }))).toBe(false);
+    const net30 = open({ bill_by_invoice: false, estimate_data: { proposal: PROPOSAL } });
+    expect(estimateBookableByStaff(net30)).toBe(false);
+    expect(staffBookingRefusalForOpenEstimate(net30).code).toBe('commercial');
+    expect(estimateBookableByStaff(open({ category: 'RESIDENTIAL' }))).toBe(true);
+  });
+
   test('a retired tree-and-shrub cadence is not', () => {
     mockRetired.mockReturnValue(true);
     expect(estimateBookableByStaff(open())).toBe(false);

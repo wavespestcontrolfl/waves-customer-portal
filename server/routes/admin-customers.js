@@ -3287,7 +3287,7 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
           'estimate_slug', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
           'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'property_id',
           // Read-only inputs for `bookable` and the booking-win notice.
-          'sent_at', 'source', 'pricing_authority',
+          'sent_at', 'source', 'pricing_authority', 'price_locked_at', 'category',
         ),
       db('services')
         // mosquito_seasonal is active as of 20260805000010, making the

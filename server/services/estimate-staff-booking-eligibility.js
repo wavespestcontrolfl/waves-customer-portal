@@ -4,6 +4,7 @@
  * any rows, evaluated with the same predicates so the New Appointment form
  * offers its "Link it" button only for a quote the booking would accept:
  *
+ *   - a price-locked open row, and any commercial estimate or proposal (linked by hand),
  *   - a portal plan-start quote (only the customer can accept it),
  *   - a bill-by-invoice proposal that is not won yet,
  *   - a gated add-on whose gate is off, or an area add-on a recurring accept
@@ -33,6 +34,13 @@ function staffBookingRefusalForOpenEstimate(estimate) {
   if (addOn) return { code: addOn.code, message: addOn.message };
   // The accept-on-book's own row predicates, for a quote that is not accepted yet.
   if (estimate.status !== 'accepted') {
+    // A price-locked open row is already claimed by an accept in flight or by a finished one.
+    if (estimate.price_locked_at) return { code: 'price_locked', message: 'This estimate is price-locked.' };
+    // Commercial quotes and proposals are linked by hand, as before: their win carries invoice terms and a
+    // first invoice that the quick link in the booking form does not set up.
+    if (String(estimate.category || '').toUpperCase() === 'COMMERCIAL' || manual.isCommercialProposalEstimate(estimate)) {
+      return { code: 'commercial', message: 'Commercial estimates are linked by hand.' };
+    }
     const accept = manual.manualAcceptRowRefusal(estimate, { billingTerm: 'standard' }) || manual.manualAcceptLockedRowRefusal(estimate);
     if (accept) return { code: accept.code || 'accept_refused', message: accept.message };
     // A re-price hold or a call-linkage correction marker on the row: assertNotQuarantined refuses it after the visit
