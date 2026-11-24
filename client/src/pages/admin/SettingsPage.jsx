@@ -1467,8 +1467,6 @@ function BlackoutDaysTab() {
   const [weeklySaving, setWeeklySaving] = useState(false);
   const [holidays, setHolidays] = useState([]);
   const [holidaySaving, setHolidaySaving] = useState(false);
-  // False when the closed holidays differ from the six the texting, voice and chat agents name (server sets it).
-  const [factsLineMatches, setFactsLineMatches] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [date, setDate] = useState("");
@@ -1493,7 +1491,6 @@ function BlackoutDaysTab() {
         setBlackouts(d.blackouts || []);
         setWeeklyDaysOff(d.weeklyDaysOff || []);
         setHolidays(d.holidays || []);
-        setFactsLineMatches(d.factsLineMatches !== false);
         setLoaded(true);
       })
       .catch((e) => {
@@ -1529,7 +1526,6 @@ function BlackoutDaysTab() {
       });
       if (d?.error) throw new Error(d.error);
       setWeeklyDaysOff(d.weeklyDaysOff || next);
-      if (typeof d.factsLineMatches === "boolean") setFactsLineMatches(d.factsLineMatches);
       rereadIfStale();
     } catch (e) {
       setWeeklyDaysOff(prev);
@@ -1556,7 +1552,6 @@ function BlackoutDaysTab() {
       if (d?.error) throw new Error(d.error);
       const closed = new Set(d.closedHolidays || []);
       setHolidays(next.map((h) => ({ ...h, closed: closed.has(h.key) })));
-      if (typeof d.factsLineMatches === "boolean") setFactsLineMatches(d.factsLineMatches);
       rereadIfStale();
     } catch (e) {
       setHolidays(prev);
@@ -1680,11 +1675,6 @@ function BlackoutDaysTab() {
         Visits already booked on a day you close stay booked unless the
         nightly auto-dispatch moves them.
       </p>
-      {!factsLineMatches && (
-        <p className="mt-1 text-ui-body text-ink-secondary" role="status">
-          Texting, voice and chat still name the six closed holidays and open Sundays. Tell Claude to update the facts line.
-        </p>
-      )}
       <div className="mb-6 mt-2 divide-y divide-zinc-200">
         {holidays.map((h) => (
           <div key={h.key} className="flex min-h-12 flex-wrap items-center justify-between gap-3 py-2">
