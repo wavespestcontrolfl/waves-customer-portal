@@ -37,7 +37,8 @@ function customerPhoneLookupKey(value) {
  * @returns {Promise<object|null>}
  */
 // Live customers whose identity phone columns contain `phone` (at most `limit`).
-async function knownCallerCustomers(dbLike, phone, columns, limit) {
+// `timeoutMs` (optional) puts a cancelling statement timeout on the read.
+async function knownCallerCustomers(dbLike, phone, columns, limit, timeoutMs) {
   const key = customerPhoneLookupKey(phone);
   if (!key) return [];
   const keys = key.length === 10 ? [key, `1${key}`] : [key];
@@ -45,16 +46,17 @@ async function knownCallerCustomers(dbLike, phone, columns, limit) {
   const frag = KNOWN_CALLER_PHONE_COLS
     .map((col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') IN (${placeholder})`)
     .join(' OR ');
-  const rows = await dbLike('customers')
+  let query = dbLike('customers')
     .select(columns)
     .whereNull('deleted_at')
-    .whereRaw(`(${frag})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => keys))
-    .limit(limit);
+    .whereRaw(`(${frag})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => keys));
+  if (timeoutMs) query = query.timeout(timeoutMs, { cancel: true });
+  const rows = await query.limit(limit);
   return rows || [];
 }
 
-async function findKnownCallerCustomer(dbLike, phone, columns = ['id', 'first_name', 'last_name']) {
-  const rows = await knownCallerCustomers(dbLike, phone, columns, 1);
+async function findKnownCallerCustomer(dbLike, phone, columns = ['id', 'first_name', 'last_name'], timeoutMs) {
+  const rows = await knownCallerCustomers(dbLike, phone, columns, 1, timeoutMs);
   return rows[0] || null;
 }
 
@@ -68,8 +70,8 @@ async function findOnlyKnownCallerCustomer(dbLike, phone, columns = ['id']) {
   return rows.length === 1 ? rows[0] : null;
 }
 
-async function knownCallerPhoneExists(dbLike, phone) {
-  return Boolean(await findKnownCallerCustomer(dbLike, phone, ['id']));
+async function knownCallerPhoneExists(dbLike, phone, timeoutMs) {
+  return Boolean(await findKnownCallerCustomer(dbLike, phone, ['id'], timeoutMs));
 }
 
 module.exports = {

@@ -37,6 +37,7 @@ function makeDbLike(rows) {
       calls.whereRaw.push({ sql, bindings });
       return builder;
     }),
+    timeout: jest.fn(() => builder),
     limit: jest.fn(() => Promise.resolve(rows)),
   };
   const dbLike = jest.fn(() => builder);
@@ -119,9 +120,9 @@ describe('exchangeTriggerHit (ring-path read)', () => {
     expect(missedCallBell.exchangeHangupScreenHit).toHaveBeenCalledWith('+19412360101');
   });
 
-  test('fails open: a query error or timeout never challenges the caller', async () => {
+  test('fails open: a query error or timeout never challenges the caller (null = failed read)', async () => {
     jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockRejectedValue(new Error('canceling statement due to statement timeout'));
-    await expect(exchangeTriggerHit('+19412360101')).resolves.toBe(false);
+    await expect(exchangeTriggerHit('+19412360101')).resolves.toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('failing open'));
   });
 });
@@ -180,12 +181,13 @@ describe('screenCandidate (who the screen may challenge)', () => {
         gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
         jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
         const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
-        const builder = { select: () => builder, whereNull: () => builder, whereRaw: () => builder, limit: () => new Promise(() => {}) };
+        const builder = { select: () => builder, whereNull: () => builder, whereRaw: () => builder, timeout: jest.fn(() => builder), limit: () => new Promise(() => {}) };
         db.mockImplementation(() => builder);
         const pending = screenCandidate('+19412360303', A);
         await jest.advanceTimersByTimeAsync(1600);
         await expect(pending).resolves.toEqual({ knownCaller: true, exchangeTrigger: false, allUnknownTrigger: false });
         expect(hit).not.toHaveBeenCalled();
+        expect(builder.timeout).toHaveBeenCalledWith(1500, { cancel: true });
       } finally {
         jest.useRealTimers();
       }
@@ -234,6 +236,15 @@ describe('screenCandidate (who the screen may challenge)', () => {
       jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
       slotRows([]);
       await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, exchangeTrigger: true, allUnknownTrigger: true });
+    });
+
+    test('a failed exchange read makes the trial stand down (fail open)', async () => {
+      gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
+      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockRejectedValue(new Error('timeout'));
+      const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
+      slotRows([]);
+      await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
+      expect(hit).not.toHaveBeenCalled();
     });
 
     test('a B caller is screened by B, not counted as a trial call', async () => {

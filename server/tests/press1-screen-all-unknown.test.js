@@ -17,11 +17,12 @@ function fakeDb({ technicians = null, leads = null, call_log = null, throwOn = n
     seen.tables.push(table);
     const builder = {};
     const chain = () => builder;
-    for (const m of ['where', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereNotNull', 'timeout']) builder[m] = jest.fn((arg) => {
+    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereNull', 'orWhereNotNull', 'timeout']) builder[m] = jest.fn((arg) => {
       if (typeof arg === 'function') arg(builder);
       return chain();
     });
-    builder.whereRaw = jest.fn((sql) => { seen.sql.push(sql); return builder; });
+    builder.whereRaw = jest.fn((sql, bindings) => { seen.sql.push(sql); seen.bindings = [...(seen.bindings || []), ...(bindings || [])]; return builder; });
+    builder.whereIn = jest.fn((col, vals) => { seen.whereIn = [...(seen.whereIn || []), [col, vals]]; return builder; });
     builder.first = jest.fn(async () => {
       if (throwOn === table) throw Object.assign(new Error('canceling statement due to statement timeout +19415550101'), { code: '57014' });
       return { technicians, leads, call_log }[table];
@@ -57,10 +58,37 @@ test('an active technician phone rings through, with no lead or call read', asyn
   expect(seen.tables).toEqual(['technicians']);
 });
 
-test('a message counts only on a call nobody answered (a short recorded staff call is no message)', async () => {
+test('a message counts only on a call nobody answered; any call Sandy touched proves nothing', async () => {
   const seen = fakeDb();
   await screenAllUnknownHit(CALLER);
-  expect(seen.sql).toContain("COALESCE(answered_by, '') <> 'human'");
+  expect(seen.whereIn).toContainEqual(['answered_by', ['missed', 'voicemail', 'unknown']]);
+  expect(seen.sql.some((q) => q.startsWith("COALESCE(call_outcome, '') NOT IN"))).toBe(true);
+  expect(seen.bindings).toEqual(expect.arrayContaining(['ai_handled', 'ai_transferred']));
+});
+
+test('an outbound call counts only when its customer leg connected for 30 s or more', async () => {
+  const seen = fakeDb();
+  await screenAllUnknownHit(CALLER);
+  expect(seen.sql).toContain("metadata->'customer_leg'->>'status' = 'completed'");
+  expect(seen.sql.some((q) => q.includes("customer_leg'->>'duration_seconds')::numeric >= ?"))).toBe(true);
+});
+
+test('reads that run past the shared 1.5 s deadline fail open (no prompt)', async () => {
+  jest.useFakeTimers();
+  try {
+    db.mockImplementation(() => {
+      const b = {};
+      for (const m of ['where', 'whereRaw', 'whereIn', 'whereNull', 'timeout']) b[m] = () => b;
+      b.first = () => new Promise(() => {});
+      return b;
+    });
+    const pending = screenAllUnknownHit(CALLER);
+    await jest.advanceTimersByTimeAsync(1600);
+    await expect(pending).resolves.toBe(false);
+    expect(logger.warn.mock.calls.map((c) => c[0]).join(' ')).toContain('past its limit');
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test('a Waves line or env staff phone rings through without any read', async () => {

@@ -865,12 +865,14 @@ function preconnectScreenStamps({ screenDecision, exchangeTrigger, allUnknownTri
 
 // The exchange trigger's read, on the ring path before any TwiML. Fails OPEN:
 // a slow or broken query never challenges a caller.
+// A failed read answers null (falsy, so the exchange rule never challenges),
+// which also tells the all-unknown trial to stand down for this call.
 async function exchangeTriggerHit(from) {
   try {
     return await require('../services/missed-call-bell').exchangeHangupScreenHit(from);
   } catch (err) {
-    logger.warn(`[preconnect-screen] exchange check failed (failing open, no challenge): ${err.message}`);
-    return false;
+    logger.warn(`[preconnect-screen] exchange check failed (failing open, no challenge): ${err?.code || err?.name || 'error'}`);
+    return null;
   }
 }
 
@@ -892,7 +894,7 @@ async function screenCandidate(from, stirVerstat) {
     // With the trial on, this read sits in front of most unknown calls, so it
     // gets the trial's time limit (a timeout counts as known: no challenge).
     knownCaller = trialOn
-      ? await press1ScreenAllUnknown.withinLimit(knownCallerPhoneExists(db, from), true)
+      ? await press1ScreenAllUnknown.withinLimit(knownCallerPhoneExists(db, from, press1ScreenAllUnknown.READ_TIMEOUT_MS), true)
       : await knownCallerPhoneExists(db, from);
   } catch (err) {
     // A code only: a Knex error echoes the bound values, here the caller's number.
@@ -903,9 +905,11 @@ async function screenCandidate(from, stirVerstat) {
   // already challenge (an exchange hit with its gate off is only a shadow, so
   // the trial still screens it); screenAllUnknownHit fails open inside.
   const exchangeGates = exchangeHit && gates.isEnabled('callScreenExchangeHistory');
-  const allUnknownTrigger = trialOn && !knownCaller && !attestationB && !exchangeGates
+  // A failed exchange read (null) means this caller's history is unknown: the
+  // trial stands down too (fail open).
+  const allUnknownTrigger = trialOn && !knownCaller && !attestationB && !exchangeGates && exchangeHit !== null
     && await press1ScreenAllUnknown.screenAllUnknownHit(from);
-  return { knownCaller, exchangeTrigger: exchangeHit && !knownCaller, allUnknownTrigger };
+  return { knownCaller, exchangeTrigger: Boolean(exchangeHit) && !knownCaller, allUnknownTrigger };
 }
 
 // Press-1 prompt words. The end of the first prompt lives in ONE constant so
