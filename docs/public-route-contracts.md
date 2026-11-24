@@ -6327,6 +6327,8 @@ request in the other), the county-record vouch of the lookup, the
 website-quote withdrawal, and the web-form shell test above. Off, every
 comparison is as before. No request or response shape changes.
 
+Priced lawn area (always on; the former `GATE_PUBLIC_QUOTE_LAWN_AREA` was removed after astro #464 went live): the `/calculate` response carries `lawn_area` when the quote has a residential `lawn_care` or `commercial_lawn` line with a positive priced area: `lawn_area.turf_sqft` (the priced turf area, rounded to whole square feet) and `lawn_area.source`, one of `measured`, `confirmed`, `ai_satellite`, `county`, `lot_estimate`, `footprint_estimate` (an unknown basis, or a satellite figure capped to the parcel, reads `lot_estimate`). The block is omitted when the quote has no priced lawn line or the area is missing or not positive; the widget then shows its own estimate copy and makes no priced-basis claim.
+
 Repeat-run dedupe (#3834 split, PR A′; always on): a tokenless `/calculate` whose typed
 email AND phone AND quoted address AND service (catalog `serviceKey`, or
 the normalized service-mix label for the direct `services` shape) equal an
