@@ -343,7 +343,8 @@ function buildCheck({
       ...(lines.length ? { ...pay, payLines: lines, lineOvertimeWeeks: linePremium.weeks } : pay),
       ...bankSnapshot(tech),
       // The paid minutes worked on each holiday, frozen with the check: Tech Rewards dates the premium by them.
-      ...(withHolidayWork ? { holidayWorkDays: tech.holiday_work_days } : {}),
+      // and the recorded meals its split read (payroll-holiday-work.js), so the frozen check shows what it used
+      ...(withHolidayWork ? { holidayWorkDays: tech.holiday_work_days, holidayWorkMeals: tech.holiday_work_meals || [] } : {}),
     }),
     pay_method: tech.pay_method || 'check',
     status: 'draft',
@@ -746,9 +747,9 @@ async function timeOffByTechnician(conn, start, end) {
 // taken, payroll-holiday-work.js holidayWorkByDay), none when it has none. Never more than the minutes the check pays
 // as worked, so the premium is never paid on hours the check does not pay.
 function rowWithHolidayWork(row, byTechnician) {
-  const capped = capHolidayDays(byTechnician.get(row.technician_id),
-    Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0));
-  return capped.minutes > 0 ? { ...row, holiday_work_minutes: capped.minutes, holiday_work_days: capped.days } : row;
+  const found = byTechnician.get(row.technician_id) || { days: [], meals: [] };
+  const capped = capHolidayDays(found.days, Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0));
+  return capped.minutes > 0 ? { ...row, holiday_work_minutes: capped.minutes, holiday_work_days: capped.days, holiday_work_meals: found.meals } : row;
 }
 
 // Year-to-date before a pay date, in cents: finalized, non-voided checks of the same calendar

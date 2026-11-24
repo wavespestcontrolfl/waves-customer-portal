@@ -978,6 +978,23 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(checkOf(await recompute(run.id), tech).techRewardsCents).toBe(GIFT);
     });
 
+    it('asks only the weeks that hold a shift into a holiday of the span, not an unrelated unpaid week before them', async () => {
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      const tech = await readyTech('Sample Alpha', { hire_date: '2026-09-07' });
+      await paidWeek(tech, '2026-09-07');
+      await trx('payroll_time_off').insert({ technician_id: tech, work_date: '2026-09-07', kind: 'holiday', minutes: '600.00' });
+      await trx('time_entries').insert({
+        technician_id: tech, entry_type: 'shift', status: 'completed', duration_minutes: '240.00',
+        clock_in: new Date('2026-09-07T02:00:00Z'), clock_out: new Date('2026-09-07T06:00:00Z'),
+      });
+      await approvedWeek(tech, '2026-08-31', '240.00');
+      await paidWeek(tech, '2026-08-31'); // the week of the shift is paid
+      await approvedWeek(tech, '2026-08-10', '240.00'); // an older week, unpaid, with no shift into any holiday: not asked
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(checkOf(run, tech).techRewardsCents).toBe(GIFT);
+    });
+
     it('waits for the prior week\'s Sunday-night shift when the span starts on the run\'s own Monday holiday', async () => {
       process.env.GATE_PAYROLL_TIME_OFF = 'true';
       // hired Monday Dec 7, the run's own Monday and a holiday: no week of the span is before the run, but the shift that

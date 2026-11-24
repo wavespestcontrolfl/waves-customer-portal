@@ -342,9 +342,10 @@ const readTech = ({ hire_on_file: onFile, ...row }) => ({ ...row, hire_date: row
  * (payroll_runs.unpaid_time_off: a time-off bank that paid none of it makes no check, and no later run pays that week);
  * a void of that run opens the week again. Whole weeks are asked, the weeks a line's overtime is priced from.
  */
+// onlyWeeks: only these Mondays are asked, whatever else the range holds.
 // skipClosed: a week whose pay run is final is not in the answer. No second live run can pay it, and no hours
 // enter it (time-tracking.js), so a wait for it would never end (payroll-runs.js payoutWaits asks this way).
-async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo, skipClosed = false }) {
+async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo, skipClosed = false, onlyWeeks = null }) {
   const from = staffWeekStartForWorkDate(coversFrom);
   const lastWeek = staffWeekStartForWorkDate(coversTo);
   const to = addStaffWorkDays(lastWeek, 6);
@@ -361,7 +362,7 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo, skipC
       .where({ technician_id: technicianId }).where('work_date', '>=', from).where('work_date', '<=', to).where('minutes', '>', 0)
       .distinct(trx.raw(`to_char(${payrollRuns().weekStartSql('work_date')}, 'YYYY-MM-DD') AS week_start`))
     : [];
-  const weeks = [...new Set([...withMinutes, ...worked, ...off.map((row) => row.week_start)])];
+  const weeks = [...new Set([...withMinutes, ...worked, ...off.map((row) => row.week_start)])].filter((week) => !onlyWeeks || onlyWeeks.has(week));
   if (!weeks.length) return null;
   const paid = new Set((await trx('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
@@ -386,12 +387,13 @@ async function unpaidHolidayShiftWeek(trx, technicianId, span, beforeRun) {
     .where('work_date', '>=', span.coversFrom).where('work_date', '<=', span.coversTo)
     .select(trx.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"))).map((row) => row.work_date);
   if (!holidays.length) return null;
-  const weeks = (await holidayWork.otherWeeksOfShiftsInto(trx, technicianId, holidays)).filter((week) => week <= beforeRun);
-  for (const week of weeks) {
-    const unpaid = await oldestUnpaidWeek(trx, technicianId, { coversFrom: week, coversTo: week });
-    if (unpaid) return unpaid;
-  }
-  return null;
+  // ONE read of the shifts that start before the span's first pay week and overlap any of the holidays; the weeks
+  // the span itself covers are asked by the caller. Then ONE read of those weeks together (onlyWeeks: no other week between
+  // them is asked).
+  const weeks = (await holidayWork.otherWeeksOfShiftsInto(trx, technicianId, holidays, { before: staffWeekStartForWorkDate(span.coversFrom) }))
+    .filter((week) => week <= beforeRun);
+  if (!weeks.length) return null;
+  return oldestUnpaidWeek(trx, technicianId, { coversFrom: weeks[0], coversTo: weeks[weeks.length - 1], onlyWeeks: new Set(weeks) });
 }
 
 /**

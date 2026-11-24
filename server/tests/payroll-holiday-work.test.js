@@ -4,7 +4,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { allocate, splitWorkDate, holidayWorkForWeek, capHolidayDays, dayBounds } = require('../services/payroll-holiday-work');
+const { allocate, splitWorkDate, holidayWorkDetailForWeek, holidayWorkForWeek, capHolidayDays, dayBounds } = require('../services/payroll-holiday-work');
 const { computePaycheck } = require('../services/payroll-calc');
 const { parseETDateTime, etDateString } = require('../utils/datetime-et');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
@@ -145,15 +145,19 @@ describe('holidayWorkForWeek: the unpaid meal inside the day', () => {
     expect(week(HOLIDAY_WEEK, { shifts: [shift], breaks: [meal], daily: daily([HOLIDAY, 480, 30]) }).get(HOLIDAY)).toBe(240);
   });
 
-  test('THE LIMIT: a Sunday to Monday shift with its meal after midnight is in another pay week: the meal is ignored and the deduction is shared', () => {
-    // Sunday 8 PM to Monday 4 AM (holiday Monday), a 1 AM Monday meal: the meal's work date is in the next pay week, so it
-    // is not read (it would be on another check) and the 30 minutes are shared by the minutes left: 240 - 15 = 225.
+  test('a Sunday to Monday shift: a 1 AM Monday meal (next pay week) still counts, and is listed for the frozen check', () => {
+    // Sunday 8 PM to Monday 4 AM (holiday Monday), a 1 AM Monday meal of 30 minutes and the 30 minute deduction on Sunday: the
+    // meal overlaps the shift whatever week its own date is in, so it is placed inside Monday: 240 - 30 = 210 (not 225).
     const shift = entry('2026-09-06T20:00', '2026-09-07T04:00');
-    const meal = entry('2026-09-07T01:00', '2026-09-07T01:30');
+    const meal = { ...entry('2026-09-07T01:00', '2026-09-07T01:30'), id: 'break-1' };
     expect(meal.work_date).toBe(HOLIDAY);
-    const input = { shifts: [shift], daily: daily(['2026-09-06', 480, 30]) };
-    expect(week(PRIOR, { ...input, breaks: [meal] }).get(HOLIDAY)).toBe(225);
-    expect(week(PRIOR, { ...input, breaks: [] }).get(HOLIDAY)).toBe(225);
+    const input = { dates: weekDates(PRIOR), shifts: [shift], daily: daily(['2026-09-06', 480, 30]), holidays: [HOLIDAY] };
+    const detail = holidayWorkDetailForWeek({ ...input, breaks: [meal] });
+    expect(detail.days).toEqual([{ workDate: HOLIDAY, minutes: 210 }]);
+    // what the frozen check shows it used: the break id, its clipped interval and minutes, and the work date it was read for
+    expect(detail.meals).toEqual([{ workDate: '2026-09-06', id: 'break-1', from: '2026-09-07T05:00:00.000Z', to: '2026-09-07T05:30:00.000Z', minutes: 30 }]);
+    // with no meal on file the 30 minutes are shared by the minutes left: 225
+    expect(holidayWorkDetailForWeek({ ...input, breaks: [] })).toEqual({ days: [{ workDate: HOLIDAY, minutes: 225 }], meals: [] });
   });
 
   test('a meal taken on the shift\'s own work date is placed by its clock time', () => {
@@ -293,7 +297,7 @@ describe('splitWorkDate: one exact split in whole hundredths', () => {
     };
     const DAYS = ['2026-09-07', '2026-11-01', '2026-10-31', '2027-03-14', '2027-03-13', '2026-12-25'];
 
-    test('500 random weeks: the week reads only breaks of the shift\'s own pay week, and every holiday figure is the exact split of its date', () => {
+    test('500 random weeks: every break that overlaps a shift is read, whatever week its date is in, and every holiday figure is the exact split of its date', () => {
       const rand = seeded(7);
       const int = (lo, hi) => lo + Math.floor(rand() * (hi - lo + 1));
       for (let n = 0; n < 500; n += 1) {
@@ -308,28 +312,30 @@ describe('splitWorkDate: one exact split in whole hundredths', () => {
           shifts.push({ clock_in: new Date(from), clock_out: new Date(to), duration_minutes: String(Math.round((to - from) / 600) / 100), work_date: date });
           rows.push([date, Math.round((to - from) / 60000), int(0, 60)]);
         }
-        const breaks = Array.from({ length: int(0, 4) }, () => {
+        const breaks = Array.from({ length: int(0, 4) }, (_, k) => {
           const base = shifts.length ? shifts[int(0, shifts.length - 1)] : null;
           const from = (base ? base.clock_in.getTime() : dayBounds(weekStart).start) + int(0, 14 * 3600000);
           const to = from + int(0, 90 * 60000);
-          return { clock_in: new Date(from), clock_out: new Date(to), duration_minutes: String(Math.round((to - from) / 600) / 100), work_date: etDateString(new Date(from)) };
+          return { id: `b${k}`, clock_in: new Date(from), clock_out: new Date(to), duration_minutes: String(Math.round((to - from) / 600) / 100), work_date: etDateString(new Date(from)) };
         });
         const holidays = dates.concat([addStaffWorkDays(weekStart, 7)]).filter(() => rand() < 0.4);
         const dailyRows = daily(...rows);
-        const got = holidayWorkForWeek({ dates, shifts, breaks, daily: dailyRows, holidays });
-        // the same answer with only the breaks of each shift's own pay week: a break of another week changes nothing
+        const detail = holidayWorkDetailForWeek({ dates, shifts, breaks, daily: dailyRows, holidays });
+        // each date is the exact split of its own shifts with EVERY break (clipped to them), a Sunday shift's Monday meal included
         const expected = new Map();
         for (const date of dates) {
           const group = shifts.filter((sh) => sh.work_date === date);
           if (!group.length) continue;
-          const own = breaks.filter((b) => staffWeekStartForWorkDate(b.work_date) === staffWeekStartForWorkDate(date));
-          const split = splitWorkDate({ shifts: group, breaks: own, held: [...new Set(holidays)].sort(), meal: Math.round(dailyRows.get(date).unpaid_meal_minutes * 100) });
+          const split = splitWorkDate({ shifts: group, breaks, held: [...new Set(holidays)].sort(), meal: Math.round(dailyRows.get(date).unpaid_meal_minutes * 100) });
           for (const part of split.parts) if (part.holiday && part.premium > 0) expected.set(part.holiday, (expected.get(part.holiday) || 0) + part.premium);
         }
         const label = `week ${n} ${weekStart}`;
-        expect([label, got]).toEqual([label, [...expected.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([workDate, units]) => ({ workDate, minutes: units / 100 }))]);
-        const noOtherWeek = breaks.filter((b) => staffWeekStartForWorkDate(b.work_date) === weekStart);
-        expect([label, holidayWorkForWeek({ dates, shifts, breaks: noOtherWeek, daily: dailyRows, holidays })]).toEqual([label, got]);
+        expect([label, detail.days]).toEqual([label, [...expected.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([workDate, units]) => ({ workDate, minutes: units / 100 }))]);
+        // the meals listed are breaks that exist, each clipped inside its own interval
+        for (const meal of detail.meals) {
+          const own = breaks.find((b) => b.id === meal.id);
+          expect([label, Boolean(own), Date.parse(meal.from) >= own.clock_in.getTime(), Date.parse(meal.to) <= own.clock_out.getTime()]).toEqual([label, true, true, true]);
+        }
       }
     });
 

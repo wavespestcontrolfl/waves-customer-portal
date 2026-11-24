@@ -380,29 +380,46 @@ postgres('payroll holiday work premium', () => {
     });
   });
 
-  it('a break of the next work date cannot change a final check\'s premium: it is not in the Sunday shift\'s deduction', async () => {
-    // Sunday 10 PM to Monday 2 AM, 30 minutes of automatic meal on Sunday. A 1 AM Monday meal has Monday as its work date, so
-    // it is in Monday's deduction and never in Sunday's: adding, changing or voiding it later moves nothing of Sunday's check.
+  it('a Monday meal read before the check is final is listed on it; one edited after is not reconciled into it, and nothing blocks Monday', async () => {
+    // Sunday 10 PM to Monday 2 AM, 30 minutes of automatic meal on Sunday, a holiday Monday.
     const { holidayWorkByDay } = require('../services/payroll-holiday-work');
     const W0 = addDays(W1, -7);
-    const id = await tech('Sample Alpha');
-    await approved(id, W0, 3.5);
-    await shift(id, `${addDays(W0, 6)}T22:00`, `${W1}T02:00`, { meal: 30 });
-    await offDay(id, W1, 10);
-    const created = (await draft(W0)).body.run;
-    // 4 h shift, 2 h inside Monday, half of the 30 minutes of meal inside it: 105 minutes
-    expect(byName(created, 'Sample Alpha')).toMatchObject({ holidayWorkHours: '1.75', holidayWorkPremiumCents: 1925 });
-    await finalize(created.id);
-    const before = await holidayWorkByDay(trx, W0, addDays(W0, 6));
+    const withMeal = await tech('Sample Alpha');
+    const without = await tech('Sample Bravo');
+    for (const id of [withMeal, without]) {
+      await approved(id, W0, 3.5);
+      await shift(id, `${addDays(W0, 6)}T22:00`, `${W1}T02:00`, { meal: 30 });
+      await offDay(id, W1, 10);
+    }
+    // Alpha's 1 AM Monday meal (its own work date is in the next pay week) is on file when the run is made
     const [meal] = await trx('time_entries').insert({
-      technician_id: id, entry_type: 'break', status: 'completed', duration_minutes: '30.00',
+      technician_id: withMeal, entry_type: 'break', status: 'completed', duration_minutes: '30.00',
       clock_in: parseETDateTime(`${W1}T01:00`), clock_out: parseETDateTime(`${W1}T01:30`),
     }).returning('id');
-    expect(await holidayWorkByDay(trx, W0, addDays(W0, 6))).toEqual(before);
+    const created = (await draft(W0)).body.run;
+    // 240 minute shift, 120 inside Monday: the meal is placed inside Monday, so 120 - 30 = 90 minutes (1.5 h, $16.50)
+    expect(byName(created, 'Sample Alpha')).toMatchObject({ holidayWorkHours: '1.50', holidayWorkPremiumCents: 1650 });
+    // Bravo has no meal on file: the 30 minutes are shared by what each part has left: 120 - 15 = 105 minutes
+    expect(byName(created, 'Sample Bravo')).toMatchObject({ holidayWorkHours: '1.75', holidayWorkPremiumCents: 1925 });
+    const done = (await finalize(created.id)).body.run;
+    const snapshot = async (name) => (await trx('payroll_checks').where({ id: byName(done, name).id })
+      .first(trx.raw("calc_snapshot->'holidayWorkMeals' AS meals"))).meals;
+    expect(await snapshot('Sample Alpha')).toEqual([{
+      workDate: addDays(W0, 6), id: meal.id, from: parseETDateTime(`${W1}T01:00`).toISOString(), to: parseETDateTime(`${W1}T01:30`).toISOString(), minutes: 30,
+    }]);
+    expect(await snapshot('Sample Bravo')).toEqual([]);
+    // a meal added or moved on Monday after the check is final changes nothing already paid, and nothing refuses it
     await trx('time_entries').where({ id: meal.id }).update({ clock_in: parseETDateTime(`${W1}T00:10`), clock_out: parseETDateTime(`${W1}T00:50`), duration_minutes: '40.00' });
-    expect(await holidayWorkByDay(trx, W0, addDays(W0, 6))).toEqual(before);
-    await trx('time_entries').where({ id: meal.id }).update({ status: 'voided' });
-    expect(await holidayWorkByDay(trx, W0, addDays(W0, 6))).toEqual(before);
+    await trx('time_entries').insert({
+      technician_id: without, entry_type: 'break', status: 'completed', duration_minutes: '30.00',
+      clock_in: parseETDateTime(`${W1}T01:00`), clock_out: parseETDateTime(`${W1}T01:30`),
+    });
+    const checks = await trx('payroll_checks').where({ run_id: created.id }).select('technician_id', 'holiday_work_minutes', 'holiday_work_premium_cents');
+    expect(checks.find((c) => c.technician_id === withMeal)).toMatchObject({ holiday_work_minutes: '90.00', holiday_work_premium_cents: '1650' });
+    expect(checks.find((c) => c.technician_id === without)).toMatchObject({ holiday_work_minutes: '105.00', holiday_work_premium_cents: '1925' });
+    // a fresh read of the same week would now give Bravo 90 (the meal added after the check was final): by design it is not
+    // reconciled into the paid check above
+    expect((await holidayWorkByDay(trx, W0, addDays(W0, 6))).get(without).days).toEqual([{ workDate: W1, minutes: 90 }]);
   });
 
   it('the fallback is per work date: a holiday summary with no shift entries still pays beside a measured shift', async () => {
