@@ -148,19 +148,32 @@ function hoursChangedBy(update, row) {
   return hhmm(update.window_start) !== hhmm(row.window_start) || hhmm(update.window_end) !== hhmm(row.window_end);
 }
 
-// GATE_TECH_SHIFT_HOURS (D4 part 3b-2c): the shift check for one row a series move places, the tapped
-// visit or a grouped partner at its stop. `row` is the row as read and `update` its write: together
-// they are the row as the move leaves it, and the shift of the technician it then carries must hold
-// its block on `dateStr` (its hours and its stored length). Not asked when `live` is false, and not
-// of a row the write leaves on its day, its hours and its technician. Judged on the shift alone
-// (shiftOnly): the day's other rules are asked where they were. A landing with no window has no
-// hours to judge.
-async function assertSeriesRowInsideShift(trx, { live, row, update, dateStr, dayChanges, initiatedBy }) {
+// A bound that is no clock time gives no block to read: the row is judged as the whole day.
+const WHOLE_DAY = { window_start: '00:00', window_end: '24:00' };
+
+// GATE_TECH_SHIFT_HOURS (D4 part 3b-2c): the shift check for one row of a stop a series move judges,
+// the plan's visit there or a grouped partner. `row` is the row as read and `update` its write:
+// together they are the row as the move leaves it, on the technician it then carries. Not asked when
+// `live` is false, and not of a row the write leaves on its day, its hours and its technician.
+//   - The tapped stop (`tapped`): the move places it, so that technician's shift on `dateStr` must
+//     hold its block (its hours and its stored length).
+//   - A later stop keeps its hours and changes its day only. It is refused only when the move takes
+//     it from inside the shift to outside it: a block the shift did not hold on the day it leaves is
+//     the office's placement, and stays the office's.
+// A bound that is there but is no clock time (unreadableBound, the unit mover's rule) gives no block,
+// and the write still stores it: the row is judged as the whole day, which no set shift holds.
+// Judged on the shift alone (shiftOnly): the day's other rules are asked where they were. A landing
+// with no window has no hours to judge.
+async function assertSeriesRowInsideShift(trx, { live, tapped, row, update, dateStr, dayChanges, initiatedBy }) {
   if (!live) return;
   const landed = { ...row, ...update };
   const technicianId = landed.technician_id || null;
   if (!dayChanges && !hoursChangedBy(update, row) && technicianId === (row.technician_id || null)) return;
-  await assertAssignableSlotTechnician(technicianId, trx, dateStr, { initiatedBy, shiftOnly: true, block: landed });
+  const { rowBlockMinutes, unreadableBound } = require('./scheduling/window-rules');
+  const block = unreadableBound(landed.window_start) || unreadableBound(landed.window_end, true) ? WHOLE_DAY : landed;
+  const leftDay = dateOnlyString(row.scheduled_date);
+  if (!tapped && await require('./technician-eligibility').shiftExcluding(trx, technicianId, leftDay, rowBlockMinutes(block))) return;
+  await assertAssignableSlotTechnician(technicianId, trx, dateStr, { initiatedBy, shiftOnly: true, block });
 }
 
 // Did this single move change the slot (the date or the window start)? Only then does it record an intent (moveIntentColumns).
@@ -2953,6 +2966,8 @@ class SmartRebooker {
     // move does (reschedule: shiftLive). The office's own series move does
     // not: the office decides.
     const seriesShiftLive = initiatedBy !== 'admin' && techShiftHoursLive();
+    // Today (Eastern): the one day whose shift follows a clock-in (the sweep's stopShiftLive).
+    const shiftToday = etDateString();
     // Customer intent reserves the selected visit only. Future cadence dates
     // are work for dispatch, not availability prerequisites for this booking.
     // SMS has no pre-confirmation placement disclosure, so it keeps its
@@ -3980,7 +3995,7 @@ class SmartRebooker {
       // lock and the partner plan's maintenance lock, both already held),
       // save-time tech eligibility, and the slot-reserve lock — what a swept
       // row takes too.
-      const fencePartner = async ({ partner, pUpdate, dateStr, partnerDateChanges, techChanges, keptTech, shiftLive }) => {
+      const fencePartner = async ({ partner, pUpdate, dateStr, partnerDateChanges, techChanges, keptTech, shiftLive, tapped }) => {
         // A partner shifted earlier than the anchor can land in a window that
         // has already passed today even when the anchor's has not: the
         // shared rule every mover applies (the anchor's check above), and the
@@ -3995,7 +4010,7 @@ class SmartRebooker {
         }
         if (partnerDateChanges) await assertPartnerPlanDayFree(trx, partner, dateStr, [...sweptIds, ...carry.partnerIds]);
         if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr, { initiatedBy, warnings: offDayWarnings });
-        await assertSeriesRowInsideShift(trx, { live: shiftLive, row: partner, update: pUpdate, dateStr, dayChanges: partnerDateChanges, initiatedBy });
+        await assertSeriesRowInsideShift(trx, { live: shiftLive, tapped, row: partner, update: pUpdate, dateStr, dayChanges: partnerDateChanges, initiatedBy });
         if (keptTech) {
           await trx.raw(
             'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -4056,7 +4071,7 @@ class SmartRebooker {
           if (!plan) continue;
           const { pUpdate, partnerDateChanges, techChanges, keptTech, liveStatus, partnerRewound } = plan;
           anyLivePartner = anyLivePartner || liveStatus;
-          await fencePartner({ partner, pUpdate, dateStr, partnerDateChanges, techChanges, keptTech, shiftLive });
+          await fencePartner({ partner, pUpdate, dateStr, partnerDateChanges, techChanges, keptTech, shiftLive, tapped: isAnchor });
           pUpdate.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, pUpdate.window_end);
           Object.assign(pUpdate, moveIntentColumns(trx, options, { series: true }));
           if (pUpdate.window_start) await probePartnerSlot(partner, pUpdate, keptTech, dateStr);
@@ -4112,10 +4127,13 @@ class SmartRebooker {
         // GATE_TECH_SHIFT_HOURS: an automatic series move places the tapped
         // stop, so that stop obeys the shift. A later visit keeps its hours
         // and its technician and changes its day only (the date-only contract
-        // below): the move cannot put it outside a shift that held it, so it
-        // is not judged, and a later visit the office placed outside the
-        // shift does not stop the plan's move.
-        const tappedShiftLive = seriesShiftLive && isAnchor;
+        // below). A technician's set hours are the same every day and only
+        // today's follow a clock-in (loadTechShifts), and a later visit lands
+        // after the tapped one, never today. So only a later stop that leaves
+        // today can sit inside the shift where it is and outside it where it
+        // lands: that stop is judged too. Any other later visit is not, and
+        // one the office placed outside the shift does not stop the plan.
+        const stopShiftLive = seriesShiftLive && (isAnchor || dateOnly(sib.scheduled_date) === shiftToday);
         // Memoized deduped projection — identical to what the collision
         // probe above locked and probed (codex #3509).
         const date = isAnchor
@@ -4477,10 +4495,10 @@ class SmartRebooker {
           }
         }
 
-        // GATE_TECH_SHIFT_HOURS: the tapped visit must sit inside the shift of
+        // GATE_TECH_SHIFT_HOURS: a judged stop's visit against the shift of
         // the technician it carries after this write (its final hours, after
         // the clash handling).
-        await assertSeriesRowInsideShift(trx, { live: tappedShiftLive, row: sib, update: updateData, dateStr: String(date).split('T')[0], dayChanges: sibDateChanges, initiatedBy });
+        await assertSeriesRowInsideShift(trx, { live: stopShiftLive, tapped: isAnchor, row: sib, update: updateData, dateStr: String(date).split('T')[0], dayChanges: sibDateChanges, initiatedBy });
 
         // Existing handoffs survive later staff/SMS/gate-off moves. Rebase
         // an untimed visit to its new due date; only a timed landing ends
@@ -4539,11 +4557,11 @@ class SmartRebooker {
               // same rationale as the single-path CAS (codex #3377 P1).
               // Also pinned when a start-only move derived this row's end
               // from its own duration (seriesOccurrenceWindow).
-              // tappedShiftLive: the shift check read the stored length too.
+              // stopShiftLive: the shift check read the stored length too.
               ...((Array.isArray(options.expectOccurrences)
                 || (!updateData.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off')
                 || (win.start && !win.end)
-                || tappedShiftLive)
+                || stopShiftLive)
                 ? { estimated_duration_minutes: sib.estimated_duration_minutes ?? null }
                 : {}),
             }),
@@ -4602,7 +4620,7 @@ class SmartRebooker {
         });
         // Grouped-visit partners ride this occurrence (GATE_SERIES_MOVE_CARRIES_VISIT).
         const carried = carry.byVisit.size
-          ? await carryVisitPartners(sib, date, updateData, { isAnchor, anchorTechChanges, sibRewound, shiftLive: tappedShiftLive })
+          ? await carryVisitPartners(sib, date, updateData, { isAnchor, anchorTechChanges, sibRewound, shiftLive: stopShiftLive })
           : null;
         touched.push({
           id: sib.id,

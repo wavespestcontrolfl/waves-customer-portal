@@ -201,12 +201,22 @@ function occupancyBlockFor(row) {
 // day's. A start that cannot be read gives nulls, and the shift check then leaves the row to the
 // caller's other checks. occupancyBlockFor above is the clock form for the overlap probes (the
 // stored end first; it clamps at 23:59).
+// PostgreSQL's TIME also holds 24:00:00, the end of the day; parseHHMM does not read it.
+const END_OF_DAY = /^24:00(?::00(?:\.0+)?)?$/;
+
+// A window bound that is there but is no clock time rowBlockMinutes reads: a start parseHHMM cannot
+// read, or an end it reads neither as a clock time nor as 24:00. A request can carry one, and
+// PostgreSQL's TIME accepts forms parseHHMM does not (24:00:00 as a start), so a write can store it
+// while the shift check has no block to judge.
+function unreadableBound(value, isEnd = false) {
+  return value != null && value !== '' && parseHHMM(value) == null && !(isEnd && END_OF_DAY.test(String(value).trim()));
+}
+
 function rowBlockMinutes(row, minutes = null) {
   const startMin = parseHHMM(row?.window_start);
   if (startMin == null) return { startMin: null, endMin: null };
   if (Number(minutes) > 0) return { startMin, endMin: startMin + Number(minutes) };
-  // PostgreSQL's TIME also holds 24:00:00, the end of the day; parseHHMM does not read it.
-  const storedEnd = /^24:00(?::00(?:\.0+)?)?$/.test(String(row?.window_end ?? '').trim()) ? 1440 : parseHHMM(row?.window_end);
+  const storedEnd = END_OF_DAY.test(String(row?.window_end ?? '').trim()) ? 1440 : parseHHMM(row?.window_end);
   const windowEnd = storedEnd == null ? 0 : (storedEnd < startMin ? storedEnd + 1440 : storedEnd);
   const lengthEnd = Number(row?.estimated_duration_minutes) > 0 ? startMin + Number(row.estimated_duration_minutes) : 0;
   const endMin = Math.max(windowEnd, lengthEnd);
@@ -242,6 +252,7 @@ module.exports = {
   parseHHMM,
   occupancyBlockFor,
   rowBlockMinutes,
+  unreadableBound,
   seriesCandidateDateClashRows,
   minutesToHHMM,
   assertAdminAppointmentWindow,

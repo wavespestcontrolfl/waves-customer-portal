@@ -1070,7 +1070,10 @@ series move's existing concurrent-change 409 (`{ error, code: 'SLOT_TAKEN' }`).
 The plan's later visits keep their hours and their technician and change
 their day only (or land with no time, `disclosed_future_placement_days`), so
 they are not checked: a later visit the office placed outside a shift does
-not refuse the customer's move. No new status, field or code. Not yet checked
+not refuse the customer's move. One exception: a later visit that keeps its
+hours and leaves today is refused, with the same 409, when today's shift (it
+follows the technician's clock-in) held it and the set hours of its new day
+do not. No new status, field or code. Not yet checked
 at a commit: the day as the route would run it (capacity mode). Gate off:
 byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the

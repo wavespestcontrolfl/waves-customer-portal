@@ -520,7 +520,9 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
       const f = await build();
       await db('technicians').where({ id: f.techId }).update({ shift_start: '08:00', shift_end: '12:00' });
       await db('scheduled_services').where({ id: f.pest[1].id }).update({ estimated_duration_minutes: 240 });
-      expect((await moveLawnSeries(f, { by: 'tech' })).success).not.toBe(false);
+      // Its write pins no length either: an edit of it after the plan was read does not stop the move.
+      const edit = { moveGuard: async () => { await db('scheduled_services').where({ id: f.pest[1].id }).update({ estimated_duration_minutes: 200 }); } };
+      expect((await moveLawnSeries(f, { by: 'tech', ...edit })).success).not.toBe(false);
       expect(dateOnly((await rowsOf([f.pest[1].id])).get(String(f.pest[1].id)).scheduled_date)).toBe(addDays(dateOnly(f.pest[1].scheduled_date), 1));
     });
 
