@@ -5926,12 +5926,10 @@ center/zoom/size, and the whole success body also runs the shared Maps-key
 scrub (`scrubMapsKeysDeep`) as a last line. The marketing site's quote form
 renders `closeUrl` as a plain `<img src>`, which is why the URL is absolute.
 `satellite.inServiceArea` is the coordinate box AND no excluded place: a geocoded or typed city, ZIP or
-address part naming DeSoto, Punta Gorda or one of the places held until a second technician is hired
-(owner ruling 2026-11-23: Rotonda West, Placida, Boca Grande, Babcock Ranch, Gulf Cove / El Jobean, Charlotte Harbor
-and Deep Creek; Englewood and Port Charlotte are served again, same day), `namesExcludedPlace` over
-`services/excluded-localities.js`, is `false`, for a fresh lookup and a cached one alike. A Port Charlotte property
-with no usable ZIP (five digits or ZIP+4) in the geocode, the record or the typed address is `null`, unknown: the held
-shared ZIPs 33980 / 33981 / 33983 carry the name too (`namesPortCharlotteWithoutZip`).
+address part naming DeSoto, Punta Gorda or a place held until a second technician is hired (the
+`NOT_YET_SERVED_*` lists, empty since the hire: Rotonda West, Placida, Boca Grande, Babcock Ranch, Gulf Cove /
+El Jobean, Charlotte Harbor and Deep Creek are served), `namesExcludedPlace` over
+`services/excluded-localities.js`, is `false`, for a fresh lookup and a cached one alike.
 `/api/public/map-image/:token` (GET/HEAD, read-only signed satellite image
 proxy; the ONLY way the public lookup, the customer service report
 (`treatmentMap.satellite.live.url`, `stationMap.image.url`) and the customer
@@ -8789,28 +8787,22 @@ street-level quality filtering but `requireInServiceArea:false` (the box
 alone is never grounds to discard a geocode as unresolvable); checked
 against the service area via `checkServiceArea`, applied uniformly to every
 resolved location including a customer's stored coordinates: first, the
-address's own city or ZIP is out when it names Punta Gorda (not served per the
-2026-10-22 owner ruling) or one of the places held until a second technician is
-hired (owner ruling 2026-11-23): Rotonda West, Placida, Boca Grande, Babcock
-Ranch, Gulf Cove / El Jobean, Charlotte Harbor and Deep Creek. Their ZIPs are held
-whole, the three that Punta Gorda shared included (33980, 33982, 33983), so a
-"Port Charlotte" address on 33980 / 33981 / 33983 is held by its ZIP. Englewood and
-Port Charlotte were held for a few hours the same day and are served again
-(owner "ok do this"); North Port is not held
-(`services/excluded-localities.js`, city / ZIP only, no coordinate box); then
-county via
+address's own city or a Punta Gorda-only ZIP (33950, 33951, 33955; 33980, 33982 and 33983 are shared with served towns, so the city decides) is out
+(Punta Gorda is not served per the 2026-10-22 owner ruling, although Charlotte
+County is; `services/excluded-localities.js`, city / ZIP only, no coordinate
+box), and so is a place held until a second technician is hired (the
+`NOT_YET_SERVED_*` lists, empty since the hire; owner ruling 2026-11-23 held
+Rotonda West, Placida, Boca Grande, Babcock Ranch, Gulf Cove / El Jobean,
+Charlotte Harbor and Deep Creek for a few hours); then county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
 `{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,
 DeSoto is not served per the 2026-09-30 owner ruling; when that county is
 Charlotte, a second lookup, `reverseGeocodeLocality`, reads the locality and
-ZIP Google places on the coordinate: an excluded locality or ZIP (including a
-bare 33980 / 33982 / 33983, which are held whole) is out, a 422 `out_of_area`,
-even when the submitted address names none, and a failed or empty lookup, or a "Port Charlotte"
-locality with no ZIP, or, with no Google key, a submitted "Port Charlotte" address with no ZIP (the held shared
-ZIPs 33980 / 33981 / 33983 carry that name too), is 503
-`{ error: 'service_area_unavailable' }`, recoverable; no Sarasota booking makes
-the lookup), else the explicit
+ZIP Google places on the coordinate: an excluded locality or Punta Gorda-only
+ZIP is out even when the submitted address names none, and a failed or empty
+lookup, or no locality on a shared ZIP 33980 / 33982 / 33983, is 503
+`{ error: 'service_area_unavailable' }`, recoverable), else the explicit
 no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
 rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
 is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no
