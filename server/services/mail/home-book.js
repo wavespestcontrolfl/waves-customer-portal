@@ -307,8 +307,15 @@ async function mintCustomer(home, contact, pin, deps) {
     return await conn.transaction(async (trx) => {
       const account = await ensureCustomerAccount(trx, {
         firstName: contact.first, lastName: contact.last, phone: contact.phone10, email: contact.email, lockPhone: true,
+        // The helper's own email match (off by default): a customer with this email, in one account or several, refuses.
+        matchEmail: true,
       });
       if (!account || account.created !== true) throw onFile();
+      // The email fence (the lock every email writer takes), held to the commit with the phone fence: two different phones
+      // claiming one new email cannot both pass the check below. Then the check itself, which sees every live profile with
+      // this email (the wizard matcher returns nothing when several profiles share one).
+      await require('../../utils/customer-comms-lock').lockCustomerEmail(trx, contact.email);
+      if (await trx('customers').whereRaw("LOWER(TRIM(COALESCE(email, ''))) = ?", [contact.email]).whereNull('deleted_at').first('id')) throw onFile();
       if (await (deps.findExistingCustomer || findExistingCustomer)(home, contact, { ...deps, db: trx })) throw onFile();
       const customerId = await insertCustomer(trx, account, home, contact, pin);
       // Born reachable and complete, as the quote wizard's customers are: the notification_prefs row the consent check
@@ -397,26 +404,28 @@ async function markEstimate(estimateId, prospectId, shown, deps) {
   await conn('estimates').where({ id: estimateId, status: 'draft' }).whereNull('archived_at').update(set);
 }
 
-// The visits this postcard has booked: a /book visit (self_booking_id set) of a customer who has a draft made for this
-// prospect, still live. Live is read from the scheduled visit itself, not only the booking row (staff cancel the visit and
-// leave the booking row as it was): cancelled, skipped and rescheduled visits are not live, as createSelfBooking's own
-// replay reads them. No address matching and no candidate cap: the link is the prospect id the draft carries.
+// The visits this postcard has booked: a /book visit (self_booking_id set) linked to a draft made for this prospect
+// (scheduled_services.source_estimate_id = the draft, which bookingPayload sends as source_estimate_id; the draft carries
+// the prospect id), still live. A customer's other bookings are not this postcard's. Live is read from the scheduled visit
+// itself, not only the booking row (staff cancel the visit and leave the booking row as it was): cancelled, skipped and
+// rescheduled visits are not live, as createSelfBooking's own replay reads them. No address matching and no candidate cap.
 function liveProspectVisits(conn, prospectId) {
   return conn('scheduled_services as ss')
     .join('self_booked_appointments as sba', 'sba.id', 'ss.self_booking_id')
-    .join('estimates as e', 'e.customer_id', 'ss.customer_id')
+    .join('estimates as e', 'e.id', 'ss.source_estimate_id')
     .whereRaw("e.estimate_data->>'mailProspectId' = ?", [String(prospectId)])
     .whereNot('sba.status', 'cancelled')
     .whereNotIn('ss.status', DEAD_VISIT_STATUSES);
 }
 
-// An earlier tap of this booking that COMMITTED (a lost response, then an identical retry): a live visit of this prospect
-// (liveProspectVisits) at this slot whose customer has this phone, whatever stage the booking has since moved the customer
-// to. Its customer id, or null. The retry then goes to createSelfBooking unchanged, whose own replay (same customer, same
-// slot, the consumed draft) answers it.
-async function findCommittedBookingCustomer(home, contact, offer, deps) {
+// An earlier tap of this booking that COMMITTED (a lost response, then an identical retry): a live visit linked to THIS draft
+// (`estimateId`, the contact's and price's own) at this slot whose customer has this phone, whatever stage the booking has
+// since moved the customer to. Its customer id, or null. The retry then goes to createSelfBooking unchanged, whose own
+// replay (same customer, same slot, a live visit of the same estimate) answers it.
+async function findCommittedBookingCustomer(home, contact, offer, estimateId, deps) {
   const conn = deps.db || db;
   const rows = await liveProspectVisits(conn, home.row.id)
+    .where('ss.source_estimate_id', estimateId)
     .join('customers as c', 'c.id', 'ss.customer_id')
     .where('sba.date', offer.date)
     .where('sba.start_time', offer.start)
@@ -485,9 +494,9 @@ async function prepareEstimate(home, contact, pin, shown, deps) {
  * runs). The draft must still exist.
  */
 async function recoverCommitted(home, contact, offer, shown, deps) {
-  const customerId = await (deps.findCommittedBookingCustomer || findCommittedBookingCustomer)(home, contact, offer, deps);
-  if (!customerId) return null;
   const estimateId = draftIdFor(home.row.id, contact, shown);
+  const customerId = await (deps.findCommittedBookingCustomer || findCommittedBookingCustomer)(home, contact, offer, estimateId, deps);
+  if (!customerId) return null;
   const draft = await (deps.db || db)('estimates').where({ id: estimateId }).first('id');
   const estimateToken = draft && (deps.handoffToken || REAL.handoffToken())(estimateId);
   return estimateToken ? { estimateId, estimateToken, customerId } : null;
@@ -503,8 +512,18 @@ async function recoverCommitted(home, contact, offer, shown, deps) {
 // waits at this point; when the first commits, its visit is committed and READ COMMITTED shows it to the check below, so
 // the second is refused. A lock taken before createSelfBooking (the mint and estimate commit in their own transactions
 // first) would not span the visit insert. An exact replay never gets here (createSelfBooking answers it earlier).
+//
+// Every pre-commit check lives here, in the one place that runs on the booking transaction just before the insert:
+//   1. the mail gate and /book still on;
+//   2. the prospect row (locked) still live at the shown price;
+//   3. the draft (locked) still holding the shown annual and setup fee as a server price;
+//   4. still no member of Waves at the address, strict, read on this transaction (the office can activate a plan at the
+//      address after the price check; a plan found now is not new-customer terms);
+//   5. with pay-at-visit on, the price this booking is about to stamp on the visit and its follow-ups is exactly the one
+//      resolveBookingVisitPrice gives for the locked draft, linked to that draft (ctx is what createSelfBooking resolved);
+//   6. no other live visit of this prospect's drafts.
 function commitGuardFor(home, shown, estimateId, deps) {
-  return async (trx) => {
+  return async (trx, ctx = {}) => {
     const gates = deps.gates || REAL.gates();
     if (typeof gates.mailHomePageLive !== 'function' || !gates.mailHomePageLive() || !gates.isEnabled('selfBooking')) return false;
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['mail-home-first-booking', String(home.row.id)]);
@@ -513,20 +532,50 @@ function commitGuardFor(home, shown, estimateId, deps) {
       .forShare()
       .first('price_annual', 'price_setup_fee');
     if (!row || toCents(row.price_annual) !== shown.annualCents || toCents(row.price_setup_fee || 0) !== shown.setupCents) return false;
-    if (!(await draftHoldsShownPrice(trx, estimateId, shown))) return false;
+    const draft = await draftHoldingShownPrice(trx, estimateId, shown);
+    if (!draft) return false;
+    if (!(await noMemberAtHome(trx, home, deps))) return false;
+    if (gates.isEnabled('bookingPayAtVisit') && !stampedPriceIsDrafts(ctx, draft, estimateId, deps)) return false;
     return !(await liveProspectVisits(trx, home.row.id).first('ss.id'));
   };
 }
 
 // The draft the visit is priced from, read FOR SHARE on the booking transaction (a staff revision takes the row FOR UPDATE,
 // so it cannot land between this check and the commit): its annual total and its frozen setup fee are the ones the customer
-// confirmed, to the cent, and it is still a server price.
-async function draftHoldsShownPrice(trx, estimateId, shown) {
-  const draft = await trx('estimates').where({ id: estimateId }).forShare().first('annual_total', 'estimate_data', 'pricing_authority');
-  if (!draft || draft.pricing_authority !== 'SERVER') return false;
+// confirmed, to the cent, and it is still a server price. The locked row, or null.
+async function draftHoldingShownPrice(trx, estimateId, shown) {
+  const draft = await trx('estimates').where({ id: estimateId }).forShare().first();
+  if (!draft || draft.pricing_authority !== 'SERVER') return null;
   const data = typeof draft.estimate_data === 'string' ? (() => { try { return JSON.parse(draft.estimate_data); } catch { return null; } })() : draft.estimate_data;
   const setupFee = data && data.setupFeeQuote && data.setupFeeQuote.amount != null ? Number(data.setupFeeQuote.amount) : 0;
-  return !!data && toCents(draft.annual_total) === shown.annualCents && Number.isFinite(setupFee) && toCents(setupFee) === shown.setupCents;
+  const holds = !!data && toCents(draft.annual_total) === shown.annualCents && Number.isFinite(setupFee) && toCents(setupFee) === shown.setupCents;
+  return holds ? draft : null;
+}
+
+// The strict member-at-address check the price pass ran (home-quote memberStatusOf), on the booking transaction. A member, a
+// near member, or a check that cannot finish all refuse.
+async function noMemberAtHome(trx, home, deps) {
+  const quote = deps.quote || REAL.quote();
+  try {
+    return (await quote.memberStatusOf(home.row, quote.memberAtAddressOn(trx))) === null;
+  } catch (err) {
+    logger.warn(`[mail-home-book] member recheck failed (code=${codeOf(err)})`);
+    return false;
+  }
+}
+
+// What createSelfBooking resolved for the visit (ctx) against what resolveBookingVisitPrice gives for the locked draft (the
+// same call booking.js makes, for the same service and the quarterly series): present, pay-at-visit, linked to this draft,
+// and cent-exact on the first and the follow-up amounts. A price that failed to resolve is a refusal, never an unpriced visit.
+function stampedPriceIsDrafts(ctx, draft, estimateId, deps) {
+  const resolve = deps.resolveBookingVisitPrice || require('../booking-pay-at-visit').resolveBookingVisitPrice;
+  const expected = resolve({ estimate: draft, serviceKey: SERVICE_KEY, bookingVisits: 4 });
+  if (!expected || !(Number(expected.amount) > 0)) return false;
+  const followUp = expected.followUpAmount ?? expected.amount;
+  return ctx.paymentPref === 'pay_at_visit'
+    && String(ctx.sourceEstimateId || '') === String(estimateId)
+    && toCents(ctx.visitPrice) === toCents(expected.amount)
+    && toCents(ctx.followUpVisitPrice) === toCents(followUp);
 }
 
 // The payload of /book's POST /confirm, with the flags it sets after the body spread: no bearer identity, never a
@@ -538,6 +587,9 @@ function bookingPayload({ home, contact, offer, pin, gates, estimate }) {
     customer_id: estimate.customerId,
     pricing_estimate_id: estimate.estimateId,
     estimate_token: estimate.estimateToken,
+    // The visit links to its draft whatever the gates (without pay-at-visit pricing the handoff does not stamp it): the
+    // first-booking claim, the retry recovery and the replay all follow this link.
+    source_estimate_id: estimate.estimateId,
     slot_date: offer.date,
     slot_start: offer.start,
     slot_end: offer.end,

@@ -419,6 +419,8 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   // The idempotent-replay lookup's answer (null = no earlier booking at this start), and the live visit behind it,
   // linked to another estimate: a replay check that filters by source_estimate_id finds nothing for this one.
   let replayExisting = null;
+  // The raw predicates the booking-row lookups were given (the replay lookup closes itself with `false`).
+  let bookingRawPredicates = [];
 
   function trxTable(table) {
     if (table === 'self_booked_appointments') {
@@ -430,7 +432,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         where: () => b,
         whereNot: () => b,
         // Effective-date day-cap predicate (SELF_BOOKING_EFFECTIVE_DATE_SQL)
-        whereRaw: () => b,
+        whereRaw: (sql) => { bookingRawPredicates.push(sql); return b; },
         whereExists: () => { boundToEstimate = true; return b; },
         modify(fn) { fn(b); return b; },
         count: () => { counting = true; return b; },
@@ -616,6 +618,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     capturedScheduledInsert = undefined;
     returnScheduledInsert = false;
     replayExisting = null;
+    bookingRawPredicates = [];
     fencedCustomer = { ...CUST };
     loadedCustomer = { ...CUST };
     mockOwnershipTables();
@@ -829,8 +832,22 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       await expect(createSelfBooking({ ...assessment(jest.fn().mockResolvedValue(true)), commitGuard }))
         .resolves.toMatchObject({ ok: false, status: 409, code: 'COMMIT_GUARD_REFUSED' });
       expect(commitGuard).toHaveBeenCalledTimes(1);
-      expect(commitGuard.mock.calls[0]).toEqual([seen.trx]);
+      // It is given what the booking is about to stamp (the pay-at-visit block's results), so the caller can check them.
+      expect(commitGuard.mock.calls[0]).toEqual([seen.trx, {
+        custId: expect.anything(), visitPrice: null, followUpVisitPrice: null, paymentPref: null, sourceEstimateId: null,
+      }]);
       expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('a commitGuard caller replays only a live visit of its own estimate: with no estimate linked the replay lookup is closed', async () => {
+      replayExisting = { id: 'sb-1', confirmation_code: 'WAV-1' };
+      await expect(createSelfBooking({ ...assessment(jest.fn().mockResolvedValue(true)), commitGuard: jest.fn().mockResolvedValue(true) }))
+        .resolves.toBeDefined();
+      expect(bookingRawPredicates).toContain('false');
+      // Without commitGuard the replay lookup is not closed (the /book funnel is unchanged).
+      bookingRawPredicates = [];
+      await createSelfBooking(assessment(jest.fn().mockResolvedValue(true)));
+      expect(bookingRawPredicates).not.toContain('false');
     });
 
     test('commitGuard true books as before; an idempotent replay skips it', async () => {

@@ -4361,6 +4361,17 @@ async function createSelfBooking(payload = {}) {
       // is not this one, and replaying it would mark this proposal won against
       // that visit and price (pre-push audit P0). Its estimate guard already
       // answers a visit linked to its own estimate as ALREADY_BOOKED, above.
+      // A commitGuard caller (the new-home postcard page) replays only a LIVE visit linked to its own estimate: a
+      // different service at that start, or a visit staff cancelled while its booking row stayed open, is not its booking.
+      if (typeof commitGuard === 'function') {
+        if (!sourceEstimateId) replayQuery.whereRaw('false');
+        else {
+          replayQuery.whereExists((visit) => visit.select(trx.raw('1')).from('scheduled_services')
+            .whereRaw('scheduled_services.self_booking_id = self_booked_appointments.id')
+            .where('scheduled_services.source_estimate_id', String(sourceEstimateId))
+            .whereNotIn('scheduled_services.status', ['cancelled', 'skipped', 'rescheduled']));
+        }
+      }
       if (paidInternalVisit) {
         const ownEstimateId = callbackVisit.estimateGuard?.estimateId;
         if (!ownEstimateId) replayQuery.whereRaw('false');
@@ -4522,7 +4533,11 @@ async function createSelfBooking(payload = {}) {
       // re-check on THIS transaction, after the replay and the conflict checks and before the visit is inserted, of what
       // it decided before it started (its gate, the prospect row it share-locks until commit, the price). A false verdict
       // refuses the booking. It is a function, so a request body (JSON) can never carry one.
-      if (typeof commitGuard === 'function' && !(await commitGuard(trx))) {
+      // It is given what this booking is about to stamp (the visit price and the follow-up price the pay-at-visit block
+      // resolved, the payment preference, the estimate the visit links to, the resolved customer), so the caller can check
+      // the price that will actually be billed, not only the draft it was read from.
+      if (typeof commitGuard === 'function'
+        && !(await commitGuard(trx, { custId, visitPrice, followUpVisitPrice, paymentPref, sourceEstimateId }))) {
         throw Object.assign(new Error('This offer just changed. Please reload the page.'), {
           statusCode: 409,
           isOperational: true,

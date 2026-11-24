@@ -17,6 +17,7 @@ const mockDb = jest.fn(() => {
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../routes/admin-customers', () => ({ ensureCustomerAccount: jest.fn() }));
+jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerEmail: jest.fn(async () => {}) }));
 jest.mock('../services/customer-default-rows', () => ({ createDefaultCustomerRows: jest.fn(async () => {}) }));
 
 const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
@@ -46,9 +47,16 @@ const INPUT = () => ({
 });
 
 // A knex-shaped handle whose transaction runs its callback on a transaction handle that records the customers inserts.
-function txConn() {
+function txConn({ emailRow } = {}) {
   const inserted = [];
-  const trx = jest.fn(() => ({ insert: jest.fn((r) => { inserted.push(r); return { returning: jest.fn(async () => [{ id: 'cust-9' }]) }; }) }));
+  const emailQuery = {};
+  emailQuery.whereRaw = jest.fn(() => emailQuery);
+  emailQuery.whereNull = jest.fn(() => emailQuery);
+  emailQuery.first = jest.fn(async () => emailRow);
+  const trx = jest.fn(() => Object.assign(emailQuery, {
+    insert: jest.fn((r) => { inserted.push(r); return { returning: jest.fn(async () => [{ id: 'cust-9' }]) }; }),
+  }));
+  trx.emailQuery = emailQuery;
   const conn = jest.fn();
   conn.transaction = jest.fn(async (fn) => fn(trx));
   return { conn, trx, inserted };
@@ -93,6 +101,8 @@ beforeEach(() => {
     engineInputFor: realQuote.engineInputFor,
     priceHome: jest.fn(async () => ({ status: 'priced', priceAnnual: 627, priceSetupFee: 0, priceDigest: 'd' })),
     judge: jest.fn(() => ({ price: { annual: 627, setupFee: 0, digest: 'd' } })),
+    memberAtAddressOn: jest.fn((conn) => ({ memberAt: conn })),
+    memberStatusOf: jest.fn(async () => null),
   };
   saveEstimate = jest.fn(async (body) => ({ estimate: { id: 'est-1', annual_total: 627, address: body.address }, reused: false, memberLinkageWarning: null }));
   updates = [];
@@ -111,6 +121,7 @@ beforeEach(() => {
   deps = {
     gates, booking, quote, saveEstimate, db: conn, buildEngineInput: jest.fn(() => ({ engine: 'input' })),
     findOwnCustomer, findExistingCustomer, mintCustomer, verifySlotOfferField, findCommittedBookingCustomer,
+    resolveBookingVisitPrice: jest.fn(() => ({ amount: 156.75, followUpAmount: 156.75 })),
   };
 });
 
@@ -262,8 +273,16 @@ describe('bookHome', () => {
     out = await attempt();
     expect(out.err.code).toBe('CONTACT_ON_FILE');
     expect(out.inserted).toEqual([]);
-    // Any other error is not hidden.
+    // An email already on any live profile (several profiles sharing it make the wizard matcher return nothing), found
+    // under the email fence: refused.
     findExistingCustomer.mockResolvedValue(null);
+    const shared = txConn({ emailRow: { id: 'shares-email' } });
+    const sharedErr = await mintCustomerReal({ row: mockRow }, validContact(INPUT()), { lat: 27.5, lng: -82.5 }, { db: shared.conn, findExistingCustomer }).catch((e) => e);
+    expect(sharedErr.code).toBe('CONTACT_ON_FILE');
+    expect(shared.inserted).toEqual([]);
+    expect(shared.trx.emailQuery.whereRaw).toHaveBeenCalledWith("LOWER(TRIM(COALESCE(email, ''))) = ?", ['sample@example.com']);
+    expect(shared.trx.emailQuery.whereNull).toHaveBeenCalledWith('deleted_at');
+    // Any other error is not hidden.
     admin.ensureCustomerAccount.mockRejectedValue(Object.assign(new Error('db down'), { code: '57P01' }));
     out = await attempt();
     expect(out.err.message).toBe('db down');
@@ -285,7 +304,9 @@ describe('bookHome', () => {
     expect(id).toBe('cust-9');
     // One transaction, under the phone fence, with the contact recheck inside it.
     expect(conn.transaction).toHaveBeenCalledTimes(1);
-    expect(admin.ensureCustomerAccount).toHaveBeenCalledWith(trx, { firstName: 'Sample', lastName: 'Person', phone: '9415550142', email: 'sample@example.com', lockPhone: true });
+    expect(admin.ensureCustomerAccount).toHaveBeenCalledWith(trx, { firstName: 'Sample', lastName: 'Person', phone: '9415550142', email: 'sample@example.com', lockPhone: true, matchEmail: true });
+    // The email fence, after the phone fence and before the checks and the insert.
+    expect(require('../utils/customer-comms-lock').lockCustomerEmail).toHaveBeenCalledWith(trx, 'sample@example.com');
     expect(findExistingCustomer).toHaveBeenCalledWith({ row: mockRow }, expect.objectContaining({ phone10: '9415550142' }), expect.objectContaining({ db: trx }));
     expect(inserted).toHaveLength(1);
     expect(inserted[0]).toMatchObject({
@@ -394,6 +415,9 @@ describe('bookHome', () => {
     await bookHome(TOKEN, INPUT(), deps);
     const { commitGuard } = booking.createSelfBooking.mock.calls[0][0];
     expect(typeof commitGuard).toBe('function');
+    // What createSelfBooking resolved for the visit just before it calls the guard.
+    const STAMP = { custId: 'cust-1', visitPrice: 156.75, followUpVisitPrice: 156.75, paymentPref: 'pay_at_visit', sourceEstimateId: 'est-1' };
+    const guard = (t, ctx = STAMP) => commitGuard(t, ctx);
     const DRAFT = { annual_total: '627.00', pricing_authority: 'SERVER', estimate_data: { mailProspectId: 'prospect-1' } };
     const trxFor = (found, liveVisit = undefined, draft = DRAFT) => {
       const prospect = {};
@@ -414,7 +438,7 @@ describe('bookHome', () => {
     };
     const ok = { price_annual: '627.00', price_setup_fee: '0.00' };
     const liveTrx = trxFor(ok);
-    expect(await commitGuard(liveTrx)).toBe(true);
+    expect(await guard(liveTrx)).toBe(true);
     // The first-booking claim: an advisory lock on this prospect, taken before the row and the bookings are read.
     expect(liveTrx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['mail-home-first-booking', 'prospect-1']);
     expect(liveTrx.raw.mock.invocationCallOrder[0]).toBeLessThan(liveTrx.prospect.first.mock.invocationCallOrder[0]);
@@ -428,33 +452,59 @@ describe('bookHome', () => {
     // reads the visit's own status: cancelled, skipped and rescheduled visits are not live.
     expect(liveTrx.live.whereRaw).toHaveBeenCalledWith("e.estimate_data->>'mailProspectId' = ?", ['prospect-1']);
     expect(liveTrx.live.whereNotIn).toHaveBeenCalledWith('ss.status', ['cancelled', 'skipped', 'rescheduled']);
-    expect(liveTrx.live.join).toHaveBeenCalledWith('estimates as e', 'e.customer_id', 'ss.customer_id');
+    // Linked through the visit's own source_estimate_id (the exact draft), never through the customer.
+    expect(liveTrx.live.join).toHaveBeenCalledWith('estimates as e', 'e.id', 'ss.source_estimate_id');
     expect(JSON.stringify(liveTrx.live.whereRaw.mock.calls)).not.toMatch(/source/);
+    // The strict member check runs again on THIS transaction.
+    expect(quote.memberAtAddressOn).toHaveBeenCalledWith(liveTrx);
+    expect(quote.memberStatusOf).toHaveBeenCalledWith(mockRow, { memberAt: liveTrx });
+    for (const status of ['exact', 'near']) {
+      quote.memberStatusOf.mockResolvedValueOnce(status);
+      expect(await guard(trxFor(ok))).toBe(false);
+    }
+    quote.memberStatusOf.mockRejectedValueOnce(new Error('lookup down'));
+    expect(await guard(trxFor(ok))).toBe(false);
+    // The price this booking is about to stamp is the one resolveBookingVisitPrice gives for the locked draft, cent-exact,
+    // linked to that draft, pay-at-visit. Missing or different refuses; with pay-at-visit off nothing is stamped or checked.
+    expect(deps.resolveBookingVisitPrice).toHaveBeenCalledWith({ estimate: DRAFT, serviceKey: 'pest_control', bookingVisits: 4 });
+    for (const bad of [
+      { ...STAMP, visitPrice: null }, { ...STAMP, visitPrice: 156.76 }, { ...STAMP, followUpVisitPrice: undefined }, { ...STAMP, followUpVisitPrice: 150 },
+      { ...STAMP, paymentPref: null }, { ...STAMP, sourceEstimateId: 'another-draft' }, { ...STAMP, sourceEstimateId: null },
+    ]) {
+      expect(await guard(trxFor(ok), bad)).toBe(false);
+    }
+    deps.resolveBookingVisitPrice.mockReturnValueOnce(null); // the draft cannot be priced per visit
+    expect(await guard(trxFor(ok))).toBe(false);
+    deps.resolveBookingVisitPrice.mockReturnValueOnce({ amount: 156.75 }); // no separate follow-up amount: the same amount
+    expect(await guard(trxFor(ok))).toBe(true);
+    gates.isEnabled.mockImplementation((name) => name !== 'bookingPayAtVisit');
+    expect(await guard(trxFor(ok), { custId: 'cust-1' })).toBe(true);
+    gates.isEnabled.mockImplementation(() => true);
     // The prospect held back, repriced (annual or setup fee) or gone since the check: refused.
-    expect(await commitGuard(trxFor(undefined))).toBe(false);
-    expect(await commitGuard(trxFor({ price_annual: '641.50', price_setup_fee: '0.00' }))).toBe(false);
-    expect(await commitGuard(trxFor({ price_annual: '627.00', price_setup_fee: '99.00' }))).toBe(false);
+    expect(await guard(trxFor(undefined))).toBe(false);
+    expect(await guard(trxFor({ price_annual: '641.50', price_setup_fee: '0.00' }))).toBe(false);
+    expect(await guard(trxFor({ price_annual: '627.00', price_setup_fee: '99.00' }))).toBe(false);
     // The draft revised after the price check (annual, or the frozen setup fee), or gone, or no longer a server price: refused.
-    expect(await commitGuard(trxFor(ok, undefined, { ...DRAFT, annual_total: '650.00' }))).toBe(false);
-    expect(await commitGuard(trxFor(ok, undefined, { ...DRAFT, estimate_data: { setupFeeQuote: { amount: 99 } } }))).toBe(false);
-    expect(await commitGuard(trxFor(ok, undefined, { ...DRAFT, pricing_authority: 'CLIENT_FALLBACK' }))).toBe(false);
-    expect(await commitGuard(trxFor(ok, undefined, undefined))).toBe(true); // control: the default draft holds
-    expect(await commitGuard(trxFor(ok, undefined, null))).toBe(false);
+    expect(await guard(trxFor(ok, undefined, { ...DRAFT, annual_total: '650.00' }))).toBe(false);
+    expect(await guard(trxFor(ok, undefined, { ...DRAFT, estimate_data: { setupFeeQuote: { amount: 99 } } }))).toBe(false);
+    expect(await guard(trxFor(ok, undefined, { ...DRAFT, pricing_authority: 'CLIENT_FALLBACK' }))).toBe(false);
+    expect(await guard(trxFor(ok, undefined, undefined))).toBe(true); // control: the default draft holds
+    expect(await guard(trxFor(ok, undefined, null))).toBe(false);
     // Another household member's first booking of this home is live: refused (the second of two simultaneous bookings,
     // once the first has committed under the lock).
-    expect(await commitGuard(trxFor(ok, { id: 'ss-other' }))).toBe(false);
+    expect(await guard(trxFor(ok, { id: 'ss-other' }))).toBe(false);
     // A draft carrying the frozen setup fee at the shown amount holds.
     const feeGuard = commitGuardFor({ row: row({ price_setup_fee: '99.00' }) }, { annualCents: 62700, setupCents: 9900 }, 'est-1', deps);
-    expect(await feeGuard(trxFor({ price_annual: '627.00', price_setup_fee: '99.00' }, undefined, { ...DRAFT, estimate_data: { setupFeeQuote: { amount: 99, kind: 'waveguard_membership' } } }))).toBe(true);
+    expect(await feeGuard(trxFor({ price_annual: '627.00', price_setup_fee: '99.00' }, undefined, { ...DRAFT, estimate_data: { setupFeeQuote: { amount: 99, kind: 'waveguard_membership' } } }), STAMP)).toBe(true);
     // The mail gate or /book turned off since: refused before the lock or the row is touched.
     gates.mailHomePageLive.mockReturnValue(false);
     const off = trxFor(ok);
-    expect(await commitGuard(off)).toBe(false);
+    expect(await guard(off)).toBe(false);
     expect(off).not.toHaveBeenCalled();
     expect(off.raw).not.toHaveBeenCalled();
     gates.mailHomePageLive.mockReturnValue(true);
     gates.isEnabled.mockImplementation((name) => name !== 'selfBooking');
-    expect(await commitGuard(trxFor(ok))).toBe(false);
+    expect(await guard(trxFor(ok))).toBe(false);
   });
 
   test('an identical retry of a booking that committed (the customer has moved past the pre-customer stage) goes to createSelfBooking for its replay', async () => {
@@ -464,7 +514,7 @@ describe('bookHome', () => {
     quote.priceHome.mockResolvedValue({ status: 'not_clean', reason: 'member_address' }); // a member at the address now
     const res = await bookHome(TOKEN, INPUT(), deps);
     expect(res).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '11:00' } } });
-    expect(findCommittedBookingCustomer).toHaveBeenCalledWith(expect.objectContaining({ row: mockRow }), expect.objectContaining({ phone10: '9415550142' }), expect.objectContaining({ date: '2026-12-02', start: '09:00' }), deps);
+    expect(findCommittedBookingCustomer).toHaveBeenCalledWith(expect.objectContaining({ row: mockRow }), expect.objectContaining({ phone10: '9415550142' }), expect.objectContaining({ date: '2026-12-02', start: '09:00' }), draftIdFor('prospect-1', validContact(INPUT()), SHOWN), deps);
     expect(findOwnCustomer).not.toHaveBeenCalled();
     expect(findExistingCustomer).not.toHaveBeenCalled();
     expect(quote.priceHome).not.toHaveBeenCalled();
@@ -495,18 +545,18 @@ describe('bookHome', () => {
     ];
     q.select = jest.fn(async () => rows);
     const conn = jest.fn(() => q);
-    const id = await findCommittedBookingCustomerReal({ row: mockRow }, validContact(INPUT()), { date: '2026-12-02', start: '09:00' }, { db: conn });
+    const id = await findCommittedBookingCustomerReal({ row: mockRow }, validContact(INPUT()), { date: '2026-12-02', start: '09:00' }, 'est-x', { db: conn });
     expect(id).toBe('mine');
     expect(conn).toHaveBeenCalledWith('scheduled_services as ss');
     expect(calls).toEqual(expect.arrayContaining([
-      ['whereRaw', "e.estimate_data->>'mailProspectId' = ?", ['prospect-1']],
+      ['whereRaw', "e.estimate_data->>'mailProspectId' = ?", ['prospect-1']], ['where', 'ss.source_estimate_id', 'est-x'],
       ['whereNot', 'sba.status', 'cancelled'], ['whereNotIn', 'ss.status', ['cancelled', 'skipped', 'rescheduled']],
       ['where', 'sba.date', '2026-12-02'], ['where', 'sba.start_time', '09:00'], ['whereNull', 'c.deleted_at'],
     ]));
     // Neither a source string nor a pipeline stage decides: the booking has promoted the customer, and a request can send any source.
-    expect(JSON.stringify(calls)).not.toMatch(/pipeline_stage|\.source|lead_source/);
+    expect(JSON.stringify(calls)).not.toMatch(/pipeline_stage|sba\.source"|lead_source/);
     rows.length = 0;
-    expect(await findCommittedBookingCustomerReal({ row: mockRow }, validContact(INPUT()), { date: '2026-12-02', start: '09:00' }, { db: conn })).toBeNull();
+    expect(await findCommittedBookingCustomerReal({ row: mockRow }, validContact(INPUT()), { date: '2026-12-02', start: '09:00' }, 'est-x', { db: conn })).toBeNull();
   });
 
   test('the phone sent to createSelfBooking has the digits the minted row stores, so its customer_id phone match resolves the same row', async () => {
@@ -610,7 +660,7 @@ describe('bookHome', () => {
       pricing_estimate_id: 'est-1',
       slot_date: '2026-12-02', slot_start: '09:00', slot_end: '10:00', technician_id: TECH, slot_sig: 'sig-2026-12-02-09:00',
       service_id: 'pest_control', service_type: 'Pest Control', recurring_pattern: 'quarterly', source: 'mail_new_home',
-      customer_id: 'cust-1', payAtVisit: true, customersOnly: true, authedCustomer: null, callbackVisit: null,
+      customer_id: 'cust-1', source_estimate_id: 'est-1', payAtVisit: true, customersOnly: true, authedCustomer: null, callbackVisit: null,
       new_customer: {
         first_name: 'Sample', last_name: 'Person', phone: '+19415550142', email: 'sample@example.com',
         address_line1: '101 EXAMPLE TRL', city: 'SAMPLETON', state: 'FL', zip: '34212', lat: 27.5, lng: -82.5,
