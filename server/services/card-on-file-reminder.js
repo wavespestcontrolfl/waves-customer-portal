@@ -105,8 +105,11 @@ async function collectEvents(today, now, customerIds = null) {
     if (!known || event.on > known.on) newest.set(String(customerId), event);
   };
 
+  // The ORIGINAL notice only (idempotency key payment.method_removed:<customer>:<method>): a bounce-recovery copy
+  // carries the same template and recipient but a fresh created_at, which would make an old removal look new.
   const removalQuery = db('email_messages')
     .where({ template_key: 'payment.method_removed', recipient_type: 'customer' })
+    .where('idempotency_key', 'like', 'payment.method_removed:%')
     // A superset of the ET window: the exact day test is made on the ET calendar day below.
     .where('created_at', '>=', new Date(now.getTime() - (DUE_AFTER_DAYS + GRACE_DAYS + 2) * DAY_MS));
   if (customerIds) removalQuery.whereIn('recipient_id', customerIds.map(String));
@@ -210,7 +213,7 @@ function visitPropertyLabel(customer, visit) {
 // The billing email the lifecycle sender would use, and whether anything blocks it (rule f).
 async function emailVerdict(customer) {
   const { getInvoiceEmailRecipients } = require('./customer-contact');
-  const { billingChannelAllowed } = require('./billing-delivery-channels');
+  const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
   const EmailTemplateLibrary = require('./email-template-library');
   let prefs;
   try {
@@ -220,6 +223,11 @@ async function emailVerdict(customer) {
     return { ok: false, reason: 'prefs_unavailable' };
   }
   if (billingChannelAllowed(prefs || {}, 'billing', 'email') === false) return { ok: false, reason: 'billing_email_not_selected' };
+  // A customer who never set the new channel list but chose the app in the old billing reminder setting (push only)
+  // is not emailed; the old default (text) says nothing about email, so it does not block.
+  if (explicitBillingChannels(prefs || {}, 'billing') === null && prefs?.billing_channel === 'push') {
+    return { ok: false, reason: 'billing_email_not_selected' };
+  }
   const [recipient] = getInvoiceEmailRecipients(customer, prefs || {}).filter((entry) => isEmailLike(entry.email));
   if (!recipient) return { ok: false, reason: 'missing_email' };
   const loaded = await EmailTemplateLibrary.loadTemplateByKey(TEMPLATE_KEY);
@@ -239,7 +247,8 @@ const CUSTOMER_COLUMNS = [
 async function liveVerdict(customerId, event, today, now) {
   const customer = await db('customers').where({ id: customerId }).first(CUSTOMER_COLUMNS);
   if (!customer) return { ok: false, reason: 'customer_not_found' };
-  if (customer.deleted_at || customer.active === false || ['churned', 'dormant'].includes(customer.pipeline_stage)) {
+  // active is nullable and portal sign-in treats NULL as inactive, so only a true active customer is emailed a portal link.
+  if (customer.deleted_at || customer.active !== true || ['churned', 'dormant'].includes(customer.pipeline_stage)) {
     return { ok: false, reason: 'customer_not_active' };
   }
   const methods = await db('payment_methods').where({ customer_id: customerId });

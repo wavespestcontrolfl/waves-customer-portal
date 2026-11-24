@@ -387,6 +387,47 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
+  test('a customer who chose the app (push) in the old billing reminder setting is not emailed; a text default or an explicit email choice is', async () => {
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'shadow';
+    const push = await dueCustomer();
+    await db('notification_prefs').insert({ customer_id: push, billing_channel: 'push' });
+    expect(await run(push)).toMatchObject({ shadow: 0, skipped: { billing_email_not_selected: 1 } });
+    const text = await dueCustomer();
+    await db('notification_prefs').insert({ customer_id: text, billing_channel: 'sms' });
+    const email = await dueCustomer();
+    await db('notification_prefs').insert({ customer_id: email, billing_channel: 'push', billing_channels: ['email'] });
+    expect(await sweep.runCardOnFileReminderSweep({ now: NOW, customerIds: [text, email] })).toMatchObject({ shadow: 2 });
+    const appOnly = await dueCustomer();
+    await db('notification_prefs').insert({ customer_id: appOnly, billing_channels: ['push'] });
+    expect(await run(appOnly)).toMatchObject({ shadow: 0, skipped: { billing_email_not_selected: 1 } });
+  });
+
+  test('a bounce-recovery copy of a removal notice is not an event: a fresh created_at never moves an old removal', async () => {
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'shadow';
+    const id = await customer();
+    await visit(id);
+    await removalEmail(id, new Date('2026-11-20T15:00:00Z'));
+    await db('email_messages').insert({
+      template_key: 'payment.method_removed', recipient_type: 'customer', recipient_id: id, recipient_email_snapshot: `cof-${id}@example.invalid`,
+      status: 'sent', created_at: new Date('2026-11-23T15:00:00Z'), idempotency_key: `bounce_recovery:${randomUUID()}`,
+    });
+    // The recovery copy (Nov 23) would postpone the Nov 20 removal to Nov 26; the original decides, so it is due today.
+    expect(await run(id)).toMatchObject({ candidates: 1, shadow: 1 });
+    const stale = await customer();
+    await visit(stale);
+    await db('email_messages').insert({
+      template_key: 'payment.method_removed', recipient_type: 'customer', recipient_id: stale, recipient_email_snapshot: `cof-${stale}@example.invalid`,
+      status: 'sent', created_at: new Date('2026-11-21T15:00:00Z'), idempotency_key: `bounce_recovery:${randomUUID()}`,
+    });
+    expect(await run(stale)).toMatchObject({ candidates: 0 });
+  });
+
+  test('a customer whose active flag is NULL cannot sign in to the linked form and is not emailed', async () => {
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'shadow';
+    const id = await dueCustomer({ active: null });
+    expect(await run(id)).toMatchObject({ shadow: 0, skipped: { customer_not_active: 1 } });
+  });
+
   test('a customer with no email address is skipped', async () => {
     process.env.GATE_CARD_ON_FILE_REMINDER = 'shadow';
     const id = await dueCustomer({ email: null });

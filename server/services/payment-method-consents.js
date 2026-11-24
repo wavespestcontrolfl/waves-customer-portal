@@ -18,7 +18,7 @@ const {
 } = require('./payment-method-consent-text');
 const { isExpiredCardMethod } = require('./autopay-eligibility');
 
-const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'portal_add_bank', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept', 'appointment_card_request', 'autopay_setup_link', 'portal_autopay_enable', 'portal_set_default', 'portal_add_card_save_only']);
+const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'portal_add_bank', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept', 'appointment_card_request', 'autopay_setup_link', 'portal_autopay_enable', 'portal_set_default']);
 
 // methodType selects which authorization copy to snapshot. Omitted/
 // unknown values default to the card variant via getConsentText().
@@ -116,27 +116,12 @@ function consentVersionQualifiesForEnrollment(version) {
  * actually authorizes recurring charges (v8+; legacy/implicit rows are
  * audit anchors, not authority).
  */
-// Source-aware, like hasEnrollmentScopedConsent below: a row from a NON_ENROLLMENT_CONSENT_SOURCES surface (a card
-// hold, the add-a-card email's save-only form) is not the authorization this gate asks for. The pay-page save, the
-// pay-page mirror and the covered-capture webhook skip writing a consent row when this answers true and then enroll
-// the method, so a hold-only or save-only row must answer false and let them record the consent the customer just
-// gave on THEIR form.
 async function hasConsentFor(customerId, stripePaymentMethodId) {
   if (!customerId || !stripePaymentMethodId) return false;
   const rows = await db('payment_method_consents')
     .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId })
-    .select('consent_text_version', 'source');
-  return rows.some((r) => consentVersionQualifiesForEnrollment(r.consent_text_version)
-    && !NON_ENROLLMENT_CONSENT_SOURCES.has(r.source));
-}
-
-// The card-on-file record the save-only add form writes: one per method is enough (a re-delivered webhook adds none).
-async function hasSaveOnlyConsent(customerId, stripePaymentMethodId) {
-  if (!customerId || !stripePaymentMethodId) return false;
-  const row = await db('payment_method_consents')
-    .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId, source: 'portal_add_card_save_only' })
-    .first('id');
-  return !!row;
+    .select('consent_text_version');
+  return rows.some((r) => consentVersionQualifiesForEnrollment(r.consent_text_version));
 }
 
 /**
@@ -155,11 +140,7 @@ async function hasSaveOnlyConsent(customerId, stripePaymentMethodId) {
  * every future visit). Every other source presented the full
  * save-and-charge card consent text.
  */
-// 'portal_add_card_save_only' (owner 2026-11-24, GATE_CARD_ON_FILE_REMINDER): the card was added from the "add a card"
-// reminder email's save-only form, which says saving it does not turn Auto Pay on. That row is the card-on-file
-// record only: it never authorizes enrollment, so no later workflow (an office Auto Pay setup link, a one-tap purchase,
-// a booking's auto-satisfy) can turn Auto Pay on for the card without the customer ticking the Auto Pay checkbox.
-const NON_ENROLLMENT_CONSENT_SOURCES = new Set(['estimate_card_hold', 'portal_add_card_save_only']);
+const NON_ENROLLMENT_CONSENT_SOURCES = new Set(['estimate_card_hold']);
 
 async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId, { dbh = db } = {}) {
   if (!customerId || !stripePaymentMethodId) return false;
@@ -385,5 +366,4 @@ module.exports = {
   sweepOrphanConsents,
   VALID_SOURCES: Array.from(VALID_SOURCES),
   NON_ENROLLMENT_CONSENT_SOURCES,
-  hasSaveOnlyConsent,
 };

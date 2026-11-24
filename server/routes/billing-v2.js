@@ -10,7 +10,7 @@ const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
 const { isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { SAVE_ONLY_METADATA_KEY, setupIntentSavesOnly } = require('../services/portal-save-only-card');
+const { SAVE_ONLY_METADATA_KEY, setupIntentSavesOnly, finishSaveOnlyAdd } = require('../services/portal-save-only-card');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral } = require('../services/failed-payments');
 const { isEnabled } = require('../config/feature-gates');
@@ -486,27 +486,33 @@ router.post('/cards', async (req, res, next) => {
     // swallowed failure would show Auto Pay off with no retry path while
     // the method sits saved-only. The save above is idempotent, so the
     // customer's retry re-enters here and completes consent + enrollment.
+    // Save-only form (the "add a card" reminder email link, services/portal-save-only-card.js): the card is saved and
+    // Auto Pay is NOT turned on. No consent row is written (a row is what the enrollment gates read), so turning Auto
+    // Pay on later asks for the Auto Pay checkbox; the audit event keeps what the customer saw. The stamp is on the
+    // SetupIntent itself, so a redirect return and the portal_add_method webhook answer the same way.
+    if (setupIntentSavesOnly(setupIntent)) {
+      const settled = await finishSaveOnlyAdd({
+        customerId: req.customerId,
+        method: card,
+        consentTextVersion: setupIntent.metadata?.[CONSENT_VERSION_METADATA_KEY],
+        ip: req.ip,
+        userAgent: req.get('user-agent') || null,
+        via: 'portal_add_card',
+      });
+      return res.json({ success: true, enrolled: false, enrollReason: 'save_only', card: savedCardPayload(settled) });
+    }
     const ConsentService = require('../services/payment-method-consents');
-    const saveOnly = setupIntentSavesOnly(setupIntent);
     await ConsentService.recordConsent({
       customerId: req.customerId,
       paymentMethodId: card.id,
       stripePaymentMethodId: resolvedPaymentMethodId,
       // Distinct audit source for bank saves (portal ACH lane) — the
-      // snapshot itself is already method-correct via methodType. The save-only form's source is the card-on-file
-      // record only: it is never enrollment authority (NON_ENROLLMENT_CONSENT_SOURCES), so Auto Pay later needs the
-      // customer's own checkbox.
-      source: saveOnly ? 'portal_add_card_save_only' : (isBankMethodType(card.method_type) ? 'portal_add_bank' : 'portal_add_card'),
+      // snapshot itself is already method-correct via methodType.
+      source: isBankMethodType(card.method_type) ? 'portal_add_bank' : 'portal_add_card',
       methodType: card.method_type || 'card',
       ip: req.ip,
       userAgent: req.get('user-agent') || null,
     });
-    // Save-only form (the "add a card" reminder email link): the method is saved and its card-on-file consent is
-    // recorded above, and Auto Pay is NOT turned on. The stamp is on the SetupIntent itself, so a redirect return and
-    // the portal_add_method webhook answer the same way.
-    if (saveOnly) {
-      return res.json({ success: true, enrolled: false, enrollReason: 'save_only', card: savedCardPayload(card) });
-    }
     // Payer routing BEFORE enrollment (Codex #3395 r7 P1): a customer whose
     // invoices route to a third-party payer must never have their saved
     // card flipped into Auto Pay — self-pay charging would point at the

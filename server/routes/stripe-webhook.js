@@ -5644,6 +5644,19 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
           throw saveErr;
         }
       }
+      // Save-only form (the "add a card" reminder email link, services/portal-save-only-card.js): the card is saved and
+      // Auto Pay is NOT turned on, here or in POST /billing/cards. No consent row is written and nothing below runs;
+      // the customer turns Auto Pay on from the Auto Pay card, which asks for its own checkbox.
+      const SaveOnlyCard = require('../services/portal-save-only-card');
+      if (SaveOnlyCard.setupIntentSavesOnly(setupIntent)) {
+        await SaveOnlyCard.finishSaveOnlyAdd({
+          customerId: wavesCustomerId,
+          method: saved,
+          consentTextVersion: setupIntent.metadata?.consent_text_version,
+          via: 'portal_add_method_webhook',
+        });
+        return;
+      }
       // The consent-version rule runs BEFORE any state moves (codex #5434 r2
       // P1): a stale or absent stamp — an intent minted under older copy,
       // verified after a copy change — must not clear the customer-level
@@ -5651,13 +5664,7 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // the previously failed bank once the pointer is honored again. The
       // pending row stays pending and unconsented; the office is asked to
       // re-collect. Same rule as POST /cards (which refuses before any save).
-      // Save-only form (the "add a card" reminder email link, services/portal-save-only-card.js): the consent it records
-      // is the card-on-file record only (source portal_add_card_save_only, never enrollment authority), so "needs a
-      // consent row" means no row at all, and the record is never an enrollment-scoped one.
-      const saveOnly = require('../services/portal-save-only-card').setupIntentSavesOnly(setupIntent);
-      const needsEnrollmentScopedConsent = saveOnly
-        ? !(await ConsentService.hasSaveOnlyConsent(wavesCustomerId, stripePmId))
-        : !(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId));
+      const needsEnrollmentScopedConsent = !(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId));
       if (needsEnrollmentScopedConsent
         && !(await ConsentService.deferredCaptureConsentVersionCurrent(setupIntent, { context: 'portal add-method webhook', customerId: wavesCustomerId }))) {
         return;
@@ -5694,17 +5701,11 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,
           stripePaymentMethodId: stripePmId,
-          source: saveOnly ? 'portal_add_card_save_only' : (isBankMethodType(saved.method_type) ? 'portal_add_bank' : 'portal_add_card'),
+          source: isBankMethodType(saved.method_type) ? 'portal_add_bank' : 'portal_add_card',
           methodType: saved.method_type || 'card',
         });
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
-      // The method is saved and its consent recorded above, and Auto Pay is NOT turned on, here or in
-      // POST /billing/cards. The customer chooses it on the Auto Pay card.
-      if (saveOnly) {
-        logger.info(`[stripe-webhook] portal-add-method save-only completed for customer ${wavesCustomerId}: pm ${stripePmId}, Auto Pay untouched`);
-        return;
-      }
       // Payer routing BEFORE enrollment (Codex #3395 r9 P1) — same fence as
       // POST /billing-v2/cards: this webhook fires independently of the
       // browser POST (before or after it), so without its own check a payer

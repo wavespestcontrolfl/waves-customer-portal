@@ -42,6 +42,10 @@ jest.mock('../services/payment-method-consents', () => ({
   hasConsentFor: jest.fn(async () => false),
   hasEnrollmentScopedConsent: jest.fn(async () => false),
 }));
+jest.mock('../services/portal-save-only-card', () => ({
+  ...jest.requireActual('../services/portal-save-only-card'),
+  finishSaveOnlyAdd: jest.fn(async ({ method }) => ({ ...method })),
+}));
 jest.mock('../services/autopay-enrollment', () => ({
   enrollConsentedMethod: jest.fn(async () => ({ enrolled: true })),
 }));
@@ -57,6 +61,7 @@ const db = require('../models/db');
 const StripeService = require('../services/stripe');
 const PayerService = require('../services/payer');
 const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+const { finishSaveOnlyAdd } = require('../services/portal-save-only-card');
 const { isExpiredCardMethod } = require('../services/autopay-eligibility');
 const NotificationService = require('../services/notification-service');
 const router = require('../routes/billing-v2');
@@ -208,9 +213,11 @@ describe('POST /cards save-only form', () => {
       const body = await res.json();
       expect(body).toMatchObject({ success: true, enrolled: false, enrollReason: 'save_only' });
       expect(body.card.id).toBe('pm-row-1');
-      // The consent row is the card-on-file record only: its source is never enrollment authority, so an office
-      // setup link or a booking auto-satisfy cannot enroll this card later.
-      expect(ConsentService.recordConsent).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-row-1', source: 'portal_add_card_save_only' }));
+      // No consent row is written (a row is what every enrollment gate reads), so no later workflow can enroll this
+      // card and turning Auto Pay on asks for the Auto Pay checkbox. The audit record and the default role are
+      // settled by the helper, which the real-schema suite (portal-save-only-card-postgres) covers.
+      expect(finishSaveOnlyAdd).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', method: expect.objectContaining({ id: 'pm-row-1' }), via: 'portal_add_card' }));
+      expect(ConsentService.recordConsent).not.toHaveBeenCalled();
       expect(enrollConsentedMethod).not.toHaveBeenCalled();
       expect(PayerService.resolveForInvoice).not.toHaveBeenCalled();
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();

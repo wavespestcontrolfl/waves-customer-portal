@@ -39,18 +39,6 @@ describe('consentVersionQualifiesForEnrollment', () => {
 describe('hasConsentFor', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  // The pay-page save, its mirror and the covered-capture webhook skip recording a consent row when this is true and
-  // then enroll Auto Pay: a hold-only or save-only row must not stand in for the authorization they enroll on.
-  test.each(['estimate_card_hold', 'portal_add_card_save_only'])('a v8+ %s row alone is not the authorization: a stale capture for the same method still records its own', async (source) => {
-    db.mockImplementation(() => qb([{ consent_text_version: 'v12_2026-09-30', source }]));
-    expect(await hasConsentFor('cust-1', 'pm_x')).toBe(false);
-    db.mockImplementation(() => qb([
-      { consent_text_version: 'v12_2026-09-30', source },
-      { consent_text_version: 'v12_2026-09-30', source: 'pay_page' },
-    ]));
-    expect(await hasConsentFor('cust-1', 'pm_x')).toBe(true);
-  });
-
   test('true when ANY row for the pm carries qualifying copy', async () => {
     db.mockImplementation(() => qb([
       { consent_text_version: 'v0_implicit_pre_consent' },
@@ -85,13 +73,6 @@ describe('hasEnrollmentScopedConsent', () => {
   test('a v8+ estimate_card_hold row alone does NOT qualify', async () => {
     db.mockImplementation(() => qb([
       { consent_text_version: 'v8_2026-06-17', source: 'estimate_card_hold' },
-    ]));
-    expect(await hasEnrollmentScopedConsent('cust-1', 'pm_x')).toBe(false);
-  });
-
-  test('a v8+ portal_add_card_save_only row (the add-a-card email form) alone does NOT qualify: no later workflow can enroll that card', async () => {
-    db.mockImplementation(() => qb([
-      { consent_text_version: 'v12_2026-09-30', source: 'portal_add_card_save_only' },
     ]));
     expect(await hasEnrollmentScopedConsent('cust-1', 'pm_x')).toBe(false);
   });
