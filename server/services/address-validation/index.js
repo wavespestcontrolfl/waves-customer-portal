@@ -28,7 +28,7 @@
 
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
-const { isPuntaGordaLocality, isPuntaGordaZip } = require('../excluded-localities');
+const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
 const { normalizeState, normalizeStreetLine, parseRawAddress } = require('../../utils/address-normalizer');
 
 // Google address calls are fail-open by design — a HUNG call must fail the
@@ -144,10 +144,11 @@ function deriveStatus(result, county) {
     postal_code: pickComponent(components, 'postal_code') || null,
   };
 
-  // A served county does not make Punta Gorda served (owner ruling
-  // 2026-10-22): the validated city, or a Punta Gorda-only ZIP, is out.
-  const puntaGorda = isPuntaGordaLocality(normalized.city) || isPuntaGordaZip(normalized.postal_code);
-  const inServiceArea = county ? (isInServiceAreaCounty(county) && !puntaGorda) : null;
+  // A served county does not make Punta Gorda served (owner ruling 2026-10-22), nor Rotonda, Englewood, Placida,
+  // Boca Grande, Port Charlotte or Babcock Ranch until a second technician is hired (owner ruling 2026-11-23):
+  // the validated city, or a ZIP that belongs only to such a place, is out.
+  const heldPlace = isExcludedLocality(normalized.city) || isExcludedZip(normalized.postal_code);
+  const inServiceArea = county ? (isInServiceAreaCounty(county) && !heldPlace) : null;
 
   const base = {
     inServiceArea,

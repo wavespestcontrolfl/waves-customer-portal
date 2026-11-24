@@ -247,6 +247,27 @@ describe('GET /:token', () => {
     expect(await router._internals.assessmentFirstFor(estimate(), { open: true })).toBeNull();
   });
 
+  // Owner ruling 2026-11-23: six more places are held until a second technician is hired.
+  test.each([
+    [{ city: 'Port Charlotte' }], [{ city: 'Englewood' }], [{ city: 'Rotonda West' }], [{ city: 'Placida' }],
+    [{ city: 'Boca Grande' }], [{ city: 'Babcock Ranch' }], [{ city: null, zip: '33948' }], [{ city: '', zip: '34223' }],
+  ])('a held place %j is gone before any location work, and /data never offers it', async (place) => {
+    // the estimate and the customer name the same property, so only the area rule can answer "gone"
+    const zip = place.zip || '34205';
+    customerRow = { ...CUSTOMER, zip, ...place };
+    estimateRow = estimate({ address: `100 Sample Way, ${place.city || 'Somewhere'}, FL ${zip}` });
+    expect((await call(TOKEN)).body).toEqual({ state: 'gone' });
+    expect(mockBookingInternals.customerBookingLocation).not.toHaveBeenCalled();
+    expect(await router._internals.assessmentFirstFor(estimateRow, { open: true })).toBeNull();
+  });
+
+  test('North Port is still offered the assessment', async () => {
+    customerRow = { ...CUSTOMER, city: 'North Port', zip: '34287' };
+    estimateRow = estimate({ address: '100 Sample Way, North Port, FL 34287' });
+    expect((await call(TOKEN)).body).not.toEqual({ state: 'gone' });
+    expect(mockBookingInternals.customerBookingLocation).toHaveBeenCalled();
+  });
+
   test('a customer\'s own plan quote that staff changed: gone before any location work, and /data never offers it (codex pre-push P1)', async () => {
     estimateRow = estimate({ source: 'plan_start', bill_by_invoice: true });
     expect((await call(TOKEN)).body).toEqual({ state: 'gone' });

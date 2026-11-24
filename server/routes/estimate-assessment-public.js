@@ -97,7 +97,7 @@ async function assessmentEligibility(estimate, data, conn = db) {
   if (!sameProperty(estimate.address, { line1: customer.address_line1, line2: customer.address_line2, zip: customer.zip })) {
     return { state: 'gone' };
   }
-  // An excluded locality (Punta Gorda, owner ruling 2026-10-22) never books, by the address's own city or ZIP: the
+  // An excluded locality (Punta Gorda, owner ruling 2026-10-22; the six held places, 2026-11-23) never books, by the address's own city or ZIP: the
   // cheap half of the inspection page's service-area check, so /data never offers it. The booking page runs the
   // whole check (bookingSetup).
   const { isExcludedLocality, isExcludedZip } = require('../services/excluded-localities');

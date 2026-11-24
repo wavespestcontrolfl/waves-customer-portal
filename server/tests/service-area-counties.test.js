@@ -40,10 +40,22 @@ describe('Punta Gorda triage flag', () => {
     expect(flagsFor({ county: 'Charlotte', postal_code: '33950' })).toContain('out_of_service_area');
   });
 
-  test('Port Charlotte (33980, 33948) and Englewood stay unflagged', () => {
-    expect(flagsFor({ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33980' })).not.toContain('out_of_service_area');
-    expect(flagsFor({ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33948' })).not.toContain('out_of_service_area');
-    expect(flagsFor({ city: 'Englewood', county: 'Charlotte', postal_code: '34223' })).not.toContain('out_of_service_area');
-    expect(flagsFor({ postal_code: '33983', county: 'Charlotte' })).not.toContain('out_of_service_area');
+  // Owner ruling 2026-11-23: six more places are held until a second technician is hired.
+  test.each([
+    [{ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33980' }],
+    [{ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33948' }],
+    [{ city: 'Englewood', county: 'Sarasota', postal_code: '34223' }],
+    [{ city: 'Rotonda West', county: 'Charlotte', postal_code: '33947' }],
+    [{ city: 'Placida', county: 'Charlotte' }],
+    [{ city: 'Boca Grande', county: 'Charlotte' }],
+    [{ city: 'Babcock Ranch', county: 'Charlotte', postal_code: '33982' }],
+    [{ postal_code: '33983', county: 'Charlotte' }],
+  ])('held place %j is flagged out_of_service_area', (sa) => {
+    expect(flagsFor(sa)).toContain('out_of_service_area');
+  });
+
+  test('North Port and Venice stay unflagged', () => {
+    expect(flagsFor({ city: 'North Port', county: 'Sarasota', postal_code: '34287' })).not.toContain('out_of_service_area');
+    expect(flagsFor({ city: 'Venice', county: 'Sarasota', postal_code: '34285' })).not.toContain('out_of_service_area');
   });
 });
