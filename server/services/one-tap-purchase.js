@@ -347,7 +347,18 @@ async function initPurchase({ customerId, clicked }) {
   if (protectedProbe?.completed) return completedRetryResponse(customerId, protectedProbe.completed);
   if (protectedProbe?.snapshot) return protectedProbe.snapshot;
   const basis = targetKey ? await buildPortalPurchaseBasis(customerId, db, { targetKey }) : null;
-  if (!basis) throw httpError(409, OFFER_CHANGED);
+  if (!basis) {
+    // Another tab can confirm after the probe and before this ownership read: the customer then owns the service
+    // and no offer remains. A purchase the probe saw open and that is now completed answers with its receipt.
+    if (protectedProbe?.probedIds?.length) {
+      const completedAfterProbe = await db('one_tap_purchases')
+        .whereIn('id', protectedProbe.probedIds)
+        .where({ customer_id: customerId, service_key: targetKey, status: 'completed' })
+        .first();
+      if (completedAfterProbe) return completedRetryResponse(customerId, completedAfterProbe);
+    }
+    throw httpError(409, OFFER_CHANGED);
+  }
   const offer = basis.payload;
   assertNoDrift(offer, clicked);
 
@@ -1789,6 +1800,17 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       // Rung 6 — comms lock before this txn's first row lock (the converter
       // inserts scheduled_services rows on this trx).
       await lockCustomerComms(trx, customerId);
+      // Catalog SHARE lock BEFORE the first scheduled_services row lock (commitReservation's own order): a catalog
+      // migration locks `services` first and then updates visit rows, so locking the selected visit before this
+      // would ABBA-deadlock against one that targets it. Same condition commitReservation uses; the later call
+      // there is a no-op. A lock timeout behind a catalog write is the recoverable re-pick, never a 500.
+      if (preparedReservationCapacity || require('./scheduling/policy').capacityEnabled()) {
+        try {
+          await require('./scheduling/catalog-lock').lockCatalogIdentity(trx);
+        } catch (lockErr) {
+          throw httpError(409, 'That time is no longer available — pick a slot again.', { code: 'SLOT_UNAVAILABLE', cause: lockErr });
+        }
+      }
 
       // AUTHORITATIVE re-checks, now serialized behind the comms lock (P0:
       // concurrent confirms both passed the unlocked pre-check). The

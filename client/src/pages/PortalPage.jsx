@@ -1516,6 +1516,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
         // Another confirmation completed while this offer was reopening.
         setResult(d);
         setStep('done');
+        // The plan changed on the server in the other tab: a host that shows the plan reloads, as after a confirm.
+        if (onPurchased) onPurchased();
       } else if (d.officeReviewRequired) {
         setSelectedSlot(d.slot || null);
         keepForOfficeReview(d.officeReviewMessage);

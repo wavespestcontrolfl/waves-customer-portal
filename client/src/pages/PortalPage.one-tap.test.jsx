@@ -24,7 +24,7 @@ vi.mock('../utils/api', () => {
 });
 
 import api from '../utils/api';
-import { DashboardTab, MyPlanTab } from './PortalPage';
+import { BillingTab, DashboardTab, MyPlanTab } from './PortalPage';
 
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -297,6 +297,24 @@ describe('one-tap purchase CTA gating', () => {
     expect(api.oneTapConfirm).not.toHaveBeenCalled();
     expect(api.oneTapRelease).not.toHaveBeenCalled();
   });
+
+  it('reloads the billing host when init returns another tab\'s completed receipt, as after a confirm (codex pre-push P1)', async () => {
+    api.getPayments.mockResolvedValue({ payments: [] });
+    api.getBalance.mockResolvedValue({ currentBalance: 0 });
+    api.getCards.mockResolvedValue({ cards: [] });
+    api.getAutopay.mockResolvedValue({ state: 'disabled' });
+    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+    api.oneTapInit.mockResolvedValue({
+      success: true, label: 'Lawn Care', perVisit: 73, emailQueued: false,
+      firstVisit: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00' },
+    });
+    const refreshCustomer = vi.fn().mockResolvedValue(undefined);
+    render(<BillingTab customer={customer} refreshCustomer={refreshCustomer} />);
+    fireEvent.click(await screen.findByText('Add now — $84.00 per application', {}, { timeout: 10000 }));
+
+    expect(await screen.findByText('Lawn Care is confirmed')).toBeInTheDocument();
+    expect(refreshCustomer).toHaveBeenCalled();
+  }, 30000);
 
   it('ordinary close still releases an incomplete purchase', async () => {
     api.getPropertyRecommendations.mockResolvedValue(recommendations());

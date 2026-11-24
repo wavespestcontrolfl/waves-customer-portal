@@ -139,6 +139,9 @@ jest.mock('../services/estimate-slot-availability', () => ({
 jest.mock('../services/scheduling/occupancy', () => ({
   acquireOccupancyLock: jest.fn(async () => {}),
 }));
+jest.mock('../services/scheduling/catalog-lock', () => ({
+  lockCatalogIdentity: jest.fn(async () => { require('../models/db').__state.events.push({ type: 'catalog' }); }),
+}));
 jest.mock('../utils/customer-comms-lock', () => ({
   lockCustomerComms: jest.fn(async () => {}),
 }));
@@ -572,6 +575,31 @@ describe('initPurchase', () => {
     expect(out).toMatchObject({ success: true, perVisit: 84 });
     expect(db.__state.tables.one_tap_purchases).toHaveLength(1);
     expect(db.__state.tables.estimates).toHaveLength(1);
+  });
+
+  test('another tab completes the purchase before the ownership read: init returns its receipt, not a stale-offer 409 (codex pre-push P1)', async () => {
+    seedProtectedPurchase();
+    const estimate = db.__state.tables.estimates[0];
+    const open = JSON.parse(estimate.estimate_data);
+    delete open.oneTapPurchase.officeReview;
+    estimate.estimate_data = JSON.stringify(open);
+    db.__state.tables.scheduled_services = [];
+    buildPortalPurchaseBasis.mockImplementationOnce(async () => {
+      // The confirm committed, so the customer owns the service and no offer remains.
+      db.__state.tables.one_tap_purchases[0].status = 'completed';
+      return null;
+    });
+
+    const out = await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+
+    expect(out).toMatchObject({ success: true, perVisit: 84 });
+    expect(db.__state.tables.one_tap_purchases).toHaveLength(1);
+  });
+
+  test('a null basis with no completed purchase keeps the stale-offer 409', async () => {
+    buildPortalPurchaseBasis.mockImplementationOnce(async () => null);
+    await expect(oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED }))
+      .rejects.toMatchObject({ status: 409 });
   });
 
   test('a protected reopen that completed before its row lock returns the frozen receipt, never office review', async () => {
@@ -1198,6 +1226,28 @@ describe('confirm', () => {
     expect(slotReservation.prepareReservationCommit).toHaveBeenCalledWith('ss-1', {
       serviceMode: 'recurring', expectedEstimateId: 'est-1', expectedCustomerId: 'cust-1',
     });
+  });
+
+  test('capacity acceptance takes the catalog SHARE lock before its first scheduled_services row lock (codex pre-push P1)', async () => {
+    slotReservation.prepareReservationCommit.mockResolvedValueOnce({ options: { technicianId: 'tech-1' } });
+    db.__state.tables.scheduled_services[0].technician_id = 'tech-1';
+    db.__state.events.length = 0;
+    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    const events = db.__state.events;
+    const catalogLock = events.findIndex(event => event.type === 'catalog');
+    expect(catalogLock).toBeGreaterThanOrEqual(0);
+    expect(events.findIndex(event => event.type === 'row')).toBeGreaterThan(catalogLock);
+  });
+
+  test('a catalog lock timeout during capacity acceptance is the recoverable re-pick, never a 500 (codex pre-push P1)', async () => {
+    slotReservation.prepareReservationCommit.mockResolvedValueOnce({ options: { technicianId: 'tech-1' } });
+    db.__state.tables.scheduled_services[0].technician_id = 'tech-1';
+    require('../services/scheduling/catalog-lock').lockCatalogIdentity.mockRejectedValueOnce(
+      Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }),
+    );
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 409, code: 'SLOT_UNAVAILABLE' });
+    expect(slotReservation.commitReservation).not.toHaveBeenCalled();
   });
 
   test('happy path: accept + commit + convert in one transaction, then email + bell + push (NO SMS)', async () => {
