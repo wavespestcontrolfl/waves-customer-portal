@@ -75,11 +75,11 @@ async function main() {
 
   // From the Mac the private database host does not resolve: use the public URL the Postgres service provides, and
   // stop with a clear message when only the private one is set.
-  // An explicit non-private DATABASE_URL (a local or QA database) always wins: the public URL replaces only a missing or
-  // private one, so an inherited DATABASE_PUBLIC_URL can never move a QA run onto production.
+  // The public URL replaces DATABASE_URL ONLY inside the nested `railway run --service Postgres` shown above: there the
+  // Postgres service itself sets both URLs, so they name the same database. Anywhere else DATABASE_URL is used as given,
+  // so an inherited DATABASE_PUBLIC_URL can never move a local or QA run onto another database.
   const PRIVATE_HOST = /\.railway\.internal\b/;
-  const explicitUrl = process.env.DATABASE_URL || '';
-  if (process.env.DATABASE_PUBLIC_URL && (!explicitUrl || PRIVATE_HOST.test(explicitUrl))) {
+  if (process.env.DATABASE_PUBLIC_URL && process.env.RAILWAY_SERVICE_NAME === 'Postgres') {
     process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
   }
   if (PRIVATE_HOST.test(process.env.DATABASE_URL || '')) {
@@ -108,13 +108,16 @@ async function main() {
     }
     if (labelsPath) {
       const { labels, nameCheck, officeByDefault } = await labelsFor({ batch, ids });
+      // A mistyped batch or an id filter that matches nothing must never replace a print file with an empty list.
+      if (!labels.length) {
+        throw usage(`no marked homes in batch "${batch}"${ids ? ' for those ids' : ''}: nothing written (run --execute --batch <name> first)`);
+      }
       // A new 0600 file renamed into place: an existing file keeps its old permissions when it is written over, and this one
       // holds buyer names and page tokens.
       const tmp = `${labelsPath}.${process.pid}.tmp`;
       fs.writeFileSync(tmp, `${JSON.stringify(labels, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
       fs.renameSync(tmp, labelsPath);
       console.log(`Wrote ${labels.length} label row(s) for batch "${batch}".`);
-      if (!labels.length) console.log('  No marked homes in that batch: run --execute --batch <name> first, then export its labels.');
       if (nameCheck.length) console.log(`  Look at the name of ${nameCheck.length} home(s) before printing: ${nameCheck.join(', ')}`);
       if (officeByDefault.length) console.log(`  No city or ZIP named an office for ${officeByDefault.length} home(s) (Lakewood Ranch line used): ${officeByDefault.join(', ')}`);
     }

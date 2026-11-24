@@ -49,6 +49,35 @@ describe('mark-mail-batch arguments', () => {
     expect(result.stderr).toMatch(/ECONNREFUSED/);
   });
 
+  test('outside the nested Postgres run, a private QA DATABASE_URL is never swapped for an inherited public URL', () => {
+    const result = spawnSync(process.execPath, [SCRIPT], {
+      encoding: 'utf8',
+      env: {
+        PATH: process.env.PATH,
+        DATABASE_URL: 'postgres://qa:qa@qa-db.railway.internal:5432/qa',
+        DATABASE_PUBLIC_URL: 'postgres://prod:prod@prod-db.invalid:5432/railway',
+      },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/PRIVATE_DB_URL/);
+    expect(result.stderr).not.toMatch(/ENOTFOUND/);
+  });
+
+  test('inside the nested Postgres run the public URL is used', () => {
+    const result = spawnSync(process.execPath, [SCRIPT], {
+      encoding: 'utf8',
+      timeout: 60000,
+      env: {
+        PATH: process.env.PATH,
+        RAILWAY_SERVICE_NAME: 'Postgres',
+        DATABASE_URL: 'postgres://u:p@postgres.railway.internal:5432/railway',
+        DATABASE_PUBLIC_URL: 'postgres://u:p@127.0.0.1:1/railway', // a closed local port: refused at once
+      },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/ECONNREFUSED/);
+  });
+
   test('a private DATABASE_URL with no public URL stops with the nested-command message', () => {
     const result = spawnSync(process.execPath, [SCRIPT], {
       encoding: 'utf8',
