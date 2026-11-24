@@ -526,16 +526,14 @@ async function resolveNoFundsSavedCardChargeAttempt({
     if (!attempt) {
       // A signed failure webhook can resolve this claim while the create request
       // is still returning. Only this worker has the response's PaymentIntent, so
-      // add it to that closed decline. A webhook's own ID is never replaced.
+      // add it to that closed decline. Only the worker's own column is written:
+      // stripe_payment_intent_id stays as it is, because the termite renewal reads
+      // a non-null value there as proof a payment was presented to the customer.
       if (declineCode === 'authentication_required' && authenticationIntentId) {
         await trx('stripe_invoice_charge_attempts')
           .where({ id: attemptId, invoice_id: invoiceId, status: 'failed' })
           .whereNotNull('resolved_at')
-          .update({
-            ...workerIntentBinding(authenticationIntentId),
-            stripe_payment_intent_id: db.raw('COALESCE(stripe_payment_intent_id, ?)', [authenticationIntentId]),
-            updated_at: new Date(),
-          });
+          .update({ ...workerIntentBinding(authenticationIntentId), updated_at: new Date() });
       }
       return false;
     }
@@ -566,10 +564,10 @@ async function resolveNoFundsSavedCardChargeAttempt({
         status: 'failed',
         error_message: String(failureMessage || 'Pre-charge setup failed').slice(0, 1000),
         decline_code: declineCode,
-        ...(authenticationIntentId ? {
-          stripe_payment_intent_id: db.raw('COALESCE(stripe_payment_intent_id, ?)', [authenticationIntentId]),
-          ...workerIntentBinding(authenticationIntentId),
-        } : {}),
+        // The worker's own column only. A non-null stripe_payment_intent_id reads
+        // as "presented to the customer" in the termite renewal, which a decline
+        // never was.
+        ...workerIntentBinding(authenticationIntentId),
         resolved_at: new Date(),
         updated_at: new Date(),
       });

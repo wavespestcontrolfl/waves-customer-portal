@@ -108,9 +108,14 @@ postgres('saved-card worker payment and verified cancellation records (PostgreSQ
     })).resolves.toMatchObject({ resolved: true });
     expect(await attemptRow()).toMatchObject({
       status: 'failed', decline_code: 'authentication_required',
-      stripe_payment_intent_id: 'pi_authentication', worker_payment_intent_id: 'pi_authentication',
+      stripe_payment_intent_id: null, worker_payment_intent_id: 'pi_authentication',
     });
     expect(await awaiting()).toBe(true);
+    // The termite renewal reads a non-null stripe_payment_intent_id as "presented to the
+    // customer"; recording the worker's PaymentIntent must not make a decline look presented.
+    const { whereAttemptPresented } = require('../services/termite-annual-renewal-charge')._private;
+    const presented = await whereAttemptPresented(trx('stripe_invoice_charge_attempts as a').where('a.id', attemptId)).first('a.id');
+    expect(presented).toBeUndefined();
   });
 
   test('a webhook that closed the decline first still gets the worker PaymentIntent, without a PI of its own replaced', async () => {
@@ -135,23 +140,24 @@ postgres('saved-card worker payment and verified cancellation records (PostgreSQ
     expect(await awaiting()).toBe(false);
   });
 
+  test('control: the fixture itself accepts an exact cancellation', async () => {
+    await insertAttempt({ status: 'ambiguous' });
+    await authentication.recordAuthenticationCancellation(canceledIntent('pi_auth'), require('../models/db'));
+    expect((await attemptRow()).authentication_canceled_intent_id).toBe('pi_auth');
+  });
+
+  // Each intent is built inside the test, after beforeEach assigned the fixture IDs,
+  // so every case fails on its own field and not on UUID validation.
+  const withMetadata = (patch) => (intent) => ({ ...intent, metadata: { ...intent.metadata, ...patch } });
   test.each([
-    ['another PaymentIntent already bound by the worker', { worker_payment_intent_id: 'pi_other' }, canceledIntent('pi_auth')],
-    ['another card', {}, canceledIntent('pi_auth', { payment_method: 'pm_other' })],
-    ['a different attempt', {}, (() => {
-      const intent = canceledIntent('pi_auth');
-      intent.metadata = { ...intent.metadata, saved_card_attempt_id: randomUUID() };
-      return intent;
-    })()],
-    ['a PaymentIntent that is not canceled', {}, canceledIntent('pi_auth', { status: 'requires_action' })],
-    ['an intent from another source', {}, (() => {
-      const intent = canceledIntent('pi_auth');
-      intent.metadata = { ...intent.metadata, source: 'pay_page' };
-      return intent;
-    })()],
-  ])('a cancellation for %s records nothing', async (_label, fields, intent) => {
+    ['another PaymentIntent already bound by the worker', { worker_payment_intent_id: 'pi_other' }, (intent) => intent],
+    ['another card', {}, (intent) => ({ ...intent, payment_method: 'pm_other' })],
+    ['a different attempt', {}, withMetadata({ saved_card_attempt_id: randomUUID() })],
+    ['a PaymentIntent that is not canceled', {}, (intent) => ({ ...intent, status: 'requires_action' })],
+    ['an intent from another source', {}, withMetadata({ source: 'pay_page' })],
+  ])('a cancellation for %s records nothing', async (_label, fields, override) => {
     await insertAttempt({ status: 'ambiguous', ...fields });
-    await authentication.recordAuthenticationCancellation(intent, require('../models/db'));
+    await authentication.recordAuthenticationCancellation(override(canceledIntent('pi_auth')), require('../models/db'));
     expect((await attemptRow()).authentication_canceled_intent_id).toBeNull();
   });
 

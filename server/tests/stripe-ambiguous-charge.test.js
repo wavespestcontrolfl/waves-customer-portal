@@ -684,7 +684,8 @@ describe('saved-card pre-charge failure release', () => {
     const written = state.updates.find((entry) => entry.table === 'stripe_invoice_charge_attempts').payload;
     expect(written).toEqual(expect.objectContaining({ status: 'failed', decline_code: 'authentication_required' }));
     expect(written.worker_payment_intent_id.bindings).toEqual(['pi_authentication']);
-    expect(written.stripe_payment_intent_id.bindings).toEqual(['pi_authentication']);
+    // A non-null stripe_payment_intent_id would read as "presented" to the termite renewal.
+    expect(written).not.toHaveProperty('stripe_payment_intent_id');
     expect(written).not.toHaveProperty('stripe_payment_intent_bound_at');
   });
 
@@ -711,7 +712,7 @@ describe('saved-card pre-charge failure release', () => {
     })).resolves.toBe(false);
     const written = state.updates.find((entry) => entry.table === 'stripe_invoice_charge_attempts').payload;
     expect(written.worker_payment_intent_id.bindings).toEqual(['pi_authentication']);
-    expect(Object.keys(written).sort()).toEqual(['stripe_payment_intent_id', 'updated_at', 'worker_payment_intent_id']);
+    expect(Object.keys(written).sort()).toEqual(['updated_at', 'worker_payment_intent_id']);
   });
 
   test('reopens a parked invoice when the stale ambiguous owner proves no charge was submitted', async () => {
