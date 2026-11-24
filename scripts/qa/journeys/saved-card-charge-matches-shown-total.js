@@ -116,8 +116,16 @@ module.exports = {
 
     // The same signed Stripe event that normally follows must settle nothing twice. Snapshot the receipt job first:
     // the webhook must leave that same job as it is (no requeue, no new attempt).
-    const jobBefore = await db('receipt_delivery_jobs').where({ invoice_id: fixture.cardInvoiceId })
-      .first('id', 'status', 'attempts', 'next_attempt_at');
+    // The stamp is written after the text goes, while the job may still be finishing its own attempt (the email leg,
+    // which QA has no transport for). Take the snapshot only once the job has settled.
+    let jobBefore;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      jobBefore = await db('receipt_delivery_jobs').where({ invoice_id: fixture.cardInvoiceId })
+        .first('id', 'status', 'attempts', 'next_attempt_at');
+      if (!['running', 'queued'].includes(jobBefore.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    assert.ok(!['running', 'queued'].includes(jobBefore.status), `The receipt job settles before the webhook (status ${jobBefore.status})`);
     const event = { id: fixture.cardEventId, type: 'payment_intent.succeeded', created: Math.floor(Date.now() / 1000),
       data: { object: { id: fixture.cardPaymentIntentId, object: 'payment_intent', status: 'succeeded', amount: call.amount,
         amount_received: call.amount, currency: call.currency, payment_method_types: call.payment_method_types,
