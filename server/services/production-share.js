@@ -525,7 +525,7 @@ async function billedByVisit(conn, visitIds) {
         UNION SELECT sr2.scheduled_service_id FROM service_records sr2 WHERE sr2.id = i.service_record_id AND sr2.scheduled_service_id IS NOT NULL
       ) mem ON true
       JOIN scheduled_services m ON m.id = mem.id
-      WHERE i.id IN (SELECT invoice_id FROM links WHERE NOT not_charged)
+      WHERE i.id IN (SELECT invoice_id FROM links)
     )
     SELECT COALESCE((SELECT json_agg(row_to_json(l)) FROM links l), '[]'::json) AS links,
       COALESCE((SELECT json_agg(row_to_json(m)) FROM members m), '[]'::json) AS members`,
@@ -545,9 +545,11 @@ async function billedByVisit(conn, visitIds) {
     shares.set(row.invoice_id, invoiceShare(row, list));
   }
   for (const row of links.rows) {
-    const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [], shares: [], invoiceIds: [] };
+    const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [], shares: [], invoiceIds: [], invoiceMembers: new Map() };
     // Every invoice linked to the visit, whatever it names (a pay run records them with a paid stop: see the INVOICE and PACKAGE rules).
     if (!entry.invoiceIds.includes(row.invoice_id)) entry.invoiceIds.push(row.invoice_id);
+    // The visits of that invoice, charged or not (the stop's related ids: see relatedIdsOf).
+    entry.invoiceMembers.set(row.invoice_id, (byInvoice.get(row.invoice_id) || []).map((member) => member.id));
     out.set(row.visit_id, entry);
     if (row.not_charged) continue;
     const share = shares.get(row.invoice_id);
@@ -767,9 +769,26 @@ async function loadCreditFacts(conn, stops) {
   const jobCache = new Map();
   const jobs = new Map();
   for (const stop of stops) jobs.set(stop.id, await jobOf(conn, stop, hasFollowUp, jobCache));
+  // The stops, and every visit of their packages (root and siblings): the related ids of a stop reach the invoices of all of them.
   const billed = await billedByVisit(conn, [...new Set([...stops.map((stop) => stop.id),
-    ...[...jobs.values()].filter((job) => job && job.root).map((job) => job.root.id)])]);
+    ...[...jobs.values()].filter((job) => job && job.root).flatMap((job) => [job.root.id, ...job.planned])])]);
   return { jobs, billed, prepaidRefunds: await termRefunds(conn, stops) };
+}
+
+// Everything a paid row elsewhere could touch this stop through: the stop, its package root and every sibling visit, every invoice linked to
+// any of those (charged or not), and every visit on those invoices. Kept on EVERY row, review rows included.
+function relatedIdsOf(stop, job, billed) {
+  const visits = new Set([stop.id]);
+  if (job && job.root) { visits.add(job.root.id); for (const id of job.planned || []) visits.add(id); }
+  const ids = new Set(visits);
+  for (const id of visits) {
+    const entry = billed.get(id);
+    for (const invoiceId of (entry && entry.invoiceIds) || []) {
+      ids.add(invoiceId);
+      for (const member of entry.invoiceMembers.get(invoiceId) || []) ids.add(member);
+    }
+  }
+  return [...ids].sort();
 }
 
 // The package slot of a package visit, review rows too: an owner-set credit keeps it as a job basis (applyLedger, slotBasis). null for a
@@ -820,6 +839,7 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
       unallocatedRefunds: invoiced.unallocated || [],
       ledger: ledgerOf(credit, invoiced),
       packageSlot,
+      related: relatedIdsOf(stop, job, billed),
       linkedInvoices: linkedInvoicesOf(invoiced, job, billed),
     });
   }
@@ -850,10 +870,10 @@ const STOP_INVOICES_SQL = `CASE WHEN jsonb_typeof(stop.value->'invoices') = 'arr
  * Voiding the paying run takes its checks out of the query. One query.
  */
 async function paidLedger(conn, visitIds, invoiceIds, rootIds, weekStart) {
-  const ledger = { visits: new Map(), invoices: new Map(), jobs: new Map() };
+  const ledger = { visits: new Map(), invoices: new Map(), jobs: new Map(), rows: [] };
   if (!visitIds.length && !invoiceIds.length && !rootIds.length) return ledger;
   const wanted = new Set(visitIds);
-  const rows = (await conn.raw(`SELECT c.id AS check_id, stop.value->>'visitId' AS visit_id, to_char(c.week_start, 'YYYY-MM-DD') AS week_start,
+  const rows = (await conn.raw(`SELECT c.id AS check_id, r.id AS run_id, stop.value->>'visitId' AS visit_id, to_char(c.week_start, 'YYYY-MM-DD') AS week_start,
       ${STOP_INVOICES_SQL} AS invoices, ${STOP_BASES_SQL} AS bases
     ${PAID_FROM_SQL}
       AND (stop.value->>'visitId' = ANY(?::text[])
@@ -863,6 +883,8 @@ async function paidLedger(conn, visitIds, invoiceIds, rootIds, weekStart) {
     ORDER BY c.week_start, c.id`, [weekStart, visitIds, invoiceIds, rootIds])).rows;
   const roots = new Set(rootIds);
   for (const row of rows) {
+    // Every paid stop row that touches what was asked for, whole (the conflict state of a stop hashes them all).
+    ledger.rows.push({ runId: row.run_id, weekStart: row.week_start, visitId: row.visit_id, invoices: row.invoices, bases: row.bases });
     // The package a paid row belonged to (null: it was paid on its own, with no package basis).
     const root = (row.bases.find((basis) => basis.basisType === 'job') || {}).basisId || null;
     if (wanted.has(row.visit_id) && !ledger.visits.has(row.visit_id)) ledger.visits.set(row.visit_id, { weekStart: row.week_start, root });
@@ -903,6 +925,7 @@ function applyLedger(rows, paid, overrides = new Map()) {
     delete clean.linkedInvoices;
     delete clean.technicianId;
     delete clean.packageSlot;
+    delete clean.related;
     return clean;
   });
 
@@ -936,46 +959,19 @@ function applyLedger(rows, paid, overrides = new Map()) {
     return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: slotBasis(row), overrideRevision: set.revision };
   }
 
-  // The conflict state of a stop: a short hash of what a pay run paid elsewhere that touches it (its linked invoices, the visits of its
-  // invoices, its package slot and visits, a package it was the root of). '' = none. The credit the owner sets stores it; a run ignores
-  // the credit when a different, non-empty state shows later.
+  // The conflict state of a stop, ONE rule: a short hash of EVERY paid stop row (finalized, non-void, a share above $0, another week)
+  // that touches what the stop is related to (row.related: itself, its package root and siblings, every invoice linked to any of
+  // those, every visit on those invoices), whole: run, week, visit, the invoice ids it recorded and its package basis. '' = none. The
+  // credit the owner sets stores it; a run ignores the credit when a different, non-empty state shows later.
   function conflictBasisOf(row) {
-    const at = row.packageSlot;
-    const parts = [...invoiceConflicts(row, at), ...memberConflicts(row), ...packageConflicts(row, at)];
-    if (paid.jobs.has(row.visitId) && !(at && at.rootId === row.visitId)) parts.push(`root:${row.visitId}`);
-    return parts.length ? require('node:crypto').createHash('sha1').update(parts.sort().join('|')).digest('hex').slice(0, 16) : '';
-  }
-
-  // The invoices linked to the stop that a paid row of another package (or of none) recorded.
-  function invoiceConflicts(row, at) {
-    // EVERY paid row that recorded the invoice counts (its visit and week), not the earliest one: a later payment of the same invoice
-    // changes the state too.
-    return (row.linkedInvoices || []).flatMap((id) => (paid.invoices.get(id) || [])
-      .filter((one) => !(at && one.root === at.rootId)).map((one) => `inv:${id}:${one.weekStart}:${one.visitId}`));
-  }
-
-  // The other visits of the invoices that priced the stop, paid already or the root of a package a pay run fixed.
-  function memberConflicts(row) {
-    const parts = [];
-    for (const member of ((row.ledger && row.ledger.invoices) || []).flatMap((inv) => inv.members)) {
-      const week = member.id === row.visitId ? null : (paid.visits.get(member.id) || {}).weekStart;
-      if (week) parts.push(`member:${member.id}:${week}`);
-      if (paid.jobs.has(member.id)) parts.push(`memberroot:${member.id}:${paid.jobs.get(member.id).weekStart}`);
-    }
-    return parts;
-  }
-
-  // The stop's package: its slot already taken, or one of its visits paid outside the package.
-  function packageConflicts(row, at) {
-    if (!at) return [];
-    const parts = [];
-    const was = paid.jobs.get(at.rootId);
-    if (was && was.slots.has(at.slot)) parts.push(`slot:${at.rootId}:${at.slot}:${was.weekStart}`);
-    for (const id of at.visits || []) {
-      const one = id === row.visitId ? null : paid.visits.get(id);
-      if (one && one.root !== at.rootId) parts.push(`outside:${id}:${one.weekStart}`);
-    }
-    return parts;
+    const related = new Set(row.related || []);
+    if (!related.size) return '';
+    const tuples = (paid.rows || [])
+      .filter((one) => related.has(one.visitId) || one.invoices.some((id) => related.has(id)) || one.bases.some((basis) => related.has(basis.basisId)))
+      .map((one) => JSON.stringify([one.runId, one.weekStart, one.visitId, [...one.invoices].sort(),
+        one.bases.map((basis) => [basis.basisType, basis.basisId, basis.slot]).sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1))]))
+      .sort();
+    return tuples.length ? require('node:crypto').createHash('sha1').update(tuples.join('|')).digest('hex').slice(0, 16) : '';
   }
 
   // A package visit credited by the owner still consumes its slot of the package: a job basis with the package root and the slot, and the
@@ -1028,11 +1024,12 @@ function applyLedger(rows, paid, overrides = new Map()) {
   }
 }
 
-const invoiceIdsOf = (rows) => [...new Set(rows.flatMap((row) => [...(row.ledger && row.ledger.invoices ? row.ledger.invoices.map((inv) => inv.invoiceId) : []), ...(row.linkedInvoices || [])]))];
+const invoiceIdsOf = (rows) => [...new Set(rows.flatMap((row) => [...(row.related || []), ...(row.ledger && row.ledger.invoices ? row.ledger.invoices.map((inv) => inv.invoiceId) : []), ...(row.linkedInvoices || [])]))];
 // Every visit of the week is looked up as a package root too: a visit that is the root of a package a pay run fixed (it may no longer be
 // a package) can never take a standalone credit.
 const rootIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
   row.visitId,
+  ...(row.related || []),
   ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId] : []),
   // The package of a review row too (an owner-set credit on it takes the fixed total, applyLedger slotBasis).
   ...(row.packageSlot ? [row.packageSlot.rootId] : []),
@@ -1042,6 +1039,7 @@ const rootIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
 // were priced from (so a member paid some other way is known whichever technicians' stops are read together).
 const visitIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
   row.visitId,
+  ...(row.related || []),
   ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId, ...row.ledger.job.visits] : []),
   // every visit of the package of a review row too (an owner-set credit on it is checked against what was paid outside the package)
   ...(row.packageSlot ? [row.packageSlot.rootId, ...(row.packageSlot.visits || [])] : []),

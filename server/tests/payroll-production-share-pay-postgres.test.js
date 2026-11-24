@@ -645,6 +645,84 @@ postgres('production share pay line', () => {
       expect(row).toMatchObject({ kind: 'owner_override_conflict_changed', creditCents: 0, needsReview: true });
     });
 
+    it('AUDIT :741: a REVIEW row keeps its invoice members: a visit of its invoice credited elsewhere later changes the conflict state', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      // one invoice covers two visits, one of them with no price: the invoice cannot be split, so BOTH are review rows
+      const mine = await stop(id, weeks[1], '1000.00', customerId);
+      const other = await stop(id, W1, null, customerId);
+      const invoiceId = (await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: '2000.00', discount_amount: '0.00', tax_amount: '0.00', total: '2000.00',
+      }).returning('id'))[0].id;
+      const [visit] = await trx('service_visits').insert({ customer_id: customerId, scheduled_date: W1, stop_base_key: 'k-741', created_by: 'test' }).returning('id');
+      const [packet] = await trx('visit_completion_packets').insert({ visit_id: visit.id, idempotency_key: 'k-741', request_hash: 'h', payload: {} }).returning('id');
+      for (const visitId of [mine, other]) {
+        await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-741-${visitId}`, invoice_id: invoiceId });
+      }
+      const shown = await api('GET', `/production-share/preview?technicianId=${id}&weekStart=${weeks[1]}`);
+      expect(shown.body.stops.find((row) => row.visitId === mine)).toMatchObject({ needsReview: true, conflictBasis: '' });
+      expect((await override({ technicianId: id, visitId: mine, weekStart: weeks[1], creditCents: 100000, reason: 'Checked' })).status).toBe(200);
+      // the other visit of that invoice is credited by the owner in week 1 and paid: a paid row that names the invoice and that visit
+      expect((await override({ technicianId: id, visitId: other, weekStart: W1, creditCents: 100000, reason: 'Checked' })).status).toBe(200);
+      await finalize((await draft(W1)).body.run.id);
+      const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
+      const row = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops.find((r) => r.visitId === mine);
+      expect(row).toMatchObject({ kind: 'owner_override_conflict_changed', creditCents: 0, needsReview: true });
+    });
+
+    it('AUDIT :973: a package slot paid again in another week changes the conflict state (every paid row, with its week and run)', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7), addDays(W1, 14)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+      const root = await stop(id, W1, '2000.00', customerId, pkg);
+      await finalize((await draft(W1)).body.run.id); // slot 1 of the package paid in week 1
+      // a chain of three visits for a package sold with two: every visit after the first is a review row
+      const extra = await stop(id, weeks[1], '0.00', customerId, { ...pkg, followup_included: true, followup_source_service_id: root });
+      const followUp = await stop(id, weeks[2], '0.00', customerId, { ...pkg, followup_included: true, followup_source_service_id: extra });
+      // a review row (the package's invoice is shared with an outside visit)
+      const outside = await stop(id, weeks[2], '300.00', await customer());
+      const invoiceId = (await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: '2300.00', discount_amount: '0.00', tax_amount: '0.00', total: '2300.00',
+      }).returning('id'))[0].id;
+      const [visit] = await trx('service_visits').insert({ customer_id: customerId, scheduled_date: W1, stop_base_key: 'k-973', created_by: 'test' }).returning('id');
+      const [packet] = await trx('visit_completion_packets').insert({ visit_id: visit.id, idempotency_key: 'k-973', request_hash: 'h', payload: {} }).returning('id');
+      for (const visitId of [root, outside]) {
+        await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-973-${visitId}`, invoice_id: invoiceId });
+      }
+      const key = { technicianId: id, visitId: followUp, weekStart: weeks[2] };
+      const before = await shownBasis(key);
+      expect(before).toMatch(/^[0-9a-f]{16}$/); // the package's week 1 payment is already part of what the owner looked at
+      expect((await override({ ...key, creditCents: 100000, reason: 'Checked' })).status).toBe(200);
+      // another visit of the package is credited by the owner in week 2 and paid: a paid row with the package's basis
+      expect((await override({ technicianId: id, visitId: extra, weekStart: weeks[1], creditCents: 50000, reason: 'Checked' })).status).toBe(200);
+      await finalize((await draft(weeks[1])).body.run.id);
+      const check = byName((await draft(weeks[2])).body.run, 'Sample Alpha');
+      const row = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops.find((r) => r.visitId === followUp);
+      expect(row).toMatchObject({ kind: 'owner_override_conflict_changed', creditCents: 0, needsReview: true });
+    });
+
+    it('AUDIT P1: a former employee with approved hours in an open run stays on the Payroll settings roster so the coverage can be set', async () => {
+      const id = await tech('Sample Former', { employment_status: 'inactive', flsa_overtime_covered: null });
+      await settings(id);
+      await worked(id, W1, 40);
+      const names = async () => (await api('GET', '/technicians')).body.technicians.map((t) => t.name);
+      expect(await names()).not.toContain('Sample Former'); // no open run
+      const draftRun = (await draft(W1)).body.run;
+      expect(draftRun.status).toBe('draft');
+      expect(await names()).toContain('Sample Former'); // an open (draft) run covers a week of their approved hours
+      expect((await api('PUT', `/technicians/${id}/flsa-coverage`, { body: { covered: true } })).status).toBe(200);
+      await api('POST', `/runs/${draftRun.id}/void`, { body: { reason: 'test' } });
+      expect(await names()).not.toContain('Sample Former'); // the run is closed again
+    });
+
     it('AUDIT :1115: a revision with no stored credit is refused; a credit is created only with neither', async () => {
       const { unpriced, key } = await world();
       expect((await override({ ...key, creditCents: 5000, reason: 'x', revision: 'abc123' })).status).toBe(409);
