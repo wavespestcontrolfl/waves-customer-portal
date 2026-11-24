@@ -2148,10 +2148,11 @@ function ReorderLimitsTab({ showToast }) {
   const [showAll, setShowAll] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const load = useCallback(async () => {
+    // Clear the error first so the loading state replaces Retry at once.
+    setLoadError(null);
     setLoading(true);
     try {
       setData(await adminFetch("/admin/inventory/reorder-suggestions"));
-      setLoadError(null);
     } catch (err) {
       // A failed read never leaves old suggestions (and their Use buttons) up.
       setData(null);
@@ -2176,7 +2177,7 @@ function ReorderLimitsTab({ showToast }) {
           expectedInventoryUnit: row.unit,
         }),
       });
-      setData((prev) => ({
+      setData((prev) => prev && ({
         ...prev,
         products: prev.products.map((p) =>
           p.productId === row.productId
@@ -2186,6 +2187,14 @@ function ReorderLimitsTab({ showToast }) {
       }));
       showToast(`${row.name}: limits saved`);
     } catch (err) {
+      if (err.status === 409) {
+        // The stock unit changed since this report loaded: its numbers are
+        // stale, so reload instead of letting the same save repeat.
+        showToast(`${row.name}: the stock unit changed; reloading suggestions`);
+        setSavingId("");
+        load();
+        return;
+      }
       showToast(`Save failed: ${err.message}`);
     } finally {
       setSavingId("");
@@ -2217,7 +2226,7 @@ function ReorderLimitsTab({ showToast }) {
             checked={showAll}
             onChange={(e) => setShowAll(e.target.checked)}
           />
-          <Button onClick={load} disabled={loading} variant="secondary">
+          <Button onClick={load} disabled={loading || Boolean(savingId)} variant="secondary">
             Refresh
           </Button>
         </div>

@@ -96,4 +96,21 @@ describe('Limits tab', () => {
     expect(screen.queryByText('No products with use to suggest limits for.')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Use' })).not.toBeInTheDocument();
   });
+
+  it('a 409 unit conflict reloads the suggestions instead of repeating the save', async () => {
+    let gets = 0;
+    fetchMock.mockImplementation((url, init = {}) => {
+      if (String(url).includes('/reorder-suggestions')) {
+        gets += 1;
+        return Promise.resolve(reply({ today: '2026-11-24', options: {}, forecastError: null, products: [ROW] }));
+      }
+      if (init.method === 'PUT') return Promise.resolve({ ok: false, status: 409, json: async () => ({}) });
+      return Promise.resolve(reply({}));
+    });
+    mount();
+    await screen.findByText('Synthetic jug product');
+    fireEvent.click(screen.getByRole('button', { name: 'Use' }));
+    await waitFor(() => expect(gets).toBe(2));
+  });
 });
+
