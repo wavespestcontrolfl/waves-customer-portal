@@ -21,7 +21,7 @@ One monorepo serves three surfaces plus the automation that runs the business:
 | SMS/Voice | Twilio (messaging, voice recording + transcription, Lookup) |
 | AI | Anthropic Claude (+ routed OpenAI/Gemini for specific features) — model tiers in `server/config/models.js`, never hardcode model IDs |
 | Storage | AWS S3 (service photos, report assets) |
-| Hosting | Railway (service settings in the dashboard; `nixpacks.toml` adds ffmpeg) |
+| Hosting | Railway; the portal builds from `deploy/portal.Dockerfile` since 2026-11-02 (#7451), which installs ffmpeg |
 
 The marketing/SEO site (hub + spoke fleet) is a **separate repo**
 (`wavespestcontrolfl/wavespestcontrol-astro`) deployed to Cloudflare Pages;

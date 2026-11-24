@@ -127,7 +127,7 @@ the `ROUTES` map in `models.js`, dispatched through
 Responses / Gemini generateContent / Anthropic SDK).
 
 Currently live:
-- **GPT-5.5** (`MODEL_OPENAI_BEST`): lead-triage classification
+- **GPT-5.6 Terra** (`MODEL_OPENAI_BEST`, which defaults to `OPENAI_BALANCED`): lead-triage classification
   (`lead-triage.js`), knowledge-base Q&A (`knowledge-bridge.js`), estimate
   assistant (`estimate-assistant.js`).
 - **Lawn visit read + paired recheck** (`MODEL_GEMINI_LAWN_ASSESSMENT`, default
