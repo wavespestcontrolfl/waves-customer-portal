@@ -137,16 +137,19 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
       base('accepted', { accepted_at: now }),
       base('expired', { expires_at: now, disposition: 'converted_other_path', disposition_source: 'system', disposition_at: now }),
       base('expired', { expires_at: now, disposition: 'expired_viewed', disposition_source: 'system' }),
+      // An expired row with NO disposition at all is a loss, not a booked win (NULL-safe NOT).
+      base('expired', { expires_at: now }),
     ]);
     const after = await funnel();
     const svc = (r) => r.by_service.find((s) => s.service === SVC) || { won: 0, lost: 0, sent: 0 };
-    expect(svc(after)).toMatchObject({ sent: 3, won: 2, lost: 1 });
+    expect(svc(after)).toMatchObject({ sent: 4, won: 2, lost: 2, wonValue: 50 });
     expect(svc(before)).toMatchObject({ sent: 0 });
     const captureAfter = await salesCapture();
     expect(captureAfter.wonCount - captureBefore.wonCount).toBe(2);
-    expect(captureAfter.lostCount - captureBefore.lostCount).toBe(1);
-    expect(captureAfter.captured - captureBefore.captured).toBe(2 * 50 * 12);
-    expect(captureAfter.missed - captureBefore.missed).toBe(50 * 12);
+    expect(captureAfter.lostCount - captureBefore.lostCount).toBe(2);
+    // Dollars: the accepted row only (a booked win is a win in the count, not in the dollars).
+    expect(captureAfter.captured - captureBefore.captured).toBe(50 * 12);
+    expect(captureAfter.missed - captureBefore.missed).toBe(2 * 50 * 12);
   });
 
   test('compare_periods counts the same sends; its accepted count still includes a self-serve acceptance', async () => {

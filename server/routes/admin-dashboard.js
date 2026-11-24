@@ -1769,7 +1769,9 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
         .where((q) => q
           .whereRaw(`(e.status = 'accepted' AND COALESCE(e.accepted_at, e.created_at) >= ${ET_MIDNIGHT_TS})`, [cutoff])
           .orWhereRaw(`(${bookedWinSql('e')} AND COALESCE(e.expires_at, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS})`, [cutoff]))
-        .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
+        // Dollars stay accepted-only (as MRR won does): a booked win is a win in the COUNT, but
+        // the customer did not necessarily buy at this offer's price.
+        .select(db.raw(`COALESCE(SUM(COALESCE(e.monthly_total, 0) * 12 + COALESCE(e.onetime_total, 0)) FILTER (WHERE e.status = 'accepted'), 0) as total`), db.raw('COUNT(*) as cnt'))
         .first(),
       // Missed = declined/expired, resolved this month. declined → declined_at,
       // expired → expires_at, then updated_at, else created_at — matching

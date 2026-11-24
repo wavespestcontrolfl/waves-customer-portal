@@ -439,6 +439,27 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect((await row(plainId)).disposition).toBe('converted_other_path');
   });
 
+  test('(s) a sibling with NO readable delivery anchor but real send evidence is ambiguous: it blocks the reclaim; an undelivered self-serve mint does not', async () => {
+    const unzoned = sentPlus(40).toISOString().replace('T', ' ').replace('Z', '');
+    const blockedCust = await customer(mockTransaction);
+    const blockedId = await expiredEstimate(mockTransaction, blockedCust);
+    // A staff send with an unreadable (unzoned) stamp: anchor NULL, sent_at present.
+    await expiredEstimate(mockTransaction, blockedCust, {
+      sent_at: sentPlus(40), estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: unzoned } }),
+    });
+    await paidInvoice(mockTransaction, blockedCust, { paidAt: sentPlus(50) });
+
+    const mintCust = await customer(mockTransaction);
+    const mintOk = await expiredEstimate(mockTransaction, mintCust);
+    await expiredEstimate(mockTransaction, mintCust, { source: 'plan_start', status: 'sent', expires_at: null, disposition: null, disposition_source: null, disposition_at: null, sent_at: sentPlus(40) });
+    await paidInvoice(mockTransaction, mintCust, { paidAt: sentPlus(50) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(blockedId)).disposition).toBe('expired_viewed');
+    expect((await row(mintOk)).disposition).toBe('converted_other_path');
+  });
+
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {
     const cust = await customer(mockTransaction);
     const id = await expiredEstimate(mockTransaction, cust, { status: 'sent', expires_at: null, disposition: null, disposition_source: null, disposition_at: null });

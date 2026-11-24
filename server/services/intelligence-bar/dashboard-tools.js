@@ -820,10 +820,11 @@ async function getEstimateFunnel(input) {
       db.raw(`${SERVICE_KEY_SQL} as service`),
       db.raw('COUNT(*) as sent'),
       // won = accepted, or an expired offer whose customer booked another way (the
-      // reclaim's code, estimate-winloss isBookedOtherWayRow); that row is not lost.
+      // reclaim's code, estimate-winloss isBookedOtherWayRow); that row is not lost. Dollars
+      // stay accepted-only: the customer did not necessarily buy at this offer's price.
       db.raw(`COUNT(*) FILTER (WHERE e.status = 'accepted' OR ${bookedWinSql('e')}) as won`),
       db.raw(`COUNT(*) FILTER (WHERE e.status IN ('declined', 'expired') AND NOT ${bookedWinSql('e')}) as lost`),
-      db.raw(`COALESCE(SUM(COALESCE(e.monthly_total,0) + COALESCE(e.onetime_total,0)) FILTER (WHERE e.status = 'accepted' OR ${bookedWinSql('e')}), 0) as won_value`),
+      db.raw(`COALESCE(SUM(COALESCE(e.monthly_total,0) + COALESCE(e.onetime_total,0)) FILTER (WHERE e.status = 'accepted'), 0) as won_value`),
     )
     .groupBy(db.raw(SERVICE_KEY_SQL))
     .orderByRaw('COUNT(*) DESC')

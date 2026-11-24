@@ -425,8 +425,17 @@ function whereNoCompetingEstimate(query) {
         // At or after: a sibling delivered at the SAME instant competes too (no id tie-break).
         // Ambiguous on purpose: a later-sent quote blocks the earlier one even if the customer
         // converted on the earlier; that case stays lost (fail closed), never double-counted.
-        .whereRaw(`${other} >= ${mine}`)
-        .whereRaw(`${other} <= (?)`, [earliestConversionSignal()]);
+        .where((q) => q
+          .where((known) => known
+            .whereRaw(`${other} >= ${mine}`)
+            .whereRaw(`${other} <= (?)`, [earliestConversionSignal()]))
+          // No readable anchor but real send evidence: when it went out is unknown, so it may be
+          // the offer the customer converted on. Ambiguous stays lost. (An undelivered self-serve
+          // mint is not a send.)
+          .orWhere((unknown) => unknown
+            .whereRaw(`${other} IS NULL`)
+            .where((evidence) => evidence.whereNotNull('other.sent_at').orWhereNotNull('other.viewed_at'))
+            .where(whereNotUndeliveredSelfServe('other'))));
     });
 }
 

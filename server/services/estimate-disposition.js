@@ -256,7 +256,8 @@ const SYSTEM_BOOKED_ROW_SQL = "(disposition = 'converted_other_path' AND disposi
 // SQL twins of the server booked-win rule (estimate-winloss isBookedOtherWayRow) for readers
 // that count in SQL, on the estimates row under `alias` (a code constant, never input): a
 // BOOKED WIN is the code AND status expired: counted as won, and out of the lost count.
-const bookedWinSql = (alias) => `(${alias}.status = 'expired' AND ${alias}.disposition = 'converted_other_path')`;
+// NULL-safe: a NULL disposition is not a booked win, so NOT(bookedWinSql) keeps that row.
+const bookedWinSql = (alias) => `(${alias}.status = 'expired' AND COALESCE(${alias}.disposition, '') = 'converted_other_path')`;
 
 const SYSTEM_BOOKED_CLEARED_UPDATES = Object.freeze({
   disposition: null,
