@@ -143,7 +143,7 @@ async function measureDay(row, { fetchRain = fetchMrmsDailyRain } = {}) {
 /**
  * The score from `measured`, or null while radar gaps could still change it. Wet day = half or more of all areas
  * measured wet. A gap counts both ways: the score waits until the areas still missing could not flip it, or, after
- * SCORE_GIVE_UP_DAYS, is taken from the areas read (marked partial; none read = no score).
+ * SCORE_GIVE_UP_DAYS, is taken from the areas read (marked partial; none read = a final score with no grade).
  */
 function scoreFrom(row, measured, now) {
   const all = Object.entries(measured);
@@ -156,8 +156,9 @@ function scoreFrom(row, measured, now) {
   const partial = wetDay === null;
   if (partial) {
     const ageDays = (Date.parse(`${etDateString(now)}T00:00:00Z`) - Date.parse(`${row.day}T00:00:00Z`)) / 86400000;
-    if (ageDays < SCORE_GIVE_UP_DAYS || !read.length) return null;
-    wetDay = wetAreas.length * 2 >= read.length;
+    if (ageDays < SCORE_GIVE_UP_DAYS) return null;
+    // Past the give-up days with no reading at all: a final, ungraded score, so the day stops taking a retry slot.
+    wetDay = read.length ? wetAreas.length * 2 >= read.length : null;
   }
   return {
     partial,
@@ -165,8 +166,8 @@ function scoreFrom(row, measured, now) {
     measured,
     wet_areas: wetAreas,
     wet_day: wetDay,
-    hit: row.call === 'unknown' ? null : (row.call === 'rain') === wetDay,
-    cutoff_hit: ['rain', 'dry'].includes(row.cutoff_call) ? (row.cutoff_call === 'rain') === wetDay : null,
+    hit: row.call === 'unknown' || wetDay === null ? null : (row.call === 'rain') === wetDay,
+    cutoff_hit: ['rain', 'dry'].includes(row.cutoff_call) && wetDay !== null ? (row.cutoff_call === 'rain') === wetDay : null,
   };
 }
 

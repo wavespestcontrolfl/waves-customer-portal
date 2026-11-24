@@ -294,5 +294,13 @@ describe('recordRun', () => {
     expect(row.score).toMatchObject({ wet_day: true, hit: true, partial: false });
     expect(row.measured_so_far).toBeUndefined();
   });
+
+  test('a day with no radar reading by the give-up day gets a final ungraded score', async () => {
+    const none = jest.fn(async () => null);
+    const row = { day: '2026-11-15', call: 'rain', cutoff_call: 'rain' };
+    expect(await rainMode.scoreDay(row, { fetchRain: none, now: new Date('2026-11-18T20:00:00Z') })).toBeNull();
+    expect(await rainMode.scoreDay(row, { fetchRain: none, now: new Date('2026-11-24T20:00:00Z') }))
+      .toMatchObject({ partial: true, wet_day: null, hit: null, cutoff_hit: null });
+  });
 });
 
