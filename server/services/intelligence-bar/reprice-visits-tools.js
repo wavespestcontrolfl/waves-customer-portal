@@ -403,9 +403,10 @@ function visitsAtSeveralPlaces(rows) {
   return new Set(rows.map((r) => (r.property_id ? `p:${String(r.property_id)}` : `a:${visitPlace(r)}`))).size > 1;
 }
 
-// A property card names its place once; a one-visit card names the visit's.
+// A property card or a one-visit card names each visit's booked place, as does
+// a card whose visits sit at more than one place.
 function placeShown(property, visitId, rows) {
-  return !property && (Boolean(visitId) || visitsAtSeveralPlaces(rows));
+  return Boolean(property) || Boolean(visitId) || visitsAtSeveralPlaces(rows);
 }
 
 // The service family inside the narrowed scope. With a property, visits with
@@ -414,12 +415,29 @@ async function pickScopedFamily({ customer, customerName, service, propertyId, v
   const scoped = await scopedVisits({ customer, customerName, propertyId, visitId, from, through });
   if (scoped.error) return scoped;
   const picked = pickFamily(scoped.rows, service);
+  // A narrowed search that found nothing says so, never "this customer has none".
+  if (picked.error && (propertyId || visitId || from || through) && picked.error.startsWith('This customer has no upcoming')) {
+    return { error: `No upcoming "${service}" visit for ${customerName} matches the chosen property, visit or dates. Nothing was changed.`, code: 'nothing_to_reprice' };
+  }
   if (picked.error) return { error: picked.error };
   return { family: picked.family, property: scoped.property };
 }
 
+// Street + unit only (a stamp can lack the ZIP the property has).
+function streetUnitKey(line1, line2) {
+  return require('../customer-property-address-keys').addressKey({ address_line1: line1, address_line2: line2 });
+}
+
+// With a property: a visit with no saved property, or one whose booked address
+// stamp names another street or unit, is left alone (Schedule serves the stamp).
 function unstampedReason(row, property) {
-  return property && row.property_id == null ? 'no saved property on the visit, so it may not be at this address' : null;
+  if (!property) return null;
+  if (row.property_id == null) return 'no saved property on the visit, so it may not be at this address';
+  if (row.service_address_line1 && property.address_line1
+    && streetUnitKey(row.service_address_line1, row.service_address_line2) !== streetUnitKey(property.address_line1, property.address_line2)) {
+    return `booked at ${visitPlace(row)}, not this property's address`;
+  }
+  return null;
 }
 
 function propertyFields(property) {

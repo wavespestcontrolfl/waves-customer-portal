@@ -566,12 +566,12 @@ describe('one property, one visit', () => {
     }
   });
 
-  test('a card spanning two units names each visit place; a one-place card does not', async () => {
+  test('a card spanning two units names each visit place; a property card names each booked place too', async () => {
     tables.scheduled_services.forEach((r) => { r.service_address_line1 = r.property_id === UNIT_A ? '101 Example Ave' : '103 Example Ave'; });
     const card = await preview({ new_price: 70 });
     expect(card.visits.map((v) => v.at)).toEqual(['101 Example Ave', '103 Example Ave', '101 Example Ave', '103 Example Ave']);
     const one = await preview({ property_id: UNIT_A, new_price: 70 });
-    expect(one.visits.every((v) => v.at === undefined)).toBe(true);
+    expect(one.visits.map((v) => v.at)).toEqual(['101 Example Ave', '101 Example Ave']);
   });
 
   test("appointment_id and property_id are references the bar's task check binds to the named customer", async () => {
@@ -607,6 +607,22 @@ describe('one property, one visit', () => {
     tables.scheduled_services.forEach((r) => Object.assign(r, { service_address_line1: '101 Example Ave', service_address_city: r.property_id === UNIT_A ? 'Sampletown' : 'Otherville' }));
     const card = await preview({ new_price: 70 });
     expect(card.visits.map((v) => v.at)).toEqual(['101 Example Ave, Sampletown', '101 Example Ave, Otherville', '101 Example Ave, Sampletown', '101 Example Ave, Otherville']);
+  });
+
+  test('a visit whose booked address names another unit is left alone on a property card', async () => {
+    tables.scheduled_services.forEach((r) => { r.service_address_line1 = r.property_id === UNIT_A ? '101 Example Ave' : '103 Example Ave'; });
+    tables.scheduled_services.find((r) => r.id === 'a-2').service_address_line1 = '103 Example Ave';
+    const card = await preview({ property_id: UNIT_A, new_price: 85.54 });
+    expect(card.visits.map((v) => [v.id, v.at])).toEqual([['a-1', '101 Example Ave']]);
+    expect(card.left_alone).toEqual([expect.objectContaining({ id: 'a-2', reason: "booked at 103 Example Ave, not this property's address" })]);
+    const res = await confirm(ask({ property_id: UNIT_A, new_price: 85.54 }), card._version);
+    expect(res.success).toBe(true);
+    expect(Schedule.updateVisitDetails.mock.calls.map((c) => c[0].id)).toEqual(['a-1']);
+  });
+
+  test('a narrowed search with no match says so, not that the customer has none', async () => {
+    const res = await preview({ property_id: UNIT_A, service: 'lawn' });
+    expect(res).toMatchObject({ code: 'nothing_to_reprice', error: expect.stringMatching(/^No upcoming "lawn" visit for Robin Sample matches the chosen property, visit or dates/) });
   });
 
   test('two units on one street show their unit line', async () => {
