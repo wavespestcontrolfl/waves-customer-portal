@@ -11,6 +11,7 @@
 // call, a web-form lead's channel overwritten, another call's row relabeled.
 
 const mockOps = [];
+const mockLsa = { id: 'lsa-1', call_log_id: '11111111-1111-4111-8111-111111111111', lead_id: 'lead-1', customer_id: 'cust-1', lead_created_at: new Date('2026-11-20T19:05:00Z') };
 let mockState = {};
 
 function builder(rawTable, inTrx) {
@@ -20,7 +21,15 @@ function builder(rawTable, inTrx) {
   for (const op of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereIn', 'select', 'orderBy', 'forUpdate', 'update']) b[op] = jest.fn(record(op));
   b.first = jest.fn((...args) => {
     mockOps.push({ table, op: 'first', args, trx: inTrx });
-    const v = mockState.first?.[table];
+    // Defaults: the lsa_leads row still holds the batch's match; the lead was
+    // born from the matched call (CA-1).
+    const lockedLsa = () => {
+      const keyed = mockOps.filter((o) => o.table === 'lsa_leads' && o.op === 'where' && o.trx && o.args[0]?.id).pop();
+      const rows = mockState.rows?.lsa_leads || [mockLsa];
+      const hit = rows.find((r) => r.id === keyed?.args[0].id) || mockLsa;
+      return { ...hit, match_basis: 'phone_time', relabeled_at: null };
+    };
+    const v = mockState.first && table in mockState.first ? mockState.first[table] : (table === 'lsa_leads' && inTrx ? lockedLsa() : undefined);
     return Promise.resolve(typeof v === 'function' ? v() : v);
   });
   b.then = (res, rej) => {
@@ -49,7 +58,7 @@ const { lsaSummary, lsaSpend, costPerWon } = require('../services/ads/lsa-summar
 const { relabelAction, relabelInTransaction, relabelMatches } = Leads._private;
 
 const CALL_ID = '11111111-1111-4111-8111-111111111111';
-const LSA = { id: 'lsa-1', call_log_id: CALL_ID, lead_id: 'lead-1', customer_id: 'cust-1', lead_created_at: new Date('2026-11-20T19:05:00Z') };
+const LSA = mockLsa;
 const ops = (table, op, trx) => mockOps.filter((o) => o.table === table && o.op === op && (trx === undefined || o.trx === trx));
 
 beforeEach(() => {
@@ -98,12 +107,12 @@ describe('relabelAction (pure)', () => {
 
 describe('relabelInTransaction', () => {
   test('relabel: locks the lead then its funnel row, updates the row and records relabeled_from in one transaction', async () => {
-    mockState.first = { leads: { id: 'lead-1' }, ad_service_attribution: { id: 'a-1', lead_source: 'waves_website', source_call_id: CALL_ID } };
-    const out = await relabelInTransaction((t) => builderFor(t), LSA, null);
+    mockState.first = { leads: { id: 'lead-1', twilio_call_sid: 'CA-1' }, ad_service_attribution: { id: 'a-1', lead_source: 'waves_website', source_call_id: CALL_ID } };
+    const out = await relabelInTransaction((t) => builderFor(t), LSA, null, 'CA-1');
     expect(out).toEqual({ result: 'relabeled' });
     // lead lock comes before the funnel row lock
     const order = mockOps.filter((o) => o.op === 'forUpdate').map((o) => o.table);
-    expect(order).toEqual(['leads', 'ad_service_attribution']);
+    expect(order).toEqual(['lsa_leads', 'leads', 'ad_service_attribution']);
     const [attr] = ops('ad_service_attribution', 'update', true);
     expect(attr.args[0]).toMatchObject({ lead_source: 'google_lsa', is_paid: true, lead_source_detail: 'Local Services', attribution_basis: 'lsa_lead_match' });
     expect(attr.args[0].updated_at).toBeInstanceOf(Date);
@@ -120,8 +129,8 @@ describe('relabelInTransaction', () => {
       [{ id: 'a', lead_source: 'web_form', source_call_id: CALL_ID }, 'kept_web_form', null],
     ]) {
       mockOps.length = 0;
-      mockState.first = { leads: { id: 'lead-1' }, ad_service_attribution: row };
-      const out = await relabelInTransaction((t) => builderFor(t), LSA, null);
+      mockState.first = { leads: { id: 'lead-1', twilio_call_sid: 'CA-1' }, ad_service_attribution: row };
+      const out = await relabelInTransaction((t) => builderFor(t), LSA, null, 'CA-1');
       expect(out).toEqual({ result });
       expect(ops('ad_service_attribution', 'update')).toHaveLength(0);
       expect(mockRecord).not.toHaveBeenCalled();
@@ -130,10 +139,10 @@ describe('relabelInTransaction', () => {
   });
 
   test('no funnel row: creates a google_lsa row through the pipeline writer on the transaction, dated by the call', async () => {
-    mockState.first = { leads: { id: 'lead-1' }, ad_service_attribution: undefined };
+    mockState.first = { leads: { id: 'lead-1', twilio_call_sid: 'CA-1' }, ad_service_attribution: undefined };
     mockRecord.mockResolvedValue({ recorded: true });
     const startedAt = new Date('2026-11-20T19:04:00Z');
-    const out = await relabelInTransaction((t) => builderFor(t), LSA, startedAt);
+    const out = await relabelInTransaction((t) => builderFor(t), LSA, startedAt, 'CA-1');
     expect(out).toEqual({ result: 'created' });
     const arg = mockRecord.mock.calls[0][0];
     expect(arg).toMatchObject({
@@ -145,18 +154,18 @@ describe('relabelInTransaction', () => {
   });
 
   test('create falls back to the lead time when the call has no start', async () => {
-    mockState.first = { leads: { id: 'lead-1' } };
+    mockState.first = { leads: { id: 'lead-1', twilio_call_sid: 'CA-1' } };
     mockRecord.mockResolvedValue({ recorded: true });
-    await relabelInTransaction((t) => builderFor(t), LSA, null);
+    await relabelInTransaction((t) => builderFor(t), LSA, null, 'CA-1');
     expect(mockRecord.mock.calls[0][0].leadDate).toBe(LSA.lead_created_at);
   });
 
   test('create refused for a transient reason: nothing is marked, so the next run retries', async () => {
     for (const reason of ['no_customer', 'no_lead', 'error', undefined]) {
       mockOps.length = 0;
-      mockState.first = { leads: { id: 'lead-1' } };
+      mockState.first = { leads: { id: 'lead-1', twilio_call_sid: 'CA-1' } };
       mockRecord.mockResolvedValue({ recorded: false, reason });
-      const out = await relabelInTransaction((t) => builderFor(t), LSA, null);
+      const out = await relabelInTransaction((t) => builderFor(t), LSA, null, 'CA-1');
       expect(out).toEqual({ retry: reason || 'not_recorded' });
       expect(ops('lsa_leads', 'update')).toHaveLength(0);
     }
@@ -165,9 +174,9 @@ describe('relabelInTransaction', () => {
   test('create refused because the lead\'s row is not provably this call\'s: final, marked unproven with the code', async () => {
     for (const reason of ['other_source', 'other_call', 'unprovenanced_row', 'web_attributed']) {
       mockOps.length = 0;
-      mockState.first = { leads: { id: 'lead-1' } };
+      mockState.first = { leads: { id: 'lead-1', twilio_call_sid: 'CA-1' } };
       mockRecord.mockResolvedValue({ recorded: false, reason });
-      const out = await relabelInTransaction((t) => builderFor(t), LSA, null);
+      const out = await relabelInTransaction((t) => builderFor(t), LSA, null, 'CA-1');
       expect(out).toEqual({ result: 'unproven' });
       const [mark] = ops('lsa_leads', 'update', true);
       expect(mark.args[0]).toMatchObject({ relabel_result: 'unproven', relabeled_from: reason });
@@ -178,7 +187,7 @@ describe('relabelInTransaction', () => {
 
   test('a lead that is gone: retry, no write', async () => {
     mockState.first = { leads: undefined };
-    const out = await relabelInTransaction((t) => builderFor(t), LSA, null);
+    const out = await relabelInTransaction((t) => builderFor(t), LSA, null, 'CA-1');
     expect(out).toEqual({ retry: 'no_lead' });
     expect(mockOps.some((o) => o.table === 'ad_service_attribution')).toBe(false);
     expect(mockRecord).not.toHaveBeenCalled();
@@ -192,9 +201,9 @@ describe('relabelMatches', () => {
   test('reads only phone_time matches with every id, not yet done, and handles each lead in its own transaction', async () => {
     mockState.rows = {
       lsa_leads: [LSA, { ...LSA, id: 'lsa-2', call_log_id: 'call-2', lead_id: 'lead-2' }],
-      call_log: [{ id: CALL_ID, created_at: new Date('2026-11-20T19:04:00Z'), metadata: {}, duration_seconds: 60 }],
+      call_log: [{ id: CALL_ID, twilio_call_sid: 'CA-1', created_at: new Date('2026-11-20T19:04:00Z'), metadata: {}, duration_seconds: 60 }],
     };
-    mockState.first = { leads: { id: 'x' }, ad_service_attribution: { id: 'a', lead_source: 'google_lsa' } };
+    mockState.first = { leads: { id: 'x', twilio_call_sid: 'CA-1' }, ad_service_attribution: { id: 'a', lead_source: 'google_lsa' } };
     const counts = await relabelMatches();
     expect(mockDb.transaction).toHaveBeenCalledTimes(2);
     expect(counts).toEqual({ relabeled: 0, created: 0, kept: 2, retry: 0, failed: 0 });
@@ -219,11 +228,11 @@ describe('relabelMatches', () => {
   });
 
   test('counts relabeled, created and retry leads', async () => {
-    mockState.rows = { lsa_leads: [LSA], call_log: [] };
-    mockState.first = { leads: { id: 'lead-1' }, ad_service_attribution: { id: 'a', lead_source: 'waves_website', source_call_id: CALL_ID } };
+    mockState.rows = { lsa_leads: [LSA], call_log: [{ id: CALL_ID, twilio_call_sid: 'CA-1', created_at: new Date('2026-11-20T19:04:00Z') }] };
+    mockState.first = { leads: { id: 'lead-1', twilio_call_sid: 'CA-1' }, ad_service_attribution: { id: 'a', lead_source: 'waves_website', source_call_id: CALL_ID } };
     expect((await relabelMatches()).relabeled).toBe(1);
 
-    mockState.first = { leads: { id: 'lead-1' } };
+    mockState.first = { leads: { id: 'lead-1', twilio_call_sid: 'CA-1' } };
     mockRecord.mockResolvedValueOnce({ recorded: true });
     expect((await relabelMatches()).created).toBe(1);
 
@@ -239,7 +248,7 @@ describe('relabelMatches', () => {
 
   test('a database error is logged as step, code and table only, counted, and the next lead still runs', async () => {
     mockState.rows = { lsa_leads: [LSA, { ...LSA, id: 'lsa-2', lead_id: 'lead-2' }], call_log: [] };
-    mockState.first = { leads: { id: 'lead-1' }, ad_service_attribution: { id: 'a', lead_source: 'google_lsa' } };
+    mockState.first = { leads: { id: 'lead-1', twilio_call_sid: 'CA-1' }, ad_service_attribution: { id: 'a', lead_source: 'google_lsa' } };
     mockDb.transaction.mockImplementationOnce(async () => {
       throw Object.assign(new Error('duplicate key value violates unique constraint, Key (consumer_phone)=(+19415550142)'), { code: '23505', table: 'ad_service_attribution' });
     });
@@ -331,7 +340,37 @@ describe('the route\'s lead exclusions', () => {
       expect(raws).toContain('l.deleted_at IS NULL');
       expect(raws).toContain("LOWER(COALESCE(l.first_name, '')");
       expect(raws).toContain("LOWER(COALESCE(c.first_name, '')");
-      expect(LSA_SUMMARY_EXCLUDE.internalNames).toContain('adam martinez');
+      expect(LSA_SUMMARY_EXCLUDE.internalNames).toEqual(require('../services/internal-test-customers').INTERNAL_TEST_CUSTOMERS);
     });
+  });
+});
+
+describe('pre-push audit guards (step B)', () => {
+  test('the match moved since the batch read: nothing is written, the lead retries', async () => {
+    mockState.first = { lsa_leads: { ...LSA, lead_id: 'lead-9', match_basis: 'phone_time', relabeled_at: null } };
+    expect(await relabelInTransaction((t) => builderFor(t), LSA, null, 'CA-1')).toEqual({ retry: 'match_changed' });
+    expect(ops('lsa_leads', 'update', true)).toHaveLength(0);
+    expect(ops('leads', 'forUpdate', true)).toHaveLength(0);
+  });
+
+  test('the lead now belongs to another customer: the lead retries', async () => {
+    mockState.first = { leads: { id: 'lead-1', customer_id: 'cust-9', twilio_call_sid: 'CA-1' } };
+    expect(await relabelInTransaction((t) => builderFor(t), LSA, null, 'CA-1')).toEqual({ retry: 'customer_changed' });
+    expect(ops('lsa_leads', 'update', true)).toHaveLength(0);
+  });
+
+  test('no funnel row and the lead was not born from this call: no row is created (first touch)', async () => {
+    mockState.first = { leads: { id: 'lead-1', twilio_call_sid: 'CA-OLDER' } };
+    expect(await relabelInTransaction((t) => builderFor(t), LSA, null, 'CA-1')).toEqual({ result: 'unproven' });
+    expect(mockRecord).not.toHaveBeenCalled();
+    const [mark] = ops('lsa_leads', 'update', true);
+    expect(mark.args[0]).toMatchObject({ relabel_result: 'unproven', relabeled_from: 'lead_not_from_call' });
+  });
+
+  test('a writer error counts as a failure, not a wait', async () => {
+    mockState.rows = { lsa_leads: [LSA], call_log: [{ id: CALL_ID, twilio_call_sid: 'CA-1', created_at: new Date('2026-11-20T19:04:00Z') }] };
+    mockState.first = { leads: { id: 'lead-1', twilio_call_sid: 'CA-1' } };
+    mockRecord.mockResolvedValueOnce({ recorded: false, reason: 'error' });
+    expect(await relabelMatches()).toMatchObject({ failed: 1, retry: 0 });
   });
 });

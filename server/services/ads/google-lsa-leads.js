@@ -465,9 +465,18 @@ function relabelAction(row, lsaLead) {
 
 // One lead, one transaction. Lock order is the repo's: the lead, then its
 // funnel row. { retry: reason } = nothing written, try again next run.
-async function relabelInTransaction(trx, lsaLead, startedAt) {
-  const lead = await trx('leads').where({ id: lsaLead.lead_id }).forUpdate().first('id');
+async function relabelInTransaction(trx, lsaLead, startedAt, callSid) {
+  // The match may have moved since the batch read (a refill, a re-match):
+  // act only on the ids still on the row, under its lock.
+  const current = await trx('lsa_leads').where({ id: lsaLead.id }).forUpdate()
+    .first('lead_id', 'customer_id', 'call_log_id', 'match_basis', 'relabeled_at');
+  if (!current || current.relabeled_at || current.match_basis !== 'phone_time'
+    || String(current.lead_id) !== String(lsaLead.lead_id)
+    || String(current.customer_id) !== String(lsaLead.customer_id)
+    || String(current.call_log_id) !== String(lsaLead.call_log_id)) return { retry: 'match_changed' };
+  const lead = await trx('leads').where({ id: lsaLead.lead_id }).forUpdate().first('id', 'customer_id', 'twilio_call_sid');
   if (!lead) return { retry: 'no_lead' };
+  if (lead.customer_id && String(lead.customer_id) !== String(lsaLead.customer_id)) return { retry: 'customer_changed' };
   const row = await trx('ad_service_attribution')
     .where({ lead_id: lsaLead.lead_id })
     .forUpdate()
@@ -475,7 +484,12 @@ async function relabelInTransaction(trx, lsaLead, startedAt) {
   const action = relabelAction(row, lsaLead);
   let result = action.result;
   let from = action.from || null;
-  if (action.type === 'create') {
+  if (action.type === 'create' && !(callSid && lead.twilio_call_sid === callSid)) {
+    // First touch: a lead the call only reused (a web form, an older call)
+    // already had its channel before this call; never file it as LSA.
+    result = 'unproven';
+    from = 'lead_not_from_call';
+  } else if (action.type === 'create') {
     // Lazy require: call-attribution loads google-call-bridge, which is heavy.
     const { recordCallPpcAttribution } = require('./call-attribution');
     const recorded = await recordCallPpcAttribution({
@@ -531,20 +545,25 @@ async function relabelMatches() {
   const counts = { relabeled: 0, created: 0, kept: 0, retry: 0, failed: 0 };
   if (!rows.length) return counts;
   const calls = await db('call_log').whereIn('id', rows.map((r) => r.call_log_id))
-    .select('id', 'created_at', 'metadata', 'duration_seconds', 'recording_duration_seconds');
+    .select('id', 'twilio_call_sid', 'created_at', 'metadata', 'duration_seconds', 'recording_duration_seconds');
   const byId = new Map(calls.map((c) => [c.id, c]));
   for (const lsaLead of rows) {
-    const startedAt = byId.has(lsaLead.call_log_id) ? callStartedAt(byId.get(lsaLead.call_log_id)) : null;
+    const call = byId.get(lsaLead.call_log_id) || null;
+    const startedAt = call ? callStartedAt(call) : null;
     let out;
     try {
-      out = await db.transaction((trx) => relabelInTransaction(trx, lsaLead, startedAt));
+      out = await db.transaction((trx) => relabelInTransaction(trx, lsaLead, startedAt, call?.twilio_call_sid || null));
     } catch (err) {
       // Never the row's values: the step, code, constraint and table only.
       logger.error(`[google-lsa-leads] database ${dbErrorText('relabel', err)}`);
       counts.failed += 1;
       continue;
     }
-    if (out.retry) {
+    if (out.retry === 'error') {
+      // The writer swallowed a database error: a failure, not a wait.
+      logger.error('[google-lsa-leads] relabel writer error');
+      counts.failed += 1;
+    } else if (out.retry) {
       logger.warn(`[google-lsa-leads] relabel waits: ${out.retry}`);
       counts.retry += 1;
     } else if (out.result === 'relabeled' || out.result === 'created') {
