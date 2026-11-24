@@ -339,4 +339,4 @@ async function tierSavingsLeftOffInvoices(conn, { today, days = LOOK_AHEAD_DAYS 
   return { checked, notJudged: visits.length - checked, findings };
 }
 
-module.exports = { tierSavingsLeftOffInvoices, upcomingEstimateVisits, LIVE_VISIT_STATUSES, _private: { engineTierRecord, pricingRecords, visitFinding } };
+module.exports = { tierSavingsLeftOffInvoices, upcomingEstimateVisits, LIVE_VISIT_STATUSES, _private: { engineTierRecord, pricingRecords, visitFinding, billingFacts } };
