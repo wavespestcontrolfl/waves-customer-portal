@@ -38,26 +38,28 @@ const centsOk = (n) => Number.isSafeInteger(n) && n > 0;
 // A visit price column as cents, -1 for none (button args hold numbers only).
 const priceCents = (value) => (value == null || value === '' ? -1 : Math.round(Number(value) * 100));
 
-// The row's own facts, or a refusal. Never trusts the row's words: amounts are checked against the records below.
-function readRow(row, item) {
-  if (!row?.id) return { refusal: office('This alert is not readable.') };
-  const meta = parseMetadata(row?.metadata);
+// The row's metadata, read as the plain case: this estimate's alert, one parked visit, nothing covered.
+function metadataFacts(meta) {
   const dedupeKey = String(meta.dedupeKey || '');
   if (!dedupeKey.startsWith(DEDUPE_PREFIX)) return { refusal: office('This alert is not a first-visit billing alert.') };
   const estimateId = dedupeKey.slice(DEDUPE_PREFIX.length);
   if (!estimateId || String(meta.sourceEstimateId || '') !== estimateId) return { refusal: office('This alert does not name its estimate.') };
-  if (meta.resolvedCovered === true) return { refusal: office('Part of this bill is already covered.') };
   const visitId = String(meta.scheduledServiceId || '');
   const parked = Array.isArray(meta.parkedVisitIds) ? meta.parkedVisitIds.map(String) : [];
   if (!visitId || parked.some((id) => id !== visitId)) return { refusal: office('More than one visit is unbilled on this estimate.') };
   if (meta.liveBesideInvoiceId) return { refusal: office('Another invoice is already on this visit.') };
-  if (meta.feeCovered || meta.applicationCovered || meta.feeOnOpenInvoice || Number(meta.coveredFeeCents) > 0) {
-    return { refusal: office('Part of this bill is already covered.') };
-  }
-  const applicationCents = Number(item?.args?.applicationCents);
-  const feeCents = Number(item?.args?.feeCents);
-  const priceBasis = Number(item?.args?.priceCents);
-  const primaryCents = Number(item?.args?.primaryCents);
+  const covered = [meta.resolvedCovered === true, meta.feeCovered, meta.applicationCovered, meta.feeOnOpenInvoice,
+    Number(meta.coveredFeeCents) > 0].some(Boolean);
+  if (covered) return { refusal: office('Part of this bill is already covered.') };
+  if (!meta.serviceRecordId || !meta.customerId) return { refusal: office('This alert does not name its visit.') };
+  return { estimateId, visitId };
+}
+
+// The button's amounts, equal to the row's recorded ones, for a visit billed at its own explicit price.
+function amountFacts(item, meta, visitId) {
+  const args = item?.args || {};
+  const [applicationCents, feeCents, priceBasis, primaryCents] = ['applicationCents', 'feeCents', 'priceCents', 'primaryCents']
+    .map((key) => Number(args[key]));
   if (!Number.isSafeInteger(priceBasis) || !Number.isSafeInteger(primaryCents)) return { refusal: office('The visit price on this alert is not readable.') };
   // Only a visit billed at its own explicit price (no primary line, no rate fallback): the button proves that price.
   if (priceBasis !== applicationCents || primaryCents !== -1) return { refusal: office('This visit is not billed at its own listed price.') };
@@ -66,8 +68,20 @@ function readRow(row, item) {
     || applicationCents !== Number(meta.expectedApplicationCentsByVisit?.[visitId])) {
     return { refusal: office('The amounts on this alert changed since it was raised.') };
   }
-  if (!meta.serviceRecordId || !meta.customerId) return { refusal: office('This alert does not name its visit.') };
-  return { rowId: String(row.id), item, estimateId, visitId, serviceRecordId: String(meta.serviceRecordId), customerId: String(meta.customerId), applicationCents, feeCents, priceCents: priceBasis, primaryCents };
+  return { applicationCents, feeCents, priceCents: priceBasis, primaryCents };
+}
+
+// The row's own facts, or a refusal. Never trusts the row's words: amounts are checked against the records below.
+function readRow(row, item) {
+  if (!row?.id) return { refusal: office('This alert is not readable.') };
+  const meta = parseMetadata(row?.metadata);
+  const ids = metadataFacts(meta);
+  if (ids.refusal) return ids;
+  const amounts = amountFacts(item, meta, ids.visitId);
+  if (amounts.refusal) return amounts;
+  return {
+    rowId: String(row.id), item, ...ids, serviceRecordId: String(meta.serviceRecordId), customerId: String(meta.customerId), ...amounts,
+  };
 }
 
 // The records must still read as the plain case: the visit completed for this customer and estimate, and the fee
@@ -161,41 +175,64 @@ async function applicationCoverageRefusal(trx, facts, visit) {
   return null;
 }
 
+async function feeCoverageRefusal(trx, facts) {
+  const { acceptedEstimateIdFromNotes } = require('./setup-fee-alert-reconcile');
+  const live = await trx('invoices').where({ customer_id: facts.customerId })
+    .whereNotIn('status', ['void', 'cancelled', 'canceled']).select('id', 'notes', 'line_items');
+  if (live.some((inv) => String(acceptedEstimateIdFromNotes(inv.notes) || '').toLowerCase() === facts.estimateId.toLowerCase())) {
+    return 'An invoice for this estimate already exists';
+  }
+  // Any live invoice on the account (a draft included) that carries setup-fee or membership money.
+  const { carriesWaveguardFeeLine } = require('./setup-fee-obligation');
+  if (live.some((inv) => carriesWaveguardFeeLine(inv))) return 'A setup or membership fee (or its waiver) is already on an invoice for this account';
+  const settled = await require('./setup-fee-obligation').setupFeeSettledElsewhere(trx, { customerId: facts.customerId, expectedFeeCents: facts.feeCents });
+  if (settled?.settled || (settled?.partial || []).length || (settled?.open || []).length) return 'Setup fee money is already on this account';
+  const Prepay = require('./annual-prepay-renewals');
+  const term = await Prepay.coveredTermsAsOf(trx, null).where('t.source_estimate_id', facts.estimateId).first('t.id');
+  if (term) return 'An annual prepay covers this estimate';
+  return null;
+}
+
+async function feeObligationRefusal(trx, facts, visit) {
+  // The fee must still be the never-invoiced one, owed in full: no stamp queued on the series for a later
+  // completion (or in flight), no office handoff, the detector's own amount. The detector reads with the
+  // completion's own arguments.
+  const seriesId = visit.recurring_parent_id || visit.id;
+  const parent = await trx('scheduled_services').where({ id: seriesId }).first('pending_setup_fee');
+  if (Number(parent?.pending_setup_fee || 0) !== 0) return 'A setup fee is queued on this plan';
+  const obligation = await require('./setup-fee-obligation').findUnmintedSetupFeeObligation({
+    sourceEstimateId: facts.estimateId, customerId: facts.customerId, excludeScheduledServiceId: visit.id,
+    visitPlanRow: { recurring_parent_id: visit.recurring_parent_id, is_recurring: visit.is_recurring },
+  }, trx);
+  if (!obligation?.owed || Math.round(Number(obligation.setupFee) * 100) !== facts.feeCents
+    || (obligation.unconsumableStamps || []).length) {
+    return 'The setup fee is no longer owed as the alert says';
+  }
+  return null;
+}
+
+async function alertRefusal(trx, facts) {
+  // The alert as it stands now: a completion may have re-parked it (another visit, new amounts) after the tap.
+  const row = await trx('notifications').where({ id: facts.rowId }).first('id', 'done_at', 'metadata');
+  if (!row || row.done_at != null) return 'This alert was resolved';
+  const now = readRow(row, facts.item);
+  if (now.refusal || now.visitId !== facts.visitId || now.applicationCents !== facts.applicationCents || now.feeCents !== facts.feeCents) {
+    return 'This alert changed after the tap';
+  }
+  return null;
+}
+
 function coverageRecheck(facts) {
   const covered = (why) => Object.assign(new Error(`${why}, so nothing was created.`), { isOperational: true, statusCode: 409, code: 'IB_SCOPE_CHANGED' });
   return async (trx) => {
-    const { acceptedEstimateIdFromNotes } = require('./setup-fee-alert-reconcile');
-    const live = await trx('invoices').where({ customer_id: facts.customerId })
-      .whereNotIn('status', ['void', 'cancelled', 'canceled']).select('id', 'notes', 'line_items');
-    if (live.some((inv) => String(acceptedEstimateIdFromNotes(inv.notes) || '').toLowerCase() === facts.estimateId.toLowerCase())) {
-      throw covered('An invoice for this estimate already exists');
-    }
-    // Any live invoice on the account (a draft included) that carries setup-fee or membership money.
-    const { carriesWaveguardFeeLine } = require('./setup-fee-obligation');
-    if (live.some((inv) => carriesWaveguardFeeLine(inv))) throw covered('A setup or membership fee (or its waiver) is already on an invoice for this account');
-    const settled = await require('./setup-fee-obligation').setupFeeSettledElsewhere(trx, { customerId: facts.customerId, expectedFeeCents: facts.feeCents });
-    if (settled?.settled || (settled?.partial || []).length || (settled?.open || []).length) throw covered('Setup fee money is already on this account');
-    const Prepay = require('./annual-prepay-renewals');
-    const term = await Prepay.coveredTermsAsOf(trx, null).where('t.source_estimate_id', facts.estimateId).first('t.id');
-    if (term) throw covered('An annual prepay covers this estimate');
+    const feeWhy = await feeCoverageRefusal(trx, facts);
+    if (feeWhy) throw covered(feeWhy);
     // The visit as the card's lock holds it: no add-ons (one may be the WaveGuard Membership line already in its
     // price), no prepayment of any size, and no prepay year (paid or awaiting payment) that already bills it.
     const visit = await trx('scheduled_services').where({ id: facts.visitId }).first();
     if (!visit) throw covered('The visit changed');
-    // The fee must still be the never-invoiced one, owed in full: no stamp queued on the series for a later
-    // completion (or in flight), no office handoff, the detector's own amount. The detector reads with the
-    // completion's own arguments.
-    const seriesId = visit.recurring_parent_id || visit.id;
-    const parent = await trx('scheduled_services').where({ id: seriesId }).first('pending_setup_fee');
-    if (Number(parent?.pending_setup_fee || 0) !== 0) throw covered('A setup fee is queued on this plan');
-    const obligation = await require('./setup-fee-obligation').findUnmintedSetupFeeObligation({
-      sourceEstimateId: facts.estimateId, customerId: facts.customerId, excludeScheduledServiceId: visit.id,
-      visitPlanRow: { recurring_parent_id: visit.recurring_parent_id, is_recurring: visit.is_recurring },
-    }, trx);
-    if (!obligation?.owed || Math.round(Number(obligation.setupFee) * 100) !== facts.feeCents
-      || (obligation.unconsumableStamps || []).length) {
-      throw covered('The setup fee is no longer owed as the alert says');
-    }
+    const obligationWhy = await feeObligationRefusal(trx, facts, visit);
+    if (obligationWhy) throw covered(obligationWhy);
     const applicationWhy = await applicationCoverageRefusal(trx, facts, visit);
     if (applicationWhy) throw covered(applicationWhy);
     // Account credit the page's send would draw (the bar's send never draws it): the page bills that case.
@@ -206,16 +243,10 @@ function coverageRecheck(facts) {
     const Deposits = require('./estimate-deposits');
     await Deposits.acquireEstimateDepositLedgerLock(trx, facts.estimateId);
     if (await Deposits.pendingDepositCredit(facts.estimateId, trx)) throw covered('An estimate deposit is waiting to be applied');
-    // The alert as it stands now: a completion may have re-parked it (another visit, new amounts) after the tap.
-    const row = await trx('notifications').where({ id: facts.rowId }).first('id', 'done_at', 'metadata');
-    if (!row || row.done_at != null) throw covered('This alert was resolved');
-    const now = readRow(row, facts.item);
-    if (now.refusal || now.visitId !== facts.visitId || now.applicationCents !== facts.applicationCents || now.feeCents !== facts.feeCents) {
-      throw covered('This alert changed after the tap');
-    }
+    const alertWhy = await alertRefusal(trx, facts);
+    if (alertWhy) throw covered(alertWhy);
   };
 }
-
 
 function invoiceInput(facts) {
   return {
@@ -362,6 +393,59 @@ async function sendInvoice(invoiceId, technicianId, facts) {
 
 const sentOk = (result) => result?.text?.status === 'sent';
 
+const changedElsewhere = (number) => `Invoice ${number} was created, then changed or sent by someone else, so this button did not send it. Check its delivery history before you send it.`;
+
+// A send whose record could not be finished (the message may have gone out): check, never resend.
+function unknownSendOutcome(number, sent) {
+  return {
+    ok: true, keepOpen: true, resolution: `Billed ${number} from the bell; send unconfirmed`,
+    message: sent.code === 'draft_changed' || sent.code === 'sent_elsewhere'
+      ? changedElsewhere(number)
+      : `Invoice ${number} was created. Its send could not be confirmed: check the invoice before you send it again.`,
+  };
+}
+
+function noSendNeededOutcome(number, sent) {
+  const why = sent.code === 'invoice_send_queued' ? 'Its pay-link text is already scheduled and will go out.' : (sent.note || 'It needs no other send.');
+  return { ok: true, message: `Invoice ${number} was created. ${why}`, resolution: `Billed ${number} from the bell`, keepOpen: true };
+}
+
+// What the tap answers once the invoice exists (every outcome keeps the row open for the reconcile).
+async function sendOutcome(row, created, sent) {
+  const number = created.invoice_number || 'the new invoice';
+  if (sent?.outcome_unknown) return unknownSendOutcome(number, sent);
+  // Something else now covers part of this bill: the draft must not be sent as it is.
+  if (sent?.conflict) {
+    logger.warn(`[setup-fee-bill-button] alert ${row.id}: created ${created.invoice_id}, send refused: coverage changed`);
+    return {
+      ok: true, keepOpen: true, resolution: `Billed ${number} from the bell; not sent (coverage changed)`,
+      message: `Invoice ${number} was created but not sent: ${sent.error || 'something else now covers part of it'} Reconcile it with the customer's other billing on the Invoices page before you send anything.`,
+    };
+  }
+  if (sentOk(sent)) {
+    logger.info(`[setup-fee-bill-button] alert ${row.id}: created and sent ${created.invoice_id}`);
+    return { ok: true, message: `Invoice ${number} for ${created.amount} was created and sent.`, resolution: `Billed and sent ${number} from the bell`, keepOpen: true };
+  }
+  // Sent nothing new, and needs nothing: already delivered, being delivered, credit covers it, or a scheduled
+  // pay-link text owns the delivery. Never ask for a manual send then.
+  if (sent?.success === true || sent?.code === 'invoice_send_queued') return noSendNeededOutcome(number, sent);
+  // The invoice exists (its notes retire this alert). Before asking for a manual send, read its delivery state:
+  // another send may have won meanwhile.
+  const now = await db('invoices').where({ id: created.invoice_id }).first('status', 'sent_at');
+  if (!now || now.sent_at || now.status !== 'draft') {
+    return {
+      ok: true, keepOpen: true, resolution: `Billed ${number} from the bell; send unconfirmed`, message: changedElsewhere(number),
+    };
+  }
+  logger.warn(`[setup-fee-bill-button] alert ${row.id}: created ${created.invoice_id}, send ${sent?.code || 'not confirmed'}`);
+  return {
+    ok: true,
+    message: `Invoice ${number} was created but not sent (${sent?.error || 'the send was refused'}). Send it from the Invoices page.`,
+    resolution: `Billed ${number} from the bell; not sent`,
+    keepOpen: true,
+  };
+}
+
 // Every outcome that created an invoice leaves the row to the stamped-invoice reconcile the create runs (keepOpen):
 // it closes the row only when every parked visit is billed, so a visit parked meanwhile keeps its instruction.
 const buttonHandler = {
@@ -386,7 +470,6 @@ const buttonHandler = {
     if (refused) return refused;
     const { created, refusal } = await createInvoice(facts);
     if (refusal) return refusal;
-    const number = created.invoice_number || 'the new invoice';
     let sent;
     try {
       sent = await sendInvoice(created.invoice_id, technicianId, { ...facts, createdVersion: created.invoice_version });
@@ -394,49 +477,7 @@ const buttonHandler = {
       logger.error(`[setup-fee-bill-button] send of ${created.invoice_id} failed (${err.code || err.name || 'error'})`);
       sent = { outcome_unknown: true };
     }
-    // A send whose record could not be finished (the message may have gone out): check, never resend.
-    if (sent?.outcome_unknown) {
-      return {
-        ok: true, keepOpen: true, resolution: `Billed ${number} from the bell; send unconfirmed`,
-        message: sent.code === 'draft_changed' || sent.code === 'sent_elsewhere'
-          ? `Invoice ${number} was created, then changed or sent by someone else, so this button did not send it. Check its delivery history before you send it.`
-          : `Invoice ${number} was created. Its send could not be confirmed: check the invoice before you send it again.`,
-      };
-    }
-    // Something else now covers part of this bill: the draft must not be sent as it is.
-    if (sent?.conflict) {
-      logger.warn(`[setup-fee-bill-button] alert ${row.id}: created ${created.invoice_id}, send refused: coverage changed`);
-      return {
-        ok: true, keepOpen: true, resolution: `Billed ${number} from the bell; not sent (coverage changed)`,
-        message: `Invoice ${number} was created but not sent: ${sent.error || 'something else now covers part of it'} Reconcile it with the customer's other billing on the Invoices page before you send anything.`,
-      };
-    }
-    if (sentOk(sent)) {
-      logger.info(`[setup-fee-bill-button] alert ${row.id}: created and sent ${created.invoice_id}`);
-      return { ok: true, message: `Invoice ${number} for ${created.amount} was created and sent.`, resolution: `Billed and sent ${number} from the bell`, keepOpen: true };
-    }
-    // Sent nothing new, and needs nothing: already delivered, being delivered, credit covers it, or a scheduled
-    // pay-link text owns the delivery. Never ask for a manual send then.
-    if (sent?.success === true || sent?.code === 'invoice_send_queued') {
-      const why = sent.code === 'invoice_send_queued' ? 'Its pay-link text is already scheduled and will go out.' : (sent.note || 'It needs no other send.');
-      return { ok: true, message: `Invoice ${number} was created. ${why}`, resolution: `Billed ${number} from the bell`, keepOpen: true };
-    }
-    // The invoice exists (its notes retire this alert). Before asking for a manual send, read its delivery state:
-    // another send may have won meanwhile.
-    const now = await db('invoices').where({ id: created.invoice_id }).first('status', 'sent_at');
-    if (!now || now.sent_at || now.status !== 'draft') {
-      return {
-        ok: true, keepOpen: true, resolution: `Billed ${number} from the bell; send unconfirmed`,
-        message: `Invoice ${number} was created, then changed or sent by someone else, so this button did not send it. Check its delivery history before you send it.`,
-      };
-    }
-    logger.warn(`[setup-fee-bill-button] alert ${row.id}: created ${created.invoice_id}, send ${sent?.code || 'not confirmed'}`);
-    return {
-      ok: true,
-      message: `Invoice ${number} was created but not sent (${sent?.error || 'the send was refused'}). Send it from the Invoices page.`,
-      resolution: `Billed ${number} from the bell; not sent`,
-      keepOpen: true,
-    };
+    return sendOutcome(row, created, sent);
   },
 };
 
