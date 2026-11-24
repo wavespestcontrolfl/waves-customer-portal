@@ -232,4 +232,19 @@ const stripeStubs = {
     } else if (resource && typeof resource === 'object') replaceStripeResources(resource, [...path, name]);
   }
 }(Stripe.resources));
-require('../../server/index');
+const app = require('../../server/index');
+// QA-only control route, mounted ahead of every application route and answered only with this run's secret. It runs the
+// job the production scheduler runs, in this process, where the text and card providers are already replaced: the runner
+// process has no fakes and must never call a job that can text a customer.
+const qaJobs = { 'appointment-reminders': () => require('../../server/services/appointment-reminders').checkAndSendReminders() };
+const routeCount = app._router.stack.length;
+app.post('/__qa/run/:job', async (req, res) => {
+  if (!process.env.QA_CONTROL_TOKEN || req.get('x-qa-control') !== process.env.QA_CONTROL_TOKEN) return res.status(404).end();
+  const job = qaJobs[req.params.job];
+  if (!job) return res.status(404).end();
+  try { res.json({ ok: true, result: await job() }); } catch (error) { res.status(500).json({ ok: false, error: error.message }); }
+});
+// Express's own query and init layers must still run first; everything the application mounted comes after the route.
+const own = app._router.stack.splice(routeCount);
+const firstApplicationLayer = app._router.stack.findIndex((layer) => !['query', 'expressInit'].includes(layer.name));
+app._router.stack.splice(firstApplicationLayer, 0, ...own);
