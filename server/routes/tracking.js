@@ -289,13 +289,25 @@ async function attachCompletionSummary(req, tracker, service, scope) {
       && !record.isProjectCompletion
       ? `/api/documents/service-report/${record.id}`
       : null;
-    tracker.serviceSummary = {
-      customerSummary: completionSummarySentence(record.notes),
-      reportUrl: record.reportUrl || null,
-      reportPdfUrl: record.reportPdfUrl || authenticatedReportUrl,
-      reportPending: record.reportAvailable === true && !record.reportUrl && !record.reportPdfUrl && !authenticatedReportUrl,
-      reportWithheld,
-    };
+    // A suppressed record (internal_only or disabled typed report) comes back
+    // reportAvailable false with no notes or links. That is withheld, not
+    // pending: Home must not draw an empty summary card for it.
+    const suppressed = record.reportAvailable === false;
+    tracker.serviceSummary = suppressed
+      ? {
+        customerSummary: null,
+        reportUrl: null,
+        reportPdfUrl: null,
+        reportPending: false,
+        reportWithheld: true,
+      }
+      : {
+        customerSummary: completionSummarySentence(record.notes),
+        reportUrl: record.reportUrl || null,
+        reportPdfUrl: record.reportPdfUrl || authenticatedReportUrl,
+        reportPending: record.reportAvailable === true && !record.reportUrl && !record.reportPdfUrl && !authenticatedReportUrl,
+        reportWithheld,
+      };
   } catch (err) {
     logger.warn(`[tracking] completion report lookup failed for ${service?.id}: ${err.message}`);
     tracker.serviceSummary = { reportPending: true, reportWithheld: false };

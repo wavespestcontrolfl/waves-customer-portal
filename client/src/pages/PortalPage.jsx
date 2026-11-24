@@ -220,21 +220,27 @@ function useReportPreview(onError, reportKey) {
     });
   }, []);
 
-  const withdrawn = Boolean(preview && (reportKey === null || preview.reportKey !== reportKey));
+  // reportKey is a key, or a function of the previewed doc (a list of visits
+  // binds each preview to its own row). A null key means the report was
+  // withdrawn: the preview closes and its blob is revoked.
+  const keyOf = (doc) => (typeof reportKey === 'function' ? reportKey(doc) : reportKey);
+  const currentKey = preview ? keyOf(preview.doc) : undefined;
+  const withdrawn = Boolean(preview && (currentKey === null || preview.reportKey !== currentKey));
   useEffect(() => {
     if (withdrawn) closePreview();
   }, [withdrawn, closePreview]);
 
-  const openPagePreview = (doc, src) => setPreview({ doc, src, reportKey });
+  const openPagePreview = (doc, src) => setPreview({ doc, src, reportKey: keyOf(doc) });
 
   const openPdfPreview = (doc, url) => {
-    setPreview({ doc, src: null, loading: true, reportKey });
+    const openedKey = keyOf(doc);
+    setPreview({ doc, src: null, loading: true, reportKey: openedKey });
     fetchAuthedPdfBlob(url)
       .then(blob => {
         const blobUrl = URL.createObjectURL(blob);
         setPreview(p => {
           if (!p || p.doc !== doc) { URL.revokeObjectURL(blobUrl); return p; }
-          return { doc, src: blobUrl, blob, blobUrl, reportKey };
+          return { doc, src: blobUrl, blob, blobUrl, reportKey: openedKey };
         });
       })
       .catch(err => {
@@ -3934,8 +3940,15 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
   useLockBodyScroll(!!lightbox);
   const lightboxRef = useModalFocus(!!lightbox, () => setLightbox(null));
   useLockBodyScroll(!!lightbox); // freeze the page behind the photo viewer
+  // Each preview is bound to the row it opened from. A refresh that drops the
+  // row, or returns it with reportAvailable false (a contact's report access
+  // withdrawn), closes the preview and revokes its blob.
   const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
-    (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
+    (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.'),
+    (doc) => {
+      const row = services.find(item => item.id === doc?.id);
+      return homeReportKey(row?.id, row, historyProperty || 'profile');
+    },
   );
 
   invalidateHistoryScopeRef.current = (requestedScopeKey, message, { clearAll = false, refreshPicker = true } = {}) => {

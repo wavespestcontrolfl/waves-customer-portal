@@ -3,7 +3,7 @@
 // per appointment, before the limit and in the total.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/context-aggregator', () => ({ customerSafeVisitNotes: jest.fn(() => null) }));
+jest.mock('../services/context-aggregator', () => ({ customerSafeVisitNotes: jest.fn(() => null), redactAccessCodes: jest.fn((text) => text) }));
 jest.mock('../services/account-properties', () => ({ applyPropertyPredicate: jest.fn((q) => q) }));
 
 const db = require('../models/db');
@@ -127,15 +127,30 @@ test.each([
   expect(services[0].propertyAddress).toBe(expected);
 });
 
-test.each([['Door inspection', 'Door inspection'], ['This treatment is completely safe', null], [undefined, null]])('Completed history project notes use only the attached report title (%s)', async (projectTitle, expected) => {
+test.each([['Door inspection', 'Door inspection'], ['  Door inspection  ', 'Door inspection'], [undefined, null]])('Completed history project notes use only the attached report title (%s)', async (projectTitle, expected) => {
   const { customerSafeVisitNotes } = require('../services/context-aggregator');
-  customerSafeVisitNotes.mockImplementationOnce((record) => record.technician_notes);
+  customerSafeVisitNotes.mockClear();
   wire({ service_records: [{
     id: 'reused-record', customer_id: 'homeowner', completion_source: 'project_completion',
     technician_notes: 'Internal handoff from the prior record.',
-    structured_notes: { projectTitle, portalAttached: true, projectReport: { url: '/projects/example' } },
+    structured_notes: {
+      projectTitle, portalAttached: true, projectReport: { url: '/projects/example' },
+      // A reused pest record keeps the earlier closeout; it must not surface.
+      reportNote: { text: 'Previous closeout note from the prior visit.' },
+    },
   }] });
   const { services } = await listPortalServiceHistory('homeowner', { historyProperty: 'all' });
   expect(services[0].notes).toBe(expected);
+  expect(customerSafeVisitNotes).not.toHaveBeenCalled();
   expect(JSON.stringify(services)).not.toContain('Internal handoff');
+  expect(JSON.stringify(services)).not.toContain('Previous closeout');
+});
+
+test('Completed history project notes are empty when no report is attached', async () => {
+  wire({ service_records: [{
+    id: 'unattached', customer_id: 'homeowner', completion_source: 'project_completion',
+    structured_notes: { projectTitle: 'Door inspection', reportNote: { text: 'Previous closeout note.' } },
+  }] });
+  const { services } = await listPortalServiceHistory('homeowner', { historyProperty: 'all' });
+  expect(services[0].notes).toBeNull();
 });

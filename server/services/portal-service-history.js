@@ -9,7 +9,8 @@ const db = require('../models/db');
 // page so every customer-facing render of technician_notes follows one
 // rule: the reviewed report text only, never the tech's raw note, with the
 // legacy inspection-fee scrub on top (owner ruling 2026-10-01; codex #2817).
-const { customerSafeVisitNotes } = require('./context-aggregator');
+const { customerSafeVisitNotes, redactAccessCodes } = require('./context-aggregator');
+const { customerSafeServiceNotes } = require('./project-types');
 const { applyPropertyPredicate } = require('./account-properties');
 const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { readReportIdentitySnapshot } = require('./service-report/report-identity-snapshot');
@@ -177,13 +178,21 @@ async function listPortalServiceHistory(customerId, {
     // Any typed delivery posture other than auto_send (internal_only
     // shadow, disabled kill switch) keeps report links off customer surfaces.
     const internalOnlyReport = suppressCustomerArtifacts;
-    // Re-completing a project can reuse a technician's existing record.
+    // Re-completing a project can reuse a technician's existing record, and
+    // that record can keep a structured reportNote from the earlier visit.
     // Only the project title frozen for the customer report has a known
-    // origin on both fresh and reused records. Keep the same fee/code scrub.
-    const notesRecord = isProjectCompletion
-      ? { ...svc, technician_notes: projectReportUrl ? structuredNotes.projectTitle || null : null }
-      : svc;
-    const notes = suppressCustomerArtifacts ? null : customerSafeVisitNotes(notesRecord, { projectLine: true });
+    // origin on both fresh and reused records, so a project excerpt reads
+    // that title directly (never customerSafeVisitNotes, which prefers a
+    // retained reportNote). Same fee scrub and access-code redaction.
+    const projectTitle = isProjectCompletion && projectReportUrl && typeof structuredNotes.projectTitle === 'string'
+      ? structuredNotes.projectTitle.trim()
+      : '';
+    const projectCopy = projectTitle ? redactAccessCodes(customerSafeServiceNotes(projectTitle, structuredNotes)) : '';
+    const notes = suppressCustomerArtifacts
+      ? null
+      : isProjectCompletion
+        ? (String(projectCopy || '').trim() || null)
+        : customerSafeVisitNotes(svc, { projectLine: true });
     return {
       id: svc.id,
       ...(historyProperty ? { propertyAddress: historyAddress(svc, customerId) } : {}),

@@ -67,6 +67,22 @@ test('uses the authenticated exact-record report when a public report token is n
   });
 });
 
+test('a suppressed typed report is withheld, not pending, so Home draws no empty card', async () => {
+  listPortalServiceHistory.mockResolvedValue({
+    services: [{ id: 'record-3', notes: null, reportUrl: null, reportPdfUrl: null, reportAvailable: false, isProjectCompletion: false }],
+    total: 1,
+  });
+
+  const tracker = await attach({ customerId: 'customer-1' }, { ...completed }, service);
+  expect(tracker.serviceSummary).toEqual({
+    customerSummary: null,
+    reportUrl: null,
+    reportPdfUrl: null,
+    reportPending: false,
+    reportWithheld: true,
+  });
+});
+
 test('keeps the completed tracker refreshable until its exact service record exists', async () => {
   listPortalServiceHistory.mockResolvedValue({ services: [], total: 0 });
   const tracker = await attach({ customerId: 'customer-1' }, { ...completed }, service);
