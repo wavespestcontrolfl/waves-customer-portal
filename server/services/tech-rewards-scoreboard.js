@@ -293,6 +293,16 @@ function lineComponents(line) {
  *                                           week's share over that week's COVERED days
  *   catch-up overtime premium              the earned weeks of the line pay it          calc_snapshot.lineOvertimeWeeks
  *   (line_overtime_premium_cents)          comes from (each week's premiumCents)
+ *   production share                       earned evenly over the SHIFT DAYS of its pay     payroll_checks.production_share_cents;
+ *   (production_share_cents)               week (the work dates of the stops the share      calc_snapshot.productionShare.stops
+ *                                           was worked out from: one equal part for each     (frozen with the check)
+ *                                           day the technician ran a route). A bar and a
+ *                                           rate sit on the whole week, so no one stop
+ *                                           earned a part of it; the shift days are the
+ *                                           days the work was done. No stop rows (a check
+ *                                           from before the snapshot): its whole week, in-
+ *                                           window days / 7. The overtime it causes is in
+ *                                           the line overtime row below, dated by week
  *   season bonus, stay bonus, December     NOT PAID BY WORK: left out of the base      payroll_checks.tech_rewards_cents
  *   gift (tech_rewards_cents)              (D5-5: a bonus never feeds a bonus)
  *   anything else (gross minus the above   NO DATE: the check's own week, in-window     (a check with no day records, a
@@ -319,6 +329,8 @@ function checkComponents(check) {
     { cents: check.ptoPayCents, spread: timeOff(check.ptoRecords) },
     { cents: check.holidayPayCents, spread: timeOff(check.holidayRecords) },
     ...(check.lines || []).flatMap(lineComponents),
+    // The production share is earned over the shift days of its week; with no day rows it falls on the week (see the table above).
+    { cents: check.productionShareCents || 0, week: check.weekStart, spread: (check.productionShareDays || []).map((date) => ({ date, weight: 1 })) },
     ...(check.lineOvertimeWeeks || []).map((w) => ({ cents: w.premiumCents, week: w.weekStart })),
   ];
   const known = components.reduce((sum, c) => sum + c.cents, 0);
@@ -499,6 +511,7 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
   const rows = await query
     .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents', 'c.regular_pay_cents',
       'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents', 'c.tech_rewards_cents',
+      'c.production_share_cents', conn.raw("c.calc_snapshot->'productionShare'->'stops' AS production_share_stops"),
       conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"),
       conn.raw("c.calc_snapshot->'ptoBank'->'paidDays' AS pto_paid_days"),
       'c.pto_minutes', conn.raw("c.calc_snapshot->'ptoBank'->'payoutMinutes' AS pto_payout_minutes"));
@@ -528,6 +541,9 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
       ptoPayCents: toCents(row.pto_pay_cents) - ptoPayoutCents(row),
       holidayPayCents: toCents(row.holiday_pay_cents),
       techRewardsCents: toCents(row.tech_rewards_cents),
+      productionShareCents: toCents(row.production_share_cents),
+      productionShareDays: [...new Set((Array.isArray(row.production_share_stops) ? row.production_share_stops : [])
+        .map((stop) => stop && stop.workDate).filter(Boolean))].sort(),
       lines: ownLines.filter((line) => GROSS_LINE_KINDS.includes(line.kind))
         .map((line) => ({ cents: toCents(line.amount_cents), earnedOn: line.earned_on, weekStart: line.week_start, coversFrom: line.covers_from, coversTo: line.covers_to })),
       lineOvertimeWeeks: premium.weeks,

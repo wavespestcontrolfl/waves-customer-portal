@@ -1,0 +1,145 @@
+/**
+ * Production share on the pay run (PR 2 of the technician production share; Technician Terms v3, "Production share";
+ * owner 2026-11-24). production-share.js works out the weekly credit and the share; this file is what the pay run
+ * (payroll-runs.js) needs around it: who gets a line, what the check freezes, and how a changed credit makes a draft stale.
+ *
+ * The line (behind GATE_PAYROLL_PRODUCTION_SHARE, dark): a W-2 technician with approved hours in the run's week and
+ * production share settings in force for that week (production_share_settings) gets a "Production share" earning equal to
+ * shareForWeek(weekCredits).shareCents, on the Friday check for its OWN pay week. A technician with no settings in force
+ * gets no line (the check keeps exactly its earlier keys). A technician with settings and a share of $0 gets the stored
+ * figure 0 and the snapshot, so the stub can show the bar they did not pass.
+ *
+ * Taxes and overtime: the share is taxable wages (payroll-calc.js), and it is a nondiscretionary production bonus, so it is
+ * in the federal regular rate FOR ITS OWN WEEK (29 CFR 778.208, 778.209: a bonus is allocated to the workweek it was
+ * earned in). The extra overtime it causes is not worked out here: the check passes the share to the same function every
+ * pay line uses (payroll-regular-rate.js lineOvertimePremium, through payroll-pay-lines.js priceLines), as one more line
+ * dated to the run's week:
+ *
+ *   extra premium = 1/2 x (share / hours worked in the week) x overtime hours in the week
+ *
+ * The hourly pay already paid straight time for every hour, so only the half is owed on top. Worked example, a technician
+ * at $20.00 an hour who works 45 hours and earns a $162.00 share: hourly pay is 40 x $20.00 + 5 x $30.00 = $950.00; the
+ * regular rate of the share part is $162.00 / 45 h = $3.60; the half-time premium is 0.5 x $3.60 x 5 h = $9.00, so the
+ * check adds $162.00 + $9.00 = $171.00 to the hourly pay. A week with no overtime pays no premium.
+ *
+ * What the check freezes (calc_snapshot.productionShare, with payroll_checks.production_share_cents): the credited
+ * production, the bar, the amount above it, the rate, the bar type, the shifts and one row per stop { visitId, workDate,
+ * kind, creditCents, needsReview }. No customer name, address or price detail is copied. A stop that needs review credits
+ * $0 (production-share.js) and the draft says how many; it never blocks the run. The review token takes the share and a
+ * signature of those rows, so a credit that changes after drafting makes the draft stale.
+ */
+const productionShare = require('./production-share');
+const { payrollProductionShareLive } = require('../config/feature-gates');
+
+// GATE_PAYROLL_PRODUCTION_SHARE, read at call time. The typeof guard keeps a test mock of feature-gates that lacks the reader
+// working (off).
+const shareOn = () => typeof payrollProductionShareLive === 'function' && payrollProductionShareLive();
+
+const KIND = 'production_share';
+
+/** The frozen record of one technician's week: the figures and one row per stop. Plain JSON, ids and cents only. Pure. */
+function snapshotOf({ weekStart, settings, result, stops }) {
+  return {
+    weekStart,
+    settingsId: settings.id,
+    fromWeek: settings.fromWeek,
+    rateBps: settings.rateBps,
+    barType: settings.barType,
+    barPerUnitCents: settings.barCents,
+    shifts: result.shifts,
+    creditedCents: result.creditedCents,
+    barCents: result.barCents,
+    aboveBarCents: result.aboveBarCents,
+    shareCents: result.shareCents,
+    stops: stops.map((stop) => ({
+      visitId: stop.visitId, workDate: stop.workDate, kind: stop.kind, creditCents: stop.creditCents, needsReview: Boolean(stop.needsReview),
+    })),
+  };
+}
+
+/**
+ * The shares of the technicians in `technicianIds` for the pay week `weekStart`: Map of technician id ->
+ * { shareCents, snapshot } for each one with settings in force, or { error } when the share could not be worked out (the
+ * pay run lists that technician as blocked, in these words). A technician with no settings has no entry. Empty with the gate
+ * off. Reads only; the connection is the pay run's transaction.
+ */
+async function sharesFor(conn, technicianIds, weekStart) {
+  const shares = new Map();
+  if (!shareOn() || !technicianIds.length) return shares;
+  for (const id of technicianIds) {
+    try {
+      const settings = await productionShare.settingsFor(conn, id, weekStart);
+      if (!settings) continue;
+      const stops = await productionShare.weekCredits(conn, id, weekStart, { settings });
+      const result = productionShare.shareForWeek({ credits: stops, shifts: productionShare.shiftDays(stops).length, settings });
+      shares.set(id, { shareCents: result.shareCents, snapshot: snapshotOf({ weekStart, settings, result, stops }) });
+    } catch (err) {
+      shares.set(id, { error: `The production share could not be worked out: ${(err && err.message) || 'unknown problem'}` });
+    }
+  }
+  return shares;
+}
+
+/** The pay line the share is priced as in payroll-regular-rate.js: one line in the check's own week. */
+const priceableLine = (weekStart, shareCents) => ({
+  kind: KIND, amountCents: shareCents, earnedWeekStart: weekStart, coversFrom: null, coversTo: null,
+});
+
+// The snapshot of a check row: a stored row carries it as `production_share` (calc_snapshot->'productionShare'); a row about
+// to be stored carries it in its calc_snapshot text.
+function snapshotOfRow(row) {
+  let snapshot = row.production_share;
+  if (!('production_share' in row) && typeof row.calc_snapshot === 'string') {
+    try { snapshot = JSON.parse(row.calc_snapshot).productionShare; } catch { snapshot = null; }
+  }
+  return snapshot && typeof snapshot === 'object' ? snapshot : null;
+}
+
+/**
+ * What the review token takes from a check's share: the figures and every stop's credit, sorted, so a credit that changes
+ * after drafting (a price, a callback test, a stop completed late) changes the token. Pure.
+ */
+function signature(row) {
+  const snapshot = snapshotOfRow(row) || {};
+  const stops = (Array.isArray(snapshot.stops) ? snapshot.stops : [])
+    .map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return [
+    snapshot.settingsId == null ? null : Number(snapshot.settingsId),
+    Number(snapshot.rateBps), snapshot.barType, Number(snapshot.barPerUnitCents), Number(snapshot.shifts),
+    Number(snapshot.creditedCents), Number(snapshot.barCents), Number(snapshot.aboveBarCents), Number(snapshot.shareCents),
+    stops,
+  ];
+}
+
+/**
+ * What a check shows of its share: the figures a technician reads on the stub (no stop rows), and the stops that need review
+ * (id and date only), so the owner can find them before he finalizes. {} for a check with no share figure. Pure.
+ */
+function viewOf(row) {
+  if (row.production_share_cents == null) return {};
+  const snapshot = snapshotOfRow(row) || {};
+  const review = (Array.isArray(snapshot.stops) ? snapshot.stops : []).filter((stop) => stop.needsReview === true);
+  return {
+    productionShareCents: Number(row.production_share_cents),
+    productionShare: {
+      creditedCents: Number(snapshot.creditedCents || 0),
+      barCents: Number(snapshot.barCents || 0),
+      aboveBarCents: Number(snapshot.aboveBarCents || 0),
+      rateBps: Number(snapshot.rateBps || 0),
+      barType: snapshot.barType || null,
+      shifts: Number(snapshot.shifts || 0),
+      stopCount: Array.isArray(snapshot.stops) ? snapshot.stops.length : 0,
+      needsReviewCount: review.length,
+      ...(review.length ? { needsReview: review.map((stop) => ({ visitId: stop.visitId, workDate: stop.workDate })) } : {}),
+    },
+  };
+}
+
+/** The plain note a draft shows for a check with stops that need review, or null. */
+function reviewNote(name, count) {
+  if (!(count > 0)) return null;
+  return `${name}: ${count} ${count === 1 ? 'stop needs' : 'stops need'} review for the production share. ${count === 1 ? 'It pays' : 'They pay'} $0 in the share until fixed. Open the production share preview for the week, fix ${count === 1 ? 'it' : 'them'}, then recompute.`;
+}
+
+module.exports = { KIND, shareOn, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };

@@ -19,7 +19,7 @@ const STATEMENT = {
   lastPayDate: '2027-12-24',
   pay: {
     regularPayCents: 700000, overtimePayCents: 50000, ptoPayCents: 20000, holidayPayCents: 0,
-    commissionCents: 60000, reviewBonusCents: 4500, healthAllowanceCents: 30000,
+    commissionCents: 60000, reviewBonusCents: 4500, healthAllowanceCents: 30000, productionShareCents: 16200,
     seasonBonusCents: 80000, stayBonusCents: 0, decemberGiftCents: 30000,
     lineOvertimePremiumCents: 5500, otherCents: 0, grossCents: 980000,
   },
@@ -44,7 +44,7 @@ describe('Yearly pay statement', () => {
     expect(screen.getByText('3 paychecks, pay dates Jan 8, 2027 to Dec 24, 2027.')).toBeInTheDocument();
     for (const [label, amount] of [
       ['Regular pay', '$7,000.00'], ['Overtime pay', '$500.00'], ['Paid time off', '$200.00'], ['Review bonus', '$45.00'],
-      ['Commission', '$600.00'], ['Health allowance', '$300.00'], ['Season bonus', '$800.00'], ['December gift', '$300.00'],
+      ['Commission', '$600.00'], ['Health allowance', '$300.00'], ['Production share', '$162.00'], ['Season bonus', '$800.00'], ['December gift', '$300.00'],
       ['Overtime on bonus, commission and allowance', '$55.00'], ['Gross pay', '$9,800.00'], ['Federal income tax', '$900.00'],
       ['Social Security', '$607.60'], ['Medicare', '$142.10'], ['SIMPLE IRA (pre-tax)', '$294.00'], ['Net pay', '$7,856.30'],
     ]) expect(rowOf(pay, label)).toHaveTextContent(amount);

@@ -169,7 +169,7 @@ postgres('yearly pay statement', () => {
     const { statement } = (await own()).body;
     expect(statement.pay).toEqual({
       regularPayCents: 395000, overtimePayCents: 7500, ptoPayCents: 20000, holidayPayCents: 10000, minimumWeekPayCents: 5000,
-      commissionCents: 6000, reviewBonusCents: 1500, healthAllowanceCents: 30000,
+      commissionCents: 6000, reviewBonusCents: 1500, healthAllowanceCents: 30000, productionShareCents: 0,
       seasonBonusCents: 120000, stayBonusCents: 30000, decemberGiftCents: 30000,
       lineOvertimePremiumCents: 1650, otherCents: 0, grossCents: 656650,
     });

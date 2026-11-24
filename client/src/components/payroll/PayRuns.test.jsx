@@ -353,6 +353,56 @@ describe('Finalized run', () => {
     expect(await within(await screen.findByRole('dialog')).findByLabelText('Pay stub')).not.toHaveTextContent('SIMPLE IRA');
   });
 
+  it('shows the production share line and its breakdown on the stub; a stub with no share shows neither', async () => {
+    const saved = { ...STUB };
+    STUB.earnings = {
+      ...STUB.earnings, productionShareCents: 16200, grossCents: 112100,
+      productionShare: { creditedCents: 378000, barCents: 270000, aboveBarCents: 108000, rateBps: 1500, barType: 'per_shift', shifts: 3, shareCents: 16200 },
+    };
+    try {
+      const detail = await openFinal();
+      fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+      const stub = await within(await screen.findByRole('dialog')).findByLabelText('Pay stub');
+      const table = within(stub).getByRole('table', { name: 'Pay stub amounts' });
+      expect(within(table).getByText('Production share').closest('tr')).toHaveTextContent('$162.00');
+      const breakdown = within(stub).getByLabelText('Production share breakdown');
+      expect(breakdown).toHaveTextContent('Credited production$3,780.00');
+      expect(breakdown).toHaveTextContent('Bar (3 shifts)$2,700.00');
+      expect(breakdown).toHaveTextContent('Above the bar$1,080.00');
+      expect(breakdown).toHaveTextContent('Rate15%');
+      expect(breakdown).toHaveTextContent('Production share$162.00');
+    } finally {
+      for (const key of Object.keys(STUB)) delete STUB[key];
+      Object.assign(STUB, saved);
+    }
+    cleanup();
+    const detail = await openFinal();
+    fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+    const plain = await within(await screen.findByRole('dialog')).findByLabelText('Pay stub');
+    expect(plain).not.toHaveTextContent('Production share');
+  });
+
+  it('adds a production share column and run total only when a check paid one, and lists the stops to review on a draft', async () => {
+    const detail = await startRun({
+      checks: [check({ productionShareCents: 16200, productionShare: { needsReviewCount: 2 } }), check({ id: 'check-b', name: 'Sample Beta' })],
+      totals: { ...totals, productionShareCents: 16200 },
+      productionShareNotes: ['Sample Alpha: 2 stops need review for the production share. They pay $0 in the share until fixed.'],
+    });
+    const view = within(detail);
+    expect(view.getByRole('columnheader', { name: 'Production share' })).toBeInTheDocument();
+    const rows = view.getByRole('table', { name: 'Paychecks' }).querySelectorAll('tbody tr');
+    expect(rows[0]).toHaveTextContent('$162.00');
+    expect(view.getByLabelText('Run totals')).toHaveTextContent('Production share (in gross pay)$162.00');
+    expect(view.getByLabelText('Production share stops to review')).toHaveTextContent('Sample Alpha: 2 stops need review');
+    // the run can still be finalized with stops to review
+    expect(view.getByRole('button', { name: 'Finalize' })).toBeEnabled();
+    cleanup();
+    const plain = await startRun({});
+    expect(within(plain).queryByRole('columnheader', { name: 'Production share' })).toBeNull();
+    expect(within(plain).getByLabelText('Run totals')).not.toHaveTextContent('Production share');
+    expect(within(plain).queryByLabelText('Production share stops to review')).toBeNull();
+  });
+
   it('says so on a check drafted with no W-4 on file (the IRS default)', async () => {
     const detail = await startRun({ checks: [check({ w4Default: true }), check({ id: 'check-b', name: 'Sample Beta' })] });
     const rows = within(detail).getByRole('table', { name: 'Paychecks' }).querySelectorAll('tbody tr');

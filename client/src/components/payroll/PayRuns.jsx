@@ -65,6 +65,24 @@ function StubBank({ bank }) {
   </>;
 }
 
+// How the production share of the pay week was worked out: credited production, the bar, what is above it, the rate, the share.
+function StubProductionShare({ figures }) {
+  if (!figures) return null;
+  const barWords = figures.barType === 'per_shift'
+    ? `Bar (${figures.shifts} ${figures.shifts === 1 ? 'shift' : 'shifts'})`
+    : 'Bar (weekly)';
+  return <>
+    <h2 className="field-section-heading">Production share</h2>
+    <div className="pay-stub-meta" aria-label="Production share breakdown">
+      <StubLine label="Credited production" value={centsToDollars(figures.creditedCents)} />
+      <StubLine label={barWords} value={centsToDollars(figures.barCents)} />
+      <StubLine label="Above the bar" value={centsToDollars(figures.aboveBarCents)} />
+      <StubLine label="Rate" value={`${figures.rateBps / 100}%`} />
+      <StubLine label="Production share" value={centsToDollars(figures.shareCents)} strong />
+    </div>
+  </>;
+}
+
 export function StubDialog({ call, check, onClose }) {
   const [stub, setStub] = useState(null);
   const [error, setError] = useState('');
@@ -114,6 +132,7 @@ export function StubDialog({ call, check, onClose }) {
               {stub.earnings.ptoPayCents > 0 && <TR><TD>Paid time off ({stub.hours.pto} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.ptoPayCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.minimumWeekPayCents > 0 && <TR><TD>Minimum week pay ({stub.hours.minimumWeek} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h, not hours worked)</TD><TD nums align="right">{centsToDollars(stub.earnings.minimumWeekPayCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.holidayPayCents > 0 && <TR><TD>Holiday pay ({stub.hours.holiday} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.holidayPayCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.productionShareCents > 0 && <TR><TD>Production share</TD><TD nums align="right">{centsToDollars(stub.earnings.productionShareCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.reviewBonusCents > 0 && <TR><TD>Review bonus</TD><TD nums align="right">{centsToDollars(stub.earnings.reviewBonusCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.commissionCents > 0 && <TR><TD>Commission</TD><TD nums align="right">{centsToDollars(stub.earnings.commissionCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.healthAllowanceCents > 0 && <TR><TD>Health allowance</TD><TD nums align="right">{centsToDollars(stub.earnings.healthAllowanceCents)}</TD><TD nums align="right" /></TR>}
@@ -131,6 +150,8 @@ export function StubDialog({ call, check, onClose }) {
           {stub.w4Default && <p className="m-0 text-ui-caption text-ink-secondary">{NO_W4_NOTE}</p>}
 
           <StubBank bank={stub.timeOffBank} />
+
+          <StubProductionShare figures={stub.earnings.productionShare} />
 
           {stub.employerContributions && stub.employerContributions.hsaCents > 0 && <>
             <h2 className="field-section-heading">Employer contributions</h2>
@@ -191,6 +212,17 @@ function WaitingBonuses({ notes = [] }) {
     <h4 className="m-0 mb-1 text-ui-body font-medium">Bonuses waiting</h4>
     <p className="m-0 mb-1 text-ui-caption text-ink-secondary">These are not on this pay run. Each line gives the last pay date that can add it. A draft also says what the bonus waited for when this pay run was last worked out. Press Recompute to check again.</p>
     <ul className="m-0 grid list-none gap-1 p-0" aria-label="Bonuses waiting">
+      {notes.map(note => <li key={note} className="rounded-sm border-hairline border-zinc-200 p-2 text-ui-caption">{note}</li>)}
+    </ul>
+  </div>;
+}
+
+// Production share stops that need review: they pay $0 in the share until fixed. The draft still finalizes; the owner reads this first.
+function ProductionShareNotes({ notes = [] }) {
+  if (!notes.length) return null;
+  return <div>
+    <h4 className="m-0 mb-1 text-ui-body font-medium">Production share: stops to review</h4>
+    <ul className="m-0 grid list-none gap-1 p-0" aria-label="Production share stops to review">
       {notes.map(note => <li key={note} className="rounded-sm border-hairline border-zinc-200 p-2 text-ui-caption">{note}</li>)}
     </ul>
   </div>;
@@ -342,6 +374,8 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
   // Only a pay run drafted with pay lines turned on carries these figures.
   const showLines = run.checks.some(check => check.reviewBonusCents > 0 || check.commissionCents > 0 || check.healthAllowanceCents > 0 || check.techRewardsCents > 0 || check.lineOvertimePremiumCents > 0);
   const showHsa = run.checks.some(check => check.hsaEmployerCents > 0);
+  // Only a check that paid a production share carries this figure.
+  const showShare = run.checks.some(check => check.productionShareCents > 0);
   return <>
     <Table aria-label="Paychecks">
       <THead><TR>
@@ -351,6 +385,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
         {showMinimum && <TH align="right">Minimum week</TH>}
         {showLines && <TH align="right">Bonus, commission, allowance</TH>}
         {showLines && <TH align="right">Overtime on those</TH>}
+        {showShare && <TH align="right">Production share</TH>}
         <TH align="right">Rate</TH><TH align="right">Gross</TH>
         <TH align="right">Federal income tax</TH><TH align="right">Social Security</TH><TH align="right">Medicare</TH><TH align="right">Net</TH>
         {showHsa && <TH align="right">HSA from Waves</TH>}
@@ -378,6 +413,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
           {showMinimum && <TD nums align="right">{check.minimumWeekPayCents > 0 ? `${hoursWord(check.minimumWeekHours)} · ${centsToDollars(check.minimumWeekPayCents)}` : ''}</TD>}
           {showLines && <TD nums align="right">{centsToDollars(check.reviewBonusCents + check.commissionCents + check.healthAllowanceCents + (check.techRewardsCents || 0))}</TD>}
           {showLines && <TD nums align="right">{centsToDollars(check.lineOvertimePremiumCents)}</TD>}
+          {showShare && <TD nums align="right">{check.productionShareCents > 0 ? centsToDollars(check.productionShareCents) : ''}</TD>}
           <TD nums align="right">{centsToDollars(Math.round(Number(check.hourlyRate) * 100))}</TD>
           <TD nums align="right">{centsToDollars(check.grossCents)}</TD>
           <TD nums align="right">{centsToDollars(check.federalIncomeTaxCents)}</TD>
@@ -400,6 +436,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
     <dl className="m-0 grid gap-1 text-ui-caption sm:grid-cols-2" aria-label="Run totals">
       <div className="flex justify-between gap-4"><dt>Gross pay</dt><dd className="m-0 tabular-nums">{centsToDollars(t.grossCents)}</dd></div>
       <div className="flex justify-between gap-4"><dt>Employee taxes withheld</dt><dd className="m-0 tabular-nums">{centsToDollars(t.employeeTaxesCents)}</dd></div>
+      {t.productionShareCents > 0 && <div className="flex justify-between gap-4"><dt>Production share (in gross pay)</dt><dd className="m-0 tabular-nums">{centsToDollars(t.productionShareCents)}</dd></div>}
       <div className="flex justify-between gap-4"><dt>Net pay</dt><dd className="m-0 tabular-nums">{centsToDollars(t.netCents)}</dd></div>
       <div className="flex justify-between gap-4"><dt>Employer taxes (you pay these)</dt><dd className="m-0 tabular-nums">{centsToDollars(t.employerTaxesCents)}</dd></div>
     </dl>
@@ -633,6 +670,7 @@ export function RunDetail({ call, run, unverified, onChanged, onMessage, onRunsC
     <Problems title="Waiting for approval" items={run.waiting} />
     <Problems title="Blocked" items={run.blocked} action={payoutAction} />
     <WaitingBonuses notes={run.techRewardsNotes} />
+    <ProductionShareNotes notes={run.productionShareNotes} />
     <UnpaidTimeOff rows={run.unpaidTimeOff} />
     <BankPayouts rows={run.bankPayouts} />
 

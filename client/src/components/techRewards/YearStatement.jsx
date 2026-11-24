@@ -24,6 +24,7 @@ const PAY_ROWS = [
   ['reviewBonusCents', 'Review bonus'],
   ['commissionCents', 'Commission'],
   ['healthAllowanceCents', 'Health allowance'],
+  ['productionShareCents', 'Production share'],
   ['seasonBonusCents', 'Season bonus'],
   ['stayBonusCents', 'Stay bonus'],
   ['decemberGiftCents', 'December gift'],
@@ -46,7 +47,7 @@ const AmountRow = ({ label, cents, strong = false }) => <TR>
   <TD>{strong ? <strong>{label}</strong> : label}</TD>
   <TD nums align="right">{strong ? <strong>{centsToDollars(cents)}</strong> : centsToDollars(cents)}</TD>
 </TR>;
-const amountRows = (rows, figures) => rows.filter(([key]) => figures[key] !== 0)
+const amountRows = (rows, figures) => rows.filter(([key]) => Boolean(figures[key]))
   .map(([key, label]) => <AmountRow key={key} label={label} cents={figures[key]} />);
 
 export function YearStatementView({ statement }) {

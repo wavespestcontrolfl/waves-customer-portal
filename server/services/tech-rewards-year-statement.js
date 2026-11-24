@@ -1,6 +1,6 @@
 /**
  * Tech Rewards yearly pay statement (Plan D5-6, owner ruling 2026-11-20). One technician's pay for one calendar year,
- * read only: wages, commission, review pay, the health allowance, the season bonus, stay bonus and December gift, Waves'
+ * read only: wages, commission, review pay, the health allowance, the production share, the season bonus, stay bonus and December gift, Waves'
  * own money on top of pay (its 2% SIMPLE IRA contribution and the HSA money, as each paycheck stored them; the deposits
  * themselves are not recorded in the portal), the taxes withheld, the technician's own SIMPLE IRA savings and net pay.
  * It writes nothing: no pay line, no pay run row, no message.
@@ -49,6 +49,7 @@ const CHECK_SUMS = Object.freeze({
   review_bonus_cents: 'reviewBonus',
   health_allowance_cents: 'healthAllowance',
   tech_rewards_cents: 'techRewards',
+  production_share_cents: 'productionShare',
   line_overtime_premium_cents: 'lineOvertimePremium',
   hsa_employer_cents: 'hsaEmployer',
   simple_employer_cents: 'simpleEmployer',
@@ -108,6 +109,8 @@ function composeStatement({ technician, year, currentYear, sums, rewards = {}, y
     commissionCents: cents(sums.commission),
     reviewBonusCents: cents(sums.reviewBonus),
     healthAllowanceCents: cents(sums.healthAllowance),
+    // The weekly production share (GATE_PAYROLL_PRODUCTION_SHARE): one stored figure on each check that paid one.
+    productionShareCents: cents(sums.productionShare),
     ...Object.fromEntries(Object.entries(REWARD_ROWS).map(([kind, key]) => [key, cents(rewards[kind])])),
     lineOvertimePremiumCents: cents(sums.lineOvertimePremium),
   };
