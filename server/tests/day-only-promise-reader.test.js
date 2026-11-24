@@ -276,6 +276,13 @@ describe('loadPromiseFacts', () => {
       expect(Object.fromEntries(levels)).toEqual({ s1: 'hour' });
     });
 
+    test('an expected date (a delayed body): filters by it, and a visit seen on another date reads hour (codex P1)', async () => {
+      const levels = (date, members) => loadPromiseLevels(fakeConn({ messages: [msg('s1')], members }), ['s1'], NOW, { sameDateOnly: date });
+      expect(Object.fromEntries(await levels('2026-11-23', [row('2026-11-23')]))).toEqual({ s1: 'none' });
+      expect(Object.fromEntries(await levels('2026-11-23', [row('2026-11-24')]))).toEqual({ s1: 'hour' });
+      expect(Object.fromEntries(await levels('2026-11-23', [row(null)]))).toEqual({ s1: 'hour' });
+    });
+
     test('loadToldVisitIds (the night freeze) is unchanged: the old-date hour still freezes', async () => {
       const told = await loadToldVisitIds(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }), ['s1'], NOW);
       expect([...told]).toEqual(['s1']);

@@ -208,7 +208,7 @@ describe('a delayed bounce of a day-only text is revalidated before it recovers 
   test('still early with nothing newer: the day-only email, as before', async () => {
     groupedWorld({ metadata: DAY_META });
     await bounce('SM_early');
-    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: true });
+    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: '2026-06-22' });
     expect(AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0]).toMatchObject({ dayOnly: true });
   });
 
@@ -355,10 +355,10 @@ describe('revalidateDelayedDaySend occurrenceDate', () => {
     expect(timePromise.loadPromiseLevels).not.toHaveBeenCalled();
   });
 
-  test('the date cannot be read: suppress (fail closed)', async () => {
+  test('the date cannot be read: it throws (a queued replay keeps its bounded retry), never a proved move', async () => {
     const broken = { where: () => broken, first: async () => { throw new Error('read failed'); } };
     db.mockImplementation(() => broken);
-    expect(await run('2026-06-22')).toBe('suppress');
+    await expect(run('2026-06-22')).rejects.toThrow('read failed');
   });
 
   test('same date: the other-date rule, so an older date\'s hour does not suppress it', async () => {
@@ -369,7 +369,7 @@ describe('revalidateDelayedDaySend occurrenceDate', () => {
       notification_prefs: Array.from({ length: 4 }, () => chain({ first: prefsRow })),
     });
     expect(await run('2026-06-22')).toBe('day');
-    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: true });
+    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: '2026-06-22' });
   });
 
   test('no date (an undated legacy body): the raw rule, an hour for any date suppresses', async () => {

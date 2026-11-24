@@ -1440,7 +1440,7 @@ async function delayedSendIsStale(scheduledServiceId, notice = null, { sameDateO
     const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date(), { sameDateOnly });
     if (levels.get(scheduledServiceId) !== 'hour') return false;
     if (!notice) return true;
-    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date(), sameDateOnly ? { sameDateOnly: true } : undefined)).get(scheduledServiceId);
+    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date(), sameDateOnly ? { sameDateOnly } : undefined)).get(scheduledServiceId);
     if (promiseSupersedesNotice(promise, notice)) return true;
     notice.setAsideOld = true;
     return false;
@@ -1469,10 +1469,13 @@ async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTi
   // `occurrenceDate` (pre-push Codex, 2026-11-24): the ET date the delayed day-only body was about. Given, the visit must
   // still be on it (else, or unreadable: suppress), and then the other-date promise rule judges it (an older date's hour
   // does not stand for it). Absent (an undated legacy body): the raw rule, exactly as before.
+  // A read failure THROWS (occurrenceStateOf), so a queued replay keeps its bounded retry (failClosed) instead of being
+  // discarded as superseded. The promise read then carries the expected date itself: a move between the two reads makes
+  // it answer 'hour', and the body is suppressed.
   let sameDateOnly = false;
   if (occurrenceDate) {
     if ((await occurrenceStateOf(occurrenceDate, scheduledServiceId)) !== 'same') return 'suppress';
-    sameDateOnly = true;
+    sameDateOnly = occurrenceDate;
   }
   const noticeTime = noticeAt ? new Date(noticeAt) : null;
   const visitDate = noticeDate || (apptTime ? etDateString(new Date(apptTime)) : null);
@@ -1487,7 +1490,11 @@ async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTi
 /** 'moved' (the visit's date differs from the bounced text's occurrence date, or cannot be read: fail closed), 'same'
  *  (proved: the text was about the visit's current date), or 'undated' (no occurrence date, or no visit id). */
 async function bouncedOccurrenceState(metadata, scheduledServiceId) {
-  return occurrenceStateOf(bouncedOccurrenceDate(metadata), scheduledServiceId);
+  try {
+    return await occurrenceStateOf(bouncedOccurrenceDate(metadata), scheduledServiceId);
+  } catch {
+    return 'moved'; // a bounce has no retry path: an unreadable date sends no recovery email (fail closed)
+  }
 }
 
 /** 'moved' / 'same' / 'undated' for a delayed body about `textedDate` (YYYY-MM-DD) against the visit's current date. */
@@ -1498,8 +1505,10 @@ async function occurrenceStateOf(textedDate, scheduledServiceId) {
     const value = row ? row.scheduled_date : null;
     const current = value instanceof Date ? value.toISOString().slice(0, 10) : (value ? String(value).slice(0, 10) : null);
     return !current || current !== textedDate ? 'moved' : 'same';
-  } catch {
-    return 'moved';
+  } catch (err) {
+    // Not 'moved': a read failure is not a proved move. The caller decides (a queued replay retries; a bounce holds).
+    err.occurrenceReadFailed = true;
+    throw err;
   }
 }
 

@@ -89,9 +89,16 @@ async function resolvePromises(conn, ids, now, { sameDateOnly = false } = {}) {
   const events = await detector.loadPromiseEvents(conn, [...new Set([...wanted, ...memberIds])], { now });
   const latest = detector.latestPromises(events, now);
   const eventsByVisit = detector.byVisit(events);
+  // `sameDateOnly` may be the EXPECTED date (a delayed body's own occurrence, appointment-reminders
+  // revalidateDelayedDaySend): the filter then uses that date, and a visit observed on another date (or none) answers an
+  // unknown-window promise, read as 'hour' (fail closed: the stale body is suppressed). Pre-push Codex P1, 2026-11-24.
+  const expected = typeof sameDateOnly === 'string' ? sameDateOnly : null;
   return new Map(ids.map((id) => {
     const stop = stopOf.get(String(id)) || [];
-    const visitDate = sameDateOnly ? dateOf.get(String(id)) || null : null;
+    if (expected && dateOf.get(String(id)) !== expected) {
+      return [id, { visit_id: id, start_at: null, communicated_at: null, date_mismatch: true }];
+    }
+    const visitDate = sameDateOnly ? expected || dateOf.get(String(id)) || null : null;
     const keep = sameDateOnly ? (promise) => onVisitDate(promise, visitDate) : null;
     const promise = stop.length > 1
       ? detector.stopPromise(stop, eventsByVisit, now, keep ? { keep } : undefined)
