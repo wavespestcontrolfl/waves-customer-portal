@@ -98,6 +98,23 @@ function countLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+// Outcomes where the service was not (fully) performed: the visit happened, the
+// work did not finish (pest-recap.js NON_PERFORMED_VISIT_OUTCOMES).
+const NOT_FINISHED_OUTCOMES = new Set(['inspection_only', 'customer_declined', 'incomplete']);
+
+// The report email's opening line (owner 2026-11-24, email wording change 1):
+// who came for which visit, and when. Built here so a visit with no
+// technician name or no date still reads as a whole sentence, and only a
+// completed visit says "finished".
+function visitDoneLine({ technicianName, serviceLabel, serviceDate, visitOutcome }) {
+  const who = String(technicianName || '').trim() || 'We';
+  const label = String(serviceLabel || '').trim();
+  const what = label ? `your ${label}` : 'your visit';
+  const when = serviceDate ? ` on ${serviceDate}` : '';
+  const verb = NOT_FINISHED_OUTCOMES.has(String(visitOutcome || '').toLowerCase()) ? 'stopped by for' : 'finished';
+  return `${who} ${verb} ${what}${when}.`;
+}
+
 function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel, pdf, inspectionCreditNote = '', firstReport = false }) {
   const findings = customerActionFindings(Array.isArray(data?.findings) ? data.findings : []);
   const applications = Array.isArray(data?.applications) ? data.applications : [];
@@ -114,6 +131,8 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
       !exteriorReadyAt && minutes(advisory.exterior_reentry_min) ? `Exterior re-entry: ${minutes(advisory.exterior_reentry_min)}` : null,
       !interiorReadyAt && minutes(advisory.interior_reentry_min) ? `Interior re-entry: ${minutes(advisory.interior_reentry_min)}` : null,
     ].filter(Boolean);
+  const serviceDate = data?.serviceDate ? formatDate(data.serviceDate) : '';
+  const technicianName = data?.technicianName || '';
   const pressureMetric = (data?.metrics || []).find((metric) => /pressure/i.test(metric.label || ''));
   const pressureValue = pressureMetric?.value != null && pressureMetric.value !== ''
     ? String(pressureMetric.value)
@@ -126,8 +145,9 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
     first_name: recipient.name ? firstName(recipient.name) : (reportGreetingFirstToken(data) || 'there'),
     report_url: reportUrl,
     service_label: serviceLabel,
-    service_date: data?.serviceDate ? formatDate(data.serviceDate) : '',
-    technician_name: data?.technicianName || '',
+    service_date: serviceDate,
+    technician_name: technicianName,
+    visit_done_line: visitDoneLine({ technicianName, serviceLabel, serviceDate, visitOutcome: data?.visitOutcome }),
     property_address: propertyAddressLine(data),
     // Nothing logged = blank, so the template's "Findings" row drops (a
     // details row with a blank value is not rendered). The row never
@@ -1054,6 +1074,7 @@ module.exports = {
   buildServiceReportV1Email,
   legacyRecipientData,
   serviceReportTemplatePayload,
+  visitDoneLine,
   sendServiceReportV1Email,
   REENTRY_SEND_LOCK_CLASS,
   REENTRY_SEND_SEAL_KEY,

@@ -31,7 +31,7 @@
  *
  * Pay lines (GATE_PAYROLL_PAY_LINES, owner 2026-10-29, D5 part 1): a caller may
  * pass `payLines` (review bonus, commission, health allowance, employer HSA, tech
- * rewards (season bonus, stay bonus, December gift) and the extra overtime those cause, from payroll-regular-rate.js) and
+ * rewards (season bonus, stay bonus, December gift), the production share (productionShareCents) and the extra overtime those cause, from payroll-regular-rate.js) and
  * `flsaCovered`. The bonus, commission, allowance and line overtime are taxable
  * wages: they add to gross and so to every tax base. The employer HSA money is
  * Section 125 cafeteria-plan pay: not gross, not net pay and in no tax base, but
@@ -437,9 +437,11 @@ function computePaycheck({
   const hsaEmployer = wholeCents(lineFigures.hsaEmployerCents, 'Employer HSA');
   // Season bonus, stay bonus and December gift pay lines (Tech Rewards Plan): taxable wages like a review bonus.
   const techRewards = wholeCents(lineFigures.techRewardsCents, 'Tech rewards');
+  // Production share (production-share.js): taxable wages like a commission, earned in the check's own pay week.
+  const productionShare = wholeCents(lineFigures.productionShareCents, 'Production share');
   const lineOvertimePremium = wholeCents(lineFigures.lineOvertimePremiumCents, 'Overtime on pay lines');
   const gross = regularPay + overtimePay + ptoPay + holidayPay + minimumPay + holidayWorkPremium
-    + reviewBonus + commission + healthAllowance + techRewards + lineOvertimePremium;
+    + reviewBonus + commission + healthAllowance + techRewards + productionShare + lineOvertimePremium;
 
   const ytd = nonNegativeCents(ytdGrossWages, 'Year-to-date wages');
   const socialSecurityWages = min(gross, max0(tables.socialSecurityWageBase - ytd));
@@ -486,6 +488,8 @@ function computePaycheck({
         lineOvertimePremiumCents: lineOvertimePremium,
         // Present only when a rewards line is on the check, so every other check keeps exactly its earlier keys.
         ...presentWhenPositive('techRewardsCents', techRewards),
+        // Likewise for the production share (GATE_PAYROLL_PRODUCTION_SHARE).
+        ...presentWhenPositive('productionShareCents', productionShare),
       } : {}),
       grossPayCents: gross,
       federalIncomeTaxCents: federalIncomeTax,

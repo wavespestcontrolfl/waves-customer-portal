@@ -54,6 +54,24 @@ function dateOnly(value) {
   return value instanceof Date ? value.toISOString().slice(0, 10) : String(value || '').slice(0, 10);
 }
 
+// A technician's unavailable time as the route simulation reads it: the day's
+// `tech_schedule_blocks` rows (anything but 'available') that apply to this
+// tech (a null technician_id is every tech's), as { startMin, endMin }. With
+// no techId the rows are taken as already filtered (the context's query).
+function blockedIntervalsFor(blocks, techId = null) {
+  return (blocks || [])
+    .filter(block => techId == null || block.technician_id == null || String(block.technician_id) === String(techId))
+    .map(block => ({ startMin: minuteOfDay(block.start_time), endMin: minuteOfDay(block.end_time) }));
+}
+
+// Every tech's blocks for one day in ONE read (capacity mode only, as in
+// loadArrivalRouteContext); blockedIntervalsFor then picks a tech's own.
+async function loadDayScheduleBlocks(conn, date) {
+  if (!capacityEnabled()) return [];
+  return conn('tech_schedule_blocks').where({ date }).whereNot('block_type', 'available')
+    .select('id', 'technician_id', 'start_time', 'end_time');
+}
+
 function minuteOfDay(value) {
   const match = String(value || '').match(/^(\d{1,2}):(\d{2})/);
   return match ? Number(match[1]) * 60 + Number(match[2]) : null;
@@ -1078,7 +1096,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
           : ('raw_estimate_minutes' in row ? row.raw_estimate_minutes : row.estimated_duration_minutes),
         estimated_duration_minutes: row.memberIds ? row.estimated_duration_minutes : workDuration(row) })), {
         origin, startMin, dayEndMin, includeReturnInFinish: capacity, bufferMinutes, end: context.home || RouteOptimizer.HQ,
-        blockedIntervals: (context.blocks || []).map(block => ({ startMin: minuteOfDay(block.start_time), endMin: minuteOfDay(block.end_time) })),
+        blockedIntervals: blockedIntervalsFor(context.blocks),
         ...extra,
         ...(travel ? { legMinutes: (from, to, departureMin) => {
           const leg = { date, from, to, departureMin };
@@ -1590,5 +1608,6 @@ module.exports = {
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
   placeMovedVisit, INSERTION_MARGIN_MINUTES,
+  blockedIntervalsFor, loadDayScheduleBlocks,
   _internals: { clockOrder, storedOrderStale, groupRouteStops, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel },
 };
