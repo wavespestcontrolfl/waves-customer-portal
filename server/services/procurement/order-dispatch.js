@@ -948,13 +948,14 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
   const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
   const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit', ...FERTILIZER_COLUMNS);
   if (!product) return { skipped: 'no_product' };
-  // June 1 - Sept 30: order no N/P fertilizer. The request stays open and
-  // unclaimed, with no hand-off bell; the first run after Sept 30 orders it.
-  if (fertilizerBlackoutHold(product, now)) return { skipped: 'fertilizer_blackout' };
   const ineligible = claimIneligibility({ product, request, vendor });
   if (ineligible) return cancelAtClaim(trx, { request, product, m, ineligible });
   const guarded = await lockedProductGuards(trx, { request });
   if (guarded) return guarded;
+  // June 1 - Sept 30: order no N/P fertilizer. Checked after the cancel
+  // checks, so only a still-valid request waits (open, unclaimed, no hand-off
+  // bell) for the first run after Sept 30.
+  if (fertilizerBlackoutHold(product, now)) return { skipped: 'fertilizer_blackout' };
   const quantity = Number(request.requested_quantity);
   if (!Number.isFinite(quantity) || quantity <= 0) return { skipped: 'no_quantity' };
   // A manual-order bell an earlier (gated) sweep rang for this request is

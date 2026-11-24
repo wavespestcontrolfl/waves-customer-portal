@@ -21,3 +21,13 @@ test('holds N or P fertilizer only, only in the window', () => {
   expect(fertilizerBlackoutHold({ name: 'Synthetic 24-0-11' }, new Date('2026-11-24T15:00:00Z'))).toBe(false);
   expect(fertilizerBlackoutHold(null, july)).toBe(false);
 });
+
+test('explicit zero N and P with no N-P-K in the name is not held, even in a fertilizer category', () => {
+  const july = new Date('2026-07-01T15:00:00Z');
+  expect(fertilizerBlackoutHold({ name: 'Synthetic Potash', category: 'fertilizer', analysis_n: 0, analysis_p: 0, fertilizer_analysis: null }, july)).toBe(false);
+  // no analysis at all: the category still counts
+  expect(fertilizerBlackoutHold({ name: 'Synthetic lawn food', category: 'fertilizer' }, july)).toBe(true);
+  // the name's N-P-K wins over a stale zero analysis
+  expect(fertilizerBlackoutHold({ name: 'Synthetic 16-4-8', category: 'fertilizer', analysis_n: 0, analysis_p: 0 }, july)).toBe(true);
+});
+

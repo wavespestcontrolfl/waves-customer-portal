@@ -596,6 +596,18 @@ describe('fertilizer blackout', () => {
     const res = await runSuppliesAutoReorderSweep({ notify, now: JULY });
     expect(notify).not.toHaveBeenCalled();
     expect(res.held).toEqual([{ productId: 'prod-fert', name: fert.name, requestId: 'req-open', reason: 'fertilizer_blackout' }]);
+    // its standing "order manually" bell is closed for the hold
+    expect(mockState.updates.filter((u) => u.table === 'notifications')).toHaveLength(1);
+  });
+
+  test('after Sept 30 the open request held bell reopens and the hand-off rings again', async () => {
+    mockState.candidates = [fert];
+    mockState.existing = { id: 'req-open', status: 'open', source: 'auto_reorder', product_id: 'prod-fert', requested_quantity: '650', unit: 'lb', metadata: {} };
+    const notify = jest.fn(async () => ({ id: 'n' }));
+    const res = await runSuppliesAutoReorderSweep({ notify, now: OCT1 });
+    expect(res.held).toEqual([]);
+    expect(mockState.updates.filter((u) => u.table === 'notifications').map((u) => u.row)).toContainEqual({ read_at: null, done_at: null, done_by: null, resolution: null });
+    expect(notify).toHaveBeenCalledTimes(1);
   });
 
   test('the window is the ET date: 11:30 PM May 31 ET still orders; Oct 1 orders again', async () => {

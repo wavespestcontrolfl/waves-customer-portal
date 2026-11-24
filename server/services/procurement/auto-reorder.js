@@ -49,7 +49,7 @@ const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 const { findLiveRestockRequest, LIVE_RESTOCK_STATUSES } = require('./live-restock-request');
 const { fitAction } = require('../admin-alert-names');
 const { raiserFor, ringOnRefreshAfterConversion } = require('../admin-alert-injected');
-const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
+const { FERTILIZER_COLUMNS, HOLD_RESOLUTION, fertilizerBlackoutHold, isNpFertilizer } = require('./fertilizer-blackout');
 
 const GATE = 'GATE_AUTO_REORDER';
 const SOURCE = 'auto_reorder';
@@ -217,25 +217,50 @@ async function refreshOpenRequest(ctx, p, existing) {
     if (!request || request.status !== 'open' || request.source !== SOURCE) return null;
     const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('auto_reorder_vendor_id', 'name', ...FERTILIZER_COLUMNS);
     if (!fresh) return null;
-    // June 1 - Sept 30: no "order manually" bell for N/P fertilizer; the
-    // request waits for the first sweep after the blackout. Read under the lock.
-    if (fertilizerBlackoutHold(fresh, ctx.now)) { ctx.result.held.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'fertilizer_blackout' }); return null; }
+    // June 1 - Sept 30 N/P fertilizer: read under the lock, acted on in
+    // handleLiveRequest (holdOpenRequest).
+    if (fertilizerBlackoutHold(fresh, ctx.now)) return { ...request, held: true };
+    // An N/P fertilizer outside the window: its hand-off may need the bell a hold closed reopened.
+    const npFertilizer = isNpFertilizer(fresh);
     const learned = learnedVendorFields(request, await lockedVendor(trx, p, fresh));
-    if (!learned) return request;
+    if (!learned) return { ...request, npFertilizer };
     await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({ vendor: learned.vendor, metadata: JSON.stringify(learned.metadata), updated_at: new Date() });
     ctx.result.refreshed.push({ productId: p.id, requestId: request.id });
-    return { ...request, ...learned };
+    return { ...request, ...learned, npFertilizer };
   });
 }
 
 // A still-open auto request whose bell failed earlier would otherwise sit
 // unworked forever: re-ring (the request-id dedupeKey makes a landed bell a
 // no-op). Requests of other sources, and ordered ones, are left alone.
+// June 1 - Sept 30, an open N/P fertilizer request: an automatic or emailed
+// order already out keeps its reconciliation bells. Otherwise the request's
+// "order manually" bells close (resolution HOLD_RESOLUTION) and nothing
+// rings until the first sweep after Sept 30 reopens them.
+async function holdOpenRequest(ctx, p, request) {
+  const dispatch = require('./order-dispatch');
+  if (await dispatch.findLiveAutoOrder(ctx.conn, p.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'auto_order_live' }); return; }
+  if (await dispatch.emailOrderOutFor(ctx.conn, request.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'email_order_out' }); return; }
+  if (!(await settleParkedLedgerBell(ctx, p, request))) return;
+  const ns = require('../notification-service')._private;
+  await ns.openToCloser(ctx.conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${request.id}`]), 'procurement')
+    .update(ns.doneColumns({ by: 'procurement', resolution: HOLD_RESOLUTION, keepExisting: true, conn: ctx.conn }));
+  ctx.result.held.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'fertilizer_blackout' });
+}
+
+// After the blackout: the bells holdOpenRequest closed open again, so the
+// hand-off is visible (a same-text re-ring alone leaves a closed row closed).
+function reopenHeldBell(conn, requestId) {
+  return conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).where('resolution', HOLD_RESOLUTION)
+    .update({ read_at: null, done_at: null, done_by: null, resolution: null }); // notifications has no updated_at
+}
+
 async function handleLiveRequest(ctx, p, existing) {
   ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: existing.id });
   if (existing.source !== SOURCE || existing.status !== 'open') return;
   const request = await refreshOpenRequest(ctx, p, existing);
   if (!request) return;
+  if (request.held) { await holdOpenRequest(ctx, p, request); return; }
   // The dispatcher only ever claims a request whose OWN metadata names an
   // auto-orderable vendor (findDispatchable). A request that could not
   // establish a vendor id (pinned to a vendor the product has since left)
@@ -261,6 +286,7 @@ async function handleLiveRequest(ctx, p, existing) {
   // fails, stand down — the ledger bell, re-rung by the dispatcher, still
   // owns the request (Codex r31 P2).
   if (!(await settleParkedLedgerBell(ctx, p, request))) return;
+  if (request.npFertilizer) await reopenHeldBell(ctx.conn, request.id);
   await bellOrWarn(ctx, p, request, 'renotified');
 }
 
