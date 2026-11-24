@@ -76,6 +76,7 @@
  *   GATE_IB_BILLING_MODE_EDIT=true (the Intelligence Bar's update_customer may change one customer's billing type (billing_mode) and per-application fee on its own confirm card, owner ruling D5 2026-10-06; the same billing-type rules as the customer page (services/billing-mode-rules.js), annual prepay and clearing the type refused, never owner-direct, no customer message; read at call time via ibBillingModeEditLive(), strict === 'true', dark by default; off = both fields are refused exactly as before)
  *   GATE_IB_TIER_UPGRADE_EMAIL=true (an Intelligence Bar update_customer card that raises a customer's WaveGuard tier AND changes the monthly rate they are billed emails that customer the membership.tier_upgraded notice after the card is confirmed and the update is saved; the card names the email before Confirm. Never on a bulk card, a first tier, a downgrade, a tier change with no price change, a rate the customer is not billed monthly, an auto-derived tier label, or an inactive or churned customer. Read at call time via ibTierUpgradeEmailLive(), strict 'true', dark by default; off = no pin, no card line and no email, exactly as before.)
  *   GATE_IB_REPRICE_VISITS=true (the Intelligence Bar's reprice_future_visits write tool, owner ruling 2026-10-07: one confirm card changes the per-visit price of one customer's future visits for one service, listing each visit's old -> new price; each visit is saved through the Schedule screen's own visit edit (updateVisitDetails over PUT /admin/schedule/:id/update-details), so the re-price block, validation and CAS are the screen's. Never a completed, in-progress, invoiced, prepaid, annual-prepay-covered or otherwise money-committed visit; a monthly-membership customer is refused (their price is the monthly rate). No customer message is sent. Read at call time via ibRepriceVisitsLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
+ *   GATE_IB_BOOK_PLAN_VISITS=true (needs GATE_IB_PLATFORM; the Intelligence Bar's book_plan_visits write tool, owner ruling 2026-11-24: one confirm card books a RECURRING visit series for one existing customer who already has (or had) a plan for the same service, through the Schedule screen's own create handler (createScheduleBooking over POST /admin/schedule), listing every planned visit date, the technician, the address and the price per visit as the handler will stamp it. Refuses a brand-new program (use accept_estimate), a duplicate open series, any price, discount, add-on, booster, prepay or monthly-rate change, and a booking that would change the customer's WaveGuard tier or monthly rate. The booking confirmation text goes unless the operator asked for no texts; no welcome text, no invoice. Read at call time via ibBookPlanVisitsLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_GENERAL_READ=true (needs GATE_IB_PLATFORM; the Intelligence Bar's find_admin_reads and read_admin_data read tools, owner ruling 2026-10-12: on the owner login only, the bar may read what an admin screen reads. read_admin_data calls one reviewed admin GET endpoint from the generated catalog (server/services/intelligence-bar/admin-read-catalog.json) on this server as the logged-in owner and returns the JSON, capped. No write, no outside call, no file or stream. Read at call time via ibGeneralReadLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call.)
  *   GATE_IB_GENERAL_EDIT=true (needs GATE_IB_PLATFORM; the Intelligence Bar's find_admin_edits and propose_admin_edit tools, owner ruling 2026-10-12: a general EDIT tool for a reviewed allow-list of small internal edits only, on the owner login only, ALWAYS a confirm card, never owner-direct. propose_admin_edit takes one method and endpoint pattern from the generated catalog (server/services/intelligence-bar/admin-write-catalog.json), the path parameters and a body limited to the fields the reviewed row lists (any other field is refused), shows each field's new value (and the current one when a reviewed read supplies it), and on Confirm sends that exact body as a PUT or PATCH to this server as the logged-in owner, so the screen's own checks apply. Never a customer message, money, price, delete, bulk change, setting, user or credential; address text shows an ADDRESS CHANGE card. Read at call time via ibGeneralEditLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call.)
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
@@ -5686,6 +5687,14 @@ function ibRepriceVisitsLive() {
   return process.env.GATE_IB_REPRICE_VISITS === 'true';
 }
 
+// GATE_IB_BOOK_PLAN_VISITS read at CALL time — strict `=== 'true'`, dark, and it needs
+// GATE_IB_PLATFORM (the tool exists only on the platform path). The Intelligence Bar's
+// book_plan_visits tool (services/intelligence-bar/book-plan-visits-tools.js): offered and
+// executable only while on. Kill: unset.
+function ibBookPlanVisitsLive() {
+  return process.env.GATE_IB_BOOK_PLAN_VISITS === 'true';
+}
+
 // GATE_IB_LEAD_CONVERT read at CALL time — strict `=== 'true'`, dark, and it needs
 // GATE_IB_PLATFORM (the tool exists only on the platform path). The Intelligence
 // Bar's convert_lead tool (services/intelligence-bar/lead-convert-tools.js):
@@ -8815,6 +8824,8 @@ module.exports.ibInvoiceActionsLive = ibInvoiceActionsLive;
 module.exports.ibInvoiceEmailLive = ibInvoiceEmailLive;
 // GATE_IB_REPRICE_VISITS reader, on its own line so gate PRs never conflict.
 module.exports.ibRepriceVisitsLive = ibRepriceVisitsLive;
+// GATE_IB_BOOK_PLAN_VISITS reader, on its own line.
+module.exports.ibBookPlanVisitsLive = ibBookPlanVisitsLive;
 // GATE_IB_VOID_INVOICE reader, on its own line.
 module.exports.ibVoidInvoiceLive = ibVoidInvoiceLive;
 // GATE_IB_PREPAY_SWITCH reader, on its own line.

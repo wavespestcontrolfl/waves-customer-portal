@@ -103,6 +103,19 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
       : `Meta click (${classified.reason === 'fbc' ? '_fbc' : 'fbclid'})`;
     return { source: 'facebook', detail, channel: 'paid' };
   }
+  if (classified.bucket === 'print') {
+    // A printed piece. Decided before the landing check below: its link lands on
+    // the website (/quote, /neighbor), which would otherwise read as waves_website.
+    // classifyAttributionSignals has already let GBP, Maps, click ids and paid
+    // tags win. source is the piece's key (business_card, yard_sign,
+    // new_home_postcard, or print_other for an unknown print medium).
+    return {
+      source: classified.print.key,
+      detail: utmCampaign ? `${classified.print.name} — ${utmCampaign}` : classified.print.name,
+      channel: 'offline',
+      area: landing?.area || null,
+    };
+  }
   if (classified.bucket === 'organic_social') {
     if (classified.socialName === 'Nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
     if (['Facebook', 'Instagram'].includes(classified.socialName)) {

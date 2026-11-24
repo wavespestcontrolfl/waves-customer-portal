@@ -7,6 +7,7 @@
     "services/cash-forecast/load.js": 1,
     "services/invoice.js": 6,
     "services/payroll-commission.js": 2,
+    "services/prior-series-billing.js": 1,
     "services/rate-review.js": 3,
     "services/schedule-integrity-watchdog.js": 4
   },

@@ -25,6 +25,8 @@ const NON_ACTIONABLE_INBOUND_TYPES = new Set([
   "sms_reaction",
   "help_request",
   "reschedule_reply",
+  // Keep aligned with server/services/sms-response-policy.js: the portal answered a new-home postcard text itself.
+  "mail_home_text_to_book",
 ]);
 
 function phoneKey(phone) {

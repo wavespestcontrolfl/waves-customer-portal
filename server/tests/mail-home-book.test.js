@@ -242,6 +242,17 @@ describe('bookHome', () => {
     expect(booking.createSelfBooking.mock.calls[0][0].customer_id).toBe('cust-1');
   });
 
+  test('the booking carries the postcard first touch (print, no click id) so it is attributed to the New-home postcard source', async () => {
+    const res = await bookHome(TOKEN, INPUT(), deps);
+    expect(res.status).toBe(200);
+    const sent = booking.createSelfBooking.mock.calls[0][0];
+    expect(sent.attribution).toEqual({ observed: true, utm: { source: 'new_home_postcard', medium: 'print' } });
+    expect(sent.source).toBe('mail_new_home');
+    const { determineLeadSource } = require('../services/lead-source-classify');
+    const u = sent.attribution.utm;
+    expect(determineLeadSource('', '', u.source, u.medium, '', '')).toMatchObject({ source: 'new_home_postcard', channel: 'offline' });
+  });
+
   test('a refused price mints no row', async () => {
     quote.priceHome.mockResolvedValue({ status: 'not_clean', reason: 'member_address' });
     await bookHome(TOKEN, INPUT(), deps);
