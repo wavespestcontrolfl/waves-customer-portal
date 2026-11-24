@@ -183,7 +183,7 @@ Provider credentials are excluded and unexpected HTTP/fetch calls are blocked.
 This does not verify real provider delivery, checkout or device hardware.
 
 Screenshots, trace, server log and a commit/step report live in `.tmp/qa/e2e`.
-Credentials and captured OTPs are private files there; never commit or attach
+Credentials, captured OTPs and captured text bodies are private files there; never commit or attach
 them. Traces can contain short-lived synthetic session tokens. CI retains only
 the report, screenshots and trace for seven days, then discards them.
 `qa:seed` leaves a synthetic fixture for local inspection; `qa:cleanup` removes

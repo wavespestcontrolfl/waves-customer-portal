@@ -77,7 +77,8 @@ RequestClient.prototype.request = async function (options) {
     throw new Error('QA blocked an unexpected Twilio transport request');
   }
   const sid = `SM${require('node:crypto').randomBytes(16).toString('hex')}`;
-  capture('sms', { sid, customerId: fixture.customerId, hasMedia: !!payload.MediaUrl });
+  // The body lets a journey prove the words sent. The capture file stays private (mode 0600, never uploaded).
+  capture('sms', { sid, customerId: fixture.customerId, to: payload.To, body: payload.Body, hasMedia: !!payload.MediaUrl });
   return { statusCode: 201, headers: {}, body: { sid, status: 'queued', to: payload.To,
     from: payload.From, body: payload.Body, num_segments: '1', num_media: '0', error_code: null } };
 };
