@@ -28,15 +28,16 @@ function fakePool(acquire) {
 
 function fakeDb(answer = { tech: false, lead: false, remembered: false }) {
   fakePool();
-  const seen = { tables: [], sql: [], bindings: [], whereIn: [], timeout: null, connection: null };
+  const seen = { tables: [], sql: [], bindings: [], whereIn: [], where: [], timeout: null, connection: null };
   db.mockImplementation((table) => {
     seen.tables.push(table);
     const b = {};
-    for (const m of ['select', 'where', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereNull', 'orWhereNotNull']) {
+    for (const m of ['select', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereNull', 'orWhereNotNull']) {
       b[m] = jest.fn((arg) => { if (typeof arg === 'function') arg(b); return b; });
     }
     b.whereRaw = jest.fn((sql, bindings) => { seen.sql.push(sql); seen.bindings.push(...(bindings || [])); return b; });
     b.whereIn = jest.fn((col, vals) => { seen.whereIn.push([col, vals]); return b; });
+    b.where = jest.fn((arg, ...rest) => { if (typeof arg === 'function') arg(b); else seen.where.push([arg, ...rest]); return b; });
     return b;
   });
   db.select.mockImplementation(() => {
@@ -124,8 +125,9 @@ describe('the remembered-caller proof', () => {
     expect(seen.sql.some((q) => q.startsWith("metadata->'forward_acceptance' IS NULL AND COALESCE("))).toBe(true);
   });
 
-  test('a message counts only on a call nobody answered, with a finished transcript that holds words', () => {
-    expect(seen.whereIn).toContainEqual(['answered_by', ['missed', 'voicemail', 'unknown']]);
+  test('a message counts only on a call sent to the Waves voicemail, with one recording and a finished transcript that holds words', () => {
+    expect(seen.where).toContainEqual(['answered_by', 'voicemail']);
+    expect(seen.sql).toContain("metadata->'additional_recordings' IS NULL AND metadata->'superseded_recordings' IS NULL");
     expect(seen.sql.some((q) => q.startsWith("regexp_replace(COALESCE(transcription, ''), ?"))).toBe(true);
     expect(seen.bindings.some((b) => typeof b === 'string' && b.includes('NO SPEECH'))).toBe(true);
   });
@@ -137,7 +139,7 @@ describe('the remembered-caller proof', () => {
   });
 
   test('staff talk needs no answered_by (empty when the caller hangs up first)', () => {
-    expect(seen.whereIn.some(([col]) => col === 'answered_by')).toBe(true); // the message branch only
+    expect(seen.where.filter(([col]) => col === 'answered_by')).toEqual([['answered_by', 'voicemail']]); // the message branch only
     expect(seen.sql.some((q) => q.includes("forward_acceptance'->>'accepted_at', metadata->'conference_path'->>'accepted_at') IS NULL OR"))).toBe(true);
   });
 

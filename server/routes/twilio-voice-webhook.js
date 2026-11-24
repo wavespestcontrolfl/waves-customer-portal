@@ -909,7 +909,9 @@ async function screenCandidate(from, stirVerstat, { redelivery = false } = {}) {
   const exchangeHit = !attestationB && await exchangeTriggerHit(from);
   // Nothing to screen, or a failed exchange read (null) on a non-B caller:
   // route normally without another read.
-  if ((!attestationB && !exchangeHit && !trialOn) || exchangeHit === null) return NO_SCREEN;
+  // A redelivery never runs the trial read, so the trial alone is no reason
+  // to read on.
+  if ((!attestationB && !exchangeHit && !(trialOn && !redelivery)) || exchangeHit === null) return NO_SCREEN;
   if (await screenKnownCaller(from, trialOn)) return { ...NO_SCREEN, knownCaller: true };
   // The trial's own read runs only on a first delivery, for a caller B and the
   // exchange rule do not already challenge (an exchange hit with its gate off

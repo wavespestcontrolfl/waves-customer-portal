@@ -33,8 +33,7 @@ const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
 const READ_TIMEOUT_MS = 1500;
 const TALK_SECONDS = 30;
 const MESSAGE_SECONDS = 10;
-// The missed-call service's unanswered outcomes and Sandy's call outcomes.
-const UNANSWERED = ['missed', 'voicemail', 'unknown'];
+// Sandy's call outcomes.
 const AI_OUTCOMES = ['ai_handled', 'ai_transferred'];
 
 // Same key as phoneKeySql gives a stored column: '1' + last 10 for a US number.
@@ -104,9 +103,13 @@ function rememberedRows(key) {
           ELSE (metadata->>'ended_at')::timestamptz
             - (${ACCEPTED_AT_SQL})::timestamptz >= make_interval(secs => ?) END`, [TALK_SECONDS]))
       .orWhere((message) => message
-        // answered_by must say nobody answered: an empty one can be a
-        // completed (answered) Studio fallback call.
-        .whereIn('answered_by', UNANSWERED)
+        // answered_by 'voicemail' = the webhook sent the caller to the Waves
+        // voicemail recorder (an empty one can be an answered Studio call).
+        // A row that ever held a second recording (a staff leg's, perhaps a
+        // carrier voicemail) proves nothing. Prod 2026-11-24: all 230
+        // qualifying rows were 'voicemail', none with a second recording.
+        .where('answered_by', 'voicemail')
+        .whereRaw("metadata->'additional_recordings' IS NULL AND metadata->'superseded_recordings' IS NULL")
         // A call staff accepted is a conversation, not a message, even when
         // answered_by stayed empty (the caller hung up first): the 30 s rule above.
         .whereRaw(`metadata->'forward_acceptance' IS NULL AND ${ACCEPTED_AT_SQL} IS NULL`)

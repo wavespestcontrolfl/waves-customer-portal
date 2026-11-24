@@ -193,6 +193,8 @@ describe('screenCandidate (who the screen may challenge)', () => {
       slotRows([]);
       await expect(screenCandidate('+19412360303', A, { redelivery: true })).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
       expect(hit).not.toHaveBeenCalled();
+      expect(allUnknown.knownCallerWithinLimit).not.toHaveBeenCalled();
+      expect(db).not.toHaveBeenCalled();
     });
 
     test('the handler replays a stored trial challenge before the customer match and the screen reads', () => {
