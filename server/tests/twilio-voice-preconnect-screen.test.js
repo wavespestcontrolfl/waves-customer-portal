@@ -149,19 +149,19 @@ describe('buildPreconnectChallengeTwiML', () => {
   });
 
   test('with no number config the opening is plain "Waves"', () => {
-    expect(xml).toContain('Thanks for calling Waves. We screen out spam calls. To reach our office, press 1.');
+    expect(xml).toContain('Thanks for calling Waves. To help us stop spam calls, please press 1 to reach our office.');
   });
 });
 
 describe('buildPreconnectChallengeTwiML words (owner 2026-11-20)', () => {
-  const END = 'We screen out spam calls. To reach our office, press 1.';
+  const END = 'To help us stop spam calls, please press 1 to reach our office.';
   const SECOND = 'This is a recording. To reach our office, press any key, or stay on the line to leave a message.';
   const twimlFor = (number) => buildPreconnectChallengeTwiML(TWILIO_NUMBERS.findByNumber(number));
   const says = (xml) => (xml.match(/<Say[^>]*>([^<]*)<\/Say>/g) || []).map((t) => t.replace(/<[^>]+>/g, ''));
 
   test('Sarasota GBP line says Waves in Sarasota, then the reason and the key', () => {
     expect(says(twimlFor('+19414910407'))[0])
-      .toBe('Thanks for calling Waves in Sarasota. We screen out spam calls. To reach our office, press 1.');
+      .toBe('Thanks for calling Waves in Sarasota. To help us stop spam calls, please press 1 to reach our office.');
   });
 
   test('every GBP line says Waves plus its own town', () => {

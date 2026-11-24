@@ -873,7 +873,7 @@ async function screenCandidate(from, stirVerstat) {
 
 // Press-1 prompt words. The end of the first prompt lives in ONE constant so
 // it can be swapped later (owner 2026-11-20 is choosing between endings).
-const PRECONNECT_PROMPT_END = 'We screen out spam calls. To reach our office, press 1.';
+const PRECONNECT_PROMPT_END = 'To help us stop spam calls, please press 1 to reach our office.';
 const PRECONNECT_SECOND_TRY = 'This is a recording. To reach our office, press any key, or stay on the line to leave a message.';
 
 // Opening line for the line the caller dialed. A spoke site speaks its own
