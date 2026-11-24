@@ -580,11 +580,6 @@ function candidateRouteOrder(service, cand) {
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
 // active stops.
 function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ, ctx = {}, blocks = []) {
-  // A version-2 allocation is one physical arrival, but auto-dispatch only
-  // has a writer for a standalone row or a visit_id unit. Never choose a
-  // cheaper scoring branch (same-day/same-tech or an unassigned source) that
-  // would move one allocation member on its own.
-  if (service.reservation_service_mix?.version === 2) return null;
   const moved = movedSiblings(siblings, placement, cand);
   const target = { ...service, technician_id: cand.technician_id, window_start: cand.start_time, window_end: cand.end_time,
     lat: geo.lat, lng: geo.lng, geo, preserveCapacity: preservesCapacity(service) };
@@ -670,10 +665,6 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
   const scoringService = ctx.refreshedRouteMover
     && String(ctx.refreshedRouteMover.id) === String(service.id)
     ? ctx.refreshedRouteMover : service;
-  if (scoringService.reservation_service_mix?.version === 2) {
-    if (drops) drops.route_window = (drops.route_window || 0) + candidates.length;
-    return [];
-  }
   const { excludeIds, siblings, visitWindowStart } = await groupContextFor(scoringService, ctx);
   const group = { members: unitMembers(scoringService, siblings), visitWindowStart };
   const dates = candidates.map((c) => c.date);

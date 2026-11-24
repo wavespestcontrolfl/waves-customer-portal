@@ -43,7 +43,6 @@ const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduli
 // scheduling/occupancy.js for why both write paths here take it first, and
 // why each also runs the tech-blind global probe (findConflictingVisits)
 // under it before committing.
-const { liveServiceOrHold } = require('./scheduling/reservation-occupancy');
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts, techScopedConfirmActive, applyTechScope } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 
@@ -1774,7 +1773,10 @@ async function reserveSlot({
         .where({ scheduled_date: date })
         .modify((q) => { if (techId) q.where('technician_id', techId); })
         .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
-        .andWhere(liveServiceOrHold)
+        .andWhere((q) => {
+          q.whereNull('reservation_expires_at')
+            .orWhereRaw('reservation_expires_at > NOW()');
+        })
         .modify((q) => { if (makeRoom) q.whereNotIn('id', makeRoom.moveIds); })
         .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
         .first('id');
@@ -1798,7 +1800,10 @@ async function reserveSlot({
           .where('scheduled_services.scheduled_date', date)
           .whereNull('scheduled_services.technician_id')
           .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-          .where(liveServiceOrHold)
+          .where((q) => {
+            q.whereNull('scheduled_services.reservation_expires_at')
+              .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+          })
           .modify((q) => { if (makeRoom) q.whereNotIn('scheduled_services.id', makeRoom.moveIds); })
           .where((q) => {
             if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
@@ -2335,7 +2340,10 @@ async function commitReservation({
         .modify((q) => { if (row.technician_id) q.where('technician_id', row.technician_id); })
         .whereNot('id', scheduledServiceId)
         .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
-        .andWhere(liveServiceOrHold)
+        .andWhere((q) => {
+          q.whereNull('reservation_expires_at')
+            .orWhereRaw('reservation_expires_at > NOW()');
+        })
         .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
         .first('id');
 

@@ -12,8 +12,6 @@ const { gateEnvValue, multiTechConfirmLive } = require('../../config/feature-gat
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
-const { liveServiceOrHold } = require('./reservation-occupancy');
-const { isHoldStop } = require('./travel-gap');
 const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation } = require('./day-stops');
 const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
   staleOrderReasons, promisedWindowOrder } = require('../route-reorder-window-fit');
@@ -249,7 +247,8 @@ async function loadArrivalRouteContext({
       // An unstamped row inherits the customer's premise, and the co-visit
       // merge compares EFFECTIVE addresses (codex #4435 r3 P1).
       ...CUSTOMER_PREMISE_ALIASES],
-  }).where(liveServiceOrHold);
+  }).where(q => q.whereNull('scheduled_services.reservation_expires_at')
+      .orWhereRaw('scheduled_services.reservation_expires_at > NOW()'));
   const blocks = capacityEnabled() || preserveCapacity ? await conn('tech_schedule_blocks')
     .where({ date }).whereNot('block_type', 'available')
     .where(query => query.where('technician_id', techId).orWhereNull('technician_id'))
@@ -279,7 +278,7 @@ async function loadArrivalRouteContext({
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   const dayRows = exemptFromPlanning(rows.filter(row => !excluded.has(String(row.id))
     && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
-    && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && isHoldStop(row))), planningMinutes);
+    && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at)), planningMinutes);
   const activeStop = fromActiveStop && date === etDateString(now) ? await loadActiveStop(conn, dayRows, techId) : null;
   return { target: movedTarget || target, rows: dayRows,
   date, now, grouped, activeTarget, activeStop, prospective: !!prospective,
@@ -586,9 +585,9 @@ function rowIsFixedBlock(row, target, capacity) {
   if (capacity) return row.technician_id == null;
   if (multiTechConfirmLive()) {
     return row.technician_id == null
-      || (row.technician_id === target.technician_id && isHoldStop(row));
+      || (row.technician_id === target.technician_id && row.reservation_expires_at != null);
   }
-  return row.technician_id !== target.technician_id || isHoldStop(row);
+  return row.technician_id !== target.technician_id || row.reservation_expires_at != null;
 }
 
 /** Simulate every candidate order and certify the winner: least travel,
@@ -976,7 +975,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   if (capacity) dayEndMin = Math.min(dayEndMin, SHIFT.endMinutes);
   const target = buildPlacementTarget(context, windowStart, windowEnd, durationMinutes);
   const dayOf = () => (target.technician_id ? rows.filter(row => row.technician_id === target.technician_id
-    && (capacity || !isHoldStop(row))) : []);
+    && (capacity || row.reservation_expires_at == null)) : []);
   // route_unverified, worded with its cause when a staff save asked for detail.
   const unverifiedBecause = (cause) => {
     if (detail !== true) return unverified(target, date);
@@ -995,7 +994,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   const placement = !capacity && !target.memberIds && !context.routeOrderPinned
     ? staffPlacement(context, place, date, target.technician_id, windowStart) : null;
   const staffInsert = placement === 'move';
-  const own = rows.filter(row => row.technician_id === target.technician_id && (capacity || !isHoldStop(row)));
+  const own = rows.filter(row => row.technician_id === target.technician_id && (capacity || row.reservation_expires_at == null));
   const originFail = {};
   const resolvedOrigin = resolvePlacementOrigin(context, capacity, departureMin, target, own, originFail);
   if (!resolvedOrigin) return unverifiedBecause(() => originFail.cause || { code: 'unknown' });

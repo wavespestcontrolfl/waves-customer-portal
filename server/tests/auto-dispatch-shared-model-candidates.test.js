@@ -914,26 +914,6 @@ test('a version-2 moving stop keeps its planning minutes in the saved route simu
   expect(legacy).toBeNull();
 });
 
-test.each([
-  ['cross-day assigned', { scheduled_date: '2026-08-04', technician_id: 't1' }, { date: '2026-08-06', technician_id: 't1' }],
-  ['same-day same-tech', { scheduled_date: '2026-08-06', technician_id: 't1' }, { date: '2026-08-06', technician_id: 't1' }],
-  ['unassigned source', { scheduled_date: '2026-08-06', technician_id: null }, { date: '2026-08-06', technician_id: 't1' }],
-])('an allocation-only moving member is rejected before the %s scoring branch', (_label, source, destination) => {
-  const geo = { lat: 27.4, lng: -82.5 };
-  const service = {
-    ...SERVICE,
-    ...source,
-    status: 'confirmed',
-    created_at: '2026-07-01T00:00:00Z',
-    reservation_service_mix: { version: 2, allocatedServiceIds: ['s1', 's2'], durationMinutes: 70 },
-  };
-  const candidate = { ...destination, start_time: '08:00', end_time: '09:00' };
-  const placement = { windows: [{ start: '08:00', end: '09:00' }], targets: [{ id: service.id, start: '08:00', end: '09:00' }] };
-  expect(scoreOnSharedModel(service, geo, candidate, [], [], placement, geo, {
-    sourceRouteStamp: 'source-stamp', departureMinutes: 8 * 60,
-  })).toBeNull();
-});
-
 test.each(['auto_dispatch_locked', 'auto_dispatch_excluded'])('a destination with a %s stop is not renumbered', (flag) => {
   const { positionFor } = require('../services/auto-dispatch/route-position');
   const origin = { lat: 27.4, lng: -82.5 };
