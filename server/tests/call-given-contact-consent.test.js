@@ -22,6 +22,8 @@ const {
   callGivenConsentApplies,
   callGivenConsentRowCovered,
   callGivenConsentAt,
+  callGivenConsentPersisted,
+  holdCallGivenFallback,
 } = _test;
 
 const GATE = 'GATE_CALL_GIVEN_CONTACT_CONSENT';
@@ -37,7 +39,7 @@ const spouse = {
 };
 
 function makeDb(customer) {
-  const writes = { updates: [] };
+  const writes = { updates: [], whereRaws: [] };
   db.raw = jest.fn((sql, binds) => ({ sql, binds }));
   db.mockImplementation((table) => {
     if (table === 'customers') {
@@ -49,7 +51,7 @@ function makeDb(customer) {
         }),
         whereNull: jest.fn(() => b),
         whereNot: jest.fn(() => b),
-        whereRaw: jest.fn(() => { collision = true; return b; }),
+        whereRaw: jest.fn((sql, binds) => { collision = true; writes.whereRaws.push([sql, binds]); return b; }),
         first: jest.fn(async () => (collision ? null : customer)),
         update: jest.fn(async (payload) => { writes.updates.push(payload); return 1; }),
       };
@@ -149,7 +151,29 @@ describe('persistCallSecondaryContact with callGivenConsent', () => {
       service_contacts_consent_source: 'call_caller_provided',
       service_contacts_consent_text_version: 'owner-ruling-2026-10-29',
     });
-    expect(writes.updates[0]).not.toHaveProperty('service_preferences');
+    // Per-phone provenance in the same UPDATE; the phone is NOT put on the unconsented list.
+    expect(writes.updates[0].service_preferences.sql).toContain('call_given_phone_keys');
+    expect(writes.updates[0].service_preferences.sql).not.toContain('unconsented_slot_phone_keys');
+    expect(writes.updates[0].service_preferences.binds).toEqual(['5550100123']);
+  });
+
+  test('the UPDATE is pinned to the coverage the decision used: stamp absent + every contact phone as read', async () => {
+    const writes = makeDb(bareCustomer);
+    await persistCallSecondaryContact('cust-1', spouse, { callGivenConsent: true, consentAt });
+    const sqls = writes.whereRaws.map(([sql]) => sql);
+    expect(sqls).toContain('service_contacts_consent_at IS NULL');
+    expect(sqls.filter((q) => q === '?? IS NOT DISTINCT FROM ?')).toHaveLength(3);
+    const stamped = makeDb(stampedWithContact);
+    await persistCallSecondaryContact('cust-1', spouse, { callGivenConsent: true, consentAt });
+    expect(stamped.whereRaws.map(([sql]) => sql)).toContain('service_contacts_consent_at IS NOT NULL');
+    const phoneBinds = stamped.whereRaws.filter(([sql]) => sql === '?? IS NOT DISTINCT FROM ?').map(([, b]) => b);
+    expect(phoneBinds).toContainEqual(['service_contact_phone', '+15550100777']);
+  });
+
+  test('without the option the UPDATE carries no coverage pin (gate off)', async () => {
+    const writes = makeDb(bareCustomer);
+    await persistCallSecondaryContact('cust-1', spouse);
+    expect(writes.whereRaws.map(([sql]) => sql)).not.toContain('service_contacts_consent_at IS NULL');
   });
 
   test('beats the explicit-consent path: no call_pipeline_request stamp, same new source', async () => {
@@ -161,9 +185,12 @@ describe('persistCallSecondaryContact with callGivenConsent', () => {
   test('an existing stamp stays exactly as it is: not cleared, not rewritten, phone not held', async () => {
     const writes = makeDb(stampedWithContact);
     expect(await persistCallSecondaryContact('cust-1', spouse, { callGivenConsent: true, consentAt })).toBe('written');
-    for (const key of ['service_contacts_consent_at', 'service_contacts_consent_source', 'service_contacts_consent_text_version', 'service_preferences']) {
+    for (const key of ['service_contacts_consent_at', 'service_contacts_consent_source', 'service_contacts_consent_text_version']) {
       expect(writes.updates[0]).not.toHaveProperty(key);
     }
+    // ...but the phone's call-given provenance is recorded (login stays refused for it) and it is not held.
+    expect(writes.updates[0].service_preferences.sql).toContain('call_given_phone_keys');
+    expect(writes.updates[0].service_preferences.sql).not.toContain('unconsented_slot_phone_keys');
     expect(writes.updates[0]).toMatchObject({ service_contact2_phone: '+15550100123' });
   });
 
@@ -180,6 +207,7 @@ describe('persistCallSecondaryContact with callGivenConsent', () => {
     expect(await persistCallSecondaryContact('cust-1', spouse, { callGivenConsent: true, consentAt })).toBe('written');
     expect(writes.updates[0]).not.toHaveProperty('service_contacts_consent_at');
     expect(writes.updates[0]).not.toHaveProperty('service_contacts_consent_source');
+    expect(writes.updates[0]).not.toHaveProperty('service_preferences');
   });
 
   test('without the option the write is today\'s: an unconsented phone on a stamped row still clears the stamp', async () => {
@@ -208,12 +236,14 @@ describe('call-site wiring (source contract)', () => {
   });
 
   test('a new phone only: a phone already on the account keeps its own standing', () => {
-    expect(src).toContain('callGivenConsent = !onRecordKeys.includes(lastTen(secondaryEntry.phone)) && callGivenConsentRowCovered(givenRow, givenSlots);');
+    expect(src).toContain('callGivenConsent = !givenOnRecord && callGivenConsentRowCovered(givenRow, givenSlots);');
   });
 
   test('consented phone: no blocking opt-in row, no queued on-site ask, no explicit-consent Reply-YES claim, card says why', () => {
     expect(src).toContain('if (onSitePreAsk && !callGivenConsent) {');
-    expect(src).toContain('const callGivenConsentApplied = callGivenConsent && result === \'written\';');
+    expect(src).toContain('const callGivenConsentApplied = (callGivenConsent || callGivenRetained)');
+    expect(src).toContain('&& await callGivenConsentPersisted(customerId, secondaryEntry.phone);');
+    expect(src).toContain("if (callGivenConsent && result === 'written' && !callGivenConsentApplied) await holdCallGivenFallback(customerId, secondaryEntry.phone);");
     expect(src).toContain('if (onSiteDecision.ask && secondaryEntry?.phone && !callGivenConsentApplied) {');
     expect(src).toContain("&& onSiteDecision.reason !== 'phone_not_from_v2' && !callGivenConsentApplied) {");
     expect(src).toContain("callGivenConsentApplied ? 'not_sent:call_given_consent' : optinAskState");
@@ -226,8 +256,104 @@ describe('call-site wiring (source contract)', () => {
     expect(src).toContain('&& !optinClaimFailedPhones.has(fanLast10(c.phone)));');
   });
 
+  test('a retry reads the persisted provenance of a phone already on record', () => {
+    expect(src).toContain('callGivenRetained = givenOnRecord;');
+  });
+
   test('gate off keeps the old call-site behavior: callGivenConsent is false, so the block above it is the old one', () => {
     process.env[GATE] = '';
     expect(callGivenConsentApplies(spouse, { phoneFromV2: true })).toBe(false);
+  });
+});
+
+describe('callGivenConsentPersisted: the committed outcome, read from the row', () => {
+  function rowDb(row) {
+    db.mockImplementation((table) => {
+      expect(table).toBe('customers');
+      const b = { where: () => b, first: async () => row };
+      return b;
+    });
+  }
+  const stamp = '2026-10-29T15:14:28Z';
+  const prefs = (o) => JSON.stringify(o);
+
+  test('true only when the row is stamped, lists the phone as call-given, and no hold names it', async () => {
+    rowDb({ service_contacts_consent_at: stamp, service_preferences: prefs({ call_given_phone_keys: ['5550100123'] }) });
+    expect(await callGivenConsentPersisted('c', '+15550100123')).toBe(true);
+    rowDb({ service_contacts_consent_at: stamp, service_preferences: prefs({ call_given_phone_keys: ['5550100123'], unconsented_slot_phone_keys: ['5550100123'] }) });
+    expect(await callGivenConsentPersisted('c', '+15550100123')).toBe(false); // a later hold wins
+    rowDb({ service_contacts_consent_at: null, service_preferences: prefs({ call_given_phone_keys: ['5550100123'] }) });
+    expect(await callGivenConsentPersisted('c', '+15550100123')).toBe(false); // stamp gone (admin edit / STOP path)
+    rowDb({ service_contacts_consent_at: stamp, service_preferences: prefs({}) });
+    expect(await callGivenConsentPersisted('c', '+15550100123')).toBe(false); // writer declined: no provenance
+    rowDb(undefined);
+    expect(await callGivenConsentPersisted('c', '+15550100123')).toBe(false);
+  });
+});
+
+describe('holdCallGivenFallback: a write that fell back takes the fail-closed path', () => {
+  test('blocking ask_failed row + unconsented list', async () => {
+    const inserted = [];
+    const updated = [];
+    db.raw = jest.fn((sql, binds) => ({ sql, binds }));
+    db.mockImplementation((table) => {
+      if (table === 'recipient_optin') {
+        return { insert: (row) => { inserted.push(row); return { onConflict: () => ({ ignore: async () => 1 }) }; } };
+      }
+      const b = { where: () => b, update: async (p) => { updated.push(p); return 1; } };
+      return b;
+    });
+    await holdCallGivenFallback('cust-1', '+15550100123');
+    expect(inserted[0]).toMatchObject({ phone_key: '5550100123', status: 'ask_failed', customer_id: 'cust-1' });
+    expect(updated[0].service_preferences.sql).toContain('unconsented_slot_phone_keys');
+    expect(updated[0].service_preferences.binds).toEqual(['5550100123']);
+  });
+});
+
+describe('contact login (contactSlotMayLogIn): caller-given consent covers texts, never sign-in', () => {
+  const { contactSlotMayLogIn, getAppointmentContacts } = require('../services/customer-contact');
+  const KEY = '5552220000';
+  const stamped = (prefs) => ({
+    id: 'c', phone: '+15550100999', service_contact_phone: '+15552220000', service_contact_name: 'Sample',
+    service_contacts_consent_at: new Date('2026-10-29T15:14:28Z'),
+    service_contacts_consent_source: 'call_caller_provided',
+    service_preferences: prefs,
+  });
+  afterEach(() => { delete process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY; });
+
+  test('a call-given phone is refused, with the holder-only gate off or on', () => {
+    const row = stamped(JSON.stringify({ call_given_phone_keys: [KEY] }));
+    expect(contactSlotMayLogIn(row, KEY)).toBe(false);
+    process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+    expect(contactSlotMayLogIn(row, KEY)).toBe(false);
+  });
+
+  test('...unless the holder\'s own portal save attested that phone', () => {
+    const row = stamped({ call_given_phone_keys: [KEY], login_attested_phone_keys: [KEY] });
+    expect(contactSlotMayLogIn(row, KEY)).toBe(true);
+    process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+    expect(contactSlotMayLogIn(row, KEY)).toBe(true);
+  });
+
+  test('other stamped phones, and a phone added under an existing stamp, behave as before', () => {
+    expect(contactSlotMayLogIn(stamped(null), KEY)).toBe(true);
+    expect(contactSlotMayLogIn(stamped({ call_given_phone_keys: ['5559990000'] }), KEY)).toBe(true);
+    // Another phone's provenance does not touch this one, and this one's provenance does not touch another phone.
+    expect(contactSlotMayLogIn(stamped({ call_given_phone_keys: [KEY] }), '5559990000')).toBe(true);
+  });
+
+  test('texts are unaffected: the call-given phone still receives appointment texts', () => {
+    const row = stamped(JSON.stringify({ call_given_phone_keys: [KEY] }));
+    expect(getAppointmentContacts(row, { appointment_notify_primary: false })).toEqual([
+      expect.objectContaining({ phone: '+15552220000' }),
+    ]);
+  });
+
+  test('call_given_phone_keys is a server-owned preference key that portal rewrites carry over and a merge carries along', () => {
+    const { SERVER_OWNED_PREF_KEYS, withServerOwnedPrefs } = require('../utils/service-preferences-server-keys');
+    expect(SERVER_OWNED_PREF_KEYS).toContain('call_given_phone_keys');
+    expect(withServerOwnedPrefs({ call_given_phone_keys: [KEY] }, { interior_spray: true }).call_given_phone_keys).toEqual([KEY]);
+    const dedupe = fs.readFileSync(require.resolve('../services/customer-dedupe'), 'utf8');
+    expect(dedupe).toContain("for (const key of ['unconsented_slot_phone_keys', 'consent_covered_phone_keys', 'call_given_phone_keys']) {");
   });
 });

@@ -10,6 +10,9 @@ const SERVER_OWNED_PREF_KEYS = [
   // The phones the signed-in holder's own portal contacts save listed for contact login
   // (GATE_CONTACT_LOGIN_HOLDER_ONLY): written only by that save, never client-writable.
   'login_attested_phone_keys',
+  // Phones the caller gave on a call and the pipeline stamped as text-consented (GATE_CALL_GIVEN_CONTACT_CONSENT):
+  // texts only, never contact login (customer-contact contactSlotMayLogIn). Written only by the call pipeline.
+  'call_given_phone_keys',
 ];
 
 // `next` with every server-owned key carried over from `raw` (the stored blob).

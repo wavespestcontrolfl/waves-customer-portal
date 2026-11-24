@@ -2625,7 +2625,7 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
     ...movedPhoneKeys,
   ]);
   const carried = {};
-  for (const key of ['unconsented_slot_phone_keys', 'consent_covered_phone_keys']) {
+  for (const key of ['unconsented_slot_phone_keys', 'consent_covered_phone_keys', 'call_given_phone_keys']) {
     const moving = (Array.isArray(loserPrefs[key]) ? loserPrefs[key] : []).filter((k) => finalSlotKeys.has(k));
     if (moving.length) carried[key] = [...new Set([...(Array.isArray(winnerPrefs[key]) ? winnerPrefs[key] : []), ...moving])];
   }

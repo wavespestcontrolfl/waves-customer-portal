@@ -523,10 +523,20 @@ function loginAttestedPrefs(lockedRow, phones, attested) {
   return prefs;
 }
 
+// Phones the call pipeline stamped as consented because the caller gave them on a call
+// (GATE_CALL_GIVEN_CONTACT_CONSENT, owner ruling 2026-10-29). That consent covers appointment and service
+// TEXTS only: such a phone never signs in on the strength of the stamp. It signs in only when the holder's own
+// portal save listed it (loginAttestedPhoneKeys), whatever GATE_CONTACT_LOGIN_HOLDER_ONLY says.
+function callGivenPhoneKeys(customer = {}) {
+  const keys = parsedServicePrefs(customer).call_given_phone_keys;
+  return new Set((Array.isArray(keys) ? keys : []).map((k) => phoneKeyOf(k)).filter(Boolean));
+}
+
 function contactSlotMayLogIn(customer, phoneKey) {
   const key = phoneKeyOf(phoneKey);
   if (!customer || !key) return false;
   if (!customer.service_contacts_consent_at || unconsentedSlotPhoneKeys(customer).has(key)) return false;
+  if (callGivenPhoneKeys(customer).has(key) && !loginAttestedPhoneKeys(customer).has(key)) return false;
   if (!require('../config/feature-gates').contactLoginHolderOnlyLive()) return true;
   return loginAttestedPhoneKeys(customer).has(key);
 }
@@ -559,6 +569,8 @@ module.exports = {
   contactSlotMayLogIn,
   loginAttestedPrefs,
   loginAttestedPhoneKeys,
+  callGivenPhoneKeys,
+  unconsentedSlotPhoneKeys,
   findServiceContactSlotByPhoneKey,
   phoneKeyOf,
   isServiceContactRole,
