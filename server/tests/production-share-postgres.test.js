@@ -365,6 +365,56 @@ postgres('production share credit', () => {
       expect(byVisit(rows, combined)).toMatchObject({ kind: 'priced', creditCents: 12000 });
     });
 
+    it('lets a discount follow its line: a fee waived by its own discount costs the work nothing; a discount on the work comes off the work', async () => {
+      const a = await tech('Sample Alpha');
+      const feeLine = { client_id: 'fee', description: 'WaveGuard Membership — one-time setup fee', amount: 99 };
+      const workLine = { client_id: 'svc', description: 'Quarterly Pest Service', amount: 100 };
+      const c1 = await customer();
+      const waived = await stop(a, c1, day(0), { estimated_price: '100.00' });
+      await invoice(c1, {
+        scheduled_service_id: waived, subtotal: '199.00', discount_amount: '99.00', total: '100.00',
+        line_items: JSON.stringify([workLine, feeLine, { description: 'Setup fee waived', amount: -99, discount_for: 'fee' }]),
+      });
+      const onWork = await stop(a, c1, day(1), { estimated_price: '100.00' });
+      await invoice(c1, {
+        scheduled_service_id: onWork, subtotal: '199.00', discount_amount: '20.00', total: '179.00',
+        line_items: JSON.stringify([workLine, feeLine, { description: 'Loyalty discount', amount: -20, discount_for: 'svc' }]),
+      });
+      const rows = await credits(a);
+      expect(byVisit(rows, waived)).toMatchObject({ kind: 'priced', creditCents: 10000, needsReview: false });
+      expect(byVisit(rows, onWork)).toMatchObject({ kind: 'priced', creditCents: 8000, needsReview: false });
+    });
+
+    it('takes an invoice-wide discount off the work when nothing is left out, and lists it for review when a fee or dues line is beside the work', async () => {
+      const a = await tech('Sample Alpha');
+      const c1 = await customer();
+      const plain = await stop(a, c1, day(0), { estimated_price: '100.00' });
+      await invoice(c1, {
+        scheduled_service_id: plain, subtotal: '100.00', discount_amount: '10.00', total: '90.00',
+        line_items: JSON.stringify([{ client_id: 'svc', description: 'Quarterly Pest Service', amount: 100 }, { description: 'Referral Credit', amount: -10 }]),
+      });
+      const column = await stop(a, c1, day(1), { estimated_price: '100.00' });
+      await invoice(c1, {
+        scheduled_service_id: column, subtotal: '100.00', discount_amount: '15.00', total: '85.00',
+        line_items: JSON.stringify([{ client_id: 'svc', description: 'Quarterly Pest Service', amount: 100 }]),
+      });
+      const unclear = await stop(a, c1, day(2), { estimated_price: '100.00' });
+      const wide = await invoice(c1, {
+        scheduled_service_id: unclear, subtotal: '199.00', discount_amount: '30.00', total: '169.00', stripe_payment_intent_id: 'pi_wide',
+        line_items: JSON.stringify([
+          { client_id: 'svc', description: 'Quarterly Pest Service', amount: 100 },
+          { client_id: 'fee', description: 'WaveGuard Membership — one-time setup fee', amount: 99 },
+          { description: 'Referral Credit', amount: -30 },
+        ]),
+      });
+      await refund(c1, 'pi_wide', '5.00');
+      const rows = await credits(a);
+      expect(byVisit(rows, plain)).toMatchObject({ kind: 'priced', creditCents: 9000 });
+      expect(byVisit(rows, column)).toMatchObject({ kind: 'priced', creditCents: 8500 });
+      expect(byVisit(rows, unclear)).toMatchObject({ creditCents: 0, needsReview: true, reason: expect.stringMatching(/not tied to any one line/) });
+      expect(byVisit(rows, unclear).unallocatedRefunds).toEqual([expect.objectContaining({ invoiceId: wide, refundCents: 500 })]);
+    });
+
     it('leaves a monthly dues line out of the visit credit and falls back to the price recorded on the visit, else review', async () => {
       const a = await tech('Sample Alpha');
       const c1 = await customer();
@@ -426,7 +476,7 @@ postgres('production share credit', () => {
       const rows = await credits(a);
       for (const id of [v1, v2]) {
         expect(byVisit(rows, id)).toMatchObject({ creditCents: 0, needsReview: true, reason: expect.stringMatching(/cannot be split/) });
-        expect(byVisit(rows, id).unallocatedRefunds).toEqual([{ invoiceId: shared, refundCents: 1200 }]);
+        expect(byVisit(rows, id).unallocatedRefunds).toEqual([expect.objectContaining({ invoiceId: shared, refundCents: 1200 })]);
       }
       const shown = await productionShare.previewWeek(a, W, trx);
       expect(shown.unallocatedRefundCents).toBe(1200); // the one invoice, once

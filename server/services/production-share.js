@@ -399,31 +399,73 @@ const lineCents = (line) => {
   return Number.isFinite(amount) ? Math.round(amount * 100) : 0;
 };
 
+const UNCLEAR_DISCOUNT_REASON = 'The invoice has a discount that is not tied to any one line, beside a setup fee or dues line, so what it took off the visit\'s work cannot be established.';
+
 /**
- * The visit-priced part of an invoice, before tax, in cents: the invoice's pre-tax total less the lines that are not the
- * visit's price. Left out: a monthly dues line (stamped `membership_dues_month`, billing-lane.js MEMBERSHIP_DUES_LINE_KEY),
- * and a one-time setup FEE line, by the classifier the setup-fee code already uses (estimate-first-application-invoice.js
- * sumPositiveSetupFeeCents: a line that says "setup fee", not waived). A line is never judged by words such as "initial": a
- * $150 "Initial Pest Cleanout" is treatment work and counts. null = the invoice does not establish the visit's own price (it
- * had only lines that were left out), so the caller falls back to a price recorded on the visit.
+ * The visit-priced part of an invoice, before tax, from its lines. Left out: a monthly dues line (stamped
+ * `membership_dues_month`, billing-lane.js MEMBERSHIP_DUES_LINE_KEY) and a one-time setup FEE line, by the classifier the
+ * setup-fee code already uses (estimate-first-application-invoice.js sumPositiveSetupFeeCents: a line that says "setup fee", not
+ * waived). A line is never judged by words such as "initial": a $150 "Initial Pest Cleanout" is treatment work and counts.
+ * Discounts follow their line: a negative line whose `discount_for` names a line's client_id comes off that line only (a
+ * setup-fee line waived by its own discount costs the treatment nothing). A discount tied to no line (or to a line that is gone)
+ * reaches the whole invoice: with nothing left out it comes off the work; with a fee or dues line beside the work, how much of it
+ * was meant for the work cannot be established, so the visit is listed for review, never prorated by guess.
+ * Returns { cents }, { none: true } (only left-out lines: the invoice names no visit price, so the caller falls back to a price
+ * recorded on the visit) or { unclear: reason }.
  */
 function visitPreTaxCents(row) {
   let lines = row.line_items;
   if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = null; } }
-  const base = (Number(row.subtotal) > 0
-    ? cents(row.subtotal) - (cents(row.discount_amount) || 0)
-    : cents(row.total) - (cents(row.tax_amount) || 0) + (cents(row.deposit_credit) || 0));
-  if (!Array.isArray(lines) || !lines.length) return Math.max(0, base);
+  if (!Array.isArray(lines) || !lines.length) {
+    const base = Number(row.subtotal) > 0
+      ? cents(row.subtotal) - (cents(row.discount_amount) || 0)
+      : cents(row.total) - (cents(row.tax_amount) || 0) + (cents(row.deposit_credit) || 0);
+    return { cents: Math.max(0, base) };
+  }
+  const { charges, discounts } = splitInvoiceLines(lines);
+  if (!charges.some((charge) => !charge.left)) return { none: true };
+  const byId = new Map(charges.filter((charge) => charge.id !== null).map((charge) => [charge.id, charge]));
+  let untied = 0;
+  for (const discount of discounts) {
+    const target = discount.target && byId.get(discount.target);
+    if (target) target.discount += discount.amount;
+    else untied += discount.amount;
+  }
+  // A discount on the invoice row that no negative line accounts for is an invoice-wide discount too.
+  untied += Math.max(0, (cents(row.discount_amount) || 0) - discounts.reduce((sum, d) => sum + d.amount, 0));
+  const work = charges.filter((charge) => !charge.left).reduce((sum, charge) => sum + Math.max(0, charge.amount - charge.discount), 0);
+  if (charges.some((charge) => charge.left)) return untied > 0 ? { unclear: UNCLEAR_DISCOUNT_REASON } : { cents: work };
+  return { cents: Math.max(0, work - untied) };
+}
+
+// The positive lines (marked `left` when dues or a setup fee) and the discount lines of an invoice, in cents.
+function splitInvoiceLines(lines) {
   const { sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
-  let left = 0;
-  let positive = false;
+  const charges = [];
+  const discounts = [];
   for (const line of lines) {
     const amount = lineCents(line);
-    if (amount <= 0 || (line && line.category === 'deposit_credit')) continue;
-    if (line[MEMBERSHIP_DUES_LINE_KEY] || sumPositiveSetupFeeCents({ line_items: [line] }) > 0) left += amount;
-    else positive = true;
+    if (!line || line.category === 'deposit_credit') continue;
+    if (amount > 0) {
+      charges.push({
+        id: line.client_id == null ? null : String(line.client_id), amount, discount: 0,
+        left: Boolean(line[MEMBERSHIP_DUES_LINE_KEY]) || sumPositiveSetupFeeCents({ line_items: [line] }) > 0,
+      });
+    } else if (amount < 0) discounts.push({ target: line.discount_for == null ? null : String(line.discount_for), amount: -amount });
   }
-  return positive ? Math.max(0, base - left) : null;
+  return { charges, discounts };
+}
+
+// How one invoice (a links row) is shared: { billed, refunded } Maps by visit, { skipped } (it names no visit price),
+// or { unallocated: its whole refund, reason } (its split across the visits, or what a discount took off, cannot be established).
+function invoiceShare(row, members) {
+  const priced = visitPreTaxCents(row);
+  const refunded = cents(row.refunded) || 0;
+  if (priced.none) return { skipped: true };
+  if (priced.unclear) return { unallocated: refunded, reason: priced.unclear };
+  if (members.length <= 1) return { billed: new Map([[row.visit_id, priced.cents]]), refunded: new Map([[row.visit_id, refunded]]) };
+  const parts = allocateCents(priced.cents, members);
+  return parts ? { billed: parts, refunded: allocateCents(refunded, members) } : { unallocated: refunded, reason: UNALLOCATED_REASON };
 }
 
 /**
@@ -481,22 +523,13 @@ async function billedByVisit(conn, visitIds) {
   for (const row of links.rows) {
     if (shares.has(row.invoice_id)) continue;
     const list = byInvoice.get(row.invoice_id) || [];
-    const billed = visitPreTaxCents(row);
-    const refunded = cents(row.refunded) || 0;
-    // The invoice does not establish a visit price (only dues or setup-fee lines): it is not this visit's charge or refund.
-    if (billed === null) { shares.set(row.invoice_id, { skipped: true }); continue; }
-    if (list.length <= 1) {
-      shares.set(row.invoice_id, { billed: new Map([[row.visit_id, billed]]), refunded: new Map([[row.visit_id, refunded]]) });
-    } else {
-      const billedParts = allocateCents(billed, list);
-      shares.set(row.invoice_id, billedParts ? { billed: billedParts, refunded: allocateCents(refunded, list) } : { unallocated: refunded });
-    }
+    shares.set(row.invoice_id, invoiceShare(row, list));
   }
   for (const row of links.rows) {
     const share = shares.get(row.invoice_id);
     if (share.skipped) continue;
     const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [] };
-    if (share.unallocated !== undefined) entry.unallocated.push({ invoiceId: row.invoice_id, refundCents: share.unallocated });
+    if (share.unallocated !== undefined) entry.unallocated.push({ invoiceId: row.invoice_id, refundCents: share.unallocated, reason: share.reason });
     else if (share.billed.has(row.visit_id)) {
       entry.billedCents = (entry.billedCents || 0) + share.billed.get(row.visit_id);
       entry.refundCents += (share.refunded && share.refunded.get(row.visit_id)) || 0;
@@ -556,7 +589,7 @@ function jobCredit(stop, job, billed) {
   const sold = TWO_TREATMENT_PACKAGE_KEYS.has(job.root.service_key) ? 2 : null;
   if (!sold) return toReview('multi_visit_job', 'The number of visits this job was sold with cannot be established (only the two-treatment packages are known).');
   const invoiced = billed.get(job.root.id);
-  if (invoiced && invoiced.unallocated.length) return toReview('multi_visit_job', UNALLOCATED_REASON);
+  if (invoiced && invoiced.unallocated.length) return toReview('multi_visit_job', invoiced.unallocated[0].reason);
   const price = invoiced && invoiced.billedCents !== null ? invoiced.billedCents : cents(job.root.estimated_price);
   const nth = job.planned.indexOf(stop.id) + 1;
   if (!(price > 0)) return toReview('multi_visit_job', "The job's first visit has no price on file.");
@@ -588,7 +621,7 @@ function ownPriceCredit(stop, invoiced) {
     if (!stop.annual_prepay_term_id) return toReview('prepaid_plan', 'The visit carries an annual prepay stamp but no term, so its prepay invoice and refunds cannot be traced.');
     return credited('prepaid_plan', cents(stop.prepaid_amount), "The prepaid plan's value for one visit");
   }
-  if (invoiced && invoiced.unallocated.length) return toReview('unpriced', UNALLOCATED_REASON);
+  if (invoiced && invoiced.unallocated.length) return toReview('unpriced', invoiced.unallocated[0].reason);
   // What the visit's invoice charged, before tax, whether or not it is paid; a fee change later never moves it.
   if (invoiced && invoiced.billedCents !== null) {
     if (invoiced.billedCents > 0) return credited('priced', invoiced.billedCents, "Pre-tax amount of the visit's invoice");
