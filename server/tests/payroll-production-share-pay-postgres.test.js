@@ -540,17 +540,18 @@ postgres('production share pay line', () => {
       await settings(await tech('Sample Bravo'));
       return id;
     };
-    // The connection the service reads through, with its transaction() refusing the first `times` calls whose callback mentions `marker`.
+    // The connection the service reads through, with its transaction() refusing the first `times` calls whose callback mentions `marker`,
+    // at any depth (the transaction a callback receives refuses the same way).
     const failing = (marker, times) => {
-      const original = trx.transaction.bind(trx);
       let left = times;
-      mockConnection = new Proxy(trx, {
+      const wrap = (connection) => new Proxy(connection, {
         get: (target, key) => (key === 'transaction'
           ? (work, ...rest) => (typeof work === 'function' && work.toString().includes(marker) && left-- > 0
             ? Promise.reject(new Error('another employee cannot be read'))
-            : original(work, ...rest))
+            : target.transaction((inner) => work(wrap(inner)), ...rest))
           : Reflect.get(target, key)),
       });
+      mockConnection = wrap(trx);
     };
 
     it('another employee whose settings cannot be read is left out of the preview', async () => {
@@ -559,6 +560,74 @@ postgres('production share pay line', () => {
       const shown = await api('GET', `/production-share/preview?technicianId=${id}&weekStart=${W1}`);
       expect(shown.status).toBe(200);
       expect(shown.body).toMatchObject({ creditedCents: 378000, shareCents: 16200 });
+    });
+
+    it('AUDIT :1046: a draft built from the per-technician retry is marked, and finalize never accepts it', async () => {
+      const id = await world();
+      failing('loadCreditFacts', 1); // the shared read fails once; the retry reads each employee alone
+      const created = (await draft(W1)).body.run;
+      mockConnection = trx;
+      const check = byName(created, 'Sample Alpha');
+      expect(check.productionShareCents).toBe(16200);
+      const snapshotOf = async () => (await trx('payroll_checks').where({ run_id: created.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(await snapshotOf()).toMatchObject({ degraded: true });
+      const shown = (await api('GET', `/runs/${created.id}`)).body.run;
+      expect((await finalize(created.id, shown.token)).status).toBe(409);
+      // the refused finalize leaves the draft re-read under the lock, without the mark; that one finalizes
+      expect(await snapshotOf()).not.toHaveProperty('degraded');
+      const done = await finalize(created.id);
+      expect(done.status).toBe(200);
+      expect(byName(done.body.run, 'Sample Alpha').productionShareCents).toBe(16200);
+      expect(id).toBeTruthy();
+    });
+
+    it('AUDIT :1046: finalize reads the credits under the lock without the retry: a failed shared read blocks the run', async () => {
+      const id = await world();
+      const created = (await draft(W1)).body.run;
+      failing('loadCreditFacts', 99);
+      const refusal = await finalize(created.id);
+      mockConnection = trx;
+      expect(refusal.status).not.toBe(200);
+      expect((await api('GET', `/runs/${created.id}`)).body.run.status).toBe('draft');
+      // the read under the lock itself: the shared read fails once, and nobody is retried
+      failing('loadCreditFacts', 1);
+      const inputs = await productionSharePay.readInputsUnderLock(mockConnection, W1);
+      mockConnection = trx;
+      expect([...inputs.values()].every((input) => input.error)).toBe(true);
+      expect(inputs.has(id)).toBe(true);
+      // the same failure in a draft is retried and marked
+      failing('loadCreditFacts', 1);
+      const retried = await productionSharePay.readInputs(mockConnection, W1);
+      mockConnection = trx;
+      expect(retried.get(id)).toMatchObject({ degraded: true });
+      expect(productionSharePay.revisionOf(retried)).not.toBe(productionSharePay.revisionOf(await productionSharePay.readInputsUnderLock(trx, W1)));
+    });
+
+    it('AUDIT :990: an owner-set credit on a package review row takes the package total a pay run fixed', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      const weeks = [W1, addDays(W1, 7)];
+      for (const week of weeks) await worked(id, week, 40);
+      const customerId = await customer();
+      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+      const root = await stop(id, W1, '2000.00', customerId, pkg);
+      await finalize((await draft(W1)).body.run.id); // the package total $2,000.00 is fixed with slot 1
+      const followUp = await stop(id, weeks[1], '0.00', customerId, { ...pkg, followup_included: true, followup_source_service_id: root });
+      // the package's invoice is now shared with a visit outside it: the follow-up is a review row
+      const outside = await stop(id, weeks[1], '300.00', await customer());
+      const invoiceId = await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: '2300.00', discount_amount: '0.00', tax_amount: '0.00', total: '2300.00',
+      }).returning('id').then((rows) => rows[0].id);
+      const [visit] = await trx('service_visits').insert({ customer_id: customerId, scheduled_date: W1, stop_base_key: 'k-990', created_by: 'test' }).returning('id');
+      const [packet] = await trx('visit_completion_packets').insert({ visit_id: visit.id, idempotency_key: 'k-990', request_hash: 'h', payload: {} }).returning('id');
+      for (const visitId of [root, outside]) {
+        await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-990-${visitId}`, invoice_id: invoiceId });
+      }
+      expect((await api('PUT', '/production-share/stop-override', { body: { technicianId: id, visitId: followUp, weekStart: weeks[1], creditCents: 100000, reason: 'Checked' } })).status).toBe(200);
+      const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
+      const row = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops.find((r) => r.visitId === followUp);
+      expect(row).toMatchObject({ kind: 'owner_set', bases: [{ basisType: 'job', basisId: root, totalCents: 200000, sold: 2, slot: 2 }] });
     });
 
     it('AUDIT :992: when the shared facts cannot be read, only the technician whose own facts fail is an error; the others keep their rows', async () => {

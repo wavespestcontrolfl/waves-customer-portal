@@ -712,7 +712,7 @@ async function weekStops(conn, technicianIds, weekStart) {
       's.service_address_zip', 'sv.service_key', 'sv.name as service_name', 'cp.address_line1 as prop_line1',
       'cp.address_line2 as prop_line2', 'cp.zip as prop_zip', 'rec.record_status', 'rec.record_notes',
       'c.billing_mode',
-      conn.raw(`to_char(${WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`), conn.raw(`${LINE_SQL} AS line`))
+      conn.raw(`to_char(${WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`), conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') AS scheduled_day"), conn.raw(`${LINE_SQL} AS line`))
     .orderByRaw(`${WORK_DATE_SQL}, s.completed_at NULLS LAST, s.id`);
 }
 
@@ -814,7 +814,7 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
     rows.push({
       visitId: stop.id, workDate: stop.work_date, serviceType: stop.service_type, technicianId: canonicalId(technicianId),
       // So the owner can find the visit behind a review row (the preview only; never stored with a check).
-      address: addressLine(stop), completedAt: stop.completed_at ? new Date(stop.completed_at).toISOString() : null, ...shown,
+      scheduledDate: stop.scheduled_day || null, address: addressLine(stop), completedAt: stop.completed_at ? new Date(stop.completed_at).toISOString() : null, ...shown,
       refundCents: (invoiced.refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
       // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
       unallocatedRefunds: invoiced.unallocated || [],
@@ -988,6 +988,8 @@ const invoiceIdsOf = (rows) => [...new Set(rows.flatMap((row) => [...(row.ledger
 const rootIdsOf = (rows) => [...new Set(rows.flatMap((row) => [
   row.visitId,
   ...(row.ledger && row.ledger.job ? [row.ledger.job.rootId] : []),
+  // The package of a review row too (an owner-set credit on it takes the fixed total, applyLedger slotBasis).
+  ...(row.packageSlot ? [row.packageSlot.rootId] : []),
   ...(row.ledger && row.ledger.invoices ? row.ledger.invoices.flatMap((inv) => inv.members.map((member) => member.id)) : []),
 ]))];
 // The visits whose paid state the rules need: this week's, the roots of their packages, and every member visit of the invoices they
@@ -1025,7 +1027,7 @@ async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
  * The ledger is applied to all of them together: one paid-ledger read, and the REMAINING of an invoice or a job shared by two
  * technicians is split once.
  */
-async function weekCreditsFor(conn, settingsById, weekStart, { skipOverrides = false } = {}) {
+async function weekCreditsFor(conn, settingsById, weekStart, { skipOverrides = false, retryPerTechnician = true } = {}) {
   requireWeek(weekStart);
   const ids = [...settingsById.keys()].map(canonicalId);
   const stops = await weekStops(conn, ids, weekStart);
@@ -1036,15 +1038,21 @@ async function weekCreditsFor(conn, settingsById, weekStart, { skipOverrides = f
   // The facts behind everyone's stops are read once, together. When that read fails, each technician with stops retries on his own, in
   // a savepoint of the same transaction: only the ones whose own facts cannot be read are errors, and an employee with no stops (or
   // none in the run) never blocks another.
+  // The retry is for a draft or a preview. The read under the payroll lock (finalize) passes retryPerTechnician: false: a failed shared
+  // read is then an error for every technician, and nothing is frozen from facts read apart. A technician credited from the retry
+  // is marked `degraded`, so a draft built from it is never the one a finalize accepts.
   let shared = null;
+  let sharedError = null;
   try {
     shared = await conn.transaction((sp) => loadCreditFacts(sp, stops));
-  } catch { shared = null; }
+  } catch (err) { sharedError = err; }
   for (const id of ids) {
     const own = byTech.get(id);
     try {
+      if (!shared && !retryPerTechnician) throw sharedError;
       const facts = shared || await conn.transaction((sp) => loadCreditFacts(sp, own));
-      credits.set(id, { rows: await conn.transaction((sp) => creditsOfStops(sp, id, own, settingsById.get(id), facts)) });
+      const rows = await conn.transaction((sp) => creditsOfStops(sp, id, own, settingsById.get(id), facts));
+      credits.set(id, shared ? { rows } : { rows, degraded: true });
     } catch (err) {
       credits.set(id, { error: message(err) });
     }
@@ -1052,7 +1060,7 @@ async function weekCreditsFor(conn, settingsById, weekStart, { skipOverrides = f
   const all = [...credits.values()].flatMap((one) => one.rows || []);
   const done = applyLedger(all, await paidOf(conn, all, weekStart), skipOverrides ? new Map() : await overridesOf(conn, weekStart));
   const byVisit = new Map(done.map((row) => [row.visitId, row]));
-  for (const [id, one] of credits) if (one.rows) credits.set(id, { rows: one.rows.map((row) => byVisit.get(row.visitId)) });
+  for (const [id, one] of credits) if (one.rows) credits.set(id, { ...one, rows: one.rows.map((row) => byVisit.get(row.visitId)) });
   return credits;
 }
 

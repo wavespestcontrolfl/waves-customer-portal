@@ -38,9 +38,11 @@ const shareOn = () => typeof payrollProductionShareLive === 'function' && payrol
 const KIND = 'production_share';
 
 /** The frozen record of one technician's week: the figures and one row per stop. Plain JSON, ids and cents only. Pure. */
-function snapshotOf({ weekStart, settings, result, stops }) {
+function snapshotOf({ weekStart, settings, result, stops, degraded = false }) {
   return {
     weekStart,
+    // Set when the credits came from the per-technician retry of a failed shared read: such a draft is never accepted by finalize.
+    ...(degraded ? { degraded: true } : {}),
     settingsId: settings.id,
     fromWeek: settings.fromWeek,
     rateBps: settings.rateBps,
@@ -88,7 +90,7 @@ async function readInputs(conn, weekStart) {
  * statement, never to both and never to neither; the reads after it are keyed by visit. Each technician's reads are in a
  * savepoint, so a failed read marks that technician and does not abort the pay run's transaction.
  */
-async function collectInputs(trx, weekStart) {
+async function collectInputs(trx, weekStart, { retry = true } = {}) {
   const inputs = new Map();
   const ids = await trx('technicians').where({ employment_type: 'w2' }).orderBy('id').pluck('id');
   const settingsById = new Map();
@@ -102,16 +104,16 @@ async function collectInputs(trx, weekStart) {
       inputs.set(id, { error: `The production share could not be worked out: ${(err && err.message) || 'unknown problem'}` });
     }
   }
-  const credits = await productionShare.weekCreditsFor(trx, settingsById, weekStart);
+  const credits = await productionShare.weekCreditsFor(trx, settingsById, weekStart, { retryPerTechnician: retry });
   for (const [id, one] of credits) {
     inputs.set(id, one.rows
-      ? { settings: settingsById.get(id), stops: one.rows }
+      ? { settings: settingsById.get(id), stops: one.rows, ...(one.degraded ? { degraded: true } : {}) }
       : { error: `The production share could not be worked out: ${one.error}` });
   }
   return inputs;
 }
 
-const readInputsUnderLock = (trx, weekStart) => (shareOn() ? collectInputs(trx, weekStart) : Promise.resolve(new Map()));
+const readInputsUnderLock = (trx, weekStart) => (shareOn() ? collectInputs(trx, weekStart, { retry: false }) : Promise.resolve(new Map()));
 
 /**
  * A revision of what readInputs returned: the same string for the same settings and the same credit rows (visit, date, kind,
@@ -135,7 +137,7 @@ function revisionOf(inputs) {
     const { settings } = input;
     const stops = input.stops.map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases, stop.invoices)])
       .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-    return [id, settings.id, settings.rateBps, settings.barType, settings.barCents, settings.callbackStopValueCents, stops];
+    return [id, settings.id, settings.rateBps, settings.barType, settings.barCents, settings.callbackStopValueCents, stops, input.degraded === true];
   });
   return JSON.stringify(rows);
 }
@@ -155,7 +157,7 @@ function sharesFor(inputs, technicianIds, weekStart) {
     try {
       const { settings, stops } = input;
       const result = productionShare.shareForWeek({ credits: stops, shifts: productionShare.shiftDays(stops).length, settings });
-      shares.set(id, { shareCents: result.shareCents, snapshot: snapshotOf({ weekStart, settings, result, stops }) });
+      shares.set(id, { shareCents: result.shareCents, snapshot: snapshotOf({ weekStart, settings, result, stops, degraded: input.degraded === true }) });
     } catch (err) {
       shares.set(id, { error: `The production share could not be worked out: ${(err && err.message) || 'unknown problem'}` });
     }
@@ -192,6 +194,7 @@ function signature(row) {
     Number(snapshot.rateBps), snapshot.barType, Number(snapshot.barPerUnitCents), Number(snapshot.shifts),
     Number(snapshot.creditedCents), Number(snapshot.barCents), Number(snapshot.aboveBarCents), Number(snapshot.shareCents),
     stops,
+    snapshot.degraded === true,
   ];
 }
 

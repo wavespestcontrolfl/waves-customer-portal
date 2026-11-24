@@ -246,15 +246,23 @@ describe('Production share preview', () => {
       }));
     });
 
-    it('AUDIT :257: a review row names its visit: short id, time, address and a link to that day before the Set credit form', async () => {
+    it('AUDIT :257: a review row names its visit: short id, time, address and a link to its scheduled day (not the pay date) before the Set credit form', async () => {
       await forms([
-        { visitId: '3fa85f64-5717-4562-b3fc-2c963f66afa6', workDate: '2026-09-15', completedAt: '2026-09-15T18:15:00Z', address: '123 Example St 34202',
+        { visitId: '3fa85f64-5717-4562-b3fc-2c963f66afa6', workDate: '2026-09-15', scheduledDate: '2026-09-14', completedAt: '2026-09-15T18:15:00Z', address: '123 Example St 34202',
           serviceType: 'Pest Control', kind: 'unpriced', creditCents: 0, reason: 'No price', needsReview: true, refundCents: 0 },
       ])();
       const reference = screen.getByLabelText('Visit reference');
       expect(reference).toHaveTextContent('Visit 3fa85f64 · 2:15 PM · 123 Example St 34202');
-      expect(within(reference).getByRole('link', { name: 'Open the day' })).toHaveAttribute('href', '/admin/schedule?date=2026-09-15');
+      expect(within(reference).getByRole('link', { name: 'Open the day' })).toHaveAttribute('href', '/admin/schedule?date=2026-09-14');
       expect(reference.compareDocumentPosition(screen.getByRole('form', { name: 'Set the credit of this stop' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('AUDIT :126: a row with no scheduled day offers no Open the day link (the pay work date is not the schedule day)', async () => {
+      await forms([
+        { visitId: 'v8', workDate: '2026-09-15', serviceType: 'Pest Control', kind: 'unpriced', creditCents: 0, reason: 'No price', needsReview: true, refundCents: 0 },
+      ])();
+      expect(screen.getByLabelText('Visit reference')).toHaveTextContent('Visit v8');
+      expect(screen.queryByRole('link', { name: 'Open the day' })).toBeNull();
     });
 
     it('AUDIT :259: a save or clear reloads the week while the employee and week are unchanged, even after another load started', async () => {

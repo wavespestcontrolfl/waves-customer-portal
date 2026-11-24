@@ -116,14 +116,15 @@ const NOT_BY_HAND = new Set(['already_paid', 'not_performed', 'unverified']);
 // A credit the owner set, or one the rules ignore now (the stop was reassigned, or its closeout changed): the owner can clear it.
 const CLEARABLE = new Set(['owner_set', 'owner_override_reassigned', 'owner_override_closeout_changed']);
 
-// Which visit a review row is: a short id, the time it was completed, its address, and the day's schedule to open it from.
+// Which visit a review row is: a short id, the time it was completed, its address, and the schedule of the day it was SCHEDULED for
+// (not the pay work date, which can differ) to open it from.
 function VisitReference({ stop }) {
   const parts = [`Visit ${String(stop.visitId || '').slice(0, 8)}`];
   if (stop.completedAt) parts.push(formatETTime(stop.completedAt));
   if (stop.address) parts.push(stop.address);
   return <p className="m-0 mt-1 text-ui-caption text-ink-secondary" aria-label="Visit reference">
     {parts.join(' · ')}
-    {stop.workDate && <> · <a className="underline" href={`/admin/schedule?date=${encodeURIComponent(stop.workDate)}`} target="_blank" rel="noreferrer">Open the day</a></>}
+    {stop.scheduledDate && <> · <a className="underline" href={`/admin/schedule?date=${encodeURIComponent(stop.scheduledDate)}`} target="_blank" rel="noreferrer">Open the day</a></>}
   </p>;
 }
 

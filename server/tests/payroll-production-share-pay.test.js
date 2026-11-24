@@ -486,6 +486,15 @@ describe('the credit rules (applyLedger)', () => {
     expect(one(job('first', 1), paid)).toMatchObject({ kind: 'multi_visit_job', creditCents: 100000, bases: [{ totalCents: 200000, slot: 1 }] });
   });
 
+  test('AUDIT :1046: the retry mark is in the revision, the snapshot and the review token', () => {
+    const input = (degraded) => new Map([['tech-a', { settings: SETTINGS, stops: stops([['v1', '2026-09-14', 100000]]), ...(degraded ? { degraded: true } : {}) }]]);
+    expect(share.revisionOf(input(true))).not.toBe(share.revisionOf(input(false)));
+    const snap = (degraded) => share.sharesFor(input(degraded), ['tech-a'], WEEK).get('tech-a').snapshot;
+    expect(snap(true)).toMatchObject({ degraded: true });
+    expect(snap(false)).not.toHaveProperty('degraded');
+    expect(share.signature({ production_share: snap(true) })).not.toEqual(share.signature({ production_share: snap(false) }));
+  });
+
   test('STOP OVERRIDE: the revision and the review token change with the credit the owner set, and with its kind alone', () => {
     const base = (stop) => share.revisionOf(new Map([['tech-a', { settings: SETTINGS, stops: [{ ...stops([['v1', '2026-09-14', 100000]])[0], ...stop }] }]]));
     expect(base({})).not.toBe(base({ kind: 'owner_set' }));
