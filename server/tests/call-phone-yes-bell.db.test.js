@@ -60,8 +60,20 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
     if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    // The ring takes the catalog lock without waiting (holdCardRows: LOCK TABLE services IN SHARE MODE NOWAIT), and a
+    // VACUUM or ANALYZE of `services` holds a lock that refuses it (SHARE UPDATE EXCLUSIVE). Other suites leave dead rows
+    // in `services`, so autovacuum reaches it at random times, and a ring this suite expects then rang nothing (CI
+    // 2026-11-21 and 2026-11-24). So autovacuum skips `services` while this suite runs, and afterAll turns it back on.
+    // An autovacuum already running makes this ALTER wait, and PostgreSQL cancels it after deadlock_timeout.
+    await database.raw('ALTER TABLE services SET (autovacuum_enabled = false)');
   });
-  afterAll(async () => { await database.destroy(); });
+  afterAll(async () => {
+    try {
+      await database.raw('ALTER TABLE services RESET (autovacuum_enabled)');
+    } finally {
+      await database.destroy();
+    }
+  });
   let admin;
   beforeEach(async () => {
     jest.clearAllMocks();
