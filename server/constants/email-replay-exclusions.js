@@ -38,6 +38,13 @@ const CARBON_COPY_CATEGORY = 'email_cc';
 // a failed send again itself, after fresh checks, at most once a day.
 const MULTI_HOME_DISCOUNT_CATEGORY = 'multi_home_discount_on';
 
+// Category stamped on the "add a card" reminder (GATE_CARD_ON_FILE_REMINDER, payment-lifecycle-email.js
+// sendCardOnFileReminder). Its copy is true only while the customer still has no usable payment method, still has a
+// visit or an open invoice, and is not suppressed, which the sweep proves at its own send. A stored copy re-sent
+// later would skip that proof, so neither stored-copy rail re-sends it: a blocked or bounced one settles as not
+// sent, and the next daily pass decides again inside its 7-day grace window.
+const CARD_ON_FILE_REMINDER_CATEGORY = 'card_on_file_reminder';
+
 // Every category whose stored copy is never re-sent, with the reason a stopped
 // provider retry records.
 const NO_STORED_COPY_REPLAY = new Map([
@@ -46,6 +53,7 @@ const NO_STORED_COPY_REPLAY = new Map([
   [MOVE_NOTICE_CATEGORY, 'Not re-sent from stored copy (the visit may have changed since).'],
   [CARBON_COPY_CATEGORY, 'Not re-sent from stored copy (it was copied to a second address).'],
   [MULTI_HOME_DISCOUNT_CATEGORY, 'Not re-sent from stored copy (the family discount is checked again before any re-send).'],
+  [CARD_ON_FILE_REMINDER_CATEGORY, 'Not re-sent from stored copy (the customer may have added a card or lost the visit since).'],
 ]);
 
 // The stop reason for a message's categories (an array), or null when its stored copy may be re-sent.
@@ -55,6 +63,6 @@ function staleStoredCopyReason(categories) {
 }
 
 module.exports = {
-  ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, ESTIMATE_FOLLOWUP_CATEGORY, MOVE_NOTICE_CATEGORY, CARBON_COPY_CATEGORY, MULTI_HOME_DISCOUNT_CATEGORY,
+  ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, ESTIMATE_FOLLOWUP_CATEGORY, MOVE_NOTICE_CATEGORY, CARBON_COPY_CATEGORY, MULTI_HOME_DISCOUNT_CATEGORY, CARD_ON_FILE_REMINDER_CATEGORY,
   NO_STORED_COPY_REPLAY, staleStoredCopyReason,
 };
