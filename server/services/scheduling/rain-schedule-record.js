@@ -105,14 +105,20 @@ function nwsReader(read) {
 const overlaps = (a, b) => a.start < b.end && b.start < a.end;
 const techOf = (row) => (row.visit.technician_id == null ? null : String(row.visit.technician_id));
 
-/** True when a target already accepted for this day's proposals holds the technician at that time. */
-const clashes = (taken, tech, date, start, end) => taken.some((t) => t.date === date
-  && (t.tech == null || tech == null || t.tech === tech) && overlaps(t, { start, end }));
+/**
+ * True when a target already accepted for this day's proposals holds the technician at that time. The same test the
+ * occupancy probe applies: with GATE_MULTI_TECH_CONFIRM on, only the same technician's route and unassigned stops
+ * conflict; off, an overlap on any technician does.
+ */
+const clashes = (taken, tech, date, start, end) => {
+  const scoped = tech != null && require('./occupancy').techScopedConfirmActive();
+  return taken.some((t) => t.date === date && (!scoped || t.tech == null || t.tech === tech) && overlaps(t, { start, end }));
+};
 
 /**
  * The first of the finder's later days whose hours for this visit's span read dry and are not already taken by a move
- * accepted for this technician, or null. Unread is never dry. A one-off move goes to a later date only: the planned
- * date itself (and any earlier one) is never a target.
+ * accepted for this technician, or null. Unread is never dry. A one-off move goes to a later work day only (Monday to
+ * Saturday, as the target day): never the planned date, an earlier one or a Sunday.
  */
 async function dryDayFor(row, hourly, { day, today, dayOptions, taken }) {
   const length = row.visit.reach.endMin - row.visit.reach.startMin;
@@ -120,7 +126,7 @@ async function dryDayFor(row, hourly, { day, today, dayOptions, taken }) {
   const options = await dayOptions(row.visit.id, length);
   for (const option of options || []) {
     const startMin = toMin(option?.suggestedWindow?.start);
-    if (!option?.date || startMin == null || option.date <= day || !inRainHorizon(option.date, today)) continue;
+    if (!option?.date || startMin == null || option.date <= day || dayOfWeek(option.date) === 0 || !inRainHorizon(option.date, today)) continue;
     const rain = rainPass.spanRain(hourly, option.date, startMin, startMin + length);
     if (!rain.complete || rain.peak >= DRY_PCT) continue;
     if (clashes(taken, techOf(row), option.date, startMin, startMin + length)) continue;
@@ -174,22 +180,24 @@ async function proposeFor(row, ctx) {
   base.peak = row.peak;
   const { reach } = row.visit;
   const length = reach.endMin - reach.startMin;
-  if (!open && row.proposal) return { ...base, decision: 'cap', would: 'reorder', to_start: row.proposal };
+  // A hour already taken by an earlier proposal is never offered, over the cap or not.
   const own = await reorderStart(row, ctx);
   if (own != null) {
+    if (!open) return { ...base, decision: 'cap', would: 'reorder', to_start: toHHMM(own) };
     const start = own - (reach.ownStartMin - reach.startMin);
     taken.push({ tech: techOf(row), date: day, start, end: start + length });
     return { ...base, decision: 'reorder', to_start: toHHMM(own) };
   }
   // No dry open hour left on the day. Only a wholly wet day moves to another one: the point's own hours, read again
-  // (the NWS read is cached by grid cell).
+  // (the NWS read is cached by grid cell). The move is checked against the accepted targets before the cap is named:
+  // a stop over the cap is `cap` only when a valid move exists, else it keeps its true reason.
   const hourly = await read(row.visit.point.lat, row.visit.point.lng);
   if (!Array.isArray(hourly)) return { ...base, decision: 'none', reason: 'unread_forecast' };
   const { wet } = rainMode.countWetHours(hourly, day);
   if (wet < rainMode.RAIN_HOURS) return { ...base, decision: 'none', reason: 'no_dry_hour' };
-  if (!open) return { ...base, decision: 'cap', would: 'day_move' };
   const target = await dryDayFor(row, hourly, ctx);
   if (!target) return { ...base, decision: 'none', reason: 'no_dry_day' };
+  if (!open) return { ...base, decision: 'cap', would: 'day_move', to_date: target.date, to_start: target.start };
   taken.push({ tech: techOf(row), date: target.date, start: target.startMin, end: target.end });
   return { ...base, decision: 'day_move', to_date: target.date, to_start: target.start, series: false };
 }
@@ -232,11 +240,15 @@ async function planDay({ now, conn, day, today, read, deps }) {
     loadOccupancy: async (args) => { snapshot = await RainOut.loadOccupancy(args); return snapshot; },
     conflictsForTarget: (...args) => RainOut.conflictsForTarget(...args),
   };
+  // Every service is classed by the catalog (catalogGate null), not by name while the rain-pass gate is off.
   // No notice to lead here: a stop that starts within 2 hours (a 6 AM recheck of an 8 AM visit) still has its rain read.
   const rows = (await rainPass.planRainPass({
     now, db: conn,
-    deps: { ...deps, rainOut, leadMinutes: 0, loadStops: stopsFor, hourlyRain: (lat, lng) => readHourly(lat, lng) },
+    deps: { ...deps, rainOut, leadMinutes: 0, catalogGate: null, loadStops: stopsFor, hourlyRain: (lat, lng) => readHourly(lat, lng) },
   })).filter((row) => row.date === day);
+  // rain-pass reads a failed occupancy snapshot as "every hour is taken": a day decided on it would freeze a move while a
+  // dry hour was open. No snapshot is a planning problem, so nothing freezes and the 15:06 run tries again.
+  if (!snapshot) return { proposals: [], checked: 0, dry: 0, problem: `occupancy unread for ${day}` };
   const parts = etParts(now);
   const occupied = (visit, date, start, end) => !snapshot || RainOut.conflictsForTarget(
     snapshot, visit.id, date, { start: toHHMM(start), end: toHHMM(end) },
@@ -410,7 +422,14 @@ async function recordScheduleRain({ now = new Date(), conn = db, read = getNwsHo
       if (planned.problem) problems.push(planned.problem);
       else days[day] = nextDayRow(days[day], { day, kind, plan: planned, at: run.at });
     }
-    run.scored = await scorePastDays(days, now, { fetchRain, loadPoints: deps.loadPoints || rainPass.loadPoints, conn });
+    // Scoring is its own try: a failure there never drops the day's decision made above.
+    try {
+      run.scored = await scorePastDays(days, now, { fetchRain, loadPoints: deps.loadPoints || rainPass.loadPoints, conn });
+    } catch (err) {
+      problems.push(`scoring failed: ${err.message}`);
+      run.error = `scoring failed: ${err.message}`;
+      logger.error(`[schedule-rain-record] scoring failed: ${err.message}`);
+    }
     await saveRun(conn, run, days, now);
     logger.info(`[schedule-rain-record] ${day} ${kind}: ${run.proposals.length} proposal(s), scored ${run.scored.length}`);
   } catch (err) {
