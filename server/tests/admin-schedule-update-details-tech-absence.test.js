@@ -451,25 +451,24 @@ describe('PUT /:id/update-details — technician job type (office paths warn, ne
     expect((body.warnings || []).some((w) => /set to Off/.test(w))).toBe(false);
   });
 
-  test('gate on, a following scope moves the later visits to a technician Off for their category, or whose shift does not hold one, while this visit keeps its technician: the reply carries every line of those visits (Codex #6740 r2)', async () => {
+  test('gate on, a following scope moves the later visits to a technician Off for their category while this visit keeps its technician: the reply warns (Codex #6740 r2)', async () => {
     process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
     const LINE = 'Test Tech B is set to Off for General pest work.';
-    const SHIFT_LINE = "Test Tech B's shift is 8:00 AM to 12:00 PM. This visit is outside those hours.";
     const anchor = baseSvc({ technician_id: TECH_B, recurring_parent_id: 'parent-1' });
     const later = baseSvc({ id: 'svc-2', technician_id: TECH_A, recurring_parent_id: 'parent-1', scheduled_date: NEW_DATE, day: NEW_DATE });
     setup({ svc: anchor, absenceTechId: null, absenceDate: null, seriesRows: [anchor, later] });
     assignDispatchJob.mockImplementation(async ({ jobId }) => (jobId === 'svc-2'
-      ? { changed: true, technicianName: 'Test Tech B', warnings: [SHIFT_LINE, LINE] }
+      ? { changed: true, technicianName: 'Test Tech B', warnings: [LINE], capabilityWarnings: [LINE] }
       // The edited visit's own line comes from the values the save writes, never
       // from the assignment's read of the row as it stood.
-      : { changed: false, technicianName: 'Test Tech B', warnings: ['stale line for the edited visit'] }));
+      : { changed: false, technicianName: 'Test Tech B', capabilityWarnings: ['stale line for the edited visit'] }));
 
     const { status, body } = await put('svc-1', { technicianId: TECH_B, assignmentScope: 'following' });
 
     expect(status).toBe(200);
     expect(body.success).toBe(true);
     expect(assignDispatchJob).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'svc-2', technicianId: TECH_B }));
-    expect(body.warnings).toEqual([SHIFT_LINE, LINE]);
+    expect(body.warnings).toEqual([LINE]);
   });
 
   test('gate off: an Off category is ignored', async () => {

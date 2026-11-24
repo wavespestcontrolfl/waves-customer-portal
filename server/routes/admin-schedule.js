@@ -2714,10 +2714,9 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
   }
 
   const assignmentWarnings = new Set();
-  // The lines for the OTHER visits a series scope reassigns (day off, shift hours,
-  // job type). The edit handler warns for the edited visit itself, from the values
-  // it is saving.
-  const siblingWarnings = new Set();
+  // Job-type lines for the OTHER visits a series scope reassigns. The edit
+  // handler warns for the edited visit itself, from the values it is saving.
+  const siblingCapabilityWarnings = new Set();
   for (const targetId of targetIds) {
     const assignment = await assignDispatchJob({
       jobId: targetId,
@@ -2731,9 +2730,9 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     });
     if (assignment.technicianName) technicianName = assignment.technicianName;
     if (assignment.changed) changedJobIds.push(targetId);
-    for (const line of assignment.warnings || []) {
-      assignmentWarnings.add(line);
-      if (String(targetId) !== String(jobId)) siblingWarnings.add(line);
+    for (const line of assignment.warnings || []) assignmentWarnings.add(line);
+    if (String(targetId) !== String(jobId)) {
+      for (const line of assignment.capabilityWarnings || []) siblingCapabilityWarnings.add(line);
     }
   }
 
@@ -2763,7 +2762,7 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     changed: changedJobIds.length > 0 || templateChanged,
     technicianName,
     ...(assignmentWarnings.size ? { warnings: [...assignmentWarnings] } : {}),
-    ...(siblingWarnings.size ? { siblingWarnings: [...siblingWarnings] } : {}),
+    ...(siblingCapabilityWarnings.size ? { siblingCapabilityWarnings: [...siblingCapabilityWarnings] } : {}),
   };
 }
 
@@ -16122,12 +16121,10 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         });
         assignmentChanged = !!assignment.changed;
         assignmentUpdatedJobIds = assignment.changedJobIds || [];
-        // A following or whole-series scope can move the other visits to a technician
-        // who does not work their day (GATE_TECH_WORK_DAYS), whose shift does not hold
-        // them (GATE_TECH_SHIFT_HOURS) or who is Off for their job type
-        // (GATE_TECH_JOB_TYPE_CHECKS, Codex #6740 r2), even when this visit keeps its
-        // technician. Each of those visits is told as the board's assign tells it.
-        for (const line of assignment.siblingWarnings || []) {
+        // Job type (GATE_TECH_JOB_TYPE_CHECKS): a following or whole-series scope
+        // can move the other visits to a technician who is Off for their job type
+        // even when this visit keeps its technician (Codex #6740 r2).
+        for (const line of assignment.siblingCapabilityWarnings || []) {
           if (!editWarnings.includes(line)) editWarnings.push(line);
         }
       }
