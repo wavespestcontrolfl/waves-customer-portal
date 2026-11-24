@@ -1701,7 +1701,7 @@ async function makeDueStaffRecords() {
 
 // ------------------------------------------------ the first-days checklist
 
-// What the owner does by hand after a signature (owner plan 2026-11-19, "build"): three items before the first day,
+// What the owner does by hand after a signature (owner plan 2026-11-19, "build"): four items before the first day,
 // and Form I-9 within 3 business days of it. A mark is job_offers.checklist[<key>] = { at, by, by_name }, kept on the
 // hire's contract: the newest signed offer of the application. An item is done when ANY signed offer of the
 // application holds its mark, so a second signature of a reopened application keeps what was done; a write moves the
@@ -1714,14 +1714,20 @@ async function makeDueStaffRecords() {
 const FIRST_DAYS_ITEMS = [
   { key: 'driving_record', label: 'Driving record copy', inBell: 'the driving record copy' },
   { key: 'license', label: "Driver's license check", inBell: "the driver's license check" },
-  { key: 'workers_comp', label: "Workers' comp in force", inBell: "workers' comp in force" },
+  // Owner 2026-11-24 *fix checklist*: no workers' comp policy for the first technician (workers-comp skip ruling),
+  // so that item is gone; a mark stored under it stays in job_offers.checklist and no longer shows. Form W-4 (none on
+  // file withholds as single) and the signed pay method form are due before the first day. The form records the
+  // hire's choice: direct deposit (F.S. 532.04: it needs the employee's written consent) or a paper check, which
+  // payroll also pays, so the item is done either way.
+  { key: 'w4', label: 'Form W-4', inBell: 'Form W-4' },
+  { key: 'pay_method', label: 'Pay method form (direct deposit or check)', inBell: 'the pay method form' },
   { key: 'i9', label: 'Form I-9', inBell: 'Form I-9', afterStart: true },
 ];
 // The hire's login (owner 2026-11-22 "press"): a person turns it on with the Team tab's Hired button, on a row with a
 // linked Waves Google address, and no job does it. This item is the reminder: first in the list, due before the first
 // day, marked by hand like the others (`note`: what to do, on the card; the alert's why holds 110 characters, so the
 // bell's words are short). The words fit a row with no Hired button too (a hire who is already active). It is in the
-// checklist while staff Google sign-in is live; with it off no press makes that login, and the checklist is the four
+// checklist while staff Google sign-in is live; with it off no press makes that login, and the checklist is the five
 // items above. A stored mark is kept either way.
 const LOGIN_ITEM = {
   key: 'google_login',
@@ -1756,7 +1762,7 @@ async function firstDayOf(conn, signed) {
 }
 
 // Each item with its due day and its mark. `signed`: the hire's signed offers, newest first. The bell names an item
-// from `ringFrom`: the day after the hire's FIRST signature for the three items due before the first day (a
+// from `ringFrom`: the day after the hire's FIRST signature for the items due before the first day (a
 // replacement offer does not start them again), the first day for Form I-9.
 function firstDaysItems(signed, marks, firstDay) {
   const i9Due = addBusinessDays(firstDay, I9_BUSINESS_DAYS);
