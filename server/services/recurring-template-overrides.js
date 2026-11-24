@@ -36,5 +36,34 @@ function overlayRecurringTemplateOverrides(parent, cols) {
   return { ...parent, ...overrides };
 }
 
-module.exports = { PRICE_SERVICE_SERVICE_KEYS, PRICE_SERVICE_PRICE_KEYS, PRICE_SERVICE_OVERRIDE_KEYS,
+// The per-visit price a recurring series bills going forward, and whether it carries a stored discount: the series' price
+// template when a price override is set, else its latest live visit's own price (a lapsed series has no live visit, so the
+// latest visit that was not cancelled, skipped or moved). price is a number, or null when the series carries no per-visit price
+// (a dues-covered member). `lock` reads the parent FOR SHARE (an in-transaction recheck). null when the series is gone.
+async function seriesEffectivePriceFacts(conn, parentId, { lock = false } = {}) {
+  if (!parentId) return null;
+  const cols = await conn('scheduled_services').columnInfo();
+  const parentQuery = conn('scheduled_services').where({ id: parentId });
+  if (lock) parentQuery.forShare();
+  const parent = await parentQuery.first();
+  if (!parent) return null;
+  const latest = await conn('scheduled_services')
+    .where((q) => q.where({ id: parentId }).orWhere({ recurring_parent_id: parentId }))
+    .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled', 'no_show'])
+    .orderBy('scheduled_date', 'desc')
+    .first();
+  const basis = latest || parent;
+  const template = overlayRecurringTemplateOverrides(parent, cols);
+  const overridden = !!parseTemplateOverrides(parent.recurring_template_overrides)
+    && Object.prototype.hasOwnProperty.call(parseTemplateOverrides(parent.recurring_template_overrides), 'estimated_price')
+    && isEnabled('editApptPriceServiceScope');
+  const raw = overridden ? template.estimated_price : basis.estimated_price;
+  const { hasStoredDiscount } = require('./intelligence-bar/reprice-visits-tools');
+  return {
+    price: raw == null || raw === '' ? null : Number(raw),
+    discounted: hasStoredDiscount(basis) || (overridden && hasStoredDiscount(template)),
+  };
+}
+
+module.exports = { seriesEffectivePriceFacts, PRICE_SERVICE_SERVICE_KEYS, PRICE_SERVICE_PRICE_KEYS, PRICE_SERVICE_OVERRIDE_KEYS,
   parseTemplateOverrides, overlayRecurringTemplateOverrides };

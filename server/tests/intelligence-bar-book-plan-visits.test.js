@@ -83,7 +83,7 @@ function seed(overrides = {}) {
   // The earlier series: a finished parent for the same service.
   tables.scheduled_services = overrides.series || [{
     id: 'old-parent', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID,
-    service_type: 'Quarterly Pest Control Service', property_id: PROPERTY_ID, status: 'completed',
+    service_type: 'Quarterly Pest Control Service', property_id: PROPERTY_ID, status: 'completed', scheduled_date: '2098-11-02', estimated_price: 89,
   }];
   tables.customer_properties = overrides.properties || [{
     id: PROPERTY_ID, customer_id: CUSTOMER_ID, active: true, is_primary: true,
@@ -203,7 +203,9 @@ describe('the card', () => {
   });
 
   test('a dues-covered member\'s series shows no per-visit price', async () => {
+    // A dues-covered member's earlier series carries no per-visit price either.
     seed({ customer: { billing_mode: 'monthly_membership', monthly_rate: 59, waveguard_tier: 'Gold' } });
+    tables.scheduled_services[0].estimated_price = null;
     const card = await propose();
     expect(card.price_per_visit).toBeNull();
     expect(card.price_note).toMatch(/monthly dues/);
@@ -343,6 +345,7 @@ describe('refusals (nothing is booked, nothing is carded)', () => {
     expect(result.error).toMatch(/per-application fee/);
     // A dues-covered member's series carries no per-visit price by design, so it still gets a card.
     seed({ customer: { billing_mode: 'monthly_membership', monthly_rate: 59, waveguard_tier: 'Gold' } });
+    tables.scheduled_services[0].estimated_price = null;
     expect((await propose()).preview).toBe(true);
   });
 });
@@ -377,7 +380,7 @@ describe('refusals that read the handler\'s own helpers', () => {
     ];
     const parent = (extra = {}) => ({
       id: 'old', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID,
-      service_type: 'Quarterly Pest Control Service', property_id: PROPERTY_ID, status: 'completed', ...extra,
+      service_type: 'Quarterly Pest Control Service', property_id: PROPERTY_ID, status: 'completed', scheduled_date: '2098-11-02', estimated_price: 89, ...extra,
     });
     beforeEach(() => {
       const CustomerProperties = require('../services/customer-properties');
@@ -478,8 +481,9 @@ describe('overlaps, credit and the same-slot rules', () => {
 describe('the lawn cadence the plan really follows', () => {
   test('a residential six-week lawn service shows and pins the nine lawn rounds, not "every 6 weeks"', async () => {
     seed({ services: [{ id: SERVICE_ID, name: '6-Week Lawn Care Service', service_key: 'lawn_care', category: 'lawn', billing_type: 'recurring', frequency: 'every_6_weeks', base_price: 55, is_active: true }],
-      series: [{ id: 'old-lawn', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID, service_type: '6-Week Lawn Care Service', property_id: PROPERTY_ID, status: 'completed' }] });
+      series: [{ id: 'old-lawn', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID, service_type: '6-Week Lawn Care Service', property_id: PROPERTY_ID, status: 'completed', scheduled_date: '2098-11-02', estimated_price: 55 }] });
     jest.spyOn(AdminSchedule, 'lawnRoundsSeriesForBooking').mockResolvedValue({ pattern: 'lawn_rounds_9', intervalDays: undefined });
+    pricing = { ...pricing, finalPrice: 55, primaryBase: 55 };
     const card = await propose({ ...INPUT, service_type: '6-Week Lawn Care Service' });
     expect(card.error).toBeUndefined();
     expect(card).toMatchObject({ cadence: 'nine lawn rounds a year', cadence_pattern: 'lawn_rounds_9' });
@@ -496,6 +500,59 @@ describe('the lawn cadence the plan really follows', () => {
   });
 });
 
+describe('the price the plan last billed (owner 2026-11-24, option A)', () => {
+  const refusedPrice = async (input = INPUT) => {
+    const result = await propose(input);
+    expect(result.code).toBe('price_changed_since_last_plan');
+    expect(result.error).toMatch(/price changed since the last plan; restart through an estimate/);
+    expect(result.preview).toBeUndefined();
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+    return result;
+  };
+
+  test('the same price books: the earlier plan billed today\'s catalog price with no discount', async () => {
+    const card = await propose();
+    expect(card.preview).toBe(true);
+    expect(card.price_per_visit).toBe('$89.00');
+    expect(card._approved.priorSeries.price).toBe(89);
+    const result = await propose(confirmedInput(card));
+    expect(result.success).toBe(true);
+    expect(AdminSchedule.createScheduleBooking.mock.calls[0][0].approvedBooking.priorSeries).toMatchObject({ id: 'old-parent', price: 89 });
+  });
+
+  test('a different price refuses (a legacy lower price, or a catalog price that has since moved)', async () => {
+    tables.scheduled_services[0].estimated_price = 79;
+    await refusedPrice();
+    tables.scheduled_services[0].estimated_price = 89;
+    tables.services[0].base_price = 95;
+    pricing = { ...pricing, finalPrice: 95 };
+    await refusedPrice();
+  });
+
+  test('a discount stamped on the earlier plan refuses, even when the net price equals the catalog price', async () => {
+    tables.scheduled_services[0].discount_id = 'disc-1';
+    await refusedPrice();
+  });
+
+  test('a series template price override is the earlier plan\'s price', async () => {
+    jest.spyOn(require('../services/recurring-template-overrides'), 'seriesEffectivePriceFacts').mockResolvedValue({ price: 74, discounted: false });
+    await refusedPrice();
+  });
+
+  test('an earlier plan priced nothing while today\'s visit is priced refuses', async () => {
+    tables.scheduled_services[0].estimated_price = null;
+    await refusedPrice();
+  });
+
+  test('the earlier plan\'s price changing between the card and Confirm refuses at Confirm', async () => {
+    const card = await propose();
+    tables.scheduled_services[0].estimated_price = 79;
+    const result = await propose(confirmedInput(card));
+    expect(result).toMatchObject({ code: 'price_changed_since_last_plan', preview_changed: true });
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+  });
+});
+
 describe('Confirm', () => {
   test('makes exactly one createScheduleBooking call with exactly the pinned body, as the confirming admin', async () => {
     tables.technicians = [{ id: 'staff-1', name: 'Test Admin' }];
@@ -509,7 +566,7 @@ describe('Confirm', () => {
       dates: QUARTERLY_DATES, price: 89, propertyId: PROPERTY_ID, technicianId: null,
       address: { line1: '1 Example Way', line2: '', city: 'Bradenton', state: 'FL', zip: '34205' },
       // The earlier series that made this a rebook; the handler re-reads it under lock.
-      priorSeries: { id: 'old-parent', family: require('../services/recurring-appointment-seeder').duplicateGuardFamilyKey('Quarterly Pest Control Service'), serviceId: SERVICE_ID },
+      priorSeries: { id: 'old-parent', family: require('../services/recurring-appointment-seeder').duplicateGuardFamilyKey('Quarterly Pest Control Service'), serviceId: SERVICE_ID, price: 89 },
       // The eligibility facts the handler compares with the locked customer row.
       customer: { id: CUSTOMER_ID, active: true, billing_mode: 'per_visit', payer_id: null, monthly_rate: null, waveguard_tier: null },
     });
@@ -557,7 +614,8 @@ describe('Confirm', () => {
     change();
     const result = await propose(confirmedInput(card));
     expect(result.preview_changed).toBe(true);
-    expect(result.error).toMatch(/changed after the card was shown/);
+    // A moved catalog price now also means the price changed since the last plan; the other drifts say what changed since the card.
+    expect(result.error).toMatch(/changed (after the card was shown|since the last plan)/);
     expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
   });
 

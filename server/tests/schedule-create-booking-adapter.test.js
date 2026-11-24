@@ -297,6 +297,14 @@ describe('createScheduleBooking approvedBooking (the transaction asserts what th
     expect(result.json.error).toMatch(/earlier plan/);
   });
 
+  test('the earlier plan\'s price, re-read under lock, rolls the booking back when it is no longer the one the card judged', async () => {
+    const result = await book({ ...approved, priorSeries: { ...priorSeries, price: 79 } });
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/price of the earlier plan/);
+    const ok = await book({ ...approved, priorSeries: { ...priorSeries, price: null } });
+    expect(ok.status).toBe(201);
+  });
+
   test('a booking approved without its earlier series is refused (fail closed)', async () => {
     const result = await book({ ...approved, priorSeries: undefined });
     expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });

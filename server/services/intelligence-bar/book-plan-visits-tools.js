@@ -27,6 +27,8 @@
  *     be active); an older row with no property stamp does not qualify and is sent to the estimate;
  *   - no inspection-credit offer is open (paused ones included): a booking would record it and can mint credit;
  *   - no other visit holds any planned slot (any overlap refuses, probed at the service's real duration);
+ *   - the earlier series' per-visit price and discounts equal today's catalog price (owner 2026-11-24, option A); otherwise
+ *     "the price changed since the last plan; restart through an estimate" (price_changed_since_last_plan);
  *   - no price, discount, add-on, booster, tier, monthly-rate or prepay change: the body carries no pricing
  *     field, a priced discount or add-on line refuses, a customer on annual prepay refuses, and a booking whose
  *     tier / monthly-rate sync would write the customer row refuses;
@@ -431,6 +433,14 @@ async function planBooking(input) {
   if (visitCount != null && (visitCount < 2 || visitCount > MAX_VISIT_COUNT)) return refuse(`visit_count must be 2 to ${MAX_VISIT_COUNT}.`, 'invalid_input');
   const priced = await priceFor({ customer, catalogRow, scheduledDate: dateStr, bookingProperty });
   if (priced.refusal) return priced.refusal;
+  // Owner ruling 2026-11-24 (option A): the plan restarts only at the price it last billed. If the earlier series' per-visit
+  // price, or a discount stamped on it, differs from today's catalog price, the price changed since the last plan and
+  // the restart goes through an estimate. The prior price is pinned and the handler's transaction re-reads it.
+  const priorFacts = await require('../recurring-template-overrides').seriesEffectivePriceFacts(db, priorSeries.id);
+  const centsOf = (v) => (v == null ? null : Math.round(Number(v) * 100));
+  if (!priorFacts || priorFacts.discounted || centsOf(priorFacts.price) !== centsOf(priced.price)) {
+    return refuse('The price changed since the last plan; restart through an estimate. The bar books a plan again only at the price and discounts it last billed.', 'price_changed_since_last_plan');
+  }
   const body = bodyFor({
     input: { ...input, scheduled_date: dateStr }, catalogRow, cadence, windowStart,
     technicianId: tech.tech?.id || null, propertyId: bookingProperty.property_id, visitCount, sendTexts,
@@ -451,7 +461,7 @@ async function planBooking(input) {
   const cadenceLabel = effectivePattern === LAWN_ROUNDS_PATTERN ? 'nine lawn rounds a year' : cadence.label;
   const pins = {
     effective_pattern: effectivePattern,
-    prior_series: priorSeries,
+    prior_series: { ...priorSeries, price: priorFacts.price },
     body,
     dates: planned.dates,
     price: priced.price,
@@ -493,7 +503,7 @@ async function planBooking(input) {
       // The eligibility facts the card judged; the handler compares them with the locked customer row before inserting.
       customer: pins.customer,
       // The earlier series that made this a rebook; the handler re-reads it under lock.
-      priorSeries: { id: priorSeries.id, family: priorSeries.family, serviceId: String(catalogRow.id) },
+      priorSeries: { id: priorSeries.id, family: priorSeries.family, serviceId: String(catalogRow.id), price: priorFacts.price },
       address: { line1: bookingProperty.service_address_line1, line2: bookingProperty.service_address_line2, city: bookingProperty.service_address_city, state: bookingProperty.service_address_state, zip: bookingProperty.service_address_zip },
     },
   };

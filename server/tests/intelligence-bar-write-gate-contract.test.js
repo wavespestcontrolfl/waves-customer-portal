@@ -754,7 +754,7 @@ const UNCONFIRMED_CALLS = [
     }, {
       customers: [{ id: '00000000-0000-0000-0000-00000000c701', first_name: 'Robin', last_name: 'Sample', active: true, billing_mode: 'per_visit', payer_id: null, address_line1: '1 Example Way', city: 'Bradenton', state: 'FL', zip: '34205' }],
       services: [{ id: 'svc-quarterly-pest', name: 'Quarterly Pest Control Service', service_key: 'pest_quarterly', billing_type: 'recurring', frequency: 'quarterly', base_price: 89, is_active: true }],
-      scheduled_services: [{ id: 'old-parent', customer_id: '00000000-0000-0000-0000-00000000c701', is_recurring: true, recurring_parent_id: null, service_id: 'svc-quarterly-pest', service_type: 'Quarterly Pest Control Service', property_id: '00000000-0000-0000-0000-00000000c702', status: 'completed' }],
+      scheduled_services: [{ id: 'old-parent', customer_id: '00000000-0000-0000-0000-00000000c701', is_recurring: true, recurring_parent_id: null, service_id: 'svc-quarterly-pest', service_type: 'Quarterly Pest Control Service', property_id: '00000000-0000-0000-0000-00000000c702', status: 'completed', scheduled_date: '2098-11-02', estimated_price: 89 }],
       customer_properties: [{ id: '00000000-0000-0000-0000-00000000c702', customer_id: '00000000-0000-0000-0000-00000000c701', active: true, address_line1: '1 Example Way', city: 'Bradenton', state: 'FL', zip: '34205' }],
     }],
     // resend_receipt's preview reads the paid invoice and the receipt resolvers

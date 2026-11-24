@@ -8698,6 +8698,12 @@ async function assertApprovedPriorSeries(trx, customerId, approved) {
     || String(row.property_id || '') !== String(approved.propertyId || '')) {
     throw approvedBookingChanged('The earlier plan this rebook relies on changed since the card was shown.');
   }
+  // The earlier plan's price (and that it carried no discount) is what the card judged equal to today's catalog price.
+  const facts = await require('../services/recurring-template-overrides').seriesEffectivePriceFacts(trx, prior.id, { lock: true });
+  const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
+  if (!facts || facts.discounted || cents(facts.price) !== cents(prior.price)) {
+    throw approvedBookingChanged('The price of the earlier plan changed since the card was shown.');
+  }
 }
 
 async function assertApprovedBooking(trx, approved, { rows, customerId, planBefore }) {
