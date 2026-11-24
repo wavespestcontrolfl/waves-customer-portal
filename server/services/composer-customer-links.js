@@ -952,20 +952,23 @@ const PORTAL_HOST_ENV_NAMES = Object.freeze(['PUBLIC_PORTAL_URL', 'PORTAL_URL', 
 function ownedHostKey(host) {
   return String(host).toLowerCase().replace(/\.$/, '');
 }
-// The host a portal origin env value names (a full URL or a bare host); null when it is unset or does not parse.
-function envPortalHost(name) {
-  const raw = String(process.env[name] || '').trim();
+// The host a link base or portal origin value names (a full http(s) URL or a bare host); null when it is empty or
+// does not parse. One parser for every value, so one bad value drops only itself: shortLinkBaseUrl() returns
+// PUBLIC_PORTAL_URL as typed (a bare host too), and a throw here would stop every composer link check.
+function portalHostOf(value) {
+  const raw = String(value || '').trim();
   if (!raw) return null;
   try {
-    return new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(raw) ? raw : `https://${raw}`).host;
+    const url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(raw) ? raw : `https://${raw}`);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.host : null;
   } catch {
     return null;
   }
 }
 function ownedPortalHosts() {
-  const hosts = [require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map((u) => new URL(u).host);
-  if (isDeployedProduction()) hosts.push(BRANDED_PORTAL_HOST, ...PORTAL_HOST_ENV_NAMES.map(envPortalHost).filter(Boolean));
-  return [...new Set(hosts.map(ownedHostKey))];
+  const values = [require('./short-url').shortLinkBaseUrl(), publicPortalUrl()];
+  if (isDeployedProduction()) values.push(BRANDED_PORTAL_HOST, ...PORTAL_HOST_ENV_NAMES.map((name) => process.env[name]));
+  return [...new Set(values.map(portalHostOf).filter(Boolean).map(ownedHostKey))];
 }
 // Every owned-portal-host link in an outbound body that is NOT already an
 // /l/<code> short link — the recognition the SMS link-wrap seam

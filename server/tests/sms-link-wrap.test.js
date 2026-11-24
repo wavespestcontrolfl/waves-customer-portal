@@ -127,6 +127,19 @@ describe('link recognition (ownedPortalLinkSpans)', () => {
       expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(PREVIEW)}`)).toBe(true);
     });
 
+    test('a bare-host PUBLIC_PORTAL_URL (the short-link base returns it as typed) still parses: its links are judged, no check throws', () => {
+      process.env.PUBLIC_PORTAL_URL = HOST;
+      expect(require('../services/short-url').shortLinkBaseUrl()).toBe(HOST);
+      expect(ownedPortalHosts()).toEqual([HOST]);
+      expect(ownedPortalLinkSpans(`Prep: ${prep(HOST)}`).map((s) => s.url)).toEqual([prep(HOST)]);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(HOST)}`)).toBe(true);
+      // A value that does not parse drops only itself.
+      deployedIn('production');
+      process.env.CLIENT_URL = 'https://';
+      process.env.PORTAL_DOMAIN = 'ftp://files.example';
+      expect(ownedPortalHosts()).toEqual([HOST]);
+    });
+
     test('a host configured with a trailing DNS dot is owned in both spellings, like an incoming FQDN link', () => {
       deployedIn('production');
       process.env.CLIENT_URL = `https://${RAILWAY}.`;
