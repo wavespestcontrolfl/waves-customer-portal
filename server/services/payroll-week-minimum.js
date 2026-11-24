@@ -99,6 +99,9 @@ async function unpaidOnDays(conn, rows, start, end) {
   return out;
 }
 
+const NO_HIRE_DATE = 'This employee has a minimum paid week and no hire date on file, so the days of the first week '
+  + 'cannot be counted. Enter the hire date (Staff), or clear the minimum (Payroll settings).';
+
 const EARLIER_STAY = 'This week holds work before the hire date on file (an earlier stay, before a rehire moved the '
   + 'hire date), so the days the minimum paid week covers cannot be counted. Pay the week by hand, or clear the '
   + 'minimum for this employee while this pay run is made (Payroll settings).';
@@ -152,10 +155,14 @@ async function applyMinimum(conn, rows, { start, end, lock = false }) {
     // A check with no work and no time off in the week (a pay line alone, such as a bonus after leaving) is not a
     // week on the job: no minimum.
     if (paidMinutes + unpaidMinutes <= 0) return row;
+    if (!tech.hire_date) {
+      holds.set(row.technician_id, NO_HIRE_DATE);
+      return row;
+    }
     // Work before the hire date on file is an earlier stay: its schedule is not known here.
     const first = firstWork.get(row.technician_id);
     const workedMinutes = Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0);
-    if (tech.hire_date && (first ? first < tech.hire_date : workedMinutes > 0 && end < tech.hire_date)) {
+    if (first ? first < tech.hire_date : workedMinutes > 0 && end < tech.hire_date) {
       holds.set(row.technician_id, EARLIER_STAY);
       return row;
     }
@@ -172,4 +179,4 @@ async function applyMinimum(conn, rows, { start, end, lock = false }) {
   return { rows: out, holds };
 }
 
-module.exports = { SCHEDULED_DAYS, EARLIER_STAY, minimumWeekMinutes, firstWorkDays, unpaidOnDays, applyMinimum };
+module.exports = { SCHEDULED_DAYS, NO_HIRE_DATE, EARLIER_STAY, minimumWeekMinutes, firstWorkDays, unpaidOnDays, applyMinimum };

@@ -263,6 +263,7 @@ function WeekMinimumCell({ technician, onSaved }) {
   const [lastDay, setLastDay] = useState(currentLast);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const showLastDay = value.trim() !== '' || currentLast !== '';
 
   async function save(event) {
     event.preventDefault();
@@ -272,7 +273,8 @@ function WeekMinimumCell({ technician, onSaved }) {
         method: 'PUT',
         body: {
           hours: value.trim() === '' ? null : value.trim(),
-          lastDay: lastDay || null,
+          // Only a date box on screen is sent: a hidden one keeps the stored day.
+          ...(showLastDay ? { lastDay: lastDay || null } : {}),
           // What this page showed: the server refuses the save when another tab changed it since.
           shown: { hours: technician.paidWeekMinimumHours ?? null, lastDay: technician.paidWeekMinimumLastDay || null },
         },
@@ -287,7 +289,7 @@ function WeekMinimumCell({ technician, onSaved }) {
       aria-label={`Minimum paid hours a week for ${technician.name}`} className="w-24" inputMode="decimal"
       autoComplete="off" placeholder="None" value={value} onChange={event => setValue(event.target.value)}
     />
-    {(value.trim() !== '' || currentLast !== '') && <label className="flex items-center gap-1 text-ui-caption text-ink-secondary">
+    {showLastDay && <label className="flex items-center gap-1 text-ui-caption text-ink-secondary">
       Last day
       <Input
         type="date" aria-label={`Last day for ${technician.name}`} className="w-40"

@@ -393,6 +393,23 @@ describe('Time off in the pay run table and stub', () => {
     await waitFor(() => expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-b/week-minimum')).toMatchObject({ method: 'PUT', body: { hours: '40', lastDay: '2026-10-14' } }));
   });
 
+  it('does not send a last day typed and then hidden by clearing the hours', async () => {
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (TECH_LIST.includes(path)) return reply({ technicians: TECHS.map(tech => ({ ...tech, paidWeekMinimumHours: tech.id === 'tech-a' ? 40 : null, paidWeekMinimumLastDay: null })) });
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    const day = await screen.findByLabelText('Last day for Sample Alpha');
+    fireEvent.change(day, { target: { value: '2026-10-13' } });
+    const hours = screen.getByLabelText('Minimum paid hours a week for Sample Alpha');
+    fireEvent.change(hours, { target: { value: '' } });
+    expect(screen.queryByLabelText('Last day for Sample Alpha')).toBeNull();
+    fireEvent.click(within(hours.closest('form')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-a/week-minimum')).toBeDefined());
+    expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-a/week-minimum').body).not.toHaveProperty('lastDay');
+  });
+
   it('sends the last day typed next to a minimum', async () => {
     const original = adminFetch.getMockImplementation();
     adminFetch.mockImplementation((path, options = {}) => {

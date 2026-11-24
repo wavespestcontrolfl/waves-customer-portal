@@ -482,6 +482,8 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
     }
     // Clearing is always allowed: a setting kept from W-2 days must not come back when the person is W-2 again.
     if (v.hours != null && tech.employment_type !== 'w2') throw new PayrollError(409, 'A minimum paid week is for W-2 employees.');
+    // The first week counts the days from the hire date: without one it cannot be counted.
+    if (v.hours != null && !tech.hire_date) throw new PayrollError(409, 'Enter the hire date first (Staff), then set the minimum.');
     // Clearing the minimum keeps the last day on file: the paid weeks it shaped stay as they were, and a rehire (a
     // later hire date) does not read it again.
     const lastDay = v.lastDay === undefined ? tech.last_day : v.lastDay;

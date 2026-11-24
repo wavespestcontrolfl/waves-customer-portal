@@ -32,7 +32,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { EARLIER_STAY } = require('../services/payroll-week-minimum');
+const { EARLIER_STAY, NO_HIRE_DATE } = require('../services/payroll-week-minimum');
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 jest.setTimeout(60000);
@@ -218,6 +218,15 @@ postgres('payroll minimum paid week', () => {
     expect((await finalize(run.id)).status).toBe(200);
     const moved = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40', lastDay: addDays(W1, 1) }, email: OWNER });
     expect(moved.status).toBe(409);
+  });
+
+  it('no hire date: the minimum cannot be set, and a week of one set before is held', async () => {
+    const id = await tech('Sample Alpha', { hired: null, minimum: null });
+    const set = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40' }, email: OWNER });
+    expect([set.status, set.body.error]).toEqual([409, 'Enter the hire date first (Staff), then set the minimum.']);
+    await trx('technicians').where({ id }).update({ paid_week_minimum_hours: '40' });
+    await worked(id, W1, 12);
+    expect((await draft(W1)).body.run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: NO_HIRE_DATE }]);
   });
 
   it('refuses a new last day before the hire date', async () => {
