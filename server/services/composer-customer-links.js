@@ -978,14 +978,18 @@ function productionAliasHostOf(value) {
   const host = portalHostOf(value);
   return host && PRODUCTION_ALIAS_HOST_RE.test(host) ? host : null;
 }
+// A link base must name a host (a bare one too): the app builds its links on it, the SMS wrap's short links among
+// them. A base that names none fails as main's parse did, so no check or wrap runs on it (the wrap then keeps the
+// body as typed). Only an alias drops itself.
+function linkBaseHostOf(value) {
+  const host = portalHostOf(value);
+  if (!host) throw new Error('A portal link base (SHORTLINK_BASE_URL / PUBLIC_PORTAL_URL) names no host');
+  return host;
+}
 function ownedPortalHosts() {
-  const hosts = [require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map(portalHostOf);
+  const hosts = [require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map(linkBaseHostOf);
   if (isDeployedProduction()) hosts.push(BRANDED_PORTAL_HOST, ...PORTAL_HOST_ENV_NAMES.map((name) => productionAliasHostOf(process.env[name])));
-  const owned = [...new Set(hosts.filter(Boolean).map(ownedHostKey))];
-  // No link base names a host (and this is not production): nothing here is ours to judge, and an empty list would
-  // make every scan match. Fail as main's parse of a bad base did.
-  if (!owned.length) throw new Error('No portal link host parses (SHORTLINK_BASE_URL / PUBLIC_PORTAL_URL)');
-  return owned;
+  return [...new Set(hosts.filter(Boolean).map(ownedHostKey))];
 }
 // Every owned-portal-host link in an outbound body that is NOT already an
 // /l/<code> short link — the recognition the SMS link-wrap seam
