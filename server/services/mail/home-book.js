@@ -49,6 +49,7 @@ const LEAD_SOURCE = 'mail_new_home';
 const LEAD_SOURCE_DETAIL = 'new_home_postcard';
 const MAX_OFFERS = 30;
 const CONTACT_ON_FILE = 'CONTACT_ON_FILE';
+const DEAD_VISIT_STATUSES = ['cancelled', 'skipped', 'rescheduled'];
 const SLOT_CONFLICT_CODES =new Set(['SLOT_TAKEN', 'SLOT_UNAVAILABLE', 'SELF_SERVE_NOTICE']);
 
 // Each outside dependency a test did not inject, loaded when used (booking.js is a large router).
@@ -272,8 +273,11 @@ async function findOwnCustomer(home, contact, deps) {
     .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${contact.phone10}`])
     .whereNull('deleted_at')
     .limit(5)
-    .select('id', 'phone', 'address_line1', 'address_line2', 'zip');
+    .select('id', 'phone', 'email', 'address_line1', 'address_line2', 'zip');
+  // An exact retry: the same phone, the same email and this home. A changed email is another contact (the existing-contact
+  // check then runs and refuses on the row this phone owns).
   const own = rows.find((r) => phone10Of(r.phone) === contact.phone10
+    && String(r.email || '').trim().toLowerCase() === contact.email
     && booking.addressMatchesCustomer(r, home.row.address_line1, home.row.zip, null));
   return own ? own.id : null;
 }
@@ -381,36 +385,46 @@ function savedPriceHolds(saved, shown, deps) {
 // decideSetupFeeQuote). booking.js bills a pest setup fee only from that field (stampDisclosedSetupFee reads
 // estimate_data.setupFeeQuote.amount), never from result.oneTime.membershipFee. A zero fee writes no quote, as the wizard
 // writes none. Only a live draft is touched.
-async function markEstimate(estimateId, shown, deps) {
+//
+// The draft also carries the prospect it was made for (estimate_data.mailProspectId, written here, never from a request):
+// the server-side link the first-booking claim and the retry recovery follow, instead of any string a caller can send.
+async function markEstimate(estimateId, prospectId, shown, deps) {
   const conn = deps.db || db;
   const set = { source: 'quote_wizard', lead_source: LEAD_SOURCE, lead_source_detail: LEAD_SOURCE_DETAIL };
-  if (shown.setupCents > 0) {
-    const frozen = JSON.stringify({ setupFeeQuote: { amount: shown.setupCents / 100, kind: 'waveguard_membership' } });
-    set.estimate_data = conn.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [frozen]);
-  }
+  const merged = { mailProspectId: String(prospectId) };
+  if (shown.setupCents > 0) merged.setupFeeQuote = { amount: shown.setupCents / 100, kind: 'waveguard_membership' };
+  set.estimate_data = conn.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(merged)]);
   await conn('estimates').where({ id: estimateId, status: 'draft' }).whereNull('archived_at').update(set);
 }
 
-// An earlier tap of this booking that COMMITTED (a lost response, then an identical retry): a live mail_new_home booking
-// at this slot whose customer has this phone and this home's address, whatever stage the booking has since moved the
-// customer to. Its customer id, or null. The retry then goes to createSelfBooking unchanged, whose own replay (same
-// customer, same slot, the consumed draft) answers it.
+// The visits this postcard has booked: a /book visit (self_booking_id set) of a customer who has a draft made for this
+// prospect, still live. Live is read from the scheduled visit itself, not only the booking row (staff cancel the visit and
+// leave the booking row as it was): cancelled, skipped and rescheduled visits are not live, as createSelfBooking's own
+// replay reads them. No address matching and no candidate cap: the link is the prospect id the draft carries.
+function liveProspectVisits(conn, prospectId) {
+  return conn('scheduled_services as ss')
+    .join('self_booked_appointments as sba', 'sba.id', 'ss.self_booking_id')
+    .join('estimates as e', 'e.customer_id', 'ss.customer_id')
+    .whereRaw("e.estimate_data->>'mailProspectId' = ?", [String(prospectId)])
+    .whereNot('sba.status', 'cancelled')
+    .whereNotIn('ss.status', DEAD_VISIT_STATUSES);
+}
+
+// An earlier tap of this booking that COMMITTED (a lost response, then an identical retry): a live visit of this prospect
+// (liveProspectVisits) at this slot whose customer has this phone, whatever stage the booking has since moved the customer
+// to. Its customer id, or null. The retry then goes to createSelfBooking unchanged, whose own replay (same customer, same
+// slot, the consumed draft) answers it.
 async function findCommittedBookingCustomer(home, contact, offer, deps) {
   const conn = deps.db || db;
-  const booking = deps.booking || REAL.booking();
-  const rows = await conn('self_booked_appointments as sba')
-    .join('customers as c', 'c.id', 'sba.customer_id')
-    .where('sba.source', LEAD_SOURCE)
+  const rows = await liveProspectVisits(conn, home.row.id)
+    .join('customers as c', 'c.id', 'ss.customer_id')
     .where('sba.date', offer.date)
     .where('sba.start_time', offer.start)
-    .whereNot('sba.status', 'cancelled')
-    .where('c.lead_source', LEAD_SOURCE)
     .whereNull('c.deleted_at')
     .whereRaw("regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${contact.phone10}`])
     .limit(5)
-    .select('c.id', 'c.phone', 'c.address_line1', 'c.address_line2', 'c.zip');
-  const own = rows.find((r) => phone10Of(r.phone) === contact.phone10
-    && booking.addressMatchesCustomer(r, home.row.address_line1, home.row.zip, null));
+    .select('c.id', 'c.phone');
+  const own = rows.find((r) => phone10Of(r.phone) === contact.phone10);
   return own ? own.id : null;
 }
 
@@ -460,7 +474,7 @@ async function prepareEstimate(home, contact, pin, shown, deps) {
   }
   if (!savedPriceHolds(saved, shown, deps)) return refuse(409, 'price_changed');
   const estimateId = saved.estimate.id;
-  await markEstimate(estimateId, shown, deps);
+  await markEstimate(estimateId, home.row.id, shown, deps);
 
   const estimateToken = (deps.handoffToken || REAL.handoffToken())(estimateId);
   return estimateToken ? { estimateId, estimateToken, customerId } : refuse(503, 'not_available');
@@ -489,7 +503,7 @@ async function recoverCommitted(home, contact, offer, shown, deps) {
 // waits at this point; when the first commits, its visit is committed and READ COMMITTED shows it to the check below, so
 // the second is refused. A lock taken before createSelfBooking (the mint and estimate commit in their own transactions
 // first) would not span the visit insert. An exact replay never gets here (createSelfBooking answers it earlier).
-function commitGuardFor(home, shown, deps) {
+function commitGuardFor(home, shown, estimateId, deps) {
   return async (trx) => {
     const gates = deps.gates || REAL.gates();
     if (typeof gates.mailHomePageLive !== 'function' || !gates.mailHomePageLive() || !gates.isEnabled('selfBooking')) return false;
@@ -499,25 +513,20 @@ function commitGuardFor(home, shown, deps) {
       .forShare()
       .first('price_annual', 'price_setup_fee');
     if (!row || toCents(row.price_annual) !== shown.annualCents || toCents(row.price_setup_fee || 0) !== shown.setupCents) return false;
-    return !(await liveBookingAtHome(trx, home, deps));
+    if (!(await draftHoldsShownPrice(trx, estimateId, shown))) return false;
+    return !(await liveProspectVisits(trx, home.row.id).first('ss.id'));
   };
 }
 
-// A live (not cancelled) mail_new_home booking whose customer is at this home's address: the home's first booking.
-async function liveBookingAtHome(trx, home, deps) {
-  const booking = deps.booking || REAL.booking();
-  const number = (String(home.row.address_line1 || '').trim().match(/^\d+(?=\s)/) || [null])[0];
-  const zip5 = (String(home.row.zip || '').match(/\d{5}/) || [null])[0];
-  if (!number || !zip5) return true; // no house number or zip to match on: fail closed
-  const rows = await trx('self_booked_appointments as sba')
-    .join('customers as c', 'c.id', 'sba.customer_id')
-    .where('sba.source', LEAD_SOURCE)
-    .whereNot('sba.status', 'cancelled')
-    .where('c.zip', 'like', `${zip5}%`)
-    .whereRaw('c.address_line1 ILIKE ?', [`${number} %`])
-    .limit(25)
-    .select('c.id', 'c.address_line1', 'c.address_line2', 'c.zip');
-  return rows.some((r) => booking.addressMatchesCustomer(r, home.row.address_line1, home.row.zip, null));
+// The draft the visit is priced from, read FOR SHARE on the booking transaction (a staff revision takes the row FOR UPDATE,
+// so it cannot land between this check and the commit): its annual total and its frozen setup fee are the ones the customer
+// confirmed, to the cent, and it is still a server price.
+async function draftHoldsShownPrice(trx, estimateId, shown) {
+  const draft = await trx('estimates').where({ id: estimateId }).forShare().first('annual_total', 'estimate_data', 'pricing_authority');
+  if (!draft || draft.pricing_authority !== 'SERVER') return false;
+  const data = typeof draft.estimate_data === 'string' ? (() => { try { return JSON.parse(draft.estimate_data); } catch { return null; } })() : draft.estimate_data;
+  const setupFee = data && data.setupFeeQuote && data.setupFeeQuote.amount != null ? Number(data.setupFeeQuote.amount) : 0;
+  return !!data && toCents(draft.annual_total) === shown.annualCents && Number.isFinite(setupFee) && toCents(setupFee) === shown.setupCents;
 }
 
 // The payload of /book's POST /confirm, with the flags it sets after the body spread: no bearer identity, never a
@@ -592,7 +601,7 @@ async function bookHome(token, input, deps = {}) {
   const result = await booking.createSelfBooking({
     ...bookingPayload({ home, contact, offer, pin, gates, estimate: prepared }),
     // Re-read inside the booking transaction: the gate, the prospect row (locked) and the price it still holds.
-    commitGuard: commitGuardFor(home, shown, deps),
+    commitGuard: commitGuardFor(home, shown, prepared.estimateId, deps),
   });
   return answerOf(result, offer, pin, booking);
 }
