@@ -54,17 +54,55 @@ beforeEach(() => {
 });
 
 describe('admin-tech-out routes', () => {
-  test('gate off answers 404 { enabled: false } on every route, with no service call', async () => {
+  test('gate off answers 404 { enabled: false } on mark-out and auto-assign, with no service call', async () => {
     techOut.techOutEnabled.mockReturnValue(false);
 
-    expect((await run('get', '/:technicianId')).statusCode).toBe(404);
     expect((await run('post', '/:technicianId', { body: { reason: 'sick' } })).statusCode).toBe(404);
-    expect((await run('delete', '/:technicianId')).statusCode).toBe(404);
-
-    expect((await run('get', '/:technicianId')).body).toEqual({ enabled: false });
-    expect(techOut.getTechOut).not.toHaveBeenCalled();
+    expect((await run('post', '/:technicianId/auto-assign')).statusCode).toBe(404);
+    expect((await run('post', '/:technicianId', { body: { reason: 'sick' } })).body).toEqual({ enabled: false });
     expect(techOut.markTechOut).not.toHaveBeenCalled();
-    expect(techOut.clearTechOut).not.toHaveBeenCalled();
+  });
+
+  test('gate off: lookup answers 404 { enabled: false } when there is no open absence', async () => {
+    techOut.techOutEnabled.mockReturnValue(false);
+    techOut.getTechOut.mockResolvedValue(null);
+
+    const res = await run('get', '/:technicianId');
+
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ enabled: false });
+  });
+
+  test('gate off: lookup still shows an open absence (a days-off row blocks assignment whatever the gate says), with auto-move off', async () => {
+    techOut.techOutEnabled.mockReturnValue(false);
+    techOut.getTechOut.mockResolvedValue({ id: 'abs-1' });
+    techOutAutoMove.autoMoveEnabled.mockReturnValue(true);
+
+    const res = await run('get', '/:technicianId');
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ enabled: true, absence: { id: 'abs-1' }, auto_move_enabled: false });
+  });
+
+  test('gate off: clear still works', async () => {
+    techOut.techOutEnabled.mockReturnValue(false);
+    techOut.clearTechOut.mockResolvedValue({ absence: { id: 'abs-1' }, resolvedAlerts: [] });
+
+    const res = await run('delete', '/:technicianId');
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ absence: { id: 'abs-1' }, resolvedAlerts: [] });
+    expect(techOut.clearTechOut).toHaveBeenCalledWith(expect.objectContaining({ technicianId: TECH_ID, actorId: 'actor-1' }));
+  });
+
+  test('gate off: clearing an absence that is not open answers 404 not_out', async () => {
+    techOut.techOutEnabled.mockReturnValue(false);
+    techOut.clearTechOut.mockRejectedValue(Object.assign(new Error('x'), { code: 'NOT_OUT' }));
+
+    const res = await run('delete', '/:technicianId');
+
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ error: 'not_out' });
   });
 
   test('GET returns the current absence, defaulting date to today ET, plus auto_move_enabled', async () => {

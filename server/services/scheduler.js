@@ -1626,6 +1626,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:25AM — Technician days off (owner 2026-11-24): writes the technician_absences
+  // rows for each active, field-dispatchable technician's day off in the next 120 days
+  // (services/tech-birthday-absences.js). Direct writes, nothing parked or sent, never re-creates a
+  // cleared row (it starts a new episode only after its own system clears), and clears its own future rows (source tech_days_off) a corrected dob or a leaver no longer gives. Each new or cleared row is announced like a tech-out mark (slot cache, board roster). Pay is
+  // recorded by the office (an ops bell outside the portal prompts it): nothing here writes pay.
+  // =========================================================================
+  cron.schedule('25 3 * * *', async () => {
+    try {
+      await runExclusive('tech-days-off', async () => {
+        const result = await require('./tech-birthday-absences').syncTechDaysOff();
+        // A pass that failed for any day must not be recorded as a success: throw after the whole pass ran.
+        if (result && result.failed > 0) throw new Error(`${result.failed} day(s) could not be written`);
+        return result;
+      });
+    } catch (err) {
+      logger.error(`[tech-days-off] daily sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:15AM — Data Hygiene deterministic normalization scan
   // =========================================================================
   cron.schedule('15 3 * * *', async () => {
