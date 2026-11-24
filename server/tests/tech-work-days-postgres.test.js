@@ -290,8 +290,13 @@ postgres('technician work days (real Postgres)', () => {
   // not hold the visit. One reader gives both lines (technician-eligibility.dayWarningsFor), so each
   // path is asked once and never refused.
   describe('the office is told the shift (GATE_TECH_SHIFT_HOURS)', () => {
-    // The week after WEEK: 2031-03-10 is a Monday. No other block books these days.
-    const [MON2, TUE2, WED2, THU2, FRI2] = ['2031-03-10', '2031-03-11', '2031-03-12', '2031-03-13', '2031-03-14'];
+    // A Monday to Friday a year out, counted from today in Eastern time: the lead route refuses a date
+    // that has passed, so a fixed week would fail once it did. Never WEEK itself (other blocks book it).
+    const dayAfter = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+    const today = require('../utils/datetime-et').etDateString();
+    const untilMonday = (8 - new Date(`${today}T12:00:00Z`).getUTCDay()) % 7;
+    const monday = [364, 371].map((n) => dayAfter(today, n + untilMonday)).find((day) => day !== WEEK[0]);
+    const [MON2, TUE2, WED2, THU2, FRI2] = [0, 1, 2, 3, 4].map((n) => dayAfter(monday, n));
     let service;
     let serviceRow;
     let morning;
@@ -338,20 +343,21 @@ postgres('technician work days (real Postgres)', () => {
       app.use('/admin/leads', require('../routes/admin-leads'));
       app.use((err, _req, res, _next) => res.status(err.statusCode || err.status || 500).json({ error: err.message }));
       const server = app.listen(0, '127.0.0.1');
-      await new Promise((resolve) => server.once('listening', resolve));
+      // The lead is listed for afterAll before its rows are written, and the server closes whatever fails.
       const lead = { leadId: randomUUID(), customerId: randomUUID() };
-      const phone = `+194155501${String(10 + Math.floor(Math.random() * 90))}`;
-      await db('customers').insert({
-        id: lead.customerId, first_name: 'Synthetic', last_name: 'Lead', active: true,
-        email: `synthetic-lead-${lead.customerId}@example.invalid`, phone,
-      });
-      await db('leads').insert({ id: lead.leadId, customer_id: lead.customerId, first_name: 'Synthetic', phone });
       made.leads.push(lead);
       const post = (body) => fetch(`http://127.0.0.1:${server.address().port}/admin/leads/${lead.leadId}/schedule-appointment`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serviceType: 'Pest Control', technicianId: morning.id, ...body }),
       }).then(async (res) => ({ status: res.status, body: await res.json() }));
       try {
+        await new Promise((resolve) => server.once('listening', resolve));
+        const phone = `+194155501${String(10 + Math.floor(Math.random() * 90))}`;
+        await db('customers').insert({
+          id: lead.customerId, first_name: 'Synthetic', last_name: 'Lead', active: true,
+          email: `synthetic-lead-${lead.customerId}@example.invalid`, phone,
+        });
+        await db('leads').insert({ id: lead.leadId, customer_id: lead.customerId, first_name: 'Synthetic', phone });
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
         // 11:00 for 90 minutes ends at 12:30, after the shift.
         const late = await post({ date: MON2, time: '11:00', durationMinutes: 90 });
