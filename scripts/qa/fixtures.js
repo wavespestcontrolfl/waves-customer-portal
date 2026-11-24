@@ -43,8 +43,8 @@ function fixtureIdentity(runId = crypto.randomUUID()) {
     // Prepay-at-booking journey: its own recurring estimate, so the one-time estimate above stays untouched.
     prepayEstimateId: id('prepay-estimate'), prepayToken: crypto.randomBytes(32).toString('hex'),
     prepayConsentId: id('prepay-consent'), prepayAppointmentId: id('prepay-appointment'), prepayEventId: `evt_qa_prepay_${suffix}`,
-    // Reminder journey: books its own visit for the fixture customer.
-    reminderAppointmentId: id('reminder-appointment'),
+    // Reminder and completion-text journeys: each books its own visit for the fixture customer.
+    reminderAppointmentId: id('reminder-appointment'), completionTextAppointmentId: id('completion-text-appointment'),
     // Refund journey: its signed Stripe events (a2 is a second event about the first refund).
     refundEventIds: ['a', 'a2', 'b'].map((part) => `evt_qa_refund_${part}_${suffix}`) };
 }
@@ -155,8 +155,8 @@ async function seed(db, f) {
   return f;
 }
 
-// One more visit for the fixture customer, written through the same booking insert the seed uses. A journey that texts about
-// a visit needs its own, because the earlier journeys complete and move the seeded one.
+// One more visit for the fixture customer, written through the same booking insert the seed uses. The journeys that
+// text about a visit each need their own, because the earlier journeys complete and move the seeded one.
 async function insertVisit(db, f, { id, scheduledDate, windowStart, status = 'confirmed', estimatedPrice = 45, ...extra }) {
   await db.transaction(async (trx) => {
     await createScheduledService({ trx, cols: await trx('scheduled_services').columnInfo(), source: { sourceAction: 'qa_fixture' },
