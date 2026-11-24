@@ -3567,6 +3567,43 @@ describe('wrappedOwnedLinkIn', () => {
   });
 });
 
+describe('ownedPortalHosts: every host the portal answers on', () => {
+  const { ownedPortalHosts, ownedPortalLinkSpans } = require('../services/composer-customer-links');
+  const RAILWAY = 'waves-portal-production.up.railway.app';
+  const PREP = `https://${RAILWAY}/prep/${'a'.repeat(32)}`;
+  const NAMES = ['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN'];
+  let saved;
+  beforeEach(() => {
+    saved = Object.fromEntries(NAMES.map((name) => [name, process.env[name]]));
+    for (const name of NAMES) delete process.env[name];
+  });
+  afterEach(() => {
+    for (const name of NAMES) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  });
+
+  test('the short host and the portal origin, plus every host a portal origin value names (production keeps the raw Railway host in CLIENT_URL)', () => {
+    expect(ownedPortalHosts()).toEqual(['wavespest.co', 'portal.wavespestcontrol.com']);
+    process.env.CLIENT_URL = `https://${RAILWAY}/`;
+    process.env.RAILWAY_PUBLIC_DOMAIN = 'Portal.WavesPestControl.com';
+    process.env.PORTAL_DOMAIN = 'not a host';
+    expect(ownedPortalHosts()).toEqual(['wavespest.co', 'portal.wavespestcontrol.com', RAILWAY]);
+  });
+
+  test('a link on the Railway host is judged like a portal link: the SMS link wrap finds it, and a foreign URL carrying it is refused', () => {
+    expect(ownedPortalLinkSpans(`Prep: ${PREP}`)).toEqual([]);
+    expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${PREP}`)).toBe(false);
+    process.env.CLIENT_URL = `https://${RAILWAY}`;
+    expect(ownedPortalLinkSpans(`Prep: ${PREP}`)).toEqual([expect.objectContaining({ url: PREP, family: 'prep' })]);
+    expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${PREP}`)).toBe(true);
+    expect(wrappedOwnedLinkIn(`Prep: ${PREP}`)).toBe(false);
+    // A look-alike of the Railway host stays foreign.
+    expect(ownedPortalLinkSpans(`https://evil-${RAILWAY}/prep/${'a'.repeat(32)}`)).toEqual([]);
+  });
+});
+
 describe('moving page links: owned by the move\'s customer at every send check (GH Codex security review on #7486)', () => {
   const { bearerLinkSendCheck } = require('../services/composer-customer-links');
   const MOVE_TOKEN = 'ab'.repeat(24);

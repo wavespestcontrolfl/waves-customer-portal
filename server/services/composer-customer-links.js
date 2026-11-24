@@ -932,9 +932,25 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
 // portal origin alike (server/index.js mounts /l with no host restriction) —
 // so a branded URL rewritten onto the portal host is the same working link
 // and is judged the same (GH Codex #3844 r6 P1) — and the long-form bearer
-// paths the same way in reverse (r8 P1). Any other host is not ours.
+// paths the same way in reverse (r8 P1). The app answers the same way on
+// every host these env values name: the portal origin names publicPortalUrl()
+// falls back through (utils/portal-url.js reads only the first one set; in
+// production CLIENT_URL still holds the raw Railway service host) and
+// RAILWAY_PUBLIC_DOMAIN (a bare host). A value that does not parse adds
+// nothing. Any other host is not ours.
+const PORTAL_HOST_ENV_NAMES = Object.freeze(['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN']);
 function ownedPortalHosts() {
-  return [...new Set([require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map((u) => new URL(u).host.toLowerCase()))];
+  const hosts = [require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map((u) => new URL(u).host.toLowerCase());
+  for (const name of PORTAL_HOST_ENV_NAMES) {
+    const raw = String(process.env[name] || '').trim();
+    if (!raw) continue;
+    try {
+      hosts.push(new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(raw) ? raw : `https://${raw}`).host.toLowerCase());
+    } catch {
+      // Not a URL or a host: nothing to own.
+    }
+  }
+  return [...new Set(hosts)];
 }
 // Every owned-portal-host link in an outbound body that is NOT already an
 // /l/<code> short link — the recognition the SMS link-wrap seam
