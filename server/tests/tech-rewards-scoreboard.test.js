@@ -297,6 +297,32 @@ describe('earnedGrossCents (by component earning date)', () => {
     expect(earnedGrossCents([week], FROM, TO)).toBe(0);
   });
 
+  test('the holiday work premium is dated by the minutes worked on each holiday, never spread over the seven days', () => {
+    // A week that straddles the cutoff (Mon Aug 31 is the last day of the window): $44.00 of premium, all of it earned
+    // on the Monday holiday. The regular pay (not the point here) is nothing, so only the premium is measured.
+    const week = (days) => plain('2026-08-31', 4400, {
+      regularPayCents: 0, holidayWorkPremiumCents: 4400, holidayWorkDays: days, dayMinutes: [],
+    });
+    expect(earnedGrossCents([week(mins(['2026-08-31', 240]))], FROM, TO)).toBe(4400);
+    // earned on Tuesday Sep 1, after the cutoff: none of it is in the window
+    expect(earnedGrossCents([week(mins(['2026-09-01', 240]))], FROM, TO)).toBe(0);
+    // two holidays worked, 2 h each side of the cutoff: half the premium is in the window
+    expect(earnedGrossCents([week(mins(['2026-08-31', 120], ['2026-09-01', 120]))], FROM, TO)).toBe(2200);
+    // the old way (a flat seven-day spread) would have counted 4400 / 7 = 629 for a Monday premium
+    expect(earnedGrossCents([week(mins(['2026-08-31', 240]))], FROM, TO)).not.toBe(629);
+  });
+
+  test('the components of a check with a holiday work premium add up to its gross', () => {
+    const week = plain('2026-08-31', 50000 + 22000 + 4400, {
+      regularPayCents: 50000, holidayPayCents: 22000, holidayWorkPremiumCents: 4400,
+      dayMinutes: mins(['2026-08-31', 240], ['2026-09-01', 600]), holidayRecords: mins(['2026-08-31', 600]),
+      holidayWorkDays: mins(['2026-08-31', 240]),
+    });
+    expect(sum(week)).toBe(week.grossCents);
+    // wages follow the shift minutes (240 of 840 on the Monday), holiday pay and premium their own dates (both on Monday)
+    expect(earnedGrossCents([week], FROM, TO)).toBe(Math.round((50000 * 240) / 840) + 22000 + 4400);
+  });
+
   test('catch-up overtime premium earned in May and paid in September counts in the season', () => {
     const paidSeptember = plain('2026-09-07', 10000, {
       regularPayCents: 7000, lineOvertimePremiumCents: 3000,

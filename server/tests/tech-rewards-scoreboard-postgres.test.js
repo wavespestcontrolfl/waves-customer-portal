@@ -66,6 +66,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.integer('pto_pay_cents');
       t.decimal('pto_minutes', 10, 2).notNullable().defaultTo(0);
       t.integer('holiday_pay_cents');
+      t.integer('holiday_work_premium_cents');
       t.integer('tech_rewards_cents');
       t.jsonb('calc_snapshot').notNullable().defaultTo('{}');
     });

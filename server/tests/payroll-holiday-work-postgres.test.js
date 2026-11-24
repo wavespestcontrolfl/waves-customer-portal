@@ -33,6 +33,8 @@ const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
+const { parseETDateTime } = require('../utils/datetime-et');
+const { readBonusPay } = require('../services/tech-rewards-scoreboard');
 
 jest.setTimeout(60000);
 
@@ -95,6 +97,22 @@ postgres('payroll holiday work premium', () => {
   };
   const byName = (run, name) => run.checks.find((c) => c.name === name);
   const WED = addDays(W1, 2);
+  // A completed shift with clock times (Eastern wall times) and the day row the weekly pay is summed from.
+  const shift = async (technicianId, fromWall, toWall, { meal = 0 } = {}) => {
+    const from = parseETDateTime(fromWall);
+    const to = parseETDateTime(toWall);
+    const minutes = (to - from) / 60000;
+    await trx('time_entries').insert({
+      technician_id: technicianId, entry_type: 'shift', status: 'completed', clock_in: from, clock_out: to, duration_minutes: minutes.toFixed(2),
+    });
+    const workDate = fromWall.slice(0, 10);
+    const existing = await trx('time_entry_daily_summary').where({ technician_id: technicianId, work_date: workDate }).first('id', 'total_shift_minutes');
+    if (existing) {
+      await trx('time_entry_daily_summary').where({ id: existing.id }).update({ total_shift_minutes: Number(existing.total_shift_minutes) + minutes, unpaid_meal_minutes: meal });
+    } else {
+      await day(technicianId, workDate, minutes / 60, meal);
+    }
+  };
 
   beforeAll(async () => {
     const url = new URL(process.env.DATABASE_URL);
@@ -171,6 +189,67 @@ postgres('payroll holiday work premium', () => {
     // The row is frozen: the minutes and the pay cannot change on a final check.
     expect(await refused(() => trx('payroll_checks').where({ id: checkId }).update({ holiday_work_premium_cents: 0 }))).toBeDefined();
     expect(await refused(() => trx('payroll_checks').where({ id: checkId }).update({ holiday_work_minutes: '0.00' }))).toBeDefined();
+  });
+
+  it('a 10 PM to 2 AM shift earns the 2 hours inside the holiday whichever night it starts on', async () => {
+    // Alpha starts Tuesday 10 PM (the night before the Wednesday holiday); Bravo starts Wednesday 10 PM. Both: 2 h, $22.00.
+    const alpha = await tech('Sample Alpha');
+    const bravo = await tech('Sample Bravo');
+    await approved(alpha, W1, 4);
+    await approved(bravo, W1, 4);
+    await shift(alpha, `${addDays(W1, 1)}T22:00`, `${WED}T02:00`);
+    await shift(bravo, `${WED}T22:00`, `${addDays(W1, 3)}T02:00`);
+    await offDay(alpha, WED, 10);
+    await offDay(bravo, WED, 10);
+    const created = (await draft(W1)).body.run;
+    expect(byName(created, 'Sample Alpha')).toMatchObject({ holidayWorkHours: '2.00', holidayWorkPremiumCents: 2200 });
+    expect(byName(created, 'Sample Bravo')).toMatchObject({ holidayWorkHours: '2.00', holidayWorkPremiumCents: 2200 });
+  });
+
+  it('takes the meal that falls inside the holiday off, and keeps the days frozen on the check for Tech Rewards', async () => {
+    // Wed 08:00-18:00 with 30 minutes of automatic meal: 570 paid minutes on the holiday.
+    const id = await tech('Sample Alpha');
+    await approved(id, W1, 9.5);
+    await shift(id, `${WED}T08:00`, `${WED}T18:00`, { meal: 30 });
+    await offDay(id, WED, 10);
+    const created = (await draft(W1)).body.run;
+    expect(byName(created, 'Sample Alpha')).toMatchObject({ holidayWorkHours: '9.50', holidayWorkPremiumCents: 10450 });
+    const done = (await finalize(created.id)).body.run;
+    const stored = await trx('payroll_checks').where({ id: byName(done, 'Sample Alpha').id })
+      .first(trx.raw("calc_snapshot->'holidayWorkDays' AS days"));
+    expect(stored.days).toEqual([{ workDate: WED, minutes: 570 }]);
+    // frozen once final
+    const checkId = byName(done, 'Sample Alpha').id;
+    expect(await refused(() => trx('payroll_checks').where({ id: checkId }).update({ calc_snapshot: JSON.stringify({}) }))).toBeDefined();
+  });
+
+  it('Tech Rewards dates the premium by the holiday worked: a bonus window ending that Monday holds all of it', async () => {
+    // Monday holiday, worked 4 h: regular 88.00 + holiday pay 220.00 + premium 44.00, all earned on the Monday.
+    const id = await tech('Sample Alpha');
+    await approved(id, W1, 4);
+    await shift(id, `${W1}T08:00`, `${W1}T12:00`);
+    await offDay(id, W1, 10);
+    const created = (await draft(W1)).body.run;
+    expect(byName(created, 'Sample Alpha')).toMatchObject({ holidayWorkPremiumCents: 4400, grossCents: 8800 + 22000 + 4400 });
+    await finalize(created.id);
+    // window ends Monday: the whole check, premium included (a flat seven-day spread would hold only 629 of its 4400)
+    expect((await readBonusPay(trx, id, W1, W1)).cents).toBe(35200);
+    // a window starting Tuesday holds none of it
+    expect((await readBonusPay(trx, id, addDays(W1, 1), addDays(W1, 6), W1)).cents).toBe(0);
+  });
+
+  it('a week that straddles the cutoff splits the premium by the minutes worked on each holiday', async () => {
+    // Monday and Tuesday are both holidays: 4 h worked each. Window ends Monday: wages, holiday pay and premium split in half.
+    const id = await tech('Sample Alpha');
+    await approved(id, W1, 8);
+    await shift(id, `${W1}T08:00`, `${W1}T12:00`);
+    await shift(id, `${addDays(W1, 1)}T08:00`, `${addDays(W1, 1)}T12:00`);
+    await offDay(id, W1, 10);
+    await offDay(id, addDays(W1, 1), 10);
+    const created = (await draft(W1)).body.run;
+    expect(byName(created, 'Sample Alpha')).toMatchObject({ holidayWorkPremiumCents: 8800, grossCents: 17600 + 44000 + 8800 });
+    await finalize(created.id);
+    expect((await readBonusPay(trx, id, W1, W1)).cents).toBe((17600 + 44000 + 8800) / 2);
   });
 
   it('no holiday row on the day: the same hours add nothing', async () => {

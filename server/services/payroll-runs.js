@@ -84,6 +84,7 @@ const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/busine
 const { PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY, lockPayrollMutations } = require('./payroll-lock');
 const { applyDueSteps, hasDueSteps, withWeekRates } = require('./payroll-rate-steps');
 const weekMinimum = require('./payroll-week-minimum');
+const { holidayWorkByDay, capHolidayDays } = require('./payroll-holiday-work');
 const { shiftCloseReviewLive, payrollTimeOffLive, payrollBankMatchLive, payrollMercuryStatusLive } = require('../config/feature-gates');
 const {
   payLinesOn, openLinesFor, priceLines, totalsOf, markLinesPaid, reopenLinesOfRun,
@@ -294,7 +295,7 @@ function buildCheck({
   const holidayMinutes = tech.holiday_minutes || 0;
   // The minimum paid week: set by evaluate() only for a technician who has one (payroll-week-minimum.js).
   const withMinimum = withTimeOff && tech.minimum_week_minutes !== undefined;
-  // Holiday work premium: only a check with worked minutes on a holiday taken carries it (holidayWorkByTechnician).
+  // Holiday work premium: only a check with worked minutes on a holiday taken carries it (payroll-holiday-work.js holidayWorkByDay).
   const withHolidayWork = withTimeOff && Number(tech.holiday_work_minutes || 0) > 0;
   // Open pay lines for this technician and the extra overtime they cause (evaluate()).
   const lines = (withLines && tech.pay_lines) || [];
@@ -341,6 +342,8 @@ function buildCheck({
     calc_snapshot: JSON.stringify({
       ...(lines.length ? { ...pay, payLines: lines, lineOvertimeWeeks: linePremium.weeks } : pay),
       ...bankSnapshot(tech),
+      // The paid minutes worked on each holiday, frozen with the check: Tech Rewards dates the premium by them.
+      ...(withHolidayWork ? { holidayWorkDays: tech.holiday_work_days } : {}),
     }),
     pay_method: tech.pay_method || 'check',
     status: 'draft',
@@ -408,6 +411,17 @@ function ptoBankSignature(row) {
   return [...figures, paidDays.join(','), ...(notPaidOut > 0 ? [`notPaidOut=${notPaidOut.toFixed(2)}`] : [])];
 }
 
+// The holiday work days a check holds ('date=minutes', in date order). A stored row carries them as `holiday_work_days`
+// (calc_snapshot->'holidayWorkDays'); a row about to be stored carries them in its calc_snapshot text. A move of the
+// same minutes to another date changes what Tech Rewards dates the premium by, so it goes stale like any other change.
+function holidayWorkSignature(row) {
+  let days = row.holiday_work_days;
+  if (!('holiday_work_days' in row) && typeof row.calc_snapshot === 'string') {
+    try { days = JSON.parse(row.calc_snapshot).holidayWorkDays; } catch { days = null; }
+  }
+  return (Array.isArray(days) ? days : []).map((d) => `${d.workDate}=${Number(d.minutes || 0).toFixed(2)}`).sort().join(',');
+}
+
 // The unpaid time off list in the token (payroll-time-off-bank.js applyBank): who, how much and why.
 const unpaidSignature = (unpaid) => unpaid.map((row) => [row.technicianId, row.hours, row.reason])
   .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
@@ -457,7 +471,7 @@ function tokenOf(run, rows, unpaid = [], payouts = []) {
     // The minimum paid week: only on a check that has one, so every other check keeps its token.
     ...(row.minimum_week_minutes != null ? [`minimum=${Number(row.minimum_week_minutes).toFixed(2)}`, Number(row.minimum_week_pay_cents)] : []),
     // The holiday work premium: only on a check that has one, so every other check keeps its token.
-    ...(row.holiday_work_minutes != null ? [`holidayWork=${Number(row.holiday_work_minutes).toFixed(2)}`, Number(row.holiday_work_premium_cents)] : []),
+    ...(row.holiday_work_minutes != null ? [`holidayWork=${Number(row.holiday_work_minutes).toFixed(2)}`, Number(row.holiday_work_premium_cents), holidayWorkSignature(row)] : []),
     // Adding, removing or changing a pay line after drafting changes the token too. A row that
     // stored pay line figures keeps them in the token after the gate is turned off, so a draft
     // that still shows them goes stale instead of finalizing without them.
@@ -508,7 +522,7 @@ const checkColumns = (conn) => [
   // The minimum paid week, read whatever the gates are: a check that paid one shows it.
   'minimum_week_minutes', 'minimum_week_pay_cents',
   // The holiday work premium, read whatever the gates are: a check that paid one shows it.
-  'holiday_work_minutes', 'holiday_work_premium_cents',
+  'holiday_work_minutes', 'holiday_work_premium_cents', conn.raw("calc_snapshot->'holidayWorkDays' as holiday_work_days"),
   'ytd_gross_before_cents', 'w4_election_id', 'pay_method', 'check_number', 'status',
   conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"),
   conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"),
@@ -728,34 +742,13 @@ async function timeOffByTechnician(conn, start, end) {
   return byTech;
 }
 
-// GATE_PAYROLL_TIME_OFF: the paid worked minutes of W-2 technicians on the days they take a holiday (a payroll_time_off
-// row of kind holiday on that work date), summed per technician. Map of id -> minutes, only for a technician who has some.
-// Paid worked minutes of a day are what the weekly summary pays (time-tracking.js computeWeeklySummaryInTransaction):
-// the day's shift minutes less its unpaid meal, never below zero, read from the day's time_entry_daily_summary row.
-// The worked hours are already paid at the straight rate; the check adds the extra half (payroll-calc.js).
-async function holidayWorkByTechnician(conn, start, end) {
-  const rows = await conn('payroll_time_off as o')
-    .join('technicians as t', 't.id', 'o.technician_id')
-    .join('time_entry_daily_summary as d', function sameDay() {
-      this.on('d.technician_id', 'o.technician_id').andOn('d.work_date', 'o.work_date');
-    })
-    .where('o.kind', 'holiday')
-    .where('o.work_date', '>=', start)
-    .where('o.work_date', '<=', end)
-    .where('t.employment_type', 'w2')
-    .groupBy('o.technician_id')
-    .select('o.technician_id',
-      conn.raw('SUM(GREATEST(COALESCE(d.total_shift_minutes, 0) - COALESCE(d.unpaid_meal_minutes, 0), 0)) AS minutes'));
-  return new Map(rows.filter((row) => Number(row.minutes) > 0).map((row) => [row.technician_id, Number(row.minutes)]));
-}
-
-// A worked row with its holiday work minutes (holiday_work_minutes), none when it has none. Never more than the
-// minutes the check pays as worked, so the premium is never paid on hours the check does not pay.
+// A worked row with its holiday work (holiday_work_minutes and holiday_work_days: the paid minutes worked on each holiday
+// taken, payroll-holiday-work.js holidayWorkByDay), none when it has none. Never more than the minutes the check pays
+// as worked, so the premium is never paid on hours the check does not pay.
 function rowWithHolidayWork(row, byTechnician) {
-  const holiday = Math.round((byTechnician.get(row.technician_id) || 0) * 100);
-  const paid = Math.round((Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0)) * 100);
-  const minutes = Math.min(holiday, paid) / 100;
-  return minutes > 0 ? { ...row, holiday_work_minutes: minutes } : row;
+  const capped = capHolidayDays(byTechnician.get(row.technician_id),
+    Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0));
+  return capped.minutes > 0 ? { ...row, holiday_work_minutes: capped.minutes, holiday_work_days: capped.days } : row;
 }
 
 // Year-to-date before a pay date, in cents: finalized, non-voided checks of the same calendar
@@ -923,7 +916,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
   let timeOffOnlyRows = [];
   if (timeOffOn()) {
     const timeOff = await timeOffByTechnician(conn, start, end);
-    const holidayWork = await holidayWorkByTechnician(conn, start, end);
+    const holidayWork = await holidayWorkByDay(conn, start, end);
     withHours = workedRows.map((row) => {
       const off = timeOff.get(row.technician_id);
       return rowWithHolidayWork({ ...row, pto_minutes: off ? off.pto : 0, holiday_minutes: off ? off.holiday : 0 }, holidayWork);
