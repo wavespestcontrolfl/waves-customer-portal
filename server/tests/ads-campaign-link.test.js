@@ -12,9 +12,10 @@ const NOW = new Date('2026-11-23T15:00:00Z');
 const GCLID_NEW = 'Cj0KCQiA_recentClick123';
 const GCLID_OLD = 'Cj0KCQiA_olderClick4567';
 
-// A fake knex: ad_service_attribution rows, ad_campaigns, and spend rows for the older-click rule.
-function fakeConn({ leads, campaigns, spendCampaignIds = [] }) {
+// A fake knex: ad_service_attribution rows, ad_campaigns, and system_settings (the try times).
+function fakeConn({ leads, campaigns, tried = {} }) {
   const updates = [];
+  const settings = { 'ads.campaign_link.tried': JSON.stringify(tried) };
   const conn = jest.fn((table) => {
     const q = {
       _where: {},
@@ -22,26 +23,28 @@ function fakeConn({ leads, campaigns, spendCampaignIds = [] }) {
       whereNull() { return q; },
       orderBy() { return q; },
       limit() { return q; },
-      join() { return q; },
-      whereIn() { return q; },
-      distinct: async () => spendCampaignIds.map((id) => ({ id })),
-      where(a, b, c) {
+      where(a) {
         if (typeof a === 'object') q._where = a;
         if (table === 'ad_campaigns' && a === 'platform') return { select: async () => campaigns };
         return q;
       },
+      first: async () => (settings[q._where.key] != null ? { value: settings[q._where.key] } : undefined),
       select: async () => leads,
       update: async (patch) => { updates.push({ id: q._where.id, ...patch }); return 1; },
+      insert: (row) => ({ onConflict: () => ({ merge: async () => { settings[row.key] = row.value; } }) }),
     };
     return q;
   });
   conn.fn = { now: () => 'now()' };
   conn.updates = updates;
+  conn.settings = settings;
   return conn;
 }
 
-function googleAdsWith(answers) {
+// Google: click_view answers by gclid; campaign metrics answer with `spenders` (Google campaign ids).
+function googleAdsWith(answers, spenders = []) {
   const query = jest.fn(async (gaql) => {
+    if (gaql.includes('FROM campaign ')) return spenders.map((id) => ({ campaign: { id }, metrics: { cost_micros: 1 } }));
     const hit = Object.entries(answers).find(([gclid]) => gaql.includes(gclid));
     return hit ? [{ campaign: { id: hit[1] } }] : [];
   });
@@ -68,27 +71,53 @@ test('a recent click Google has no record of yet stays unlinked for the next run
   expect(g.query).toHaveBeenCalledTimes(2); // the lead day and the day before
 });
 
-test('an older click takes the one campaign with spend that day; two campaigns = unlinked', async () => {
+test('an older click takes the one campaign Google says had spend that day; two campaigns = unlinked', async () => {
   const lead = { id: 'b1', gclid: GCLID_OLD, lead_date: '2026-07-01' };
-  const one = fakeConn({ leads: [lead], campaigns, spendCampaignIds: ['local-gbp'] });
-  const g = googleAdsWith({});
-  expect((await linkCampaigns({ now: NOW, conn: one, googleAds: g })).linked.only_campaign_with_spend).toBe(1);
+  const one = fakeConn({ leads: [lead], campaigns });
+  const g1 = googleAdsWith({}, ['22594274874']);
+  expect((await linkCampaigns({ now: NOW, conn: one, googleAds: g1 })).linked.only_campaign_with_spend).toBe(1);
   expect(one.updates[0]).toMatchObject({ campaign_id: 'local-gbp', campaign_link_basis: 'only_campaign_with_spend' });
-  expect(g.query).not.toHaveBeenCalled();
+  expect(g1.query.mock.calls[0][0]).toMatch(/FROM campaign WHERE segments.date BETWEEN '2026-06-30' AND '2026-07-01'/);
 
-  const two = fakeConn({ leads: [lead], campaigns, spendCampaignIds: ['local-gbp', 'local-pest'] });
-  expect((await linkCampaigns({ now: NOW, conn: two, googleAds: g })).unlinked).toBe(1);
+  const two = fakeConn({ leads: [lead], campaigns });
+  const g2 = googleAdsWith({}, ['22594274874', '24535212391']);
+  expect((await linkCampaigns({ now: NOW, conn: two, googleAds: g2 })).unlinked).toBe(1);
   expect(two.updates).toEqual([]);
+});
+
+test('a lead day still inside the 90-day window is looked up exactly, even when the day before has left it', async () => {
+  const conn = fakeConn({ leads: [{ id: 'd1', gclid: GCLID_NEW, lead_date: '2026-08-25' }], campaigns });
+  const g = googleAdsWith({}, ['22594274874']);
+  const out = await linkCampaigns({ now: NOW, conn, googleAds: g });
+  expect(out.unlinked).toBe(1); // no click record: waits, never guesses from spend
+  expect(g.query).toHaveBeenCalledTimes(1);
+  expect(g.query.mock.calls[0][0]).toMatch(/FROM click_view WHERE segments.date = '2026-08-25'/);
+});
+
+test('every waiting lead gets a turn: least recently tried first', async () => {
+  const leads = Array.from({ length: 55 }, (_, i) => ({ id: `r${i}`, gclid: `${GCLID_NEW}${i}`, lead_date: '2026-11-10' }));
+  const tried = Object.fromEntries(leads.slice(0, 50).map((l) => [l.id, '2026-11-22T11:00:00.000Z']));
+  const conn = fakeConn({ leads, campaigns, tried });
+  const g = googleAdsWith({});
+  await linkCampaigns({ now: NOW, conn, googleAds: g });
+  const queried = new Set(g.query.mock.calls.map(([q]) => q.match(/gclid = '([^']+)'/)[1]));
+  for (let i = 50; i < 55; i += 1) expect(queried.has(`${GCLID_NEW}${i}`)).toBe(true);
+  expect(JSON.parse(conn.settings['ads.campaign_link.tried']).r50).toBe(NOW.toISOString());
 });
 
 test('a campaign Google names that is not in ad_campaigns, or a malformed click id, is never written', async () => {
   const conn = fakeConn({
-    leads: [{ id: 'c1', gclid: GCLID_NEW, lead_date: '2026-11-10' }, { id: 'c2', gclid: "x' OR 1=1 --", lead_date: '2026-11-10' }],
+    leads: [
+      { id: 'c1', gclid: GCLID_NEW, lead_date: '2026-11-10' },
+      { id: 'c2', gclid: "x' OR 1=1 --", lead_date: '2026-11-10' },
+      { id: 'c3', gclid: 'n/a', lead_date: '2026-06-01' },
+    ],
     campaigns,
   });
-  const g = googleAdsWith({ [GCLID_NEW]: 999 });
+  const g = googleAdsWith({ [GCLID_NEW]: 999 }, ['22594274874']);
   const out = await linkCampaigns({ now: NOW, conn, googleAds: g });
-  expect(out.unlinked).toBe(2);
+  expect(out.checked).toBe(1); // the malformed and the placeholder never enter, old or new
+  expect(out.unlinked).toBe(1);
   expect(conn.updates).toEqual([]);
   expect(g.query.mock.calls.every(([q]) => !q.includes('OR 1=1'))).toBe(true);
   expect(_internals.GCLID_RE.test("x' OR 1=1 --")).toBe(false);
