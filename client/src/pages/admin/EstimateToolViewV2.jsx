@@ -909,15 +909,14 @@ const DEAD_ANIMAL_ACCESS_OPTIONS = [
   { value: "in_wall", label: "Inside a wall or ceiling (needs an opening) - custom quote" },
 ];
 const DEAD_ANIMAL_ACCESS_VALUES = DEAD_ANIMAL_ACCESS_OPTIONS.map((o) => o.value).filter(Boolean);
-// The four rodent-guarantee eligibility confirmations. They are per-job
+// The three rodent-guarantee eligibility confirmations (sanitation is not required, owner 2026-11-23). They are per-job
 // affirmations (work actually completed for THIS property), so they must reset
 // on a fresh estimate / customer-or-address change / when the guarantee toggle
 // is turned off — and any change must invalidate a generated estimate, since
-// all four gate whether RODENT_GUARANTEE prices at all.
+// all three gate whether RODENT_GUARANTEE prices at all.
 const RODENT_GUARANTEE_ELIGIBILITY_KEYS = [
   "rgTrappingCompleted",
   "rgExclusionCompleted",
-  "rgSanitationBaseline",
   "rgNoActivityAfterFinalCheck",
 ];
 
@@ -2085,7 +2084,6 @@ export default function EstimateToolViewV2({
     svcRodentGuarantee: false,
     rgTrappingCompleted: false,
     rgExclusionCompleted: false,
-    rgSanitationBaseline: false,
     rgNoActivityAfterFinalCheck: false,
     showOneTimeOption: false,
     billByInvoice: false,
@@ -4905,7 +4903,6 @@ export default function EstimateToolViewV2({
           : {}),
         rgTrappingCompleted: !!form.rgTrappingCompleted,
         rgExclusionCompleted: !!form.rgExclusionCompleted,
-        rgSanitationBaseline: !!form.rgSanitationBaseline,
         rgNoActivityAfterFinalCheck: !!form.rgNoActivityAfterFinalCheck,
         rodentTrappingPlan: "standard",
         rodentTrappingEmergency: !!form.rodentTrappingEmergency,
@@ -8719,14 +8716,13 @@ export default function EstimateToolViewV2({
               {form.svcRodentGuarantee && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <p className="text-14 text-zinc-400 font-medium mb-2">
-                    Guarantee Eligibility — all four required
+                    Guarantee Eligibility — all three required
                   </p>
                   <CheckboxV2 k="rgTrappingCompleted" label="Trapping completed" />
                   <CheckboxV2 k="rgExclusionCompleted" label="Exclusion completed" />
-                  <CheckboxV2 k="rgSanitationBaseline" label="Sanitation completed or photo baseline on file" />
                   <CheckboxV2 k="rgNoActivityAfterFinalCheck" label="No activity after final trap check" />
                   <div className="text-14 text-zinc-600 mt-2">
-                    $199–$299/yr by property tier. 12-month re-entry warranty, renewable annually — free re-service during the term. All four boxes must be confirmed or the guarantee will not be added.
+                    $199–$299/yr by property tier. 12-month re-entry warranty, renewable annually — free re-service during the term. All three boxes must be confirmed or the guarantee will not be added.
                   </div>
                 </div>
               )}

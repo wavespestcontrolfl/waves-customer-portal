@@ -6114,8 +6114,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       };
     }
   }
-  // Annual rodent guarantee — gated. The engine drops the line unless all four
-  // eligibility flags are true, so the rep confirms each affirmatively; missing
+  // Annual rodent guarantee — gated. The engine drops the line unless all three
+  // eligibility flags are true (trapping, exclusion, no activity; sanitation is not required), so the rep confirms each affirmatively; missing
   // any → INELIGIBLE and no line item (fail closed). Pass the normalized
   // homeSqFt/stories/roofType so tiering (standard/complex/estate) keys off the
   // same authoritative inputs as the rest of the estimate — the engine's
@@ -6129,7 +6129,6 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       eligibility: {
         trappingCompleted: !!o.rgTrappingCompleted,
         exclusionCompleted: !!o.rgExclusionCompleted,
-        sanitationCompletedOrPhotoBaseline: !!o.rgSanitationBaseline,
         noActivityAfterFinalTrapCheck: !!o.rgNoActivityAfterFinalCheck,
       },
     };
