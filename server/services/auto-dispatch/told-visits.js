@@ -35,7 +35,7 @@ async function loadStopMembers(conn, ids) {
   const rows = await conn('scheduled_services').whereIn('id', ids).select('id', 'visit_id', 'status', 'scheduled_date');
   const visitIds = [...new Set(rows.map((r) => r.visit_id).filter((v) => v != null).map(String))];
   const members = visitIds.length
-    ? await conn('scheduled_services').whereIn('visit_id', visitIds).select('id', 'visit_id', 'status') : [];
+    ? await conn('scheduled_services').whereIn('visit_id', visitIds).select('id', 'visit_id', 'status', 'scheduled_date') : [];
   const membersOf = new Map();
   for (const member of members) {
     const key = String(member.visit_id);
@@ -43,7 +43,7 @@ async function loadStopMembers(conn, ids) {
     membersOf.get(key).push(member);
   }
   const stopOf = new Map(rows.map((r) => [String(r.id), r.visit_id != null ? membersOf.get(String(r.visit_id)) || [] : []]));
-  const dateOf = new Map(rows.map((r) => [String(r.id), visitDateOf(r.scheduled_date)]));
+  const dateOf = new Map([...members, ...rows].map((r) => [String(r.id), visitDateOf(r.scheduled_date)]));
   return { stopOf, memberIds: members.map((m) => String(m.id)), dateOf };
 }
 
@@ -66,28 +66,33 @@ function slotDateOf(start) {
   }
 }
 
-/**
- * The stop-wide resolved promise for each requested id: Map<id, promise|null>. One stop-members read and one
- * loadPromiseEvents read, however many ids. Throws when a read fails.
- */
-async function resolvePromises(conn, ids, now) {
-  return (await resolveWithDates(conn, ids, now)).promises;
+/** Is this promise event about the date its visit now holds? A known slot whose ET date differs from that visit's own date
+ *  is not (owner 2026-11-24, "fix"). An unknown window, an unknown visit date or an unreadable slot keeps the event. */
+function onVisitDate(event, dateOf) {
+  if (!event || event.start_at == null) return true;
+  const visitDate = dateOf.get(String(event.visit_id)) || null;
+  const at = new Date(event.start_at);
+  const slotDate = Number.isNaN(at.getTime()) ? null : slotDateOf(at);
+  return !visitDate || !slotDate || visitDate === slotDate;
 }
 
-/** resolvePromises plus each requested visit's own date (`dateOf`, from the same stop-members read). */
-async function resolveWithDates(conn, ids, now) {
+/** The stop-wide resolved promise for each requested id: Map<id, promise|null>. One stop-members read and one
+ *  loadPromiseEvents read, however many ids. Throws when a read fails. With `sameDateOnly` (loadPromiseFacts only), every
+ *  event whose slot is for another date than its own visit's date is set aside BEFORE the latest and stop-wide choice, so
+ *  an old-date slot never hides a sibling's current hour. */
+async function resolvePromises(conn, ids, now, { sameDateOnly = false } = {}) {
   const detector = require('../no-show-detector');
   const wanted = ids.map(String);
   const { stopOf, memberIds, dateOf } = await loadStopMembers(conn, wanted);
-  const events = await detector.loadPromiseEvents(conn, [...new Set([...wanted, ...memberIds])], { now });
+  const loaded = await detector.loadPromiseEvents(conn, [...new Set([...wanted, ...memberIds])], { now });
+  const events = sameDateOnly ? loaded.filter((event) => onVisitDate(event, dateOf)) : loaded;
   const latest = detector.latestPromises(events, now);
   const eventsByVisit = detector.byVisit(events);
-  const promises = new Map(ids.map((id) => {
+  return new Map(ids.map((id) => {
     const stop = stopOf.get(String(id)) || [];
     const promise = stop.length > 1 ? detector.stopPromise(stop, eventsByVisit, now) : latest.get(String(id));
     return [id, promise || null];
   }));
-  return { promises, dateOf };
 }
 
 /** Set of the given ids whose communicated window (the visit's own latest promise, or its stop's) has a known slot.
@@ -118,31 +123,23 @@ function promiseLevelOf(promise) {
  *  (`start`, a Date; null otherwise, and for a withdrawn promise). ONE promise read gives both facts, so they always
  *  agree (the day re-plan's 2-hour told shift, owner 2026-11-24). Throws when a read fails; every caller must fail closed.
  *
- *  An hour told for ANOTHER date is not an hour for this visit (owner 2026-11-24, "fix"): when the latest promise has a
- *  known slot whose ET date differs from the visit's own date, the level is 'none' and `start` is null. Seen live after
- *  a no-show: the 24-hour text said Nov 14 9-11, the office moved the visit to Nov 23 with no text, and the 3-day text
- *  still quoted an hour. A newer promise for the new date (a move notice, a reminder) is the latest one and counts as
- *  usual. An unknown visit date or slot date keeps today's answer ('hour', fail closed); so does an unknown window. */
+ *  An hour told for ANOTHER date is not an hour for this visit (owner 2026-11-24, "fix"): every promise event whose known
+ *  slot is on another ET date than its own visit's date is set aside before the choice (resolvePromises
+ *  sameDateOnly), so a visit whose only hour was for an older date reads 'none', and in a grouped stop a sibling's
+ *  current hour still stands. Seen live after a no-show: the 24-hour text said Nov 14 9-11, the office moved the visit to
+ *  Nov 23 with no text, and the 3-day text still quoted an hour. An unknown visit date or slot date keeps the event (fail
+ *  closed); so does an unknown window. resolvePromises, the night freeze and the office's told badge are unchanged. */
 async function loadPromiseFacts(conn, ids, now = new Date()) {
   const facts = new Map();
   if (!ids || ids.length === 0) return facts;
-  const { promises, dateOf } = await resolveWithDates(conn, ids, now);
+  const promises = await resolvePromises(conn, ids, now, { sameDateOnly: true });
   for (const id of ids) {
     const promise = promises.get(id);
-    let level = promiseLevelOf(promise);
+    const level = promiseLevelOf(promise);
     let start = null;
     if (level === 'hour' && promise.withdrawn !== true && promise.start_at != null) {
       const at = promise.start_at instanceof Date ? promise.start_at : new Date(promise.start_at);
       if (!Number.isNaN(at.getTime())) start = at;
-    }
-    if (level === 'hour' && promise && promise.start_at != null) {
-      const at = new Date(promise.start_at);
-      const visitDate = dateOf.get(String(id)) || null;
-      const slotDate = Number.isNaN(at.getTime()) ? null : slotDateOf(at);
-      if (visitDate && slotDate && visitDate !== slotDate) {
-        level = 'none';
-        start = null;
-      }
     }
     facts.set(id, { level, start });
   }

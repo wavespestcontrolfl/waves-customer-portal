@@ -226,6 +226,20 @@ describe('loadPromiseFacts', () => {
       expect(await facts(fakeConn({ messages: [dayMsg('s1')], members: [row('2026-11-23')] }))).toEqual({ s1: { level: 'day', start: null } });
     });
 
+    test('a grouped stop: a sibling\'s current-date hour still stands over a member\'s old-date one (codex P1)', async () => {
+      const NEW_SLOT = Date.parse('2026-11-23T14:00:00Z');
+      const members = [
+        { id: 's1', visit_id: 'v1', status: 'pending', scheduled_date: '2026-11-23' },
+        { id: 's2', visit_id: 'v1', status: 'pending', scheduled_date: '2026-11-23' },
+      ];
+      const messages = [msg('s1'), msg('s2', { id: 3, metadata: { rendered_slot_ms: NEW_SLOT } })];
+      const out = await facts(fakeConn({ messages, members }), ['s1', 's2']);
+      expect(out.s1).toEqual({ level: 'hour', start: new Date(NEW_SLOT) });
+      expect(out.s2).toEqual({ level: 'hour', start: new Date(NEW_SLOT) });
+      const onlyOld = await facts(fakeConn({ messages: [msg('s1')], members }), ['s1', 's2']);
+      expect(onlyOld).toEqual({ s1: { level: 'none', start: null }, s2: { level: 'none', start: null } });
+    });
+
     test('loadToldVisitIds (the night freeze) is unchanged: the old-date hour still freezes', async () => {
       const told = await loadToldVisitIds(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }), ['s1'], NOW);
       expect([...told]).toEqual(['s1']);
