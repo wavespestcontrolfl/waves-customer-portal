@@ -53,8 +53,8 @@ function snapshotOf({ weekStart, settings, result, stops }) {
     shareCents: result.shareCents,
     stops: stops.map((stop) => ({
       visitId: stop.visitId, workDate: stop.workDate, kind: stop.kind, creditCents: stop.creditCents, needsReview: Boolean(stop.needsReview),
-      // The credit bases (a shared invoice or a multi-visit job, with the split of ALL its visits) this credit was priced from, frozen
-      // with the week: every later week reads them by visit id (production-share.js applyFrozen).
+      // What this credit drew from each basis (a shared invoice or a multi-visit job): [{ basisType, basisId, cents }]. Every later
+      // week reads the paid cents of a basis from these rows (production-share.js, the credit ledger).
       ...(stop.bases && stop.bases.length ? { bases: stop.bases } : {}),
     })),
   };
@@ -130,12 +130,10 @@ async function readInputsUnderLock(trx, weekStart) {
  * credit, review mark), whatever the order. The pay run's finalize reads the inputs again under the payroll lock and compares
  * revisions, so credits that changed between its first read and the lock are never frozen onto a check. Pure.
  */
-// The credit bases a stop was priced from, in a fixed order: [[type, id, total, sold, [[visitId, cents, slot], ...]], ...]. The review
-// token and the revision both take it, so a basis that changes after drafting makes the draft stale even when the credits do not move.
+// The credit bases a stop drew from, in a fixed order: [[type, id, cents], ...] (the credit ledger, production-share.js). The review token
+// and the revision both take it, so a basis that changes after drafting makes the draft stale even when the credits do not move.
 function basesSignature(bases) {
-  return (Array.isArray(bases) ? bases : []).map((one) => [one.basisType, one.basisId, Number(one.totalCents), Number(one.sold || 0),
-    Object.entries(one.allocation || {}).map(([visitId, cents]) => [visitId, Number(cents), Number((one.slots || {})[visitId] || 0)])
-      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))])
+  return (Array.isArray(bases) ? bases : []).map((one) => [one.basisType, one.basisId, Number(one.cents)])
     .sort((a, b) => (`${a[0]}:${a[1]}` < `${b[0]}:${b[1]}` ? -1 : 1));
 }
 

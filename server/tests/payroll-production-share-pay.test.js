@@ -294,105 +294,117 @@ describe('the read under the payroll lock', () => {
   });
 });
 
-describe('the first finalized payment freezes the credit basis (applyFrozen)', () => {
+describe('the credit ledger (applyLedger)', () => {
   const productionShare = require('../services/production-share');
-  const invoiceBasis = (a, b) => ({ basisType: 'invoice', basisId: 'inv-1', totalCents: a + b, allocation: { 'visit-1': a, 'visit-2': b } });
-  const frozenInvoice = (basis = invoiceBasis(60000, 60000)) => [{ weekStart: '2026-09-14', basis }];
-  // A week-2 row of visit-2 as it prices live now: from the invoice (bases) or from its own price (no bases)
-  const live = (cents, bases = [invoiceBasis(cents, 120000 - cents)], kind = 'priced') => ({ visitId: 'visit-2', workDate: '2026-09-21', kind, creditCents: cents, needsReview: false, bases });
-  const none = new Map();
+  const invoice = (invoiceId, totalCents, members, shareCents) => ({ invoiceId, totalCents, members: members.map(([id, weight]) => ({ id, weight })), shareCents });
+  const plain = (visitId, invoices) => ({
+    visitId, workDate: '2026-09-21', kind: 'priced', creditCents: invoices.reduce((sum, inv) => sum + inv.shareCents, 0), needsReview: false, ledger: { invoices },
+  });
+  const job = (visitId, nth, { price = 200000, sold = 2, rootId = 'root', root = [] } = {}) => ({
+    visitId, workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: productionShare.jobPartCents(price, sold, nth), needsReview: false,
+    ledger: { job: { rootId, price, sold, nth }, rootInvoices: root, invoices: visitId === rootId ? root : [] },
+  });
+  // what finalized pay runs paid: byBasis = { 'invoice:inv-1': [cents, ['visit-1']] }, visits = { visitId: week }
+  const paidOf = (byBasis = {}, visits = {}) => ({
+    visits: new Map(Object.entries(visits)),
+    byBasis: new Map(Object.entries(byBasis).map(([key, [cents, who]]) => [key, { cents, visits: new Set(who) }])),
+  });
+  const MEMBERS = [['visit-1', 100000], ['visit-2', 100000]];
+  const one = (rows, paid = paidOf()) => productionShare.applyLedger(rows, paid)[0];
 
-  test('a listed visit credits its frozen cents, whatever its live invoice link, price or split (lost link, repriced, new weights)', () => {
-    // the live split moved either way: the frozen $600.00 stays
-    for (const cents of [90000, 30000]) {
-      expect(productionShare.applyFrozen([live(cents)], none, frozenInvoice())[0]).toMatchObject({ kind: 'frozen_basis', creditCents: 60000, needsReview: false });
-    }
-    // the invoice link is gone: the visit falls back to its own $1,000.00 price, and still credits the frozen $600.00
-    expect(productionShare.applyFrozen([live(100000, [])], none, frozenInvoice())[0]).toMatchObject({ kind: 'frozen_basis', creditCents: 60000 });
-    // no live price at all (unpriced review): the frozen cents still stand
-    expect(productionShare.applyFrozen([{ ...live(0, []), kind: 'unpriced', needsReview: true }], none, frozenInvoice())[0]).toMatchObject({ creditCents: 60000, needsReview: false });
+  test('nothing paid from a basis: exactly the live credit, with what it drew from each basis, and no ledger left on the row', () => {
+    const out = one([plain('visit-2', [invoice('inv-1', 200000, MEMBERS, 100000)])]);
+    expect(out).toMatchObject({ kind: 'priced', creditCents: 100000, needsReview: false, bases: [{ basisType: 'invoice', basisId: 'inv-1', cents: 100000 }] });
+    expect(out).not.toHaveProperty('ledger');
+    const rootJob = one([job('root', 1)]);
+    expect(rootJob).toMatchObject({ creditCents: 100000, bases: [{ basisType: 'job', basisId: 'root', cents: 100000 }] });
   });
 
-  test('a credit that is not price-derived (prepaid slice, callback value, free visit, not performed) keeps its own credit', () => {
-    for (const kind of ['prepaid_plan', 'callback_other', 'free_visit', 'not_performed', 'unverified']) {
-      const row = live(40000, [], kind);
-      expect(productionShare.applyFrozen([row], none, frozenInvoice())[0]).toBe(row);
+  test('an invoice credits REMAINING (live total less what was paid), whatever its split is now', () => {
+    const paid = paidOf({ 'invoice:inv-1': [100000, ['visit-1']] });
+    // the split moved to $1,500 / $500 after visit-1 was paid $1,000: visit-2 is the last open member and takes the $1,000 remaining
+    for (const live of [150000, 50000]) {
+      expect(one([plain('visit-2', [invoice('inv-1', 200000, MEMBERS, live)])], paid)).toMatchObject({ creditCents: 100000, bases: [{ cents: 100000 }] });
     }
+    // reprice the whole invoice to $1,200 after $1,000 was paid: $200 remain
+    expect(one([plain('visit-2', [invoice('inv-1', 120000, MEMBERS, 60000)])], paid).creditCents).toBe(20000);
   });
 
-  test('a visit that joined the basis live and is not in its allocation is $0 and named; so is one that joined an invoice paid whole', () => {
-    const joined = { ...live(60000), visitId: 'visit-9', bases: [invoiceBasis(60000, 60000)] };
-    expect(productionShare.applyFrozen([joined], none, frozenInvoice())[0]).toMatchObject({
-      kind: 'joined_basis', creditCents: 0, needsReview: true, reason: expect.stringContaining('joined, after the week of 2026-09-14 was paid'),
-    });
-    const wholeBefore = frozenInvoice({ basisType: 'invoice', basisId: 'inv-1', totalCents: 120000, allocation: { 'visit-1': 120000 } });
-    expect(productionShare.applyFrozen([live(60000)], none, wholeBefore)[0]).toMatchObject({ kind: 'joined_basis', creditCents: 0 });
+  test('REMAINING is shared by the live weights of the member visits not paid yet, never more than REMAINING', () => {
+    const members = [['visit-1', 100000], ['visit-2', 300000], ['visit-3', 100000]];
+    const paid = paidOf({ 'invoice:inv-1': [100000, ['visit-1']] });
+    const rows = productionShare.applyLedger([plain('visit-2', [invoice('inv-1', 300000, members, 180000)])], paid);
+    // $2,000.00 remain over visit-2 (3 parts) and visit-3 (1 part): visit-2 gets $1,500.00 now and visit-3 keeps its part for later
+    expect(rows[0].creditCents).toBe(150000);
+  });
+
+  test('an invoice credited in full: a visit that joins it later, or a second visit of it, is $0 and needs review', () => {
+    const paid = paidOf({ 'invoice:inv-1': [200000, ['visit-1']] });
+    const out = one([plain('visit-2', [invoice('inv-1', 200000, MEMBERS, 100000)])], paid);
+    expect(out).toMatchObject({ kind: 'basis_exhausted', creditCents: 0, needsReview: true, bases: [] });
+    expect(out.reason).toContain('already credited in full');
+    // credited above the live total (the invoice was reduced after): nothing remains either
+    expect(one([plain('visit-2', [invoice('inv-1', 150000, MEMBERS, 75000)])], paid).kind).toBe('basis_exhausted');
+  });
+
+  test('PER INVOICE: what is left of a shared invoice plus the visit\'s own separate invoice', () => {
+    const paid = paidOf({ 'invoice:inv-1': [10000, ['visit-1']] });
+    const out = one([plain('visit-2', [invoice('inv-1', 20000, [['visit-1', 15000], ['visit-2', 5000]], 5000), invoice('inv-own', 5000, [['visit-2', 5000]], 5000)])], paid);
+    expect(out.creditCents).toBe(15000); // $100.00 remaining of the shared invoice + $50.00 of its own
+    expect(out.bases).toEqual([{ basisType: 'invoice', basisId: 'inv-1', cents: 10000 }, { basisType: 'invoice', basisId: 'inv-own', cents: 5000 }]);
   });
 
   test('a visit already credited on a finalized check is already_paid, before anything else', () => {
-    expect(productionShare.applyFrozen([live(60000)], new Map([['visit-2', '2026-09-14']]), frozenInvoice())[0]).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true });
+    const out = one([plain('visit-2', [invoice('inv-1', 200000, MEMBERS, 100000)])], paidOf({}, { 'visit-2': '2026-09-14' }));
+    expect(out).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true, bases: [] });
   });
 
-  const jobBasis = { basisType: 'job', basisId: 'root-1', totalCents: 200000, sold: 2, allocation: { 'root-1': 100000 }, slots: { 'root-1': 1 } };
-  const followUp = (repricedPart, nth = 2) => ({
-    visitId: 'visit-2', workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: repricedPart, needsReview: false,
-    bases: [{ basisType: 'job', basisId: 'root-1', totalCents: 120000, sold: 2, allocation: { 'root-1': 60000, 'visit-2': repricedPart }, slots: { 'root-1': 1, 'visit-2': nth } }],
+  test('a package: its follow-up credits the job price less what was paid (reprice $2,000 -> $1,200 after $1,000 was paid: $200)', () => {
+    const paid = paidOf({ 'job:root': [100000, ['root']] });
+    expect(one([job('followup', 2, { price: 120000 })], paid)).toMatchObject({ kind: 'multi_visit_job', creditCents: 20000, bases: [{ basisType: 'job', basisId: 'root', cents: 20000 }] });
+    expect(one([job('followup', 2, { price: 200000 })], paid).creditCents).toBe(100000);
+    // the price went UP after: it takes the rest, never a fixed half
+    expect(one([job('followup', 2, { price: 300000 })], paid).creditCents).toBe(200000);
   });
 
-  test('a package follow-up takes its free slot of the FROZEN job price when the root is repriced after half was paid ($2,000.00 -> $1,200.00)', () => {
-    const out = productionShare.applyFrozen([followUp(60000)], none, [{ weekStart: '2026-09-14', basis: jobBasis }])[0];
-    expect(out).toMatchObject({ kind: 'frozen_basis', creditCents: 100000, needsReview: false });
-    // the row carries the frozen job with its own part added, so a later week reads it too
-    expect(out.bases[0]).toMatchObject({ basisId: 'root-1', totalCents: 200000, allocation: { 'root-1': 100000, 'visit-2': 100000 }, slots: { 'root-1': 1, 'visit-2': 2 } });
+  test('THREE CREDITS: a two-visit package paid for both visits earns a replacement nothing', () => {
+    const paid = paidOf({ 'job:root': [200000, ['root', 'followup']] });
+    const out = one([job('replacement', 2)], paid);
+    expect(out).toMatchObject({ kind: 'basis_exhausted', creditCents: 0, needsReview: true });
+    expect(out.reason).toContain('package');
   });
 
-  test('a follow-up that was planned when the first visit was paid is listed: its frozen cents', () => {
-    const planned = { ...jobBasis, allocation: { 'root-1': 100000, 'visit-2': 100000 }, slots: { 'root-1': 1, 'visit-2': 2 } };
-    expect(productionShare.applyFrozen([followUp(60000)], none, [{ weekStart: '2026-09-14', basis: planned }])[0]).toMatchObject({ kind: 'frozen_basis', creditCents: 100000 });
+  test('more visits than sold slots left: the first ones credit, the rest are $0 and need review', () => {
+    const paid = paidOf({ 'job:root': [100000, ['root']] });
+    const rows = productionShare.applyLedger([job('a', 2), job('b', 3)], paid);
+    expect(rows.map((row) => [row.kind, row.creditCents])).toEqual([['multi_visit_job', 100000], ['basis_exhausted', 0]]);
   });
 
-  test('a visit that wants a slot the frozen job already used, or one past the sold count, is $0 and named', () => {
-    expect(productionShare.applyFrozen([followUp(60000, 1)], none, [{ weekStart: '2026-09-14', basis: jobBasis }])[0]).toMatchObject({ kind: 'joined_basis', creditCents: 0 });
-    expect(productionShare.applyFrozen([followUp(60000, 3)], none, [{ weekStart: '2026-09-14', basis: jobBasis }])[0]).toMatchObject({ kind: 'joined_basis', creditCents: 0 });
+  test('the first payment of a package also draws the root\'s invoice share out of that invoice; later visits draw none', () => {
+    const root = [invoice('inv-9', 200000, [['root', 100000], ['visit-9', 100000]], 100000)];
+    const [first, second] = productionShare.applyLedger([job('root', 1, { price: 100000, root }), job('followup', 2, { price: 100000, root })], paidOf());
+    expect(first.bases).toEqual([{ basisType: 'job', basisId: 'root', cents: 50000 }, { basisType: 'invoice', basisId: 'inv-9', cents: 100000 }]);
+    expect(second.bases).toEqual([{ basisType: 'job', basisId: 'root', cents: 50000 }]);
+    // after it was paid, the other visit of the invoice sees $1,000 gone
+    const later = one([plain('visit-9', [invoice('inv-9', 200000, [['root', 100000], ['visit-9', 100000]], 150000)])], paidOf({ 'invoice:inv-9': [100000, ['root']] }));
+    expect(later.creditCents).toBe(100000);
   });
 
-  test('PER INVOICE: a frozen shared invoice credits its frozen cents and the visit\'s own separate invoice its live cents, and both stay on the row', () => {
-    // visit-2: $100.00 of the shared invoice (frozen, though it now splits $150 / $50) plus its own $50.00 invoice
-    const own = { basisType: 'invoice', basisId: 'inv-own', totalCents: 5000, allocation: { 'visit-2': 5000 } };
-    const row = live(10000, [invoiceBasis(15000, 5000), own]);
-    const out = productionShare.applyFrozen([{ ...row, creditCents: 10000 }], none, frozenInvoice(invoiceBasis(10000, 10000)))[0];
-    expect(out).toMatchObject({ kind: 'frozen_basis', creditCents: 15000, needsReview: false });
-    expect(out.bases).toEqual([invoiceBasis(10000, 10000), own]);
-    // a lost shared link leaves only the own invoice live: frozen $100.00 + live $50.00 all the same
-    expect(productionShare.applyFrozen([live(5000, [own])], none, frozenInvoice(invoiceBasis(10000, 10000)))[0]).toMatchObject({ creditCents: 15000 });
+  test('a package root priced from an invoice others were paid from takes the REMAINING of the invoice as its price', () => {
+    const root = [invoice('inv-9', 200000, [['root', 100000], ['visit-9', 100000]], 150000)];
+    const paid = paidOf({ 'invoice:inv-9': [100000, ['visit-9']] });
+    // $1,000.00 of the $2,000.00 invoice remains for the root: half of it now, not half of the live $1,500.00 share
+    const out = one([job('root', 1, { price: 150000, root })], paid);
+    expect(out.creditCents).toBe(50000);
+    expect(out.bases).toEqual([{ basisType: 'job', basisId: 'root', cents: 50000 }, { basisType: 'invoice', basisId: 'inv-9', cents: 100000 }]);
   });
 
-  test('a job part whose root price came from an invoice a finalized week froze takes its part of the FROZEN amount, never the whole', () => {
-    // visit-1 is the root of a two-treatment package; it was priced $1,500.00 from a shared invoice now, $1,000.00 was frozen for it
-    const liveJob = { basisType: 'job', basisId: 'visit-1', totalCents: 150000, sold: 2, allocation: { 'visit-1': 75000 }, slots: { 'visit-1': 1 } };
-    const root = { visitId: 'visit-1', workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: 75000, needsReview: false, bases: [liveJob] };
-    const frozenInv = [{ weekStart: '2026-09-14', basis: { basisType: 'invoice', basisId: 'inv-9', totalCents: 200000, allocation: { 'visit-1': 100000, 'visit-9': 100000 } } }];
-    const out = productionShare.applyFrozen([root], none, frozenInv)[0];
-    expect(out).toMatchObject({ kind: 'frozen_basis', creditCents: 50000 });
-    expect(out.bases[0]).toMatchObject({ basisType: 'job', totalCents: 100000, allocation: { 'visit-1': 50000 } });
-    expect(out.bases[1].basisId).toBe('inv-9');
-  });
-
-  test('no frozen basis changes nothing, and a row with no basis behind it is left alone', () => {
-    const row = live(60000);
-    expect(productionShare.applyFrozen([row], none, [])[0]).toBe(row);
-    const own = live(100000, []);
-    expect(productionShare.applyFrozen([own], none, frozenInvoice())[0]).toMatchObject({ kind: 'frozen_basis' }); // listed: frozen
-    const other = { ...live(100000, []), visitId: 'visit-7' };
-    expect(productionShare.applyFrozen([other], none, frozenInvoice())[0]).toBe(other);
-  });
-
-  test('the snapshot freezes the bases on the stop, and only on a stop that has one', () => {
-    const rows = [{ visitId: 'v1', workDate: '2026-09-14', kind: 'priced', creditCents: 100, needsReview: false, bases: [invoiceBasis(1, 2)] },
-      { visitId: 'v2', workDate: '2026-09-15', kind: 'priced', creditCents: 100, needsReview: false, bases: [] }];
-    const made = share.snapshotOf({ weekStart: WEEK, settings: SETTINGS, result: shareForWeek({ credits: rows, shifts: 2, settings: SETTINGS }), stops: rows });
-    expect(made.stops[0].bases).toEqual([invoiceBasis(1, 2)]);
-    expect(made.stops[1]).not.toHaveProperty('bases');
+  test('a row that is already $0 and needs review, and a credit no invoice or job priced, are left alone', () => {
+    for (const kind of ['prepaid_plan', 'callback_other', 'free_visit', 'not_performed', 'unverified', 'multi_visit_job']) {
+      const row = { visitId: 'visit-2', workDate: '2026-09-21', kind, creditCents: kind === 'prepaid_plan' ? 40000 : 0, needsReview: kind === 'unverified' || kind === 'multi_visit_job', ledger: null };
+      const out = one([row], paidOf({ 'invoice:inv-1': [200000, ['visit-1']], 'job:root': [200000, ['root']] }));
+      expect(out).toMatchObject({ kind, creditCents: row.creditCents, needsReview: row.needsReview });
+    }
   });
 });
 
@@ -458,13 +470,14 @@ describe('the down guard migration', () => {
 });
 
 describe('the credit bases are in both finalize comparisons', () => {
-  const split = (a, b) => [{ basisType: 'invoice', basisId: 'inv-1', totalCents: a + b, allocation: { v1: a, v2: b } }];
+  const split = (a, b) => [{ basisType: 'invoice', basisId: 'inv-1', cents: a }, { basisType: 'invoice', basisId: 'inv-2', cents: b }];
   const withInvoices = (bases) => stops([['v1', '2026-09-14', 100000], ['v2', '2026-09-15', 110000], ['v3', '2026-09-16', 100000], ['v4', '2026-09-17', 102000]])
     .map((stop, i) => (i === 1 ? { ...stop, bases } : stop));
 
   test('the revision changes when only a split changes (the credits stay the same)', () => {
     const rev = (invoices) => share.revisionOf(new Map([['tech-a', { settings: SETTINGS, stops: withInvoices(invoices) }]]));
     expect(rev(split(100000, 100000))).toBe(rev(split(100000, 100000)));
+    expect(rev([...split(100000, 100000)].reverse())).toBe(rev(split(100000, 100000)));
     expect(rev(split(150000, 50000))).not.toBe(rev(split(100000, 100000)));
     expect(rev([])).not.toBe(rev(split(100000, 100000)));
   });
