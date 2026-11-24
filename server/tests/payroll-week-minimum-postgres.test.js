@@ -223,10 +223,13 @@ postgres('payroll minimum paid week', () => {
   it('no hire date: the minimum cannot be set, and a week of one set before is held', async () => {
     const id = await tech('Sample Alpha', { hired: null, minimum: null });
     const set = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40' }, email: OWNER });
-    expect([set.status, set.body.error]).toEqual([409, 'Enter the hire date first (Staff), then set the minimum.']);
+    expect([set.status, set.body.error]).toEqual([409, 'Enter a readable hire date first (Staff), then set the minimum.']);
     await trx('technicians').where({ id }).update({ paid_week_minimum_hours: '40' });
     await worked(id, W1, 12);
     expect((await draft(W1)).body.run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: NO_HIRE_DATE }]);
+    // A hire date the calendar code cannot read (year 20251) counts as none.
+    await trx('technicians').where({ id }).update({ hire_date: '20251-01-05' });
+    expect((await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '38' }, email: OWNER })).status).toBe(409);
   });
 
   it('refuses a new last day before the hire date', async () => {
@@ -356,7 +359,9 @@ postgres('payroll minimum paid week', () => {
   it('a week with no work and no time off on file gets no check from the minimum', async () => {
     await tech('Sample Alpha');
     const created = await draft(W1);
-    expect((created.body.run?.checks || []).length).toBe(0);
+    // No paycheck to make: the server refuses the draft with its plain reason, never a server error.
+    expect(created.status).not.toBe(500);
+    expect(created.status === 201 ? created.body.run.checks : []).toEqual([]);
   });
 
   it('the setting: owner account only, 0 to 40 hours, empty clears it, and a draft read before it goes stale', async () => {

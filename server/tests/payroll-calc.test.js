@@ -358,8 +358,10 @@ describe('computePaycheck: minimum paid week (payroll-week-minimum.js)', () => {
 
   test('carries no minimum key when the figure is not passed, and refuses a mistyped one', () => {
     expect(paycheck({ ptoMinutes: 0, holidayMinutes: 0 })).not.toHaveProperty('minimumWeekPayCents');
-    expect(paycheck({ minimumWeekMinutes: 0 }).minimumWeekPayCents).toBe(0);
-    expect(() => paycheck({ minimumWeekMinutes: '-1' })).toThrow(/Minimum week minutes/);
+    expect(paycheck({ minimumWeekMinutes: 0, minimumWeekTargetMinutes: 0 }).minimumWeekPayCents).toBe(0);
+    expect(() => paycheck({ minimumWeekMinutes: '-1', minimumWeekTargetMinutes: 0 })).toThrow(/Minimum week minutes/);
+    expect(() => paycheck({ minimumWeekMinutes: '60' })).toThrow(/passed together/);
+    expect(() => paycheck({ minimumWeekTargetMinutes: '2400' })).toThrow(/passed together/);
   });
 });
 

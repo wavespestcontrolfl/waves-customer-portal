@@ -25,6 +25,8 @@
 const { STAFF_WORK_DATE_SQL, STAFF_DAILY_WORK_SQL, addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 const SCHEDULED_DAYS = 4;
+// Read lazily: tech-rewards-pay-lines.js reads the pay run module at call time too.
+const hireDateSql = () => require('./tech-rewards-pay-lines').HIRE_DATE_SQL;
 
 // Minutes as whole hundredths, so the sums never meet a float.
 const hundredths = (minutes) => Math.round(Number(minutes || 0) * 100);
@@ -99,7 +101,7 @@ async function unpaidOnDays(conn, rows, start, end) {
   return out;
 }
 
-const NO_HIRE_DATE = 'This employee has a minimum paid week and no hire date on file, so the days of the first week '
+const NO_HIRE_DATE = 'This employee has a minimum paid week and no readable hire date on file, so the days of the first week '
   + 'cannot be counted. Enter the hire date (Staff), or clear the minimum (Payroll settings).';
 
 const EARLIER_STAY = 'This week holds work before the hire date on file (an earlier stay, before a rehire moved the '
@@ -123,7 +125,8 @@ async function applyMinimum(conn, rows, { start, end, lock = false }) {
     .where({ employment_type: 'w2' })
     .whereNotNull('paid_week_minimum_hours')
     .select('id', 'paid_week_minimum_hours',
-      conn.raw("to_char(hire_date, 'YYYY-MM-DD') AS hire_date"),
+      // A hire date the calendar code cannot read is none (held below), as Tech Rewards reads it.
+      conn.raw(`${hireDateSql()} AS hire_date`),
       conn.raw("to_char(paid_week_minimum_last_day, 'YYYY-MM-DD') AS last_day"));
   if (lock) techQuery.forShare();
   const techs = new Map((await techQuery).map((row) => [row.id, row]));

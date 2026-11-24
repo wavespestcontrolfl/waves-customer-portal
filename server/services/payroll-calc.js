@@ -366,6 +366,10 @@ function computePaycheck({
   // Minimum week pay (payroll-week-minimum.js). Its line is in the output only when the caller passed it.
   const withMinimum = minimumWeekMinutes !== undefined;
   nonNegativeCents(minimumWeekMinutes, 'Minimum week minutes');
+  // The line and its guarantee come as a pair (payroll-runs.js buildCheck), so no gross is paid without its line.
+  if (withMinimum !== (minimumWeekTargetMinutes !== undefined)) {
+    throw new Error('Minimum week minutes and minimum week target minutes are passed together');
+  }
   const minimumPay = minimumWeekPay({
     rateCents, regularHundredths, overtimeHundredths, regularPay, ptoPay, holidayPay,
     ptoMinutes, holidayMinutes, minimumWeekTargetMinutes, minimumWeekPayoutMinutes,

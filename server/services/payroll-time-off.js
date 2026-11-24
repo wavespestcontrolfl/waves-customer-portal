@@ -475,7 +475,8 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
     const tech = await trx('technicians').where({ id: technicianId }).forUpdate()
       .first('id', 'employment_type', 'paid_week_minimum_hours',
         trx.raw("to_char(paid_week_minimum_last_day, 'YYYY-MM-DD') AS last_day"),
-        trx.raw("to_char(hire_date, 'YYYY-MM-DD') AS hire_date"));
+        // A hire date the calendar code cannot read is none, as the pay run reads it.
+        trx.raw(`${require('./tech-rewards-pay-lines').HIRE_DATE_SQL} AS hire_date`));
     if (!tech) throw new PayrollError(404, 'Technician not found.');
     if (v.shown && (!sameHours(v.shown.hours, tech.paid_week_minimum_hours) || (v.shown.lastDay || null) !== tech.last_day)) {
       throw new PayrollError(409, WEEK_MINIMUM_STALE);
@@ -483,7 +484,7 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
     // Clearing is always allowed: a setting kept from W-2 days must not come back when the person is W-2 again.
     if (v.hours != null && tech.employment_type !== 'w2') throw new PayrollError(409, 'A minimum paid week is for W-2 employees.');
     // The first week counts the days from the hire date: without one it cannot be counted.
-    if (v.hours != null && !tech.hire_date) throw new PayrollError(409, 'Enter the hire date first (Staff), then set the minimum.');
+    if (v.hours != null && !tech.hire_date) throw new PayrollError(409, 'Enter a readable hire date first (Staff), then set the minimum.');
     // Clearing the minimum keeps the last day on file: the paid weeks it shaped stay as they were, and a rehire (a
     // later hire date) does not read it again.
     const lastDay = v.lastDay === undefined ? tech.last_day : v.lastDay;
