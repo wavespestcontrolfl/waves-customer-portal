@@ -1090,7 +1090,7 @@ async function liveJob(job, { now, deps, priceSettings }) {
 // One item per job (the dedupe key holds every row, open or done, so a later morning never raises a second one; it
 // refreshes the one row's terms). It closes by itself once the customer has an estimate made after the item, once the
 // offer's last day has passed, or once the customer is no longer one the offer may go to: opted out of offers, or no
-// longer a live customer (closeOfficeItems, which every run asks first, shadow included). A shadow run raises none: shadow sends nothing to anyone but the office samples.
+// longer a live customer (closeOfficeItems, which every run asks, shadow included, after its jobs). A shadow run raises none: shadow sends nothing to anyone but the office samples.
 const OFFICE_ITEM_PREFIX = 'onetime-plan-offer:office:';
 const OFFICE_REASON_WORDS = Object.freeze({
   no_setup_fee: 'The plan price for this home has no setup fee, so the offer\'s "$0 setup" line would not be true.',
@@ -1457,17 +1457,24 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
   const summary = { mode, jobs: 0, sample: 0, office: 0, held: 0, done: 0, failed: 0, reasons: {} };
   if (mode !== 'shadow' && mode !== 'live') return summary;
   const deps = { ...defaultDeps(), ...overrides };
-  // The office items are closed first, in both modes and whatever the templates say: an item raised on a live morning
-  // must not stay actionable while the offer is paused (shadow, or the words taken back). Sends nothing.
-  try {
-    await closeOfficeItems({ now, deps });
-  } catch (err) {
-    logger.warn(`[onetime-plan-offer] office item close failed (code=${err?.code || 'none'})`);
-  }
+  // The office items are closed on every run, whatever the mode and the templates say: an item raised on a live
+  // morning must not stay actionable while the offer is paused (shadow, or the words taken back). A run that reads
+  // jobs closes them AFTER the jobs: a home priced today gets its estimate first, and a job whose offer day moved
+  // refreshes its item's last day first, so neither item is judged on yesterday's facts. Sends nothing.
+  const closeItems = async () => {
+    try {
+      await closeOfficeItems({ now, deps });
+    } catch (err) {
+      logger.warn(`[onetime-plan-offer] office item close failed (code=${err?.code || 'none'})`);
+    }
+  };
   if (mode === 'live') {
     summary.sent = 0;
     // The owner's publish of the offer template is his approval of the words. Until then no job is read.
-    if (!(await offerWordsPublished(deps))) return { ...summary, words_not_approved: true };
+    if (!(await offerWordsPublished(deps))) {
+      await closeItems();
+      return { ...summary, words_not_approved: true };
+    }
   }
   const run = { mode, now, deps, priceSettings: { refused: 0, priced: 0 } };
   const today = etDateString(now);
@@ -1478,6 +1485,7 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
     page = page.length < PAGE_SIZE ? [] : await dueJobsPage(deps.db, today, page[page.length - 1]);
   }
   await reportPriceSettings(run, run.priceSettings);
+  await closeItems();
   if (mode === 'live') {
     try {
       await reconcileOfferDeliveries(run);

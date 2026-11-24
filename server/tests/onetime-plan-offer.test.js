@@ -2053,6 +2053,29 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(closeKeys.mock.calls.map(([, keys]) => keys)).toEqual([[_test.officeItemKey('ended')]]);
     });
 
+    test('a live run closes after its jobs: a home priced today is not judged on yesterday', async () => {
+      const order = [];
+      closeKeys.mockImplementation(async () => { order.push('close'); return 1; });
+      const deps = liveWorld({
+        tables: { notifications: [item('ended', { lastDay: '2030-03-11' })] },
+        sendWithLedger: jest.fn(async () => { order.push('send'); return { ok: true, sent: true, row: { id: 'led-1' }, duplicate: false }; }),
+      });
+      await run(deps);
+      expect(order).toEqual(['send', 'close']);
+    });
+
+    test('a job whose offer day moved refreshes its item before the close reads the last day', async () => {
+      const order = [];
+      closeKeys.mockImplementation(async () => { order.push('close'); return 1; });
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'not_priced' })),
+        raiseOfficeItem: jest.fn(async () => { order.push('raise'); return { id: 'n-1' }; }),
+        tables: { notifications: [item('ended', { lastDay: '2030-03-11' })] },
+      });
+      await run(deps);
+      expect(order).toEqual(['raise', 'close']);
+    });
+
     test('off reads nothing', async () => {
       process.env.GATE_ONETIME_PLAN_OFFER = 'off';
       const deps = liveWorld({ tables: { notifications: [item('ended', { lastDay: '2030-03-11' })] } });
