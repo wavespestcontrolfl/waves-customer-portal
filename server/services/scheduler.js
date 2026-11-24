@@ -6080,9 +6080,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // TUESDAYS 9:40AM — Stale-rule check (owner request 2026-11-24). Reads the last 30 days of admin
+  // TUESDAYS 9:40AM — Stale-rule check (owner request 2026-11-24). Reads the last 60 days of admin
   // bells that say the system held an action for a person, and rings ONE bell a week (key = ISO week)
-  // when a held action was closed by hand 3+ times: the rule behind it may be out of date. No bell
+  // when a held action was handled by hand in at least half of 3+ bells: the rule behind it may be out of date. No bell
   // when nothing is flagged. Read-only: sends nothing to a customer, writes one admin notification
   // row. No GATE_* (owner rule 2026-11-05).
   // =========================================================================
