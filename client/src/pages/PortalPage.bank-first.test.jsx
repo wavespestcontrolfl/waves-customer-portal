@@ -199,6 +199,21 @@ describe('Billing tab Add Payment Method modal — save-only form from the remin
     expect(api.updateAutopay).not.toHaveBeenCalled();
   });
 
+  it('a save-only form opened before a deploy is refused as stale: the link comes back, so the refresh opens the save-only form again', async () => {
+    api.createSetupIntent.mockResolvedValue({ publishableKey: 'pk_test_1', clientSecret: 'seti_secret', paymentMethodTypes: ['card'] });
+    api.saveStripeCard.mockRejectedValue(Object.assign(new Error('The payment authorization text was updated. Please refresh the page and try again.'), { status: 409, code: 'CONSENT_VERSION_STALE' }));
+    getStripe.mockResolvedValue({ ...fakeStripe(), confirmSetup: vi.fn(async () => ({ setupIntent: savedSetupIntent })) });
+    window.history.replaceState({}, '', '/?tab=billing&add_card=1');
+    render(<BillingTab customer={customer} openAddCard />);
+    await screen.findByRole('dialog', { name: 'Add payment method' }, SETTLE);
+    expect(window.location.search).toBe('?tab=billing');
+    await waitFor(() => expect(handlers.ready).toBeTypeOf('function'), { timeout: 2000 });
+    await act(async () => { handlers.ready(); });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Card' }));
+    expect(await screen.findByText(/payment authorization text was updated/, {}, SETTLE)).toBeInTheDocument();
+    expect(window.location.search).toContain('add_card=1');
+  });
+
   it('a failed start keeps the link and the save-only mode: the retry button mints save-only again, never the Auto Pay form', async () => {
     api.createSetupIntent
       .mockRejectedValueOnce(new Error('Could not start the form'))

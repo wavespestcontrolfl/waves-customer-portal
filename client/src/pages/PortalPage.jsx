@@ -6949,6 +6949,16 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
       // charging (Codex #2507 round-6), same as the remove-card path below.
       setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
+      // A save-only form opened before a deploy changed its text is refused as stale. The link was consumed when the
+      // form opened, so a refresh would land on the ordinary Add payment button (the Auto Pay form): put the link
+      // back so the refresh opens the save-only form again.
+      if (saveOnlyAdd && err?.code === 'CONSENT_VERSION_STALE') {
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.set('add_card', '1');
+          window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+        } catch { /* a browser without history.replaceState: the customer reopens the link from the email */ }
+      }
       setStripeError(err.message || 'Failed to save card');
     }
     setStripeLoading(false);
