@@ -455,7 +455,7 @@ postgres('production share pay line', () => {
 
   describe('a shared invoice split across two pay weeks', () => {
     // One $2,000.00 invoice over two visits priced $1,000.00 each: V1 in week 1 (paid, share above $0), V2 in week 2.
-    const sharedWorld = async () => {
+    const sharedWorld = async ({ linkSecond = true, stampSecond = false } = {}) => {
       const id = await tech('Sample Alpha');
       await settings(id);
       const W2 = addDays(W1, 7);
@@ -464,16 +464,29 @@ postgres('production share pay line', () => {
       const customerId = await customer();
       const v1 = await stop(id, W1, '1000.00', customerId);
       const v2 = await stop(id, W2, '1000.00', customerId);
+      if (stampSecond) {
+        // V2 is a prepaid-plan visit (its credit is the prepaid slice, not the shared invoice)
+        const [prepayInvoice] = await trx('invoices').insert({
+          token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'paid',
+          subtotal: '400.00', discount_amount: '0.00', tax_amount: '0.00', total: '400.00',
+        }).returning('id');
+        const [term] = await trx('annual_prepay_terms').insert({
+          customer_id: customerId, term_start: '2026-09-01', term_end: '2027-08-31', status: 'active', prepay_amount: '400.00',
+          prepay_invoice_id: prepayInvoice.id, coverage_visit_count: 4,
+        }).returning('id');
+        await trx('scheduled_services').where({ id: v2 }).update({ annual_prepay_term_id: term.id, prepaid_amount: '400.00', prepaid_method: 'annual_prepay_invoice' });
+      }
       const [inv] = await trx('invoices').insert({
         token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
         subtotal: '2000.00', discount_amount: '0.00', tax_amount: '0.00', total: '2000.00',
       }).returning('id');
       const [visit] = await trx('service_visits').insert({ customer_id: customerId, scheduled_date: W1, stop_base_key: 'k-share', created_by: 'test' }).returning('id');
       const [packet] = await trx('visit_completion_packets').insert({ visit_id: visit.id, idempotency_key: 'k-share', request_hash: 'h', payload: {} }).returning('id');
-      for (const visitId of [v1, v2]) {
-        await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-share-${visitId}`, invoice_id: inv.id });
-      }
-      return { id, v1, v2, inv: inv.id, W2 };
+      const link = (visitId) => trx('visit_completion_packet_items').insert({
+        packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-share-${visitId}`, invoice_id: inv.id });
+      await link(v1);
+      if (linkSecond) await link(v2);
+      return { id, v1, v2, inv: inv.id, W2, joinSecond: () => link(v2) };
     };
     const reprice = (world, first, second) => Promise.all([
       trx('scheduled_services').where({ id: world.v1 }).update({ estimated_price: first }),
@@ -513,6 +526,37 @@ postgres('production share pay line', () => {
       await reprice(world, '500.00', '1500.00');
       const check = byName((await draft(world.W2)).body.run, 'Sample Alpha');
       expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+    });
+
+    it('a visit that JOINS the invoice after it was paid whole is a changed split: $0 and named', async () => {
+      const world = await sharedWorld({ linkSecond: false });
+      const week1 = (await draft(W1)).body.run;
+      await finalize(week1.id);
+      // week 1 paid the whole $2,000.00 invoice to V1; the frozen split is V1 alone
+      const frozen = (await trx('payroll_checks').where({ run_id: week1.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops[0];
+      expect(frozen.invoices).toEqual([{ invoiceId: world.inv, allocation: { [world.v1]: 200000 } }]);
+      await world.joinSecond();
+      const check = byName((await draft(world.W2)).body.run, 'Sample Alpha');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
+    });
+
+    it('a credit that did NOT come from the invoice (a prepaid slice) is not touched by its split guard', async () => {
+      const world = await sharedWorld({ stampSecond: true });
+      await finalize((await draft(W1)).body.run.id);
+      await reprice(world, '1500.00', '500.00');
+      const check = byName((await draft(world.W2)).body.run, 'Sample Alpha');
+      expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 40000 });
+      const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+      expect(snapshot.stops[0]).toMatchObject({ kind: 'prepaid_plan', creditCents: 40000 });
+      expect(snapshot.stops[0]).not.toHaveProperty('invoices');
+    });
+
+    it('the frozen splits are read from other weeks only, and only from a check that paid a share', async () => {
+      const world = await sharedWorld();
+      await finalize((await draft(W1)).body.run.id);
+      const other = await productionShare.frozenAllocations(trx, [world.inv], world.W2);
+      expect(other.get(world.inv)).toEqual({ weekStart: W1, allocation: { [world.v1]: 100000, [world.v2]: 100000 } });
+      expect((await productionShare.frozenAllocations(trx, [world.inv], W1)).size).toBe(0);
     });
 
     it('voiding the run that froze the split frees the later visit: it credits from the live split', async () => {

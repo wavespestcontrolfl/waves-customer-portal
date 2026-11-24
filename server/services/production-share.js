@@ -477,7 +477,7 @@ function invoiceShare(row, members) {
  * invoice (`unallocated`, with the invoice's whole refund kept visible) and never priced from the visit instead. Draft and void invoices are no charge. The prepay invoice of an annual term
  * is never attributed here: its refunds go to the term's visits (termRefunds).
  * Returns Map visitId -> { billedCents (null = no invoice named the visit's price), refundCents, unallocated: [{ invoiceId, refundCents }],
- * shared: [{ invoiceId, allocation: { visitId: cents } }] for each invoice split across several visits }.
+ * allocations: [{ invoiceId, allocation: { visitId: cents } }] for each invoice that priced the visit }.
  */
 async function billedByVisit(conn, visitIds) {
   const out = new Map();
@@ -529,14 +529,15 @@ async function billedByVisit(conn, visitIds) {
   for (const row of links.rows) {
     const share = shares.get(row.invoice_id);
     if (share.skipped) continue;
-    const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [], shared: [] };
+    const entry = out.get(row.visit_id) || { billedCents: null, refundCents: 0, unallocated: [], allocations: [] };
     if (share.unallocated !== undefined) entry.unallocated.push({ invoiceId: row.invoice_id, refundCents: share.unallocated, reason: share.reason });
     else if (share.billed.has(row.visit_id)) {
       entry.billedCents = (entry.billedCents || 0) + share.billed.get(row.visit_id);
       entry.refundCents += (share.refunded && share.refunded.get(row.visit_id)) || 0;
-      // The invoice's FULL allocation (visit id -> cents) when several visits share it: a pay run freezes it on the stop, so a later
-      // pay week of another visit of the same invoice can tell that the split changed (see markSharedChanged).
-      if (share.billed.size > 1) entry.shared.push({ invoiceId: row.invoice_id, allocation: Object.fromEntries(share.billed) });
+      // The invoice's FULL allocation (visit id -> cents), also when one visit holds all of it: a pay run freezes it on the stop, so a
+      // later pay week of another visit of the same invoice can tell that the split changed, a visit that JOINED an invoice that was
+      // paid whole included (see markSharedChanged).
+      entry.allocations.push({ invoiceId: row.invoice_id, allocation: Object.fromEntries(share.billed) });
     }
     out.set(row.visit_id, entry);
   }
@@ -678,11 +679,12 @@ async function weekStops(conn, technicianIds, weekStart) {
     .orderByRaw(`${WORK_DATE_SQL}, s.completed_at NULLS LAST, s.id`);
 }
 
-// The shared-invoice allocations of the given billedByVisit entries, once per invoice.
-function sharedInvoices(entries) {
-  const seen = new Map();
-  for (const entry of entries) for (const one of (entry && entry.shared) || []) if (!seen.has(one.invoiceId)) seen.set(one.invoiceId, one);
-  return [...seen.values()];
+// The invoice allocations a credit CAME FROM: the invoices of the billedByVisit entry the credit was priced from, or none when the
+// credit was priced some other way (the visit's own price, a prepaid slice, a callback value, a free visit, a review row). A guard
+// on the split of an invoice must only touch a credit that the split decided.
+function invoicesBehind(credit, entry) {
+  return credit.needsReview || !(credit.creditCents > 0) || !entry || entry.billedCents === null || entry.billedCents === undefined
+    ? [] : (entry.allocations || []);
 }
 
 /**
@@ -708,6 +710,7 @@ async function creditsOfStops(conn, technicianId, stops, inForce) {
     const callback = isCallbackVisit(stop);
     const job = jobs.get(stop.id);
     let credit;
+    let basis = null; // the billedByVisit entry a credit above $0 was priced from, if any
     const performed = performedState(stop);
     // Whether any work was done comes first: a stop closed out incomplete, declined or inspection only earns nothing, and a
     // stop with no completion record cannot be credited with certainty.
@@ -715,17 +718,17 @@ async function creditsOfStops(conn, technicianId, stops, inForce) {
     else if (performed === 'unknown') credit = toReview('unverified', 'The visit has no completed closeout record, so it cannot be known that the work was done.');
     // An included follow-up (even of a re-service type) and the first visit of a job are parts of the job; any other callback is
     // judged by the work it follows.
-    else if (job && (stop.followup_included || !callback)) credit = jobCredit(stop, job, billed);
+    else if (job && (stop.followup_included || !callback)) { credit = jobCredit(stop, job, billed); basis = credit.kind === 'multi_visit_job' && !credit.needsReview ? billed.get(job.root.id) : null; }
     else if (callback) credit = await callbackCredit(conn, stop, technicianId, inForce);
-    else credit = ownPriceCredit(stop, billed.get(stop.id));
+    else { credit = ownPriceCredit(stop, billed.get(stop.id)); basis = credit.kind === 'priced' ? billed.get(stop.id) : null; }
     const invoiced = billed.get(stop.id) || {};
     rows.push({
       visitId: stop.id, workDate: stop.work_date, serviceType: stop.service_type, ...credit,
       refundCents: (invoiced.refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
       // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
       unallocatedRefunds: invoiced.unallocated || [],
-      // The shared invoices this credit came from, with their full allocation (the visit's own and the job's first visit).
-      invoices: sharedInvoices([invoiced, job && job.root ? billed.get(job.root.id) : null]),
+      // The invoices this credit was priced from, with their full allocation, frozen with the week (see markSharedChanged).
+      invoices: invoicesBehind(credit, basis),
     });
   }
   return rows;
@@ -759,7 +762,8 @@ async function paidElsewhere(conn, visitIds, weekStart) {
 /**
  * The allocation each shared invoice was frozen with when a finalized run first paid it, for the invoices in `invoiceIds`, in a
  * week other than `weekStart`: Map of invoice id -> { weekStart, allocation: { visitId: cents } }. One query; the earliest paid
- * week wins. Only checks that paid a share above $0 count, as in paidElsewhere; voiding the run takes its checks out.
+ * week wins. Only checks that paid a share above $0 count, and only stop rows with a credit above $0 (a $0 stop was not priced by
+ * the invoice), as in paidElsewhere; voiding the run takes its checks out.
  */
 async function frozenAllocations(conn, invoiceIds, weekStart) {
   const frozen = new Map();
@@ -774,6 +778,7 @@ async function frozenAllocations(conn, invoiceIds, weekStart) {
       THEN stop.value->'invoices' ELSE '[]'::jsonb END) AS inv(value)
     WHERE c.status = 'finalized' AND r.status = 'finalized' AND c.week_start <> ?::date
       AND COALESCE(c.production_share_cents, 0) > 0
+      AND COALESCE((stop.value->>'creditCents')::bigint, 0) > 0
       AND inv.value->>'invoiceId' = ANY(?::text[])
     ORDER BY c.week_start, c.id`, [weekStart, invoiceIds]);
   for (const row of rows.rows) {
@@ -788,7 +793,7 @@ const sameAllocation = (a, b) => {
 };
 
 /**
- * A stop of a shared invoice whose split no longer matches the split a finalized run froze (another visit of the invoice was
+ * A stop whose credit came from an invoice (row.invoices) whose split no longer matches the split a finalized run froze (another visit of the invoice was
  * paid in another week) is $0 and needs review: crediting it from the live split could pay more or less than the invoice's price
  * across the two weeks. A split that still matches changes nothing (this visit's frozen cents are its live cents). A row that is
  * already $0 for another reason keeps that reason. Pure.
@@ -889,6 +894,6 @@ async function previewWeek(technicianId, weekStart, conn = db) {
 }
 
 module.exports = {
-  allocateCents, BAR_TYPES, OWN_CALLBACK_DAYS, shareForWeek, jobPartCents, shiftDays, settingsFor, settingsHistory, saveSettings, weekCredits, weekCreditsFor, weekStops, creditsOfStops, paidElsewhere, markSharedChanged,
+  allocateCents, BAR_TYPES, OWN_CALLBACK_DAYS, shareForWeek, jobPartCents, shiftDays, settingsFor, settingsHistory, saveSettings, weekCredits, weekCreditsFor, weekStops, creditsOfStops, paidElsewhere, frozenAllocations, markSharedChanged,
   previewWeek,
 };

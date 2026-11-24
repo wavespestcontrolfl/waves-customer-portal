@@ -130,11 +130,19 @@ async function readInputsUnderLock(trx, weekStart) {
  * credit, review mark), whatever the order. The pay run's finalize reads the inputs again under the payroll lock and compares
  * revisions, so credits that changed between its first read and the lock are never frozen onto a check. Pure.
  */
+// The invoices a stop's credit came from, in a fixed order: [[invoiceId, [[visitId, cents], ...]], ...]. The review token and the
+// revision both take it, so a split that changes after drafting makes the draft stale even when the credits do not move.
+function invoicesSignature(invoices) {
+  return (Array.isArray(invoices) ? invoices : []).map((one) => [one.invoiceId,
+    Object.entries(one.allocation || {}).map(([visitId, cents]) => [visitId, Number(cents)]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+}
+
 function revisionOf(inputs) {
   const rows = [...inputs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([id, input]) => {
     if (input.error) return [id, 'error', input.error];
     const { settings } = input;
-    const stops = input.stops.map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true])
+    const stops = input.stops.map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, invoicesSignature(stop.invoices)])
       .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
     return [id, settings.id, settings.rateBps, settings.barType, settings.barCents, settings.callbackStopValueCents, stops];
   });
@@ -186,7 +194,7 @@ function snapshotOfRow(row) {
 function signature(row) {
   const snapshot = snapshotOfRow(row) || {};
   const stops = (Array.isArray(snapshot.stops) ? snapshot.stops : [])
-    .map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true])
+    .map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, invoicesSignature(stop.invoices)])
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return [
     snapshot.settingsId == null ? null : Number(snapshot.settingsId),

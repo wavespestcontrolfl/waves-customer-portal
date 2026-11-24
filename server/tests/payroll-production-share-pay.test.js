@@ -321,6 +321,21 @@ describe('a shared invoice frozen with its week', () => {
     expect(productionShare.markSharedChanged([review], frozen)[0].kind).toBe('unpriced');
   });
 
+  test('an invoice that went from one visit to several (or back) is a changed split, for the credit it priced', () => {
+    const wasWhole = new Map([['inv-1', { weekStart: '2026-09-14', allocation: { 'visit-1': 20000 } }]]);
+    // visit-2 joined the invoice after it was paid whole to visit-1
+    expect(productionShare.markSharedChanged([row(10000, 10000)], wasWhole)[0]).toMatchObject({ kind: 'shared_invoice_changed', creditCents: 0 });
+    // the invoice was split, then visit-2 left it: visit-1 now holds it whole, and a later week of visit-1 is a changed split too
+    const wasSplit = new Map([['inv-1', { weekStart: '2026-09-14', allocation: { 'visit-1': 10000, 'visit-2': 10000 } }]]);
+    const whole = { visitId: 'visit-1', workDate: '2026-09-21', kind: 'priced', creditCents: 20000, needsReview: false, invoices: [{ invoiceId: 'inv-1', allocation: { 'visit-1': 20000 } }] };
+    expect(productionShare.markSharedChanged([whole], wasSplit)[0].kind).toBe('shared_invoice_changed');
+  });
+
+  test('a row with no invoice behind its credit (own price, prepaid slice, callback value) is never touched by a split guard', () => {
+    const ownPrice = { visitId: 'visit-2', workDate: '2026-09-21', kind: 'priced', creditCents: 5000, needsReview: false, invoices: [] };
+    expect(productionShare.markSharedChanged([ownPrice], frozen)[0]).toBe(ownPrice);
+  });
+
   test('the snapshot freezes the invoice split on the stop, and only on a stop that has one', () => {
     const rows = [{ visitId: 'v1', workDate: '2026-09-14', kind: 'priced', creditCents: 100, needsReview: false, invoices: [live(1, 2)] },
       { visitId: 'v2', workDate: '2026-09-15', kind: 'priced', creditCents: 100, needsReview: false, invoices: [] }];
@@ -388,6 +403,30 @@ describe('the down guard migration', () => {
       'ALTER TABLE payroll_checks DROP CONSTRAINT IF EXISTS payroll_checks_production_share_check',
       'ALTER TABLE payroll_checks DROP COLUMN IF EXISTS production_share_cents',
     ]);
+  });
+});
+
+describe('the invoice splits are in both finalize comparisons', () => {
+  const split = (a, b) => [{ invoiceId: 'inv-1', allocation: { v1: a, v2: b } }];
+  const withInvoices = (invoices) => stops([['v1', '2026-09-14', 100000], ['v2', '2026-09-15', 110000], ['v3', '2026-09-16', 100000], ['v4', '2026-09-17', 102000]])
+    .map((stop, i) => (i === 1 ? { ...stop, invoices } : stop));
+
+  test('the revision changes when only a split changes (the credits stay the same)', () => {
+    const rev = (invoices) => share.revisionOf(new Map([['tech-a', { settings: SETTINGS, stops: withInvoices(invoices) }]]));
+    expect(rev(split(100000, 100000))).toBe(rev(split(100000, 100000)));
+    expect(rev(split(150000, 50000))).not.toBe(rev(split(100000, 100000)));
+    expect(rev([])).not.toBe(rev(split(100000, 100000)));
+  });
+
+  test('the review token changes when only a split changes', () => {
+    const row = (invoices) => {
+      const made = workedOut(withInvoices(invoices));
+      return { technician_id: 'tech-1', hourly_rate: '20.00', regular_minutes: '2400.00', overtime_minutes: '0.00', pay_method: 'check',
+        w4_election_id: null, ytd_gross_before_cents: 0, ...build({ production_share: made }).check };
+    };
+    const run = { week_start: WEEK, pay_date: PAY_DATE };
+    expect(tokenOf(run, [row(split(100000, 100000))])).toBe(tokenOf(run, [row(split(100000, 100000))]));
+    expect(tokenOf(run, [row(split(150000, 50000))])).not.toBe(tokenOf(run, [row(split(100000, 100000))]));
   });
 });
 
