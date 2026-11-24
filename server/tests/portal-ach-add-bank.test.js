@@ -83,7 +83,7 @@ jest.mock('../models/db', () => {
 
 const billingRouter = require('../routes/billing-v2');
 const autopayRouter = require('../routes/customer-autopay');
-const { CONSENT_VERSION, ACH_CONSENT_TEXT, CARD_CONSENT_TEXT } = require('../services/payment-method-consent-text');
+const { CONSENT_VERSION, SAVE_ONLY_CONSENT_VERSION, ACH_CONSENT_TEXT, CARD_CONSENT_TEXT } = require('../services/payment-method-consent-text');
 // Every capture attests the consent text version the tab rendered (codex
 // #5434 r1 P1): the mint stamps it on the SetupIntent, POST /cards records
 // only under a current stamp.
@@ -161,11 +161,30 @@ describe('POST /cards/setup-intent — gate-authoritative method types', () => {
   test('the save-only form (the "add a card" email link) mints a card-only SetupIntent stamped enroll_autopay=false, even when a bank is asked for', async () => {
     mockIsEnabled.mockReturnValue(true);
     mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs', setupIntentId: 'si_1', paymentMethodTypes: ['card'] });
-    await invoke(handler(), { body: { paymentMethodType: 'card_or_bank', enrollAutopay: false, ...ATTEST } });
+    await invoke(handler(), { body: { paymentMethodType: 'card_or_bank', enrollAutopay: false, consentTextVersion: SAVE_ONLY_CONSENT_VERSION } });
     expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({
       // The mint also keeps the request's address and agent, so either completion can record the same evidence.
-      metadata: { purpose: 'portal_add_method', ...STAMP, enroll_autopay: 'false', save_only_ip: '1.2.3.4', save_only_ua: 'jest-agent' },
+      // The stamp is the save-only text's own version (the form shows its own statement, not the Auto Pay authorization).
+      metadata: { purpose: 'portal_add_method', consent_text_version: SAVE_ONLY_CONSENT_VERSION, enroll_autopay: 'false', save_only_ip: '1.2.3.4', save_only_ua: 'jest-agent' },
     }));
+  });
+
+  test.each([
+    ['the Auto Pay authorization version', ATTEST],
+    ['no version', {}],
+  ])('the save-only form attesting %s is refused with 409 CONSENT_VERSION_STALE before any mint', async (_name, attest) => {
+    mockIsEnabled.mockReturnValue(true);
+    const { statusCode, body } = await invoke(handler(), { body: { paymentMethodType: 'card', enrollAutopay: false, ...attest } });
+    expect(statusCode).toBe(409);
+    expect(body.code).toBe('CONSENT_VERSION_STALE');
+    expect(mockCreateSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('the usual form attesting the save-only version is refused too (the texts are not interchangeable)', async () => {
+    mockIsEnabled.mockReturnValue(true);
+    const { statusCode } = await invoke(handler(), { body: { paymentMethodType: 'card', consentTextVersion: SAVE_ONLY_CONSENT_VERSION } });
+    expect(statusCode).toBe(409);
+    expect(mockCreateSetupIntent).not.toHaveBeenCalled();
   });
 
   test.each([

@@ -5649,9 +5649,14 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // the customer turns Auto Pay on from the Auto Pay card, which asks for its own checkbox.
       const SaveOnlyCard = require('../services/portal-save-only-card');
       if (SaveOnlyCard.setupIntentSavesOnly(setupIntent)) {
-        // The same stale-copy rule as the browser save (and the branch below): an intent minted under older consent text
-        // neither records what the customer saw nor takes the default role; the office is asked to re-collect.
-        if (!(await ConsentService.deferredCaptureConsentVersionCurrent(setupIntent, { context: 'portal add-method webhook', customerId: wavesCustomerId }))) return;
+        // The same stale-copy rule as the browser save: an intent minted under older save-only text neither records what the
+        // customer saw nor takes the default role.
+        if (!SaveOnlyCard.saveOnlyStampIsCurrent(setupIntent)) {
+          // No consent row is ever written for a save-only add, so there is nothing for the office to re-collect (the
+          // authorization bell would never close): the card stays saved and nothing is recorded or promoted.
+          logger.warn(`[stripe-webhook] portal-add-method save-only SI ${setupIntent?.id}: stamped text version ${setupIntent?.metadata?.consent_text_version || 'absent'} is not the current save-only one, nothing recorded (customer ${wavesCustomerId})`);
+          return;
+        }
         await SaveOnlyCard.finishSaveOnlyAdd({
           customerId: wavesCustomerId,
           method: saved,

@@ -17,7 +17,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { recordAuditEvent } = require('./audit-log');
 const { isUsableSavedMethod } = require('./autopay-eligibility');
-const { getConsentText } = require('./payment-method-consent-text');
+const { SAVE_ONLY_CONSENT_TEXT, CONSENT_VERSION_METADATA_KEY, saveOnlyConsentVersionIsCurrent } = require('./payment-method-consent-text');
 
 const SAVE_ONLY_METADATA_KEY = 'enroll_autopay';
 const SAVE_ONLY_AUDIT_ACTION = 'customer.payment_method.saved_card_only';
@@ -35,13 +35,19 @@ function saveOnlyMetadata({ ip, userAgent } = {}) {
   return metadata;
 }
 
+// The save-only form attests its own text version (SAVE_ONLY_CONSENT_VERSION), not the Auto Pay authorization's: a stamp
+// from any other text, or none, is refused like a stale one.
+function saveOnlyStampIsCurrent(setupIntent) {
+  return saveOnlyConsentVersionIsCurrent(setupIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY]);
+}
+
 // What finishSaveOnlyAdd records from a stamped SetupIntent.
 function saveOnlyEvidence(setupIntent) {
   const metadata = setupIntent?.metadata || {};
   return {
     ip: metadata.save_only_ip || null,
     userAgent: metadata.save_only_ua || null,
-    consentTextVersion: metadata.consent_text_version || null,
+    consentTextVersion: metadata[CONSENT_VERSION_METADATA_KEY] || null,
   };
 }
 
@@ -74,7 +80,7 @@ async function recordSaveOnlyEvent(trx, customerId, method, { consentTextVersion
     metadata: {
       via,
       consentTextVersion: consentTextVersion || null,
-      consentText: getConsentText('card'),
+      consentText: SAVE_ONLY_CONSENT_TEXT,
       stripePaymentMethodId: method.stripe_payment_method_id || null,
     },
     ip_address: ip,
@@ -109,5 +115,5 @@ async function finishSaveOnlyAdd({ customerId, method, consentTextVersion = null
 }
 
 module.exports = {
-  SAVE_ONLY_METADATA_KEY, SAVE_ONLY_AUDIT_ACTION, setupIntentSavesOnly, saveOnlyMetadata, saveOnlyEvidence, finishSaveOnlyAdd,
+  SAVE_ONLY_METADATA_KEY, SAVE_ONLY_AUDIT_ACTION, setupIntentSavesOnly, saveOnlyStampIsCurrent, saveOnlyMetadata, saveOnlyEvidence, finishSaveOnlyAdd,
 };

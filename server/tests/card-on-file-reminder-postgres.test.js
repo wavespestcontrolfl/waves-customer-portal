@@ -305,11 +305,11 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     expect(await run(legacy, { now: EXPIRY_NOW })).toMatchObject({ shadow: 1 });
   });
 
-  test('(b) needs an upcoming visit or an open invoice; with only an invoice the Next visit line is left out', async () => {
+  test('(b) needs an upcoming visit: an open invoice alone gets nothing, in shadow or live (owner 2026-11-24)', async () => {
     process.env.GATE_CARD_ON_FILE_REMINDER = 'true';
     const nothing = await customer();
     await removalEmail(nothing);
-    expect(await run(nothing)).toMatchObject({ sent: 0, skipped: { nothing_upcoming: 1 } });
+    expect(await run(nothing)).toMatchObject({ sent: 0, skipped: { no_upcoming_visit: 1 } });
 
     const past = await customer();
     await removalEmail(past);
@@ -317,15 +317,28 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     const cancelled = await customer();
     await removalEmail(cancelled);
     await visit(cancelled, '2026-12-02', { status: 'cancelled' });
-    expect(await sweep.runCardOnFileReminderSweep({ now: NOW, customerIds: [past, cancelled] })).toMatchObject({ sent: 0, skipped: { nothing_upcoming: 2 } });
+    expect(await sweep.runCardOnFileReminderSweep({ now: NOW, customerIds: [past, cancelled] })).toMatchObject({ sent: 0, skipped: { no_upcoming_visit: 2 } });
 
+    // Only an open invoice, no upcoming visit: no email and no would-send row.
     const owes = await customer();
     await removalEmail(owes);
     await invoice(owes);
-    expect(await run(owes)).toMatchObject({ sent: 1 });
-    const [message] = await emails(owes);
-    expect(message.text_snapshot).toContain('Your account has no card on file now.');
-    expect(message.text_snapshot).not.toContain('Next visit');
+    expect(await run(owes)).toMatchObject({ sent: 0, skipped: { no_upcoming_visit: 1 } });
+    expect(await emails(owes)).toHaveLength(0);
+    expect(await ledger(owes)).toHaveLength(0);
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'shadow';
+    expect(await run(owes)).toMatchObject({ shadow: 0, skipped: { no_upcoming_visit: 1 } });
+    expect(await ledger(owes)).toHaveLength(0);
+
+    // A visit plus an open invoice still sends, and the Next visit row is always there.
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'true';
+    const both = await customer();
+    await removalEmail(both);
+    await visit(both, '2026-12-02');
+    await invoice(both);
+    expect(await run(both)).toMatchObject({ sent: 1 });
+    const [message] = await emails(both);
+    expect(message.text_snapshot).toContain('Next visit: December 2, 2026');
     expect(message.text_snapshot).not.toMatch(/\{\{|\}\}/);
   });
 
@@ -478,12 +491,10 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     const id = await customer();
     await removalEmail(id);
     const visitId = await visit(id, '2026-12-02');
-    await invoice(id);
     const real = lifecycle.sendCardOnFileReminder;
     const stub = jest.spyOn(lifecycle, 'sendCardOnFileReminder').mockImplementationOnce(async (args) => {
-      // The visit is cancelled in between: an invoice is still open, so the customer stays eligible, but the email
-      // would name a visit that is gone.
-      await db('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+      // The visit moves in between: the email would name the old date.
+      await db('scheduled_services').where({ id: visitId }).update({ scheduled_date: '2026-12-05' });
       expect(await args.beforeProviderHandoff()).toBe(false);
       return { ok: false, reason: 'stopped' };
     });
@@ -492,7 +503,24 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     stub.mockImplementation(real);
     expect(await run(id)).toMatchObject({ sent: 1 });
     const [message] = await emails(id);
-    expect(message.text_snapshot).not.toContain('Next visit');
+    expect(message.text_snapshot).toContain('Next visit: December 5, 2026');
+  });
+
+  test('the only visit cancelled before the provider request stops the send, even with an open invoice', async () => {
+    process.env.GATE_CARD_ON_FILE_REMINDER = 'true';
+    const id = await customer();
+    await removalEmail(id);
+    const visitId = await visit(id, '2026-12-02');
+    await invoice(id);
+    jest.spyOn(lifecycle, 'sendCardOnFileReminder').mockImplementationOnce(async (args) => {
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+      expect(await args.beforeProviderHandoff()).toBe(false);
+      return { ok: false, reason: 'stopped' };
+    });
+    expect(await run(id)).toMatchObject({ sent: 0, skipped: { stopped: 1 } });
+    expect(await run(id)).toMatchObject({ sent: 0, skipped: { no_upcoming_visit: 1 } });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(await ledger(id)).toHaveLength(0);
   });
 
   test('a card removed after the sweep read its events makes a newer loss that is not due: the send stops', async () => {

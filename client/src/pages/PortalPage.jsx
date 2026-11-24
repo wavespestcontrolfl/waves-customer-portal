@@ -8044,11 +8044,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
               }}><Icon name="close" size={20} strokeWidth={2} /></button>
             </div>
             <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 16 }} />
-            {saveOnlyAdd && (
-              <div style={{ fontSize: 14, color: muted, marginBottom: 12 }}>
-                Saving this card does not turn Auto Pay on.
-              </div>
-            )}
             {stripeError && (
               <div style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginBottom: 12 }}>
                 {stripeError}
@@ -8064,7 +8059,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
                 reflects the copy the customer saw; the copy follows the
                 Payment Element tab (card vs ACH authorization). */}
             <div style={{ marginBottom: 12 }}>
-              <SaveCardConsent locked onChange={() => {}} methodType={addMethodType} />
+              <SaveCardConsent locked onChange={() => {}} methodType={addMethodType} variant={saveOnlyAdd ? 'save_only' : null} />
             </div>
             <button onClick={handleConfirmCard} disabled={stripeLoading || !stripeReady} data-glass-accent="" data-glass-size="primary" style={{
               ...primaryButton,

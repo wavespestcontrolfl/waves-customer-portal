@@ -6,8 +6,9 @@
  *   (a) the customer has NO usable payment method now (same predicate the charge path uses: stripe id present, card not
  *       expired, bank not blocked). A card added before day 3 ends it. A customer who turned Auto Pay off on purpose
  *       and kept a usable card fails here, so that customer is never emailed;
- *   (b) a visit billed to the customer is still scheduled or a self-pay invoice is open (a visit billed to a
- *       third-party payer does not count: its payer is resolved per visit, like the invoice that visit will create);
+ *   (b) a visit billed to the customer is still scheduled (owner 2026-11-24: a customer with only an open invoice and
+ *       no upcoming visit gets nothing, invoice reminders already reach them; a visit billed to a third-party payer
+ *       does not count: its payer is resolved per visit, like the invoice that visit will create);
  *   (c) the customer is active (not deleted, not churned or dormant, not inactive), is not on a collections dispute
  *       hold, and is not on an annual prepay with nothing due;
  *   (d) an expired card does not trigger the email when the customer had turned Auto Pay off on purpose (the last
@@ -258,19 +259,18 @@ async function liveVerdict(customerId, event, today, now) {
   if (held.held) return { ok: false, reason: 'collection_hold' };
 
   let upcoming;
-  let openInvoice;
   try {
-    [upcoming, openInvoice] = await Promise.all([
-      nextSelfPayVisit(customerId, today),
-      require('./open-balance').openBalanceExists(customerId),
-    ]);
+    upcoming = await nextSelfPayVisit(customerId, today);
   } catch (err) {
     logger.warn(`[card-on-file-reminder] payer check failed for ${customerId}: ${err.message}`);
     return { ok: false, reason: 'payer_check_failed' };
   }
   const visit = upcoming.visit;
-  if (!visit && openInvoice !== true) return { ok: false, reason: upcoming.payerBilled ? 'payer_billed' : 'nothing_upcoming' };
-  if (openInvoice !== true && await require('./customer-lifecycle-guard').findActivePrepayTerm(db, customerId)) {
+  // An open invoice alone never qualifies (owner 2026-11-24): the customer needs an upcoming visit billed to them.
+  if (!visit) return { ok: false, reason: upcoming.payerBilled ? 'payer_billed' : 'no_upcoming_visit' };
+  // An annual prepay with nothing due: its visits are paid for, so the email would ask for a card nothing needs yet.
+  if (await require('./open-balance').openBalanceExists(customerId) !== true
+    && await require('./customer-lifecycle-guard').findActivePrepayTerm(db, customerId)) {
     return { ok: false, reason: 'prepaid_nothing_due' };
   }
   const email = await emailVerdict(customer);
@@ -278,7 +278,7 @@ async function liveVerdict(customerId, event, today, now) {
   return {
     ok: true,
     customer,
-    nextVisitDate: visit ? dateOnlyString(visit.scheduled_date) : null,
+    nextVisitDate: dateOnlyString(visit.scheduled_date),
     propertyLabel: visitPropertyLabel(customer, visit),
   };
 }

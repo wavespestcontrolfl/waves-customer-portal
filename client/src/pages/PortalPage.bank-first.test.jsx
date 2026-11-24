@@ -40,7 +40,7 @@ vi.mock('../lib/stripeLoader', () => ({ getStripe: vi.fn() }));
 
 import api from '../utils/api';
 import { getStripe } from '../lib/stripeLoader';
-import { getConsentText } from '../lib/paymentMethodConsentText';
+import { getConsentText, SAVE_ONLY_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import { BillingTab } from './PortalPage';
 
 const customer = {
@@ -165,7 +165,7 @@ describe('Billing tab Add Payment Method modal — no close while saving', { tim
 describe('Billing tab Add Payment Method modal — save-only form from the reminder email link', { timeout: 30000 }, () => {
   const savedSetupIntent = { status: 'succeeded', payment_method: 'pm_new', id: 'si_new' };
 
-  it('opens by itself, card only, minted with enrollAutopay:false, and says saving does not turn Auto Pay on', async () => {
+  it('opens by itself, card only, minted with enrollAutopay:false, and shows the save-only statement instead of the Auto Pay authorization', async () => {
     api.createSetupIntent.mockResolvedValue({ publishableKey: 'pk_test_1', clientSecret: 'seti_secret', paymentMethodTypes: ['card'] });
     getStripe.mockResolvedValue(fakeStripe());
     window.history.replaceState({}, '', '/?tab=billing&add_card=1');
@@ -173,7 +173,11 @@ describe('Billing tab Add Payment Method modal — save-only form from the remin
     const dialog = await screen.findByRole('dialog', { name: 'Add payment method' }, SETTLE);
     expect(api.createSetupIntent).toHaveBeenCalledTimes(1);
     expect(api.createSetupIntent).toHaveBeenCalledWith('card', { enrollAutopay: false });
-    expect(dialog).toHaveTextContent('Saving this card does not turn Auto Pay on.');
+    expect(SAVE_ONLY_CONSENT_TEXT).toBe('Save this card for future payments. We charge it only when you pay with it or turn on Auto Pay.');
+    expect(dialog).toHaveTextContent(SAVE_ONLY_CONSENT_TEXT);
+    // The standard Auto Pay authorization is replaced, never shown beside it.
+    expect(dialog).not.toHaveTextContent(getConsentText('card'));
+    expect(dialog).not.toHaveTextContent('By checking this box');
     expect(screen.getByRole('button', { name: 'Save Card' })).toBeInTheDocument();
     // The link is consumed on open, so a Stripe redirect that returns to this URL cannot open a second form.
     expect(window.location.search).toBe('?tab=billing');
@@ -224,9 +228,11 @@ describe('Billing tab Add Payment Method modal — save-only form from the remin
     expect(api.createSetupIntent).toHaveBeenLastCalledWith('card_or_bank');
   });
 
-  it('the usual Add payment button still mints the full form and shows no save-only line', async () => {
+  it('the usual Add payment button still mints the full form and shows the standard authorization, not the save-only text', async () => {
     await openModal(['card', 'us_bank_account']);
     expect(api.createSetupIntent).toHaveBeenCalledWith('card_or_bank');
-    expect(screen.getByRole('dialog', { name: 'Add payment method' })).not.toHaveTextContent('does not turn Auto Pay on');
+    const dialog = screen.getByRole('dialog', { name: 'Add payment method' });
+    expect(dialog).toHaveTextContent(getConsentText('us_bank_account'));
+    expect(dialog).not.toHaveTextContent(SAVE_ONLY_CONSENT_TEXT);
   });
 });
