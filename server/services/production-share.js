@@ -286,6 +286,13 @@ const isCallbackVisit = (visit) => visit.is_callback === true || isReService({
 const normalizedText = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 // A visit's address as text: its own, else its property's. null = no street and zip on file. The unit (line 2) is part of
 // it: two units of one building are two homes.
+// The line the owner sees to find the visit behind a review row: its street and zip, else its property's.
+function addressLine(visit) {
+  const own = normalizedText(visit.service_address_line1);
+  const zip = visit.service_address_zip || visit.prop_zip;
+  return [own ? visit.service_address_line1 : visit.prop_line1, zip].filter(Boolean).join(' ') || null;
+}
+
 function addressParts(visit) {
   const own = normalizedText(visit.service_address_line1);
   const line = own ? visit.service_address_line1 : visit.prop_line1;
@@ -494,33 +501,38 @@ async function billedByVisit(conn, visitIds) {
         OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = i.stripe_charge_id)
         OR p.metadata::jsonb ->> 'invoice_id' = i.id::text))`;
   // Every service record of the visit counts for ownership (an invoice can hang on an earlier one); only the closeout outcome reads
-  // the latest. One row per visit and invoice.
-  const links = await conn.raw(`
-    SELECT DISTINCT s.id AS visit_id, i.id AS invoice_id, i.line_items, i.subtotal, i.discount_amount, i.total, i.tax_amount,
-      (COALESCE(i.status = ANY(?::text[]), true) OR i.archived_at IS NOT NULL) AS not_charged,
-      ${rr.depositCreditSql('i')} AS deposit_credit,
-      ${refundOf} AS refunded
-    FROM scheduled_services s
-    LEFT JOIN (SELECT scheduled_service_id, id AS service_record_id FROM service_records WHERE scheduled_service_id = ANY(?::uuid[])) sr
-      ON sr.scheduled_service_id = s.id
-    JOIN invoices i ON ${rr.VISIT_INVOICE_LINK_SQL}
-    WHERE s.id = ANY(?::uuid[]) AND i.annual_prepay_term_id IS NULL
-      AND NOT EXISTS (SELECT 1 FROM annual_prepay_terms t WHERE t.prepay_invoice_id = i.id)`,
+  // the latest. One row per visit and invoice. The links, the invoice amounts and the member visits with their weights are read in ONE
+  // statement (one snapshot, even on a READ COMMITTED connection): an invoice edited or relinked while the run reads can never give
+  // amounts from one moment and members from another.
+  const read = await conn.raw(`
+    WITH links AS (
+      SELECT DISTINCT s.id AS visit_id, i.id AS invoice_id, i.line_items, i.subtotal, i.discount_amount, i.total, i.tax_amount,
+        (COALESCE(i.status = ANY(?::text[]), true) OR i.archived_at IS NOT NULL) AS not_charged,
+        ${rr.depositCreditSql('i')} AS deposit_credit,
+        ${refundOf} AS refunded
+      FROM scheduled_services s
+      LEFT JOIN (SELECT scheduled_service_id, id AS service_record_id FROM service_records WHERE scheduled_service_id = ANY(?::uuid[])) sr
+        ON sr.scheduled_service_id = s.id
+      JOIN invoices i ON ${rr.VISIT_INVOICE_LINK_SQL}
+      WHERE s.id = ANY(?::uuid[]) AND i.annual_prepay_term_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM annual_prepay_terms t WHERE t.prepay_invoice_id = i.id)
+    ), members AS (
+      SELECT i.id AS invoice_id, m.id AS visit_id, COALESCE(m.estimated_price, m.primary_line_price) AS weight
+      FROM invoices i
+      JOIN LATERAL (
+        ${rr.INVOICE_MEMBER_IDS_SQL}
+        UNION SELECT i.scheduled_service_id WHERE i.scheduled_service_id IS NOT NULL
+        UNION SELECT sr2.scheduled_service_id FROM service_records sr2 WHERE sr2.id = i.service_record_id AND sr2.scheduled_service_id IS NOT NULL
+      ) mem ON true
+      JOIN scheduled_services m ON m.id = mem.id
+      WHERE i.id IN (SELECT invoice_id FROM links WHERE NOT not_charged)
+    )
+    SELECT COALESCE((SELECT json_agg(row_to_json(l)) FROM links l), '[]'::json) AS links,
+      COALESCE((SELECT json_agg(row_to_json(m)) FROM members m), '[]'::json) AS members`,
   [NOT_CHARGED_INVOICE_STATUSES, visitIds, visitIds]);
+  const links = { rows: read.rows[0].links };
+  const members = { rows: read.rows[0].members };
   if (!links.rows.length) return out;
-  // A draft, void or archived invoice is no charge (never in an amount), but it is still LINKED: it goes in the invoice history a paid stop records,
-  // so the invoice cannot later be issued and credit another visit unseen.
-  const invoiceIds = [...new Set(links.rows.filter((row) => !row.not_charged).map((row) => row.invoice_id))];
-  const members = await conn.raw(`
-    SELECT i.id AS invoice_id, m.id AS visit_id, COALESCE(m.estimated_price, m.primary_line_price) AS weight
-    FROM invoices i
-    JOIN LATERAL (
-      ${rr.INVOICE_MEMBER_IDS_SQL}
-      UNION SELECT i.scheduled_service_id WHERE i.scheduled_service_id IS NOT NULL
-      UNION SELECT sr2.scheduled_service_id FROM service_records sr2 WHERE sr2.id = i.service_record_id AND sr2.scheduled_service_id IS NOT NULL
-    ) mem ON true
-    JOIN scheduled_services m ON m.id = mem.id
-    WHERE i.id = ANY(?::uuid[])`, [invoiceIds]);
   const byInvoice = new Map();
   for (const row of members.rows) {
     if (!byInvoice.has(row.invoice_id)) byInvoice.set(row.invoice_id, []);
@@ -800,7 +812,9 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
     delete shown.job;
     delete shown.invoiceBased;
     rows.push({
-      visitId: stop.id, workDate: stop.work_date, serviceType: stop.service_type, technicianId: canonicalId(technicianId), ...shown,
+      visitId: stop.id, workDate: stop.work_date, serviceType: stop.service_type, technicianId: canonicalId(technicianId),
+      // So the owner can find the visit behind a review row (the preview only; never stored with a check).
+      address: addressLine(stop), completedAt: stop.completed_at ? new Date(stop.completed_at).toISOString() : null, ...shown,
       refundCents: (invoiced.refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
       // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
       unallocatedRefunds: invoiced.unallocated || [],

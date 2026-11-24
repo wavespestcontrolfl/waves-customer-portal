@@ -1030,6 +1030,24 @@ postgres('production share pay line', () => {
       expect(byName((await draft(weeks[1])).body.run, 'Sample Alpha').productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 0 });
     });
 
+    it('AUDIT :514: the invoice links, amounts, member visits and weights are read in ONE statement', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const first = await stop(id, W1, '1000.00', customerId);
+      const second = await stop(id, addDays(W1, 1), '1000.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '2000.00');
+      await shareInvoice(customerId, invoiceId, [first, second], 'k-514');
+      const sql = [];
+      const spy = new Proxy(trx, { get: (target, key) => (key === 'raw' ? (text, ...rest) => { sql.push(String(text)); return target.raw(text, ...rest); } : Reflect.get(target, key)) });
+      const facts = await productionShare.loadCreditFacts(spy, await productionShare.weekStops(trx, [id], W1));
+      const reads = sql.filter((text) => /FROM invoices i/.test(text));
+      expect(reads).toHaveLength(1);
+      expect(reads[0]).toMatch(/WITH links AS[\s\S]*members AS/);
+      // and the split still works from that one read: $1,000.00 each
+      expect(facts.billed.get(first).billedCents).toBe(100000);
+      expect(facts.billed.get(second).billedCents).toBe(100000);
+    });
+
     it('AUDIT :507: an archived invoice linked to a paid stop is in its invoice history and never in its dollars', async () => {
       const id = await tech('Sample Alpha');
       await settings(id, { bar_cents: 10000 });

@@ -5,7 +5,7 @@ import { Field } from '../ui/Field';
 import { Input } from '../ui/Input';
 import { Select } from '../ui/Select';
 import { Table, TBody, TD, TH, THead, TR } from '../ui/Table';
-import { etDateString } from '../../lib/timezone';
+import { etDateString, formatETTime } from '../../lib/timezone';
 import { addStaffCalendarDays } from '../../lib/staffTimeDate';
 import { centsToDollars, dayLabel, lastFinishedWeekStart } from './payrollFormat';
 import { dollarsToCents } from './PayLinesPanel';
@@ -116,6 +116,17 @@ const NOT_BY_HAND = new Set(['already_paid', 'not_performed', 'unverified']);
 // A credit the owner set, or one the rules ignore now (the stop was reassigned, or its closeout changed): the owner can clear it.
 const CLEARABLE = new Set(['owner_set', 'owner_override_reassigned', 'owner_override_closeout_changed']);
 
+// Which visit a review row is: a short id, the time it was completed, its address, and the day's schedule to open it from.
+function VisitReference({ stop }) {
+  const parts = [`Visit ${String(stop.visitId || '').slice(0, 8)}`];
+  if (stop.completedAt) parts.push(formatETTime(stop.completedAt));
+  if (stop.address) parts.push(stop.address);
+  return <p className="m-0 mt-1 text-ui-caption text-ink-secondary" aria-label="Visit reference">
+    {parts.join(' · ')}
+    {stop.workDate && <> · <a className="underline" href={`/admin/schedule?date=${encodeURIComponent(stop.workDate)}`} target="_blank" rel="noreferrer">Open the day</a></>}
+  </p>;
+}
+
 function StopCreditForm({ call, technicianId, weekStart, stop, generation, onChanged }) {
   const [credit, setCredit] = useState('');
   const [reason, setReason] = useState('');
@@ -135,25 +146,31 @@ function StopCreditForm({ call, technicianId, weekStart, stop, generation, onCha
     setBusy(false);
   }
   if (CLEARABLE.has(stop.kind)) {
-    return <div className="mt-1 flex flex-wrap items-center gap-2">
-      <Button type="button" variant="secondary" disabled={busy} onClick={() => run('DELETE', body)}>
-        {stop.kind === 'owner_set' ? 'Clear the credit I set' : 'Clear the old credit'}
-      </Button>
-      {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
-    </div>;
+    return <>
+      <VisitReference stop={stop} />
+      <div className="mt-1 flex flex-wrap items-center gap-2">
+        <Button type="button" variant="secondary" disabled={busy} onClick={() => run('DELETE', body)}>
+          {stop.kind === 'owner_set' ? 'Clear the credit I set' : 'Clear the old credit'}
+        </Button>
+        {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+      </div>
+    </>;
   }
   if (!stop.needsReview || NOT_BY_HAND.has(stop.kind)) return null;
-  return <form className="mt-1 flex flex-wrap items-end gap-2" aria-label="Set the credit of this stop"
-    onSubmit={event => { event.preventDefault(); run('PUT', { ...body, creditCents: cents, reason: reason.trim() }); }}>
-    <Field label="Credit ($)">
-      <Input inputMode="decimal" autoComplete="off" value={credit} onChange={event => setCredit(event.target.value)} />
-    </Field>
-    <Field label="Reason">
-      <Input autoComplete="off" value={reason} onChange={event => setReason(event.target.value)} />
-    </Field>
-    <Button type="submit" variant="secondary" disabled={busy || cents == null || !reason.trim()}>Set credit</Button>
-    {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
-  </form>;
+  return <>
+    <VisitReference stop={stop} />
+    <form className="mt-1 flex flex-wrap items-end gap-2" aria-label="Set the credit of this stop"
+      onSubmit={event => { event.preventDefault(); run('PUT', { ...body, creditCents: cents, reason: reason.trim() }); }}>
+      <Field label="Credit ($)">
+        <Input inputMode="decimal" autoComplete="off" value={credit} onChange={event => setCredit(event.target.value)} />
+      </Field>
+      <Field label="Reason">
+        <Input autoComplete="off" value={reason} onChange={event => setReason(event.target.value)} />
+      </Field>
+      <Button type="submit" variant="secondary" disabled={busy || cents == null || !reason.trim()}>Set credit</Button>
+      {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+    </form>
+  </>;
 }
 
 function PreviewNotes({ preview }) {
@@ -178,6 +195,9 @@ export default function ProductionSharePanel({ call, technicians }) {
   const [loaded, setLoaded] = useState(null);
   // Only the newest request may write, and a change of employee or week drops the answer on screen and any request on its way.
   const newest = useRef(0);
+  // Counts only changes of the employee or week. A save or clear reloads the week whenever the selection is unchanged, however many
+  // requests started or finished meanwhile (newest orders the requests; it is not the selection).
+  const selection = useRef(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -198,6 +218,7 @@ export default function ProductionSharePanel({ call, technicians }) {
   // Any change of the selection starts over: nothing shown or saved belongs to a different employee or week.
   function select(change) {
     newest.current += 1;
+    selection.current += 1;
     setLoaded(null); setError(''); setBusy(false);
     if (change.technicianId !== undefined) setTechnicianId(change.technicianId);
     if (change.weekStart !== undefined) setWeekStart(change.weekStart);
@@ -255,8 +276,8 @@ export default function ProductionSharePanel({ call, technicians }) {
                 <TD>
                   {stop.needsReview && <span className="text-warn-fg">Needs review: </span>}{stop.reason}
                   <StopCreditForm key={`${stop.visitId}:${stop.kind}:${stop.creditCents}`} call={call} technicianId={preview.technician.id}
-                    weekStart={preview.weekStart} stop={stop} generation={() => newest.current}
-                    onChanged={(startedUnder) => { if (startedUnder === newest.current) load(preview.technician.id, preview.weekStart); }} />
+                    weekStart={preview.weekStart} stop={stop} generation={() => selection.current}
+                    onChanged={(startedUnder) => { if (startedUnder === selection.current) load(preview.technician.id, preview.weekStart); }} />
                 </TD>
                 <TD nums align="right">{stop.refundCents > 0 ? centsToDollars(stop.refundCents) : ''}</TD>
               </TR>)}
@@ -265,8 +286,8 @@ export default function ProductionSharePanel({ call, technicians }) {
         <SettingsForm
           key={`${preview.technician.id}:${preview.weekStart}:${preview.settings ? preview.settings.id : 'none'}`}
           call={call} technicians={technicians} technicianId={preview.technician.id} weekStart={preview.weekStart}
-          current={preview.settings} generation={() => newest.current}
-          onSaved={(startedUnder) => { if (startedUnder === newest.current) load(preview.technician.id, preview.weekStart); }}
+          current={preview.settings} generation={() => selection.current}
+          onSaved={(startedUnder) => { if (startedUnder === selection.current) load(preview.technician.id, preview.weekStart); }}
         />
       </div>}
       </>}

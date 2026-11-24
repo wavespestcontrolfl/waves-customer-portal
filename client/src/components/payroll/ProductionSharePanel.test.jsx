@@ -246,6 +246,38 @@ describe('Production share preview', () => {
       }));
     });
 
+    it('AUDIT :257: a review row names its visit: short id, time, address and a link to that day before the Set credit form', async () => {
+      await forms([
+        { visitId: '3fa85f64-5717-4562-b3fc-2c963f66afa6', workDate: '2026-09-15', completedAt: '2026-09-15T18:15:00Z', address: '123 Example St 34202',
+          serviceType: 'Pest Control', kind: 'unpriced', creditCents: 0, reason: 'No price', needsReview: true, refundCents: 0 },
+      ])();
+      const reference = screen.getByLabelText('Visit reference');
+      expect(reference).toHaveTextContent('Visit 3fa85f64 · 2:15 PM · 123 Example St 34202');
+      expect(within(reference).getByRole('link', { name: 'Open the day' })).toHaveAttribute('href', '/admin/schedule?date=2026-09-15');
+      expect(reference.compareDocumentPosition(screen.getByRole('form', { name: 'Set the credit of this stop' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('AUDIT :259: a save or clear reloads the week while the employee and week are unchanged, even after another load started', async () => {
+      let finish;
+      const call = vi.fn((path) => {
+        if (path === '/production-share/stop-override') return new Promise((resolve) => { finish = () => resolve({}); });
+        return Promise.resolve(answerFor(path));
+      });
+      render(<ProductionSharePanel call={call} technicians={TECHS} />);
+      open();
+      await show(call);
+      const previews = () => call.mock.calls.filter(([path]) => path.startsWith('/production-share/preview')).length;
+      fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '10' } });
+      fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'why' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Set credit' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', expect.anything()));
+      // the owner reloads the same week while the save is on its way: that is a new request, not a new selection
+      fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+      await waitFor(() => expect(previews()).toBe(2));
+      await act(async () => { finish(); });
+      await waitFor(() => expect(previews()).toBe(3));
+    });
+
     it('a stop whose closeout changed since the owner set its credit shows Clear and sends DELETE', async () => {
       const call = await forms([
         { visitId: 'v7', workDate: '2026-09-15', serviceType: 'Pest Control', kind: 'owner_override_closeout_changed', creditCents: 0, reason: 'The closeout of this stop changed', needsReview: true, refundCents: 0 },
