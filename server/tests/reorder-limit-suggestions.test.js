@@ -1,6 +1,6 @@
 const {
-  parsePackText,
-  packSizeInInventoryUnit,
+  packInInventoryUnit,
+  pickPriceRow,
   isBlackoutFertilizer,
   blackoutWindow,
   weeklyTotals,
@@ -9,24 +9,44 @@ const {
 const { parseArgs, render } = require('../scripts/suggest-reorder-limits');
 
 const steady = (perDay, days = 56) => Array.from({ length: days }, (_, i) => ({ daysAgo: i, qty: perDay }));
-const product = (over = {}) => ({ id: 'p1', name: 'LESCO CrossCheck Plus', inventoryUnit: 'gal', packSize: 1, ...over });
+const product = (over = {}) => ({ id: 'p1', name: 'LESCO CrossCheck Plus', inventoryUnit: 'gal', pack: { pack: 1 }, ...over });
 
-describe('pack size', () => {
-  test('reads plain container text and converts to the stock unit', () => {
-    expect(parsePackText('2.5 gal')).toEqual({ amount: 2.5, unit: 'gal' });
-    expect(parsePackText('78 fl oz')).toEqual({ amount: 78, unit: 'fl_oz' });
-    expect(packSizeInInventoryUnit({ inventoryUnit: 'fl_oz', containerSize: '1 gal' })).toBe(128);
-    expect(packSizeInInventoryUnit({ inventoryUnit: 'lb', vendorQuantity: '50', vendorUnit: 'lb' })).toBe(50);
+describe('pack size (read the dispatcher\'s way)', () => {
+  test('converts a readable pack to the stock unit', () => {
+    expect(packInInventoryUnit('1 gal', 'fl_oz')).toEqual({ pack: 128 });
+    expect(packInInventoryUnit('50 lb', 'lb')).toEqual({ pack: 50 });
+    expect(packInInventoryUnit('78 fl oz', 'fl_oz')).toEqual({ pack: 78 });
   });
 
-  test('refuses multi-pack text instead of guessing a case size', () => {
-    expect(parsePackText('4 x 1 gal')).toBeNull();
-    expect(parsePackText('case of 4')).toBeNull();
-    expect(packSizeInInventoryUnit({ inventoryUnit: 'gal', containerSize: '4 x 1 gal' })).toBeNull();
+  test('a count pack the dispatcher accepts is read as a count', () => {
+    expect(packInInventoryUnit('10 stations', 'each')).toEqual({ pack: 10 });
   });
 
-  test('a pack in another dimension is not used', () => {
-    expect(packSizeInInventoryUnit({ inventoryUnit: 'lb', containerSize: '1 gal' })).toBeNull();
+  test('bare ounces, cross-dimension and missing packs are refused, not guessed', () => {
+    expect(packInInventoryUnit('10 oz', 'lb').error).toBe('ambiguous_unit');
+    expect(packInInventoryUnit('1 gal', 'lb').error).toBe('pack_unit_mismatch');
+    expect(packInInventoryUnit('', 'gal').error).toBe('no_pack_size');
+    expect(packInInventoryUnit('1 case', 'each').error).toBe('no_pack_size');
+  });
+
+  test('a 1 fl oz pack stocked in gal keeps full precision', () => {
+    expect(packInInventoryUnit('1 fl oz', 'gal').pack).toBe(0.0078125);
+  });
+});
+
+describe('price row choice', () => {
+  const rows = [
+    { vendor_id: 'other', vendor_name: 'Amazon', quantity: '1 qt', is_best_price: true },
+    { vendor_id: 'siteone', vendor_name: 'SiteOne', quantity: '1 gal', is_best_price: false },
+  ];
+  test('the configured vendor\'s row, never another vendor\'s pack', () => {
+    expect(pickPriceRow(rows, { auto_reorder_vendor_id: 'siteone', vendor_name: 'SiteOne' }).row.quantity).toBe('1 gal');
+    expect(pickPriceRow(rows.slice(0, 1), { auto_reorder_vendor_id: 'siteone', vendor_name: 'SiteOne' })).toEqual({ row: null, vendorName: 'SiteOne' });
+  });
+  test('no vendor configured: best price, and the name says so', () => {
+    const r = pickPriceRow(rows, { auto_reorder_vendor_id: null });
+    expect(r.row.vendor_name).toBe('Amazon');
+    expect(r.vendorName).toMatch(/best price, no vendor set/);
   });
 });
 
@@ -64,7 +84,7 @@ describe('suggestLimitsForProduct', () => {
   });
 
   test('the lawn schedule wins when it is above recorded use', () => {
-    const r = suggestLimitsForProduct({ product: product({ inventoryUnit: 'lb', packSize: 50 }), usage: steady(1), forecastDemand: 280, today: '2026-11-24' });
+    const r = suggestLimitsForProduct({ product: product({ inventoryUnit: 'lb', pack: { pack: 50 } }), usage: steady(1), forecastDemand: 280, today: '2026-11-24' });
     expect(r.basis).toBe('lawn schedule');
     expect(r.dailyUse).toBe(10);
     expect(r.suggestedReorder).toBe(250); // 210 lb -> 5 bags
@@ -83,33 +103,46 @@ describe('suggestLimitsForProduct', () => {
     expect(r.suggestedThreshold).toBeNull();
   });
 
+  test('only unconvertible rows: flagged for unit review, not hidden as no use', () => {
+    const r = suggestLimitsForProduct({ product: product(), usage: [], unconverted: 4, today: '2026-11-24' });
+    expect(r.status).toBe('needs_unit_review');
+  });
+
+  test('small packs keep exact multiples the dispatcher maps back to the same count', () => {
+    const r = suggestLimitsForProduct({ product: product({ pack: { pack: 0.0078125 } }), usage: steady(0.001), today: '2026-11-24' });
+    expect(r.packs).toBe(3); // 0.021 gal / 0.0078125 = 2.69 -> 3
+    expect(r.suggestedReorder).toBe(0.0234375);
+  });
+
   test('no stock unit is flagged', () => {
     const r = suggestLimitsForProduct({ product: product({ inventoryUnit: null }), usage: steady(1), today: '2026-11-24' });
     expect(r.status).toBe('no_unit');
   });
 
   test('unreadable pack size leaves the amount unrounded and says so', () => {
-    const r = suggestLimitsForProduct({ product: product({ packSize: null }), usage: steady(0.1), today: '2026-11-24' });
+    const r = suggestLimitsForProduct({ product: product({ pack: { error: 'ambiguous_unit', message: 'unresolved ounce' } }), usage: steady(0.1), today: '2026-11-24' });
     expect(r.status).toBe('no_pack_size');
     expect(r.suggestedReorder).toBe(2.1);
+    expect(r.note).toContain('unresolved ounce');
   });
 
   test('N/P fertilizer holds inside the blackout', () => {
-    const r = suggestLimitsForProduct({ product: product({ name: 'LESCO 24-0-11', inventoryUnit: 'lb', packSize: 50 }), usage: steady(5), today: '2026-07-01' });
+    const r = suggestLimitsForProduct({ product: product({ name: 'LESCO 24-0-11', inventoryUnit: 'lb', pack: { pack: 50 } }), usage: steady(5), today: '2026-07-01' });
     expect(r.status).toBe('blackout_hold');
     expect(r.suggestedReorder).toBeNull();
   });
 
   test('N/P fertilizer near June 1 is capped to use before the blackout', () => {
-    const r = suggestLimitsForProduct({ product: product({ name: 'LESCO 24-0-11', inventoryUnit: 'lb', packSize: 50 }), usage: steady(5), today: '2026-05-18' });
-    // 14 days to June 1 = 70 lb usable; threshold 50 lb leaves 20 lb -> 1 bag
+    const r = suggestLimitsForProduct({ product: product({ name: 'LESCO 24-0-11', inventoryUnit: 'lb', pack: { pack: 50 } }), usage: steady(5), today: '2026-05-18' });
+    // 14 days to June 1 = 70 lb usable; threshold 50 lb leaves 20 lb: no
+    // whole 50 lb bag fits before the blackout, so order none.
     expect(r.status).toBe('blackout_capped');
     expect(r.suggestedThreshold).toBe(50);
-    expect(r.suggestedReorder).toBe(50);
+    expect(r.suggestedReorder).toBe(0);
   });
 
   test('N/P fertilizer days before June 1 orders nothing more', () => {
-    const r = suggestLimitsForProduct({ product: product({ name: 'LESCO 24-0-11', inventoryUnit: 'lb', packSize: 50 }), usage: steady(5), today: '2026-05-29' });
+    const r = suggestLimitsForProduct({ product: product({ name: 'LESCO 24-0-11', inventoryUnit: 'lb', pack: { pack: 50 } }), usage: steady(5), today: '2026-05-29' });
     expect(r.suggestedReorder).toBe(0);
   });
 });
