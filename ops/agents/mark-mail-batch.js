@@ -15,6 +15,8 @@
 //   name = the buyers as the label shows them, price = the monthly price (whole dollars bare), perApplication = the price
 //   of one application (annual / 4, from whole cents; 4 a year), textNumber = the office line of the home's city or ZIP,
 //   heldUntil = "Mon D". The file holds buyer names and page tokens: it is written 0600; keep it out of the repo.
+//   Labels come ONLY from a named batch that is already marked (--labels needs --batch): print what was marked, so a home
+//   priced between a preview and the mark can never be marked mailed without a card, and the hold date matches the label.
 // - No customer comms, no paid calls.
 //
 // Run from the repo root:
@@ -64,6 +66,7 @@ function parseArgs() {
   if (labelsPath !== undefined && !labelsPath.trim()) throw usage('--labels is empty: give an output file');
   if (batch !== undefined && !batch.trim()) throw usage('--batch is empty: give a batch name');
   if (execute && !batch) throw usage('--execute needs --batch <name>');
+  if (labelsPath !== undefined && !batch) throw usage('--labels needs --batch <name>: labels are printed from a marked batch only');
   return { execute, batch, ids, labelsPath };
 }
 
@@ -72,8 +75,14 @@ async function main() {
 
   // From the Mac the private database host does not resolve: use the public URL the Postgres service provides, and
   // stop with a clear message when only the private one is set.
-  if (process.env.DATABASE_PUBLIC_URL) process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
-  if (/\.railway\.internal\b/.test(process.env.DATABASE_URL || '')) {
+  // An explicit non-private DATABASE_URL (a local or QA database) always wins: the public URL replaces only a missing or
+  // private one, so an inherited DATABASE_PUBLIC_URL can never move a QA run onto production.
+  const PRIVATE_HOST = /\.railway\.internal\b/;
+  const explicitUrl = process.env.DATABASE_URL || '';
+  if (process.env.DATABASE_PUBLIC_URL && (!explicitUrl || PRIVATE_HOST.test(explicitUrl))) {
+    process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
+  }
+  if (PRIVATE_HOST.test(process.env.DATABASE_URL || '')) {
     throw Object.assign(new Error('only the private database URL is set: run it with the nested Postgres command above'), { code: 'PRIVATE_DB_URL' });
   }
   const db = require(server('models/db'));
@@ -84,7 +93,12 @@ async function main() {
       if (result.batchExists) console.log(`Batch "${batch}" already exists: nothing marked. A batch name is used once; pick a new name for new homes.`);
       else console.log(`Marked ${result.marked.length} home(s) as mailed in batch "${batch}".`);
       if (result.notMailable.length) console.log(`  ${result.notMailable.length} id(s) not marked (not eligible, not priced, or already mailed)`);
-    } else if (!labelsPath || !batch) {
+    } else if (!labelsPath) {
+      // The same answer --execute would give: a used batch name marks nothing.
+      if (batch && await db('mail_prospects').where({ mail_batch: batch }).first('id')) {
+        console.log(`Batch "${batch}" already exists: --execute would mark nothing. A batch name is used once; pick a new name for new homes.`);
+        return;
+      }
       const { homes, notMailable } = await wouldMark({ ids });
       console.log(`Homes ready to mark as mailed: ${homes.length}`);
       for (const h of homes.slice(0, 200)) console.log(`  would mark prospect ${h.id}: $${h.monthly} a month (annual ${h.annual}, setup ${h.setupFee})`);
@@ -99,7 +113,8 @@ async function main() {
       const tmp = `${labelsPath}.${process.pid}.tmp`;
       fs.writeFileSync(tmp, `${JSON.stringify(labels, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
       fs.renameSync(tmp, labelsPath);
-      console.log(`Wrote ${labels.length} label row(s) for ${batch ? `batch "${batch}"` : 'the homes a dry run would mark'}.`);
+      console.log(`Wrote ${labels.length} label row(s) for batch "${batch}".`);
+      if (!labels.length) console.log('  No marked homes in that batch: run --execute --batch <name> first, then export its labels.');
       if (nameCheck.length) console.log(`  Look at the name of ${nameCheck.length} home(s) before printing: ${nameCheck.join(', ')}`);
       if (officeByDefault.length) console.log(`  No city or ZIP named an office for ${officeByDefault.length} home(s) (Lakewood Ranch line used): ${officeByDefault.join(', ')}`);
     }

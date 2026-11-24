@@ -25,11 +25,36 @@ describe('mark-mail-batch arguments', () => {
     [['--execute', '--batch', 'run-1', 'stray'], /unknown argument "stray"/],
     [['--execute', '--batch', 'run-1', '--ids', 'a', '--ids', 'b'], /--ids is given twice/],
     [['--dry-run'], /unknown argument "--dry-run"/],
+    [['--labels', 'out.json'], /--labels needs --batch/],
   ])('%j is refused with a usage message and nothing is run', (args, message) => {
     const result = run(...args);
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/mark-mail-batch failed: USAGE/);
     expect(result.stderr).toMatch(message);
     expect(result.stdout).toBe('');
+  });
+
+  test('an explicit QA DATABASE_URL wins over an inherited DATABASE_PUBLIC_URL', () => {
+    const result = spawnSync(process.execPath, [SCRIPT], {
+      encoding: 'utf8',
+      timeout: 60000,
+      env: {
+        PATH: process.env.PATH,
+        DATABASE_URL: 'postgres://qa:qa@127.0.0.1:1/waves_qa', // a closed local port: refused at once
+        DATABASE_PUBLIC_URL: 'postgres://prod:prod@prod-db.invalid:5432/railway', // would fail ENOTFOUND if chosen
+      },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).not.toMatch(/ENOTFOUND/);
+    expect(result.stderr).toMatch(/ECONNREFUSED/);
+  });
+
+  test('a private DATABASE_URL with no public URL stops with the nested-command message', () => {
+    const result = spawnSync(process.execPath, [SCRIPT], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH, DATABASE_URL: 'postgres://u:p@postgres.railway.internal:5432/railway' },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/PRIVATE_DB_URL/);
   });
 });
