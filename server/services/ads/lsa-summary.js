@@ -1,3 +1,4 @@
+const { notMembershipCustomerSql } = require('../waveguard-existing-services');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { parseETDateTime } = require('../../utils/datetime-et');
@@ -55,11 +56,14 @@ async function wonCounts(since, until, excludeRows) {
       .where({ 'asa.lead_source': 'google_lsa' })
       .whereIn('asa.funnel_stage', WON_STAGES)
       .where('asa.lead_date', '>=', since)
-      .where('asa.lead_date', '<', until),
+      .where('asa.lead_date', '<', until)
+      .leftJoin('customers as lsa_mc', 'lsa_mc.id', 'asa.customer_id'),
   )
     .select(
       db.raw('COUNT(*) AS booked'),
-      db.raw('COUNT(*) FILTER (WHERE asa.is_recurring IS TRUE) AS recurring'),
+      // A plan member counts from booking, not from the first costed visit
+      // (is_recurring is the revenue sync's snapshot): the shared member rule.
+      db.raw(`COUNT(*) FILTER (WHERE asa.is_recurring IS TRUE OR (lsa_mc.id IS NOT NULL AND NOT (${notMembershipCustomerSql('lsa_mc')}))) AS recurring`),
     )
     .first();
   return { booked: toInt(row?.booked), recurring: toInt(row?.recurring) };

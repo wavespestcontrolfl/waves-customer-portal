@@ -463,9 +463,31 @@ function relabelAction(row, lsaLead) {
   return { type: 'keep', result: `kept_${row.lead_source || 'none'}`.slice(0, 40) };
 }
 
+// { ok } | { retry } | { unproven: reason }. A lead born from another call
+// (it only reused this one) is unproven: first touch keeps its channel.
+async function callStillAttributable(trx, lsaLead, lead) {
+  // Lazy require: call-attribution loads google-call-bridge, which is heavy.
+  const { resolveSourceCallProvenanceLocked } = require('./call-attribution');
+  const prov = await resolveSourceCallProvenanceLocked(trx, { leadId: lead.id, twilioCallSid: lead.twilio_call_sid });
+  if (prov.refusedReason === 'call_unsettled') return { retry: 'call_unsettled' };
+  if (prov.refusedReason) return { unproven: String(prov.refusedReason).slice(0, 40) };
+  if (!prov.sourceCallId || String(prov.sourceCallId) !== String(lsaLead.call_log_id)) return { unproven: 'lead_not_from_call' };
+  return { ok: true };
+}
+
+async function markLsaLead(trx, lsaLead, result, from) {
+  await trx('lsa_leads').where({ id: lsaLead.id }).update({
+    relabeled_at: new Date(),
+    relabel_result: result,
+    relabeled_from: from,
+    updated_at: new Date(),
+  });
+  return { result };
+}
+
 // One lead, one transaction. Lock order is the repo's: the lead, then its
 // funnel row. { retry: reason } = nothing written, try again next run.
-async function relabelInTransaction(trx, lsaLead, startedAt, callSid) {
+async function relabelInTransaction(trx, lsaLead, startedAt) {
   // The match may have moved since the batch read (a refill, a re-match):
   // act only on the ids still on the row, under its lock.
   const current = await trx('lsa_leads').where({ id: lsaLead.id }).forUpdate()
@@ -474,9 +496,15 @@ async function relabelInTransaction(trx, lsaLead, startedAt, callSid) {
     || String(current.lead_id) !== String(lsaLead.lead_id)
     || String(current.customer_id) !== String(lsaLead.customer_id)
     || String(current.call_log_id) !== String(lsaLead.call_log_id)) return { retry: 'match_changed' };
-  const lead = await trx('leads').where({ id: lsaLead.lead_id }).forUpdate().first('id', 'customer_id', 'twilio_call_sid');
+  const lead = await trx('leads').where({ id: lsaLead.lead_id }).forUpdate().first('id', 'customer_id', 'twilio_call_sid', 'status');
   if (!lead) return { retry: 'no_lead' };
   if (lead.customer_id && String(lead.customer_id) !== String(lsaLead.customer_id)) return { retry: 'customer_changed' };
+  // The pipeline's own check, under the same lead -> call_log lock order: the
+  // call still belongs to this lead and was not rejected (spam, not a lead),
+  // repointed or left unsettled. A rejected call never regains paid credit.
+  const proof = await callStillAttributable(trx, lsaLead, lead);
+  if (proof.retry) return proof;
+  if (proof.unproven) return markLsaLead(trx, lsaLead, 'unproven', proof.unproven);
   const row = await trx('ad_service_attribution')
     .where({ lead_id: lsaLead.lead_id })
     .forUpdate()
@@ -484,13 +512,7 @@ async function relabelInTransaction(trx, lsaLead, startedAt, callSid) {
   const action = relabelAction(row, lsaLead);
   let result = action.result;
   let from = action.from || null;
-  if (action.type === 'create' && !(callSid && lead.twilio_call_sid === callSid)) {
-    // First touch: a lead the call only reused (a web form, an older call)
-    // already had its channel before this call; never file it as LSA.
-    result = 'unproven';
-    from = 'lead_not_from_call';
-  } else if (action.type === 'create') {
-    // Lazy require: call-attribution loads google-call-bridge, which is heavy.
+  if (action.type === 'create') {
     const { recordCallPpcAttribution } = require('./call-attribution');
     const recorded = await recordCallPpcAttribution({
       customerId: lsaLead.customer_id,
@@ -510,6 +532,10 @@ async function relabelInTransaction(trx, lsaLead, startedAt, callSid) {
       from = String(recorded.reason).slice(0, 40);
     } else {
       result = 'created';
+      // The row starts at 'lead'; a conversion that happened before it existed
+      // advanced nothing, so replay the lead's current status (won, lost...).
+      const { bridgeLeadFunnelStage } = require('../lead-funnel-bridge');
+      if (lead.status) await bridgeLeadFunnelStage(lead.id, lead.status, trx);
     }
   } else if (action.type === 'relabel') {
     await trx('ad_service_attribution').where({ id: row.id }).update({
@@ -520,13 +546,7 @@ async function relabelInTransaction(trx, lsaLead, startedAt, callSid) {
       updated_at: new Date(),
     });
   }
-  await trx('lsa_leads').where({ id: lsaLead.id }).update({
-    relabeled_at: new Date(),
-    relabel_result: result,
-    relabeled_from: from,
-    updated_at: new Date(),
-  });
-  return { result };
+  return markLsaLead(trx, lsaLead, result, from);
 }
 
 // Phone-call leads matched to a call, the lead and the customer, not yet done,
@@ -552,7 +572,7 @@ async function relabelMatches() {
     const startedAt = call ? callStartedAt(call) : null;
     let out;
     try {
-      out = await db.transaction((trx) => relabelInTransaction(trx, lsaLead, startedAt, call?.twilio_call_sid || null));
+      out = await db.transaction((trx) => relabelInTransaction(trx, lsaLead, startedAt));
     } catch (err) {
       // Never the row's values: the step, code, constraint and table only.
       logger.error(`[google-lsa-leads] database ${dbErrorText('relabel', err)}`);
