@@ -1200,7 +1200,6 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
   const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
 
   test('the scheduled T&S guide keeps label details but cannot bypass an unverified product label', async () => {
-    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
     process.env.GATE_PROTOCOL_SOP = 'true';
     try {
       const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' },
@@ -1214,7 +1213,6 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       // Holding a job must not mutate the shared admin reference.
       expect(require('../config/tree-shrub-field-guide.json').products.tritek.mix).toEqual([1.28, 1.28]);
     } finally {
-      delete process.env.GATE_TREE_SHRUB_FIELD_GUIDE;
       delete process.env.GATE_PROTOCOL_SOP;
     }
   });
@@ -1222,7 +1220,6 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
   // Owner 2026-10-29 ("i just want to warn techs"): weather never withholds a guide
   // mix. A missing forecast shows it; an open label review (the label, not the weather) still withholds it.
   test('the T&S guide shows a mix when only the forecast is missing, not when a label review is open', async () => {
-    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
     process.env.GATE_PROTOCOL_SOP = 'true';
     const sourceCheck = require('../services/epa-product-label').checkEpaSource;
     try {
@@ -1247,7 +1244,6 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(held.mix).toBeNull();
       expect(held.summary).toMatch(/Mix withheld/);
     } finally {
-      delete process.env.GATE_TREE_SHRUB_FIELD_GUIDE;
       delete process.env.GATE_PROTOCOL_SOP;
       delete process.env.GATE_LABEL_PIPELINE;
     }

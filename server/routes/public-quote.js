@@ -2393,15 +2393,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const scopedToTypedIdentity = (qb) => qb
       .where({ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey, service_interest: serviceInterest })
       .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [observedExtraCount]);
-    // Repeat-run dedupe is DARK until GATE_WIZARD_LEAD_DEDUPE=true (read at
-    // call time). Off: no run is looked up as a repeat, so every run files
-    // as 'new' exactly as before this lane, and a row labelled while the
-    // gate was on keeps the marker it carries — the token path neither
-    // relabels nor re-validates it (the kill switch must not reopen the
-    // pipeline it labelled; pre-push P1). The conversion side of a repeat
-    // lands in its own PR; labelling ahead of it would leave accepted
-    // reruns crediting no lead.
-    const dedupeOn = require('../config/feature-gates').gateEnvValue('GATE_WIZARD_LEAD_DEDUPE');
+    // Repeat-run dedupe: a repeat run files as status 'duplicate' of the open
+    // lead it repeats, so the pipeline counts one prospect once.
     if (leadId) {
       // OWNERSHIP (atomic): leadId is a client-supplied id on a public,
       // PII-accepting write surface, so prove ownership the same way /upsell
@@ -2434,7 +2427,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // declared timeline captured at the property-lookup stage, a
         // won_estimate_id stamp, and the duplicate_of_lead_id marker a
         // repeat run stamped (codex #3834 r2 P1) — this merge write is the
-        // path that does NOT re-derive the label (gate off, or a lost
+        // path that does NOT re-derive the label (a lost
         // claim; the claimed write below derives its own marker)
         // (jsonb_strip_nulls drops a key the prior row never had); a value in
         // THIS stage's snapshot wins the merge.
@@ -2514,10 +2507,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // this public retry claims 0 rows instead of regressing it (r9 P1);
       // on 0 rows the row is re-read and claimed once more — a concurrent
       // request on this token that moved the label — and a row still in
-      // play after that reopens as 'new' (below). Gate off: the stored
-      // marker is kept as is (no lookup, no relabel — the kill switch must
-      // not reopen the pipeline it labelled) through the merge write.
-      let prior = dedupeOn ? await ownRow().first(RETURNING) : null;
+      // play after that reopens as 'new' (below).
+      let prior = await ownRow().first(RETURNING);
       lead = null;
       for (let attempt = 0; !lead && relabelable(prior) && attempt < 2; attempt++) {
         const stored = prior.status === 'duplicate' ? duplicateOfFromExtracted(prior.extracted_data) : null;
@@ -2549,10 +2540,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // pre-dedupe outcome), never a mislabelled one. Still claimed on the
       // status being in play, so a staff transition wins here too.
       if (!lead && relabelable(prior)) await land((q) => q.whereIn('status', ['new', 'duplicate']), null);
-      // Gate off, or the row left play (a staff transition won): the fields
-      // land through the merge write and the label is the row's own — the
-      // stored marker when the gate is off; whatever the winning write left
-      // otherwise (nothing follows a marker on a row that is no longer
+      // The row left play (a staff transition won): the fields land through
+      // the merge write and the label is the row's own — whatever the winning
+      // write left (nothing follows a marker on a row that is no longer
       // 'duplicate').
       if (!lead) await land((q) => q);
       if (relabelable(lead)) {
@@ -2560,7 +2550,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // extra-property count as observed on the row) scopes every later
         // public write that moves the label (r13 P1).
         observedExtraCount = parseExtracted(lead.extracted_data)?.additional_properties?.length || 0;
-        if (dedupeOn && duplicateOfLeadId) {
+        if (duplicateOfLeadId) {
           // The row is filed as a repeat: a funnel row it carries at the
           // lead stage — its own earlier stamp, or a concurrent repeat's
           // root repair that picked it as root while this relabel was in
@@ -2600,7 +2590,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // a trusted-path job (the office merge). Two concurrent first runs can
     // still both land 'new' — the office merges those by hand, as before.
     if (!lead && !additionalProperties.length) {
-      duplicateOfLeadId = dedupeOn ? await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest }) : null;
+      duplicateOfLeadId = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest });
     }
     if (!lead) {
       const rows = await db('leads').insert({
@@ -2645,7 +2635,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // declined / expired / archived estimate, identity), so the two cannot
     // drift — and reopen THIS row, scoped to the label it just received, so
     // a staff transition on this row in the meantime still wins.
-    if (dedupeOn && duplicateOfLeadId) {
+    if (duplicateOfLeadId) {
       const targetOpen = await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, onlyLeadId: duplicateOfLeadId });
       // A target that is no longer open because ITS OWN relabel landed in
       // flight (B picked A while A was filing as a repeat of O — the r10
@@ -4466,14 +4456,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // widget can explain the per-application price instead of asserting one.
     // Absent whenever the quote has no priced lawn line — the widget then
     // falls back to its own estimate copy and makes no priced-basis claim.
-    // DARK until astro #464 deploys (local audit P1): emitting this field
-    // activates the deployed widget's source labels, which until #464
-    // include the banned verify-on-first-visit wording. The gate makes this
-    // push safe regardless of deploy order; flip GATE_PUBLIC_QUOTE_LAWN_AREA
-    // after #464 is live.
-    const lawnArea = require('../config/feature-gates').isEnabled('publicQuoteLawnArea')
-      ? deriveLawnArea(estimate)
-      : null;
+    const lawnArea = deriveLawnArea(estimate);
     if (lawnArea) {
       response.lawn_area = lawnArea;
     }

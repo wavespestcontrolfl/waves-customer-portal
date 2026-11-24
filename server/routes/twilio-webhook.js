@@ -371,7 +371,7 @@ router.post('/sms', async (req, res) => {
 
     // Event-driven health rescore on a hot inbound signal (competitor mention,
     // cancellation, price complaint). Fire-and-forget so it never delays the
-    // webhook ack; gated behind GATE_EVENT_RESCORE (no-op when off). Defined
+    // webhook ack. Defined
     // here so it can fire on BOTH the early-return branches (opt-out/cancel —
     // the strongest churn signal) and the general inbound path.
     const fireEventRescore = (src) => {
@@ -2091,7 +2091,7 @@ async function lastOutboundOnThread(toPhone, ourNumber) {
   return last;
 }
 
-// GATE_SMS_COURTESY_AFTER_TEMPLATE (owner 2026-10-14): an automated visit text
+// Courtesy reply after an automated visit text (owner 2026-10-14): an automated visit text
 // asks nothing a person is waiting to hear back on, even when its template
 // carries a "reply"/"confirm" line. Only the explicit allowlist counts; a
 // person's text ('manual', AI-approved drafts) and every unlisted type keep
@@ -2100,8 +2100,7 @@ async function lastOutboundOnThread(toPhone, ourNumber) {
 // came before it (Codex #6331).
 const DELIVERED_STATUSES = new Set(['sent', 'delivered']);
 function isAutomatedVisitText(row) {
-  return require('../config/feature-gates').smsCourtesyAfterTemplateLive()
-    && DELIVERED_STATUSES.has(String(row?.status || '').toLowerCase())
+  return DELIVERED_STATUSES.has(String(row?.status || '').toLowerCase())
     && AUTOMATED_VISIT_TEXT_TYPES.has(String(row?.message_type || '').toLowerCase());
 }
 
@@ -2119,14 +2118,13 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
   }
 }
 
-// Gate on: an affirmative tapback (Liked/Loved/👍-type emoji, the same ACK
+// An affirmative tapback (Liked/Loved/👍-type emoji, the same ACK
 // list as isQuietSmsReaction) on a thread whose last Waves text was automated
 // is quiet even though that template quoted a "reply"/"confirm" line, but
 // only when the tapback quotes that last text. ❓/👎
 // and every other reaction keep their loud path. Fails closed (loud).
 async function isAffirmativeReactionToAutomatedText(body, toPhone, ourNumber) {
   try {
-    if (!require('../config/feature-gates').smsCourtesyAfterTemplateLive()) return false;
     if (!isAffirmativeSmsReaction(body)) return false;
     const last = await lastOutboundOnThread(toPhone, ourNumber);
     if (!isAutomatedVisitText(last)) return false;
@@ -2134,7 +2132,7 @@ async function isAffirmativeReactionToAutomatedText(body, toPhone, ourNumber) {
     // text must not go quiet because a reminder went out after it, and prefix
     // or substring matches let a staff text that is a prefix of (or sits inside)
     // the reminder through. Anything but an exact match (after whitespace and
-    // case are collapsed) stays loud, as before the gate.
+    // case are collapsed) stays loud.
     const collapse = (t) => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
     const quoted = collapse(reactionQuotedTarget(body));
     return quoted !== '' && quoted === collapse(last.message_body);

@@ -1,6 +1,5 @@
 /**
  * Event-driven health rescore (near-real-time on a hot inbound SMS).
- *  - no-op unless GATE_EVENT_RESCORE === 'true',
  *  - detects fresh signals for the customer, then rescores (canonical engine),
  *  - never touches a notification and never reads customer_health_scores
  *    itself: the live churn alert (and its prior-risk read + atomic claim)
@@ -46,12 +45,10 @@ describe('rescoreOnInboundMessage', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     triggerNotification.mockResolvedValue({ bellWritten: true });
-    process.env.GATE_EVENT_RESCORE = 'true';
   });
 
-  test('no-op when the gate is off', async () => {
-    process.env.GATE_EVENT_RESCORE = 'false';
-    const out = await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
+  test('no-op without a customer id', async () => {
+    const out = await eventRescore.rescoreOnInboundMessage(null, { source: 'inbound_sms' });
     expect(out).toBeNull();
     expect(SignalDetector.detectSignals).not.toHaveBeenCalled();
     expect(customerHealth.scoreCustomer).not.toHaveBeenCalled();

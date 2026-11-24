@@ -6327,9 +6327,9 @@ request in the other), the county-record vouch of the lookup, the
 website-quote withdrawal, and the web-form shell test above. Off, every
 comparison is as before. No request or response shape changes.
 
-Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
-read at call time, default off in every environment — off, every run
-files as `new` exactly as before): a tokenless `/calculate` whose typed
+Priced lawn area (always on; the former `GATE_PUBLIC_QUOTE_LAWN_AREA` was removed after astro #464 went live): the `/calculate` response carries `lawn_area` when the quote has a residential `lawn_care` or `commercial_lawn` line with a positive priced area: `lawn_area.turf_sqft` (the priced turf area, rounded to whole square feet) and `lawn_area.source`, one of `measured`, `confirmed`, `ai_satellite`, `county`, `lot_estimate`, `footprint_estimate` (an unknown basis, or a satellite figure capped to the parcel, reads `lot_estimate`). The block is omitted when the quote has no priced lawn line or the area is missing or not positive; the widget then shows its own estimate copy and makes no priced-basis claim.
+
+Repeat-run dedupe (#3834 split, PR A′; always on): a tokenless `/calculate` whose typed
 email AND phone AND quoted address AND service (catalog `serviceKey`, or
 the normalized service-mix label for the direct `services` shape) equal an
 OPEN `quote_wizard` lead's (`OPEN_LEAD_STATUSES`) created inside 30 days,
@@ -6349,7 +6349,7 @@ marker grants no access (a typed contact is not ownership evidence), the
 draft estimate stays mirrored to the run's own row, and `/upsell` reaches
 only the authenticated lead's draft. Resolving a repeat to its root at
 estimate acceptance / self-booking is PR B′ (services, not this route).
-Kill switch: unset the gate — rows already labelled keep their marker.
+Rollback: revert the PR — rows already labelled keep their marker.
 
 Same-person customer link (owner 2026-10-31; always on since the gate was
 removed 2026-11-16): the

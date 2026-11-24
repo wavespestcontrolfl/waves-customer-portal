@@ -837,18 +837,6 @@ const gates = {
   // through acceptance even after this gate is disabled. Strict opt-in.
   visitCombinedCapacity: process.env.GATE_VISIT_COMBINED_CAPACITY === 'true',
 
-  // Quote-wizard repeat-run dedupe (#3834 split, PR A′): a tokenless
-  // /calculate rerun of an OPEN quote_wizard lead (same email + phone +
-  // address + service, 30 days) files as status 'duplicate' carrying
-  // extracted_data.duplicate_of_lead_id instead of a second 'new' lead —
-  // label only, the public route never writes the original. OFF (default,
-  // every environment): every run files as 'new', byte-identical to before.
-  // Flip only once the conversion side (PR B′: accept-time and self-booking
-  // resolution of a repeat to its root) has merged, or accepted reruns
-  // credit no lead as won. Kill switch: unset. This entry is for
-  // logGateStatus; the route reads gateEnvValue at CALL time.
-  wizardLeadDedupe: gateEnvValue('GATE_WIZARD_LEAD_DEDUPE'),
-
   // Booking stamping contract (Tier 2 consolidation): the shared
   // field-stamping authority in services/booking/create-scheduled-service.js
   // that scheduled_services insert sites converge on. Gate OFF = no
@@ -1563,11 +1551,6 @@ const gates = {
   // Communications composer and send it themselves. Read at call time by
   // server/services/sms-translation.js — this entry is for logGateStatus only.
   smsAnyLanguageInbox: gateEnvValue('GATE_SMS_ANY_LANGUAGE_INBOX'),
-  // Courtesy reply to an automated visit text (owner 2026-10-14): a bare "Ok" / "Thanks" / 👍
-  // after Waves' own confirmation, reminder, en-route, arrival or completion text is marked
-  // read with no bell. Read at call time by server/routes/twilio-webhook.js
-  // smsCourtesyAfterTemplateLive() — this entry is for logGateStatus only.
-  smsCourtesyAfterTemplate: process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
   // Away Watch + Welcome Home (owner 2026-10-31): a member's away dates drive a tech job-card line and a
   // 3-photo closeout minimum. Read at call time by awayWatchLive() — this entry is for logGateStatus only.
   awayWatch: process.env.GATE_AWAY_WATCH === 'true',
@@ -3240,15 +3223,6 @@ const gates = {
   // Enable with GATE_ESTIMATE_SOFT_EXIT=true.
   estimateSoftExit: isProd ? process.env.GATE_ESTIMATE_SOFT_EXIT === 'true' : true,
 
-  // The `lawn_area` block on POST /public/quote/calculate — the priced
-  // treatable-area basis the website estimator renders as "Priced for N sq
-  // ft". Ships DARK because merely EMITTING the field activates the deployed
-  // astro widget's source labels, and until astro PR #464 deploys those
-  // labels include the banned verify-on-first-visit wording (owner ruling
-  // 2026-08-12). Flip AFTER #464 is live on the hub + spokes.
-  // Enable with GATE_PUBLIC_QUOTE_LAWN_AREA=true.
-  publicQuoteLawnArea: isProd ? process.env.GATE_PUBLIC_QUOTE_LAWN_AREA === 'true' : true,
-
   // Website estimate pages publish eligible engine quotes directly into the
   // existing estimate booking/Auto Pay flow. Ordinary lead forms never opt in.
   websiteQuoteBooking: process.env.GATE_WEBSITE_QUOTE_BOOKING === 'true',
@@ -3529,7 +3503,6 @@ const gates = {
   // Current-visit procedure and readable SOP sheet inside the Job Card drawer.
   // Uses the same visit resolver; unset restores the legacy protocol tabs.
   protocolSop: gateEnvValue('GATE_PROTOCOL_SOP'),
-  treeShrubFieldGuide: gateEnvValue('GATE_TREE_SHRUB_FIELD_GUIDE'),
   // Schedule day-view exceptions from the Job Card; no paragraph generation
   // or cache writes. Requires GATE_JOB_CARD too; unset removes the strips.
   dispatchReadiness: gateEnvValue('GATE_DISPATCH_READINESS'),
@@ -8304,14 +8277,6 @@ function portalAiVoiceProfileLive() {
   return process.env.GATE_PORTAL_AI_VOICE_PROFILE === 'true';
 }
 
-// GATE_SMS_COURTESY_AFTER_TEMPLATE read at CALL time — strict `=== 'true'`.
-// The one reader for the inbound-SMS courtesy rule after an automated visit
-// text (server/routes/twilio-webhook.js lastOutboundAskedQuestion). Off = a
-// reply after such a text counts as answering it, as before.
-function smsCourtesyAfterTemplateLive() {
-  return process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true';
-}
-
 // GATE_AWAY_WATCH read at CALL time — strict `=== 'true'`. The one reader for Away Watch + Welcome Home
 // (property-preferences-schema.js writers, routes/property.js and admin-customers.js responses,
 // job-card.js lines, complete-scheduled-service.js photo minimum). Off = no change anywhere.
@@ -8962,8 +8927,6 @@ function oneTapReportLive() {
 module.exports.oneTapReportLive = oneTapReportLive;
 
 
-// GATE_SMS_COURTESY_AFTER_TEMPLATE reader, on its own line so gate PRs never conflict.
-module.exports.smsCourtesyAfterTemplateLive = smsCourtesyAfterTemplateLive;
 // GATE_AWAY_WATCH reader, on its own line so gate PRs never conflict.
 module.exports.awayWatchLive = awayWatchLive;
 // GATE_SMS_BARE_YES_REPLY reader, on its own line so gate PRs never conflict.
