@@ -278,12 +278,14 @@ postgres('payroll minimum paid week', () => {
       const refused = await put({ hours: '38', lastDay });
       expect([refused.status, refused.body.error]).toEqual([409, `A final pay run already paid this employee for the week of ${lastDay && lastDay < W1 ? addDays(W1, -7) : W1} or later, so the last day cannot change there. Void that pay run first.`]);
     }
-    expect((await put({ hours: null })).status).toBe(409);
+    // Clearing the minimum is always open: the last day stays on file.
+    const retired = await put({ hours: null });
+    expect([retired.status, retired.body.technician]).toEqual([200, { id, paidWeekMinimumHours: null, paidWeekMinimumLastDay: addDays(W1, 1) }]);
     // A later last day whose week has no final check is fine.
     const tech2 = await tech('Sample Bravo', { paid_week_minimum_last_day: addDays(W1, 1) });
     const later = await api('PUT', `/technicians/${tech2}/week-minimum`, { body: { hours: '40', lastDay: addDays(W1, 15) }, email: OWNER });
     expect(later.body.technician.paidWeekMinimumLastDay).toBe(addDays(W1, 15));
-    const cleared = await api('PUT', `/technicians/${tech2}/week-minimum`, { body: { hours: null }, email: OWNER });
+    const cleared = await api('PUT', `/technicians/${tech2}/week-minimum`, { body: { hours: null, lastDay: null }, email: OWNER });
     expect(cleared.body.technician).toEqual({ id: tech2, paidWeekMinimumHours: null, paidWeekMinimumLastDay: null });
   });
 
@@ -293,6 +295,8 @@ postgres('payroll minimum paid week', () => {
     const listed = (await api('GET', '/technicians')).body.technicians.map((row) => row.id);
     expect(listed).toContain(id);
     expect(listed).not.toContain(gone);
+    // The Time off panel's roster does not offer a person kept only for their minimum.
+    expect((await api('GET', '/technicians?formerBank=1')).body.technicians.map((row) => row.id)).not.toContain(id);
   });
 
   it('holds a week of an earlier stay: work before the hire date on file', async () => {

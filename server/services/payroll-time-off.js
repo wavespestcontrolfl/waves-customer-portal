@@ -461,7 +461,7 @@ async function setPtoAllowance(technicianId, input, actor, conn = db) {
 
 // The minimum paid hours of a full workweek, a setting (offer letter, "Hours and schedule"; payroll-week-minimum.js),
 // and the employee's last day when they leave (its week pays the scheduled days up to it; later weeks no minimum).
-// hours null clears both: the pay run pays the hours on file and no more. A change of the last day is refused once a
+// hours null clears the minimum (the last day stays on file): the pay run pays the hours on file and no more. A change of the last day is refused once a
 // final check of the employee covers its week (the earlier of the old and the new day) or a later one: a paid week
 // never changes under it. Void that pay run first.
 async function setWeekMinimum(technicianId, input, actor, conn = db) {
@@ -482,7 +482,9 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
     }
     // Clearing is always allowed: a setting kept from W-2 days must not come back when the person is W-2 again.
     if (v.hours != null && tech.employment_type !== 'w2') throw new PayrollError(409, 'A minimum paid week is for W-2 employees.');
-    const lastDay = v.hours == null ? null : (v.lastDay === undefined ? tech.last_day : v.lastDay);
+    // Clearing the minimum keeps the last day on file: the paid weeks it shaped stay as they were, and a rehire (a
+    // later hire date) does not read it again.
+    const lastDay = v.lastDay === undefined ? tech.last_day : v.lastDay;
     // A last day before the hire date ended an earlier stay (a rehire moved the hire date past it): the pay run no
     // longer reads it, so it is not guarded and can be cleared or replaced.
     const shownLast = tech.last_day && tech.hire_date && tech.last_day < tech.hire_date ? null : tech.last_day;

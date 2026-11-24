@@ -260,7 +260,8 @@ async function listPayrollTechnicians(conn = db, formerWithBank) {
   const withFamily = typeof payrollFamilyEmployeeLive === 'function' && payrollFamilyEmployeeLive();
   // GATE_PAYROLL_MERCURY_STATUS: the Mercury recipient id rides on each row (null = not entered).
   const withMercury = typeof payrollMercuryStatusLive === 'function' && payrollMercuryStatusLive();
-  const rows = await listedEmployees(conn('technicians'), formerWithBank, withTimeOff)
+  // The settings roster only: the Time off panel (formerWithBank) never offers a person kept for their minimum.
+  const rows = await listedEmployees(conn('technicians'), formerWithBank, withTimeOff && !formerWithBank)
     .orderBy('name')
     .select('id', 'name', 'pay_rate', 'pay_method', 'employment_status', 'employment_type',
       ...(withTimeOff ? ['pto_hours_per_year', 'paid_week_minimum_hours', conn.raw("to_char(paid_week_minimum_last_day, 'YYYY-MM-DD') AS paid_week_minimum_last_day")] : []),

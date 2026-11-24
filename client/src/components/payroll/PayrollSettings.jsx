@@ -287,7 +287,7 @@ function WeekMinimumCell({ technician, onSaved }) {
       aria-label={`Minimum paid hours a week for ${technician.name}`} className="w-24" inputMode="decimal"
       autoComplete="off" placeholder="None" value={value} onChange={event => setValue(event.target.value)}
     />
-    {current !== '' && <label className="flex items-center gap-1 text-ui-caption text-ink-secondary">
+    {(value.trim() !== '' || currentLast !== '') && <label className="flex items-center gap-1 text-ui-caption text-ink-secondary">
       Last day
       <Input
         type="date" aria-label={`Last day for ${technician.name}`} className="w-40"

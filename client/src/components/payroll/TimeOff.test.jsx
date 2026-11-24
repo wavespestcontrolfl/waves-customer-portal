@@ -382,6 +382,17 @@ describe('Time off in the pay run table and stub', () => {
     expect(within(stub).getByText('$88.00')).toBeInTheDocument();
   });
 
+  it('shows the last day box as soon as minimum hours are typed, and sends both in one save', async () => {
+    render(<PayrollSettings />);
+    expect(screen.queryByLabelText('Last day for Sample Beta')).toBeNull();
+    const hours = await screen.findByLabelText('Minimum paid hours a week for Sample Beta');
+    fireEvent.change(hours, { target: { value: '40' } });
+    const day = screen.getByLabelText('Last day for Sample Beta');
+    fireEvent.change(day, { target: { value: '2026-10-14' } });
+    fireEvent.click(within(day.closest('form')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-b/week-minimum')).toMatchObject({ method: 'PUT', body: { hours: '40', lastDay: '2026-10-14' } }));
+  });
+
   it('sends the last day typed next to a minimum', async () => {
     const original = adminFetch.getMockImplementation();
     adminFetch.mockImplementation((path, options = {}) => {
