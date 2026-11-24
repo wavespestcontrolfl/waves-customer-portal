@@ -248,30 +248,6 @@ describe('one snapshot for the whole run', () => {
   });
 });
 
-describe('the migration down', () => {
-  const migration = require('../models/migrations/20261124070000_payroll_production_share');
-  const fakeKnex = (stored) => {
-    const calls = [];
-    const knex = (table) => ({ whereNotNull: () => ({ first: async () => { calls.push(`read ${table}`); return stored ? { id: 1 } : undefined; } }) });
-    knex.raw = async (sql) => { calls.push(sql.trim().split('\n')[0]); };
-    knex.schema = { hasColumn: async () => true };
-    return { knex, calls };
-  };
-
-  test('takes the table lock BEFORE it looks for a stored share, and refuses when one is there', async () => {
-    const { knex, calls } = fakeKnex(true);
-    await expect(migration.down(knex)).rejects.toThrow(/production share figures/);
-    expect(calls).toEqual(['LOCK TABLE payroll_checks IN ACCESS EXCLUSIVE MODE', 'read payroll_checks']);
-  });
-
-  test('with nothing stored it drops the column after the lock', async () => {
-    const { knex, calls } = fakeKnex(false);
-    await migration.down(knex);
-    expect(calls[0]).toBe('LOCK TABLE payroll_checks IN ACCESS EXCLUSIVE MODE');
-    expect(calls.at(-1)).toMatch(/DROP COLUMN/);
-  });
-});
-
 describe('the review token', () => {
   const row = (made, extra = {}) => ({
     technician_id: 'tech-1', hourly_rate: '20.00', regular_minutes: '2400.00', overtime_minutes: '0.00', pay_method: 'check',

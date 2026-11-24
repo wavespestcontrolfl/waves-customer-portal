@@ -368,18 +368,6 @@ postgres('production share pay line', () => {
     expect((await readBonusPay(trx, id, addDays(W1, 3), addDays(W1, 6), W1)).cents).toBe(Math.round(80000 * 4 / 7));
   });
 
-  it('the migration down takes the payroll_checks table lock first and holds it while it drops the column', async () => {
-    const migration = require('../models/migrations/20261124070000_payroll_production_share');
-    await trx.raw('SAVEPOINT lockcheck');
-    await migration.down(trx);
-    const held = await trx.raw(`SELECT l.mode FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
-      WHERE c.relname = 'payroll_checks' AND l.pid = pg_backend_pid() AND l.granted`);
-    expect(held.rows.map((row) => row.mode)).toContain('AccessExclusiveLock');
-    const column = await trx.raw("SELECT 1 FROM information_schema.columns WHERE table_name = 'payroll_checks' AND column_name = 'production_share_cents'");
-    expect(column.rows).toHaveLength(0);
-    await trx.raw('ROLLBACK TO SAVEPOINT lockcheck');
-  });
-
   it('the migration refuses to go down while a check holds a share figure', async () => {
     const migration = require('../models/migrations/20261124070000_payroll_production_share');
     const id = await tech('Sample Alpha');

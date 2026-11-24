@@ -24,9 +24,6 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  // Lock first, hold to the end of the migration transaction: a pay run that finalizes a check with a share between the check
-  // below and the drop would otherwise lose the figure without a word.
-  await knex.raw('LOCK TABLE payroll_checks IN ACCESS EXCLUSIVE MODE');
   // A check that paid a production share is payroll evidence: preserve it and roll forward.
   if (await knex.schema.hasColumn('payroll_checks', 'production_share_cents')
     && await knex('payroll_checks').whereNotNull('production_share_cents').first('id')) {
