@@ -335,6 +335,8 @@ describe('a booked visit survives its old hold timestamp', () => {
     expect(guard).toContain('String(existingAppointmentRow.source_estimate_id) === String(estimate.id)');
     // An explicit false (the fresh page showing a booked visit) is never refused here.
     expect(guard).toContain('shownAsHold === true');
+    // The legacy renderer offers only booked visits and says so.
+    expect(src).toContain('payload.existingAppointmentWasHold = false;');
   });
 
   test('the linked-appointment lookup keeps the customer\'s own booked row on every read, not only an accept', () => {

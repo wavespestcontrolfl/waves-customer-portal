@@ -9027,6 +9027,8 @@ ${ssrMonthlyAverage ? `  // Monthly average: the average is computed for the ser
       }
       if (EXISTING_APPOINTMENT_ID) {
         payload.existingAppointmentId = EXISTING_APPOINTMENT_ID;
+        // This renderer never offers a live hold, only a booked visit.
+        payload.existingAppointmentWasHold = false;
         delete payload.slotId;
       }
       if (bookingState.serviceMode === 'recurring' && DEFAULT_RECURRING_FREQUENCY) {
