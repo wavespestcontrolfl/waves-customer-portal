@@ -325,7 +325,8 @@ function sentAnchorMs(row) {
   // Every other source keeps main's lenient read of the stamp (codex
   // pre-push P1): the strict rule exists for the self-serve report anchor
   // only, and must not move a staff quote to another cohort.
-  const candidates = [ms(data?.deliveryState?.firstDeliveredAt), ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
+  // websiteLinkText.at: a website quote's link text (the anchor a resend's rewritten sent_at cannot move).
+  const candidates = [ms(data?.deliveryState?.firstDeliveredAt), ms(data?.websiteLinkText?.at), ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
     .filter((ts) => ts != null);
   return candidates.length ? Math.min(...candidates) : null;
 }

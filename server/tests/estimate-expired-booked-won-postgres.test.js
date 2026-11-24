@@ -614,7 +614,7 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect((await row(livePerformedId)).archived_at).not.toBeNull();
   });
 
-  test('(z) a website quote whose link was texted (deliveryState.websiteLinkTextedAt) has its delivery anchor; one never texted has none', async () => {
+  test('(z) a website quote whose link text was ACCEPTED and carried the link has its delivery anchor (estimate_data.websiteLinkText.at); suppressed, link-less or never-texted ones have none', async () => {
     const { recordWebsiteLinkTexted } = require('../services/website-quote-publication');
     const published = new Date('2026-10-01T12:00:00Z');
     const mk = async () => {
@@ -625,56 +625,62 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
       await paidInvoice(mockTransaction, cust, { paidAt: new Date('2026-10-20T12:00:00Z') });
       return id;
     };
+    const url = 'https://portal.example.test/estimate/tok?website=1';
+    // What sendCustomerMessage returns after the pipeline: sentBody has the scheme stripped.
+    const accepted = { sent: true, deliveryOutcome: 'accepted', sentBody: `Your quote: ${url.replace(/^https?:\/\//, '')}` };
     const texted = await mk();
+    const suppressed = await mk();
+    const noLink = await mk();
+    const uncertain = await mk();
     const never = await mk();
     const textedAt = new Date('2026-10-01T12:01:00Z');
-    const url = 'https://portal.example.test/estimate/tok?website=1';
-    const body = `Your quote: ${url}`;
-    expect(await recordWebsiteLinkTexted(texted, { body, url, at: textedAt, conn: mockTransaction })).toBe(true);
-    // A second text keeps the first time.
-    await recordWebsiteLinkTexted(texted, { body, url, at: new Date('2026-10-02T12:00:00Z'), conn: mockTransaction });
-    // A rendered text WITHOUT the link (a template with no {booking_url}) records nothing.
-    expect(await recordWebsiteLinkTexted(never, { body: 'Thanks for your quote request!', url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(texted, { result: accepted, url, at: textedAt, conn: mockTransaction })).toBe(true);
+    // A second text keeps the first time (atomic: the write only fires while the key is absent).
+    expect(await recordWebsiteLinkTexted(texted, { result: accepted, url, at: new Date('2026-10-02T12:00:00Z'), conn: mockTransaction })).toBe(false);
+    // Suppressed / blocked, a text without the link, and an uncertain handoff record nothing.
+    expect(await recordWebsiteLinkTexted(suppressed, { result: { sent: false, blocked: true, deliveryOutcome: 'not_sent', sentBody: accepted.sentBody }, url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(noLink, { result: { ...accepted, sentBody: 'Thanks for your quote request!' }, url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(uncertain, { result: { ...accepted, deliveryOutcome: 'uncertain' }, url, conn: mockTransaction })).toBe(false);
 
     await guard.reclaimExpiredConvertedEstimates();
 
     const stored = await row(texted);
-    expect(stored.estimate_data.deliveryState.websiteLinkTextedAt).toBe(textedAt.toISOString());
+    expect(stored.estimate_data.websiteLinkText).toEqual({ at: textedAt.toISOString() });
     expect(stored.disposition).toBe('converted_other_path');
-    expect((await row(never)).disposition).toBe('expired_viewed');
-    // The lead-reach stamp is untouched: this is not a person's handoff.
-    expect(stored.estimate_data.deliveryState.firstDeliveredAt).toBeUndefined();
+    for (const id of [suppressed, noLink, uncertain, never]) {
+      expect((await row(id)).estimate_data.websiteLinkText).toBeUndefined();
+      expect((await row(id)).disposition).toBe('expired_viewed');
+    }
+    // The lead-reach stamp and deliveryState are untouched: this is not a person's handoff.
+    expect(stored.estimate_data.deliveryState?.firstDeliveredAt).toBeUndefined();
   });
 
-  test('(aa) the text receipt survives a staff resend rebuilding deliveryState, suppressed or delivered, and never moves later', async () => {
+  test('(aa) texted in Oct, resent in Nov: a staff send merges top-level and never touches the receipt; the reclaim and the cohort both anchor on Oct', async () => {
     const { recordWebsiteLinkTexted } = require('../services/website-quote-publication');
-    const { carryWebsiteLinkTexted } = require('../services/self-serve-estimates');
-    const published = new Date('2026-10-01T12:00:00Z');
-    const cust = await customer(mockTransaction);
-    const id = await expiredEstimate(mockTransaction, cust, { source: 'quote_wizard', created_at: published, sent_at: published });
+    const { _private } = require('../services/estimate-winloss');
+    const oct = new Date('2026-10-01T12:00:00Z');
+    const nov = new Date('2026-11-05T12:00:00Z');
     const url = 'https://portal.example.test/estimate/tok?website=1';
-    const first = new Date('2026-10-01T12:01:00Z');
-    await recordWebsiteLinkTexted(id, { body: url, url, at: first, conn: mockTransaction });
-    const rebuild = async (extra) => {
-      const prior = (await row(id)).estimate_data.deliveryState;
-      // The shape sendEstimateNow writes: a wholesale deliveryState with the carry spread in.
-      const patch = { deliveryState: { attemptedAt: new Date().toISOString(), sentChannels: [], ...carryWebsiteLinkTexted(prior), ...extra } };
-      await mockTransaction('estimates').where({ id }).update({
-        estimate_data: mockTransaction.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]),
-      });
-      return (await row(id)).estimate_data.deliveryState;
-    };
-    const suppressed = await rebuild({});
-    expect(suppressed.websiteLinkTextedAt).toBe(first.toISOString());
-    const delivered = await rebuild({ firstDeliveredAt: '2026-10-05T12:00:00.000Z' });
-    expect(delivered.websiteLinkTextedAt).toBe(first.toISOString());
-    expect(delivered.firstDeliveredAt).toBe('2026-10-05T12:00:00.000Z');
-    // The carry reads only an existing receipt.
-    expect(carryWebsiteLinkTexted({})).toEqual({});
-    expect(carryWebsiteLinkTexted(null)).toEqual({});
-    // The two rebuild sites spread it (source check; the send path itself needs the whole send stack).
-    const admin = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
-    expect(admin.split('carryWebsiteLinkTexted(').length - 1).toBe(2);
+    const cust = await customer(mockTransaction);
+    const id = await expiredEstimate(mockTransaction, cust, {
+      source: 'quote_wizard', created_at: oct, sent_at: oct, expires_at: new Date('2026-10-08T12:00:00Z'),
+    });
+    await recordWebsiteLinkTexted(id, { result: { sent: true, deliveryOutcome: 'accepted', sentBody: `Your quote: ${url.slice(8)}` }, url, at: new Date('2026-10-01T12:01:00Z'), conn: mockTransaction });
+    // What sendEstimateNow writes on a Nov resend: sent_at rewritten, deliveryState replaced wholesale, merged top-level.
+    const patch = { deliveryState: { attemptedAt: nov.toISOString(), sentChannels: [], channels: {}, firstDeliveredAt: nov.toISOString() } };
+    await mockTransaction('estimates').where({ id }).update({
+      sent_at: nov,
+      estimate_data: mockTransaction.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]),
+    });
+    await paidInvoice(mockTransaction, cust, { paidAt: new Date('2026-10-20T12:00:00Z') });
+
+    const after = await row(id);
+    expect(after.estimate_data.websiteLinkText.at).toBe('2026-10-01T12:01:00.000Z');
+    // Cohort anchor (JS) is the Oct text, not the Nov resend.
+    expect(_private.sentAnchorMs(after)).toBe(Date.parse('2026-10-01T12:01:00.000Z'));
+    // Reclaim anchor (SQL) agrees: a payment 19 days after the Oct text is inside its window.
+    await guard.reclaimExpiredConvertedEstimates();
+    expect((await row(id)).disposition).toBe('converted_other_path');
   });
 
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {

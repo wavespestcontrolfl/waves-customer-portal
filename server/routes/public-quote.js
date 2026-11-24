@@ -4278,7 +4278,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             logger.info(`[public-quote] Customer SMS sent for lead ${lead.id}`);
             // The website quote's own link went out: record the delivery (never fails the quote).
             if (websiteEstimateUrl && bookingUrl === websiteEstimateUrl && draftEstimateId) {
-              await require('../services/website-quote-publication').recordWebsiteLinkTexted(draftEstimateId, { body: customerBody, url: bookingUrl })
+              await require('../services/website-quote-publication').recordWebsiteLinkTexted(draftEstimateId, { result: smsResult, url: bookingUrl })
                 .catch((e) => logger.warn(`[public-quote] website link delivery not recorded: ${e.message}`));
             }
           }

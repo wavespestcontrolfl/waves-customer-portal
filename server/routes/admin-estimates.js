@@ -98,7 +98,6 @@ const { OUTLINE_PROGRAMS, outlineProgram } = require('../services/service-outlin
 // ESTIMATE_LIST_LIMIT (the hard ceiling for limit=all list fetches) and SENT_ONLY_DELIVERY_ATTEMPT_STATUSES live with
 // the list's row selection in services/estimate-call-list.js, which the 9 AM Call today push shares.
 const { ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, clickStatsByEstimateId } = require('../services/estimate-call-list');
-const { carryWebsiteLinkTexted } = require('../services/self-serve-estimates');
 const SENDABLE_ESTIMATE_STATUSES = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']);
 
 function estimateMatchesSentOnlyScope(estimate = {}) {
@@ -141,8 +140,6 @@ function publishedSiblingDeliveryPatch(sibling, anchorDeliveryState, deliveredAt
   return {
     deliveryState: {
       ...anchorDeliveryState,
-      // The sibling's OWN website-link receipt, never the anchor's.
-      ...carryWebsiteLinkTexted(prior?.deliveryState),
       firstDeliveredAt: prior?.deliveryState?.firstDeliveredAt || deliveredAt,
       lastDeliveredAt: deliveredAt,
       deliveredAt: [...priorDeliveredAt, deliveredAt].slice(-DELIVERY_HISTORY_MAX),
@@ -3627,8 +3624,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       sentChannels,
       failedChannels,
       channels,
-      // The website-quote text receipt survives the rebuild (suppressed or delivered send alike).
-      ...carryWebsiteLinkTexted(priorDeliveryState),
       ...(firstDeliveredAt ? { firstDeliveredAt } : {}),
       ...(lastDeliveredAt ? { lastDeliveredAt } : {}),
       ...(deliveredAt.length ? { deliveredAt } : {}),
