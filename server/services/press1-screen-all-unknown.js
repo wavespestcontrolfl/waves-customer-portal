@@ -14,12 +14,13 @@
  *  - a remembered caller: the number talked with the office (an inbound call a
  *    person answered, 30 s or more, Sandy not involved; or an outbound call
  *    whose customer leg connected for 30 s or more) or left a message longer
- *    than 10 s on an earlier call nobody answered (no person, no Sandy). A bare key
+ *    than 10 s on an earlier call nobody answered (no person, no Sandy), with a
+ *    finished transcript that holds words (dead air is no message). A bare key
  *    press is never remembered: in the 60 days to 2026-11-20, 5 robocall
  *    numbers had pressed a key before.
  *
- * The reads share one wall-clock deadline (READ_TIMEOUT_MS, pool wait
- * included) and each also has a cancelling statement timeout. All fail OPEN
+ * One statement answers it, with a cancelling statement timeout and a
+ * wall-clock limit (READ_TIMEOUT_MS, pool wait included). It fails OPEN
  * (no challenge): a slow or broken query
  * never makes a real caller press a key, and an unsure staff check never
  * challenges a technician.
@@ -54,39 +55,25 @@ function withinLimit(promise, onTimeout) {
 }
 
 // Any ACTIVE technician's own phone (not gated on GATE_TECH_STAFF_GUARDS: the
-// trial must never ask a technician to press 1). A failed read throws, so the
-// caller fails open.
-// Time left before `deadline` (ms since epoch); throws once it is spent, so a
-// read never starts after the webhook has moved on.
-function budget(deadline) {
-  const left = deadline - Date.now();
-  if (left <= 0) throw Object.assign(new Error('deadline passed'), { code: 'DEADLINE' });
-  return left;
-}
-
-async function activeTechnicianPhone(key, deadline) {
-  const ms = budget(deadline);
-  const row = await db('technicians')
+// trial must never ask a technician to press 1).
+function technicianRows(key) {
+  return db('technicians').select(db.raw('1'))
     .where({ employment_status: 'active' })
-    .whereRaw(`${phoneKeySql('phone')} = ?`, [key])
-    .timeout(ms, { cancel: true })
-    .first('id');
-  return Boolean(row);
+    .whereRaw(`${phoneKeySql('phone')} = ?`, [key]);
 }
 
-async function onLiveLead(key, deadline) {
-  const ms = budget(deadline);
-  const row = await db('leads')
+function liveLeadRows(key) {
+  return db('leads').select(db.raw('1'))
     .whereNull('deleted_at')
-    .whereRaw(`${phoneKeySql('phone')} = ?`, [key])
-    .timeout(ms, { cancel: true })
-    .first('id');
-  return Boolean(row);
+    .whereRaw(`${phoneKeySql('phone')} = ?`, [key]);
 }
 
-async function rememberedCaller(key, deadline) {
-  const ms = budget(deadline);
-  const row = await db('call_log')
+// The processor's no-speech markers (missed-call-bell.js NO_SPEECH_MARKER_RE):
+// a message counts only once its transcript holds real words.
+const NO_SPEECH_SQL = String.raw`\[(VOICEMAIL|NO SPEECH)\]|\[Recording had no usable speech;[^\]]*\]`;
+
+function rememberedRows(key) {
+  return db('call_log').select(db.raw('1'))
     .where((who) => who
       .where((inbound) => inbound
         .where('direction', 'inbound')
@@ -111,7 +98,11 @@ async function rememberedCaller(key, deadline) {
             .orWhere((message) => message
               .where((unanswered) => unanswered.whereIn('answered_by', UNANSWERED).orWhereNull('answered_by'))
               .where('recording_duration_seconds', '>', MESSAGE_SECONDS)
-              .where((rec) => rec.whereNotNull('recording_sid').orWhereNotNull('recording_url'))))))
+              .where((rec) => rec.whereNotNull('recording_sid').orWhereNotNull('recording_url'))
+              // Dead air is no message: the transcript must be done and hold
+              // words once the no-speech markers are removed.
+              .where('transcription_status', 'completed')
+              .whereRaw("regexp_replace(COALESCE(transcription, ''), ?, '', 'gi') ~ '[[:alnum:]]'", [NO_SPEECH_SQL])))))
       // An outbound parent call runs while the customer's phone only rings, so
       // its own length proves nothing: the customer leg must have connected
       // for 30 s, or (older bridges with no customer_leg) the bridge recorded
@@ -127,10 +118,7 @@ async function rememberedCaller(key, deadline) {
             .whereRaw("metadata->'customer_leg' IS NULL")
             .whereNotNull('bridged_at')
             .where('recording_duration_seconds', '>=', TALK_SECONDS)
-            .where((rec) => rec.whereNotNull('recording_sid').orWhereNotNull('recording_url'))))))
-    .timeout(ms, { cancel: true })
-    .first('id');
-  return Boolean(row);
+            .where((rec) => rec.whereNotNull('recording_sid').orWhereNotNull('recording_url'))))));
 }
 
 /**
@@ -138,25 +126,26 @@ async function rememberedCaller(key, deadline) {
  * with no customer match on a first delivery. Never throws.
  * @returns {Promise<boolean>}
  */
-async function checkReads(key, deadline) {
-  if (await activeTechnicianPhone(key, deadline)) return false;
-  if (await onLiveLead(key, deadline)) return false;
-  return !(await rememberedCaller(key, deadline));
-}
-
 async function screenAllUnknownHit(from) {
   const key = callerKey(from);
   if (key.length < 10) return false;
   if (TWILIO_NUMBERS.isInternalNumber(from)) return false;
   try {
-    const reads = checkReads(key, Date.now() + READ_TIMEOUT_MS);
-    reads.catch(() => {}); // a read that fails after the deadline has no one left to tell
-    const verdict = await withinLimit(reads, 'timeout');
-    if (verdict === 'timeout') {
+    // ONE statement (one connection, one cancelling timeout) answers all three
+    // questions, and the wall-clock limit also covers the wait for a connection.
+    const read = db.select(
+      db.raw('EXISTS (?) AS tech', [technicianRows(key)]),
+      db.raw('EXISTS (?) AS lead', [liveLeadRows(key)]),
+      db.raw('EXISTS (?) AS remembered', [rememberedRows(key)]),
+    ).timeout(READ_TIMEOUT_MS, { cancel: true }).first();
+    read.catch(() => {}); // a read that fails after the limit has no one left to tell
+    const row = await withinLimit(read, 'timeout');
+    if (row === 'timeout') {
       logger.warn('[preconnect-screen] all-unknown check ran past its limit (failing open, no challenge)');
       return false;
     }
-    return verdict;
+    if (!row) return false;
+    return !(row.tech || row.lead || row.remembered);
   } catch (err) {
     // A code only: a Knex error echoes the bound values, here the caller's number.
     logger.warn(`[preconnect-screen] all-unknown check failed (failing open, no challenge): ${err?.code || err?.name || 'error'}`);
