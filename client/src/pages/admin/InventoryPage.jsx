@@ -524,7 +524,7 @@ export default function InventoryPage() {
           canAuthor={isAdminRole}
         />
       )}
-      {tab === "limits" && <ReorderLimitsTab showToast={showToast} />}
+      {tab === "limits" && <ReorderLimitsTab showToast={showToast} onUpdate={loadStats} />}
       {tab === "unit-review" && <UnitReviewTab showToast={showToast} />}
       {tab === "restock" && (
         <RestockRequestsTab
@@ -2141,7 +2141,7 @@ function ReorderLimitRow({ row, saving, onUse }) {
   );
 }
 
-function ReorderLimitsTab({ showToast }) {
+function ReorderLimitsTab({ showToast, onUpdate }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState("");
@@ -2186,6 +2186,7 @@ function ReorderLimitsTab({ showToast }) {
         ),
       }));
       showToast(`${row.name}: limits saved`);
+      onUpdate?.(); // the header's low-stock count reads the new threshold
     } catch (err) {
       if (err.status === 409) {
         // The stock unit changed since this report loaded: its numbers are
@@ -2252,7 +2253,7 @@ function ReorderLimitsTab({ showToast }) {
                 <ReorderLimitRow
                   key={row.productId}
                   row={row}
-                  saving={savingId === row.productId}
+                  saving={Boolean(savingId)}
                   onUse={() => acceptSuggestion(row)}
                 />
               ))}

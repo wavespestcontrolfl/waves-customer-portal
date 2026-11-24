@@ -94,4 +94,23 @@ describe('PUT /:id expectedInventoryUnit', () => {
     });
     expect(updates).toEqual([]);
   });
+
+  test('unit cleared since the report loaded: 409 (reload), not the 400 unit-required error', async () => {
+    const updates = [];
+    const resolve = (q) => {
+      const update = q._calls.find(([name]) => name === 'update');
+      if (update) { updates.push(update[1][0]); return {}; }
+      return { id: PRODUCT, name: 'Synthetic jug', inventory_unit: null, inventory_on_hand: null };
+    };
+    const trx = jest.fn((table) => makeChain(table, resolve));
+    trx.raw = jest.fn(async () => ({}));
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    db.mockImplementation((table) => makeChain(table, resolve));
+    await withServer(async (base) => {
+      const res = await send(base, 'PUT', `/${PRODUCT}`, { lowStockThreshold: 0.75, reorderQuantity: 3, expectedInventoryUnit: 'gal' });
+      expect(res.status).toBe(409);
+    });
+    expect(updates).toEqual([]);
+  });
 });
+
