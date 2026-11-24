@@ -15679,7 +15679,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // as the create-appointment path.
       if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined) {
         const eligibilityRow = await trx('scheduled_services').where({ id: req.params.id })
-          .first('technician_id', 'service_type', 'service_id', 'service_key_snapshot', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+          .first('technician_id', 'service_type', 'service_id', 'service_key_snapshot', 'window_start', 'window_end', 'estimated_duration_minutes',
+            trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
         const finalTechnicianId = hasTechnicianIdUpdate
           ? requestedTechnicianId
           : (eligibilityRow?.technician_id || null);
@@ -15696,7 +15697,10 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           await assertAssignableTechnician(finalTechnicianId, { conn: trx, date: finalDate });
           // Work days (GATE_TECH_WORK_DAYS): an office save onto a day the
           // technician does not work still goes through; the modal is told.
-          const offDayLine = await require('../services/technician-eligibility').dayWarningFor(finalTechnicianId, finalDate, { conn: trx });
+          // Shift hours (GATE_TECH_SHIFT_HOURS): on a day the technician works, the
+          // same read says when the shift does not hold the visit as this save
+          // leaves it: the row's hours and length, with this save's own (dayWarningFor).
+          const offDayLine = await require('../services/technician-eligibility').dayWarningFor(finalTechnicianId, finalDate, { conn: trx, block: { ...eligibilityRow, ...updates } });
           if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
           // Job type (GATE_TECH_JOB_TYPE_CHECKS): a technician set to Off for this visit's
           // category. Advisory, never a block ([] with the gate off).

@@ -15,7 +15,10 @@ const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gate
 // Work days (GATE_TECH_WORK_DAYS): every non-admin move is automatic (customer,
 // rain-out, auto-dispatch, AI), so a kept technician who does not work that
 // weekday is refused the same way. An admin move only warns: the line is added
-// to `warnings` (a Set the caller reads) and the move proceeds.
+// to `warnings` (a Set the caller reads) and the move proceeds. The same line
+// reader also says when that technician's shift does not hold `landed`, the row
+// as the office's move leaves it (GATE_TECH_SHIFT_HOURS, D4 part 3c;
+// technician-eligibility.dayWarningFor): told, never refused.
 //
 // Shift hours (GATE_TECH_SHIFT_HOURS, D4): `block` is the visit as the move will
 // leave it: its window and its stored length. The caller passes it only for a
@@ -33,7 +36,7 @@ const slotNoLongerAvailable = () => Object.assign(new Error('That time slot is n
 // Is this a move that obeys the shift hours (GATE_TECH_SHIFT_HOURS)? An automatic
 // one: the office's own move does not, the office decides.
 const automaticShiftLive = (initiatedBy) => initiatedBy !== 'admin' && techShiftHoursLive();
-async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null, shiftOnly = false } = {}) {
+async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null, shiftOnly = false, landed = null } = {}) {
   const staffMove = initiatedBy === 'admin';
   try {
     const hours = block ? require('./scheduling/window-rules').shiftBlockMinutes(block) : undefined;
@@ -48,7 +51,7 @@ async function assertAssignableSlotTechnician(technicianId, trx, date, { initiat
     }
     await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: !staffMove, hours });
     if (staffMove && warnings) {
-      const line = await require('./technician-eligibility').dayWarningFor(technicianId, String(date).slice(0, 10), { conn: trx });
+      const line = await require('./technician-eligibility').dayWarningFor(technicianId, String(date).slice(0, 10), { conn: trx, block: landed });
       if (line) warnings.add(line);
     }
   } catch (err) {
@@ -2478,7 +2481,7 @@ class SmartRebooker {
       // edit stays untouched: no new query.
       // GATE_TECH_SHIFT_HOURS (shiftLive): an automatic (non-admin) move obeys
       // the kept technician's shift hours. The office's own move does not: the
-      // office decides (D4 part 3c warns it). A visit group moves its members
+      // office decides, and is told (D4 part 3c: `landed`). A visit group moves its members
       // through this function one by one (skipVisitSeam), and may name a
       // technician this call does not see, so a member is not judged alone
       // here: the group is judged as one unit (D4 part 3b-2b).
@@ -2493,8 +2496,11 @@ class SmartRebooker {
       if (eligibilityChecked) {
         // An hours-only move is judged on the shift alone (shiftOnly): the day's
         // other rules were not asked of it before, and are not asked now.
+        // `landed`: the row as this move leaves it. An automatic move is judged on it
+        // (`block`); the office's own move is told when the shift does not hold it.
+        const landed = { window_start: updates.window_start, window_end: updates.window_end, estimated_duration_minutes: service.estimated_duration_minutes };
         await assertAssignableSlotTechnician(keptTechId, trx, newDateStr, { initiatedBy, warnings: offDayWarnings, shiftOnly: !dayOrTechMove,
-          block: shiftLive ? { window_start: updates.window_start, window_end: updates.window_end, estimated_duration_minutes: service.estimated_duration_minutes } : null });
+          block: shiftLive ? landed : null, landed });
       }
       // The shift check judged the technician and the length of the unlocked
       // pre-read. The write below pins both (shiftJudged), so a reassignment or
@@ -4017,7 +4023,7 @@ class SmartRebooker {
           });
         }
         if (partnerDateChanges) await assertPartnerPlanDayFree(trx, partner, dateStr, [...sweptIds, ...carry.partnerIds]);
-        if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr, { initiatedBy, warnings: offDayWarnings });
+        if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr, { initiatedBy, warnings: offDayWarnings, landed: { ...partner, ...pUpdate } });
         await assertSeriesRowInsideShift(trx, { live: shiftLive, tapped, row: partner, update: pUpdate, dateStr, dayChanges: partnerDateChanges, initiatedBy });
         if (keptTech) {
           await trx.raw(
@@ -4284,7 +4290,7 @@ class SmartRebooker {
         const anchorTechChanges = isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId');
         if (isAnchor && (anchorTechChanges || sibDateChanges)) {
           const anchorKeptTechId = anchorTechChanges ? (options.technicianId || null) : (sib.technician_id || null);
-          await assertAssignableSlotTechnician(anchorKeptTechId, trx, String(date).split('T')[0], { initiatedBy, warnings: offDayWarnings });
+          await assertAssignableSlotTechnician(anchorKeptTechId, trx, String(date).split('T')[0], { initiatedBy, warnings: offDayWarnings, landed: { ...sib, ...updateData } });
         }
         // Same save-time eligibility check for every NON-anchor sibling
         // that lands on a new date (tech-out P1): a follower keeps its own
@@ -4296,7 +4302,7 @@ class SmartRebooker {
         // move).
         if (!isAnchor && sibDateChanges) {
           const sibKeptTechId = sib.technician_id || null;
-          await assertAssignableSlotTechnician(sibKeptTechId, trx, String(date).split('T')[0], { initiatedBy, warnings: offDayWarnings });
+          await assertAssignableSlotTechnician(sibKeptTechId, trx, String(date).split('T')[0], { initiatedBy, warnings: offDayWarnings, landed: { ...sib, ...updateData } });
         }
         if (anchorTechChanges) {
           updateData.technician_id = options.technicianId || null;

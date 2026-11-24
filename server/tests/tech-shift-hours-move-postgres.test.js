@@ -152,10 +152,43 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
     expect(await move(id, nextDay, { start: '09:00', end: '10:00' })).toMatchObject({ success: true });
   });
 
-  test('the office\'s own move outside the shift lands: it is not checked here', async () => {
+  // D4 part 3c: the office decides, and is told (dayWarningFor, next to the day-off line).
+  const OFFICE_LINE = "Fixture technician's shift is 8:00 AM to 12:00 PM. This visit is outside those hours.";
+  const shiftLines = (result) => (result.warnings || []).filter((w) => /shift is/.test(w));
+
+  test('the office\'s own move outside the shift lands, and the office is told the shift', async () => {
     const id = await seed();
-    expect(await move(id, nextDay, { start: '13:00', end: '14:00' }, 'admin', { overlapAdvisory: true })).toMatchObject({ success: true });
+    const result = await move(id, nextDay, { start: '13:00', end: '14:00' }, 'admin', { overlapAdvisory: true });
+    expect(result).toMatchObject({ success: true });
+    expect(shiftLines(result)).toEqual([OFFICE_LINE]);
     expect(await rowOf(id)).toMatchObject({ day: nextDay, window_start: '13:00:00', window_end: '14:00:00' });
+  });
+
+  test('the office\'s own move inside the shift has no line; the stored length is part of the visit', async () => {
+    const inside = await seed();
+    expect(shiftLines(await move(inside, nextDay, { start: '10:00', end: '11:00' }, 'admin', { overlapAdvisory: true }))).toEqual([]);
+    // 11:00 to 12:00 with a stored 90 minutes ends at 12:30, after the shift.
+    const long = await seed({ estimated_duration_minutes: 90 });
+    expect(shiftLines(await move(long, dayAfter(nextDay), { start: '11:00', end: '12:00' }, 'admin', { overlapAdvisory: true }))).toEqual([OFFICE_LINE]);
+    expect(await rowOf(long)).toMatchObject({ day: dayAfter(nextDay), window_start: '11:00:00' });
+  });
+
+  test('the office\'s own move to a technician\'s day off outside the shift is told the day off alone; gate off, no shift line', async () => {
+    const dow = new Date(`${nextDay}T12:00:00Z`).getUTCDay();
+    await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== dow) });
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    try {
+      const id = await seed();
+      const result = await move(id, nextDay, { start: '13:00', end: '14:00' }, 'admin', { overlapAdvisory: true });
+      expect(shiftLines(result)).toEqual([]);
+      expect(result.warnings.filter((w) => /does not work on/.test(w))).toHaveLength(1);
+    } finally {
+      delete process.env.GATE_TECH_WORK_DAYS;
+      await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: null });
+    }
+    delete process.env.GATE_TECH_SHIFT_HOURS;
+    const off = await seed();
+    expect(shiftLines(await move(off, dayAfter(nextDay), { start: '13:00', end: '14:00' }, 'admin', { overlapAdvisory: true }))).toEqual([]);
   });
 
   // A visit group moves each member through reschedule (skipVisitSeam) and may name a technician
@@ -1027,10 +1060,31 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       });
     });
 
-    test('the office\'s own series move is not checked', async () => {
+    test('the office\'s own series move is not checked, and the office is told the shift once', async () => {
       const ids = await seedSeries({ 1: { window_start: '12:00', window_end: '13:00' } });
-      expect(await moveSeries(ids, { start: '12:00', end: '13:00' }, 'admin', { sourceSurface: 'dispatch_board', overlapAdvisory: true })).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      const result = await moveSeries(ids, { start: '12:00', end: '13:00' }, 'admin', { sourceSurface: 'dispatch_board', overlapAdvisory: true });
+      expect(result).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      expect(shiftLines(result)).toEqual([OFFICE_LINE]);
       expect(await daysOf(ids)).toEqual(moved);
+    });
+
+    test('the office\'s own series move is told for the one visit the shift does not hold: the tapped one, or a later one', async () => {
+      const board = { sourceSurface: 'dispatch_board', overlapAdvisory: true };
+      // The tapped visit goes to 11:00 to 12:00, which ends with the shift. Its stored 90 minutes end at 12:30.
+      const tapped = await seedSeries({ 0: { estimated_duration_minutes: 90 } });
+      expect(shiftLines(await moveSeries(tapped, { start: '11:00', end: '12:00' }, 'admin', board))).toEqual([OFFICE_LINE]);
+      await f.db('scheduled_services').del();
+      // A later visit keeps its own hours on its new day: 12:00 to 13:00 starts when the shift ends. The tapped one fits.
+      const later = await seedSeries({ 1: { window_start: '12:00', window_end: '13:00' } });
+      expect(shiftLines(await moveSeries(later, fits, 'admin', board))).toEqual([OFFICE_LINE]);
+      expect(await daysOf(later)).toEqual(moved);
+    });
+
+    test('the office\'s own series move inside the shift has no line', async () => {
+      const ids = await seedSeries();
+      const result = await moveSeries(ids, fits, 'admin', { sourceSurface: 'dispatch_board', overlapAdvisory: true });
+      expect(result).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      expect(shiftLines(result)).toEqual([]);
     });
 
     test('gate off: the same moves land and the same edit does not stop the move, as before', async () => {

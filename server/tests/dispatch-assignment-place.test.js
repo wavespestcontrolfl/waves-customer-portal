@@ -29,7 +29,7 @@ const path = require('path');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { lockTechDays } = require('../services/scheduling/tech-day-lock');
-const { assertAssignableTechnician } = require('../services/technician-eligibility');
+const { assertAssignableTechnician, dayWarningFor, capabilityOffWarningsFor } = require('../services/technician-eligibility');
 const arrivalRoute = require('../services/scheduling/arrival-route');
 const { assignDispatchJob } = require('../services/dispatch-assignment');
 
@@ -179,6 +179,57 @@ describe('assignDispatchJob shiftHours option', () => {
     await assign(extra);
     expect(lockedCheck().hours).toBeUndefined();
     expect(pins(chain)).toEqual([]);
+  });
+});
+
+// D4 part 3c: the office is told when the new technician does not work that day, or that
+// technician's shift does not hold the visit. One reader (dayWarningFor) answers both; the lines
+// themselves have their cases in the technician-eligibility suites and on real rows in
+// tech-work-days-postgres.test.js. These pin what the assign asks it.
+describe('assignDispatchJob day line: what the assign asks', () => {
+  const TIMED = { ...JOB, window_start: '10:00:00', window_end: '12:00:00', estimated_duration_minutes: 90 };
+  const LINE = "Tech Two's shift is 8:00 AM to 11:00 AM. This visit is outside those hours.";
+  const withJob = (job) => {
+    const jobChain = { where: jest.fn(() => jobChain), first: jest.fn(async () => job) };
+    db.mockImplementation(() => jobChain);
+  };
+
+  test('a new technician: asked for that technician on the visit\'s day with the row\'s own hours and length; the line leads the warnings', async () => {
+    withJob(TIMED);
+    dayWarningFor.mockResolvedValueOnce(LINE);
+    capabilityOffWarningsFor.mockResolvedValueOnce(['Tech Two is set to Off for Lawn work.']);
+    const out = await assign();
+    expect(dayWarningFor).toHaveBeenCalledTimes(1);
+    expect(dayWarningFor).toHaveBeenCalledWith('t-new', DAY, {
+      conn: db, block: { window_start: '10:00:00', window_end: '12:00:00', estimated_duration_minutes: 90 },
+    });
+    expect(out.warnings).toEqual([LINE, 'Tech Two is set to Off for Lawn work.']);
+  });
+
+  test('no line: no warnings key', async () => {
+    withJob(TIMED);
+    expect(await assign()).not.toHaveProperty('warnings');
+  });
+
+  test('the day and the hours the caller\'s same transaction is about to write replace the row\'s; one it leaves out keeps the row\'s', async () => {
+    withJob(TIMED);
+    const moved = etDateString(addETDays(new Date(), 31));
+    await assign({ noticeSnapshot: { date: moved, windowStart: '14:00', windowEnd: undefined } });
+    expect(dayWarningFor).toHaveBeenCalledWith('t-new', moved, {
+      conn: db, block: { window_start: '14:00', window_end: '12:00:00', estimated_duration_minutes: 90 },
+    });
+    dayWarningFor.mockClear();
+    await assign({ noticeSnapshot: { windowStart: null, windowEnd: null } });
+    expect(dayWarningFor).toHaveBeenCalledWith('t-new', DAY, {
+      conn: db, block: { window_start: null, window_end: null, estimated_duration_minutes: 90 },
+    });
+  });
+
+  test('the technician stays, or the visit is unassigned: not asked', async () => {
+    withJob(TIMED);
+    await assign({ technicianId: 't-old' });
+    await assign({ technicianId: null });
+    expect(dayWarningFor).not.toHaveBeenCalled();
   });
 });
 

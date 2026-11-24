@@ -209,8 +209,15 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // Work days (GATE_TECH_WORK_DAYS): an office assignment or board drag onto a
   // day the technician does not work is allowed; the result carries one plain
   // warning line for the route to return. Gate off: no read, no `warnings` key.
+  // Shift hours (GATE_TECH_SHIFT_HOURS): on a day the technician works, the same
+  // read says when the shift does not hold the visit (dayWarningFor). The visit's
+  // block is the row's own hours, or the hours the caller's same transaction is
+  // about to write (`noticeSnapshot`, read once here for this and for the card below).
+  const overrides = Object.fromEntries(Object.entries(noticeSnapshot || {}).filter(([, v]) => v !== undefined));
+  const landedHours = { windowStart: job.window_start, windowEnd: job.window_end, ...overrides };
+  const landedBlock = { window_start: landedHours.windowStart, window_end: landedHours.windowEnd, estimated_duration_minutes: job.estimated_duration_minutes };
   const offDayLine = newTechId && (job.technician_id || null) !== newTechId
-    ? await require('./technician-eligibility').dayWarningFor(newTechId, eligibilityDate, { conn })
+    ? await require('./technician-eligibility').dayWarningFor(newTechId, eligibilityDate, { conn, block: landedBlock })
     : null;
   // Job type (GATE_TECH_JOB_TYPE_CHECKS): the same office paths also say so when the
   // technician is set to Off for this visit's job type. Warns, never blocks; the helper
@@ -346,7 +353,6 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // `actorId` also stamps dispatch_alerts.resolved_by and the broadcast, so
   // a system label must never ride it (codex r9 P2).
   const rowSnapshot = { date: updatedRow.scheduled_date, windowStart: updatedRow.window_start, windowEnd: updatedRow.window_end };
-  const overrides = Object.fromEntries(Object.entries(noticeSnapshot || {}).filter(([, v]) => v !== undefined));
   void require('./tech-visit-notifications').notifyAssignmentChange({
     visitId: jobId, fromTechId, toTechId: newTechId, actorId: noticeActorId === undefined ? actorId : noticeActorId, trx,
     snapshot: { ...rowSnapshot, ...overrides },

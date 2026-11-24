@@ -353,15 +353,56 @@ describe('reschedule — shared occupancy conflict gate', () => {
         expect(trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
       });
 
-      test('gate on, the office\'s own move outside the shift commits: no shift read, no extra pin', async () => {
+      // D4 part 3c: the office decides, and is told. The line is the answer's warning; nothing more is pinned.
+      test('gate on, the office\'s own move outside the shift commits and is told the shift; no extra pin', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
-        const { trx, trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
-        expect(await SmartRebooker.reschedule(
+        const { trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
+        const result = await SmartRebooker.reschedule(
           'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true },
-        )).toMatchObject({ success: true });
-        expect(reads(trx, 'time_entries')).toBe(false);
+        );
+        expect(result).toMatchObject({ success: true, warnings: ["Tech's shift is 8:00 AM to 10:00 AM. This visit is outside those hours."] });
+        expect(trxScheduled.update).toHaveBeenCalled();
         expect(trxScheduled.where).not.toHaveBeenCalledWith({ technician_id: 'tech-1' });
         expect(trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
+      });
+
+      test('gate on, the office\'s own move: the new hours and the stored length are what the shift is asked about', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // 13:00 to 13:30 with a stored 45 minutes ends at 13:45: a shift to 13:30 does not hold it, one to 13:45 does.
+        const office = (techShift) => {
+          wireRescheduleMocks(service(tech), { techShift });
+          return SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '13:30' }, 'admin', 'admin', { overlapAdvisory: true });
+        };
+        expect((await office(['08:00', '13:30'])).warnings).toEqual(["Tech's shift is 8:00 AM to 1:30 PM. This visit is outside those hours."]);
+        expect((await office(['08:00', '13:45'])).warnings).toBeUndefined();
+        expect((await office(['13:01', '18:00'])).warnings).toEqual(["Tech's shift is 1:01 PM to 6:00 PM. This visit is outside those hours."]);
+        expect((await office(null)).warnings).toBeUndefined();
+      });
+
+      test('gate off, the office\'s own move outside the set hours: no line, and the hours are not read', async () => {
+        const { trx } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
+        const result = await SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true },
+        );
+        expect(result.success).toBe(true);
+        expect(result.warnings).toBeUndefined();
+        expect(reads(trx, 'time_entries')).toBe(false);
+      });
+
+      test('both gates on, the office\'s own move onto a day off outside the shift: the day-off line alone', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        try {
+          const targetDow = new Date(`${TARGET}T12:00:00Z`).getUTCDay();
+          wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'], techWorkDays: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== targetDow) });
+          const result = await SmartRebooker.reschedule(
+            'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true },
+          );
+          expect(result.warnings).toHaveLength(1);
+          expect(result.warnings[0]).toMatch(/^Tech does not work on \w+days\.$/);
+        } finally {
+          delete process.env.GATE_TECH_WORK_DAYS;
+        }
       });
 
       // A visit group moves each member through reschedule (skipVisitSeam) and judges the group as one unit.
