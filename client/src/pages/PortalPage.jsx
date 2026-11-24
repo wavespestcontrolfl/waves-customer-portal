@@ -6809,6 +6809,21 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
         setAutopayRefreshKey((k) => k + 1);
       })
       .catch((err) => {
+        // An intent from before a text change is refused as stale (same as the inline save). Drop the returned intent
+        // from the URL, so a refresh does not resubmit it; a save-only one also brings the save-only link back, so the
+        // refresh reopens the save-only form, never the Auto Pay one.
+        if (err?.code === 'CONSENT_VERSION_STALE') {
+          try {
+            clearReturnedSetupIntent();
+            if (err.saveOnly === true) {
+              // The visible Add payment button retries in the same mode until the refresh.
+              setSaveOnlyAdd(true);
+              const url = new URL(window.location.href);
+              url.searchParams.set('add_card', '1');
+              window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+            }
+          } catch { /* a browser without history.replaceState: the customer reopens the link from the email */ }
+        }
         setStripeError(err.message || 'Failed to finish bank account setup');
       })
       .finally(() => setStripeLoading(false));
@@ -6949,6 +6964,16 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
       // charging (Codex #2507 round-6), same as the remove-card path below.
       setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
+      // A save-only form opened before a deploy changed its text is refused as stale. The link was consumed when the
+      // form opened, so a refresh would land on the ordinary Add payment button (the Auto Pay form): put the link
+      // back so the refresh opens the save-only form again.
+      if (saveOnlyAdd && err?.code === 'CONSENT_VERSION_STALE') {
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.set('add_card', '1');
+          window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+        } catch { /* a browser without history.replaceState: the customer reopens the link from the email */ }
+      }
       setStripeError(err.message || 'Failed to save card');
     }
     setStripeLoading(false);
@@ -8044,11 +8069,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
               }}><Icon name="close" size={20} strokeWidth={2} /></button>
             </div>
             <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 16 }} />
-            {saveOnlyAdd && (
-              <div style={{ fontSize: 14, color: muted, marginBottom: 12 }}>
-                Saving this card does not turn Auto Pay on.
-              </div>
-            )}
             {stripeError && (
               <div style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginBottom: 12 }}>
                 {stripeError}
@@ -8064,7 +8084,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
                 reflects the copy the customer saw; the copy follows the
                 Payment Element tab (card vs ACH authorization). */}
             <div style={{ marginBottom: 12 }}>
-              <SaveCardConsent locked onChange={() => {}} methodType={addMethodType} />
+              <SaveCardConsent locked onChange={() => {}} methodType={addMethodType} variant={saveOnlyAdd ? 'save_only' : null} />
             </div>
             <button onClick={handleConfirmCard} disabled={stripeLoading || !stripeReady} data-glass-accent="" data-glass-size="primary" style={{
               ...primaryButton,

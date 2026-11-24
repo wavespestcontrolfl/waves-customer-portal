@@ -163,13 +163,14 @@ function makeApplyDeps(db, { now, blocks = [], over = {} } = {}) {
     findConflicts: fakeFindConflicts(db),
     loadBlocks: jest.fn(async () => blocks),
     // The night told-lock's reads inside the move transaction: nobody was told anything, no set time, no person placed any visit.
-    loadPromiseLevels: jest.fn(async () => new Map()),
+    loadPromiseFacts: jest.fn(async () => new Map()),
     loadSetTime: jest.fn(async () => new Map()),
     isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
   };
   const liveRows = (dateStr) => db.rows.filter((r) => String(r.scheduled_date).slice(0, 10) === dateStr && !excludedStatuses.includes(r.status) && !r.reservation_expires_at);
   const deps = {
     fixedReason: _internals.fixedReason,
+    toldFactsOf: _internals.toldFactsOf,
     rowHours: _internals.rowHours,
     versionHash: _internals.versionHash,
     excludedStatuses,

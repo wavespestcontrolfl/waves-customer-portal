@@ -491,7 +491,9 @@ async function remindersByText(prefs, row, env, conn, budget = NO_LIMIT) {
 async function moveBlockedReason(move, { conn, env, day, techId, budget = NO_LIMIT }) {
   const row = (day?.allRows || []).find((r) => String(r.id) === String(move.row.id));
   if (!row || !sameTech(row, techId) || bookedRange(row)?.startMin !== move.fromMin) return 'changed';
-  const why = env.fixedReason(row, day);
+  // Checked at the new hour too, as the re-plan's writer does: a stop told an hour may start only up to 2 hours later
+  // than the told slot (day-replan TOLD_SHIFT_MIN, owner 2026-11-24), so the offer, the hold and the write agree.
+  const why = env.fixedReason(row, day) || env.fixedReason(shiftRow(row, move), day);
   if (why) return `fixed_${why}`;
   let prefs;
   let pref;

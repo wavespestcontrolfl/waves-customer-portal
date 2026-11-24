@@ -48,7 +48,9 @@ function flexPolicyText(config) {
     parts.push("A visit is frozen close to its date, or once its reminder is sent.");
   }
   parts.push("A move to another day lands at least 5 days out, within 5 days of the visit's date.");
-  if (Number(config.flexWideRadiusDays) === 7) {
+  if (Number(config.flexWideRadiusDays) === 7 && Number(config.flexBimonthlyRadiusDays) === 6) {
+    parts.push("A bimonthly visit may move up to 6 days, and a visit that repeats every 12 weeks or less often (quarterly, longer) up to 7 days, when the nearest other visit of its series is 56 days away or more.");
+  } else if (Number(config.flexWideRadiusDays) === 7) {
     parts.push("A visit that repeats every 8 weeks or less often (bimonthly, quarterly, longer) may move up to 7 days, when the nearest other visit of its series is 56 days away or more.");
   }
   return parts.join(" ");

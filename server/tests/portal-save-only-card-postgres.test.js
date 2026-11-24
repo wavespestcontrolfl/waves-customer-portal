@@ -16,11 +16,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 maybeDescribe('finishSaveOnlyAdd (real schema)', () => {
   let db;
   let finishSaveOnlyAdd;
+  let SAVE_ONLY_CONSENT_VERSION;
+  let SAVE_ONLY_CONSENT_TEXT;
   const customerIds = [];
 
   beforeAll(() => {
     db = require('../models/db');
     ({ finishSaveOnlyAdd } = require('../services/portal-save-only-card'));
+    ({ SAVE_ONLY_CONSENT_VERSION, SAVE_ONLY_CONSENT_TEXT } = require('../services/payment-method-consent-text'));
   });
 
   afterEach(async () => {
@@ -54,7 +57,7 @@ maybeDescribe('finishSaveOnlyAdd (real schema)', () => {
     return row;
   }
   const finish = (customerId, method, extra = {}) => finishSaveOnlyAdd({
-    customerId, method, consentTextVersion: 'v12_2026-09-30', ip: '203.0.113.9', userAgent: 'test-agent', via: 'portal_add_card', ...extra,
+    customerId, method, consentTextVersion: SAVE_ONLY_CONSENT_VERSION, ip: '203.0.113.9', userAgent: 'test-agent', via: 'portal_add_card', ...extra,
   });
   const defaults = async (customerId) => (await db('payment_methods').where({ customer_id: customerId, is_default: true }).select('id')).map((r) => r.id);
 
@@ -66,8 +69,8 @@ maybeDescribe('finishSaveOnlyAdd (real schema)', () => {
     const events = await db('audit_log').where({ action: 'customer.payment_method.saved_card_only', resource_id: method.id });
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ actor_type: 'customer', actor_id: id, resource_type: 'payment_method', ip_address: '203.0.113.9', user_agent: 'test-agent' });
-    expect(events[0].metadata).toMatchObject({ via: 'portal_add_card', consentTextVersion: 'v12_2026-09-30', stripePaymentMethodId: method.stripe_payment_method_id });
-    expect(events[0].metadata.consentText).toContain('authorize Waves Pest Control, LLC');
+    expect(events[0].metadata).toMatchObject({ via: 'portal_add_card', consentTextVersion: SAVE_ONLY_CONSENT_VERSION, stripePaymentMethodId: method.stripe_payment_method_id });
+    expect(events[0].metadata.consentText).toBe(SAVE_ONLY_CONSENT_TEXT);
     expect(await db('payment_method_consents').where({ customer_id: id })).toHaveLength(0);
     const after = await db('customers').where({ id }).first('autopay_enabled', 'autopay_payment_method_id');
     expect(after).toMatchObject({ autopay_enabled: false, autopay_payment_method_id: null });
