@@ -28,17 +28,25 @@
  *     tier / monthly-rate sync would write the customer row refuses;
  *   - no linked estimate and no separate program.
  *
+ * The card pins values, but the Schedule handler re-reads and re-decides inside its own transaction. So Confirm also
+ * hands the handler the approved plan (createScheduleBooking's internal `approvedBooking`), and the handler asserts it
+ * right before commit: same inserted dates, same stamped price, property and technician, no setup fee, no tier or
+ * monthly-rate write, no prepay term refresh. Anything else rolls the booking back (code APPROVED_BOOKING_CHANGED).
+ *
  * Dark behind GATE_IB_BOOK_PLAN_VISITS (ibBookPlanVisitsLive, strict 'true'; needs GATE_IB_PLATFORM).
  */
 const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { ibBookPlanVisitsLive } = require('../../config/feature-gates');
-const { validScheduleDate } = require('../../utils/datetime-et');
+const { validScheduleDate, sameDayWindowElapsed, deriveWindowEnd } = require('../../utils/datetime-et');
 const { resolveBillingLane } = require('../billing-lane');
 const { dateOnlyString } = require('../../utils/date-only');
 
 const MAX_VISIT_COUNT = 12;
+const LAWN_ROUNDS_PATTERN = 'lawn_rounds_9';
+// Handler answers that mean "the booking is no longer the one the card showed".
+const STALE_CARD_CODES = new Set(['APPROVED_BOOKING_CHANGED', 'PRICE_DIVERGED', 'CUSTOMER_CHANGED_RETRY']);
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const ESTIMATE_PATH = 'Start a new plan through the estimate (accept_estimate).';
 const NO_CHANGE_LINE = 'No price, discount or add-on is set. The WaveGuard tier and the monthly rate do not change. No welcome text and no invoice are sent.';
@@ -120,23 +128,44 @@ async function resolveService(serviceType) {
   return { row, bookedType: row.name };
 }
 
-// Does this customer already have (or had) a recurring series for the same service family? The
-// duplicate-series guard's own family classifier (duplicateGuardFamilyKey) decides, over every series
-// parent in any status, so a cancelled or run-out series counts.
-async function hadPlanForService(customerId, catalogRow, propertyId) {
+// Did this series parent run at the named property? A stamped property_id decides. A legacy row with none is placed the
+// way the duplicate-series guard places it: its source estimate's property, else its stamped service address, else the
+// customer's own primary address. A null property id never matches every property.
+async function seriesRanAtProperty(parent, bookingProperty, primaryPropertyId) {
+  if (!bookingProperty) return true;
+  if (parent.property_id) return String(parent.property_id) === String(bookingProperty.property_id);
+  if (parent.source_estimate_id) {
+    const estimate = await db('estimates').where({ id: parent.source_estimate_id }).first('property_id');
+    if (estimate?.property_id) return String(estimate.property_id) === String(bookingProperty.property_id);
+  }
+  const { normalizedStampedStreet, sameScopeKey } = require('../estimate-property-linkage');
+  const stamped = normalizedStampedStreet(parent.service_address_line1, parent.service_address_line2, parent.service_address_city, parent.service_address_zip);
+  if (stamped) {
+    const target = normalizedStampedStreet(bookingProperty.service_address_line1, bookingProperty.service_address_line2, bookingProperty.service_address_city, bookingProperty.service_address_zip);
+    return !!target && sameScopeKey(stamped, target);
+  }
+  return !!primaryPropertyId && String(primaryPropertyId) === String(bookingProperty.property_id);
+}
+
+// Does this customer already have (or had) a recurring series for the same service family, at this property? The
+// duplicate-series guard's own family classifier (duplicateGuardFamilyKey) decides, over every series parent in any
+// status, so a cancelled or run-out series counts.
+async function hadPlanForService(customerId, catalogRow, bookingProperty) {
   const { duplicateGuardFamilyKey } = require('../recurring-appointment-seeder');
   const target = duplicateGuardFamilyKey(catalogRow.name);
   const parents = await db('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true })
     .whereNull('recurring_parent_id')
-    .select('id', 'service_id', 'service_type', 'property_id');
-  return (parents || []).some((p) => {
+    .select('*');
+  const primary = bookingProperty
+    ? await db('customer_properties').where({ customer_id: customerId, is_primary: true }).first('id')
+    : null;
+  for (const p of parents || []) {
     const sameFamily = (p.service_id != null && String(p.service_id) === String(catalogRow.id))
       || (p.service_type && duplicateGuardFamilyKey(p.service_type) === target);
-    if (!sameFamily) return false;
-    // A named property only counts its own series (or a series with no property on it).
-    return !propertyId || !p.property_id || String(p.property_id) === String(propertyId);
-  });
+    if (sameFamily && await seriesRanAtProperty(p, bookingProperty, primary?.id || null)) return true;
+  }
+  return false;
 }
 
 // An open series for the service (the handler's duplicate-series guard, asked now so no card is made).
@@ -158,23 +187,32 @@ async function openSeriesFor(customerId, catalogRow, bookingProperty) {
   });
 }
 
-// A live annual-prepay term covering the day: the create's post-commit prepay-term refresh would touch it.
-async function prepayTermRefusal(customer, scheduledDate) {
+// Annual prepay: the create's post-commit refresh (refreshActiveTermsForCustomer) would touch a term. Asked through the
+// refresh's own selection (refreshableTermsForCustomer), as reprice_future_visits does, so a term that ends before the first
+// visit and a cancelled end-at-term agreement still inside its paid window both count.
+async function prepayTermRefusal(customer) {
   if (resolveBillingLane(customer).mode === 'annual_prepay' || customer.billing_mode === 'annual_prepay') {
-    return refuse('This customer is billed by annual prepay, and booking a series can change a prepay term. The bar can\'t book a plan for an annual-prepay customer.', 'annual_prepay_customer');
+    return refuse("This customer is billed by annual prepay, and booking a series can change a prepay term. The bar can't book a plan for an annual-prepay customer.", 'annual_prepay_customer');
   }
-  let term = null;
+  let terms = [];
   try {
-    term = await db('annual_prepay_terms')
-      .where({ customer_id: customer.id })
-      .whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
-      .andWhere('term_end', '>=', scheduledDate)
-      .first('id');
+    terms = await require('../annual-prepay-renewals').refreshableTermsForCustomer(customer.id);
   } catch (err) {
     logger.warn(`[intelligence-bar:book-plan-visits] prepay term read failed: ${err.message}`);
-    return refuse('Could not check this customer\'s annual prepay terms, so the bar can\'t tell whether a booking would touch one.', 'prepay_check_failed');
+    return refuse("Could not check this customer's annual prepay terms, so the bar can't tell whether a booking would touch one.", 'prepay_check_failed');
   }
-  return term ? refuse('This customer has an annual prepay term covering that date, and booking a series can change it. The bar can\'t book a plan for them.', 'annual_prepay_term') : null;
+  return terms.length ? refuse("This customer has an annual prepay term the booking would refresh. The bar can't book a plan for them.", 'annual_prepay_term') : null;
+}
+
+// A bait-station program can owe a setup fee on its first visit (the handler's direct rodent setup resolver). The card
+// shows no setup fee, so any program that would owe one is refused; the handler's transaction checks the same thing.
+async function setupFeeRefusal(customerId, catalogRow) {
+  const owed = await require('../secure-appointment-plans').directRodentSetupForRow(db, {
+    customer_id: customerId, service_id: catalogRow.id, service_type: catalogRow.name,
+  });
+  return owed > 0
+    ? refuse(`Restarting ${catalogRow.name} would add a bait-station setup fee of $${Number(owed).toFixed(2)} to the first visit. The card can't show that, so the bar can't book it.`, 'setup_fee_owed')
+    : null;
 }
 
 // The property the visits land on: a named one, or none when the customer has a single property.
@@ -249,11 +287,11 @@ async function priceFor({ customer, catalogRow, scheduledDate, bookingProperty }
       return { refusal: refuse(`"${catalogRow.name}" has no catalog price and nothing in this customer's billing would invoice its visits, so the bar can't book it without a price.`, 'no_billable_amount') };
     }
   }
-  return { price, duesCovered };
+  return { price, duesCovered, finalPrice: Number(pricing.finalPrice) || 0 };
 }
 
 // The request body for createScheduleBooking: no pricing field, no estimate, no override.
-function bodyFor({ input, catalogRow, cadence, windowStart, technicianId, propertyId, visitCount, sendTexts }) {
+function bodyFor({ input, catalogRow, cadence, windowStart, technicianId, propertyId, visitCount, sendTexts, expectedPrice }) {
   return {
     customerId: uuid(input.customer_id),
     scheduledDate: input.scheduled_date,
@@ -268,6 +306,8 @@ function bodyFor({ input, catalogRow, cadence, windowStart, technicianId, proper
     ...(visitCount ? { recurringCount: visitCount, recurringOngoing: false } : { recurringOngoing: true }),
     // The Schedule modal's own create-invoice default for a priced visit; the handler strips it for a dues-covered series.
     createInvoice: true,
+    // The handler's own price check (PRICE_DIVERGED): its pricing must equal the catalog price the card showed.
+    expected_price: expectedPrice,
     sendConfirmationSms: sendTexts,
   };
 }
@@ -324,6 +364,12 @@ async function planBooking(input) {
   }
   const cadence = catalogCadence;
 
+  // Today's first visit: its window must not already be over (create_appointment's own rule, at the service's duration).
+  const durationMinutes = Number(catalogRow.default_duration_minutes) > 0 ? Number(catalogRow.default_duration_minutes) : 60;
+  if (sameDayWindowElapsed(dateStr, deriveWindowEnd(windowStart, durationMinutes) || windowStart)) {
+    return refuse('That time has already passed today. Pick a later window or a future date.', 'window_elapsed');
+  }
+
   const notHeldRetired = await require('../service-library').retiredServicesNotHeldBy({
     customerId, serviceTypes: [catalogRow.name], recurrence: { pattern: cadence.pattern, intervalDays: cadence.intervalDays },
   });
@@ -335,7 +381,7 @@ async function planBooking(input) {
   if (property.refusal) return refuse(property.refusal.error.replace(/ Nothing was (proposed|booked)\.?$/, ''), property.refusal.code, property.refusal.properties ? { properties: property.refusal.properties } : {});
   const bookingProperty = property.stamp;
 
-  if (!(await hadPlanForService(customerId, catalogRow, bookingProperty?.property_id || null))) {
+  if (!(await hadPlanForService(customerId, catalogRow, bookingProperty))) {
     return refuse(`${privateName(customer)} has no earlier ${catalogRow.name} plan, so this would be a brand-new program. ${ESTIMATE_PATH}`, 'new_program');
   }
   const open = await openSeriesFor(customerId, catalogRow, bookingProperty);
@@ -343,30 +389,44 @@ async function planBooking(input) {
     const next = open[0].next_upcoming_date ? ` Its next visit is ${open[0].next_upcoming_date}.` : '';
     return refuse(`${privateName(customer)} already has an open ${catalogRow.name} series.${next} Move or extend that series instead of booking another.`, 'duplicate_series');
   }
-  const prepay = await prepayTermRefusal(customer, dateStr);
+  const prepay = await prepayTermRefusal(customer);
   if (prepay) return prepay;
+  const setupFee = await setupFeeRefusal(customerId, catalogRow);
+  if (setupFee) return setupFee;
 
   const tech = await resolveTechnician(input);
   if (tech.refusal) return tech.refusal;
 
   const visitCount = Number.isInteger(input.visit_count) ? input.visit_count : null;
   if (visitCount != null && (visitCount < 2 || visitCount > MAX_VISIT_COUNT)) return refuse(`visit_count must be 2 to ${MAX_VISIT_COUNT}.`, 'invalid_input');
+  const priced = await priceFor({ customer, catalogRow, scheduledDate: dateStr, bookingProperty });
+  if (priced.refusal) return priced.refusal;
   const body = bodyFor({
     input: { ...input, scheduled_date: dateStr }, catalogRow, cadence, windowStart,
     technicianId: tech.tech?.id || null, propertyId: bookingProperty?.property_id || null, visitCount, sendTexts,
+    expectedPrice: priced.finalPrice,
   });
-
-  const priced = await priceFor({ customer, catalogRow, scheduledDate: dateStr, bookingProperty });
-  if (priced.refusal) return priced.refusal;
   const planned = await planDates(body, bookingProperty);
   if (planned.dates.length < 2) return refuse('The Schedule screen could not place a second visit for this cadence and date.', 'no_plan_dates');
   const syncRefusal = await planSyncRefusal({ customerId, catalogRow, dates: planned.dates });
   if (syncRefusal) return syncRefusal;
+  // Another visit already in a planned slot: the same overlap preview create_appointment shows, per date, tech-blind (so
+  // unassigned visits count). Pinned with the card, so a conflict that is new at Confirm is a stale card.
+  const overlaps = [];
+  for (const date of planned.dates) {
+    const who = await Tools.ibBookingOverlapWho(date, input.time_window, tech.tech?.id || null);
+    if (who.length) overlaps.push({ date, visits: who.map((w) => ({ customer: w.customer, service: w.service, window: w.window, fact: w.fact })) });
+  }
 
   const windowLabel = Tools.clockLabel(`${windowStart}:00`);
   const visits = planned.dates.map((date, i) => ({ number: i + 1, date, weekday: WEEKDAYS[new Date(`${date}T12:00:00Z`).getUTCDay()], window: windowLabel }));
   const technicianLabel = tech.tech ? tech.tech.name : null;
+  // The cadence the Schedule create will really write: a residential six-week lawn plan becomes the nine fixed lawn rounds.
+  const effectivePattern = planned.pattern;
+  const cadenceLabel = effectivePattern === LAWN_ROUNDS_PATTERN ? 'nine lawn rounds a year' : cadence.label;
   const pins = {
+    effective_pattern: effectivePattern,
+    overlaps,
     body,
     dates: planned.dates,
     price: priced.price,
@@ -389,9 +449,11 @@ async function planBooking(input) {
     customer_name: privateName(customer),
     address: addressOf(customer, bookingProperty),
     service: catalogRow.name,
-    cadence: cadence.label,
+    cadence: cadenceLabel,
+    cadence_pattern: effectivePattern,
     ongoing: visitCount == null,
     visits,
+    ...(overlaps.length ? { overlaps } : {}),
     visit_count_shown: visits.length,
     technician: technicianLabel,
     price_per_visit: priced.price == null ? null : money(priced.price),
@@ -401,6 +463,8 @@ async function planBooking(input) {
     ...(planned.shortfall ? { shortfall: planned.shortfall } : {}),
     _version: hashOf(pins),
     _body: body,
+    // What the handler asserts inside its booking transaction before commit (createScheduleBooking's approvedBooking).
+    _approved: { dates: planned.dates, price: priced.price, propertyId: bookingProperty?.property_id || null, technicianId: tech.tech ? String(tech.tech.id) : null },
   };
 }
 
@@ -410,7 +474,10 @@ function cardLines(preview) {
   lines.push({ kind: 'customer', text: `Booked for ${preview.customer_name} at ${preview.address}` });
   lines.push({ kind: 'operational', text: `Service: ${preview.service}, ${preview.cadence}` });
   for (const v of preview.visits || []) lines.push({ kind: 'operational', text: `Visit ${String(v.number).padStart(2, '0')} · ${weekdayDate(v.date)} · ${v.window}` });
-  if (preview.ongoing) lines.push({ kind: 'operational', text: `Ongoing plan: these are the first ${preview.visit_count_shown} visits. The plan adds later visits itself on the same cadence.` });
+  for (const o of preview.overlaps || []) {
+    for (const v of o.visits) lines.push({ kind: 'operational', text: `Overlap on ${weekdayDate(o.date)}: ${[v.customer, v.service, v.window].filter(Boolean).join(' · ')} already holds that time. The booking still goes ahead.` });
+  }
+  if (preview.ongoing) lines.push({ kind: 'operational', text: `Ongoing plan: these are the first ${preview.visit_count_shown} visits. The plan adds later visits itself on ${preview.cadence_pattern === LAWN_ROUNDS_PATTERN ? 'the nine fixed lawn rounds' : 'the same cadence'}.` });
   if (preview.shortfall) lines.push({ kind: 'operational', text: preview.shortfall });
   lines.push({ kind: 'operational', text: `Technician: ${preview.technician || 'none picked (the plan leaves the visits unassigned)'}` });
   lines.push({ kind: 'billing', text: preview.price_per_visit ? `Price per visit: ${preview.price_per_visit}, the catalog price, as the Schedule screen stamps it` : `Price per visit: ${preview.price_note || 'none stamped'}` });
@@ -451,7 +518,9 @@ function replyRefusal(reply) {
   if (reply.status === 409 && Array.isArray(json.existingSeries || json.existing_series || json.conflicts)) {
     return refuse('The customer already has an open series for this service, so the Schedule screen refused a second one.', 'duplicate_series', { status: reply.status });
   }
-  return refuse(json.error || `The Schedule screen refused the booking (${reply.status}).`, json.code || 'schedule_refused', { status: reply.status });
+  return refuse(json.error || `The Schedule screen refused the booking (${reply.status}).`, json.code || 'schedule_refused', {
+    status: reply.status, ...(STALE_CARD_CODES.has(json.code) ? { preview_changed: true } : {}),
+  });
 }
 
 async function commit(input, actionContext) {
@@ -462,10 +531,10 @@ async function commit(input, actionContext) {
   let reply;
   try {
     // The one booking call: exactly the body the card pinned.
-    reply = await createScheduleBooking({ body: plan._body, actor: await actorFor(actionContext) });
+    reply = await createScheduleBooking({ body: plan._body, actor: await actorFor(actionContext), approvedBooking: plan._approved });
   } catch (err) {
     if (err?.status && err.status < 500 && err.isOperational) {
-      return refuse(err.message, err.code || 'schedule_refused', { status: err.status });
+      return refuse(err.message, err.code || 'schedule_refused', { status: err.status, ...(STALE_CARD_CODES.has(err.code) ? { preview_changed: true } : {}) });
     }
     logger.error(`[intelligence-bar:book-plan-visits] booking interrupted for ${plan.customer_id}: ${err?.code || err?.name || 'error'}`);
     return {

@@ -140,3 +140,64 @@ describe('createScheduleBooking runs the POST / handler', () => {
     await expect(createScheduleBooking({ body: oneOff, actor })).rejects.toThrow('db down');
   });
 });
+
+// The Intelligence Bar's book_plan_visits card pins what it showed, but this handler re-reads and re-decides inside its own
+// transaction. createScheduleBooking's internal `approvedBooking` makes the transaction assert the approved plan right
+// before commit: any difference rolls the booking back (409 APPROVED_BOOKING_CHANGED). Without it (the HTTP path) nothing
+// changes.
+describe('createScheduleBooking approvedBooking (the transaction asserts what the card approved)', () => {
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  const approved = { dates: ['2099-07-03'], price: 89, propertyId: null, technicianId: 'tech-1' };
+  let refreshable;
+  beforeEach(() => {
+    refreshable = [];
+    jest.spyOn(AnnualPrepayRenewals, 'refreshableTermsForCustomer').mockImplementation(async () => refreshable);
+    // The visit table's columns, so the handler stamps the price and technician it would stamp in production.
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const c = base(table);
+      if (table === 'scheduled_services') c.columnInfo = jest.fn().mockResolvedValue({ source_action: {}, estimated_price: {}, technician_id: {} });
+      return c;
+    });
+    const baseTrx = db.transaction.getMockImplementation();
+    db.transaction = jest.fn(async (cb) => baseTrx(cb));
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  const book = (approvedBooking, body = oneOff) => createScheduleBooking({ body, actor, approvedBooking });
+
+  test('the approved dates, price and technician commit as booked', async () => {
+    const result = await book(approved);
+    expect(result.status).toBe(201);
+    expect(inserts.map((d) => [d.scheduled_date, Number(d.estimated_price), d.technician_id])).toEqual([['2099-07-03', 89, 'tech-1']]);
+  });
+
+  test.each([
+    ['a drifted price', { ...approved, price: 90 }],
+    ['a drifted date', { ...approved, dates: ['2099-07-04'] }],
+    ['a different technician', { ...approved, technicianId: 'tech-2' }],
+    ['a different property', { ...approved, propertyId: 'prop-other' }],
+  ])('%s rolls the whole booking back with APPROVED_BOOKING_CHANGED and runs no post-commit effect', async (_label, drift) => {
+    const result = await book(drift);
+    expect(result.status).toBe(409);
+    expect(result.json.code).toBe('APPROVED_BOOKING_CHANGED');
+    expect(result.json.error).toMatch(/Nothing was booked/);
+    // The transaction callback threw, so the transaction rejected (the database rolls the inserts back) and nothing after it ran.
+    await expect(db.transaction.mock.results[0].value).rejects.toMatchObject({ code: 'APPROVED_BOOKING_CHANGED' });
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test('a prepay term the post-commit refresh would touch rolls the booking back', async () => {
+    refreshable = [{ id: 'term-1', status: 'active', term_end: '2099-01-01' }];
+    const result = await book(approved);
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/prepay term/);
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test('approvedBooking is internal: one posted in the HTTP body is ignored, and the handler books as before', async () => {
+    const result = await book(null, { ...oneOff, approvedBooking: { dates: ['2000-01-01'], price: 1, technicianId: 'nobody' } });
+    expect(result.status).toBe(201);
+    expect(AnnualPrepayRenewals.refreshableTermsForCustomer).not.toHaveBeenCalled();
+  });
+});

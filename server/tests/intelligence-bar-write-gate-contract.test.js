@@ -1168,6 +1168,10 @@ const UNCONFIRMED_CALLS = [
         jest.spyOn(require('../services/recurring-appointment-seeder'), 'findActiveRecurringSeries').mockResolvedValue([]),
         jest.spyOn(require('../services/self-booking-plan-sync'), 'bookingWouldChangeCustomerPlan').mockResolvedValue({ writes: false, reason: 'no_change' }),
         jest.spyOn(require('../services/service-library'), 'retiredServicesNotHeldBy').mockResolvedValue([]),
+        // The prepay-term refresh selection, the direct rodent setup resolver and the per-date overlap probe have their own suites.
+        jest.spyOn(require('../services/annual-prepay-renewals'), 'refreshableTermsForCustomer').mockResolvedValue([]),
+        jest.spyOn(require('../services/secure-appointment-plans'), 'directRodentSetupForRow').mockResolvedValue(0),
+        jest.spyOn(require('../services/intelligence-bar/tools'), 'ibBookingOverlapWho').mockResolvedValue([]),
       ] : [];
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
