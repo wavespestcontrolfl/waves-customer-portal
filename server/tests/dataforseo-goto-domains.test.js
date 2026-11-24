@@ -60,6 +60,13 @@ describe('serpOrganic google /goto wrapper normalization', () => {
     expect(item.site_url).toBe('https://shop.example.com:8443');
   });
 
+  test('a breadcrumb that carries a URL path still restores the domain', async () => {
+    response = serp([organic({ breadcrumb: 'https://www.turnerpest.com/residential/sarasota/' })]);
+    const [item] = itemsOf(await dataforseo.serpOrganic('pest control'));
+    expect(item.domain).toBe('www.turnerpest.com');
+    expect(item.site_url).toBe('https://www.turnerpest.com');
+  });
+
   test('breadcrumb with no host ("5 comments") leaves the item unchanged', async () => {
     response = serp([organic({ breadcrumb: '5 comments' })]);
     const [item] = itemsOf(await dataforseo.serpOrganic('pest control'));

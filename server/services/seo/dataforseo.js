@@ -61,7 +61,6 @@ function resolvePoisonedParam() {
 // site_url = the breadcrumb base URL (path segments are truncated text, not real paths) and
 // domain_from_breadcrumb = true. `url` keeps the wrapper (it still leads to the page). Items with no usable
 // breadcrumb host (social posts: "5 comments") and non-goto items stay as they are.
-const BREADCRUMB_BASE_RE = /^(https?:\/\/)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(:\d+)?\/?$/i;
 
 function isGotoItem(item) {
   if (!item || item.type !== 'organic' || typeof item.url !== 'string') return false;
@@ -73,10 +72,12 @@ function isGotoItem(item) {
 
 function breadcrumbSite(breadcrumb) {
   const base = String(breadcrumb || '').split('›')[0].trim();
-  const m = BREADCRUMB_BASE_RE.exec(base);
-  if (!m) return null;
-  const host = m[2].toLowerCase();
-  return { host, url: `${m[1] ? m[1].toLowerCase() : 'https://'}${host}${m[3] || ''}` };
+  // A site address has no spaces; "5 comments" and other text do.
+  if (!base || /\s/.test(base)) return null;
+  let u;
+  try { u = new URL(/^https?:\/\//i.test(base) ? base : `https://${base}`); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol) || !u.hostname.includes('.')) return null;
+  return { host: u.hostname.toLowerCase(), url: u.origin };
 }
 
 function normalizeGotoOrganic(data) {
