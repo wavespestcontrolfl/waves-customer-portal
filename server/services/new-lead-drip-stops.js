@@ -8,7 +8,8 @@
  *      sequence takes over),
  *   2. a visit is booked (any scheduled service that is not cancelled, rescheduled, skipped or a no-show),
  *   3. the lead is a paying customer (a paid invoice, a customer pipeline stage) or the lead row is converted,
- *   4. the lead replied by text or email since the enrollment (the engine's two reply arms, estimate-follow-up.hasRepliedSince).
+ *   4. the enrolling lead row is closed (not an open status), removed or missing,
+ *   5. the lead replied by text or email since the enrollment (the engine's two reply arms, estimate-follow-up.hasRepliedSince).
  * The existing suppression and email-off checks run before this in automation-runner.js.
  *
  * Any doubt defers, never sends: a failed read returns { defer: true } and the runner leaves the step due for a later tick.
@@ -21,6 +22,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { NON_LIVE_APPOINTMENT_STATUSES } = require('./estimate-conversion-guard');
+const { isOpenLeadRow } = require('./lead-statuses');
 
 // The two steps migration 20261124140000_new_lead_drip_steps seeds (and 20261124140100 stores disabled), by their fixed ids (the migrations carry the same ids).
 // Only these exist for the runner while GATE_NEW_LEAD_DRIP_STEPS is on (automation-runner.js enabledSequenceSteps), and only
@@ -35,11 +37,12 @@ function enrollmentMeta(enrollment) {
   try { return JSON.parse(raw) || {}; } catch { return {}; }
 }
 
-// An estimate made for this person since the enrollment: by customer id, or by the address the sequence mails.
+// An estimate made OR SENT for this person since the enrollment: by customer id, or by the address the sequence mails. A draft
+// made before the enrollment and sent after it counts (the lead webhook can make a draft without linking it to the lead).
 async function estimateSince(enrollment, email) {
   if (!enrollment.customer_id && !email) return false;
   const row = await db('estimates')
-    .where('created_at', '>=', enrollment.enrolled_at)
+    .where((when) => when.where('created_at', '>=', enrollment.enrolled_at).orWhere('sent_at', '>=', enrollment.enrolled_at))
     .where((who) => {
       if (enrollment.customer_id) who.orWhere('customer_id', enrollment.customer_id);
       if (email) who.orWhereRaw('lower(trim(customer_email)) = ?', [email]);
@@ -87,6 +90,18 @@ async function repliedSince(enrollment, email, lead) {
   return require('./estimate-follow-up').hasRepliedSince(asker, new Date(enrollment.enrolled_at), { throwOnError: true });
 }
 
+// The stops, in the order they are read. Each one reads what it needs from { who, email, leadId, lead }.
+const leadGone = ({ leadId, lead }) => !!leadId && (!lead || !!lead.deleted_at || !isOpenLeadRow(lead));
+const STOPS = [
+  { cancelReason: 'new_lead_estimate', reason: 'The lead has an estimate since enrolling',
+    hit: async (c) => await estimateSince(c.who, c.email) || leadHasEstimate(c.leadId, c.lead) },
+  { cancelReason: 'new_lead_booked', reason: 'The lead has a booked visit', hit: (c) => visitBooked(c.who.customer_id) },
+  { cancelReason: 'new_lead_customer', reason: 'The lead is a customer', hit: (c) => isPayingCustomer(c.who.customer_id, c.lead) },
+  // The office closed, marked spam or lost, or removed the enrolling lead (or the row is gone): no more emails.
+  { cancelReason: 'new_lead_lead_closed', reason: 'The enrolling lead is closed or removed', hit: leadGone },
+  { cancelReason: 'new_lead_replied', reason: 'The lead replied since enrolling', hit: (c) => repliedSince(c.who, c.email, c.lead) },
+];
+
 /**
  * @returns {Promise<null | { reason: string, cancelReason: string } | { defer: true, reason: string }>}
  *   null = no stop, send. A stop ends the enrollment. defer = read failed or enrollment time unreadable, try again later.
@@ -94,24 +109,19 @@ async function repliedSince(enrollment, email, lead) {
 async function newLeadDripStop(enrollment) {
   const enrolledMs = enrollment.enrolled_at ? new Date(enrollment.enrolled_at).getTime() : NaN;
   if (!Number.isFinite(enrolledMs)) return { defer: true, reason: 'The new lead enrollment time is unreadable; email deferred' };
-  const email = String(enrollment.email || '').trim().toLowerCase();
   const leadId = enrollmentMeta(enrollment).lead_id || null;
   try {
-    const lead = leadId ? (await db('leads').where({ id: leadId }).first('phone', 'converted_at', 'estimate_id', 'customer_id')) || null : null;
+    const lead = leadId ? (await db('leads').where({ id: leadId }).first('phone', 'converted_at', 'estimate_id', 'customer_id', 'status', 'deleted_at')) || null : null;
     // The lead webhook can enroll a lead with no customer id, and booking an assessment later links the lead to a customer
-    // without converting it: the lead's current customer id stands in for the enrollment's missing one in every read below.
-    const who = { ...enrollment, customer_id: enrollment.customer_id || lead?.customer_id || null };
-    if (await estimateSince(who, email) || await leadHasEstimate(leadId, lead)) {
-      return { reason: 'The lead has an estimate since enrolling', cancelReason: 'new_lead_estimate' };
-    }
-    if (await visitBooked(who.customer_id)) {
-      return { reason: 'The lead has a booked visit', cancelReason: 'new_lead_booked' };
-    }
-    if (await isPayingCustomer(who.customer_id, lead)) {
-      return { reason: 'The lead is a customer', cancelReason: 'new_lead_customer' };
-    }
-    if (await repliedSince(who, email, lead)) {
-      return { reason: 'The lead replied since enrolling', cancelReason: 'new_lead_replied' };
+    // without converting it: the lead's current customer id stands in for the enrollment's missing one in every read.
+    const context = {
+      leadId,
+      lead,
+      email: String(enrollment.email || '').trim().toLowerCase(),
+      who: { ...enrollment, customer_id: enrollment.customer_id || lead?.customer_id || null },
+    };
+    for (const stop of STOPS) {
+      if (await stop.hit(context)) return { reason: stop.reason, cancelReason: stop.cancelReason };
     }
     return null;
   } catch (e) {

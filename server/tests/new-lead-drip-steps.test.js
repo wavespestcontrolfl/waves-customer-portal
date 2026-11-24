@@ -103,6 +103,7 @@ function queues({ steps, reads = {}, enrollment: overrides = {}, passed = [], le
   const enrollmentUpdate = chain();
   const sendUpdate = chain();
   const stepsChain = chain({ result: steps });
+  const estimateRead = answer(reads.estimate);
   const noLock = !enrollment.customer_id;
   const noCustomer = noLock && !reads.lead?.customer_id;
   setDbQueues({
@@ -114,13 +115,14 @@ function queues({ steps, reads = {}, enrollment: overrides = {}, passed = [], le
     automation_steps: [stepsChain],
     automation_step_sends: [chain({ returning: [{ id: 'send-n' }] }), sendUpdate],
     email_suppressions: [chain({ result: [] })],
-    estimates: leadId ? [answer(reads.estimate), answer(reads.mirroredEstimate)] : [answer(reads.estimate)],
+    estimates: leadId ? [estimateRead, answer(reads.mirroredEstimate)] : [estimateRead],
     scheduled_services: noCustomer ? [] : [answer(reads.visit)],
     invoices: noCustomer ? [] : [answer(reads.invoice)],
     customers: noCustomer ? [] : [answer(reads.customerStage ?? { pipeline_stage: 'new_lead' }), answer({ phone: '+19415550100' })],
-    leads: leadId ? [answer(reads.lead ?? { phone: null, converted_at: null, estimate_id: null })] : [],
+    // reads.lead = null is a lead row that is gone.
+    leads: leadId ? [answer(reads.lead === null ? undefined : { phone: null, converted_at: null, estimate_id: null, status: 'new', deleted_at: null, ...reads.lead })] : [],
   });
-  return { enrollmentUpdate, sendUpdate, stepsChain };
+  return { enrollmentUpdate, sendUpdate, stepsChain, estimateRead };
 }
 
 const tableReads = (table) => db.mock.calls.filter(([t]) => t === table).length;
@@ -286,6 +288,38 @@ describe('gate on: stops at step 1 and step 2', () => {
     const { enrollmentUpdate } = queues({ steps: STEPS, passed: [STEP_0], leadId: 'lead-1', reads: { mirroredEstimate: { id: 'est-8' } } });
     await stopped('The lead has an estimate since enrolling');
     cancelledWith(enrollmentUpdate, 'new_lead_estimate');
+  });
+
+  test('an estimate made before the enrollment but SENT after it cancels as new_lead_estimate (the match reads sent_at too)', async () => {
+    const { estimateRead } = queues({ steps: STEPS, passed: [STEP_0], reads: { estimate: { id: 'est-7' } } });
+    await sendStep('enrollment-n');
+    const when = estimateRead.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    const seen = [];
+    const builder = { where: jest.fn((...a) => { seen.push(['where', ...a]); return builder; }), orWhere: jest.fn((...a) => { seen.push(['orWhere', ...a]); return builder; }) };
+    when(builder);
+    expect(seen).toEqual([['where', 'created_at', '>=', ENROLLED_AT], ['orWhere', 'sent_at', '>=', ENROLLED_AT]]);
+  });
+
+  test.each([['lost'], ['spam'], ['won'], ['unresponsive']])('a lead the office set to %s cancels as new_lead_lead_closed', async (status) => {
+    const { enrollmentUpdate } = queues({ steps: STEPS, passed: [STEP_0], leadId: 'lead-1', reads: { lead: { status } } });
+    await stopped('The enrolling lead is closed or removed');
+    cancelledWith(enrollmentUpdate, 'new_lead_lead_closed');
+    expect(followUp.hasRepliedSince).not.toHaveBeenCalled();
+  });
+
+  test('a soft-deleted or missing lead row cancels as new_lead_lead_closed', async () => {
+    const deleted = queues({ steps: STEPS, passed: [STEP_0], leadId: 'lead-1', reads: { lead: { deleted_at: new Date('2026-11-21T10:00:00Z') } } });
+    await stopped('The enrolling lead is closed or removed');
+    cancelledWith(deleted.enrollmentUpdate, 'new_lead_lead_closed');
+    const gone = queues({ steps: STEPS, passed: [STEP_0], leadId: 'lead-1', reads: { lead: null } });
+    await stopped('The enrolling lead is closed or removed');
+    cancelledWith(gone.enrollmentUpdate, 'new_lead_lead_closed');
+  });
+
+  test.each([['new'], ['contacted'], ['estimate_sent'], ['estimate_viewed']])('a lead still %s sends', async (status) => {
+    const { enrollmentUpdate } = queues({ steps: STEPS, passed: [STEP_0], leadId: 'lead-1', reads: { lead: { status } } });
+    await sendOk();
+    notCancelled(enrollmentUpdate);
   });
 
   test('a lead enrolled with no customer id is checked for a text reply by the lead phone', async () => {
