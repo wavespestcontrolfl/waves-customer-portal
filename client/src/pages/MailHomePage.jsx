@@ -2,7 +2,9 @@
  * /h/:token — the page a new homeowner reaches from the QR code on a Waves postcard (mailer step 2c).
  *
  * The visitor is a stranger with no account. The page shows the home's street address, the quarterly pest control
- * price we worked out for it (or "Call us for your price" when there is none) and one action: call us.
+ * price we worked out for it (or "Call us for your price" when there is none) and the way to act on it: call us, or,
+ * when the home has a price, pick a first visit and book it on the same page (mailer step 2d-1: GET .../times, then
+ * POST .../book; the answers are named in docs/public-route-contracts.md).
  * Data: GET /api/public/home/:token (server/routes/mail-home-public.js). Any failure, a dead link and the gate being
  * off all read the same: one friendly "not available" state, so the page never hints whether a token exists.
  *
@@ -11,11 +13,12 @@
  * list the estimate shows for the quarterly pest plan.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { BrandCard, CustomerColumn, PublicStateCard } from '../components/brand';
+import { BrandButton, BrandCard, BrandInput, CustomerColumn, PublicStateCard } from '../components/brand';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { glassPestInclusions } from '../lib/estimate-glass-copy';
+import { arrivalWindowLabel } from '../lib/estimate-glass-slots';
 import { useGlassSurface } from '../glass/glass-engine';
 import { DOC, DOC_EYEBROW, FS, FW, LH, SP, docHeading } from '../theme-doc';
 
@@ -87,10 +90,322 @@ export function addressCase(text) {
   }).join(' ');
 }
 
+// ---- first visit: pick a time, book it (mailer step 2d-1) ----------------------------------------------------------------
+
+// '2026-11-30' → a local Date (never `new Date('2026-11-30')`, which is UTC midnight and reads as the day before).
+function dateOf(ymd) {
+  const [y, m, d] = String(ymd).split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+const dayChipLabel = (ymd) => dateOf(ymd).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+const dayLongLabel = (ymd) => dateOf(ymd).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+// The customer's time is the arrival window: the slot start plus 2 hours (AGENTS.md), '09:00' → '9:00-11:00 AM'. The
+// slot's own end_time is the visit's length and is never shown.
+const slotLabel = (o) => arrivalWindowLabel(o.start_time) || o.start_label || '';
+
+// Soonest first, always (the server sorts too; this keeps the page right if it ever does not).
+const sortOffers = (offers) => [...offers].sort((a, b) => `${a.date} ${a.start_time}`.localeCompare(`${b.date} ${b.start_time}`));
+
+const FIELD_ERRORS = {
+  name: 'Enter your name.',
+  phone: 'Enter a 10-digit mobile phone number.',
+  email: 'Enter a valid email address.',
+};
+
+// What the visitor reads when the booking ends with the call button. Any answer not named here is the generic one.
+const CALL_NOTICES = {
+  price_changed: 'Your price was updated — call us.',
+  contact_on_file: "You're already with Waves — call us and we'll get you scheduled.",
+};
+const GENERIC_NOTICE = 'Something went wrong — call us.';
+
+const chipStyle = (selected) => ({
+  flex: '0 0 auto',
+  minHeight: 48,
+  padding: '0 16px',
+  boxSizing: 'border-box',
+  border: `1px solid ${selected ? DOC.navyLiteral : DOC.borderStrong}`,
+  borderRadius: 10,
+  background: selected ? DOC.navyLiteral : DOC.surface,
+  color: selected ? '#FFFFFF' : DOC.ink,
+  fontSize: FS.body,
+  fontWeight: FW.semibold,
+  cursor: 'pointer',
+});
+
+const slotStyle = {
+  minHeight: 48,
+  padding: '0 8px',
+  boxSizing: 'border-box',
+  border: `1px solid ${DOC.borderStrong}`,
+  borderRadius: 10,
+  background: DOC.surface,
+  color: DOC.ink,
+  fontSize: FS.body,
+  fontWeight: FW.semibold,
+  cursor: 'pointer',
+};
+
+const fieldLabelStyle = { display: 'block', marginBottom: SP.xxs, fontSize: FS.body, fontWeight: FW.semibold, color: DOC.ink };
+const fieldErrorStyle = { margin: `${SP.xxs}px 0 0`, fontSize: FS.body, lineHeight: LH.snug, color: DOC.danger };
+const noticeStyle = { margin: `0 0 ${SP.sm}px`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink };
+
+function CallButton() {
+  return (
+    <a href={WAVES_SUPPORT_PHONE_TEL} data-glass-accent="" data-glass-size="primary" style={callButtonStyle}>
+      Call {WAVES_SUPPORT_PHONE_DISPLAY}
+    </a>
+  );
+}
+
+function CheckMark() {
+  return (
+    <svg width="48" height="48" viewBox="0 0 48 48" aria-hidden="true" focusable="false" style={{ display: 'block', margin: '0 auto' }}>
+      <circle cx="24" cy="24" r="22" fill={DOC.successBg} stroke={DOC.success} strokeWidth="2" />
+      <path d="M14 25l7 7 13-15" fill="none" stroke={DOC.success} strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// Shown for a home that has a price. onNeedCall(true) tells the page this card carries the call button, so the page
+// does not show a second one.
+function FirstVisitPicker({ token, price, address, onNeedCall }) {
+  const [times, setTimes] = useState({ status: 'loading', offers: [] }); // loading | ready | call
+  const [day, setDay] = useState(null);
+  const [picked, setPicked] = useState(null);
+  const [form, setForm] = useState({ name: '', phone: '', email: '' });
+  const [fieldErrors, setFieldErrors] = useState({});
+  const [notice, setNotice] = useState(null); // shown above the times after a refusal
+  const [callNotice, setCallNotice] = useState(null); // ends the flow with the call button
+  const [booked, setBooked] = useState(null);
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const timesRun = useRef(0);
+
+  const showOffers = useCallback((list) => {
+    const offers = sortOffers(list);
+    setTimes(offers.length ? { status: 'ready', offers } : { status: 'call', offers: [] });
+    setDay(offers.length ? offers[0].date : null);
+  }, []);
+
+  const loadTimes = useCallback(async () => {
+    const run = ++timesRun.current;
+    setTimes({ status: 'loading', offers: [] });
+    try {
+      const r = await fetch(`${API_BASE}/public/home/${encodeURIComponent(token)}/times`);
+      const json = r.ok ? await r.json() : null;
+      if (run !== timesRun.current) return;
+      showOffers(json && Array.isArray(json.offers) ? json.offers : []);
+    } catch {
+      if (run === timesRun.current) showOffers([]);
+    }
+  }, [token, showOffers]);
+
+  useEffect(() => {
+    loadTimes();
+    return () => { timesRun.current += 1; };
+  }, [loadTimes]);
+
+  const needCall = times.status === 'call' || Boolean(callNotice);
+  useEffect(() => {
+    onNeedCall(needCall);
+    return () => onNeedCall(false);
+  }, [needCall, onNeedCall]);
+
+  const perApp = formatMoney(perApplication(price.annual));
+
+  const setField = (key) => (e) => {
+    const value = e.target.value;
+    setForm((f) => ({ ...f, [key]: value }));
+    setFieldErrors((errs) => (errs[key] ? { ...errs, [key]: null } : errs));
+  };
+
+  // The server is the authority; these only catch an empty or plainly wrong box before the request.
+  const checkForm = () => {
+    const errs = {};
+    if (!form.name.trim()) errs.name = FIELD_ERRORS.name;
+    if (form.phone.replace(/\D/g, '').length < 10) errs.phone = FIELD_ERRORS.phone;
+    if (!/^\S+@\S+\.\S+$/.test(form.email.trim())) errs.email = FIELD_ERRORS.email;
+    return errs;
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (sendingRef.current) return;
+    const errs = checkForm();
+    setFieldErrors(errs);
+    if (Object.keys(errs).length) return;
+    sendingRef.current = true;
+    setSending(true);
+    setNotice(null);
+    try {
+      const r = await fetch(`${API_BASE}/public/home/${encodeURIComponent(token)}/book`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          offer: picked,
+          name: form.name.trim(),
+          phone: form.phone.trim(),
+          email: form.email.trim(),
+          // The price the page showed, as JSON numbers: the server refuses the booking when the price has moved.
+          price: { annual: Number(price.annual), setupFee: Number(price.setupFee) || 0 },
+        }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (r.ok && body.booked) {
+        setBooked({ date: body.date || picked.date, window: body.window || {} });
+      } else if (body.error === 'slot_taken' || body.error === 'invalid_offer') {
+        setPicked(null);
+        setNotice('That time was just taken. Pick another time.');
+        if (body.error === 'slot_taken' && Array.isArray(body.offers) && body.offers.length) showOffers(body.offers);
+        else loadTimes();
+      } else if (body.error === 'invalid_contact' && FIELD_ERRORS[body.field]) {
+        setFieldErrors({ [body.field]: FIELD_ERRORS[body.field] });
+      } else {
+        setCallNotice(CALL_NOTICES[body.error] || GENERIC_NOTICE);
+      }
+    } catch {
+      setCallNotice(GENERIC_NOTICE);
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
+  };
+
+  if (booked) {
+    const line1 = addressCase(address.line1);
+    const city = addressCase(address.city);
+    // The booking answer's window start is the committed start; the same helper makes the range the chips showed.
+    const arrival = arrivalWindowLabel(booked.window.start || picked.start_time);
+    return (
+      <BrandCard data-testid="booked" style={{ marginTop: SP.md, textAlign: 'center' }}>
+        <CheckMark />
+        <h2 style={{ ...docHeading(2), marginTop: SP.sm }}>You&rsquo;re booked</h2>
+        <p style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.sub, fontWeight: FW.semibold, lineHeight: LH.snug, color: DOC.ink }}>
+          {dayLongLabel(booked.date)}
+        </p>
+        {arrival ? (
+          <p style={{ margin: `${SP.xxs}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink }}>{arrival}</p>
+        ) : null}
+        {line1 || city ? (
+          <p style={{ margin: `${SP.xs}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
+            {line1}
+            {line1 && city ? <br /> : null}
+            {city}
+          </p>
+        ) : null}
+        <p style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
+          We sent the details to your phone and email.
+        </p>
+      </BrandCard>
+    );
+  }
+
+  if (callNotice) {
+    return (
+      <BrandCard style={{ marginTop: SP.md }}>
+        <p role="alert" style={noticeStyle}>{callNotice}</p>
+        <CallButton />
+      </BrandCard>
+    );
+  }
+
+  if (times.status === 'loading') {
+    return (
+      <BrandCard style={{ marginTop: SP.md }}>
+        <p role="status" style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.supporting }}>Finding open times&hellip;</p>
+      </BrandCard>
+    );
+  }
+
+  if (times.status === 'call') {
+    return (
+      <BrandCard style={{ marginTop: SP.md }}>
+        {notice ? <p role="alert" style={noticeStyle}>{notice}</p> : null}
+        <h2 style={{ ...docHeading(3), marginBottom: SP.sm }}>Call us to pick a time</h2>
+        <CallButton />
+      </BrandCard>
+    );
+  }
+
+  if (picked) {
+    const fieldProps = (key) => ({
+      id: `home-book-${key}`,
+      value: form[key],
+      onChange: setField(key),
+      required: true,
+      'aria-required': 'true',
+      'aria-invalid': fieldErrors[key] ? 'true' : undefined,
+      'aria-describedby': fieldErrors[key] ? `home-book-${key}-error` : undefined,
+      error: Boolean(fieldErrors[key]),
+      disabled: sending,
+    });
+    const fieldError = (key) => (fieldErrors[key] ? <p id={`home-book-${key}-error`} role="alert" style={fieldErrorStyle}>{fieldErrors[key]}</p> : null);
+    return (
+      <BrandCard style={{ marginTop: SP.md }}>
+        <h2 style={{ ...docHeading(3), marginBottom: SP.xxs }}>
+          {dayLongLabel(picked.date)}, {slotLabel(picked)}
+        </h2>
+        <p style={{ margin: 0, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
+          Quarterly pest control &middot; {perApp} per application
+        </p>
+        <form onSubmit={submit} noValidate style={{ marginTop: SP.md, display: 'grid', gap: SP.md }}>
+          <div>
+            <label htmlFor="home-book-name" style={fieldLabelStyle}>Your name</label>
+            <BrandInput {...fieldProps('name')} type="text" autoComplete="name" />
+            {fieldError('name')}
+          </div>
+          <div>
+            <label htmlFor="home-book-phone" style={fieldLabelStyle}>Mobile phone</label>
+            <BrandInput {...fieldProps('phone')} type="tel" autoComplete="tel" inputMode="tel" />
+            {fieldError('phone')}
+          </div>
+          <div>
+            <label htmlFor="home-book-email" style={fieldLabelStyle}>Email</label>
+            <BrandInput {...fieldProps('email')} type="email" autoComplete="email" />
+            {fieldError('email')}
+          </div>
+          <BrandButton type="submit" fullWidth disabled={sending}>
+            {sending ? 'Booking…' : 'Book this visit'}
+          </BrandButton>
+          <BrandButton variant="ghost" fullWidth disabled={sending} onClick={() => { setPicked(null); setFieldErrors({}); }}>
+            Pick a different time
+          </BrandButton>
+        </form>
+      </BrandCard>
+    );
+  }
+
+  const days = [...new Set(times.offers.map((o) => o.date))];
+  const dayOffers = times.offers.filter((o) => o.date === day);
+  return (
+    <BrandCard style={{ marginTop: SP.md }}>
+      <h2 style={{ ...docHeading(3), marginBottom: SP.sm }}>Pick your first visit</h2>
+      {notice ? <p role="alert" style={noticeStyle}>{notice}</p> : null}
+      <div role="group" aria-label="Day" style={{ display: 'flex', gap: SP.xs, overflowX: 'auto', paddingBottom: SP.xxs }}>
+        {days.map((d) => (
+          <button key={d} type="button" aria-pressed={d === day} onClick={() => setDay(d)} style={chipStyle(d === day)}>
+            {dayChipLabel(d)}
+          </button>
+        ))}
+      </div>
+      <div role="group" aria-label="Time" style={{ marginTop: SP.sm, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: SP.xs }}>
+        {dayOffers.map((o) => (
+          <button key={`${o.date}-${o.start_time}-${o.slot_sig}`} type="button" onClick={() => { setNotice(null); setPicked(o); }} style={slotStyle}>
+            {slotLabel(o)}
+          </button>
+        ))}
+      </div>
+    </BrandCard>
+  );
+}
+
 export default function MailHomePage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ready | unavailable
+  const [pickerHasCall, setPickerHasCall] = useState(false);
   useGlassSurface(true);
 
   useEffect(() => {
@@ -169,6 +484,8 @@ export default function MailHomePage() {
         )}
       </BrandCard>
 
+      {price ? <FirstVisitPicker token={token} price={price} address={data.address} onNeedCall={setPickerHasCall} /> : null}
+
       <BrandCard style={{ marginTop: SP.md }}>
         <h2 style={{ ...docHeading(3), marginBottom: SP.sm }}>What the plan includes</h2>
         <ul style={{ margin: 0, paddingLeft: SP.lg, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
@@ -178,11 +495,11 @@ export default function MailHomePage() {
         </ul>
       </BrandCard>
 
-      <div style={{ marginTop: SP.xl }}>
-        <a href={WAVES_SUPPORT_PHONE_TEL} data-glass-accent="" data-glass-size="primary" style={callButtonStyle}>
-          Call {WAVES_SUPPORT_PHONE_DISPLAY}
-        </a>
-      </div>
+      {pickerHasCall ? null : (
+        <div style={{ marginTop: SP.xl }}>
+          <CallButton />
+        </div>
+      )}
     </CustomerColumn>
   );
 }
