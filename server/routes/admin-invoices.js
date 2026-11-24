@@ -1078,6 +1078,9 @@ const invoiceCreateHandler = async (req, res, next) => {
     // the alert transaction's coverage scans and its instruction write,
     // and it retires the alert immediately after creation (Codex P0).
     const stampedEstimateId = require('../services/setup-fee-alert-reconcile').acceptedEstimateIdFromNotes(notes);
+    // An invoice with a WaveGuard setup or membership fee line takes the account's fee lock, the one the bell's
+    // Bill and send holds from its last coverage read until its text goes out (setup-fee-bill-button.js).
+    const carriesFeeLine = require('../services/setup-fee-obligation').carriesWaveguardFeeLine({ line_items: lineItems });
     const createArgs = {
       customerId,
       serviceRecordId,
@@ -1087,8 +1090,9 @@ const invoiceCreateHandler = async (req, res, next) => {
       title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate,
       ...(expectedDiscountStacking !== undefined ? { expectedDiscountStacking } : {}),
     };
-    const invoice = (linkedScheduledServiceId || stampedEstimateId || ibExpectedTotalCents !== undefined)
+    const invoice = (linkedScheduledServiceId || stampedEstimateId || carriesFeeLine || ibExpectedTotalCents !== undefined)
       ? await db.transaction(async (trx) => {
+        if (carriesFeeLine) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`setup_fee_account:${customerId}`]);
         if (linkedScheduledServiceId) {
           const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
           await acquireScheduledInvoiceMintLock(trx, linkedScheduledServiceId);

@@ -41,6 +41,16 @@ jest.mock('../services/billing-lane', () => ({
 let mockTemplateOn = true;
 let mockDisposition = null;
 let mockHold = null;
+let mockCombined = false;
+let mockDiscountLines = false;
+let mockBreakdown = null;
+jest.mock('../services/estimate-first-application-invoice', () => ({
+  refuseCoveredMemberMintInTrx: jest.fn(async () => {
+    if (mockCombined) throw Object.assign(new Error('covered'), { code: 'FIRST_APPLICATION_COVERED' });
+  }),
+}));
+jest.mock('../config/feature-gates', () => ({ invoiceEstimateDiscountLinesLive: jest.fn(() => mockDiscountLines) }));
+jest.mock('../services/completion-pricing', () => ({ acceptedVisitBreakdown: jest.fn(async () => ({ breakdown: mockBreakdown })) }));
 jest.mock('../services/billing-recovery-bill', () => ({ currentDisposition: jest.fn(async () => mockDisposition), liveCardHoldForVisit: jest.fn(async () => mockHold) }));
 jest.mock('../routes/admin-sms-templates', () => ({ isTemplateActive: jest.fn(async () => mockTemplateOn) }));
 jest.mock('../services/customer-credit', () => ({ autoApplyWouldApply: jest.fn(async () => mockWouldDraw) }));
@@ -120,6 +130,9 @@ beforeEach(() => {
   mockTemplateOn = true;
   mockDisposition = null;
   mockHold = null;
+  mockCombined = false;
+  mockDiscountLines = false;
+  mockBreakdown = null;
   mockSuppressed = null;
 });
 
@@ -377,16 +390,29 @@ test('the send carries a credit check that runs under its claim', async () => {
   mockDisposition = null;
   mockHold = { id: 'h1', status: 'charge_review' };
   expect(await verify({ id: INV, customer_id: CUST }, database)).toMatch(/card hold is open/);
+  mockHold = null;
+  mockCombined = true;
+  expect(await verify({ id: INV, customer_id: CUST }, database)).toMatch(/combined first-application invoice/);
+  mockCombined = false;
+  mockDiscountLines = true;
+  mockBreakdown = { amount: APP / 100 };
+  expect(await verify({ id: INV, customer_id: CUST }, database)).toMatch(/lists estimate discounts/);
+  mockBreakdown = null;
+  expect(await verify({ id: INV, customer_id: CUST }, database)).toBeNull();
 });
 
-test('a send plan with an effect the prompt does not name (a lead marked won) is not sent', async () => {
+test('a send plan that would mark a lead won is not sent; the ordinary informational effects are', async () => {
+  const effects = ['delivery', 'attachments', 'closeout', 'followups', 'review', 'credit'].map((key) => ({ key, text: `${key} row` }));
   Send.planInvoiceSend.mockResolvedValueOnce({
-    channel: 'text', _version: { total_cents: APP + FEE, invoice_version: EDITED.getTime() },
-    effects: [{ key: 'delivery', text: 'Texts the invoice' }, { key: 'lead_conversion', text: 'Sending this invoice also marks lead 1234 won' }],
+    channel: 'text', _version: { total_cents: APP + FEE, invoice_version: EDITED.getTime() }, effects, _lead_targets: 'abc123',
   });
   const out = await tap();
   expect(Send.commitInvoiceSend).not.toHaveBeenCalled();
-  expect(out.message).toMatch(/marks lead 1234 won/);
+  expect(out.message).toMatch(/mark a lead won/);
+  Send.planInvoiceSend.mockResolvedValueOnce({
+    channel: 'text', _version: { total_cents: APP + FEE, invoice_version: EDITED.getTime() }, effects, _lead_targets: 'none',
+  });
+  expect((await tap()).message).toMatch(/created and sent/);
 });
 
 test('a send refused because coverage changed says to reconcile, never to send it by hand', async () => {

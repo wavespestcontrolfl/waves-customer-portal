@@ -130,6 +130,36 @@ function customerPreLock(facts) {
 
 // Run inside the create transaction, after the card's own locks (visit mint lock, the setup-fee alert lock) and its
 // scope recheck: nothing may cover either charge now. Throws a 409 to refuse; nothing is created.
+// Other billing that owns the visit or changes its lines. Returns the refusal reason, or null.
+async function visitBillingRefusal(trx, facts, visit) {
+  if (await trx('scheduled_service_addons').where({ scheduled_service_id: facts.visitId }).first('id')) return 'The visit has add-ons';
+  const Recovery = require('./billing-recovery-bill');
+  // A card hold on the visit (held, charging, or a charge whose outcome is in review) may already collect it.
+  if (await Recovery.liveCardHoldForVisit(facts.visitId, trx)) return 'A card hold is open on this visit';
+  // Billing Recovery handled the visit (Mark free, Bill, Billed elsewhere): a live disposition refuses.
+  const disposition = await Recovery.currentDisposition(trx, facts.visitId);
+  if (disposition && !disposition.stale) return 'Billing Recovery already handled this visit';
+  // A priced member visit billed on its trip's combined first-application invoice (the mint's own guard).
+  try {
+    await require('./estimate-first-application-invoice').refuseCoveredMemberMintInTrx(trx, facts.visitId);
+  } catch (err) {
+    if (err?.code === 'FIRST_APPLICATION_COVERED') return 'The trip\'s combined first-application invoice bills this visit';
+    throw err;
+  }
+  // GATE_INVOICE_ESTIMATE_DISCOUNT_LINES: the visit invoice would list the estimate's discounts as their own lines,
+  // which this two-line invoice cannot. Fail closed on an unreadable breakdown.
+  if (require('../config/feature-gates').invoiceEstimateDiscountLinesLive()) {
+    let breakdown;
+    try {
+      ({ breakdown } = await trx.transaction((sp) => require('./completion-pricing').acceptedVisitBreakdown(visit, { database: sp })));
+    } catch {
+      return 'The estimate discount check failed';
+    }
+    if (breakdown && Math.round(Number(breakdown.amount) * 100) === facts.applicationCents) return 'This visit\'s invoice lists estimate discounts';
+  }
+  return null;
+}
+
 // The visit-side checks, shared by the create transaction and the send claim (nothing that reads invoices, so the
 // new draft never trips them): the visit as the button priced it, and nothing else covering the application.
 // Returns the refusal reason, or null.
@@ -157,12 +187,8 @@ async function applicationCoverageRefusal(trx, facts, visit) {
   if (priceCents(visit.estimated_price) !== facts.priceCents || priceCents(visit.primary_line_price) !== facts.primaryCents) {
     return 'The visit price changed since the visit was completed';
   }
-  if (await trx('scheduled_service_addons').where({ scheduled_service_id: facts.visitId }).first('id')) return 'The visit has add-ons';
-  // A card hold on the visit (held, charging, or a charge whose outcome is in review) may already collect it.
-  if (await require('./billing-recovery-bill').liveCardHoldForVisit(facts.visitId, trx)) return 'A card hold is open on this visit';
-  // Billing Recovery handled the visit (Mark free, Bill, Billed elsewhere): a live disposition refuses.
-  const disposition = await require('./billing-recovery-bill').currentDisposition(trx, facts.visitId);
-  if (disposition && !disposition.stale) return 'Billing Recovery already handled this visit';
+  const billingWhy = await visitBillingRefusal(trx, facts, visit);
+  if (billingWhy) return billingWhy;
   if (visit.prepaid_method || Number(visit.prepaid_amount) > 0) return 'The visit has a prepayment';
   let bought;
   try {
@@ -346,9 +372,10 @@ function sendVerify(facts) {
     try {
       others = await database.transaction(async (sp) => {
         await sp.raw("SET LOCAL lock_timeout = '3s'");
-        // Never the customer row FOR UPDATE here: the provider handoff holds this lock through dispatch, and the
-        // text's sms_log insert (another connection) needs KEY SHARE on that row. A brand-new invoice committed
-        // between this read and dispatch is the known limit (docs/gates-and-env.md).
+        // The account's fee lock (an advisory lock, never the customer row: the text's sms_log insert on another
+        // connection needs KEY SHARE on that row). Every invoice create that carries a WaveGuard fee line takes it
+        // (admin-invoices.js), so a new fee invoice waits until this send's transaction ends.
+        await sp.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`setup_fee_account:${claimed.customer_id}`]);
         const rows = await sp('invoices').where({ customer_id: claimed.customer_id }).whereNot('id', claimed.id)
           .whereNotIn('status', ['void', 'cancelled', 'canceled']).orderBy('id').forUpdate()
           .select('id', 'notes', 'line_items', 'scheduled_service_id', 'service_record_id');
@@ -380,10 +407,10 @@ async function sendInvoice(invoiceId, technicianId, facts) {
   // A pay-link text already scheduled owns the delivery: keep that answer.
   if (plan.code === 'invoice_send_queued') return { code: 'invoice_send_queued' };
   if (plan.error) return { error: plan.error };
-  // Only the effects the confirm prompt names: the text, its payment reminders, the visit's closeout. Anything else
-  // (a lead marked won) was never shown, so the draft stays for the Invoices page card.
-  const extra = (plan.effects || []).filter((e) => !['delivery', 'followups', 'closeout'].includes(e.key));
-  if (extra.length) return { error: `this send would also ${extra.map((e) => String(e.text || e.key).replace(/^Sending this invoice also /i, '')).join('; ')}` };
+  // A lead the send would mark won (the plan's applied lead set) is outside what the confirm prompt names, so the
+  // draft stays for the Invoices page card. The other effects (the text, its reminders, the visit closeout, the
+  // informational rows) are what any send of this invoice does.
+  if (plan._lead_targets && plan._lead_targets !== 'none') return { error: 'this send would also mark a lead won' };
   if (!(await draftUnchanged(invoiceId, plan, facts))) {
     const inv = await db('invoices').where({ id: invoiceId }).first('status', 'sent_at');
     // Someone else may have sent or edited it: never ask for a blind resend.

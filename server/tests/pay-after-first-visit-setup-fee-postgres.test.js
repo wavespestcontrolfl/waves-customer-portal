@@ -267,8 +267,8 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
         await Button.customerPreLock(facts)(trx);
         await Button.coverageRecheck(facts)(trx);
       })).resolves.toBeUndefined();
-      // The send claim's check, on a real transaction: it passes with nothing else billed, and it leaves the
-      // customer row free for the text's sms_log insert on another connection (KEY SHARE on the customer).
+      // The send claim's check, on a real transaction: it passes with nothing else billed, it leaves the customer
+      // row free for the text's sms_log insert on another connection (KEY SHARE on the customer) ...
       const check = Button.sendVerify(facts);
       const sendTrx = await mockPg.transaction();
       try {
@@ -279,6 +279,9 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
           await other.raw("SET LOCAL lock_timeout = '300ms'");
           await other.raw('SELECT 1 FROM customers WHERE id = ? FOR KEY SHARE', [f.customerId]);
         })).resolves.toBeUndefined();
+        // ... while it holds the account's fee lock, which every fee-line invoice create takes (admin-invoices.js).
+        const other = await mockPg.raw('SELECT pg_try_advisory_lock(hashtext(?)) AS got', [`setup_fee_account:${f.customerId}`]);
+        expect(other.rows[0].got).toBe(false);
       } finally { await sendTrx.rollback(); }
     } finally { await cleanup(f); }
   });
