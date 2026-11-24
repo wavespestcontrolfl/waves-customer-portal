@@ -3286,6 +3286,8 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
           'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
           'estimate_slug', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
           'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'property_id',
+          // Read-only inputs for `bookable` and the booking-win notice.
+          'sent_at', 'source', 'pricing_authority', 'price_locked_at', 'category', 'address',
         ),
       db('services')
         // mosquito_seasonal is active as of 20260805000010, making the
@@ -3385,6 +3387,16 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         serviceInterest: estimate.service_interest,
         acceptedAt: estimate.accepted_at,
         createdAt: estimate.created_at,
+        // When it went out: the booking modal offers to link a quote sent in
+        // the last 60 days so the booking records the win.
+        sentAt: estimate.sent_at || null,
+        // Would a staff booking accept this quote? Same row refusals as POST
+        // /admin/schedule (plan-start, unwon bill-by-invoice proposal, gated or
+        // dropped add-ons, retired T&S cadence). An accepted row runs the helper's accepted branch; a quote with no schedulable line (quote-required-only items) is not bookable.
+        bookable: require('../services/estimate-staff-booking-eligibility').estimateBookableByStaff(estimate, { schedulableLineCount: lines.length }),
+        // Whether the quote carries a street of its own (the text itself is not sent). A quote tied to no property
+        // that carries one may be for another address, so the booking form offers no link for it.
+        hasQuotedAddress: !!String(estimate.address || '').trim(),
         monthlyTotal,
         annualTotal,
         onetimeTotal,
