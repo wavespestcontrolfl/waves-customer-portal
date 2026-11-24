@@ -145,6 +145,7 @@ function world({ tables = {}, jobs = [JOB], reminderJobs = [], ...deps } = {}) {
     raiseOfficeItem: jest.fn(async () => ({ id: 'n-office' })),
     planStartAcceptRefusal: jest.fn(async () => null),
     assertPlanStartAcceptEligible: jest.fn(async () => undefined),
+    hasPlanNow: jest.fn(async () => false),
     ...deps,
   };
 }
@@ -2103,6 +2104,34 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(deps.raiseOfficeItem).toHaveBeenCalledWith({
         job: { id: 'job-1' }, customer: expect.objectContaining({ id: 'cust-1', first_name: 'Jordan' }), offerDay: '2030-03-05', reason: 'not_priced',
       });
+    });
+
+    test('the customer has a plan now: the item is withdrawn, never rewritten with a later deadline', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'has_plan' })),
+        hasPlanNow: jest.fn(async () => true),
+        tables: { notifications: [item('job-1', { lastDay: '2030-03-20', jobId: 'job-1', reason: 'not_priced' })], estimates: [] },
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys, , opts]) => [keys, opts.resolution])).toEqual([[[_test.officeItemKey('job-1')], 'The customer has a plan now']]);
+      expect(deps.raiseOfficeItem).not.toHaveBeenCalled();
+    });
+
+    test('the plan check is the mint\'s own: a plan rate on the row, or a live recurring service', async () => {
+      const restart = require('../services/cancellation-resolution/restart');
+      const owns = jest.spyOn(restart, 'ownsAnyRecurringService');
+      try {
+        owns.mockResolvedValue(false);
+        const { hasPlanNow } = _test.defaultDeps();
+        expect(await hasPlanNow('db', { ...CUSTOMER, monthly_rate: 35 })).toBe(true);
+        expect(await hasPlanNow('db', { ...CUSTOMER })).toBe(false);
+        owns.mockResolvedValue(true);
+        expect(await hasPlanNow('db', { ...CUSTOMER })).toBe(true);
+        expect(owns).toHaveBeenLastCalledWith('db', 'cust-1');
+      } finally {
+        owns.mockRestore();
+      }
     });
 
     test('an item whose terms are current is not rewritten', async () => {

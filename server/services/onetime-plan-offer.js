@@ -167,6 +167,12 @@ function defaultDeps() {
     closePriceSettingsAlert,
     raiseOfficeItem,
     planStartAcceptRefusal,
+    // The plan-start mint's own bar (restart.js): a plan tier, rate or billing lane on the row, or any live recurring
+    // service or prepaid term, means the customer has a plan and no plan offer stands.
+    hasPlanNow: async (database, customer) => {
+      const restart = require('./cancellation-resolution/restart');
+      return !restart.planStartAccountOpen(customer) || restart.ownsAnyRecurringService(database, customer.id);
+    },
     assertPlanStartAcceptEligible: (...args) => require('./cancellation-resolution/restart').assertPlanStartAcceptEligible(...args),
   };
 }
@@ -1152,7 +1158,7 @@ async function planStartAcceptRefusal(database, estimate) {
   }
 }
 
-// The customer the item names is no longer one the offer may go to: not a live customer any more, or opted out of
+// The customer the item names is no longer one the offer may go to: not a live customer any more, on a plan now, or opted out of
 // Waves offers (the job's own opt-out read, optOutReason). The sentence that closes the item, or null.
 // The email division's verdicts that mean "do not contact this customer" for good, not "not today" (the caps and
 // recent human contact are not here): staff do-not-contact, email turned off, a suppression, no address.
@@ -1163,8 +1169,10 @@ const WITHDRAWN_VERDICTS = Object.freeze([
 ]);
 async function officeItemWithdrawn({ customerId, jobId }, { now, deps }) {
   const account = () => deps.db('customers').where({ id: customerId });
-  const customer = await account().whereNull('deleted_at').first('id', 'email', 'active');
+  // The whole row: the plan check reads the tier, rate and billing fields.
+  const customer = await account().whereNull('deleted_at').first();
   if (!customer || customer.active === false || !(await whereLiveCustomer(account()).first('id'))) return 'The customer is no longer active';
+  if (await deps.hasPlanNow(deps.db, customer)) return 'The customer has a plan now';
   if (await optOutReason(deps.db, { customerId, email: customer.email, deps })) return 'The customer turned off offers';
   // The division's own contact checks, as the job's emailAllowed asks them. A failed read keeps the item open.
   const verdict = await deps.eligibleForEmail({
