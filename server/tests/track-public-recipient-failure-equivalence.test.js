@@ -40,7 +40,7 @@ const logger = require('../services/logger');
 const holds = require('../services/disclaimed-number-holds');
 const trackPublicRouter = require('../routes/track-public');
 
-const TOKEN = 'b'.repeat(64);
+const TOKEN = `vr_${'b'.repeat(48)}`;
 const RECIP = { id: 'r-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', phone_key: '9415550002', phone_e164: '+19415550002', first_name: 'Bob' };
 const LIVE = new Date(Date.now() + 86400000).toISOString();
 const EN_ROUTE = {

@@ -28,7 +28,7 @@ describe('recordForCall (the booking step)', () => {
   let holder = { customer_id: 'cust-1', phone: null };
   const chain = () => {
     const q = {};
-    ['where', 'whereNull', 'whereRaw', 'join', 'onConflict', 'ignore'].forEach((m) => { q[m] = jest.fn(() => q); });
+    ['where', 'whereNull', 'whereRaw', 'join', 'onConflict', 'merge'].forEach((m) => { q[m] = jest.fn(() => q); });
     q.first = jest.fn(async (...cols) => (cols.includes('s.customer_id') ? holder : null));
     q.insert = jest.fn((row) => { inserts.push(row); return q; });
     q.returning = jest.fn(async () => [{ id: 'vtr-1' }]);
@@ -52,6 +52,8 @@ describe('recordForCall (the booking step)', () => {
   beforeEach(() => {
     inserts.length = 0;
     holder = { customer_id: 'cust-1', phone: null };
+    db.raw = jest.fn((sql) => ({ sql }));
+    db.fn = { now: jest.fn(() => 'now()') };
     db.mockImplementation(() => chain());
   });
 

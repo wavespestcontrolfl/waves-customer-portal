@@ -141,6 +141,45 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(after.find((row) => row.phone_key === BOB.slice(-10)).id).toBe(stored[0].id);
     });
 
+    test('a fresh call for the same visit and number REPLACES an ineligible row (never bound, or bound to another customer) and leaves an eligible one exactly as it is', async () => {
+      await record({}, entry({ first_name: 'Bob', role: 'spouse_partner' }));
+      const [first] = await rows();
+      const claim = { 'confirmation:2031-01-01T09:00': 'token-1' };
+      await db('visit_text_recipients').where({ id: first.id }).update({ track_token: `vr_${'d'.repeat(48)}`, deliveries: claim });
+      // (1) already bound to the visit's customer: nothing changes, nothing is reported as created
+      const same = await record({}, entry({ first_name: 'Robert', role: 'friend' }));
+      expect(same.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: false }]);
+      const kept = (await rows())[0];
+      expect(kept).toMatchObject({ id: first.id, first_name: 'Bob', role: 'spouse_partner', customer_id: customerId, track_token: `vr_${'d'.repeat(48)}` });
+      expect(kept.deliveries).toEqual(claim);
+      // (2) never bound (customer_id null): replaced, with the old token and claims cleared
+      await db('visit_text_recipients').where({ id: first.id }).update({ customer_id: null });
+      const [{ id: secondCall }] = await db('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE }).returning('id');
+      try {
+        const replaced = await record({ callLogId: secondCall }, entry({ first_name: 'Robert', role: 'friend' }));
+        expect(replaced.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: true }]);
+        const after = await rows();
+        expect(after).toHaveLength(1);
+        expect(after[0]).toMatchObject({ id: first.id, customer_id: customerId, call_log_id: secondCall, first_name: 'Robert', role: 'friend', track_token: null });
+        expect(after[0].deliveries).toEqual({});
+        // (3) bound to a customer the visit has since left: replaced the same way
+        const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(41) }).returning('id');
+        try {
+          await db('visit_text_recipients').where({ id: first.id }).update({ customer_id: otherCustomerId, track_token: `vr_${'e'.repeat(48)}`, deliveries: claim });
+          const again = await record({ callLogId: secondCall }, entry({ first_name: 'Rob' }));
+          expect(again.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: true }]);
+          const final = (await rows())[0];
+          expect(final).toMatchObject({ customer_id: customerId, first_name: 'Rob', track_token: null });
+          expect(final.deliveries).toEqual({});
+        } finally {
+          await db('visit_text_recipients').where({ id: first.id }).update({ customer_id: customerId });
+          await db('customers').where({ id: otherCustomerId }).del();
+        }
+      } finally {
+        await db('call_log').where({ id: secondCall }).del();
+      }
+    });
+
     test('a retry never resets a delivery claim', async () => {
       await record();
       const [contact] = await VisitRecipient.contactsForVisit(visitId, 'confirmation');
@@ -316,7 +355,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       ]);
       for (const [input] of sendCustomerMessage.mock.calls.slice(0, 3)) expect(input.body).not.toMatch(/https?:|track|reschedule/i);
       const [{ track_token: bobToken }] = await rows();
-      expect(bobToken).toMatch(/^[a-f0-9]{64}$/);
+      expect(bobToken).toMatch(/^vr_[a-f0-9]{48}$/);
       expect(bobToken).not.toBe(HOLDER_TOKEN);
       const enRouteBody = sendCustomerMessage.mock.calls[3][0].body;
       expect(enRouteBody).toContain(`Pat is on the way, about 12 minutes away. Track live: https://x.test/track/${bobToken}`);
@@ -356,7 +395,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       await attempt();
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       expect(builder).toHaveBeenCalledTimes(1);
-      expect((await rows())[0].track_token).toMatch(/^[a-f0-9]{64}$/);
+      expect((await rows())[0].track_token).toMatch(/^vr_[a-f0-9]{48}$/);
     });
 
     test('a skipped attempt mints no token: with the slot already claimed, no token and no link are made', async () => {
@@ -756,7 +795,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
   });
 
   describe('the recipient\'s own tracker token', () => {
-    const TOKEN_FORMAT = /^[a-f0-9]{64}$/;
+    const TOKEN_FORMAT = /^vr_[a-f0-9]{48}$/;
     let getContactPrefRow;
     beforeEach(async () => {
       process.env[GATE] = 'true';
@@ -766,6 +805,17 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       await db('scheduled_services').where({ id: visitId }).update({ status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
     });
     afterEach(() => { delete process.env[GATE]; });
+
+    test('a token of any other shape (an old 64-hex one) is replaced once by the recognizable vr_ shape, then stays', async () => {
+      const [{ id }] = await rows();
+      await db('visit_text_recipients').where({ id }).update({ track_token: 'c'.repeat(64) });
+      const minted = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(minted).toMatch(TOKEN_FORMAT);
+      expect(minted.length).toBeLessThanOrEqual(64);
+      expect(await VisitRecipient.ensureTrackToken(id, customerId)).toBe(minted);
+      // the old shape no longer opens anything
+      expect(await VisitRecipient.visitForTrackToken('c'.repeat(64))).toBeNull();
+    });
 
     test('minted once on first use, the same value after, never the holder\'s; two racing mints agree', async () => {
       const [{ id }] = await rows();

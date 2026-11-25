@@ -34,14 +34,16 @@ test('a failed track-token lookup logs the driver code only, never the token', a
   expect(socket.userType).toBeUndefined();
 });
 
-test('a recipient\'s token (not a track_view_token) is never a socket credential: no row, no room', async () => {
-  db.mockImplementation(() => {
-    const q = { leftJoin: () => q, where: () => q, first: async () => null };
-    return q;
-  });
-  const socket = { handshake: { auth: { trackToken: TOKEN }, headers: {} } };
+test('a visit text recipient\'s token (vr_ + 48 hex) is refused by FORMAT before any database read: no row lookup, no room', async () => {
+  db.mockClear();
+  db.mockImplementation(() => { throw new Error('the database must not be read for this token'); });
+  const RECIPIENT = `vr_${'b'.repeat(48)}`;
+  const socket = { handshake: { auth: { trackToken: RECIPIENT }, headers: {} } };
   const next = jest.fn();
   await socketAuth(socket, next);
   expect(next.mock.calls[0][0]).toMatchObject({ data: { code: 'TRACK_TOKEN_INVALID' } });
+  expect(db).not.toHaveBeenCalled();
   expect(socket.userType).toBeUndefined();
+  // and nothing it logged carries the token
+  expect(JSON.stringify([logger.error.mock.calls, logger.warn.mock.calls])).not.toContain(RECIPIENT);
 });

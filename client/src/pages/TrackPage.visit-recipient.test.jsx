@@ -80,84 +80,64 @@ describe('TrackPage for a visit text recipient', () => {
       </MemoryRouter>,
     );
     expect(await screen.findByText(/Tracking link unavailable/i)).toBeInTheDocument();
-    expect(io).not.toHaveBeenCalled();
   });
 });
 
 describe('the live socket', () => {
-  it('never opens for a visit text recipient\'s link (its token is not a socket credential)', async () => {
+  const RECIPIENT = `vr_${'b'.repeat(48)}`; // a visit text recipient's own token shape
+  const HOLDER = 'a'.repeat(64);
+  const renderAt = (path) => render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes><Route path="/track/:token" element={<TrackPage />} /></Routes>
+    </MemoryRouter>,
+  );
+  const holderBody = () => ({ ...payload('en_route', { meta: { pollIntervalSeconds: 0 } }), scope: undefined });
+
+  it('never opens for a recipient-format URL (its token is not a socket credential): not at mount, not after the GET answers', async () => {
     io.mockClear();
-    renderTrack(payload('en_route', { meta: { pollIntervalSeconds: 30 } }));
+    global.fetch = vi.fn(async (url, init) => (init?.method === 'POST' ? { ok: true, status: 204 } : { ok: true, status: 200, json: async () => payload('en_route', { meta: { pollIntervalSeconds: 30 } }) }));
+    renderAt(`/track/${RECIPIENT}`);
+    expect(io).not.toHaveBeenCalled();
     expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(io).not.toHaveBeenCalled();
   });
 
-  it('does not open before the GET has answered; for the holder it opens once the answer arrives (and not again on a refetch)', async () => {
+  it('a holder URL opens its socket AT MOUNT, before the GET answers, and there is no connect refetch (as on main)', async () => {
     io.mockClear();
+    const handlers = {};
+    io.mockImplementation(() => ({ on: vi.fn((event, fn) => { handlers[event] = fn; }), off: vi.fn(), disconnect: vi.fn() }));
+    const gets = [];
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
     global.fetch = vi.fn(async (url, init) => {
       if (init?.method === 'POST') return { ok: true, status: 204 };
+      gets.push(String(url));
       await gate;
-      return { ok: true, status: 200, json: async () => ({ ...payload('en_route', { meta: { pollIntervalSeconds: 0 } }), scope: undefined }) };
+      return { ok: true, status: 200, json: async () => holderBody() };
     });
-    render(
-      <MemoryRouter initialEntries={['/track/token']}>
-        <Routes><Route path="/track/:token" element={<TrackPage />} /></Routes>
-      </MemoryRouter>,
-    );
-    await Promise.resolve();
-    expect(io).not.toHaveBeenCalled();
+    renderAt(`/track/${HOLDER}`);
+    await waitFor(() => expect(io).toHaveBeenCalledTimes(1));
+    expect(io.mock.calls[0][0].auth.trackToken).toBe(HOLDER);
     release();
     expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
-    await waitFor(() => expect(io).toHaveBeenCalledTimes(1));
-  });
-
-  it('the holder page refetches on EVERY socket connect (the first included) with the no-provider ETA flag; the normal GET and the poll carry no flag', async () => {
-    io.mockClear();
-    const handlers = {};
-    const socket = { on: vi.fn((event, fn) => { handlers[event] = fn; }), off: vi.fn(), disconnect: vi.fn() };
-    io.mockImplementation(() => socket);
-    const gets = [];
-    global.fetch = vi.fn(async (url, init) => {
-      if (init?.method === 'POST') return { ok: true, status: 204 };
-      gets.push(String(url));
-      return { ok: true, status: 200, json: async () => ({ ...payload('en_route', { meta: { pollIntervalSeconds: 0 } }), scope: undefined }) };
-    });
-    render(
-      <MemoryRouter initialEntries={['/track/token']}>
-        <Routes><Route path="/track/:token" element={<TrackPage />} /></Routes>
-      </MemoryRouter>,
-    );
-    expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
-    await waitFor(() => expect(handlers.connect).toBeTypeOf('function'));
-    // the initial GET is the normal one
-    expect(gets).toHaveLength(1);
-    expect(gets[0]).not.toContain('refresh=');
-    // the FIRST connect refetches, once, with the flag
-    await act(async () => { handlers.connect(); });
-    await waitFor(() => expect(gets).toHaveLength(2));
-    expect(gets[1]).toMatch(/\/track\/token\?refresh=socket$/);
-    // so does every reconnect
-    await act(async () => { handlers.connect(); });
-    await waitFor(() => expect(gets).toHaveLength(3));
-    expect(gets[2]).toMatch(/\?refresh=socket$/);
-    // a job-update broadcast refetches as before: no flag
+    // only the job-update broadcast refetches; a socket connect does nothing, and no URL ever carries a query flag
+    expect(handlers.connect).toBeUndefined();
     await act(async () => { handlers['customer:job_update'](); });
-    await waitFor(() => expect(gets).toHaveLength(4));
-    expect(gets[3]).not.toContain('refresh=');
+    await waitFor(() => expect(gets).toHaveLength(2));
+    expect(gets.every((url) => !url.includes('?'))).toBe(true);
     io.mockImplementation(() => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }));
   });
 
-  it('navigating from a holder URL to a recipient URL in the same page never opens a socket with the recipient token', async () => {
+  it('navigating from a holder URL to a recipient URL closes the socket and never opens one with the recipient token', async () => {
     io.mockClear();
-    const HOLDER = 'h'.repeat(64);
-    const RECIPIENT = 'r'.repeat(64);
+    const disconnect = vi.fn();
+    io.mockImplementation(() => ({ on: vi.fn(), off: vi.fn(), disconnect }));
     let releaseRecipient;
     const recipientGate = new Promise((resolve) => { releaseRecipient = resolve; });
     global.fetch = vi.fn(async (url, init) => {
       if (init?.method === 'POST') return { ok: true, status: 204 };
-      if (String(url).includes(HOLDER)) return { ok: true, status: 200, json: async () => ({ ...payload('en_route', { meta: { pollIntervalSeconds: 0 } }), scope: undefined }) };
+      if (String(url).includes(HOLDER)) return { ok: true, status: 200, json: async () => holderBody() };
       await recipientGate;
       return { ok: true, status: 200, json: async () => payload('en_route', { meta: { pollIntervalSeconds: 0 } }) };
     });
@@ -173,14 +153,14 @@ describe('the live socket', () => {
     );
     expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
     await waitFor(() => expect(io).toHaveBeenCalledTimes(1));
-    expect(io.mock.calls[0][0].auth.trackToken).toBe(HOLDER);
-    // Navigate: the old (holder) answer must not authorize a socket for the new token, before or after the recipient answer.
     await act(async () => { fireEvent.click(screen.getByText('go')); });
+    expect(disconnect).toHaveBeenCalled();
     releaseRecipient();
     expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     const handshakes = io.mock.calls.map((call) => (call[1] || call[0]).auth.trackToken);
     expect(handshakes).not.toContain(RECIPIENT);
     expect(io).toHaveBeenCalledTimes(1);
+    io.mockImplementation(() => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }));
   });
 });

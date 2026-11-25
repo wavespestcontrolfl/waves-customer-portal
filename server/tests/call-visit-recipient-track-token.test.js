@@ -38,7 +38,7 @@ const VisitRecipient = require('../services/call-visit-recipient');
 
 const GATE = 'GATE_CALL_GIVEN_VISIT_TEXTS';
 const gateBefore = process.env[GATE];
-const TOKEN = 'b'.repeat(64);
+const TOKEN = `vr_${'b'.repeat(48)}`;
 const ROW = { id: 'r-1', scheduled_service_id: 'ss-1', customer_id: 'cust-1', phone_key: '9415550002', phone_e164: '+19415550002', first_name: 'Bob', last_name: 'Roe' };
 const LIVE = new Date(Date.now() + 86400000).toISOString();
 const VISIT = { id: 'ss-1', customer_id: 'cust-1', status: 'en_route', track_state: 'en_route', completed_at: null, en_route_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(), scheduled_date: '2026-12-01', window_start: '09:00:00', service_type: 'Pest Control', track_token_expires_at: LIVE };
@@ -292,7 +292,7 @@ describe('ensureTrackToken: one atomic mint on the recipient row', () => {
     mockTables.visit_text_recipients.returning = [{ track_token: TOKEN }];
     expect(await VisitRecipient.ensureTrackToken('r-1', 'cust-1')).toBe(TOKEN);
     expect(mockTables.visit_text_recipients.updates).toHaveLength(1);
-    expect(JSON.stringify(mockTables.visit_text_recipients.updates[0])).toContain('COALESCE(track_token');
+    expect(JSON.stringify(mockTables.visit_text_recipients.updates[0])).toContain("CASE WHEN track_token ~ '^vr_[a-f0-9]{48}$' THEN track_token ELSE ('vr_' || encode(gen_random_bytes(24), 'hex')) END");
     expect(mockTables.scheduled_services.updates).toEqual([]);
   });
 });

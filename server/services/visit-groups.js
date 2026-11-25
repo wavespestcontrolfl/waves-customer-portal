@@ -1051,55 +1051,6 @@ function rowStillAtVisitStop(row, visit, otherMembers = []) {
   return anchors.some((m) => windowsOverlap(row.window_start, row.window_end, m.window_start, m.window_end));
 }
 
-// How far apart two members' en_route_at stamps may be and still be ONE drive: the fan-out writes the siblings seconds after the
-// tapped row. A sibling stamped much later is a separate en-route (the tech came back to it), not this drive.
-const SAME_DRIVE_EN_ROUTE_MS = 5 * 60 * 1000;
-
-/**
- * READ-ONLY, ONE query: the other members of `service`'s visit whose tracker is part of the SAME drive, so a viewer of `service`
- * may treat the technician's current_job_id on any of them as this visit's drive (the en-route fan-out moves current_job_id to the
- * last sibling it advances). A sibling is admitted only when ALL hold, judged on the rows as this one read saw them:
- *   - `service` itself is still a live member of an OPEN visit, on the visit's technician, and at the visit's stop
- *     (rowStillAtVisitStop, the rule the fan-out applies to its own primary);
- *   - BOTH rows have a non-null property_id and they are EQUAL: a null property_id proves nothing about the address (two different
- *     addresses of one customer can both be null), so any null means no sibling position;
- *   - the sibling has the same visit_id, the SAME technician_id, and is at the visit's stop by the same rule (same date, customer
- *     and property, window still connected): a row moved to another stop or tech that still holds the old visit_id is out;
- *   - the sibling is itself en_route by status AND tracker, with an en_route_at within SAME_DRIVE_EN_ROUTE_MS of the service's.
- * Anything else (not grouped, detached, an unreadable shape) returns []; a failed read THROWS, so the caller decides.
- */
-async function sameDriveSiblingIds(service, { conn = db } = {}) {
-  if (!service || !service.id || !service.visit_id || !service.technician_id || !service.en_route_at) return [];
-  const startMs = new Date(service.en_route_at).getTime();
-  if (!Number.isFinite(startMs)) return [];
-  const rows = await conn('scheduled_services as m')
-    .join('service_visits as v', 'v.id', 'm.visit_id')
-    .where('m.visit_id', service.visit_id)
-    .whereNotIn('m.status', TERMINAL_ROW_STATUSES)
-    .select('m.id', 'm.status', 'm.track_state', 'm.en_route_at', 'm.technician_id',
-      'm.customer_id', 'm.property_id', 'm.scheduled_date', 'm.window_start', 'm.window_end',
-      'v.status as v_status', 'v.technician_id as v_technician_id', 'v.customer_id as v_customer_id',
-      'v.property_id as v_property_id', 'v.scheduled_date as v_scheduled_date',
-      'v.window_start as v_window_start', 'v.window_end as v_window_end');
-  const me = rows.find((r) => String(r.id) === String(service.id));
-  if (!me || String(me.v_status) !== 'open') return [];
-  const visit = {
-    scheduled_date: me.v_scheduled_date, customer_id: me.v_customer_id, property_id: me.v_property_id,
-    window_start: me.v_window_start, window_end: me.v_window_end,
-  };
-  const techId = String(service.technician_id);
-  if (String(me.technician_id || '') !== techId || (me.v_technician_id && String(me.v_technician_id) !== techId)) return [];
-  if (!me.property_id || !rowStillAtVisitStop(me, visit, rows.filter((o) => o.id !== me.id))) return [];
-  return rows
-    .filter((s) => String(s.id) !== String(me.id))
-    .filter((s) => s.property_id && String(s.property_id) === String(me.property_id)
-      && String(s.technician_id || '') === techId
-      && s.status === 'en_route' && s.track_state === 'en_route' && s.en_route_at
-      && Math.abs(new Date(s.en_route_at).getTime() - startMs) <= SAME_DRIVE_EN_ROUTE_MS
-      && rowStillAtVisitStop(s, visit, rows.filter((o) => o.id !== s.id)))
-    .map((s) => s.id);
-}
-
 /** Non-terminal members of a visit other than `rowId`, with their stop tuple + windows (for connectivity checks). */
 async function otherLiveMembers(t, visitId, rowId) {
   return t('scheduled_services').where({ visit_id: visitId }).whereNot('id', rowId)
@@ -3211,7 +3162,6 @@ module.exports = {
   NOTIFICATION_CLAIM_LEASE_MS,
   dateOnly,
   rowStillAtVisitStop,
-  sameDriveSiblingIds,
   toMinutes,
   // Pure key builder, exported for the reminder cron's visit-scoped email
   // idempotency key (the undelivered-SMS recovery rebuilds it from the

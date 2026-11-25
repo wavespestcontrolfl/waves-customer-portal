@@ -11,7 +11,8 @@
  *    parser never reads the body: a malformed or oversized body can never turn
  *    the view beacon's 404/204 into a 400/413.
  */
-const TRACK_TOKEN_RE = /^[a-f0-9]{64}$/;
+// A holder's tracker token (64 hex) or a visit text recipient's own (`vr_` + 48 hex): the same shapes track-public accepts.
+const TRACK_TOKEN_RE = /^(?:[a-f0-9]{64}|vr_[a-f0-9]{48})$/;
 const VIEW_PATH_RE = /^\/([^/]+)\/view\/?$/;
 
 function trackPublicPreparser(req, res, next) {

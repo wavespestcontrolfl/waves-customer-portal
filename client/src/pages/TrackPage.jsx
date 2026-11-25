@@ -8,6 +8,13 @@ import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import AppLinkCards from '../components/crossSell/AppLinkCards';
+
+// A visit text recipient's own tracker token (`vr_` + 48 hex; the holder's is 64 hex): not a socket credential. Mirrors
+// server/utils/recipient-track-token.js.
+const RECIPIENT_TRACK_TOKEN_RE = /^vr_[a-f0-9]{48}$/;
+function isRecipientTrackToken(token) {
+  return RECIPIENT_TRACK_TOKEN_RE.test(token || '');
+}
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -953,8 +960,6 @@ export default function TrackPage() {
 
   const { token } = useParams();
   const [data, setData] = useState(null);
-  // The token the current `data` was fetched FOR: after a navigation to another token the old answer must never gate the new socket.
-  const [dataToken, setDataToken] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   // React reuses this page instance across /track/:token navigations —
@@ -979,13 +984,11 @@ export default function TrackPage() {
   // richer state object (window, property, vehicle, summary,
   // cancellation, etc.). Refetching gives us the full state without
   // having to merge a narrow payload into a rich UI.
-  // `socketRefresh`: the refetch a socket connect or reconnect triggers. It asks the server for the no-provider ETA (`?refresh=socket`,
-  // no paid Distance Matrix call): a connect is a catch-up read, not a new reading of the road, and the 30 s poll keeps the ETA fresh.
-  const fetchTrack = useCallback(async ({ socketRefresh = false } = {}) => {
+  const fetchTrack = useCallback(async () => {
     const seq = ++fetchSeqRef.current;
     const stale = () => tokenRef.current !== token || fetchSeqRef.current !== seq;
     try {
-      const r = await fetch(`${API_BASE}/public/track/${token}${socketRefresh === true ? '?refresh=socket' : ''}`);
+      const r = await fetch(`${API_BASE}/public/track/${token}`);
       if (stale()) return; // superseded by a newer request or a token change
       if (r.status === 404) {
         setNotFound(true);
@@ -999,7 +1002,6 @@ export default function TrackPage() {
       if (stale()) return;
       if (body?.state) {
         setData(body);
-        setDataToken(token);
         if (viewSentRef.current !== token) {
           viewSentRef.current = token;
           // Fire-and-forget: a failed view report must never touch the page.
@@ -1041,7 +1043,6 @@ export default function TrackPage() {
     let cancelled = false;
     tokenRef.current = token;
     setData(null);
-    setDataToken(null);
     setNotFound(false);
     setLoading(true);
     (async () => {
@@ -1067,12 +1068,11 @@ export default function TrackPage() {
   // a refresh restores live updates. We don't surface socket errors
   // to the UI.
   //
-  // Not before the GET has answered, and never for a visit text recipient's link (scope 'visit_recipient'): the socket
-  // joins the HOLDER's customer room, and a recipient's token is not a socket credential. Recipients refresh by poll.
-  // A boolean, not `data`, so a refetch never reconnects the socket.
-  const socketAllowed = Boolean(data) && dataToken === token && data.scope !== 'visit_recipient';
+  // Never for a visit text recipient's link: the socket joins the HOLDER's customer room and a recipient's token is not a socket
+  // credential. Its token has its own shape (`vr_` + 48 hex), so the page decides from the URL alone, at mount, before anything is
+  // fetched; the server's socket auth refuses that shape too. Recipients refresh by poll.
   useEffect(() => {
-    if (!token || notFound || !socketAllowed) return undefined;
+    if (!token || notFound || isRecipientTrackToken(token)) return undefined;
     const origin = socketOrigin();
     const socket = origin
       ? io(origin, { auth: { trackToken: token }, transports: ['websocket', 'polling'], reconnection: true })
@@ -1082,20 +1082,12 @@ export default function TrackPage() {
       fetchTrack();
     }
     socket.on('customer:job_update', handleJobUpdate);
-    // A broadcast sent before the socket joined its room, or while it was down, is gone: refetch on EVERY connect, the first
-    // included (the room join can trail the initial GET) and every reconnect. The refetch asks for the no-provider ETA, so it
-    // never costs a paid Distance Matrix call; the normal GET and the poll are unchanged.
-    function handleConnect() {
-      fetchTrack({ socketRefresh: true });
-    }
-    socket.on('connect', handleConnect);
 
     return () => {
       socket.off('customer:job_update', handleJobUpdate);
-      socket.off('connect', handleConnect);
       socket.disconnect();
     };
-  }, [token, notFound, socketAllowed, fetchTrack]);
+  }, [token, notFound, fetchTrack]);
 
   // Server-driven polling cadence. While en-route the response sets
   // pollIntervalSeconds=30 so we refresh vehicle coords + ETA between

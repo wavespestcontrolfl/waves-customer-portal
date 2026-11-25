@@ -80,7 +80,8 @@ const SCHEDULED_POLL_SECONDS = 60;
 const SERVICE_PHOTO_TTL_SECONDS = PhotoService.CUSTOMER_DWELL_TTL_SECONDS;
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
-const TOKEN_RE = /^[a-f0-9]{64}$/;
+// A holder's tracker token (64 hex) or a visit text recipient's own (`vr_` + 48 hex, utils/recipient-track-token.js).
+const TOKEN_RE = /^(?:[a-f0-9]{64}|vr_[a-f0-9]{48})$/;
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -447,9 +448,7 @@ async function buildApproxVehicle(row) {
 
 // `readOnly` (a visit text recipient's link): no write and no paid call. The tracker's own cached position only (no
 // Bouncie fetch, which writes tech_status), and the straight-line ETA (no Distance Matrix).
-// `allowProvider: false` (the holder's socket-connect refetch, `?refresh=socket`) uses the no-provider straight-line ETA: no paid
-// Distance Matrix call. A recipient's read-only view never calls it either.
-async function buildVehicle(service, { readOnly = false, allowProvider = true } = {}) {
+async function buildVehicle(service, { readOnly = false } = {}) {
   // Phase 2: live tech location + ETA from tech_status. Returns null
   // if either the tech's last GPS ping is missing or the property
   // doesn't have a geocode — TrackPage falls back to a no-map en-route
@@ -461,10 +460,6 @@ async function buildVehicle(service, { readOnly = false, allowProvider = true } 
   // without it nothing proves a fix is from THIS drive.
   if (readOnly && (service.status !== 'en_route' || service.track_state !== 'en_route' || !service.en_route_at)) return null;
 
-  // A grouped visit's en-route fan-out moves the technician's current_job_id to the last sibling it advances. Those siblings count
-  // as this drive ONLY on the strict read in visit-groups (same visit, same tech, same stop, themselves en route within minutes of
-  // this row's own en_route_at); anything else, or no group, leaves just this visit's own id.
-  const driveJobIds = readOnly ? [service.id, ...(await require('../services/visit-groups').sameDriveSiblingIds(service))] : null;
   const position = await resolveFreshTechPosition({
     techId: service.technician_id,
     // Same remap floor as the SMS ETA path (round-34 P2): a cached tech_status fix
@@ -472,10 +467,10 @@ async function buildVehicle(service, { readOnly = false, allowProvider = true } 
     // OLD vehicle's, so the text and the tracking page never show different vehicles.
     cachedNotBefore: techMappingCutoff(service.tech_mapping_changed_at),
     logPrefix: 'track-public',
-    // A recipient sees the truck only while the technician's ACTIVE job is this visit or a sibling of the SAME drive (see above): a
-    // tech who has moved on to another stop, a moved or re-assigned sibling's included, is at another customer's home, whatever
-    // this visit's state still says.
-    ...(readOnly ? { allowBouncieFallback: false, strict: true, requireCurrentJobIds: driveJobIds, requireFixAfter: service.en_route_at } : {}),
+    // A recipient sees the truck only while the technician's ACTIVE job is exactly THIS visit, decided inside the one SELECT that
+    // returns the fix (tech_status.current_job_id = this visit's id): a grouped visit whose focus moved to a sibling, or a tech who
+    // has moved on to another stop, shows no truck, whatever this visit's state still says.
+    ...(readOnly ? { allowBouncieFallback: false, strict: true, requireCurrentJobIds: [service.id], requireFixAfter: service.en_route_at } : {}),
   });
   if (!position) return null;
 
@@ -486,7 +481,7 @@ async function buildVehicle(service, { readOnly = false, allowProvider = true } 
     customerLng: service.longitude,
     techUpdatedAt: position.lastReportedAt,
     logPrefix: 'track-public',
-    ...(readOnly || allowProvider === false ? { allowProvider: false } : {}),
+    ...(readOnly ? { allowProvider: false } : {}),
   });
 
   return {
@@ -785,7 +780,6 @@ function readTrackVisit(where) {
       's.recurring_dispatch_due_date',
       's.service_id',
       's.property_id',
-      's.visit_id',
       's.is_recurring',
       's.recurring_parent_id',
       's.is_callback',
@@ -949,7 +943,7 @@ router.get('/:token', safeRoute(async (req, res, next) => {
       // leaves track_state='en_route', and keying off it here would keep
       // streaming fresh tech GPS coords and polling until token expiry
       // even though the customer is shown a terminal missed-visit card.
-      vehicle: customerState === 'en_route' ? (recipientScope ? recipientVehicle : await buildVehicle(row, { readOnly: false, allowProvider: req.query?.refresh !== 'socket' })) : null,
+      vehicle: customerState === 'en_route' ? (recipientScope ? recipientVehicle : await buildVehicle(row, { readOnly: false })) : null,
       stopsAhead: stopsReady ? stopsReady.stopsAhead : null,
       // True when a count exists but is not yet the durable clamp floor —
       // the page must POST /:token/stops-ahead (the explicit write path)

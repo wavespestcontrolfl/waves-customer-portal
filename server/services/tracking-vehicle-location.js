@@ -26,9 +26,16 @@ async function withTimeout(promise, timeoutMs, fallbackValue = null) {
 // is accepted only if it was reported AND received by the server STRICTLY AFTER the mapping's last change
 // (technicians.bouncie_imei_changed_at; NULL = never remapped = no cutoff). A caller-passed
 // `cachedNotBefore` is honored only as an EXTRA floor (it can tighten, never loosen).
-async function readMappingAndCache(techId, dbh = db) {
-  return dbh('technicians as t')
-    .leftJoin('tech_status as ts', 'ts.tech_id', 't.id')
+async function readMappingAndCache(techId, dbh = db, requireCurrentJobIds = null) {
+  // `requireCurrentJobIds` (a visit text recipient's link): the tech_status row joins ONLY while its current_job_id is one of these
+  // visits, so the job condition and the fix come out of the same statement (the JS check in cachedPositionFrom stays as a second
+  // guard). Without it the join is the plain one.
+  const joined = requireCurrentJobIds
+    ? dbh('technicians as t').leftJoin('tech_status as ts', function joinCurrentJob() {
+      this.on('ts.tech_id', 't.id').andOn(dbh.raw('ts.current_job_id::text = ANY(?::text[])', [requireCurrentJobIds.map(String)]));
+    })
+    : dbh('technicians as t').leftJoin('tech_status as ts', 'ts.tech_id', 't.id');
+  return joined
     .where('t.id', techId)
     .first('t.bouncie_imei', 't.bouncie_imei_changed_at', 'ts.lat', 'ts.lng', 'ts.location_updated_at', 'ts.location_received_at', 'ts.current_job_id');
 }
@@ -137,7 +144,7 @@ async function resolveBouncieFallback({
     // remap-cutoff acceptance as any cached fix) — never the older fetched coordinates.
     const committedMs = new Date(written.location_updated_at).getTime();
     if (Number.isFinite(committedMs) && committedMs > new Date(lastReportedAt).getTime()) {
-      return cachedPositionFrom(await readMappingAndCache(techId, dbh), cachedNotBefore, requireCurrentJobIds, requireFixAfter);
+      return cachedPositionFrom(await readMappingAndCache(techId, dbh, requireCurrentJobIds), cachedNotBefore, requireCurrentJobIds, requireFixAfter);
     }
 
     return {
@@ -177,7 +184,7 @@ async function resolveFreshTechPosition({
 
   let row;
   try {
-    row = await readMappingAndCache(techId, dbh);
+    row = await readMappingAndCache(techId, dbh, requireCurrentJobIds);
   } catch (err) {
     logger.warn(`[${logPrefix}] tracker mapping / tech_status lookup failed (code=${(err && err.code) || 'none'})`);
     if (strict) throw Object.assign(new Error('tech_status read failed'), { code: err && err.code });

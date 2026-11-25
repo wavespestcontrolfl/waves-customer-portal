@@ -149,7 +149,7 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
   for (const entry of eligibleEntries(v2Extraction, { excludePhones: [...excludePhones, holder?.phone] })) {
     if (await disclaimedNumberHeld(entry.phoneE164, conn, { strict: true })) { result.skipped.push({ reason: 'disclaimed_number' }); continue; }
     if (await suppressedNumber(entry.phoneKey, conn)) { result.skipped.push({ reason: 'suppressed' }); continue; }
-    const rows = await conn(TABLE).insert({
+    const fresh = {
       scheduled_service_id: scheduledServiceId,
       customer_id: authorizingCustomerId,
       phone_key: entry.phoneKey,
@@ -160,7 +160,28 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       source: SOURCE,
       consent_version: CONSENT_VERSION,
       call_log_id: callLogId,
-    }).onConflict(['scheduled_service_id', 'phone_key']).ignore().returning('id');
+    };
+    // One atomic write per number: a new row; or, when the same visit and number already have a row that is NOT bound to this
+    // visit's current customer (never bound, or bound to a customer the visit has since left), a fresh qualifying call REPLACES it:
+    // the new customer, call, name and role, with its old tracker token and delivery claims cleared. A row that is already bound
+    // to the visit's customer is left exactly as it is (no change, no row returned).
+    const rows = await conn(TABLE).insert(fresh)
+      .onConflict(['scheduled_service_id', 'phone_key'])
+      .merge({
+        customer_id: fresh.customer_id,
+        phone_e164: fresh.phone_e164,
+        first_name: fresh.first_name,
+        last_name: fresh.last_name,
+        role: fresh.role,
+        source: fresh.source,
+        consent_version: fresh.consent_version,
+        call_log_id: fresh.call_log_id,
+        track_token: null,
+        deliveries: conn.raw("'{}'::jsonb"),
+        created_at: conn.fn.now(),
+      })
+      .where(conn.raw(`${TABLE}.customer_id IS DISTINCT FROM ?`, [authorizingCustomerId]))
+      .returning('id');
     result.recorded.push({ phoneKey: entry.phoneKey, created: rows.length > 0 });
   }
   return result;
@@ -503,7 +524,8 @@ async function arrivalSnapshot(visit, conn) {
 async function ensureTrackToken(visitRecipientId, customerId, conn = db) {
   const rows = await conn(TABLE)
     .where({ id: visitRecipientId, customer_id: customerId })
-    .update({ track_token: conn.raw("COALESCE(track_token, encode(gen_random_bytes(32), 'hex'))") })
+    // Minted once, in the recipient's own recognizable shape (vr_ + 48 hex); a token of any other shape is replaced by one.
+    .update({ track_token: conn.raw(`CASE WHEN track_token ~ '^vr_[a-f0-9]{48}$' THEN track_token ELSE ${RECIPIENT_TRACK_TOKEN_MINT_SQL} END`) })
     .returning('track_token');
   const first = Array.isArray(rows) ? rows[0] : null;
   return (first && typeof first === 'object' ? first.track_token : first) || null;
@@ -525,7 +547,7 @@ async function recipientTrackUrl(contact, context, conn) {
   }
 }
 
-const TRACK_TOKEN_RE = /^[a-f0-9]{64}$/;
+const { RECIPIENT_TRACK_TOKEN_RE: TRACK_TOKEN_RE, RECIPIENT_TRACK_TOKEN_MINT_SQL } = require('../utils/recipient-track-token');
 
 /**
  * The visit a recipient's tracker token opens, or null. The link works only while the gate is on, the row still exists

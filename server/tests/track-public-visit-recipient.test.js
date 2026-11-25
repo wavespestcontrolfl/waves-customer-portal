@@ -36,7 +36,7 @@ const mockRecordPageView = require('../services/customer-page-views').recordPage
 
 const trackPublicRouter = require('../routes/track-public');
 
-const RECIPIENT_TOKEN = 'b'.repeat(64);
+const RECIPIENT_TOKEN = `vr_${'b'.repeat(48)}`;
 const HOLDER_TOKEN = 'a'.repeat(64);
 const find = (path, method) => trackPublicRouter.stack.find((l) => l.route?.path === path && l.route.methods[method]).route.stack[0].handle;
 
@@ -63,7 +63,7 @@ function visitRow(over = {}) {
 
 // db: the holder lookup (by track_view_token) misses; the by-id read returns the visit; every other table is recorded.
 const writes = [];
-function install(row, { holderRow = null, members = null } = {}) {
+function install(row, { holderRow = null } = {}) {
   const tablesRead = [];
   mockDb.raw = jest.fn((sql) => sql);
   mockDb.mockImplementation((table) => {
@@ -78,19 +78,16 @@ function install(row, { holderRow = null, members = null } = {}) {
       if (table !== 'scheduled_services as s' && table !== 'scheduled_services') return null;
       return byToken ? holderRow : row;
     });
-    // The visit-group read (visit-groups.sameDriveSiblingIds): one query over the visit's members joined to the visit.
-    q.join = jest.fn(() => q);
-    q.whereNotIn = jest.fn(() => q);
-    q.then = (resolve, reject) => Promise.resolve(table === 'scheduled_services as m' && members ? members : []).then(resolve, reject);
+    q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
     return q;
   });
   return tablesRead;
 }
 
-async function get(token = RECIPIENT_TOKEN, query = undefined) {
+async function get(token = RECIPIENT_TOKEN) {
   const res = { statusCode: 200, body: undefined, set: jest.fn(() => res), status: jest.fn((c) => { res.statusCode = c; return res; }), json: jest.fn((b) => { res.body = b; return res; }) };
   const next = jest.fn();
-  await find('/:token', 'get')({ params: { token }, query }, res, next);
+  await find('/:token', 'get')({ params: { token } }, res, next);
   if (next.mock.calls.length) throw next.mock.calls[0][0];
   return res;
 }
@@ -230,95 +227,34 @@ describe('GET /:token with a visit text recipient\'s token: the reduced payload'
     for (const [arg] of mockEta.mock.calls) expect(arg.allowProvider).toBe(false);
   });
 
-  test('the truck shows only while the technician\'s active job is this visit (or a same-drive sibling): an ungrouped visit asks for its own id and nothing else', async () => {
+  test('the truck shows only while the technician\'s active job is exactly THIS visit: the resolver is asked for this visit\'s own id and nothing else', async () => {
     const tablesRead = install(visitRow(ENROUTE));
     await get();
     expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1']);
-    // an ungrouped visit makes no group lookup: a sibling visit's active job never shows this visit's truck
+    // no visit-group lookup: a sibling visit's active job never shows this visit's truck
     expect(tablesRead.filter((table) => table === 'scheduled_services')).toEqual([]);
     mockResolvePosition.mockClear();
-    // a grouped visit with no admissible sibling is still only itself (the group rules are pinned just below)
-    install(visitRow({ ...ENROUTE, visit_id: 'group-1' }), { members: [] });
+    // a grouped visit is still only itself (pinned just below)
+    install(visitRow({ ...ENROUTE, visit_id: 'group-1' }));
     await get();
     expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1']);
   });
 
-  describe('a GROUPED visit: the fan-out moves current_job_id to a sibling', () => {
-    const START = minutesAgo(10);
-    const STOP = { v_status: 'open', v_technician_id: 'tech-1', v_customer_id: 'cust-1', v_property_id: 'prop-1', v_scheduled_date: '2026-12-01', v_window_start: '09:00:00', v_window_end: '11:00:00' };
-    const member = (id, over = {}) => ({
-      id, status: 'en_route', track_state: 'en_route', en_route_at: START, technician_id: 'tech-1', customer_id: 'cust-1', property_id: 'prop-1',
-      scheduled_date: '2026-12-01', window_start: '09:00:00', window_end: '11:00:00', ...STOP, ...over,
-    });
-    const grouped = () => visitRow({ ...ENROUTE, en_route_at: START, visit_id: 'group-1', property_id: 'prop-1' });
-    // The resolver stands in for tech_status: the technician's active job is the SIBLING, so a fix exists only if the sibling is asked for.
-    const techOnSibling = () => mockResolvePosition.mockImplementation(async ({ requireCurrentJobIds }) => (requireCurrentJobIds.includes('sib-1')
+  test('a GROUPED visit whose active job moved to a sibling shows NO truck: the resolver is only ever asked for this visit\'s own id', async () => {
+    // the technician\'s current_job_id is the sibling: the resolver (which stands in for the one SELECT) finds no fix for this id
+    mockResolvePosition.mockImplementation(async ({ requireCurrentJobIds }) => (requireCurrentJobIds.includes('sib-1')
       ? { lat: 27.1, lng: -82.1, lastReportedAt: new Date().toISOString(), source: 'bouncie' } : null));
-    afterEach(() => mockResolvePosition.mockImplementation(async () => ({ lat: 27.1, lng: -82.1, lastReportedAt: new Date().toISOString(), source: 'bouncie' })));
-    const vehicleFor = async (members) => {
-      install(grouped(), { members });
-      techOnSibling();
-      return (await get()).body.vehicle;
-    };
-
-    test('a sibling at the SAME stop (same tech, property, window chain, en route in the same drive): the truck shows', async () => {
-      expect(await vehicleFor([member('visit-1'), member('sib-1', { en_route_at: minutesAgo(9.9) })])).not.toBeNull();
-      expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1', 'sib-1']);
-    });
-
-    test.each([
-      ['moved to another stop (another date) but still holding the old visit_id', { scheduled_date: '2026-12-09' }],
-      ['moved to another property', { property_id: 'prop-2' }],
-      ['moved to another customer', { customer_id: 'cust-2' }],
-      ['with no property on file (null property_id)', { property_id: null }],
-      ['on another technician', { technician_id: 'tech-2' }],
-      ['no technician', { technician_id: null }],
-      ['its window no longer chains to the stop', { window_start: '15:00:00', window_end: '16:00:00' }],
-      ['not en route by status', { status: 'confirmed' }],
-      ['not en route by tracker', { track_state: 'scheduled' }],
-      ['en route with no en_route_at', { en_route_at: null }],
-      ['en route in a DIFFERENT drive (stamped an hour later)', { en_route_at: minutesAgo(-50) }],
-    ])('a sibling %s is never this drive: no truck', async (_label, over) => {
-      expect(await vehicleFor([member('visit-1'), member('sib-1', over)])).toBeNull();
+    try {
+      const tablesRead = install(visitRow({ ...ENROUTE, visit_id: 'group-1' }));
+      const { body } = await get();
+      expect(body.state).toBe('en_route');
+      expect(body.vehicle).toBeNull();
       expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1']);
-    });
-
-    test('two addresses with NO property on file (this row, the visit and the sibling all null) never share a truck', async () => {
-      const nullStop = { v_property_id: null, property_id: null };
-      install(visitRow({ ...ENROUTE, en_route_at: START, visit_id: 'group-1', property_id: null }), { members: [member('visit-1', nullStop), member('sib-1', nullStop)] });
-      techOnSibling();
-      expect((await get()).body.vehicle).toBeNull();
-      expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1']);
-    });
-
-    test('a visit that is not open, a detached viewer row, or this row on another stop admits no sibling', async () => {
-      expect(await vehicleFor([member('visit-1', { v_status: 'dissolved' }), member('sib-1', { v_status: 'dissolved' })])).toBeNull();
-      expect(await vehicleFor([member('visit-1', { technician_id: 'tech-2' }), member('sib-1')])).toBeNull();
-      expect(await vehicleFor([member('visit-1', { scheduled_date: '2026-12-09' }), member('sib-1')])).toBeNull();
-      expect(await vehicleFor([member('sib-1')])).toBeNull(); // this row is not even a live member
-    });
-
-    test('a FAILED group read answers 404 like an unknown token (strict), never a quiet "no truck"', async () => {
-      mockDb.raw = jest.fn((sql) => sql);
-      mockDb.mockImplementation((table) => {
-        let byToken = false;
-        const q = {};
-        for (const m of ['join', 'whereNotIn', 'leftJoin', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
-        q.where = jest.fn((arg) => { if (arg && arg['s.track_view_token']) byToken = true; return q; });
-        q.first = jest.fn(async () => (table === 'scheduled_services as s' && !byToken ? grouped() : null));
-        q.then = (resolve, reject) => (table === 'scheduled_services as m' ? Promise.reject(Object.assign(new Error('x'), { code: '57P01' })) : Promise.resolve([])).then(resolve, reject);
-        return q;
-      });
-      techOnSibling();
-      expect((await get()).statusCode).toBe(404);
-    });
-
-    test('an ungrouped visit makes no group read at all', async () => {
-      const tablesRead = install(visitRow(ENROUTE), { members: [member('visit-1'), member('sib-1')] });
-      techOnSibling();
-      expect((await get()).body.vehicle).toBeNull();
-      expect(tablesRead).not.toContain('scheduled_services as m');
-    });
+      // no visit-group read of any kind
+      expect(tablesRead.filter((table) => table !== 'scheduled_services as s' && table !== 'scheduled_services')).toEqual([]);
+    } finally {
+      mockResolvePosition.mockImplementation(async () => ({ lat: 27.1, lng: -82.1, lastReportedAt: new Date().toISOString(), source: 'bouncie' }));
+    }
   });
 
   test('the cached fix must be from THIS drive: the resolver is asked for fixes strictly after the visit\'s en_route_at', async () => {
@@ -431,39 +367,6 @@ describe('GET /:token with a visit text recipient\'s token: the reduced payload'
     expect(body.state).toBe('complete');
     expect(body.vehicle).toBeNull();
     expect(Object.keys(body).sort()).toEqual(ALLOWED_KEYS.slice().sort());
-  });
-});
-
-describe('the HOLDER\'s GET: the socket-connect refetch (?refresh=socket) makes no paid ETA call', () => {
-  const enRouteHolder = () => visitRow({ ...ENROUTE, en_route_at: minutesAgo(10) });
-  test('the flag asks for the no-provider ETA; the plain GET and the poll leave the provider allowed', async () => {
-    install(enRouteHolder(), { holderRow: enRouteHolder() });
-    mockEta.mockClear();
-    expect((await get(HOLDER_TOKEN, { refresh: 'socket' })).statusCode).toBe(200);
-    expect(mockEta).toHaveBeenCalledTimes(1);
-    expect(mockEta.mock.calls[0][0].allowProvider).toBe(false);
-
-    mockEta.mockClear();
-    install(enRouteHolder(), { holderRow: enRouteHolder() });
-    expect((await get(HOLDER_TOKEN)).statusCode).toBe(200);
-    expect(mockEta).toHaveBeenCalledTimes(1);
-    expect(mockEta.mock.calls[0][0]).not.toHaveProperty('allowProvider');
-
-    // any other value of the flag is not the flag
-    mockEta.mockClear();
-    install(enRouteHolder(), { holderRow: enRouteHolder() });
-    await get(HOLDER_TOKEN, { refresh: 'yes' });
-    expect(mockEta.mock.calls[0][0]).not.toHaveProperty('allowProvider');
-  });
-
-  test('buildVehicle: allowProvider false reaches the ETA call, the default does not set it', async () => {
-    const { buildVehicle } = trackPublicRouter._test;
-    mockEta.mockClear();
-    await buildVehicle(enRouteHolder(), { readOnly: false, allowProvider: false });
-    expect(mockEta.mock.calls[0][0].allowProvider).toBe(false);
-    mockEta.mockClear();
-    await buildVehicle(enRouteHolder(), { readOnly: false });
-    expect(mockEta.mock.calls[0][0]).not.toHaveProperty('allowProvider');
   });
 });
 
