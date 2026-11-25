@@ -165,7 +165,16 @@ postgres('production share refunds', () => {
   const signals = async (visitIds) => productionShareRefunds.refundSignalsOf(trx, visitIds);
   const preview = async (technicianId, weekStart) => (await api('GET', `/production-share/preview?technicianId=${technicianId}&weekStart=${weekStart}`)).body;
   const rowOf = (shown, visitId) => shown.stops.find((one) => one.visitId === visitId);
-  const takeBack = (body) => api('PUT', '/production-share/refund-take-back', { body });
+  // The revision of the stored answer, as the page would have it from the preview ('none' when there is no answer).
+  const revisionNow = async (checkId, visitId) => {
+    const row = await trx('production_share_refund_take_backs').where({ source_check_id: checkId, visit_id: visitId })
+      .first('id', trx.raw(`to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') AS updated_text`));
+    return row ? `${Number(row.id)}:${row.updated_text}` : 'none';
+  };
+  // A page sends the answer it saw: the helper reads it from the table unless the test says what to send.
+  const takeBack = async (body) => api('PUT', '/production-share/refund-take-back', {
+    body: { ...body, answerRevision: body.answerRevision === undefined ? await revisionNow(body.checkId, body.visitId) : body.answerRevision },
+  });
   const bells = () => trx('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'production-share-refund:%'").count({ n: '*' }).first().then((row) => Number(row.n));
 
   // One $1,000.00 stop in W1 on its own paid invoice (card charge pi_<tag>), paid by a final pay run; W2 and W3 have ordinary stops.
@@ -325,7 +334,10 @@ postgres('production share refunds', () => {
       expect(rowOf(await preview(id, W1), visit)).toMatchObject({ kind: 'owner_set', creditCents: 9000, needsReview: false });
       // A second refund: the credit he set is no longer used, the stop reports it and he looks again.
       await paymentOf(customerId, { stripe_payment_intent_id: 'pi_own2', refund_amount: '20.00' });
-      expect(rowOf(await preview(id, W1), visit)).toMatchObject({ kind: 'owner_override_conflict_changed', creditCents: 0, needsReview: true });
+      // The new refund is named as the cause (its own kind, a reason that says refund) and rings the refund bell.
+      const after = rowOf(await preview(id, W1), visit);
+      expect(after).toMatchObject({ kind: 'owner_override_refund_changed', creditCents: 0, needsReview: true, reason: expect.stringMatching(/new refund/) });
+      expect(await bells()).toBe(2);
     });
 
     it('rings one bell for the flagged stop, however many times a preview reads it, and a new signal rings again', async () => {
@@ -356,7 +368,7 @@ postgres('production share refunds', () => {
       const payment = await refundOn(world, '30.00');
       const shown = await week(world, W2, '500.00');
       expect(shown.takeBackToSet).toEqual([{
-        checkId: world.checkId, visitId: world.visit, workDate: W1, paidWeekStart: W1, creditCents: 100000, newSignals: [`pay:${payment}:3000`],
+        checkId: world.checkId, visitId: world.visit, workDate: W1, paidWeekStart: W1, creditCents: 100000, newSignals: [`pay:${payment}:3000`], answerRevision: 'none',
       }]);
       expect(shown.takeBacks).toEqual([]);
       expect(shown.creditedCents).toBe(50000);
@@ -375,14 +387,15 @@ postgres('production share refunds', () => {
       const visit = await stop(id, W1, '100.00', customerId);
       await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_payment_intent_id: 'pi_hand' });
       const first = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_hand', refund_amount: '10.00' });
-      expect((await override({ technicianId: id, visitId: visit, weekStart: W1, creditCents: 9000, reason: 'Refund was $10' })).status).toBe(200);
+      // $200.00 credited above the $100.00 bar: a share of $15.00, so the week counts as paid.
+      expect((await override({ technicianId: id, visitId: visit, weekStart: W1, creditCents: 20000, reason: 'Refund was $10' })).status).toBe(200);
       const { done } = await finalWeek(W1);
       const stored = await trx('payroll_checks').where({ id: byName(done, 'Sample Alpha').id }).first('calc_snapshot');
-      expect(stored.calc_snapshot.productionShare.stops[0]).toMatchObject({ kind: 'owner_set', creditCents: 9000, refundSignals: [`pay:${first}:1000`] });
+      expect(stored.calc_snapshot.productionShare.stops[0]).toMatchObject({ kind: 'owner_set', creditCents: 20000, refundSignals: [`pay:${first}:1000`] });
       await stop(id, W2, '500.00', customerId);
       expect((await preview(id, W2)).takeBackToSet).toEqual([]);
       const second = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_hand', refund_amount: '15.00' });
-      expect((await preview(id, W2)).takeBackToSet).toEqual([expect.objectContaining({ visitId: visit, creditCents: 9000, newSignals: [`pay:${second}:1500`] })]);
+      expect((await preview(id, W2)).takeBackToSet).toEqual([expect.objectContaining({ visitId: visit, creditCents: 20000, newSignals: [`pay:${second}:1500`] })]);
     });
 
     it('takes the owner\'s total back from the next week, capped at that week\'s production, and the rest from the week after', async () => {
@@ -429,7 +442,9 @@ postgres('production share refunds', () => {
       expect(lowered.takeBacks).toEqual([expect.objectContaining({ cents: -20000 })]);
       expect(lowered).toMatchObject({ refundTakeBackCents: -20000, creditedCents: 30000 });
       // Clear it: everything taken is given back.
-      const cleared = await api('DELETE', '/production-share/refund-take-back', { body: { checkId: world.checkId, visitId: world.visit } });
+      const cleared = await api('DELETE', '/production-share/refund-take-back', {
+        body: { checkId: world.checkId, visitId: world.visit, answerRevision: await revisionNow(world.checkId, world.visit) },
+      });
       expect(cleared.status).toBe(200);
       expect((await preview(world.id, W3)).takeBacks).toEqual([expect.objectContaining({ cents: -30000 })]);
     });
@@ -516,6 +531,124 @@ postgres('production share refunds', () => {
     });
   });
 
+  describe('what a take-back source is, and what counts as new', () => {
+    it('a stop on a check that paid no share is not a source: no prompt, and the route refuses it', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      for (const weekStart of [W1, W2]) await worked(id, weekStart, 40);
+      const customerId = await customer();
+      // $90.00 credited under the $100.00 bar: a share of $0, the check is final but paid nothing.
+      const visit = await stop(id, W1, '90.00', customerId);
+      await invoiceFor(customerId, '90.00', { scheduled_service_id: visit, stripe_payment_intent_id: 'pi_zero' });
+      const { done } = await finalWeek(W1);
+      const check = byName(done, 'Sample Alpha');
+      expect(check.productionShareCents).toBe(0);
+      await paymentOf(customerId, { stripe_payment_intent_id: 'pi_zero', refund_amount: '10.00' });
+      await stop(id, W2, '500.00', customerId);
+      const shown = await preview(id, W2);
+      expect(shown.takeBackToSet).toEqual([]);
+      const refused = await takeBack({ checkId: check.id, visitId: visit, cents: 100, signals: [] });
+      expect(refused.status).toBe(400);
+      expect(refused.body.error).toMatch(/paid a share/);
+    });
+
+    it('finds a later refund from the invoices the check froze, when the visit link is gone', async () => {
+      const world = await paidWorld('frozen');
+      const frozen = await trx('payroll_checks').where({ id: world.checkId }).first('calc_snapshot');
+      expect(frozen.calc_snapshot.productionShare.stops[0]).toMatchObject({ invoices: [world.invoiceId], refundInvoices: [world.invoiceId] });
+      // The invoice is relinked away from the visit: the live links no longer reach it.
+      await trx('invoices').where({ id: world.invoiceId }).update({ scheduled_service_id: null });
+      expect((await signals([world.visit])).get(world.visit)).toEqual([]);
+      const payment = await refundOn(world, '30.00');
+      const shown = await week(world, W2, '500.00');
+      expect(shown.takeBackToSet).toEqual([expect.objectContaining({ visitId: world.visit, newSignals: [`pay:${payment}:3000`] })]);
+      // The save-time check reads the same frozen invoices.
+      expect((await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 1000, signals: shown.takeBackToSet[0].newSignals })).status).toBe(200);
+    });
+
+    it('freezes the prepay invoice of an annual term with a paid prepaid-plan stop', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      await worked(id, W1, 40);
+      const customerId = await customer();
+      const termInvoice = await invoiceFor(customerId, '100.00', { stripe_payment_intent_id: 'pi_termfrozen' });
+      const termId = randomUUID();
+      await trx('annual_prepay_terms').insert({
+        id: termId, customer_id: customerId, term_start: '2026-09-01', term_end: '2027-08-31', status: 'active', prepay_amount: '100.00',
+        prepay_invoice_id: termInvoice, coverage_visit_count: 1,
+      });
+      await stop(id, W1, '0.00', customerId, { annual_prepay_term_id: termId, prepaid_amount: '400.00', prepaid_method: 'annual_prepay_invoice' });
+      const { done } = await finalWeek(W1);
+      const stored = await trx('payroll_checks').where({ id: byName(done, 'Sample Alpha').id }).first('calc_snapshot');
+      expect(stored.calc_snapshot.productionShare.stops[0]).toMatchObject({ kind: 'prepaid_plan', creditCents: 40000, refundInvoices: [termInvoice] });
+      expect(stored.calc_snapshot.productionShare.stops[0].invoices).toBeUndefined();
+    });
+
+    it('a replacement refund of the same amount on the same payment is a new signal, when the Stripe refund ids were recorded', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_payment_intent_id: 'pi_repl' });
+      const payment = await paymentOf(customerId, {
+        stripe_payment_intent_id: 'pi_repl', refund_amount: '10.00', stripe_refund_id: 're_1', metadata: JSON.stringify({ stamped_refund_ids: ['re_1'] }),
+      });
+      const first = (await signals([visit])).get(visit);
+      expect(first).toEqual([expect.stringMatching(new RegExp(`^pay:${payment}:1000:[0-9a-f]{10}$`))]);
+      // re_1 failed and re_2 succeeded for the same $10.00.
+      await trx('payments').where({ id: payment }).update({ stripe_refund_id: 're_2', metadata: JSON.stringify({ stamped_refund_ids: ['re_2'] }) });
+      const second = (await signals([visit])).get(visit);
+      expect(second).toHaveLength(1);
+      expect(second[0]).not.toEqual(first[0]);
+      // A legacy row (no refund id recorded) keeps the cents-only form.
+      await trx('payments').where({ id: payment }).update({ stripe_refund_id: null, metadata: null });
+      expect((await signals([visit])).get(visit)).toEqual([`pay:${payment}:1000`]);
+    });
+  });
+
+  describe('the owner\'s answers are compared and frozen', () => {
+    it('refuses a change or a clear that names another answer than the stored one, and accepts the current one', async () => {
+      const world = await paidWorld('rev2');
+      await refundOn(world, '30.00');
+      const open = await week(world, W2, '500.00');
+      const { newSignals, answerRevision } = open.takeBackToSet[0];
+      expect(answerRevision).toBe('none');
+      const body = { checkId: world.checkId, visitId: world.visit, signals: newSignals };
+      // Two tabs loaded the same week; the first saves, the second still says 'none'.
+      expect((await takeBack({ ...body, cents: 30000, answerRevision: 'none' })).status).toBe(200);
+      const stale = await takeBack({ ...body, cents: 40000, answerRevision: 'none' });
+      expect(stale.status).toBe(409);
+      expect(stale.body.error).toMatch(/changed since you loaded/);
+      const shown = (await preview(world.id, W2)).takeBackAnswers[0];
+      expect(shown.answerRevision).toMatch(/^\d+:\d{4}-\d{2}-\d{2}T/);
+      // A clear with the wrong revision is refused, and so is a change; the answer stays.
+      const wrong = { answerRevision: '0:1999-01-01T00:00:00.000000' };
+      expect((await api('DELETE', '/production-share/refund-take-back', { body: { checkId: world.checkId, visitId: world.visit, ...wrong } })).status).toBe(409);
+      expect((await takeBack({ ...body, cents: 40000, ...wrong })).status).toBe(409);
+      expect(await revisionNow(world.checkId, world.visit)).toBe(shown.answerRevision);
+      // A missing revision is a plain refusal.
+      expect((await api('PUT', '/production-share/refund-take-back', { body })).status).toBe(400);
+      expect((await takeBack({ ...body, cents: 40000, answerRevision: shown.answerRevision })).status).toBe(200);
+      expect((await api('DELETE', '/production-share/refund-take-back', { body: { checkId: world.checkId, visitId: world.visit, answerRevision: await revisionNow(world.checkId, world.visit) } })).status).toBe(200);
+    });
+
+    it('freezes the answers a week used, so a changed answer makes the draft stale even when the credit moved is the same', async () => {
+      const world = await paidWorld('freeze2');
+      await refundOn(world, '30.00');
+      await stop(world.id, W2, '100.00', world.customerId);
+      const open = await preview(world.id, W2);
+      await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 30000, signals: open.takeBackToSet[0].newSignals });
+      const draftRun = (await draft(W2)).body.run;
+      // Only $100.00 of credit: $300.00 and $400.00 both take $100.00 this week.
+      const stored = await trx('payroll_checks').where({ id: byName(draftRun, 'Sample Alpha').id }).first('calc_snapshot');
+      expect(stored.calc_snapshot.productionShare.refundAnswers).toEqual([expect.objectContaining({ sourceCheckId: world.checkId, visitId: world.visit, cents: 30000, revision: expect.any(String) })]);
+      expect(stored.calc_snapshot.productionShare.takeBacks[0].cents).toBe(10000);
+      await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 40000, signals: open.takeBackToSet[0].newSignals });
+      const view = (await api('GET', `/runs/${draftRun.id}`)).body.run;
+      expect(view.stale).toBe(true);
+      expect((await finalize(draftRun.id, draftRun.token)).status).toBe(409);
+    });
+  });
+
   describe('the refund take-back routes', () => {
     it('refuses a total below 0, a check that is not final, a stop not on the check, a stale page and anyone but the owner account', async () => {
       const world = await paidWorld('route');
@@ -551,7 +684,7 @@ postgres('production share refunds', () => {
       // The audit event of an answer names who, what and how much.
       const audit = await trx('audit_log').where({ action: 'payroll.production_share_refund_take_back_set' }).first();
       expect(audit.metadata).toMatchObject({ cents: 100, visit_id: world.visit });
-      expect((await api('DELETE', '/production-share/refund-take-back', { body: { checkId: world.checkId, visitId: randomUUID() } })).status).toBe(404);
+      expect((await api('DELETE', '/production-share/refund-take-back', { body: { checkId: world.checkId, visitId: randomUUID(), answerRevision: 'none' } })).status).toBe(404);
     });
   });
 });

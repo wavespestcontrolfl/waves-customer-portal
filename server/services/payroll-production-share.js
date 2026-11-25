@@ -39,6 +39,9 @@
  * later share week is never collected. refundSignals, takeBackToSet, takeBacks and the owner's answers are in the revision and the signature,
  * so an answer or a new refund between draft and finalize makes the draft stale. dependsOnRuns of a take-back names the run that paid the
  * credit and every run that holds an entry for that source, so voidRun refuses (dependentChecksOf) while a later final check relied on it.
+ * A stop row of a paid stop also freezes refundInvoices (the invoice ids its refund signals were read from) and the snapshot freezes
+ * refundAnswers (the owner's answers the week used, by revision): both are in the signature, so a changed answer makes the draft stale.
+ * A take-back source is a stop row on a final check whose share was above $0 (the paidLedger rule): a $0-share week is none.
  */
 const productionShare = require('./production-share');
 const refunds = require('./production-share-refunds');
@@ -51,7 +54,7 @@ const shareOn = () => typeof payrollProductionShareLive === 'function' && payrol
 const KIND = 'production_share';
 
 /** The frozen record of one technician's week: the figures and one row per stop. Plain JSON, ids and cents only. Pure. */
-function snapshotOf({ weekStart, settings, result, stops, degraded = false, takeBacks = [], takeBackToSet = [] }) {
+function snapshotOf({ weekStart, settings, result, stops, degraded = false, takeBacks = [], takeBackToSet = [], takeBackAnswers = [] }) {
   return {
     weekStart,
     // Set when the credits came from the per-technician retry of a failed shared read: such a draft is never accepted by finalize.
@@ -74,6 +77,11 @@ function snapshotOf({ weekStart, settings, result, stops, degraded = false, take
         dependsOnRuns: [...(one.dependsOnRuns || [])].sort(),
       })),
     } : {}),
+    // The owner's answers this week read (what he decided, by revision): a changed answer changes the review token even when the credit
+    // moved stays the same.
+    ...(takeBackAnswers.length ? {
+      refundAnswers: takeBackAnswers.map((one) => ({ sourceCheckId: one.checkId, visitId: one.visitId, cents: one.cents, revision: one.revision })),
+    } : {}),
     ...(takeBackToSet.length ? {
       takeBackToSet: takeBackToSet.map((one) => ({
         checkId: one.checkId, visitId: one.visitId, workDate: one.workDate || null, paidWeekStart: one.paidWeekStart, creditCents: one.creditCents,
@@ -84,6 +92,9 @@ function snapshotOf({ weekStart, settings, result, stops, degraded = false, take
       visitId: stop.visitId, workDate: stop.workDate, kind: stop.kind, creditCents: stop.creditCents, needsReview: Boolean(stop.needsReview),
       // The refund signals at finalize: a later signal that is not here is a new refund on a paid stop.
       ...(stop.refundSignals && stop.refundSignals.length ? { refundSignals: [...stop.refundSignals].sort() } : {}),
+      // The invoice ids those signals were read from, for a paid stop (the term's prepay invoice included), so a later refund is found even
+      // when the visit is deleted or the invoice relinked.
+      ...(stop.creditCents > 0 && stop.refundInvoices && stop.refundInvoices.length ? { refundInvoices: [...stop.refundInvoices].sort() } : {}),
       // What later weeks read from a paid stop (production-share.js, CREDIT RULES): the invoice ids linked to its visit, and for a
       // package visit its package { basisType: 'job', basisId, totalCents, sold, slot }.
       ...(stop.invoices && stop.invoices.length ? { invoices: stop.invoices } : {}),
@@ -179,7 +190,7 @@ const sortedJson = (rows) => rows.map((one) => JSON.stringify(one)).sort();
 const takeBackSignature = (takeBacks, toSet, answers = []) => [
   sortedJson((takeBacks || []).map((one) => [one.sourceCheckId || null, one.visitId, one.paidWeekStart, one.workDate || null, Number(one.cents), [...(one.dependsOnRuns || [])].sort()])),
   sortedJson((toSet || []).map((one) => [one.checkId, one.visitId, one.paidWeekStart, Number(one.creditCents), [...one.newSignals].sort()])),
-  sortedJson(answers.map((one) => [one.id, one.sourceCheckId, one.visitId, Number(one.cents), [...one.signals].sort(), one.updatedAt])),
+  sortedJson(answers.map((one) => [one.sourceCheckId, one.visitId, Number(one.cents), one.revision])),
 ];
 const stopRefundSignature = (stop) => [...(stop.refundSignals || [])].sort();
 
@@ -189,7 +200,8 @@ function revisionOf(inputs) {
     const { settings } = input;
     const stops = input.stops.map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true, basesSignature(stop.bases, stop.invoices), [...(stop.dependsOnRuns || [])].sort(), stopRefundSignature(stop)])
       .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-    const moved = takeBackSignature(refunds.applyTakeBacks(input.stops, input.takeBackOwed || []).takeBacks, input.takeBackToSet, input.takeBackAnswers);
+    const moved = takeBackSignature(refunds.applyTakeBacks(input.stops, input.takeBackOwed || []).takeBacks, input.takeBackToSet,
+      (input.takeBackAnswers || []).map((one) => ({ sourceCheckId: one.checkId, visitId: one.visitId, cents: one.cents, revision: one.revision })));
     return [id, settings.id, settings.rateBps, settings.barType, settings.barCents, settings.callbackStopValueCents, stops, input.degraded === true, moved];
   });
   return JSON.stringify(rows);
@@ -214,7 +226,7 @@ function sharesFor(inputs, technicianIds, weekStart) {
       const result = productionShare.shareForWeek({ credits: [applied.creditedCents], shifts: productionShare.shiftDays(stops).length, settings });
       shares.set(id, {
         shareCents: result.shareCents,
-        snapshot: snapshotOf({ weekStart, settings, result, stops, degraded: input.degraded === true, takeBacks: applied.takeBacks, takeBackToSet: input.takeBackToSet || [] }),
+        snapshot: snapshotOf({ weekStart, settings, result, stops, degraded: input.degraded === true, takeBacks: applied.takeBacks, takeBackToSet: input.takeBackToSet || [], takeBackAnswers: input.takeBackAnswers || [] }),
       });
     } catch (err) {
       shares.set(id, { error: `The production share could not be worked out: ${(err && err.message) || 'unknown problem'}` });
@@ -278,7 +290,7 @@ function signature(row) {
     Number(snapshot.creditedCents), Number(snapshot.barCents), Number(snapshot.aboveBarCents), Number(snapshot.shareCents),
     stops,
     snapshot.degraded === true,
-    takeBackSignature(snapshot.takeBacks, snapshot.takeBackToSet),
+    takeBackSignature(snapshot.takeBacks, snapshot.takeBackToSet, snapshot.refundAnswers),
   ];
 }
 

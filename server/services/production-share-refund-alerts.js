@@ -9,6 +9,8 @@ const { payrollProductionShareLive } = require('../config/feature-gates');
 const logger = require('./logger');
 const { flagKeyOf } = require('./production-share-refunds');
 
+// A stop flagged for a refund, and a stop whose owner credit a new refund put aside.
+const OWN_KINDS = new Set(['refund_flagged', 'owner_override_refund_changed']);
 const CATEGORY = 'payroll';
 const LINK = '/admin/timetracking?tab=payroll';
 
@@ -28,7 +30,7 @@ const KINDS = {
 // The refund flags in a technician's week: [{ kind: 'own' | 'paid', visitId, signals }]. Pure.
 function flagsOf({ stops = [], takeBackToSet = [] }) {
   return [
-    ...stops.filter((stop) => stop.kind === 'refund_flagged').map((stop) => ({ kind: 'own', visitId: stop.visitId, signals: stop.refundSignals || [] })),
+    ...stops.filter((stop) => OWN_KINDS.has(stop.kind)).map((stop) => ({ kind: 'own', visitId: stop.visitId, signals: stop.refundSignals || [] })),
     ...takeBackToSet.map((one) => ({ kind: 'paid', visitId: one.visitId, signals: one.newSignals || [] })),
   ];
 }

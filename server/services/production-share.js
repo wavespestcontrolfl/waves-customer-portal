@@ -795,7 +795,7 @@ async function loadCreditFacts(conn, stops) {
   // The stops, and every visit of their packages (root and siblings): the related ids of a stop reach the invoices of all of them.
   const billed = await billedByVisit(conn, [...new Set([...stops.map((stop) => stop.id),
     ...[...jobs.values()].filter((job) => job && job.root).flatMap((job) => [job.root.id, ...job.planned])])]);
-  return { jobs, billed, prepaidRefunds: await termRefunds(conn, stops), signals: await refunds.refundSignalsOf(conn, stops.map((stop) => stop.id)) };
+  return { jobs, billed, prepaidRefunds: await termRefunds(conn, stops), signals: await refunds.refundSourcesOf(conn, stops.map((stop) => stop.id)) };
 }
 
 // What a visit was billed, as plain sorted data: the amounts and the visits and weights of each invoice, so a price edited, a visit added to
@@ -871,6 +871,7 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
     else if (callback) credit = await callbackCredit(conn, stop, technicianId, inForce);
     else credit = ownPriceCredit(stop, billed.get(stop.id));
     const invoiced = billed.get(stop.id) || {};
+    const refundSource = (signals && signals.get(canonicalId(stop.id))) || { signals: [], invoiceIds: [] };
     // The package slot of a package visit, review rows too: an owner-set credit keeps it as a job basis (applyLedger, withOverride).
     const packageSlot = packageSlotOf(stop, job, callback, credit);
     const shown = { ...credit };
@@ -883,7 +884,10 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
       scheduledDate: stop.scheduled_day || null, address: addressLine(stop), completedAt: stop.completed_at ? new Date(stop.completed_at).toISOString() : null, ...shown,
       refundCents: (invoiced.refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
       // Every sign of a refund on the visit's invoices (production-share-refunds.js), sorted: a stop with any is flagged in applyLedger.
-      refundSignals: (signals && signals.get(canonicalId(stop.id))) || [],
+      refundSignals: refundSource.signals,
+      // The invoice ids behind them (live links, a package's, an annual term's prepay invoice): frozen with a paid stop, so a deleted visit or a
+      // relinked invoice still asks about a later refund (snapshot stops[].refundInvoices).
+      refundInvoices: refundSource.invoiceIds,
       // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
       unallocatedRefunds: invoiced.unallocated || [],
       ledger: ledgerOf(credit, invoiced),
@@ -1031,7 +1035,13 @@ function applyLedger(rows, paid, overrides = new Map()) {
       return { ...review(row, 'owner_override_closeout_changed', 'The closeout of this stop changed since the owner set its credit (its work is no longer confirmed): clear that credit in the production share preview.'), overrideRevision: set.revision };
     }
     // A NEW conflict (an invoice or package of the stop paid elsewhere since the owner set the credit) is checked before the credit is used.
-    if (tuples.some((tuple) => !(set.conflictTuples || []).includes(tuple))) {
+    const added = tuples.filter((tuple) => !(set.conflictTuples || []).includes(tuple));
+    // A new REFUND signal says so (its own kind, the refund bell, a reason that names the refund); it comes first because the owner
+    // looks at the stop again either way.
+    if (added.some((tuple) => tuple.startsWith('refund:'))) {
+      return { ...review(row, 'owner_override_refund_changed', 'A new refund is recorded on this visit since the owner set its credit: clear that credit, then set it again in the production share preview.'), overrideRevision: set.revision, dependsOnRuns: dependsOnRunsOf(row) };
+    }
+    if (added.length) {
       return { ...review(row, 'owner_override_conflict_changed', 'This stop, its invoice or its package was paid elsewhere since the owner set its credit: clear that credit and look at the stop again in the production share preview.'), overrideRevision: set.revision, dependsOnRuns: dependsOnRunsOf(row) };
     }
     return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: slotBasis(row), overrideRevision: set.revision, dependsOnRuns: dependsOnRunsOf(row) };
@@ -1054,7 +1064,7 @@ function applyLedger(rows, paid, overrides = new Map()) {
   }
 
   // The refund signals of the stop are conflict state too: an override set before a new signal appeared is no longer used (the subset
-  // rule of withOverride reports owner_override_conflict_changed), and the stop's revision moves with them.
+  // rule of withOverride reports owner_override_refund_changed), and the stop's revision moves with them.
   function conflictTuplesOf(row) {
     return [...new Set([...touchingRows(row)
       .map((one) => JSON.stringify([one.runId, one.weekStart, one.visitId, [...one.invoices].sort(),
@@ -1413,7 +1423,7 @@ async function previewWeek(technicianId, weekStart, conn = db) {
   const result = shareForWeek({ credits: [applied.creditedCents], shifts: days.length, settings });
   await require('./production-share-refund-alerts').raiseRefundFlagAlerts({ technicianId: id, stops, takeBackToSet: week.takeBackToSet });
   // The conflict tuples stay on the server: the page gets the stop's revision.
-  const shown = stops.map((stop) => { const copy = { ...stop }; delete copy.conflictTuples; return copy; });
+  const shown = stops.map((stop) => { const copy = { ...stop }; delete copy.conflictTuples; delete copy.refundInvoices; return copy; });
   return {
     technician: { id, name: technician.name },
     weekStart,

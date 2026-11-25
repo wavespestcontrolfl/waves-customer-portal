@@ -97,8 +97,24 @@ describe('Production share preview', () => {
       .toMatchObject({ visitId: 'v9', creditCents: 9000, stopRevision: 'rev9' });
   });
 
+  it('names a new refund as the reason an owner credit is no longer used, and lets him clear that credit', async () => {
+    const aside = {
+      visitId: 'v8', workDate: '2026-09-16', serviceType: 'Pest Control', kind: 'owner_override_refund_changed', creditCents: 0, needsReview: true, refundCents: 2000,
+      reason: 'A new refund is recorded on this visit since the owner set its credit: clear that credit, then set it again in the production share preview.', overrideRevision: 'ov8',
+    };
+    const call = vi.fn(async (path) => answerFor(path, { stops: [aside], needsReview: [aside] }));
+    render(<ProductionSharePanel call={call} technicians={TECHS} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open the production share preview' }));
+    fireEvent.change(screen.getByLabelText('Employee'), { target: { value: 'tech-a' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+    expect(await screen.findByText('New refund since you set it')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear the old credit' }));
+    await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', expect.objectContaining({ method: 'DELETE' })));
+    expect(call.mock.calls.find(([path]) => path === '/production-share/stop-override')[1].body).toMatchObject({ visitId: 'v8', revision: 'ov8' });
+  });
+
   describe('refunds on paid stops', () => {
-    const toSet = { checkId: 'check-1', visitId: 'v-paid', workDate: '2026-09-08', paidWeekStart: '2026-09-07', creditCents: 100000, newSignals: ['pay:x:3000'] };
+    const toSet = { checkId: 'check-1', visitId: 'v-paid', workDate: '2026-09-08', paidWeekStart: '2026-09-07', creditCents: 100000, newSignals: ['pay:x:3000'], answerRevision: 'none' };
     const open = async (patch) => {
       const call = vi.fn(async (path) => (path.startsWith('/production-share/preview') ? answerFor(path, patch) : {}));
       render(<ProductionSharePanel call={call} technicians={TECHS} />);
@@ -120,13 +136,13 @@ describe('Production share preview', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/refund-take-back', expect.objectContaining({ method: 'PUT' })));
       expect(call.mock.calls.find(([path]) => path === '/production-share/refund-take-back')[1].body)
-        .toEqual({ checkId: 'check-1', visitId: 'v-paid', cents: 30000, signals: ['pay:x:3000'] });
+        .toEqual({ checkId: 'check-1', visitId: 'v-paid', cents: 30000, signals: ['pay:x:3000'], answerRevision: 'none' });
       // The week is read again after a save.
       await waitFor(() => expect(call.mock.calls.filter(([path]) => path.startsWith('/production-share/preview')).length).toBe(2));
     });
 
     it('keeps an answered stop with the total he set, lets him clear it, and says what was taken or given back', async () => {
-      const answered = { ...toSet, cents: 30000, note: null, signals: ['pay:x:3000'], newSignals: [] };
+      const answered = { ...toSet, cents: 30000, note: null, signals: ['pay:x:3000'], newSignals: [], answerRevision: '7:2026-09-20T10:00:00.000001' };
       const call = await open({
         takeBackToSet: [], takeBackAnswers: [answered], owedTakeBackCents: 30000,
         takeBacks: [
@@ -143,7 +159,7 @@ describe('Production share preview', () => {
       expect(screen.getByText(/Still owed and not yet taken: \$100\.00/)).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
       await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/refund-take-back', expect.objectContaining({ method: 'DELETE' })));
-      expect(call.mock.calls.find(([path]) => path === '/production-share/refund-take-back')[1].body).toEqual({ checkId: 'check-1', visitId: 'v-paid' });
+      expect(call.mock.calls.find(([path]) => path === '/production-share/refund-take-back')[1].body).toEqual({ checkId: 'check-1', visitId: 'v-paid', answerRevision: '7:2026-09-20T10:00:00.000001' });
     });
 
     it('shows no section for a week with no refunds on paid stops', async () => {
