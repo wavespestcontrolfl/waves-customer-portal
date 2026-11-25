@@ -21937,6 +21937,12 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
         if (priceVerdict && !(await SeriesPriceGuards.insertedRowIsPrepaid(conn, autoExtRow.id))) {
           SeriesPriceGuards.raiseExtensionPriceAlertAfterCommit(conn, priceVerdict, { ...priceAlertContext, childId: autoExtRow.id });
         }
+        // The cancelled-root alert for this very date closes once the guard has
+        // added that occurrence at a price a paid visit backs (rationale on
+        // closeRefusedPriceAlertAfterInsert). Gate off or a verdict: no read.
+        if (!priceVerdict && SeriesPriceGuards.seriesPriceGuardsLive()) {
+          await SeriesPriceGuards.closeRefusedPriceAlertAfterInsert(conn, { parent, parentId, child: nextData, childDate: nextStr, childId: autoExtRow.id });
+        }
         spawnedVisit = {
           scheduledServiceId: autoExtRow.id,
           customerId: parent.customer_id,

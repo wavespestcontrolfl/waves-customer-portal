@@ -265,6 +265,16 @@ describe('raiseExtensionPriceAlertAfterCommit', () => {
   });
 });
 
+describe('closeRefusedPriceAlertAfterInsert: kill switch', () => {
+  test('gate off (the default): returns before any database read', async () => {
+    const conn = fakeConn({});
+    await expect(guards.closeRefusedPriceAlertAfterInsert(conn, {
+      parent: { status: 'cancelled' }, parentId: 'r', child: { estimated_price: 117 }, childDate: '2031-03-04', childId: 'c1',
+    })).resolves.toBe(false);
+    expect(conn.seen).toHaveLength(0);
+  });
+});
+
 describe('gate', () => {
   test('GATE_SERIES_PRICE_GUARDS is off unless exactly "true"', () => {
     jest.isolateModules(() => {

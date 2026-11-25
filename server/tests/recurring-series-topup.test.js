@@ -1716,12 +1716,13 @@ describe('classifySeriesOutcome (scripts/recurring-series-topup.js) — the no_c
 // auto-extend) acts on each verdict, and that the gate-off path never asks.
 describe('extendSeriesOnceLocked — series price guards', () => {
   const SeriesPriceGuards = require('../services/series-price-guards');
-  let live; let verdict; let raise; let prepaid;
+  let live; let verdict; let raise; let prepaid; let close;
   beforeEach(() => {
     live = jest.spyOn(SeriesPriceGuards, 'seriesPriceGuardsLive').mockReturnValue(true);
     verdict = jest.spyOn(SeriesPriceGuards, 'extensionPriceVerdict').mockResolvedValue(null);
     raise = jest.spyOn(SeriesPriceGuards, 'raiseExtensionPriceAlertAfterCommit').mockImplementation(() => {});
     prepaid = jest.spyOn(SeriesPriceGuards, 'insertedRowIsPrepaid').mockResolvedValue(false);
+    close = jest.spyOn(SeriesPriceGuards, 'closeRefusedPriceAlertAfterInsert').mockResolvedValue(false);
   });
   afterEach(() => jest.restoreAllMocks());
 
@@ -1734,6 +1735,26 @@ describe('extendSeriesOnceLocked — series price guards', () => {
     expect(verdict).not.toHaveBeenCalled();
     expect(prepaid).not.toHaveBeenCalled();
     expect(raise).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  test('no verdict: each inserted occurrence is offered to the alert closer with its own date and row', async () => {
+    const { conn, inserted } = topupScenario();
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 21 });
+    expect(inserted.length).toBeGreaterThan(0);
+    expect(close).toHaveBeenCalledTimes(inserted.length);
+    close.mock.calls.forEach(([, ctx], i) => {
+      expect(ctx).toMatchObject({ parentId: 10, childDate: inserted[i].scheduled_date, childId: inserted[i].id });
+      expect(ctx.child.scheduled_date).toBe(inserted[i].scheduled_date);
+    });
+  });
+
+  test('a verdict (refused or over the last paid visit): the closer is never asked', async () => {
+    verdict.mockResolvedValue({ skip: true, kind: 'cancelled_root', price: 333.45, lastPaid: 117 });
+    await topUpRecurringSeriesLocked(topupScenario({ parentOverrides: { status: 'cancelled', estimated_price: '333.45' }, colsOverrides: { estimated_price: {} } }).conn, 10, { horizonDays: 21 });
+    verdict.mockResolvedValue({ skip: false, kind: 'over_last_paid', price: 216.99, lastPaid: 117 });
+    await topUpRecurringSeriesLocked(topupScenario({ parentOverrides: { estimated_price: '216.99' } }).conn, 10, { horizonDays: 21 });
+    expect(close).not.toHaveBeenCalled();
   });
 
   test('a cancelled root the last paid visit does not back: nothing inserted, one alert, skip reported', async () => {
