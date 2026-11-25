@@ -7,8 +7,7 @@ const { hashContractToken, publicContractUrl } = require('./contracts');
 const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
-const { warranty13692CheckLive } = require('../config/feature-gates');
-const { CONSUMER_NOTICE_GRACE_END, findConsumerNotice } = require('./consumer-notices');
+const { findConsumerNotice } = require('./consumer-notices');
 const { woodBasePlatePct } = require('./project-types');
 
 const NEW_CONSTRUCTION_WARRANTY_KEY = 'service_agreement.termite_new_construction_warranty';
@@ -89,7 +88,7 @@ const PLAN_YEARS = {
 const LEGACY_PLAN_LABELS = { 'Builder 1-year': 'Builder 1-year, renewable yearly to year 5' };
 // payer comes from the office: the certificate's builder is not always the
 // party who paid for the treatment.
-const OFFICE_FIELDS = ['structures', 'notice_location', 'payer', 'treatment_price', 'plan_price', 'renewal_fee', 'consumer_notice_date'];
+const OFFICE_FIELDS = ['structures', 'notice_location', 'payer', 'treatment_price', 'plan_price', 'renewal_fee'];
 const FINAL_EXTERIOR_NOT_RECORDED = 'Final exterior treatment: not recorded on this certificate when this warranty was issued. It does not change the warranty dates above.';
 
 function bad(message, status = 400) {
@@ -226,41 +225,34 @@ function money(value, label) {
 // 10-24 Q5); its text prints the same amount.
 const BUILDER_RENEWAL_FEE_CAP = 149;
 
-// Rule 5E-14.105(1): the signed FDACS-13692 comes before the contract.
-// GATE_WARRANTY_13692_CHECK (owner 2026-10-24): a signed notice on file (an
-// e-signed Document Request or an uploaded paper scan) supplies the printed
-// date on the warranty and on the Builder Master Agreement; with none, the
-// typed date still works through the grace end, then the issue refuses.
-const noticeWarning = (document) => `No signed FDACS-13692 consumer notice is on file for this customer. Until ${us(parseIso(CONSUMER_NOTICE_GRACE_END))} you can type the date it was signed. After that, ${document} cannot be issued until the notice is signed (send it from Document Requests) or the paper form is uploaded.`;
+// Rule 5E-14.105(1): the signed FDACS-13692 comes before the contract. A
+// signed notice on file (an e-signed Document Request or an uploaded paper
+// scan) supplies the printed date on the warranty and on the Builder Master
+// Agreement; with none, the issue refuses.
 const WARRANTY_NOTICE = {
-  warning: noticeWarning('the warranty'),
   required: 'Get the FDACS-13692 consumer notice signed (send it from Document Requests, or upload the paper form) on or before the contract basis date, then issue the warranty.',
 };
 const MASTER_AGREEMENT_NOTICE = {
-  warning: noticeWarning('the master agreement'),
   required: 'Get the FDACS-13692 consumer notice signed (send it from Document Requests, or upload the paper form), then issue the master agreement.',
 };
 
 // { signedOn } when a signed notice dated on or before `onOrBefore` is on
-// file, else { warnings } while the grace lasts (through the grace end, an
-// Eastern date); refuses after it. `messages` names the contract.
+// file, else refuses. `messages` names the contract.
 async function noticeOnOrBefore(customer, onOrBefore, conn, messages) {
   const found = await findConsumerNotice(conn, customer.id, { onOrBefore });
-  if (found) return { signedOn: found.signedOn, warnings: [] };
-  if (key(parseIso(etDateString())) > key(parseIso(CONSUMER_NOTICE_GRACE_END))) throw bad(messages.required, 409);
-  return { signedOn: null, warnings: [messages.warning] };
+  if (!found) throw bad(messages.required, 409);
+  return { signedOn: found.signedOn };
 }
 
-// The warranty's notice. Gate off = nothing here (the typed date).
+// The warranty's notice.
 async function consumerNoticeOnFile(body, customer, initial, conn) {
-  if (!warranty13692CheckLive()) return { signedOn: null, warnings: [] };
   const basis = parseUs(body?.values?.basis?.date);
   if (!basis) throw bad('Enter the contract basis date as MM/DD/YYYY.');
   // The notice comes before the contract and before the treatment.
   return noticeOnOrBefore(customer, key(basis) < key(initial) ? basis : initial, conn, WARRANTY_NOTICE);
 }
 
-function officeFields(body, initial, noticeSignedOn = null) {
+function officeFields(body, noticeSignedOn) {
   const warranty = body?.values?.warranty || {};
   const out = Object.fromEntries(OFFICE_FIELDS.map((field) => [field, oneLine(warranty[field])]));
   out.treatment_price = money(out.treatment_price, 'treatment price');
@@ -269,17 +261,8 @@ function officeFields(body, initial, noticeSignedOn = null) {
     throw bad('The Builder Master Agreement caps the annual renewal fee at $149.00.');
   }
   if (out.plan_price !== PLAN_PRICE_INCLUDED) out.plan_price = money(out.plan_price, 'plan price');
-  // A notice on file prints its own signed date: the typed one is ignored.
-  if (noticeSignedOn) {
-    out.consumer_notice_date = noticeSignedOn;
-    return out;
-  }
-  const notice = parseUs(out.consumer_notice_date);
-  if (!notice || key(notice) > key(initial)) throw bad('The FDACS-13692 date must be a real date on or before the treatment date.');
-  // Rule 5E-14.105(1): the signed consumer notice comes before the contract.
-  const basis = parseUs(body?.values?.basis?.date);
-  if (basis && key(notice) > key(basis)) throw bad('The FDACS-13692 date must be on or before the contract basis date.');
-  out.consumer_notice_date = us(notice);
+  // The notice on file prints its own signed date.
+  out.consumer_notice_date = noticeSignedOn;
   return out;
 }
 
@@ -696,7 +679,7 @@ async function templateIssueWithWarnings(templateKey, body, customer, conn = db)
     service: { name: 'New Construction Termite Warranty' },
     warranty: {
       ...values.warranty,
-      ...officeFields(body, initial, notice.signedOn),
+      ...officeFields(body, notice.signedOn),
       contract_basis: contractBasis(body?.values?.basis, values.project.builder, initial),
       // The day Waves signs it (the signature line); delivery keeps its own time.
       issue_date: us(parseIso(etDateString())),
@@ -707,7 +690,7 @@ async function templateIssueWithWarnings(templateKey, body, customer, conn = db)
   // checked record. The fixed text itself is not screened: version 8 printed
   // "No termite infestation was known to be present." unscreened.
   const { description, conditions } = method.wording(printed.treatment, record);
-  return { values: { ...printed, treatment: { ...printed.treatment, description }, conditions }, warnings: notice.warnings };
+  return { values: { ...printed, treatment: { ...printed.treatment, description }, conditions }, warnings: [] };
 }
 
 // ── Builder Master Agreement and Lot Order (owner 10-24) ────────────────────
@@ -744,10 +727,9 @@ function builderDocumentValues(templateKey, body, noticeSignedOn = null) {
   }
   if (templateKey === BUILDER_MASTER_AGREEMENT_KEY) {
     // Rule 5E-14.105(1): the consumer notice is signed before the agreement,
-    // and the agreement is signed today at the earliest. A notice on file
-    // prints its own signed date: the typed one is ignored.
-    values.agreement.consumer_notice_date = noticeSignedOn
-      || builderDate(input.agreement?.consumer_notice_date, 'FDACS-13692 date', { notAfter: today });
+    // and the agreement is signed today at the earliest. The notice on file
+    // prints its own signed date.
+    values.agreement.consumer_notice_date = noticeSignedOn;
   } else {
     const lot = input.lot || {};
     values.lot.agreement_date = builderDate(lot.agreement_date, 'master agreement date', { notAfter: today });
@@ -766,14 +748,14 @@ function builderDocumentValues(templateKey, body, noticeSignedOn = null) {
 }
 
 // A builder document's values. The master agreement looks for the signed
-// notice on file when the 13692 check is on: Waves signs it today, so the
-// notice must be dated today or earlier. A lot order runs under the master
-// agreement and prints no notice date.
+// notice on file: Waves signs it today, so the notice must be dated today or
+// earlier. A lot order runs under the master agreement and prints no notice
+// date.
 async function builderDocumentIssue(templateKey, body, customer, conn) {
-  const notice = templateKey === BUILDER_MASTER_AGREEMENT_KEY && warranty13692CheckLive()
+  const notice = templateKey === BUILDER_MASTER_AGREEMENT_KEY
     ? await noticeOnOrBefore(customer, parseIso(etDateString()), conn, MASTER_AGREEMENT_NOTICE)
-    : { signedOn: null, warnings: [] };
-  return { values: builderDocumentValues(templateKey, body, notice.signedOn), warnings: notice.warnings };
+    : { signedOn: null };
+  return { values: builderDocumentValues(templateKey, body, notice.signedOn), warnings: [] };
 }
 
 // Staff read the full warranty text before it is created: the preview
@@ -809,7 +791,6 @@ module.exports = {
   NEW_CONSTRUCTION_WARRANTY_KEY,
   BUILDER_MASTER_AGREEMENT_KEY,
   BUILDER_LOT_ORDER_KEY,
-  CONSUMER_NOTICE_GRACE_END,
   issueDeliveryState,
   assertConfirmedRender,
   renderHash,

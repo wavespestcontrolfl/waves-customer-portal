@@ -226,19 +226,16 @@ export function consumerNoticeOnFile(notices, initialDate, basisDate) {
   }) || null;
 }
 
-// What blocks Create in the issue dialog: every office field filled, both
-// dates real and on or before treatment, and a plan with a treatment date.
-// With a notice on file the typed FDACS-13692 date is not asked for.
+// What blocks Create in the issue dialog: every office field filled, the
+// basis date real and on or before treatment, and a plan with a treatment date.
+// A signed FDACS-13692 on file is required; its date prints on the warranty.
 export function warrantyIssueReadiness(base, office, { noticeOnFile = false } = {}) {
   const initial = base.treatment.initial_date;
   const basisProblem = text(office.basisDate) ? basisDateProblem(office.basisDate, initial) : '';
-  const noticeProblem = !noticeOnFile && text(office.noticeDate) ? basisDateProblem(office.noticeDate, initial) : '';
-  const required = noticeOnFile ? Object.fromEntries(Object.entries(office).filter(([field]) => field !== 'noticeDate')) : office;
-  const filled = Object.values(required).every((v) => text(v));
+  const filled = Object.values(office).every((v) => text(v));
   return {
     basisProblem,
-    noticeProblem,
-    ready: Boolean(filled && !basisProblem && !noticeProblem && base.warranty.term_end && initial),
+    ready: Boolean(noticeOnFile && filled && !basisProblem && base.warranty.term_end && initial),
   };
 }
 
