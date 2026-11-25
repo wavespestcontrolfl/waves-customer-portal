@@ -1061,8 +1061,18 @@ function getVoiceProfileTextNonBlocking() {
   return _profileCache.text;
 }
 
+// Appended to the base prompt of a practice-line session (GPT-Live trial brain).
+const PRACTICE_LINE_ADDENDUM = [
+  'PRACTICE LINE (this overrides anything above):',
+  '- This is a practice line. You cannot transfer the call, and nothing you file here is saved: a lead,',
+  '  a booking request or a re-service request is only checked, never created.',
+  '- When a tool result says so, tell the caller plainly that this is a practice line and nothing was',
+  '  booked or saved. Do NOT promise a callback, a call from the office or a confirmation.',
+  '- Keep answering questions after that.',
+].join('\n');
+
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false, evalHarness = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, practiceLine = false, resumed = false, evalHarness = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -1072,6 +1082,11 @@ class RelayConversation {
     // the hangup capture floor stays down. A profile test or a stranger
     // dialling the test number can never create dispatch work.
     this.sandbox = sandbox === true;
+    // ⭐ A PRACTICE LINE (the GPT-Live trial's brain, live-brain.js; sandbox
+    // only). Its writes are dry runs that SAY so, it never transfers (no
+    // transfer tool, no provider-failure handoff, no packet), and it never ends
+    // itself after a captured lead: the host owns the call and its close.
+    this._practiceLine = practiceLine === true && this.sandbox;
     // Resolved ONCE, here, and pinned for the rest of this session — see the
     // file header + resolveSessionModel(). Every model request and version
     // stamp below reads this.model, never the module-level MODEL, so a
@@ -1732,7 +1747,7 @@ class RelayConversation {
    * caveat as relay-protocol.parsePrompt).
    */
   _maybeEndAfterTurn() {
-    if (!this.leadCaptured || this._holdOpenForRetry || !this._endSession || this._ending) return;
+    if (this._practiceLine || !this.leadCaptured || this._holdOpenForRetry || !this._endSession || this._ending) return;
     this._ending = true;
     try {
       this._endSession({ reason: 'agent_complete', captured: true });
@@ -2653,6 +2668,8 @@ class RelayConversation {
       callSid: this.callSid,
       // Dry-run flag for the write tools (see the constructor).
       sandbox: this.sandbox,
+      // Practice line: dry runs say so, and transfer_to_office is refused before any packet (relay-tools).
+      practiceLine: this._practiceLine,
       // The claim-owner nonce — every WRITE transaction re-proves ownership
       // against it INSIDE the transaction (the supersession fences outside
       // are check-then-act; the in-trx check is the atomic one). LIVE getter,
@@ -2794,6 +2811,7 @@ class RelayConversation {
       // recorded on the artifact — never left to the model's reading of the
       // clock block.
       officeOpenNow: () => {
+        if (convo._practiceLine) return null; // hours unknown: no transfer tool, no transfer rules
         const { isOfficeOpenAt } = require('./relay-context');
         return isOfficeOpenAt(convo._officeHours, new Date());
       },
@@ -2923,6 +2941,7 @@ class RelayConversation {
    */
   async _maybeHandoffForFailure(toolCtx) {
     const { providerFailurePolicy } = require('./relay-recovery');
+    if (this._practiceLine) return false; // a practice line never transfers or files a callback
     if ([this._handoffForFailure, this.ended, this._ending].some(Boolean)) return false;
     if (providerFailurePolicy({ modelFailures: this._modelFailures, toolFailures: this._toolFailures }) !== 'handoff') return false;
     await withTimeout(Promise.allSettled([...this._inFlightWrites.values()]), WRITE_DRAIN_TIMEOUT_MS);
@@ -3750,7 +3769,7 @@ class RelayConversation {
       // its prompt rules for the whole call (the prompt and tool list are
       // frozen per session — cache-prefix stability).
       const officeOpen = toolCtx.officeOpenNow();
-      const bareBase = buildBasePrompt(contextEnabled, this.language, { officeOpen });
+      const bareBase = buildBasePrompt(contextEnabled, this.language, { officeOpen }) + (this._practiceLine ? `\n\n${PRACTICE_LINE_ADDENDUM}` : '');
       const basePrompt = bareBase + (callerBlock ? `\n\n${callerBlock}` : '');
       const profileText = getVoiceProfileTextNonBlocking();
       this._systemBlocks = [{
@@ -4670,4 +4689,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds, providerFor, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName, getVoiceProfileTextNonBlocking };
+module.exports = { RelayConversation, PRACTICE_LINE_ADDENDUM, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds, providerFor, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName, getVoiceProfileTextNonBlocking };

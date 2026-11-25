@@ -52,7 +52,7 @@ const silence = (bytes) => Buffer.alloc(bytes, 0xff).toString('base64');
 // With it, every clock advance after session.started also delivers the
 // caller's audio for that time, as Twilio does: voiced inside a span, silent
 // outside it. The bridge reads the reply delay from that audio.
-function setup({ closeReply = true, deps = {}, speech = [] } = {}) {
+function setup({ closeReply = true, deps = {}, speech = [], caller } = {}) {
   let clock = 1_000_000;
   const twilio = new FakeSocket();
   const openai = new FakeSocket({
@@ -70,7 +70,7 @@ function setup({ closeReply = true, deps = {}, speech = [] } = {}) {
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   const openaiFactory = jest.fn(() => openai);
   const admit = jest.fn(async () => true);
-  const bridge = runLiveBridge(twilio, { callSid: CALL_SID, voice: 'marin', cell: '71' }, {
+  const bridge = runLiveBridge(twilio, { callSid: CALL_SID, voice: 'marin', cell: '71', caller }, {
     openaiFactory,
     now: () => clock,
     admit,
@@ -1430,11 +1430,14 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     expect(bridgeMod.buildLiveInstructions().endsWith(bridgeMod.TRIAL_LIMITS)).toBe(true);
   });
 
-  test('the brain opens at session.started for this call, from the bridge\'s own db', async () => {
-    const { t, brainFactory } = toolsSetup();
+  test('the brain opens at session.started for this call, from the bridge\'s own db, with the signed stamp\'s caller', async () => {
+    const caller = { from: '+19415550100', to: '+19412412993', stirVerstat: null };
+    const brain = { ask: jest.fn(), end: jest.fn(async () => {}), softTimeouts: 0, hardTimeouts: 0 };
+    const brainFactory = jest.fn(async () => brain);
+    const t = setup({ caller, deps: { toolsOn: () => true, brainFactory, transcriptQuietMs: 0 } });
     await t.ready();
     expect(brainFactory).toHaveBeenCalledTimes(1);
-    expect(brainFactory).toHaveBeenCalledWith({ callSid: CALL_SID, db: t.db });
+    expect(brainFactory).toHaveBeenCalledWith({ callSid: CALL_SID, db: t.db, caller });
   });
 
   test('a delegation asks the brain with the caller words since the last delegation and speaks ONE commentary append', async () => {
@@ -1504,6 +1507,72 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     expect(bridgeMod.capReply('  Short.  ')).toBe('Short.');
     expect(bridgeMod.capReply(`${'word '.repeat(600)}`, 100)).toBe('word '.repeat(20).trim());
     expect(bridgeMod.capReply('x'.repeat(50), 10)).toBe('x'.repeat(10));
+  });
+
+  test('each delegation keeps ITS OWN words, bound when it arrives, however long it waits in the queue', async () => {
+    let releaseFirst;
+    const { t, brain } = toolsSetup({
+      reply: (text) => (text === 'one' ? new Promise((resolve) => { releaseFirst = () => resolve('reply one'); }) : Promise.resolve(`reply to ${text}`)),
+    });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    // two more questions arrive while the first answer runs
+    t.openai.receive(said('second question', 5000, 5600));
+    t.openai.receive(created('d2'));
+    t.openai.receive(said('third question', 9000, 9600));
+    t.openai.receive(created('d3'));
+    releaseFirst();
+    await waitFor(() => answers(t).length === 3);
+    expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['one', 'second question', 'third question']);
+    expect(answers(t).map((m) => m.content)).toEqual(['reply one', 'reply to second question', 'reply to third question']);
+  });
+
+  test('late fragments of a question join the delegation that is waiting for them, not the next one', async () => {
+    const { t, brain } = toolsSetup({ deps: { transcriptQuietMs: 30, transcriptMaxWaitMs: 1000 } });
+    await t.ready();
+    t.openai.receive(said('When is ', 0, 300));
+    t.openai.receive(created('d1'));
+    setTimeout(() => t.openai.receive(said('my visit?', 300, 700)), 10); // the rest of the same question, late
+    await waitFor(() => answers(t).length === 1);
+    expect(brain.ask.mock.calls[0][0]).toBe('When is my visit?');
+    // after d1's transcript settled, new words belong to the next delegation
+    t.openai.receive(said('And the price?', 4000, 4600));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 2);
+    expect(brain.ask.mock.calls[1][0]).toBe('And the price?');
+  });
+
+  test('a reply that is digit-heavy is cut to fit 500 tokens although it is under 1,800 characters', async () => {
+    const invoice = 'Invoice 20260412345 for 1234.56 dollars was paid on 2026-03-04 by card 1111. ';
+    const reply = invoice.repeat(22); // 1,700 characters
+    expect(reply.length).toBeLessThan(bridgeMod.BRAIN_REPLY_MAX_CHARS);
+    expect(bridgeMod.estimateTokens(reply)).toBeGreaterThan(500);
+    const { t } = toolsSetup({ reply: async () => reply });
+    await t.ready();
+    t.openai.receive(said('invoices?', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    const content = answers(t)[0].content;
+    expect(bridgeMod.estimateTokens(content)).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_TOKENS);
+    expect(content.length).toBeLessThan(reply.length);
+    expect(content.endsWith('1111.')).toBe(true); // at a sentence end
+  });
+
+  test('estimateTokens counts a digit and a non-ASCII character as a token each, other text at 4 characters a token', () => {
+    expect(bridgeMod.estimateTokens('1234')).toBe(4);
+    expect(bridgeMod.estimateTokens('héllo')).toBe(1 + Math.ceil(4 / 4));
+    expect(bridgeMod.estimateTokens('abcdefgh')).toBe(2);
+    expect(bridgeMod.estimateTokens('')).toBe(0);
+  });
+
+  test('capReply fits characters and tokens at once, and non-ASCII text is cut by tokens too', () => {
+    const spanish = 'Su próxima visita está programada para mañana por la tarde. '.repeat(30); // many non-ASCII, under 1,800 chars
+    const cut = bridgeMod.capReply(spanish);
+    expect(bridgeMod.estimateTokens(cut)).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_TOKENS);
+    expect(cut.length).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_CHARS);
+    expect(bridgeMod.capReply('A short one. ')).toBe('A short one.');
   });
 
   test('two delegations are served one at a time, in order: the second brain ask starts after the first reply is sent', async () => {

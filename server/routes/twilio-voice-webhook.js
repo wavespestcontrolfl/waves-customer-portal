@@ -2724,7 +2724,7 @@ function gptLiveMaxUsd() {
 // reservation. Returns false when the
 // reservation does not fit under the cap; a database error, or a call already
 // claimed, throws and the caller refuses the call (fail closed).
-async function reserveGptLiveCall(callSid, { cell, voice, token }) {
+async function reserveGptLiveCall(callSid, { cell, voice, token, caller = {} }) {
   const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
   const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
   return db.transaction(async (trx) => {
@@ -2747,7 +2747,15 @@ async function reserveGptLiveCall(callSid, { cell, voice, token }) {
       .returning('call_sid');
     if (!claimed || !claimed.length) throw new Error('call already claimed a GPT-Live reservation');
     // stream_token_sha256 binds the reservation to the one token issued here.
-    const stamp = { gpt_live: { cell, voice, started_at: new Date().toISOString(), reserved_usd: PER_CALL_RESERVE_USD, stream_token_sha256: callTokenDigest(token) } };
+    // from / to / stir_verstat come from THIS request, which gptLiveRequestSigned verified: the
+    // bridge's tools mode (GATE_VOICE_GPT_LIVE_TOOLS) reads the caller identity from here, never
+    // from the call_log row's own columns, which an unsigned webhook could have changed.
+    const stamp = {
+      gpt_live: {
+        cell, voice, started_at: new Date().toISOString(), reserved_usd: PER_CALL_RESERVE_USD, stream_token_sha256: callTokenDigest(token),
+        from: caller.from || null, to: caller.to || null, stir_verstat: caller.stirVerstat || null,
+      },
+    };
     const updated = await trx('call_log')
       .where({ twilio_call_sid: callSid })
       .whereRaw(GPT_LIVE_UNCLAIMED_SQL)
@@ -2796,6 +2804,7 @@ function gptLiveStreamXml(req, callSid, token) {
 }
 
 async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
+  const caller = { from: req.body?.From, to: req.body?.To, stirVerstat: req.body?.StirVerstat };
   if (!isRelayAttached()) {
     logger.warn(`[gpt-live] relay not attached — hanging up ${maskSid(callSid)}`);
     return gptLiveSayAndHangup(res, 'The voice relay is not attached on this deploy. Goodbye.');
@@ -2805,7 +2814,7 @@ async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
     const { mintCallToken, LIVE_TOKEN_AUDIENCE } = require('../services/voice-agent/relay-protocol');
     const token = mintCallToken(callSid, { audience: LIVE_TOKEN_AUDIENCE });
     if (!token) throw new Error('no call token (VOICE_RELAY_WS_SECRET unset)');
-    if (!(await reserveGptLiveCall(callSid, { cell, voice, token }))) {
+    if (!(await reserveGptLiveCall(callSid, { cell, voice, token, caller }))) {
       logger.warn(`[gpt-live] budget used up — refused ${maskSid(callSid)} cell ${cell}`);
       return gptLiveSayAndHangup(res, 'The GPT-Live test budget is used up. Goodbye.');
     }

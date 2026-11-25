@@ -9131,8 +9131,20 @@ relay socket refuses such a token, and this path refuses a relay token) and be t
 (`stream_token_sha256`; any other valid token for the call is refused), the gate must be on, and the token is then
 burned; any failure destroys the socket. The socket goes to `services/voice-agent/live-bridge.js`, which admits the
 call's ledger row once after the handshake and before OpenAI opens (a reservation already released or settled opens
-no OpenAI session). It has no tools and no lookups (client
-delegation: the bridge answers every delegation with one fixed sentence). No booking, lead, text or transfer. Before any write, the cell
+no OpenAI session). The bridge has two modes, picked once per call by `GATE_VOICE_GPT_LIVE_TOOLS` (dark; unset or any
+value but `true` = the first). Gate off (the default): no tools and no lookups (client delegation: the bridge answers
+every delegation with one fixed sentence), and no booking, lead, text or transfer. Gate on: each delegation is answered
+by one Sandy conversation per call (`services/voice-agent/live-brain.js`, a `RelayConversation` built with
+`sandbox: true` and `practiceLine: true`), so the socket can speak account, visit, open-time, price, invoice and
+estimate details. What authorizes those private reads: the call must be the sandbox-sourced `call_log` row carrying the
+`metadata.gpt_live` stamp, and the caller number (and carrier attestation) the conversation reads must be the ones the
+cell route stamped from its own Twilio-signature-verified request (`from`, `to`, `stir_verstat` on the stamp, checked
+independently of the shared `TWILIO_SIGNATURE_VALIDATION` mode); the brain refuses to open when the row's own number or
+attestation differs from the stamp, or the stamp has no number. Writes are practice only: a lead, booking request or
+re-service request is validated and answered "practice line, nothing was booked or saved" and nothing is written; the
+conversation has no transfer tool and no automatic handoff, so no handoff packet is ever written; it never texts. The
+bridge keeps the caller's and GPT-Live's transcript fragments in memory only and the summary stores counts and times
+only. Before any write, the cell
 route verifies the request's Twilio signature itself (the shared middleware lets unsigned requests through in its
 `log` and `disabled` modes); unsigned or invalid = refused with no ledger write and no Twilio update. The cell route
 reserves one call's worst-case OpenAI cost in its own ledger table (`voice_gpt_live_ledger`, one row per CallSid)

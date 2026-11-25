@@ -733,10 +733,27 @@ function callerAttested(ctx = {}) {
  * down and the record says NO lead was created; the model's summary still
  * becomes the row's call_summary. No lead id, no promise, no ticket flag.
  */
+// A practice line (the GPT-Live trial's brain) gets an explicit result: it must
+// not speak as though the write succeeded, and nothing here ends or captures the
+// call, so follow-up questions still get answers.
+const PRACTICE_WRITE_WORDS = {
+  capture_lead: 'the request would be saved for the office',
+  request_booking: 'the booking request would go to the office to confirm',
+  request_reservice: 'a re-service request would be filed for the office',
+};
+function practiceLineText(name) {
+  const real = PRACTICE_WRITE_WORDS[name] || 'it would be filed';
+  return `PRACTICE LINE: ${name} was checked and NOT run, so nothing was booked, saved or filed. `
+    + `Tell the caller plainly: "This is a practice line, so nothing was booked or saved. On a real call, ${real}." `
+    + 'Do NOT say it was done, and do NOT promise a callback, a confirmation or a call from the office. '
+    + 'Then keep helping with any other question.';
+}
+
 function sandboxDryRunText(name, input = {}, ctx = {}, { estimateMissing = [] } = {}) {
   logger.info(`[voice-relay] ${name} DRY RUN — sandbox call, validated, nothing written callSid=${ctx.callSid || 'n/a'}`);
   // An incomplete estimate capture holds the call open and re-prompts in
   // production; the dry run keeps that behaviour so the bake-off measures it.
+  if (ctx.practiceLine === true) return practiceLineText(name);
   const holdOpen = estimateMissing.length > 0;
   if (name !== 'request_booking' && typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false, holdOpen });
   if (name === 'capture_lead' && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
@@ -759,6 +776,10 @@ function sandboxDryRunText(name, input = {}, ctx = {}, { estimateMissing = [] } 
  */
 async function executeTool(name, input = {}, ctx = {}) {
   try {
+    if (name === 'transfer_to_office' && ctx.practiceLine === true) {
+      // A practice line never transfers: refused before any handoff packet exists.
+      return 'This is a practice line and cannot transfer the call. Do NOT try again. Tell the caller the office can be called or texted directly.';
+    }
     if (name === 'transfer_to_office') {
       // Gate + office state re-checked inside (fail closed); the packet is
       // server-built and the staff leg is rendered by /relay-complete.

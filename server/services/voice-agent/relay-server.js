@@ -210,7 +210,9 @@ async function readLiveStamp(callSid, deadlineMs) {
   }
   const live = meta && meta.gpt_live;
   if (!live || typeof live !== 'object') return null;
-  return { voice: String(live.voice || ''), cell: String(live.cell || ''), tokenDigest: String(live.stream_token_sha256 || '') };
+  // The caller identity the SIGNED cell request stamped (tools mode reads it, never the row's own columns).
+  const caller = { from: String(live.from || ''), to: String(live.to || ''), stirVerstat: live.stir_verstat ? String(live.stir_verstat) : null };
+  return { voice: String(live.voice || ''), cell: String(live.cell || ''), tokenDigest: String(live.stream_token_sha256 || ''), caller };
 }
 
 // Twilio signs the Media Streams handshake: X-Twilio-Signature over the exact
@@ -278,7 +280,7 @@ async function handleLiveUpgrade(req, socket, head, pathname) {
       liveWss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES });
     }
     const { runLiveBridge } = require('./live-bridge');
-    return liveWss.handleUpgrade(req, socket, head, (ws) => runLiveBridge(ws, { callSid, voice: stamp.voice, cell: stamp.cell }));
+    return liveWss.handleUpgrade(req, socket, head, (ws) => runLiveBridge(ws, { callSid, voice: stamp.voice, cell: stamp.cell, caller: stamp.caller }));
   } catch (e) {
     logger.warn(`[voice-live] rejected ws upgrade: ${e.message} callSid=${callSid}`);
     return destroySocket(socket);

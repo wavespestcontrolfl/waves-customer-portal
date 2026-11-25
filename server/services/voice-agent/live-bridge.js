@@ -27,7 +27,7 @@
  *     caller's transcript fragments IN MEMORY, hands the words since the last
  *     delegation to the brain (with what GPT-Live said just before, labelled),
  *     one ask at a time, and speaks its reply as a session.commentary.append
- *     (about 1,800 characters at most). An ask still running after 6 s gets
+ *     (about 1,800 characters or 450 estimated tokens at most). An ask still running after 6 s gets
  *     one holding line on the same delegation id and the real answer follows as
  *     a second append; after 20 s the brain gives up with a fixed "the office
  *     will confirm" line. At most BRAIN_ASK_CAP asks a call, then the fixed
@@ -53,7 +53,8 @@ const DELEGATION_REPLY = "I can't look that up on this test line. You can call o
 
 // Tools mode (GATE_VOICE_GPT_LIVE_TOOLS): one brain ask per delegation.
 const BRAIN_ASK_CAP = 15; // asks a call; after that the fixed sentence (each ask is a paid model call)
-const BRAIN_REPLY_MAX_CHARS = 1800; // one commentary append holds 500 tokens at most
+const BRAIN_REPLY_MAX_CHARS = 1800;
+const BRAIN_REPLY_MAX_TOKENS = 450; // one commentary append holds 500 tokens at most; estimateTokens is conservative
 const BRAIN_NO_WORDS_REPLY = "Sorry, I didn't catch that. Could you say it again?";
 const BRAIN_STILL_REPLY = 'Still pulling that up.'; // spoken when an ask runs past the brain's soft deadline
 const AGENT_TEXT_MAX_CHARS = 300; // what GPT-Live said, kept for the brain's context (the latest part)
@@ -220,14 +221,41 @@ const sleep = (ms) => new Promise((resolve) => {
   if (timer.unref) timer.unref();
 });
 
-// A reply cut to maxChars at a sentence end when one lies in its second half,
-// else at a word.
-function capReply(text, maxChars = BRAIN_REPLY_MAX_CHARS) {
+// A conservative token estimate for a spoken reply: each digit and each
+// non-ASCII character counts as a token of its own (the worst case for
+// tokenizers), everything else about 4 characters to the token.
+function estimateTokens(text) {
+  let single = 0;
+  let other = 0;
+  for (const ch of String(text)) {
+    if (ch >= '0' && ch <= '9') single += 1;
+    else if (ch.charCodeAt(0) > 127) single += 1;
+    else other += 1;
+  }
+  return single + Math.ceil(other / 4);
+}
+
+// A reply cut so it fits BOTH maxChars and maxTokens (an append holds 500
+// tokens; digit-heavy invoice details and other languages run well over 4
+// characters a token), at a sentence end when one lies in the second half of
+// what fits, else at a word.
+function capReply(text, maxChars = BRAIN_REPLY_MAX_CHARS, maxTokens = BRAIN_REPLY_MAX_TOKENS) {
   const t = String(text || '').trim();
-  if (t.length <= maxChars) return t;
-  const head = t.slice(0, maxChars);
+  if (t.length <= maxChars && estimateTokens(t) <= maxTokens) return t;
+  let fit = 0;
+  let single = 0;
+  let other = 0;
+  for (const ch of t) {
+    if (fit + ch.length > maxChars) break;
+    const digitOrWide = (ch >= '0' && ch <= '9') || ch.charCodeAt(0) > 127;
+    if (single + (digitOrWide ? 1 : 0) + Math.ceil((other + (digitOrWide ? 0 : 1)) / 4) > maxTokens) break;
+    if (digitOrWide) single += 1;
+    else other += 1;
+    fit += ch.length;
+  }
+  const head = t.slice(0, fit);
   const sentenceEnd = Math.max(head.lastIndexOf('. '), head.lastIndexOf('! '), head.lastIndexOf('? '));
-  if (sentenceEnd >= maxChars / 2) return head.slice(0, sentenceEnd + 1).trim();
+  if (sentenceEnd >= fit / 2) return head.slice(0, sentenceEnd + 1).trim();
   const wordEnd = head.lastIndexOf(' ');
   return (wordEnd > 0 ? head.slice(0, wordEnd) : head).trim();
 }
@@ -257,12 +285,13 @@ function defaultDeps() {
 }
 
 class LiveBridge {
-  constructor(twilioWs, { callSid, voice, cell }, deps = {}) {
+  constructor(twilioWs, { callSid, voice, cell, caller }, deps = {}) {
     this.deps = { ...defaultDeps(), ...deps };
     this.twilio = twilioWs;
     this.callSid = callSid;
     this.voice = voice;
     this.cell = cell;
+    this.caller = caller || null; // the Twilio-signed cell request's From / To / StirVerstat (the brain's identity proof)
     this.openai = null;
     this.streamSid = null;
     this.ready = false; // session.started seen: caller audio may flow
@@ -312,8 +341,10 @@ class LiveBridge {
     // The caller's words, in memory only and never logged or stored: fragments
     // since the last delegation, and the latest two utterances for a delegation
     // that finds none. fragments counts them for the transcript settle.
-    this.callerSince = '';
-    this.callerSinceStartMs = null; // session time the first fragment since the last delegation began
+    // Words not yet bound to a delegation, and the newest delegation's range, which
+    // takes late fragments of its question until its transcript settles.
+    this.callerPending = { text: '', startMs: null };
+    this.callerLate = null;
     this.callerRecent = []; // { text, startMs }
     this.agentRecent = []; // what GPT-Live said, { text, startMs }, so "yes, the second one" has a referent
     this.agentFragmentEndMs = null;
@@ -766,7 +797,8 @@ class LiveBridge {
     }
     if (this.tools) {
       const receivedAt = this.deps.now();
-      this.brainChain = this.brainChain.then(() => this.answerWithBrain(id, receivedAt)).catch(() => {});
+      const range = this.openRange(); // this delegation's words, bound now, not when it reaches the front of the queue
+      this.brainChain = this.brainChain.then(() => this.answerWithBrain(id, receivedAt, range)).catch(() => {});
       return;
     }
     this.toOpenAi({ type: 'session.commentary.append', delegation_id: id, content: DELEGATION_REPLY });
@@ -790,8 +822,9 @@ class LiveBridge {
     const text = typeof msg.delta === 'string' ? msg.delta : '';
     if (!text.trim()) return;
     this.callerFragments += 1;
-    if (!this.callerSince && Number.isFinite(msg.start_ms)) this.callerSinceStartMs = msg.start_ms;
-    this.callerSince = (this.callerSince + text).slice(-CALLER_TEXT_MAX_CHARS);
+    const range = this.callerLate && this.callerLate.open ? this.callerLate : this.callerPending;
+    if (!range.text && Number.isFinite(msg.start_ms)) range.startMs = msg.start_ms;
+    range.text = (range.text + text).slice(-CALLER_TEXT_MAX_CHARS);
     this.callerFragmentEndMs = LiveBridge.addFragment(this.callerRecent, this.callerFragmentEndMs, msg, 2);
   }
 
@@ -799,20 +832,31 @@ class LiveBridge {
     this.agentFragmentEndMs = LiveBridge.addFragment(this.agentRecent, this.agentFragmentEndMs, msg, AGENT_UTTERANCES_KEPT);
   }
 
-  // The words for the next ask: since the last delegation, else the latest two
-  // utterances; with what GPT-Live said just before them, labelled, so the
-  // brain can tell what "yes, the second one" answers. GPT-Live's own
-  // "let me check" lines, spoken after the caller, are left out by time.
-  takeCallerText() {
+  // A delegation's own words, bound when it ARRIVES: everything not yet bound to
+  // an earlier delegation. Late fragments of its question join it until its
+  // transcript settles (noteCallerText) or the next delegation arrives. Queued
+  // delegations each keep their own range, however long they wait.
+  openRange() {
+    const range = { text: this.callerPending.text, startMs: this.callerPending.startMs, open: this.deps.transcriptQuietMs > 0 }; // no settle wait: closed at once
+    this.callerPending = { text: '', startMs: null };
+    if (this.callerLate) this.callerLate.open = false;
+    this.callerLate = range;
+    range.settled = this.settleTranscript().then(() => { range.open = false; });
+    return range;
+  }
+
+  // The words for one ask: its range, else the latest two utterances; with what
+  // GPT-Live said just before them, labelled, so the brain can tell what "yes,
+  // the second one" answers. GPT-Live's own "let me check" lines, spoken after
+  // the caller, are left out by time.
+  takeCallerText(range) {
     const clean = (t) => t.replace(/\s+/g, ' ').trim();
-    let words = clean(this.callerSince);
-    let startMs = this.callerSinceStartMs;
+    let words = clean(range.text);
+    let startMs = range.startMs;
     if (!words) {
       words = clean(this.callerRecent.map((u) => u.text).join(' '));
       startMs = this.callerRecent.length ? this.callerRecent[0].startMs : null;
     }
-    this.callerSince = '';
-    this.callerSinceStartMs = null;
     if (!words) return '';
     const before = this.agentRecent.filter((u) => startMs === null || u.startMs === null || u.startMs < startMs);
     const agent = before.length ? clean(before[before.length - 1].text).slice(-AGENT_TEXT_MAX_CHARS) : '';
@@ -836,7 +880,7 @@ class LiveBridge {
   ensureBrain() {
     if (!this.brainPromise) {
       this.brainPromise = Promise.resolve()
-        .then(() => this.deps.brainFactory({ callSid: this.callSid, db: this.deps.db() }))
+        .then(() => this.deps.brainFactory({ callSid: this.callSid, db: this.deps.db(), caller: this.caller }))
         .then((brain) => {
           this.brain = brain;
           if (this._finalizing) void brain.end('bridge_closed');
@@ -854,11 +898,11 @@ class LiveBridge {
   // What to say for one delegation, and whether the brain was asked (so its
   // times are kept). Never throws. A delegation past the soft deadline gets a
   // holding line through say(), then this returns the real answer.
-  async brainReply(say) {
+  async brainReply(say, range) {
     if (this.brainAsks >= BRAIN_ASK_CAP) return { reply: DELEGATION_REPLY };
-    await this.settleTranscript();
+    await range.settled;
     if (this._finalizing) return { reply: DELEGATION_REPLY };
-    const words = this.takeCallerText();
+    const words = this.takeCallerText(range);
     if (!words) return { reply: BRAIN_NO_WORDS_REPLY };
     const brain = await this.ensureBrain();
     if (!brain || this._finalizing) return { reply: DELEGATION_REPLY };
@@ -883,9 +927,9 @@ class LiveBridge {
     if (!this._finalizing) this.toOpenAi({ type: 'session.commentary.append', delegation_id: id, content });
   }
 
-  async answerWithBrain(id, receivedAt) {
+  async answerWithBrain(id, receivedAt, range) {
     if (this._finalizing) return;
-    const { reply, startedAt, endedAt } = await this.brainReply((line) => this.speak(id, line));
+    const { reply, startedAt, endedAt } = await this.brainReply((line) => this.speak(id, line), range);
     this.speak(id, reply); // nothing is sent if the call ended while the brain worked
     if (startedAt === undefined) return;
     const ms = (from, to) => Math.max(0, to - from);
@@ -1066,6 +1110,8 @@ module.exports = {
   BRAIN_ASK_CAP,
   BRAIN_REPLY_MAX_CHARS,
   capReply,
+  estimateTokens,
+  BRAIN_REPLY_MAX_TOKENS,
   OPENAI_LIVE_URL,
   INSTRUCTIONS_MAX_CHARS,
   PER_CALL_RESERVE_USD,

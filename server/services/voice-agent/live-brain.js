@@ -17,8 +17,19 @@
  * frame). A turn is over when handlePrompt()'s promise settles; every token
  * sent before then is the turn's reply.
  *
- * Nothing here transfers the call: the end/handoff callback answers false
- * ("not sent"), so no tool claims a transfer or a hangup it did not do.
+ * Nothing here transfers the call. The conversation is a practice line
+ * (RelayConversation option practiceLine): it has no transfer tool and no
+ * automatic handoff, so no handoff packet is ever written; its writes are
+ * dry runs that tell the caller plainly nothing was booked or saved; and it
+ * never ends itself, so questions after a dry-run booking still get answers.
+ * The end/handoff callback answers false ("not sent") as a last backstop.
+ *
+ * Who the caller is: the account tools run only for the caller number (and
+ * carrier attestation) the Twilio-SIGNED live-cell request stamped on the
+ * call (`caller`, passed in by the bridge). open() refuses when the call_log
+ * row's own number or attestation differs from the stamp, since an unsigned
+ * webhook (the shared signature check can be in log or disabled mode) could
+ * have changed the row.
  *
  * The close does not run RelayConversation.end(). end() writes the call's
  * transcript (the caller's words) into call_log, stamps the row ai_handled and
@@ -37,12 +48,30 @@ const logger = require('../logger');
 // is given up and TIMEOUT_REPLY is the answer.
 const SOFT_DEADLINE_MS = 6000;
 const ASK_DEADLINE_MS = 20000;
-// Spoken at the hard deadline: GPT-Live paraphrases it and the call goes on.
-const TIMEOUT_REPLY = "I'll have the office confirm that for you.";
+// Spoken at the hard deadline, and for every ask after it (the brain is retired
+// then): GPT-Live paraphrases it and the call goes on. It promises nothing the
+// system files: no callback, no office task.
+const TIMEOUT_REPLY = "I can't pull that up right now. You can call or text the office for that.";
 const CLOSED_REPLY = "I can't check that right now.";
 
 function errCode(err) {
   return String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32);
+}
+
+const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
+
+// The row must agree with what the signed cell request stamped: the same caller
+// number, and the same attestation (metadata.stir_verstat, which
+// verifyInboundCaller reads). No stamped number: no account access.
+function identityMatches(row, caller) {
+  const stampedFrom = lastTen(caller && caller.from);
+  if (stampedFrom.length !== 10 || lastTen(row.from_phone) !== stampedFrom) return false;
+  let meta = row.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  const rowAttestation = (meta && meta.stir_verstat) || null;
+  return rowAttestation === ((caller && caller.stirVerstat) || null);
 }
 
 class LiveBrain {
@@ -54,6 +83,8 @@ class LiveBrain {
     this.deadlineMs = deadlineMs;
     this.softMs = softMs;
     this.ended = false;
+    this.retired = false; // a hard timeout retires the conversation: its turn may still be running
+    this.queue = Promise.resolve(); // asks run one at a time
     this.softTimeouts = 0; // asks still running at the soft deadline (they may still answer)
     this.hardTimeouts = 0; // asks given up at the hard deadline
     this.turn = null; // the turn collecting tokens: { tokens: [], closed: false }
@@ -72,12 +103,13 @@ class LiveBrain {
   // from the call's own row: the bridge proved it at the door, and this refuses
   // anything but a sandbox-sourced inbound row, whatever the caller asks.
   // `make` is injected by tests (and builds a RelayConversation by default).
-  static async open({ callSid, db, make, deadlineMs, softMs }) {
+  static async open({ callSid, db, make, deadlineMs, softMs, caller }) {
     const { VOICE_RELAY_SANDBOX_SOURCE } = require('./relay-protocol');
     const sid = String(callSid || '').trim();
     if (!sid) throw new Error('live_brain_no_callsid');
-    const row = await db('call_log').where({ twilio_call_sid: sid }).first('source', 'from_phone', 'to_phone');
+    const row = await db('call_log').where({ twilio_call_sid: sid }).first('source', 'from_phone', 'to_phone', 'metadata');
     if (!row || row.source !== VOICE_RELAY_SANDBOX_SOURCE) throw new Error('live_brain_not_sandbox');
+    if (!identityMatches(row, caller)) throw new Error('live_brain_identity_mismatch');
     let brain = null;
     const build = make || ((args) => {
       const { RelayConversation } = require('./relay-conversation');
@@ -88,10 +120,11 @@ class LiveBrain {
       // The live door verified the signed per-call token for this CallSid and
       // burned it; the row is the proof ANI checks read.
       callTokenVerified: true,
-      from: row.from_phone || null,
-      to: row.to_phone || null,
+      from: caller.from, // the signed request's number, which the row was just checked against
+      to: caller.to || row.to_phone || null,
       language: null,
       sandbox: true, // always: a write tool never runs on this line
+      practiceLine: true, // no transfer, explicit dry-run wording, never ends itself
       send: (token) => brain.collect(token),
       endSession: () => {
         logger.info(`[voice-live-brain] end/handoff frame ignored callSid=${sid}`);
@@ -112,9 +145,16 @@ class LiveBrain {
   // is the answer. At the hard deadline it resolves TIMEOUT_REPLY, counts the
   // timeout and aborts the conversation's round so the next ask starts clean.
   // Rejects only when the conversation's turn fails.
-  async ask(text, { onSoft } = {}) {
+  ask(text, opts = {}) {
+    const run = this.queue.then(() => this.runAsk(text, opts));
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  async runAsk(text, { onSoft } = {}) {
     const prompt = String(text || '').trim();
     if (this.ended || !prompt) return CLOSED_REPLY;
+    if (this.retired) return TIMEOUT_REPLY;
     const turn = { tokens: [], closed: false };
     this.turn = turn;
     let timer;
@@ -137,7 +177,14 @@ class LiveBrain {
       if (outcome === 'deadline') {
         this.hardTimeouts += 1;
         logger.warn(`[voice-live-brain] ask hit the ${this.deadlineMs} ms deadline callSid=${this.callSid}`);
-        try { this.convo.interrupt(); } catch { /* nothing to abort */ }
+        // The turn may still be awaiting a tool and could start another model round, so
+        // the conversation is retired for good: ended (queued turns stop), aborted, and
+        // never asked again. Later asks answer TIMEOUT_REPLY without touching it.
+        this.retired = true;
+        try {
+          this.convo.ended = true;
+          this.convo.interrupt();
+        } catch { /* nothing to abort */ }
         return TIMEOUT_REPLY;
       }
       return turn.tokens.join('').replace(/\s+/g, ' ').trim();

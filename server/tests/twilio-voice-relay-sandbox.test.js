@@ -490,8 +490,8 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
   // A cell request as Twilio sends it: signed over the public URL and the form
   // body (the route checks it itself; the shared middleware may only log).
   const CELL_PATH = '/api/webhooks/twilio/relay-sandbox/cell';
-  const cell = (digits, CallSid = 'CA-sb-live', { signed = true } = {}) => {
-    const body = { CallSid, To: SANDBOX, Digits: digits };
+  const cell = (digits, CallSid = 'CA-sb-live', { signed = true, extra = {} } = {}) => {
+    const body = { CallSid, To: SANDBOX, Digits: digits, ...extra };
     const headers = { host: 'portal.example.com', 'x-forwarded-proto': 'https' };
     if (signed) {
       headers['x-twilio-signature'] = require('twilio').getExpectedTwilioSignature(process.env.TWILIO_AUTH_TOKEN || '', `https://portal.example.com${CELL_PATH}`, body);
@@ -592,9 +592,22 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     expect(stamp).toEqual({
       cell: '71', voice: 'marin', started_at: expect.any(String), reserved_usd: PER_CALL_RESERVE_USD,
       stream_token_sha256: callTokenDigest(url.split('/').pop()),
+      from: null, to: SANDBOX, stir_verstat: null, // no From on this request
     });
     expect(update.mock.calls[0][0].metadata.sql).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
     delete process.env.TWILIO_ACCOUNT_SID;
+    delete process.env.TWILIO_AUTH_TOKEN;
+  });
+
+  test('gate on: the stamp carries the caller identity of the SIGNED request (From, To, StirVerstat) for tools mode', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    process.env.TWILIO_AUTH_TOKEN = 'test-token';
+    const { update } = primeLive();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71', 'CA-sb-live', { extra: { From: '+19415550100', StirVerstat: 'TN-Validation-Passed-A' } }), res);
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).gpt_live).toMatchObject({
+      from: '+19415550100', to: SANDBOX, stir_verstat: 'TN-Validation-Passed-A',
+    });
     delete process.env.TWILIO_AUTH_TOKEN;
   });
 
