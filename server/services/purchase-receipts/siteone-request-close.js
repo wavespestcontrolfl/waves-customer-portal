@@ -138,10 +138,14 @@ async function readRobotRequest(trx, requestId, locked) {
 
 // Every condition, on one read of the rows; the order dispatched is what the
 // line must cover.
+// The unlocked pre-check stops at the PO: a line with the robot's own PO always takes the NOWAIT
+// locks before its quantity is tested, so a short line also meets a manual receive that holds the
+// request (and rolls back to retry) instead of committing stock the receive then adds again.
 async function coveredRequest(trx, args, requestId, locked) {
   const { ledger, request } = await readRobotRequest(trx, requestId, locked);
   if (!isRobotOrderedRequest(request) || !ledgerPlacedBefore(ledger, args.email.received_at)) return null;
   if (!purchaseOrderMatches(ledger, args.purchaseOrder)) return null;
+  if (!locked) return request;
   const both = await quantitiesInOrderUnit(trx, request, args.product, args.receivedQty, args.receivedUnit);
   return both && lineCoversOrder(both.line, both.ordered) ? request : null;
 }

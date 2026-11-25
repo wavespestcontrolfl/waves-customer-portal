@@ -151,6 +151,12 @@ describe('closeRequestCoveredByLine', () => {
     expect(calls.updates).toEqual([]);
   });
 
+  test('a SHORT line with the robot\'s PO still takes the lock: a held request throws instead of committing stock', async () => {
+    const { trx, calls } = scriptedTrx({ live: [robot], ledger: placed, request: robot, lockHeld: true });
+    await expect(closeRequestCoveredByLine(trx, { ...args, receivedQty: 10 })).rejects.toMatchObject({ code: REQUEST_HELD });
+    expect(calls.updates).toEqual([]);
+  });
+
   test('the matched request held by another transaction throws, so the line rolls back and retries', async () => {
     const { trx, calls } = scriptedTrx({ live: [robot], ledger: placed, request: robot, lockHeld: true });
     await expect(closeRequestCoveredByLine(trx, args)).rejects.toMatchObject({ code: REQUEST_HELD, message: expect.stringMatching(/held by another action.*retries on the next sweep/) });
