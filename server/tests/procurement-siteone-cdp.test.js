@@ -30,7 +30,7 @@ const el = (spec = {}) => ({ visible: true, text: '', attrs: {}, value: '', chec
 
 function makeWorld(over = {}) {
   const w = {
-    url: 'about:blank', clicks: [], fills: [], gotos: [], cart: [], po: '', handleClicks: [], locatorPlaceClicks: 0, placeBtns: null, tenderReads: 0, onTenderRead: null, signedOutHeader: false, signInText: 'Sign In', emptyText: 'Your cart is empty.', hideEmptyState: false, poDraft: null, poSticky: false, bodyThrows: false, entrySeq: 0, flipOnRead: 0, flipCount: 0, removeNoop: false, step: 'order-type', radioChecked: false,
+    url: 'about:blank', clicks: [], fills: [], gotos: [], cart: [], po: '', productAccountText: null, checkoutAccountText: null, rowReads: 0, onRowRead: null, handleClicks: [], locatorPlaceClicks: 0, placeBtns: null, tenderReads: 0, onTenderRead: null, signedOutHeader: false, signInText: 'Sign In', emptyText: 'Your cart is empty.', hideEmptyState: false, poDraft: null, poSticky: false, bodyThrows: false, entrySeq: 0, flipOnRead: 0, flipCount: 0, removeNoop: false, step: 'order-type', radioChecked: false,
     signedOut: false, signInFails: false, identifierValue: 'owner-prefilled', closeCalls: 0, pageCloseCalls: 0,
     brandText: `CSI-PEST : ${SKU}`, formSku: SKU, formStore: '238', uomRows: [], searchHits: 1,
     pickupClass: 'cart-top-fulfillment-method__tile fullfillment-pickup fullfilment-select', pickupText: 'Pickup #238,5115 Lena Rd',
@@ -44,6 +44,22 @@ function makeWorld(over = {}) {
     ...over,
   };
   w.cartRowEls = () => w.cart.map((row) => el({
+    // What the browser would give an evaluate over this row's handle (live, so a replaced row reads detached).
+    dom: {
+      getAttribute: (name) => {
+        if (name === 'data-requestedqty') {
+          if (w.flipOnRead) { w.flipCount += 1; if (w.flipCount === w.flipOnRead) row.qty = 9; }
+          const v = String(row.qty);
+          w.rowReads += 1;
+          if (w.onRowRead) w.onRowRead(w.rowReads, w);
+          return v;
+        }
+        return { 'data-itemnumber': row.sku, 'data-cartentry': row.entry || '' }[name] ?? null;
+      },
+      querySelector: () => ({ value: String(row.qty) }),
+      get isConnected() { return w.cart.includes(row); },
+      contains: (link) => link.owner === row,
+    },
     attrs: {
       'data-itemnumber': row.sku,
       'data-cartentry': row.entry || '',
@@ -55,7 +71,7 @@ function makeWorld(over = {}) {
     },
     children: {
       [S.cartQtyInput]: [el({ value: String(row.qty) })],
-      [S.cartRemoveLine]: [el({ name: `remove:${row.sku}`, onClick: () => { if (!w.removeNoop) w.cart = w.cart.filter((r) => r !== row); } })],
+      [S.cartRemoveLine]: [el({ dom: { owner: row, get isConnected() { return w.cart.includes(row); } }, name: `remove:${row.sku}`, onClick: () => { if (!w.removeNoop) w.cart = w.cart.filter((r) => r !== row); } })],
     },
   }));
   return w;
@@ -78,7 +94,7 @@ function screens(w) {
     [S.reviewButton]: [el({ name: 'review-your-order', onClick: () => { go('/en/checkout/multi/order-summary/view')(); if (w.signOutAfter === 'review') w.signedOut = true; } })],
   } : {};
   const checkout = {
-    [S.accountNode]: w.hideAccount ? [] : [el({ text: w.accountText })],
+    [S.accountNode]: w.hideAccount ? [] : [el({ text: w.checkoutAccountText ?? w.accountText, attrs: w.accountAttr ? { 'data-account-number': w.accountAttr } : {} })],
     [S.orderTypeForm]: [el({ visible: false })],
     [S.pickupLocation]: [el({ text: w.checkoutLocText })],
     [S.checkoutStoreId]: [el({ visible: false, value: '238' })],
@@ -106,6 +122,7 @@ function screens(w) {
   };
   const confirmation = { [S.body]: [el({ text: w.confirmationBody })], ...(w.confirmationField ? { [S.confirmationNumber]: [el({ text: w.confirmationBody })] } : {}), [S.heading]: [el({ text: 'Order Received' })] };
   const product = {
+    [S.accountNode]: (w.productAccountText ?? w.accountText) === '' ? [] : [el({ text: w.productAccountText ?? w.accountText, attrs: w.accountAttr ? { 'data-account-number': w.accountAttr } : {} })],
     [S.brandItemNumber]: [el({ text: w.brandText })],
     [S.formBrandItemNumber]: [el({ visible: false, value: w.formSku })],
     [S.formStoreId]: [el({ visible: false, value: w.formStore })],
@@ -177,7 +194,7 @@ function makeBrowser(w) {
       return collection(current()[sel] || []);
     },
     close: async () => { w.pageCloseCalls += 1; w.closeOrder.push('page'); },
-    evaluate: async (fn, arg) => fn(arg.map((h) => h.dom)),
+    evaluate: async (fn, arg) => fn(arg.map((h) => (h && h.dom ? h.dom : h))),
   };
   const browser = {
     contexts: () => [{ newPage: async () => page }],
@@ -787,7 +804,7 @@ test('R6 click: the click goes to the element handle that passed review, with fo
   const disabled = await run({ onTenderRead: (n, w) => { if (n === 2) w.placeBtns[0].enabled = false; } });
   expect(disabled.error.refuse).toBe('place_button_ambiguous');
   for (const r of [replaced, detached, disabled]) {
-    expect(r.w.handleClicks).toEqual([]);
+    expect(r.w.clicks).not.toContain('place-order'); // (the handle clicks seen here are cleanup's own remove link)
     expect(r.w.placed).toBe(0);
     expect(r.w.cart).toEqual([]); // not an account problem: cleanup runs
     expectSafe(r.w);
@@ -847,4 +864,58 @@ test('R6 sign-out marker: a shown header "Sign In" (no redirect, no Okta box) is
   const mid = await run({}, { onCall: (n, w) => { if (n === 1) w.signedOutHeader = true; } });
   expect(mid.error.runLevel).toBe(true);
   expect(mid.w.placed).toBe(0);
+});
+
+// ---- round 7 -----------------------------------------------------------------------
+
+test('R7 money: the WHOLE text must be one amount with exactly two decimals', async () => {
+  const { parseMoney } = adapter._internals;
+  expect(parseMoney('$1,250.00')).toBe(125000);
+  expect(parseMoney('$105.93')).toBe(10593);
+  expect(parseMoney(' $12.50 ')).toBe(1250);
+  expect(parseMoney('$1250.00')).toBe(125000);
+  for (const bad of ['$1 250.00', '$1 250.00', '$1 250.00', '$1,250', '$1,250.0', '$12.345', '$12', '$0.00', 'Total $105.93', '$105.93 $5.00', '$1,25.00', '$-5.00', '', null]) {
+    expect(parseMoney(bad)).toBeNull();
+  }
+  // End to end: an unreadable total refuses before anything is checked out or clicked.
+  const cart = await run({ cartTotalText: '$1,250' });
+  expect(cart.error.refuse).toBe('cart_total_unreadable');
+  expect(cart.w.clicks).not.toContain('continue-checkout');
+  const review = await run({ reviewTotalText: '$1 250.00' });
+  expect(review.error.refuse).toBe('review_total_unreadable');
+  expect(review.w.placed).toBe(0);
+  expect((await run({ reviewTotalText: '$1,250.00' })).result.amountCents).toBe(125000);
+  for (const r of [cart, review]) { expect(r.w.cart).toEqual([]); expectSafe(r.w); }
+});
+
+test('R7 account: re-proven on the product page before Add to Cart and on the checkout page before the PO / form submit', async () => {
+  const product = await run({ productAccountText: 'Signed in as account 5550001' });
+  expect(product.error.refuse).toBe('account_mismatch');
+  expect(product.w.clicks).not.toContain('add-to-cart');
+  expect(product.w.cart).toEqual([]);
+  const productGone = await run({ productAccountText: '' });
+  expect(productGone.error.refuse).toBe('account_unreadable');
+  expect(productGone.w.clicks).not.toContain('add-to-cart');
+  const checkout = await run({ checkoutAccountText: 'Signed in as account 5550001' }, { args: { poNumber: 'PO-7' } });
+  expect(checkout.error.refuse).toBe('account_mismatch');
+  expect(checkout.w.fills).toEqual([]); // no PO typed
+  expect(checkout.w.clicks).not.toContain('order-type-submit');
+  // Account mismatch: cleanup touches nothing, so the line is left for the owner.
+  expect(checkout.w.cart).toHaveLength(1);
+  expect(checkout.error.evidence.cart_left_for_owner).toBe(true);
+  for (const r of [product, productGone, checkout]) expectSafe(r.w);
+});
+
+test('R7 cleanup: the remove click goes to the link handle inside the verified row handle; a row replaced in between is never clicked', async () => {
+  const refuse = [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }];
+  const exact = await run({}, { verdicts: refuse });
+  expect(exact.error.evidence.cleanup).toBe('row_removed');
+  expect(exact.w.handleClicks).toEqual([{ force: true, noWaitAfter: true, timeout: 1000 }]);
+  // The row is replaced by an identical-looking one after the handle was read: the old handle is detached.
+  const replaced = await run({}, { verdicts: refuse, onCall: (n, w) => { if (n === 2) w.onRowRead = (reads, world) => { if (reads === 1) world.cart[0] = { sku: SKU, qty: 2, entry: 'E1' }; }; } });
+  expect(replaced.error.evidence).toMatchObject({ cleanup: 'cart_left_for_owner', cart_left_for_owner: true });
+  expect(replaced.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]); // a locator click would have logged here
+  expect(replaced.w.handleClicks).toEqual([]);
+  expect(replaced.w.cart).toEqual([{ sku: SKU, qty: 2, entry: 'E1' }]);
+  for (const r of [exact, replaced]) expectSafe(r.w);
 });

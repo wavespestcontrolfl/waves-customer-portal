@@ -42,6 +42,13 @@
  *     a 1 s timeout; never a locator click.
  *   - A signed-out SiteOne can stay on the same URL: a shown header node reading
  *     exactly "Sign In" is the sign-out marker (run-level).
+ *   - A total is the WHOLE text of its node and one amount with exactly two
+ *     decimals (no spaces inside the digits); anything else is *_total_unreadable.
+ *   - The approved account is proven again on the product page right before Add
+ *     to Cart and on the checkout page before a PO is typed / the form submitted.
+ *   - Cleanup resolves the row and its own remove link to handles once, proves
+ *     both attached with the item / entry / quantity unchanged in one evaluate,
+ *     and clicks the link handle (force / noWaitAfter / 1 s), never a locator.
  *   - After every navigation or submit in checkout the sign-out detection of
  *     openPage runs again (run-level, so the claim is released and retried).
  *   - The cart is shared with the owner's phone app: the bot starts only from
@@ -208,11 +215,13 @@ const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const hasToken = (text, token) => new RegExp(`(^|[^a-z0-9])${escapeRegex(normalizeText(token))}($|[^a-z0-9])`).test(normalizeText(text));
 const hasEveryToken = (text, tokens) => tokens.length > 0 && tokens.every((t) => hasToken(text, t));
 
-// The ONE currency amount in a total's text; zero or several → null.
+// The WHOLE text must be one dollar amount with exactly two decimals:
+// "$1,250.00", "$12.50", "$1250.00". A space or narrow space inside the digits,
+// a missing or third decimal, or extra words → null (the caller refuses).
 function parseMoney(text) {
-  const amounts = [...String(text || '').replace(/,/g, '').matchAll(/\$\s*(\d+(?:\.\d{1,2})?)/g)].map((m) => Number(m[1]));
-  if (amounts.length !== 1) return null;
-  const n = amounts[0];
+  const t = String(text || '').trim();
+  if (!/^\$?\s?\d{1,3}(,\d{3})*\.\d{2}$/.test(t) && !/^\$?\d+\.\d{2}$/.test(t)) return null;
+  const n = Number(t.replace(/[$,\s]/g, ''));
   return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null;
 }
 // "CSI-PEST : 82003599" → "82003599": the item number after the last ":".
@@ -319,6 +328,28 @@ async function rowReading(row) {
   };
 }
 
+// Browser-side readers for the row handles (self-contained: they are serialized).
+const READ_ROW = ([row, qtySel]) => {
+  const q = row.querySelector(qtySel);
+  return {
+    attached: !!row.isConnected,
+    sku: String(row.getAttribute('data-itemnumber') || '').trim(),
+    entry: String(row.getAttribute('data-cartentry') || '').trim(),
+    requested: String(row.getAttribute('data-requestedqty') || '').trim(),
+    inputQty: q ? String(q.value).trim() : null,
+  };
+};
+const READ_ROW_AND_LINK = ([row, link, qtySel]) => {
+  const q = row.querySelector(qtySel);
+  return {
+    linked: !!(row.isConnected && link.isConnected && row.contains(link)),
+    sku: String(row.getAttribute('data-itemnumber') || '').trim(),
+    entry: String(row.getAttribute('data-cartentry') || '').trim(),
+    requested: String(row.getAttribute('data-requestedqty') || '').trim(),
+    inputQty: q ? String(q.value).trim() : null,
+  };
+};
+
 // The row is exactly what this run added: our item, the cart entry verified
 // after the add, and the quantity we set. No verified entry id → never ours.
 function isOwnRow(run, reading) {
@@ -342,12 +373,23 @@ async function removeOwnRow(run) {
   if (!(await accountProven(run))) { leaveCart(run, 'cart_left_for_owner'); return; }
   const bound = (await matches(page, rowSelectorFor(run.ownEntry))).all;
   if (!bound.length) { run.evidence.cleanup = 'row_absent'; return; }
-  if (!run.cartEmptyBefore || bound.length !== 1 || !isOwnRow(run, await rowReading(bound[0]))) { leaveCart(run, 'cart_left_for_owner'); return; }
-  const row = bound[0];
-  const link = await shownAll(row, SELECTORS.cartRemoveLine);
-  if (link.length !== 1) { leaveCart(run, 'remove_link_unreadable'); return; }
-  if (!isOwnRow(run, await rowReading(row))) { leaveCart(run, 'cart_left_for_owner'); return; }
-  await link[0].click();
+  if (!run.cartEmptyBefore || bound.length !== 1) { leaveCart(run, 'cart_left_for_owner'); return; }
+  // The row and its own remove link are resolved to handles ONCE; the click
+  // goes to the link handle, never a locator that could re-resolve to another row.
+  const links = await shownAll(bound[0], SELECTORS.cartRemoveLine);
+  const rowHandle = await bound[0].elementHandle().catch(() => null);
+  const linkHandle = links.length === 1 ? await links[0].elementHandle().catch(() => null) : null;
+  if (!rowHandle || !linkHandle) { leaveCart(run, 'remove_link_unreadable'); return; }
+  let before;
+  let now;
+  try {
+    before = await page.evaluate(READ_ROW, [rowHandle, SELECTORS.cartQtyInput]);
+    if (!before.attached || !isOwnRow(run, before)) { leaveCart(run, 'cart_left_for_owner'); return; }
+    // One evaluate: both still attached, the link is inside the row, item / entry / quantity unchanged.
+    now = await page.evaluate(READ_ROW_AND_LINK, [rowHandle, linkHandle, SELECTORS.cartQtyInput]);
+  } catch { leaveCart(run, 'cart_left_for_owner'); return; }
+  if (!now.linked || !isOwnRow(run, now)) { leaveCart(run, 'cart_left_for_owner'); return; }
+  await linkHandle.click({ force: true, noWaitAfter: true, timeout: 1000 });
   await page.waitForTimeout(run.opts.settleMs);
   const gone = await poll(page, async () => {
     await openPage(run, URLS.cart, PATHS.cart);
@@ -498,6 +540,7 @@ async function addToCart(run) {
   const { page, quantity, evidence } = run;
   const qtyBox = await oneShown(page, SELECTORS.pdpQty, 'quantity boxes', evidence);
   const button = await oneShown(page, SELECTORS.addToCart, 'Add to Cart buttons', evidence);
+  await verifyAccount(run); // still the approved account on THIS page, right before the add
   await qtyBox.fill(String(quantity));
   run.added = true; // from the click on, the line may exist: cleanup looks for it
   await button.click();
@@ -561,6 +604,7 @@ async function fillOrderType(run) {
   if (!hasEveryToken(locText, pickupTokens)) throw new RefusedError('pickup_not_selected', 'SiteOne checkout: the pickup location is not the approved branch', evidence);
   const storeField = String(await (await oneAttached(page, SELECTORS.checkoutStoreId, 'checkout store fields', evidence)).inputValue().catch(() => '')).trim();
   if (storeField !== storeId) throw new RefusedError('store_mismatch', `SiteOne checkout store ${storeField || '?'} is not the approved store ${storeId}`, evidence);
+  await verifyAccount(run); // and on the checkout page, before a PO is typed or the form submitted
   if (poNumber && run.dryRun) evidence.poSkipped = 'dry_run'; // a dry run never types a PO
   if (poNumber && !run.dryRun) {
     const po = await oneShown(page, SELECTORS.poInput, 'PO number boxes', evidence);
