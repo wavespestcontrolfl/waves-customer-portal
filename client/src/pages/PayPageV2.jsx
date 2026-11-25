@@ -738,7 +738,7 @@ function PayFaqItem({ question, children }) {
     </details>
   );
 }
-function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBilled }) {
+function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBilled, bankFormReady = false }) {
   if (!enabled) return null;
   // Same derivation as PaymentForm's tile: the /setup rate when it has
   // answered, else the client mirror of the configured rate.
@@ -776,6 +776,9 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
             emailing billing@wavespestcontrol.com or calling us.
           </PayFaqItem>
         )}
+        {/* Manual-entry steps only while the payment form (with its Bank
+            account tile) is on the page; a setup failure hides the form. */}
+        {bankFormReady && (
         <PayFaqItem question="My bank won’t let me sign in. How do I pay by bank?">
           You don’t need to sign in. Choose Bank account, then pick “Enter bank details manually”
           in the bank window, type your routing and account number, and press Pay. Stripe sends{' '}
@@ -783,10 +786,12 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
           email you get to verify your account. The payment then starts processing, and we email
           your receipt once it clears. Bank payments have no added fee.
         </PayFaqItem>
+        )}
         <PayFaqItem question="The page or my bank link isn’t working. What do I do?">
-          Reload this page and try once more. If your bank still won’t connect, enter your bank
-          details manually (see above), or pay with a card or a different account instead. Still
-          stuck? Give us a call and we’ll sort it out — <HelpPhoneLink tone="dark" inline />.
+          Reload this page and try once more. If your bank still won’t connect,{' '}
+          {bankFormReady ? 'enter your bank details manually (see above), or ' : 'you can '}pay with
+          a card or a different account instead. Still stuck? Give us a call and we’ll sort it out
+          — <HelpPhoneLink tone="dark" inline />.
         </PayFaqItem>
         <PayFaqItem question="Will I get a receipt, and where is my invoice copy?">
           Yes — we email your receipt once the payment goes through (a bank transfer, once it
@@ -3228,6 +3233,7 @@ export default function PayPageV2() {
               zelle={!!data.manualPayOptions?.zelle?.recipient && !stripeSetup?.combined && !(data.manualPayOptions?.creditPending && !stripeSetup)}
               saveRequired={!payer && saveCardRequired}
               thirdPartyBilled={!!payer}
+              bankFormReady={!!stripeSetup?.clientSecret}
             />
             {/* Hidden once /setup reports a combined-balance PI (the server
                 already withholds the block when siblings preview; this
