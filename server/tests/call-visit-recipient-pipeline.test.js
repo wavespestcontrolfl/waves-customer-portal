@@ -26,12 +26,17 @@ describe('recordForCall (the booking step)', () => {
   const inserts = [];
   // the visit's own customer and the account holder's number (the visit is the call customer's)
   let holder = { customer_id: 'cust-1', phone: null };
-  const chain = () => {
+  const chain = (table) => {
     const q = {};
     ['where', 'whereNull', 'whereRaw', 'join', 'onConflict', 'merge'].forEach((m) => { q[m] = jest.fn(() => q); });
-    q.first = jest.fn(async (...cols) => (cols.includes('s.customer_id') ? holder : null));
+    q.first = jest.fn(async (...cols) => {
+      if (cols.includes('s.customer_id')) return holder;
+      if (table === 'scheduled_services' && cols.includes('customer_id')) return { customer_id: holder.customer_id }; // the in-transaction re-read
+      return null;
+    });
     q.insert = jest.fn((row) => { inserts.push(row); return q; });
     q.returning = jest.fn(async () => [{ id: 'vtr-1' }]);
+    q.del = jest.fn(async () => 1);
     return q;
   };
   const bob = { first_name: 'Bob', last_name: 'Roe', phone_e164: BOB, role: 'spouse_partner', wants_appointment_texts: true };
@@ -54,7 +59,9 @@ describe('recordForCall (the booking step)', () => {
     holder = { customer_id: 'cust-1', phone: null };
     db.raw = jest.fn((sql) => ({ sql }));
     db.fn = { now: jest.fn(() => 'now()') };
-    db.mockImplementation(() => chain());
+    db.mockImplementation((table) => chain(table));
+    // recordForVisit writes inside one transaction (an advisory lock, a re-read of the visit's customer, delete-and-insert)
+    db.transaction = jest.fn(async (fn) => fn(Object.assign((table) => chain(table), { raw: jest.fn(async () => ({})) })));
   });
 
   test('gate off: nothing is written', async () => {

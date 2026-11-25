@@ -141,7 +141,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(after.find((row) => row.phone_key === BOB.slice(-10)).id).toBe(stored[0].id);
     });
 
-    test('a fresh call for the same visit and number REPLACES an ineligible row (never bound, or bound to another customer) and leaves an eligible one exactly as it is', async () => {
+    test('a fresh call for the same visit and number REPLACES an ineligible row by delete-and-insert (a NEW id), and leaves an eligible one exactly as it is', async () => {
       await record({}, entry({ first_name: 'Bob', role: 'spouse_partner' }));
       const [first] = await rows();
       const claim = { 'confirmation:2031-01-01T09:00': 'token-1' };
@@ -152,7 +152,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       const kept = (await rows())[0];
       expect(kept).toMatchObject({ id: first.id, first_name: 'Bob', role: 'spouse_partner', customer_id: customerId, track_token: `vr_${'d'.repeat(48)}` });
       expect(kept.deliveries).toEqual(claim);
-      // (2) never bound (customer_id null): replaced, with the old token and claims cleared
+      // (2) never bound (customer_id null): the old row is gone and a fresh one (new id) stands, with no token and no claims
       await db('visit_text_recipients').where({ id: first.id }).update({ customer_id: null });
       const [{ id: secondCall }] = await db('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE }).returning('id');
       try {
@@ -160,23 +160,58 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(replaced.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: true }]);
         const after = await rows();
         expect(after).toHaveLength(1);
-        expect(after[0]).toMatchObject({ id: first.id, customer_id: customerId, call_log_id: secondCall, first_name: 'Robert', role: 'friend', track_token: null });
+        expect(after[0].id).not.toBe(first.id);
+        expect(after[0]).toMatchObject({ customer_id: customerId, call_log_id: secondCall, first_name: 'Robert', role: 'friend', track_token: null });
         expect(after[0].deliveries).toEqual({});
-        // (3) bound to a customer the visit has since left: replaced the same way
+        expect(await db('visit_text_recipients').where({ id: first.id }).first()).toBeUndefined();
+        // (3) bound to a customer the visit has since left: replaced the same way, with yet another id
         const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(41) }).returning('id');
         try {
-          await db('visit_text_recipients').where({ id: first.id }).update({ customer_id: otherCustomerId, track_token: `vr_${'e'.repeat(48)}`, deliveries: claim });
+          await db('visit_text_recipients').where({ id: after[0].id }).update({ customer_id: otherCustomerId, track_token: `vr_${'e'.repeat(48)}`, deliveries: claim });
           const again = await record({ callLogId: secondCall }, entry({ first_name: 'Rob' }));
           expect(again.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: true }]);
-          const final = (await rows())[0];
-          expect(final).toMatchObject({ customer_id: customerId, first_name: 'Rob', track_token: null });
-          expect(final.deliveries).toEqual({});
+          const final = await rows();
+          expect(final).toHaveLength(1);
+          expect(final[0].id).not.toBe(after[0].id);
+          expect(final[0]).toMatchObject({ customer_id: customerId, first_name: 'Rob', track_token: null });
+          expect(final[0].deliveries).toEqual({});
         } finally {
-          await db('visit_text_recipients').where({ id: first.id }).update({ customer_id: customerId });
+          await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
           await db('customers').where({ id: otherCustomerId }).del();
         }
       } finally {
         await db('call_log').where({ id: secondCall }).del();
+      }
+    });
+
+    test('concurrent authorizations from two customers for one visit: the visit\'s current customer\'s survives, never the stale one', async () => {
+      const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(42) }).returning('id');
+      try {
+        // the visit now belongs to the OTHER customer (reassigned); calls from both customers race to record the same number
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: otherCustomerId });
+        const results = await Promise.all([
+          record({ customerId }, entry({ first_name: 'Stale' })),
+          record({ customerId: otherCustomerId }, entry({ first_name: 'Fresh' })),
+          record({ customerId }, entry({ first_name: 'Stale2' })),
+        ]);
+        expect(results[0].skipped).toEqual([{ reason: 'customer_mismatch' }]);
+        expect(results[2].skipped).toEqual([{ reason: 'customer_mismatch' }]);
+        const stored = await rows();
+        expect(stored).toHaveLength(1);
+        expect(stored[0]).toMatchObject({ customer_id: otherCustomerId, first_name: 'Fresh' });
+        // and the other order: a row recorded for the old customer is replaced when the visit's new customer records
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: customerId });
+        await record({ customerId }, entry({ first_name: 'Old' }));
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: otherCustomerId });
+        await Promise.all([record({ customerId: otherCustomerId }, entry({ first_name: 'Fresh' })), record({ customerId }, entry({ first_name: 'Stale' }))]);
+        const settled = await rows();
+        expect(settled).toHaveLength(1);
+        expect(settled[0]).toMatchObject({ customer_id: otherCustomerId, first_name: 'Fresh' });
+      } finally {
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: customerId });
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+        await db('customers').where({ id: otherCustomerId }).del();
       }
     });
 
@@ -479,6 +514,47 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       process.env[GATE] = 'true';
       await db('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
       expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toMatchObject({ eligible: false });
+    });
+
+    test('a queued replay carrying the OLD row id is dropped once the number is rebound to a new row; the new confirmation is sent once', async () => {
+      const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [row] = await queued();
+      const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
+      // the send carried the row id AND its customer binding
+      expect(meta.recipient_customer_id).toBe(customerId);
+      expect(meta.visit_recipient_id).toBeTruthy();
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toEqual({ eligible: true });
+      // a replay that names no customer binding is not owed either
+      const { recipient_customer_id: _unbound, ...withoutBinding } = meta;
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', withoutBinding)).toMatchObject({ eligible: false, reason: 'recipient-not-owed' });
+      // the visit is reassigned to another customer, whose call records the same number: delete-and-insert, a NEW row id
+      const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(43) }).returning('id');
+      try {
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: otherCustomerId });
+        await VisitRecipient.recordForVisit({ scheduledServiceId: visitId, customerId: otherCustomerId, callLogId, v2Extraction: extraction(entry()), excludePhones: [] });
+        const [fresh] = await rows();
+        expect(fresh.id).not.toBe(meta.visit_recipient_id);
+        expect(fresh.customer_id).toBe(otherCustomerId);
+        // the OLD queued replay (old id, old binding) finds no row and drops, at the replay recheck and at the provider handoff
+        expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toMatchObject({ eligible: false, reason: 'recipient-not-owed' });
+        expect(await VisitRecipient.providerCheck({ ...meta, replay: true })).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_NOT_OWED' });
+        // the new row's confirmation goes out once
+        sendCustomerMessage.mockReset();
+        sendCustomerMessage.mockResolvedValue({ sent: true });
+        await notify('confirmation');
+        await notify('confirmation');
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        // and that send's own recheck (its row id and binding) passes at the handoff
+        const handoff = await sendCustomerMessage.mock.calls[0][0].providerPreSendCheck();
+        expect(handoff).toEqual({ ok: true });
+      } finally {
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: customerId });
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+        await db('sms_log').where({ customer_id: otherCustomerId }).del();
+        await db('customers').where({ id: otherCustomerId }).del();
+      }
     });
 
     test('a replay that ends without a send gives the claim back, so a later sender still owes the text', async () => {
@@ -1184,18 +1260,20 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         const [{ id: provedId }] = await rows();
         await db('call_log').where({ id: callLogId }).update({ customer_id: customerId });
         await db('visit_text_recipients').where({ id: provedId }).update({ customer_id: null });
-        const base = (over) => ({ phone_key: '941555' + String(Math.floor(1000 + Math.random() * 8999)), phone_e164: '+1941555' + String(Math.floor(1000 + Math.random() * 8999)), consent_version: 'test', ...over });
+        // four DISTINCT fixed numbers (unique to this run); the key is always the last 10 digits of the E.164
+        const numbers = [phone(50), phone(51), phone(52), phone(53)];
+        const base = (n, over) => ({ phone_e164: numbers[n], phone_key: numbers[n].slice(-10), consent_version: 'test', ...over });
         // the whole run is one transaction that is ROLLED BACK: the assertions read inside it, nothing else is ever touched
         const rollback = new Error('rollback');
         let seen;
         await db.transaction(async (trx) => {
           const [{ id: otherCallId }] = await trx('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE, customer_id: otherCustomerId }).returning('id');
           const [{ id: noCustomerCallId }] = await trx('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE }).returning('id');
-          const make = async (over) => (await trx('visit_text_recipients').insert(base({ scheduled_service_id: otherVisitId, ...over })).returning('id'))[0].id;
-          const conflicting = await make({ call_log_id: otherCallId });         // the call was another customer's
-          const callWithoutCustomer = await make({ call_log_id: noCustomerCallId });
-          const noCall = await make({});                                           // no call on record
-          const alreadyBound = await make({ call_log_id: callLogId, customer_id: otherCustomerId }); // bound elsewhere: never overwritten
+          const make = async (n, over) => (await trx('visit_text_recipients').insert(base(n, { scheduled_service_id: otherVisitId, ...over })).returning('id'))[0].id;
+          const conflicting = await make(0, { call_log_id: otherCallId });         // the call was another customer's
+          const callWithoutCustomer = await make(1, { call_log_id: noCustomerCallId });
+          const noCall = await make(2, {});                                           // no call on record
+          const alreadyBound = await make(3, { call_log_id: callLogId, customer_id: otherCustomerId }); // bound elsewhere: never overwritten
           await migration.up(trx);
           const customerOf = async (rowId) => (await trx('visit_text_recipients').where({ id: rowId }).first('customer_id')).customer_id;
           seen = {

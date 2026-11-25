@@ -7843,7 +7843,7 @@ shape returns no stops count, route progress, approximate vehicle or scheduled
 polling, and the stops-ahead POST does not compute or persist a count for it.
 The track payload never returns or mints a reschedule token. A second
 token kind resolves on this route while GATE_CALL_GIVEN_VISIT_TEXTS is on: a
-visit text recipient's own `visit_text_recipients.track_token` (`vr_` + 48 lowercase hex, a shape of its own that never matches the holder's 64 hex, so the page and the socket auth refuse it as a socket credential by format; minted
+visit text recipient's own `visit_text_recipients.track_token` (`vr_` + 48 lowercase hex, a shape of its own that never matches the holder's 64 hex, so the page and the socket auth refuse it as a socket credential by format; while GATE_CALL_GIVEN_VISIT_TEXTS is off the pre-parser answers it with the generic 404 on all three routes before any limiter or database read; minted
 when their en-route text wins its send claim). LIFETIME RULE (one function, `recipientLinkEligible` in
 `server/services/track-token-expiry.js`, used by the module that resolves the
 token and by the GET and both POST routes): the token opens only while the

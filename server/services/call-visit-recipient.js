@@ -145,13 +145,11 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
   if (!holder || !holder.customer_id || (customerId && String(customerId) !== String(holder.customer_id))) {
     return { ...result, skipped: [{ reason: 'customer_mismatch' }] };
   }
-  const authorizingCustomerId = holder.customer_id;
   for (const entry of eligibleEntries(v2Extraction, { excludePhones: [...excludePhones, holder?.phone] })) {
     if (await disclaimedNumberHeld(entry.phoneE164, conn, { strict: true })) { result.skipped.push({ reason: 'disclaimed_number' }); continue; }
     if (await suppressedNumber(entry.phoneKey, conn)) { result.skipped.push({ reason: 'suppressed' }); continue; }
     const fresh = {
       scheduled_service_id: scheduledServiceId,
-      customer_id: authorizingCustomerId,
       phone_key: entry.phoneKey,
       phone_e164: entry.phoneE164,
       first_name: entry.firstName ? String(entry.firstName).slice(0, 100) : null,
@@ -161,27 +159,23 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       consent_version: CONSENT_VERSION,
       call_log_id: callLogId,
     };
-    // One atomic write per number: a new row; or, when the same visit and number already have a row that is NOT bound to this
-    // visit's current customer (never bound, or bound to a customer the visit has since left), a fresh qualifying call REPLACES it:
-    // the new customer, call, name and role, with its old tracker token and delivery claims cleared. A row that is already bound
-    // to the visit's customer is left exactly as it is (no change, no row returned).
-    const rows = await conn(TABLE).insert(fresh)
-      .onConflict(['scheduled_service_id', 'phone_key'])
-      .merge({
-        customer_id: fresh.customer_id,
-        phone_e164: fresh.phone_e164,
-        first_name: fresh.first_name,
-        last_name: fresh.last_name,
-        role: fresh.role,
-        source: fresh.source,
-        consent_version: fresh.consent_version,
-        call_log_id: fresh.call_log_id,
-        track_token: null,
-        deliveries: conn.raw("'{}'::jsonb"),
-        created_at: conn.fn.now(),
-      })
-      .where(conn.raw(`${TABLE}.customer_id IS DISTINCT FROM ?`, [authorizingCustomerId]))
-      .returning('id');
+    // NEVER rebound in place. One transaction per number, serialized per visit by an advisory lock (no row lock on the visit):
+    // the visit's customer is re-read inside it, and when the same visit and number already have a row that is not bound to that
+    // customer (never bound, or bound to one the visit has left) the row is DELETED and a fresh one is INSERTED, so its id is new.
+    // Anything queued or in flight under the old id (a held text, a replay, a handoff recheck, a tracker token) finds no row and
+    // drops. A row already bound to the visit's customer is left exactly as it is.
+    const outcome = await conn.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
+      const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
+      if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
+      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id');
+      if (existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id)) return 'kept';
+      if (existing) await trx(TABLE).where({ id: existing.id }).del();
+      await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
+      return 'created';
+    });
+    if (outcome === 'customer_mismatch') { result.skipped.push({ reason: 'customer_mismatch' }); continue; }
+    const rows = outcome === 'created' ? [1] : [];
     result.recorded.push({ phoneKey: entry.phoneKey, created: rows.length > 0 });
   }
   return result;
@@ -281,6 +275,8 @@ async function ownedContact(row, visit, kind, conn) {
     // Not a service-contact role: the send runs at phone_matches_customer trust. This person has no slot and no login.
     role: ROLE,
     visitRecipientId: row.id,
+    // The customer this row was recorded for, carried in every send's recheck and replay: a row with another binding is another row.
+    recipientCustomerId: row.customer_id,
     claimKey: `${kind}:${scheduledDate || ''}T${windowStart || ''}`,
     visit: { id: visit.id, customerId: visit.customer_id, serviceType: visit.service_type, scheduledDate, windowStart },
   };
@@ -396,6 +392,7 @@ async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, re
       ...promiseMeta,
       ...(recheckMeta.arrival_start ? { arrival_start: recheckMeta.arrival_start } : {}),
       ...(recheckMeta.recipient_hint ? { recipient_hint: recheckMeta.recipient_hint } : {}),
+      ...(recheckMeta.recipient_customer_id ? { recipient_customer_id: recheckMeta.recipient_customer_id } : {}),
       replay_purpose: KINDS[kind].purpose,
       slot_scheduled_date: contact.visit.scheduledDate,
       ...(contact.visit.windowStart ? { slot_window_start: contact.visit.windowStart } : {}),
@@ -579,7 +576,7 @@ async function resolveTrackToken(token, conn) {
     if (!visit || !rowBelongsToVisitCustomer(row, visit) || !recipientLinkEligible(visit)) return null;
     // Only a link that can still open pays for the permission reads: the same check the en-route send makes at the
     // provider handoff, read fresh on every request.
-    const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id }, { conn, anyVisitStatus: true });
+    const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id, recipient_customer_id: row.customer_id }, { conn, anyVisitStatus: true });
     if (!permission.ok) return null;
     // The final recheck: the visit as it stands now, after the permission reads.
     const again = await readLinkVisit(row.scheduled_service_id, conn);
@@ -642,6 +639,7 @@ async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
     claim_key: contact.claimKey,
     // Who staff should check if this text cannot be confirmed at the handoff: the first name and the LAST 4 digits only.
     recipient_hint: recipientHint(contact),
+    recipient_customer_id: contact.recipientCustomerId,
     ...(dayOnly ? { promise_level: 'day' } : {}),
     ...(arrivalStart && !dayOnly ? { arrival_start: arrivalStart } : {}),
   };
@@ -704,6 +702,11 @@ async function recipientPermission(meta, { conn = db, anyVisitStatus = false } =
   const contacts = await contactsForVisit(meta.scheduled_service_id, meta.kind, { conn, throwOnError: true, anyVisitStatus });
   const mine = contacts.find((contact) => contact.visitRecipientId === meta.visit_recipient_id);
   if (!mine) return noVerdict('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
+  // The row must be the one the send was built with: its id (found above) AND its customer binding. A caller with no recorded
+  // customer (an old queued text) is not owed.
+  if (!meta.recipient_customer_id || String(mine.recipientCustomerId || '') !== String(meta.recipient_customer_id)) {
+    return noVerdict('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
+  }
   // The hold on the visit above is the HOLDER's number; the person's own number can be held by another call.
   if (await require('./disclaimed-number-holds').disclaimedNumberHeld(mine.phone, conn, { strict: true })) {
     return noVerdict('RECIPIENT_NUMBER_HOLD', 'recipient-number-hold');

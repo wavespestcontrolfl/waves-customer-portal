@@ -108,7 +108,7 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     disclaimedNumberHeldForVisit.mockResolvedValue(true);
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
     // and the send's handoff check reads the same hold
-    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALLBACK_NUMBER_HOLD');
+    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', recipient_customer_id: 'cust-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALLBACK_NUMBER_HOLD');
   });
 
   test('a callback-number hold on the RECIPIENT\'s own number closes the link and the send recheck', async () => {
@@ -116,7 +116,7 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     disclaimedNumberHeld.mockResolvedValue(true);
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
     expect(disclaimedNumberHeld).toHaveBeenCalledWith('+19415550002', expect.anything(), { strict: true });
-    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('RECIPIENT_NUMBER_HOLD');
+    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', recipient_customer_id: 'cust-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('RECIPIENT_NUMBER_HOLD');
   });
 
   test('a lookup error is rethrown without the bound token (a knex message carries its bindings)', async () => {
@@ -132,7 +132,7 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     seed();
     callVetoesForNumber.mockResolvedValue({ doNotContact: true, smsDeclined: false });
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
-    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALL_DO_NOT_CONTACT');
+    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', recipient_customer_id: 'cust-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALL_DO_NOT_CONTACT');
     expect(callVetoesForNumber).toHaveBeenCalledWith('+19415550002', expect.objectContaining({ dbi: expect.anything() }));
   });
 
@@ -140,7 +140,7 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     seed();
     callVetoesForNumber.mockResolvedValue({ doNotContact: false, smsDeclined: true });
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
-    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALL_SMS_DECLINED');
+    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', recipient_customer_id: 'cust-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALL_SMS_DECLINED');
   });
 
   test('the choices row is read FAIL-CLOSED, and an unreadable or missing choices table denies (the link errors, the recheck throws)', async () => {
@@ -153,7 +153,7 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
     expect(JSON.stringify(logger.warn.mock.calls)).toContain('42P01');
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('service_contact_notification_prefs');
-    await expect(VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'x' })).rejects.toThrow();
+    await expect(VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', recipient_customer_id: 'cust-1', claim_key: 'x' })).rejects.toThrow();
   });
 
   test('the cheap lifetime check runs FIRST: a closed link answers with no permission read at all', async () => {
