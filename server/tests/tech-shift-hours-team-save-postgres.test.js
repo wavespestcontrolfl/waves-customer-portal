@@ -31,8 +31,11 @@ const { randomUUID } = require('node:crypto');
 
 jest.setTimeout(60000);
 
-// 2031-03-03 is a Monday.
-const [MON, TUE, WED, FRI] = ['2031-03-03', '2031-03-04', '2031-03-05', '2031-03-07'];
+// The save lists the visits from today (ET) forward, so the days follow the clock: the first Monday
+// three weeks or more from now, and the Tuesday, Wednesday and Friday after it.
+const monday = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() + 21));
+monday.setUTCDate(monday.getUTCDate() + ((8 - monday.getUTCDay()) % 7));
+const [MON, TUE, WED, FRI] = [0, 1, 2, 4].map((later) => new Date(monday.getTime() + later * 86400000).toISOString().slice(0, 10));
 
 postgres('a Team save of the shift hours lists the visits the new hours do not hold (real Postgres)', () => {
   let db;
@@ -110,10 +113,14 @@ postgres('a Team save of the shift hours lists the visits the new hours do not h
     await makeVisit(tech, { window_start: '13:00', window_end: '14:00', scheduled_date: '2020-01-06' }); // a past day
     await makeVisit(tech, { window_start: null, window_end: null }); // no time to judge
     await makeVisit(other, { window_start: '13:00', window_end: '14:00' }); // another technician's
+    // An estimate's slot hold (no customer, a reservation stamp): nobody has booked it.
+    await makeVisit(tech, { scheduled_date: TUE, window_start: '15:00', window_end: '16:00', customer_id: null, reservation_expires_at: db.raw("NOW() + INTERVAL '15 minutes'") });
+    // A hold the office booked keeps its stamp and has a customer: a visit.
+    const bookedHold = await makeVisit(tech, { scheduled_date: FRI, window_start: '15:00', window_end: '16:00', reservation_expires_at: db.raw("NOW() + INTERVAL '15 minutes'") });
 
     const body = await save(tech, hours('08:00', '12:00'));
     expect(await storedHours(tech)).toEqual(['08:00:00', '12:00:00']);
-    expect(ids(body)).toEqual([endsLate, startsEarly, long]);
+    expect(ids(body)).toEqual([endsLate, startsEarly, long, bookedHold]);
     expect(body.outsideShiftVisits[0]).toEqual({
       id: endsLate, scheduledDate: expect.anything(), serviceType: 'Quarterly Pest Control', customerName: 'Synthetic Hours',
     });
@@ -121,10 +128,11 @@ postgres('a Team save of the shift hours lists the visits the new hours do not h
     expect(body.futureAssignedVisits).toEqual([]);
     expect((await db('scheduled_services').where({ id: endsLate }).first('technician_id')).technician_id).toBe(tech.id);
 
-    // A later end holds two of the three (a visit may end at the shift's end); an earlier start holds the third.
-    expect(ids(await save(tech, hours('08:00', '12:30')))).toEqual([startsEarly]);
-    expect(ids(await save(tech, hours('07:00', '12:30')))).toEqual([]);
-    expect(ids(await save(tech, hours('07:00', '12:29')))).toEqual([endsLate, long]);
+    // A later end alone is new hours (a visit may end at the shift's end), and so is an earlier start alone.
+    expect(ids(await save(tech, hours('08:00', '12:30')))).toEqual([startsEarly, bookedHold]);
+    expect(ids(await save(tech, hours('07:00', '12:30')))).toEqual([bookedHold]);
+    expect(ids(await save(tech, hours('07:00', '16:00')))).toEqual([]);
+    expect(ids(await save(tech, hours('07:00', '12:29')))).toEqual([endsLate, long, bookedHold]);
   });
 
   test('a day the technician does not work is not listed: the shift is not that day\'s', async () => {

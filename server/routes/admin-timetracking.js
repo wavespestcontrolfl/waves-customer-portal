@@ -1056,13 +1056,17 @@ function formatFutureAssignedVisits(rows) {
 // today (ET) forward that the hours this save set do not hold. They are the visits an office save gets the
 // shift line for (shiftWarning: on a day the technician works, the visit's own minutes, today on the hours
 // of the clock-in). Listed for the office to move or reassign; never modified, as on offboarding.
+// An estimate's slot hold (no customer, a reservation stamp) is not a visit: nobody has booked it, and it is
+// left out (the filter of occupancy.js and tech-open-visit-nudge.js).
 // {} and no read with the gate off, when the save left the hours as they were, or when the technician now
 // has no set hours.
 async function outsideNewShiftReply(conn, before, tech) {
   const [was, now] = [storedShift(before), storedShift(tech)];
   if (!techShiftHoursOn() || !now || (was && was.startMin === now.startMin && was.endMin === now.endMin)) return {};
   const shiftOf = await loadTechShifts(conn, { technicianIds: [tech.id] });
-  const outside = (await listFutureAssignedVisits(conn, tech.id)).filter((visit) => !isOffDay(tech, visit.scheduled_date)
+  const visits = await listFutureAssignedVisits(conn, tech.id)
+    .where((q) => q.whereNotNull('s.customer_id').orWhereNull('s.reservation_expires_at'));
+  const outside = visits.filter((visit) => !isOffDay(tech, visit.scheduled_date)
     && shiftWarning(tech, shiftOf(tech.id, visit.scheduled_date), rowBlockMinutes(visit)));
   return { outsideShiftVisits: formatFutureAssignedVisits(outside) };
 }
