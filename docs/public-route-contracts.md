@@ -7841,7 +7841,7 @@ not approved for customer copy, the payload instead uses neutral
 `pending_rebook` office recovery with no reason or picker action. That unplaced
 shape returns no stops count, route progress, approximate vehicle or scheduled
 polling, and the stops-ahead POST does not compute or persist a count for it.
-The track payload never returns or mints a reschedule token. A second
+The track payload never returns or mints a reschedule token. The holder GET accepts `?refresh=socket` (sent by the page on every socket connect) and then uses the no-provider ETA, never a paid Distance Matrix call; no other value changes anything. A second
 token kind resolves on this route while GATE_CALL_GIVEN_VISIT_TEXTS is on: a
 visit text recipient's own `visit_text_recipients.track_token` (64 hex, minted
 when their en-route text wins its send claim). LIFETIME RULE (one function, `recipientLinkEligible` in

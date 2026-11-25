@@ -447,7 +447,9 @@ async function buildApproxVehicle(row) {
 
 // `readOnly` (a visit text recipient's link): no write and no paid call. The tracker's own cached position only (no
 // Bouncie fetch, which writes tech_status), and the straight-line ETA (no Distance Matrix).
-async function buildVehicle(service, { readOnly = false } = {}) {
+// `allowProvider: false` (the holder's socket-connect refetch, `?refresh=socket`) uses the no-provider straight-line ETA: no paid
+// Distance Matrix call. A recipient's read-only view never calls it either.
+async function buildVehicle(service, { readOnly = false, allowProvider = true } = {}) {
   // Phase 2: live tech location + ETA from tech_status. Returns null
   // if either the tech's last GPS ping is missing or the property
   // doesn't have a geocode — TrackPage falls back to a no-map en-route
@@ -484,7 +486,7 @@ async function buildVehicle(service, { readOnly = false } = {}) {
     customerLng: service.longitude,
     techUpdatedAt: position.lastReportedAt,
     logPrefix: 'track-public',
-    ...(readOnly ? { allowProvider: false } : {}),
+    ...(readOnly || allowProvider === false ? { allowProvider: false } : {}),
   });
 
   return {
@@ -947,7 +949,7 @@ router.get('/:token', safeRoute(async (req, res, next) => {
       // leaves track_state='en_route', and keying off it here would keep
       // streaming fresh tech GPS coords and polling until token expiry
       // even though the customer is shown a terminal missed-visit card.
-      vehicle: customerState === 'en_route' ? (recipientScope ? recipientVehicle : await buildVehicle(row, { readOnly: false })) : null,
+      vehicle: customerState === 'en_route' ? (recipientScope ? recipientVehicle : await buildVehicle(row, { readOnly: false, allowProvider: req.query?.refresh !== 'socket' })) : null,
       stopsAhead: stopsReady ? stopsReady.stopsAhead : null,
       // True when a count exists but is not yet the durable clamp floor —
       // the page must POST /:token/stops-ahead (the explicit write path)

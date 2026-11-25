@@ -1128,12 +1128,39 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(sendCustomerMessage).not.toHaveBeenCalled();
       });
 
-      test('the migration backfills an existing row from its visit\'s customer', async () => {
+      test('the migration backfills ONLY from the call the number was given on (and only when that call\'s customer is the visit\'s current one); everything else stays NULL, and other rows are untouched', async () => {
+        const migration = require('../models/migrations/20261124230000_visit_text_recipients_customer_id');
         await record();
-        const [{ id }] = await rows();
-        await db('visit_text_recipients').where({ id }).update({ customer_id: null });
-        await require('../models/migrations/20261124230000_visit_text_recipients_customer_id').up(db);
-        expect((await rows())[0].customer_id).toBe(customerId);
+        const [{ id: provedId }] = await rows();
+        await db('call_log').where({ id: callLogId }).update({ customer_id: customerId });
+        await db('visit_text_recipients').where({ id: provedId }).update({ customer_id: null });
+        const base = (over) => ({ phone_key: '941555' + String(Math.floor(1000 + Math.random() * 8999)), phone_e164: '+1941555' + String(Math.floor(1000 + Math.random() * 8999)), consent_version: 'test', ...over });
+        // the whole run is one transaction that is ROLLED BACK: the assertions read inside it, nothing else is ever touched
+        const rollback = new Error('rollback');
+        let seen;
+        await db.transaction(async (trx) => {
+          const [{ id: otherCallId }] = await trx('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE, customer_id: otherCustomerId }).returning('id');
+          const [{ id: noCustomerCallId }] = await trx('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE }).returning('id');
+          const make = async (over) => (await trx('visit_text_recipients').insert(base({ scheduled_service_id: otherVisitId, ...over })).returning('id'))[0].id;
+          const conflicting = await make({ call_log_id: otherCallId });         // the call was another customer's
+          const callWithoutCustomer = await make({ call_log_id: noCustomerCallId });
+          const noCall = await make({});                                           // no call on record
+          const alreadyBound = await make({ call_log_id: callLogId, customer_id: otherCustomerId }); // bound elsewhere: never overwritten
+          await migration.up(trx);
+          const customerOf = async (rowId) => (await trx('visit_text_recipients').where({ id: rowId }).first('customer_id')).customer_id;
+          seen = {
+            proved: await customerOf(provedId),
+            conflicting: await customerOf(conflicting),
+            callWithoutCustomer: await customerOf(callWithoutCustomer),
+            noCall: await customerOf(noCall),
+            alreadyBound: await customerOf(alreadyBound),
+          };
+          throw rollback;
+        }).catch((err) => { if (err !== rollback) throw err; });
+        expect(seen).toEqual({ proved: customerId, conflicting: null, callWithoutCustomer: null, noCall: null, alreadyBound: otherCustomerId });
+        // after the rollback nothing the migration did persists, and the scratch rows are gone
+        expect((await rows())[0].customer_id).toBeNull();
+        expect(await db('visit_text_recipients').where({ scheduled_service_id: otherVisitId }).count('* as n').first()).toMatchObject({ n: '0' });
       });
     });
 

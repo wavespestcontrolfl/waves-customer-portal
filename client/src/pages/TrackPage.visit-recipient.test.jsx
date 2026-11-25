@@ -113,15 +113,15 @@ describe('the live socket', () => {
     await waitFor(() => expect(io).toHaveBeenCalledTimes(1));
   });
 
-  it('the holder page does NOT refetch on the first socket connect, but refetches once on every reconnect', async () => {
+  it('the holder page refetches on EVERY socket connect (the first included) with the no-provider ETA flag; the normal GET and the poll carry no flag', async () => {
     io.mockClear();
     const handlers = {};
     const socket = { on: vi.fn((event, fn) => { handlers[event] = fn; }), off: vi.fn(), disconnect: vi.fn() };
     io.mockImplementation(() => socket);
-    let gets = 0;
+    const gets = [];
     global.fetch = vi.fn(async (url, init) => {
       if (init?.method === 'POST') return { ok: true, status: 204 };
-      gets += 1;
+      gets.push(String(url));
       return { ok: true, status: 200, json: async () => ({ ...payload('en_route', { meta: { pollIntervalSeconds: 0 } }), scope: undefined }) };
     });
     render(
@@ -131,19 +131,21 @@ describe('the live socket', () => {
     );
     expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
     await waitFor(() => expect(handlers.connect).toBeTypeOf('function'));
-    const before = gets;
-    // the first connect follows a GET that is already current: no extra GET
+    // the initial GET is the normal one
+    expect(gets).toHaveLength(1);
+    expect(gets[0]).not.toContain('refresh=');
+    // the FIRST connect refetches, once, with the flag
     await act(async () => { handlers.connect(); });
-    await Promise.resolve();
-    expect(gets).toBe(before);
-    // a reconnect fires the same event again: one GET each time
+    await waitFor(() => expect(gets).toHaveLength(2));
+    expect(gets[1]).toMatch(/\/track\/token\?refresh=socket$/);
+    // so does every reconnect
     await act(async () => { handlers.connect(); });
-    await waitFor(() => expect(gets).toBe(before + 1));
-    await act(async () => { handlers.connect(); });
-    await waitFor(() => expect(gets).toBe(before + 2));
-    // the job-update broadcast still refetches
+    await waitFor(() => expect(gets).toHaveLength(3));
+    expect(gets[2]).toMatch(/\?refresh=socket$/);
+    // a job-update broadcast refetches as before: no flag
     await act(async () => { handlers['customer:job_update'](); });
-    await waitFor(() => expect(gets).toBe(before + 3));
+    await waitFor(() => expect(gets).toHaveLength(4));
+    expect(gets[3]).not.toContain('refresh=');
     io.mockImplementation(() => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }));
   });
 

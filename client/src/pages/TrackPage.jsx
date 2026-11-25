@@ -979,11 +979,13 @@ export default function TrackPage() {
   // richer state object (window, property, vehicle, summary,
   // cancellation, etc.). Refetching gives us the full state without
   // having to merge a narrow payload into a rich UI.
-  const fetchTrack = useCallback(async () => {
+  // `socketRefresh`: the refetch a socket connect or reconnect triggers. It asks the server for the no-provider ETA (`?refresh=socket`,
+  // no paid Distance Matrix call): a connect is a catch-up read, not a new reading of the road, and the 30 s poll keeps the ETA fresh.
+  const fetchTrack = useCallback(async ({ socketRefresh = false } = {}) => {
     const seq = ++fetchSeqRef.current;
     const stale = () => tokenRef.current !== token || fetchSeqRef.current !== seq;
     try {
-      const r = await fetch(`${API_BASE}/public/track/${token}`);
+      const r = await fetch(`${API_BASE}/public/track/${token}${socketRefresh === true ? '?refresh=socket' : ''}`);
       if (stale()) return; // superseded by a newer request or a token change
       if (r.status === 404) {
         setNotFound(true);
@@ -1080,13 +1082,11 @@ export default function TrackPage() {
       fetchTrack();
     }
     socket.on('customer:job_update', handleJobUpdate);
-    // A broadcast sent while the socket was down is gone: refetch on every RECONNECT so the page catches up without waiting for a
-    // poll or the next transition. socket.io emits 'connect' for the first connection too, which follows a GET that is already
-    // current, so the first one is skipped.
-    let connectedOnce = false;
+    // A broadcast sent before the socket joined its room, or while it was down, is gone: refetch on EVERY connect, the first
+    // included (the room join can trail the initial GET) and every reconnect. The refetch asks for the no-provider ETA, so it
+    // never costs a paid Distance Matrix call; the normal GET and the poll are unchanged.
     function handleConnect() {
-      if (!connectedOnce) { connectedOnce = true; return; }
-      fetchTrack();
+      fetchTrack({ socketRefresh: true });
     }
     socket.on('connect', handleConnect);
 

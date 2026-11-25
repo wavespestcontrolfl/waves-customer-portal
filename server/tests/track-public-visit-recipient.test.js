@@ -87,10 +87,10 @@ function install(row, { holderRow = null, members = null } = {}) {
   return tablesRead;
 }
 
-async function get(token = RECIPIENT_TOKEN) {
+async function get(token = RECIPIENT_TOKEN, query = undefined) {
   const res = { statusCode: 200, body: undefined, set: jest.fn(() => res), status: jest.fn((c) => { res.statusCode = c; return res; }), json: jest.fn((b) => { res.body = b; return res; }) };
   const next = jest.fn();
-  await find('/:token', 'get')({ params: { token } }, res, next);
+  await find('/:token', 'get')({ params: { token }, query }, res, next);
   if (next.mock.calls.length) throw next.mock.calls[0][0];
   return res;
 }
@@ -431,6 +431,39 @@ describe('GET /:token with a visit text recipient\'s token: the reduced payload'
     expect(body.state).toBe('complete');
     expect(body.vehicle).toBeNull();
     expect(Object.keys(body).sort()).toEqual(ALLOWED_KEYS.slice().sort());
+  });
+});
+
+describe('the HOLDER\'s GET: the socket-connect refetch (?refresh=socket) makes no paid ETA call', () => {
+  const enRouteHolder = () => visitRow({ ...ENROUTE, en_route_at: minutesAgo(10) });
+  test('the flag asks for the no-provider ETA; the plain GET and the poll leave the provider allowed', async () => {
+    install(enRouteHolder(), { holderRow: enRouteHolder() });
+    mockEta.mockClear();
+    expect((await get(HOLDER_TOKEN, { refresh: 'socket' })).statusCode).toBe(200);
+    expect(mockEta).toHaveBeenCalledTimes(1);
+    expect(mockEta.mock.calls[0][0].allowProvider).toBe(false);
+
+    mockEta.mockClear();
+    install(enRouteHolder(), { holderRow: enRouteHolder() });
+    expect((await get(HOLDER_TOKEN)).statusCode).toBe(200);
+    expect(mockEta).toHaveBeenCalledTimes(1);
+    expect(mockEta.mock.calls[0][0]).not.toHaveProperty('allowProvider');
+
+    // any other value of the flag is not the flag
+    mockEta.mockClear();
+    install(enRouteHolder(), { holderRow: enRouteHolder() });
+    await get(HOLDER_TOKEN, { refresh: 'yes' });
+    expect(mockEta.mock.calls[0][0]).not.toHaveProperty('allowProvider');
+  });
+
+  test('buildVehicle: allowProvider false reaches the ETA call, the default does not set it', async () => {
+    const { buildVehicle } = trackPublicRouter._test;
+    mockEta.mockClear();
+    await buildVehicle(enRouteHolder(), { readOnly: false, allowProvider: false });
+    expect(mockEta.mock.calls[0][0].allowProvider).toBe(false);
+    mockEta.mockClear();
+    await buildVehicle(enRouteHolder(), { readOnly: false });
+    expect(mockEta.mock.calls[0][0]).not.toHaveProperty('allowProvider');
   });
 });
 
