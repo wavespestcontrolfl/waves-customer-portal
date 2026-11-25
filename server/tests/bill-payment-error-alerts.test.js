@@ -257,4 +257,24 @@ describe('bill-payment-error-alerts', () => {
     expect(triggerNotification).toHaveBeenCalledWith('bill_payment_error', expect.objectContaining({ phase: 'client' }));
     expect(insertFn).toHaveBeenCalledWith(expect.objectContaining({ phase: 'client' }));
   });
+
+  test('a failed bell dispatch clears notified_at so the next occurrence rings again', async () => {
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, error: 'insert failed' });
+    const update = jest.fn().mockResolvedValue(1);
+    const baseDb = dbMock.getMockImplementation();
+    dbMock.mockImplementation((table) => {
+      const q = baseDb(table);
+      if (table === 'bill_payment_error_alerts') q.where = jest.fn(() => ({ update }));
+      return q;
+    });
+    const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
+    const result = await alertBillPaymentError({
+      invoice: { id: 'inv_123', invoice_number: 'WPC-2026-0100', customer_id: 'cust_123', total: '125.50', stripe_payment_intent_id: 'pi_123' },
+      phase: 'stripe_confirm',
+      methodCategory: 'us_bank_account',
+      message: 'Bank declined',
+    });
+    expect(update).toHaveBeenCalledWith({ notified_at: null });
+    expect(result).toEqual({ notified: false, error: 'insert failed', alertId: 'alert-1' });
+  });
 });

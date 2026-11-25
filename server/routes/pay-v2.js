@@ -1213,6 +1213,9 @@ router.post('/:token/update-amount', async (req, res, next) => {
       methodCategory,
       { saveCard: savingOnUpdate, consentTextVersion },
     );
+    // Bank-step-left bell candidate (owner 2026-11-24): best-effort, never
+    // blocks the payment (the helper logs and swallows its own failure).
+    await require('../services/bank-step-left-bell').recordBankSelection(invoice.id, methodCategory, result?.paymentIntentId || paymentIntentId);
 
     res.json(result);
   } catch (err) {

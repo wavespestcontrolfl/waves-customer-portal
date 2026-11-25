@@ -211,7 +211,7 @@ async function alertBillPaymentError(input = {}) {
     return { notified: false, duplicate: true, alertId: row?.id || null };
   }
 
-  await triggerNotification('bill_payment_error', {
+  const dispatched = await triggerNotification('bill_payment_error', {
     amount: Number(invoice.total || 0),
     customerName: customerLabel(customer),
     invoiceId: invoice.id,
@@ -224,6 +224,17 @@ async function alertBillPaymentError(input = {}) {
     paymentIntentId,
     source,
   });
+  // The dispatch itself failed (not a preference that silenced the bell):
+  // clear this ring's stamp so the next occurrence rings again instead of
+  // being deduped for 24 h behind a bell nobody got.
+  if (dispatched?.error) {
+    try {
+      await db('bill_payment_error_alerts').where({ id: row.id }).update({ notified_at: null });
+    } catch (err) {
+      logger.error(`[bill-payment-alerts] could not clear notified_at for alert ${row?.id}: ${err.message}`);
+    }
+    return { notified: false, error: dispatched.error, alertId: row?.id || null };
+  }
 
   return { notified: true, alertId: row?.id || null };
 }
