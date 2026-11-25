@@ -171,6 +171,17 @@ describe('server with SITEONE_ORDER_RUNNER=mac', () => {
     expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
   });
 
+  test('an emailed order stops the watchdog before any cancel, even when the need is gone', async () => {
+    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 31 * 3600e3) }) });
+    state.onHand = '3';
+    const read = state.read;
+    state.read = (table, q, cols) => (table === 'vendor_order_emails' ? { po: 'P1', status: 'sending' } : read(table, q, cols));
+    // The race: the email sender claimed between the remote_runner claim transaction and this one.
+    const out = await dispatch._internals.macWatchdog(fakeConn(state), 'r1', null, NOW, {});
+    expect(out).toEqual({ emailOrderOut: true });
+    expect(state.updates).toHaveLength(0);
+  });
+
   test('a request already handed off is re-belled (deduped) without a second mark', async () => {
     const state = baseState({ request: request({ metadata: { vendorId: 'v-siteone', macHandedOffAt: '2026-11-24T11:10:00.000Z' } }) });
     const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });

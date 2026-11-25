@@ -1460,7 +1460,7 @@ const isDryRunPark = (ledger) => !!ledger && ledger.status === 'needs_review' &&
 
 // Everything the claim would refuse on, checked under the claim's locks, in its order: a gone need is
 // cancelled (its bells retired); a sibling request (a manual or forecast order of the same product),
-// an unreconciled order, a fertilizer blackout, an order already out or emailed are holds — no bell,
+// an unreconciled order, a fertilizer blackout or an order already out are holds — no bell,
 // no stamp (bellUndispatchable would ring nothing for them, and a stamp would keep the Mac off the
 // request after the hold ends). Runs on every pass, a request already handed off included.
 async function macHandOffBlocker(trx, { request, m, now }) {
@@ -1474,7 +1474,6 @@ async function macHandOffBlocker(trx, { request, m, now }) {
   if (guarded) return { hold: guarded };
   if (fertilizerBlackoutHold(product, now)) return { hold: { held: 'fertilizer_blackout' } };
   if (await findLiveAutoOrder(trx, request.product_id)) return { hold: { autoOrderLive: true } };
-  if (await emailOrderOutFor(trx, request.id)) return { hold: { emailOrderOut: true } };
   return null;
 }
 
@@ -1485,6 +1484,9 @@ async function macWatchdogLocked(trx, requestId, now, env) {
   const ledger = await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id', 'status', 'error', 'updated_at');
   const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request || request.status !== 'open' || request.source !== 'auto_reorder') return {};
+  // An order emailed to the vendor (sent, or sending) — checked right after the request lock, as
+  // claimRequest does: nothing below may cancel or hand off a request whose order may be in flight.
+  if (await emailOrderOutFor(trx, requestId)) return { result: { emailOrderOut: true } };
   const m = meta(request.metadata);
   let lastTouch = null;
   if (!m.macHandedOffAt) {
