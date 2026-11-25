@@ -5252,9 +5252,18 @@ describe('rain-out service', () => {
       test('a technician caller is answered about itself only, and no caller about no one', async () => {
         reader.mockImplementation(async (_id, asks) => asks.map(() => LINE));
         const targets = [slot('13:00', '14:00', { technicianId: TECH_A }), slot('13:00', '14:00', { technicianId: TECH_B })];
-        const own = await RainOut.checkSlots({ targets, caller: { isAdmin: false, technicianId: TECH_B.toUpperCase() } });
-        expect(own.results).toEqual([{ conflicts: [] }, { conflicts: [], shiftWarning: LINE }]);
-        expect(reader.mock.calls.map(([id]) => id)).toEqual([TECH_B]);
+        // Its own id in any spelling the check takes: capitals, braces, no hyphens.
+        for (const spelled of [TECH_B.toUpperCase(), `{${TECH_B}}`, TECH_B.replace(/-/g, '')]) {
+          reader.mockClear();
+          const own = await RainOut.checkSlots({ targets, caller: { isAdmin: false, technicianId: spelled } });
+          expect(own.results).toEqual([{ conflicts: [] }, { conflicts: [], shiftWarning: LINE }]);
+          expect(reader.mock.calls.map(([id]) => id)).toEqual([TECH_B]);
+        }
+        reader.mockClear();
+        // The slot's id in another spelling is the caller's own too, and still not the other technician's.
+        const braced = [slot('13:00', '14:00', { technicianId: `{${TECH_A}}` }), slot('13:00', '14:00', { technicianId: TECH_B.replace(/-/g, '') })];
+        expect((await RainOut.checkSlots({ targets: braced, caller: { isAdmin: false, technicianId: TECH_B } })).results)
+          .toEqual([{ conflicts: [] }, { conflicts: [], shiftWarning: LINE }]);
         reader.mockClear();
         for (const caller of [null, undefined, {}, { isAdmin: false, technicianId: null }, { isAdmin: 'true', technicianId: 'admin-1' }]) {
           expect((await RainOut.checkSlots({ targets, caller })).results).toEqual([{ conflicts: [] }, { conflicts: [] }]);

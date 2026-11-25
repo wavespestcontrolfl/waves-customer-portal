@@ -251,6 +251,10 @@ postgres('the stops a rest-of-route move would land outside the shift (real Post
       expect(await lineFor({ isAdmin: false, technicianId }, technicianId)).toBe(line);
       expect(await lineFor({ isAdmin: false, technicianId: other }, technicianId)).toBeNull();
       expect(await lineFor(null, technicianId)).toBeNull();
+      // Its own id in another spelling is still its own, and another technician's is not.
+      expect(await lineFor({ isAdmin: false, technicianId }, `{${technicianId}}`)).toBe(line);
+      expect(await lineFor({ isAdmin: false, technicianId }, technicianId.replace(/-/g, ''))).toBe(line);
+      expect(await lineFor({ isAdmin: false, technicianId: other }, `{${technicianId}}`)).toBeNull();
       // The check takes a uuid in braces, with no hyphens, or in capitals, and so does PostgreSQL.
       const admin = { isAdmin: true, technicianId: null };
       expect(await lineFor(admin, `{${technicianId}}`)).toBe(line);

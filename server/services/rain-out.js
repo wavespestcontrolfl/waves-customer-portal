@@ -1665,9 +1665,11 @@ async function pickedShiftLines(asks, caller) {
 // Whose shift a caller may ask about before a save: an admin any technician's, a technician its own.
 // The line names the technician and the shift's hours (today's follow the clock-in), and these reads
 // change nothing, so a technician-role login never learns another technician's hours from them,
-// whatever GATE_TECH_LOGIN_PRIVACY says. No caller: no one's.
+// whatever GATE_TECH_LOGIN_PRIVACY says. No caller: no one's. The two ids are compared as uuids, not as
+// text: slot-check takes an id in capitals, in braces or with no hyphens (Joi.guid), and so does PostgreSQL.
+const uuidDigits = (id) => String(id).toLowerCase().replace(/[{}-]/g, '');
 const mayAskShiftOf = (caller, technicianId) => caller?.isAdmin === true
-  || (caller?.technicianId != null && String(caller.technicianId).toLowerCase() === String(technicianId).toLowerCase());
+  || (caller?.technicianId != null && uuidDigits(caller.technicianId) === uuidDigits(technicianId));
 
 // A visit as a save of the picked window would leave it: that window, and the visit's length.
 const pickedBlock = (window, minutes) => ({ window_start: window.start, window_end: window.end, estimated_duration_minutes: minutes });
