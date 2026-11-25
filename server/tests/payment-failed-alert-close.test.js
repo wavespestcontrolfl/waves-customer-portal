@@ -14,7 +14,8 @@ const PaymentPlans = require('../services/payment-plans');
 
 const INV_A = '11111111-1111-4111-8111-111111111111';
 const INV_B = '22222222-2222-4222-8222-222222222222';
-const bell = (id, payload) => ({ id, metadata: { triggerKey: 'payment_failed', payload } });
+const CUST = '33333333-3333-4333-8333-333333333333';
+const bell = (id, payload, triggerKey = 'payment_failed') => ({ id, created_at: '2026-11-01T12:00:00Z', metadata: { triggerKey, payload } });
 
 // A connection whose queries are compiled, never executed. `responses[table]`
 // is a queue of results for the awaited queries on that table, in order.
@@ -49,7 +50,8 @@ test('selects bells by invoice id OR by the failed attempt ledger row, then clos
   const { conn, captured } = compilingConn({ responses: settledSingle() });
   expect(await closePaymentFailedAlertsForPaidInvoice(INV_A, conn)).toBe(1);
   const select = captured.find((q) => q.table === 'notifications' && q.sql.startsWith('select'));
-  expect(select.sql).toContain("metadata->>'triggerKey' = 'payment_failed'");
+  expect(select.sql).toContain("metadata->>'triggerKey' IN ($");
+  expect(select.bindings).toEqual(expect.arrayContaining(['payment_failed', 'bill_payment_error']));
   expect(select.sql).toContain('"recipient_type" = $');
   expect(select.sql).toContain("metadata->'payload'->>'invoiceId' = $");
   expect(select.sql).toContain("metadata->'payload'->>'paymentIntentId' IN (");
@@ -171,13 +173,74 @@ describe('repair sweep', () => {
     } });
     expect(await sweepSettledPaymentFailedAlerts({ conn })).toBe(1);
     const select = captured.find((q) => q.table === 'notifications' && q.sql.startsWith('select'));
-    expect(select.sql).toContain("metadata->>'triggerKey' = 'payment_failed'");
+    expect(select.sql).toContain("metadata->>'triggerKey' IN ($");
+    expect(select.bindings).toEqual(expect.arrayContaining(['payment_failed', 'bill_payment_error']));
     expect(select.sql).toContain('"done_at" is null');
     expect(select.sql).toContain('limit $');
     const update = captured.find((q) => q.table === 'notifications' && q.sql.startsWith('update'));
     expect(update.bindings).toContain(7);
     expect(update.bindings).not.toContain(8);
     expect(update.bindings).toContain(RESOLUTION);
+  });
+
+  test('a bill_payment_error bell closes when its invoice is paid, judged on payload.invoiceId alone', async () => {
+    const { conn, captured } = compilingConn({ responses: {
+      notifications: [[bell(7, { invoiceId: INV_A, paymentIntentId: 'pi_combined' }, 'bill_payment_error'), bell(8, { invoiceId: INV_B }, 'bill_payment_error')], 1],
+      invoices: [[{ id: INV_A }], []],
+    } });
+    expect(await sweepSettledPaymentFailedAlerts({ conn })).toBe(1);
+    // the combined PaymentIntent's ledger is never read for this trigger
+    expect(captured.some((q) => q.table === 'payments')).toBe(false);
+    const invoiceReads = captured.filter((q) => q.table === 'invoices');
+    expect(invoiceReads[0].bindings).toEqual(expect.arrayContaining([INV_A]));
+    expect(captured.find((q) => q.table === 'notifications' && q.sql.startsWith('update')).bindings).toEqual(expect.arrayContaining([7]));
+    expect(captured.find((q) => q.table === 'notifications' && q.sql.startsWith('update')).bindings).not.toContain(8);
+  });
+
+  describe('a payment_failed bell with no invoice', () => {
+    const noInvoice = (extra = {}) => bell(7, { amount: 113.6, customerId: CUST, invoiceId: null, ...extra });
+    const run = (paidRow, notification = noInvoice()) => {
+      const { conn, captured } = compilingConn({ responses: { notifications: [[notification], 1], payments: [[]], invoices: [[]] } });
+      // the later-payment probe is the payments query that ends in .first(); answer it directly
+      const wrapped = (table) => {
+        const b = conn(table);
+        if (table === 'payments') b.first = async () => { captured.push({ table, ...b.toSQL().toNative() }); return paidRow; };
+        return b;
+      };
+      Object.assign(wrapped, conn);
+      return sweepSettledPaymentFailedAlerts({ conn: wrapped }).then((closed) => ({ closed, captured }));
+    };
+
+    test('closes when the same customer has a later paid payment of the same amount', async () => {
+      const { closed, captured } = await run({ id: 'pay-1' });
+      expect(closed).toBe(1);
+      const probe = captured.find((q) => q.table === 'payments' && q.sql.includes('"superseded_by_payment_id" is null'));
+      expect(probe.sql).toContain('"status" = $');
+      expect(probe.sql).toContain('amount::numeric = $');
+      expect(probe.sql).toContain('"created_at" >= $');
+      expect(probe.bindings).toEqual(expect.arrayContaining([CUST, 'paid', '113.60', '2026-11-01T12:00:00Z']));
+    });
+
+    test('stays open with no such payment', async () => {
+      expect((await run(undefined)).closed).toBe(0);
+    });
+
+    test.each([
+      ['no customer id', { customerId: null }],
+      ['a non-UUID customer id', { customerId: 'cus_123' }],
+      ['no amount', { amount: 0 }],
+      ['a combined allocation that could not be read', { allocationUnreadable: true }],
+    ])('never closes on a payment match with %s', async (_label, extra) => {
+      const { closed, captured } = await run({ id: 'pay-1' }, noInvoice(extra));
+      expect(closed).toBe(0);
+      expect(captured.some((q) => q.sql.includes('superseded_by_payment_id'))).toBe(false);
+    });
+
+    test('a bell that names an invoice is judged by that invoice, never by a same-amount payment', async () => {
+      const { closed, captured } = await run({ id: 'pay-1' }, noInvoice({ invoiceId: INV_B }));
+      expect(closed).toBe(0);
+      expect(captured.some((q) => q.sql.includes('superseded_by_payment_id'))).toBe(false);
+    });
   });
 
   test('a failure is logged and closes nothing', async () => {

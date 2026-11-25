@@ -194,6 +194,56 @@ function raiseExtensionPriceAlertAfterCommit(conn, verdict, context) {
   });
 }
 
+// Closing the cancelled-root bell. The bell ("check <name>'s plan price") says a
+// plan visit was NOT added because the series' first visit is cancelled and what
+// the plan collected does not back its price. It is obsolete exactly when the
+// guard would no longer refuse: re-run extensionPriceVerdict on the bell's own
+// stored price and root. It stays open while the root is still cancelled and no
+// comparable paid visit backs the price (or the price is over it); it closes
+// when a paid completed visit now backs the price, the root is no longer
+// cancelled (the guard's over-last-paid path then owns any price alert), or the
+// series is prepay-covered. A later visit existing is NOT evidence: nothing in
+// the guard looks at that. Admin bell state only; sends nothing. Open rows only
+// (a person's done row is not reopened by this), one bounded page per run.
+const CANCELLED_ROOT_KEY_PREFIX = 'series-price-guard:cancelled-root:';
+const CANCELLED_ROOT_RESOLUTION = 'The plan price now checks out';
+const CANCELLED_ROOT_SWEEP_PAGE = 200;
+
+async function cancelledRootAlertSettled(conn, meta) {
+  const price = positiveAmount(meta.price);
+  const rootId = meta.seriesRootId;
+  if (price == null || !rootId) return false;
+  const root = await conn('scheduled_services').where({ id: rootId })
+    .first('id', 'status', 'service_type', 'annual_prepay_term_id');
+  if (!root) return false;
+  const verdict = await extensionPriceVerdict(conn, {
+    parent: root, parentId: root.id, child: { estimated_price: price, service_type: root.service_type, is_callback: false },
+  });
+  return verdict?.kind !== 'cancelled_root';
+}
+
+async function sweepSettledCancelledRootAlerts({ conn = db, page = CANCELLED_ROOT_SWEEP_PAGE } = {}) {
+  try {
+    const { doneColumns, openToCloser } = require('./notification-service')._private;
+    const rows = await openToCloser(conn('notifications')
+      .where({ recipient_type: 'admin', category: 'billing' })
+      .whereRaw("metadata->>'doneWhen' = 'plan_price_checked'")
+      .whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [CANCELLED_ROOT_KEY_PREFIX.length, CANCELLED_ROOT_KEY_PREFIX]), 'series-price-guard')
+      .orderBy('id', 'asc').limit(page).select('id', 'metadata');
+    const closable = [];
+    for (const row of rows || []) {
+      const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+      if (await cancelledRootAlertSettled(conn, meta)) closable.push(row.id);
+    }
+    if (!closable.length) return 0;
+    return await openToCloser(conn('notifications').whereIn('id', closable), 'series-price-guard')
+      .update(doneColumns({ by: 'series-price-guard', resolution: CANCELLED_ROOT_RESOLUTION, keepExisting: true, conn }));
+  } catch (err) {
+    logger.warn(`[series-price-guard] cancelled-root alert sweep failed: ${err.message}`);
+    return 0;
+  }
+}
+
 // A performed visit that completed with no billable amount and nothing
 // billed or covering it. Pure — the completion flow passes its own hoisted
 // derivations. A reviewed price (set at completion, $0 included) is the
@@ -248,6 +298,8 @@ module.exports = {
   insertedRowIsPrepaid,
   raiseExtensionPriceAlert,
   raiseExtensionPriceAlertAfterCommit,
+  sweepSettledCancelledRootAlerts,
+  CANCELLED_ROOT_RESOLUTION,
   unbilledCompletionAlertDue,
   raiseUnbilledCompletionAlert,
 };

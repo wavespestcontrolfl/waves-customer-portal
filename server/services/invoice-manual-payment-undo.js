@@ -248,11 +248,11 @@ async function describeManualPaymentUndo(invoiceId) {
 // representative invoice is another one). Only a bell closed since the payment: one a person closed earlier keeps its earlier done_at
 // (or a resolution of their own) and is left.
 async function reopenPaymentFailedBells(trx, invoiceId, since) {
-  const { RESOLUTION } = require('./payment-failed-alert-close');
+  const { RESOLUTION, TRIGGER_KEYS } = require('./payment-failed-alert-close');
   const { parseJson, failedAllocationInvoiceIds } = require('./payment-failed-allocation');
   const closed = await trx('notifications')
     .where({ recipient_type: 'admin', category: 'payment', done_by: 'payments', resolution: RESOLUTION })
-    .whereRaw("metadata->>'triggerKey' = 'payment_failed'")
+    .whereRaw("metadata->>'triggerKey' IN (?, ?)", TRIGGER_KEYS)
     .where('done_at', '>=', since)
     .select('id', 'metadata');
   const reopen = [];

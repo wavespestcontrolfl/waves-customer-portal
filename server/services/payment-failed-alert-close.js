@@ -9,6 +9,14 @@
 // close runs in a SAVEPOINT on the caller's connection, so a failure here rolls
 // back only the close and is logged; it never fails or rolls back the payment.
 //
+// Two bells are closed here (TRIGGER_KEYS): payment_failed (a charge that was
+// declined) and bill_payment_error (a customer's checkout on the pay page
+// failed, e.g. "Bank payment error"). Both are about an invoice that was not
+// collected, and both are obsolete once it is paid. A payment_failed bell for
+// an autopay charge with NO invoice (payload.invoiceId null, no ledger invoice)
+// has no invoice to watch: it closes when a later PAID payment of the same
+// amount exists for the same customer (settledByLaterPayment).
+//
 // A bell closes only when its whole allocation is settled (see
 // payment-failed-allocation.js): a combined PaymentIntent's bell stays open
 // until every invoice it covered is paid. A bell matches the invoice by EITHER key:
@@ -19,9 +27,48 @@
 //     attempt's own ledger row; covers alerts raised before the stamp fix).
 const db = require('../models/db');
 const logger = require('./logger');
-const { parseJson, isFailedAllocationSettled } = require('./payment-failed-allocation');
+const { parseJson, isUuid, failedAllocationInvoiceIds, isFailedAllocationSettled } = require('./payment-failed-allocation');
 
 const RESOLUTION = 'The invoice was paid';
+const TRIGGER_KEYS = ['payment_failed', 'bill_payment_error'];
+const TRIGGER_KEYS_SQL = "metadata->>'triggerKey' IN (?, ?)";
+
+// An autopay failure with no invoice: settled when the same customer has a
+// later paid payment of the same amount (recorded after the bell was raised).
+// Only for a bell that names no invoice at all, so it never shortcuts an
+// allocation that is still unpaid. Needs a UUID customer and a positive amount.
+async function settledByLaterPayment(conn, row, payload) {
+  const amount = Number(payload.amount);
+  if (payload.invoiceId != null || payload.allocationUnreadable || !isUuid(String(payload.customerId || ''))) return false;
+  if (!Number.isFinite(amount) || amount <= 0 || !row.created_at) return false;
+  if ((await failedAllocationInvoiceIds(conn, payload)).length) return false;
+  const paid = await conn('payments')
+    .where({ customer_id: String(payload.customerId), status: 'paid' })
+    .whereNull('superseded_by_payment_id')
+    .whereRaw('amount::numeric = ?::numeric', [amount.toFixed(2)])
+    .where('created_at', '>=', row.created_at)
+    .first('id');
+  return Boolean(paid);
+}
+
+// Which of these open bells are obsolete. A bill_payment_error bell is about
+// payload.invoiceId alone (its PaymentIntent may be a combined one); a
+// payment_failed bell judges its whole allocation, else the later-payment rule.
+async function settledBellIds(conn, rows) {
+  const closable = [];
+  for (const row of rows || []) {
+    const meta = parseJson(row.metadata);
+    const payload = meta.payload || {};
+    const attempt = meta.triggerKey === 'bill_payment_error'
+      ? { invoiceId: payload.invoiceId }
+      : { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId, allocationInvoiceIds: payload.allocationInvoiceIds, allocationUnreadable: payload.allocationUnreadable };
+    if (await isFailedAllocationSettled(conn, attempt)
+      || (meta.triggerKey !== 'bill_payment_error' && await settledByLaterPayment(conn, row, payload))) {
+      closable.push(row.id);
+    }
+  }
+  return closable;
+}
 
 async function closeRows(invoiceId, conn) {
   const { doneColumns, openToCloser } = require('./notification-service')._private;
@@ -30,7 +77,7 @@ async function closeRows(invoiceId, conn) {
   // comparisons only (no uuid cast), so a malformed stored id cannot throw.
   const candidates = await openToCloser(conn('notifications')
     .where({ recipient_type: 'admin', category: 'payment' })
-    .whereRaw("metadata->>'triggerKey' = 'payment_failed'"), 'payments')
+    .whereRaw(TRIGGER_KEYS_SQL, TRIGGER_KEYS), 'payments')
     .where(function aboutThisInvoice() {
       this.whereRaw("metadata->'payload'->>'invoiceId' = ?", [id])
         .orWhereRaw(
@@ -40,16 +87,10 @@ async function closeRows(invoiceId, conn) {
           [id],
         );
     })
-    .select('id', 'metadata');
+    .select('id', 'metadata', 'created_at');
   // A combined attempt's one bell covers several invoices: close it only when
   // its whole allocation is settled, not when just this invoice is.
-  const closable = [];
-  for (const row of candidates || []) {
-    const payload = parseJson(row.metadata).payload || {};
-    if (await isFailedAllocationSettled(conn, { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId, allocationInvoiceIds: payload.allocationInvoiceIds, allocationUnreadable: payload.allocationUnreadable })) {
-      closable.push(row.id);
-    }
-  }
+  const closable = await settledBellIds(conn, candidates);
   if (!closable.length) return 0;
   return openToCloser(conn('notifications').whereIn('id', closable), 'payments')
     .update(doneColumns({ by: 'payments', resolution: RESOLUTION, keepExisting: true, conn }));
@@ -91,21 +132,15 @@ async function sweepSettledPaymentFailedAlerts({ conn = db, page = SWEEP_PAGE } 
     const afterId = /^[0-9a-f-]{36}$/i.test(cursorRow?.value || '') ? cursorRow.value : null;
     const candidates = await openToCloser(conn('notifications')
       .where({ recipient_type: 'admin', category: 'payment' })
-      .whereRaw("metadata->>'triggerKey' = 'payment_failed'"), 'payments')
+      .whereRaw(TRIGGER_KEYS_SQL, TRIGGER_KEYS), 'payments')
       .modify((q) => { if (afterId) q.where('id', '>', afterId); })
       .orderBy('id', 'asc')
       .limit(page)
-      .select('id', 'metadata');
+      .select('id', 'metadata', 'created_at');
     const nextCursor = (candidates || []).length === page ? candidates[candidates.length - 1].id : null;
     await conn('system_settings').insert({ key: SWEEP_CURSOR_KEY, value: nextCursor, category: 'notifications' })
       .onConflict('key').merge({ value: nextCursor, updated_at: conn.fn.now() });
-    const closable = [];
-    for (const row of candidates || []) {
-      const payload = parseJson(row.metadata).payload || {};
-      if (await isFailedAllocationSettled(conn, { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId, allocationInvoiceIds: payload.allocationInvoiceIds, allocationUnreadable: payload.allocationUnreadable })) {
-        closable.push(row.id);
-      }
-    }
+    const closable = await settledBellIds(conn, candidates);
     if (!closable.length) return 0;
     return await openToCloser(conn('notifications').whereIn('id', closable), 'payments')
       .update(doneColumns({ by: 'payments', resolution: RESOLUTION, keepExisting: true, conn }));
@@ -115,4 +150,4 @@ async function sweepSettledPaymentFailedAlerts({ conn = db, page = SWEEP_PAGE } 
   }
 }
 
-module.exports = { closePaymentFailedAlertsForPaidInvoice, sweepSettledPaymentFailedAlerts, RESOLUTION };
+module.exports = { closePaymentFailedAlertsForPaidInvoice, sweepSettledPaymentFailedAlerts, RESOLUTION, TRIGGER_KEYS };

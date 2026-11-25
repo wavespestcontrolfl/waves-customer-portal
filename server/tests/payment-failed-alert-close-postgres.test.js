@@ -31,10 +31,11 @@ postgres('payment_failed bells close when their invoice is paid', () => {
     });
     return id;
   }
-  async function insertAlert({ paymentIntentId, invoiceId = null, triggerKey = 'payment_failed', category = 'payment', allocationInvoiceIds }) {
+  async function insertAlert({ paymentIntentId, invoiceId = null, triggerKey = 'payment_failed', category = 'payment', allocationInvoiceIds, extraPayload = {}, createdAt = null }) {
     const [row] = await db('notifications').insert({
       recipient_type: 'admin', category, title: 'Billing', body: 'payment failed',
-      metadata: JSON.stringify({ triggerKey, dedupeKey: `payment-failed:${paymentIntentId}:ch_x`, payload: { invoiceId, paymentIntentId, ...(allocationInvoiceIds ? { allocationInvoiceIds } : {}) } }),
+      metadata: JSON.stringify({ triggerKey, dedupeKey: `payment-failed:${paymentIntentId}:ch_x`, payload: { invoiceId, paymentIntentId, ...(allocationInvoiceIds ? { allocationInvoiceIds } : {}), ...extraPayload } }),
+      ...(createdAt ? { created_at: createdAt } : {}),
     }).returning('id');
     const id = row.id ?? row;
     notificationIds.push(id);
@@ -265,5 +266,71 @@ postgres('payment_failed bells close when their invoice is paid', () => {
     expect(triggerNotification.mock.calls.some(([, payload]) => payload.paymentIntentId === piId)).toBe(false);
     const job = await db('stripe_payment_notification_log').where({ payment_intent_id: piId }).first('pending_payload');
     expect(job.pending_payload).toBeNull();
+  });
+
+  test('a bill_payment_error bell ("Bank payment error") closes when its invoice is paid, by the hook and by the sweep', async () => {
+    const { sweepSettledPaymentFailedAlerts } = require('../services/payment-failed-alert-close');
+    const byHook = await insertAlert({ paymentIntentId: null, invoiceId: invoiceA, triggerKey: 'bill_payment_error' });
+    const bySweep = await insertAlert({ paymentIntentId: null, invoiceId: invoiceB, triggerKey: 'bill_payment_error' });
+    const stillOwed = await insertAlert({ paymentIntentId: null, invoiceId: randomUUID(), triggerKey: 'bill_payment_error' });
+    await pay(invoiceA);
+    expect(await state(byHook)).toMatchObject({ done_by: 'payments', resolution: 'The invoice was paid' });
+    await db('invoices').where({ id: invoiceB }).update({ status: 'paid', paid_at: new Date() });
+    await db('system_settings').where({ key: 'payment_failed_alert_sweep_cursor' }).del();
+    await sweepSettledPaymentFailedAlerts({ conn: db });
+    expect(await state(bySweep)).toMatchObject({ done_by: 'payments' });
+    expect((await state(stillOwed)).done_at).toBeNull();
+  });
+
+  describe('an autopay failure with no invoice', () => {
+    const { sweepSettledPaymentFailedAlerts } = require('../services/payment-failed-alert-close');
+    const failedAt = new Date('2026-11-01T15:00:00Z');
+    const alertFor = (extraPayload = {}) => insertAlert({
+      paymentIntentId: `pi_${randomUUID()}`, createdAt: failedAt, extraPayload: { amount: 113.6, customerId, ...extraPayload },
+    });
+    const paidPayment = (patch = {}) => db('payments').insert({
+      customer_id: customerId, processor: 'stripe', stripe_payment_intent_id: `pi_${randomUUID()}`, amount: 113.6,
+      status: 'paid', payment_date: '2026-11-03', created_at: new Date('2026-11-03T15:00:00Z'), ...patch,
+    });
+    const sweep = async () => {
+      await db('system_settings').where({ key: 'payment_failed_alert_sweep_cursor' }).del();
+      await sweepSettledPaymentFailedAlerts({ conn: db });
+    };
+
+    test('closes on a later paid payment of the same amount for the same customer', async () => {
+      const alert = await alertFor();
+      await sweep();
+      expect((await state(alert)).done_at).toBeNull();
+      await paidPayment();
+      await sweep();
+      expect(await state(alert)).toMatchObject({ done_by: 'payments', resolution: 'The invoice was paid' });
+    });
+
+    test('stays open for a different amount, an earlier payment, a failed payment, or another customer', async () => {
+      const alert = await alertFor();
+      await paidPayment({ amount: 113.61 });
+      await paidPayment({ created_at: new Date('2026-10-30T15:00:00Z') });
+      await paidPayment({ status: 'failed' });
+      const otherCustomer = randomUUID();
+      await db('customers').insert({
+        id: otherCustomer, first_name: 'Other', last_name: 'Fixture', email: `${otherCustomer}@example.invalid`,
+        phone: '+19415550144', address_line1: '101 Test Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer',
+      });
+      try {
+        await paidPayment({ customer_id: otherCustomer });
+        await sweep();
+        expect((await state(alert)).done_at).toBeNull();
+      } finally {
+        await db('payments').where({ customer_id: otherCustomer }).del();
+        await db('customers').where({ id: otherCustomer }).del();
+      }
+    });
+
+    test('a bell that names an invoice is not closed by a same-amount payment', async () => {
+      const alert = await alertFor({ invoiceId: invoiceA });
+      await paidPayment();
+      await sweep();
+      expect((await state(alert)).done_at).toBeNull();
+    });
   });
 });
