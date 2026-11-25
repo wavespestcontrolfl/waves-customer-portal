@@ -11,6 +11,12 @@ jest.mock('../services/ops-digest', () => ({
   fullSetItemKeys: (rows) => rows.map((r) => String(r.id)),
 }));
 
+// Known env for the watcher's own switches, restored after (a CI or local value must not skip delivery).
+const ENV_KEYS = ['PROMISED_ESTIMATE_WATCHER_DISABLED', 'PROMISED_ESTIMATE_WATCHER_EMAIL'];
+const savedEnv = {};
+beforeAll(() => { for (const k of ENV_KEYS) { savedEnv[k] = process.env[k]; delete process.env[k]; } });
+afterAll(() => { for (const k of ENV_KEYS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; } });
+
 const { deliverOpsDigest } = require('../services/ops-digest');
 const { runPromisedEstimateWatcher } = require('../services/promised-estimate-watcher');
 
