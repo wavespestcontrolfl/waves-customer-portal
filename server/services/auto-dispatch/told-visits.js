@@ -93,7 +93,21 @@ function onVisitDate(promise, visitDate) {
  *  supersession rule (a newer notice still replaces an older one, even when the newer one is the off-date one), so
  *  nothing it replaced comes back. A single visit's off-date latest reads null; in a stop, stopPromise's `keep` test
  *  drops off-date candidates before its newest/earliest choice, so a sibling's current hour still stands. */
-async function resolvePromises(conn, ids, now, { sameDateOnly = false, membersOut = null } = {}) {
+/** Runs `fn` on ONE read-only REPEATABLE READ snapshot of the database (owner 2026-11-24 *snapshot*): a decision that reads
+ *  a visit, its stop and its promises in several queries then sees one moment, so a move or regroup between the queries
+ *  cannot make them disagree. A caller's own transaction (conn.isTransaction) is used as is: its isolation is the caller's. */
+const SNAPSHOT = Object.freeze({ isolationLevel: 'repeatable read', readOnly: true });
+const opensSnapshot = (conn) => Boolean(conn) && !conn.isTransaction && typeof conn.transaction === 'function';
+async function readSnapshot(conn, fn) {
+  return opensSnapshot(conn) ? conn.transaction((trx) => fn(trx), SNAPSHOT) : fn(conn);
+}
+
+async function resolvePromises(conn, ids, now, options = {}) {
+  // Its own reads on one snapshot too (readSnapshot); it re-enters itself ONCE on the snapshot's transaction (onSnapshot).
+  if (!options.onSnapshot && opensSnapshot(conn)) {
+    return conn.transaction((trx) => resolvePromises(trx, ids, now, { ...options, onSnapshot: true }), SNAPSHOT);
+  }
+  const { sameDateOnly = false, membersOut = null } = options;
   const detector = require('../no-show-detector');
   const wanted = ids.map(String);
   const { stopOf, memberIds, dateOf } = await loadStopMembers(conn, wanted);
@@ -192,4 +206,4 @@ async function loadPromiseLevels(conn, ids, now = new Date(), { sameDateOnly = t
   return new Map([...facts].map(([id, fact]) => [id, fact.level]));
 }
 
-module.exports = { loadToldVisitIds, loadPromiseLevels, loadPromiseFacts, resolvePromises, promiseLevelOf };
+module.exports = { loadToldVisitIds, loadPromiseLevels, loadPromiseFacts, resolvePromises, promiseLevelOf, readSnapshot };

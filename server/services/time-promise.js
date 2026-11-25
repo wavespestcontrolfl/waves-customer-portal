@@ -10,7 +10,7 @@
  * Parts B1 (booking confirmation, 72-hour reminder) and B2 (move notices) call it. It sends nothing and spends nothing.
  */
 
-const { loadPromiseLevels, loadPromiseFacts, resolvePromises, promiseLevelOf } = require('./auto-dispatch/told-visits');
+const { loadPromiseLevels, loadPromiseFacts, resolvePromises, promiseLevelOf, readSnapshot } = require('./auto-dispatch/told-visits');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
@@ -321,8 +321,8 @@ function renderedDateOf(onDate, id) {
 
 /** The live member ids the promise read judged for one id, sorted: its stop's non-ended members, or itself alone. */
 function judgedLiveIds(judged, id) {
-  const live = (judged || []).filter((m) => !ENDED_STATUSES.includes(String(m.status || ''))).map((m) => m.id);
-  return (judged && judged.length ? live : [String(id)]).sort();
+  const live = (judged || []).filter((m) => !ENDED_STATUSES.includes(String(m.status || ''))).map((m) => `${m.id}:${m.status}`);
+  return judged && judged.length ? live.sort() : null;
 }
 
 /** Adds to `moved` every id whose later stop read disagrees with the promise read: its own row is off the rendered
@@ -334,14 +334,25 @@ function addMovedInStopRead(moved, facts, ids, onDate, judged) {
     const own = members.find((m) => String(m.id) === String(id));
     // A missing own row (it left its stop between the stop reads) is unverified too: siblings never speak for it.
     if (expected && (!own || dateOnlyString(own.scheduled_date) !== expected)) { moved.add(id); continue; }
-    const seen = members.map((m) => String(m.id)).sort();
-    if (expected && judged && judged.has(id) && judgedLiveIds(judged.get(id), id).join() !== seen.join()) moved.add(id);
+    // Status too: stopPromise treats a rescheduled sibling and a pending one differently (pre-push Codex P1).
+    const seen = members.map((m) => `${m.id}:${m.status}`).sort();
+    const before = judged && judged.has(id) ? judgedLiveIds(judged.get(id), id) : null;
+    if (expected && before && before.join() !== seen.join()) moved.add(id);
   }
 }
 
-async function dayOnlyEligibility(conn, ids, now = new Date(), { ignoreLevel = false, onDate = null } = {}) {
+async function dayOnlyEligibility(conn, ids, now = new Date(), options = {}) {
+  if (!ids || ids.length === 0) return new Map();
+  // Every read of the decision on one snapshot (told-visits readSnapshot); a snapshot that cannot open is a failed read.
+  try {
+    return await readSnapshot(conn, (snapshot) => eligibilityIn(snapshot, ids, now, options));
+  } catch {
+    return new Map(ids.map((id) => [id, { eligible: false, level: 'hour', failed: true }]));
+  }
+}
+
+async function eligibilityIn(conn, ids, now, { ignoreLevel = false, onDate = null } = {}) {
   const result = new Map();
-  if (!ids || ids.length === 0) return result;
   try {
     // A MOVE replaces the old promise (part B2), so its decision ignores the level: every visit reads as 'none'.
     // `onDate` (a send's or screen row's own rendered date) pins both reads to it: a visit seen off that date in either
@@ -457,22 +468,27 @@ async function dayOnlyMoveDecision(conn, {
 async function dayOnlyReplayDecision(conn, { id, startAt, now = new Date(), reminder24hEnabled } = {}) {
   try {
     if (id == null || !shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: false, level: 'none' })) return false;
-    const row = await conn('scheduled_services').where({ id: String(id) }).first('id', 'customer_asked_time', 'customer_asked_time_at');
-    if (!row || (await memberIntentState(conn, { ...row, id: row.id ?? String(id) })).intent !== false) return false;
-    // Stop-wide, like every other day-only decision: every live member of the visit's stop must be eligible too (a sibling the
-    // customer picked blocks it), with the old level ignored (the move replaced the old promise; the check below judges the new date).
-    if ((await dayOnlyEligibility(conn, [String(id)], now, { ignoreLevel: true })).get(String(id))?.eligible !== true) return false;
-    // The date being rendered (startAt's ET date) is the expected date (pre-push Codex P1, 2026-11-24): an off-date promise
-    // does not stand, so a sibling's hour for THIS date is never hidden by another member's older-date slot, and a visit
-    // seen on another date answers an unknown window (no day-only text).
-    const renderDate = etDateString(startAt instanceof Date ? startAt : new Date(startAt));
-    const promise = (await resolvePromises(conn, [id], now, { sameDateOnly: renderDate })).get(id);
-    if (!promise) return true;
-    if (promise.start_at == null) return promise.level === 'day';
-    return etDateString(new Date(promise.start_at)) !== etDateString(startAt instanceof Date ? startAt : new Date(startAt));
+    // The intent, the stop-wide eligibility and the promise read on ONE snapshot (told-visits readSnapshot).
+    return await readSnapshot(conn, (snapshot) => replayIn(snapshot, { id, startAt, now }));
   } catch {
     return false;
   }
+}
+
+async function replayIn(conn, { id, startAt, now }) {
+  const row = await conn('scheduled_services').where({ id: String(id) }).first('id', 'customer_asked_time', 'customer_asked_time_at');
+  if (!row || (await memberIntentState(conn, { ...row, id: row.id ?? String(id) })).intent !== false) return false;
+  // Stop-wide, like every other day-only decision: every live member of the visit's stop must be eligible too (a sibling the
+  // customer picked blocks it), with the old level ignored (the move replaced the old promise; the check below judges the new date).
+  if ((await dayOnlyEligibility(conn, [String(id)], now, { ignoreLevel: true })).get(String(id))?.eligible !== true) return false;
+  // The date being rendered (startAt's ET date) is the expected date (pre-push Codex P1, 2026-11-24): an off-date promise
+  // does not stand, so a sibling's hour for THIS date is never hidden by another member's older-date slot, and a visit
+  // seen on another date answers an unknown window (no day-only text).
+  const renderDate = etDateString(startAt instanceof Date ? startAt : new Date(startAt));
+  const promise = (await resolvePromises(conn, [id], now, { sameDateOnly: renderDate })).get(id);
+  if (!promise) return true;
+  if (promise.start_at == null) return promise.level === 'day';
+  return etDateString(new Date(promise.start_at)) !== etDateString(startAt instanceof Date ? startAt : new Date(startAt));
 }
 
 /** Records the office's "customer asked for this time" (true) or "day only" (false) on the moved visit(s). Throws on a failed write. ONLY for a caller that runs inside the

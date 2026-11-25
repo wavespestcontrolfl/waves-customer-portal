@@ -289,3 +289,42 @@ describe('loadPromiseFacts', () => {
     });
   });
 });
+
+describe('readSnapshot: one read-only REPEATABLE READ snapshot per decision (owner 2026-11-24 *snapshot*)', () => {
+  const { readSnapshot } = require('../services/auto-dispatch/told-visits');
+  const timePromise = require('../services/time-promise');
+
+  test('a base connection opens one read-only repeatable-read transaction and runs every read on it', async () => {
+    const trx = { isTransaction: true };
+    const base = { transaction: jest.fn(async (fn) => fn(trx)) };
+    expect(await readSnapshot(base, async (c) => (c === trx ? 'on-snapshot' : 'elsewhere'))).toBe('on-snapshot');
+    expect(base.transaction).toHaveBeenCalledTimes(1);
+    expect(base.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+  });
+
+  test('resolvePromises on a base connection opens the snapshot itself', async () => {
+    const { resolvePromises } = require('../services/auto-dispatch/told-visits');
+    const base = { transaction: jest.fn(async () => { throw new Error('no pool'); }) };
+    await expect(resolvePromises(base, ['s1'], NOW)).rejects.toThrow('no pool');
+    expect(base.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+  });
+
+  test("a caller's own transaction is used as is (no nested snapshot)", async () => {
+    const trx = { isTransaction: true, transaction: jest.fn() };
+    expect(await readSnapshot(trx, async (c) => c)).toBe(trx);
+    expect(trx.transaction).not.toHaveBeenCalled();
+  });
+
+  test('the eligibility decision runs inside the snapshot; a snapshot that cannot open is a failed read', async () => {
+    const base = { transaction: jest.fn(async () => { throw new Error('pool exhausted'); }) };
+    expect(Object.fromEntries(await timePromise.dayOnlyEligibility(base, ['s1'], NOW))).toEqual({ s1: { eligible: false, level: 'hour', failed: true } });
+    expect(base.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+  });
+
+  test('the replay decision runs inside one snapshot; a snapshot that cannot open sends no day-only copy', async () => {
+    const base = { transaction: jest.fn(async () => { throw new Error('pool exhausted'); }) };
+    const far = new Date(NOW.getTime() + 5 * 24 * 3600 * 1000);
+    expect(await timePromise.dayOnlyReplayDecision(base, { id: 's1', startAt: far, now: NOW, reminder24hEnabled: true })).toBe(false);
+    expect(base.transaction).toHaveBeenCalledTimes(1);
+  });
+});

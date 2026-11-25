@@ -380,6 +380,9 @@ describe('loadTimeDisplay', () => {
       const withEnded = [...same, m('s3', '2026-11-20')].map((r) => (r.id === 's3' ? { ...r, status: 'cancelled' } : r));
       const endedSibling = fakeConn({ servicesByRead: [withEnded, withEnded, withEnded, same], reminders: [office('s1'), office('s2')] });
       expect((await loadTimeDisplay(endedSibling, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
+      const pendingAgain = [m('s1', '2026-11-20'), { ...m('s2', '2026-11-20'), status: 'rescheduled' }];
+      const restatused = fakeConn({ servicesByRead: [pendingAgain, pendingAgain, pendingAgain, same], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(restatused, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
       const steady = fakeConn({ services: same, reminders: [office('s1'), office('s2')] });
       expect((await loadTimeDisplay(steady, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
     });
