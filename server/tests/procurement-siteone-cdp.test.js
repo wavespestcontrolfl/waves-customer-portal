@@ -34,8 +34,10 @@ function makeWorld(over = {}) {
     brandText: `CSI-PEST : ${SKU}`, formSku: SKU, formStore: '238', uomRows: [], searchHits: 1,
     pickupClass: 'cart-top-fulfillment-method__tile fullfillment-pickup fullfilment-select', pickupText: 'Pickup #238,5115 Lena Rd',
     cartTotalText: '$105.93', addBehavior: 'normal', checkoutLocText: 'Pickup at #238, 5115 Lena Rd',
-    reviewBody: 'Review your order. Payment: Pay At Branch. Store 238.', reviewCode: `Item # : ${SKU}`, reviewQtyText: 'Qty: 2',
-    reviewQtyNode: true, reviewTotalText: '$110.40', placeButtons: 1, cardField: false, noRadioCheck: false,
+    reviewBody: 'Review your order. Reference 5500990. Store 238.', reviewTenderText: 'Payment Method Pay At branch, Lakewood Ranch 238',
+    reviewPickupText: 'Pickup Lakewood Ranch 238', hideTender: false, oktaAction: '#', oktaFormMissing: false, signInUrl: null,
+    checkoutUrl: null, confirmUrl: null, reviewCode: `Item # : ${SKU}`, reviewQtyText: 'Qty: 2',
+    reviewQtyNode: true, closeOrder: [], reviewTotalText: '$110.40', placeButtons: 1, cardField: false, noRadioCheck: false,
     confirmationBody: 'Thank you. Order Number: 7700123', noConfirmation: false, placeClickThrows: false, placed: 0, qty: 0,
     ...over,
   };
@@ -55,7 +57,7 @@ function screens(w) {
     [S.cartRow]: w.cartRowEls(),
     [S.pickupTile]: [el({ attrs: { class: w.pickupClass }, text: w.pickupText })],
     [S.cartTotal]: [el({ text: w.cartTotalText })],
-    [S.continueCheckout]: [el({ name: 'continue-checkout', onClick: go('/en/checkout/multi/siteOne-checkout') })],
+    [S.continueCheckout]: [el({ name: 'continue-checkout', onClick: () => { w.url = w.checkoutUrl || 'https://www.siteone.com/en/checkout/multi/siteOne-checkout'; } })],
   };
   const payment = w.step === 'payment' ? {
     [S.payAtBranchLabel]: [el({ name: 'label:PAY_AT_BRANCH', onClick: () => { w.radioChecked = !w.noRadioCheck; } })],
@@ -71,9 +73,11 @@ function screens(w) {
     [S.orderTypeSubmit]: [el({ name: 'order-type-submit', onClick: () => { w.step = 'payment'; } })],
     ...payment,
   };
-  const placeBtn = () => el({ name: 'place-order', text: 'Place Your Order', onClick: () => { w.placed += 1; if (w.placeClickThrows) throw new Error('Target page closed'); if (!w.noConfirmation) go('/en/checkout/multi/order-confirmation')(); } });
+  const placeBtn = () => el({ name: 'place-order', text: 'Place Your Order', onClick: () => { w.placed += 1; if (w.placeClickThrows) throw new Error('Target page closed'); if (!w.noConfirmation) { if (w.confirmUrl) w.url = w.confirmUrl; else go('/en/checkout/multi/order-confirmation')(); } } });
   const review = {
     [S.body]: [el({ text: w.reviewBody })],
+    [S.reviewTender]: w.hideTender ? [] : [el({ text: w.reviewTenderText })],
+    [S.reviewPickup]: [el({ text: w.reviewPickupText })],
     [S.reviewItemCode]: [el({ text: w.reviewCode, children: { [S.reviewItemBlock]: [el({ children: { [S.reviewQty]: w.reviewQtyNode ? [el({ text: w.reviewQtyText })] : [] } })] } })],
     [S.reviewTotal]: [el({ text: w.reviewTotalText })],
     [S.placeOrder]: Array.from({ length: w.placeButtons }, placeBtn),
@@ -92,7 +96,8 @@ function screens(w) {
     } })],
   };
   const search = { [S.searchResult]: Array.from({ length: w.searchHits }, () => el({ attrs: { href: '/p/PRODUCT-1' } })) };
-  const okta = { [S.oktaIdentifier]: [el({ value: w.identifierValue })], [S.oktaSubmit]: [el({ name: 'okta-sign-in', onClick: () => { if (!w.signInFails) w.signedOut = false; } })] };
+  const oktaForm = w.oktaFormMissing ? [] : [el({ attrs: { action: w.oktaAction } })];
+  const okta = { [S.oktaIdentifier]: [el({ value: w.identifierValue, children: { [S.oktaForm]: oktaForm } })], [S.oktaSubmit]: [el({ name: 'okta-sign-in', onClick: () => { if (!w.signInFails) w.signedOut = false; } })] };
   const byPath = { '/en/cart': cart, '/en/checkout/multi/siteOne-checkout': checkout, '/en/checkout/multi/order-summary/view': review, '/en/checkout/multi/order-confirmation': confirmation, '/en/search': search, '/p/PRODUCT-1': product };
   return { byPath, okta };
 }
@@ -125,26 +130,27 @@ function makeBrowser(w) {
     return tagAll(byPath[path] || {});
   };
   const page = {
-    url: () => w.url,
+    url: () => (w.signedOut && w.signInUrl ? w.signInUrl : w.url),
     goto: async (url) => { w.gotos.push(url); w.url = url; },
     waitForTimeout: async () => {},
     setDefaultTimeout: () => {},
     locator: (sel) => collection(current()[sel] || []),
-    close: async () => { w.pageCloseCalls += 1; },
+    close: async () => { w.pageCloseCalls += 1; w.closeOrder.push('page'); },
   };
   const browser = {
     contexts: () => [{ newPage: async () => page }],
-    close: async () => { w.closeCalls += 1; },
+    close: async () => { w.closeCalls += 1; w.closeOrder.push('browser'); },
   };
   return { browser, page };
 }
 
-async function run(over = {}, { env = ENV, args = {}, verdicts } = {}) {
+async function run(over = {}, { env = ENV, args = {}, verdicts, onCall } = {}) {
   const w = makeWorld(over);
   const { browser } = makeBrowser(w);
   const calls = [];
   const beforeSubmit = jest.fn(async (cents) => {
     calls.push(cents);
+    if (onCall) onCall(calls.length, w);
     const v = verdicts ? verdicts[calls.length - 1] : { ok: true };
     return v || { ok: true };
   });
@@ -158,7 +164,9 @@ async function run(over = {}, { env = ENV, args = {}, verdicts } = {}) {
 
 // Invariants that hold on EVERY run.
 function expectSafe(w) {
-  expect(w.closeCalls).toBe(0);
+  // Our own page closes first, then our connection drops (browser.close() on a
+  // CDP browser only disconnects — playwright-core 1.59.1, see the adapter header).
+  expect(w.closeOrder).toEqual(['page', 'browser']);
   expect(w.pageCloseCalls).toBe(1);
   expect(w.clicks.some((c) => /remove-all/.test(c))).toBe(false);
 }
@@ -166,7 +174,7 @@ function expectSafe(w) {
 // ---- tests -----------------------------------------------------------------------
 
 test('contract: no static quote, packaged quantity, no stored login; selectors never name remove-all', () => {
-  expect(adapter).toMatchObject({ key: 'siteone-cdp', quotesAtPlace: true, packagedQuantity: true, loginRequired: false, preSubmitTotal: 'vendor' });
+  expect(adapter).toMatchObject({ key: 'siteone-cdp', quotesAtPlace: true, packagedQuantity: true, acceptsPoNumber: true, loginRequired: false, preSubmitTotal: 'vendor' });
   expect(typeof adapter.place).toBe('function');
   expect(adapter.quote()).toBeNull();
   expect(Object.isFrozen(S)).toBe(true);
@@ -196,7 +204,7 @@ test('happy live path: one add, pay at branch, one Place click, order number + r
   const { w, result, calls } = await run({}, { args: { poNumber: 'PO-77' } });
   expect(result).toMatchObject({ externalOrderNumber: '7700123', amountCents: 11040, dryRun: false });
   expect(result.evidence).toMatchObject({ shownItemNumber: SKU, formItemNumber: SKU, uom: 'single_unit', cartTotalCents: 10593, reviewTotalCents: 11040 });
-  expect(calls).toEqual([10593, 11040]); // cart pre-check, then the binding review total
+  expect(calls).toEqual([10593, 11040, 11040]); // cart pre-check, the review total, then the claim re-asserted at the click
   expect(w.placed).toBe(1);
   expect(w.po).toBe('PO-77');
   expect(w.cart).toEqual([{ sku: SKU, qty: 2 }]); // submitted: nothing cleaned up
@@ -247,11 +255,13 @@ test('a non-empty cart refuses cart_not_empty and touches nothing', async () => 
   expectSafe(w);
 });
 
-test('cart mismatch removes ONLY our row and refuses cart_mismatch', async () => {
+test('cart mismatch removes ONLY our row (when it is exactly what we added) and refuses cart_mismatch', async () => {
+  // A quantity that is not what we set belongs to the owner now: left alone.
   const wrong = await run({ addBehavior: 'wrongQty' });
   expect(wrong.error.refuse).toBe('cart_mismatch');
-  expect(wrong.w.cart).toEqual([]);
-  expect(wrong.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([`remove:${SKU}`]);
+  expect(wrong.w.cart).toEqual([{ sku: SKU, qty: 3 }]);
+  expect(wrong.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
+  expect(wrong.error.evidence).toMatchObject({ cleanup: 'cart_left_for_owner', cart_left_for_owner: true });
   expect(wrong.w.clicks).not.toContain('continue-checkout');
   // Someone else's line appears beside ours: theirs stays.
   const extra = await run({ addBehavior: 'extraRow' });
@@ -273,7 +283,7 @@ test('pickup tile not selected / wrong branch refuses pickup_not_selected and cl
 });
 
 test('a review page that is not Pay at Branch refuses and cleans up', async () => {
-  const { w, error } = await run({ reviewBody: 'Review. Payment: Credit card. Store 238.' });
+  const { w, error } = await run({ reviewTenderText: 'Payment Method Credit Card, Lakewood Ranch 238' });
   expect(error.refuse).toBe('not_pay_at_branch');
   expect(w.placed).toBe(0);
   expect(w.cart).toEqual([]);
@@ -418,4 +428,136 @@ test('bad arguments refuse before any browser work', async () => {
   await expect(adapter.place({ ...base, poNumber: 'lower case!' }, { env: ENV, connect })).rejects.toMatchObject({ refuse: 'bad_po_number' });
   await expect(adapter.place({ ...base, beforeSubmit: undefined }, { env: ENV, connect })).rejects.toMatchObject({ refuse: 'no_cap_check' });
   expect(connect).not.toHaveBeenCalled();
+});
+
+// ---- pre-push Codex round: P0 1-5, P1 x2 -----------------------------------------
+
+test('P0 1: sign-in is clicked only on an approved identity-provider origin with an approved form action', async () => {
+  const { isApprovedSignInOrigin } = adapter._internals;
+  expect(isApprovedSignInOrigin('https://www.siteone.com/login', {})).toBe(true);
+  expect(isApprovedSignInOrigin('https://sso.siteone.com/login', {})).toBe(true);
+  for (const bad of ['http://www.siteone.com/', 'https://siteone.com.evil.example/', 'https://evilsiteone.com/', 'https://www.siteone.com:8443/', 'https://login.example-idp.test/']) {
+    expect(isApprovedSignInOrigin(bad, {})).toBe(false);
+  }
+  // An exact Okta host is added by env, https only.
+  expect(isApprovedSignInOrigin('https://login.example-idp.test/x', { SITEONE_SIGN_IN_ORIGINS: 'https://login.example-idp.test' })).toBe(true);
+  expect(isApprovedSignInOrigin('http://login.example-idp.test/x', { SITEONE_SIGN_IN_ORIGINS: 'http://login.example-idp.test' })).toBe(false);
+  expect(isApprovedSignInOrigin('https://other.example-idp.test/x', { SITEONE_SIGN_IN_ORIGINS: 'https://login.example-idp.test' })).toBe(false);
+
+  const offOrigin = await run({ signedOut: true, signInUrl: 'https://siteone.com.evil.example/login' });
+  expect(offOrigin.error.runLevel).toBe(true);
+  expect(offOrigin.w.clicks).not.toContain('okta-sign-in');
+  const badAction = await run({ signedOut: true, oktaAction: 'https://evil.example/collect' });
+  expect(badAction.error.runLevel).toBe(true);
+  expect(badAction.w.clicks).not.toContain('okta-sign-in');
+  const noForm = await run({ signedOut: true, oktaFormMissing: true });
+  expect(noForm.error.runLevel).toBe(true);
+  expect(noForm.w.clicks).not.toContain('okta-sign-in');
+  const okIdp = await run({ signedOut: true, signInUrl: 'https://login.example-idp.test/signin' }, { env: { ...ENV, SITEONE_SIGN_IN_ORIGINS: 'https://login.example-idp.test' } });
+  expect(okIdp.result.dryRun).toBe(false);
+  expect(okIdp.w.clicks).toContain('okta-sign-in');
+  for (const r of [offOrigin, badAction, noForm, okIdp]) expectSafe(r.w);
+});
+
+test('P0 2: transitions parse the URL: exact origin and pathname, never a substring', async () => {
+  const lookalike = await run({ checkoutUrl: 'https://www.siteone.com.evil.example/en/checkout/multi/siteOne-checkout' });
+  expect(lookalike.error.runLevel).toBe(true);
+  expect(lookalike.w.clicks).not.toContain('order-type-submit');
+  const queryTrick = await run({ checkoutUrl: 'https://www.siteone.com/other?next=/en/checkout/multi/siteOne-checkout' });
+  expect(queryTrick.error.refuse).toBe('page_unrecognized');
+  expect(queryTrick.w.clicks).not.toContain('order-type-submit');
+  const suffix = await run({ checkoutUrl: 'https://www.siteone.com/en/checkout/multi/siteOne-checkout-evil' });
+  expect(suffix.error.refuse).toBe('page_unrecognized');
+  // Right before the Place click the page is on the wrong origin: nothing clicked.
+  const atClick = await run({}, { onCall: (n, w) => { if (n === 3) w.url = 'https://evil.example/en/checkout/multi/order-summary/view'; } });
+  expect(atClick.error.runLevel).toBe(true);
+  expect(atClick.w.placed).toBe(0);
+  const wrongPath = await run({}, { onCall: (n, w) => { if (n === 3) w.url = 'https://www.siteone.com/en/checkout/multi/order-summary/view/extra'; } });
+  expect(wrongPath.w.placed).toBe(0);
+  expect(wrongPath.error.ambiguous).toBeUndefined();
+  for (const r of [lookalike, queryTrick, suffix, atClick, wrongPath]) { expect(r.w.placed).toBe(0); expectSafe(r.w); }
+});
+
+test('P0 3: the reservation is bound to the click: a changed total, item, quantity, tender or pickup refuses with no click', async () => {
+  const changes = {
+    total: (w) => { w.reviewTotalText = '$150.00'; },
+    quantity: (w) => { w.reviewQtyText = 'Qty: 3'; },
+    item: (w) => { w.reviewCode = 'Item # : 55555555'; },
+    tender: (w) => { w.reviewTenderText = 'Payment Method Credit Card, Lakewood Ranch 238'; },
+    pickup: (w) => { w.reviewPickupText = 'Pickup Other Branch 104'; },
+  };
+  for (const [name, change] of Object.entries(changes)) {
+    const r = await run({}, { onCall: (n, w) => { if (n === 3) change(w); } });
+    expect(r.error.refuse).toBeTruthy();
+    expect(r.error.ambiguous).toBeUndefined();
+    expect(r.w.placed).toBe(0);
+    expect(r.w.cart).toEqual([]);
+    expectSafe(r.w);
+    if (name !== 'total') continue;
+    expect(r.error.refuse).toBe('review_changed');
+  }
+  // The claim is re-asserted at the click; if it is lost, nothing is clicked.
+  const lost = await run({}, { verdicts: [{ ok: true }, { ok: true }, { ok: false, reason: 'claim_lost' }] });
+  expect(lost.error.refuse).toBe('claim_lost');
+  expect(lost.w.placed).toBe(0);
+});
+
+test('P0 4: tender and pickup come from their own review fields; unreadable fields refuse', async () => {
+  const noField = await run({ hideTender: true });
+  expect(noField.error.refuse).toBe('review_fields_unreadable');
+  // Pay at Branch in a stray part of the page does not count.
+  const stray = await run({ reviewTenderText: 'Payment Method Credit Card', reviewBody: 'Pay At branch Lakewood Ranch 238 Reference 5500990' });
+  expect(stray.error.refuse).toBe('not_pay_at_branch');
+  const lookalike = await run({ reviewTenderText: 'Payment Method Pay At Branch Plus, Lakewood Ranch 238' });
+  expect(lookalike.error.refuse).toBe('not_pay_at_branch');
+  const store = await run({ reviewPickupText: 'Pickup Lakewood Ranch 2385' });
+  expect(store.error.refuse).toBe('pickup_not_selected');
+  const okLabel = await run({ reviewTenderText: 'Pay At branch, Lakewood Ranch 238' });
+  expect(okLabel.result.dryRun).toBe(false);
+  for (const r of [noField, stray, lookalike, store]) { expect(r.w.placed).toBe(0); expect(r.w.cart).toEqual([]); expectSafe(r.w); }
+});
+
+test('P0 5: only a NEW number on a siteone.com page that is no longer the review page is an order number', async () => {
+  // The number was already on the review page before the click: not new.
+  const old = await run({ confirmationBody: 'Thank you. Order Number: 5500990' });
+  expect(old.error.ambiguous).toBe(true);
+  expect(old.w.placed).toBe(1);
+  // A number shown while the page is still the review page: not a confirmation.
+  const stillReview = await run({ noConfirmation: true, reviewBody: 'Review. Reference 5500990.' });
+  expect(stillReview.error.ambiguous).toBe(true);
+  // A confirmation on another origin: ambiguous.
+  const offSite = await run({ confirmUrl: 'https://www.siteone.com.evil.example/en/checkout/multi/order-confirmation' });
+  expect(offSite.error.ambiguous).toBe(true);
+  expect(offSite.error.evidence.url).toBe('/en/checkout/multi/order-confirmation');
+  // Our own PO is never the number.
+  const po = await run({ confirmationBody: 'Thank you. Order #: PO-8 placed' }, { args: { poNumber: 'PO-8' } });
+  expect(po.error.ambiguous).toBe(true);
+  const fresh = await run({ confirmationBody: 'Order Number: 7700123' });
+  expect(fresh.result.externalOrderNumber).toBe('7700123');
+  const { numberTokens } = adapter._internals;
+  expect([...numberTokens('Reference 5500990, store 238, ship 1234-AB, Thank you')].sort()).toEqual(['1234-AB', '5500990']);
+});
+
+test('P1: cleanup removes our row only when its quantity is exactly what we added; otherwise it is left for the owner', async () => {
+  // Merged / changed quantity after the add: left alone.
+  const merged = await run({}, { verdicts: [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }], onCall: (n, w) => { if (n === 2) w.cart[0].qty = 5; } });
+  expect(merged.error.refuse).toBe('over_monthly_cap');
+  expect(merged.w.cart).toEqual([{ sku: SKU, qty: 5 }]);
+  expect(merged.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
+  expect(merged.error.evidence.cart_left_for_owner).toBe(true);
+  // A second line with our item number: ambiguous, left alone.
+  const twice = await run({}, { verdicts: [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }], onCall: (n, w) => { if (n === 2) w.cart.push({ sku: SKU, qty: 2 }); } });
+  expect(twice.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
+  expect(twice.error.evidence.cart_left_for_owner).toBe(true);
+  // Exactly what we added: removed.
+  const exact = await run({}, { verdicts: [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }] });
+  expect(exact.w.cart).toEqual([]);
+  expect(exact.error.evidence.cart_left_for_owner).toBeUndefined();
+  for (const r of [merged, twice, exact]) expectSafe(r.w);
+});
+
+test('P1: browser.close() is called once, after our own page closed; Chrome stays up (it only drops the CDP socket)', async () => {
+  const r = await run({}, { env: { ...ENV, SITEONE_BOT_DRY_RUN: 'true' } });
+  expect(r.w.closeOrder).toEqual(['page', 'browser']);
+  expect(r.w.closeCalls).toBe(1);
 });

@@ -33,8 +33,20 @@
  *     touches a saved card, "Pay with a New Card" or a card iframe.
  *   - The cap check (beforeSubmit) runs on the cart total and again, bound,
  *     on the review page's total right before the click.
- *   - NEVER browser.close(): on a CDP connection the browser is the owner's
- *     Chrome. The bot closes only the page it opened.
+ *   - The bot closes only the page it opened, then browser.close(), which on a
+ *     connectOverCDP browser only drops the WebSocket (playwright-core 1.59.1:
+ *     chromium.js:98-101 doClose = transport.closeAndWait; Browser.close is
+ *     sent only in the launch path, browserType.js:205-222). It never closes
+ *     a context, so the owner's Chrome and tabs stay up.
+ *   - Sign-in: the page origin AND the form's action origin must be an approved
+ *     identity-provider origin (https siteone.com hosts, plus any exact https
+ *     origin in SITEONE_SIGN_IN_ORIGINS — set it to the Okta host the first
+ *     dry run shows). Otherwise run-level and nothing is clicked.
+ *   - Every transition (checkout, review, the Place click) parses page.url() and
+ *     requires origin https://www.siteone.com and the exact pathname.
+ *   - The reservation is bound to the click: after the cap check passes, the
+ *     review total, item code, quantity, tender and pickup are read AGAIN right
+ *     before the click and must be unchanged, else nothing is clicked.
  *   - Evidence never holds an input value (except our own PO number), a
  *     cookie, or a card field.
  *   - Every selector lives in SELECTORS. They were walked on the owner's
@@ -50,6 +62,7 @@ try { ({ chromium } = require('playwright')); } catch { chromium = null; }
 const SELECTORS = Object.freeze({
   oktaIdentifier: 'input[name="identifier"]',
   oktaSubmit: 'input[type="submit"][value="Sign in"]',
+  oktaForm: 'xpath=ancestor::form[1]',
   searchResult: '.product-item a.name',
   brandItemNumber: 'div.brand-itemnumber',
   formBrandItemNumber: 'form#addToCartForm input[name="brandItemNumber"]',
@@ -76,6 +89,12 @@ const SELECTORS = Object.freeze({
   // the bot never opens the card section.)
   paymentBlockers: 'input[autocomplete="cc-number"], input[autocomplete="cc-csc"], input[autocomplete="one-time-code"], input[name*="cardNumber" i], input[name*="card_number" i], input[name*="cvv" i], input[name*="securityCode" i], input[name*="otp" i], input[name*="verificationCode" i]',
   reviewButton: 'input#btnShow.payment-to-branch',
+  // UNVERIFIED: the review page's own tender and pickup fields (the page reads
+  // "Payment Method Pay At branch, Lakewood Ranch 238"). Not found, or not
+  // exactly one shown each → refuse review_fields_unreadable; the first dry run
+  // shows the real DOM.
+  reviewTender: '[data-test="payment-method"], .order-summary__payment-method, [class*="payment-method" i]',
+  reviewPickup: '[data-test="pickup-location"], .order-summary__pickup, [class*="pickup-location" i]',
   reviewItemCode: 'div.item__code',
   // UNVERIFIED: the nearest ancestor of the item code that holds a quantity node.
   reviewItemBlock: 'xpath=ancestor::*[.//*[contains(@class,"item__qty") or contains(@class,"item__quantity")]][1]',
@@ -87,13 +106,21 @@ const SELECTORS = Object.freeze({
 });
 
 const BASE = 'https://www.siteone.com';
-const URLS = Object.freeze({
-  search: (sku) => `${BASE}/en/search?text=${encodeURIComponent(sku)}`,
-  cart: `${BASE}/en/cart`,
-  checkout: `${BASE}/en/checkout/multi/siteOne-checkout`,
+const PATHS = Object.freeze({
+  search: '/en/search',
+  cart: '/en/cart',
+  checkout: '/en/checkout/multi/siteOne-checkout',
+  review: '/en/checkout/multi/order-summary/view',
 });
-const REVIEW_PATH = '/checkout/multi/order-summary/view';
-const CHECKOUT_PATH = '/checkout/multi/siteOne-checkout';
+const URLS = Object.freeze({
+  search: (sku) => `${BASE}${PATHS.search}?text=${encodeURIComponent(sku)}`,
+  cart: `${BASE}${PATHS.cart}`,
+  checkout: `${BASE}${PATHS.checkout}`,
+});
+// Identity-provider origins the bot may press Sign in on: https siteone.com
+// hosts, plus the exact https origins in SITEONE_SIGN_IN_ORIGINS (CSV; set it
+// to the Okta host the first dry run shows). Nothing else is ever clicked.
+const SIGN_IN_HOST_SUFFIX = '.siteone.com';
 const NAV_TIMEOUT = 45000;
 const ACTION_TIMEOUT = 15000;
 const WAIT_STEP = 500;
@@ -189,12 +216,27 @@ async function poll(page, fn, ms, step = WAIT_STEP) {
   return null;
 }
 
-function isTrustedSiteOneUrl(u) {
-  try {
-    const url = new URL(String(u));
-    const h = url.hostname.toLowerCase();
-    return url.protocol === 'https:' && (h === 'siteone.com' || h.endsWith('.siteone.com'));
-  } catch { return false; }
+function parseUrl(u, base) { try { return new URL(String(u), base); } catch { return null; } }
+
+// The page is exactly on https://www.siteone.com (and, when given, this exact
+// pathname). Parsed, never a substring match.
+function atSiteOne(page, pathname = null) {
+  const u = parseUrl(page.url());
+  return !!u && u.origin === BASE && (pathname == null || u.pathname === pathname);
+}
+// A transition check: off siteone.com is run-level (the browser went somewhere
+// we do not control); the wrong page on siteone.com refuses.
+function assertAt(run, pathname, what) {
+  if (!atSiteOne(run.page)) throw runLevel(`siteone cdp: the ${what} left https://www.siteone.com`);
+  if (pathname != null && !atSiteOne(run.page, pathname)) throw new RefusedError('page_unrecognized', `SiteOne is not on the ${what} page`, run.evidence);
+}
+
+function isApprovedSignInOrigin(u, env) {
+  const url = parseUrl(u);
+  if (!url || url.protocol !== 'https:' || url.port !== '') return false;
+  const host = url.hostname.toLowerCase();
+  if (host === 'siteone.com' || host.endsWith(SIGN_IN_HOST_SUFFIX)) return true;
+  return csv(env.SITEONE_SIGN_IN_ORIGINS).some((o) => parseUrl(o)?.origin === url.origin && o.startsWith('https://'));
 }
 
 // ---- navigation + sign-in ---------------------------------------------------
@@ -204,19 +246,30 @@ async function signInFormShown(page) { return (await shownAll(page, SELECTORS.ok
 // The Okta form is Chrome-prefilled: the bot checks the identifier is already
 // there, then clicks the one Sign in button. It never types.
 async function clickPrefilledSignIn(run) {
-  const { page, evidence } = run;
-  if (!String(page.url()).startsWith('https://')) throw runLevel('siteone cdp: the sign-in page is not https');
+  const { page, evidence, env } = run;
+  // The page's own origin first: nothing is read or clicked on an unapproved one.
+  if (!isApprovedSignInOrigin(page.url(), env)) throw runLevel('siteone cdp: the sign-in page is not on an approved identity-provider origin');
   run.signIns += 1;
   if (run.signIns > MAX_SIGN_INS) throw runLevel('siteone cdp: signed out again and again — the profile is not signed in');
-  const identifier = await oneShown(page, SELECTORS.oktaIdentifier, 'sign-in identifier boxes', evidence);
+  const identifier = await oneShown(page, SELECTORS.oktaIdentifier, 'sign-in identifier boxes', evidence).catch(() => { throw runLevel('siteone cdp: the sign-in form is not readable'); });
+  const button = await oneShown(page, SELECTORS.oktaSubmit, 'Sign in buttons', evidence).catch(() => { throw runLevel('siteone cdp: the Sign in button is not readable'); });
+  // The form's action (and the button's formaction) must post to an approved origin too.
+  const forms = await allMatches(identifier, SELECTORS.oktaForm);
+  if (forms.length !== 1) throw runLevel('siteone cdp: the sign-in form could not be proven');
+  for (const holder of [forms[0], button]) {
+    const target = await holder.getAttribute(holder === button ? 'formaction' : 'action').catch(() => null);
+    if (target && !isApprovedSignInOrigin(parseUrl(target, page.url())?.href, env)) throw runLevel('siteone cdp: the sign-in form posts to an unapproved origin');
+  }
   if (!String(await identifier.inputValue().catch(() => '')).trim()) throw runLevel('siteone cdp: the sign-in form is not prefilled — sign in on the Mac by hand');
-  const button = await oneShown(page, SELECTORS.oktaSubmit, 'Sign in buttons', evidence);
   await button.click();
   evidence.signIns = run.signIns;
   await page.waitForTimeout(run.opts.settleMs);
 }
 
-async function openPage(run, url) {
+async function allMatches(scope, selector) { return (await matches(scope, selector)).all; }
+
+// `pathname`: when given, the page must end exactly there (the cart, checkout).
+async function openPage(run, url, pathname = null) {
   const { page } = run;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
   if (await signInFormShown(page)) {
@@ -224,7 +277,7 @@ async function openPage(run, url) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
     if (await signInFormShown(page)) throw runLevel('siteone cdp: still not signed in after the prefilled sign-in');
   }
-  if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone cdp: navigation left siteone.com');
+  assertAt(run, pathname, 'navigation');
   await page.waitForTimeout(run.opts.settleMs);
 }
 
@@ -246,12 +299,21 @@ async function rowReading(row) {
 // Remove ONLY the line this run added: its row, matched by item number.
 async function removeOwnRow(run) {
   const { page, vendorSku } = run;
-  await openPage(run, URLS.cart);
+  await openPage(run, URLS.cart, PATHS.cart);
   const ours = [];
-  for (const row of await cartRows(page)) if ((await rowReading(row)).sku === vendorSku) ours.push(row);
-  if (ours.length !== 1) { run.evidence.cleanup = ours.length ? 'row_ambiguous' : 'row_absent'; return; }
-  const link = await shownAll(ours[0], SELECTORS.cartRemoveLine);
-  if (link.length !== 1) { run.evidence.cleanup = 'remove_link_unreadable'; return; }
+  for (const row of await cartRows(page)) {
+    const reading = await rowReading(row);
+    if (reading.sku === vendorSku) ours.push({ row, reading });
+  }
+  if (!ours.length) { run.evidence.cleanup = 'row_absent'; return; }
+  // Only a row that is exactly what this run added (one line, the quantity we
+  // set, the cart empty before) is removed. Anything else — a changed or merged
+  // quantity, a second line — belongs to the owner now: leave it.
+  const readings = ours.length === 1 ? [ours[0].reading.requested, ours[0].reading.inputQty].filter((q) => q != null && q !== '') : [];
+  const exact = run.cartEmptyBefore && readings.length > 0 && readings.every((q) => Number(q) === run.quantity);
+  if (!exact) { run.evidence.cleanup = 'cart_left_for_owner'; run.evidence.cart_left_for_owner = true; return; }
+  const link = await shownAll(ours[0].row, SELECTORS.cartRemoveLine);
+  if (link.length !== 1) { run.evidence.cleanup = 'remove_link_unreadable'; run.evidence.cart_left_for_owner = true; return; }
   await link[0].click();
   await page.waitForTimeout(run.opts.settleMs);
   run.evidence.cleanup = 'row_removed';
@@ -259,7 +321,7 @@ async function removeOwnRow(run) {
 
 async function clearPo(run) {
   const { page } = run;
-  await openPage(run, URLS.checkout);
+  await openPage(run, URLS.checkout, PATHS.checkout);
   const po = await shownAll(page, SELECTORS.poInput);
   if (po.length === 1) await po[0].fill('');
   run.evidence.poCleared = po.length === 1;
@@ -279,9 +341,10 @@ async function cleanup(run) {
 // ---- stages -----------------------------------------------------------------
 
 async function assertCartEmpty(run) {
-  await openPage(run, URLS.cart);
+  await openPage(run, URLS.cart, PATHS.cart);
   const rows = await cartRows(run.page);
   run.evidence.cartRowsBefore = rows.length;
+  run.cartEmptyBefore = rows.length === 0;
   if (rows.length) throw new RefusedError('cart_not_empty', `SiteOne cart already holds ${rows.length} line(s) — never touched: empty it by hand`, run.evidence);
 }
 
@@ -292,9 +355,9 @@ async function openProduct(run) {
   if (hits.length !== 1) throw new RefusedError('sku_not_found', `SiteOne search for the item number shows ${hits.length} result(s) (expected exactly one)`, evidence);
   const href = await hits[0].getAttribute('href').catch(() => null);
   if (!href) throw new RefusedError('sku_not_found', 'SiteOne search result has no link', evidence);
-  const target = new URL(href, BASE).toString();
-  if (!isTrustedSiteOneUrl(target)) throw new RefusedError('page_unrecognized', 'SiteOne search result leaves siteone.com', evidence);
-  await openPage(run, target);
+  const target = parseUrl(href, BASE);
+  if (!target || target.origin !== BASE) throw new RefusedError('page_unrecognized', 'SiteOne search result leaves siteone.com', evidence);
+  await openPage(run, target.toString());
 }
 
 async function readUom(page, evidence) {
@@ -335,7 +398,7 @@ async function addToCart(run) {
 async function verifyOwnRow(run) {
   const { page, vendorSku, quantity, evidence } = run;
   let rows = [];
-  await poll(page, async () => { await openPage(run, URLS.cart); rows = await cartRows(page); return rows.length > 0; }, 3 * run.opts.settleMs + 3 * WAIT_STEP, run.opts.settleMs || WAIT_STEP);
+  await poll(page, async () => { await openPage(run, URLS.cart, PATHS.cart); rows = await cartRows(page); return rows.length > 0; }, 3 * run.opts.settleMs + 3 * WAIT_STEP, run.opts.settleMs || WAIT_STEP);
   evidence.cartRowsAfter = rows.length;
   const readings = [];
   for (const row of rows) readings.push(await rowReading(row));
@@ -371,8 +434,8 @@ async function verifyCartAndGate(run) {
   await run.gate(evidence.cartTotalCents, 'cart total');
   const go = await oneShown(page, SELECTORS.continueCheckout, 'checkout buttons', evidence);
   await go.click();
-  const reached = await poll(page, async () => page.url().includes(CHECKOUT_PATH), STEP_WAIT);
-  if (!reached) throw new RefusedError('page_unrecognized', 'SiteOne did not reach the checkout page', evidence);
+  const reached = await poll(page, async () => atSiteOne(page, PATHS.checkout), STEP_WAIT);
+  if (!reached) { assertAt(run, PATHS.checkout, 'checkout'); throw new RefusedError('page_unrecognized', 'SiteOne did not reach the checkout page', evidence); }
   await page.waitForTimeout(run.opts.settleMs);
 }
 
@@ -409,12 +472,12 @@ async function choosePayAtBranch(run) {
   await assertNoPaymentPrompt(page, evidence);
   const review = await oneShown(page, SELECTORS.reviewButton, 'Review Your Order buttons', evidence);
   await review.click();
-  const reached = await poll(page, async () => page.url().includes(REVIEW_PATH), STEP_WAIT);
-  if (!reached) throw new RefusedError('page_unrecognized', 'SiteOne did not reach the order review page', evidence);
+  const reached = await poll(page, async () => atSiteOne(page, PATHS.review), STEP_WAIT);
+  if (!reached) { assertAt(run, PATHS.review, 'order review'); throw new RefusedError('page_unrecognized', 'SiteOne did not reach the order review page', evidence); }
   await page.waitForTimeout(run.opts.settleMs);
 }
 
-async function verifyReviewItem(run) {
+async function readReviewItem(run) {
   const { page, vendorSku, quantity, evidence } = run;
   const item = await oneShown(page, SELECTORS.reviewItemCode, 'review item codes', evidence);
   const code = itemNumberAfterColon(await textOf(item));
@@ -424,33 +487,63 @@ async function verifyReviewItem(run) {
   const qtyNodes = (await block.count().catch(() => 0)) ? await shownAll(block.nth(0), SELECTORS.reviewQty) : [];
   const figures = qtyNodes.length ? (await textOf(qtyNodes[0])).match(/\d+/g) || [] : [];
   if (qtyNodes.length !== 1 || figures.length !== 1) throw new RefusedError('review_qty_unreadable', 'SiteOne review: the item quantity could not be read in the item block', evidence);
-  evidence.reviewQty = Number(figures[0]);
-  if (evidence.reviewQty !== quantity) throw new RefusedError('review_qty_mismatch', `SiteOne review quantity ${figures[0]} is not ${quantity}`, evidence);
+  const qty = Number(figures[0]);
+  evidence.reviewQty = qty;
+  if (qty !== quantity) throw new RefusedError('review_qty_mismatch', `SiteOne review quantity ${figures[0]} is not ${quantity}`, evidence);
+  return { code, qty };
 }
 
-async function verifyReview(run) {
-  const { page, storeId, evidence } = run;
-  const body = normalizeText(await textOf(await oneAttached(page, SELECTORS.body, 'page bodies', evidence)));
-  if (!body.includes('pay at branch') || !body.includes(storeId)) throw new RefusedError('not_pay_at_branch', 'SiteOne review does not show Pay at Branch for the approved store', evidence);
-  await verifyReviewItem(run);
-  const totalCents = await readTotal(page, SELECTORS.reviewTotal, 'review total', evidence);
-  evidence.reviewTotalCents = totalCents;
-  await run.gate(totalCents, 'order');
-  const buttons = (await shownAll(page, SELECTORS.placeOrder));
+// A review field read from its OWN node (never whole-page text): exactly one
+// shown node, else the page is not one the bot can prove.
+async function readReviewField(run, selector, what) {
+  const nodes = await shownAll(run.page, selector);
+  if (nodes.length !== 1) throw new RefusedError('review_fields_unreadable', `SiteOne review: ${nodes.length} ${what} fields shown (expected exactly one)`, run.evidence);
+  return normalizeText(await textOf(nodes[0]));
+}
+
+// "Payment Method Pay At branch, Lakewood Ranch 238": after the label, the
+// tender is the first comma segment and must be exactly "pay at branch".
+const tenderOf = (text) => text.replace(/^payment method\s*:?\s*/, '').split(',')[0].trim();
+
+async function readPlaceButton(run) {
+  const buttons = await shownAll(run.page, SELECTORS.placeOrder);
   const enabled = [];
   for (const b of buttons) if (await b.isEnabled().catch(() => false)) enabled.push(b);
-  if (buttons.length !== 1 || enabled.length !== 1) throw new RefusedError('place_button_ambiguous', `SiteOne review shows ${buttons.length} Place order button(s), ${enabled.length} enabled (expected exactly one)`, evidence);
-  evidence.placeButton = normalizeText(await textOf(enabled[0])).slice(0, 60);
-  return { totalCents, button: enabled[0] };
+  if (buttons.length !== 1 || enabled.length !== 1) throw new RefusedError('place_button_ambiguous', `SiteOne review shows ${buttons.length} Place order button(s), ${enabled.length} enabled (expected exactly one)`, run.evidence);
+  run.evidence.placeButton = normalizeText(await textOf(enabled[0])).slice(0, 60);
+  return enabled[0];
 }
 
-// Order numbers after a confirmation label; one distinct candidate or none.
+// Everything the click is bound to, read from the review page right now.
+async function readReview(run) {
+  const { page, storeId, evidence } = run;
+  const tender = await readReviewField(run, SELECTORS.reviewTender, 'payment method');
+  const pickup = await readReviewField(run, SELECTORS.reviewPickup, 'pickup location');
+  evidence.reviewTender = tender.slice(0, 80);
+  evidence.reviewPickup = pickup.slice(0, 120);
+  if (tenderOf(tender) !== 'pay at branch') throw new RefusedError('not_pay_at_branch', 'SiteOne review: the payment method is not exactly Pay at Branch', evidence);
+  if (!hasToken(pickup, storeId)) throw new RefusedError('pickup_not_selected', `SiteOne review: the pickup location does not show store ${storeId}`, evidence);
+  const { code, qty } = await readReviewItem(run);
+  const totalCents = await readTotal(page, SELECTORS.reviewTotal, 'review total', evidence);
+  evidence.reviewTotalCents = totalCents;
+  return { tender, pickup, code, qty, totalCents, button: await readPlaceButton(run) };
+}
+const reviewKey = (r) => JSON.stringify([r.tender, r.pickup, r.code, r.qty, r.totalCents]);
+
+// Order-number-looking strings on a page (a digit, 4-20 characters).
+function numberTokens(text) {
+  return new Set([...String(text || '').toUpperCase().matchAll(/[A-Z0-9][A-Z0-9-]{3,19}/g)].map((m) => m[0]).filter((t) => /\d/.test(t)));
+}
+
+// Order numbers after a confirmation label that are NOT in `exclude`
+// (the review page's own strings and our PO); one distinct candidate or none.
 const CONFIRMATION_RE = /(?:order\s*(?:#|number|no\.?|id)|confirmation(?:\s*(?:#|number|no\.?|id))?)\s*[:#]?\s*([A-Z0-9][A-Z0-9-]{3,19})/gi;
-function orderNumberIn(text, poNumber) {
+function orderNumberIn(text, exclude = []) {
+  const skip = new Set([...(typeof exclude === 'string' ? [exclude] : (exclude || []))].filter(Boolean).map((x) => String(x).toUpperCase()));
   const found = new Set();
   for (const m of String(text || '').matchAll(CONFIRMATION_RE)) {
     const n = m[1].toUpperCase();
-    if (/\d/.test(n) && n !== poNumber) found.add(n);
+    if (/\d/.test(n) && !skip.has(n)) found.add(n);
   }
   return found.size === 1 ? [...found][0] : null;
 }
@@ -464,23 +557,45 @@ function ambiguousError(message, evidence) {
 
 async function afterClickEvidence(page, poNumber) {
   const heading = await shownAll(page, SELECTORS.heading).then((h) => (h.length ? textOf(h[0]) : '')).catch(() => '');
-  let url = '';
-  try { url = new URL(page.url()).pathname; } catch { url = ''; }
-  return { poNumber: poNumber || null, url, h1: String(heading).slice(0, 120) };
+  const u = parseUrl(page.url());
+  return { poNumber: poNumber || null, url: u ? u.pathname : '', h1: String(heading).slice(0, 120) };
+}
+
+// The confirmation: a NEW number (not on the review page before the click, not
+// our PO) on a siteone.com page that is no longer the review page.
+async function readConfirmation(run, baseline) {
+  const u = parseUrl(run.page.url());
+  if (!u || u.origin !== BASE) throw ambiguousError('the page after the click left https://www.siteone.com', null);
+  if (u.pathname === PATHS.review) return null;
+  const text = await textOf(run.page.locator(SELECTORS.body).nth(0));
+  return orderNumberIn(text, [...baseline, run.poNumber]);
+}
+
+// Bind the reservation to the click: the cap check passed on `first`, so what
+// is clicked must be exactly that. Read it all again; any change → no click.
+async function bindToClick(run, first) {
+  const { page, evidence } = run;
+  if (!run.dryRun) await run.gate(first.totalCents, 'final claim check'); // the claim is re-asserted at the click
+  let baseline;
+  try { baseline = numberTokens(await textOf(await oneAttached(page, SELECTORS.body, 'page bodies', evidence))); } catch { throw new RefusedError('review_fields_unreadable', 'SiteOne review: the page text could not be read before the click', evidence); }
+  const again = await readReview(run);
+  if (reviewKey(again) !== reviewKey(first)) throw new RefusedError('review_changed', 'SiteOne review changed after the cap check — nothing clicked', evidence, again.totalCents);
+  assertAt(run, PATHS.review, 'order review');
+  return { button: again.button, baseline, totalCents: again.totalCents };
 }
 
 // From the click on, every failure is ambiguous: the order may exist.
-async function clickPlaceOrder(run, review) {
+async function clickPlaceOrder(run, bound) {
   const { page, poNumber } = run;
   run.submitted = true;
   try {
-    await review.button.click();
-    const number = await poll(page, async () => orderNumberIn(await textOf(page.locator(SELECTORS.body).nth(0)), poNumber), CONFIRMATION_WAIT, run.opts.confirmStep);
-    if (number) return { externalOrderNumber: number, amountCents: review.totalCents, evidence: { ...run.evidence, confirmed: true }, dryRun: false };
+    await bound.button.click();
+    const number = await poll(page, () => readConfirmation(run, bound.baseline), CONFIRMATION_WAIT, run.opts.confirmStep);
+    if (number) return { externalOrderNumber: number, amountCents: bound.totalCents, evidence: { ...run.evidence, confirmed: true }, dryRun: false };
   } catch (err) {
     throw ambiguousError(`SiteOne Place order was clicked and failed after it: ${String(err.message).slice(0, 120)} — verify with the vendor`, { ...(await afterClickEvidence(page, poNumber).catch(() => ({ poNumber: poNumber || null }))), error: String(err.message).slice(0, 120) });
   }
-  throw ambiguousError('SiteOne Place order was clicked but no order number was found — verify with the vendor', await afterClickEvidence(page, poNumber).catch(() => ({ poNumber: poNumber || null })));
+  throw ambiguousError('SiteOne Place order was clicked but no new order number was found on a confirmation page — verify with the vendor', await afterClickEvidence(page, poNumber).catch(() => ({ poNumber: poNumber || null })));
 }
 
 async function walk(run) {
@@ -491,9 +606,11 @@ async function walk(run) {
   await verifyCartAndGate(run);
   await fillOrderType(run);
   await choosePayAtBranch(run);
-  const review = await verifyReview(run);
-  if (run.dryRun) return { dryRun: true, amountCents: review.totalCents, externalOrderNumber: null, evidence: run.evidence };
-  return clickPlaceOrder(run, review);
+  const first = await readReview(run);
+  await run.gate(first.totalCents, 'order');
+  const bound = await bindToClick(run, first);
+  if (run.dryRun) return { dryRun: true, amountCents: bound.totalCents, externalOrderNumber: null, evidence: run.evidence };
+  return clickPlaceOrder(run, bound);
 }
 
 // ---- place() ----------------------------------------------------------------
@@ -550,7 +667,7 @@ async function place(args, opts = {}) {
   };
   const { browser, page } = await openPageInOwnerChrome(env, connect);
   const run = {
-    page, vendorSku: sku, quantity: qty, poNumber: po, dryRun, evidence, gate, signIns: 0, added: false, poFilled: false, submitted: false,
+    page, vendorSku: sku, quantity: qty, poNumber: po, dryRun, evidence, gate, signIns: 0, env, cartEmptyBefore: false, added: false, poFilled: false, submitted: false,
     storeId: String(env.SITEONE_APPROVED_STORE_ID).trim(), pickupTokens: csv(env.SITEONE_APPROVED_PICKUP),
     opts: { settleMs: opts.settleMs ?? SETTLE_MS, confirmStep: opts.confirmStep ?? 1000 },
   };
@@ -562,9 +679,10 @@ async function place(args, opts = {}) {
     throw classify(err, run);
   } finally {
     await cleanup(run);
-    // Only our own page is closed. browser.close() would end the owner's Chrome.
+    // Only our own page is closed; then our connection is dropped.
     try { await page.close(); } catch { /* noop */ }
-    try { if (typeof browser.disconnect === 'function') await browser.disconnect(); } catch { /* noop */ }
+    // On a connectOverCDP browser close() only drops our WebSocket (see the header).
+    try { await browser.close(); } catch { /* noop */ }
   }
 }
 
@@ -579,5 +697,5 @@ module.exports = {
   quote: () => null,
   place,
   RefusedError,
-  _internals: { SELECTORS, URLS, parseMoney, itemNumberAfterColon, orderNumberIn, hasToken, hasEveryToken, isDryRun, isLocalCdpUrl },
+  _internals: { SELECTORS, URLS, PATHS, parseMoney, itemNumberAfterColon, orderNumberIn, numberTokens, hasToken, hasEveryToken, isDryRun, isLocalCdpUrl, isApprovedSignInOrigin },
 };
