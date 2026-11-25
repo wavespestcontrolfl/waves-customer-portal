@@ -178,17 +178,6 @@ function serverReportedError(message, {
   return err;
 }
 
-// Page-driven navigations (a promo reload, the annual-prepay pay URL, a
-// stale-balance reload, a bank-redirect cleanup) mark themselves first, so the
-// bank-step leave report (PaymentForm's pagehide) never rings the office while
-// checkout is still going on.
-let payPageNavigatingOnPurpose = false;
-function payPageLeftOnPurpose() { return payPageNavigatingOnPurpose; }
-function resetPayPageNavigation() { payPageNavigatingOnPurpose = false; }
-function reloadPayPage() { payPageNavigatingOnPurpose = true; window.location.reload(); }
-function replacePayPage(url) { payPageNavigatingOnPurpose = true; window.location.replace(url); }
-function assignPayPage(url) { payPageNavigatingOnPurpose = true; window.location.assign(url); }
-
 function reportPaymentError(token, payload = {}) {
   if (!token || !payload.message) return;
   try {
@@ -836,7 +825,7 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
   );
 }
 
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card', bankLeaveRef = null }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card' }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -877,35 +866,6 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const [syncingAmount, setSyncingAmount] = useState(false);
   const [amountSyncError, setAmountSyncError] = useState(false);
   const selectedMethodRef = useRef(initialMethod || 'card');
-  // Office bell when a customer picks Bank account and leaves without
-  // pressing Pay (owner 2026-11-24, "build it"). Stripe reports nothing
-  // when its bank sign-in window is closed, so the office only heard of a
-  // stuck bank payment when the customer texted. One report per page load,
-  // through the same /error path (deduped per invoice for 24 h server-side).
-  // The page owns the state (bankLeaveRef): a Pay press can replace the
-  // PaymentIntent, and this form is keyed by intent id, so a ref here would
-  // reset on that remount and ring after a real Pay press.
-  const ownBankLeaveRef = useRef({ tried: false, reported: false });
-  const bankLeave = bankLeaveRef || ownBankLeaveRef;
-  const paymentIntentIdRef = useRef(paymentIntentId);
-  paymentIntentIdRef.current = paymentIntentId;
-  useEffect(() => {
-    if (typeof window === 'undefined') return undefined;
-    const onPageHide = () => {
-      if (selectedMethodRef.current !== 'us_bank_account') return;
-      if (bankLeave.current.tried || bankLeave.current.reported || processingRef.current || payPageLeftOnPurpose()) return;
-      bankLeave.current.reported = true;
-      reportPaymentError(token, {
-        message: 'Customer picked Bank account and left the pay page without paying',
-        phase: 'bank_step_left',
-        code: 'bank_step_left',
-        methodCategory: 'us_bank_account',
-        paymentIntentId: paymentIntentIdRef.current || undefined,
-      });
-    };
-    window.addEventListener('pagehide', onPageHide);
-    return () => window.removeEventListener('pagehide', onPageHide);
-  }, [token, bankLeave]);
   const syncingAmountRef = useRef(false);
   const amountSyncSeqRef = useRef(0);
   // Counts ALL in-flight /update-amount requests, not just the latest sequence.
@@ -953,7 +913,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         // server's locked re-verification): reload to live amounts — same
         // contract as the /setup staleBalance path.
         if (data.staleBalance) {
-          reloadPayPage();
+          window.location.reload();
           return new Promise(() => {});
         }
         // The consent text changed under this tab: refresh prompt, never a
@@ -1319,7 +1279,6 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
     // ACH: use the existing confirmPayment flow (no surcharge)
     if (selectedMethodRef.current === 'us_bank_account') {
-      bankLeave.current.tried = true;
       // The invoice PaymentIntent is locked to ONE tender family server-side,
       // and reusing an open intent on a pay-page reload resets it to card-only.
       // If we confirm a bank PaymentMethod against a still-card-only intent,
@@ -1491,7 +1450,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         // of re-quoting into the same 409 (codex #5434 r7 P2). Same contract
         // as the /setup and /update-amount staleBalance paths.
         if (result.staleBalance) {
-          reloadPayPage();
+          window.location.reload();
           return new Promise(() => {});
         }
         throw serverReportedError(result.error || (isConsentVersionStale(result) ? CONSENT_VERSION_STALE_MESSAGE : 'Payment failed'));
@@ -1999,15 +1958,6 @@ export default function PayPageV2() {
   useGlassSurface(true);
   const { token } = useParams();
   const navigate = useNavigate();
-  // Bank-step leave report state for this page load (see PaymentForm).
-  const bankLeaveRef = useRef({ tried: false, reported: false });
-  // A bfcache restore after a page-driven navigation starts a fresh visit.
-  useEffect(() => {
-    resetPayPageNavigation();
-    const onShow = (e) => { if (e.persisted) resetPayPageNavigation(); };
-    window.addEventListener('pageshow', onShow);
-    return () => window.removeEventListener('pageshow', onShow);
-  }, []);
   const location = useLocation();
   const urlSaveRequiredHint = shouldRequireSaveCard(location.search);
   const saveCardDefault = shouldDefaultSaveCard(location.search) || urlSaveRequiredHint;
@@ -2141,7 +2091,7 @@ export default function PayPageV2() {
               // the invoice is still payable; re-derive real state instead
               // of showing "covered, nothing due".
               if (body?.settled === false) {
-                replacePayPage(window.location.pathname);
+                window.location.replace(window.location.pathname);
                 return;
               }
               setSetupCapture({ status: 'done' });
@@ -2241,7 +2191,7 @@ export default function PayPageV2() {
           // invoice is still payable; re-derive real state instead of
           // showing "covered, nothing due" (Codex #2507 round-9).
           if (body.settled === false) {
-            replacePayPage(window.location.pathname);
+            window.location.replace(window.location.pathname);
             return;
           }
           setSetupCapture({ status: 'done' });
@@ -2336,7 +2286,7 @@ export default function PayPageV2() {
             // other open invoices) changed since this page rendered — reload
             // to show the customer the updated amounts before they pay.
             // Never-resolving promise: the navigation supersedes this chain.
-            reloadPayPage();
+            window.location.reload();
             return new Promise(() => {});
           }
           throw serverReportedError(setup.error || 'Failed to initialize payment', {
@@ -2711,7 +2661,7 @@ export default function PayPageV2() {
                       // is still payable, so re-derive real state instead
                       // of showing "covered, nothing due".
                       if (body?.settled === false) {
-                        replacePayPage(window.location.pathname);
+                        window.location.replace(window.location.pathname);
                         return;
                       }
                       setSetupCapture({ status: 'done' });
@@ -2924,7 +2874,6 @@ export default function PayPageV2() {
             {paymentState === 'ready' && stripeSetup ? (
               <PaymentForm
                 key={stripeSetup.paymentIntentId}
-                bankLeaveRef={bankLeaveRef}
                 initialMethod={stripeSetup.initialMethod || 'card'}
                 publishableKey={stripeSetup.publishableKey}
                 clientSecret={stripeSetup.clientSecret}
@@ -3230,7 +3179,7 @@ export default function PayPageV2() {
             <PayPlanChoice
               planChoice={data.planChoice}
               panelStyle={subtlePanel}
-              onChosen={(payUrl) => assignPayPage(payUrl)}
+              onChosen={(payUrl) => window.location.assign(payUrl)}
               choosePrepay={async () => {
                 const response = await fetch(`${API_BASE}/pay/${token}/plan-choice`, {
                   method: 'POST',
@@ -3250,7 +3199,7 @@ export default function PayPageV2() {
             <PayPromoCode
               promoCode={promoVerdict === undefined ? data.promoCode : promoVerdict}
               panelStyle={subtlePanel}
-              onSaved={() => reloadPayPage()}
+              onSaved={() => window.location.reload()}
               submitCode={async (code) => {
                 const response = await fetch(`${API_BASE}/pay/${token}/promo-code`, {
                   method: 'POST',
@@ -3301,7 +3250,7 @@ export default function PayPageV2() {
                   // invoice takes the SAME full reload the staleInvoice 409
                   // path uses — never a data swap beside the old client
                   // secret. Before /setup answers there is no PI to strand.
-                  if (stripeSetup) { reloadPayPage(); return; }
+                  if (stripeSetup) { window.location.reload(); return; }
                   setData(fresh);
                 }}
               />

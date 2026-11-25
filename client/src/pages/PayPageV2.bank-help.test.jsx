@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
 // Bank help (owner 2026-11-24, "build it"): a customer whose bank sign-in
 // fails closes Stripe's bank window before Pay, so (1) the manual-entry help
-// line shows as soon as Bank account is picked, (2) the FAQ answers "my bank
-// won't let me sign in", and (3) leaving the page with Bank account picked and
-// no Pay press reports once to /pay/:token/error (office bell).
+// line shows as soon as Bank account is picked, and (2) the FAQ answers "my
+// bank won't let me sign in".
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -105,7 +104,6 @@ function stubPayFetch(quote) {
     return response(204, {});
   });
   vi.stubGlobal('fetch', fetchMock);
-  return fetchMock;
 }
 
 afterEach(() => {
@@ -115,18 +113,13 @@ afterEach(() => {
   elementCalls.length = 0;
 });
 
-const errorPosts = (fetchMock) => fetchMock.mock.calls
-  .filter(([url, init]) => String(url).endsWith('/error') && init?.method === 'POST')
-  .map(([, init]) => JSON.parse(init.body));
-
 async function mount() {
   const { getStripe } = await import('../lib/stripeLoader');
   getStripe.mockResolvedValue(fakeStripe());
-  const fetchMock = stubPayFetch({ base: 150, surcharge: 0, total: 150, funding: 'debit', rateBps: 290 });
+  stubPayFetch({ base: 150, surcharge: 0, total: 150, funding: 'debit', rateBps: 290 });
   renderPage();
   await screen.findByRole('group', { name: 'Payment method' });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Continue to review' })).not.toBeDisabled());
-  return fetchMock;
 }
 
 const pickBank = () => fireEvent.click(screen.getByRole('button', { name: /Bank account/ }));
@@ -152,22 +145,5 @@ describe('pay page — bank help (owner 2026-11-24)', () => {
     expect(screen.getByText(q).closest('details')).toHaveTextContent('Enter bank details manually');
     // Type-neutral deposit wording: Stripe may send one SM-code deposit or two amounts.
     expect(screen.getByText(q).closest('details')).toHaveTextContent('a small deposit (or two)');
-  });
-
-  it('reports once when the customer leaves with Bank account picked and no Pay press', async () => {
-    const fetchMock = await mount();
-    pickBank();
-    await screen.findByTestId('bank-manual-entry-help');
-    window.dispatchEvent(new Event('pagehide'));
-    window.dispatchEvent(new Event('pagehide'));
-    const posts = errorPosts(fetchMock);
-    expect(posts).toHaveLength(1);
-    expect(posts[0]).toMatchObject({ phase: 'bank_step_left', code: 'bank_step_left', methodCategory: 'us_bank_account' });
-  });
-
-  it('does not report when the customer leaves on Card', async () => {
-    const fetchMock = await mount();
-    window.dispatchEvent(new Event('pagehide'));
-    expect(errorPosts(fetchMock)).toHaveLength(0);
   });
 });

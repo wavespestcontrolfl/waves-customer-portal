@@ -234,18 +234,4 @@ describe('bill-payment-error-alerts', () => {
 
     expect(first).toBe(second);
   });
-
-  test('a bank-step leave keys on the invoice alone, so a replacement intent does not ring again', () => {
-    const { __private } = require('../services/bill-payment-error-alerts');
-    const key = (pi, msg) => __private.buildDedupeKey({
-      invoiceId: 'inv_123', paymentIntentId: pi, phase: 'bank_step_left', methodCategory: 'us_bank_account', errorMessage: msg,
-    });
-    expect(key('pi_old', 'left')).toBe(key('pi_new', 'left again'));
-    expect(key('pi_old', 'left')).not.toBe(__private.buildDedupeKey({
-      invoiceId: 'inv_456', paymentIntentId: 'pi_old', phase: 'bank_step_left', methodCategory: 'us_bank_account', errorMessage: 'left',
-    }));
-    expect(key('pi_old', 'left')).not.toBe(__private.buildDedupeKey({
-      invoiceId: 'inv_123', paymentIntentId: 'pi_old', phase: 'stripe_confirm', methodCategory: 'us_bank_account', errorMessage: 'left',
-    }));
-  });
 });
