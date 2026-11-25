@@ -127,15 +127,18 @@ function parseDepthMessage(message) {
 }
 
 /**
- * Give every function a key that survives edits elsewhere in the file: its
- * name plus its ordinal among same-named functions, or `<anon>#n` for the nth
- * unnamed one. Mutates and returns fns (sorted by head position).
+ * Give every function a key that survives edits elsewhere in the file: the
+ * named things around it (class, object literal, enclosing function), its own
+ * name, and its ordinal among functions with the same owner and name:
+ *   `Foo::run#1`, `callback of router.get('/x')#1`, `<anon>#2`.
+ * Two classes that both define `run` therefore never share a key. Mutates and
+ * returns fns (sorted by head position).
  */
 function keyFunctions(fns) {
   const sorted = [...fns].sort((x, y) => x.headLine - y.headLine || x.headColumn - y.headColumn);
   const seen = new Map();
   for (const fn of sorted) {
-    const base = fn.name || '<anon>';
+    const base = `${fn.owner ? `${fn.owner}::` : ''}${fn.name || '<anon>'}`;
     const n = (seen.get(base) || 0) + 1;
     seen.set(base, n);
     fn.key = `${base}#${n}`;
@@ -147,38 +150,111 @@ function countAnonymous(fns) {
   return fns.filter((f) => !f.name).length;
 }
 
+const FUNCTION_TYPES = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression']);
+const CALLEE_MAX = 48;
+
+function propertyKeyName(key) {
+  if (!key) return null;
+  if (key.name) return key.name;
+  return key.value !== undefined ? String(key.value) : null;
+}
+
+/** `router.get('/x', fn)` -> "callback of router.get('/x')": a route stays findable when others move. */
+function callbackName(call, getText) {
+  const callee = getText(call.callee).replace(/\s+/g, ' ').slice(0, CALLEE_MAX);
+  const first = call.arguments[0];
+  let literal = '';
+  if (first && first.type === 'Literal' && typeof first.value === 'string') literal = `'${first.value}'`;
+  else if (first && first.type === 'TemplateLiteral' && first.expressions.length === 0) literal = `'${first.quasis[0].value.cooked}'`;
+  return `callback of ${callee}(${literal})`;
+}
+
+/** Name a function node from its own id or the way it is bound; null for a truly anonymous one. */
+function functionName(node, getText) {
+  if (node.id && node.id.name) return node.id.name;
+  const parent = node.parent;
+  if (!parent) return null;
+  if (parent.type === 'VariableDeclarator') return parent.id && parent.id.name ? parent.id.name : null;
+  if (parent.type === 'Property' || parent.type === 'MethodDefinition' || parent.type === 'PropertyDefinition') return propertyKeyName(parent.key);
+  if (parent.type === 'AssignmentExpression') return getText(parent.left);
+  if (parent.type === 'CallExpression' && parent.arguments.includes(node)) return callbackName(parent, getText);
+  return null;
+}
+
+/** What an object literal or class expression is bound to, from the node holding it. */
+function bindingName(holder, getText) {
+  if (!holder) return null;
+  if (holder.type === 'VariableDeclarator') return holder.id && holder.id.name ? holder.id.name : null;
+  if (holder.type === 'Property' || holder.type === 'PropertyDefinition') return propertyKeyName(holder.key);
+  if (holder.type === 'AssignmentExpression') return getText(holder.left);
+  return null;
+}
+
+function containerName(node, getText) {
+  if (node.type === 'ClassDeclaration' || node.type === 'ClassExpression') {
+    return (node.id && node.id.name) || bindingName(node.parent, getText);
+  }
+  if (node.type === 'ObjectExpression') return bindingName(node.parent, getText);
+  if (FUNCTION_TYPES.has(node.type)) return functionName(node, getText);
+  return null;
+}
+
+/** Names of the classes, object literals and functions around a function, outermost first, joined by ">". */
+function functionOwner(node, getText) {
+  const names = [];
+  for (let p = node.parent; p; p = p.parent) {
+    const name = containerName(p, getText);
+    if (name) names.push(name);
+  }
+  return names.reverse().join('>');
+}
+
 /**
- * Every complexity / max-depth message of one file, tied to its function.
- *   complexity: the whole enclosing function is the range that counts.
- *   max-depth:  the too-deep block's own line span is the range that counts.
- * Items: { file, line, rule, name, score, max, key, startLine, endLine }
- * where line is the function's first line (the block's, for max-depth).
+ * Every complexity / max-depth finding of one file, tied to its function.
+ * Items: { file, line, rule, name, score, max, key, anon, startLine, endLine }
+ *   complexity: one item per over-limit function; line = its first line.
+ *   max-depth:  ONE item per function, scored by its deepest block and
+ *     reported at that block's line. Both rules count a change anywhere in the
+ *     function (startLine..endLine is the function) as touching it, so
+ *     wrapping four old blocks in a new fifth is seen. Code outside any
+ *     function is judged on the too-deep block's own lines.
  */
+function complexityItem(file, msg, fn) {
+  const parsed = parseComplexityMessage(msg.message);
+  const startLine = fn ? fn.startLine : msg.line;
+  return {
+    file, line: startLine, rule: 'complexity', key: fn ? fn.key : '(module)', anon: !!fn && !fn.name,
+    score: parsed.score, max: parsed.max,
+    name: parsed.name || (fn && fn.name) || '(anonymous function)',
+    startLine, endLine: fn ? fn.endLine : (msg.endLine || msg.line),
+  };
+}
+
+function depthItem(file, msg, fn) {
+  const parsed = parseDepthMessage(msg.message);
+  return {
+    file, line: msg.line, rule: 'max-depth', key: fn ? fn.key : '(module)', anon: !!fn && !fn.name,
+    score: parsed.score, max: parsed.max, name: (fn && fn.name) || null,
+    startLine: fn ? fn.startLine : msg.line,
+    endLine: fn ? fn.endLine : (msg.endLine || msg.line),
+  };
+}
+
 function flaggedItems(file, messages, fns) {
   keyFunctions(fns);
   const out = [];
+  const depth = new Map();
   for (const msg of messages) {
     if (!QUALITY_RULES.has(msg.ruleId)) continue;
     const fn = findFunctionForMessage(fns, msg.line, (msg.column || 1) - 1);
-    const key = fn ? fn.key : '(module)';
-    if (msg.ruleId === 'complexity') {
-      const parsed = parseComplexityMessage(msg.message);
-      const startLine = fn ? fn.startLine : msg.line;
-      out.push({
-        file, line: startLine, rule: 'complexity', key, score: parsed.score, max: parsed.max,
-        name: parsed.name || (fn && fn.name) || '(anonymous function)',
-        startLine, endLine: fn ? fn.endLine : (msg.endLine || msg.line),
-      });
-    } else {
-      const parsed = parseDepthMessage(msg.message);
-      out.push({
-        file, line: msg.line, rule: 'max-depth', key, score: parsed.score, max: parsed.max,
-        name: (fn && fn.name) || null,
-        startLine: msg.line, endLine: msg.endLine || msg.line,
-      });
-    }
+    if (msg.ruleId === 'complexity') { out.push(complexityItem(file, msg, fn)); continue; }
+    const item = depthItem(file, msg, fn);
+    const groupKey = fn ? item.key : `${item.key}@${msg.line}`;
+    const prev = depth.get(groupKey);
+    if (!prev || (item.score || 0) > (prev.score || 0)) depth.set(groupKey, item);
   }
-  return out.sort((a, b) => a.line - b.line);
+  out.push(...depth.values());
+  return out.sort((x, y) => x.line - y.line);
 }
 
 /** Flagged items whose range holds a changed line. */
@@ -199,23 +275,39 @@ function baseScoreMap(file, messages, fns) {
   return map;
 }
 
+/** Is every line of startLine..endLine inside the added/changed lines of the diff? */
+function fullyChanged(startLine, endLine, hunks) {
+  const added = hunks.filter((h) => !h.deletion).sort((x, y) => x.start - y.start);
+  let next = startLine;
+  for (const h of added) {
+    if (h.start > next) break;
+    if (h.end >= next) next = h.end + 1;
+    if (next > endLine) return true;
+  }
+  return next > endLine;
+}
+
 /**
- * Split violations into FAIL and WARN.
- *   FAIL: a new function, one that was at or under the limit at base, or one
- *         whose score is higher than at base.
- *   WARN: it was already over the limit at base with an equal or higher score
- *         (a one-line fix inside a legacy function is not a new problem).
- * baseInfo: null when the file has no base version (new file: all FAIL), else
+ * Split violations into NEW/WORSE (fail) and WARN (warn).
+ *   fail: a new or rewritten function (the file is new, or every line of the
+ *         function is in the diff), one that was at or under the limit at
+ *         base, or one whose score is higher than at base.
+ *   warn: it was already over the limit at base with an equal or lower score,
+ *         and the diff touches only part of it (a one-line fix in a legacy
+ *         function is not a new problem).
+ * baseInfo: null when the file has no base version (new file: all fail), else
  *   { scores: Map from baseScoreMap, anonMatches: boolean } where anonMatches
  *   says the file has as many unnamed functions at base as at head. Unnamed
- *   functions match by ordinal only when it does; otherwise they WARN.
+ *   functions match by ordinal only when it does; otherwise they warn.
+ * hunks: the changed ranges of the file (see parseDiffRanges).
  */
-function classifyViolations(violations, baseInfo) {
+function classifyViolations(violations, baseInfo, hunks = []) {
   const fail = [];
   const warn = [];
   for (const v of violations) {
-    if (!baseInfo) { fail.push({ ...v, base: null }); continue; }
-    if (v.key.startsWith('<anon>') && !baseInfo.anonMatches) { warn.push({ ...v, base: null }); continue; }
+    if (!baseInfo || fullyChanged(v.startLine, v.endLine, hunks)) { fail.push({ ...v, base: null }); continue; }
+    const anon = v.anon || /<anon>#\d+$/.test(v.key);
+    if (anon && !baseInfo.anonMatches) { warn.push({ ...v, base: null }); continue; }
     const base = baseInfo.scores.get(`${v.rule}|${v.key}`);
     if (base === undefined) fail.push({ ...v, base: null });
     else if ((v.score || 0) > base) fail.push({ ...v, base });
@@ -245,6 +337,9 @@ module.exports = {
   parseComplexityMessage,
   parseDepthMessage,
   keyFunctions,
+  functionName,
+  functionOwner,
+  fullyChanged,
   countAnonymous,
   flaggedItems,
   violationsForFile,

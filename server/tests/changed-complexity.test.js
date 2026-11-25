@@ -3,8 +3,10 @@
 const {
   parseDiffRanges, isLintable, rangesTouch, findFunctionForMessage,
   parseComplexityMessage, parseDepthMessage, violationsForFile, formatViolation, HINT, WARN_NOTE,
-  parseDiffOldPaths, keyFunctions, countAnonymous, baseScoreMap, classifyViolations,
+  parseDiffOldPaths, keyFunctions, countAnonymous, baseScoreMap, classifyViolations, flaggedItems,
+  fullyChanged, functionName, functionOwner,
 } = require('../../scripts/lib/changed-complexity');
+const { report, parseArgs } = require('../../scripts/check-changed-complexity');
 
 const DIFF = [
   'diff --git a/server/a.js b/server/a.js',
@@ -141,14 +143,14 @@ describe('violationsForFile', () => {
     expect(violationsForFile('server/a.js', messages, fns, [{ start: 1, end: 5, deletion: false }])).toEqual([]);
   });
 
-  test('max-depth is judged on the too-deep block itself', () => {
+  test('max-depth is judged on its enclosing function (deepest block reported)', () => {
+    // line 102 is inside the old `legacy` function (60-120): both its findings count
     const inBlock = violationsForFile('server/a.js', messages, fns, [{ start: 102, end: 102, deletion: false }]);
-    // line 102 is also inside the old `legacy` function (60-120), so that function is changed too
     expect(inBlock.map((x) => x.rule).sort()).toEqual(['complexity', 'max-depth']);
     expect(inBlock.find((x) => x.rule === 'max-depth')).toMatchObject({ line: 100, score: 5, max: 4 });
-    // a change elsewhere in the same old function, outside the deep block, does not trip it
-    const elsewhere = violationsForFile('server/a.js', messages, fns, [{ start: 70, end: 70, deletion: false }]);
-    expect(elsewhere.map((x) => x.rule)).toEqual(['complexity']); // the function changed, the deep block did not
+    // a change in `decide` (10-50) trips only decide's complexity: legacy is untouched
+    const elsewhere = violationsForFile('server/a.js', messages, fns, [{ start: 15, end: 15, deletion: false }]);
+    expect(elsewhere.map((x) => x.rule)).toEqual(['complexity']);
   });
 
   test('other rules and parse errors are ignored', () => {
@@ -263,5 +265,160 @@ describe('formatViolation', () => {
       .toBe('server/a.js:100  blocks nested 5 deep (max 4)  base 5');
     expect(HINT).toBe('remove decisions; do not move them into a one-use helper');
     expect(WARN_NOTE).toBe('Codex flags a rewritten function still over 20; lower it if this diff rewrites it');
+  });
+});
+
+// ── Fix 1: advisory, never blocks ───────────────────────────────────────────
+describe('report (advisory output and exit code)', () => {
+  const failing = [{ file: 'a.js', line: 4, rule: 'complexity', name: 'decide', score: 27, max: 20, base: 25 }];
+  const capture = (fn) => {
+    const lines = [];
+    const spy = jest.spyOn(console, 'log').mockImplementation((l) => lines.push(l));
+    try { return { code: fn(), lines }; } finally { spy.mockRestore(); }
+  };
+
+  test('new or worse findings print a loud NEW/WORSE section and still exit 0', () => {
+    const { code, lines } = capture(() => report(failing, [], 1, false));
+    expect(code).toBe(0);
+    expect(lines.filter((l) => l.startsWith('[changed-complexity] NEW/WORSE:')).length).toBeGreaterThanOrEqual(3);
+    expect(lines.join('\n')).toContain('a.js:4  decide  complexity 27 (max 20)  base 25');
+    expect(lines.join('\n')).toContain(HINT);
+    expect(lines.join('\n')).toContain('does not block the push');
+  });
+
+  test('touched legacy functions only print WARN and exit 0', () => {
+    const { code, lines } = capture(() => report([], [{ ...failing[0], score: 25 }], 1, false));
+    expect(code).toBe(0);
+    expect(lines.join('\n')).toContain('[changed-complexity] WARN: a.js:4');
+    expect(lines.join('\n')).not.toContain('NEW/WORSE');
+  });
+
+  test('--strict is the only way to get exit 1', () => {
+    expect(capture(() => report(failing, [], 1, true)).code).toBe(1);
+    expect(capture(() => report([], [], 1, true)).code).toBe(0);
+    expect(parseArgs(['--strict']).strict).toBe(true);
+    expect(parseArgs([]).strict).toBe(false);
+  });
+});
+
+// ── Fix 2: nesting is judged on the enclosing function ──────────────────────
+describe('max-depth is selected by the enclosing function and compared with its base depth', () => {
+  const fns = () => [{ name: 'run', headLine: 10, headColumn: 0, startLine: 10, endLine: 60, endColumn: 1 }];
+  const deep = (line, n) => ({ ruleId: 'max-depth', message: `Blocks are nested too deeply (${n}). Maximum allowed is 4.`, line, column: 9, endLine: line + 2 });
+
+  test('a change anywhere in the function counts, not just inside the deep block', () => {
+    // 4 old blocks wrapped in a new 5th: the deep block (lines 30-32) was not itself edited; line 12 was
+    const v = violationsForFile('a.js', [deep(30, 5)], fns(), [{ start: 12, end: 12, deletion: false }]);
+    expect(v).toHaveLength(1);
+    expect(v[0]).toMatchObject({ rule: 'max-depth', line: 30, score: 5, key: 'run#1' });
+    // base had depth 4 (no message): the function was within the limit, so it is NEW/WORSE
+    const r = classifyViolations(v, { scores: new Map(), anonMatches: true }, [{ start: 12, end: 12, deletion: false }]);
+    expect(r.fail).toHaveLength(1);
+  });
+
+  test('one item per function, scored by its deepest block, reported at that block', () => {
+    const items = flaggedItems('a.js', [deep(20, 5), deep(40, 6), deep(45, 5)], fns());
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ line: 40, score: 6, startLine: 10, endLine: 60 });
+  });
+
+  test('an old function with the same depth at base only warns, a deeper one fails', () => {
+    const base = { scores: baseScoreMap('a.js', [deep(20, 5)], fns()), anonMatches: true };
+    const hunk = [{ start: 12, end: 12, deletion: false }];
+    expect(classifyViolations(violationsForFile('a.js', [deep(30, 5)], fns(), hunk), base, hunk).warn).toHaveLength(1);
+    expect(classifyViolations(violationsForFile('a.js', [deep(30, 6)], fns(), hunk), base, hunk).fail).toHaveLength(1);
+  });
+
+  test('code outside any function is judged on the block lines', () => {
+    expect(violationsForFile('a.js', [deep(100, 5)], [], [{ start: 5, end: 5, deletion: false }])).toEqual([]);
+    expect(violationsForFile('a.js', [deep(100, 5)], [], [{ start: 101, end: 101, deletion: false }])).toHaveLength(1);
+  });
+});
+
+// ── Fix 3: a function wholly inside the added lines is new ──────────────────
+describe('fullyChanged and new anonymous callbacks', () => {
+  test('fullyChanged needs every line covered by added or changed hunks', () => {
+    const h = (start, end, deletion = false) => ({ start, end, deletion });
+    expect(fullyChanged(10, 20, [h(5, 25)])).toBe(true);
+    expect(fullyChanged(10, 20, [h(10, 14), h(15, 20)])).toBe(true); // adjacent hunks join
+    expect(fullyChanged(10, 20, [h(10, 14), h(16, 20)])).toBe(false); // a gap at line 15
+    expect(fullyChanged(10, 20, [h(11, 20)])).toBe(false);
+    expect(fullyChanged(10, 20, [h(9, 12, false), h(12, 13, true)])).toBe(false);
+    expect(fullyChanged(10, 20, [])).toBe(false);
+  });
+
+  test('a callback wholly in added lines is NEW even when an unnamed one with that ordinal existed at base', () => {
+    const v = { file: 'a.js', line: 30, rule: 'complexity', name: '(anonymous function)', score: 22, max: 20, key: '<anon>#1', anon: true, startLine: 30, endLine: 70 };
+    const base = { scores: new Map([['complexity|<anon>#1', 22]]), anonMatches: true };
+    expect(classifyViolations([v], base, [{ start: 30, end: 70, deletion: false }]).fail).toHaveLength(1);
+    // the same callback with only one line edited is still matched by ordinal and warns
+    expect(classifyViolations([v], base, [{ start: 40, end: 40, deletion: false }]).warn).toHaveLength(1);
+  });
+
+  test('a fully added callback fails even when the unnamed counts differ (no ambiguous WARN)', () => {
+    const v = { file: 'a.js', line: 30, rule: 'complexity', name: '(anonymous function)', score: 22, max: 20, key: '<anon>#2', anon: true, startLine: 30, endLine: 70 };
+    const base = { scores: new Map(), anonMatches: false };
+    expect(classifyViolations([v], base, [{ start: 30, end: 70, deletion: false }]).fail).toHaveLength(1);
+    expect(classifyViolations([v], base, [{ start: 40, end: 40, deletion: false }]).warn).toHaveLength(1);
+  });
+});
+
+// ── Fix 4: keys carry the owner (class / object / enclosing function) ───────
+describe('function names and owners', () => {
+  const text = (n) => n.text;
+  const id = (name) => ({ type: 'Identifier', name, text: name });
+  const link = (child, parent) => { child.parent = parent; return child; };
+  const fn = (parent, extra = {}) => link({ type: 'FunctionExpression', ...extra }, parent);
+
+  test('two classes with a same-named method get different keys', () => {
+    const mk = (cls) => {
+      const klass = { type: 'ClassDeclaration', id: id(cls) };
+      const body = link({ type: 'ClassBody' }, klass);
+      const method = link({ type: 'MethodDefinition', key: id('run') }, body);
+      const f = fn(method);
+      method.value = f;
+      return { name: functionName(f, text), owner: functionOwner(f, text) };
+    };
+    const a = { ...mk('Alpha'), headLine: 3, headColumn: 2 };
+    const b = { ...mk('Beta'), headLine: 30, headColumn: 2 };
+    expect(a).toMatchObject({ name: 'run', owner: 'Alpha' });
+    keyFunctions([a, b]);
+    expect([a.key, b.key]).toEqual(['Alpha::run#1', 'Beta::run#1']);
+  });
+
+  test('methods of an exported object literal carry the binding as owner', () => {
+    const assign = { type: 'AssignmentExpression', left: { text: 'module.exports' } };
+    const obj = link({ type: 'ObjectExpression' }, assign);
+    const prop = link({ type: 'Property', key: id('save') }, obj);
+    const f = fn(prop);
+    prop.value = f;
+    expect(functionOwner(f, text)).toBe('module.exports');
+    const inner = fn(link({ type: 'VariableDeclarator', id: id('helper') }, f));
+    expect(functionOwner(inner, text)).toBe('module.exports>save');
+    expect(functionName(inner, text)).toBe('helper');
+  });
+
+  test('a route callback is named after its route, so it survives routes moving around', () => {
+    const call = { type: 'CallExpression', callee: { text: "router.post" }, arguments: [{ type: 'Literal', value: '/pay' }] };
+    const f = { type: 'ArrowFunctionExpression', parent: call };
+    call.arguments.push(f);
+    expect(functionName(f, text)).toBe("callback of router.post('/pay')");
+    const other = { type: 'CallExpression', callee: { text: 'items.map' }, arguments: [] };
+    const g = { type: 'ArrowFunctionExpression', parent: other };
+    other.arguments.push(g);
+    expect(functionName(g, text)).toBe('callback of items.map()');
+  });
+
+  test('a truly anonymous function has no name and is counted as anonymous', () => {
+    const f = { type: 'FunctionExpression', parent: { type: 'ExpressionStatement' } };
+    expect(functionName(f, text)).toBeNull();
+    expect(countAnonymous([{ name: functionName(f, text) }])).toBe(1);
+  });
+
+  test('same-named methods of one class are told apart by ordinal', () => {
+    const x = { name: 'run', owner: 'A', headLine: 3, headColumn: 0 };
+    const y = { name: 'run', owner: 'A', headLine: 9, headColumn: 0 };
+    keyFunctions([y, x]);
+    expect([x.key, y.key]).toEqual(['A::run#1', 'A::run#2']);
   });
 });

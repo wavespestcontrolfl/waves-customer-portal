@@ -1232,18 +1232,6 @@ jobs:
         run: npm run check:technician-routes
       - name: Local session supervisor lifecycle tests
         run: python3 -m unittest discover -s scripts/agents/tests -v
-      - name: Changed functions stay under complexity 20 and nesting 4
-        # The same check the pre-push hook runs. complexity and max-depth are
-        # warnings in eslint.config.js, so the lint step below never fails on
-        # them; Codex then raises each as a P2. Fails only for a function the
-        # PR adds, or changes so its score is higher than at the merge-base;
-        # a touched legacy function with an equal or lower score only warns. The base is origin/<base_ref>, the same ref the
-        # lint step below diffs against: its merge-base is the base tip the PR
-        # merges into, so main commits landed after the PR opened are not
-        # counted (the event's base.sha can lag behind them). Needs the full
-        # history fetched above. PR events only.
-        if: github.event_name == 'pull_request'
-        run: node scripts/check-changed-complexity.js --base "origin/${{ github.base_ref }}"
       - name: Lint changed files (errors-only, same scope as the pre-commit hook)
         # Changed-files-only is deliberate — the repo has no lint history and
         # eslint.config.js encodes that decision. Full-repo lint would flag
