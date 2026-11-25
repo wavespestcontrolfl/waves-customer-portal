@@ -125,6 +125,8 @@ class LiveBrain {
       language: null,
       sandbox: true, // always: a write tool never runs on this line
       practiceLine: true, // no transfer, explicit dry-run wording, never ends itself
+      // The attestation the signed request stamped: the conversation decides on this, and never reads the row's.
+      signedAttestation: caller.stirVerstat || null,
       send: (token) => brain.collect(token),
       endSession: () => {
         logger.info(`[voice-live-brain] end/handoff frame ignored callSid=${sid}`);

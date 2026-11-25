@@ -9140,7 +9140,14 @@ estimate details. What authorizes those private reads: the call must be the sand
 `metadata.gpt_live` stamp, and the caller number (and carrier attestation) the conversation reads must be the ones the
 cell route stamped from its own Twilio-signature-verified request (`from`, `to`, `stir_verstat` on the stamp, checked
 independently of the shared `TWILIO_SIGNATURE_VALIDATION` mode); the brain refuses to open when the row's own number or
-attestation differs from the stamp, or the stamp has no number. Writes are practice only: a lead, booking request or
+attestation differs from the stamp, or the stamp has no number. The conversation then decides on the STAMPED
+attestation only (`signedIdentity` into `verifyInboundCaller`): the row's own `stir_verstat` is never read for it. The
+read tools reachable on the socket are the relay's own split-tier set, with the same tier and attestation rules as
+`/ws/voice-agent` (see that entry): `lookup_customer`, `get_account_overview`, `get_service_history`, `get_today_eta`,
+`get_open_estimates`, `get_services_catalog`, `get_pricing`, `get_availability` and `find_slots` need only the ANI
+match; `get_invoice_history` and the balance figure, `get_service_report`, and the bodies of calls and texts
+(`get_call_history`, `get_message_history`) need attestation A on the stamp, and without it are refused before they run.
+Writes are practice only: a lead, booking request or
 re-service request is validated and answered "practice line, nothing was booked or saved" and nothing is written; the
 conversation has no transfer tool and no automatic handoff, so no handoff packet is ever written; it never texts. The
 bridge keeps the caller's and GPT-Live's transcript fragments in memory only and the summary stores counts and times

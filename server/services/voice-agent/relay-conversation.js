@@ -1072,7 +1072,7 @@ const PRACTICE_LINE_ADDENDUM = [
 ].join('\n');
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, practiceLine = false, resumed = false, evalHarness = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, practiceLine = false, signedAttestation = null, resumed = false, evalHarness = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -1326,6 +1326,8 @@ class RelayConversation {
         callSid: this.callSid,
         sessionKey: this.sessionKey,
         sessionGeneration: this.sessionGeneration,
+        // A practice line decides on the attestation its signed request stamped, never the row's.
+        signedIdentity: this._practiceLine ? { attestation: signedAttestation || null } : null,
         onVerified: (ok) => { this._callerVerified = ok === true; },
         // A hydration that settles AFTER the 4s race still upgrades the
         // session (the late-verification doctrine): without this, a slow

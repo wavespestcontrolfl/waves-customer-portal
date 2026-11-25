@@ -1489,7 +1489,7 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     expect(brain.ask.mock.calls[0][0]).toBe('late words');
   });
 
-  test('a long reply is cut under the 500-token limit at a sentence end', async () => {
+  test('a long reply is cut to the 450-byte bound (tokens never exceed bytes) at a sentence end', async () => {
     const sentence = 'Your technician arrives between nine and eleven in the morning on Tuesday. ';
     const { t } = toolsSetup({ reply: async () => sentence.repeat(60) });
     await t.ready();
@@ -1498,7 +1498,8 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     await waitFor(() => answers(t).length > 0);
     const content = answers(t)[0].content;
     expect(content.length).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_CHARS);
-    expect(content.length).toBeGreaterThan(900);
+    expect(content.length).toBeGreaterThan(300);
+    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_TOKENS);
     expect(content.endsWith('Tuesday.')).toBe(true);
     expect(answers(t)).toHaveLength(1);
   });
@@ -1560,19 +1561,65 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     expect(content.endsWith('1111.')).toBe(true); // at a sentence end
   });
 
-  test('estimateTokens counts a digit and a non-ASCII character as a token each, other text at 4 characters a token', () => {
+  test('the token bound is the UTF-8 byte count: a token is at least a byte, so tokens never exceed it', () => {
     expect(bridgeMod.estimateTokens('1234')).toBe(4);
-    expect(bridgeMod.estimateTokens('héllo')).toBe(1 + Math.ceil(4 / 4));
-    expect(bridgeMod.estimateTokens('abcdefgh')).toBe(2);
+    expect(bridgeMod.estimateTokens('héllo')).toBe(6); // é is two bytes
+    expect(bridgeMod.estimateTokens('日本語')).toBe(9);
     expect(bridgeMod.estimateTokens('')).toBe(0);
   });
 
-  test('capReply fits characters and tokens at once, and non-ASCII text is cut by tokens too', () => {
-    const spanish = 'Su próxima visita está programada para mañana por la tarde. '.repeat(30); // many non-ASCII, under 1,800 chars
-    const cut = bridgeMod.capReply(spanish);
-    expect(bridgeMod.estimateTokens(cut)).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_TOKENS);
-    expect(cut.length).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_CHARS);
+  test('capReply fits the byte bound whatever the text: punctuation, identifiers, digits and other scripts', () => {
+    const samples = [
+      'Su próxima visita está programada para mañana por la tarde. '.repeat(30),
+      'ID: a1-b2_c3/d4#e5@f6 | '.repeat(80),
+      '日本語のテキストです。'.repeat(80),
+      '1234567890 '.repeat(120),
+    ];
+    for (const sample of samples) {
+      const cut = bridgeMod.capReply(sample);
+      expect(Buffer.byteLength(cut, 'utf8')).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_TOKENS);
+      expect(cut.length).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_CHARS);
+      expect(cut.length).toBeGreaterThan(0);
+    }
     expect(bridgeMod.capReply('A short one. ')).toBe('A short one.');
+  });
+
+  test('a brain that is slow to open: the first delegation gets the fixed sentence within the bound, then the late brain serves the next', async () => {
+    let open;
+    const brain = { ask: jest.fn(async () => 'late brain answer'), end: jest.fn(async () => {}), softTimeouts: 0, hardTimeouts: 0 };
+    const { t } = toolsSetup({ brainOpen: () => new Promise((resolve) => { open = () => resolve(brain); }), deps: { brainOpenMs: 30 } });
+    await t.ready();
+    t.openai.receive(said('first', 0, 300));
+    t.openai.receive(created('d1'));
+    t.openai.receive(said('second', 6000, 6300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 1);
+    expect(answers(t)[0]).toEqual({ type: 'session.commentary.append', delegation_id: 'd1', content: DELEGATION_REPLY });
+    open(); // the brain finishes opening after the bound
+    await waitFor(() => answers(t).length === 2);
+    t.twilioStop();
+    await finalized(t);
+    expect(summaryOf(t).errors).toContain('brain_open_timeout');
+  });
+
+  test('a delegation\'s context is frozen when its range closes: later speech changes neither its words nor its fallback', async () => {
+    let releaseFirst;
+    let calls = 0;
+    const { t, brain } = toolsSetup({
+      reply: () => { calls += 1; return calls === 1 ? new Promise((resolve) => { releaseFirst = () => resolve('r1'); }) : Promise.resolve('r2'); },
+    });
+    await t.ready();
+    t.openai.receive(said('question one', 0, 600));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    // d2 arrives with no new words (its fallback is the latest two utterances AS OF NOW)...
+    t.openai.receive(created('d2'));
+    // ...and the caller then asks something else, and GPT-Live speaks, before d2 reaches the front
+    t.openai.receive(said('a different question', 9000, 9600));
+    t.openai.receive({ type: 'session.output_transcript.delta', delta: 'Sure thing.', start_ms: 9700, end_ms: 10000 });
+    releaseFirst();
+    await waitFor(() => answers(t).length === 2);
+    expect(brain.ask.mock.calls[1][0]).toBe('question one'); // frozen: not 'a different question'
   });
 
   test('two delegations are served one at a time, in order: the second brain ask starts after the first reply is sent', async () => {

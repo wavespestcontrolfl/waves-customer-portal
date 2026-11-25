@@ -27,7 +27,7 @@
  *     caller's transcript fragments IN MEMORY, hands the words since the last
  *     delegation to the brain (with what GPT-Live said just before, labelled),
  *     one ask at a time, and speaks its reply as a session.commentary.append
- *     (about 1,800 characters or 450 estimated tokens at most). An ask still running after 6 s gets
+ *     (1,800 characters and 450 UTF-8 bytes at most, which bounds the tokens). An ask still running after 6 s gets
  *     one holding line on the same delegation id and the real answer follows as
  *     a second append; after 20 s the brain gives up with a fixed "the office
  *     will confirm" line. At most BRAIN_ASK_CAP asks a call, then the fixed
@@ -54,8 +54,9 @@ const DELEGATION_REPLY = "I can't look that up on this test line. You can call o
 // Tools mode (GATE_VOICE_GPT_LIVE_TOOLS): one brain ask per delegation.
 const BRAIN_ASK_CAP = 15; // asks a call; after that the fixed sentence (each ask is a paid model call)
 const BRAIN_REPLY_MAX_CHARS = 1800;
-const BRAIN_REPLY_MAX_TOKENS = 450; // one commentary append holds 500 tokens at most; estimateTokens is conservative
+const BRAIN_REPLY_MAX_TOKENS = 450; // one commentary append holds 500 tokens at most; bounded by UTF-8 bytes (tokens <= bytes)
 const BRAIN_NO_WORDS_REPLY = "Sorry, I didn't catch that. Could you say it again?";
+const BRAIN_OPEN_MAX_MS = 4000; // the brain must be open within this of a delegation reaching its turn, or the fixed sentence
 const BRAIN_STILL_REPLY = 'Still pulling that up.'; // spoken when an ask runs past the brain's soft deadline
 const AGENT_TEXT_MAX_CHARS = 300; // what GPT-Live said, kept for the brain's context (the latest part)
 const AGENT_UTTERANCES_KEPT = 4;
@@ -221,36 +222,26 @@ const sleep = (ms) => new Promise((resolve) => {
   if (timer.unref) timer.unref();
 });
 
-// A conservative token estimate for a spoken reply: each digit and each
-// non-ASCII character counts as a token of its own (the worst case for
-// tokenizers), everything else about 4 characters to the token.
+// An upper bound on a reply's tokens that holds for any tokenizer: a token is at
+// least one UTF-8 byte (byte-level and byte-fallback vocabularies never make a
+// token of zero bytes), so tokens <= bytes. Averages (4 characters a token) fail
+// on digits, punctuation-heavy identifiers and other languages; this cannot.
 function estimateTokens(text) {
-  let single = 0;
-  let other = 0;
-  for (const ch of String(text)) {
-    if (ch >= '0' && ch <= '9') single += 1;
-    else if (ch.charCodeAt(0) > 127) single += 1;
-    else other += 1;
-  }
-  return single + Math.ceil(other / 4);
+  return Buffer.byteLength(String(text), 'utf8');
 }
 
 // A reply cut so it fits BOTH maxChars and maxTokens (an append holds 500
-// tokens; digit-heavy invoice details and other languages run well over 4
-// characters a token), at a sentence end when one lies in the second half of
-// what fits, else at a word.
+// tokens), by that byte bound, at a sentence end when one lies in the second
+// half of what fits, else at a word. 450 bytes is about 75 spoken words: short
+// is fine on a phone.
 function capReply(text, maxChars = BRAIN_REPLY_MAX_CHARS, maxTokens = BRAIN_REPLY_MAX_TOKENS) {
   const t = String(text || '').trim();
   if (t.length <= maxChars && estimateTokens(t) <= maxTokens) return t;
   let fit = 0;
-  let single = 0;
-  let other = 0;
+  let bytes = 0;
   for (const ch of t) {
-    if (fit + ch.length > maxChars) break;
-    const digitOrWide = (ch >= '0' && ch <= '9') || ch.charCodeAt(0) > 127;
-    if (single + (digitOrWide ? 1 : 0) + Math.ceil((other + (digitOrWide ? 0 : 1)) / 4) > maxTokens) break;
-    if (digitOrWide) single += 1;
-    else other += 1;
+    bytes += Buffer.byteLength(ch, 'utf8');
+    if (fit + ch.length > maxChars || bytes > maxTokens) break;
     fit += ch.length;
   }
   const head = t.slice(0, fit);
@@ -275,6 +266,7 @@ function defaultDeps() {
     db: () => require('../../models/db'),
     toolsOn: () => require('../../config/feature-gates').voiceGptLiveToolsLive(),
     brainFactory: (args) => require('./live-brain').LiveBrain.open(args),
+    brainOpenMs: BRAIN_OPEN_MAX_MS,
     transcriptQuietMs: TRANSCRIPT_QUIET_MS,
     transcriptMaxWaitMs: TRANSCRIPT_MAX_WAIT_MS,
     apiKey: () => process.env.OPENAI_API_KEY,
@@ -841,7 +833,17 @@ class LiveBridge {
     this.callerPending = { text: '', startMs: null };
     if (this.callerLate) this.callerLate.open = false;
     this.callerLate = range;
-    range.settled = this.settleTranscript().then(() => { range.open = false; });
+    // The context is FROZEN as the range closes (its words, the fallback utterances and the
+    // agent line before them): later speech never changes what this delegation asks.
+    if (!range.open) {
+      range.prompt = this.takeCallerText(range);
+      range.settled = Promise.resolve();
+    } else {
+      range.settled = this.settleTranscript().then(() => {
+        range.open = false;
+        range.prompt = this.takeCallerText(range);
+      });
+    }
     return range;
   }
 
@@ -902,9 +904,13 @@ class LiveBridge {
     if (this.brainAsks >= BRAIN_ASK_CAP) return { reply: DELEGATION_REPLY };
     await range.settled;
     if (this._finalizing) return { reply: DELEGATION_REPLY };
-    const words = this.takeCallerText(range);
+    const words = range.prompt;
     if (!words) return { reply: BRAIN_NO_WORDS_REPLY };
-    const brain = await this.ensureBrain();
+    // A brain that is slow to open (a stalled database read) must not hold every queued
+    // delegation without a word: past the bound the fixed sentence is the answer, and a
+    // brain that opens later still serves the asks after it.
+    const brain = await waitAtMost(this.ensureBrain(), this.deps.brainOpenMs);
+    if (brain === undefined) this.noteError('brain_open_timeout');
     if (!brain || this._finalizing) return { reply: DELEGATION_REPLY };
     this.brainAsks += 1;
     const startedAt = this.deps.now();

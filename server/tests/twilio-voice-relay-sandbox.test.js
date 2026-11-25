@@ -693,6 +693,19 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     }
   });
 
+  test('a failed stamp write logs a bounded code, never the error message (it can echo the caller\'s numbers)', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    const { update } = primeLive({ stampFails: true });
+    update.mockImplementation(() => Promise.reject(Object.assign(new Error('update call_log set metadata = {"from":"+19415550100","to":"+19412412993"}'), { code: '57014' })));
+    logger.error.mockClear();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71', 'CA-sb-live', { extra: { From: '+19415550100' } }), res);
+    expect(res.body).toContain('not available right now');
+    const logged = JSON.stringify(logger.error.mock.calls);
+    expect(logged).toContain('code=57014');
+    expect(logged).not.toMatch(/9415550100|9412412993|update call_log/);
+  });
+
   test('relay not attached: the same spoken notice as the answer handler', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
     primeLive();

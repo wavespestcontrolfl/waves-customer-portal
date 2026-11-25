@@ -59,6 +59,7 @@ describe('LiveBrain.open', () => {
     expect(d.where).toHaveBeenCalledWith({ twilio_call_sid: CALL_SID });
     expect(convo.args).toMatchObject({
       callSid: CALL_SID, from: '+19415550100', to: '+19412412993', sandbox: true, practiceLine: true, callTokenVerified: true,
+      signedAttestation: 'TN-Validation-Passed-A', // the stamped attestation, never the row's
     });
     expect(typeof convo.args.send).toBe('function');
   });
