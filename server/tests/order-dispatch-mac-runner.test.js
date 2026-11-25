@@ -30,7 +30,7 @@ function fakeConn(state) {
     const q = { table, where: {}, raws: [] };
     const self = {
       where(w) { if (w && typeof w === 'object') Object.assign(q.where, w); return self; },
-      whereIn() { return self; }, whereNull() { return self; }, whereNotNull() { return self; },
+      whereIn() { return self; }, whereNot() { return self; }, whereNull() { return self; }, whereNotNull() { return self; },
       whereRaw(sql, b) { q.raws.push([sql, b]); return self; },
       leftJoin() { return self; }, join() { return self; }, select() { return self; }, orderBy() { return self; }, forUpdate() { return self; },
       first: async (...cols) => state.read(table, q, cols),
@@ -150,6 +150,24 @@ describe('server with SITEONE_ORDER_RUNNER=mac', () => {
     const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
     expect(out).toEqual({ requestId: 'r1', skipped: 'remote_runner', autoOrderLive: true });
     expect(state.updates).toHaveLength(0);
+    expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
+  });
+
+  test('a sibling request (a manual order of the same product) is a hold, not a missed run', async () => {
+    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 31 * 3600e3) }) });
+    const read = state.read;
+    state.read = (table, q, cols) => (table === 'product_restock_requests' && q.where.product_id === 'p1' ? { id: 'r-manual', source: 'manual', status: 'ordered' } : read(table, q, cols));
+    const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
+    expect(out).toMatchObject({ requestId: 'r1', skipped: 'sibling_live_request' });
+    expect(state.updates).toHaveLength(0);
+    expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
+  });
+
+  test('a handed-off request whose need is gone is cancelled, not re-belled', async () => {
+    const state = baseState({ request: request({ metadata: { vendorId: 'v-siteone', macHandedOffAt: '2026-11-24T11:10:00.000Z' } }) });
+    state.onHand = '3';
+    const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
+    expect(out).toEqual({ requestId: 'r1', skipped: 'stock_no_longer_low', cancelled: true });
     expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
   });
 

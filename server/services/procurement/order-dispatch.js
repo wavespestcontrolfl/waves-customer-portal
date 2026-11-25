@@ -1458,6 +1458,26 @@ function macStaleMs(env = process.env) {
 }
 const isDryRunPark = (ledger) => !!ledger && ledger.status === 'needs_review' && String(ledger.error || '').startsWith('dry_run:');
 
+// Everything the claim would refuse on, checked under the claim's locks, in its order: a gone need is
+// cancelled (its bells retired); a sibling request (a manual or forecast order of the same product),
+// an unreconciled order, a fertilizer blackout, an order already out or emailed are holds — no bell,
+// no stamp (bellUndispatchable would ring nothing for them, and a stamp would keep the Mac off the
+// request after the hold ends). Runs on every pass, a request already handed off included.
+async function macHandOffBlocker(trx, { request, m, now }) {
+  const vendor = m.vendorId ? await trx('vendors').where({ id: m.vendorId }).forUpdate().first('id', 'name', 'code', 'active', 'updated_at') : null;
+  const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
+  const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit', ...FERTILIZER_COLUMNS);
+  if (!product || !vendor) return { hold: {} };
+  const ineligible = claimIneligibility({ product, request, vendor });
+  if (ineligible) return { hold: await cancelAtClaim(trx, { request, product, m, ineligible }) };
+  const guarded = await lockedProductGuards(trx, { request });
+  if (guarded) return { hold: guarded };
+  if (fertilizerBlackoutHold(product, now)) return { hold: { held: 'fertilizer_blackout' } };
+  if (await findLiveAutoOrder(trx, request.product_id)) return { hold: { autoOrderLive: true } };
+  if (await emailOrderOutFor(trx, request.id)) return { hold: { emailOrderOut: true } };
+  return null;
+}
+
 async function macWatchdogLocked(trx, requestId, now, env) {
   const peek = await trx('product_restock_requests').where({ id: requestId }).first('product_id');
   if (!peek) return {};
@@ -1466,23 +1486,16 @@ async function macWatchdogLocked(trx, requestId, now, env) {
   const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request || request.status !== 'open' || request.source !== 'auto_reorder') return {};
   const m = meta(request.metadata);
+  let lastTouch = null;
+  if (!m.macHandedOffAt) {
+    // Any ledger row but a dry-run park = an order is out or parked with its own bell: never the office's.
+    if (ledger && !isDryRunPark(ledger)) return {};
+    lastTouch = Math.max(new Date(request.created_at).getTime(), ledger ? new Date(ledger.updated_at).getTime() : 0);
+    if (now.getTime() - lastTouch < macStaleMs(env)) return {};
+  }
+  const blocker = await macHandOffBlocker(trx, { request, m, now });
+  if (blocker) return { result: blocker.hold };
   if (m.macHandedOffAt) return { handOff: true };
-  // Any ledger row but a dry-run park = an order is out or parked with its own bell: never the office's.
-  if (ledger && !isDryRunPark(ledger)) return {};
-  const lastTouch = Math.max(new Date(request.created_at).getTime(), ledger ? new Date(ledger.updated_at).getTime() : 0);
-  if (now.getTime() - lastTouch < macStaleMs(env)) return {};
-  const vendor = m.vendorId ? await trx('vendors').where({ id: m.vendorId }).forUpdate().first('id', 'name', 'code', 'active', 'updated_at') : null;
-  const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
-  const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit', ...FERTILIZER_COLUMNS);
-  if (!product || !vendor) return {};
-  const ineligible = claimIneligibility({ product, request, vendor });
-  if (ineligible) return { result: await cancelAtClaim(trx, { request, product, m, ineligible }) };
-  // A temporary hold is not a missed Mac run: an N/P fertilizer blackout (June 1 - Sept 30), an
-  // automatic order already out for the product, or an emailed order. bellUndispatchable would ring
-  // nothing for these, and a stamp written now would keep the Mac off the request after the hold ends.
-  if (fertilizerBlackoutHold(product, now)) return { result: { held: 'fertilizer_blackout' } };
-  if (await findLiveAutoOrder(trx, request.product_id)) return { result: { autoOrderLive: true } };
-  if (await emailOrderOutFor(trx, requestId)) return { result: { emailOrderOut: true } };
   await trx('product_restock_requests').where({ id: requestId, status: 'open' })
     .update({ metadata: JSON.stringify({ ...m, macHandedOffAt: now.toISOString() }), updated_at: now });
   logger.warn(`[order-dispatch] SiteOne request ${requestId} not touched by the Mac runner for ${Math.round((now.getTime() - lastTouch) / 3600000)} h — handed to the office`);
