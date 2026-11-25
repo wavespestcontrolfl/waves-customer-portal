@@ -140,6 +140,7 @@ describe('pay page — bank help (owner 2026-11-24)', () => {
     expect(help).toHaveTextContent('Can’t sign in to your bank?');
     expect(help).toHaveTextContent('Enter bank details manually');
     expect(help).toHaveTextContent(/routing and account\s+number/);
+    expect(help).toHaveTextContent('a small deposit (or two)');
     fireEvent.click(screen.getByRole('button', { name: /Card or wallet/ }));
     await waitFor(() => expect(screen.queryByTestId('bank-manual-entry-help')).toBeNull());
   });
@@ -149,6 +150,8 @@ describe('pay page — bank help (owner 2026-11-24)', () => {
     const q = 'My bank won’t let me sign in. How do I pay by bank?';
     fireEvent.click(screen.getByText(q));
     expect(screen.getByText(q).closest('details')).toHaveTextContent('Enter bank details manually');
+    // Type-neutral deposit wording: Stripe may send one SM-code deposit or two amounts.
+    expect(screen.getByText(q).closest('details')).toHaveTextContent('a small deposit (or two)');
   });
 
   it('reports once when the customer leaves with Bank account picked and no Pay press', async () => {

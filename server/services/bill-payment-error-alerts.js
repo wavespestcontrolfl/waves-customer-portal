@@ -77,6 +77,11 @@ function customerLabel(customer) {
 }
 
 function buildDedupeKey({ invoiceId, paymentIntentId, phase, methodCategory, errorMessage }) {
+  // A customer leaving the bank step (pay page) rings once per invoice per
+  // 24 h: a replacement PaymentIntent between visits must not ring again.
+  if (normalizePhase(phase) === 'bank_step_left') {
+    return crypto.createHash('sha256').update(`${invoiceId || 'no_invoice'}|bank_step_left`).digest('hex');
+  }
   const raw = [
     invoiceId || 'no_invoice',
     paymentIntentId || 'no_pi',

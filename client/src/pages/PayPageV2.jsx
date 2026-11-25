@@ -778,9 +778,10 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
         )}
         <PayFaqItem question="My bank won’t let me sign in. How do I pay by bank?">
           You don’t need to sign in. Choose Bank account, then pick “Enter bank details manually”
-          in the bank window and type your routing and account number. Stripe sends two small test
-          deposits to your account in 1–2 business days; confirm them from the email you get, and
-          the payment goes through. Bank payments have no added fee.
+          in the bank window and type your routing and account number. Stripe sends{' '}
+          {microdepositSavedPhrases(null).deposits} to your account in 1–2 business days; follow the
+          email you get to verify your account, and the payment goes through. Bank payments have no
+          added fee.
         </PayFaqItem>
         <PayFaqItem question="The page or my bank link isn’t working. What do I do?">
           Reload this page and try once more. If your bank still won’t connect, enter your bank
@@ -824,7 +825,7 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
   );
 }
 
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card' }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card', bankLeaveRef = null }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -870,16 +871,19 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // when its bank sign-in window is closed, so the office only heard of a
   // stuck bank payment when the customer texted. One report per page load,
   // through the same /error path (deduped per invoice for 24 h server-side).
-  const bankPayTriedRef = useRef(false);
-  const bankLeaveReportedRef = useRef(false);
+  // The page owns the state (bankLeaveRef): a Pay press can replace the
+  // PaymentIntent, and this form is keyed by intent id, so a ref here would
+  // reset on that remount and ring after a real Pay press.
+  const ownBankLeaveRef = useRef({ tried: false, reported: false });
+  const bankLeave = bankLeaveRef || ownBankLeaveRef;
   const paymentIntentIdRef = useRef(paymentIntentId);
   paymentIntentIdRef.current = paymentIntentId;
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     const onPageHide = () => {
       if (selectedMethodRef.current !== 'us_bank_account') return;
-      if (bankPayTriedRef.current || bankLeaveReportedRef.current || processingRef.current) return;
-      bankLeaveReportedRef.current = true;
+      if (bankLeave.current.tried || bankLeave.current.reported || processingRef.current) return;
+      bankLeave.current.reported = true;
       reportPaymentError(token, {
         message: 'Customer picked Bank account and left the pay page without paying',
         phase: 'bank_step_left',
@@ -890,7 +894,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     };
     window.addEventListener('pagehide', onPageHide);
     return () => window.removeEventListener('pagehide', onPageHide);
-  }, [token]);
+  }, [token, bankLeave]);
   const syncingAmountRef = useRef(false);
   const amountSyncSeqRef = useRef(0);
   // Counts ALL in-flight /update-amount requests, not just the latest sequence.
@@ -1304,7 +1308,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
     // ACH: use the existing confirmPayment flow (no surcharge)
     if (selectedMethodRef.current === 'us_bank_account') {
-      bankPayTriedRef.current = true;
+      bankLeave.current.tried = true;
       // The invoice PaymentIntent is locked to ONE tender family server-side,
       // and reusing an open intent on a pay-page reload resets it to card-only.
       // If we confirm a bank PaymentMethod against a still-card-only intent,
@@ -1791,8 +1795,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           <strong>{showManualEntryHint ? 'Trouble linking your bank?' : 'Can’t sign in to your bank?'}</strong>{' '}
           Some banks don't support instant linking. In the bank window, choose{' '}
           <strong>“Enter bank details manually”</strong> and type your routing and account
-          number. You'll confirm two small test deposits in 1–2 business days, and bank
-          payments have no added fee.
+          number. Stripe then sends {microdepositSavedPhrases(null).deposits} in 1–2 business
+          days to verify your account, and bank payments have no added fee.
         </div>
       )}
 
@@ -1984,6 +1988,8 @@ export default function PayPageV2() {
   useGlassSurface(true);
   const { token } = useParams();
   const navigate = useNavigate();
+  // Bank-step leave report state for this page load (see PaymentForm).
+  const bankLeaveRef = useRef({ tried: false, reported: false });
   const location = useLocation();
   const urlSaveRequiredHint = shouldRequireSaveCard(location.search);
   const saveCardDefault = shouldDefaultSaveCard(location.search) || urlSaveRequiredHint;
@@ -2900,6 +2906,7 @@ export default function PayPageV2() {
             {paymentState === 'ready' && stripeSetup ? (
               <PaymentForm
                 key={stripeSetup.paymentIntentId}
+                bankLeaveRef={bankLeaveRef}
                 initialMethod={stripeSetup.initialMethod || 'card'}
                 publishableKey={stripeSetup.publishableKey}
                 clientSecret={stripeSetup.clientSecret}
