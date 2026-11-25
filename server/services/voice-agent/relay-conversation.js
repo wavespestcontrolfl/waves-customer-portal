@@ -1079,10 +1079,10 @@ function getVoiceProfileTextNonBlocking() {
 // Appended to the base prompt of a practice-line session (GPT-Live trial brain).
 const PRACTICE_LINE_ADDENDUM = [
   'PRACTICE LINE (this overrides anything above):',
-  '- This is a practice line. You can only quote prices, describe services, find open times and take',
-  '  a new-customer request. You cannot see accounts, visits, invoices, estimates, messages or call',
-  '  history, and you cannot transfer the call. If asked about an account, say this practice line cannot',
-  '  see accounts and the caller can call or text the Waves office.',
+  '- This is a practice line. You can only quote prices, describe services and take a new-customer',
+  '  request. You cannot check open appointment times, and you cannot see accounts, visits, invoices,',
+  '  estimates, messages or call history, and you cannot transfer the call. If asked about open times or an',
+  '  account, say this practice line cannot check that and the caller can call or text the Waves office.',
   '- Nothing you file here is saved: a request is only checked, never created. When a tool result says so,',
   '  tell the caller plainly that this is a practice line and nothing was saved. Do NOT promise a callback,',
   '  a call from the office or a confirmation.',
@@ -1097,7 +1097,7 @@ const PRACTICE_COPY = {
 };
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, practiceLine = false, cancelSignal = null, resumed = false, evalHarness = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, practiceLine = false, resumed = false, evalHarness = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -1112,9 +1112,6 @@ class RelayConversation {
     // transfer tool, no provider-failure handoff, no packet), and it never ends
     // itself after a captured lead: the host owns the call and its close.
     this._practiceLine = practiceLine === true && this.sandbox;
-    // A call-scoped AbortSignal owned by the host (LiveBrain): aborted on a hard timeout or the close, it
-    // stops every paid stage a tool has not started yet (geocode, date parser, road times).
-    this._cancelSignal = this._practiceLine && cancelSignal ? cancelSignal : null;
     // Resolved ONCE, here, and pinned for the rest of this session — see the
     // file header + resolveSessionModel(). Every model request and version
     // stamp below reads this.model, never the module-level MODEL, so a
@@ -1205,10 +1202,6 @@ class RelayConversation {
     // PR 2A: every tool call's outcome (name + ok) for the handoff packet;
     // the one-per-call transfer latch.
     this._toolOutcomes = [];
-    // Every tool the model asked for, counted when it is DISPATCHED (names only), so a host that
-    // meters paid tools sees one that is still running when the call ends (the per-turn stats
-    // record a tool only after it returns).
-    this._toolAttempts = [];
     this._transferRequested = false;
     // PR 2B — session recovery. `resumed` is the reconnected leg's HINT
     // (unverified frame input); `_resume` is the row's proof, loaded below.
@@ -2641,7 +2634,6 @@ class RelayConversation {
    * a degradation string, so the caller hears a sentence instead of silence.
    */
   async _executeToolBounded(name, input, ctx) {
-    this._toolAttempts.push(String(name || '').slice(0, 40));
     const isWrite = WRITE_TOOLS.has(name);
     const ms = isWrite ? WRITE_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
     const practice = this._practiceLine === true;
@@ -2715,9 +2707,6 @@ class RelayConversation {
       sandbox: this.sandbox,
       // Practice line: dry runs say so, and transfer_to_office is refused before any packet (relay-tools).
       practiceLine: this._practiceLine,
-      // Call-scoped cancellation: once the brain ends or is retired (convo.ended), no new paid stage starts.
-      isCancelled: () => convo.ended === true || convo._cancelSignal?.aborted === true,
-      signal: convo._cancelSignal,
       // The claim-owner nonce — every WRITE transaction re-proves ownership
       // against it INSIDE the transaction (the supersession fences outside
       // are check-then-act; the in-trx check is the atomic one). LIVE getter,

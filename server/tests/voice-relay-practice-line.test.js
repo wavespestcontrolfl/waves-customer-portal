@@ -73,8 +73,8 @@ describe('practiceLine option', () => {
 });
 
 describe('the tool allowlist', () => {
-  test('is exactly the public-information tools plus the dry-run capture', () => {
-    expect([...PRACTICE_LINE_TOOLS]).toEqual(['get_services_catalog', 'get_pricing', 'get_availability', 'find_slots', 'capture_lead']);
+  test('is exactly the public-information tools plus the dry-run capture, and no tool that can start a paid provider request', () => {
+    expect([...PRACTICE_LINE_TOOLS]).toEqual(['get_services_catalog', 'get_pricing', 'capture_lead']);
   });
 
   test('registration: a practice line is offered those tools and no others, whatever gates are on', () => {
@@ -89,7 +89,7 @@ describe('the tool allowlist', () => {
   });
 
   const ACCOUNT_AND_OTHER_TOOLS = [
-    'lookup_customer', 'get_account_overview', 'get_service_history', 'get_service_report', 'get_open_estimates', 'get_invoice_history',
+    'get_availability', 'find_slots', 'lookup_customer', 'get_account_overview', 'get_service_history', 'get_service_report', 'get_open_estimates', 'get_invoice_history',
     'get_today_eta', 'get_call_history', 'get_message_history', 'request_reservice', 'request_booking', 'transfer_to_office', 'made_up_tool',
   ];
   test.each(ACCOUNT_AND_OTHER_TOOLS)('execution: %s is refused before any database call, even with a customer ref or a matched id', async (name) => {
@@ -104,6 +104,21 @@ describe('the tool allowlist', () => {
     expect(relayContext.lookupCustomersText).not.toHaveBeenCalled();
     expect(relayContext.accountOverviewText).not.toHaveBeenCalled();
     expect(markTransferRequested).not.toHaveBeenCalled();
+  });
+
+  test('no allowlisted tool starts a paid provider request or a database read: pricing, catalog and the dry-run capture', async () => {
+    const realFetch = global.fetch;
+    global.fetch = jest.fn(async () => { throw new Error('no network on a practice line'); });
+    try {
+      const ctx = { sandbox: true, practiceLine: true, callSid: 'CA-practice-1', from: '+19415551234', markCaptured: jest.fn(), noteCallSummary: jest.fn() };
+      await executeTool('get_pricing', { service: 'pest_control', property_type: 'single_family', home_sqft: 2000, lot_sqft: 9000 }, ctx);
+      await executeTool('get_pricing', { service: 'pest_control', property_type: 'commercial' }, ctx);
+      await executeTool('capture_lead', { first_name: 'Pat', call_summary: 'Wants a quote.' }, ctx);
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(db).not.toHaveBeenCalled();
+    } finally {
+      global.fetch = realFetch;
+    }
   });
 
   test('capture_lead: use_account_details is forced off, and the write is the practice dry run', async () => {
@@ -163,8 +178,10 @@ describe('failure copy and the end of the session', () => {
   });
 
   test('the practice addendum names what it can and cannot do, and forbids promising a callback', () => {
-    expect(PRACTICE_LINE_ADDENDUM).toMatch(/quote prices, describe services, find open times and take\s+a new-customer request/);
-    expect(PRACTICE_LINE_ADDENDUM).toMatch(/cannot see accounts, visits, invoices, estimates, messages or call\s+history/);
+    expect(PRACTICE_LINE_ADDENDUM).toMatch(/quote prices, describe services and take a new-customer\s+request/);
+    expect(PRACTICE_LINE_ADDENDUM).toMatch(/cannot check open appointment times/);
+    expect(PRACTICE_LINE_ADDENDUM).toMatch(/cannot see accounts, visits, invoices,\s+estimates, messages or call history/);
+    expect(PRACTICE_LINE_ADDENDUM).toMatch(/say this practice line cannot check that/);
     expect(PRACTICE_LINE_ADDENDUM).toMatch(/Do NOT promise a callback/);
     expect(PRACTICE_LINE_ADDENDUM.length).toBeLessThan(900);
   });
@@ -244,18 +261,6 @@ describe('no practice-reachable result promises a callback', () => {
         const retry = await convo._executeToolBounded('capture_lead', {}, ctx); // the first is still in flight
         expect(retry).toMatch(/practice line/);
         noPromise(retry);
-      } finally {
-        spy.mockRestore();
-      }
-    });
-
-    test('the tool-attempt record counts a dispatch at its start, even one that never returns', async () => {
-      jest.useFakeTimers();
-      const spy = slow();
-      try {
-        const convo = practice();
-        void convo._executeToolBounded('find_slots', {}, convo._buildToolCtx());
-        expect(convo._toolAttempts).toEqual(['find_slots']);
       } finally {
         spy.mockRestore();
       }

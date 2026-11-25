@@ -4,8 +4,9 @@
  *
  * One RelayConversation (Sandy's own Claude/OpenAI agent) per call, always
  * built with sandbox: true and practiceLine: true. It is a PUBLIC-INFORMATION
- * line: five tools only (relay-tools PRACTICE_LINE_TOOLS: the services
- * catalog, pricing, availability, find_slots, and capture_lead as a dry run),
+ * line: three tools only (relay-tools PRACTICE_LINE_TOOLS: the services
+ * catalog, pricing, and capture_lead as a dry run), none of which starts a
+ * paid provider request (no geocode, forecast, date parser or road time),
  * and NO caller context at all: no caller recognition, no account match, no
  * call_log claim, no recent-text hydration. It cannot see accounts, visits,
  * invoices, estimates, messages or call history, whatever number called. The
@@ -42,9 +43,6 @@ const logger = require('../logger');
 // An ask that is not done at SOFT_DEADLINE_MS tells its caller (onSoft) and keeps
 // waiting: the real answer still goes out when it lands. At ASK_DEADLINE_MS it
 // is given up and TIMEOUT_REPLY is the answer.
-// Tools whose run can start paid provider calls: find_slots (the date parser, with its provider fallback,
-// plus geocode and road times) and get_availability (geocode and road times).
-const PAID_TOOLS = new Set(['find_slots', 'get_availability']);
 const SOFT_DEADLINE_MS = 6000;
 const ASK_DEADLINE_MS = 20000;
 // Spoken at the hard deadline, and for every ask after it (the brain is retired
@@ -60,34 +58,30 @@ function errCode(err) {
 class LiveBrain {
   // `convo` is the one conversation. Build it with LiveBrain.open(): the
   // constructor is public for tests only and takes the conversation built.
-  constructor({ callSid, convo, deadlineMs = ASK_DEADLINE_MS, softMs = SOFT_DEADLINE_MS, cancel = null }) {
+  constructor({ callSid, convo, deadlineMs = ASK_DEADLINE_MS, softMs = SOFT_DEADLINE_MS }) {
     this.callSid = callSid;
     this.convo = convo;
     this.deadlineMs = deadlineMs;
     this.softMs = softMs;
     this.ended = false;
-    this.lastUsage = { rounds: 0, paidToolCalls: 0 }; // the latest ask's model rounds and paid tool calls (counts only)
+    this.lastUsage = { rounds: 0 }; // the latest ask's model rounds (counts only; the practice line has no paid tool)
     this.lastRan = false; // whether the latest ask reached the conversation (a retired or closed brain answers without running)
     this.retired = false; // a hard timeout retires the conversation: its turn may still be running
     this.queue = Promise.resolve(); // asks run one at a time
     this.softTimeouts = 0; // asks still running at the soft deadline (they may still answer)
     this.hardTimeouts = 0; // asks given up at the hard deadline
-    this.cancel = cancel || new AbortController(); // call-scoped: aborted on a hard timeout or the close; paid stages of a tool check it before each request
     this.turn = null; // the turn collecting tokens: { tokens: [], closed: false }
     this.wakeEnded = null;
     this.endedPromise = new Promise((resolve) => { this.wakeEnded = resolve; });
   }
 
-  // Model rounds and paid tool calls the conversation has made so far (counts only: a round and a tool
-  // call each count when they START, so a timed-out or aborted one is still counted).
+  // Model rounds the conversation has started so far (counts only: a round counts when it STARTS, so a
+  // timed-out or aborted one still counts). The practice line has no paid tool, so rounds are its whole spend.
   usage() {
     const stats = this.convo && Array.isArray(this.convo._turnStats) ? this.convo._turnStats : [];
-    const attempts = this.convo && Array.isArray(this.convo._toolAttempts) ? this.convo._toolAttempts : [];
     let rounds = 0;
     for (const stat of stats) rounds += Number(stat.rounds) || 0;
-    // Paid tools are counted when they START (the conversation records the dispatch), not from the
-    // completed turn stats: a lookup still running when the call ends or the deadline passes still counts.
-    return { rounds, paidToolCalls: attempts.filter((name) => PAID_TOOLS.has(name)).length };
+    return { rounds };
   }
 
   // The collector the conversation's `send` writes to. Tokens of a turn that
@@ -108,7 +102,6 @@ class LiveBrain {
     const row = await db('call_log').where({ twilio_call_sid: sid }).first('source', 'from_phone', 'to_phone');
     if (!row || row.source !== VOICE_RELAY_SANDBOX_SOURCE) throw new Error('live_brain_not_sandbox');
     let brain = null;
-    const cancelController = new AbortController();
     const build = make || ((args) => {
       const { RelayConversation } = require('./relay-conversation');
       return new RelayConversation(args);
@@ -123,14 +116,13 @@ class LiveBrain {
       language: null,
       sandbox: true, // always: a write tool never runs on this line
       practiceLine: true, // no transfer, explicit dry-run wording, never ends itself
-      cancelSignal: cancelController.signal,
       send: (token) => brain.collect(token),
       endSession: () => {
         logger.info(`[voice-live-brain] end/handoff frame ignored callSid=${sid}`);
         return false;
       },
     });
-    brain = new LiveBrain({ callSid: sid, convo, deadlineMs, softMs, cancel: cancelController });
+    brain = new LiveBrain({ callSid: sid, convo, deadlineMs, softMs });
     if (convo && convo.sandbox !== true) {
       // Belt and braces: a conversation that is not in dry-run mode never serves a call.
       throw new Error('live_brain_not_sandbox');
@@ -183,7 +175,6 @@ class LiveBrain {
         // the conversation is retired for good: ended (queued turns stop), aborted, and
         // never asked again. Later asks answer TIMEOUT_REPLY without touching it.
         this.retired = true;
-        this.cancel.abort();
         try {
           this.convo.ended = true;
           this.convo.interrupt();
@@ -197,7 +188,7 @@ class LiveBrain {
       throw err;
     } finally {
       const after = this.usage();
-      this.lastUsage = { rounds: after.rounds - before.rounds, paidToolCalls: after.paidToolCalls - before.paidToolCalls };
+      this.lastUsage = { rounds: after.rounds - before.rounds };
       clearTimeout(timer);
       clearTimeout(softTimer);
       if (this.turn === turn) this.turn = null;
@@ -210,7 +201,6 @@ class LiveBrain {
   async end(reason) {
     if (this.ended) return;
     this.ended = true;
-    this.cancel.abort();
     if (this.turn) this.turn.closed = true;
     this.wakeEnded();
     try {

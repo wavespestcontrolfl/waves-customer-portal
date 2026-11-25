@@ -304,9 +304,7 @@ async function findArrivalWindowSlots(opts) {
 // of it; the save it advises checks with that same model. Everyone else keeps
 // the default allowance.
 function travelAllowance(opts) {
-  // `signal`: once it aborts, route-optimizer sends no queued road-time request.
-  const allowance = { ...(opts.providerTravel === false ? { maxRequests: 0 } : {}), ...(opts.signal ? { signal: opts.signal } : {}) };
-  return Object.keys(allowance).length ? allowance : undefined;
+  return opts.providerTravel === false ? { maxRequests: 0 } : undefined;
 }
 
 async function findCapacitySlots(opts) {
@@ -1536,7 +1534,6 @@ module.exports = {
   DAY_START_HOUR,
   DAY_END_HOUR,
   _internals: {
-    travelAllowance,
     legacyGapStarts,
     capacityLegs,
     enumerateDates,

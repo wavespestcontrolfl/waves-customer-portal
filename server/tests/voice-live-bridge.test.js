@@ -1424,10 +1424,11 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     const tools = bridgeMod.buildLiveInstructions({ tools: true });
     expect(tools.endsWith(bridgeMod.TOOLS_LIMITS)).toBe(true);
     expect(tools).not.toContain(bridgeMod.TRIAL_LIMITS);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/Delegate only these: prices, services offered, open appointment times, and a\s+new-customer booking/);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/never\s+guess or invent/);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/cannot see accounts, visits, invoices, estimates, messages or call history/);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/this practice line cannot see accounts/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/Delegate only these: prices, services offered, and a new-customer request/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/cannot check open appointment times, accounts/);
+    expect(bridgeMod.TOOLS_LIMITS).not.toMatch(/Delegate[^.]*open (appointment )?times/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/never guess or invent a price or service/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/estimates, messages or call history: if asked,\s+say this practice line cannot check that/);
     expect(bridgeMod.TOOLS_LIMITS.length).toBeLessThan(700);
     expect(bridgeMod.buildLiveInstructions().endsWith(bridgeMod.TRIAL_LIMITS)).toBe(true);
   });
@@ -1623,10 +1624,28 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     // d1 arrives with nothing new, then d2 arrives before d1's settle wait is over
     t.openai.receive(created('d1'));
     t.openai.receive(created('d2'));
-    // the caller's next question is spoken after both delegations arrived: it belongs to d2's open range
-    t.openai.receive(said('Late question', 9000, 9600));
+    // the late tail of d2's own question (its audio runs on from the delegation): it joins d2's open range
+    t.openai.receive(said('Late question', 700, 1100));
     await waitFor(() => answers(t).length === 3);
     expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['Old words', 'Old words', 'Late question']);
+  });
+
+  test('a new question that starts after the delegation (a delayed transcript batch) is kept out of the preceding delegation', async () => {
+    const { t, brain } = toolsSetup({ deps: { transcriptQuietMs: 60, transcriptMaxWaitMs: 1000 } });
+    await t.ready();
+    t.openai.receive(said('Old words', 0, 600));
+    t.openai.receive(created('d0'));
+    await waitFor(() => answers(t).length === 1);
+    // d1 arrives (GPT-Live's clock at 5,000 ms) with nothing new, and its settle window is open...
+    t.openai.receive({ ...created('d1'), offset_ms: 5000 });
+    // ...a late tail of d1's own question (audio before the delegation) joins it
+    t.openai.receive(said('tail', 4800, 5000));
+    // ...and the caller's NEXT question, whose audio starts well after the delegation, does not
+    t.openai.receive(said('A brand new question', 9000, 10000));
+    await waitFor(() => answers(t).length === 2);
+    t.openai.receive({ ...created('d2'), offset_ms: 10500 });
+    await waitFor(() => answers(t).length === 3);
+    expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['Old words', 'tail', 'A brand new question']);
   });
 
   test('a retired brain\'s reply is neither counted as an ask nor timed', async () => {
@@ -1868,9 +1887,9 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     expect(logged).not.toMatch(/4111|secret-gate-code|visit is Tuesday/);
   });
 
-  test('the summary records, per ask, the model rounds and paid tool calls (counts only)', async () => {
+  test('the summary records, per ask, the model rounds (counts only; the practice line has no paid tool)', async () => {
     let n = 0;
-    const { t, brain } = toolsSetup({ reply: async () => { n += 1; brain.lastUsage = { rounds: n + 1, paidToolCalls: n }; return `reply ${n}`; } });
+    const { t, brain } = toolsSetup({ reply: async () => { n += 1; brain.lastUsage = { rounds: n + 1 }; return `reply ${n}`; } });
     await t.ready();
     t.openai.receive(said('first', 0, 300));
     t.openai.receive(created('d1'));
@@ -1879,7 +1898,9 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     await waitFor(() => answers(t).length === 2);
     t.twilioStop();
     await finalized(t);
-    expect(summaryOf(t)).toMatchObject({ brain_asks: 2, brain_rounds: [2, 3], brain_paid_tool_calls: [1, 2] });
+    const summary = summaryOf(t);
+    expect(summary).toMatchObject({ brain_asks: 2, brain_rounds: [2, 3] });
+    expect(summary).not.toHaveProperty('brain_paid_tool_calls');
   });
 
   test('a queued delegation\'s wait before the brain starts includes the ask ahead of it', async () => {

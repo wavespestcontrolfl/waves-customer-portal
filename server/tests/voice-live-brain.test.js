@@ -25,7 +25,6 @@ function fakeConvo(args, script = async (convo) => { convo.send('One moment. ', 
     sandbox: args.sandbox === true,
     ended: false,
     prompts: [],
-    _toolAttempts: [],
     _turnStats: [],
     send: args.send,
     interrupt: jest.fn(),
@@ -170,51 +169,20 @@ describe('ask', () => {
     expect(brain.lastRan).toBe(false); // the retired brain ran nothing for this ask
   });
 
-  test('usage counts model rounds and paid tool calls when they START (counts only), timed-out and still-running ones included', async () => {
+  test('usage counts the model rounds each ask started (counts only), timed-out asks included', async () => {
     const { brain, convo } = await open({
       script: async (c) => {
         c._turnStats = [...(c._turnStats || []), { rounds: 3, tools: [] }];
-        c._toolAttempts.push('find_slots', 'get_pricing', 'get_availability');
         c.send('ok', true);
       },
     });
     convo._turnStats = [{ rounds: 1, tools: [] }]; // an earlier turn: not part of this ask
-    convo._toolAttempts = [];
     await brain.ask('first');
-    expect(brain.lastUsage).toEqual({ rounds: 3, paidToolCalls: 2 }); // get_pricing starts no paid call
-    expect(brain.usage()).toEqual({ rounds: 4, paidToolCalls: 2 });
-    convo.handlePrompt.mockImplementationOnce(async () => { convo._turnStats.push({ rounds: 2, tools: [] }); convo._toolAttempts.push('find_slots'); convo.send('again', true); });
+    expect(brain.lastUsage).toEqual({ rounds: 3 });
+    expect(brain.usage()).toEqual({ rounds: 4 });
+    convo.handlePrompt.mockImplementationOnce(async () => { convo._turnStats.push({ rounds: 2, tools: [] }); convo.send('again', true); });
     await brain.ask('second');
-    expect(brain.lastUsage).toEqual({ rounds: 2, paidToolCalls: 1 });
-  });
-
-  test('a paid lookup still pending when the call ends is counted, and the call-scoped signal aborts', async () => {
-    const { brain, convo } = await open({
-      script: (c) => { c._toolAttempts.push('find_slots'); return new Promise(() => {}); }, // a geocode that never returns
-      deadlineMs: 60000,
-    });
-    convo._toolAttempts = [];
-    convo._turnStats = [];
-    expect(convo.args.cancelSignal.aborted).toBe(false);
-    const pending = brain.ask('slots next week');
-    await new Promise((r) => setImmediate(r));
-    await brain.end('twilio_stop');
-    await expect(pending).resolves.toBe(CLOSED_REPLY);
-    expect(brain.lastUsage.paidToolCalls).toBe(1);
-    expect(convo.args.cancelSignal.aborted).toBe(true);
-  });
-
-  test('a hard timeout counts the started lookup and aborts the call-scoped signal', async () => {
-    const { brain, convo } = await open({
-      deadlineMs: 20,
-      softMs: 10,
-      script: (c) => { c._toolAttempts.push('get_availability'); return new Promise(() => {}); },
-    });
-    convo._toolAttempts = [];
-    convo._turnStats = [];
-    await expect(brain.ask('open times')).resolves.toBe(TIMEOUT_REPLY);
-    expect(brain.lastUsage.paidToolCalls).toBe(1);
-    expect(convo.args.cancelSignal.aborted).toBe(true);
+    expect(brain.lastUsage).toEqual({ rounds: 2 });
   });
 
   test('lastRan is true only for an ask that reached the conversation', async () => {

@@ -9138,15 +9138,16 @@ by one Sandy conversation per call (`services/voice-agent/live-brain.js`, a `Rel
 `sandbox: true` and `practiceLine: true`, only on a `voice_relay_sandbox` call_log row). **Tools mode has NO account
 reads.** A practice line resolves no caller context at all (no caller recognition, no customer match by number, no
 call_log session claim, no recent-text hydration), so the socket cannot speak anything about a customer's account,
-visits, invoices, estimates, messages or calls, whoever called. The conversation is offered exactly five tools
+visits, invoices, estimates, messages or calls, whoever called. The conversation is offered exactly three tools
 (`PRACTICE_LINE_TOOLS` in `relay-tools.js`), and `executeTool` refuses every other tool name before any database call
-(account tools, `lookup_customer`, `request_reservice`, `request_booking`, `transfer_to_office`, and any made-up name):
-`get_services_catalog` (the public service list), `get_pricing` (public website pricing from the pricing engine, for any
-caller including a prospect), `get_availability` and `find_slots` (open appointment times for an address or timeframe
-the caller states; they read the booking engine and may buy Google geocodes and road times, which is why the gate needs
-the owner's spend yes, and with no matched customer they never read an account's address), and `capture_lead`
-(validated, then answered as a practice dry run: nothing is saved, no lead, no text, no callback promised; its
-`use_account_details` option is forced off). The conversation has no transfer tool and no automatic handoff, so no
+(the availability tools `get_availability` and `find_slots`, account tools, `lookup_customer`, `request_reservice`,
+`request_booking`, `transfer_to_office`, and any made-up name): `get_services_catalog` (the public service list),
+`get_pricing` (public website pricing from the pricing engine, for any caller including a prospect; the engine runs
+locally and starts no provider request), and `capture_lead` (validated, then answered as a practice dry run: nothing is
+saved, no lead, no text, no callback promised; its `use_account_details` option is forced off). **No allowlisted tool
+starts a paid provider request** (no geocode, weather forecast, date parser or road time): open appointment times are
+not offered, and GPT-Live is told to say the practice line cannot check them. The only paid calls on the socket are the
+brain's own model rounds. The conversation has no transfer tool and no automatic handoff, so no
 handoff packet is ever written, and it never texts. The bridge keeps the caller's and GPT-Live's transcript fragments in
 memory only and the summary stores counts and times only. Before any write, the cell
 route verifies the request's Twilio signature itself (the shared middleware lets unsigned requests through in its

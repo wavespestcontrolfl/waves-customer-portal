@@ -1145,8 +1145,7 @@ function firstNonblankAddressValue(...values) {
   return values.map(value => String(value ?? '').trim()).find(Boolean) || '';
 }
 
-// `signal` (a caller that can go away, such as a voice call): once it aborts, no further paid geocode starts.
-async function resolveBookingCoords({ lat, lng, address, city, estimate_id, signal = null }) {
+async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
   let resolvedLat = lat ? parseFloat(lat) : null;
   let resolvedLng = lng ? parseFloat(lng) : null;
   let disclosable = !!(resolvedLat && resolvedLng);
@@ -1161,7 +1160,7 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id, sign
         resolvedLng = parseFloat(c.longitude);
       } else if (c) {
         const addr = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');
-        if (addr && !signal?.aborted) {
+        if (addr) {
           const geo = await geocodeAddress(addr);
           resolvedLat = geo.lat; resolvedLng = geo.lng;
         }
@@ -1170,7 +1169,6 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id, sign
   }
 
   if ((!resolvedLat || !resolvedLng) && address) {
-    if (signal?.aborted) return { lat: null, lng: null, disclosable: false }; // the caller went away: no paid geocode
     const geo = await geocodeAddress(address);
     resolvedLat = geo.lat; resolvedLng = geo.lng;
     disclosable = true;
@@ -1752,7 +1750,7 @@ function crewSlots(slots, crew) {
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
 // Per truck (GATE_MULTI_TECH_CONFIRM, owner rule B) find-time's slots of a truck on another truck's zone
 // day go before any start is claimed (dropOtherTruckDays), so a start goes to the zone day's own truck.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, crew, verifiedOnly, signal }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, crew, verifiedOnly }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -1903,8 +1901,6 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // availabilityForPin's read-only caller passes it (the hourly route check's slot-rule
     // decision); unset for every other caller = the shared allowance, as before.
     providerTravel: paidLookups,
-    // Road lookups stop once this aborts (route-optimizer createSchedulingTravel): a voice call that ended buys no more.
-    signal,
     // An unreadable closed-day list (find-time's blackout read) throws for a caller that
     // counts openings (availabilityForPin `verifiedOnly`), as for the nightly dispatch
     // search; every other caller fails open (closed days offered), as before.

@@ -185,12 +185,9 @@ const WHEN_SCHEMA = {
   },
 };
 
-async function parseWithAI(query, now, signal = null) {
+async function parseWithAI(query, now) {
   const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
     laneId: 'parse_when',
-    // An aborted signal stops the chain before each provider attempt (runFallbackChain), so a caller that
-    // has gone away buys no fallback leg.
-    ...(signal ? { signal } : {}),
     maxTokens: 300,
     jsonMode: true,
     jsonSchema: WHEN_SCHEMA,
@@ -229,7 +226,7 @@ async function parseWhen(query, opts = {}) {
   let parsed = null;
   let source = 'fallback';
   try {
-    parsed = await parseWithAI(query, now, opts.signal || null);
+    parsed = await parseWithAI(query, now);
     if (parsed) source = 'ai';
   } catch (err) {
     logger.warn(`[parse-when] AI parse failed: ${err.message}`);

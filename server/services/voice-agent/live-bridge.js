@@ -23,7 +23,7 @@
  *   - Tools (GATE_VOICE_GPT_LIVE_TOOLS on, owner 2026-11-24): the delegation is
  *     answered by one Sandy conversation per call (live-brain.js, a
  *     RelayConversation as a sandbox PRACTICE LINE: public information only,
- *     prices, services, open times and a dry-run new-customer request; no
+ *     prices, services and a dry-run new-customer request; no open times, no
  *     account tools and no caller recognition; writes are dry runs).
  *     GPT-Live's delegation names no task, so the bridge keeps the
  *     caller's transcript fragments IN MEMORY, hands the words since the last
@@ -134,12 +134,12 @@ const TRIAL_LIMITS = [
 // Tools mode replaces TRIAL_LIMITS (which says nothing can be looked up).
 const TOOLS_LIMITS = [
   'TRIAL LIMITS (this overrides everything above):',
-  'This is a practice line. Delegate only these: prices, services offered, open appointment times, and a',
-  'new-customer booking or service request. For those, say only what the delegation result says; never',
-  'guess or invent a time, price or service. A booking or request is practice and changes nothing, and the',
-  'result says so. You cannot see accounts, visits, invoices, estimates, messages or call history: if asked,',
-  'say this practice line cannot see accounts, and they can call or text the Waves office. You cannot send',
-  'a text or transfer the call, and nobody will call back from this line.',
+  'This is a practice line. Delegate only these: prices, services offered, and a new-customer request. For',
+  'those, say only what the delegation result says; never guess or invent a price or service. A request is',
+  'practice and changes nothing, and the result says so. You cannot check open appointment times, accounts,',
+  'visits, invoices, estimates, messages or call history: if asked, say this practice line cannot check that,',
+  'and they can call or text the Waves office. You cannot send a text or transfer the call, and nobody will',
+  'call back from this line.',
 ].join('\n');
 
 // ── Session setup pieces (pure, exported for tests) ────────────────────────
@@ -333,7 +333,6 @@ class LiveBridge {
     this.brainWaitMs = [];
     this.brainTotalMs = [];
     this.brainRounds = []; // per ask: model rounds the relay conversation ran (counts only)
-    this.brainPaidToolCalls = []; // per ask: find_slots / get_availability calls (each can start geocode, date-parser and road-time calls)
     // The caller's words, in memory only and never logged or stored: fragments
     // since the last delegation, and the latest two utterances for a delegation
     // that finds none. fragments counts them for the transcript settle.
@@ -553,7 +552,7 @@ class LiveBridge {
       'session.output_audio.delta': () => this.onOutputAudio(msg),
       'session.input_transcript.delta': () => this.onInputTranscript(msg),
       'session.output_transcript.delta': () => { if (this.tools) this.noteAgentText(msg); },
-      'session.delegation.created': () => this.onDelegation(msg.delegation),
+      'session.delegation.created': () => this.onDelegation(msg.delegation, msg.offset_ms),
       'session.usage.updated': () => this.noteUsage(msg.usage),
       'session.closed': () => this.onSessionClosed(msg),
       error: () => this.onOpenAiError(msg),
@@ -782,7 +781,7 @@ class LiveBridge {
   // the brain's reply is that one commentary append, in the order asked.
   // A delegation to any other target would be paid backend work this session
   // never set up: end the call.
-  onDelegation(delegation) {
+  onDelegation(delegation, offsetMs = null) {
     const id = delegation && typeof delegation.id === 'string' ? delegation.id : '';
     if (!id || this.delegations.has(id) || this._finalizing) return;
     this.delegations.add(id);
@@ -793,7 +792,7 @@ class LiveBridge {
     }
     if (this.tools) {
       const receivedAt = this.deps.now();
-      const range = this.openRange(); // this delegation's words, bound now, not when it reaches the front of the queue
+      const range = this.openRange(offsetMs); // this delegation's words, bound now, not when it reaches the front of the queue
       this.brainChain = this.brainChain.then(() => this.answerWithBrain(id, receivedAt, range)).catch(() => {});
       return;
     }
@@ -814,11 +813,23 @@ class LiveBridge {
     return Number.isFinite(msg.end_ms) ? msg.end_ms : endMs;
   }
 
+  // A fragment that arrives while a delegation's transcript is settling is the late tail of ITS question only
+  // when its audio time (start_ms) runs on from that question: before the delegation, or within one utterance gap
+  // of the question's last word. One that starts later is the caller's next question, and waits for the next
+  // delegation. A fragment with no usable time keeps the old rule (it joins the delegation that is settling).
+  static belongsToLate(range, msg) {
+    if (!Number.isFinite(msg.start_ms)) return true;
+    const anchors = [range.endMs, range.offsetMs].filter(Number.isFinite);
+    if (!anchors.length) return true;
+    return msg.start_ms - Math.max(...anchors) < UTTERANCE_GAP_MS;
+  }
+
   noteCallerText(msg) {
     const text = typeof msg.delta === 'string' ? msg.delta : '';
     if (!text.trim()) return;
     this.callerFragments += 1;
-    const range = this.callerLate && this.callerLate.open ? this.callerLate : this.callerPending;
+    const range = this.callerLate && this.callerLate.open && LiveBridge.belongsToLate(this.callerLate, msg) ? this.callerLate : this.callerPending;
+    if (range === this.callerLate && Number.isFinite(msg.end_ms)) range.endMs = Math.max(range.endMs ?? msg.end_ms, msg.end_ms);
     if (!range.text && Number.isFinite(msg.start_ms)) range.startMs = msg.start_ms;
     range.text = (range.text + text).slice(-CALLER_TEXT_MAX_CHARS);
     this.callerFragmentEndMs = LiveBridge.addFragment(this.callerRecent, this.callerFragmentEndMs, msg, 2);
@@ -832,11 +843,16 @@ class LiveBridge {
   // an earlier delegation. Late fragments of its question join it until its
   // transcript settles (noteCallerText) or the next delegation arrives. Queued
   // delegations each keep their own range, however long they wait.
-  openRange() {
+  openRange(offsetMs = null) {
     // The delegation before this one closes now, with its context frozen as of now: it never
     // reads the shared fragments again, whatever is said after this delegation arrives.
     if (this.callerLate) this.freezeRange(this.callerLate);
-    const range = { text: this.callerPending.text, startMs: this.callerPending.startMs, open: this.deps.transcriptQuietMs > 0 }; // no settle wait: closed at once
+    // offsetMs: where GPT-Live's session clock stood when it delegated; endMs: where this range's own words ended.
+    // Together they tell a late continuation of this question from the caller's NEXT one (belongsToLate).
+    const range = {
+      text: this.callerPending.text, startMs: this.callerPending.startMs, open: this.deps.transcriptQuietMs > 0, // no settle wait: closed at once
+      offsetMs: Number.isFinite(offsetMs) ? offsetMs : null, endMs: this.callerFragmentEndMs,
+    };
     this.callerPending = { text: '', startMs: null };
     this.callerLate = range;
     // The context is FROZEN as the range closes (its words, the fallback utterances and the
@@ -960,7 +976,6 @@ class LiveBridge {
     this.brainTotalMs.push(ms(receivedAt, this.deps.now()));
     const usage = (this.brain && this.brain.lastUsage) || {};
     this.brainRounds.push(Number(usage.rounds) || 0);
-    this.brainPaidToolCalls.push(Number(usage.paidToolCalls) || 0);
   }
 
   async endBrain() {
@@ -1082,7 +1097,6 @@ class LiveBridge {
         brain_ms: this.brainMs,
         brain_total_ms: this.brainTotalMs,
         brain_rounds: this.brainRounds,
-        brain_paid_tool_calls: this.brainPaidToolCalls,
       } : {}),
       errors,
     };
