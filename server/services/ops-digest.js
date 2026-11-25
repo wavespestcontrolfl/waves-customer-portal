@@ -385,8 +385,7 @@ async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = nul
 function ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash, ringOnFirstIdentity = false, ringAfterQuietClose = false }) {
   return (existingRow, existingMeta) => {
     if (existingMeta?.resolved === true) return true;
-    if (ringAfterQuietClose && existingRow?.done_at
-      && existingRow.done_by === notificationService()._private.QUIET_FALL_OFF_DONE_BY) return true;
+    if (ringAfterQuietClose && existingRow && notificationService()._private.closedByQuietPolicy(existingRow)) return true;
     // (A shrinking list still never rings, even on first identity.)
     if (ringOnFirstIdentity && itemSetHash && !existingMeta?.itemSetHash && !Array.isArray(existingMeta?.itemKeys)
       && !(metaCount(existingMeta) !== null && Number(count) < metaCount(existingMeta))) return true;

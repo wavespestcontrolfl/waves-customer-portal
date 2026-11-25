@@ -5,7 +5,10 @@
 // crons keys and synthetic in-process ones.
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ _private: { QUIET_FALL_OFF_DONE_BY: 'quiet-72h' } }));
+jest.mock('../services/notification-service', () => ({ _private: {
+  QUIET_FALL_OFF_DONE_BY: 'quiet-72h',
+  closedByQuietPolicy: (row) => Boolean(row.done_at) && ['quiet-72h', 'retention'].includes(row.done_by),
+} }));
 
 const {
   alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom,
@@ -208,6 +211,7 @@ describe('ringOnRefreshFrom — ringAfterQuietClose', () => {
   const closed = (done_by) => ({ done_at: new Date(), done_by });
   test('a row the quiet policy closed rings again while the same list stands', () => {
     expect(ringOnRefreshFrom({ ...args, ringAfterQuietClose: true })(closed('quiet-72h'), same)).toBe(true);
+    expect(ringOnRefreshFrom({ ...args, ringAfterQuietClose: true })(closed('retention'), same)).toBe(true);
   });
   test('a person close, an open row and a sender without the opt-in stay quiet', () => {
     expect(ringOnRefreshFrom({ ...args, ringAfterQuietClose: true })(closed('42'), same)).toBe(false);

@@ -177,9 +177,11 @@ const DUPLICATE_OWNER_LEG = `
                    )))
 `;
 
-async function loadUnkeptPromises() {
+// conn: the caller's connection (the retention sweep's live check passes its own); defaults to the app db.
+async function loadUnkeptPromises(conn) {
+  const q = conn || db;
   const { PLACEHOLDER_NAME_SQL_RE } = require('./call-commitments');
-  const { rows } = await db.raw(
+  const { rows } = await q.raw(
     `
     SELECT c.id, c.created_at, c.customer_id, c.disposition,
            c.ai_extraction_enriched AS asked_source,

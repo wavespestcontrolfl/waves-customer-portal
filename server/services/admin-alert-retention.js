@@ -269,10 +269,10 @@ const LIVE_CHECKS = {
     return live;
   },
   // The promised-estimate row speaks for the watcher's whole list: live while that list is not empty.
-  async promisedQuotesOwed(_conn, rows) {
+  async promisedQuotesOwed(conn, rows) {
     try {
       const { _private } = require('./promised-estimate-watcher');
-      return (await _private.loadUnkeptPromises()).length ? new Set(rows.map((r) => r.id)) : new Set();
+      return (await _private.loadUnkeptPromises(conn)).length ? new Set(rows.map((r) => r.id)) : new Set();
     } catch (err) {
       logger.warn(`[alert-retention] promisedQuotesOwed live check failed (${err.message}) — treating the row as live`);
       return new Set(rows.map((r) => r.id));

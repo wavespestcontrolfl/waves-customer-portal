@@ -576,6 +576,14 @@ describe('refreshQuietClosed (identical emission after a quiet close)', () => {
     expect(mockRows.notifications[0]).toMatchObject({ done_at: null, done_by: null, read_at: null });
   });
 
+  test('a close by the nightly retention sweep is cleared the same way', async () => {
+    await emit();
+    close('retention');
+    const again = await emit();
+    expect(again).toMatchObject({ deduped: true, refreshed: true, rung: true });
+    expect(mockRows.notifications[0]).toMatchObject({ done_at: null, done_by: null });
+  });
+
   test('a person\'s Done stays done on the identical emission', async () => {
     await emit();
     close('42');

@@ -394,8 +394,11 @@ const RING_METADATA_KEYS = ['count', 'newCount', 'itemKeys', 'itemSetHash'];
 // or rings on?
 // refreshQuietClosed (opt-in): the quiet policy closed the standing row, so an identical
 // emission still enters the refresh branch and lets ringOnRefresh decide whether it comes back.
-// A row the quiet policy closed (done_by 'quiet-72h'), never a person's close.
-const closedByQuietPolicy = (row) => Boolean(row.done_at) && row.done_by === QUIET_FALL_OFF_DONE_BY;
+// A row the quiet policy or the nightly retention sweep closed, never a person's close.
+// 'retention' = admin-alert-retention RETENTION_BY (the nightly age30 / fyi7 sweep); an older close of an opted-in row
+// by that sweep is recovered the same way as a quiet close.
+const AGED_OUT_DONE_BY = new Set([QUIET_FALL_OFF_DONE_BY, 'retention']);
+const closedByQuietPolicy = (row) => Boolean(row.done_at) && AGED_OUT_DONE_BY.has(row.done_by);
 
 function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged, refreshQuietClosed }) {
   return (refreshQuietClosed && closedByQuietPolicy(existing)) || versionChanged || existing.title !== nextTitle || existing.body !== nextBody
@@ -1452,6 +1455,7 @@ module.exports._private = {
   REOPENABLE_DONE_BY_SQL,
   KEEP_DB_HOLD_SQL,
   QUIET_FALL_OFF_DONE_BY,
+  closedByQuietPolicy,
   QUIET_HOLD_KEY,
   DONE_CLEARED,
   MAX_ADMIN_TITLE_CHARS,

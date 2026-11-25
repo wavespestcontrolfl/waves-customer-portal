@@ -263,6 +263,13 @@ describe('the promised-quotes row: held while the list stands', () => {
     expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(null, [r])]).toEqual([]);
   });
 
+  test('the check reads through the sweep\'s own connection', async () => {
+    const spy = owed(1);
+    const conn = { marker: 'sweep-conn' };
+    await retention.LIVE_CHECKS.promisedQuotesOwed(conn, [promised()]);
+    expect(spy).toHaveBeenCalledWith(conn);
+  });
+
   test('a failed check calls the row live, so the sweep leaves it alone', async () => {
     owed(new Error('db down'));
     const r = promised();
