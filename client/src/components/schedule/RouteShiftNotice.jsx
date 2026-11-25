@@ -9,9 +9,13 @@
 //
 // A row's windowEnd is null for a stop with no stored end (it is judged on its length): the
 // line then names the start alone.
+//
+// A stored 24:00 (PostgreSQL keeps it) can reach a row. It is midnight; the sheets' formatters
+// read hour 24 as noon.
+const clock = (formatTime, value) => formatTime(value === '24:00' ? '00:00' : value);
 const hoursOf = (row, formatTime) => (row.windowEnd
-  ? `${formatTime(row.windowStart)}-${formatTime(row.windowEnd)}`
-  : `from ${formatTime(row.windowStart)}`);
+  ? `${clock(formatTime, row.windowStart)}-${clock(formatTime, row.windowEnd)}`
+  : `from ${clock(formatTime, row.windowStart)}`);
 
 export default function RouteShiftNotice({ rows, formatTime, own = false, style }) {
   if (!rows.length) return null;

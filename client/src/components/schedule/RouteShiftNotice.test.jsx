@@ -47,6 +47,14 @@ describe('RouteShiftNotice', () => {
     expect(screen.getByText('⚠️ With the rest of the route, 2 stops land outside your shift hours (first: from <10:45>) — those stops will not move. Pick a different time.')).toBeInTheDocument();
   });
 
+  it('a stored 24:00 is midnight, at a start and at an end', () => {
+    render(<RouteShiftNotice own rows={[{ windowStart: '24:00', windowEnd: null }]} formatTime={upper} />);
+    expect(screen.getByText(/\(from <00:00>\)/)).toBeInTheDocument();
+    cleanup();
+    render(<RouteShiftNotice rows={[{ windowStart: '23:00', windowEnd: '24:00' }]} formatTime={upper} />);
+    expect(screen.getByText(/\(<23:00>-<00:00>\)/)).toBeInTheDocument();
+  });
+
   it('takes the style it is given', () => {
     render(<RouteShiftNotice rows={[late]} formatTime={upper} style={{ marginBottom: 18 }} />);
     expect(screen.getByText(/1 stop lands/)).toHaveStyle({ marginBottom: '18px' });

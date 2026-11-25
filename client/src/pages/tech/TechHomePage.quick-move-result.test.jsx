@@ -455,4 +455,13 @@ describe('Tech Home Quick Move: stops a rest-of-route move would land outside th
     fireEvent.click(screen.getByRole('button', { name: /^Rest of route/ }));
     expect(screen.getByText('⚠️ With the rest of the route, 2 stops land outside your shift hours (first: 5:00 PM-6:00 PM) — those stops will not move. Pick a different time.')).toBeInTheDocument();
   });
+
+  it('a stop stored with a 24:00 start and no end reads as midnight, not noon', async () => {
+    // The server's row for such a stop on a day move (the mover refuses it).
+    optionsExtra = { days: [outside([{ windowStart: '24:00', windowEnd: null }])] };
+    await openSheet();
+    fireEvent.click(screen.getByText(/Fri, Jan 2, 9:00 AM-10:00 AM/));
+    fireEvent.click(screen.getByRole('button', { name: /^Rest of route/ }));
+    expect(screen.getByText('⚠️ With the rest of the route, 1 stop lands outside your shift hours (from 12:00 AM) — that stop will not move. Pick a different time.')).toBeInTheDocument();
+  });
 });
