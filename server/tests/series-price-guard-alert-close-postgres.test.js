@@ -144,12 +144,54 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
     expect((await get(other.bell.id)).done_at).toBeNull();
   });
 
-  test('a bell a person already closed is left as it is', async () => {
-    const s = await series();
-    const at = new Date(Date.now() - 3600000);
-    await db('notifications').where({ id: s.bell.id }).update({ done_at: at, done_by: '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10', resolution: 'Checked by hand' });
-    expect(await run(s)).toBe(false);
-    expect((await get(s.bell.id)).resolution).toBe('Checked by hand');
+  describe('a bell closed before the visit was added (openToCloser: the system takes ownership once)', () => {
+    const person = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
+    const closedAt = () => new Date(Date.now() - 3600000);
+    const takenOver = async (s, closeColumns, { expectClosed = true } = {}) => {
+      const at = closedAt();
+      await db('notifications').where({ id: s.bell.id }).update({ done_at: at, ...closeColumns });
+      expect(await run(s)).toBe(expectClosed);
+      const row = await get(s.bell.id);
+      return { row, at };
+    };
+
+    test('closed by the quiet 72-hour fall-off: ours now, first close time kept, our resolution replaces its text', async () => {
+      const s = await series();
+      const { row, at } = await takenOver(s, { done_by: 'quiet-72h', resolution: 'No new activity for 3 days' });
+      expect(row.done_by).toBe('series-price-guard');
+      expect(row.done_at.getTime()).toBe(at.getTime());
+      expect(row.resolution).toMatch(/last paid visit backs/);
+    });
+
+    test('a person\'s Done with no resolution: ours now, first close time kept', async () => {
+      const s = await series();
+      const { row, at } = await takenOver(s, { done_by: person, resolution: null });
+      expect(row.done_by).toBe('series-price-guard');
+      expect(row.done_at.getTime()).toBe(at.getTime());
+      expect(row.resolution).toMatch(/last paid visit backs/);
+    });
+
+    test('a person\'s Done with a resolution: the system takes ownership, their words and close time stand', async () => {
+      const s = await series();
+      const { row, at } = await takenOver(s, { done_by: person, resolution: 'Checked by hand' });
+      expect(row.done_by).toBe('series-price-guard');
+      expect(row.done_at.getTime()).toBe(at.getTime());
+      expect(row.resolution).toBe('Checked by hand');
+    });
+
+    test('a bell another system component closed is left alone', async () => {
+      const s = await series();
+      const { row, at } = await takenOver(s, { done_by: 'relevance', resolution: 'Moved on' }, { expectClosed: false });
+      expect([row.done_by, row.resolution, row.done_at.getTime()]).toEqual(['relevance', 'Moved on', at.getTime()]);
+    });
+
+    test('a closed bell still needs the same proof: a price the last paid visit does not back leaves it as it was', async () => {
+      const s = await series();
+      const at = closedAt();
+      await db('notifications').where({ id: s.bell.id }).update({ done_at: at, done_by: 'quiet-72h', resolution: 'No new activity for 3 days' });
+      expect(await run(s, { price: 333.45 })).toBe(false);
+      expect((await get(s.bell.id)).done_by).toBe('quiet-72h');
+    });
   });
 
   describe('the refusal bell is written inside the refusal\'s own transaction', () => {

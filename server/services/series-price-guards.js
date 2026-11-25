@@ -217,19 +217,23 @@ async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, ch
 
 const cancelledRootDedupeKey = (rootId) => `series-price-guard:cancelled-root:${rootId}`;
 
-// The conditional close, on the savepoint `sp` of the extension's transaction.
+// The conditional close, on the savepoint `sp` of the extension's transaction. The rows it may close are
+// openToCloser's: not done, or done by a person or by the quiet 72-hour fall-off (their "Recently done" Reopen
+// would otherwise bring the obsolete alert back). keepExisting: the first done_at stands, a person's own
+// resolution text stands, the quiet fall-off's text is replaced by ours, and done_by becomes this closer (the
+// condition really cleared, so the Reopen is refused).
 async function closeStandingRefusedAlert(sp, { parent, parentId, child, childDate, childId }) {
-  const standing = () => sp('notifications')
-    .where({ recipient_type: 'admin' }).whereNull('done_at')
+  const { doneColumns, openToCloser } = require('./notification-service')._private;
+  const standing = () => openToCloser(sp('notifications')
+    .where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ?", [cancelledRootDedupeKey(parentId)])
-    .whereRaw("metadata->>'refusedDate' = ?", [childDate]);
+    .whereRaw("metadata->>'refusedDate' = ?", [childDate]), CLOSED_BY);
   if (!(await standing().first('id'))) return false;
   if (await insertedRowIsPrepaid(sp, childId)) return false;
   const facts = await extensionPriceFacts(sp, { parent, parentId, child });
   if (!facts || facts.lastPaid == null || facts.over) return false;
-  const { doneColumns } = require('./notification-service')._private;
   const closed = await standing().update(doneColumns({
-    by: CLOSED_BY, resolution: 'The plan added the visit it had held, at a price its last paid visit backs', conn: sp,
+    by: CLOSED_BY, resolution: 'The plan added the visit it had held, at a price its last paid visit backs', keepExisting: true, conn: sp,
   })).returning('id');
   return closed.length > 0;
 }
