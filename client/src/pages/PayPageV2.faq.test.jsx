@@ -129,6 +129,9 @@ describe('pay page — FAQ under the Pay button (GATE_PAY_PAGE_FAQ)', () => {
     ]) expect(screen.getByText(q)).toBeInTheDocument();
     // No Zelle question without manualPayOptions, and no Zelle mention in the fee answer.
     expect(screen.queryByText('Can I pay by Zelle?')).not.toBeInTheDocument();
+    // No payment form on this page (Stripe unavailable): no manual bank-entry steps.
+    expect(screen.queryByText('My bank won’t let me sign in. How do I pay by bank?')).not.toBeInTheDocument();
+    expect(screen.queryByText(/enter your bank details manually/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Zelle has no fees/)).not.toBeInTheDocument();
     // The FAQ sits inside the payment panel, above "Other ways to pay".
     expect(FAQ().closest('.waves-pay-payment-panel')).not.toBeNull();
