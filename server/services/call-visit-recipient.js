@@ -385,10 +385,41 @@ async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, re
  * `gate(contact)`: optional per-recipient check by the sender, 'send' (default), 'skip' or 'abort'
  * (the pipeline lost its claim). Never throws into the sender. Returns false only when a gate aborted.
  */
-async function notifyVisitRecipients({ scheduledServiceId, kind, excludePhones = [], context = {}, dayOnly = false, gate = null, conn = db }) {
+async function notifyVisitRecipients(args) {
+  return notifyAttempt(args, 0);
+}
+
+// A recipient lookup that throws (a database blip, the choices table unreadable) is NOT "nobody is owed": the notice is retried for
+// the recipients only, a few times over minutes, each attempt re-reading everything fresh (the gate, the visit, the declines)
+// and each send still guarded by the once-per-slot claim, so a retry can never double a text. The holder's result is never touched
+// (this function returns true either way). Not the deferred-replay registry: that entry replays a frozen per-recipient text row,
+// and a failed lookup is the one case where the recipients are not yet known. In-process and bounded, like the quiet-hours rule
+// for the 24 h and en-route texts: a notice that stays unreadable past the last attempt is dropped, with an error line.
+let lookupRetryDelaysMs = [15 * 1000, 60 * 1000, 5 * 60 * 1000];
+
+function scheduleLookupRetry(args, attempt) {
+  if (attempt >= lookupRetryDelaysMs.length) {
+    logger.error(`[call-visit-recipient] ${args.kind} for visit ${args.scheduledServiceId} not sent: recipients stayed unreadable after ${attempt} retries`);
+    return;
+  }
+  const timer = setTimeout(() => {
+    notifyAttempt(args, attempt + 1).catch((err) => logger.warn(`[call-visit-recipient] ${args.kind} retry for visit ${args.scheduledServiceId} failed: ${err.code || err.name || 'error'}`));
+  }, lookupRetryDelaysMs[attempt]);
+  if (timer && typeof timer.unref === 'function') timer.unref();
+}
+
+async function notifyAttempt(args, attempt) {
+  const { scheduledServiceId, kind, excludePhones = [], context = {}, dayOnly = false, gate = null, conn = db } = args;
   if (!gateLive() || !KINDS[kind] || !scheduledServiceId) return true;
+  let contacts;
   try {
-    const contacts = await contactsForVisit(scheduledServiceId, kind, { excludePhones, conn });
+    contacts = await contactsForVisit(scheduledServiceId, kind, { excludePhones, conn, throwOnError: true });
+  } catch (err) {
+    logger.warn(`[call-visit-recipient] ${kind} for visit ${scheduledServiceId}: recipients unreadable (${err.code || err.name || 'error'}), retrying`);
+    scheduleLookupRetry(args, attempt);
+    return true;
+  }
+  try {
     for (const contact of contacts) {
       const verdict = gate ? await gate(contact) : 'send';
       if (verdict === 'abort') return false;
@@ -589,15 +620,11 @@ async function recipientPermission(meta, { conn = db, anyVisitStatus = false } =
     return noVerdict('RECIPIENT_NUMBER_HOLD', 'recipient-number-hold');
   }
   // A do-not-contact request heard on any call with the person's number (a plain read of call_log).
-  const holds = require('./messaging/auto-text-holds');
-  // includeSpokenNumber: the same reach as the "no texts" check below (a call that spoke the number as a callback).
-  if (await holds.askedNotToBeContactedOnAnyCall(mine.phone, { dbi: conn, includeSpokenNumber: true })) {
-    return noVerdict('CALL_DO_NOT_CONTACT', 'asked-not-to-be-contacted');
-  }
-  // An explicit "no texts" heard on any call with the number, the spoken callback number included (a plain read, no logging).
-  if (await holds.saidNoTextsOnAnyCall(mine.phone, { dbi: conn })) {
-    return noVerdict('CALL_SMS_DECLINED', 'said-no-texts');
-  }
+  // A do-not-contact request or an explicit "no texts" heard on any call with the number, in every place a spoken number
+  // lives: ONE read of call_log (a plain read, no logging), because the link re-reads this on every poll.
+  const vetoes = await require('./messaging/auto-text-holds').callVetoesForNumber(mine.phone, { dbi: conn });
+  if (vetoes.doNotContact) return noVerdict('CALL_DO_NOT_CONTACT', 'asked-not-to-be-contacted');
+  if (vetoes.smsDeclined) return noVerdict('CALL_SMS_DECLINED', 'said-no-texts');
   return { ok: true, mine };
 }
 
@@ -641,6 +668,7 @@ function releaseDeferredClaim(meta, { conn = db } = {}) {
 }
 
 module.exports = {
+  _test: { setLookupRetryDelays: (delays) => { lookupRetryDelaysMs = delays; } },
   gateLive,
   SOURCE,
   CONSENT_VERSION,

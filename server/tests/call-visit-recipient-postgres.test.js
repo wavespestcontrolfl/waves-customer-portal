@@ -23,12 +23,11 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
 // A service contact's own text choices need the contact-login tables; pass through (the module reads the person's choices
-// row directly: getContactPrefRow + contactAllows), with a hook to force a decline and the gate on.
+// row directly: getContactPrefRow + contactAllows, whatever GATE_CONTACT_LOGIN says), with a hook to force a decline.
 jest.mock('../services/contact-notification-prefs', () => {
   const actual = jest.requireActual('../services/contact-notification-prefs');
   return {
     ...actual,
-    contactPrefsLive: jest.fn(() => true),
     getContactPrefRow: jest.fn((...args) => actual.getContactPrefRow(...args)),
   };
 });
@@ -49,6 +48,14 @@ const HOLDER = phone(1);
 const BOB = phone(2);
 const ANI = phone(10);
 const OUR_LINE = phone(11);
+
+const waitFor = async (predicate, ms = 4000) => {
+  const until = Date.now() + ms;
+  while (!predicate()) {
+    if (Date.now() > until) throw new Error('timed out waiting');
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
+};
 
 const entry = (over = {}) => ({
   first_name: 'Bob', last_name: 'Roe', phone_e164: BOB, role: 'spouse_partner', wants_appointment_texts: true, ...over,
@@ -777,11 +784,122 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         }
       });
 
+      test('every place a spoken number lives, for BOTH vetoes: V1-only (no V2 extraction at all), V2 callback, V2 text number', async () => {
+        const insertCall = async (row) => (await db('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE, ...row }).returning('id'))[0].id;
+        const made = [];
+        try {
+          // legacy V1 only: ai_extraction_enriched is NULL, the number sits in ai_extraction.phone, do-not-contact in the flat field
+          made.push(await insertCall({ ai_extraction: JSON.stringify({ phone: BOB, do_not_contact_request: true }) }));
+          await noMoreLink();
+          await db('call_log').whereIn('id', made).del(); made.length = 0;
+          expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+          // V1 number, V2 "no texts" (sms_declined is a V2-only field; the spoken number is found in the V1 text)
+          made.push(await insertCall({ v2_extraction_status: 'valid', ai_extraction: JSON.stringify({ phone: BOB }), ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }) }));
+          await noMoreLink();
+          await db('call_log').whereIn('id', made).del(); made.length = 0;
+          // V2 text number
+          made.push(await insertCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ caller: { text_phone_e164: BOB }, consent: { sms_declined: true } }) }));
+          await noMoreLink();
+          await db('call_log').whereIn('id', made).del(); made.length = 0;
+          // a formatted legacy number still matches on its last 10 digits
+          made.push(await insertCall({ ai_extraction: JSON.stringify({ phone: `(${BOB.slice(2, 5)}) ${BOB.slice(5, 8)}-${BOB.slice(8)}`, do_not_contact_request: true }) }));
+          await noMoreLink();
+        } finally {
+          if (made.length) await db('call_log').whereIn('id', made).del();
+        }
+        expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      });
+
+      test('ONE call_log query per open-link request, covering both vetoes, and its plan uses the call_log last-10 indexes', async () => {
+        const seen = [];
+        const counting = Object.assign((table) => { if (table === 'call_log') seen.push(table); return db(table); }, { raw: db.raw.bind(db), fn: db.fn });
+        expect(await VisitRecipient.visitForTrackToken(token, { conn: counting })).not.toBeNull();
+        expect(seen).toEqual(['call_log']);
+        // the plan: with sequential scans off, every number branch is answered by an index of migration 20261124200000
+        const holds = require('../services/messaging/auto-text-holds');
+        const { sql, bindings } = holds._callVetoQuery(db, BOB.slice(-10)).toSQL();
+        const plan = await db.transaction(async (trx) => {
+          await trx.raw('SET LOCAL enable_seqscan = off');
+          const res = await trx.raw(`EXPLAIN ${sql}`, bindings);
+          return res.rows.map((r) => r['QUERY PLAN']).join('\n');
+        });
+        for (const index of ['call_log_from_phone_last10_index', 'call_log_to_phone_last10_index', 'call_log_spoken_phone_last10_index', 'call_log_spoken_text_phone_last10_index', 'call_log_v1_phone_last10_index']) {
+          expect(plan).toContain(index);
+        }
+      });
+
       test('a staff do-not-contact on Bob\'s number', async () => {
         await suppress(BOB);
         await db('messaging_suppression').where({ phone: BOB }).update({ reason: 'manual_dnc' });
         await noMoreLink();
       });
+    });
+
+    test('a recipient lookup that throws is retried for the recipients only (the holder\'s result is untouched), then sent once', async () => {
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      sendCustomerMessage.mockReset();
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+      VisitRecipient._test.setLookupRetryDelays([20, 20, 20]);
+      try {
+        let failures = 2;
+        const flaky = Object.assign((table) => {
+          if (table === 'visit_text_recipients' && failures > 0) { failures -= 1; throw Object.assign(new Error('connection terminated'), { code: '57P01' }); }
+          return db(table);
+        }, { raw: db.raw.bind(db), fn: db.fn });
+        const result = await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'confirmation', excludePhones: [HOLDER], conn: flaky });
+        expect(result).toBe(true);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        await waitFor(() => sendCustomerMessage.mock.calls.length >= 1);
+        // the claim keeps it to one text however many retries and senders ask
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'confirmation', excludePhones: [HOLDER] });
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0].to).toBe(BOB);
+      } finally {
+        VisitRecipient._test.setLookupRetryDelays([15000, 60000, 300000]);
+      }
+    });
+
+    test('a lookup that stays unreadable gives up after the bounded retries: nothing is sent, the holder result is still true, an error line names no number', async () => {
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      const logger = require('../services/logger');
+      sendCustomerMessage.mockReset();
+      VisitRecipient._test.setLookupRetryDelays([10, 10]);
+      try {
+        const broken = Object.assign((table) => {
+          if (table === 'visit_text_recipients') throw Object.assign(new Error(`select * from visit_text_recipients where phone_e164 = '${BOB}'`), { code: '57P01' });
+          return db(table);
+        }, { raw: db.raw.bind(db), fn: db.fn });
+        expect(await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'confirmation', excludePhones: [HOLDER], conn: broken })).toBe(true);
+        await waitFor(() => logger.error.mock.calls.some(([line]) => /stayed unreadable/.test(line)));
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        expect(JSON.stringify([logger.warn.mock.calls, logger.error.mock.calls])).not.toContain(BOB);
+      } finally {
+        VisitRecipient._test.setLookupRetryDelays([15000, 60000, 300000]);
+      }
+    });
+
+    test('a decline SAVED in the choices table binds the link and the text with GATE_CONTACT_LOGIN off (the default)', async () => {
+      expect(process.env.GATE_CONTACT_LOGIN).toBeUndefined();
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      await db('service_contact_notification_prefs').insert({ customer_id: customerId, phone_key: BOB.slice(-10), tech_en_route: false });
+      try {
+        expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+        sendCustomerMessage.mockReset();
+        sendCustomerMessage.mockResolvedValue({ sent: true });
+        await db('visit_text_recipients').where({ id }).update({ deliveries: '{}' });
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER] });
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        // another notice the person did not turn off still goes (the row is per notice)
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'confirmation', excludePhones: [HOLDER] });
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        await db('service_contact_notification_prefs').where({ customer_id: customerId }).del();
+      }
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
     });
 
     test('a missing choices table denies: the link errors and a text is held, never read as "no choices"', async () => {

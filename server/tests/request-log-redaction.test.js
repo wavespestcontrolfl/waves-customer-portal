@@ -187,6 +187,28 @@ describe('short links /l/:code (they front bearer-token URLs, and the 10-11 char
     expect(line).not.toContain(code);
   });
 
+  test.each(['L', 'l'])('the mount is matched without regard to case: /%s/<code> and a Referer https://host/%s/<code> (Express serves /L/<code> from the same router)', (mount) => {
+    expect(redact(`/${mount}/AbCdEfGhJk`)).toBe(`/${mount}/[REDACTED]`);
+    expect(redact(`https://portal.wavespestcontrol.com/${mount}/AbCdEfGhJk`)).toBe(`https://portal.wavespestcontrol.com/${mount}/[REDACTED]`);
+    expect(redact(`/${mount}/abcdefghjk/extra?x=1`)).toBe(`/${mount}/[REDACTED]/[REDACTED]?x=1`);
+  });
+
+  test('Express itself is case-insensitive for this mount and the router lowercases the code, so no other spelling reaches it', async () => {
+    const express = require('express');
+    const app = express();
+    expect(app.get('case sensitive routing')).toBeFalsy();
+    const hits = [];
+    app.use('/l', (req, res) => { hits.push(req.originalUrl); res.end('ok'); });
+    const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
+    try {
+      for (const path of ['/l/abc', '/L/abc']) {
+        await fetch(`http://127.0.0.1:${server.address().port}${path}`);
+      }
+    } finally { server.close(); }
+    expect(hits).toEqual(['/l/abc', '/L/abc']);
+    expect(require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8')).not.toMatch(/case sensitive routing|caseSensitive/);
+  });
+
   test('other paths that merely contain an "l" segment, and the /l index itself, are untouched', () => {
     expect(redact('/l')).toBe('/l');
     expect(redact('/api/admin/l/abcdefghjk')).toBe('/api/admin/l/abcdefghjk');

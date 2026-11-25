@@ -30,8 +30,9 @@ jest.mock('../services/contact-notification-prefs', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
 jest.mock('../services/disclaimed-number-holds', () => ({ disclaimedNumberHeldForVisit: jest.fn(async () => false), disclaimedNumberHeld: jest.fn(async () => false) }));
 const { disclaimedNumberHeldForVisit, disclaimedNumberHeld } = require('../services/disclaimed-number-holds');
-jest.mock('../services/messaging/auto-text-holds', () => ({ askedNotToBeContactedOnAnyCall: jest.fn(async () => false), saidNoTextsOnAnyCall: jest.fn(async () => false) }));
-const { askedNotToBeContactedOnAnyCall, saidNoTextsOnAnyCall } = require('../services/messaging/auto-text-holds');
+// ONE call_log read for both vetoes (their SQL runs on PostgreSQL in the Postgres suite).
+jest.mock('../services/messaging/auto-text-holds', () => ({ callVetoesForNumber: jest.fn(async () => ({ doNotContact: false, smsDeclined: false })) }));
+const { callVetoesForNumber } = require('../services/messaging/auto-text-holds');
 const { getContactPrefRow } = require('../services/contact-notification-prefs');
 const VisitRecipient = require('../services/call-visit-recipient');
 
@@ -49,8 +50,7 @@ beforeEach(() => {
   getContactPrefRow.mockResolvedValue(null);
   disclaimedNumberHeldForVisit.mockResolvedValue(false);
   disclaimedNumberHeld.mockResolvedValue(false);
-  askedNotToBeContactedOnAnyCall.mockResolvedValue(false);
-  saidNoTextsOnAnyCall.mockResolvedValue(false);
+  callVetoesForNumber.mockResolvedValue({ doNotContact: false, smsDeclined: false });
 });
 afterAll(() => { if (gateBefore === undefined) delete process.env[GATE]; else process.env[GATE] = gateBefore; });
 
@@ -130,18 +130,17 @@ describe('visitForTrackToken: who a recipient link opens', () => {
 
   test('a do-not-contact request recorded on a call with the recipient\'s number closes the link and the send recheck', async () => {
     seed();
-    askedNotToBeContactedOnAnyCall.mockResolvedValue(true);
+    callVetoesForNumber.mockResolvedValue({ doNotContact: true, smsDeclined: false });
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
     expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALL_DO_NOT_CONTACT');
-    expect(askedNotToBeContactedOnAnyCall).toHaveBeenCalledWith('+19415550002', expect.objectContaining({ dbi: expect.anything() }));
+    expect(callVetoesForNumber).toHaveBeenCalledWith('+19415550002', expect.objectContaining({ dbi: expect.anything() }));
   });
 
   test('an explicit "no texts" heard on a call with the recipient\'s number (the spoken callback number included) closes the link and the send recheck', async () => {
     seed();
-    saidNoTextsOnAnyCall.mockResolvedValue(true);
+    callVetoesForNumber.mockResolvedValue({ doNotContact: false, smsDeclined: true });
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
     expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALL_SMS_DECLINED');
-    expect(saidNoTextsOnAnyCall).toHaveBeenCalledWith('+19415550002', expect.objectContaining({ dbi: expect.anything() }));
   });
 
   test('the choices row is read FAIL-CLOSED, and an unreadable or missing choices table denies (the link errors, the recheck throws)', async () => {
@@ -167,11 +166,10 @@ describe('visitForTrackToken: who a recipient link opens', () => {
       seed({ visit: { ...VISIT, ...closed } });
       disclaimedNumberHeldForVisit.mockClear();
       disclaimedNumberHeld.mockClear();
-      askedNotToBeContactedOnAnyCall.mockClear();
-      saidNoTextsOnAnyCall.mockClear();
+      callVetoesForNumber.mockClear();
       getContactPrefRow.mockClear();
       expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
-      for (const read of [disclaimedNumberHeldForVisit, disclaimedNumberHeld, askedNotToBeContactedOnAnyCall, saidNoTextsOnAnyCall, getContactPrefRow]) {
+      for (const read of [disclaimedNumberHeldForVisit, disclaimedNumberHeld, callVetoesForNumber, getContactPrefRow]) {
         expect(read).not.toHaveBeenCalled();
       }
       expect(mockTables.recipient_optin?.reads || []).toEqual([]);
@@ -182,9 +180,11 @@ describe('visitForTrackToken: who a recipient link opens', () => {
   test('an open link pays for every permission read', async () => {
     seed();
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).not.toBeNull();
-    for (const read of [disclaimedNumberHeldForVisit, disclaimedNumberHeld, askedNotToBeContactedOnAnyCall, saidNoTextsOnAnyCall, getContactPrefRow]) {
+    for (const read of [disclaimedNumberHeldForVisit, disclaimedNumberHeld, callVetoesForNumber, getContactPrefRow]) {
       expect(read).toHaveBeenCalled();
     }
+    // both call-log vetoes come from ONE read per request
+    expect(callVetoesForNumber).toHaveBeenCalledTimes(1);
   });
 
   test('the choices row is read whatever GATE_CONTACT_LOGIN says (a saved decline binds this feature with that gate off)', async () => {

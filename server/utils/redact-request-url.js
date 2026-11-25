@@ -114,12 +114,14 @@ function isTokenLikePathSegment(segment, previousSegment) {
 
 // A short link (/l/<code>, services/short-url.js) fronts a bearer-token URL (a tracker, reschedule or pay link), and its
 // code is only 10-11 characters: below every length rule above, so the code itself is the credential. Redacted by
-// position: the segment right after a root-level "l", in a path (/l/<code>) or a full URL (a Referer header:
-// https://host/l/<code>).
+// position: every segment after a root-level "l", in a path (/l/<code>) or a full URL (a Referer header:
+// https://host/l/<code>). Case-insensitive: Express matches the /l mount without regard to case (/L/<code> reaches the
+// same router, and the router lowercases the code), so /L/<code> is the same credential.
 function isShortLinkCodeSegment(segments, i) {
-  if (!segments[i] || segments[i - 1] !== 'l') return false;
-  return (i === 2 && segments[0] === '')
-    || (i === 4 && /^https?:$/i.test(segments[0]) && segments[1] === '');
+  if (!segments[i]) return false;
+  const isMount = (segment) => String(segment || '').toLowerCase() === 'l';
+  return (i >= 2 && segments[0] === '' && isMount(segments[1]))
+    || (i >= 4 && /^https?:$/i.test(segments[0]) && segments[1] === '' && isMount(segments[3]));
 }
 
 /**
