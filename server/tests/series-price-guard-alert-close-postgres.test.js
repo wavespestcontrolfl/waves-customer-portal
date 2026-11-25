@@ -17,15 +17,21 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
   const made = { notifications: [], invoices: [], scheduled_services: [], customers: [] };
 
   beforeAll(() => {
+    // A disposable CI database or this worktree's private QA database only: the suite writes and deletes rows.
+    const url = new URL(process.env.DATABASE_URL);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
     db = require('../models/db');
     guards = require('../services/series-price-guards');
   });
   afterAll(async () => {
-    if (made.notifications.length) await db('audit_log').where({ resource_type: 'notification' }).whereIn('resource_id', made.notifications).del();
+    if (db && made.notifications.length) await db('audit_log').where({ resource_type: 'notification' }).whereIn('resource_id', made.notifications).del();
     for (const table of ['notifications', 'invoices', 'scheduled_services', 'customers']) {
-      if (made[table].length) await db(table).whereIn('id', made[table]).del();
+      if (db && made[table].length) await db(table).whereIn('id', made[table]).del();
     }
-    await db.destroy();
+    await db?.destroy();
   }, 120000);
 
   const insert = async (table, row) => {
@@ -269,13 +275,14 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
       const s = await series({ refusedDate: null });
       const key = `series-price-guard:cancelled-root:${s.root.id}`;
       const person = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
-      // ringOnRefresh runs after the standing row was read and before it is rewritten: close it right there.
+      // standingRefresh runs after the standing row was read and before it is rewritten: close it right there.
       const doneInBetween = async () => {
         await db('notifications').where({ id: s.bell.id }).update({ done_at: new Date(), done_by: person, resolution: 'Checked' });
-        return false;
+        return null;
       };
       const result = await NotificationService().notifyAdmin('billing', 'Schedule - check a plan price', 'Not added: the Jun 3 visit.', {
-        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, refreshOnlyOpen: true, dedupeVersion: OTHER_DATE, ringOnRefresh: doneInBetween,
+        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, refreshOnlyOpen: true, dedupeVersion: OTHER_DATE,
+        ringOnRefresh: () => false, standingRefresh: doneInBetween,
         metadata: { kind: 'cancelled_root', seriesRootId: s.root.id, refusedDate: OTHER_DATE },
       });
       expect(result.deduped).toBe(false);
@@ -288,15 +295,36 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
       expect(open[0].metadata.refusedDate).toBe(OTHER_DATE);
     });
 
+    test('a Send to Claude stamp and note written after the probe survive the refresh', async () => {
+      const s = await series({ refusedDate: DATE });
+      const key = `series-price-guard:cancelled-root:${s.root.id}`;
+      const sent = { feed: 'activity', who: 'claude', severity: 'needs-you', claudeQueue: 'sent-to-claude', sentToClaude: { at: '2031-03-01T12:00:00Z', note: 'Check the plan price first' } };
+      // standingRefresh runs after the standing row was read and before it is rewritten: the stamp lands right there.
+      const handoffInBetween = async () => {
+        await db('notifications').where({ id: s.bell.id }).update({ metadata: db.raw("metadata || ?::jsonb", [JSON.stringify(sent)]) });
+        return null;
+      };
+      const result = await NotificationService().notifyAdmin('billing', 'Schedule - check a plan price', 'Not added: the Jun 3 visit.', {
+        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, refreshOnlyOpen: true, dedupeVersion: OTHER_DATE,
+        ringOnRefresh: () => false, standingRefresh: handoffInBetween,
+        metadata: { kind: 'cancelled_root', seriesRootId: s.root.id, refusedDate: OTHER_DATE, who: 'person', severity: 'needs-you' },
+      });
+      expect(result.deduped).toBe(true);
+      const row = await get(s.bell.id);
+      expect(row.metadata).toMatchObject({ ...sent, refusedDate: OTHER_DATE, dedupeVersion: OTHER_DATE });
+      expect(row.done_at).toBeNull();
+    });
+
     test('without the option the old write stands (other callers are unchanged)', async () => {
       const s = await series({ refusedDate: null });
       const key = `series-price-guard:cancelled-root:${s.root.id}`;
       const doneInBetween = async () => {
         await db('notifications').where({ id: s.bell.id }).update({ done_at: new Date(), done_by: 'someone' });
-        return false;
+        return null;
       };
       const result = await NotificationService().notifyAdmin('billing', 'Schedule - check a plan price', 'Not added: the Jun 3 visit.', {
-        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, dedupeVersion: OTHER_DATE, ringOnRefresh: doneInBetween,
+        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, dedupeVersion: OTHER_DATE,
+        ringOnRefresh: () => false, standingRefresh: doneInBetween,
         metadata: { kind: 'cancelled_root', refusedDate: OTHER_DATE },
       });
       expect(result.deduped).toBe(true);

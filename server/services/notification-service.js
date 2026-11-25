@@ -536,13 +536,26 @@ function createPlainAdmin(service, { category, title, body, createOpts, ringGate
   return callerTrx ? gated(callerTrx) : db.transaction(gated);
 }
 
+// refreshOnlyOpen: the standing row as it stands now, locked, with the metadata to merge onto it. The rewrite
+// replaces the metadata, so it must be built from this read, not the probe's: a "Send to Claude" stamp or note
+// written after the probe survives. null when a person closed the row since the probe.
+async function lockOpenStandingRow(trx, existing, useMeta) {
+  const current = await trx('notifications').where({ id: existing.id }).forUpdate().first();
+  if (!current || current.done_at != null) return null;
+  const existingMeta = typeof current.metadata === 'string' ? JSON.parse(current.metadata) : (current.metadata || {});
+  return { existing: current, existingMeta, useMeta: keepSentToClaude(current, existingMeta, useMeta) };
+}
+
 // notifyAdmin's refresh of a standing keyed row (the refreshOnDedupe branch): decides the ring, merges the
 // metadata and rewrites the row, returning the write's result. refreshOnlyOpen (opt-in, with dedupeOpenOnly): the
 // rewrite lands only while the row is still open (done_at IS NULL). A person's Done between the probe and this
 // write would otherwise take the new content onto a closed row and leave no open bell; with no row written it
 // returns null and the caller inserts a fresh one, as it does when no standing row exists.
 async function refreshStandingRow(trx, ctx) {
-  const { existing, existingMeta, useMeta, adjusted, ringOnRefresh, bumpOnRefresh, refreshOnlyOpen } = ctx;
+  const { adjusted, ringOnRefresh, bumpOnRefresh, refreshOnlyOpen } = ctx;
+  const row = refreshOnlyOpen ? await lockOpenStandingRow(trx, ctx.existing, ctx.useMeta) : ctx;
+  if (!row) return null;
+  const { existing, existingMeta, useMeta } = row;
   const { nextTitle, nextBody, nextDetail, nextLink, detailChanged, sameText } = ctx;
   // A row that newly enters the owner audience (engineering/fyi ->
   // owner) is news to the owner even at an equal count: it may
