@@ -27,18 +27,23 @@
  * Counts are per line, so a signature split over two lines is not seen.
  * False-positive shapes this skips on purpose:
  *   - addDay(totals, d), addedDays, addMonthsSameDay: not a day step, the name
- *     must be add<Qualifier>Days.
- *   - const { addETDays } = require(...) and const addETDays = require(...):
- *     an import, not a copy; the three helper names are never counted.
- *   - windowMs: 24 * 60 * 60 * 1000, new Date(Date.now() - 7 * 86400000) and
- *     other elapsed windows from now: a day-ms literal counts only on a line
- *     with no Date.now() that builds a Date
- *     (new Date(, Date.parse(, Date.UTC(, toISOString(, etDateString(,
- *     parseETDateTime() or as a one-day constant (const DAY_MS = 86400000;).
+ *     must be add/plus<Qualifier>Days.
+ *   - const { addETDays } = require(...) and const addDays = require(...): an
+ *     import, not a copy. A local DEFINITION counts whatever its name is, even
+ *     one called addETDays: the real helpers live in the exempt home files.
+ *   - windowMs: 24 * 60 * 60 * 1000 and new Date(Date.now() - 7 * 86400000):
+ *     an elapsed window from now is not calendar math. It stays exempt only
+ *     while the line never turns the result into a calendar day: a day-ms
+ *     step on a line with etDateString(, dateOnlyString(,
+ *     toISOString().slice(0, 10), Date.parse(, Date.UTC(, parseETDateTime( or a
+ *     T12:00 anchor counts even when Date.now() is on the same line.
  *   - /^\d{4}-\d{2}-\d{2}T.../ and other timestamp patterns: a timestamp is not
  *     a date-only value; only a pattern that is the whole date counts.
  * Shapes it still counts (so the baseline holds them): new Date(x.getTime() +
  * n * 86400000) rolling windows, one-day TTL constants, and setUTCDate week math.
+ *
+ * The matcher tables at the bottom (shapes that must count, shapes that must
+ * not) run on sample strings, so a change to a pattern is checked there first.
  *
  * Set DATE_ARITHMETIC_WRITE=<file> to write the current counts there as baseline JSON.
  */
@@ -62,21 +67,38 @@ const USE = [
   'addStaffWorkDays (server/utils/staff-time-work-date.js)',
   'or dateOnlyString / validDateOnly (server/utils/date-only.js).',
 ].join(' ');
-const HELPER_NAMES = new Set(['addETDays', 'addETBusinessDays', 'addStaffWorkDays']);
-
 // A one-day constant: const DAY_MS = 86400000;  or  = 24 * 60 * 60 * 1000;
-const ONE_DAY_MS = '(?:86400000|86_400_000|864e5|24 *\\* *60 *\\* *60 *\\* *1000|60 *\\* *60 *\\* *24 *\\* *1000|1000 *\\* *60 *\\* *60 *\\* *24)';
-const ANY_DAY_MS = new RegExp(`(?<![\\w.])${ONE_DAY_MS}(?![\\w.])|1000 *\\* *86400\\b|86400 *\\* *1000\\b`);
-const DAY_MS_CONSTANT = new RegExp(`\\b(?:const|let|var)\\s+\\w+\\s*=\\s*${ONE_DAY_MS}\\s*;`);
+const ONE_DAY_MS = '(?:86400000|86_400_000|864e5|8\\.64e7|24 *\\* *60 *\\* *60 *\\* *1000|60 *\\* *60 *\\* *24 *\\* *1000|1000 *\\* *60 *\\* *60 *\\* *24|60 *\\* *24 *\\* *60 *\\* *1000|24 *\\* *3600 *\\* *1000|3600 *\\* *24 *\\* *1000|1000 *\\* *3600 *\\* *24|86400 *\\* *1000|1000 *\\* *86400)';
+const ANY_DAY_MS = new RegExp(`(?<![\\w.])${ONE_DAY_MS}(?![\\w.])`);
+const DAY_MS_CONSTANT = new RegExp(`\\b(?:const|let|var)\\s+\\w+\\s*=\\s*${ONE_DAY_MS}\\s*[;,]`);
+// n * DAY_MS written with a named constant (local or imported)
+const DAY_MS_NAME = /\b(?:(?:[A-Z][A-Z0-9_]*_)?DAY_?(?:MS|MILLIS|MILLISECONDS)|(?:MS|MILLIS)_(?:PER|IN)_DAY|ONE_DAY\w*|dayMs|DAY_IN_MS)\b/;
 const DATE_MACHINERY = /new Date\(|Date\.(?:parse|UTC)\(|\.toISOString\(|etDateString\(|parseETDateTime\(/;
+// The line turns the step into a calendar day, or starts from a calendar day:
+// a Date.now() elsewhere on the line does not make it an elapsed window.
+const CALENDAR_DAY_USE = /etDateString\(|dateOnlyString\(|\.toISOString\(\)\s*\.(?:slice|substring|split)\(|\.slice\(\s*0\s*,\s*10\s*\)|Date\.(?:parse|UTC)\(|parseETDateTime\(|T\d{2}:\d{2}/;
+
+const DAY_STEP_NAME = '(?:add|plus)(?:[A-Z]\\w*)?Days(?:[A-Z]\\w*)?';
+// function addDays( | const addDays = | x.addDays = ( | addDays: ( | addDays(a, b) {
+const ADD_DAYS_DEFINITION = new RegExp([
+  `\\bfunction\\s+(${DAY_STEP_NAME})\\b`,
+  `\\b(?:const|let|var)\\s+(${DAY_STEP_NAME})\\b(?!\\s*=\\s*require)`,
+  `\\.(${DAY_STEP_NAME})\\s*=\\s*(?:async\\s+)?(?:function\\b|\\(|\\w+\\s*=>)`,
+  `^\\s*(${DAY_STEP_NAME})\\s*:\\s*(?:async\\s+)?(?:function\\b|\\(|\\w+\\s*=>)`,
+  `^\\s*(?:async\\s+)?(${DAY_STEP_NAME})\\s*\\([^)]*\\)\\s*\\{`,
+].join('|'), 'g');
+
+// \d{4}-\d{2}-\d{2} or [0-9]{4}-[0-9]{2}-[0-9]{2}, groups optional, whole pattern is the date
+const DATE_ONLY_LITERAL = /\/\^\(?(?:\\d|\[0-9\])\{4\}\)?-\(?(?:\\d|\[0-9\])\{2\}\)?-\(?(?:\\d|\[0-9\])\{2\}\)?\$?\/[a-z]*/g;
+// the same pattern inside a string: new RegExp('^\\d{4}-\\d{2}-\\d{2}$')
+const DATE_ONLY_STRING = /RegExp\(\s*['"`]\^\(?(?:\\\\d|\[0-9\])\{4\}\)?-\(?(?:\\\\d|\[0-9\])\{2\}\)?-\(?(?:\\\\d|\[0-9\])\{2\}\)?\$?['"`]/g;
+const DATE_ONLY_REGEX = new RegExp(`${DATE_ONLY_LITERAL.source}|${DATE_ONLY_STRING.source}`, 'g');
 
 const RULES = [
   {
     id: 'add-days-function',
-    // function addDays( / const addDays = / const addDateStringDays = ...
-    countLine: (rel, line) => [...line.matchAll(/(?:\bfunction\s+|\b(?:const|let|var)\s+)(add(?:[A-Z]\w*)?Days)\b(?!\s*=\s*require)/g)]
-      .filter((m) => !HELPER_NAMES.has(m[1])).length,
-    use: `Do not write your own addDays. ${USE}`,
+    countLine: (rel, line) => [...line.matchAll(ADD_DAYS_DEFINITION)].length,
+    use: `Do not write your own addDays, even one named addETDays. ${USE}`,
   },
   {
     id: 'calendar-day-mutation',
@@ -86,14 +108,20 @@ const RULES = [
   },
   {
     id: 'day-ms-math',
-    // n * 86400000 on a line that builds or reads a Date, or a one-day constant
-    countLine: (rel, line) => ((ANY_DAY_MS.test(line) && DATE_MACHINERY.test(line) && !/Date\.now\(\)/.test(line)) || DAY_MS_CONSTANT.test(line) ? 1 : 0),
+    // n * 86400000 (or n * DAY_MS) on a line that builds a Date, or a one-day constant.
+    // A Date.now() anchor exempts the line only when it never reaches a calendar day.
+    countLine: (rel, line) => {
+      if (DAY_MS_CONSTANT.test(line)) return 1;
+      if (!ANY_DAY_MS.test(line) && !DAY_MS_NAME.test(line)) return 0;
+      if (CALENDAR_DAY_USE.test(line)) return 1;
+      return DATE_MACHINERY.test(line) && !/Date\.now\(\)/.test(line) ? 1 : 0;
+    },
     use: `Do not add or subtract n * 86400000 (24 * 60 * 60 * 1000) to move a calendar day; a day is 23 or 25 hours across a DST seam. ${USE}`,
   },
   {
     id: 'date-only-regex',
-    // /^\d{4}-\d{2}-\d{2}$/, /^(\d{4}-\d{2}-\d{2})/ : the whole pattern is the date
-    signature: /\/\^\(?\\d\{4\}-\\d\{2\}-\\d\{2\}\)?\$?\/[a-z]*/g,
+    // /^\d{4}-\d{2}-\d{2}$/, /^(\d{4}-\d{2}-\d{2})/, [0-9] forms, new RegExp('^\\d{4}-...')
+    signature: DATE_ONLY_REGEX,
     use: `Do not write your own YYYY-MM-DD check. Use validDateOnly or dateOnlyString (server/utils/date-only.js), or validCalendarDate (server/utils/datetime-et.js). ${USE}`,
   },
 ];
@@ -109,10 +137,27 @@ function walk(dir, out = []) {
   return out;
 }
 
-const codeLines = (source) => source
-  .split('\n')
-  .filter((line) => !/^\s*(?:\/\/|\/?\*)/.test(line))
-  .map((line) => line.replace(/\s\/\/\s.*$/, ''));
+// Drops comments: whole // lines, /* ... */ blocks (a line that starts one, up
+// to the line that ends it) and trailing ` // note` text. A continuation line
+// that starts with `* 86400000` is code, not a JSDoc line, so it is kept.
+function codeLines(source) {
+  const out = [];
+  let inBlock = false;
+  for (const raw of source.split('\n')) {
+    let line = raw;
+    if (inBlock) {
+      const end = line.indexOf('*/');
+      if (end < 0) continue;
+      line = line.slice(end + 2);
+      inBlock = false;
+    }
+    line = line.replace(/\/\*.*?\*\//g, ' ');
+    if (/^\s*\/\*/.test(line)) { inBlock = true; continue; }
+    if (/^\s*\/\//.test(line)) continue;
+    out.push(line.replace(/\s\/\/\s.*$/, ''));
+  }
+  return out;
+}
 const signatureCount = (signature) => (rel, line) => (line.match(signature) || []).length;
 
 const SOURCES = walk(SERVER_ROOT).map((file) => ({
@@ -175,5 +220,109 @@ describe('calendar-day arithmetic stays in the shared date helpers', () => {
       .filter((name) => !exported('utils/date-only.js').includes(name))).toEqual([]);
     expect(['addStaffWorkDays']
       .filter((name) => !exported('utils/staff-time-work-date.js').includes(name))).toEqual([]);
+  });
+});
+
+// Matcher tables: sample code against each rule. A change to a pattern edits
+// these rows first; the repo scan above then only reports real files.
+const countSample = (id, text) => {
+  const rule = RULES.find((r) => r.id === id);
+  const countLine = rule.countLine || signatureCount(rule.signature);
+  return codeLines(text).reduce((sum, line) => sum + countLine('sample.js', line), 0);
+};
+
+const MUST_COUNT = [
+  // add-days-function: any local definition, whatever its name or form
+  ['add-days-function', 'function addDays(d, n) { return d; }'],
+  ['add-days-function', 'const addDays = (day, n) => day;'],
+  ['add-days-function', 'const addDateStringDays = (v, n) => v;'],
+  ['add-days-function', 'const addBusinessDays = (v, n) => v;'],
+  ['add-days-function', 'function addETDays(date, days) { return date; }'],
+  ['add-days-function', 'const addETDays = (date, days) => new Date(date);'],
+  ['add-days-function', 'const addStaffWorkDays = (day, n) => day;'],
+  ['add-days-function', 'function addStaffWorkDays(day, n) {'],
+  ['add-days-function', 'module.exports.addDays = (d, n) => d;'],
+  ['add-days-function', '  addDays: (d, n) => d,'],
+  ['add-days-function', '  addDays(d, n) {'],
+  ['add-days-function', 'function plusDays(d, n) {'],
+  // calendar-day-mutation
+  ['calendar-day-mutation', 'd.setDate(d.getDate() + 1);'],
+  ['calendar-day-mutation', 'd.setUTCDate(d.getUTCDate() - n);'],
+  ['calendar-day-mutation', 'const x = new Date(s); x.setDate(start.getDate() + i);'],
+  // day-ms-math
+  ['day-ms-math', "const next = new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000);"],
+  ['day-ms-math', 'const DAY_MS = 86400000;'],
+  ['day-ms-math', 'const DAY_MS = 24 * 60 * 60 * 1000;'],
+  ['day-ms-math', 'return new Date(d.getTime() + n * 24 * 60 * 60 * 1000);'],
+  ['day-ms-math', 'const t = new Date(base.getTime() + n * DAY_MS);'],
+  ['day-ms-math', 'const t = new Date(base.getTime() + n * 24 * 3600 * 1000);'],
+  // Date.now() on the line does not exempt a step that lands on a calendar day
+  ['day-ms-math', 'const tomorrow = etDateString(new Date(Date.now() + 86400000));'],
+  ['day-ms-math', 'const d = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);'],
+  ['day-ms-math', 'const d = dateOnlyString(new Date(Date.now() + 2 * 24 * 60 * 60 * 1000));'],
+  ['day-ms-math', "const d = new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000), now = Date.now();"],
+  ['day-ms-math', 'const d = etDateString(new Date(Date.now() + 2 * DAY_MS));'],
+  // date-only-regex
+  ['date-only-regex', 'if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(v)) return null;'],
+  ['date-only-regex', 'const m = /^(\\d{4}-\\d{2}-\\d{2})/.exec(v);'],
+  ['date-only-regex', 'const m = /^\\d{4}-\\d{2}-\\d{2}/.test(v);'],
+  ['date-only-regex', 'const m = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(v);'],
+  ['date-only-regex', 'const m = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(v);'],
+  ['date-only-regex', "const re = new RegExp('^\\\\d{4}-\\\\d{2}-\\\\d{2}$');"],
+];
+
+const MUST_NOT_COUNT = [
+  // add-days-function: imports, other names, comments
+  ['add-days-function', "const { addETDays, etDateString } = require('../utils/datetime-et');"],
+  ['add-days-function', "const addETDays = require('../utils/datetime-et').addETDays;"],
+  ['add-days-function', "const { addStaffWorkDays } = require('../utils/staff-time-work-date');"],
+  ['add-days-function', "const addDays = require('date-fns/addDays');"],
+  ['add-days-function', 'const next = addETDays(date, 3);'],
+  ['add-days-function', 'function addDay(totals, d) {'],
+  ['add-days-function', 'let addedDays = new Map();'],
+  ['add-days-function', 'const shiftDays = (rows) => rows.map((r) => r.workDate);'],
+  ['add-days-function', 'function addMonthsSameDay(value, months) {'],
+  ['add-days-function', '// function addDays(d, n) {'],
+  ['add-days-function', '/**\n * const addDays = (d, n) => d;\n */'],
+  // calendar-day-mutation
+  ['calendar-day-mutation', 'd.setDate(15);'],
+  ['calendar-day-mutation', 'const day = d.getDate() + 1;'],
+  ['calendar-day-mutation', '// d.setDate(d.getDate() + 1);'],
+  // day-ms-math: elapsed windows from now and bare durations
+  ['day-ms-math', 'windowMs: 24 * 60 * 60 * 1000, // 24 hours'],
+  ['day-ms-math', 'const since = new Date(Date.now() - 7 * 86400000);'],
+  ['day-ms-math', 'const expiresAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);'],
+  ['day-ms-math', 'const stale = Date.now() - row.at > 86400000;'],
+  ['day-ms-math', 'const ttl = 7 * 24 * 60 * 60 * 1000;'],
+  ['day-ms-math', 'const ms = 86400;'],
+  ['day-ms-math', 'const big = 1186400000;'],
+  ['day-ms-math', '// new Date(x.getTime() + 86400000)'],
+  ['day-ms-math', 'const iso = new Date(Date.now() + 86400000).toISOString();'],
+  // date-only-regex: timestamps and unanchored scrubbing
+  ['date-only-regex', 'const re = /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}$/;'],
+  ['date-only-regex', 'const re = /^\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}/;'],
+  ['date-only-regex', "s.replace(/\\d{4}-\\d{2}-\\d{2}/g, ' ');"],
+  ['date-only-regex', 'const re = /^\\d{4}-\\d{2}$/;'],
+  ['date-only-regex', "const ok = validDateOnly(value);"],
+];
+
+describe('matcher tables', () => {
+  test.each(MUST_COUNT)('%s counts: %s', (id, sample) => {
+    expect(countSample(id, sample)).toBeGreaterThan(0);
+  });
+
+  test.each(MUST_NOT_COUNT)('%s skips: %s', (id, sample) => {
+    expect(countSample(id, sample)).toBe(0);
+  });
+
+  test('a continuation line that starts with * is code, a JSDoc line is not', () => {
+    expect(codeLines('const t = a +\n  n\n  * 86400000;')).toContain('  * 86400000;');
+    expect(codeLines('/**\n * adds 86400000\n */\nconst x = 1;').filter(Boolean)).toEqual(['const x = 1;']);
+    expect(codeLines('const x = 1; /* 86400000 */ const y = 2;').join('')).not.toContain('86400000');
+  });
+
+  test('a local addETDays definition counts and a shared import passes', () => {
+    expect(countSample('add-days-function', 'function addETDays(d, n) {')).toBe(1);
+    expect(countSample('add-days-function', "const { addETDays } = require('../utils/datetime-et');")).toBe(0);
   });
 });
