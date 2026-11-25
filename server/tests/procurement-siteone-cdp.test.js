@@ -30,7 +30,7 @@ const el = (spec = {}) => ({ visible: true, text: '', attrs: {}, value: '', chec
 
 function makeWorld(over = {}) {
   const w = {
-    url: 'about:blank', clicks: [], fills: [], gotos: [], cart: [], po: '', poDraft: null, poSticky: false, bodyThrows: false, entrySeq: 0, flipOnRead: 0, flipCount: 0, removeNoop: false, step: 'order-type', radioChecked: false,
+    url: 'about:blank', clicks: [], fills: [], gotos: [], cart: [], po: '', handleClicks: [], locatorPlaceClicks: 0, placeBtns: null, tenderReads: 0, onTenderRead: null, signedOutHeader: false, signInText: 'Sign In', emptyText: 'Your cart is empty.', hideEmptyState: false, poDraft: null, poSticky: false, bodyThrows: false, entrySeq: 0, flipOnRead: 0, flipCount: 0, removeNoop: false, step: 'order-type', radioChecked: false,
     signedOut: false, signInFails: false, identifierValue: 'owner-prefilled', closeCalls: 0, pageCloseCalls: 0,
     brandText: `CSI-PEST : ${SKU}`, formSku: SKU, formStore: '238', uomRows: [], searchHits: 1,
     pickupClass: 'cart-top-fulfillment-method__tile fullfillment-pickup fullfilment-select', pickupText: 'Pickup #238,5115 Lena Rd',
@@ -66,7 +66,8 @@ function screens(w) {
   const cart = {
     [S.cartRow]: w.cartRowEls(),
     [S.pickupTile]: [el({ attrs: { class: w.pickupClass }, text: w.pickupText })],
-    [S.cartTotal]: [el({ text: w.cartTotalText })],
+    [S.cartTotal]: w.cart.length ? [el({ text: w.cartTotalText })] : [], // not shown on an empty cart (walked live)
+    [S.cartEmpty]: w.cart.length === 0 && !w.hideEmptyState ? [el({ text: w.emptyText })] : [],
     [S.accountNode]: w.hideAccount ? [] : [el({ text: w.accountText, attrs: w.accountAttr ? { 'data-account-number': w.accountAttr } : {} })],
     [S.continueCheckout]: [el({ name: 'continue-checkout', onClick: () => { w.url = w.checkoutUrl || 'https://www.siteone.com/en/checkout/multi/siteOne-checkout'; if (w.signOutAfter === 'continue') w.signedOut = true; } })],
   };
@@ -77,6 +78,7 @@ function screens(w) {
     [S.reviewButton]: [el({ name: 'review-your-order', onClick: () => { go('/en/checkout/multi/order-summary/view')(); if (w.signOutAfter === 'review') w.signedOut = true; } })],
   } : {};
   const checkout = {
+    [S.accountNode]: w.hideAccount ? [] : [el({ text: w.accountText })],
     [S.orderTypeForm]: [el({ visible: false })],
     [S.pickupLocation]: [el({ text: w.checkoutLocText })],
     [S.checkoutStoreId]: [el({ visible: false, value: '238' })],
@@ -90,15 +92,17 @@ function screens(w) {
     } })],
     ...payment,
   };
+  // The SAME element objects on every read, so a handle can be proven to be the same element.
+  const placeBtns = () => { if (!w.placeBtns) w.placeBtns = Array.from({ length: w.placeButtons }, placeBtn); return w.placeBtns; };
   const placeBtn = () => el({ name: 'place-order', text: 'Place Your Order', onClick: () => { w.placed += 1; if (w.placeClickThrows) throw new Error('Target page closed'); if (!w.noConfirmation) { w.url = w.confirmUrl || 'https://www.siteone.com/en/checkout/orderConfirmation/7700123'; } } });
   const review = {
     [S.body]: [el({ text: w.reviewBody, throws: w.bodyThrows })],
-    [S.reviewTender]: w.hideTender ? [] : [el({ text: w.reviewTenderText })],
+    [S.reviewTender]: w.hideTender ? [] : [el({ text: w.reviewTenderText, onRead: () => { w.tenderReads += 1; if (w.onTenderRead) w.onTenderRead(w.tenderReads, w); } })],
     [S.reviewPickup]: [el({ text: w.reviewPickupText })],
     [S.reviewAccount]: w.hideReviewAccount ? [] : [el({ text: w.reviewAccountText })],
     [S.reviewItemCode]: [el({ text: w.reviewCode, children: { [S.reviewItemBlock]: [el({ children: { [S.reviewQty]: w.reviewQtyNode ? [el({ text: w.reviewQtyText })] : [] } })] } })],
     [S.reviewTotal]: [el({ text: w.reviewTotalText })],
-    [S.placeOrder]: Array.from({ length: w.placeButtons }, placeBtn),
+    [S.placeOrder]: placeBtns(),
   };
   const confirmation = { [S.body]: [el({ text: w.confirmationBody })], ...(w.confirmationField ? { [S.confirmationNumber]: [el({ text: w.confirmationBody })] } : {}), [S.heading]: [el({ text: 'Order Received' })] };
   const product = {
@@ -129,10 +133,19 @@ function wrap(spec) {
     isVisible: async () => spec.visible,
     isEnabled: async () => spec.enabled,
     isChecked: async () => spec.checked,
-    innerText: async () => { if (spec.throws) throw new Error('detached'); return spec.text; },
+    innerText: async () => { if (spec.onRead) spec.onRead(); if (spec.throws) throw new Error('detached'); return spec.text; },
     inputValue: async () => spec.value,
     getAttribute: async (name) => (name in spec.attrs ? spec.attrs[name] : null),
-    click: async () => { if (spec.name) spec.world?.clicks.push(spec.name); if (spec.onClick) spec.onClick(); },
+    click: async () => { if (spec.name === 'place-order') spec.world.locatorPlaceClicks += 1; if (spec.name) spec.world?.clicks.push(spec.name); if (spec.onClick) spec.onClick(); },
+    elementHandle: async () => {
+      spec.dom = spec.dom || { isConnected: true };
+      return {
+        dom: spec.dom,
+        isVisible: async () => spec.visible,
+        isEnabled: async () => spec.enabled,
+        click: async (opts) => { spec.world.handleClicks.push(opts); if (spec.name) spec.world.clicks.push(spec.name); if (spec.onClick) spec.onClick(); },
+      };
+    },
     fill: async (v) => { if (spec.onFill) spec.onFill(v); },
     locator: (sel) => collection(spec.children[sel] || []),
   };
@@ -147,7 +160,9 @@ function makeBrowser(w) {
     let path = '/';
     try { path = new URL(w.url).pathname; } catch { path = '/'; }
     if (path.startsWith('/en/checkout/orderConfirmation/') || (w.confirmEverywhere && !byPath[path])) return tagAll(confirmation);
-    return tagAll(byPath[path] || {});
+    const screen = tagAll(byPath[path] || {});
+    if (w.signedOutHeader) screen[S.signInMarker] = tag([el({ text: w.signInText })]);
+    return screen;
   };
   const page = {
     url: () => (w.signedOut && w.signInUrl ? w.signInUrl : w.url),
@@ -162,6 +177,7 @@ function makeBrowser(w) {
       return collection(current()[sel] || []);
     },
     close: async () => { w.pageCloseCalls += 1; w.closeOrder.push('page'); },
+    evaluate: async (fn, arg) => fn(arg.map((h) => h.dom)),
   };
   const browser = {
     contexts: () => [{ newPage: async () => page }],
@@ -696,7 +712,11 @@ test('R5 account: the signed-in account must be exactly the approved one, before
   expect(wrongAtReview.error.refuse).toBe('account_mismatch');
   const noReviewAccount = await run({ hideReviewAccount: true });
   expect(noReviewAccount.error.refuse).toBe('account_unreadable');
-  for (const r of [wrongAtReview, noReviewAccount]) { expect(r.w.placed).toBe(0); expect(r.w.cart).toEqual([]); expectSafe(r.w); }
+  expect(noReviewAccount.w.cart).toEqual([]);
+  // After an account mismatch the session is not the approved account: cleanup touches nothing.
+  expect(wrongAtReview.w.cart).toHaveLength(1);
+  expect(wrongAtReview.error.evidence.cart_left_for_owner).toBe(true);
+  for (const r of [wrongAtReview, noReviewAccount]) { expect(r.w.placed).toBe(0); expectSafe(r.w); }
 });
 
 test('R5 cleanup: no verified cart entry id → never remove; the remove locator is bound to the entry', async () => {
@@ -732,4 +752,99 @@ test('R5 sign-out after any checkout step is run-level (the claim is released), 
   const viaPath = await run({ signOutAfter: 'continue', checkoutUrl: 'https://www.siteone.com/en/login' });
   expect(viaPath.error.runLevel).toBe(true);
   expect(viaPath.w.placed).toBe(0);
+});
+
+// ---- round 6 -----------------------------------------------------------------------
+
+test('R6 account: the WHOLE token incl. any suffix must equal the approved account string', async () => {
+  for (const accountText of ['Signed in as account 2330739-01', 'Signed in as account 2330739 - 01', 'Signed in as account 2330739.01', 'Account 2330739-', 'Accounts 2330739 2330739-01']) {
+    const r = await run({ accountText });
+    expect(r.error.refuse).toBe('account_mismatch');
+    expect(r.w.clicks).toEqual([]);
+    expectSafe(r.w);
+  }
+  expect((await run({ accountText: 'Signed in as account 2330739' })).result.dryRun).toBe(false);
+  // A short suffix on the final review page: refuse, nothing clicked, cleanup touches nothing.
+  const suffix = await run({}, { onCall: (n, w) => { if (n === 3) w.reviewAccountText = 'Bill to account 2330739-01'; } });
+  expect(suffix.error.refuse).toBe('account_mismatch');
+  expect(suffix.w.placed).toBe(0);
+  expect(suffix.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
+  expectSafe(suffix.w);
+});
+
+test('R6 click: the click goes to the element handle that passed review, with force / noWaitAfter / 1 s, never a locator click', async () => {
+  const ok = await run({});
+  expect(ok.result.externalOrderNumber).toBe('7700123');
+  expect(ok.w.handleClicks).toEqual([{ force: true, noWaitAfter: true, timeout: 1000 }]);
+  expect(ok.w.locatorPlaceClicks).toBe(0);
+  // Replaced between resolving the handle and the final re-read.
+  const replaced = await run({ onTenderRead: (n, w) => { if (n === 2) w.placeBtns = null; } });
+  expect(replaced.error.refuse).toBe('place_button_replaced');
+  // Detached after the re-read started.
+  const detached = await run({ onTenderRead: (n, w) => { if (n === 2) w.placeBtns[0].dom.isConnected = false; } });
+  expect(detached.error.refuse).toBe('place_button_replaced');
+  // Disabled by the re-read.
+  const disabled = await run({ onTenderRead: (n, w) => { if (n === 2) w.placeBtns[0].enabled = false; } });
+  expect(disabled.error.refuse).toBe('place_button_ambiguous');
+  for (const r of [replaced, detached, disabled]) {
+    expect(r.w.handleClicks).toEqual([]);
+    expect(r.w.placed).toBe(0);
+    expect(r.w.cart).toEqual([]); // not an account problem: cleanup runs
+    expectSafe(r.w);
+  }
+});
+
+test('R6 cleanup: the approved account is proven on each cleanup page, else the cart and PO are left for the owner', async () => {
+  const refuse = [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }];
+  const switched = await run({}, { args: { poNumber: 'PO-6' }, verdicts: refuse, onCall: (n, w) => { if (n === 2) w.accountText = 'Signed in as account 5550001'; } });
+  expect(switched.error.refuse).toBe('over_monthly_cap');
+  expect(switched.w.cart).toHaveLength(1);
+  expect(switched.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
+  expect(switched.w.po).toBe('PO-6');
+  expect(switched.error.evidence).toMatchObject({ cart_left_for_owner: true, po_left_for_owner: true });
+  expect(switched.error.evidence.poCleared).toBeUndefined();
+  const unreadable = await run({}, { verdicts: refuse, onCall: (n, w) => { if (n === 2) w.hideAccount = true; } });
+  expect(unreadable.w.cart).toHaveLength(1);
+  expect(unreadable.error.evidence.cart_left_for_owner).toBe(true);
+  // An account mismatch refusal runs no cleanup page at all.
+  const mismatch = await run({}, { args: { poNumber: 'PO-6' }, onCall: (n, w) => { if (n === 3) w.reviewAccountText = 'Bill to account 5550001'; } });
+  expect(mismatch.error.refuse).toBe('account_mismatch');
+  expect(mismatch.w.po).toBe('PO-6');
+  expect(mismatch.w.cart).toHaveLength(1);
+  expect(mismatch.error.evidence).toMatchObject({ cart_left_for_owner: true, po_left_for_owner: true });
+  const after = mismatch.w.gotos.slice(-1)[0];
+  expect(after).toBeDefined();
+  expect(mismatch.w.clicks.filter((c) => c === 'order-type-submit')).toHaveLength(1); // no PO-clearing submit
+  for (const r of [switched, unreadable, mismatch]) expectSafe(r.w);
+});
+
+test('R6 empty cart: positive evidence is required (the cart\'s own empty state), else cart_state_unreadable before anything is added', async () => {
+  for (const over of [{ hideEmptyState: true }, { emptyText: 'Welcome back' }]) {
+    const r = await run(over);
+    expect(r.error.refuse).toBe('cart_state_unreadable');
+    expect(r.w.clicks).toEqual([]);
+    expect(r.w.cart).toEqual([]);
+    expectSafe(r.w);
+  }
+  expect((await run({})).result.dryRun).toBe(false);
+  expect((await run({ cart: [{ sku: 'PHONE-APP-1', qty: 3 }] })).error.refuse).toBe('cart_not_empty');
+});
+
+test('R6 sign-out marker: a shown header "Sign In" (no redirect, no Okta box) is run-level, checked before the account read', async () => {
+  const MESSAGE = 'SiteOne signed Chrome out — sign in to siteone.com in Chrome on the Mac';
+  // The account node cannot be read while signed out: this must NOT become account_unreadable.
+  const out = await run({ signedOutHeader: true, hideAccount: true });
+  expect(out.error.runLevel).toBe(true);
+  expect(out.error.message).toBe(MESSAGE);
+  expect(out.error.refuse).toBeUndefined();
+  expect(out.w.clicks).toEqual([]);
+  expectSafe(out.w);
+  // Only the exact text counts.
+  for (const signInText of ['Sign In Now', 'sign in', 'My Account']) {
+    expect((await run({ signedOutHeader: true, signInText })).result.dryRun).toBe(false);
+  }
+  // Signed out in the middle of checkout: run-level, claim released.
+  const mid = await run({}, { onCall: (n, w) => { if (n === 1) w.signedOutHeader = true; } });
+  expect(mid.error.runLevel).toBe(true);
+  expect(mid.w.placed).toBe(0);
 });
