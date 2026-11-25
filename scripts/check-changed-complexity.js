@@ -40,7 +40,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const {
   HINT, WARN_NOTE, functionName, functionOwner, isLintable, parseDiffRanges, parseDiffOldPaths, violationsForFile,
-  baseScoreMap, classifyViolations, countAnonymous, formatViolation,
+  baseScoreMap, duplicateKeys, assertParsed, classifyViolations, countAnonymous, formatViolation,
 } = require('./lib/changed-complexity');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -132,9 +132,10 @@ async function main() {
   const fails = [];
   const warns = [];
   let linted = 0;
-  const lint = async (source, abs) => {
+  const lint = async (source, abs, label) => {
     const results = await eslint.lintText(source, { filePath: abs, warnIgnored: false });
     if (!results.length) return null;
+    assertParsed(results[0], label);
     return { messages: results[0].messages, fns: spansByFile.get(abs) || [] };
   };
   for (const [file, hunks] of changed) {
@@ -142,7 +143,7 @@ async function main() {
     try { source = git(['show', `${opts.head}:${file}`]); } catch { continue; }
     const abs = path.join(REPO_ROOT, file);
     try {
-      const head = await lint(source, abs);
+      const head = await lint(source, abs, file);
       if (!head) continue;
       linted += 1;
       const found = violationsForFile(file, head.messages, head.fns, hunks);
@@ -152,11 +153,12 @@ async function main() {
       if (oldPath) {
         let baseSource = null;
         try { baseSource = git(['show', `${mergeBase}:${oldPath}`]); } catch { baseSource = null; }
-        const base = baseSource === null ? null : await lint(baseSource, path.join(REPO_ROOT, oldPath));
+        const base = baseSource === null ? null : await lint(baseSource, path.join(REPO_ROOT, oldPath), `${oldPath} at base`);
         if (base) {
           baseInfo = {
             scores: baseScoreMap(oldPath, base.messages, base.fns),
             anonMatches: countAnonymous(base.fns) === countAnonymous(head.fns),
+            dups: duplicateKeys(base.fns),
           };
         }
       }
@@ -164,7 +166,7 @@ async function main() {
       fails.push(...fail);
       warns.push(...warn);
     } catch (e) {
-      console.error(`[changed-complexity] ESLint failed on ${file}: ${e.message}`);
+      console.error(`[changed-complexity] cannot check ${file}: ${e.message}`);
       return 2;
     }
   }

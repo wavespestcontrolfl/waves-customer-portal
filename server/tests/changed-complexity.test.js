@@ -4,8 +4,10 @@ const {
   parseDiffRanges, isLintable, rangesTouch, findFunctionForMessage,
   parseComplexityMessage, parseDepthMessage, violationsForFile, formatViolation, HINT, WARN_NOTE,
   parseDiffOldPaths, keyFunctions, countAnonymous, baseScoreMap, classifyViolations, flaggedItems,
-  fullyChanged, functionName, functionOwner,
+  fullyChanged, functionName, functionOwner, assertParsed, duplicateKeys,
 } = require('../../scripts/lib/changed-complexity');
+const fs = require('fs');
+const path = require('path');
 const { report, parseArgs } = require('../../scripts/check-changed-complexity');
 
 const DIFF = [
@@ -420,5 +422,68 @@ describe('function names and owners', () => {
     const y = { name: 'run', owner: 'A', headLine: 9, headColumn: 0 };
     keyFunctions([y, x]);
     expect([x.key, y.key]).toEqual(['A::run#1', 'A::run#2']);
+  });
+});
+
+// ── Audit round: base ref, parse errors, duplicate keys ─────────────────────
+describe('pre-push hook base', () => {
+  test('the complexity report uses BASE (CODEX_REVIEW_BASE aware), never the migration guard base', () => {
+    const hook = fs.readFileSync(path.join(__dirname, '../../scripts/hooks/pre-push'), 'utf8');
+    const start = hook.indexOf('# ── Changed-function complexity report');
+    const block = hook.slice(start, hook.indexOf('# ── Round log', start));
+    expect(block).toContain('git rev-parse --verify "$BASE"');
+    expect(block).toContain('--base "$BASE"');
+    expect(block).not.toContain('GUARD_BASE');
+    expect(hook).toMatch(/^BASE="\$\{CODEX_REVIEW_BASE:-origin\/main\}"/m);
+  });
+});
+
+describe('assertParsed', () => {
+  test('a file ESLint could not parse throws and names the file', () => {
+    const result = { fatalErrorCount: 1, messages: [{ fatal: true, line: 7, message: 'Parsing error: Unexpected token' }] };
+    expect(() => assertParsed(result, 'server/a.js')).toThrow('server/a.js does not parse (line 7: Parsing error: Unexpected token)');
+    expect(() => assertParsed(result, 'server/a.js at base')).toThrow('at base does not parse');
+  });
+  test('a parsed file, or no result, passes', () => {
+    expect(() => assertParsed({ fatalErrorCount: 0, messages: [] }, 'a.js')).not.toThrow();
+    expect(() => assertParsed(null, 'a.js')).not.toThrow();
+  });
+});
+
+describe('duplicate owner::name keys are never matched by ordinal', () => {
+  const v = (over) => ({ file: 'a.js', line: 10, rule: 'complexity', name: 'run', score: 30, max: 20, key: 'A::run#2', anon: false, startLine: 10, endLine: 40, ...over });
+  const hunk = [{ start: 20, end: 20, deletion: false }];
+
+  test('keyFunctions marks every function that shares an owner::name', () => {
+    const fns = [
+      { name: 'run', owner: 'A', headLine: 1, headColumn: 0 },
+      { name: 'run', owner: 'A', headLine: 9, headColumn: 0 },
+      { name: 'run', owner: 'B', headLine: 20, headColumn: 0 },
+    ];
+    keyFunctions(fns);
+    expect(fns.map((f) => f.dup)).toEqual([true, true, false]);
+    expect([...duplicateKeys(fns)]).toEqual(['A::run']);
+  });
+
+  test('a duplicate at head warns as ambiguous, with no base score inherited', () => {
+    const base = { scores: new Map([['complexity|A::run#2', 12]]), anonMatches: true, dups: new Set() };
+    const r = classifyViolations([v({ dup: true })], base, hunk);
+    expect(r.fail).toHaveLength(0);
+    expect(r.warn).toMatchObject([{ ambiguous: true, base: null }]);
+    expect(formatViolation(r.warn[0])).toContain('(ambiguous match)');
+    expect(formatViolation(r.warn[0])).not.toContain('base ');
+  });
+
+  test('a duplicate at base warns as ambiguous even when the head key is unique', () => {
+    const base = { scores: new Map([['complexity|A::run#1', 12]]), anonMatches: true, dups: new Set(['A::run']) };
+    const r = classifyViolations([v({ key: 'A::run#1' })], base, hunk);
+    expect(r.fail).toHaveLength(0);
+    expect(r.warn[0].ambiguous).toBe(true);
+  });
+
+  test('a duplicate whose whole function is in the diff is still NEW/WORSE', () => {
+    const base = { scores: new Map(), anonMatches: true, dups: new Set(['A::run']) };
+    const all = [{ start: 10, end: 40, deletion: false }];
+    expect(classifyViolations([v({ dup: true })], base, all).fail).toHaveLength(1);
   });
 });

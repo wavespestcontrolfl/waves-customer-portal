@@ -142,8 +142,22 @@ function keyFunctions(fns) {
     const n = (seen.get(base) || 0) + 1;
     seen.set(base, n);
     fn.key = `${base}#${n}`;
+    fn.baseKey = base;
   }
+  for (const fn of sorted) fn.dup = seen.get(fn.baseKey) > 1;
   return sorted;
+}
+
+/** Throw, naming the file, when ESLint could not parse it: no messages is not "no findings". */
+function assertParsed(result, label) {
+  if (!result || !(result.fatalErrorCount > 0)) return;
+  const fatal = (result.messages || []).find((m) => m.fatal) || {};
+  throw new Error(`${label} does not parse (line ${fatal.line || '?'}: ${fatal.message || 'syntax error'})`);
+}
+
+/** Owner::name keys that more than one function in the file shares (keyFunctions must have run). */
+function duplicateKeys(fns) {
+  return new Set(fns.filter((f) => f.dup).map((f) => f.baseKey));
 }
 
 function countAnonymous(fns) {
@@ -223,7 +237,7 @@ function complexityItem(file, msg, fn) {
   const parsed = parseComplexityMessage(msg.message);
   const startLine = fn ? fn.startLine : msg.line;
   return {
-    file, line: startLine, rule: 'complexity', key: fn ? fn.key : '(module)', anon: !!fn && !fn.name,
+    file, line: startLine, rule: 'complexity', key: fn ? fn.key : '(module)', anon: !!fn && !fn.name, dup: !!fn && !!fn.dup,
     score: parsed.score, max: parsed.max,
     name: parsed.name || (fn && fn.name) || '(anonymous function)',
     startLine, endLine: fn ? fn.endLine : (msg.endLine || msg.line),
@@ -233,7 +247,7 @@ function complexityItem(file, msg, fn) {
 function depthItem(file, msg, fn) {
   const parsed = parseDepthMessage(msg.message);
   return {
-    file, line: msg.line, rule: 'max-depth', key: fn ? fn.key : '(module)', anon: !!fn && !fn.name,
+    file, line: msg.line, rule: 'max-depth', key: fn ? fn.key : '(module)', anon: !!fn && !fn.name, dup: !!fn && !!fn.dup,
     score: parsed.score, max: parsed.max, name: (fn && fn.name) || null,
     startLine: fn ? fn.startLine : msg.line,
     endLine: fn ? fn.endLine : (msg.endLine || msg.line),
@@ -296,8 +310,10 @@ function fullyChanged(startLine, endLine, hunks) {
  *         and the diff touches only part of it (a one-line fix in a legacy
  *         function is not a new problem).
  * baseInfo: null when the file has no base version (new file: all fail), else
- *   { scores: Map from baseScoreMap, anonMatches: boolean } where anonMatches
- *   says the file has as many unnamed functions at base as at head. Unnamed
+ *   { scores: Map from baseScoreMap, dups: Set from duplicateKeys, anonMatches: boolean } where anonMatches
+ *   says the file has as many unnamed functions at base as at head. A key shared
+ *   by several functions (at head or base) is never matched by ordinal: it warns
+ *   as an ambiguous match unless the whole function is in the diff. Unnamed
  *   functions match by ordinal only when it does; otherwise they warn.
  * hunks: the changed ranges of the file (see parseDiffRanges).
  */
@@ -306,6 +322,8 @@ function classifyViolations(violations, baseInfo, hunks = []) {
   const warn = [];
   for (const v of violations) {
     if (!baseInfo || fullyChanged(v.startLine, v.endLine, hunks)) { fail.push({ ...v, base: null }); continue; }
+    const baseKey = v.key.replace(/#\d+$/, '');
+    if (v.dup || (baseInfo.dups && baseInfo.dups.has(baseKey))) { warn.push({ ...v, base: null, ambiguous: true }); continue; }
     const anon = v.anon || /<anon>#\d+$/.test(v.key);
     if (anon && !baseInfo.anonMatches) { warn.push({ ...v, base: null }); continue; }
     const base = baseInfo.scores.get(`${v.rule}|${v.key}`);
@@ -318,7 +336,7 @@ function classifyViolations(violations, baseInfo, hunks = []) {
 
 function formatViolation(v) {
   const where = `${v.file}:${v.line}`;
-  const tail = typeof v.base === 'number' ? `  base ${v.base}` : '';
+  const tail = (typeof v.base === 'number' ? `  base ${v.base}` : '') + (v.ambiguous ? '  (ambiguous match)' : '');
   if (v.rule === 'complexity') {
     return `${where}  ${v.name}  complexity ${v.score} (max ${v.max})${tail}`;
   }
@@ -337,6 +355,8 @@ module.exports = {
   parseComplexityMessage,
   parseDepthMessage,
   keyFunctions,
+  duplicateKeys,
+  assertParsed,
   functionName,
   functionOwner,
   fullyChanged,
