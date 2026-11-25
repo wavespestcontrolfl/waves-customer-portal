@@ -142,7 +142,10 @@ class LiveBrain {
     return run;
   }
 
-  async runAsk(text, { onSoft } = {}) {
+  async runAsk(text, { onSoft, softMs, deadlineMs } = {}) {
+    // The caller may pass what is left of the delegation's deadlines (the bridge counts from the delegation's arrival).
+    const hardMs = Number.isFinite(deadlineMs) ? deadlineMs : this.deadlineMs;
+    const holdMs = Number.isFinite(softMs) ? softMs : this.softMs;
     this.lastRan = false;
     const prompt = String(text || '').trim();
     if (this.ended || !prompt) return CLOSED_REPLY;
@@ -153,14 +156,14 @@ class LiveBrain {
     this.turn = turn;
     let timer;
     const deadline = new Promise((resolve) => {
-      timer = setTimeout(() => resolve('deadline'), this.deadlineMs);
+      timer = setTimeout(() => resolve('deadline'), hardMs);
       if (timer.unref) timer.unref();
     });
     const softTimer = setTimeout(() => {
       if (turn.closed) return;
       this.softTimeouts += 1;
       try { if (typeof onSoft === 'function') onSoft(); } catch { /* a failed holding line never fails the ask */ }
-    }, this.softMs);
+    }, holdMs);
     if (softTimer.unref) softTimer.unref();
     try {
       const done = Promise.resolve(this.convo.handlePrompt(prompt)).then(() => 'done', () => 'failed');
@@ -170,7 +173,7 @@ class LiveBrain {
       if (outcome === 'failed') throw new Error('live_brain_turn_failed');
       if (outcome === 'deadline') {
         this.hardTimeouts += 1;
-        logger.warn(`[voice-live-brain] ask hit the ${this.deadlineMs} ms deadline callSid=${this.callSid}`);
+        logger.warn(`[voice-live-brain] ask hit the ${hardMs} ms deadline callSid=${this.callSid}`);
         // The turn may still be awaiting a tool and could start another model round, so
         // the conversation is retired for good: ended (queued turns stop), aborted, and
         // never asked again. Later asks answer TIMEOUT_REPLY without touching it.

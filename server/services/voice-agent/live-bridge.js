@@ -46,6 +46,7 @@
  */
 
 const logger = require('../logger');
+const { SOFT_DEADLINE_MS, ASK_DEADLINE_MS, TIMEOUT_REPLY } = require('./live-brain');
 
 const OPENAI_LIVE_URL = 'wss://api.openai.com/v1/live/sessions';
 const LIVE_VOICES = Object.freeze(['marin', 'delta']);
@@ -270,6 +271,8 @@ function defaultDeps() {
     toolsOn: () => require('../../config/feature-gates').voiceGptLiveToolsLive(),
     brainFactory: (args) => require('./live-brain').LiveBrain.open(args),
     brainOpenMs: BRAIN_OPEN_MAX_MS,
+    brainSoftMs: SOFT_DEADLINE_MS,
+    brainHardMs: ASK_DEADLINE_MS,
     transcriptQuietMs: TRANSCRIPT_QUIET_MS,
     transcriptMaxWaitMs: TRANSCRIPT_MAX_WAIT_MS,
     apiKey: () => process.env.OPENAI_API_KEY,
@@ -833,6 +836,9 @@ class LiveBridge {
     if (!range.text && Number.isFinite(msg.start_ms)) range.startMs = msg.start_ms;
     range.text = (range.text + text).slice(-CALLER_TEXT_MAX_CHARS);
     this.callerFragmentEndMs = LiveBridge.addFragment(this.callerRecent, this.callerFragmentEndMs, msg, 2);
+    // Where the NEWEST caller utterance of this range began: GPT-Live's line that prompted the selection is the one
+    // right before it ("hello" / the offer of two services / "the second one" names the offer, not the greeting).
+    range.latestStartMs = this.callerRecent[this.callerRecent.length - 1].startMs;
   }
 
   noteAgentText(msg) {
@@ -850,13 +856,14 @@ class LiveBridge {
     // offsetMs: where GPT-Live's session clock stood when it delegated; endMs: where this range's own words ended.
     // Together they tell a late continuation of this question from the caller's NEXT one (belongsToLate).
     const range = {
-      text: this.callerPending.text, startMs: this.callerPending.startMs, open: this.deps.transcriptQuietMs > 0, // no settle wait: closed at once
+      text: this.callerPending.text, startMs: this.callerPending.startMs, latestStartMs: this.callerPending.latestStartMs ?? null,
+      open: this.deps.transcriptQuietMs > 0, // no settle wait: closed at once
       offsetMs: Number.isFinite(offsetMs) ? offsetMs : null, endMs: this.callerFragmentEndMs,
       // The fallback for a delegation with no words of its own, fixed HERE: what the caller said before it arrived.
       // A later question (it goes to the next delegation) never becomes this one's fallback.
       fallback: this.callerRecent.map((u) => ({ text: u.text, startMs: u.startMs })),
     };
-    this.callerPending = { text: '', startMs: null };
+    this.callerPending = { text: '', startMs: null, latestStartMs: null };
     this.callerLate = range;
     // The context is FROZEN as the range closes (its words, the fallback utterances and the
     // agent line before them): later speech never changes what this delegation asks.
@@ -884,10 +891,12 @@ class LiveBridge {
   takeCallerText(range) {
     const clean = (t) => t.replace(/\s+/g, ' ').trim();
     let words = clean(range.text);
-    let startMs = range.startMs;
+    // The agent line is picked relative to the NEWEST caller utterance of these words, not the first: after "hello",
+    // GPT-Live's offer of two services and "the price of the second one", the offer is the line that matters.
+    let startMs = range.latestStartMs ?? range.startMs;
     if (!words) {
       words = clean(range.fallback.map((u) => u.text).join(' ')).slice(-CALLER_TEXT_MAX_CHARS);
-      startMs = range.fallback.length ? range.fallback[0].startMs : null;
+      startMs = range.fallback.length ? range.fallback[range.fallback.length - 1].startMs : null;
     }
     if (!words) return '';
     const before = this.agentRecent.filter((u) => startMs === null || u.startMs === null || u.startMs < startMs);
@@ -930,7 +939,7 @@ class LiveBridge {
   // What to say for one delegation, and whether the brain was asked (so its
   // times are kept). Never throws. A delegation past the soft deadline gets a
   // holding line through say(), then this returns the real answer.
-  async brainReply(say, range) {
+  async brainReply(say, range, receivedAt) {
     if (this.brainAsks >= BRAIN_ASK_CAP) return { reply: DELEGATION_REPLY };
     await range.settled;
     if (this._finalizing) return { reply: DELEGATION_REPLY };
@@ -942,11 +951,23 @@ class LiveBridge {
     const brain = await waitAtMost(this.ensureBrain(), this.deps.brainOpenMs);
     if (brain === undefined) this.noteError('brain_open_timeout');
     if (!brain || this._finalizing) return { reply: DELEGATION_REPLY };
+    // The deadlines run from the delegation's ARRIVAL, queue time included: what is left of each is what the ask gets,
+    // and a delegation that already passed its hard deadline while queued is answered with the timeout line, no model call.
+    const { brainSoftMs, brainHardMs } = this.deps;
+    const waited = Math.max(0, this.deps.now() - receivedAt);
+    if (waited >= brainHardMs) {
+      this.noteError('brain_expired_in_queue');
+      return { reply: TIMEOUT_REPLY };
+    }
     this.brainAsks += 1;
     const startedAt = this.deps.now();
     let reply;
     try {
-      reply = await brain.ask(words, { onSoft: () => say(BRAIN_STILL_REPLY) });
+      reply = await brain.ask(words, {
+        onSoft: () => say(BRAIN_STILL_REPLY),
+        softMs: Math.max(0, brainSoftMs - waited),
+        deadlineMs: brainHardMs - waited,
+      });
       if (brain.lastRan === false) {
         // A retired or closed brain answered without running anything: no paid call, so not counted or timed.
         this.brainAsks -= 1;
@@ -970,7 +991,7 @@ class LiveBridge {
 
   async answerWithBrain(id, receivedAt, range) {
     if (this._finalizing) return;
-    const { reply, startedAt, endedAt } = await this.brainReply((line) => this.speak(id, line), range);
+    const { reply, startedAt, endedAt } = await this.brainReply((line) => this.speak(id, line), range, receivedAt);
     this.speak(id, reply); // nothing is sent if the call ended while the brain worked
     if (startedAt === undefined) return;
     const ms = (from, to) => Math.max(0, to - from);

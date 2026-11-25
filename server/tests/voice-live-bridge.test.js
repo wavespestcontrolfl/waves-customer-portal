@@ -1448,13 +1448,13 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     t.openai.receive(created('d1'));
     await waitFor(() => answers(t).length > 0);
     expect(brain.ask).toHaveBeenCalledTimes(1);
-    expect(brain.ask).toHaveBeenCalledWith('When is my next visit?', { onSoft: expect.any(Function) });
+    expect(brain.ask).toHaveBeenCalledWith('When is my next visit?', expect.objectContaining({ onSoft: expect.any(Function), softMs: 6000, deadlineMs: 20000 }));
     expect(answers(t)).toEqual([{ type: 'session.commentary.append', delegation_id: 'd1', content: 'Your next visit is Tuesday.' }]);
     // a second delegation gets only the words after the first
     t.openai.receive(said('And how much is it?', 6000, 7000));
     t.openai.receive(created('d2'));
     await waitFor(() => answers(t).length > 1);
-    expect(brain.ask).toHaveBeenLastCalledWith('And how much is it?', { onSoft: expect.any(Function) });
+    expect(brain.ask).toHaveBeenLastCalledWith('And how much is it?', expect.objectContaining({ onSoft: expect.any(Function) }));
     expect(answers(t).map((m) => m.delegation_id)).toEqual(['d1', 'd2']);
   });
 
@@ -1662,6 +1662,54 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     t.openai.receive({ ...created('d2'), offset_ms: 10000 });
     await waitFor(() => answers(t).length === 3);
     expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['Old words', 'Old words', 'The next question']);
+  });
+
+  test('the agent line is the one right before the caller\'s NEWEST utterance: "the second one" names the offer, not the greeting', async () => {
+    const { t, brain } = toolsSetup();
+    await t.ready();
+    const agent = (words, start, end) => ({ type: 'session.output_transcript.delta', delta: words, start_ms: start, end_ms: end });
+    t.openai.receive(agent('Thanks for calling Waves, how can I help?', 0, 2500));
+    t.openai.receive(said('Hello.', 3000, 3600));
+    t.openai.receive(agent('I can help with pest control or lawn care. Which one?', 4500, 8000));
+    t.openai.receive(said(' What is the price of the second one?', 9500, 11000));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    expect(brain.ask.mock.calls[0][0]).toBe('Agent just said: I can help with pest control or lawn care. Which one?\nCaller said: Hello. What is the price of the second one?');
+  });
+
+  test('deadlines count from the delegation\'s arrival: a queued delegation gets what is left, and one past its hard deadline gets the timeout line with no model call', async () => {
+    const { TIMEOUT_REPLY } = require('../services/voice-agent/live-brain');
+    let releaseFirst;
+    let n = 0;
+    const { t, brain } = toolsSetup({
+      reply: (text) => {
+        n += 1;
+        if (n === 1) return new Promise((resolve) => { releaseFirst = () => resolve('reply one'); });
+        t.advance(3000); // the second answer itself takes 3 s
+        return Promise.resolve('reply two');
+      },
+    });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    t.openai.receive(said('two', 6000, 6300));
+    t.openai.receive(created('d2'));
+    t.openai.receive(said('three', 12000, 12300));
+    t.openai.receive(created('d3'));
+    t.advance(18000); // the first lookup runs 18 s; d2 and d3 wait behind it
+    releaseFirst();
+    await waitFor(() => answers(t).length === 3);
+    // d2 waited 18 s: its holding line is already due and it has 2 s left
+    expect(brain.ask.mock.calls[1][1]).toMatchObject({ softMs: 0, deadlineMs: 2000 });
+    // d3 waited 18 s + 3 s = 21 s: past 20 s, so no model call, the timeout line
+    expect(brain.ask).toHaveBeenCalledTimes(2);
+    expect(answers(t)[2]).toEqual({ type: 'session.commentary.append', delegation_id: 'd3', content: TIMEOUT_REPLY });
+    t.twilioStop();
+    await finalized(t);
+    const summary = summaryOf(t);
+    expect(summary.brain_asks).toBe(2); // the expired one is not an ask
+    expect(summary.errors).toContain('brain_expired_in_queue');
   });
 
   test('a retired brain\'s reply is neither counted as an ask nor timed', async () => {

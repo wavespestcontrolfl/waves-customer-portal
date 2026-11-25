@@ -216,6 +216,15 @@ describe('ask', () => {
     expect(order).toEqual(['start 1', 'end 1', 'start 2', 'end 2']);
   });
 
+  test('the caller can hand over what is left of the deadlines: a hard deadline of 15 ms and a soft one that is already due', async () => {
+    const { brain } = await open({ script: () => new Promise(() => {}) }); // the brain's own defaults are 6 s and 20 s
+    const onSoft = jest.fn();
+    await expect(brain.ask('slow', { onSoft, softMs: 0, deadlineMs: 15 })).resolves.toBe(TIMEOUT_REPLY);
+    expect(onSoft).toHaveBeenCalledTimes(1);
+    expect(brain.softTimeouts).toBe(1);
+    expect(brain.hardTimeouts).toBe(1);
+  });
+
   test('the default deadlines are 6 s soft and 20 s hard', () => {
     expect(SOFT_DEADLINE_MS).toBe(6000);
     expect(ASK_DEADLINE_MS).toBe(20000);
