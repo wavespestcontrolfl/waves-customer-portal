@@ -662,6 +662,42 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       } finally { spy.mockRestore(); bell.mockRestore(); }
     });
 
+    test('a permission read failing on EVERY replay attempt: no bell on the earlier attempts, ONE deduped bell on the last (through the replay registry)', async () => {
+      const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('../services/messaging/scheduled-sms-limits');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [row] = await queued();
+      const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
+      const notifications = require('../services/notification-service');
+      const bell = jest.spyOn(notifications, 'notifyAdmin').mockResolvedValue({ id: 'n-1' });
+      const spy = jest.spyOn(Holds, 'disclaimedNumberHeldForVisit').mockRejectedValue(Object.assign(new Error(`select where phone '${BOB}'`), { code: '57P01' }));
+      try {
+        for (let attempt = 1; attempt < SCHEDULED_SMS_MAX_ATTEMPTS; attempt += 1) {
+          expect(await recheckDeferredReplay('visit_text_recipient_deferred', { ...meta, scheduled_sms_attempts: attempt })).toMatchObject({ eligible: false, retryable: true });
+        }
+        expect(bell).not.toHaveBeenCalled();
+        // the last attempt: held for nothing more, so staff are told, once, with the recipient named by first name and last 4 only
+        expect(await recheckDeferredReplay('visit_text_recipient_deferred', { ...meta, scheduled_sms_attempts: SCHEDULED_SMS_MAX_ATTEMPTS })).toMatchObject({ eligible: false, retryable: true });
+        expect(bell).toHaveBeenCalledTimes(1);
+        const opts = bell.mock.calls[0][3];
+        expect(opts.detail).toContain(`Bob, ending ${BOB.slice(-4)}`);
+        expect(JSON.stringify(bell.mock.calls)).not.toContain(BOB.slice(-10));
+        // a repeat carries the same dedupe key (the bell store keeps one row)
+        await recheckDeferredReplay('visit_text_recipient_deferred', { ...meta, scheduled_sms_attempts: SCHEDULED_SMS_MAX_ATTEMPTS });
+        expect(bell.mock.calls.map((c) => c[3].dedupeKey)).toEqual([opts.dedupeKey, opts.dedupeKey]);
+        // the module's own throw carries the code only
+        const thrown = await VisitRecipient.recipientStillOwedDeferred({ ...meta, scheduled_sms_attempts: 1 }).catch((e) => e);
+        expect(thrown.code).toBe('57P01');
+        expect(`${thrown.message} ${thrown.stack}`).not.toContain(BOB.slice(-10));
+      } finally { spy.mockRestore(); bell.mockRestore(); }
+    });
+
+    test('call_log_v1_phone is IMMUTABLE and PARALLEL UNSAFE (its exception block opens a subtransaction)', async () => {
+      const { rows } = await db.raw("SELECT provolatile, proparallel FROM pg_proc WHERE proname = 'call_log_v1_phone'");
+      expect(rows).toEqual([{ provolatile: 'i', proparallel: 'u' }]);
+    });
+
     test('a queued day-only text is revalidated at the replay handoff (the 24 h reminder switched off, a later promise delivered); a fresh send is not asked again', async () => {
       const Reminders = require('../services/appointment-reminders');
       sendCustomerMessage.mockResolvedValueOnce(HELD);

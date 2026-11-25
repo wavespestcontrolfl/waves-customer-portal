@@ -707,7 +707,7 @@ async function providerCheck(meta, { conn = db } = {}) {
     // Unreadable is not a decline: the text is held and may never be retried, so tell staff (the same bell, once per visit and notice).
     // An immediate send is never retried, so it rings now. A deferred replay retries a retryable check failure: it rings only when
     // THIS is the replay's last attempt (the scheduler counts the attempt in scheduled_sms_attempts and gives up at the cap).
-    if (meta.replay && (Number(meta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+    if (meta.replay && !isLastReplayAttempt(meta)) {
       return { ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', reason: 'recheck-failed', retryable: true };
     }
     await raiseUnsentBell({ scheduledServiceId: meta.scheduled_service_id, kind: meta.kind, date: claimDate(meta.claim_key), hint: meta.recipient_hint });
@@ -715,11 +715,21 @@ async function providerCheck(meta, { conn = db } = {}) {
   }
 }
 
+// The scheduler counts each replay attempt in scheduled_sms_attempts (this attempt included) and gives up at the cap.
+function isLastReplayAttempt(meta) {
+  return (Number(meta && meta.scheduled_sms_attempts) || 1) >= SCHEDULED_SMS_MAX_ATTEMPTS;
+}
+
 /** The replay's fresh check, before a queued text goes out. True when still owed; throws on an unreadable answer. */
 async function recipientStillOwedDeferred(meta, { conn = db } = {}) {
   try {
     return (await recipientStillOwed({ ...meta, replay: true }, { conn })).ok === true;
   } catch (err) {
+    // An unreadable answer is retried, and staff hear about it only when the LAST attempt also could not read it: the text then
+    // ends undelivered (the same deduped bell the handoff check raises). The bell never changes the rethrow below.
+    if (isLastReplayAttempt(meta)) {
+      await raiseUnsentBell({ scheduledServiceId: meta.scheduled_service_id, kind: meta.kind, date: claimDate(meta.claim_key), hint: meta.recipient_hint });
+    }
     // The replay registry logs a thrown error's message, and a knex message carries the bound values (a phone, a claim): rethrow
     // a fresh error with only the code. It still throws, so the registry holds the row for a retry (retryable).
     throw Object.assign(new Error('visit-only replay recheck failed'), { code: err && err.code });

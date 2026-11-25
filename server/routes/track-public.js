@@ -459,6 +459,10 @@ async function buildVehicle(service, { readOnly = false } = {}) {
   // without it nothing proves a fix is from THIS drive.
   if (readOnly && (service.status !== 'en_route' || service.track_state !== 'en_route' || !service.en_route_at)) return null;
 
+  // A grouped visit's en-route fan-out moves the technician's current_job_id to the last sibling it advances. Those siblings count
+  // as this drive ONLY on the strict read in visit-groups (same visit, same tech, same stop, themselves en route within minutes of
+  // this row's own en_route_at); anything else, or no group, leaves just this visit's own id.
+  const driveJobIds = readOnly ? [service.id, ...(await require('../services/visit-groups').sameDriveSiblingIds(service))] : null;
   const position = await resolveFreshTechPosition({
     techId: service.technician_id,
     // Same remap floor as the SMS ETA path (round-34 P2): a cached tech_status fix
@@ -466,10 +470,10 @@ async function buildVehicle(service, { readOnly = false } = {}) {
     // OLD vehicle's, so the text and the tracking page never show different vehicles.
     cachedNotBefore: techMappingCutoff(service.tech_mapping_changed_at),
     logPrefix: 'track-public',
-    // A recipient sees the truck only while the technician's ACTIVE job is exactly THIS visit (tech_status.current_job_id ===
-    // this visit's own id; no visit-group lookup): a tech who has moved on to another stop, a sibling's included, is at another
-    // customer's home, whatever this visit's state still says.
-    ...(readOnly ? { allowBouncieFallback: false, strict: true, requireCurrentJobIds: [service.id], requireFixAfter: service.en_route_at } : {}),
+    // A recipient sees the truck only while the technician's ACTIVE job is this visit or a sibling of the SAME drive (see above): a
+    // tech who has moved on to another stop, a moved or re-assigned sibling's included, is at another customer's home, whatever
+    // this visit's state still says.
+    ...(readOnly ? { allowBouncieFallback: false, strict: true, requireCurrentJobIds: driveJobIds, requireFixAfter: service.en_route_at } : {}),
   });
   if (!position) return null;
 
@@ -776,6 +780,7 @@ function readTrackVisit(where) {
       's.recurring_dispatch_due_date',
       's.service_id',
       's.property_id',
+      's.visit_id',
       's.is_recurring',
       's.recurring_parent_id',
       's.is_callback',
