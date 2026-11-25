@@ -299,25 +299,43 @@ async function memberEligible(conn, member, source) {
  * is rejected without a read) AND the same customer-pick check, since a customer's self-service reschedule leaves the office
  * source in place.
  */
+/** The promise level of each id, and the ids whose read saw the visit off its rendered date (`onDate`: one date, or a
+ *  Map<id, date>). With `onDate`, one facts read pinned to that date (a mismatch is unverified, pre-push Codex P1). */
+async function readLevels(conn, ids, now, { ignoreLevel, onDate }) {
+  if (ignoreLevel) return { levels: new Map(ids.map((id) => [id, 'none'])), moved: new Set() };
+  if (!onDate) return { levels: await loadPromiseLevels(conn, ids, now), moved: new Set() };
+  const promiseFacts = await loadPromiseFacts(conn, ids, now, { sameDateOnly: onDate });
+  return {
+    levels: new Map([...promiseFacts].map(([id, fact]) => [id, fact.level])),
+    moved: new Set([...promiseFacts].filter(([, fact]) => fact.mismatch === true).map(([id]) => id)),
+  };
+}
+
+/** The rendered date for one id (`onDate` is one date or a Map<id, date>), or null. */
+function renderedDateOf(onDate, id) {
+  return typeof onDate === 'string' ? onDate : onDate instanceof Map ? onDate.get(String(id)) || null : null;
+}
+
+/** Adds to `moved` every id whose own row in the later stop read is off its rendered date (a move between the two
+ *  reads; pre-push Codex P1). */
+function addMovedInStopRead(moved, facts, ids, onDate) {
+  for (const id of onDate ? ids : []) {
+    const expected = renderedDateOf(onDate, id);
+    const own = (facts.get(String(id)) || []).find((m) => String(m.id) === String(id));
+    if (expected && own && dateOnlyString(own.scheduled_date) !== expected) moved.add(id);
+  }
+}
+
 async function dayOnlyEligibility(conn, ids, now = new Date(), { ignoreLevel = false, onDate = null } = {}) {
   const result = new Map();
   if (!ids || ids.length === 0) return result;
   try {
     // A MOVE replaces the old promise (part B2), so its decision ignores the level: every visit reads as 'none'.
-    // `onDate` (a send's own rendered date): the level read is pinned to it, so a visit moved off that date reads 'hour'
-    // (fail closed) and an hour told for that date is never dropped against the visit's new date (pre-push Codex P1).
-    // With `onDate`, one facts read: a visit moved off its rendered date between reads is unverified (not eligible,
-    // 'hour', failed), so a screen keeps the hour and an AI context withholds it, as for any failed read (Codex P1).
-    const moved = new Set();
-    let levels;
-    if (ignoreLevel) levels = new Map(ids.map((id) => [id, 'none']));
-    else if (!onDate) levels = await loadPromiseLevels(conn, ids, now);
-    else {
-      const promiseFacts = await loadPromiseFacts(conn, ids, now, { sameDateOnly: onDate });
-      levels = new Map([...promiseFacts].map(([id, fact]) => [id, fact.level]));
-      for (const [id, fact] of promiseFacts) if (fact.mismatch === true) moved.add(id);
-    }
+    // `onDate` (a send's or screen row's own rendered date) pins both reads to it: a visit seen off that date in either
+    // read is unverified (not eligible, 'hour', failed), so a screen keeps the hour and an AI context withholds it.
+    const { levels, moved } = await readLevels(conn, ids, now, { ignoreLevel, onDate });
     const facts = await loadStopFacts(conn, ids);
+    addMovedInStopRead(moved, facts, ids, onDate);
     const memberIds = [...new Set([...facts.values()].flat().map((m) => String(m.id)))];
     const sources = await loadBookingSources(conn, memberIds);
     for (const id of ids) {

@@ -20,7 +20,7 @@ const svc = (id, over = {}) => ({
 const child = (id, over = {}) => svc(id, { is_recurring: true, recurring_parent_id: 'parent-1', ...over });
 
 /** A knex-shaped fake over rows per table. `calls` counts how many reads each table got. */
-function fakeConn({ services = [], reminders = [], moves = {}, messages = [], emails = [], failOn = null } = {}) {
+function fakeConn({ services = [], servicesByRead = null, reminders = [], moves = {}, messages = [], emails = [], failOn = null } = {}) {
   const calls = {};
   const conn = (table) => {
     calls[table] = (calls[table] || 0) + 1;
@@ -41,7 +41,8 @@ function fakeConn({ services = [], reminders = [], moves = {}, messages = [], em
       if (table === 'reschedule_log') return moves[eq.scheduled_service_id] || [];
       const pick = (rows) => rows.filter((r) => ins.every(([col, vals]) => r[col] != null && vals.includes(String(r[col])))
         && notIns.every(([col, vals]) => !vals.includes(String(r[col]))));
-      if (table === 'scheduled_services') return pick(services);
+      // servicesByRead: the Nth scheduled_services read sees the Nth list (the last one repeats), a move between reads.
+      if (table === 'scheduled_services') return pick(servicesByRead ? servicesByRead[Math.min(calls[table], servicesByRead.length) - 1] : services);
       if (table === 'appointment_reminders') return pick(reminders).filter((r) => r.cancelled !== true);
       return [];
     };
@@ -354,6 +355,12 @@ describe('loadTimeDisplay', () => {
       const told = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: Date.parse('2026-11-20T14:00:00Z') } };
       const moved = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-21' })], reminders: [office('s1')], messages: [told] });
       expect((await loadTimeDisplay(moved, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: true, level: 'hour', eligible: false, failed: true });
+    });
+
+    test('a visit moved between the promise read and the stop read is unverified too (codex P1)', async () => {
+      const told = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: Date.parse('2026-11-21T14:00:00Z') } };
+      const conn = fakeConn({ servicesByRead: [[svc('s1', { scheduled_date: '2026-11-20' })], [svc('s1', { scheduled_date: '2026-11-21' })]], reminders: [office('s1')], messages: [told] });
+      expect((await loadTimeDisplay(conn, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: true, level: 'hour', eligible: false, failed: true });
     });
 
     test('an eligible visit inside the cutoff: the hour', async () => {
