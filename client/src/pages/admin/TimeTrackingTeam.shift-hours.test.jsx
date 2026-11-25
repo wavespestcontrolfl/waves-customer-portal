@@ -16,7 +16,8 @@ const BASE_TECH = {
   active: true, employment_status: 'active', field_dispatchable: true,
 };
 
-function setup(tech, { enabled = true } = {}) {
+// `reply`: what the save's answer carries besides the route's fixed keys.
+function setup(tech, { enabled = true, reply = {} } = {}) {
   const writes = [];
   const showToast = vi.fn();
   vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
@@ -29,6 +30,7 @@ function setup(tech, { enabled = true } = {}) {
           success: true,
           futureAssignedVisits: [],
           ...(options.method === 'POST' ? { technician: { id: 'tech-new' } } : {}),
+          ...reply,
         }),
       });
     }
@@ -95,6 +97,40 @@ describe('TeamTab shift hours', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Update' }));
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(writes[0].body.shiftHours).toEqual({ start: '08:00', end: '18:00' });
+  });
+
+  // The server lists the coming visits the new hours do not hold; they stay where they are.
+  const saveHours = async (reply) => {
+    const { writes, showToast } = setup({ ...BASE_TECH, shift_start: null, shift_end: null }, { reply });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(start(), { target: { value: '08:00' } });
+    fireEvent.change(end(), { target: { value: '12:00' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    await waitFor(() => expect(showToast).toHaveBeenCalled());
+    return showToast.mock.calls;
+  };
+  const listed = (count) => Array.from({ length: count }, (_, i) => ({ id: `visit-${i}`, scheduledDate: '2031-03-03', serviceType: 'Pest Control', customerName: 'Synthetic One' }));
+
+  it('new hours that leave visits outside them: the toast gives the count and where to act', async () => {
+    expect(await saveHours({ outsideShiftVisits: listed(3) }))
+      .toEqual([['Technician updated — 3 upcoming visits outside the new shift hours; move or reassign on the Schedule']]);
+  });
+
+  it('one visit outside the new hours reads in the singular', async () => {
+    expect(await saveHours({ outsideShiftVisits: listed(1) }))
+      .toEqual([['Technician updated — 1 upcoming visit outside the new shift hours; move or reassign on the Schedule']]);
+  });
+
+  it('new hours that hold every visit, or an answer with no list: the plain toast', async () => {
+    expect(await saveHours({ outsideShiftVisits: [] })).toEqual([['Technician updated']]);
+    cleanup();
+    expect(await saveHours({})).toEqual([['Technician updated']]);
+  });
+
+  it('a technician who leaves the pool in the same save: the still-assigned line wins', async () => {
+    expect(await saveHours({ futureAssignedVisits: listed(2), outsideShiftVisits: listed(1) }))
+      .toEqual([['Technician updated — 2 upcoming visits still assigned; reassign on the Schedule']]);
   });
 
   it('an edit that leaves the hours as loaded sends no shiftHours (the saved hours stand)', async () => {

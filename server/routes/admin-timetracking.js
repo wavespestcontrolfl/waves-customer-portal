@@ -14,7 +14,10 @@ const territoryReadoutOn = () => (typeof featureGates.territoryReadoutLive === '
 const techShiftHoursOn = () => (typeof featureGates.techShiftHoursLive === 'function' ? featureGates.techShiftHoursLive() : false);
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
+const {
+  isEmploymentStatus, employmentPatch, isAssignable, isOffDay, loadTechShifts, shiftWarning, storedShift,
+} = require('../services/technician-eligibility');
+const { rowBlockMinutes } = require('../services/scheduling/window-rules');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const {
   categoriesForServices,
@@ -1036,7 +1039,8 @@ function listFutureAssignedVisits(conn, technicianId) {
     .where('s.scheduled_date', '>=', etDateString(new Date()))
     .whereNotIn('s.status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
     .orderBy('s.scheduled_date')
-    .select('s.id', 's.scheduled_date', 's.service_type', 's.service_id', 's.service_key_snapshot', 'c.first_name', 'c.last_name');
+    .select('s.id', 's.scheduled_date', 's.service_type', 's.service_id', 's.service_key_snapshot', 'c.first_name', 'c.last_name',
+      's.window_start', 's.window_end', 's.estimated_duration_minutes');
 }
 
 function formatFutureAssignedVisits(rows) {
@@ -1046,6 +1050,21 @@ function formatFutureAssignedVisits(rows) {
     serviceType: v.service_type,
     customerName: [v.first_name, v.last_name].filter(Boolean).join(' ') || null,
   }));
+}
+
+// What a save of the shift hours tells the office (GATE_TECH_SHIFT_HOURS, D4): the technician's visits from
+// today (ET) forward that the hours this save set do not hold. They are the visits an office save gets the
+// shift line for (shiftWarning: on a day the technician works, the visit's own minutes, today on the hours
+// of the clock-in). Listed for the office to move or reassign; never modified, as on offboarding.
+// {} and no read with the gate off, when the save left the hours as they were, or when the technician now
+// has no set hours.
+async function outsideNewShiftReply(conn, before, tech) {
+  const [was, now] = [storedShift(before), storedShift(tech)];
+  if (!techShiftHoursOn() || !now || (was && was.startMin === now.startMin && was.endMin === now.endMin)) return {};
+  const shiftOf = await loadTechShifts(conn, { technicianIds: [tech.id] });
+  const outside = (await listFutureAssignedVisits(conn, tech.id)).filter((visit) => !isOffDay(tech, visit.scheduled_date)
+    && shiftWarning(tech, shiftOf(tech.id, visit.scheduled_date), rowBlockMinutes(visit)));
+  return { outsideShiftVisits: formatFutureAssignedVisits(outside) };
 }
 
 // A staff row with any operational or pay history is a person, not a slot.
@@ -1366,6 +1385,7 @@ async function updateTechnician(req, res, next) {
       return {
         tech,
         futureAssignedVisits,
+        shiftReply: await outsideNewShiftReply(trx, target, tech),
         revokeAccess,
         revocationReason: active === false
           ? 'account_deactivated'
@@ -1406,6 +1426,7 @@ async function updateTechnician(req, res, next) {
       success: true,
       technician: sanitizeTechForAdmin(tech),
       futureAssignedVisits: formatFutureAssignedVisits(outcome.futureAssignedVisits),
+      ...outcome.shiftReply,
     });
   } catch (err) {
     const dup = uniqueViolationBody(err);
