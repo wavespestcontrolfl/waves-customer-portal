@@ -35,10 +35,11 @@ function makeWorld(over = {}) {
     pickupClass: 'cart-top-fulfillment-method__tile fullfillment-pickup fullfilment-select', pickupText: 'Pickup #238,5115 Lena Rd',
     cartTotalText: '$105.93', addBehavior: 'normal', checkoutLocText: 'Pickup at #238, 5115 Lena Rd',
     reviewBody: 'Review your order. Reference 5500990. Store 238.', reviewTenderText: 'Payment Method Pay At branch, Lakewood Ranch 238',
-    reviewPickupText: 'Pickup Lakewood Ranch 238', hideTender: false, oktaAction: '#', oktaFormMissing: false, signInUrl: null,
+    reviewPickupText: 'Pickup Lakewood Ranch 238', hideTender: false, oktaAction: 'https://www.siteone.com/en/login', oktaFormMissing: false, oktaButtonForm: 'same', oktaButtonFormAction: null, confirmEverywhere: false, confirmationField: true, poOccupied: '', signInUrl: null,
     checkoutUrl: null, confirmUrl: null, reviewCode: `Item # : ${SKU}`, reviewQtyText: 'Qty: 2',
     reviewQtyNode: true, closeOrder: [], reviewTotalText: '$110.40', placeButtons: 1, cardField: false, noRadioCheck: false,
-    confirmationBody: 'Thank you. Order Number: 7700123', noConfirmation: false, placeClickThrows: false, placed: 0, qty: 0,
+    confirmationBody: 'Order Number: 7700123', noConfirmation: false, placeClickThrows: false, placed: 0, qty: 0,
+    formA: { id: 'a' }, formB: { id: 'b' },
     ...over,
   };
   w.cartRowEls = () => w.cart.map((row) => el({
@@ -69,11 +70,11 @@ function screens(w) {
     [S.orderTypeForm]: [el({ visible: false })],
     [S.pickupLocation]: [el({ text: w.checkoutLocText })],
     [S.checkoutStoreId]: [el({ visible: false, value: '238' })],
-    [S.poInput]: [el({ value: w.po, onFill: (v) => { w.po = v; } })],
+    [S.poInput]: [el({ value: w.po || w.poOccupied, onFill: (v) => { w.po = v; w.poOccupied = ''; } })],
     [S.orderTypeSubmit]: [el({ name: 'order-type-submit', onClick: () => { w.step = 'payment'; } })],
     ...payment,
   };
-  const placeBtn = () => el({ name: 'place-order', text: 'Place Your Order', onClick: () => { w.placed += 1; if (w.placeClickThrows) throw new Error('Target page closed'); if (!w.noConfirmation) { if (w.confirmUrl) w.url = w.confirmUrl; else go('/en/checkout/multi/order-confirmation')(); } } });
+  const placeBtn = () => el({ name: 'place-order', text: 'Place Your Order', onClick: () => { w.placed += 1; if (w.placeClickThrows) throw new Error('Target page closed'); if (!w.noConfirmation) { w.url = w.confirmUrl || 'https://www.siteone.com/en/checkout/orderConfirmation/7700123'; } } });
   const review = {
     [S.body]: [el({ text: w.reviewBody })],
     [S.reviewTender]: w.hideTender ? [] : [el({ text: w.reviewTenderText })],
@@ -82,7 +83,7 @@ function screens(w) {
     [S.reviewTotal]: [el({ text: w.reviewTotalText })],
     [S.placeOrder]: Array.from({ length: w.placeButtons }, placeBtn),
   };
-  const confirmation = { [S.body]: [el({ text: w.confirmationBody })], [S.heading]: [el({ text: 'Order Received' })] };
+  const confirmation = { [S.body]: [el({ text: w.confirmationBody })], ...(w.confirmationField ? { [S.confirmationNumber]: [el({ text: w.confirmationBody })] } : {}), [S.heading]: [el({ text: 'Order Received' })] };
   const product = {
     [S.brandItemNumber]: [el({ text: w.brandText })],
     [S.formBrandItemNumber]: [el({ visible: false, value: w.formSku })],
@@ -96,10 +97,16 @@ function screens(w) {
     } })],
   };
   const search = { [S.searchResult]: Array.from({ length: w.searchHits }, () => el({ attrs: { href: '/p/PRODUCT-1' } })) };
-  const oktaForm = w.oktaFormMissing ? [] : [el({ attrs: { action: w.oktaAction } })];
-  const okta = { [S.oktaIdentifier]: [el({ value: w.identifierValue, children: { [S.oktaForm]: oktaForm } })], [S.oktaSubmit]: [el({ name: 'okta-sign-in', onClick: () => { if (!w.signInFails) w.signedOut = false; } })] };
-  const byPath = { '/en/cart': cart, '/en/checkout/multi/siteOne-checkout': checkout, '/en/checkout/multi/order-summary/view': review, '/en/checkout/multi/order-confirmation': confirmation, '/en/search': search, '/p/PRODUCT-1': product };
-  return { byPath, okta };
+  // What the browser would report: the form owner and the RESOLVED submission URL.
+  const formA = w.oktaFormMissing ? null : w.formA; // one DOM object per form, stable across reads
+  const buttonForm = w.oktaButtonForm === 'same' ? formA : w.formB;
+  const submitUrl = w.oktaButtonFormAction ?? w.oktaAction;
+  const okta = {
+    [S.oktaIdentifier]: [el({ value: w.identifierValue, dom: { form: formA } })],
+    [S.oktaSubmit]: [el({ name: 'okta-sign-in', dom: { form: buttonForm, formAction: submitUrl }, onClick: () => { if (!w.signInFails) w.signedOut = false; } })],
+  };
+  const byPath = { '/en/cart': cart, '/en/checkout/multi/siteOne-checkout': checkout, '/en/checkout/multi/order-summary/view': review, '/en/search': search, '/p/PRODUCT-1': product };
+  return { byPath, okta, confirmation };
 }
 
 function collection(els) {
@@ -116,6 +123,7 @@ function wrap(spec) {
     click: async () => { if (spec.name) spec.world?.clicks.push(spec.name); if (spec.onClick) spec.onClick(); },
     fill: async (v) => { if (spec.onFill) spec.onFill(v); },
     locator: (sel) => collection(spec.children[sel] || []),
+    elementHandle: async () => ({ dom: spec.dom || {}, dispose: async () => {} }),
   };
 }
 
@@ -123,10 +131,11 @@ function makeBrowser(w) {
   const tag = (specs) => specs.map((s) => Object.assign(s, { world: w }));
   const tagAll = (map) => Object.fromEntries(Object.entries(map).map(([k, v]) => [k, tag(v).map((s) => { Object.values(s.children).forEach((c) => tag(c)); return s; })]));
   const current = () => {
-    const { byPath, okta } = screens(w);
+    const { byPath, okta, confirmation } = screens(w);
     if (w.signedOut) return tagAll(okta);
     let path = '/';
     try { path = new URL(w.url).pathname; } catch { path = '/'; }
+    if (path.startsWith('/en/checkout/orderConfirmation/') || (w.confirmEverywhere && !byPath[path])) return tagAll(confirmation);
     return tagAll(byPath[path] || {});
   };
   const page = {
@@ -136,6 +145,7 @@ function makeBrowser(w) {
     setDefaultTimeout: () => {},
     locator: (sel) => collection(current()[sel] || []),
     close: async () => { w.pageCloseCalls += 1; w.closeOrder.push('page'); },
+    evaluate: async (fn, arg) => fn(arg.map((h) => h.dom)),
   };
   const browser = {
     contexts: () => [{ newPage: async () => page }],
@@ -519,18 +529,18 @@ test('P0 4: tender and pickup come from their own review fields; unreadable fiel
 
 test('P0 5: only a NEW number on a siteone.com page that is no longer the review page is an order number', async () => {
   // The number was already on the review page before the click: not new.
-  const old = await run({ confirmationBody: 'Thank you. Order Number: 5500990' });
+  const old = await run({ confirmationBody: 'Thank you. Order Number: 5500990', confirmUrl: 'https://www.siteone.com/en/checkout/orderConfirmation/5500990' });
   expect(old.error.ambiguous).toBe(true);
   expect(old.w.placed).toBe(1);
   // A number shown while the page is still the review page: not a confirmation.
   const stillReview = await run({ noConfirmation: true, reviewBody: 'Review. Reference 5500990.' });
   expect(stillReview.error.ambiguous).toBe(true);
   // A confirmation on another origin: ambiguous.
-  const offSite = await run({ confirmUrl: 'https://www.siteone.com.evil.example/en/checkout/multi/order-confirmation' });
+  const offSite = await run({ confirmUrl: 'https://www.siteone.com.evil.example/en/checkout/orderConfirmation/7700123' });
   expect(offSite.error.ambiguous).toBe(true);
-  expect(offSite.error.evidence.url).toBe('/en/checkout/multi/order-confirmation');
+  expect(offSite.error.evidence.url).toBe('/en/checkout/orderConfirmation/7700123');
   // Our own PO is never the number.
-  const po = await run({ confirmationBody: 'Thank you. Order #: PO-8 placed' }, { args: { poNumber: 'PO-8' } });
+  const po = await run({ confirmationBody: 'Thank you. Order #: PO-8 placed', confirmUrl: 'https://www.siteone.com/en/checkout/orderConfirmation/PO-8' }, { args: { poNumber: 'PO-8' } });
   expect(po.error.ambiguous).toBe(true);
   const fresh = await run({ confirmationBody: 'Order Number: 7700123' });
   expect(fresh.result.externalOrderNumber).toBe('7700123');
@@ -560,4 +570,65 @@ test('P1: browser.close() is called once, after our own page closed; Chrome stay
   const r = await run({}, { env: { ...ENV, SITEONE_BOT_DRY_RUN: 'true' } });
   expect(r.w.closeOrder).toEqual(['page', 'browser']);
   expect(r.w.closeCalls).toBe(1);
+});
+
+// ---- round 3 -----------------------------------------------------------------------
+
+test('R3 P0: the order number is read only on the vendor confirmation path (one segment), from its own node or the URL code', async () => {
+  const { confirmationCodeOf } = adapter._internals;
+  expect(confirmationCodeOf('/en/checkout/orderConfirmation/7700123')).toBe('7700123');
+  expect(confirmationCodeOf('/en/checkout/orderConfirmation/so-778899')).toBe('SO-778899');
+  for (const bad of ['/en/checkout/orderConfirmation/', '/en/checkout/orderConfirmation/7700123/extra', '/en/checkout/orderConfirmation', '/en/my-account/orders/7700123', '/en/checkout/orderConfirmationX/7700123', '/en/checkout/orderConfirmation/abcdefgh']) {
+    expect(confirmationCodeOf(bad)).toBeNull();
+  }
+  // Field on the confirmation page wins; with no field the URL code is the number.
+  const field = await run({ confirmationBody: 'Order Number: 8800456' });
+  expect(field.result.externalOrderNumber).toBe('8800456');
+  const urlOnly = await run({ confirmationField: false });
+  expect(urlOnly.result.externalOrderNumber).toBe('7700123');
+  // Any other destination (history, account page, a deeper path) is ambiguous, even with a fresh-looking number on it.
+  for (const confirmUrl of ['https://www.siteone.com/en/my-account/orders/7700999', 'https://www.siteone.com/en/checkout/orderConfirmation/7700123/extra', 'https://www.siteone.com/en/checkout/multi/order-summary/view']) {
+    const r = await run({ confirmUrl, confirmEverywhere: true, confirmationBody: 'Order Number: 7700999' });
+    expect(r.error.ambiguous).toBe(true);
+    expect(r.w.placed).toBe(1);
+    expectSafe(r.w);
+  }
+});
+
+test('R3 P0: sign-in needs one form owner and an approved browser-resolved submission URL', async () => {
+  const split = await run({ signedOut: true, oktaButtonForm: 'other' });
+  expect(split.error.runLevel).toBe(true);
+  expect(split.w.clicks).not.toContain('okta-sign-in');
+  // A button formaction overrides the form's action: the resolved URL is judged.
+  const override = await run({ signedOut: true, oktaButtonFormAction: 'https://evil.example/collect' });
+  expect(override.error.runLevel).toBe(true);
+  expect(override.w.clicks).not.toContain('okta-sign-in');
+  const lookalike = await run({ signedOut: true, oktaButtonFormAction: 'https://www.siteone.com.evil.example/login' });
+  expect(lookalike.error.runLevel).toBe(true);
+  const unresolved = await run({ signedOut: true, oktaButtonFormAction: '' , oktaAction: '' });
+  expect(unresolved.error.runLevel).toBe(true);
+  const relative = await run({ signedOut: true, oktaButtonFormAction: '/en/login' });
+  expect(relative.error.runLevel).toBe(true); // the browser reports an absolute URL; a relative one is unproven
+  const noForm = await run({ signedOut: true, oktaFormMissing: true });
+  expect(noForm.error.runLevel).toBe(true);
+  const good = await run({ signedOut: true });
+  expect(good.w.clicks).toContain('okta-sign-in');
+  for (const r of [split, override, lookalike, unresolved, relative, noForm, good]) expectSafe(r.w);
+});
+
+test('R3 P1: a PO box that already holds a value refuses; cleanup clears it only while it still equals our PO', async () => {
+  const occupied = await run({ poOccupied: 'OWNER-123' }, { args: { poNumber: 'PO-4' } });
+  expect(occupied.error.refuse).toBe('po_field_occupied');
+  expect(occupied.w.poOccupied).toBe('OWNER-123'); // untouched
+  expect(occupied.w.fills ?? []).toEqual([]);
+  expect(occupied.w.cart).toEqual([]); // our row still removed
+  // Our PO is cleared when it is still ours...
+  const ours = await run({}, { args: { poNumber: 'PO-4' }, verdicts: [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }] });
+  expect(ours.w.po).toBe('');
+  expect(ours.error.evidence.poCleared).toBe(true);
+  // ...and left alone when it changed under us.
+  const changed = await run({}, { args: { poNumber: 'PO-4' }, verdicts: [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }], onCall: (n, w) => { if (n === 2) w.po = 'OWNER-999'; } });
+  expect(changed.w.po).toBe('OWNER-999');
+  expect(changed.error.evidence).toMatchObject({ poCleared: false, po_left_for_owner: true });
+  for (const r of [occupied, ours, changed]) expectSafe(r.w);
 });

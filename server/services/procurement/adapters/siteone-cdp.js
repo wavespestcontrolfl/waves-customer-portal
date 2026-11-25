@@ -38,10 +38,17 @@
  *     chromium.js:98-101 doClose = transport.closeAndWait; Browser.close is
  *     sent only in the launch path, browserType.js:205-222). It never closes
  *     a context, so the owner's Chrome and tabs stay up.
- *   - Sign-in: the page origin AND the form's action origin must be an approved
- *     identity-provider origin (https siteone.com hosts, plus any exact https
+ *   - Sign-in: the page origin AND the browser-resolved submission URL
+ *     (button.formAction, else form.action) must be an approved
+ *     identity-provider origin, and the identifier box and the button must
+ *     share one form (el.form identity, read in one page.evaluate) (https siteone.com hosts, plus any exact https
  *     origin in SITEONE_SIGN_IN_ORIGINS — set it to the Okta host the first
  *     dry run shows). Otherwise run-level and nothing is clicked.
+ *   - After the click an order number is read only on the vendor's confirmation
+ *     path (URLS.confirmationPathPrefix + one segment, UNVERIFIED) and must be
+ *     NEW against the review page's strings. Any other destination is ambiguous.
+ *   - A PO box that already holds a value refuses (po_field_occupied); cleanup
+ *     clears it only while it still equals the PO this run typed.
  *   - Every transition (checkout, review, the Place click) parses page.url() and
  *     requires origin https://www.siteone.com and the exact pathname.
  *   - The reservation is bound to the click: after the cap check passes, the
@@ -62,7 +69,6 @@ try { ({ chromium } = require('playwright')); } catch { chromium = null; }
 const SELECTORS = Object.freeze({
   oktaIdentifier: 'input[name="identifier"]',
   oktaSubmit: 'input[type="submit"][value="Sign in"]',
-  oktaForm: 'xpath=ancestor::form[1]',
   searchResult: '.product-item a.name',
   brandItemNumber: 'div.brand-itemnumber',
   formBrandItemNumber: 'form#addToCartForm input[name="brandItemNumber"]',
@@ -100,6 +106,9 @@ const SELECTORS = Object.freeze({
   reviewItemBlock: 'xpath=ancestor::*[.//*[contains(@class,"item__qty") or contains(@class,"item__quantity")]][1]',
   reviewQty: '[class*="item__qty"], [class*="item__quantity"]',
   reviewTotal: 'strong#totalPriceWithTax',
+  // UNVERIFIED: the confirmation page's own order-number node. Without it the
+  // number comes from the confirmation URL's <code> segment.
+  confirmationNumber: '[data-test="order-number"], .order-confirmation__number, .confirmation-number',
   placeOrder: 'button#placeOrder, #placeOrder2',
   body: 'body',
   heading: 'h1',
@@ -116,6 +125,11 @@ const URLS = Object.freeze({
   search: (sku) => `${BASE}${PATHS.search}?text=${encodeURIComponent(sku)}`,
   cart: `${BASE}${PATHS.cart}`,
   checkout: `${BASE}${PATHS.checkout}`,
+  // UNVERIFIED: SiteOne is Hybris, whose confirmation page is
+  // /checkout/orderConfirmation/<code>. After the click ONLY this path (one
+  // segment after the prefix) is read for an order number; any other
+  // destination (order history, an account page) is ambiguous.
+  confirmationPathPrefix: '/en/checkout/orderConfirmation/',
 });
 // Identity-provider origins the bot may press Sign in on: https siteone.com
 // hosts, plus the exact https origins in SITEONE_SIGN_IN_ORIGINS (CSV; set it
@@ -243,6 +257,19 @@ function isApprovedSignInOrigin(u, env) {
 
 async function signInFormShown(page) { return (await shownAll(page, SELECTORS.oktaIdentifier)).length > 0; }
 
+// One page.evaluate over both elements: same form owner (el.form identity) and
+// the browser-resolved submission URL.
+async function readSignInSubmission(page, identifier, button) {
+  const handles = [await identifier.elementHandle(), await button.elementHandle()];
+  try {
+    return await page.evaluate(([idEl, btn]) => ({
+      sameForm: !!idEl.form && idEl.form === btn.form,
+      submitUrl: btn.formAction || (btn.form && btn.form.action) || '',
+    }), handles);
+  } catch { throw runLevel('siteone cdp: the sign-in form could not be proven'); }
+  finally { for (const h of handles) await h?.dispose?.().catch(() => {}); }
+}
+
 // The Okta form is Chrome-prefilled: the bot checks the identifier is already
 // there, then clicks the one Sign in button. It never types.
 async function clickPrefilledSignIn(run) {
@@ -253,20 +280,18 @@ async function clickPrefilledSignIn(run) {
   if (run.signIns > MAX_SIGN_INS) throw runLevel('siteone cdp: signed out again and again — the profile is not signed in');
   const identifier = await oneShown(page, SELECTORS.oktaIdentifier, 'sign-in identifier boxes', evidence).catch(() => { throw runLevel('siteone cdp: the sign-in form is not readable'); });
   const button = await oneShown(page, SELECTORS.oktaSubmit, 'Sign in buttons', evidence).catch(() => { throw runLevel('siteone cdp: the Sign in button is not readable'); });
-  // The form's action (and the button's formaction) must post to an approved origin too.
-  const forms = await allMatches(identifier, SELECTORS.oktaForm);
-  if (forms.length !== 1) throw runLevel('siteone cdp: the sign-in form could not be proven');
-  for (const holder of [forms[0], button]) {
-    const target = await holder.getAttribute(holder === button ? 'formaction' : 'action').catch(() => null);
-    if (target && !isApprovedSignInOrigin(parseUrl(target, page.url())?.href, env)) throw runLevel('siteone cdp: the sign-in form posts to an unapproved origin');
-  }
+  // The identifier and the button must belong to the SAME form, and the URL the
+  // browser would submit to (button.formAction, else form.action — both already
+  // resolved against document.baseURI) must be an approved origin.
+  const submission = await readSignInSubmission(page, identifier, button);
+  if (!submission.sameForm) throw runLevel('siteone cdp: the identifier box and the Sign in button are not in the same form');
+  if (!isApprovedSignInOrigin(parseUrl(submission.submitUrl)?.href, env)) throw runLevel('siteone cdp: the sign-in form would submit to an unapproved origin');
   if (!String(await identifier.inputValue().catch(() => '')).trim()) throw runLevel('siteone cdp: the sign-in form is not prefilled — sign in on the Mac by hand');
   await button.click();
   evidence.signIns = run.signIns;
   await page.waitForTimeout(run.opts.settleMs);
 }
 
-async function allMatches(scope, selector) { return (await matches(scope, selector)).all; }
 
 // `pathname`: when given, the page must end exactly there (the cart, checkout).
 async function openPage(run, url, pathname = null) {
@@ -323,8 +348,11 @@ async function clearPo(run) {
   const { page } = run;
   await openPage(run, URLS.checkout, PATHS.checkout);
   const po = await shownAll(page, SELECTORS.poInput);
-  if (po.length === 1) await po[0].fill('');
-  run.evidence.poCleared = po.length === 1;
+  // Clear it only while it still holds exactly the PO we typed; any other value is not ours.
+  const ours = po.length === 1 && (await po[0].inputValue().catch(() => null)) === run.poNumber;
+  if (ours) await po[0].fill('');
+  run.evidence.poCleared = ours;
+  if (!ours) run.evidence.po_left_for_owner = true;
 }
 
 // Best-effort cleanup of what THIS run left behind (never on a submitted order).
@@ -450,6 +478,8 @@ async function fillOrderType(run) {
   if (storeField !== storeId) throw new RefusedError('store_mismatch', `SiteOne checkout store ${storeField || '?'} is not the approved store ${storeId}`, evidence);
   if (poNumber) {
     const po = await oneShown(page, SELECTORS.poInput, 'PO number boxes', evidence);
+    // Never overwrite a PO this run did not type (a value is left from an earlier run or the owner).
+    if (String(await po.inputValue().catch(() => 'unreadable')).trim() !== '') throw new RefusedError('po_field_occupied', 'SiteOne checkout: the PO number box already holds a value — nothing typed', evidence);
     run.poFilled = true;
     await po.fill(poNumber);
   }
@@ -561,14 +591,36 @@ async function afterClickEvidence(page, poNumber) {
   return { poNumber: poNumber || null, url: u ? u.pathname : '', h1: String(heading).slice(0, 120) };
 }
 
+// The code in /checkout/orderConfirmation/<code>: exactly one segment after the
+// prefix, shaped like an order number. Any other path gives null.
+function confirmationCodeOf(pathname) {
+  if (!pathname.startsWith(URLS.confirmationPathPrefix)) return null;
+  const rest = pathname.slice(URLS.confirmationPathPrefix.length);
+  if (!rest || rest.includes('/')) return null;
+  let code = '';
+  try { code = decodeURIComponent(rest).toUpperCase(); } catch { return null; }
+  return /^[A-Z0-9][A-Z0-9-]{3,19}$/.test(code) && /\d/.test(code) ? code : null;
+}
+
 // The confirmation: a NEW number (not on the review page before the click, not
-// our PO) on a siteone.com page that is no longer the review page.
+// our PO) read ONLY on the vendor's confirmation path on siteone.com: from its
+// own number node, else from the URL's <code> segment. Any other page — the
+// review page still, order history, an account page — reads nothing.
 async function readConfirmation(run, baseline) {
   const u = parseUrl(run.page.url());
   if (!u || u.origin !== BASE) throw ambiguousError('the page after the click left https://www.siteone.com', null);
-  if (u.pathname === PATHS.review) return null;
-  const text = await textOf(run.page.locator(SELECTORS.body).nth(0));
-  return orderNumberIn(text, [...baseline, run.poNumber]);
+  const urlCode = confirmationCodeOf(u.pathname);
+  if (!urlCode) return null;
+  const skip = new Set([...baseline, run.poNumber].filter(Boolean).map((x) => String(x).toUpperCase()));
+  const nodes = await shownAll(run.page, SELECTORS.confirmationNumber);
+  if (nodes.length > 1) return null;
+  let fieldNumber = null;
+  if (nodes.length === 1) {
+    const text = await textOf(nodes[0]);
+    const bare = text.trim().toUpperCase();
+    fieldNumber = orderNumberIn(text, skip) || (/^[A-Z0-9][A-Z0-9-]{3,19}$/.test(bare) && /\d/.test(bare) && !skip.has(bare) ? bare : null);
+  }
+  return fieldNumber || (skip.has(urlCode) ? null : urlCode);
 }
 
 // Bind the reservation to the click: the cap check passed on `first`, so what
@@ -697,5 +749,5 @@ module.exports = {
   quote: () => null,
   place,
   RefusedError,
-  _internals: { SELECTORS, URLS, PATHS, parseMoney, itemNumberAfterColon, orderNumberIn, numberTokens, hasToken, hasEveryToken, isDryRun, isLocalCdpUrl, isApprovedSignInOrigin },
+  _internals: { SELECTORS, URLS, PATHS, confirmationCodeOf, parseMoney, itemNumberAfterColon, orderNumberIn, numberTokens, hasToken, hasEveryToken, isDryRun, isLocalCdpUrl, isApprovedSignInOrigin },
 };
