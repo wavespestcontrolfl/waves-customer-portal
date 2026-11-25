@@ -3543,6 +3543,47 @@ describe('rain-out service', () => {
         expect(result.routeShiftConflicts).toEqual([{ windowStart: '14:00', windowEnd: '15:00' }]);
       });
 
+      // The overlap advisory cannot read a day-move stop with no stored end when REBOOKER_NULL_END_OCCUPANCY
+      // is off (commit then skips that occupancy check). The shift check is not that switch's.
+      test('gate on: a day move judges a stop with a start and no stored end on its stored length, whatever the occupancy switch', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const openEnded = { id: 'svc-7', window_start: '16:30:00', window_end: null, estimated_duration_minutes: 90 };
+        const short = { id: 'svc-8', window_start: '16:30:00', window_end: null, estimated_duration_minutes: 30 };
+        try {
+          for (const occupancySwitch of [undefined, 'off']) {
+            if (occupancySwitch) process.env.REBOOKER_NULL_END_OCCUPANCY = occupancySwitch;
+            const { result } = await check(onDay(THU), { route: [openEnded, short] });
+            expect(result.routeShiftConflicts).toEqual([{ windowStart: '16:30', windowEnd: null }]);
+          }
+        } finally {
+          delete process.env.REBOOKER_NULL_END_OCCUPANCY;
+        }
+      });
+
+      test('gate on: a target that leaves the later stops on their own hours today judges none of them', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // The tapped stop keeps its 09:00 start and takes a new end: no push. svc-3 and svc-4 are after 12:00
+        // already, where the office put them; the move does not write their hours.
+        const sameStart = { date: etDateString(), window: { start: '09:00', end: '10:30' } };
+        expect((await check(sameStart, { shift: ['08:00', '12:00'] })).result).not.toHaveProperty('routeShiftConflicts');
+        // A stop with no window does get hours from that target, and they are judged.
+        expect((await check(sameStart, { shift: ['08:00', '10:00'], route: [...ROUTE, WINDOWLESS] })).result.routeShiftConflicts)
+          .toEqual([{ windowStart: '09:00', windowEnd: '10:30' }]);
+        // One minute of push writes every stop's hours.
+        const oneMinute = { date: etDateString(), window: { start: '09:01', end: '10:01' } };
+        expect((await check(oneMinute, { shift: ['08:00', '12:00'] })).result.routeShiftConflicts).toHaveLength(2);
+      });
+
+      test('gate on: a member of a visit group with no window of its own is not judged on a push today', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // The group moves as a unit, and its planner can leave this member with no time.
+        const member = { ...WINDOWLESS, id: 'svc-9', visit_id: 'visit-1' };
+        expect((await check(laterToday(), { shift: ['08:00', '14:30'], route: [member] })).result).not.toHaveProperty('routeShiftConflicts');
+        // A member with its own hours is judged where the push lands it.
+        const timed = { ...ROUTE[1], id: 'svc-10', visit_id: 'visit-1' };
+        expect((await check(laterToday(), { route: [timed] })).result.routeShiftConflicts).toEqual([{ windowStart: '17:00', windowEnd: '18:00' }]);
+      });
+
       test('gate on: no row on a day the technician does not work (the shift is not that day\'s)', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
         process.env.GATE_TECH_WORK_DAYS = 'true';

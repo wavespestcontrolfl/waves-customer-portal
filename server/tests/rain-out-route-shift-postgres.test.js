@@ -96,12 +96,33 @@ postgres('the stops a rest-of-route move would land outside the shift (real Post
     expect(await check(anchor, today, '10:00', '11:00')).not.toHaveProperty('routeShiftConflicts');
   });
 
-  test('a day move: each stop is judged on the window it keeps', async () => {
-    const { anchor } = await makeRoute({ shift_end: '12:00' });
-    const result = await check(anchor, laterDay, '09:00', '10:00');
-    expect(result.routeShiftConflicts).toEqual([
+  test('a day move: each stop is judged on the hours it keeps, a stop with no stored end on its length', async () => {
+    const { anchor, technicianId } = await makeRoute({ shift_end: '12:00' });
+    // A start and no end, ninety minutes of work: done at 12:15. The same start with thirty minutes is held.
+    await makeStop(technicianId, '10:45', null, { estimated_duration_minutes: 90 });
+    await makeStop(technicianId, '10:50', null, { estimated_duration_minutes: 30 });
+    const rows = [
+      { windowStart: '10:45', windowEnd: null },
       { windowStart: '11:30', windowEnd: '12:00' },
       { windowStart: '12:00', windowEnd: '13:00' },
+    ];
+    expect((await check(anchor, laterDay, '09:00', '10:00')).routeShiftConflicts).toEqual(rows);
+    // The occupancy check's switch is not the shift's.
+    process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
+    try {
+      expect((await check(anchor, laterDay, '09:00', '10:00')).routeShiftConflicts).toEqual(rows);
+    } finally {
+      delete process.env.REBOOKER_NULL_END_OCCUPANCY;
+    }
+  });
+
+  test('a target that leaves the later stops on their own hours today judges none of them', async () => {
+    const { anchor } = await makeRoute({ shift_end: '12:00' });
+    // The tapped stop keeps its 09:00 start: no push, and no stop's hours are written.
+    expect(await check(anchor, today, '09:00', '09:30')).not.toHaveProperty('routeShiftConflicts');
+    expect((await check(anchor, today, '09:01', '10:01')).routeShiftConflicts).toEqual([
+      { windowStart: '11:31', windowEnd: '12:01' },
+      { windowStart: '12:01', windowEnd: '13:01' },
     ]);
   });
 

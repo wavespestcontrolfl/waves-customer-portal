@@ -1502,8 +1502,9 @@ function routeLandings({ service, route, target }) {
 // `office`: the sheet whose move commits as the office. The office is told the shift line on a day the
 // technician works only (dayWarningsFor: the shift is not an off day's), so an off day gives it no row.
 // The technician's own move is judged on the shift whatever the day, and so is its sheet.
-// Each stop is judged on the route's technician and its own stored length, as the mover judges it; a
-// grouped stop's partner on another technician is not read here. Advisory: a read that fails is logged and
+// Each stop is judged on the route's technician, on the hours the move gives it (shiftLanding) and its
+// own stored length, as the mover judges it; a grouped stop's partner on another technician is not read
+// here. A row's windowEnd is null for a stop with no stored end. Advisory: a read that fails is logged and
 // gives {}, and the sheet opens as before.
 async function routeShiftRows(service, route, { office = false } = {}) {
   const none = () => ({});
@@ -1520,9 +1521,10 @@ async function routeShiftRows(service, route, { office = false } = {}) {
     const workDays = office ? await db('technicians').where({ id: service.technician_id }).first('id', 'work_days') : null;
     return (target) => {
       try {
-        const { targetDate, windows } = routeLandings({ service, route, target });
+        const { targetDate, isSameDay, windows } = routeLandings({ service, route, target });
         const shift = isOffDay(workDays, targetDate) ? null : shiftOf(service.technician_id, targetDate);
-        const outside = windows.filter((window, i) => window && !shiftHoldsBlock(shift, route[i], window));
+        const outside = route.map((job, i) => shiftLanding(job, windows[i], isSameDay))
+          .filter((window, i) => window && !shiftHoldsBlock(shift, route[i], window));
         return outside.length ? { routeShiftConflicts: outside.map((w) => ({ windowStart: w.start, windowEnd: w.end })) } : {};
       } catch (err) {
         return unread(err);
@@ -1532,6 +1534,23 @@ async function routeShiftRows(service, route, { office = false } = {}) {
     unread(err);
     return none;
   }
+}
+
+// The hours a rest-of-route move gives `job` for the shift check, as commit() writes them, or null when
+// the mover does not judge the stop on the shift:
+//   - a day move keeps the stop's own hours. Its start with no stored end is still judged, on the stored
+//     length, whatever the overlap advisory reads of that row (REBOOKER_NULL_END_OCCUPANCY is the occupancy
+//     check's switch, not the shift's). No start: no hours to judge (shiftHoldsBlock).
+//   - a push today (`pushed`, routeLandings: the start and the end move together) that leaves the stop on
+//     its own stored start is no move of that stop: a stop the office placed outside the shift stays the
+//     office's.
+//   - a stop with no window of its own lands on the target's hours, but not as a member of a visit group:
+//     the group moves as a unit, and its planner can leave that member with no time.
+function shiftLanding(job, pushed, isSameDay) {
+  const own = { start: toHHMM(job.window_start), end: toHHMM(job.window_end) };
+  if (!isSameDay) return own;
+  const unjudged = own.start && own.end ? own.start === pushed.start : job.visit_id;
+  return unjudged ? null : pushed;
 }
 
 /**
