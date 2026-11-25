@@ -224,8 +224,10 @@ const cancelledRootDedupeKey = (rootId) => `series-price-guard:cancelled-root:${
 // condition really cleared, so the Reopen is refused).
 async function closeStandingRefusedAlert(sp, { parent, parentId, child, childDate, childId }) {
   const { doneColumns, openToCloser } = require('./notification-service')._private;
+  // The predicate and the key expression are the ones notifications_admin_dedupe_key_idx is built on, so the
+  // lookup reads that index; the literal 'admin' (not a bound value) lets the planner match the partial index.
   const standing = () => openToCloser(sp('notifications')
-    .where({ recipient_type: 'admin' })
+    .whereRaw("recipient_type = 'admin'")
     .whereRaw("metadata->>'dedupeKey' = ?", [cancelledRootDedupeKey(parentId)])
     .whereRaw("metadata->>'refusedDate' = ?", [childDate]), CLOSED_BY);
   if (!(await standing().first('id'))) return false;
