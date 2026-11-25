@@ -2690,6 +2690,8 @@ class RelayConversation {
       sandbox: this.sandbox,
       // Practice line: dry runs say so, and transfer_to_office is refused before any packet (relay-tools).
       practiceLine: this._practiceLine,
+      // Call-scoped cancellation: once the brain ends or is retired (convo.ended), no new paid stage starts.
+      isCancelled: () => convo.ended === true,
       // The claim-owner nonce — every WRITE transaction re-proves ownership
       // against it INSIDE the transaction (the supersession fences outside
       // are check-then-act; the in-trx check is the atomic one). LIVE getter,
@@ -3759,7 +3761,9 @@ class RelayConversation {
       );
     }
     const toolCtx = this._buildToolCtx();
-    const contextEnabled = isContextEnabled();
+    // A practice line serves public pricing and the service catalog whether or not the account-context
+    // gate is on, so its prompt is the one that quotes prices.
+    const contextEnabled = isContextEnabled() || this._practiceLine;
 
     // Office hours are optional context. `.catch()` handles a REJECTION, not a
     // HANG — an un-timed await here would hold the caller's first turn open for

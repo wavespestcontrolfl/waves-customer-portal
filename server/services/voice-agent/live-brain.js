@@ -42,6 +42,9 @@ const logger = require('../logger');
 // An ask that is not done at SOFT_DEADLINE_MS tells its caller (onSoft) and keeps
 // waiting: the real answer still goes out when it lands. At ASK_DEADLINE_MS it
 // is given up and TIMEOUT_REPLY is the answer.
+// Tools whose run can start paid provider calls: find_slots (the date parser, with its provider fallback,
+// plus geocode and road times) and get_availability (geocode and road times).
+const PAID_TOOLS = new Set(['find_slots', 'get_availability']);
 const SOFT_DEADLINE_MS = 6000;
 const ASK_DEADLINE_MS = 20000;
 // Spoken at the hard deadline, and for every ask after it (the brain is retired
@@ -63,6 +66,7 @@ class LiveBrain {
     this.deadlineMs = deadlineMs;
     this.softMs = softMs;
     this.ended = false;
+    this.lastUsage = { rounds: 0, paidToolCalls: 0 }; // the latest ask's model rounds and paid tool calls (counts only)
     this.lastRan = false; // whether the latest ask reached the conversation (a retired or closed brain answers without running)
     this.retired = false; // a hard timeout retires the conversation: its turn may still be running
     this.queue = Promise.resolve(); // asks run one at a time
@@ -71,6 +75,19 @@ class LiveBrain {
     this.turn = null; // the turn collecting tokens: { tokens: [], closed: false }
     this.wakeEnded = null;
     this.endedPromise = new Promise((resolve) => { this.wakeEnded = resolve; });
+  }
+
+  // Model rounds and paid tool calls the conversation has made so far, from its own per-turn stats
+  // (counts only: a round counts when it STARTS, so a timed-out or aborted one is still a round).
+  usage() {
+    const stats = this.convo && Array.isArray(this.convo._turnStats) ? this.convo._turnStats : [];
+    let rounds = 0;
+    let paidToolCalls = 0;
+    for (const stat of stats) {
+      rounds += Number(stat.rounds) || 0;
+      for (const tool of (Array.isArray(stat.tools) ? stat.tools : [])) if (PAID_TOOLS.has(tool.name)) paidToolCalls += 1;
+    }
+    return { rounds, paidToolCalls };
   }
 
   // The collector the conversation's `send` writes to. Tokens of a turn that
@@ -137,6 +154,7 @@ class LiveBrain {
     if (this.ended || !prompt) return CLOSED_REPLY;
     if (this.retired) return TIMEOUT_REPLY;
     this.lastRan = true;
+    const before = this.usage();
     const turn = { tokens: [], closed: false };
     this.turn = turn;
     let timer;
@@ -175,6 +193,8 @@ class LiveBrain {
       logger.warn(`[voice-live-brain] ask failed callSid=${this.callSid} code=${errCode(err)}`);
       throw err;
     } finally {
+      const after = this.usage();
+      this.lastUsage = { rounds: after.rounds - before.rounds, paidToolCalls: after.paidToolCalls - before.paidToolCalls };
       clearTimeout(timer);
       clearTimeout(softTimer);
       if (this.turn === turn) this.turn = null;

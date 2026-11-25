@@ -332,6 +332,8 @@ class LiveBridge {
     this.brainMs = [];
     this.brainWaitMs = [];
     this.brainTotalMs = [];
+    this.brainRounds = []; // per ask: model rounds the relay conversation ran (counts only)
+    this.brainPaidToolCalls = []; // per ask: find_slots / get_availability calls (each can start geocode, date-parser and road-time calls)
     // The caller's words, in memory only and never logged or stored: fragments
     // since the last delegation, and the latest two utterances for a delegation
     // that finds none. fragments counts them for the transcript settle.
@@ -956,6 +958,9 @@ class LiveBridge {
     this.brainWaitMs.push(ms(receivedAt, startedAt));
     this.brainMs.push(ms(startedAt, endedAt));
     this.brainTotalMs.push(ms(receivedAt, this.deps.now()));
+    const usage = (this.brain && this.brain.lastUsage) || {};
+    this.brainRounds.push(Number(usage.rounds) || 0);
+    this.brainPaidToolCalls.push(Number(usage.paidToolCalls) || 0);
   }
 
   async endBrain() {
@@ -1067,7 +1072,8 @@ class LiveBridge {
       // a paid model call); how many ran past its soft deadline (a holding line
       // was spoken and the answer still came) and how many hit the hard one (given
       // up); and for each ask in ms, the wait before the brain started (queue and
-      // transcript settle), the brain's time, and delegation to the answer.
+      // transcript settle), the brain's time, and delegation to the answer; and for
+      // each ask the model rounds and paid tool calls it ran (what the spend estimate rests on).
       ...(this.tools ? {
         brain_asks: this.brainAsks,
         brain_soft_timeouts: this.brain ? this.brain.softTimeouts : 0,
@@ -1075,6 +1081,8 @@ class LiveBridge {
         brain_wait_ms: this.brainWaitMs,
         brain_ms: this.brainMs,
         brain_total_ms: this.brainTotalMs,
+        brain_rounds: this.brainRounds,
+        brain_paid_tool_calls: this.brainPaidToolCalls,
       } : {}),
       errors,
     };

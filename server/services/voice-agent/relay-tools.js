@@ -590,9 +590,12 @@ function knownCallerRefusal(account, input = {}, ctx = {}) {
   return account.kind === 'which_property' ? WHICH_PROPERTY_TEXT : OTHER_PROPERTY_TEXT;
 }
 
-async function resolveAvailability({ address_line1, city, zip, when, account = null }) {
+async function resolveAvailability({ address_line1, city, zip, when, account = null, isCancelled = () => false }) {
   const { isEnabled } = require('../../config/feature-gates');
   if (!isEnabled('selfBooking')) return { status: 'unavailable' };
+  // Call-scoped cancellation (a practice line whose brain ended or was retired): checked before every
+  // paid stage (geocode, date parser, routing), so a lookup that outlived its call starts no new one.
+  if (isCancelled()) return { status: 'cancelled' };
 
   const booking = require('../../routes/booking')._internals;
   const config = await booking.loadBookingConfig();
@@ -611,6 +614,7 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
     address: (street || zipStr) && addrParts.length ? `${addrParts.join(', ')}, FL` : null,
     city: cityStr || null,
   });
+  if (isCancelled()) return { status: 'cancelled' };
   if (!coords.lat || !coords.lng) return { status: 'need_location' };
   // Which account's property these times were scored at (null = a stated
   // location): request_booking books a known caller only from their own.
@@ -621,12 +625,14 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
 
   if (when) {
     const { parseWhen, summarizeWindow } = require('../../services/scheduling/parse-when');
+    if (isCancelled()) return { status: 'cancelled' };
     const w = await parseWhen(String(when), {
       now: today,
       minDaysOut: config.advance_days_min ?? 1,
       maxDaysOut: booking.MAX_BOOKING_HORIZON_DAYS,
       defaultWindowDays: config.advance_days_max ?? 14,
     });
+    if (isCancelled()) return { status: 'cancelled' };
     const availability = await booking.buildBookingAvailability({
       lat: coords.lat, lng: coords.lng, duration,
       rangeFrom: w.dateFrom, rangeTo: w.dateTo, config, today,
@@ -651,6 +657,7 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
   const { etDateString, addETDays } = require('../../utils/datetime-et');
   const rangeFrom = etDateString(addETDays(today, config.advance_days_min ?? 1));
   const rangeTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
+  if (isCancelled()) return { status: 'cancelled' };
   const availability = await booking.buildBookingAvailability({
     lat: coords.lat, lng: coords.lng, duration, rangeFrom, rangeTo, config, today, surface: 'voice',
   });
@@ -662,7 +669,30 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
   };
 }
 
+// A practice line files nothing and calls nobody, so its availability results promise no callback,
+// no confirmation call and no held time.
+function practiceAvailabilityText(res, ctx) {
+  if (res.status === 'cancelled') return 'Could not check times right now. Tell the caller they can call or text the Waves office to schedule.';
+  if (res.status === 'unavailable') {
+    return 'Live scheduling is not available right now. Do NOT quote any times. This is a practice line: tell the caller to call or text the Waves office to schedule.';
+  }
+  if (res.status === 'need_location') {
+    return 'Could not determine the service location. Ask the caller for their street address or ZIP code, then call this tool again.';
+  }
+  const list = formatSlots(res.availability && res.availability.slots, 4, ctx.rememberSlot, res.offerContext);
+  if (!list) {
+    return `${res.summary ? res.summary + ' ' : ''}No open times in that window. Offer to look at another day or timeframe, or tell the caller they can call or text the Waves office. Do not promise a callback.`;
+  }
+  return (
+    `${res.summary ? res.summary + ' ' : ''}Open times: ${list}. `
+    + 'NOTHING IS BOOKED — read the caller two or three of these options. This is a practice line, so it can\'t hold or '
+    + 'book the time: say so plainly ("this practice line can\'t hold the time; on a real call the team would confirm it"). '
+    + 'Do NOT promise a call, a confirmation, or that the slot is reserved.'
+  );
+}
+
 function availabilityResultToText(res, ctx = {}) {
+  if (ctx.practiceLine === true) return practiceAvailabilityText(res, ctx);
   if (res.status === 'unavailable') {
     return 'Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.';
   }
@@ -798,7 +828,11 @@ async function executeTool(name, input = {}, ctx = {}) {
         return 'This is a practice line. It cannot look at accounts, visits, invoices, messages or history, '
           + 'and it cannot transfer the call. Do NOT try again. Tell the caller to call or text the Waves office for that.';
       }
+      if (typeof ctx.isCancelled === 'function' && ctx.isCancelled()) return 'Could not check that right now. Tell the caller they can call or text the Waves office.';
       if (name === 'capture_lead') input = { ...input, use_account_details: false }; // no account is ever read here
+      // The two public reads run whether or not the account-context gate is on: they read no account.
+      if (name === 'get_pricing') return await require('./relay-context').pricingText(input);
+      if (name === 'get_services_catalog') return await require('./relay-context').servicesCatalogText();
     }
     if (name === 'transfer_to_office') {
       // Gate + office state re-checked inside (fail closed); the packet is
@@ -1757,7 +1791,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       const account = await knownCallerAvailabilityLocation(input, ctx);
       const refusal = knownCallerRefusal(account, input, ctx);
       if (refusal) return refusal;
-      const res = await resolveAvailability({ address_line1: input.address_line1, city: input.city, zip: input.zip, account });
+      const res = await resolveAvailability({ address_line1: input.address_line1, city: input.city, zip: input.zip, account, isCancelled: ctx.isCancelled });
       return availabilityResultToText(res, ctx) + (account && res.status === 'ok' ? ACCOUNT_LOCATION_NOTE : '');
     }
 
@@ -1768,7 +1802,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       const refusal = knownCallerRefusal(account, input, ctx);
       if (refusal) return refusal;
       if (!input.when) return 'Ask the caller what day or timeframe they prefer, then call find_slots with that.';
-      const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip, account });
+      const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip, account, isCancelled: ctx.isCancelled });
       return availabilityResultToText(res, ctx) + (account && res.status === 'ok' ? ACCOUNT_LOCATION_NOTE : '');
     }
 
@@ -1780,6 +1814,10 @@ async function executeTool(name, input = {}, ctx = {}) {
     // The failure is answered with a string; the session reads this flag so
     // the handoff record never reports a failed tool as ok.
     if (ctx && typeof ctx === 'object') ctx.toolFailed = true;
+    if (ctx && ctx.practiceLine === true) {
+      return 'Could not look that up right now. This is a practice line: tell the caller to call or text the Waves office. '
+        + 'Do not promise a callback or that anyone will follow up.';
+    }
     if (name === 'capture_lead') {
       return 'The lead could not be saved right now, but proceed to wrap up the call politely; the call is still recorded for follow-up.';
     }

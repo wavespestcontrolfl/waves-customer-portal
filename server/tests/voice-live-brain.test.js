@@ -168,6 +168,22 @@ describe('ask', () => {
     expect(brain.lastRan).toBe(false); // the retired brain ran nothing for this ask
   });
 
+  test('usage counts the model rounds and paid tool calls of each ask (counts only), timed-out asks included', async () => {
+    const { brain, convo } = await open({
+      script: async (c) => {
+        c._turnStats = [...(c._turnStats || []), { rounds: 3, tools: [{ name: 'find_slots' }, { name: 'get_pricing' }, { name: 'get_availability' }] }];
+        c.send('ok', true);
+      },
+    });
+    convo._turnStats = [{ rounds: 1, tools: [] }]; // an earlier turn: not part of this ask
+    await brain.ask('first');
+    expect(brain.lastUsage).toEqual({ rounds: 3, paidToolCalls: 2 }); // get_pricing starts no paid call
+    expect(brain.usage()).toEqual({ rounds: 4, paidToolCalls: 2 });
+    convo.handlePrompt.mockImplementationOnce(async () => { convo._turnStats.push({ rounds: 2, tools: [{ name: 'find_slots' }] }); convo.send('again', true); });
+    await brain.ask('second');
+    expect(brain.lastUsage).toEqual({ rounds: 2, paidToolCalls: 1 });
+  });
+
   test('lastRan is true only for an ask that reached the conversation', async () => {
     const { brain } = await open();
     await brain.ask('hello');

@@ -1868,6 +1868,20 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     expect(logged).not.toMatch(/4111|secret-gate-code|visit is Tuesday/);
   });
 
+  test('the summary records, per ask, the model rounds and paid tool calls (counts only)', async () => {
+    let n = 0;
+    const { t, brain } = toolsSetup({ reply: async () => { n += 1; brain.lastUsage = { rounds: n + 1, paidToolCalls: n }; return `reply ${n}`; } });
+    await t.ready();
+    t.openai.receive(said('first', 0, 300));
+    t.openai.receive(created('d1'));
+    t.openai.receive(said('second', 6000, 6300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 2);
+    t.twilioStop();
+    await finalized(t);
+    expect(summaryOf(t)).toMatchObject({ brain_asks: 2, brain_rounds: [2, 3], brain_paid_tool_calls: [1, 2] });
+  });
+
   test('a queued delegation\'s wait before the brain starts includes the ask ahead of it', async () => {
     const { t } = toolsSetup({ reply: async () => { t.advance(1000); return 'ok'; } });
     await t.ready();
