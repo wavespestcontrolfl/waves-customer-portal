@@ -130,6 +130,18 @@ postgres('the stops a rest-of-route move would land outside the shift (real Post
     ]);
   });
 
+  test('a tapped stop from another day, moved to today: a stop that keeps its day and its hours is not judged', async () => {
+    const technicianId = await makeTech({ shift_end: '12:00' });
+    const { etDateString, addETDays } = require('../utils/datetime-et');
+    // An overdue visit, and two stops today: one the shift holds, one the office put after 12:00.
+    const overdue = await makeStop(technicianId, '09:00', '10:00', { scheduled_date: etDateString(addETDays(new Date(), -1)) });
+    await makeStop(technicianId, '10:00', '11:00');
+    await makeStop(technicianId, '12:00', '13:00');
+    expect(await check(overdue, today, '09:00', '10:00')).not.toHaveProperty('routeShiftConflicts');
+    // To another day, today's stops change day: the one after 12:00 is judged.
+    expect((await check(overdue, laterDay, '09:00', '10:00')).routeShiftConflicts).toEqual([{ windowStart: '12:00', windowEnd: '13:00' }]);
+  });
+
   test('a day the technician does not work gives the office no row', async () => {
     process.env.GATE_TECH_WORK_DAYS = 'true';
     const weekday = new Date(`${laterDay}T12:00:00Z`).getUTCDay();

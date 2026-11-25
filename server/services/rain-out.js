@@ -1523,7 +1523,7 @@ async function routeShiftRows(service, route, { office = false } = {}) {
       try {
         const { targetDate, isSameDay, windows } = routeLandings({ service, route, target });
         const shift = isOffDay(workDays, targetDate) ? null : shiftOf(service.technician_id, targetDate);
-        const outside = route.map((job, i) => shiftLanding(job, windows[i], isSameDay))
+        const outside = route.map((job, i) => shiftLanding(job, windows[i], isSameDay, targetDate))
           .filter((window, i) => window && !shiftHoldsBlock(shift, route[i], window));
         return outside.length ? { routeShiftConflicts: outside.map((w) => ({ windowStart: w.start, windowEnd: w.end })) } : {};
       } catch (err) {
@@ -1541,17 +1541,21 @@ async function routeShiftRows(service, route, { office = false } = {}) {
 //   - a member of a visit group. The group moves as a unit through its own planner (visit-groups.js
 //     moveVisitAsUnit), which the flat projection here does not follow. No visit has been made since
 //     2026-10-22 (owner: appointments are no longer grouped), so these are old stops only.
-//   - a day move keeps the stop's own hours. Its start with no stored end is still judged, on the stored
-//     length, whatever the overlap advisory reads of that row (REBOOKER_NULL_END_OCCUPANCY is the occupancy
-//     check's switch, not the shift's). No start: no hours to judge (shiftHoldsBlock).
-//   - a push today (`pushed`, routeLandings) that does not change the stop's stored hours is no move of
-//     that stop, by the mover's own test (hoursChangedBy: a stored time with seconds is a change). A stop
-//     the office placed outside the shift stays the office's.
-function shiftLanding(job, pushed, isSameDay) {
+//   - a stop the move leaves on its own day and its own stored hours. The route is today's, and the tapped
+//     stop can be another day's (an overdue visit moved to today): `isSameDay` is about the tapped stop, so
+//     each stop's own day is compared with the target's, as the mover does (rebooker.js sameDayTarget).
+//     "Its own hours" is the mover's test too (hoursChangedBy: a stored time with seconds is a change). A
+//     stop the office placed outside the shift stays the office's.
+// The hours are commit()'s: the push (`pushed`, routeLandings) when the target is the tapped stop's day, the
+// stop's own hours when it is not. A start with no stored end is still judged, on the stored length,
+// whatever the overlap advisory reads of that row (REBOOKER_NULL_END_OCCUPANCY is the occupancy check's
+// switch, not the shift's). No start: no hours to judge (shiftHoldsBlock).
+function shiftLanding(job, pushed, isSameDay, targetDate) {
   if (job.visit_id) return null;
-  if (!isSameDay) return { start: toHHMM(job.window_start), end: toHHMM(job.window_end) };
-  const changed = require('./scheduling/window-rules').hoursChangedBy({ window_start: pushed.start, window_end: pushed.end }, job);
-  return changed ? pushed : null;
+  const landed = isSameDay ? pushed : { start: toHHMM(job.window_start), end: toHHMM(job.window_end) };
+  const keepsDay = dateOnlyString(job.scheduled_date) === targetDate;
+  const written = !keepsDay || require('./scheduling/window-rules').hoursChangedBy({ window_start: landed.start, window_end: landed.end }, job);
+  return written ? landed : null;
 }
 
 /**

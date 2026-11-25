@@ -442,7 +442,7 @@ describe('rain-out service', () => {
           wireDb({
             scheduled_services: [
               chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed' }) }),
-              chain({ rows: ROUTE }),
+              chain({ rows: ROUTE.map((job) => ({ scheduled_date: etDateString(), ...job })) }),
             ],
             // The technician's sheet reads the hours twice (its own hours, then the route's) and no work
             // days: a third read would throw, and the rows would be gone. The office's sheet does not hold
@@ -3472,7 +3472,8 @@ describe('rain-out service', () => {
       ];
       const WINDOWLESS = { id: 'svc-5', window_start: null, window_end: null, estimated_duration_minutes: 60 };
       // `technicians` answers the set hours (loadTechShifts, with today's clock-ins: none), then the work days.
-      const check = async (target, { shift = ['08:00', '17:00'], workDays = null, route = ROUTE, hoursRead } = {}) => {
+      // The route's stops are today's, as remainingRouteJobs reads them; the tapped stop's day can be another.
+      const check = async (target, { shift = ['08:00', '17:00'], workDays = null, route = ROUTE, hoursRead, anchorDate = etDateString() } = {}) => {
         listOccupiedWindows.mockResolvedValue([]);
         const technicians = [
           chain({ whereNotNull: jest.fn().mockReturnThis(), rows: shift ? [{ id: 'tech-1', shift_start: shift[0], shift_end: shift[1] }] : [], ...hoursRead }),
@@ -3480,8 +3481,8 @@ describe('rain-out service', () => {
         ];
         wireDb({
           scheduled_services: [
-            chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1', technician_id: 'tech-1', scheduled_date: etDateString(), window_start: '09:00', route_order: 1 }) }),
-            chain({ rows: route }),
+            chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1', technician_id: 'tech-1', scheduled_date: anchorDate, window_start: '09:00', route_order: 1 }) }),
+            chain({ rows: route.map((job) => ({ scheduled_date: etDateString(), ...job })) }),
           ],
           technicians,
           time_entries: [chain({ groupBy: jest.fn().mockReturnThis(), min: jest.fn().mockResolvedValue([]) })],
@@ -3572,6 +3573,28 @@ describe('rain-out service', () => {
         // One minute of push writes every stop's hours.
         const oneMinute = { date: etDateString(), window: { start: '09:01', end: '10:01' } };
         expect((await check(oneMinute, { shift: ['08:00', '12:00'] })).result.routeShiftConflicts).toHaveLength(2);
+      });
+
+      test('gate on: a tapped stop from another day, moved to today: a stop that keeps its day and its hours is not judged', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // An overdue visit. Today's stops stay today, on their own hours: svc-3 and svc-4 are after 12:00
+        // already, and the move does not write them.
+        const toToday = { date: etDateString(), window: { start: '09:00', end: '10:00' } };
+        expect((await check(toToday, { shift: ['08:00', '12:00'], anchorDate: '2020-01-06' })).result).not.toHaveProperty('routeShiftConflicts');
+        // A stored time with seconds is rewritten to the minute, so that stop is judged.
+        const seconds = { id: 'svc-13', window_start: '12:00:30', window_end: '13:00:00', estimated_duration_minutes: 60 };
+        expect((await check(toToday, { shift: ['08:00', '12:00'], anchorDate: '2020-01-06', route: [...ROUTE, seconds] })).result.routeShiftConflicts)
+          .toEqual([{ windowStart: '12:00', windowEnd: '13:00' }]);
+        // The stop's own day as pg reads a DATE back.
+        const pgDate = { ...ROUTE[1], scheduled_date: new Date(`${etDateString()}T00:00:00Z`) };
+        expect((await check(toToday, { shift: ['08:00', '12:00'], anchorDate: '2020-01-06', route: [pgDate] })).result).not.toHaveProperty('routeShiftConflicts');
+      });
+
+      test('gate on: a tapped stop on another day that keeps its day: today\'s stops change day, and are judged on their hours', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // No push (the tapped stop keeps 09:00), and still a move of every later stop: from today to Thursday.
+        expect((await check(onDay(THU), { shift: ['08:00', '12:00'], anchorDate: THU })).result.routeShiftConflicts)
+          .toEqual([{ windowStart: '12:00', windowEnd: '13:00' }, { windowStart: '11:30', windowEnd: '12:00' }]);
       });
 
       test('gate on: a stored time with seconds is a change of hours, as the mover reads it', async () => {
