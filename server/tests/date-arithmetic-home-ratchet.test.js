@@ -31,16 +31,18 @@
  *   - const { addETDays } = require(...) and const addDays = require(...): an
  *     import, not a copy. A local DEFINITION counts whatever its name is, even
  *     one called addETDays: the real helpers live in the exempt home files.
- *   - windowMs: 24 * 60 * 60 * 1000 and new Date(Date.now() - 7 * 86400000):
- *     an elapsed window from now is not calendar math. It stays exempt only
- *     while the line never turns the result into a calendar day: a day-ms
- *     step on a line with etDateString(, dateOnlyString(,
- *     toISOString().slice(0, 10), Date.parse(, Date.UTC(, parseETDateTime( or a
- *     T12:00 anchor counts even when Date.now() is on the same line.
+ *   - TTLs, age limits and rolling windows: const MAX_AGE_MS = 86400000,
+ *     windowMs: 24 * 60 * 60 * 1000, new Date(now.getTime() - 7 * DAY_MS),
+ *     new Date(Date.now() - 86400000). 24 hours is the right answer there.
+ *     day-ms-math counts a line only when a one-day step (literal or a day
+ *     constant name) sits on the same line as a calendar-day sink: any export
+ *     of the three helper modules whose name matches /date|day/i (read at
+ *     runtime, so a new helper is covered), or .toISOString().slice(...),
+ *     .substring(...), .split(...), or .slice(0, 10).
  *   - /^\d{4}-\d{2}-\d{2}T.../ and other timestamp patterns: a timestamp is not
  *     a date-only value; only a pattern that is the whole date counts.
- * Shapes it still counts (so the baseline holds them): new Date(x.getTime() +
- * n * 86400000) rolling windows, one-day TTL constants, and setUTCDate week math.
+ * Shapes it still counts (so the baseline holds them): setUTCDate week math
+ * and a day-ms step that ends in a calendar-day sink.
  *
  * The matcher tables at the bottom (shapes that must count, shapes that must
  * not) run on sample strings, so a change to a pattern is checked there first.
@@ -67,16 +69,21 @@ const USE = [
   'addStaffWorkDays (server/utils/staff-time-work-date.js)',
   'or dateOnlyString / validDateOnly (server/utils/date-only.js).',
 ].join(' ');
-// A one-day constant: const DAY_MS = 86400000;  or  = 24 * 60 * 60 * 1000;
+// One day in ms, as a literal: 86400000, 24 * 60 * 60 * 1000, ...
 const ONE_DAY_MS = '(?:86400000|86_400_000|864e5|8\\.64e7|24 *\\* *60 *\\* *60 *\\* *1000|60 *\\* *60 *\\* *24 *\\* *1000|1000 *\\* *60 *\\* *60 *\\* *24|60 *\\* *24 *\\* *60 *\\* *1000|24 *\\* *3600 *\\* *1000|3600 *\\* *24 *\\* *1000|1000 *\\* *3600 *\\* *24|86400 *\\* *1000|1000 *\\* *86400)';
 const ANY_DAY_MS = new RegExp(`(?<![\\w.])${ONE_DAY_MS}(?![\\w.])`);
-const DAY_MS_CONSTANT = new RegExp(`\\b(?:const|let|var)\\s+\\w+\\s*=\\s*${ONE_DAY_MS}\\s*[;,]`);
 // n * DAY_MS written with a named constant (local or imported)
 const DAY_MS_NAME = /\b(?:(?:[A-Z][A-Z0-9_]*_)?DAY_?(?:MS|MILLIS|MILLISECONDS)|(?:MS|MILLIS)_(?:PER|IN)_DAY|ONE_DAY\w*|dayMs|DAY_IN_MS)\b/;
-const DATE_MACHINERY = /new Date\(|Date\.(?:parse|UTC)\(|\.toISOString\(|etDateString\(|parseETDateTime\(/;
-// The line turns the step into a calendar day, or starts from a calendar day:
-// a Date.now() elsewhere on the line does not make it an elapsed window.
-const CALENDAR_DAY_USE = /etDateString\(|dateOnlyString\(|\.toISOString\(\)\s*\.(?:slice|substring|split)\(|\.slice\(\s*0\s*,\s*10\s*\)|Date\.(?:parse|UTC)\(|parseETDateTime\(|T\d{2}:\d{2}/;
+
+// Calendar-day sinks: every export of the helper modules whose name mentions a
+// date or a day, read from the modules so a new helper is covered at once.
+const SINK_NAMES = [...new Set(HOMES.flatMap((home) => {
+  const mod = require(path.join(SERVER_ROOT, home));
+  return Object.keys(mod).filter((name) => typeof mod[name] === 'function' && /date|day/i.test(name));
+}))];
+const CALENDAR_DAY_SINK = new RegExp(
+  `\\b(?:${SINK_NAMES.join('|')})\\(|\\.toISOString\\(\\)\\s*\\.(?:slice|substring|split)\\(|\\.slice\\(\\s*0\\s*,\\s*10\\s*\\)`,
+);
 
 const DAY_STEP_NAME = '(?:add|plus)(?:[A-Z]\\w*)?Days(?:[A-Z]\\w*)?';
 // function addDays( | const addDays = | x.addDays = ( | addDays: ( | addDays(a, b) {
@@ -108,14 +115,8 @@ const RULES = [
   },
   {
     id: 'day-ms-math',
-    // n * 86400000 (or n * DAY_MS) on a line that builds a Date, or a one-day constant.
-    // A Date.now() anchor exempts the line only when it never reaches a calendar day.
-    countLine: (rel, line) => {
-      if (DAY_MS_CONSTANT.test(line)) return 1;
-      if (!ANY_DAY_MS.test(line) && !DAY_MS_NAME.test(line)) return 0;
-      if (CALENDAR_DAY_USE.test(line)) return 1;
-      return DATE_MACHINERY.test(line) && !/Date\.now\(\)/.test(line) ? 1 : 0;
-    },
+    // a one-day ms step (literal or DAY_MS-style name) and a calendar-day sink on one line
+    countLine: (rel, line) => ((ANY_DAY_MS.test(line) || DAY_MS_NAME.test(line)) && CALENDAR_DAY_SINK.test(line) ? 1 : 0),
     use: `Do not add or subtract n * 86400000 (24 * 60 * 60 * 1000) to move a calendar day; a day is 23 or 25 hours across a DST seam. ${USE}`,
   },
   {
@@ -250,17 +251,18 @@ const MUST_COUNT = [
   ['calendar-day-mutation', 'd.setUTCDate(d.getUTCDate() - n);'],
   ['calendar-day-mutation', 'const x = new Date(s); x.setDate(start.getDate() + i);'],
   // day-ms-math
-  ['day-ms-math', "const next = new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000);"],
-  ['day-ms-math', 'const DAY_MS = 86400000;'],
-  ['day-ms-math', 'const DAY_MS = 24 * 60 * 60 * 1000;'],
-  ['day-ms-math', 'return new Date(d.getTime() + n * 24 * 60 * 60 * 1000);'],
-  ['day-ms-math', 'const t = new Date(base.getTime() + n * DAY_MS);'],
-  ['day-ms-math', 'const t = new Date(base.getTime() + n * 24 * 3600 * 1000);'],
+  ['day-ms-math', "const next = new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);"],
+  ['day-ms-math', 'return etDateString(new Date(d.getTime() + n * 24 * 60 * 60 * 1000));'],
+  ['day-ms-math', 'const t = formatETDate(new Date(base.getTime() + n * DAY_MS));'],
+  ['day-ms-math', 'const t = dateOnlyString(new Date(base.getTime() + n * 24 * 3600 * 1000));'],
+  ['day-ms-math', 'const label = formatETDate(new Date(Date.now() + 86400000));'],
+  ['day-ms-math', 'const days = etCalendarDaysUntil(new Date(x.getTime() + 86400000));'],
+  ['day-ms-math', 'const d = new Date(t + 86400000).toISOString().substring(0, 10);'],
+  ['day-ms-math', "const d = new Date(t + 86400000).toISOString().split('T')[0];"],
   // Date.now() on the line does not exempt a step that lands on a calendar day
   ['day-ms-math', 'const tomorrow = etDateString(new Date(Date.now() + 86400000));'],
   ['day-ms-math', 'const d = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);'],
   ['day-ms-math', 'const d = dateOnlyString(new Date(Date.now() + 2 * 24 * 60 * 60 * 1000));'],
-  ['day-ms-math', "const d = new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000), now = Date.now();"],
   ['day-ms-math', 'const d = etDateString(new Date(Date.now() + 2 * DAY_MS));'],
   // date-only-regex
   ['date-only-regex', 'if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(v)) return null;'],
@@ -294,6 +296,11 @@ const MUST_NOT_COUNT = [
   ['day-ms-math', 'const expiresAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);'],
   ['day-ms-math', 'const stale = Date.now() - row.at > 86400000;'],
   ['day-ms-math', 'const ttl = 7 * 24 * 60 * 60 * 1000;'],
+  ['day-ms-math', 'const X_MAX_AGE_MS = 86400000;'],
+  ['day-ms-math', 'const DAY_MS = 24 * 60 * 60 * 1000;'],
+  ['day-ms-math', 'new Date(now.getTime() - 7 * DAY_MS)'],
+  ['day-ms-math', 'return new Date(d.getTime() + n * 24 * 60 * 60 * 1000);'],
+  ['day-ms-math', "const next = new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400000);"],
   ['day-ms-math', 'const ms = 86400;'],
   ['day-ms-math', 'const big = 1186400000;'],
   ['day-ms-math', '// new Date(x.getTime() + 86400000)'],
@@ -319,6 +326,11 @@ describe('matcher tables', () => {
     expect(codeLines('const t = a +\n  n\n  * 86400000;')).toContain('  * 86400000;');
     expect(codeLines('/**\n * adds 86400000\n */\nconst x = 1;').filter(Boolean)).toEqual(['const x = 1;']);
     expect(codeLines('const x = 1; /* 86400000 */ const y = 2;').join('')).not.toContain('86400000');
+  });
+
+  test('the day sinks come from the real helper exports', () => {
+    expect(SINK_NAMES).toEqual(expect.arrayContaining(['etDateString', 'formatETDate', 'addETDays', 'dateOnlyString', 'validDateOnly', 'staffWorkDate', 'addStaffWorkDays']));
+    expect(SINK_NAMES).not.toContain('TZ');
   });
 
   test('a local addETDays definition counts and a shared import passes', () => {
