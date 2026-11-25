@@ -329,6 +329,7 @@ class LiveBridge {
     this.brain = null;
     this.brainPromise = null; // the brain being opened, or open
     this.brainChain = Promise.resolve(); // delegations are answered one at a time
+    this.delegationTimers = new Set(); // the arrival timers of delegations that may still be queued
     this.brainAsks = 0;
     // Per ask (counts and ms only): the wait before the brain started (queue and
     // transcript settle), the brain's own time, and delegation to the answer.
@@ -796,7 +797,13 @@ class LiveBridge {
     if (this.tools) {
       const receivedAt = this.deps.now();
       const range = this.openRange(offsetMs); // this delegation's words, bound now, not when it reaches the front of the queue
-      this.brainChain = this.brainChain.then(() => this.answerWithBrain(id, receivedAt, range)).catch(() => {});
+      // A timer armed at ARRIVAL: a delegation still waiting for its turn (or for the brain to open) when its 20 s run out is
+      // answered with the timeout line then, not whenever the queue reaches it. One already running is bounded by the brain's own deadline.
+      const entry = { id, expired: false, started: false, timer: null };
+      entry.timer = setTimeout(() => this.expireQueued(entry), this.deps.brainHardMs);
+      if (entry.timer.unref) entry.timer.unref();
+      this.delegationTimers.add(entry.timer);
+      this.brainChain = this.brainChain.then(() => this.answerWithBrain(id, receivedAt, range, entry)).catch(() => {});
       return;
     }
     this.toOpenAi({ type: 'session.commentary.append', delegation_id: id, content: DELEGATION_REPLY });
@@ -939,16 +946,33 @@ class LiveBridge {
   // What to say for one delegation, and whether the brain was asked (so its
   // times are kept). Never throws. A delegation past the soft deadline gets a
   // holding line through say(), then this returns the real answer.
-  async brainReply(say, range, receivedAt) {
+  expireQueued(entry) {
+    this.delegationTimers.delete(entry.timer);
+    if (entry.started || entry.expired || this._finalizing) return;
+    entry.expired = true;
+    this.noteError('brain_expired_in_queue');
+    this.speak(entry.id, TIMEOUT_REPLY);
+  }
+
+  async brainReply(say, range, receivedAt, entry) {
+    if (entry.expired) return { skipped: true };
     if (this.brainAsks >= BRAIN_ASK_CAP) return { reply: DELEGATION_REPLY };
     await range.settled;
+    if (entry.expired) return { skipped: true };
     if (this._finalizing) return { reply: DELEGATION_REPLY };
     const words = range.prompt;
     if (!words) return { reply: BRAIN_NO_WORDS_REPLY };
     // A brain that is slow to open (a stalled database read) must not hold every queued
     // delegation without a word: past the bound the fixed sentence is the answer, and a
     // brain that opens later still serves the asks after it.
-    const brain = await waitAtMost(this.ensureBrain(), this.deps.brainOpenMs);
+    // The wait for it never runs past this delegation's own 20 s (counted from its arrival), whatever the queue ahead did.
+    const left = this.deps.brainHardMs - Math.max(0, this.deps.now() - receivedAt);
+    if (left <= 0) {
+      this.expireQueued(entry);
+      return { skipped: true };
+    }
+    const brain = await waitAtMost(this.ensureBrain(), Math.min(this.deps.brainOpenMs, left));
+    if (entry.expired) return { skipped: true };
     if (brain === undefined) this.noteError('brain_open_timeout');
     if (!brain || this._finalizing) return { reply: DELEGATION_REPLY };
     // The deadlines run from the delegation's ARRIVAL, queue time included: what is left of each is what the ask gets,
@@ -956,9 +980,12 @@ class LiveBridge {
     const { brainSoftMs, brainHardMs } = this.deps;
     const waited = Math.max(0, this.deps.now() - receivedAt);
     if (waited >= brainHardMs) {
-      this.noteError('brain_expired_in_queue');
-      return { reply: TIMEOUT_REPLY };
+      this.expireQueued(entry);
+      return { skipped: true };
     }
+    entry.started = true; // from here the brain's own deadline bounds it
+    clearTimeout(entry.timer);
+    this.delegationTimers.delete(entry.timer);
     this.brainAsks += 1;
     const startedAt = this.deps.now();
     let reply;
@@ -989,9 +1016,12 @@ class LiveBridge {
     if (!this._finalizing) this.toOpenAi({ type: 'session.commentary.append', delegation_id: id, content });
   }
 
-  async answerWithBrain(id, receivedAt, range) {
+  async answerWithBrain(id, receivedAt, range, entry) {
     if (this._finalizing) return;
-    const { reply, startedAt, endedAt } = await this.brainReply((line) => this.speak(id, line), range, receivedAt);
+    const { reply, startedAt, endedAt, skipped } = await this.brainReply((line) => this.speak(id, line), range, receivedAt, entry);
+    if (skipped) return; // its timeout line already went out (expireQueued): it never runs the brain
+    clearTimeout(entry.timer);
+    this.delegationTimers.delete(entry.timer);
     this.speak(id, reply); // nothing is sent if the call ended while the brain worked
     if (startedAt === undefined) return;
     const ms = (from, to) => Math.max(0, to - from);
@@ -1019,6 +1049,8 @@ class LiveBridge {
   async runFinalize(reason) {
     clearTimeout(this.capTimer);
     clearTimeout(this.startTimer);
+    for (const timer of this.delegationTimers) clearTimeout(timer);
+    this.delegationTimers.clear();
     // Stops the brain first: any model round it has running spends until it ends.
     const brainEnded = this.endBrain().catch(() => {});
     await this.closeOpenAi();

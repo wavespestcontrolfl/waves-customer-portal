@@ -1712,6 +1712,50 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     expect(summary.errors).toContain('brain_expired_in_queue');
   });
 
+  test('an arrival timer answers a delegation still queued at its hard deadline, while the ask ahead of it runs, and its turn then skips it', async () => {
+    const { TIMEOUT_REPLY } = require('../services/voice-agent/live-brain');
+    let releaseFirst;
+    const { t, brain } = toolsSetup({
+      reply: () => new Promise((resolve) => { releaseFirst = () => resolve('reply one'); }),
+      deps: { brainHardMs: 60, brainSoftMs: 30 },
+    });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    t.openai.receive(said('two', 6000, 6300));
+    t.openai.receive(created('d2'));
+    // d1's ask runs on; d2 waits behind it and its own 60 ms run out
+    await waitFor(() => answers(t).some((m) => m.delegation_id === 'd2'));
+    expect(answers(t).filter((m) => m.delegation_id === 'd2')).toEqual([{ type: 'session.commentary.append', delegation_id: 'd2', content: TIMEOUT_REPLY }]);
+    expect(brain.ask).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await waitFor(() => answers(t).some((m) => m.delegation_id === 'd1'));
+    await flush();
+    expect(answers(t).filter((m) => m.delegation_id === 'd2')).toHaveLength(1); // its turn came and skipped it: no second line, no ask
+    expect(brain.ask).toHaveBeenCalledTimes(1);
+    t.twilioStop();
+    await finalized(t);
+    expect(summaryOf(t)).toMatchObject({ brain_asks: 1 });
+    expect(summaryOf(t).errors).toContain('brain_expired_in_queue');
+  });
+
+  test('a stalled brain open never holds a delegation past its own hard deadline: the open wait is capped to what is left', async () => {
+    const { TIMEOUT_REPLY } = require('../services/voice-agent/live-brain');
+    const { t, brain } = toolsSetup({ brainOpen: () => new Promise(() => {}), deps: { brainHardMs: 50, brainOpenMs: 4000, brainSoftMs: 20, closeWaitMs: 20 } });
+    await t.ready();
+    t.openai.receive(said('first', 0, 300));
+    t.openai.receive(created('d1'));
+    t.openai.receive(said('second', 6000, 6300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 2, 3000); // both well before the 4 s open wait would have ended
+    expect(answers(t).map((m) => m.content)).toEqual([TIMEOUT_REPLY, TIMEOUT_REPLY]);
+    expect(brain.ask).not.toHaveBeenCalled();
+    t.twilioStop();
+    await finalized(t);
+    expect(summaryOf(t).errors).toContain('brain_expired_in_queue');
+  });
+
   test('a retired brain\'s reply is neither counted as an ask nor timed', async () => {
     const { t, brain } = toolsSetup({ reply: async () => 'real answer' });
     await t.ready();

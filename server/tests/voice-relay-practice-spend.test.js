@@ -108,6 +108,31 @@ describe('SDK retries are off on a practice line (a separate client, never the s
   });
 });
 
+describe('the per-turn clock block', () => {
+  const OLD = process.env.VOICE_RELAY_CONTEXT_ENABLED;
+  afterAll(() => {
+    if (OLD === undefined) delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    else process.env.VOICE_RELAY_CONTEXT_ENABLED = OLD;
+  });
+
+  test('a practice line never gets the production clock block (its follow-up and open/closed lines), an ordinary session still does', async () => {
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+    const seen = [];
+    const stream = (_provider, params) => { seen.push(JSON.stringify(params.messages)); return { finalMessage: async () => ({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }) }; };
+    const practice = build({ stream });
+    const convo = new practice.Convo(practiceArgs());
+    await convo._runLoop('what does pest control cost').catch(() => {});
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).not.toMatch(/CLOCK|team member|office is (open|closed)|follow up/i);
+
+    const ordinary = build({ stream });
+    const other = new ordinary.Convo({ callSid: 'CA-ord-clock', from: '+19415551234', send: jest.fn() });
+    await other._runLoop('what does pest control cost').catch(() => {});
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toMatch(/CLOCK/i);
+  });
+});
+
 describe('no mid-call provider switch on a practice line', () => {
   test('the switch is never eligible, and a failed OpenAI round is one request, then the failure copy', async () => {
     const { Convo, rec } = build({ stream: failingStream('overloaded', { status: 529 }) });

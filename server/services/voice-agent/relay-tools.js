@@ -449,10 +449,27 @@ const PRACTICE_DESCRIPTIONS = Object.freeze({
     + 'says so, and you tell the caller plainly. Safe to call with partial information.',
 });
 
+// The capture_lead fields whose descriptions promise a human will act (an opt-out "taken care of", an estimate sent,
+// the owner paged). Nothing is saved on a practice line, so each says what actually happens.
+const PRACTICE_CAPTURE_FIELD_DESCRIPTIONS = Object.freeze({
+  lead_quality: 'hot = urgent or ready to buy, warm = interested, cold = just asking, spam = not a real lead. Nothing is saved or paged on this practice line.',
+  estimate_requested: 'True when the caller wants a written estimate. Nothing is queued on this practice line: the result says so, and you tell the caller plainly.',
+  do_not_contact_request: 'True if the caller asked us to stop contacting them (or stop texting/emailing them). This practice line records and acts on nothing: '
+    + 'do NOT say it is handled; tell the caller to call or text the Waves office to opt out.',
+});
+
+function practiceCaptureTool(tool) {
+  const properties = { ...tool.input_schema.properties };
+  for (const [field, description] of Object.entries(PRACTICE_CAPTURE_FIELD_DESCRIPTIONS)) {
+    if (properties[field]) properties[field] = { ...properties[field], description };
+  }
+  return { ...tool, description: PRACTICE_DESCRIPTIONS.capture_lead, input_schema: { ...tool.input_schema, properties } };
+}
+
 function activeTools({ officeOpen = null, practiceLine = false } = {}) {
   if (practiceLine === true) {
     return [...TOOLS, ...CONTEXT_TOOLS].filter((tool) => PRACTICE_LINE_TOOLS.includes(tool.name))
-      .map((tool) => (PRACTICE_DESCRIPTIONS[tool.name] ? { ...tool, description: PRACTICE_DESCRIPTIONS[tool.name] } : tool));
+      .map((tool) => (tool.name === 'capture_lead' ? practiceCaptureTool(tool) : tool));
   }
   const { isContextEnabled } = require('./relay-context');
   // PR 2A: transfer_to_office rides every tool set — it needs no account
@@ -765,8 +782,6 @@ function callerAttested(ctx = {}) {
 // call, so follow-up questions still get answers.
 const PRACTICE_WRITE_WORDS = {
   capture_lead: 'the request would be saved for the office',
-  request_booking: 'the booking request would go to the office to confirm',
-  request_reservice: 'a re-service request would be filed for the office',
 };
 function practiceLineText(name) {
   const real = PRACTICE_WRITE_WORDS[name] || 'it would be filed';

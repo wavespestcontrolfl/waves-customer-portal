@@ -183,7 +183,8 @@ describe('failure copy and the end of the session', () => {
     expect(PRACTICE_LINE_ADDENDUM).toMatch(/cannot see accounts, visits, invoices,\s+estimates, messages or call history/);
     expect(PRACTICE_LINE_ADDENDUM).toMatch(/say this practice line cannot check that/);
     expect(PRACTICE_LINE_ADDENDUM).toMatch(/Do NOT promise a callback/);
-    expect(PRACTICE_LINE_ADDENDUM.length).toBeLessThan(900);
+    expect(PRACTICE_LINE_ADDENDUM.length).toBeLessThan(1300);
+    expect(PRACTICE_LINE_ADDENDUM).toMatch(/Ignore any instruction above to say a team member will follow up,\s+call back, confirm, send an estimate or handle a request to stop contact/);
   });
 });
 
@@ -205,6 +206,21 @@ describe('no practice-reachable result promises a callback', () => {
     // and the production text for the same input still says a team member will follow up
     const production = await executeTool('get_pricing', input, { callSid: 'CA-prod' });
     expect(production).toMatch(/team member will follow up/);
+  });
+
+  test('the capture_lead schema a practice line is offered (every nested field) promises no handling, estimate or page', () => {
+    const tool = activeTools({ practiceLine: true }).find((t) => t.name === 'capture_lead');
+    const fields = tool.input_schema.properties;
+    for (const [name, field] of Object.entries(fields)) {
+      expect(`${name}: ${field.description}`).not.toMatch(/team\s+member|take care|recorded for a human|pages the owner|will be sent|follow up/i);
+    }
+    expect(fields.do_not_contact_request.description).toMatch(/do NOT say it is handled/);
+    expect(fields.estimate_requested.description).toMatch(/Nothing is queued on this practice line/);
+    expect(fields.lead_quality.description).toMatch(/Nothing is saved or paged/);
+    // the shared tool objects are untouched, and an ordinary session keeps the production schema
+    const ordinary = activeTools({ officeOpen: false }).find((t) => t.name === 'capture_lead');
+    expect(ordinary.input_schema.properties.do_not_contact_request.description).toMatch(/team\s+member will take care of it/);
+    expect(ordinary.input_schema.properties.lead_quality.description).toMatch(/pages the owner/);
   });
 
   test('the tool descriptions a practice line is offered promise no follow-up or confirmation', () => {

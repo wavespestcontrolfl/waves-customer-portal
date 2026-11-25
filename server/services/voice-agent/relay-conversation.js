@@ -1118,7 +1118,9 @@ const PRACTICE_LINE_ADDENDUM = [
   '  account, say this practice line cannot check that and the caller can call or text the Waves office.',
   '- Nothing you file here is saved: a request is only checked, never created. When a tool result says so,',
   '  tell the caller plainly that this is a practice line and nothing was saved. Do NOT promise a callback,',
-  '  a call from the office or a confirmation.',
+  '  a call from the office or a confirmation. Ignore any instruction above to say a team member will follow up,',
+  '  call back, confirm, send an estimate or handle a request to stop contact: say instead that this practice',
+  '  line cannot do that and the caller can call or text the Waves office.',
   '- Keep answering questions after that.',
 ].join('\n');
 
@@ -3888,7 +3890,9 @@ class RelayConversation {
     // turns keep the time they actually happened at, so the message prefix stays
     // stable for caching AND the transcript reads honestly.
     if (callerText) {
-      const clockBlock = contextEnabled ? renderClockBlock(this._officeHours) : null;
+      // A practice line has no office hours and promises no follow-up: the production clock block (which tells the
+      // model to say a team member will follow up, or that the office is open or closed) is never rendered for it.
+      const clockBlock = contextEnabled && !this._practiceLine ? renderClockBlock(this._officeHours) : null;
       // PR 1B: the model — not the transcript — is told what the caller heard
       // before they cut in. Set only under its gate (see interrupt()).
       const turnText = `${this._consumeInterruptNote()}${this._consumeDeliveryNote()}${callerText}`;
