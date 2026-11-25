@@ -32,10 +32,10 @@
  * stopPromise, codex P1 round 25), so the evidence must be read from all of them.
  */
 async function loadStopMembers(conn, ids) {
-  const rows = await conn('scheduled_services').whereIn('id', ids).select('id', 'visit_id', 'status');
+  const rows = await conn('scheduled_services').whereIn('id', ids).select('id', 'visit_id', 'status', 'scheduled_date');
   const visitIds = [...new Set(rows.map((r) => r.visit_id).filter((v) => v != null).map(String))];
   const members = visitIds.length
-    ? await conn('scheduled_services').whereIn('visit_id', visitIds).select('id', 'visit_id', 'status') : [];
+    ? await conn('scheduled_services').whereIn('visit_id', visitIds).select('id', 'visit_id', 'status', 'scheduled_date') : [];
   const membersOf = new Map();
   for (const member of members) {
     const key = String(member.visit_id);
@@ -43,23 +43,101 @@ async function loadStopMembers(conn, ids) {
     membersOf.get(key).push(member);
   }
   const stopOf = new Map(rows.map((r) => [String(r.id), r.visit_id != null ? membersOf.get(String(r.visit_id)) || [] : []]));
-  return { stopOf, memberIds: members.map((m) => String(m.id)) };
+  // Two reads of one id that disagree (a move between them) give null: an unknown date, so the filter fails closed
+  // and an expected-date read reports a mismatch (pre-push Codex P1).
+  const dateOf = new Map(rows.map((r) => [String(r.id), visitDateOf(r.scheduled_date)]));
+  for (const m of members) {
+    const id = String(m.id);
+    const day = visitDateOf(m.scheduled_date);
+    dateOf.set(id, dateOf.has(id) && dateOf.get(id) !== day ? null : day);
+  }
+  // A grouped row missing from its own stop read (it left the stop between the reads) has an unknown date too.
+  for (const r of rows) {
+    if (r.visit_id != null && !(stopOf.get(String(r.id)) || []).some((m) => String(m.id) === String(r.id))) dateOf.set(String(r.id), null);
+  }
+  const rowOf = new Map(rows.map((r) => [String(r.id), r]));
+  return { stopOf, memberIds: members.map((m) => String(m.id)), dateOf, rowOf };
 }
 
-/**
- * The stop-wide resolved promise for each requested id: Map<id, promise|null>. One stop-members read and one
- * loadPromiseEvents read, however many ids. Throws when a read fails.
- */
-async function resolvePromises(conn, ids, now) {
+/** A visit's calendar date as 'YYYY-MM-DD', or null when it is missing or unreadable (the caller then fails closed). */
+function visitDateOf(value) {
+  try {
+    if (value == null || value === '') return null;
+    const { dateOnlyString, validDateOnly } = require('../../utils/date-only');
+    const day = dateOnlyString(value);
+    return validDateOnly(day) ? day : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The ET calendar date of a promise slot, or null. */
+function slotDateOf(start) {
+  try {
+    return require('../../utils/datetime-et').etDateString(start) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Is this promise about `visitDate` (the REQUESTED visit's own date)? A known slot on another ET date is not (owner
+ *  2026-11-24, "fix"). An unknown window, an unknown visit date or an unreadable slot keeps the promise (fail closed). */
+function onVisitDate(promise, visitDate) {
+  if (!promise || promise.start_at == null || !visitDate) return true;
+  const at = new Date(promise.start_at);
+  const slotDate = Number.isNaN(at.getTime()) ? null : slotDateOf(at);
+  return !slotDate || visitDate === slotDate;
+}
+
+/** The stop-wide resolved promise for each requested id: Map<id, promise|null>. One stop-members read and one
+ *  loadPromiseEvents read, however many ids. Throws when a read fails. With `sameDateOnly` (loadPromiseFacts only), a
+ *  promise whose slot is on another date than the REQUESTED visit's date does not stand: it is dropped AFTER every
+ *  supersession rule (a newer notice still replaces an older one, even when the newer one is the off-date one), so
+ *  nothing it replaced comes back. A single visit's off-date latest reads null; in a stop, stopPromise's `keep` test
+ *  drops off-date candidates before its newest/earliest choice, so a sibling's current hour still stands. */
+/** Runs `fn` on ONE read-only REPEATABLE READ snapshot of the database (owner 2026-11-24 *snapshot*): a decision that reads
+ *  a visit, its stop and its promises in several queries then sees one moment, so a move or regroup between the queries
+ *  cannot make them disagree. A caller's own transaction (conn.isTransaction) is used as is: its isolation is the caller's. */
+const SNAPSHOT = Object.freeze({ isolationLevel: 'repeatable read', readOnly: true });
+const opensSnapshot = (conn) => Boolean(conn) && !conn.isTransaction && typeof conn.transaction === 'function';
+async function readSnapshot(conn, fn) {
+  return opensSnapshot(conn) ? conn.transaction((trx) => fn(trx), SNAPSHOT) : fn(conn);
+}
+
+async function resolvePromises(conn, ids, now, options = {}) {
+  // Its own reads on one snapshot too (readSnapshot); it re-enters itself ONCE on the snapshot's transaction (onSnapshot).
+  if (!options.onSnapshot && opensSnapshot(conn)) {
+    return conn.transaction((trx) => resolvePromises(trx, ids, now, { ...options, onSnapshot: true }), SNAPSHOT);
+  }
+  const { sameDateOnly = false, membersOut = null } = options;
   const detector = require('../no-show-detector');
   const wanted = ids.map(String);
-  const { stopOf, memberIds } = await loadStopMembers(conn, wanted);
+  const { stopOf, memberIds, dateOf, rowOf } = await loadStopMembers(conn, wanted);
   const events = await detector.loadPromiseEvents(conn, [...new Set([...wanted, ...memberIds])], { now });
   const latest = detector.latestPromises(events, now);
   const eventsByVisit = detector.byVisit(events);
+  // `sameDateOnly` may be the EXPECTED date (the date a confirmation replay renders, time-promise
+  // dayOnlyReplayDecision): the filter then uses that date, and a visit observed on another date (or none) answers an
+  // unknown-window promise, read as 'hour' (fail closed: the stale body is suppressed). Pre-push Codex P1, 2026-11-24.
+  // It may also be a Map<id, date> (a customer screen's rows, each rendered on its own date).
+  const expectedOf = (id) => (typeof sameDateOnly === 'string' ? sameDateOnly
+    : sameDateOnly instanceof Map ? sameDateOnly.get(String(id)) || null : null);
   return new Map(ids.map((id) => {
+    const expected = expectedOf(id);
     const stop = stopOf.get(String(id)) || [];
-    const promise = stop.length > 1 ? detector.stopPromise(stop, eventsByVisit, now) : latest.get(String(id));
+    // `membersOut` (an expected-date read): the stop members this read judged, so a later read can prove it saw the same.
+    // A standalone visit is its own one member, so joining a stop between the reads is a change too (Codex P1).
+    const judged = stop.length ? stop : [rowOf.get(String(id))].filter(Boolean);
+    if (membersOut) membersOut.set(id, judged.map((m) => ({ id: String(m.id), status: m.status })));
+    if (expected && dateOf.get(String(id)) !== expected) {
+      return [id, { visit_id: id, start_at: null, communicated_at: null, date_mismatch: true }];
+    }
+    const visitDate = sameDateOnly ? expected || dateOf.get(String(id)) || null : null;
+    const keep = sameDateOnly ? (promise) => onVisitDate(promise, visitDate) : null;
+    const promise = stop.length > 1
+      ? detector.stopPromise(stop, eventsByVisit, now, keep ? { keep } : undefined)
+      : latest.get(String(id));
+    if (promise && keep && !keep(promise)) return [id, null];
     return [id, promise || null];
   }));
 }
@@ -90,11 +168,25 @@ function promiseLevelOf(promise) {
 /** Map<id, { level, start }>: what the customer was told about each visit (same stop-wide resolution as
  *  loadToldVisitIds; the level rule is promiseLevelOf) and, for an 'hour' level with a known slot, that slot's start
  *  (`start`, a Date; null otherwise, and for a withdrawn promise). ONE promise read gives both facts, so they always
- *  agree (the day re-plan's 2-hour told shift, owner 2026-11-24). Throws when a read fails; every caller must fail closed. */
-async function loadPromiseFacts(conn, ids, now = new Date()) {
+ *  agree (the day re-plan's 2-hour told shift, owner 2026-11-24). Throws when a read fails; every caller must fail closed.
+ *
+ *  An hour told for ANOTHER date is not an hour for this visit (owner 2026-11-24, "fix"): a standing promise whose known
+ *  slot is on another ET date than the requested visit's date is dropped after supersession (resolvePromises
+ *  sameDateOnly), so a visit whose latest hour was for another date reads 'none', and in a grouped stop a sibling's
+ *  current hour still stands. Seen live after a no-show: the 24-hour text said Nov 14 9-11, the office moved the visit to
+ *  Nov 23 with no text, and the 3-day text still quoted an hour. An unknown visit date or slot date keeps the event (fail
+ *  closed); so does an unknown window. resolvePromises, the night freeze and the office's told badge are unchanged.
+ *
+ *  `sameDateOnly: false` keeps the raw rule (an hour for ANY date counts). Delayed day-only sends use it
+ *  (appointment-reminders delayedSendIsStale): every stored body, bounce and queued replay was written for its own date,
+ *  and the raw rule suppresses it after a move, as before this change. Owner 11-24 *narrow*: the known gap is that a
+ *  bounced or queued day-only resend for the new date can be skipped; the 24-hour text with the window still goes. */
+async function loadPromiseFacts(conn, ids, now = new Date(), { sameDateOnly = true } = {}) {
   const facts = new Map();
   if (!ids || ids.length === 0) return facts;
-  const promises = await resolvePromises(conn, ids, now);
+  const expectedRead = typeof sameDateOnly === 'string' || sameDateOnly instanceof Map;
+  const membersOut = expectedRead ? new Map() : null;
+  const promises = await resolvePromises(conn, ids, now, membersOut ? { sameDateOnly, membersOut } : { sameDateOnly });
   for (const id of ids) {
     const promise = promises.get(id);
     const level = promiseLevelOf(promise);
@@ -103,16 +195,19 @@ async function loadPromiseFacts(conn, ids, now = new Date()) {
       const at = promise.start_at instanceof Date ? promise.start_at : new Date(promise.start_at);
       if (!Number.isNaN(at.getTime())) start = at;
     }
-    facts.set(id, { level, start });
+    // A visit seen off its expected date (date_mismatch) is unverified: callers keep the hour and mark the read failed.
+    const fact = promise?.date_mismatch === true ? { level, start, mismatch: true } : { level, start };
+    if (membersOut) fact.members = membersOut.get(id) || [];
+    facts.set(id, fact);
   }
   return facts;
 }
 
 /** Map<id, 'none' | 'day' | 'hour'>: what the customer was told about each visit (loadPromiseFacts' level). Throws when
  *  a read fails; every caller must fail closed. */
-async function loadPromiseLevels(conn, ids, now = new Date()) {
-  const facts = await loadPromiseFacts(conn, ids, now);
+async function loadPromiseLevels(conn, ids, now = new Date(), { sameDateOnly = true } = {}) {
+  const facts = await loadPromiseFacts(conn, ids, now, { sameDateOnly });
   return new Map([...facts].map(([id, fact]) => [id, fact.level]));
 }
 
-module.exports = { loadToldVisitIds, loadPromiseLevels, loadPromiseFacts, resolvePromises, promiseLevelOf };
+module.exports = { loadToldVisitIds, loadPromiseLevels, loadPromiseFacts, resolvePromises, promiseLevelOf, readSnapshot };

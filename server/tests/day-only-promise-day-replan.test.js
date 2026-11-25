@@ -21,7 +21,7 @@ jest.mock('../services/auto-dispatch/candidate-slots', () => ({
 jest.mock('../services/auto-dispatch/told-visits', () => {
   const loadPromiseLevels = jest.fn();
   const loadPromiseFacts = jest.fn(async (...args) => new Map([...(await loadPromiseLevels(...args))].map(([id, level]) => [id, { level, start: null }])));
-  return { loadToldVisitIds: jest.fn(), loadPromiseLevels, loadPromiseFacts };
+  return { loadToldVisitIds: jest.fn(), loadPromiseLevels, loadPromiseFacts, readSnapshot: (conn, fn) => fn(conn) };
 });
 const factsFrom = (levelsFn) => async (...args) => new Map([...(await levelsFn(...args))].map(([id, level]) => [id, { level, start: null }]));
 jest.mock('../services/time-promise', () => ({ ...jest.requireActual('../services/time-promise'), dayOnlyEligibility: jest.fn() }));

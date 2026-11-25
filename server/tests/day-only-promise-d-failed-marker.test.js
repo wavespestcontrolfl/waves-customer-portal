@@ -22,7 +22,8 @@ function conn(failTable = null) {
     for (const m of ['join', 'leftJoin', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'distinct', 'orWhere', 'orderBy', 'where', 'whereIn', 'whereNotIn']) chain[m] = () => chain;
     chain.select = async () => {
       if (failTable === table) throw new Error(`read failed: ${table}`);
-      return [];
+      // The visits themselves exist, on the dates their rows render (the reader pins each row to its own date).
+      return table === 'scheduled_services' ? ROWS.map((r) => ({ ...r, visit_id: null, status: 'pending' })) : [];
     };
     return chain;
   };
