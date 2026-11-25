@@ -326,6 +326,38 @@ ${hits}
   fi
 fi
 
+# ── Changed-function complexity guard (deterministic, no LLM) ─────────────
+# Blocks a push when a function the branch ADDS or CHANGES has ESLint
+# `complexity` over 20 or a `max-depth` warning (the two QUALITY_WARN rules in
+# eslint.config.js) AND is new or scores higher than at the merge-base. Codex
+# raises each as a P2, so this moves the finding to the push. A touched legacy
+# function that was already over the limit with an equal or higher score only
+# prints a WARN; untouched legacy functions are ignored. Only the changed files are
+# linted, read at the pushed sha. Fix: remove decisions from the function; do
+# not move them into a one-use helper. A check that cannot run (no node_modules,
+# no origin/main, git or ESLint error: exit 2) warns and lets the push through.
+#   SKIP_CHANGED_COMPLEXITY=1 git push   — skip this guard only
+if [ "${SKIP_CHANGED_COMPLEXITY:-0}" = "1" ]; then
+  echo "[changed-complexity] SKIP_CHANGED_COMPLEXITY=1 set — skipping complexity guard." >&2
+elif ! command -v node >/dev/null 2>&1 || [ ! -f scripts/check-changed-complexity.js ]; then
+  echo "[changed-complexity] node or scripts/check-changed-complexity.js missing — skipping complexity guard." >&2
+elif ! git rev-parse --verify "$GUARD_BASE" >/dev/null 2>&1; then
+  echo "[changed-complexity] $GUARD_BASE not found locally — skipping complexity guard (git fetch origin to enable it)." >&2
+else
+  CC_SEEN=" "
+  for cc_sha in "${GUARD_SHAS[@]}"; do
+    case "$CC_SEEN" in *" $cc_sha "*) continue ;; esac
+    CC_SEEN="$CC_SEEN$cc_sha "
+    node scripts/check-changed-complexity.js --base "$GUARD_BASE" --head "$cc_sha" >&2
+    cc_rc=$?
+    if [ "$cc_rc" -eq 1 ]; then
+      exit 1
+    elif [ "$cc_rc" -ne 0 ]; then
+      echo "[changed-complexity] the check could not run (exit $cc_rc) — not blocking this push." >&2
+    fi
+  done
+fi
+
 # ── Round log ────────────────────────────────────────────────────────────
 # One line for each pushed commit, in the clone's COMMON git dir, so every
 # worktree of this clone appends to the same files:
