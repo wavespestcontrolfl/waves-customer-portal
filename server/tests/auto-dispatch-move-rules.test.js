@@ -245,7 +245,7 @@ test('a day move compares totals clamped WITHOUT the default-time credit (Codex 
 // Owner 2026-11-24 *all rec* (minutes rule): a first day move that saves 10 modeled detour minutes
 // qualifies below the score bar when customer preference and technician fit do not drop.
 describe('minutes rule', () => {
-  const MINUTES = { ...CONFIG, minutesRuleSavingMinutes: 10 };
+  const MINUTES = { ...CONFIG, roadCheckEnabled: true, minutesRuleSavingMinutes: 10 };
   const full = (total, pref = 12.5, tech = 9.75) => ({
     total_score: total, default_time_score: 0, customer_preference_score: pref, technician_score: tech,
   });
@@ -273,9 +273,11 @@ describe('minutes rule', () => {
   });
 
   // Owner 2026-11-24 "do whatever you rec": a visit already moved needs 15 minutes, not the 20-point bar.
-  test('off when the ordinary drive floor is 0: with no drive test there is no road check either', () => {
+  test('off when the ordinary drive floor is 0 or the road check is off: minutes must be confirmed on roads', () => {
     const zero = { ...MINUTES, minDayMoveDriveSavingMinutes: 0 };
     expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62) }], { config: zero }).qualifies).toBe(false);
+    const noRoads = { ...MINUTES, roadCheckEnabled: false };
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62) }], { config: noRoads }).qualifies).toBe(false);
   });
 
   test('the service default window is not the customer\'s preference: losing it does not block the rule', () => {

@@ -170,7 +170,10 @@ async function confirmOnRoads(ranked, ctx) {
   } catch (err) {
     logger.warn(`[auto-dispatch] road check failed (model kept): ${err.message}`);
     // A slot roads already refused stays refused: the error only stops the search.
-    return failed.length ? settled(ranked, failed[0], false) : ranked;
+    // With nothing measured yet, it is the unanswered best slot: the model stands
+    // for it, and no unchecked minutes-rule slot stays in the fallback list.
+    return failed.length ? settled(ranked, failed[0], false)
+      : withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
   }
 }
 

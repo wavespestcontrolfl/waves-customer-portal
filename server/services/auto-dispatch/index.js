@@ -487,6 +487,7 @@ function minutesRuleNote({ service, current, currentScore, cand, candScore, thre
 // work the note out again.
 function minutesRuleConfigOf(config) {
   return {
+    roadCheckEnabled: config.roadCheckEnabled,
     minDayMoveDriveSavingMinutes: config.minDayMoveDriveSavingMinutes,
     minutesRuleSavingMinutes: config.minutesRuleSavingMinutes,
     minutesRuleSecondMoveSavingMinutes: config.minutesRuleSecondMoveSavingMinutes,

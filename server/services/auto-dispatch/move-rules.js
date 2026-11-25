@@ -123,11 +123,12 @@ function ownPreferenceScore(score) {
   return hundredths(score.customer_preference_score) - hundredths(score.default_time_score) - hundredths(score.dry_time_score);
 }
 
-// The rule needs the ordinary drive floor on (> 0): with it off the run has
-// no drive test and the road check does not run, so minutes cannot be checked.
+// The rule needs the road check (GATE_AUTO_DISPATCH_ROAD_CHECK) and the
+// ordinary drive floor on (> 0): without both, road-check.js measures nothing,
+// and a minutes-only move must be confirmed on real roads.
 function minutesRuleOk({ service, current, cand, currentScore, candScore, gain, config }) {
   const floor = minutesRuleFloor(service, config);
-  if (floor <= 0 || !((config.minDayMoveDriveSavingMinutes || 0) > 0)) return false;
+  if (floor <= 0 || config.roadCheckEnabled !== true || !((config.minDayMoveDriveSavingMinutes || 0) > 0)) return false;
   if (!current || !cand || !isDayMove(current, cand) || current.detour_group_blind || !(gain > 0)) return false;
   return driveSavingMinutes(current, cand) >= floor
     && ownPreferenceScore(candScore) >= ownPreferenceScore(currentScore)

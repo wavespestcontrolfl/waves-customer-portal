@@ -161,10 +161,13 @@ test('apply mode: a second move on minutes logs a changed row with the 15-minute
   try {
     servicesResult = [svc({ auto_dispatch_change_count: 1 })];
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_MODERATE] });
-    const res = await runAutoDispatch({ mode: 'apply' });
+    jest.spyOn(require('../services/auto-dispatch/road-check'), 'createRunTravel')
+      .mockReturnValue({ preload: async () => {}, lookup: () => null, diagnostics: () => ({ requests: 0, elements: 0 }) });
+    const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true });
     expect(res).toMatchObject({ changed: 1 });
     expect(lastDecision('changed').constraints.minutes_rule).toEqual({ saving_floor_minutes: 15 });
   } finally {
+    jest.restoreAllMocks();
     process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
   }
 });
@@ -775,7 +778,11 @@ test('idempotency: an already-moved visit needs a much larger gain to move again
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: true });
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
   db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
-  const byMinutes = await runAutoDispatch({ mode: 'dry_run' });
+  // The minutes rule needs the road check on; no road legs on these fixtures, so the model's number stands.
+  const noRoads = jest.spyOn(require('../services/auto-dispatch/road-check'), 'createRunTravel')
+    .mockReturnValue({ preload: async () => {}, lookup: () => null, diagnostics: () => ({ requests: 0, elements: 0 }) });
+  const byMinutes = await runAutoDispatch({ mode: 'dry_run', roadCheckEnabled: true });
+  noRoads.mockRestore();
   expect(byMinutes.recommended).toBe(1);
   // The audit row names the second-move floor that applied (15), not the first-move 10.
   const row = audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.constraints && d.constraints.minutes_rule).pop();

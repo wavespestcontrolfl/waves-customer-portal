@@ -115,6 +115,15 @@ describe('confirmOnRoads', () => {
     expect(out.ranked.map((c) => c.name)).toEqual(['first', 'third']);
   });
 
+  test('a road error on the first slot: the model stands for it, and unchecked minutes-rule slots leave the fallback list', async () => {
+    const ranked = rankedOf('first', 'second', 'third');
+    ranked.rankedRows = ranked.rankedRows.map((row, i) => ({ ...row, byMinutes: i === 1 }));
+    const throwing = { preload: jest.fn(async () => {}), lookup: () => { throw new Error('matrix down'); } };
+    const out = await confirmOnRoads(ranked, { service, current, config: { ...config, minutesRuleSavingMinutes: 10 }, travel: throwing });
+    expect(out.ranked.map((c) => c.name)).toEqual(['first', 'third']);
+    expect(roadResultOf(out.best)).toEqual({ source: 'estimate' });
+  });
+
   test('a road error after a refused slot keeps the refusal: the rejected slot is not reinstated', async () => {
     let calls = 0;
     const throwing = {
@@ -204,6 +213,11 @@ describe('confirmOnRoads', () => {
   test('a reader that throws keeps the model\'s result', async () => {
     const ranked = rankedOf('first');
     const travel = { preload: jest.fn(async () => { throw new Error('network down'); }), lookup: () => null };
-    expect(await confirmOnRoads(ranked, { service, current, config, travel })).toBe(ranked);
+    // The model's slot stands, marked as the estimate (same as an unanswered best slot).
+    const out = await confirmOnRoads(ranked, { service, current, config, travel });
+    expect(out).toMatchObject({ qualifies: true, gain: ranked.gain });
+    expect(out.best.name).toBe('first');
+    expect(out.ranked.map((c) => c.name)).toEqual(['first']);
+    expect(roadResultOf(out.best)).toEqual({ source: 'estimate' });
   });
 });
