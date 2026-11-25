@@ -33,7 +33,7 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
-const { isTrackTokenLive, isTrackTokenLiveWithExpiry } = require('../services/track-token-expiry');
+const { isTrackTokenLive, recipientTrackLinkOpen } = require('../services/track-token-expiry');
 const logger = require('../services/logger');
 const { recordPageView, logViewFailure } = require('../services/customer-page-views');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -683,24 +683,12 @@ const PRIVACY_HEADERS = {
 // referral cards, the reschedule and sign-in actions, the cancellation reason, the next visit of the plan, and every key
 // not named below. `scope` tells the page to hide what only the holder sees. After the visit it is the plain
 // "complete" state, with the tech and the service name and nothing about the work (no summary, no links).
-// pending_rebook (the office is rebooking) and skipped (the plan skipped this visit): the kind only. A skipped visit's
-// nextVisit is the holder's plan, never sent.
-const RECIPIENT_VISIT_CHANGE_KINDS = new Set(['pending_rebook', 'skipped']);
-// A visit parked for the HOLDER to pick a new day (customer_pick, awaiting_customer) has no booked time yet: the
-// recipient sees the same neutral pending_rebook as an office rebooking, with no reason and no scheduling action.
-function recipientVisitChange(visitChange) {
-  if (!visitChange) return null;
-  if (visitChange.kind === 'customer_pick' && visitChange.stage === 'awaiting_customer') return { kind: 'pending_rebook' };
-  return RECIPIENT_VISIT_CHANGE_KINDS.has(visitChange.kind) ? { kind: visitChange.kind } : null;
-}
+// The link's lifetime keeps the reachable states to three (recipientTrackLinkOpen in track-token-expiry.js): en route, on
+// property, and complete for up to 2 hours after the visit. Scheduled, cancelled, skipped, parked and rebooking visits
+// answer 404, so the payload has no visitChange, no schedule state and no scheduled poll.
+const RECIPIENT_STATES = new Set(['en_route', 'on_property', 'complete']);
 
-const RECIPIENT_SCHEDULED_POLL_SECONDS = 120;
-function recipientPollSeconds(state, scheduledPoll) {
-  if (state === 'en_route' || state === 'on_property') return EN_ROUTE_POLL_SECONDS;
-  return state === 'scheduled' && scheduledPoll === true ? RECIPIENT_SCHEDULED_POLL_SECONDS : 0;
-}
-
-function recipientTrackPayload(full, { scheduledPoll = false } = {}) {
+function recipientTrackPayload(full) {
   const state = full.state;
   const property = full.property || {};
   return {
@@ -723,12 +711,9 @@ function recipientTrackPayload(full, { scheduledPoll = false } = {}) {
         }
       : null,
     arrivedAt: full.arrivedAt ?? null,
-    // The visit's own kind only when the office is rebooking it; no reason, no action, no other visit.
-    visitChange: recipientVisitChange(full.visitChange),
     meta: {
-      // The page's poll is the only live update this link has (no socket). Quick while the tech is on the way or on site;
-      // a slow, bounded one on the visit's own day while scheduled AND placed (a parked, customer-pick or rebooking visit does not poll), so a visit that goes en route (again) refreshes.
-      pollIntervalSeconds: recipientPollSeconds(state, scheduledPoll),
+      // The page's poll is the only live update this link has (no socket): quick while the tech is on the way or on site.
+      pollIntervalSeconds: state === 'en_route' || state === 'on_property' ? EN_ROUTE_POLL_SECONDS : 0,
     },
   };
 }
@@ -738,10 +723,10 @@ function recipientVisitId(token) {
   return require('../services/call-visit-recipient').visitForTrackToken(token).then((hit) => (hit ? hit.visitId : null));
 }
 
-// The visit's own track_token_expires_at, but a missing expiry is refused (the holder's legacy links stay live on null).
+// The link's lifetime (recipientTrackLinkOpen): en route or on site, or up to 2 h after completion, with a live finite expiry.
 async function recipientVisitLive(visitId) {
-  const visit = await db('scheduled_services').where({ id: visitId }).first('track_token_expires_at');
-  return Boolean(visit) && isTrackTokenLiveWithExpiry(visit.track_token_expires_at);
+  const visit = await db('scheduled_services').where({ id: visitId }).first('status', 'track_state', 'completed_at', 'track_token_expires_at');
+  return recipientTrackLinkOpen(visit);
 }
 
 // The visit row both token kinds read: the holder's tracker token and a visit text recipient's own.
@@ -831,12 +816,15 @@ router.get('/:token', safeRoute(async (req, res, next) => {
     }
 
     if (!row) return res.status(404).json({ error: 'Not found' });
-    if (!(recipientScope ? isTrackTokenLiveWithExpiry : isTrackTokenLive)(row.track_token_expires_at)) {
+    if (recipientScope ? !recipientTrackLinkOpen(row) : !isTrackTokenLive(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });
     }
     const officeRebooking = row.status === 'rescheduled';
     const unplacedCustomerPick = isUnplacedCustomerPick(row);
     const customerState = publicTrackState(row);
+    // The recipient's link shows only en route, on property and complete (the lifetime check above agrees; this is the same
+    // rule on the state the payload reports).
+    if (recipientScope && !RECIPIENT_STATES.has(customerState)) return res.status(404).json({ error: 'Not found' });
     // A recipient's link never writes or calls a geocoder: it uses the stored pin, or the page's no-map fallback.
     if (!officeRebooking && !unplacedCustomerPick && !recipientScope) row = await ensureEnRouteDestinationGeocoded(row);
 
@@ -985,7 +973,7 @@ router.get('/:token', safeRoute(async (req, res, next) => {
         || null;
     }
 
-    res.json(recipientScope ? recipientTrackPayload(response, { scheduledPoll: scheduledRouteTracking && isServiceDateToday(row.scheduled_date) }) : response);
+    res.json(recipientScope ? recipientTrackPayload(response) : response);
   } catch (err) {
     next(err);
   }

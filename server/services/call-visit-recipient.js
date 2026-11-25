@@ -37,7 +37,7 @@ const logger = require('./logger');
 const { toE164, isValidNanpNumber } = require('../utils/phone');
 const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
 const { dateOnlyString } = require('../utils/date-only');
-const { isTrackTokenLiveWithExpiry } = require('./track-token-expiry');
+const { isTrackTokenLiveWithExpiry, recipientTrackLinkOpen } = require('./track-token-expiry');
 
 const SOURCE = 'call_caller_provided';
 const CONSENT_VERSION = 'owner-ruling-2026-11-24-visit-only';
@@ -186,8 +186,10 @@ async function recordForCall({ scheduledServiceId, customerId, call, contactPhon
  * suppression. Read only. Throws on an unreadable answer; callers fail closed.
  */
 async function declinedByRecipient({ customerId, phoneKey, phoneE164, purpose, conn = db }) {
-  const { contactPhoneDeclinesText } = require('./contact-notification-prefs');
-  if (await contactPhoneDeclinesText(customerId, phoneE164, KINDS_BY_PURPOSE[purpose]?.prefsColumn ?? null, { dbh: conn })) return true;
+  // The person's own text choice as a service contact: a direct read of their choices row (code-only errors, no write).
+  // contactPhoneDeclinesText logs err.message, so it is not used here.
+  const prefs = require('./contact-notification-prefs');
+  if (prefs.contactPrefsLive() && !prefs.contactAllows(await prefs.getContactPrefRow(customerId, phoneE164, { dbh: conn }), KINDS_BY_PURPOSE[purpose]?.prefsColumn ?? null, 'sms')) return true;
   const optin = await conn('recipient_optin').where({ customer_id: customerId, phone_key: phoneKey, status: 'declined' }).first('status');
   if (optin) return true;
   return suppressedNumber(phoneKey, conn);
@@ -210,7 +212,7 @@ async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], 
   if (!scheduledServiceId || !KINDS[kind]) return [];
   try {
     const visit = await conn('scheduled_services').where({ id: scheduledServiceId }).first('id', 'status', 'scheduled_date', 'window_start', 'customer_id', 'service_type');
-    // `anyVisitStatus`: the tracker link keeps showing a visit that is on site, done or cancelled; a send never does.
+    // `anyVisitStatus`: the tracker link also serves a visit that is on site or just completed (its own lifetime rule limits it); a send never does.
     if (!visit || (!anyVisitStatus && !LIVE_STATUSES.includes(String(visit.status || '')))) return [];
     const rows = await conn(TABLE).where({ scheduled_service_id: scheduledServiceId }).orderBy('created_at', 'asc');
     if (!rows.length) return [];
@@ -465,8 +467,11 @@ async function resolveTrackToken(token, conn) {
   // The same permission check the en-route send makes at the provider handoff, read fresh on every request.
   const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id }, { conn, anyVisitStatus: true });
   if (!permission.ok) return null;
-  const visit = await conn('scheduled_services').where({ id: row.scheduled_service_id }).first('id', 'track_token_expires_at');
-  if (!visit || !isTrackTokenLiveWithExpiry(visit.track_token_expires_at)) return null;
+  // The short lifetime: en route or on site, or up to two hours after completion; never scheduled, cancelled, skipped,
+  // parked or rebooking. Plus a live, finite expiry on the visit's own tracker link.
+  const visit = await conn('scheduled_services').where({ id: row.scheduled_service_id })
+    .first('id', 'status', 'track_state', 'completed_at', 'track_token_expires_at');
+  if (!visit || !recipientTrackLinkOpen(visit)) return null;
   return { visitId: visit.id, recipientId: row.id };
 }
 
@@ -564,7 +569,7 @@ const noVerdict = (code, reason) => ({ ok: false, code, reason });
  * the visit and has declined nothing (own text choices, opt-in decline, STOP, any active suppression or do-not-contact).
  * ONE function for the send's handoff recheck (recipientStillOwed, below, adds the slot checks), the replay and the
  * tracker link (visitForTrackToken), so no door opens that another keeps shut. Returns { ok:true, mine } or a verdict.
- * `anyVisitStatus`: the tracker link also serves a visit that is on site, done or cancelled. Throws on an unreadable answer.
+ * `anyVisitStatus`: the tracker link also serves a visit that is on site or just completed. Throws on an unreadable answer.
  */
 async function recipientPermission(meta, { conn = db, anyVisitStatus = false } = {}) {
   if (!gateLive()) return noVerdict('VISIT_TEXT_GATE_OFF', 'gate-off');
@@ -579,41 +584,11 @@ async function recipientPermission(meta, { conn = db, anyVisitStatus = false } =
   if (await require('./disclaimed-number-holds').disclaimedNumberHeld(mine.phone, conn)) {
     return noVerdict('RECIPIENT_NUMBER_HOLD', 'recipient-number-hold');
   }
-  const revoked = await revokedOnSendPath(mine, meta.kind, conn);
-  if (revoked) return revoked;
-  return { ok: true, mine };
-}
-
-/**
- * Every other revocation the send path honors for a text to this person about this visit, so the tracker link closes
- * wherever the text would stop. null = none. Throws on an unreadable answer (never reads as "not revoked"):
- *   - an unconfirmed street-level address hold on the visit (send step 6.35);
- *   - a do-not-contact request, or an explicit "no texts", heard on any call with the person's number (auto-text-holds);
- *   - the send layer's own suppression and consent validators, run on the input the send builds: STOP, wrong number,
- *     staff do-not-contact, landline, and the account's SMS switch and its notice toggles (property toggles included).
- * The callback-number holds (the visit's, then the person's own) are checked by the caller.
- */
-async function revokedOnSendPath(mine, kind, conn) {
-  const phone = mine.phone;
-  if (await require('./street-level-hold').isStreetLevelHoldVisit(mine.visit.id, conn)) return noVerdict('STREET_LEVEL_HOLD', 'address-hold');
-  const holds = require('./messaging/auto-text-holds');
-  if (await holds.askedNotToBeContactedOnAnyCall(phone, { dbi: conn })) return noVerdict('CALL_DO_NOT_CONTACT', 'asked-not-to-be-contacted');
-  if (await holds.saidNoTextsOnAnyCall(phone, { dbi: conn })) return noVerdict('CALL_SMS_DECLINED', 'said-no-texts');
-  const purpose = KINDS[kind].purpose;
-  const input = {
-    channel: 'sms', audience: 'customer', purpose, customerId: mine.visit.customerId, appointmentId: mine.visit.id,
-    to: phone, identityTrustLevel: 'phone_matches_customer', metadata: {},
-  };
-  const policy = require('./messaging/policy').resolvePolicy('customer', purpose);
-  let state = await require('./messaging/validators/consent').loadContactState(input, conn);
-  state = await require('./messaging/validators/suppression').loadSuppressionState(input, state, conn);
-  // The loaders swallow a read error into a flag; here an unreadable answer must retry, never pass or drop.
-  if (state.lookupFailed || state.suppressionLookupFailed) throw new Error('send-layer contact state unreadable');
-  for (const check of [require('./messaging/validators/suppression').checkSuppression, require('./messaging/validators/consent').checkConsentForPurpose]) {
-    const verdict = await check(input, policy, state);
-    if (!verdict.ok) return noVerdict(verdict.code || 'SEND_LAYER_REFUSED', 'send-layer-refused');
+  // A do-not-contact request heard on any call with the person's number (a plain read of call_log).
+  if (await require('./messaging/auto-text-holds').askedNotToBeContactedOnAnyCall(mine.phone, { dbi: conn })) {
+    return noVerdict('CALL_DO_NOT_CONTACT', 'asked-not-to-be-contacted');
   }
-  return null;
+  return { ok: true, mine };
 }
 
 async function recipientStillOwed(meta, { conn = db } = {}) {

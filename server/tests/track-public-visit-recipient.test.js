@@ -91,23 +91,101 @@ async function get(token = RECIPIENT_TOKEN) {
   return res;
 }
 
-const ALLOWED_KEYS = ['arrivedAt', 'meta', 'property', 'scope', 'service', 'state', 'tech', 'vehicle', 'visitChange', 'window'];
+const ALLOWED_KEYS = ['arrivedAt', 'meta', 'property', 'scope', 'service', 'state', 'tech', 'vehicle', 'window'];
 
 beforeEach(() => {
   jest.clearAllMocks();
   mockDb.mockReset();
   writes.length = 0;
-  mockIsToday.mockReturnValue(false);
   mockVisitForTrackToken.mockResolvedValue({ visitId: 'visit-1', recipientId: 'r-1' });
 });
 
-describe('GET /:token with a visit text recipient\'s token', () => {
+const minutesAgo = (n) => new Date(Date.now() - n * 60 * 1000).toISOString();
+const ENROUTE = { status: 'en_route', track_state: 'en_route' };
+const ONSITE = { status: 'on_site', track_state: 'on_property', arrived_at: '2026-12-01T14:00:00.000Z' };
+const DONE = (minutes) => ({ status: 'completed', track_state: 'complete', completed_at: minutesAgo(minutes) });
+
+describe('GET /:token with a visit text recipient\'s token: the link\'s lifetime', () => {
   test.each([
-    ['scheduled', {}],
-    ['en route', { track_state: 'en_route', status: 'en_route', en_route_at: new Date().toISOString() }],
-    ['on property', { track_state: 'on_property', arrived_at: '2026-12-01T14:00:00.000Z' }],
-    ['complete', { status: 'completed', track_state: 'complete', completed_at: '2026-12-01T15:00:00.000Z' }],
+    ['en route', ENROUTE],
+    ['on property', ONSITE],
+    ['complete, 5 minutes ago', DONE(5)],
+    ['complete, 119 minutes ago', DONE(119)],
+  ])('%s: opens', async (_label, over) => {
+    install(visitRow(over));
+    expect((await get()).statusCode).toBe(200);
+  });
+
+  test.each([
+    ['scheduled', { status: 'confirmed', track_state: 'scheduled' }],
+    ['pending', { status: 'pending', track_state: 'scheduled' }],
     ['cancelled', { status: 'cancelled', track_state: 'cancelled' }],
+    ['skipped', { status: 'skipped', track_state: 'scheduled' }],
+    ['no show', { status: 'no_show', track_state: 'scheduled' }],
+    ['the office is rebooking', { status: 'rescheduled', track_state: 'scheduled' }],
+    ['parked for the holder to pick a day', { status: 'confirmed', track_state: 'scheduled', customer_pick_by: '2026-11-20T00:00:00Z', window_start: null, window_end: null }],
+    ['a stale en-route state on a rebooked visit', { status: 'rescheduled', track_state: 'en_route' }],
+    ['en route by status but scheduled by track state', { status: 'en_route', track_state: 'scheduled' }],
+    ['complete, 121 minutes ago', DONE(121)],
+    ['complete, a day ago', DONE(24 * 60)],
+    ['complete with no completed_at', { status: 'completed', track_state: 'complete', completed_at: null }],
+    ['complete with an unreadable completed_at', { status: 'completed', track_state: 'complete', completed_at: 'not-a-date' }],
+  ])('404: %s', async (_label, over) => {
+    install(visitRow(over));
+    const res = await get();
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ error: 'Not found' });
+  });
+
+  test('404: the visit\'s own link has expired', async () => {
+    install(visitRow({ ...ENROUTE, track_token_expires_at: '2000-01-01T00:00:00.000Z' }));
+    expect((await get()).statusCode).toBe(404);
+  });
+
+  test.each([[null], [undefined], ['not-a-date']])('404: the visit has no live expiry on record (%s)', async (expiry) => {
+    install(visitRow({ ...ENROUTE, track_token_expires_at: expiry }));
+    expect((await get()).statusCode).toBe(404);
+  });
+
+  test('the holder\'s own legacy link with a null expiry still opens, in any state (unchanged)', async () => {
+    const row = visitRow({ status: 'confirmed', track_state: 'scheduled', track_token_expires_at: null });
+    install(row, { holderRow: row });
+    expect((await get(HOLDER_TOKEN)).statusCode).toBe(200);
+  });
+
+  test.each([
+    ['gate off, a declined person or a deleted row (the module answers null)', () => mockVisitForTrackToken.mockResolvedValue(null)],
+  ])('404: %s', async (_label, arrange) => {
+    install(visitRow(ENROUTE));
+    arrange();
+    expect((await get()).statusCode).toBe(404);
+  });
+
+  test('404: the visit row is gone', async () => {
+    install(null);
+    expect((await get()).statusCode).toBe(404);
+  });
+
+  test('a malformed token never reaches the recipient lookup', async () => {
+    install(visitRow(ENROUTE));
+    expect((await get('nope')).statusCode).toBe(404);
+    expect(mockVisitForTrackToken).not.toHaveBeenCalled();
+  });
+
+  test('the holder\'s own token never asks the recipient module and keeps its full payload', async () => {
+    install(visitRow(ENROUTE), { holderRow: visitRow(ENROUTE) });
+    const res = await get(HOLDER_TOKEN);
+    expect(mockVisitForTrackToken).not.toHaveBeenCalled();
+    expect(res.body.scope).toBeUndefined();
+    expect(res.body.customerFirstName).toBe(HOLDER_ONLY.firstName);
+  });
+});
+
+describe('GET /:token with a visit text recipient\'s token: the reduced payload', () => {
+  test.each([
+    ['en route', ENROUTE],
+    ['on property', ONSITE],
+    ['complete', DONE(5)],
   ])('%s: only whitelisted keys, no holder-only value anywhere', async (_label, over) => {
     const tablesRead = install(visitRow(over));
     const res = await get();
@@ -118,7 +196,7 @@ describe('GET /:token with a visit text recipient\'s token', () => {
     for (const value of Object.values(HOLDER_ONLY)) expect(text).not.toContain(value);
     expect(text).not.toContain('Zztenant');
     expect(text).not.toContain('Zzroe');
-    expect(text).not.toMatch(/prepToken|serviceReportToken|invoiceToken|reviewUrl|crossSell|referral|summary|customerFirstName|customer"|cancellation|stopsAhead|routeProgress|vehicleApprox|photos/);
+    expect(text).not.toMatch(/prepToken|serviceReportToken|invoiceToken|reviewUrl|crossSell|referral|summary|customerFirstName|customer"|cancellation|stopsAhead|routeProgress|vehicleApprox|photos|visitChange/);
     // The holder-only reads never happen: no report, invoice, review, prep project or offer lookups.
     for (const table of ['invoices', 'service_records', 'service_photos', 'review_requests', 'projects', 'referrals']) {
       expect(tablesRead).not.toContain(table);
@@ -127,13 +205,10 @@ describe('GET /:token with a visit text recipient\'s token', () => {
   });
 
   test.each([
-    ['scheduled', {}],
-    ['en route with a stored pin', { track_state: 'en_route', status: 'en_route' }],
-    ['en route with NO stored pin', { track_state: 'en_route', status: 'en_route', latitude: null, longitude: null }],
-    ['on property', { track_state: 'on_property', arrived_at: '2026-12-01T14:00:00.000Z' }],
-    ['complete', { status: 'completed', track_state: 'complete', completed_at: '2026-12-01T15:00:00.000Z' }],
-    ['cancelled', { status: 'cancelled', track_state: 'cancelled' }],
-    ['rebooking', { status: 'rescheduled' }],
+    ['en route with a stored pin', ENROUTE],
+    ['en route with NO stored pin', { ...ENROUTE, latitude: null, longitude: null }],
+    ['on property', ONSITE],
+    ['complete', DONE(5)],
   ])('read-only: %s makes no write, no geocoder call, no Bouncie fetch, no paid ETA, no short link, no page view', async (_label, over) => {
     install(visitRow(over));
     const res = await get();
@@ -150,7 +225,7 @@ describe('GET /:token with a visit text recipient\'s token', () => {
   });
 
   test('en route with no stored pin: no map (vehicle null), never a geocode', async () => {
-    install(visitRow({ track_state: 'en_route', status: 'en_route', latitude: null, longitude: null }));
+    install(visitRow({ ...ENROUTE, latitude: null, longitude: null }));
     const { body } = await get();
     expect(body.state).toBe('en_route');
     expect(body.vehicle).toBeNull();
@@ -159,137 +234,39 @@ describe('GET /:token with a visit text recipient\'s token', () => {
   });
 
   test('the holder\'s own en-route GET still geocodes, fetches and asks the provider (unchanged)', async () => {
-    install(visitRow({ track_state: 'en_route', status: 'en_route', latitude: null, longitude: null }), { holderRow: visitRow({ track_state: 'en_route', status: 'en_route', latitude: null, longitude: null }) });
+    const row = visitRow({ ...ENROUTE, latitude: null, longitude: null });
+    install(row, { holderRow: row });
     mockGeocode.mockResolvedValue(null);
     await get(HOLDER_TOKEN);
     expect(mockGeocode).toHaveBeenCalled();
   });
 
   test('the property is the pin and the town, never the street, unit or zip', async () => {
-    install(visitRow());
+    install(visitRow(ENROUTE));
     const { body } = await get();
     expect(body.property).toEqual({ lat: 27.2, lng: -82.2, city: 'Parrish' });
     expect(body.service).toEqual({ type: 'Pest Control' });
     expect(body.tech).toEqual({ firstName: 'Pat', photoUrl: 'https://img.test/pat.jpg', yearsWithWaves: null });
   });
 
-  test('en route: the whitelisted vehicle fields and a poll; every other state does not poll', async () => {
-    install(visitRow({ track_state: 'en_route', status: 'en_route' }));
+  test('en route: the whitelisted vehicle fields and a 30 s poll; on property polls too; complete does not', async () => {
+    install(visitRow(ENROUTE));
     const enRoute = (await get()).body;
     expect(enRoute.state).toBe('en_route');
     expect(Object.keys(enRoute.vehicle).sort()).toEqual(['etaMinutes', 'etaSource', 'lastReportedAt', 'lat', 'lng', 'stale']);
     expect(enRoute.meta).toEqual({ pollIntervalSeconds: 30 });
-    install(visitRow());
+    install(visitRow(ONSITE));
+    expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 30 });
+    install(visitRow(DONE(5)));
     expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 0 });
-  });
-
-  test('scheduled on the visit\'s own day polls slowly (120 s), so a visit that goes en route (again) refreshes; other days and end states do not', async () => {
-    mockIsToday.mockReturnValue(true);
-    install(visitRow());
-    expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 120 });
-    install(visitRow({ status: 'completed', track_state: 'complete' }));
-    expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 0 });
-    install(visitRow({ status: 'cancelled', track_state: 'cancelled' }));
-    expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 0 });
-    mockIsToday.mockReturnValue(false);
-    install(visitRow());
-    expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 0 });
-  });
-
-  test.each([
-    ['a visit parked for the holder to pick a day (customer pick, no placed window)', { customer_pick_by: '2026-11-20T00:00:00Z', window_start: null, window_end: null }],
-    ['a visit the office is rebooking', { status: 'rescheduled' }],
-  ])('%s: reports scheduled but never polls, even on its own day', async (_label, over) => {
-    mockIsToday.mockReturnValue(true);
-    install(visitRow(over));
-    const { body } = await get();
-    expect(body.state).toBe('scheduled');
-    expect(body.meta).toEqual({ pollIntervalSeconds: 0 });
   });
 
   test('complete is a plain done state: no summary, no links, no cards', async () => {
-    install(visitRow({ status: 'completed', track_state: 'complete', completed_at: '2026-12-01T15:00:00.000Z' }));
+    install(visitRow(DONE(5)));
     const { body } = await get();
     expect(body.state).toBe('complete');
     expect(body.vehicle).toBeNull();
     expect(Object.keys(body).sort()).toEqual(ALLOWED_KEYS.slice().sort());
-  });
-
-  test('a visit parked for the holder to pick a new day shows the neutral rebooking state, with no reason, deadline or scheduling action', () => {
-    const out = trackPublicRouter._test.recipientTrackPayload({
-      state: 'scheduled',
-      visitChange: {
-        kind: 'customer_pick', stage: 'awaiting_customer', nextActor: 'customer', reason: 'zz-rain', pickBy: '2026-11-20T01:00:00.000Z',
-        current: null, action: { kind: 'portal_visits', href: '/?tab=schedule', label: 'Open Visits' },
-      },
-    });
-    expect(out.visitChange).toEqual({ kind: 'pending_rebook' });
-    expect(JSON.stringify(out)).not.toMatch(/zz-rain|tab=schedule|Open Visits|pickBy/);
-  });
-
-  test('a skipped visit keeps only its kind: never the holder\'s next visit', () => {
-    const out = trackPublicRouter._test.recipientTrackPayload({ state: 'cancelled', visitChange: { kind: 'skipped', nextVisit: { date: '2026-12-20' } } });
-    expect(out.visitChange).toEqual({ kind: 'skipped' });
-    expect(JSON.stringify(out)).not.toContain('2026-12-20');
-  });
-
-  test('a visit the office is rebooking says so, with no reason, action or other visit', async () => {
-    install(visitRow({ status: 'rescheduled' }));
-    const { body } = await get();
-    expect(body.visitChange).toEqual({ kind: 'pending_rebook' });
-  });
-
-  test.each([
-    [{ kind: 'customer_pick', stage: 'booked', reason: 'zz', current: { date: '2026-12-20' } }],
-    [{ kind: 'office_move', reason: 'zz' }],
-  ])('a visit change that names the holder\'s other visits or an action never reaches the recipient (%j)', (visitChange) => {
-    const out = trackPublicRouter._test.recipientTrackPayload({ state: 'scheduled', visitChange, customer: { name: 'zz' }, summary: { x: 1 }, prepToken: 'zz' });
-    expect(out.visitChange).toBeNull();
-    expect(Object.keys(out).sort()).toEqual(ALLOWED_KEYS.slice().sort());
-  });
-
-  test.each([
-    ['gate off, a declined person or a deleted row (the module answers null)', () => mockVisitForTrackToken.mockResolvedValue(null)],
-  ])('404: %s', async (_label, arrange) => {
-    install(visitRow());
-    arrange();
-    const res = await get();
-    expect(res.statusCode).toBe(404);
-    expect(res.body).toEqual({ error: 'Not found' });
-  });
-
-  test('404: the visit\'s own link has expired', async () => {
-    install(visitRow({ track_token_expires_at: '2000-01-01T00:00:00.000Z' }));
-    expect((await get()).statusCode).toBe(404);
-  });
-
-  test.each([[null], [undefined], ['not-a-date']])('404: the visit has no live expiry on record (%s); the holder\'s legacy null still opens', async (expiry) => {
-    install(visitRow({ track_token_expires_at: expiry }));
-    expect((await get()).statusCode).toBe(404);
-  });
-
-  test('the holder\'s own legacy link with a null expiry still opens (unchanged)', async () => {
-    install(visitRow({ track_token_expires_at: null }), { holderRow: visitRow({ track_token_expires_at: null }) });
-    expect((await get(HOLDER_TOKEN)).statusCode).toBe(200);
-  });
-
-  test('404: the visit row is gone', async () => {
-    install(null);
-    expect((await get()).statusCode).toBe(404);
-  });
-
-  test('a malformed token never reaches the recipient lookup', async () => {
-    install(visitRow());
-    expect((await get('nope')).statusCode).toBe(404);
-    expect(mockVisitForTrackToken).not.toHaveBeenCalled();
-  });
-
-  test('the holder\'s own token never asks the recipient module and keeps its full payload', async () => {
-    install(visitRow(), { holderRow: visitRow() });
-    const res = await get(HOLDER_TOKEN);
-    expect(mockVisitForTrackToken).not.toHaveBeenCalled();
-    expect(res.body.scope).toBeUndefined();
-    expect(res.body.customerFirstName).toBe(HOLDER_ONLY.firstName);
   });
 });
 
@@ -301,7 +278,7 @@ describe('POST /:token/stops-ahead and /:token/view with a recipient token', () 
   };
 
   test('stops-ahead answers the generic state, computes nothing and writes nothing', async () => {
-    install(visitRow());
+    install(visitRow(ENROUTE));
     const res = await post('/:token/stops-ahead');
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ stopsAhead: null, routeProgress: null });
@@ -309,26 +286,43 @@ describe('POST /:token/stops-ahead and /:token/view with a recipient token', () 
   });
 
   test('view answers 204 and records no customer page view', async () => {
-    install(visitRow());
+    install(visitRow(ENROUTE));
     const res = await post('/:token/view');
     expect(res.statusCode).toBe(204);
     expect(mockRecordPageView).not.toHaveBeenCalled();
   });
 
   test.each(['/:token/stops-ahead', '/:token/view'])('%s: 404 when the link does not resolve', async (path) => {
-    install(visitRow());
+    install(visitRow(ENROUTE));
     mockVisitForTrackToken.mockResolvedValue(null);
     expect((await post(path)).statusCode).toBe(404);
   });
 
-  test.each(['/:token/stops-ahead', '/:token/view'])('%s: 404 when the visit\'s link has expired', async (path) => {
-    install(visitRow({ track_token_expires_at: '2000-01-01T00:00:00.000Z' }));
-    expect((await post(path)).statusCode).toBe(404);
+  test.each(['/:token/stops-ahead', '/:token/view'])('%s: 404 when the visit\'s link has expired or has no expiry on record', async (path) => {
+    for (const expiry of ['2000-01-01T00:00:00.000Z', null]) {
+      install(visitRow({ ...ENROUTE, track_token_expires_at: expiry }));
+      expect((await post(path)).statusCode).toBe(404);
+    }
   });
 
-  test.each(['/:token/stops-ahead', '/:token/view'])('%s: 404 when the visit has no expiry on record', async (path) => {
-    install(visitRow({ track_token_expires_at: null }));
-    expect((await post(path)).statusCode).toBe(404);
+  test.each(['/:token/stops-ahead', '/:token/view'])('%s: 404 outside the lifetime (scheduled, cancelled, skipped, parked, 2 h after completion)', async (path) => {
+    for (const over of [
+      { status: 'confirmed', track_state: 'scheduled' },
+      { status: 'cancelled', track_state: 'cancelled' },
+      { status: 'skipped', track_state: 'scheduled' },
+      { status: 'rescheduled', track_state: 'scheduled' },
+      DONE(130),
+    ]) {
+      install(visitRow(over));
+      expect((await post(path)).statusCode).toBe(404);
+    }
+  });
+
+  test.each(['/:token/stops-ahead', '/:token/view'])('%s: opens while en route, on site, or within 2 h of completion', async (path) => {
+    for (const over of [ENROUTE, ONSITE, DONE(60)]) {
+      install(visitRow(over));
+      expect([200, 204]).toContain((await post(path)).statusCode);
+    }
   });
 });
 

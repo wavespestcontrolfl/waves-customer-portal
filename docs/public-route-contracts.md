@@ -7844,15 +7844,27 @@ polling, and the stops-ahead POST does not compute or persist a count for it.
 The track payload never returns or mints a reschedule token. A second
 token kind resolves on this route while GATE_CALL_GIVEN_VISIT_TEXTS is on: a
 visit text recipient's own `visit_text_recipients.track_token` (64 hex, minted
-when their en-route text is built). It returns a reduced whitelist payload with
-`scope: 'visit_recipient'` for that one visit: state, technician first name and
-photo, window, lat/lng and town (no street, zip or names), service name, live
-vehicle and ETA, arrival time, `visitChange` only as `{ kind: 'pending_rebook' }` or `{ kind: 'skipped' }` (kind only, never `nextVisit`).
-It never returns `summary`, the report, invoice, prep or review tokens, photos,
-the offer and referral cards, `customer`, `cancellation`, stops count or route
-progress, and the cards and summary reads do not run. The recipient path is strictly read-only (no geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the send's own permission check (`recipientPermission`) passes. Its stops-ahead POST
-answers nulls and its view POST records nothing. Gate off, a deleted row, a
-declined person, an unknown token, an expired visit link or a visit with no expiry on record answer the same 404. A customer-pick visit awaiting the holder shows `{ kind: 'pending_rebook' }`. Every handler on this router runs inside `safeRoute`: a thrown or `next(err)` error leaves as a fresh Error with only the driver `code`, never the knex message (it carries the bound token).
+when their en-route text wins its send claim). LIFETIME RULE: it opens only
+while the visit is en route or on site, and for 2 hours after `completed_at`;
+scheduled, cancelled, skipped, parked, rebooking and later answer 404, as does
+a visit with no live finite `track_token_expires_at` (the holder's legacy null
+expiry still opens for the holder token only). It returns a reduced whitelist
+payload with `scope: 'visit_recipient'` for that one visit and only in the
+`en_route`, `on_property` and `complete` states: state, technician first name
+and photo, window, lat/lng and town (no street, zip or names), service name,
+live vehicle and ETA, arrival time, `meta.pollIntervalSeconds` (30 while en
+route or on site, else 0). It never returns `summary`, the report, invoice, prep
+or review tokens, photos, the offer and referral cards, `customer`,
+`cancellation`, `visitChange`, stops count or route progress, and the cards and
+summary reads do not run. The recipient path is strictly read-only (no
+geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while
+the plain permission reads pass (`recipientPermission`: gate, person on the
+visit, no decline, no callback-number hold on the visit or the person's number,
+no call do-not-contact). Its stops-ahead POST answers nulls and its view POST
+records nothing. The page never opens the live socket for this scope. Every
+handler on this router runs inside `safeRoute`: a thrown or `next(err)` error
+leaves as a fresh Error with only the driver `code`, never the knex message (it
+carries the bound token).
 A
 cancelled or missed visit returns only that the office is the next actor. An
 operational `rescheduled` row adds `visitChange.kind = pending_rebook`; its

@@ -22,10 +22,15 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   ...jest.requireActual('../services/messaging/send-customer-message'),
   sendCustomerMessage: jest.fn(),
 }));
-// A service contact's own text choices need the contact-login tables; pass through, with a hook to force a decline.
+// A service contact's own text choices need the contact-login tables; pass through (the module reads the person's choices
+// row directly: getContactPrefRow + contactAllows), with a hook to force a decline and the gate on.
 jest.mock('../services/contact-notification-prefs', () => {
   const actual = jest.requireActual('../services/contact-notification-prefs');
-  return { ...actual, contactPhoneDeclinesText: jest.fn((...args) => actual.contactPhoneDeclinesText(...args)) };
+  return {
+    ...actual,
+    contactPrefsLive: jest.fn(() => true),
+    getContactPrefRow: jest.fn((...args) => actual.getContactPrefRow(...args)),
+  };
 });
 
 const GATE = 'GATE_CALL_GIVEN_VISIT_TEXTS';
@@ -268,7 +273,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
 
   describe('notifyVisitRecipients (real database, stubbed provider)', () => {
     let sendCustomerMessage;
-    let contactPhoneDeclinesText;
+    let getContactPrefRow;
     const HELD = {
       sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, retryable: true, nextAllowedAt: `${VISIT_DATE}T12:00:00.000Z`,
     };
@@ -279,7 +284,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     beforeEach(async () => {
       process.env[GATE] = 'true';
       ({ sendCustomerMessage } = require('../services/messaging/send-customer-message'));
-      ({ contactPhoneDeclinesText } = require('../services/contact-notification-prefs'));
+      ({ getContactPrefRow } = require('../services/contact-notification-prefs'));
       sendCustomerMessage.mockReset();
       sendCustomerMessage.mockResolvedValue({ sent: true });
       await record();
@@ -388,9 +393,9 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       await suppress(BOB);
       await notify('reminder_72h');
       await db('messaging_suppression').where({ phone: BOB }).del();
-      contactPhoneDeclinesText.mockResolvedValueOnce(true);
+      getContactPrefRow.mockResolvedValueOnce({ tech_en_route: false });
       await notify('en_route');
-      expect(contactPhoneDeclinesText).toHaveBeenCalledWith(customerId, BOB, 'tech_en_route', expect.any(Object));
+      expect(getContactPrefRow).toHaveBeenCalledWith(customerId, BOB, expect.any(Object));
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       // A pending Reply-YES ask is NOT a decline: this is the permission that does not wait for the YES.
       await db('recipient_optin').insert({ ...optinRow, status: 'pending' });
@@ -662,11 +667,13 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
 
   describe('the recipient\'s own tracker token', () => {
     const TOKEN_FORMAT = /^[a-f0-9]{64}$/;
-    let contactPhoneDeclinesText;
+    let getContactPrefRow;
     beforeEach(async () => {
       process.env[GATE] = 'true';
-      ({ contactPhoneDeclinesText } = require('../services/contact-notification-prefs'));
+      ({ getContactPrefRow } = require('../services/contact-notification-prefs'));
       await record();
+      // The link's lifetime: en route (or on site, or just completed). The tests below move the visit through the others.
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'en_route', track_state: 'en_route' });
     });
     afterEach(() => { delete process.env[GATE]; });
 
@@ -738,30 +745,6 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         }
       });
 
-      test('an explicit "no texts" on a call with Bob\'s number', async () => {
-        const [{ id: noTexts }] = await db('call_log').insert({
-          direction: 'inbound', from_phone: BOB, to_phone: OUR_LINE, v2_extraction_status: 'valid',
-          ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }),
-        }).returning('id');
-        try {
-          await noMoreLink();
-        } finally {
-          await db('call_log').where({ id: noTexts }).del();
-        }
-      });
-
-      test('the account\'s SMS switch turned off', async () => {
-        await db('notification_prefs').insert({ customer_id: customerId, sms_enabled: false }).onConflict('customer_id').merge({ sms_enabled: false });
-        await noMoreLink();
-        await db('notification_prefs').where({ customer_id: customerId }).update({ sms_enabled: true });
-        expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
-      });
-
-      test('the account\'s en-route notice switched off', async () => {
-        await db('notification_prefs').insert({ customer_id: customerId, sms_enabled: true, tech_en_route: false }).onConflict('customer_id').merge({ tech_en_route: false });
-        await noMoreLink();
-      });
-
       test('a staff do-not-contact on Bob\'s number', async () => {
         await suppress(BOB);
         await db('messaging_suppression').where({ phone: BOB }).update({ reason: 'manual_dnc' });
@@ -769,10 +752,29 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       });
     });
 
-    test('a completed or on-site visit still opens the link', async () => {
-      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'completed' });
+    test('the lifetime: en route and on site open; completed opens for 2 hours; scheduled, cancelled, skipped, rebooking and older completions do not', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       const [{ id }] = await rows();
-      expect(await VisitRecipient.visitForTrackToken(await VisitRecipient.ensureTrackToken(id))).not.toBeNull();
+      const token = await VisitRecipient.ensureTrackToken(id);
+      const setVisit = (patch) => db('scheduled_services').where({ id: visitId }).update(patch);
+      const open = async () => (await VisitRecipient.visitForTrackToken(token)) !== null;
+      await setVisit({ status: 'en_route', track_state: 'en_route' });
+      expect(await open()).toBe(true);
+      await setVisit({ status: 'on_site', track_state: 'on_property' });
+      expect(await open()).toBe(true);
+      await setVisit({ status: 'completed', track_state: 'complete', completed_at: new Date(Date.now() - 60 * 60 * 1000) });
+      expect(await open()).toBe(true);
+      await setVisit({ completed_at: new Date(Date.now() - 3 * 60 * 60 * 1000) });
+      expect(await open()).toBe(false);
+      for (const patch of [
+        { status: 'confirmed', track_state: 'scheduled', completed_at: null },
+        { status: 'cancelled', track_state: 'cancelled' },
+        { status: 'skipped', track_state: 'scheduled' },
+        { status: 'rescheduled', track_state: 'scheduled' },
+      ]) {
+        await setVisit(patch);
+        expect(await open()).toBe(false);
+      }
     });
 
     test('404 cases: gate off, a wrong token, a declined person, the visit gone, no live expiry', async () => {
@@ -780,7 +782,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       const [{ id }] = await rows();
       const token = await VisitRecipient.ensureTrackToken(id);
       expect(await VisitRecipient.visitForTrackToken('c'.repeat(64))).toBeNull();
-      contactPhoneDeclinesText.mockResolvedValueOnce(true);
+      getContactPrefRow.mockResolvedValueOnce({ tech_en_route: false });
       expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
       await suppress(BOB);
       expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();

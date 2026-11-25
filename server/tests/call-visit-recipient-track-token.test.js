@@ -22,30 +22,18 @@ jest.mock('../models/db', () => {
   return mockDb;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/contact-notification-prefs', () => ({ contactPhoneDeclinesText: jest.fn(async () => false) }));
+// The person's own text choices: a direct read of their choices row (contactPhoneDeclinesText logs err.message, so it is not used).
+jest.mock('../services/contact-notification-prefs', () => ({
+  contactPrefsLive: jest.fn(() => true),
+  getContactPrefRow: jest.fn(async () => null),
+  contactAllows: jest.fn((row, column) => !(row && (row.sms_enabled === false || (column && row[column] === false)))),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
 jest.mock('../services/disclaimed-number-holds', () => ({ disclaimedNumberHeldForVisit: jest.fn(async () => false), disclaimedNumberHeld: jest.fn(async () => false) }));
 const { disclaimedNumberHeldForVisit, disclaimedNumberHeld } = require('../services/disclaimed-number-holds');
-// The other revocations the send path honors, each a module of its own (their SQL runs on PostgreSQL in the Postgres suite).
-jest.mock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: jest.fn(async () => false) }));
-jest.mock('../services/messaging/auto-text-holds', () => ({
-  askedNotToBeContactedOnAnyCall: jest.fn(async () => false),
-  saidNoTextsOnAnyCall: jest.fn(async () => false),
-}));
-jest.mock('../services/messaging/validators/consent', () => ({
-  loadContactState: jest.fn(async () => ({ prefs: {}, customer: { id: 'cust-1' }, lookupFailed: false })),
-  checkConsentForPurpose: jest.fn(async () => ({ ok: true })),
-}));
-jest.mock('../services/messaging/validators/suppression', () => ({
-  loadSuppressionState: jest.fn(async (input, state) => ({ ...state, suppressionLoaded: true })),
-  checkSuppression: jest.fn(async () => ({ ok: true })),
-}));
-const { isStreetLevelHoldVisit } = require('../services/street-level-hold');
-const { askedNotToBeContactedOnAnyCall, saidNoTextsOnAnyCall } = require('../services/messaging/auto-text-holds');
-const consentValidator = require('../services/messaging/validators/consent');
-const suppressionValidator = require('../services/messaging/validators/suppression');
-
-const { contactPhoneDeclinesText } = require('../services/contact-notification-prefs');
+jest.mock('../services/messaging/auto-text-holds', () => ({ askedNotToBeContactedOnAnyCall: jest.fn(async () => false) }));
+const { askedNotToBeContactedOnAnyCall } = require('../services/messaging/auto-text-holds');
+const { getContactPrefRow } = require('../services/contact-notification-prefs');
 const VisitRecipient = require('../services/call-visit-recipient');
 
 const GATE = 'GATE_CALL_GIVEN_VISIT_TEXTS';
@@ -53,21 +41,16 @@ const gateBefore = process.env[GATE];
 const TOKEN = 'b'.repeat(64);
 const ROW = { id: 'r-1', scheduled_service_id: 'ss-1', phone_key: '9415550002', phone_e164: '+19415550002', first_name: 'Bob', last_name: 'Roe' };
 const LIVE = new Date(Date.now() + 86400000).toISOString();
-const VISIT = { id: 'ss-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-12-01', window_start: '09:00:00', service_type: 'Pest Control', track_token_expires_at: LIVE };
+const VISIT = { id: 'ss-1', customer_id: 'cust-1', status: 'en_route', track_state: 'en_route', completed_at: null, scheduled_date: '2026-12-01', window_start: '09:00:00', service_type: 'Pest Control', track_token_expires_at: LIVE };
 
 beforeEach(() => {
   jest.clearAllMocks();
   for (const k of Object.keys(mockTables)) delete mockTables[k];
   process.env[GATE] = 'true';
-  contactPhoneDeclinesText.mockResolvedValue(false);
+  getContactPrefRow.mockResolvedValue(null);
   disclaimedNumberHeldForVisit.mockResolvedValue(false);
   disclaimedNumberHeld.mockResolvedValue(false);
-  isStreetLevelHoldVisit.mockResolvedValue(false);
   askedNotToBeContactedOnAnyCall.mockResolvedValue(false);
-  saidNoTextsOnAnyCall.mockResolvedValue(false);
-  consentValidator.loadContactState.mockResolvedValue({ prefs: {}, customer: { id: 'cust-1' }, lookupFailed: false });
-  consentValidator.checkConsentForPurpose.mockResolvedValue({ ok: true });
-  suppressionValidator.checkSuppression.mockResolvedValue({ ok: true });
 });
 afterAll(() => { if (gateBefore === undefined) delete process.env[GATE]; else process.env[GATE] = gateBefore; });
 
@@ -145,60 +128,12 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     expect(`${err.message} ${err.stack}`).not.toContain(TOKEN);
   });
 
-  describe('every other revocation the send path honors closes the link and the send recheck alike', () => {
-    const META = { scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' };
-    const both = async (code) => {
-      expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
-      expect((await VisitRecipient.recipientStillOwed(META)).code).toBe(code);
-    };
-
-    test('a do-not-contact request recorded on a call with the recipient\'s number', async () => {
-      seed();
-      askedNotToBeContactedOnAnyCall.mockResolvedValue(true);
-      await both('CALL_DO_NOT_CONTACT');
-      expect(askedNotToBeContactedOnAnyCall).toHaveBeenCalledWith('+19415550002', expect.objectContaining({ dbi: expect.anything() }));
-    });
-
-    test('an explicit "no texts" heard on a call with the recipient\'s number', async () => {
-      seed();
-      saidNoTextsOnAnyCall.mockResolvedValue(true);
-      await both('CALL_SMS_DECLINED');
-    });
-
-    test('an unconfirmed street-level address hold on the visit', async () => {
-      seed();
-      isStreetLevelHoldVisit.mockResolvedValue(true);
-      await both('STREET_LEVEL_HOLD');
-      expect(isStreetLevelHoldVisit).toHaveBeenCalledWith('ss-1', expect.anything());
-    });
-
-    test('the send layer\'s own suppression verdict (STOP, wrong number, staff DNC, landline)', async () => {
-      seed();
-      suppressionValidator.checkSuppression.mockResolvedValue({ ok: false, code: 'SUPPRESSED_MANUAL_DNC' });
-      await both('SUPPRESSED_MANUAL_DNC');
-    });
-
-    test('the send layer\'s own consent verdict (the account\'s SMS switch, the notice toggles)', async () => {
-      seed();
-      consentValidator.checkConsentForPurpose.mockResolvedValue({ ok: false, code: 'SMS_OPTED_OUT' });
-      await both('SMS_OPTED_OUT');
-      const [input, policy] = consentValidator.checkConsentForPurpose.mock.calls[0];
-      // the input the send builds: the en-route purpose, the visit and the holder as customer, the recipient's number
-      expect(input).toMatchObject({ channel: 'sms', audience: 'customer', purpose: 'tech_en_route', customerId: 'cust-1', appointmentId: 'ss-1', to: '+19415550002' });
-      expect(policy.prefsColumn).toBe('tech_en_route');
-    });
-
-    test('an unreadable contact state throws (retry), never passes', async () => {
-      seed();
-      consentValidator.loadContactState.mockResolvedValue({ prefs: null, customer: null, lookupFailed: true });
-      await expect(VisitRecipient.visitForTrackToken(TOKEN)).rejects.toThrow('lookup failed');
-      await expect(VisitRecipient.recipientStillOwed(META)).rejects.toThrow('unreadable');
-    });
-
-    test('with none of them, the link opens', async () => {
-      seed();
-      expect(await VisitRecipient.visitForTrackToken(TOKEN)).toEqual({ visitId: 'ss-1', recipientId: 'r-1' });
-    });
+  test('a do-not-contact request recorded on a call with the recipient\'s number closes the link and the send recheck', async () => {
+    seed();
+    askedNotToBeContactedOnAnyCall.mockResolvedValue(true);
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALL_DO_NOT_CONTACT');
+    expect(askedNotToBeContactedOnAnyCall).toHaveBeenCalledWith('+19415550002', expect.objectContaining({ dbi: expect.anything() }));
   });
 
   test('a person no longer on the visit (row not listed for it) resolves nothing', async () => {
@@ -207,9 +142,30 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
   });
 
-  test.each(['on_site', 'completed', 'cancelled'])('a %s visit still opens the link (the page says what happened), where a send would not', async (status) => {
-    seed({ visit: { ...VISIT, status } });
+  const minutesAgo = (n) => new Date(Date.now() - n * 60 * 1000).toISOString();
+  test.each([
+    ['en route', { status: 'en_route', track_state: 'en_route' }],
+    ['on site', { status: 'on_site', track_state: 'on_property' }],
+    ['completed 5 minutes ago', { status: 'completed', track_state: 'complete', completed_at: minutesAgo(5) }],
+    ['completed 119 minutes ago', { status: 'completed', track_state: 'complete', completed_at: minutesAgo(119) }],
+  ])('lifetime: a visit that is %s opens the link', async (_label, over) => {
+    seed({ visit: { ...VISIT, ...over } });
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toEqual({ visitId: 'ss-1', recipientId: 'r-1' });
+  });
+
+  test.each([
+    ['scheduled', { status: 'confirmed', track_state: 'scheduled' }],
+    ['pending', { status: 'pending', track_state: 'scheduled' }],
+    ['cancelled', { status: 'cancelled', track_state: 'cancelled' }],
+    ['skipped', { status: 'skipped', track_state: 'scheduled' }],
+    ['no show', { status: 'no_show', track_state: 'scheduled' }],
+    ['waiting to be rebooked', { status: 'rescheduled', track_state: 'scheduled' }],
+    ['en route by status only', { status: 'en_route', track_state: 'scheduled' }],
+    ['completed 121 minutes ago', { status: 'completed', track_state: 'complete', completed_at: minutesAgo(121) }],
+    ['completed with no completed_at', { status: 'completed', track_state: 'complete', completed_at: null }],
+  ])('lifetime: a visit that is %s closes the link', async (_label, over) => {
+    seed({ visit: { ...VISIT, ...over } });
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
   });
 
   test('a row whose visit is gone resolves nothing', async () => {
@@ -218,7 +174,7 @@ describe('visitForTrackToken: who a recipient link opens', () => {
   });
 
   test.each([
-    ['the person turned off en-route texts', () => contactPhoneDeclinesText.mockResolvedValue(true), {}],
+    ['the person turned off en-route texts (their own choices row)', () => getContactPrefRow.mockResolvedValue({ tech_en_route: false }), {}],
     ['the person declined at the opt-in', () => {}, { optin: { status: 'declined' } }],
     ['the number is suppressed (STOP)', () => {}, { suppressed: { phone: '+19415550002' } }],
   ])('declined: %s', async (_label, arrange, seedArgs) => {

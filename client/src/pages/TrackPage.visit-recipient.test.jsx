@@ -4,9 +4,10 @@
 // must show no report, invoice, review or offer.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { io } from 'socket.io-client';
 import TrackPage from './TrackPage';
 
 vi.mock('socket.io-client', () => ({
@@ -52,12 +53,6 @@ afterEach(() => {
 });
 
 describe('TrackPage for a visit text recipient', () => {
-  it('renders the scheduled state with no holder name, address line or plan cards', async () => {
-    renderTrack(payload('scheduled'));
-    expect(await screen.findByRole('heading', { name: /your pest control is booked/i })).toBeInTheDocument();
-    expect(screen.queryByText(/prep instructions/i)).not.toBeInTheDocument();
-  });
-
   it('renders en route with the tech and a no-map fallback when the truck has no fix', async () => {
     renderTrack(payload('en_route', { meta: { pollIntervalSeconds: 30 } }));
     expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
@@ -77,38 +72,44 @@ describe('TrackPage for a visit text recipient', () => {
     expect(screen.queryByText(/Thanks for choosing Waves/i)).not.toBeInTheDocument();
   });
 
-  it('a skipped visit shows the skipped state, not a cancellation, with no next-visit date', async () => {
-    renderTrack(payload('cancelled', { visitChange: { kind: 'skipped' } }));
-    expect(await screen.findByText(/visit was skipped/i)).toBeInTheDocument();
-    expect(screen.queryByText(/was cancelled/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Your next regular visit/i)).not.toBeInTheDocument();
+  it('a 404 (the link is closed) shows the not-found card', async () => {
+    global.fetch = vi.fn(() => Promise.resolve({ ok: false, status: 404, json: async () => ({ error: 'Not found' }) }));
+    render(
+      <MemoryRouter initialEntries={['/track/token']}>
+        <Routes><Route path="/track/:token" element={<TrackPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/Tracking link unavailable/i)).toBeInTheDocument();
+    expect(io).not.toHaveBeenCalled();
+  });
+});
+
+describe('the live socket', () => {
+  it('never opens for a visit text recipient\'s link (its token is not a socket credential)', async () => {
+    io.mockClear();
+    renderTrack(payload('en_route', { meta: { pollIntervalSeconds: 30 } }));
+    expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
+    expect(io).not.toHaveBeenCalled();
   });
 
-  it('cancelled renders without a reason', async () => {
-    renderTrack(payload('cancelled'));
-    expect(await screen.findByText(/was cancelled/i)).toBeInTheDocument();
-    expect(screen.queryByText(/Reason:/)).not.toBeInTheDocument();
-  });
-
-  it('a scheduled visit polls on the server\'s slow interval and shows the en-route state when the tech heads out', async () => {
-    const bodies = [
-      payload('scheduled', { meta: { pollIntervalSeconds: 120 } }),
-      payload('en_route', { meta: { pollIntervalSeconds: 30 } }),
-    ];
-    let n = 0;
-    global.fetch = vi.fn((url, init) => {
-      if (init?.method === 'POST') return Promise.resolve({ ok: true, status: 204 });
-      const body = bodies[Math.min(n, bodies.length - 1)];
-      n += 1;
-      return Promise.resolve({ ok: true, status: 200, json: async () => body });
+  it('does not open before the GET has answered; for the holder it opens once the answer arrives (and not again on a refetch)', async () => {
+    io.mockClear();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    global.fetch = vi.fn(async (url, init) => {
+      if (init?.method === 'POST') return { ok: true, status: 204 };
+      await gate;
+      return { ok: true, status: 200, json: async () => ({ ...payload('en_route', { meta: { pollIntervalSeconds: 0 } }), scope: undefined }) };
     });
     render(
       <MemoryRouter initialEntries={['/track/token']}>
         <Routes><Route path="/track/:token" element={<TrackPage />} /></Routes>
       </MemoryRouter>,
     );
-    expect(await screen.findByRole('heading', { name: /your pest control is booked/i })).toBeInTheDocument();
-    await act(async () => { await vi.advanceTimersByTimeAsync(120 * 1000); });
+    await Promise.resolve();
+    expect(io).not.toHaveBeenCalled();
+    release();
     expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
+    await waitFor(() => expect(io).toHaveBeenCalledTimes(1));
   });
 });

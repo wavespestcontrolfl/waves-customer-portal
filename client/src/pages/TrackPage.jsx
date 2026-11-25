@@ -1060,8 +1060,13 @@ export default function TrackPage() {
   // restart, etc.), the user still gets the initial fetch's data and
   // a refresh restores live updates. We don't surface socket errors
   // to the UI.
+  //
+  // Not before the GET has answered, and never for a visit text recipient's link (scope 'visit_recipient'): the socket
+  // joins the HOLDER's customer room, and a recipient's token is not a socket credential. Recipients refresh by poll.
+  // A boolean, not `data`, so a refetch never reconnects the socket.
+  const socketAllowed = Boolean(data) && data.scope !== 'visit_recipient';
   useEffect(() => {
-    if (!token || notFound) return undefined;
+    if (!token || notFound || !socketAllowed) return undefined;
     const origin = socketOrigin();
     const socket = origin
       ? io(origin, { auth: { trackToken: token }, transports: ['websocket', 'polling'], reconnection: true })
@@ -1076,7 +1081,7 @@ export default function TrackPage() {
       socket.off('customer:job_update', handleJobUpdate);
       socket.disconnect();
     };
-  }, [token, notFound, fetchTrack]);
+  }, [token, notFound, socketAllowed, fetchTrack]);
 
   // Server-driven polling cadence. While en-route the response sets
   // pollIntervalSeconds=30 so we refresh vehicle coords + ETA between
