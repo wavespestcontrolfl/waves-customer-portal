@@ -133,18 +133,25 @@ async function suppressedNumber(phoneKey, conn) {
  * `blocked`: the call-level SMS verdict (do-not-contact, the TCPA gate, a disclaimed caller number).
  * `excludePhones`: the call legs and the caller's own numbers (callerNumbers).
  */
-async function recordForVisit({ scheduledServiceId, callLogId = null, v2Extraction, excludePhones = [], blocked = false, conn = db }) {
+async function recordForVisit({ scheduledServiceId, customerId = null, callLogId = null, v2Extraction, excludePhones = [], blocked = false, conn = db }) {
   const result = { recorded: [], skipped: [] };
   if (!scheduledServiceId || blocked) return { ...result, skipped: [{ reason: blocked ? 'call_sms_blocked' : 'no_visit' }] };
   const { disclaimedNumberHeld } = require('./disclaimed-number-holds');
   // The account holder already gets this visit's texts as themselves: no second row for their own number.
   const holder = await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
-    .where('s.id', scheduledServiceId).first('c.phone');
+    .where('s.id', scheduledServiceId).first('c.phone', 's.customer_id');
+  // The row is bound to the customer whose call authorized it: that customer must be the visit's own (never a visit that is
+  // already someone else's), and every later send and tracker read requires the visit to still belong to them.
+  if (!holder || !holder.customer_id || (customerId && String(customerId) !== String(holder.customer_id))) {
+    return { ...result, skipped: [{ reason: 'customer_mismatch' }] };
+  }
+  const authorizingCustomerId = holder.customer_id;
   for (const entry of eligibleEntries(v2Extraction, { excludePhones: [...excludePhones, holder?.phone] })) {
-    if (await disclaimedNumberHeld(entry.phoneE164, conn)) { result.skipped.push({ reason: 'disclaimed_number' }); continue; }
+    if (await disclaimedNumberHeld(entry.phoneE164, conn, { strict: true })) { result.skipped.push({ reason: 'disclaimed_number' }); continue; }
     if (await suppressedNumber(entry.phoneKey, conn)) { result.skipped.push({ reason: 'suppressed' }); continue; }
     const rows = await conn(TABLE).insert({
       scheduled_service_id: scheduledServiceId,
+      customer_id: authorizingCustomerId,
       phone_key: entry.phoneKey,
       phone_e164: entry.phoneE164,
       first_name: entry.firstName ? String(entry.firstName).slice(0, 100) : null,
@@ -168,6 +175,7 @@ async function recordForCall({ scheduledServiceId, customerId, call, contactPhon
   try {
     const result = await recordForVisit({
       scheduledServiceId,
+      customerId,
       callLogId: call.id,
       v2Extraction,
       excludePhones: callerNumbers({ call, contactPhone, extractedPhone: extracted.phone, v2Extraction }),
@@ -223,7 +231,8 @@ async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], 
     const taken = new Set([...excludePhones, holder?.phone].map(lastTen).filter(Boolean));
     const contacts = [];
     for (const row of rows) {
-      const contact = taken.has(row.phone_key) ? null : await ownedContact(row, visit, kind, conn);
+      // A row bound to another customer (the visit was reassigned) or to none is nobody's to text.
+      const contact = taken.has(row.phone_key) || !rowBelongsToVisitCustomer(row, visit) ? null : await ownedContact(row, visit, kind, conn);
       if (contact) contacts.push(contact);
     }
     return contacts;
@@ -232,6 +241,11 @@ async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], 
     logger.warn(`[call-visit-recipient] recipients unreadable for visit ${scheduledServiceId}: ${err.code || err.name || 'db_error'}`);
     return [];
   }
+}
+
+// The row was recorded for THIS visit's customer. A null customer_id (never bound) or another customer's is never eligible.
+function rowBelongsToVisitCustomer(row, visit) {
+  return Boolean(row && visit && row.customer_id && visit.customer_id && String(row.customer_id) === String(visit.customer_id));
 }
 
 // One recipient row as a contact a sender can text, or null when they have declined.
@@ -303,7 +317,7 @@ async function sendOnce(contact, send, { conn = db } = {}) {
   let claimed;
   try {
     claimed = await conn(TABLE)
-      .where({ id: contact.visitRecipientId })
+      .where({ id: contact.visitRecipientId, customer_id: contact.visit.customerId })
       .whereRaw('NOT jsonb_exists(deliveries, ?)', [contact.claimKey])
       .update({ deliveries: conn.raw('deliveries || jsonb_build_object(?::text, ?::text)', [contact.claimKey, claimToken]) });
   } catch (err) {
@@ -486,9 +500,9 @@ async function arrivalSnapshot(visit, conn) {
  * The recipient's OWN map-only tracker credential, minted on first use. One atomic write: two senders racing get the
  * same token. The holder's tracker token is never read here: it opens the report, the invoice and the other visits' links.
  */
-async function ensureTrackToken(visitRecipientId, conn = db) {
+async function ensureTrackToken(visitRecipientId, customerId, conn = db) {
   const rows = await conn(TABLE)
-    .where({ id: visitRecipientId })
+    .where({ id: visitRecipientId, customer_id: customerId })
     .update({ track_token: conn.raw("COALESCE(track_token, encode(gen_random_bytes(32), 'hex'))") })
     .returning('track_token');
   const first = Array.isArray(rows) ? rows[0] : null;
@@ -503,7 +517,7 @@ async function recipientTrackUrl(contact, context, conn) {
     // No link for a visit whose own tracker link has no live expiry on record: the recipient's link ends with it.
     const visit = await conn('scheduled_services').where({ id: contact.visit.id }).first('track_token_expires_at');
     if (!visit || !isTrackTokenLiveWithExpiry(visit.track_token_expires_at)) return null;
-    const token = await ensureTrackToken(contact.visitRecipientId, conn);
+    const token = await ensureTrackToken(contact.visitRecipientId, contact.visit.customerId, conn);
     return token ? await context.trackUrlFor(token) : null;
   } catch (err) {
     logger.warn(`[call-visit-recipient] tracker link unavailable for visit ${contact.visit.id}: ${err.code || err.name || 'error'}`);
@@ -530,7 +544,7 @@ async function visitForTrackToken(token, { conn = db } = {}) {
 }
 
 async function resolveTrackToken(token, conn) {
-  const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id');
+  const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id', 'customer_id');
   if (!row) return null;
   // The cheap check FIRST: the short lifetime (en route within 3 h of en_route_at, on site within 4 h of arrived_at, or up to two
   // hours after completion; never scheduled,
@@ -540,15 +554,15 @@ async function resolveTrackToken(token, conn) {
   // unknown token does, with a code-only log: only an error on the token lookup above may surface as an error (a 500).
   try {
     const visit = await readLinkVisit(row.scheduled_service_id, conn);
-    if (!visit || !recipientLinkEligible(visit)) return null;
+    if (!visit || !rowBelongsToVisitCustomer(row, visit) || !recipientLinkEligible(visit)) return null;
     // Only a link that can still open pays for the permission reads: the same check the en-route send makes at the
     // provider handoff, read fresh on every request.
     const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id }, { conn, anyVisitStatus: true });
     if (!permission.ok) return null;
     // The final recheck: the visit as it stands now, after the permission reads.
     const again = await readLinkVisit(row.scheduled_service_id, conn);
-    if (!again || !recipientLinkEligible(again)) return null;
-    return { visitId: visit.id, recipientId: row.id };
+    if (!again || !rowBelongsToVisitCustomer(row, again) || !recipientLinkEligible(again)) return null;
+    return { visitId: visit.id, recipientId: row.id, customerId: again.customer_id };
   } catch (err) {
     logger.warn(`[call-visit-recipient] tracker link check unreadable (code=${err && err.code ? err.code : 'none'}), answering as unknown`);
     return null;
@@ -558,7 +572,7 @@ async function resolveTrackToken(token, conn) {
 // Every field recipientLinkEligible reads (the one rule shared with the track route).
 function readLinkVisit(scheduledServiceId, conn) {
   return conn('scheduled_services').where({ id: scheduledServiceId })
-    .first('id', 'status', 'track_state', 'completed_at', 'en_route_at', 'arrived_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
+    .first('id', 'customer_id', 'status', 'track_state', 'completed_at', 'en_route_at', 'arrived_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
 }
 
 // The copy and the slot the send is guarded on. null = nothing sendable.
@@ -662,14 +676,14 @@ const noVerdict = (code, reason) => ({ ok: false, code, reason });
 async function recipientPermission(meta, { conn = db, anyVisitStatus = false } = {}) {
   if (!gateLive()) return noVerdict('VISIT_TEXT_GATE_OFF', 'gate-off');
   // The raw reader THROWS on a failed read (the boolean wrapper turns it into "held"): a failed read retries, never drops the text.
-  if (await require('./disclaimed-number-holds').disclaimedNumberHeldForVisit({ scheduledServiceId: meta.scheduled_service_id }, conn)) {
+  if (await require('./disclaimed-number-holds').disclaimedNumberHeldForVisit({ scheduledServiceId: meta.scheduled_service_id }, conn, { strict: true })) {
     return noVerdict('CALLBACK_NUMBER_HOLD', 'callback-number-hold');
   }
   const contacts = await contactsForVisit(meta.scheduled_service_id, meta.kind, { conn, throwOnError: true, anyVisitStatus });
   const mine = contacts.find((contact) => contact.visitRecipientId === meta.visit_recipient_id);
   if (!mine) return noVerdict('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
   // The hold on the visit above is the HOLDER's number; the person's own number can be held by another call.
-  if (await require('./disclaimed-number-holds').disclaimedNumberHeld(mine.phone, conn)) {
+  if (await require('./disclaimed-number-holds').disclaimedNumberHeld(mine.phone, conn, { strict: true })) {
     return noVerdict('RECIPIENT_NUMBER_HOLD', 'recipient-number-hold');
   }
   // A do-not-contact request heard on any call with the person's number (a plain read of call_log).

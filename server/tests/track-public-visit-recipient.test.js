@@ -101,7 +101,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockDb.mockReset();
   writes.length = 0;
-  mockVisitForTrackToken.mockResolvedValue({ visitId: 'visit-1', recipientId: 'r-1' });
+  mockVisitForTrackToken.mockResolvedValue({ visitId: 'visit-1', recipientId: 'r-1', customerId: 'cust-1' });
 });
 
 const minutesAgo = (n) => new Date(Date.now() - n * 60 * 1000).toISOString();
@@ -445,7 +445,7 @@ describe('ONE eligibility rule: an ineligible recipient token answers exactly as
     install(null);
     mockVisitForTrackToken.mockResolvedValue(null);
     const out = await run(path, method);
-    mockVisitForTrackToken.mockResolvedValue({ visitId: 'visit-1', recipientId: 'r-1' });
+    mockVisitForTrackToken.mockResolvedValue({ visitId: 'visit-1', recipientId: 'r-1', customerId: 'cust-1' });
     return out;
   };
 
@@ -454,6 +454,20 @@ describe('ONE eligibility rule: an ineligible recipient token answers exactly as
     expect(expected.statusCode).toBe(404);
     install(visitRow({ ...ENROUTE, customer_pick_by: '2026-11-20T00:00:00Z', window_start: null, window_end: null }));
     expect(await run(path, method)).toEqual(expected);
+  });
+
+  test.each(ROUTES)('%s (%s): a visit REASSIGNED to another customer after the row was bound is the same 404 as an unknown token', async (path, method) => {
+    const expected = await unknown(path, method);
+    // the module's answer is bound to cust-1; the visit row the route reads now belongs to cust-2 (the final payload lookup)
+    install(visitRow({ ...ENROUTE, customer_id: 'cust-2' }));
+    expect(await run(path, method)).toEqual(expected);
+    // a module answer with no customer binding at all is never served either
+    install(visitRow(ENROUTE));
+    mockVisitForTrackToken.mockResolvedValueOnce({ visitId: 'visit-1', recipientId: 'r-1' });
+    expect(await run(path, method)).toEqual(expected);
+    // control: bound and unchanged
+    install(visitRow(ENROUTE));
+    expect((await run(path, method)).statusCode).not.toBe(404);
   });
 
   test.each(ROUTES)('%s (%s): every other ineligible row is the same 404 as an unknown token', async (path, method) => {

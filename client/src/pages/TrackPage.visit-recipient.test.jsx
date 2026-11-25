@@ -113,7 +113,7 @@ describe('the live socket', () => {
     await waitFor(() => expect(io).toHaveBeenCalledTimes(1));
   });
 
-  it('the holder page refetches on socket connect AND on every reconnect, and a recipient (no socket) has nothing to refetch', async () => {
+  it('the holder page does NOT refetch on the first socket connect, but refetches once on every reconnect', async () => {
     io.mockClear();
     const handlers = {};
     const socket = { on: vi.fn((event, fn) => { handlers[event] = fn; }), off: vi.fn(), disconnect: vi.fn() };
@@ -132,9 +132,13 @@ describe('the live socket', () => {
     expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
     await waitFor(() => expect(handlers.connect).toBeTypeOf('function'));
     const before = gets;
+    // the first connect follows a GET that is already current: no extra GET
+    await act(async () => { handlers.connect(); });
+    await Promise.resolve();
+    expect(gets).toBe(before);
+    // a reconnect fires the same event again: one GET each time
     await act(async () => { handlers.connect(); });
     await waitFor(() => expect(gets).toBe(before + 1));
-    // a reconnect fires the same event again
     await act(async () => { handlers.connect(); });
     await waitFor(() => expect(gets).toBe(before + 2));
     // the job-update broadcast still refetches

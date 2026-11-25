@@ -39,7 +39,7 @@ const VisitRecipient = require('../services/call-visit-recipient');
 const GATE = 'GATE_CALL_GIVEN_VISIT_TEXTS';
 const gateBefore = process.env[GATE];
 const TOKEN = 'b'.repeat(64);
-const ROW = { id: 'r-1', scheduled_service_id: 'ss-1', phone_key: '9415550002', phone_e164: '+19415550002', first_name: 'Bob', last_name: 'Roe' };
+const ROW = { id: 'r-1', scheduled_service_id: 'ss-1', customer_id: 'cust-1', phone_key: '9415550002', phone_e164: '+19415550002', first_name: 'Bob', last_name: 'Roe' };
 const LIVE = new Date(Date.now() + 86400000).toISOString();
 const VISIT = { id: 'ss-1', customer_id: 'cust-1', status: 'en_route', track_state: 'en_route', completed_at: null, en_route_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(), scheduled_date: '2026-12-01', window_start: '09:00:00', service_type: 'Pest Control', track_token_expires_at: LIVE };
 
@@ -67,7 +67,7 @@ function seed({ row = ROW, visit = VISIT, optin = null, suppressed = null } = {}
 describe('visitForTrackToken: who a recipient link opens', () => {
   test('a live row opens its own visit', async () => {
     seed();
-    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toEqual({ visitId: 'ss-1', recipientId: 'r-1' });
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toEqual({ visitId: 'ss-1', recipientId: 'r-1', customerId: 'cust-1' });
     // Read by the recipient column, never the holder's.
     const reads = JSON.stringify(mockTables.visit_text_recipients.reads);
     expect(reads).toContain('track_token');
@@ -115,7 +115,7 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     seed();
     disclaimedNumberHeld.mockResolvedValue(true);
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
-    expect(disclaimedNumberHeld).toHaveBeenCalledWith('+19415550002', expect.anything());
+    expect(disclaimedNumberHeld).toHaveBeenCalledWith('+19415550002', expect.anything(), { strict: true });
     expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('RECIPIENT_NUMBER_HOLD');
   });
 
@@ -246,7 +246,7 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     ['completed 119 minutes ago', { status: 'completed', track_state: 'complete', completed_at: minutesAgo(119) }],
   ])('lifetime: a visit that is %s opens the link', async (_label, over) => {
     seed({ visit: { ...VISIT, ...over } });
-    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toEqual({ visitId: 'ss-1', recipientId: 'r-1' });
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toEqual({ visitId: 'ss-1', recipientId: 'r-1', customerId: 'cust-1' });
   });
 
   test.each([
@@ -290,7 +290,7 @@ describe('ensureTrackToken: one atomic mint on the recipient row', () => {
   test('writes only the recipient row and returns the token', async () => {
     seed();
     mockTables.visit_text_recipients.returning = [{ track_token: TOKEN }];
-    expect(await VisitRecipient.ensureTrackToken('r-1')).toBe(TOKEN);
+    expect(await VisitRecipient.ensureTrackToken('r-1', 'cust-1')).toBe(TOKEN);
     expect(mockTables.visit_text_recipients.updates).toHaveLength(1);
     expect(JSON.stringify(mockTables.visit_text_recipients.updates[0])).toContain('COALESCE(track_token');
     expect(mockTables.scheduled_services.updates).toEqual([]);

@@ -41,7 +41,7 @@ const holds = require('../services/disclaimed-number-holds');
 const trackPublicRouter = require('../routes/track-public');
 
 const TOKEN = 'b'.repeat(64);
-const RECIP = { id: 'r-1', scheduled_service_id: 'visit-1', phone_key: '9415550002', phone_e164: '+19415550002', first_name: 'Bob' };
+const RECIP = { id: 'r-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', phone_key: '9415550002', phone_e164: '+19415550002', first_name: 'Bob' };
 const LIVE = new Date(Date.now() + 86400000).toISOString();
 const EN_ROUTE = {
   id: 'visit-1', customer_id: 'cust-1', status: 'en_route', track_state: 'en_route', completed_at: null, track_token_expires_at: LIVE,
@@ -139,6 +139,14 @@ describe.each(ROUTES)('%s (%s)', (path, method) => {
     expect(await run(path, method)).toEqual(expected);
     expect(routeQueryRan).toBeGreaterThanOrEqual(1);
     expect(seen).toBeGreaterThanOrEqual(MODULE_READS);
+  });
+
+  test('a visit REASSIGNED to another customer (or a row bound to none) answers as unknown, through the real module', async () => {
+    const expected = await unknownAnswer();
+    world({ visit: { ...EN_ROUTE, customer_id: 'cust-2' } });
+    expect(await run(path, method)).toEqual(expected);
+    world({ recipient: { ...RECIP, customer_id: null } });
+    expect(await run(path, method)).toEqual(expected);
   });
 
   test('an error on the token lookup ITSELF is the only one allowed to surface as an error', async () => {

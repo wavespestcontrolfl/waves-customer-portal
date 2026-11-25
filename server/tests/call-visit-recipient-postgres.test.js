@@ -770,7 +770,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     test('minted once on first use, the same value after, never the holder\'s; two racing mints agree', async () => {
       const [{ id }] = await rows();
       expect((await rows())[0].track_token).toBeNull();
-      const minted = await Promise.all([VisitRecipient.ensureTrackToken(id), VisitRecipient.ensureTrackToken(id), VisitRecipient.ensureTrackToken(id)]);
+      const minted = await Promise.all([VisitRecipient.ensureTrackToken(id, customerId), VisitRecipient.ensureTrackToken(id, customerId), VisitRecipient.ensureTrackToken(id, customerId)]);
       expect(minted[0]).toMatch(TOKEN_FORMAT);
       expect(new Set(minted).size).toBe(1);
       expect((await rows())[0].track_token).toBe(minted[0]);
@@ -779,8 +779,8 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     test('the token opens exactly its own visit while the gate is on, and is unique per row', async () => {
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       const [{ id }] = await rows();
-      const token = await VisitRecipient.ensureTrackToken(id);
-      expect(await VisitRecipient.visitForTrackToken(token)).toEqual({ visitId, recipientId: id });
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(await VisitRecipient.visitForTrackToken(token)).toEqual({ visitId, recipientId: id, customerId });
       const [other] = await db('visit_text_recipients').insert({
         scheduled_service_id: otherVisitId, phone_key: BOB.slice(-10), phone_e164: BOB, consent_version: 'x', track_token: token === 'f'.repeat(64) ? 'e'.repeat(64) : 'f'.repeat(64),
       }).returning('id');
@@ -790,7 +790,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     test('a callback-number hold added after the text was sent closes the link (the same check as the send)', async () => {
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       const [{ id }] = await rows();
-      const token = await VisitRecipient.ensureTrackToken(id);
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
       expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
       await db('disclaimed_number_holds').insert({ phone_e164: HOLDER, customer_id: customerId, source_call_log_id: callLogId, held_at: new Date() });
       expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
@@ -801,7 +801,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     test('a callback-number hold on the recipient\'s OWN number closes the link', async () => {
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       const [{ id }] = await rows();
-      const token = await VisitRecipient.ensureTrackToken(id);
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
       expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
       await db('disclaimed_number_holds').insert({ phone_e164: BOB, customer_id: null, source_call_log_id: callLogId, held_at: new Date() });
       expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
@@ -814,7 +814,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       beforeEach(async () => {
         await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
         const [{ id }] = await rows();
-        token = await VisitRecipient.ensureTrackToken(id);
+        token = await VisitRecipient.ensureTrackToken(id, customerId);
         expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
       });
       const noMoreLink = async () => expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
@@ -981,7 +981,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(process.env.GATE_CONTACT_LOGIN).toBeUndefined();
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       const [{ id }] = await rows();
-      const token = await VisitRecipient.ensureTrackToken(id);
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
       expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
       await db('service_contact_notification_prefs').insert({ customer_id: customerId, phone_key: BOB.slice(-10), tech_en_route: false });
       try {
@@ -1004,7 +1004,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     test('a missing choices table denies: the link errors and a text is held, never read as "no choices"', async () => {
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       const [{ id }] = await rows();
-      const token = await VisitRecipient.ensureTrackToken(id);
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
       expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
       const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
       // The same database, except that the per-contact choices table does not exist (Postgres 42P01).
@@ -1029,10 +1029,118 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
     });
 
+    test('a MISSING disclaimed-number table (42P01) is never read as "no hold": the link answers like an unknown token and the text is held', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      const holdsTable = 'disclaimed_number_holds';
+      // the REAL helpers, over a database where only that table does not exist
+      const withoutHoldsTable = Object.assign((table) => {
+        if (table !== holdsTable) return db(table);
+        const missing = Object.assign(new Error(`relation "${holdsTable}" does not exist for '${BOB}'`), { code: '42P01' });
+        const q = { where: () => q, whereNull: () => q, first: async () => { throw missing; } };
+        return q;
+      }, { raw: db.raw.bind(db), fn: db.fn });
+      // the strict option itself: a code-only throw where the default read says "no hold"
+      const thrown = await Holds.disclaimedNumberHeld(BOB, withoutHoldsTable, { strict: true }).catch((e) => e);
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown.code).toBe('42P01');
+      expect(`${thrown.message} ${thrown.stack}`).not.toContain(BOB.slice(-10));
+      expect(await Holds.disclaimedNumberHeld(BOB, withoutHoldsTable)).toBe(false); // the other callers keep the old reading
+      // the recipient's two checks (the visit's holder number, and the person's own number) both go through it
+      expect(await VisitRecipient.visitForTrackToken(token, { conn: withoutHoldsTable })).toBeNull();
+      await db('visit_text_recipients').where({ id }).update({ deliveries: '{}' });
+      sendCustomerMessage.mockReset();
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+      const notifications = require('../services/notification-service');
+      const bell = jest.spyOn(notifications, 'notifyAdmin').mockResolvedValue({ id: 'n-1' });
+      try {
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER], conn: withoutHoldsTable });
+        // the text reaches the provider boundary only to be HELD there: the handoff recheck says retry, never "no hold"
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        const handoff = await sendCustomerMessage.mock.calls[0][0].providerPreSendCheck();
+        expect(handoff).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', retryable: true });
+      } finally { bell.mockRestore(); }
+      sendCustomerMessage.mockClear();
+      await db('visit_text_recipients').where({ id }).update({ deliveries: '{}' });
+      // control: with the table readable, the link opens and the text goes
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER] });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    describe('the row is bound to the customer whose call authorized it', () => {
+      let otherCustomerId;
+      beforeEach(async () => {
+        [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(40) }).returning('id');
+      });
+      afterEach(async () => {
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: customerId });
+        await db('customers').where({ id: otherCustomerId }).del();
+      });
+      const reassign = (to) => db('scheduled_services').where({ id: visitId }).update({ customer_id: to });
+
+      test('recording writes the visit\'s customer, and a call from another customer records nothing', async () => {
+        expect((await record()).recorded).toHaveLength(1);
+        expect((await rows())[0].customer_id).toBe(customerId);
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+        const mismatch = await record({ customerId: otherCustomerId });
+        expect(mismatch.recorded).toEqual([]);
+        expect(mismatch.skipped).toEqual([{ reason: 'customer_mismatch' }]);
+        expect(await rows()).toHaveLength(0);
+      });
+
+      test('a visit reassigned to another customer: no text, no claim, and the link answers like an unknown token', async () => {
+        await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
+        await record();
+        const [{ id }] = await rows();
+        const token = await VisitRecipient.ensureTrackToken(id, customerId);
+        expect(await VisitRecipient.visitForTrackToken(token)).toMatchObject({ visitId, customerId });
+        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+        sendCustomerMessage.mockReset();
+        sendCustomerMessage.mockResolvedValue({ sent: true });
+        await reassign(otherCustomerId);
+        expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [] });
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        expect((await rows())[0].deliveries).toEqual({});
+        // the replay and handoff rechecks say the same, and a token is not minted for the reassigned visit
+        expect(await VisitRecipient.recipientStillOwed({ scheduled_service_id: visitId, kind: 'en_route', visit_recipient_id: id, claim_key: `en_route:${VISIT_DATE}T09:00` })).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_NOT_OWED' });
+        expect(await VisitRecipient.ensureTrackToken(id, otherCustomerId)).toBeNull();
+        // it comes back when the visit does
+        await reassign(customerId);
+        expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      });
+
+      test('a row with NO customer_id (never bound) is ineligible: no text, no link', async () => {
+        await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
+        await record();
+        const [{ id }] = await rows();
+        const token = await VisitRecipient.ensureTrackToken(id, customerId);
+        await db('visit_text_recipients').where({ id }).update({ customer_id: null });
+        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+        sendCustomerMessage.mockReset();
+        sendCustomerMessage.mockResolvedValue({ sent: true });
+        expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [] });
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+
+      test('the migration backfills an existing row from its visit\'s customer', async () => {
+        await record();
+        const [{ id }] = await rows();
+        await db('visit_text_recipients').where({ id }).update({ customer_id: null });
+        await require('../models/migrations/20261124230000_visit_text_recipients_customer_id').up(db);
+        expect((await rows())[0].customer_id).toBe(customerId);
+      });
+    });
+
     test('the lifetime: en route and on site open; completed opens for 2 hours; scheduled, cancelled, skipped, rebooking and older completions do not', async () => {
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       const [{ id }] = await rows();
-      const token = await VisitRecipient.ensureTrackToken(id);
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
       const setVisit = (patch) => db('scheduled_services').where({ id: visitId }).update(patch);
       const open = async () => (await VisitRecipient.visitForTrackToken(token)) !== null;
       await setVisit({ status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
@@ -1057,7 +1165,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     test('404 cases: gate off, a wrong token, a declined person, the visit gone, no live expiry', async () => {
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       const [{ id }] = await rows();
-      const token = await VisitRecipient.ensureTrackToken(id);
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
       expect(await VisitRecipient.visitForTrackToken('c'.repeat(64))).toBeNull();
       getContactPrefRow.mockResolvedValueOnce({ tech_en_route: false });
       expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();

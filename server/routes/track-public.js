@@ -735,17 +735,20 @@ function recipientLinkEligible(row) {
   return Boolean(row) && recipientLinkEligibleRule(row);
 }
 
-// The visit a recipient's link names while the gate is on, the row stands and the person has not declined; else null.
-function recipientVisitId(token) {
-  return require('../services/call-visit-recipient').visitForTrackToken(token).then((hit) => (hit ? hit.visitId : null));
+// What a recipient's link names while the gate is on, the row stands, it is bound to the visit's customer and the person has not
+// declined: { visitId, recipientId, customerId }; else null.
+function recipientHit(token) {
+  return require('../services/call-visit-recipient').visitForTrackToken(token);
 }
 
 // The POSTs read the visit once more for the same rule the GET applies to its own row (recipientLinkEligible).
-async function recipientVisitLive(visitId) {
+async function recipientVisitLive(hit) {
+  if (!hit || !hit.visitId || !hit.customerId) return false;
   try {
-    const visit = await db('scheduled_services').where({ id: visitId })
-      .first('status', 'track_state', 'completed_at', 'en_route_at', 'arrived_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
-    return recipientLinkEligible(visit);
+    const visit = await db('scheduled_services').where({ id: hit.visitId })
+      .first('customer_id', 'status', 'track_state', 'completed_at', 'en_route_at', 'arrived_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
+    // The visit must still belong to the customer the row was bound to (a reassigned visit answers like an unknown token).
+    return Boolean(visit) && String(visit.customer_id) === String(hit.customerId) && recipientLinkEligible(visit);
   } catch (err) {
     // After the token lookup: an error answers as an unknown token, with a code-only log.
     logger.warn(`[track-public] recipient visit recheck failed (code=${err?.code || 'none'})`);
@@ -839,6 +842,8 @@ router.get('/:token', safeRoute(async (req, res, next) => {
         // token lookup itself may answer 500.
         try {
           row = await readTrackVisit({ 's.id': recipient.visitId });
+          // The visit must still belong to the customer the row was bound to, as of THIS read too.
+          if (row && String(row.customer_id) !== String(recipient.customerId)) row = null;
         } catch (err) {
           logger.warn(`[track-public] recipient visit read failed (code=${err?.code || 'none'})`);
           row = null;
@@ -1042,8 +1047,7 @@ router.post('/:token/stops-ahead', safeRoute(async (req, res, next) => {
     if (!row) {
       // A visit text recipient's link: valid, but the route count is the holder's, so it answers the generic state
       // (the reduced payload never asks for it) and writes nothing.
-      const visitId = await recipientVisitId(req.params.token);
-      return visitId && await recipientVisitLive(visitId)
+      return await recipientVisitLive(await recipientHit(req.params.token))
         ? res.json({ stopsAhead: null, routeProgress: null })
         : res.status(404).json({ error: 'Not found' });
     }
@@ -1087,8 +1091,7 @@ router.post('/:token/view', safeRoute(async (req, res) => {
     if (!row) {
       // A visit text recipient's link: the view counts as no customer's page view (it is not the account holder's),
       // so it records nothing; a valid link answers the same 204.
-      const visitId = await recipientVisitId(req.params.token);
-      return visitId && await recipientVisitLive(visitId)
+      return await recipientVisitLive(await recipientHit(req.params.token))
         ? res.status(204).end()
         : res.status(404).json({ error: 'Not found' });
     }
