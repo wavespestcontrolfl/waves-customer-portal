@@ -2815,7 +2815,8 @@ async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
     logger.info(`[gpt-live] cell ${cell} voice ${voice} ${maskSid(callSid)}`);
     return res.type('text/xml').send(gptLiveStreamXml(req, callSid, token));
   } catch (err) {
-    logger.error(`[gpt-live] refused ${maskSid(callSid)} (fail closed): ${err.message}`);
+    // A bounded code only: the stamp update binds the caller's numbers, and a database error message can echo bindings.
+    logger.error(`[gpt-live] refused ${maskSid(callSid)} (fail closed) code=${String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32)}`);
     return gptLiveSayAndHangup(res, 'The GPT-Live test is not available right now. Goodbye.');
   }
 }

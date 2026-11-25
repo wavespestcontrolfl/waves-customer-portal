@@ -433,7 +433,44 @@ const TOOLS_WITH_ACCOUNT_DETAILS = TOOLS.map((tool) => (tool.name !== 'capture_l
   input_schema: { ...tool.input_schema, properties: { ...tool.input_schema.properties, use_account_details: USE_ACCOUNT_DETAILS_PROPERTY } },
 }));
 
-function activeTools({ officeOpen = null } = {}) {
+// ⭐ A PRACTICE LINE'S WHOLE TOOL SET (RelayConversation practiceLine: the GPT-Live trial's brain).
+// Public information and one dry-run write, and NO paid provider request (no geocode, forecast, date
+// parser or road time) and nothing that reads a customer account: it resolves no caller context, so
+// there is no matched customer, and executeTool refuses every other name before any database call.
+// No availability tools, no lookup_customer, no account overview, history, invoices, estimates, ETA or
+// reports, no re-service, no booking, no transfer. The only paid calls are the brain's own model rounds.
+const PRACTICE_LINE_TOOLS = Object.freeze(['get_services_catalog', 'get_pricing', 'capture_lead']);
+
+// The tool description that tells the model a human will follow up: on a practice line nothing is
+// filed, so it says what actually happens.
+const PRACTICE_DESCRIPTIONS = Object.freeze({
+  capture_lead: 'Practice run of saving a new-customer request. Call it once you have the caller\'s reason for calling and '
+    + 'the contact and location detail they give. On this practice line NOTHING is saved and nobody follows up: the result '
+    + 'says so, and you tell the caller plainly. Safe to call with partial information.',
+});
+
+// The capture_lead fields whose descriptions promise a human will act (an opt-out "taken care of", an estimate sent,
+// the owner paged). Nothing is saved on a practice line, so each says what actually happens.
+const PRACTICE_CAPTURE_FIELD_DESCRIPTIONS = Object.freeze({
+  lead_quality: 'hot = urgent or ready to buy, warm = interested, cold = just asking, spam = not a real lead. Nothing is saved or paged on this practice line.',
+  estimate_requested: 'True when the caller wants a written estimate. Nothing is queued on this practice line: the result says so, and you tell the caller plainly.',
+  do_not_contact_request: 'True if the caller asked us to stop contacting them (or stop texting/emailing them). This practice line records and acts on nothing: '
+    + 'do NOT say it is handled; tell the caller to call or text the Waves office to opt out.',
+});
+
+function practiceCaptureTool(tool) {
+  const properties = { ...tool.input_schema.properties };
+  for (const [field, description] of Object.entries(PRACTICE_CAPTURE_FIELD_DESCRIPTIONS)) {
+    if (properties[field]) properties[field] = { ...properties[field], description };
+  }
+  return { ...tool, description: PRACTICE_DESCRIPTIONS.capture_lead, input_schema: { ...tool.input_schema, properties } };
+}
+
+function activeTools({ officeOpen = null, practiceLine = false } = {}) {
+  if (practiceLine === true) {
+    return [...TOOLS, ...CONTEXT_TOOLS].filter((tool) => PRACTICE_LINE_TOOLS.includes(tool.name))
+      .map((tool) => (tool.name === 'capture_lead' ? practiceCaptureTool(tool) : tool));
+  }
   const { isContextEnabled } = require('./relay-context');
   // PR 2A: transfer_to_office rides every tool set — it needs no account
   // context, only the gate and an OPEN office (null = unknown = closed).
@@ -547,7 +584,7 @@ async function knownCallerAvailabilityLocation(input = {}, ctx = {}) {
   } catch (err) {
     // Fail to the ordinary path: its offers are not account offers, and
     // request_booking refuses to book those for this caller.
-    logger.warn(`[voice-relay] account location for availability failed callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+    logger.warn(`[voice-relay] account location for availability failed callSid=${ctx.callSid || 'n/a'} code=${errCode(err)}`);
     return null;
   }
 }
@@ -719,6 +756,13 @@ const ATTESTATION_ONLY_TOOLS = Object.freeze({
   get_message_history: 'any-tier',
 });
 
+// A bounded error code for logs. A database error's message can echo its bindings
+// (caller-supplied names, streets, phone numbers), so err.message is never logged
+// on the tool path.
+function errCode(err) {
+  return String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32);
+}
+
 function callerAttested(ctx = {}) {
   return ctx.callerAttested === true;
 }
@@ -733,10 +777,25 @@ function callerAttested(ctx = {}) {
  * down and the record says NO lead was created; the model's summary still
  * becomes the row's call_summary. No lead id, no promise, no ticket flag.
  */
+// A practice line (the GPT-Live trial's brain) gets an explicit result: it must
+// not speak as though the write succeeded, and nothing here ends or captures the
+// call, so follow-up questions still get answers.
+const PRACTICE_WRITE_WORDS = {
+  capture_lead: 'the request would be saved for the office',
+};
+function practiceLineText(name) {
+  const real = PRACTICE_WRITE_WORDS[name] || 'it would be filed';
+  return `PRACTICE LINE: ${name} was checked and NOT run, so nothing was booked, saved or filed. `
+    + `Tell the caller plainly: "This is a practice line, so nothing was booked or saved. On a real call, ${real}." `
+    + 'Do NOT say it was done, and do NOT promise a callback, a confirmation or a call from the office. '
+    + 'Then keep helping with any other question.';
+}
+
 function sandboxDryRunText(name, input = {}, ctx = {}, { estimateMissing = [] } = {}) {
   logger.info(`[voice-relay] ${name} DRY RUN — sandbox call, validated, nothing written callSid=${ctx.callSid || 'n/a'}`);
   // An incomplete estimate capture holds the call open and re-prompts in
   // production; the dry run keeps that behaviour so the bake-off measures it.
+  if (ctx.practiceLine === true) return practiceLineText(name);
   const holdOpen = estimateMissing.length > 0;
   if (name !== 'request_booking' && typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false, holdOpen });
   if (name === 'capture_lead' && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
@@ -759,6 +818,18 @@ function sandboxDryRunText(name, input = {}, ctx = {}, { estimateMissing = [] } 
  */
 async function executeTool(name, input = {}, ctx = {}) {
   try {
+    if (ctx.practiceLine === true) {
+      // The allowlist is the first thing a practice line meets: any other tool, however the model got its
+      // name (an account read, a lookup, a transfer, a made-up one), is refused before any database call.
+      if (!PRACTICE_LINE_TOOLS.includes(name)) {
+        return 'This is a practice line. It cannot look at accounts, visits, invoices, messages or history, '
+          + 'and it cannot transfer the call. Do NOT try again. Tell the caller to call or text the Waves office for that.';
+      }
+      if (name === 'capture_lead') input = { ...input, use_account_details: false }; // no account is ever read here
+      // The two public reads run whether or not the account-context gate is on: they read no account.
+      if (name === 'get_pricing') return await require('./relay-context').pricingText(input, { practiceLine: true });
+      if (name === 'get_services_catalog') return await require('./relay-context').servicesCatalogText({ practiceLine: true });
+    }
     if (name === 'transfer_to_office') {
       // Gate + office state re-checked inside (fail closed); the packet is
       // server-built and the staff leg is rendered by /relay-complete.
@@ -1392,7 +1463,7 @@ async function executeTool(name, input = {}, ctx = {}) {
         } catch (err) {
           // The lead still records the request; a failed suppression must not
           // lose the lead, and the owner alert below still pages a human.
-          logger.error(`[voice-relay] verbal do-not-contact could NOT be recorded callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+          logger.error(`[voice-relay] verbal do-not-contact could NOT be recorded callSid=${ctx.callSid || 'n/a'} code=${errCode(err)}`);
         }
       }
       // ⭐ A RECOGNISED CONTACT GETS AN OFFICE BELL, NEVER A LEAD (owner ruling
@@ -1735,10 +1806,14 @@ async function executeTool(name, input = {}, ctx = {}) {
     // arbitrary string straight back into the tool result.
     return `Unknown tool "${String(name || '').replace(/[^\w.-]/g, '').slice(0, 40)}". Do not retry; continue the conversation.`;
   } catch (err) {
-    logger.error(`[voice-relay] tool "${name}" failed: ${err.message}`);
+    logger.error(`[voice-relay] tool "${String(name || '').replace(/[^\w.-]/g, '').slice(0, 40)}" failed code=${errCode(err)}`);
     // The failure is answered with a string; the session reads this flag so
     // the handoff record never reports a failed tool as ok.
     if (ctx && typeof ctx === 'object') ctx.toolFailed = true;
+    if (ctx && ctx.practiceLine === true) {
+      return 'Could not look that up right now. This is a practice line: tell the caller to call or text the Waves office. '
+        + 'Do not promise a callback or that anyone will follow up.';
+    }
     if (name === 'capture_lead') {
       return 'The lead could not be saved right now, but proceed to wrap up the call politely; the call is still recorded for follow-up.';
     }
@@ -1757,4 +1832,4 @@ async function executeTool(name, input = {}, ctx = {}) {
   }
 }
 
-module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, sandboxDryRunText, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier, ATTESTATION_ONLY_TOOLS };
+module.exports = { PRACTICE_LINE_TOOLS, TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, sandboxDryRunText, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier, ATTESTATION_ONLY_TOOLS };
