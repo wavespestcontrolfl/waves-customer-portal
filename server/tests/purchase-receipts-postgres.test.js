@@ -607,14 +607,14 @@ jest.setTimeout(30000);
     });
 
     // A line handed to the inventory agent (no stock yet) whose invoice email + extraction are stored.
-    async function queuedSiteOneLine({ invoiceNumber = '900000009-001', extractedNumber = invoiceNumber, po, quantity = 2 }) {
+    async function queuedSiteOneLine({ invoiceNumber = '900000009-001', extractedNumber = invoiceNumber, po, quantity = 2, uom = 'EA' }) {
       const [email] = await mockConn('emails').insert({
         gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'AB00000@siteone.com', subject: `SiteOne Confirmation : Invoice #${invoiceNumber}`,
         authentication_results: 'dkim=pass header.i=@siteone.com', received_at: RECEIVED_AT,
       }).returning('*');
       await mockConn('email_attachments').insert({
         email_id: email.id, filename: 'invoice.pdf', mime_type: 'application/pdf', is_invoice: true,
-        extracted_data: JSON.stringify({ invoice_number: extractedNumber, purchase_order: po, subtotal: 25 * quantity, tax: 0, total: 25 * quantity, line_items: [{ description: TITLE, quantity, unit_price: 25, total: 25 * quantity }] }),
+        extracted_data: JSON.stringify({ invoice_number: extractedNumber, purchase_order: po, subtotal: 25 * quantity, tax: 0, total: 25 * quantity, line_items: [{ description: TITLE, quantity, unit_price: 25, total: 25 * quantity, ...(uom == null ? {} : { uom }) }] }),
       });
       const [queued] = await mockConn('purchase_receipt_lines').insert({
         vendor: 'siteone', order_number: invoiceNumber, shipment_key: invoiceNumber, line_no: 1, email_id: email.id,
@@ -635,6 +635,8 @@ jest.setTimeout(30000);
     test.each([
       ['a replaced extraction for another invoice', { extractedNumber: '900000777-001' }],
       ['an extraction whose line quantity changed', { quantity: 3 }],
+      ['an extraction whose line lost its unit of measure', { uom: null }],
+      ['an extraction whose line is now a case', { uom: 'CS' }],
     ])('a queued line whose stored invoice no longer matches (%s) logs its stock but never closes the request', async (_label, over) => {
       const { req, po } = await robotOrder();
       const { email, queued } = await queuedSiteOneLine({ po, ...over });
