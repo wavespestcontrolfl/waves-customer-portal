@@ -224,6 +224,34 @@ describe('GET /:token with a visit text recipient\'s token: the reduced payload'
     for (const [arg] of mockEta.mock.calls) expect(arg.allowProvider).toBe(false);
   });
 
+  test('the truck shows only while the technician\'s active job is THIS visit (or its visit group): the resolver is asked for those job ids', async () => {
+    install(visitRow(ENROUTE));
+    await get();
+    expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1']);
+    // a visit group: the other services of the group count too
+    mockResolvePosition.mockClear();
+    mockDb.mockImplementation((table) => {
+      const q = {};
+      for (const m of ['where', 'leftJoin', 'whereNotNull', 'orderBy', 'whereRaw', 'limit']) q[m] = jest.fn(() => q);
+      let byToken = false;
+      q.where = jest.fn((arg, val) => { if ((arg && arg['s.track_view_token']) || (arg === 's.track_view_token' && val)) byToken = true; return q; });
+      q.select = jest.fn(async () => [{ id: 'visit-1' }, { id: 'sibling-9' }]);
+      q.first = jest.fn(async () => (table === 'scheduled_services as s' ? (byToken ? null : visitRow({ ...ENROUTE, visit_id: 'group-1' })) : null));
+      return q;
+    });
+    mockDb.raw = jest.fn((sql) => sql);
+    await get();
+    expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1', 'sibling-9']);
+  });
+
+  test('the technician has moved on to another stop (the resolver answers no position): no vehicle at all', async () => {
+    mockResolvePosition.mockResolvedValueOnce(null);
+    install(visitRow(ENROUTE));
+    const { body } = await get();
+    expect(body.state).toBe('en_route');
+    expect(body.vehicle).toBeNull();
+  });
+
   test('en route with no stored pin: no map (vehicle null), never a geocode', async () => {
     install(visitRow({ ...ENROUTE, latitude: null, longitude: null }));
     const { body } = await get();

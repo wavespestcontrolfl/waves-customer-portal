@@ -41,11 +41,32 @@ const freshLoc = () => ({ lat: 28.0, lng: -81.0, updatedAt: minutesAgo(0.1).toIS
 
 beforeEach(() => { db.mockReset(); pingTechLocation.mockReset(); });
 
+describe('requireCurrentJobIds: a visit text recipient sees the truck only while its active job is this visit', () => {
+  test('the active job is this visit: the cached fix is served', async () => {
+    install({ ts: { ...fixRow(1), current_job_id: 'visit-1' } });
+    expect((await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1'] })).source).toBe('tech_status');
+  });
+  test('the active job is another visit of the same visit group: served', async () => {
+    install({ ts: { ...fixRow(1), current_job_id: 'sibling-2' } });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1', 'sibling-2'] })).not.toBeNull();
+  });
+  test('the technician has moved on to another stop (a different active job, or none): no position', async () => {
+    install({ ts: { ...fixRow(1), current_job_id: 'other-customer-visit' } });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1'] })).toBeNull();
+    install({ ts: { ...fixRow(1), current_job_id: null } });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1'] })).toBeNull();
+  });
+  test('without the requirement (the holder\'s own page) the cached fix is served whatever the active job', async () => {
+    install({ ts: { ...fixRow(1), current_job_id: 'other-customer-visit' } });
+    expect((await resolveFreshTechPosition({ techId: 't1' })).source).toBe('tech_status');
+  });
+});
+
 describe('one statement: current mapping + cache', () => {
   test('the query joins technicians to tech_status and selects the mapping columns with the cache columns', async () => {
     install({ ts: fixRow(1) });
     await resolveFreshTechPosition({ techId: 't1' });
-    expect(queries).toEqual(['technicians as t', 'join:tech_status as ts:ts.tech_id=t.id', 'cols:t.bouncie_imei,t.bouncie_imei_changed_at,ts.lat,ts.lng,ts.location_updated_at,ts.location_received_at']);
+    expect(queries).toEqual(['technicians as t', 'join:tech_status as ts:ts.tech_id=t.id', 'cols:t.bouncie_imei,t.bouncie_imei_changed_at,ts.lat,ts.lng,ts.location_updated_at,ts.location_received_at,ts.current_job_id']);
   });
   test('never remapped (NULL change time): a fresh cached fix is trusted, no fallback call', async () => {
     install({ ts: fixRow(1) });

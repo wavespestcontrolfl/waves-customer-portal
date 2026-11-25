@@ -447,6 +447,16 @@ async function buildApproxVehicle(row) {
 
 // `readOnly` (a visit text recipient's link): no write and no paid call. The tracker's own cached position only (no
 // Bouncie fetch, which writes tech_status), and the straight-line ETA (no Distance Matrix).
+// This visit's id, plus the other services of its visit group (tech_status.current_job_id may name any of them).
+async function activeJobIdsOf(service) {
+  const ids = [service.id];
+  if (service.visit_id) {
+    const siblings = await db('scheduled_services').where({ visit_id: service.visit_id }).select('id');
+    if (Array.isArray(siblings)) for (const sibling of siblings) if (sibling && sibling.id) ids.push(sibling.id);
+  }
+  return [...new Set(ids)];
+}
+
 async function buildVehicle(service, { readOnly = false } = {}) {
   // Phase 2: live tech location + ETA from tech_status. Returns null
   // if either the tech's last GPS ping is missing or the property
@@ -463,7 +473,9 @@ async function buildVehicle(service, { readOnly = false } = {}) {
     // OLD vehicle's, so the text and the tracking page never show different vehicles.
     cachedNotBefore: techMappingCutoff(service.tech_mapping_changed_at),
     logPrefix: 'track-public',
-    ...(readOnly ? { allowBouncieFallback: false } : {}),
+    // A recipient sees the truck only while the technician's ACTIVE job is this visit (or one in its visit group): a tech
+    // who has moved on to another stop is at another customer's home, whatever this visit's state still says.
+    ...(readOnly ? { allowBouncieFallback: false, requireCurrentJobIds: await activeJobIdsOf(service) } : {}),
   });
   if (!position) return null;
 
@@ -756,6 +768,7 @@ function readTrackVisit(where) {
       's.recurring_dispatch_due_date',
       's.service_id',
       's.property_id',
+      's.visit_id',
       's.is_recurring',
       's.recurring_parent_id',
       's.is_callback',

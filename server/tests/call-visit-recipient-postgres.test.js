@@ -745,11 +745,54 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         }
       });
 
+      test('an explicit "no texts" on a call with Bob\'s number, and on a call that SPOKE his number as the callback', async () => {
+        const [{ id: noTexts }] = await db('call_log').insert({
+          direction: 'inbound', from_phone: BOB, to_phone: OUR_LINE, v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }),
+        }).returning('id');
+        try {
+          await noMoreLink();
+          await db('call_log').where({ id: noTexts }).update({
+            from_phone: ANI, ai_extraction_enriched: JSON.stringify({ caller: { phone_e164: BOB }, consent: { sms_declined: true } }),
+          });
+          await noMoreLink();
+        } finally {
+          await db('call_log').where({ id: noTexts }).del();
+        }
+      });
+
       test('a staff do-not-contact on Bob\'s number', async () => {
         await suppress(BOB);
         await db('messaging_suppression').where({ phone: BOB }).update({ reason: 'manual_dnc' });
         await noMoreLink();
       });
+    });
+
+    test('a missing choices table denies: the link errors and a text is held, never read as "no choices"', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      // The same database, except that the per-contact choices table does not exist (Postgres 42P01).
+      const { TABLE } = jest.requireActual('../services/contact-notification-prefs');
+      const withoutChoicesTable = Object.assign((table) => {
+        if (table !== TABLE) return db(table);
+        const missing = Object.assign(new Error(`relation "${TABLE}" does not exist`), { code: '42P01' });
+        const q = { where: () => q, select: async () => { throw missing; } };
+        return q;
+      }, { raw: db.raw.bind(db), fn: db.fn });
+      await expect(VisitRecipient.visitForTrackToken(token, { conn: withoutChoicesTable })).rejects.toMatchObject({ code: '42P01' });
+      // control: the same text goes out when the table can be read
+      sendCustomerMessage.mockReset();
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+      await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER] });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      sendCustomerMessage.mockClear();
+      await db('visit_text_recipients').where({ id }).update({ deliveries: '{}' });
+      await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER], conn: withoutChoicesTable });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
     });
 
     test('the lifetime: en route and on site open; completed opens for 2 hours; scheduled, cancelled, skipped, rebooking and older completions do not', async () => {

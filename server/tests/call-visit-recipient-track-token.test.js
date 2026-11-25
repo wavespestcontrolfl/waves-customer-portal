@@ -31,8 +31,8 @@ jest.mock('../services/contact-notification-prefs', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
 jest.mock('../services/disclaimed-number-holds', () => ({ disclaimedNumberHeldForVisit: jest.fn(async () => false), disclaimedNumberHeld: jest.fn(async () => false) }));
 const { disclaimedNumberHeldForVisit, disclaimedNumberHeld } = require('../services/disclaimed-number-holds');
-jest.mock('../services/messaging/auto-text-holds', () => ({ askedNotToBeContactedOnAnyCall: jest.fn(async () => false) }));
-const { askedNotToBeContactedOnAnyCall } = require('../services/messaging/auto-text-holds');
+jest.mock('../services/messaging/auto-text-holds', () => ({ askedNotToBeContactedOnAnyCall: jest.fn(async () => false), saidNoTextsOnAnyCall: jest.fn(async () => false) }));
+const { askedNotToBeContactedOnAnyCall, saidNoTextsOnAnyCall } = require('../services/messaging/auto-text-holds');
 const { getContactPrefRow } = require('../services/contact-notification-prefs');
 const VisitRecipient = require('../services/call-visit-recipient');
 
@@ -51,6 +51,7 @@ beforeEach(() => {
   disclaimedNumberHeldForVisit.mockResolvedValue(false);
   disclaimedNumberHeld.mockResolvedValue(false);
   askedNotToBeContactedOnAnyCall.mockResolvedValue(false);
+  saidNoTextsOnAnyCall.mockResolvedValue(false);
 });
 afterAll(() => { if (gateBefore === undefined) delete process.env[GATE]; else process.env[GATE] = gateBefore; });
 
@@ -134,6 +135,25 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
     expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALL_DO_NOT_CONTACT');
     expect(askedNotToBeContactedOnAnyCall).toHaveBeenCalledWith('+19415550002', expect.objectContaining({ dbi: expect.anything() }));
+  });
+
+  test('an explicit "no texts" heard on a call with the recipient\'s number (the spoken callback number included) closes the link and the send recheck', async () => {
+    seed();
+    saidNoTextsOnAnyCall.mockResolvedValue(true);
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALL_SMS_DECLINED');
+    expect(saidNoTextsOnAnyCall).toHaveBeenCalledWith('+19415550002', expect.objectContaining({ dbi: expect.anything() }));
+  });
+
+  test('the choices row is read FAIL-CLOSED, and an unreadable or missing choices table denies (the link errors, the recheck throws)', async () => {
+    seed();
+    await VisitRecipient.visitForTrackToken(TOKEN);
+    expect(getContactPrefRow).toHaveBeenCalledWith('cust-1', '+19415550002', expect.objectContaining({ failClosed: true }));
+    getContactPrefRow.mockRejectedValue(Object.assign(new Error('relation "service_contact_notification_prefs" does not exist'), { code: '42P01' }));
+    const err = await VisitRecipient.visitForTrackToken(TOKEN).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.code).toBe('42P01');
+    await expect(VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'x' })).rejects.toThrow();
   });
 
   test('a person no longer on the visit (row not listed for it) resolves nothing', async () => {

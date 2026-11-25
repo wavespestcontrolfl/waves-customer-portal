@@ -30,10 +30,13 @@ async function readMappingAndCache(techId, dbh = db) {
   return dbh('technicians as t')
     .leftJoin('tech_status as ts', 'ts.tech_id', 't.id')
     .where('t.id', techId)
-    .first('t.bouncie_imei', 't.bouncie_imei_changed_at', 'ts.lat', 'ts.lng', 'ts.location_updated_at', 'ts.location_received_at');
+    .first('t.bouncie_imei', 't.bouncie_imei_changed_at', 'ts.lat', 'ts.lng', 'ts.location_updated_at', 'ts.location_received_at', 'ts.current_job_id');
 }
 
-function cachedPositionFrom(row, extraFloor = null) {
+// `requiredJobIds` (a visit text recipient's link): the cached fix counts only while the technician's ACTIVE job is one of these
+// visits. A technician who has moved on to another stop is at another customer's home, whatever this visit's state still says.
+function cachedPositionFrom(row, extraFloor = null, requiredJobIds = null) {
+  if (requiredJobIds && !requiredJobIds.map(String).includes(String(row?.current_job_id))) return null;
   const lat = finiteNumber(row?.lat);
   const lng = finiteNumber(row?.lng);
   const lastReportedAt = row?.location_updated_at;
@@ -72,6 +75,7 @@ async function resolveBouncieFallback({
   logPrefix,
   dbh = db,
   cachedNotBefore = null,
+  requireCurrentJobIds = null,
 }) {
   try {
     const svc = bouncieService || require('./bouncie');
@@ -124,7 +128,7 @@ async function resolveBouncieFallback({
     // remap-cutoff acceptance as any cached fix) — never the older fetched coordinates.
     const committedMs = new Date(written.location_updated_at).getTime();
     if (Number.isFinite(committedMs) && committedMs > new Date(lastReportedAt).getTime()) {
-      return cachedPositionFrom(await readMappingAndCache(techId, dbh), cachedNotBefore);
+      return cachedPositionFrom(await readMappingAndCache(techId, dbh), cachedNotBefore, requireCurrentJobIds);
     }
 
     return {
@@ -152,6 +156,8 @@ async function resolveFreshTechPosition({
   cachedNotBefore = null,
   // Optional caller connection (a provider handoff's held transaction, Codex #5334 P1); default = the root pool.
   dbh = db,
+  // Only the cached fix of a technician whose active job (tech_status.current_job_id) is one of these visits.
+  requireCurrentJobIds = null,
 } = {}) {
   if (!techId) return null;
 
@@ -164,13 +170,13 @@ async function resolveFreshTechPosition({
   }
   if (!row) return null;
 
-  const cached = cachedPositionFrom(row, cachedNotBefore);
+  const cached = cachedPositionFrom(row, cachedNotBefore, requireCurrentJobIds);
   if (cached) return cached;
 
   if (!allowBouncieFallback) return null;
   const imei = String(row.bouncie_imei || '').trim();
   if (!imei) return null;
-  return resolveBouncieFallback({ techId, imei, bouncieService, timeoutMs, logPrefix, dbh, cachedNotBefore });
+  return resolveBouncieFallback({ techId, imei, bouncieService, timeoutMs, logPrefix, dbh, cachedNotBefore, requireCurrentJobIds });
 }
 
 module.exports = {

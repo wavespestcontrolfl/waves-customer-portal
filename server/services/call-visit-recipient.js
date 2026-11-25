@@ -187,9 +187,10 @@ async function recordForCall({ scheduledServiceId, customerId, call, contactPhon
  */
 async function declinedByRecipient({ customerId, phoneKey, phoneE164, purpose, conn = db }) {
   // The person's own text choice as a service contact: a direct read of their choices row (code-only errors, no write).
-  // contactPhoneDeclinesText logs err.message, so it is not used here.
+  // contactPhoneDeclinesText logs err.message, so it is not used here. failClosed: a missing or unreadable choices table
+  // THROWS (a send is held and retried, the link answers an error) instead of reading as "no choices".
   const prefs = require('./contact-notification-prefs');
-  if (prefs.contactPrefsLive() && !prefs.contactAllows(await prefs.getContactPrefRow(customerId, phoneE164, { dbh: conn }), KINDS_BY_PURPOSE[purpose]?.prefsColumn ?? null, 'sms')) return true;
+  if (prefs.contactPrefsLive() && !prefs.contactAllows(await prefs.getContactPrefRow(customerId, phoneE164, { dbh: conn, failClosed: true }), KINDS_BY_PURPOSE[purpose]?.prefsColumn ?? null, 'sms')) return true;
   const optin = await conn('recipient_optin').where({ customer_id: customerId, phone_key: phoneKey, status: 'declined' }).first('status');
   if (optin) return true;
   return suppressedNumber(phoneKey, conn);
@@ -585,8 +586,13 @@ async function recipientPermission(meta, { conn = db, anyVisitStatus = false } =
     return noVerdict('RECIPIENT_NUMBER_HOLD', 'recipient-number-hold');
   }
   // A do-not-contact request heard on any call with the person's number (a plain read of call_log).
-  if (await require('./messaging/auto-text-holds').askedNotToBeContactedOnAnyCall(mine.phone, { dbi: conn })) {
+  const holds = require('./messaging/auto-text-holds');
+  if (await holds.askedNotToBeContactedOnAnyCall(mine.phone, { dbi: conn })) {
     return noVerdict('CALL_DO_NOT_CONTACT', 'asked-not-to-be-contacted');
+  }
+  // An explicit "no texts" heard on any call with the number, the spoken callback number included (a plain read, no logging).
+  if (await holds.saidNoTextsOnAnyCall(mine.phone, { dbi: conn })) {
+    return noVerdict('CALL_SMS_DECLINED', 'said-no-texts');
   }
   return { ok: true, mine };
 }
