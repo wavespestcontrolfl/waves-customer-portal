@@ -43,7 +43,14 @@ async function loadStopMembers(conn, ids) {
     membersOf.get(key).push(member);
   }
   const stopOf = new Map(rows.map((r) => [String(r.id), r.visit_id != null ? membersOf.get(String(r.visit_id)) || [] : []]));
-  const dateOf = new Map([...members, ...rows].map((r) => [String(r.id), visitDateOf(r.scheduled_date)]));
+  // Two reads of one id that disagree (a move between them) give null: an unknown date, so the filter fails closed
+  // and an expected-date read reports a mismatch (pre-push Codex P1).
+  const dateOf = new Map(rows.map((r) => [String(r.id), visitDateOf(r.scheduled_date)]));
+  for (const m of members) {
+    const id = String(m.id);
+    const day = visitDateOf(m.scheduled_date);
+    dateOf.set(id, dateOf.has(id) && dateOf.get(id) !== day ? null : day);
+  }
   return { stopOf, memberIds: members.map((m) => String(m.id)), dateOf };
 }
 

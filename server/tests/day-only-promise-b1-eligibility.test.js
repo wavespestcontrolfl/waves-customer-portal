@@ -363,6 +363,18 @@ describe('loadTimeDisplay', () => {
       expect((await loadTimeDisplay(conn, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: true, level: 'hour', eligible: false, failed: true });
     });
 
+    test('a grouped visit: two reads that disagree on its date, or its own row gone from the stop, are unverified (codex P1)', async () => {
+      const m = (id, date) => svc(id, { visit_id: 'v1', scheduled_date: date });
+      const unverified = { showHour: true, level: 'hour', eligible: false, failed: true };
+      const disagree = fakeConn({ servicesByRead: [[m('s1', '2026-11-20')], [m('s1', '2026-11-21'), m('s2', '2026-11-21')], [m('s1', '2026-11-20'), m('s2', '2026-11-20')]], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(disagree, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const same = [m('s1', '2026-11-20'), m('s2', '2026-11-20')];
+      const left = fakeConn({ servicesByRead: [same, same, same, [m('s2', '2026-11-20')]], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(left, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const steady = fakeConn({ services: same, reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(steady, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
+    });
+
     test('an eligible visit inside the cutoff: the hour', async () => {
       const conn = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-11' })], reminders: [office('s1')] });
       const out = await loadTimeDisplay(conn, [row('s1', '2026-11-11', '08:00:00')], NOW); // 18 h out (ET 08:00 = 13:00Z)

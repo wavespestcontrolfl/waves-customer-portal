@@ -322,7 +322,8 @@ function addMovedInStopRead(moved, facts, ids, onDate) {
   for (const id of onDate ? ids : []) {
     const expected = renderedDateOf(onDate, id);
     const own = (facts.get(String(id)) || []).find((m) => String(m.id) === String(id));
-    if (expected && own && dateOnlyString(own.scheduled_date) !== expected) moved.add(id);
+    // A missing own row (it left its stop between the stop reads) is unverified too: siblings never speak for it.
+    if (expected && (!own || dateOnlyString(own.scheduled_date) !== expected)) moved.add(id);
   }
 }
 
