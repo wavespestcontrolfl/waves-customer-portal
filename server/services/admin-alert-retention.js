@@ -4,7 +4,8 @@
  * (runAdminAlertRetention, scheduler.js 1:32 AM ET):
  *   - age30: an admin row not done whose last activity is older than 30 days
  *     is marked done, read or unread. Bell rows only: a row that lives in the
- *     Activity feed (metadata.feed = 'activity') has no bell to leave.
+ *     Activity feed (metadata.feed = 'activity') has no bell to leave. A money
+ *     row (KEEP_UNTIL_SETTLED_CATEGORIES) is never aged out by this rule.
  *   - fyi7: an FYI row (metadata.severity = 'fyi', and an ops_digest row of
  *     audience 'fyi') not done and idle for 7 days is marked done. This is the
  *     09-30 rule (docs/admin-notifications.md section 4 item 4), Activity rows
@@ -195,9 +196,14 @@ const isActivityOnly = (meta) => meta.feed === 'activity';
 
 // The rule a row falls under at `ageMs` of idleness, or null. Strictly older than
 // the limit: a row exactly 30 days idle stays.
+// A money row (KEEP_UNTIL_SETTLED_CATEGORIES) never ages out under age30: it stays until a person marks it done or its
+// own closer settles it (owner ruling 2026-11-05 "A"). Before this, only the quiet policy honoured the list, so the
+// nightly sweep closed unworked billing rows at 30 days. An FYI money row still follows fyi7: it asks for no action.
+const isKeptMoneyRow = (row) => KEEP_UNTIL_SETTLED_CATEGORIES.includes(row.category || '');
+
 function ruleFor(row, meta, ageMs) {
   if (isFyiRow(row, meta) && ageMs > FYI_DAYS * DAY_MS) return 'fyi7';
-  if (!isActivityOnly(meta) && ageMs > AGE_DAYS * DAY_MS) return 'age30';
+  if (!isActivityOnly(meta) && !isKeptMoneyRow(row) && ageMs > AGE_DAYS * DAY_MS) return 'age30';
   return null;
 }
 
@@ -291,7 +297,8 @@ async function loadPage(conn, { now, cursor, limit, scope = null }) {
   const ageCutoff = new Date(now.getTime() - AGE_DAYS * DAY_MS);
   const fyiCutoff = new Date(now.getTime() - FYI_DAYS * DAY_MS);
   return pageQuery(conn, { cursor, limit, scope }, (query) => query
-    .where((q) => q.where((a) => a.where('created_at', '<', ageCutoff).whereRaw(NOT_ACTIVITY_SQL))
+    .where((q) => q.where((a) => a.where('created_at', '<', ageCutoff).whereRaw(NOT_ACTIVITY_SQL)
+      .whereRaw("NOT (COALESCE(category, '') = ANY(?::text[]))", [KEEP_UNTIL_SETTLED_CATEGORIES]))
       .orWhere((f) => f.where('created_at', '<', fyiCutoff).whereRaw(FYI_SQL))));
 }
 

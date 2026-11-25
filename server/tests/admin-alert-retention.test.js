@@ -164,7 +164,7 @@ function fakeIo(rows, { live = {}, cursors = {} } = {}) {
 describe('runAdminAlertRetention: the sweep', () => {
   const rows = () => [
     row({ created_at: ago(60), category: 'alert' }),
-    row({ created_at: ago(35), category: 'billing', read_at: ago(34) }),
+    row({ created_at: ago(35), category: 'schedule', read_at: ago(34) }),
     row({ created_at: ago(20), category: 'alert' }),
     row({ created_at: ago(9), category: 'lead', metadata: { severity: 'fyi' } }),
     row({ created_at: ago(90), category: 'alert', metadata: { rungAt: ago(1).toISOString() } }),
@@ -176,7 +176,7 @@ describe('runAdminAlertRetention: the sweep', () => {
     const summary = await retention.runAdminAlertRetention({ now: NOW, io });
     expect(summary).toMatchObject({
       scanned: 5, written: 3, kept: { refreshed: 1 },
-      expire: { total: 3, unread: 2, byRule: { age30: 2, fyi7: 1 }, byCategory: { alert: 1, billing: 1, lead: 1 } },
+      expire: { total: 3, unread: 2, byRule: { age30: 2, fyi7: 1 }, byCategory: { alert: 1, lead: 1, schedule: 1 } },
     });
     expect(io.calls.expire.map((c) => c.rule).sort()).toEqual(['age30', 'fyi7']);
     expect(io.calls.expire.find((c) => c.rule === 'age30').ids).toEqual([data[0].id, data[1].id]);
@@ -301,5 +301,24 @@ describe('the sweep never takes a row lock', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'admin-alert-retention.js'), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     expect(source).not.toMatch(/forUpdate|forShare|FOR UPDATE|FOR SHARE|skipLocked/);
+  });
+});
+
+describe('money rows stay until settled (owner ruling 2026-11-05 "A")', () => {
+  test.each(retention.KEEP_UNTIL_SETTLED_CATEGORIES)('a %s row idle 90 days is not aged out', (category) => {
+    expect(retention.judgeRow(row({ created_at: ago(90), category }), NOW)).toEqual({ expire: false, reason: 'young' });
+  });
+
+  test('an FYI money row still follows fyi7', () => {
+    expect(retention.judgeRow(row({ created_at: ago(9), category: 'billing', metadata: { severity: 'fyi' } }), NOW))
+      .toEqual({ expire: true, rule: 'fyi7' });
+  });
+
+  test('the sweep leaves an old billing row open and still expires an old alert', async () => {
+    const data = [row({ created_at: ago(40), category: 'billing' }), row({ created_at: ago(40), category: 'alert' })];
+    const io = fakeIo(data);
+    const summary = await retention.runAdminAlertRetention({ now: NOW, io });
+    expect(summary.written).toBe(1);
+    expect(io.calls.expire).toEqual([{ rule: 'age30', ids: [data[1].id] }]);
   });
 });
