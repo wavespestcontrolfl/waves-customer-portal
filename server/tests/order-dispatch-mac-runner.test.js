@@ -65,6 +65,10 @@ function baseState({ request, ledger = null, vendors = { 'v-siteone': SITEONE, '
 const request = (over = {}) => ({ id: 'r1', product_id: 'p1', status: 'open', source: 'auto_reorder', requested_quantity: '2', unit: 'gal', created_at: new Date(NOW.getTime() - 2 * 3600e3), metadata: { vendorId: 'v-siteone' }, ...over });
 const MAC_REGISTRY = { siteone: { remoteRunner: 'mac' } };
 
+const MAC_ENV_KEYS = ['SITEONE_ORDER_RUNNER', 'SITEONE_CDP_URL'];
+const withEnv = (vals) => { for (const k of MAC_ENV_KEYS) delete process.env[k]; Object.assign(process.env, vals); };
+afterEach(() => { for (const k of MAC_ENV_KEYS) delete process.env[k]; });
+
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_AUTO_ORDER = 'true';
@@ -231,21 +235,26 @@ describe('the Mac run', () => {
   });
 
   test('the script refuses without SITEONE_CDP_URL', async () => {
-    await expect(macRun({ env: { SITEONE_ORDER_RUNNER: 'mac' }, adapters: {}, runExclusive: jest.fn(), dispatch: jest.fn() })).rejects.toThrow(/SITEONE_CDP_URL/);
+    withEnv({ SITEONE_ORDER_RUNNER: 'mac' });
+    await expect(macRun({ adapters: {}, runExclusive: jest.fn(), dispatch: jest.fn() })).rejects.toThrow(/SITEONE_CDP_URL/);
   });
 
   test('the script claims nothing when the live env hands SiteOne back to the server', async () => {
     const runDispatch = jest.fn();
     const exclusive = jest.fn();
-    await expect(macRun({ env: { SITEONE_CDP_URL: 'http://127.0.0.1:9222' }, adapters: {}, runExclusive: exclusive, dispatch: runDispatch })).rejects.toThrow(/SITEONE_ORDER_RUNNER/);
+    withEnv({ SITEONE_CDP_URL: 'http://127.0.0.1:9222' });
+    await expect(macRun({ adapters: {}, runExclusive: exclusive, dispatch: runDispatch })).rejects.toThrow(/SITEONE_ORDER_RUNNER/);
     expect(exclusive).not.toHaveBeenCalled();
     expect(runDispatch).not.toHaveBeenCalled();
   });
 
   test('the default registry is the Chrome adapter and it loads', async () => {
     const runDispatch = jest.fn(async () => ({ results: [] }));
-    await macRun({ env: { SITEONE_ORDER_RUNNER: 'mac', SITEONE_CDP_URL: 'http://127.0.0.1:9222' }, runExclusive: async (n, fn) => fn(), dispatch: runDispatch });
+    withEnv({ SITEONE_ORDER_RUNNER: 'mac', SITEONE_CDP_URL: 'http://127.0.0.1:9222' });
     const cdp = require('../services/procurement/adapters/siteone-cdp');
+    const spy = jest.spyOn(cdp, 'configured').mockReturnValue(true);
+    await macRun({ runExclusive: async (n, fn) => fn(), dispatch: runDispatch });
+    spy.mockRestore();
     expect(runDispatch.mock.calls[0][0].adapters).toEqual({ siteone: cdp });
     expect(cdp.quotesAtPlace).toBe(true);
     expect(cdp.packagedQuantity).toBe(true);
@@ -256,14 +265,25 @@ describe('the Mac run', () => {
   test('the script dispatches SiteOne only, with no reconciliation, under its own lease', async () => {
     const runDispatch = jest.fn(async () => ({ results: [] }));
     const exclusive = jest.fn(async (name, fn) => fn());
-    const env = { SITEONE_ORDER_RUNNER: 'mac', SITEONE_CDP_URL: 'http://127.0.0.1:9222' };
-    await macRun({ env, adapters: { siteone: {} }, runExclusive: exclusive, dispatch: runDispatch });
+    withEnv({ SITEONE_ORDER_RUNNER: 'mac', SITEONE_CDP_URL: 'http://127.0.0.1:9222' });
+    await macRun({ adapters: { siteone: {} }, runExclusive: exclusive, dispatch: runDispatch });
     expect(exclusive.mock.calls[0][0]).toBe('siteone-mac-order');
-    expect(runDispatch).toHaveBeenCalledWith({ adapters: { siteone: {} }, onlyAdapters: ['siteone'], reconcile: false, env });
+    // The one env the adapter reads too: process.env itself, never a caller's copy.
+    expect(runDispatch).toHaveBeenCalledWith({ adapters: { siteone: {} }, onlyAdapters: ['siteone'], reconcile: false, env: process.env });
+    expect(runDispatch.mock.calls[0][0].env).toBe(process.env);
+  });
+
+  test('an unconfigured Mac adapter fails the run before any claim (no un-stamped hand-off)', async () => {
+    withEnv({ SITEONE_ORDER_RUNNER: 'mac', SITEONE_CDP_URL: 'http://127.0.0.1:9222' });
+    const runDispatch = jest.fn();
+    const exclusive = jest.fn(async (n, fn) => fn());
+    await expect(macRun({ adapters: { siteone: { configured: () => false } }, runExclusive: exclusive, dispatch: runDispatch })).rejects.toThrow(/not configured/);
+    expect(runDispatch).not.toHaveBeenCalled();
   });
 
   test('a held lease is a failure, not a silent day', async () => {
     const exclusive = jest.fn(async () => ({ skipped: true, reason: 'lease_held' }));
-    await expect(macRun({ env: { SITEONE_ORDER_RUNNER: 'mac', SITEONE_CDP_URL: 'http://127.0.0.1:9222' }, adapters: {}, runExclusive: exclusive, dispatch: jest.fn() })).rejects.toThrow(/lease_held/);
+    withEnv({ SITEONE_ORDER_RUNNER: 'mac', SITEONE_CDP_URL: 'http://127.0.0.1:9222' });
+    await expect(macRun({ adapters: { siteone: {} }, runExclusive: exclusive, dispatch: jest.fn() })).rejects.toThrow(/lease_held/);
   });
 });

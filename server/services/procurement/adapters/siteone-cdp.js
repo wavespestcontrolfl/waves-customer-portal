@@ -774,13 +774,21 @@ async function bindToClick(run, first) {
   // must still be that same, attached element afterwards.
   const handle = await (await readPlaceButton(run)).elementHandle();
   if (!handle || !(await handle.isVisible().catch(() => false)) || !(await handle.isEnabled().catch(() => false))) throw new RefusedError('place_button_ambiguous', 'SiteOne review: the Place order button is not visible and enabled', evidence);
-  const again = await readReview(run);
-  if (reviewKey(again) !== reviewKey(first)) throw new RefusedError('review_changed', 'SiteOne review changed after the cap check — nothing clicked', evidence, again.totalCents);
+  // Every slow check first (URL, sign-out, button identity); the full review re-read LAST, so nothing
+  // the cap check approved can change between the final read and the click (pre-push round 8 P0).
   assertAt(run, PATHS.review, 'order review');
   await assertSignedIn(run);
+  if (!(await handle.isVisible().catch(() => false)) || !(await handle.isEnabled().catch(() => false))) throw new RefusedError('place_button_replaced', 'SiteOne review: the Place order button was replaced or detached after the checks — nothing clicked', evidence);
+  const again = await readReview(run);
+  if (reviewKey(again) !== reviewKey(first)) throw new RefusedError('review_changed', 'SiteOne review changed after the cap check — nothing clicked', evidence, again.totalCents);
   const current = await again.button.elementHandle();
-  const same = await page.evaluate(([a, b]) => a === b && a.isConnected, [handle, current]).catch(() => false);
-  if (!same || !(await handle.isVisible().catch(() => false)) || !(await handle.isEnabled().catch(() => false))) throw new RefusedError('place_button_replaced', 'SiteOne review: the Place order button was replaced or detached after the checks — nothing clicked', evidence);
+  const same = await page.evaluate(([x, y]) => x === y && x.isConnected, [handle, current]).catch(() => false);
+  if (!same || !(await handle.isEnabled().catch(() => false))) throw new RefusedError('place_button_replaced', 'SiteOne review: the Place order button was replaced or detached after the checks — nothing clicked', evidence);
+  // The payable total and the tender are the LAST reads before the click (after every other check),
+  // so a recalculation during those awaits refuses instead of being submitted.
+  const lastTender = await readReviewField(run, SELECTORS.reviewTender, 'payment method');
+  const lastTotal = await readTotal(page, SELECTORS.reviewTotal, 'review total', evidence);
+  if (lastTotal !== first.totalCents || lastTender !== first.tender) throw new RefusedError('review_changed', 'SiteOne review changed at the click — nothing clicked', evidence, lastTotal);
   return { handle, baseline, totalCents: again.totalCents };
 }
 

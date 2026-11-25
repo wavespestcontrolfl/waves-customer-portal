@@ -29,13 +29,22 @@ function summarize(result) {
   return `${JOB}: ${count((r) => r.status === 'placed')} placed, ${count((r) => r.status === 'needs_review')} parked, ${count((r) => r.skipped)} skipped of ${results.length}${result && result.skipped ? ` (${result.skipped})` : ''}`;
 }
 
-async function run({ env = process.env, adapters = null, runExclusive = null, dispatch = null } = {}) {
+// One environment for everything: the runner switch, the caps, the gates AND the adapter's dry-run
+// and approved-account settings all come from process.env (the adapter reads it too), so a caller can
+// never pair a dry-run setting here with a live one inside the adapter.
+async function run({ adapters = null, runExclusive = null, dispatch = null } = {}) {
+  const env = process.env;
   const { runVendorOrderDispatch, _internals: { siteoneRunsOnMac } } = require('../services/procurement/order-dispatch');
   // The switch that hands SiteOne back to the server stops the Mac too: with it unset the server's
   // own adapter owns SiteOne again, and a Mac order beside it could buy the same need twice.
   if (!siteoneRunsOnMac(env)) throw new Error(`${JOB}: SITEONE_ORDER_RUNNER is not 'mac' in the live env — the server owns SiteOne orders, nothing claimed`);
   if (!String(env.SITEONE_CDP_URL || '').trim()) throw new Error(`${JOB}: SITEONE_CDP_URL is not set (this job runs only on the Mac with Chrome on :9222)`);
   const registry = adapters || { siteone: require('../services/procurement/adapters/siteone-cdp') };
+  // An unconfigured Mac (no approved account, store or pickup) is a broken job, not a hand-off: the
+  // dispatcher would ring "order manually" with no macHandedOffAt stamp, and a later fixed run could
+  // buy it a second time. Fail the run instead (its wrapper rings the failure bell); the server's
+  // watchdog stamps and hands off the request if the Mac stays down.
+  if (typeof registry.siteone.configured === 'function' && registry.siteone.configured() !== true) throw new Error(`${JOB}: the SiteOne Chrome adapter is not configured (SITEONE_CDP_URL, SITEONE_APPROVED_ACCOUNT, SITEONE_APPROVED_STORE_ID, SITEONE_APPROVED_PICKUP)`);
   const exclusive = runExclusive || require('../utils/cron-lock').runExclusive;
   const runDispatch = dispatch || runVendorOrderDispatch;
   const result = await exclusive(JOB, () => runDispatch({ adapters: registry, onlyAdapters: ['siteone'], reconcile: false, env }), { waitForSlot: false });

@@ -811,6 +811,20 @@ test('R6 click: the click goes to the element handle that passed review, with fo
   }
 });
 
+test('R8 click: the total and tender are the last reads before the click; a change there refuses with no click', async () => {
+  // Tender reads: 1 = review, 2 = re-read, 3 = the last read right before the click.
+  const total = await run({ onTenderRead: (n, w) => { if (n === 3) w.reviewTotalText = '$190.40'; } });
+  expect(total.error.refuse).toBe('review_changed');
+  // The fake captures a node's text before its read hook runs, so a change set during read 2 shows at read 3.
+  const tender = await run({ onTenderRead: (n, w) => { if (n === 2) w.reviewTenderText = 'Payment Method Credit Card, Spark-6646'; } });
+  expect(tender.error.refuse).toBe('review_changed');
+  for (const r of [total, tender]) {
+    expect(r.w.placed).toBe(0);
+    expect(r.w.clicks).not.toContain('place-order');
+    expectSafe(r.w);
+  }
+});
+
 test('R6 cleanup: the approved account is proven on each cleanup page, else the cart and PO are left for the owner', async () => {
   const refuse = [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }];
   const switched = await run({}, { args: { poNumber: 'PO-6' }, verdicts: refuse, onCall: (n, w) => { if (n === 2) w.accountText = 'Signed in as account 5550001'; } });
