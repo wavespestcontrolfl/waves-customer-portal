@@ -398,7 +398,7 @@ describe('SiteOne invoices in the sweep', () => {
 
   test('a reconciled invoice records its lines by invoice number: zero lines skipped, returns held', async () => {
     mockState.siteOneEmails = [siteOneEmail];
-    mockState.siteOneInvoice = { number: '900000001-001', problem: null, lines };
+    mockState.siteOneInvoice = { number: '900000001-001', problem: null, lines, purchaseOrder: 'WAVES-AB12CD34' };
     mockState.outcomes = [
       { status: 'logged', product: taurus, receivedQty: 78, receivedUnit: 'fl_oz', hasOpenRestockRequest: false, lineId: 'line-s1' },
       { status: 'unmatched', inserted: true, product: null, lineId: 'line-s3' },
@@ -410,6 +410,8 @@ describe('SiteOne invoices in the sweep', () => {
       { vendor: 'siteone', orderNumber: '900000001-001', shipmentKey: '900000001-001', lineNo: 1, holdAs: undefined },
       { vendor: 'siteone', orderNumber: '900000001-001', shipmentKey: '900000001-001', lineNo: 3, holdAs: 'returned' },
     ]);
+    // The invoice's printed PO rides on every line, for the restock-request close.
+    expect(calls.map(({ purchaseOrder }) => purchaseOrder)).toEqual(['WAVES-AB12CD34', 'WAVES-AB12CD34']);
     // A plain logged line is information only: no notification.
     expect(notify).not.toHaveBeenCalled();
     expect(mockNotifyAdmin).not.toHaveBeenCalled();

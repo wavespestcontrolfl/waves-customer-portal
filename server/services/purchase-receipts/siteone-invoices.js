@@ -122,6 +122,7 @@ async function invoiceExtraction(emailId, conn) {
  *   pending: not read into lines yet, still inside the grace window.
  *   problem: null (use the lines), 'unreadable' (never read, or read with
  *   no usable lines or a quantity that isn't a number), or the failed check.
+ *   purchaseOrder: the PO printed on the invoice, or null.
  *   lines: [{ title, quantity, lineNo, uom }] — lineNo is the invoice line's
  *   own position, so both copies of an invoice key the same line the same
  *   way; uom is the line's unit of measure, upper-cased, or null.
@@ -142,7 +143,30 @@ async function readSiteOneInvoice(email, now = Date.now(), conn = db) {
   const lines = items.map((line, index) => ({
     title: String(line.description || ''), quantity: Number(line.quantity), lineNo: index + 1, uom: lineUom(line),
   }));
-  return { number, problem, lines };
+  return { number, problem, lines, purchaseOrder: extractedPurchaseOrder(extracted) };
+}
+
+// The PO of a queued SiteOne line (one handed to the inventory agent that posts later through
+// logQueuedLine), or null. The stored extraction can be replaced after the line was queued, so the
+// PO counts only when that invoice still verifies, carries the line's own invoice number, and shows
+// the same line (position, title and quantity) the line was queued from.
+async function queuedLinePurchaseOrder(line, conn = db) {
+  const email = line && line.email_id ? await conn('emails').where({ id: line.email_id }).first() : null;
+  const invoice = email ? await readSiteOneInvoice(email, Date.now(), conn) : null;
+  if (!invoice || invoice.pending || invoice.problem || invoice.number !== line.order_number) return null;
+  const same = invoice.lines.find((l) => l.lineNo === Number(line.line_no));
+  if (!same || same.title !== String(line.raw_title || '') || same.quantity !== Number(line.quantity)) return null;
+  // The same unit-of-measure rule the sweep holds a line by (a case, or no unit, is unverified).
+  // Required lazily: sweep.js requires this module.
+  if (require('./sweep').siteOneHold(invoice.problem, same.quantity, same.uom, same.title) !== undefined) return null;
+  return invoice.purchaseOrder;
+}
+
+// The PO printed on the invoice (the extraction's optional purchase_order), or
+// null: a blank or non-string value never reaches the receipt lane.
+function extractedPurchaseOrder(extracted) {
+  const po = typeof extracted.purchase_order === 'string' ? extracted.purchase_order.trim() : '';
+  return po || null;
 }
 
 
@@ -154,4 +178,5 @@ function lineUom(line) {
 
 module.exports = {
   VENDOR, isSiteOneInvoiceEmail, findSiteOneInvoiceEmails, copyReceivedBefore, readSiteOneInvoice, verificationProblem, emailInvoiceNumber,
+  queuedLinePurchaseOrder,
 };

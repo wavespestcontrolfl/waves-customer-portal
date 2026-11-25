@@ -62,6 +62,20 @@ describe('readParsedInvoice', () => {
   });
 
   test.each([
+    ['a printed PO, trimmed', '  WAVES-AB12CD34 ', 'WAVES-AB12CD34'],
+    ['no PO', undefined, null],
+    ['a null PO', null, null],
+    ['a blank PO', '   ', null],
+    ['an object PO', {}, null],
+    ['a numeric PO', 4471, null],
+    ['an OCR run-on past the length cap', 'X'.repeat(65), null],
+  ])('purchase_order, %s: optional, never degrades the answer', (_label, raw, expected) => {
+    const { invoice, degraded } = readParsedInvoice({ invoice_number: 'INV-12', total: 10, purchase_order: raw });
+    expect(invoice.purchase_order).toBe(expected);
+    expect(degraded).toBe(false);
+  });
+
+  test.each([
     ['an impossible invoice_date', { invoice_number: 'A1', invoice_date: '2026-13-45', total: 10 }, 'invoice_date'],
     ['a numeric invoice_date', { invoice_number: 'A1', invoice_date: 20260101, total: 10 }, 'invoice_date'],
     ['an object invoice_number', { invoice_number: {}, total: 10 }, 'invoice_number'],
