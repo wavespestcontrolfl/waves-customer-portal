@@ -178,8 +178,9 @@ describe('wiring', () => {
     const rain = read('services/rain-out.js');
     expect(rain).toContain('technicianId: service.technician_id');
     // getOptions presets, checkTarget, route-scope probe, and the route-checked
-    // same-day hours: the visit's own technician.
-    expect((rain.match(/technicianId: service\.technician_id/g) || []).length).toBe(4);
+    // same-day hours: the visit's own technician. The two asks for the office's shift
+    // line (checkTarget's tapped stop, the hours the office's sheet offers) name it too.
+    expect((rain.match(/technicianId: service\.technician_id/g) || []).length).toBe(6);
   });
 
   // Owner ruling 2026-10-03: with two technicians, staff booking or moving a

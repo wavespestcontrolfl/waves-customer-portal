@@ -394,7 +394,13 @@ describe('rain-out service', () => {
     // GATE_TECH_SHIFT_HOURS (D4 part 3b-2a): a technician's own move refuses an hour the visit's
     // technician's shift today does not hold, so the sheet does not offer one. Now is 10:00 ET.
     describe('shift hours', () => {
-      afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+      // The office's sheet also states the shift line of each hour it offers. That is another reader's
+      // (shiftLinesFor), proved in its own block below: here it has no line, so the reads counted are the others'.
+      let offeredLines;
+      beforeEach(() => {
+        offeredLines = jest.spyOn(require('../services/technician-eligibility'), 'shiftLinesFor').mockImplementation(async (_id, asks) => asks.map(() => null));
+      });
+      afterEach(() => { offeredLines.mockRestore(); delete process.env.GATE_TECH_SHIFT_HOURS; });
       const sameDayOnShift = async (shift, overrides = {}) => {
         SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
         wireDb({
@@ -423,6 +429,82 @@ describe('rain-out service', () => {
         expect(options.ok).toBe(true);
         return options.sameDay.map((o) => o.window.start);
       };
+
+      // The office's sheet (it commits as the office, and its hours are not held to the shift): each hour
+      // and each day it offers carries the shift line the move would state (shiftWarning, tellOfferedShiftLines).
+      describe('the office\'s sheet: the shift line of each hour it offers', () => {
+        const LINE = "Synthetic Tech's shift is 8:00 AM to 1:00 PM. This visit is outside those hours.";
+        const offered = async ({ office = true, service = {} } = {}) => {
+          finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
+          SmartRebooker.findRescheduleOptions.mockResolvedValue([
+            { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
+          ]);
+          wireDb({
+            scheduled_services: [
+              chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed', estimated_duration_minutes: 45, ...service }) }),
+              chain({ rows: [] }),
+            ],
+            // A technician's own sheet holds its hours to the shift: the set hours, then today's clock-ins (none).
+            ...(office ? {} : {
+              technicians: [chain({ whereNotNull: jest.fn().mockReturnThis(), rows: [{ id: 'tech-1', shift_start: '08:00', shift_end: '20:00' }] })],
+              time_entries: [chain({ groupBy: jest.fn().mockReturnThis(), min: jest.fn().mockResolvedValue([]) })],
+            }),
+          });
+          const options = await RainOut.getOptions('svc-1', office
+            ? { caller: { isAdmin: true, technicianId: 'admin-1' }, initiatedBy: 'admin' }
+            : { caller: { isAdmin: false, technicianId: 'tech-1' } });
+          expect(options.ok).toBe(true);
+          return [...options.sameDay, ...options.days];
+        };
+        const block = (start, end) => ({ window_start: start, window_end: end, estimated_duration_minutes: 45 });
+
+        test('the reader is asked once, about every hour and day offered as the move would leave the visit, and each line rides its own option', async () => {
+          offeredLines.mockImplementation(async (_id, asks) => asks.map((ask) => (ask.block.window_start === '14:00' ? LINE : null)));
+          const options = await offered();
+          expect(options.map((o) => [o.date, o.window.start, o.shiftWarning])).toEqual([
+            ['2026-06-11', '11:00', undefined], ['2026-06-11', '14:00', LINE], ['2026-06-12', '08:00', undefined],
+          ]);
+          expect(options[0]).not.toHaveProperty('shiftWarning');
+          // The visit's technician; each option's day and one-hour window, with the visit's stored length.
+          expect(offeredLines.mock.calls).toEqual([['tech-1', [
+            { technicianId: 'tech-1', date: '2026-06-11', block: block('11:00', '12:00') },
+            { technicianId: 'tech-1', date: '2026-06-11', block: block('14:00', '15:00') },
+            { technicianId: 'tech-1', date: '2026-06-12', block: block('08:00', '09:00') },
+          ]]]);
+        });
+
+        test('a technician\'s own sheet is not asked: its hours are held to the shift already', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          offeredLines.mockImplementation(async (_id, asks) => asks.map(() => LINE));
+          const options = await offered({ office: false });
+          expect(options.length).toBeGreaterThan(0);
+          for (const option of options) expect(option).not.toHaveProperty('shiftWarning');
+          expect(offeredLines).not.toHaveBeenCalled();
+        });
+
+        test('a visit with no technician is not asked', async () => {
+          offeredLines.mockImplementation(async (_id, asks) => asks.map(() => LINE));
+          for (const option of await offered({ service: { technician_id: null } })) expect(option).not.toHaveProperty('shiftWarning');
+          expect(offeredLines).not.toHaveBeenCalled();
+        });
+
+        test('a reader that fails: the options come back with no line, and the failure is logged', async () => {
+          const logger = require('../services/logger');
+          offeredLines.mockRejectedValue(new Error('hours unread'));
+          const options = await offered();
+          expect(options).toHaveLength(3);
+          for (const option of options) expect(option).not.toHaveProperty('shiftWarning');
+          expect(logger.info).toHaveBeenCalledWith('[rain-out] picked-hour shift line failed for technician tech-1: hours unread');
+        });
+
+        test('gate off: the real reader reads nothing, and no option has the key', async () => {
+          offeredLines.mockRestore();
+          const options = await offered();
+          expect(options).toHaveLength(3);
+          for (const option of options) expect(option).not.toHaveProperty('shiftWarning');
+          expect(db.mock.calls.map(([table]) => table)).not.toContain('technicians');
+        });
+      });
 
       // The rest of the route (routeShiftRows): each hour and each day says which later stops it would land
       // outside the shift. A technician's sheet reads the hours twice (its own hours, then the route's stops).
@@ -3471,8 +3553,72 @@ describe('rain-out service', () => {
     // GATE_TECH_SHIFT_HOURS (D4): the stops a rest-of-route move would land outside the route technician's
     // shift. The technician's commit refuses each of them, the office's is told a line for each; the sheets
     // say so before the tap (routeShiftConflicts, routeShiftRows).
+    // GATE_TECH_SHIFT_HOURS (D4): the tapped stop's own hour on the office's sheet. The office's move is told
+    // the shift line after the tap; the target check states the same line before it (shiftWarning,
+    // pickedShiftLines), from the office's own reader.
+    describe('the tapped stop: the office\'s shift line for the picked hour', () => {
+      const LINE = "Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours.";
+      const eligibility = require('../services/technician-eligibility');
+      let reader;
+      beforeEach(() => { reader = jest.spyOn(eligibility, 'shiftLinesFor').mockImplementation(async (_id, asks) => asks.map(() => null)); });
+      afterEach(() => { reader.mockRestore(); delete process.env.GATE_TECH_SHIFT_HOURS; });
+      // A visit alone on its route: the rows of the rest of the route read nothing.
+      const check = async (target, service = {}) => {
+        listOccupiedWindows.mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: '2031-03-06', window_start: '09:00', window_end: '10:00',
+              estimated_duration_minutes: 90, route_order: 1, ...service,
+            }) }),
+            chain({ rows: [] }),
+          ],
+        });
+        return RainOut.checkTarget({ serviceId: 'svc-1', caller: { isAdmin: true, technicianId: 'admin-1' }, target });
+      };
+      const target = { date: '2031-03-07T00:00:00.000Z', window: { start: '16:30', end: '17:00' } };
+
+      test('the reader is asked about the visit as the move would leave it, and its line rides the answer', async () => {
+        reader.mockResolvedValue([LINE]);
+        expect(await check(target)).toEqual({ ok: true, conflicts: [], routeConflicts: [], shiftWarning: LINE });
+        // The visit's technician, the target's day, the picked window with the stored length.
+        expect(reader.mock.calls).toEqual([
+          ['tech-1', [{ technicianId: 'tech-1', date: '2031-03-07', block: { window_start: '16:30', window_end: '17:00', estimated_duration_minutes: 90 } }]],
+        ]);
+      });
+
+      test('no line: no key', async () => {
+        expect(await check(target)).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        expect(reader).toHaveBeenCalledTimes(1);
+      });
+
+      test('a visit with no technician is not asked', async () => {
+        reader.mockResolvedValue([LINE]);
+        expect(await check(target, { technician_id: null })).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        expect(reader).not.toHaveBeenCalled();
+      });
+
+      test('a reader that fails gives no line, is logged, and the check still answers', async () => {
+        const logger = require('../services/logger');
+        reader.mockRejectedValue(new Error('hours unread'));
+        expect(await check(target)).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        expect(logger.info).toHaveBeenCalledWith('[rain-out] picked-hour shift line failed for technician tech-1: hours unread');
+      });
+
+      test('gate off: the real reader reads nothing and no key comes back', async () => {
+        reader.mockRestore();
+        expect(await check(target)).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        expect(db.mock.calls.map(([table]) => table)).toEqual(['scheduled_services', 'scheduled_services']);
+      });
+    });
+
     describe('route scope: the stops a move would land outside the shift', () => {
-      afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; delete process.env.GATE_TECH_WORK_DAYS; });
+      // The tapped stop's own line is another reader's (above): none here, so the reads counted are the rows'.
+      let ownLine;
+      beforeEach(() => {
+        ownLine = jest.spyOn(require('../services/technician-eligibility'), 'shiftLinesFor').mockImplementation(async (_id, asks) => asks.map(() => null));
+      });
+      afterEach(() => { ownLine.mockRestore(); delete process.env.GATE_TECH_SHIFT_HOURS; delete process.env.GATE_TECH_WORK_DAYS; });
       // After the 09:00 anchor, in route order.
       const ROUTE = [
         { id: 'svc-2', window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 60 },
@@ -5007,6 +5153,85 @@ describe('rain-out service', () => {
       const empty = await RainOut.checkSlots({ targets: [], caller: ADMIN });
       expect(empty).toEqual({ ok: false, reason: 'bad_target' });
       expect(listOccupiedWindows).not.toHaveBeenCalled();
+    });
+
+    // GATE_TECH_SHIFT_HOURS (D4): the pickers' check states, before the save, the shift line the office's
+    // save would state for the picked hour (shiftWarning, pickedShiftLines), from the office's own reader.
+    describe('the office\'s shift line for a picked slot', () => {
+      const LINE = "Synthetic Tech's shift is 8:00 AM to 12:00 PM. This visit is outside those hours.";
+      const [TECH_A, TECH_B] = ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'];
+      const eligibility = require('../services/technician-eligibility');
+      let reader;
+      beforeEach(() => { reader = jest.spyOn(eligibility, 'shiftLinesFor').mockImplementation(async (_id, asks) => asks.map(() => null)); });
+      afterEach(() => { reader.mockRestore(); delete process.env.GATE_TECH_SHIFT_HOURS; });
+      const slot = (start, end, extra) => ({ date: '2026-08-20', window: { start, end }, ...extra });
+      const block = (start, end, minutes) => ({ window_start: start, window_end: end, estimated_duration_minutes: minutes });
+
+      test('each technician is asked once about every slot that names it, and each line rides its own result', async () => {
+        // TECH_A's second slot is outside the shift, TECH_B's only slot too.
+        reader.mockImplementation(async (technicianId, asks) => asks.map((ask) => (
+          ask.block.window_start === '13:00' ? `${technicianId === TECH_A ? 'A' : 'B'}: ${LINE}` : null)));
+        const result = await RainOut.checkSlots({
+          targets: [
+            slot('09:00', '10:00', { technicianId: TECH_A }),
+            slot('13:00', '14:00', { technicianId: TECH_B }),
+            slot('13:00', '14:00'),
+            slot('13:00', '13:30', { technicianId: TECH_A, durationMinutes: 90, date: '2026-08-21' }),
+          ],
+          caller: ADMIN,
+        });
+        expect(result.results).toEqual([
+          { conflicts: [] }, { conflicts: [], shiftWarning: `B: ${LINE}` }, { conflicts: [] }, { conflicts: [], shiftWarning: `A: ${LINE}` },
+        ]);
+        // Each slot's own day, its picked window and the length sent; a slot with no technician is not asked about.
+        expect(reader.mock.calls).toEqual([
+          [TECH_A, [
+            { technicianId: TECH_A, date: '2026-08-20', block: block('09:00', '10:00', undefined) },
+            { technicianId: TECH_A, date: '2026-08-21', block: block('13:00', '13:30', 90) },
+          ]],
+          [TECH_B, [{ technicianId: TECH_B, date: '2026-08-20', block: block('13:00', '14:00', undefined) }]],
+        ]);
+      });
+
+      test('no slot names a technician (the bulk bar): the reader is not asked', async () => {
+        const result = await RainOut.checkSlots({ targets: [slot('13:00', '14:00'), slot('15:00', '16:00', { technicianId: null })], caller: ADMIN });
+        expect(result.results).toEqual([{ conflicts: [] }, { conflicts: [] }]);
+        expect(reader).not.toHaveBeenCalled();
+      });
+
+      test('the line is beside the overlap answer, never a row of it', async () => {
+        reader.mockResolvedValue([LINE]);
+        listOccupiedWindows.mockResolvedValue(occ('2026-08-20', [{
+          id: 'svc-9', customer_id: 'cust-9', status: 'confirmed', service_type: 'Mosquito Treatment',
+          window_start: '13:00:00', window_end: '14:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
+        }]));
+        wireDb({ customers: [chain({ rows: [{ id: 'cust-9', first_name: 'cust-9a', last_name: 'cust-9b' }] })] });
+        const { results } = await RainOut.checkSlots({ targets: [slot('13:30', '14:30', { technicianId: TECH_A })], caller: ADMIN });
+        expect(results[0].shiftWarning).toBe(LINE);
+        expect(results[0].conflicts).toHaveLength(1);
+        expect(results[0].conflicts[0]).not.toHaveProperty('warning');
+      });
+
+      test('one technician\'s reader fails: no line for its slots, logged, and the other technician\'s line stands', async () => {
+        const logger = require('../services/logger');
+        reader.mockImplementation(async (technicianId, asks) => {
+          if (technicianId === TECH_A) throw new Error('hours unread');
+          return asks.map(() => LINE);
+        });
+        const result = await RainOut.checkSlots({
+          targets: [slot('13:00', '14:00', { technicianId: TECH_A }), slot('13:00', '14:00', { technicianId: TECH_B })], caller: ADMIN,
+        });
+        expect(result).toEqual({ ok: true, results: [{ conflicts: [] }, { conflicts: [], shiftWarning: LINE }] });
+        expect(logger.info).toHaveBeenCalledWith(`[rain-out] picked-hour shift line failed for technician ${TECH_A}: hours unread`);
+      });
+
+      test('gate off: the real reader reads nothing and no result has the key', async () => {
+        reader.mockRestore();
+        wireDb({});
+        const result = await RainOut.checkSlots({ targets: [slot('13:00', '14:00', { technicianId: TECH_A })], caller: ADMIN });
+        expect(result).toEqual({ ok: true, results: [{ conflicts: [] }] });
+        expect(db.mock.calls.map(([table]) => table)).not.toContain('technicians');
+      });
     });
   });
 });

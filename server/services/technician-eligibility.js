@@ -167,6 +167,19 @@ async function dayWarningsFor(technicianId, dates, { conn = db, block = null, sh
   const list = (Array.isArray(dates) ? dates : [dates]).filter(Boolean);
   const hours = techShiftHoursLive() && block ? require('./scheduling/window-rules').rowBlockMinutes(block) : null;
   if (!((techWorkDaysLive() && !shiftOnly) || isBlock(hours)) || !technicianId || !list.length) return [];
+  const { tech, shiftOf } = await officeLineReads(technicianId, conn, isBlock(hours));
+  const lines = new Set();
+  for (const date of [...list].sort()) {
+    const offDay = offDayWarning(tech, date);
+    const line = offDay ? !shiftOnly && offDay : shiftWarning(tech, shiftOf(technicianId, date), hours);
+    if (line) lines.add(line);
+  }
+  return [...lines];
+}
+
+// The reads behind an office line: the technician's name and work days, and (`withShift`) the shift
+// reader. Each read has its own savepoint on a transaction; a failed read gives no technician, or no shift.
+async function officeLineReads(technicianId, conn, withShift) {
   const guarded = async (read, failed) => {
     try {
       return await (conn.isTransaction && typeof conn.transaction === 'function' ? conn.transaction((sp) => read(sp)) : read(conn));
@@ -176,14 +189,23 @@ async function dayWarningsFor(technicianId, dates, { conn = db, block = null, sh
   };
   const tech = await guarded((c) => c('technicians').where({ id: technicianId }).first('id', 'name', 'work_days'), null);
   const noShift = () => null;
-  const shiftOf = isBlock(hours) ? await guarded((c) => loadTechShifts(c, { technicianIds: [technicianId] }), noShift) : noShift;
-  const lines = new Set();
-  for (const date of [...list].sort()) {
-    const offDay = offDayWarning(tech, date);
-    const line = offDay ? !shiftOnly && offDay : shiftWarning(tech, shiftOf(technicianId, date), hours);
-    if (line) lines.add(line);
-  }
-  return [...lines];
+  return { tech, shiftOf: withShift ? await guarded((c) => loadTechShifts(c, { technicianIds: [technicianId] }), noShift) : noShift };
+}
+
+/**
+ * The shift line of dayWarningsFor's `shiftOnly`, for several questions about one technician on one
+ * pair of reads: `asks` is [{ date, block }], and the answer has one entry for each ask, in order, the
+ * line or null. For a screen that asks before a save about each hour it offers or the office picked
+ * (D4 picked-hour hints). The same answer as `dayWarningFor(technicianId, date, { block, shiftOnly: true })`
+ * for each ask: no line on a day the technician does not work, none for a time it cannot read, and no
+ * read with GATE_TECH_SHIFT_HOURS off, with no technician, or with no ask it can read.
+ */
+async function shiftLinesFor(technicianId, asks, { conn = db } = {}) {
+  const { rowBlockMinutes } = require('./scheduling/window-rules');
+  const hours = asks.map((ask) => (techShiftHoursLive() && ask.date && ask.block ? rowBlockMinutes(ask.block) : null));
+  if (!technicianId || !hours.some(isBlock)) return asks.map(() => null);
+  const { tech, shiftOf } = await officeLineReads(technicianId, conn, true);
+  return asks.map((ask, i) => (isBlock(hours[i]) && !offDayWarning(tech, ask.date) ? shiftWarning(tech, shiftOf(technicianId, ask.date), hours[i]) : null));
 }
 
 /** dayWarningsFor for one date: its line (the day-off line or the shift line), or null. */
@@ -633,5 +655,6 @@ module.exports = {
   shiftWarning,
   dayWarningFor,
   dayWarningsFor,
+  shiftLinesFor,
   capabilityOffWarningsFor,
 };
