@@ -694,32 +694,30 @@ const PRIVACY_HEADERS = {
 // property (each capped: 3 h from en_route_at, 4 h from arrived_at), and complete for up to 2 hours after the visit. Scheduled,
 // cancelled, skipped, parked and rebooking visits answer 404, so the payload has no visitChange, no schedule state and no scheduled poll.
 
+// The listed keys of `obj`, each one present (null when missing): the recipient payload's whitelist, field by field.
+function pickOrNull(obj, keys) {
+  return Object.fromEntries(keys.map((k) => [k, obj?.[k] ?? null]));
+}
+
 function recipientTrackPayload(full) {
   const state = full.state;
-  const property = full.property || {};
+  const enRoute = state === 'en_route';
   return {
     scope: 'visit_recipient',
     state,
-    tech: full.tech ? { firstName: full.tech.firstName ?? null, photoUrl: full.tech.photoUrl ?? null, yearsWithWaves: null } : null,
-    window: full.window ? { date: full.window.date ?? null, start: full.window.start ?? null, end: full.window.end ?? null } : null,
+    tech: full.tech ? { ...pickOrNull(full.tech, ['firstName', 'photoUrl']), yearsWithWaves: null } : null,
+    window: full.window ? pickOrNull(full.window, ['date', 'start', 'end']) : null,
     // The pin for the map and the town, not the street.
-    property: { lat: property.lat ?? null, lng: property.lng ?? null, city: property.city ?? null },
-    service: { type: full.service?.type ?? null },
+    property: pickOrNull(full.property, ['lat', 'lng', 'city']),
+    service: pickOrNull(full.service, ['type']),
     // Live position and ETA while the tech drives to this visit (vehicle is null in every other state).
-    vehicle: state === 'en_route' && full.vehicle
-      ? {
-          lat: full.vehicle.lat ?? null,
-          lng: full.vehicle.lng ?? null,
-          lastReportedAt: full.vehicle.lastReportedAt ?? null,
-          stale: full.vehicle.stale === true,
-          etaMinutes: full.vehicle.etaMinutes ?? null,
-          etaSource: full.vehicle.etaSource ?? null,
-        }
+    vehicle: enRoute && full.vehicle
+      ? { ...pickOrNull(full.vehicle, ['lat', 'lng', 'lastReportedAt', 'etaMinutes', 'etaSource']), stale: full.vehicle.stale === true }
       : null,
     arrivedAt: full.arrivedAt ?? null,
     meta: {
       // The page's poll is the only live update this link has (no socket): quick while the tech is on the way or on site.
-      pollIntervalSeconds: state === 'en_route' || state === 'on_property' ? EN_ROUTE_POLL_SECONDS : 0,
+      pollIntervalSeconds: enRoute || state === 'on_property' ? EN_ROUTE_POLL_SECONDS : 0,
     },
   };
 }
