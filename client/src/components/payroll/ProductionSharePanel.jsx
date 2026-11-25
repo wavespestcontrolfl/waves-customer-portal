@@ -12,14 +12,15 @@ import { dollarsToCents } from './PayLinesPanel';
 
 // Production share, preview (Technician Terms v3, owner 2026-11-23): the weekly CREDIT and the numbers it is computed
 // with. The preview itself pays nothing. When GATE_PAYROLL_PRODUCTION_SHARE is on, a pay run pays the share from these
-// numbers (PR 2); the page is not told the gate state, so its words are neutral. The owner account saves the
+// numbers (PR 2); refunds are the owner's call (PR 3a): a refund_flagged stop shows its reason and the stop credit box, and a refund on
+// a paid stop is answered with the total to take back; the page is not told the gate state, so its words are neutral. The owner account saves the
 // numbers; the preview shows each completed stop's credit, the shifts, the bar and the share the week would give.
 
 const KIND_WORDS = {
   priced: 'Priced visit', prepaid_plan: 'Prepaid plan visit', multi_visit_job: 'Part of a multi-visit job',
   callback_own: 'Callback, own work', callback_other: "Callback, another technician's work", callback_review: 'Callback',
   free_assessment: 'Free assessment', free_visit: 'Free visit', unpriced: 'No price',
-  not_performed: 'No work performed', unverified: 'No closeout record',
+  not_performed: 'No work performed', unverified: 'No closeout record', refund_flagged: 'Refund recorded',
   owner_set: 'Set by the owner', already_paid: 'Already paid', invoice_paid_elsewhere: 'Invoice paid elsewhere',
   package_paid_elsewhere: 'Package paid elsewhere', basis_exhausted: 'Package visit used', owner_override_reassigned: 'Reassigned since you set it', owner_override_closeout_changed: 'Closeout changed since you set it', owner_override_conflict_changed: 'Paid elsewhere since you set it',
 };
@@ -187,11 +188,76 @@ function StopCreditForm({ call, technicianId, weekStart, stop, generation, onCha
   </>;
 }
 
+// A refund on a stop a pay run already paid: the owner sets the TOTAL credit to take back for it (the code never works a refund out).
+// A paid stop with a new refund is listed with an empty box; a stop he answered keeps its row, with his total, so he can change or clear it.
+function RefundTakeBackRow({ call, row, generation, onChanged }) {
+  const [text, setText] = useState(row.cents == null ? '' : centsToPlain(row.cents));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const cents = dollarsToCents(text);
+  const tooMuch = cents != null && cents > row.creditCents;
+
+  async function run(method, body) {
+    setBusy(true); setError('');
+    // The selection this change was started under: the week is reloaded only if the selection is still the same after it.
+    const startedUnder = generation();
+    try {
+      await call('/production-share/refund-take-back', { method, body });
+      onChanged(startedUnder);
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+  return <TR>
+    <TD>{dayLabel(row.workDate)}</TD>
+    <TD>{dayLabel(row.paidWeekStart)}</TD>
+    <TD nums align="right">{centsToDollars(row.creditCents)}</TD>
+    <TD>{row.isNew ? <span className="text-warn-fg">New refund</span> : 'Answered'}</TD>
+    <TD>
+      <form className="flex flex-wrap items-end gap-2" aria-label="Set the refund take-back of this paid stop"
+        onSubmit={event => { event.preventDefault(); run('PUT', { checkId: row.checkId, visitId: row.visitId, cents, signals: row.newSignals }); }}>
+        <Field label="Take back ($, up to the credit paid)">
+          <Input inputMode="decimal" autoComplete="off" value={text} onChange={event => setText(event.target.value)} />
+        </Field>
+        <Button type="submit" variant="secondary" disabled={busy || cents == null || tooMuch}>Save</Button>
+        {row.cents != null && <Button type="button" variant="secondary" disabled={busy} onClick={() => run('DELETE', { checkId: row.checkId, visitId: row.visitId })}>Clear</Button>}
+        {tooMuch && <span role="alert" className="text-ui-caption text-alert-fg">More than the {centsToDollars(row.creditCents)} paid.</span>}
+        {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+      </form>
+    </TD>
+  </TR>;
+}
+
+function RefundTakeBacks({ call, preview, generation, onChanged }) {
+  const rows = new Map();
+  for (const one of preview.takeBackAnswers || []) rows.set(`${one.checkId}:${one.visitId}`, { ...one, isNew: false });
+  for (const one of preview.takeBackToSet || []) rows.set(`${one.checkId}:${one.visitId}`, { ...(rows.get(`${one.checkId}:${one.visitId}`) || {}), ...one, isNew: true });
+  const applied = (preview.takeBacks || []).filter(one => one.cents !== 0);
+  if (!rows.size && !applied.length) return null;
+  return <div className="grid gap-2" aria-label="Refunds on paid stops">
+    <h3 className="m-0 text-ui-body font-medium text-zinc-900">Refunds on paid stops</h3>
+    {rows.size > 0 && <Table aria-label="Paid stops with a refund">
+      <THead><TR><TH>Visit day</TH><TH>Paid in week of</TH><TH align="right">Credit paid</TH><TH>State</TH><TH>Take-back</TH></TR></THead>
+      <TBody>
+        {[...rows.values()].map(row => <RefundTakeBackRow key={`${row.checkId}:${row.visitId}:${row.cents}:${(row.newSignals || []).join(',')}`}
+          call={call} row={row} generation={generation} onChanged={onChanged} />)}
+      </TBody>
+    </Table>}
+    {applied.map(one => <p key={`${one.sourceCheckId}:${one.visitId}`} className="m-0 text-ui-caption text-ink-secondary">
+      {one.cents > 0
+        ? `Refund taken back from a paid week: ${centsToDollars(one.cents)} (visit of ${dayLabel(one.workDate || one.paidWeekStart)})`
+        : `Refund given back to a paid week: ${centsToDollars(-one.cents)} (visit of ${dayLabel(one.workDate || one.paidWeekStart)})`}
+    </p>)}
+    {preview.owedTakeBackCents > 0 && <p className="m-0 text-ui-caption text-ink-secondary">
+      Still owed and not yet taken: {centsToDollars(Math.max(0, preview.owedTakeBackCents - applied.filter(one => one.cents > 0).reduce((sum, one) => sum + one.cents, 0)))}. It comes off the next share week. A take-back is never taken from wages.
+    </p>}
+  </div>;
+}
+
 function PreviewNotes({ preview }) {
   return <>
         {!preview.configured && <p className="m-0 text-ui-caption text-ink-secondary">No numbers are set for this week, so the share shows $0.</p>}
         {preview.refundCents > 0 && <p className="m-0 text-ui-caption text-ink-secondary">
-          Refunds on these stops total {centsToDollars(preview.refundCents)}. They are not taken back yet.
+          Refunds recorded on these stops total {centsToDollars(preview.refundCents)}. A stop with a refund shows $0 until you set its credit.
         </p>}
         {preview.unallocatedRefundCents > 0 && <p role="status" className="m-0 text-ui-caption text-warn-fg">
           Refunds of {centsToDollars(preview.unallocatedRefundCents)} are on shared invoices that cannot be split across their visits. They are not in any stop above.
@@ -275,6 +341,8 @@ export default function ProductionSharePanel({ call, technicians }) {
           <div><dt className="text-ui-caption text-ink-secondary">Share (estimate)</dt><dd className="m-0 text-zinc-900">{centsToDollars(preview.shareCents)}</dd></div>
         </dl>
         <PreviewNotes preview={preview} />
+        <RefundTakeBacks call={call} preview={preview} generation={() => selection.current}
+          onChanged={(startedUnder) => { if (startedUnder === selection.current) load(preview.technician.id, preview.weekStart); }} />
         {preview.stops.length === 0
           ? <p className="m-0">No completed stops in this week.</p>
           : <Table aria-label="Stops and their credit">

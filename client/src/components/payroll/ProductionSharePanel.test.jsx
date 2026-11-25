@@ -53,7 +53,7 @@ describe('Production share preview', () => {
     expect(summary.getByText('$105.00')).toBeInTheDocument();
     expect(screen.getByText(/1 stop need review/)).toBeInTheDocument();
     expect(screen.getByText(/Needs review:/)).toBeInTheDocument();
-    expect(screen.getByText(/Refunds on these stops total \$30\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/Refunds recorded on these stops total \$30\.00/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('Share of the amount above the bar (%)'), { target: { value: '16' } });
     fireEvent.change(screen.getByLabelText('Bar for each shift ($)'), { target: { value: '425.50' } });
@@ -75,6 +75,86 @@ describe('Production share preview', () => {
     fireEvent.change(screen.getByLabelText('Employee'), { target: { value: 'tech-a' } });
     fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
     expect(await screen.findByText(/Refunds of \$12\.00 are on shared invoices/)).toBeInTheDocument();
+  });
+
+  it('shows a refund-flagged stop with its reason and the credit box the owner already has', async () => {
+    const flagged = {
+      visitId: 'v9', workDate: '2026-09-16', serviceType: 'Pest Control', kind: 'refund_flagged', creditCents: 0, needsReview: true, refundCents: 1000,
+      reason: 'A refund is recorded on this visit. Set its credit in the production share preview.', stopRevision: 'rev9', refundSignals: ['pay:x:1000'],
+    };
+    const call = vi.fn(async (path) => answerFor(path, { stops: [flagged], needsReview: [flagged] }));
+    render(<ProductionSharePanel call={call} technicians={TECHS} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open the production share preview' }));
+    fireEvent.change(screen.getByLabelText('Employee'), { target: { value: 'tech-a' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+    expect(await screen.findByText('Refund recorded')).toBeInTheDocument();
+    expect(screen.getByText(/A refund is recorded on this visit\. Set its credit/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '90' } });
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'Refund was $10' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Set credit' }));
+    await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', expect.objectContaining({ method: 'PUT' })));
+    expect(call.mock.calls.find(([path]) => path === '/production-share/stop-override')[1].body)
+      .toMatchObject({ visitId: 'v9', creditCents: 9000, stopRevision: 'rev9' });
+  });
+
+  describe('refunds on paid stops', () => {
+    const toSet = { checkId: 'check-1', visitId: 'v-paid', workDate: '2026-09-08', paidWeekStart: '2026-09-07', creditCents: 100000, newSignals: ['pay:x:3000'] };
+    const open = async (patch) => {
+      const call = vi.fn(async (path) => (path.startsWith('/production-share/preview') ? answerFor(path, patch) : {}));
+      render(<ProductionSharePanel call={call} technicians={TECHS} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Open the production share preview' }));
+      fireEvent.change(screen.getByLabelText('Employee'), { target: { value: 'tech-a' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+      await screen.findByLabelText('Refunds on paid stops');
+      return call;
+    };
+
+    it('lists a paid stop with a new refund and saves the total in cents with the signals it saw; refuses more than the credit paid', async () => {
+      const call = await open({ takeBackToSet: [toSet], takeBackAnswers: [], takeBacks: [] });
+      expect(screen.getByText('New refund')).toBeInTheDocument();
+      const box = screen.getByLabelText('Take back ($, up to the credit paid)');
+      fireEvent.change(box, { target: { value: '1000.01' } });
+      expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+      expect(screen.getByText(/More than the \$1,000\.00 paid/)).toBeInTheDocument();
+      fireEvent.change(box, { target: { value: '300' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/refund-take-back', expect.objectContaining({ method: 'PUT' })));
+      expect(call.mock.calls.find(([path]) => path === '/production-share/refund-take-back')[1].body)
+        .toEqual({ checkId: 'check-1', visitId: 'v-paid', cents: 30000, signals: ['pay:x:3000'] });
+      // The week is read again after a save.
+      await waitFor(() => expect(call.mock.calls.filter(([path]) => path.startsWith('/production-share/preview')).length).toBe(2));
+    });
+
+    it('keeps an answered stop with the total he set, lets him clear it, and says what was taken or given back', async () => {
+      const answered = { ...toSet, cents: 30000, note: null, signals: ['pay:x:3000'], newSignals: [] };
+      const call = await open({
+        takeBackToSet: [], takeBackAnswers: [answered], owedTakeBackCents: 30000,
+        takeBacks: [
+          { sourceCheckId: 'check-1', visitId: 'v-paid', workDate: '2026-09-08', paidWeekStart: '2026-09-07', cents: 20000 },
+          { sourceCheckId: 'check-2', visitId: 'v-other', workDate: '2026-09-09', paidWeekStart: '2026-09-07', cents: -5000 },
+          { sourceCheckId: 'check-3', visitId: 'v-zero', workDate: '2026-09-10', paidWeekStart: '2026-09-07', cents: 0 },
+        ],
+      });
+      expect(screen.getByText('Answered')).toBeInTheDocument();
+      expect(screen.getByLabelText('Take back ($, up to the credit paid)')).toHaveValue('300.00');
+      expect(screen.getByText('Refund taken back from a paid week: $200.00 (visit of Sep 8, 2026)')).toBeInTheDocument();
+      expect(screen.getByText(/Refund given back to a paid week: \$50\.00/)).toBeInTheDocument();
+      expect(screen.queryByText(/Sep 10, 2026/)).toBeNull(); // the 0-cent entry only keeps a dependency
+      expect(screen.getByText(/Still owed and not yet taken: \$100\.00/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/refund-take-back', expect.objectContaining({ method: 'DELETE' })));
+      expect(call.mock.calls.find(([path]) => path === '/production-share/refund-take-back')[1].body).toEqual({ checkId: 'check-1', visitId: 'v-paid' });
+    });
+
+    it('shows no section for a week with no refunds on paid stops', async () => {
+      const call = vi.fn(async (path) => answerFor(path, { takeBackToSet: [], takeBackAnswers: [], takeBacks: [] }));
+      render(<ProductionSharePanel call={call} technicians={TECHS} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Open the production share preview' }));
+      fireEvent.change(screen.getByLabelText('Employee'), { target: { value: 'tech-a' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+      await screen.findByLabelText('Week summary');
+      expect(screen.queryByLabelText('Refunds on paid stops')).toBeNull();
+    });
   });
 
   it('says so when no numbers are set, and shows a server refusal', async () => {

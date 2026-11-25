@@ -1178,7 +1178,10 @@ async function runView(conn, runId, { evaluation = null } = {}) {
   if (notes.length) view.techRewardsNotes = notes;
   // Stops that need review in a draft's production shares: the owner reads this before he finalizes. Present only when there is one.
   if (run.status === 'draft') {
-    const reviewNotes = view.checks.map((check) => productionSharePay.reviewNote(check.name, check.productionShare && check.productionShare.needsReviewCount)).filter(Boolean);
+    const reviewNotes = view.checks.flatMap((check) => [
+      productionSharePay.reviewNote(check.name, check.productionShare && check.productionShare.needsReviewCount),
+      productionSharePay.takeBackNote(check.name, check.productionShare && check.productionShare.takeBackToSetCount),
+    ]).filter(Boolean);
     if (reviewNotes.length) view.productionShareNotes = reviewNotes;
   }
   return view;
@@ -1312,6 +1315,7 @@ async function draftRun(input, actor, conn = db) {
   const today = etDateString();
   const seasonScores = await readSeasonScores(conn, payDate);
   const shareInputs = await productionSharePay.readInputs(conn, start);
+  await productionSharePay.alertRefundFlags(shareInputs);
   let runId;
   try {
     runId = await conn.transaction(async (trx) => {
@@ -1351,6 +1355,7 @@ async function recomputeRun(runId, actor, conn = db) {
   const today = etDateString();
   const seasonScores = await readSeasonScoresOfRun(conn, runId);
   const shareInputs = await readShareInputsOfRun(conn, runId);
+  await productionSharePay.alertRefundFlags(shareInputs);
   await conn.transaction(async (trx) => {
     await lockRunWrite(trx, today);
     const run = await loadRun(trx, runId, { lock: true });
@@ -1611,6 +1616,8 @@ async function setCheckNumber(checkId, input, actor, conn = db) {
 const stubShare = (figures, shareCents) => ({
   creditedCents: figures.creditedCents, barCents: figures.barCents, aboveBarCents: figures.aboveBarCents,
   rateBps: figures.rateBps, barType: figures.barType, shifts: figures.shifts, shareCents,
+  // Refund take-backs moved this week (the net, negative = credit given back): creditedCents is after them (payroll-production-share.js).
+  ...(Number(figures.refundTakeBackCents) ? { refundTakeBackCents: Number(figures.refundTakeBackCents) } : {}),
 });
 
 async function getStub(checkId, conn = db) {

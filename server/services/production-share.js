@@ -1,7 +1,8 @@
 /**
  * Production share, PR 1: the weekly CREDIT, its dated settings and the numbers an admin preview shows (Technician
  * Terms v3, "Production share"; owner 2026-11-23). It pays NOTHING: no pay line, no check, no gate. PR 2 puts the share
- * on the paycheck; PR 3 takes refunds back.
+ * on the paycheck; PR 3a asks the owner about refunds (production-share-refunds.js: the code never measures a refund, it detects one
+ * and the owner sets the take-back).
  *
  * The rule, in integer cents:
  *   share = rate x max(0, credited production - bar), never below $0.
@@ -45,8 +46,11 @@
  *     pay is never guessed up.
  *   - $0                                a free assessment (no-cost-visit-types.js isConsultationServiceType with no
  *     price of its own) and the always-free visit types (isAlwaysFreeServiceType).
- *   - A refund                          takes back the credit of that stop; PR 3 does it. PR 1 only exposes the stop's
- *     refund total (refundCents): refunds on the payments of the visit's linked invoices (the same links and the same split
+ *   - A refund                          the code does NOT work out what a refund takes back (owner 2026-11-25). A stop with ANY refund
+ *     signal (production-share-refunds.js refundSignalsOf: payments, parked refunds, returned credit, a refunded invoice, a statement
+ *     refund) is $0 and needs review, kind refund_flagged, until the owner sets its credit; a refund that appears on a stop a final check
+ *     already paid is listed (takeBackToSet) and the owner sets the total to take back. refundCents is only the stop's recorded refund
+ *     total, shown for information: refunds on the payments of the visit's linked invoices (the same links and the same split
  *     as the amount), plus, for a prepaid plan visit, its share of the refunds on the term's prepay invoice, spread over the
  *     term's stamped visits so the shares add up to the term refund. The term invoice is counted once, in the term share.
  */
@@ -58,6 +62,7 @@ const { completionInvoiceAmount, hasAuthoritativeZeroPrice, ANNUAL_PREPAY_PREPAI
 const { NON_CHARGEABLE_CLOSEOUT_OUTCOMES } = require('./visit-outcomes');
 const { TWO_TREATMENT_PACKAGE_KEYS } = require('./typed-followup-obligation');
 const { isReService } = require('./re-service');
+const refunds = require('./production-share-refunds');
 const {
   isAlwaysFreeServiceType, isConsultationServiceType,
   ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX,
@@ -790,7 +795,7 @@ async function loadCreditFacts(conn, stops) {
   // The stops, and every visit of their packages (root and siblings): the related ids of a stop reach the invoices of all of them.
   const billed = await billedByVisit(conn, [...new Set([...stops.map((stop) => stop.id),
     ...[...jobs.values()].filter((job) => job && job.root).flatMap((job) => [job.root.id, ...job.planned])])]);
-  return { jobs, billed, prepaidRefunds: await termRefunds(conn, stops) };
+  return { jobs, billed, prepaidRefunds: await termRefunds(conn, stops), signals: await refunds.refundSignalsOf(conn, stops.map((stop) => stop.id)) };
 }
 
 // What a visit was billed, as plain sorted data: the amounts and the visits and weights of each invoice, so a price edited, a visit added to
@@ -848,7 +853,7 @@ function packageSlotOf(stop, job, callback, credit) {
  * from them). `facts` = loadCreditFacts of a wider set of stops (the pay run reads them once for everyone); read here when not given.
  */
 async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) {
-  const { jobs, billed, prepaidRefunds } = facts || await loadCreditFacts(conn, stops);
+  const { jobs, billed, prepaidRefunds, signals } = facts || await loadCreditFacts(conn, stops);
 
   const rows = [];
   for (const stop of stops) {
@@ -877,6 +882,8 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
       // So the owner can find the visit behind a review row (the preview only; never stored with a check).
       scheduledDate: stop.scheduled_day || null, address: addressLine(stop), completedAt: stop.completed_at ? new Date(stop.completed_at).toISOString() : null, ...shown,
       refundCents: (invoiced.refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
+      // Every sign of a refund on the visit's invoices (production-share-refunds.js), sorted: a stop with any is flagged in applyLedger.
+      refundSignals: (signals && signals.get(canonicalId(stop.id))) || [],
       // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
       unallocatedRefunds: invoiced.unallocated || [],
       ledger: ledgerOf(credit, invoiced),
@@ -950,6 +957,17 @@ async function paidLedger(conn, visitIds, invoiceIds, rootIds, weekStart) {
   return ledger;
 }
 
+const REFUND_FLAGGED_REASON = 'A refund is recorded on this visit. Set its credit in the production share preview.';
+
+// A stop that would credit above $0 and has a refund signal is $0 and needs review until the owner sets its credit (production-share-refunds.js).
+// A stop that is already review, $0 or already paid keeps its own answer; its signals still ride in the conflict tuples.
+function flagRefund(row, result) {
+  const flagged = (row.refundSignals || []).length > 0 && !result.needsReview && result.creditCents > 0 && result.kind !== 'already_paid';
+  if (!flagged) return result;
+  // $0 uses no package slot (a review row records none until the owner sets its credit).
+  return { ...result, bases: [], ...toReview('refund_flagged', REFUND_FLAGGED_REASON) };
+}
+
 // A stop whose work was not done or not confirmed, or that a pay run paid: never credited by the owner's hand (saving a credit refuses
 // it, and an earlier credit is ignored when the stop turns into one).
 const MANUAL_CREDIT_INELIGIBLE = new Set(['not_performed', 'unverified', 'already_paid']);
@@ -967,7 +985,7 @@ const reviewFrom = (row, kind, reason, runs) => ({ ...review(row, kind, reason),
 function applyLedger(rows, paid, overrides = new Map()) {
   return rows.map((row) => {
     const tuples = conflictTuplesOf(row);
-    const base = settle(row);
+    const base = flagRefund(row, settle(row));
     // The owner's credit for this stop and week (stop override) replaces whatever the rules computed, review rows included (a visit a pay
     // run already paid stays already paid). The invoices linked to the visit are still recorded with a paid row, so a later week of
     // another visit of them is caught.
@@ -1035,10 +1053,13 @@ function applyLedger(rows, paid, overrides = new Map()) {
     return [...new Set(touchingRows(row).map((one) => one.runId))].sort();
   }
 
+  // The refund signals of the stop are conflict state too: an override set before a new signal appeared is no longer used (the subset
+  // rule of withOverride reports owner_override_conflict_changed), and the stop's revision moves with them.
   function conflictTuplesOf(row) {
-    return [...new Set(touchingRows(row)
+    return [...new Set([...touchingRows(row)
       .map((one) => JSON.stringify([one.runId, one.weekStart, one.visitId, [...one.invoices].sort(),
-        one.bases.map((basis) => [basis.basisType, basis.basisId, basis.slot]).sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1))])))].sort();
+        one.bases.map((basis) => [basis.basisType, basis.basisId, basis.slot]).sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1))])),
+    ...(row.refundSignals || []).map((id) => `refund:${id}`)])].sort();
   }
 
   // A short revision of the stop as the rules see it: their kind, the visit, its pricing facts (service type, the original work of a
@@ -1157,7 +1178,7 @@ async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
  * The ledger is applied to all of them together: one paid-ledger read, and the REMAINING of an invoice or a job shared by two
  * technicians is split once.
  */
-async function weekCreditsFor(conn, settingsById, weekStart, { skipOverrides = false, retryPerTechnician = true } = {}) {
+async function weekCreditsFor(conn, settingsById, weekStart, { skipOverrides = false, retryPerTechnician = true, refundLedger = true } = {}) {
   requireWeek(weekStart);
   const ids = [...settingsById.keys()].map(canonicalId);
   const stops = await weekStops(conn, ids, weekStart);
@@ -1191,15 +1212,38 @@ async function weekCreditsFor(conn, settingsById, weekStart, { skipOverrides = f
   const done = applyLedger(all, await paidOf(conn, all, weekStart), skipOverrides ? new Map() : await overridesOf(conn, weekStart));
   const byVisit = new Map(done.map((row) => [row.visitId, row]));
   for (const [id, one] of credits) if (one.rows) credits.set(id, { ...one, rows: one.rows.map((row) => byVisit.get(row.visitId)) });
+  if (refundLedger) await attachRefundLedger(conn, credits, ids, weekStart, retryPerTechnician, message);
   return credits;
 }
 
 /**
- * The credit rows of one technician for a pay week, from the same grouped read the pay run uses (weekCreditsFor over every W-2
+ * What the paid weeks ask of this week and what the owner answered (production-share-refunds.js refundLedgerOf), per technician, read in
+ * a savepoint so a failed read ends there. Sets takeBackOwed / takeBackToSet / takeBackAnswers on each entry of `credits` that has rows.
+ * When the shared read fails, a draft or preview (retryPerTechnician) reads each technician on his own and marks him `degraded` (a draft
+ * built from it is never the one a finalize accepts); under the lock (no retry) every technician is an error.
+ */
+async function attachRefundLedger(conn, credits, ids, weekStart, retryPerTechnician, message) {
+  let ledger = null;
+  let ledgerError = null;
+  try { ledger = await conn.transaction((sp) => refunds.refundLedgerOf(sp, ids, weekStart)); } catch (err) { ledgerError = err; }
+  for (const [id, one] of credits) {
+    if (!one.rows) continue;
+    let mine = ledger && ledger.get(id);
+    let degraded = Boolean(one.degraded);
+    if (!mine && retryPerTechnician) {
+      try { mine = (await conn.transaction((sp) => refunds.refundLedgerOf(sp, [id], weekStart))).get(id); degraded = true; } catch (err) { ledgerError = err; }
+    }
+    if (!mine) { credits.set(id, { error: message(ledgerError) }); continue; }
+    credits.set(id, { ...one, ...(degraded ? { degraded: true } : {}), takeBackOwed: mine.owed, takeBackToSet: mine.toSet, takeBackAnswers: mine.answers });
+  }
+}
+
+/**
+ * The credit rows and refund ledger of one technician for a pay week, from the same grouped read the pay run uses (weekCreditsFor over every W-2
  * technician with settings in force, plus this one): the credits of a basis shared with another technician's stops are split once, so
  * the preview shows what a pay run draws. Throws the read's own error for this technician.
  */
-async function creditsOfWeek(conn, technicianId, weekStart, settings, opts = {}) {
+async function weekOfTechnician(conn, technicianId, weekStart, settings, opts = {}) {
   const settingsById = new Map();
   for (const id of await conn('technicians').where({ employment_type: 'w2' }).pluck('id')) {
     // Another employee's settings that cannot be read leave that employee out of the preview, not the selected one.
@@ -1211,8 +1255,12 @@ async function creditsOfWeek(conn, technicianId, weekStart, settings, opts = {})
   settingsById.set(technicianId, settings);
   const one = (await weekCreditsFor(conn, settingsById, weekStart, opts)).get(technicianId);
   if (one.error) throw new PayrollError(500, `The production share could not be worked out: ${one.error}`);
-  return one.rows;
+  return one;
 }
+
+// The credit rows alone (the owner's stop credit reads no refund ledger).
+const creditsOfWeek = async (conn, technicianId, weekStart, settings, opts = {}) => (
+  await weekOfTechnician(conn, technicianId, weekStart, settings, { ...opts, refundLedger: false })).rows;
 
 // ---------------------------------------------------------------- stop credit overrides
 
@@ -1357,9 +1405,13 @@ async function previewWeek(technicianId, weekStart, conn = db) {
   const settings = await settingsFor(conn, id, weekStart);
   // The week as the pay run works it out: every W-2 technician with numbers in force is read together (an invoice or a package shared
   // by two technicians is split once), and this technician's rows are returned.
-  const stops = await creditsOfWeek(conn, id, weekStart, settings);
+  const week = await weekOfTechnician(conn, id, weekStart, settings);
+  const stops = week.rows;
   const days = shiftDays(stops);
-  const result = shareForWeek({ credits: stops, shifts: days.length, settings });
+  // A take-back the owner set for a refund on a paid stop comes off the week's credited production, as the pay run takes it.
+  const applied = refunds.applyTakeBacks(stops, week.takeBackOwed);
+  const result = shareForWeek({ credits: [applied.creditedCents], shifts: days.length, settings });
+  await require('./production-share-refund-alerts').raiseRefundFlagAlerts({ technicianId: id, stops, takeBackToSet: week.takeBackToSet });
   // The conflict tuples stay on the server: the page gets the stop's revision.
   const shown = stops.map((stop) => { const copy = { ...stop }; delete copy.conflictTuples; return copy; });
   return {
@@ -1373,6 +1425,13 @@ async function previewWeek(technicianId, weekStart, conn = db) {
     stops: shown,
     needsReview: shown.filter((stop) => stop.needsReview),
     refundCents: stops.reduce((sum, stop) => sum + stop.refundCents, 0),
+    // Refunds the owner is asked about: paid stops with a new refund (takeBackToSet), his answers (takeBackAnswers, with the total he set),
+    // and what this week takes (takeBacks, signed; negative = credit given back; refundTakeBackCents is the net, owedTakeBackCents all that is owed).
+    takeBackToSet: week.takeBackToSet,
+    takeBackAnswers: week.takeBackAnswers,
+    takeBacks: applied.takeBacks,
+    refundTakeBackCents: applied.refundTakeBackCents,
+    owedTakeBackCents: week.takeBackOwed.reduce((sum, one) => sum + Math.max(0, one.cents), 0),
     // Whole refunds on shared invoices that could not be split, each invoice once.
     unallocatedRefundCents: [...new Map(stops.flatMap((stop) => stop.unallocatedRefunds).map((u) => [u.invoiceId, u.refundCents])).values()]
       .reduce((sum, cents2) => sum + cents2, 0),
@@ -1382,4 +1441,5 @@ async function previewWeek(technicianId, weekStart, conn = db) {
 module.exports = {
   allocateCents, BAR_TYPES, OWN_CALLBACK_DAYS, shareForWeek, jobPartCents, shiftDays, settingsFor, settingsHistory, saveSettings, weekCredits, weekCreditsFor, weekStops, creditsOfStops, paidLedger, applyLedger, loadCreditFacts,
   previewWeek, overridesOf, setStopOverride, clearStopOverride,
+  setRefundTakeBack: refunds.setRefundTakeBack, clearRefundTakeBack: refunds.clearRefundTakeBack,
 };
