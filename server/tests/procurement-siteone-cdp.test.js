@@ -116,7 +116,7 @@ function screens(w) {
   const review = {
     [S.body]: [el({ text: w.reviewBody, throws: w.bodyThrows })],
     [S.reviewTender]: w.hideTender ? [] : [live(el({ onRead: () => { w.tenderReads += 1; if (w.onTenderRead) w.onTenderRead(w.tenderReads, w); } }), () => w.reviewTenderText)],
-    [S.reviewPickup]: [el({ text: w.reviewPickupText })],
+    [S.reviewPickup]: [live(el({}), () => w.reviewPickupText)],
     [S.reviewAccount]: w.hideReviewAccount ? [] : [el({ text: w.reviewAccountText })],
     [S.reviewItemCode]: [el({ text: w.reviewCode, children: { [S.reviewItemBlock]: [el({ children: { [S.reviewQty]: w.reviewQtyNode ? [el({ text: w.reviewQtyText })] : [] } })] } })],
     [S.reviewTotal]: [live(el({}), () => w.reviewTotalText)],
@@ -162,6 +162,11 @@ function wrap(spec) {
       if (!Object.getOwnPropertyDescriptor(spec.dom, 'innerText')) {
         Object.defineProperty(spec.dom, 'innerText', { configurable: true, get: () => { if (spec.onRead) spec.onRead(); return spec.text; } });
         Object.defineProperty(spec.dom, 'disabled', { configurable: true, get: () => !spec.enabled });
+        // The page this node lives on, as the click step sees it: its URL and the shown matches of a selector.
+        Object.defineProperty(spec.dom, 'ownerDocument', { configurable: true, get: () => ({
+          location: { get href() { return spec.world.url; } },
+          querySelectorAll: (sel) => (spec.world.currentScreen()[sel] || []).filter((n) => n.visible).map(() => ({ offsetParent: {} })),
+        }) });
         spec.dom.click = () => { spec.world.handleClicks.push({ dom: true }); if (spec.name) spec.world.clicks.push(spec.name); if (spec.onClick) spec.onClick(); };
       }
       return {
@@ -189,6 +194,7 @@ function makeBrowser(w) {
     if (w.signedOutHeader) screen[S.signInMarker] = tag([el({ text: w.signInText })]);
     return screen;
   };
+  w.currentScreen = () => current();
   const page = {
     url: () => (w.signedOut && w.signInUrl ? w.signInUrl : w.url),
     goto: async (url) => { w.gotos.push(url); w.url = url; w.poDraft = null; },
@@ -202,7 +208,8 @@ function makeBrowser(w) {
       return collection(current()[sel] || []);
     },
     close: async () => { w.pageCloseCalls += 1; w.closeOrder.push('page'); },
-    evaluate: async (fn, arg) => fn(arg.map((h) => (h && h.dom ? h.dom : h))),
+    // Handles anywhere in the argument (as Playwright serializes them) arrive as their DOM nodes.
+    evaluate: async (fn, arg) => { const unwrap = (v) => (v && v.dom ? v.dom : Array.isArray(v) ? v.map(unwrap) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, unwrap(x)])) : v); return fn(unwrap(arg)); },
   };
   const browser = {
     contexts: () => [{ newPage: async () => page }],
@@ -828,7 +835,13 @@ test('R8 click: the total and tender are the last reads before the click; a chan
   const inStep = await run({ onTenderRead: (n, w) => { if (n === 4) w.reviewTenderText = 'Payment Method Credit Card, Spark-6646'; } });
   expect(inStep.error.refuse).toBe('review_changed');
   expect(inStep.error.message).toMatch(/changed/);
-  for (const r of [atBind, inStep]) {
+  // A different pickup branch, or a new URL, appearing inside that same step: refused, no click.
+  const pickup = await run({ onTenderRead: (n, w) => { if (n === 4) w.reviewPickupText = 'Pickup Sarasota 112'; } });
+  expect(pickup.error.refuse).toBe('review_changed');
+  const moved = await run({ onTenderRead: (n, w) => { if (n === 4) w.url += '?cart=other'; } });
+  expect(moved.error.refuse).toBe('review_changed');
+  expect(moved.error.message).toMatch(/\(url\)/);
+  for (const r of [atBind, inStep, pickup, moved]) {
     expect(r.w.placed).toBe(0);
     expect(r.w.clicks).not.toContain('place-order');
     expectSafe(r.w);

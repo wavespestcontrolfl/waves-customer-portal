@@ -751,8 +751,20 @@ function claimIneligibility({ product, request, vendor }) {
  * ledger row inserted 'placing', commit. Returns { skipped[, cancelled] } or
  * the claim ({ request, vendor, adapterKey, product, ledger, pricing, order }).
  */
+// The Mac runner's two claim rules (SITEONE_ORDER_RUNNER=mac). The server's marker slot places
+// nothing: the Mac claims this vendor (no ledger row, no bell here). And a request the watchdog
+// handed to the office is never claimed by the Mac too — a person orders it now; a claim would buy
+// it twice. (Its vendor scope, onlyAdapters, is checked on the LOCKED vendor row in the caller: a
+// vendor edit after the unlocked pre-filter makes a request out of scope, never a "no adapter"
+// hand-off.)
+function macRunnerSkip(adapter, m) {
+  if (adapter.remoteRunner) return 'remote_runner';
+  if (m.macHandedOffAt) return 'handed_to_office';
+  return null;
+}
+
 // The request's vendor must be active, have an adapter, and be gated on.
-async function resolveClaimVendor(trx, { request, registry, deadAdapters = null, login = null }) {
+async function resolveClaimVendor(trx, { request, registry, deadAdapters = null, login = null, onlyAdapters }) {
   const m = meta(request.metadata);
   if (!m.vendorId) return { skipped: 'no_vendor' };
   // Locked: a vendor edit (password rotation, account change) between the
@@ -760,17 +772,15 @@ async function resolveClaimVendor(trx, { request, registry, deadAdapters = null,
   // below sees the prefetch's row (Codex #3853 r15 P1).
   const vendor = await trx('vendors').where({ id: m.vendorId }).forUpdate().first('id', 'name', 'code', 'active', 'updated_at');
   const adapterKey = adapterKeyFor(vendor);
+  if (onlyAdapters && !onlyAdapters.includes(adapterKey)) return { skipped: 'out_of_scope' };
   if (!vendor || vendor.active === false || !adapterKey || !registry[adapterKey]) return { skipped: 'no_adapter' };
   if (!gateEnvValue(VENDOR_GATE[adapterKey])) return { skipped: 'vendor_gated' };
   // An adapter that already failed run-level THIS run (its DNS, browser or
   // credential store is down) gets no further claims this run — the request
   // stays open for tomorrow, no ledger row is written (Codex r8 P1).
   if (deadAdapters && deadAdapters.has(adapterKey)) return { skipped: 'adapter_down' };
-  // The Mac places this vendor's orders: the server claims nothing (no ledger row, no bell here).
-  if (registry[adapterKey].remoteRunner) return { skipped: 'remote_runner' };
-  // The watchdog handed this request to the office (the Mac missed it): a person orders it now, so
-  // the Mac must never claim it too — that would buy it twice.
-  if (m.macHandedOffAt) return { skipped: 'handed_to_office' };
+  const macSkip = macRunnerSkip(registry[adapterKey], m);
+  if (macSkip) return { skipped: macSkip };
   // The same credential check canAutoOrder makes: an adapter without its key
   // must not claim (and retire the manual bell) only to park every request as
   // "no prior order" — hand it back instead (Codex r21 P2).
@@ -940,7 +950,7 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
   return { ledger, pricing, order };
 }
 
-async function claimRequest(trx, { requestId, registry, deadAdapters = null, login = null, now = new Date() }) {
+async function claimRequest(trx, { requestId, registry, deadAdapters = null, login = null, now = new Date(), onlyAdapters = null }) {
   // The product's pricing advisory lock FIRST — the lock every
   // vendor_pricing writer holds to commit — then the request row, then the
   // product row: the sweep's order (auto-reorder.js lockProductPricing), so
@@ -962,7 +972,7 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
   // (or may): never claim it for the bot as well. The email claim takes this same request
   // row lock, so the two cannot both pass.
   if (await emailOrderOutFor(trx, requestId)) return { skipped: 'email_order' };
-  const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters, login });
+  const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters, login, onlyAdapters });
   if (resolved.skipped) return resolved;
   const { vendor, adapterKey, m, credentials = null } = resolved;
   const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
@@ -1513,7 +1523,7 @@ async function macWatchdog(conn, requestId, notify, now = new Date(), env = proc
   return { macHandedOff: true, ...(await bellUndispatchable(conn, requestId, notify, now)) };
 }
 
-async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env, deadAdapters = null } = {}) {
+async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env, deadAdapters = null, onlyAdapters = null } = {}) {
   // The master gate closing between the 6:10 sweep (which stood down its own
   // bell because this lane would order) and the dispatch is the same
   // hand-off as a vendor gate: the request gets the sweep's deduped bell
@@ -1521,7 +1531,7 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await bellUndispatchable(conn, requestId, notify, now)) };
   const registry = adapters || loadAdapters();
   const login = await prefetchVendorLogin(conn, requestId, registry, deadAdapters);
-  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login, now }));
+  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login, now, onlyAdapters }));
   // A request the watchdog handed to the office keeps going through the watchdog's locked, eligibility-
   // checked hand-off under EITHER runner (the server after SITEONE_ORDER_RUNNER is unset, or the Mac): a
   // hand-off bell that failed to land is re-rung, and a need that is gone is cancelled.
@@ -1619,7 +1629,7 @@ async function dispatchPasses({ conn, notify, adapters, now, env, onlyAdapters =
       seen.add(row.id);
       if (onlyAdapters && !onlyAdapters.includes(await requestAdapterKey(conn, row.id))) continue;
       try {
-        const result = await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env, deadAdapters });
+        const result = await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env, deadAdapters, onlyAdapters });
         results.push(result);
         // Not a run-level error — the request parked with its bell — but the
         // adapter is done for this run (a rejected login: Codex #3853 r21 P1).

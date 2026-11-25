@@ -47,7 +47,11 @@ function readLiveRailwayVars() {
 function liveStopReason(live, launch) {
   if (!ON(live.GATE_AUTO_ORDER) || !ON(live.GATE_AUTO_ORDER_SITEONE)) return 'an auto-order gate is off now';
   if (String(live.SITEONE_ORDER_RUNNER || '').trim().toLowerCase() !== 'mac') return 'SITEONE_ORDER_RUNNER is no longer mac';
-  if (String(live.SITEONE_BOT_DRY_RUN ?? '') !== String(launch.SITEONE_BOT_DRY_RUN ?? '')) return 'SITEONE_BOT_DRY_RUN changed since launch';
+  // The caps the reservation enforces are the launch values; a cap changed since launch (lowered or
+  // raised) stops the run rather than reserve against a limit the owner has replaced.
+  for (const k of ['SITEONE_BOT_DRY_RUN', 'AUTO_ORDER_MAX_PER_ORDER_CENTS', 'AUTO_ORDER_MAX_MONTHLY_CENTS']) {
+    if (String(live[k] ?? '').trim() !== String(launch[k] ?? '').trim()) return `${k} changed since launch`;
+  }
   return null;
 }
 function withLiveSwitches(adapter, { readLive = readLiveRailwayVars, launch = process.env } = {}) {

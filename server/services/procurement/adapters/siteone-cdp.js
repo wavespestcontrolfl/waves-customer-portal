@@ -787,18 +787,42 @@ async function bindToClick(run, first) {
   const current = await again.button.elementHandle();
   const same = await page.evaluate(([x, y]) => x === y && x.isConnected, [handle, current]).catch(() => false);
   if (!same || !(await handle.isEnabled().catch(() => false))) throw new RefusedError('place_button_replaced', 'SiteOne review: the Place order button was replaced or detached after the checks — nothing clicked', evidence);
-  // The payable total and the tender are the LAST reads before the click (after every other check),
-  // read from the exact nodes the click step re-checks inside the browser.
-  const tenderNodes = await shownAll(page, SELECTORS.reviewTender);
-  const totalNodes = await shownAll(page, SELECTORS.reviewTotal);
-  if (tenderNodes.length !== 1 || totalNodes.length !== 1) throw new RefusedError('review_fields_unreadable', 'SiteOne review: the payment method or total is not exactly one shown field at the click', evidence);
-  const rawTender = String(await tenderNodes[0].innerText()).trim();
-  const rawTotal = String(await totalNodes[0].innerText()).trim();
-  if (parseMoney(rawTotal) !== first.totalCents || normalizeText(rawTender) !== first.tender) throw new RefusedError('review_changed', 'SiteOne review changed at the click — nothing clicked', evidence, parseMoney(rawTotal));
-  const tenderHandle = await tenderNodes[0].elementHandle();
-  const totalHandle = await totalNodes[0].elementHandle();
-  if (!tenderHandle || !totalHandle) throw new RefusedError('review_fields_unreadable', 'SiteOne review: the payment method or total node could not be bound at the click', evidence);
-  return { handle, baseline, totalCents: again.totalCents, tenderHandle, totalHandle, rawTender, rawTotal };
+  // Every field the cap check approved — tender, pickup, bill-to account, item, quantity, total — is
+  // bound to its exact node and raw text here, proven equal to the approved review, and checked again
+  // with the review URL inside the one browser step that clicks (clickPlaceOrder).
+  const fields = await bindReviewFields(run, first);
+  return { handle, baseline, totalCents: again.totalCents, fields, href: page.url() };
+}
+
+// The top-level review fields (each exactly one shown node) and what each must still read.
+const BOUND_FIELDS = [
+  ['reviewTender', (run, raw, first) => normalizeText(raw) === first.tender],
+  ['reviewPickup', (run, raw, first) => normalizeText(raw) === first.pickup],
+  ['reviewAccount', (run, raw) => { checkAccountText(run, raw, 'review account at the click'); return true; }],
+  ['reviewItemCode', (run, raw, first) => itemNumberAfterColon(raw) === first.code],
+  ['reviewTotal', (run, raw, first) => parseMoney(raw) === first.totalCents],
+];
+
+async function bindReviewFields(run, first) {
+  const { page, evidence } = run;
+  const fields = [];
+  const bindOne = async (node, selector, ok) => {
+    const raw = String(await node.innerText()).trim();
+    if (!ok(raw)) throw new RefusedError('review_changed', 'SiteOne review changed at the click — nothing clicked', evidence);
+    const handle = await node.elementHandle();
+    if (!handle) throw new RefusedError('review_fields_unreadable', 'SiteOne review: a review field could not be bound at the click', evidence);
+    fields.push({ selector, handle, raw });
+  };
+  for (const [key, check] of BOUND_FIELDS) {
+    const nodes = await shownAll(page, SELECTORS[key]);
+    if (nodes.length !== 1) throw new RefusedError('review_fields_unreadable', `SiteOne review: ${nodes.length} ${key} fields shown at the click (expected exactly one)`, evidence);
+    await bindOne(nodes[0], SELECTORS[key], (raw) => check(run, raw, first));
+  }
+  const block = (await shownAll(page, SELECTORS.reviewItemCode))[0].locator(SELECTORS.reviewItemBlock);
+  const qtyNodes = (await block.count().catch(() => 0)) ? await shownAll(block.nth(0), SELECTORS.reviewQty) : [];
+  if (qtyNodes.length !== 1) throw new RefusedError('review_qty_unreadable', 'SiteOne review: the item quantity could not be read at the click', evidence);
+  await bindOne(qtyNodes[0], null, (raw) => { const f = raw.match(/\d+/g) || []; return f.length === 1 && Number(f[0]) === first.qty; });
+  return fields;
 }
 
 // From the click on, every failure is ambiguous: the order may exist.
@@ -808,13 +832,18 @@ async function clickPlaceOrder(run, bound) {
   // text the cap check approved, then the click — nothing can change between the check and the click.
   let fired;
   try {
-    fired = await page.evaluate(([btn, total, tender, wantTotal, wantTender]) => {
+    fired = await page.evaluate(([btn, href, fields]) => {
       if (!btn || !btn.isConnected || btn.disabled) return { clicked: false, why: 'button' };
-      if (!total || !total.isConnected || !tender || !tender.isConnected) return { clicked: false, why: 'fields' };
-      if (String(total.innerText).trim() !== wantTotal || String(tender.innerText).trim() !== wantTender) return { clicked: false, why: 'changed' };
+      const doc = btn.ownerDocument;
+      if (!doc) return { clicked: false, why: 'url' };
+      for (const f of fields) {
+        if (!f.node || !f.node.isConnected || String(f.node.innerText).trim() !== f.raw) return { clicked: false, why: 'changed' };
+        if (f.selector && [...doc.querySelectorAll(f.selector)].filter((e) => e.offsetParent !== null).length !== 1) return { clicked: false, why: 'fields' };
+      }
+      if (doc.location.href !== href) return { clicked: false, why: 'url' };
       btn.click();
       return { clicked: true };
-    }, [bound.handle, bound.totalHandle, bound.tenderHandle, bound.rawTotal, bound.rawTender]);
+    }, [bound.handle, bound.href, bound.fields.map((f) => ({ node: f.handle, raw: f.raw, selector: f.selector }))]);
   } catch (err) {
     // The task may have run the click before it failed: the order may exist.
     run.submitted = true;

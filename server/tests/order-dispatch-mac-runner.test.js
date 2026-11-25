@@ -230,6 +230,21 @@ describe('the Mac run', () => {
     expect(autoReorder.ringRestockBell.mock.calls[0][0].request.id).toBe('r1');
   });
 
+  test('the vendor scope is re-applied to the LOCKED vendor: an edit after the pre-filter is out of scope, no hand-off bell', async () => {
+    const state = baseState({ request: request() });
+    const read = state.read;
+    let vendorReads = 0;
+    // The unlocked pre-filter sees SiteOne; the vendor was re-mapped before the claim's locked read.
+    state.read = (table, q, cols) => (table === 'vendors' ? ((vendorReads += 1) === 1 ? SITEONE : STICKER) : read(table, q, cols));
+    state.list = (table) => (table === 'product_restock_requests as prr' ? [{ id: 'r1' }] : []);
+    const place = jest.fn();
+    const out = await dispatch.runVendorOrderDispatch({ conn: fakeConn(state), adapters: { siteone: { place, configured: () => true, quotesAtPlace: true } }, onlyAdapters: ['siteone'], reconcile: false, now: NOW, env: {} });
+    expect(out.results).toEqual([expect.objectContaining({ requestId: 'r1', skipped: 'out_of_scope' })]);
+    expect(place).not.toHaveBeenCalled();
+    expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
+    expect(state.inserts).toHaveLength(0);
+  });
+
   test('the PO number is short, upper case and built from the ledger id', () => {
     expect(dispatch._internals.poNumberFor({ id: '5488075d-1234-4abc-9def-000000000000' })).toBe('WAVES-5488075D');
   });
@@ -293,6 +308,11 @@ describe('the Mac run', () => {
     expect(liveStopReason({ ...on, GATE_AUTO_ORDER: '' }, launch)).toMatch(/gate is off/);
     expect(liveStopReason({ ...on, SITEONE_ORDER_RUNNER: '' }, launch)).toMatch(/no longer mac/);
     expect(liveStopReason({ ...on, SITEONE_BOT_DRY_RUN: 'true' }, launch)).toMatch(/changed since launch/);
+    const capped = { ...launch, AUTO_ORDER_MAX_PER_ORDER_CENTS: '35000', AUTO_ORDER_MAX_MONTHLY_CENTS: '40000' };
+    const liveCapped = { ...on, AUTO_ORDER_MAX_PER_ORDER_CENTS: '35000', AUTO_ORDER_MAX_MONTHLY_CENTS: '40000' };
+    expect(liveStopReason(liveCapped, capped)).toBeNull();
+    expect(liveStopReason({ ...liveCapped, AUTO_ORDER_MAX_MONTHLY_CENTS: '10000' }, capped)).toMatch(/AUTO_ORDER_MAX_MONTHLY_CENTS changed/);
+    expect(liveStopReason({ ...liveCapped, AUTO_ORDER_MAX_PER_ORDER_CENTS: '5000' }, capped)).toMatch(/AUTO_ORDER_MAX_PER_ORDER_CENTS changed/);
 
     let live = on;
     const cap = jest.fn(async () => ({ ok: true }));
