@@ -127,8 +127,23 @@ const ADAPTER_BY_CODE = { 1: 'siteone', 25: 'stickermule' };
 const ADAPTER_BY_NAME = { siteone: 'siteone', 'sticker mule': 'stickermule' };
 const VENDOR_GATE = { siteone: 'GATE_AUTO_ORDER_SITEONE', stickermule: 'GATE_AUTO_ORDER_STICKERMULE' };
 
-function loadAdapters() {
-  return { siteone: require('./adapters/siteone'), stickermule: require('./adapters/stickermule') };
+// SiteOne blocks every server-side browser (ERR_HTTP2_PROTOCOL_ERROR) and takes no email orders, so its
+// orders are placed by a job on the owner's Mac that drives his own signed-in Chrome
+// (scripts/siteone-mac-order-run.js + adapters/siteone-cdp.js). With SITEONE_ORDER_RUNNER=mac the
+// server's registry holds a marker in SiteOne's place: canAutoOrder still reads the vendor as
+// automatic (gate + marker; no stored login is needed), so the sweep stands down its manual bell, but
+// the server never claims a SiteOne request (resolveClaimVendor → remote_runner). The Mac passes its
+// own registry, so this marker is never loaded there. A request the Mac has not touched for
+// SITEONE_MAC_STALE_HOURS goes to the office (macWatchdog).
+const REMOTE_RUNNER = 'mac';
+const siteoneRunsOnMac = (env = process.env) => String(env.SITEONE_ORDER_RUNNER || '').trim().toLowerCase() === REMOTE_RUNNER;
+const MAC_RUNNER_MARKER = Object.freeze({ remoteRunner: REMOTE_RUNNER });
+
+function loadAdapters(env = process.env) {
+  return {
+    siteone: siteoneRunsOnMac(env) ? MAC_RUNNER_MARKER : require('./adapters/siteone'),
+    stickermule: require('./adapters/stickermule'),
+  };
 }
 
 function adapterKeyFor(vendor) {
@@ -751,6 +766,11 @@ async function resolveClaimVendor(trx, { request, registry, deadAdapters = null,
   // credential store is down) gets no further claims this run — the request
   // stays open for tomorrow, no ledger row is written (Codex r8 P1).
   if (deadAdapters && deadAdapters.has(adapterKey)) return { skipped: 'adapter_down' };
+  // The Mac places this vendor's orders: the server claims nothing (no ledger row, no bell here).
+  if (registry[adapterKey].remoteRunner) return { skipped: 'remote_runner' };
+  // The watchdog handed this request to the office (the Mac missed it): a person orders it now, so
+  // the Mac must never claim it too — that would buy it twice.
+  if (m.macHandedOffAt) return { skipped: 'handed_to_office' };
   // The same credential check canAutoOrder makes: an adapter without its key
   // must not claim (and retire the manual bell) only to park every request as
   // "no prior order" — hand it back instead (Codex r21 P2).
@@ -1283,6 +1303,8 @@ async function settledFinalCents(conn, { ledger, placed, quoteCents }) {
 // Stages after a committed claim: price → binding total → vendor call →
 // post-submit detector → record. Every exit is a park, a record, or a
 // run-level throw after releasing the claim.
+const poNumberFor = (ledger) => `WAVES-${String(ledger.id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toUpperCase()}`;
+
 async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
   const { request, vendor, adapterKey, product, ledger, pricing, order, credentials } = claim;
   const adapter = registry[adapterKey];
@@ -1303,7 +1325,9 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     }
     // `credentials` is the login the claim looked up for a login-driven
     // adapter (undefined for every other — the claim already decided which).
-    const base = { vendorSku, quantity, quoteCents, credentials };
+    // An adapter that fills a purchase-order field (the Mac's SiteOne Chrome adapter) gets one built from
+    // the ledger id: the order can be found by it after an ambiguous click.
+    const base = { vendorSku, quantity, quoteCents, credentials, ...(adapter.acceptsPoNumber ? { poNumber: poNumberFor(ledger) } : {}) };
     // An adapter with no static quote reads the vendor's total at the point of
     // sale and runs the cap reservation through beforeSubmit right before it
     // submits (the binding total is the vendor's, never a local estimate).
@@ -1417,6 +1441,37 @@ async function bellUndispatchable(conn, requestId, notify, now = new Date()) {
   return { belled: true };
 }
 
+// The Mac runner's watchdog (server side). The Mac job runs every morning after the sweep and touches
+// each SiteOne request it sees: a claim, a dry-run park, a placed order. A request with no such touch
+// for SITEONE_MAC_STALE_HOURS (default 20: one missed morning) means the Mac, its Chrome or its login
+// is down. The request is then marked handed off — the Mac never claims it after that — and the office
+// gets the sweep's own "order manually" bell. Marking first, then ringing: a lost bell is re-rung by
+// the next run (bellUndispatchable is request-id deduped); a Mac claim can never race a bell.
+const DEFAULT_MAC_STALE_HOURS = 20;
+function macStaleMs(env = process.env) {
+  const h = Number(env.SITEONE_MAC_STALE_HOURS);
+  return (Number.isFinite(h) && h > 0 ? h : DEFAULT_MAC_STALE_HOURS) * 3600 * 1000;
+}
+async function macWatchdog(conn, requestId, notify, now = new Date(), env = process.env) {
+  const request = await conn('product_restock_requests').where({ id: requestId }).first('id', 'status', 'source', 'created_at', 'metadata');
+  if (!request || request.status !== 'open' || request.source !== 'auto_reorder') return {};
+  const m = meta(request.metadata);
+  if (!m.macHandedOffAt) {
+    const ledger = await conn('vendor_orders').where({ restock_request_id: requestId }).first('id', 'updated_at');
+    // A ledger row other than a dry-run park (findDispatchable only returns those) means an order is
+    // out or parked with its own bell: never hand that to the office.
+    if (ledger && !(await conn('vendor_orders').where({ id: ledger.id, status: 'needs_review' }).whereRaw("error LIKE 'dry_run:%'").first('id'))) return {};
+    const lastTouch = Math.max(new Date(request.created_at).getTime(), ledger ? new Date(ledger.updated_at).getTime() : 0);
+    if (now.getTime() - lastTouch < macStaleMs(env)) return {};
+    const marked = await conn('product_restock_requests').where({ id: requestId, status: 'open' })
+      .whereRaw("NULLIF(metadata->>'macHandedOffAt', '') IS NULL")
+      .update({ metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('macHandedOffAt', ?::text)", [now.toISOString()]), updated_at: now });
+    if (!marked) return {};
+    logger.warn(`[order-dispatch] SiteOne request ${requestId} not touched by the Mac runner for ${Math.round((now.getTime() - lastTouch) / 3600000)} h — handed to the office`);
+  }
+  return { macHandedOff: true, ...(await bellUndispatchable(conn, requestId, notify, now)) };
+}
+
 async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env, deadAdapters = null } = {}) {
   // The master gate closing between the 6:10 sweep (which stood down its own
   // bell because this lane would order) and the dispatch is the same
@@ -1426,6 +1481,7 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   const registry = adapters || loadAdapters();
   const login = await prefetchVendorLogin(conn, requestId, registry, deadAdapters);
   const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login, now }));
+  if (claim.skipped === 'remote_runner') return { requestId, skipped: claim.skipped, ...(await macWatchdog(conn, requestId, notify, now, env)) };
   if (claim.skipped) {
     // A lost hand-off bell is reported, not swallowed: the request stays open
     // and unclaimed, so the next run re-rings it — and this run goes red.
@@ -1490,7 +1546,16 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
 // tomorrow; a pass that finds nothing new ends. A run-level error (the
 // environment is broken for every remaining request) stops the batch with
 // its claims released — job_health records it, tomorrow retries.
-async function dispatchPasses({ conn, notify, adapters, now, env }) {
+// The vendor adapter a request would dispatch through (null = none): the Mac runner's onlyAdapters
+// filter, so a SiteOne-only registry never reaches a Sticker Mule request (it would read no_adapter
+// and hand the request to the office while the server's own run would order it).
+async function requestAdapterKey(conn, requestId) {
+  const request = await conn('product_restock_requests').where({ id: requestId }).first('metadata');
+  const vendorId = request ? meta(request.metadata).vendorId : null;
+  return vendorId ? adapterKeyFor(await conn('vendors').where({ id: vendorId }).first('id', 'name', 'code')) : null;
+}
+
+async function dispatchPasses({ conn, notify, adapters, now, env, onlyAdapters = null }) {
   const seen = new Set();
   const results = [];
   let runLevelError = null;
@@ -1508,6 +1573,7 @@ async function dispatchPasses({ conn, notify, adapters, now, env }) {
     if (!rows.length) break;
     for (const row of rows) {
       seen.add(row.id);
+      if (onlyAdapters && !onlyAdapters.includes(await requestAdapterKey(conn, row.id))) continue;
       try {
         const result = await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env, deadAdapters });
         results.push(result);
@@ -1546,17 +1612,20 @@ function runProblems({ results, recovered, bellsPending }) {
   return problems;
 }
 
-async function runVendorOrderDispatch({ conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
+// onlyAdapters + reconcile:false = the Mac runner (scripts/siteone-mac-order-run.js): it dispatches
+// only its own vendor's requests and leaves reconciliation (stale claims, bells that never landed) to
+// the server's 6:10 run, which owns it for every vendor.
+async function runVendorOrderDispatch({ conn = db, notify = null, adapters = null, now = new Date(), env = process.env, onlyAdapters = null, reconcile = true } = {}) {
   // Reconciliation runs BEFORE and REGARDLESS of the gate: a 'placing' claim
   // the dispatcher died on, or a park whose bell never sent, is an order that
   // may already exist at the vendor — killing the lane must surface it, not
   // bury it (pre-push P0). Bells first: the one outcome that must not wait
   // another day. A gated run still walks the dispatchable requests: each is
   // handed off with its bell instead of ordered (Codex r18 P2).
-  const bells = await reringPendingBells({ conn, notify, now });
-  const recovered = await recoverStalePlacing({ conn, notify, now });
+  const bells = reconcile ? await reringPendingBells({ conn, notify, now }) : { rung: [], pending: [] };
+  const recovered = reconcile ? await recoverStalePlacing({ conn, notify, now }) : { recovered: [], unrecovered: [], bellPending: [] };
   const gated = !gateEnvValue(GATE);
-  const { results, seen, runLevelError } = await dispatchPasses({ conn, notify, adapters, now, env });
+  const { results, seen, runLevelError } = await dispatchPasses({ conn, notify, adapters, now, env, onlyAdapters });
   const bellsPending = [...bells.pending, ...recovered.bellPending, ...results.filter((r) => r.bellPending).map((r) => r.ledgerId)];
   logger.info(`[order-dispatch] ${results.filter((r) => r.status === 'placed').length} placed, ${results.filter((r) => r.status === 'needs_review').length} parked, ${results.filter((r) => r.status === 'failed').length} failed, ${results.filter((r) => r.skipped).length} skipped of ${seen.size}; ${bells.rung.length} bells re-rung, ${bellsPending.length} pending`);
   if (runLevelError) throw runLevelError;
@@ -1588,5 +1657,5 @@ module.exports = {
   emailOrderOutFor,
   orderedQuantityFor,
   AUTO_ORDER_GATE: GATE,
-  _internals: { adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS, HEARTBEAT_MS, startClaimHeartbeat },
+  _internals: { siteoneRunsOnMac, macWatchdog, macStaleMs, poNumberFor, requestAdapterKey, adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS, HEARTBEAT_MS, startClaimHeartbeat },
 };
