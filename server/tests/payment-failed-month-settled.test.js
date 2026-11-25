@@ -8,10 +8,11 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const logger = require('../services/logger');
 const {
-  isInvoicelessMonthSettled, isInvoicelessMonthUncollected, isInvoicelessPayload, obligationMonthOf, monthWindow,
+  closeIfMonthCollected, isInvoicelessMonthUncollected, isInvoicelessPayload, obligationMonthOf,
 } = require('../services/payment-failed-month-settled');
 
 const CUSTOMER = '33333333-3333-4333-8333-333333333333';
+const close = jest.fn(async () => 1);
 const PAYLOAD = { invoiceId: null, customerId: CUSTOMER, paymentIntentId: 'pi_x', attemptId: 'ch_x' };
 
 describe('isInvoicelessPayload', () => {
@@ -37,31 +38,19 @@ describe('isInvoicelessPayload', () => {
 });
 
 describe('obligationMonthOf', () => {
-  const MONTHLY = 'Gold WaveGuard Monthly — X';
-  test('prefers a valid billed_month stamp, whatever the description or date', () => {
+  test('a valid billed_month stamp names the month, whatever the description or date', () => {
     expect(obligationMonthOf({ metadata: { billed_month: '2026-10' }, description: 'Manual charge — WaveGuard Gold', payment_date: '2026-11-20' })).toBe('2026-10');
     expect(obligationMonthOf({ metadata: JSON.stringify({ billed_month: '2026-11' }), description: null, payment_date: null })).toBe('2026-11');
   });
 
-  test.each(['garbage', '2026-13', '2026-00', '2026-1', '2026-11-01', 20261, ['2026-11'], ''])('an invalid stamp %p gives no month, never the date fallback', (stamped) => {
-    expect(obligationMonthOf({ metadata: { billed_month: stamped }, description: MONTHLY, payment_date: '2026-11-01' })).toBeNull();
+  test.each(['garbage', '2026-13', '2026-00', '2026-1', '2026-11-01', 20261, ['2026-11'], ''])('an invalid stamp %p gives no month', (stamped) => {
+    expect(obligationMonthOf({ metadata: { billed_month: stamped }, description: 'Gold WaveGuard Monthly — X', payment_date: '2026-11-01' })).toBeNull();
   });
 
-  test('an unstamped legacy row uses the monthly marker and the payment_date month', () => {
-    expect(obligationMonthOf({ metadata: null, description: MONTHLY, payment_date: '2026-11-01' })).toBe('2026-11');
-    expect(obligationMonthOf({ metadata: {}, description: MONTHLY, payment_date: new Date(Date.UTC(2026, 10, 1)) })).toBe('2026-11');
+  test('an unstamped row has NO month: the description marker and payment date are never used', () => {
+    expect(obligationMonthOf({ metadata: null, description: 'Gold WaveGuard Monthly — X', payment_date: '2026-11-01' })).toBeNull();
+    expect(obligationMonthOf({ metadata: {}, description: 'Gold WaveGuard Monthly — X', payment_date: new Date(Date.UTC(2026, 10, 1)) })).toBeNull();
   });
-
-  test('an unstamped row without the marker, or without a date, has no month', () => {
-    expect(obligationMonthOf({ metadata: null, description: 'Manual charge — WaveGuard Gold', payment_date: '2026-11-01' })).toBeNull();
-    expect(obligationMonthOf({ metadata: null, description: MONTHLY, payment_date: null })).toBeNull();
-  });
-});
-
-test('monthWindow spans the whole calendar month', () => {
-  expect(monthWindow('2026-11')).toEqual({ monthKey: '2026-11', monthStart: '2026-11-01', monthEnd: '2026-11-30' });
-  expect(monthWindow('2028-02').monthEnd).toBe('2028-02-29');
-  expect(monthWindow('2026-12').monthEnd).toBe('2026-12-31');
 });
 
 // A connection that records which tables are read and answers from queues.
@@ -83,15 +72,16 @@ function fakeConn({ payments = [], failWith = null } = {}) {
 describe('doubt reads nothing or leaves the bell open', () => {
   test('a payload that is not the dues-failure shape runs no query', async () => {
     const { conn, reads } = fakeConn();
-    expect(await isInvoicelessMonthSettled(conn, { ...PAYLOAD, invoiceId: 'x' })).toBe(false);
+    expect(await closeIfMonthCollected(conn, { ...PAYLOAD, invoiceId: 'x' }, close)).toBe(0);
     expect(await isInvoicelessMonthUncollected(conn, { ...PAYLOAD, allocationUnreadable: true })).toBe(false);
     expect(reads).toEqual([]);
+    expect(close).not.toHaveBeenCalled();
   });
 
   test('no ledger row, or two rows on one PaymentIntent, is open', async () => {
-    expect(await isInvoicelessMonthSettled(fakeConn({ payments: [] }).conn, PAYLOAD)).toBe(false);
+    expect(await closeIfMonthCollected(fakeConn({ payments: [] }).conn, PAYLOAD, close)).toBe(0);
     const row = { id: 1, customer_id: CUSTOMER, status: 'failed', description: 'WaveGuard Monthly', payment_date: '2026-11-01', metadata: { billed_month: '2026-11' } };
-    expect(await isInvoicelessMonthSettled(fakeConn({ payments: [row, { ...row, id: 2 }] }).conn, PAYLOAD)).toBe(false);
+    expect(await closeIfMonthCollected(fakeConn({ payments: [row, { ...row, id: 2 }] }).conn, PAYLOAD, close)).toBe(0);
   });
 
   test('a row of another customer, a non-failed row, or one that names an invoice is open', async () => {
@@ -101,9 +91,10 @@ describe('doubt reads nothing or leaves the bell open', () => {
       { ...row, status: 'paid' },
       { ...row, metadata: { billed_month: '2026-11', invoice_id: 'legacy' } },
       { ...row, metadata: { billed_month: 'garbage' } },
+      { ...row, metadata: null },
     ]) {
       const { conn, reads } = fakeConn({ payments: [bad] });
-      expect(await isInvoicelessMonthSettled(conn, PAYLOAD)).toBe(false);
+      expect(await closeIfMonthCollected(conn, PAYLOAD, close)).toBe(0);
       expect(await isInvoicelessMonthUncollected(conn, PAYLOAD)).toBe(false);
       expect(reads).toEqual(['payments', 'payments']);
     }
@@ -111,8 +102,30 @@ describe('doubt reads nothing or leaves the bell open', () => {
 
   test('a failing read is logged and leaves the bell open, never thrown', async () => {
     const { conn } = fakeConn({ failWith: new Error('db down') });
-    expect(await isInvoicelessMonthSettled(conn, PAYLOAD)).toBe(false);
+    expect(await closeIfMonthCollected(conn, PAYLOAD, close)).toBe(0);
     expect(await isInvoicelessMonthUncollected(conn, PAYLOAD)).toBe(false);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('db down'));
+  });
+});
+
+// The sweep must close under the same locks manual payment Undo takes, in Undo's order.
+describe('lock order is pinned to Undo\'s', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (file) => fs.readFileSync(path.join(__dirname, '..', 'services', file), 'utf8');
+  const order = (src, markers) => markers.map((m) => src.indexOf(m));
+  const ascending = (positions) => positions.every((pos, i) => pos > -1 && (i === 0 || pos > positions[i - 1]));
+
+  test('Undo takes the combined-customer lock, then the receipt-claim lock, then the invoice row', () => {
+    const src = read('invoice-manual-payment-undo.js');
+    expect(ascending(order(src, ['lockCombinedCustomerStable(trx', 'lockInvoiceReceiptClaim(trx, invoiceId)', ".forUpdate().first()"]))).toBe(true);
+  });
+
+  test('the sweep\'s settlement check takes the same three locks in the same order, then closes in the same transaction', () => {
+    const src = read('payment-failed-month-settled.js');
+    expect(ascending(order(src, ['lockCombinedCustomerStable(trx', 'lockInvoiceReceiptClaim(trx, id)', ".forUpdate().select('id')"]))).toBe(true);
+    // the lock helper runs inside the same transaction callback that calls close(trx)
+    const body = src.slice(src.indexOf('async function closeIfMonthCollected'));
+    expect(ascending(order(body, ['conn.transaction(async (trx)', 'lockSettlingInvoices(trx, attempt)).length ? close(trx)']))).toBe(true);
   });
 });

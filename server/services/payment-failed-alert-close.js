@@ -34,34 +34,50 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { parseJson, isUuid, isFailedAllocationSettled } = require('./payment-failed-allocation');
-const { isInvoicelessMonthSettled } = require('./payment-failed-month-settled');
+const { closeIfMonthCollected } = require('./payment-failed-month-settled');
 
 const RESOLUTION = 'The invoice was paid';
 const TRIGGER_KEYS = ['payment_failed', 'bill_payment_error'];
 const TRIGGER_KEYS_SQL = "metadata->>'triggerKey' IN (?, ?)";
 
-// Which of these open bells are obsolete. A bill_payment_error bell is about
-// payload.invoiceId alone (its PaymentIntent may be a combined one); a
-// payment_failed bell judges its whole allocation. A payment_failed bell with
-// no invoice at all (a monthly-dues autopay charge) is judged by its billed
-// month instead (payment-failed-month-settled.js).
-async function isBellSettled(conn, meta) {
-  const payload = meta.payload || {};
-  if (meta.triggerKey === 'bill_payment_error') return isFailedAllocationSettled(conn, { invoiceId: payload.invoiceId });
-  const attempt = { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId, allocationInvoiceIds: payload.allocationInvoiceIds, allocationUnreadable: payload.allocationUnreadable };
-  return (await isFailedAllocationSettled(conn, attempt)) || isInvoicelessMonthSettled(conn, payload);
+// Close these bells as the payments closer (a row a person marked Done is taken
+// over; see openToCloser). Returns how many rows were updated.
+async function closeBells(conn, ids) {
+  const { doneColumns, openToCloser } = require('./notification-service')._private;
+  return openToCloser(conn('notifications').whereIn('id', ids), 'payments')
+    .update(doneColumns({ by: 'payments', resolution: RESOLUTION, keepExisting: true, conn }));
 }
 
-async function settledBellIds(conn, rows) {
+// Is this bell obsolete by its invoice allocation? A bill_payment_error bell is
+// about payload.invoiceId alone (its PaymentIntent may be a combined one); a
+// payment_failed bell judges its whole allocation.
+function isAllocationSettled(conn, meta) {
+  const payload = meta.payload || {};
+  if (meta.triggerKey === 'bill_payment_error') return isFailedAllocationSettled(conn, { invoiceId: payload.invoiceId });
+  return isFailedAllocationSettled(conn, { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId, allocationInvoiceIds: payload.allocationInvoiceIds, allocationUnreadable: payload.allocationUnreadable });
+}
+
+// Close the obsolete bells among `rows`; returns the number closed. Allocation-
+// settled bells close in one update. A payment_failed bell with no invoice at
+// all (a monthly-dues autopay charge) is judged by its billed month instead and
+// closed in the same transaction as its check (payment-failed-month-settled.js).
+// `hookInvoiceId`: the paid-invoice hook, whose own transaction already holds
+// that invoice (the sweep passes none and takes the locks itself).
+async function closeSettledBells(conn, rows, { hookInvoiceId = null } = {}) {
   const closable = [];
+  let closed = 0;
   for (const row of rows || []) {
-    if (await isBellSettled(conn, parseJson(row.metadata))) closable.push(row.id);
+    const meta = parseJson(row.metadata);
+    if (await isAllocationSettled(conn, meta)) closable.push(row.id);
+    else if (meta.triggerKey === 'payment_failed') {
+      closed += await closeIfMonthCollected(conn, meta.payload, (trx) => closeBells(trx, [row.id]), { onlyInvoiceId: hookInvoiceId });
+    }
   }
-  return closable;
+  return closable.length ? closed + await closeBells(conn, closable) : closed;
 }
 
 async function closeRows(invoiceId, conn) {
-  const { doneColumns, openToCloser } = require('./notification-service')._private;
+  const { openToCloser } = require('./notification-service')._private;
   const id = String(invoiceId);
   // Candidates: open bells that name this invoice by either key. Text
   // comparisons only (no uuid cast), so a malformed stored id cannot throw.
@@ -90,10 +106,7 @@ async function closeRows(invoiceId, conn) {
     .select('id', 'metadata');
   // A combined attempt's one bell covers several invoices: close it only when
   // its whole allocation is settled, not when just this invoice is.
-  const closable = await settledBellIds(conn, candidates);
-  if (!closable.length) return 0;
-  return openToCloser(conn('notifications').whereIn('id', closable), 'payments')
-    .update(doneColumns({ by: 'payments', resolution: RESOLUTION, keepExisting: true, conn }));
+  return closeSettledBells(conn, candidates, { hookInvoiceId: id });
 }
 
 // `conn` is a transaction (a savepoint is opened on it) or the pool. Returns
@@ -127,7 +140,7 @@ const SWEEP_CURSOR_KEY = 'payment_failed_alert_sweep_cursor';
 
 async function sweepSettledPaymentFailedAlerts({ conn = db, page = SWEEP_PAGE } = {}) {
   try {
-    const { doneColumns, openToCloser } = require('./notification-service')._private;
+    const { openToCloser } = require('./notification-service')._private;
     const cursorRow = await conn('system_settings').where({ key: SWEEP_CURSOR_KEY }).first('value');
     const afterId = /^[0-9a-f-]{36}$/i.test(cursorRow?.value || '') ? cursorRow.value : null;
     const candidates = await openToCloser(conn('notifications')
@@ -140,10 +153,7 @@ async function sweepSettledPaymentFailedAlerts({ conn = db, page = SWEEP_PAGE } 
     const nextCursor = (candidates || []).length === page ? candidates[candidates.length - 1].id : null;
     await conn('system_settings').insert({ key: SWEEP_CURSOR_KEY, value: nextCursor, category: 'notifications' })
       .onConflict('key').merge({ value: nextCursor, updated_at: conn.fn.now() });
-    const closable = await settledBellIds(conn, candidates);
-    if (!closable.length) return 0;
-    return await openToCloser(conn('notifications').whereIn('id', closable), 'payments')
-      .update(doneColumns({ by: 'payments', resolution: RESOLUTION, keepExisting: true, conn }));
+    return await closeSettledBells(conn, candidates);
   } catch (err) {
     logger.warn(`[payment-failed-alert-close] repair sweep failed: ${err.message}`);
     return 0;

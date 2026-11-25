@@ -120,9 +120,10 @@ postgres('invoice-less payment_failed bells close by billed month', () => {
       expect((await state(bell)).done_by).toBe('payments');
     });
 
-    test('an unstamped legacy failed row: the monthly description and the payment month', async () => {
-      const bell = await failedBell({ metadata: null });
-      await insertPayment({ status: 'paid', date: '2026-11-03', description: MONTHLY, metadata: null });
+    test('processing AND prepaid dues invoices for the same month: the settled one counts, whatever the row order', async () => {
+      const bell = await failedBell();
+      await insertDuesInvoice('processing');
+      await insertDuesInvoice('prepaid');
       await sweep();
       expect((await state(bell)).done_by).toBe('payments');
     });
@@ -205,6 +206,23 @@ postgres('invoice-less payment_failed bells close by billed month', () => {
       }
     });
 
+    test('legacy rows without a billed_month stamp never settle: an unstamped failed row, or an unstamped collecting payment', async () => {
+      // unstamped failed row (the monthly description and date would have named November)
+      const unstampedFailed = await failedBell({ metadata: null });
+      await insertPayment({ status: 'paid', date: '2026-11-03', description: MONTHLY, metadata: null });
+      await insertPayment(paidNov());
+      // stamped failed row, but the only collections are matched by description alone
+      await db('payments').where({ customer_id: customerId, status: 'paid' }).del();
+      const stampedFailed = await failedBell();
+      await insertPayment({ status: 'paid', date: '2026-11-03', description: MONTHLY, metadata: null });
+      await insertPayment({ status: 'paid', date: '2026-11-03', description: MONTHLY, metadata: { type: 'monthly_autopay' } });
+      // an explicit one-time Charge now carries no billed_month
+      await insertPayment({ status: 'paid', date: '2026-11-04', description: 'Manual charge — WaveGuard Gold', metadata: null });
+      await sweep();
+      expect(await isOpen(unstampedFailed)).toBe(true);
+      expect(await isOpen(stampedFailed)).toBe(true);
+    });
+
     test('an unstamped row without the monthly description has no month, so it stays open', async () => {
       const bell = await failedBell({ metadata: null, description: 'One-time service' });
       await insertPayment({ status: 'paid', date: '2026-11-03', description: 'One-time service', metadata: null });
@@ -262,6 +280,34 @@ postgres('invoice-less payment_failed bells close by billed month', () => {
       await sweep();
       expect(await isOpen(mine)).toBe(true);
       expect((await state(theirs)).done_by).toBe('payments');
+    });
+  });
+
+  describe('the sweep holds the Undo locks across its check and its close', () => {
+    test('while an Undo-like transaction holds the paid dues invoice, the sweep waits and sees the reverted invoice', async () => {
+      const bell = await failedBell();
+      const invoice = await insertDuesInvoice('paid');
+      const undoLike = await db.transaction();
+      await undoLike('invoices').where({ id: invoice }).forUpdate().first('id');
+      await undoLike('invoices').where({ id: invoice }).update({ status: 'overdue', paid_at: null });
+      let finished = false;
+      const running = sweep().then(() => { finished = true; });
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(finished).toBe(false);
+      expect(await isOpen(bell)).toBe(true);
+      await undoLike.commit();
+      await running;
+      expect(await isOpen(bell)).toBe(true);
+    });
+
+    test('when the sweep gets the locks first, a waiting Undo reopens the bell it closed', async () => {
+      const bell = await failedBell();
+      const invoice = await insertDuesInvoice('paid');
+      await sweep();
+      expect((await state(bell)).done_by).toBe('payments');
+      await db('invoices').where({ id: invoice }).update({ status: 'overdue', paid_at: null });
+      await db.transaction((trx) => require('../services/invoice-manual-payment-undo').reopenPaymentFailedBells(trx, invoice, new Date(Date.now() - 60000)));
+      expect(await isOpen(bell)).toBe(true);
     });
   });
 
