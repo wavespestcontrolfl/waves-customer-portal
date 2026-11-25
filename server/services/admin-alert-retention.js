@@ -209,11 +209,16 @@ const fyiTriggerKeys = () => {
   const { TRIGGER_REGISTRY } = require('./notification-triggers');
   return Object.keys(TRIGGER_REGISTRY).filter((k) => TRIGGER_REGISTRY[k]?.rule?.severity === 'fyi');
 };
-// A deposited-payout notice (stripe-webhook payout.paid, no metadata) is news too; a failed or held payout stays.
-const DEPOSITED_PAYOUT_TITLE = 'Payout deposited';
+// Finished-outcome notices are news too (stripe-webhook.js, no metadata): a deposited payout, and a plain dispute that
+// closed won or lost. A failed payout, an open dispute and any "needs reconciliation" or combined-payment dispute stay.
+// One SQL LIKE per prefix; the JS check reads the same list.
+const SETTLED_NOTICE_PREFIXES = [['payout', 'Payout deposited'], ['dispute', 'Dispute won:'], ['dispute', 'Dispute lost:']];
+const isSettledNotice = (row) => SETTLED_NOTICE_PREFIXES
+  .some(([category, prefix]) => row.category === category && String(row.title || '').startsWith(prefix));
 const isKeptMoneyRow = (row, meta) => KEEP_UNTIL_SETTLED_CATEGORIES.includes(row.category || '')
-  && !fyiTriggerKeys().includes(String(meta.triggerKey || ''))
-  && !(row.category === 'payout' && String(row.title || '').startsWith(DEPOSITED_PAYOUT_TITLE));
+  && !fyiTriggerKeys().includes(String(meta.triggerKey || '')) && !isSettledNotice(row);
+const SETTLED_NOTICE_SQL = SETTLED_NOTICE_PREFIXES.map(() => '(category = ? AND title LIKE ?)').join(' OR ');
+const settledNoticeBindings = () => SETTLED_NOTICE_PREFIXES.flatMap(([category, prefix]) => [category, `${prefix}%`]);
 
 function ruleFor(row, meta, ageMs) {
   if (isFyiRow(row, meta) && ageMs > FYI_DAYS * DAY_MS) return 'fyi7';
@@ -330,8 +335,8 @@ async function loadPage(conn, { now, cursor, limit, scope = null }) {
   const fyiCutoff = new Date(now.getTime() - FYI_DAYS * DAY_MS);
   return pageQuery(conn, { cursor, limit, scope }, (query) => query
     .where((q) => q.where((a) => a.where('created_at', '<', ageCutoff).whereRaw(NOT_ACTIVITY_SQL)
-      .whereRaw("(NOT (COALESCE(category, '') = ANY(?::text[])) OR COALESCE(metadata->>'triggerKey', '') = ANY(?::text[]) OR (category = 'payout' AND title LIKE ?))",
-        [KEEP_UNTIL_SETTLED_CATEGORIES, fyiTriggerKeys(), `${DEPOSITED_PAYOUT_TITLE}%`]))
+      .whereRaw(`(NOT (COALESCE(category, '') = ANY(?::text[])) OR COALESCE(metadata->>'triggerKey', '') = ANY(?::text[]) OR ${SETTLED_NOTICE_SQL})`,
+        [KEEP_UNTIL_SETTLED_CATEGORIES, fyiTriggerKeys(), ...settledNoticeBindings()]))
       .orWhere((f) => f.where('created_at', '<', fyiCutoff).whereRaw(FYI_SQL))));
 }
 
