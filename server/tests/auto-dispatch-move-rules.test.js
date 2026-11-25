@@ -301,6 +301,10 @@ describe('minutes rule', () => {
     expect(at(7, MINUTES).qualifies).toBe(false); // second-move half not set
   });
 
+  test('a grouped visit (siblings move with it) keeps the score bar: the minutes rule does not apply', () => {
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62) }], { current: { ...CUR, grouped: true } }).qualifies).toBe(false);
+  });
+
   test('a same-day re-time is not a day move: the minutes rule does not apply', () => {
     expect(rankM([{ cand: sameDay({ detour_minutes: 7 }), sc: full(62) }]).qualifies).toBe(false);
   });

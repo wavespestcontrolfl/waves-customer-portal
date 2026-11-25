@@ -747,19 +747,28 @@ async function computeCurrentPlacement(service, prefs, ctx) {
     capability_level: ctx.capabilityFor(techId, category),
     // The legacy neighbors above exclude only this row, so a grouped visit's
     // detour is measured against its own siblings (move-rules.js drive floor).
-    ...(await legacyGroupBlindField(service, ctx)),
+    ...(await groupFields(service, ctx)),
     ...(await sharedModelCurrentPlacement(service, geo, ctx, dateStr, category)),
     ...(await currentConflictField(service, ctx)),
   };
 }
 
-// Legacy model only: `detour_group_blind` when the visit has a live grouped
-// sibling. A visit_id alone is not enough — a group whose other members are
-// all terminal has a valid detour (Codex #6207 r7 P2).
-async function legacyGroupBlindField(service, ctx) {
-  if (!service.visit_id || autoDispatchSharedModelLive()) return {};
+// When the visit has a live grouped sibling: `grouped` (the whole group moves
+// together, so the minutes rule does not apply; move-rules.js minutesRuleOk,
+// owner 2026-11-24) and, legacy model only, `detour_group_blind`. A visit_id
+// alone is not enough — a group whose other members are all terminal has a
+// valid detour (Codex #6207 r7 P2).
+// Shared model: the evaluation's one group read (withGroupContext); a direct
+// caller with none gets no `grouped` (it never ranks moves). Legacy model: the
+// read it always made.
+async function groupFields(service, ctx) {
+  if (!service.visit_id) return {};
+  if (autoDispatchSharedModelLive()) {
+    const group = ctx.groupContext;
+    return group && group.siblings.length ? { grouped: true } : {};
+  }
   const { siblings } = await groupContextFor(service, ctx);
-  return siblings.length ? { detour_group_blind: true } : {};
+  return siblings.length ? { grouped: true, detour_group_blind: true } : {};
 }
 
 // GATE_AUTO_DISPATCH_CONFLICT_MOVES (ctx.conflictMoves): `conflict` when the

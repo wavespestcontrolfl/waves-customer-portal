@@ -129,7 +129,9 @@ function ownPreferenceScore(score) {
 function minutesRuleOk({ service, current, cand, currentScore, candScore, gain, config }) {
   const floor = minutesRuleFloor(service, config);
   if (floor <= 0 || config.roadCheckEnabled !== true || !((config.minDayMoveDriveSavingMinutes || 0) > 0)) return false;
-  if (!current || !cand || !isDayMove(current, cand) || current.detour_group_blind || !(gain > 0)) return false;
+  // A grouped visit moves with its siblings, whose own move counts this row
+  // cannot see: it keeps the score bar (candidate-slots.js groupFields).
+  if (!current || !cand || !isDayMove(current, cand) || current.grouped || current.detour_group_blind || !(gain > 0)) return false;
   return driveSavingMinutes(current, cand) >= floor
     && ownPreferenceScore(candScore) >= ownPreferenceScore(currentScore)
     && (Number(candScore.technician_score) || 0) >= (Number(currentScore.technician_score) || 0);
