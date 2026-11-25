@@ -275,10 +275,18 @@ describe('the promised-quotes row: held while the list stands', () => {
     const newer = promised();
     const older = promised();
     const first = jest.fn(async () => ({ id: newer.id }));
-    const chain = { where: () => chain, whereNull: () => chain, whereRaw: () => chain, orderBy: () => chain, first };
+    const chain = { where: () => chain, whereRaw: () => chain, orderBy: () => chain, first };
     const conn = jest.fn(() => chain);
     expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(conn, [older, newer])]).toEqual([newer.id]);
     expect(conn).toHaveBeenCalledWith('notifications');
+    expect(chain.whereNull).toBeUndefined();
+  });
+
+  test('a newer CLOSED keyed row means the older open duplicate is not held', async () => {
+    owed(2);
+    const older = promised();
+    const chain = { where: () => chain, whereRaw: () => chain, orderBy: () => chain, first: jest.fn(async () => ({ id: 'newer-closed' })) };
+    expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(jest.fn(() => chain), [older])]).toEqual([]);
   });
 
   test('a failed check calls the row live, so the sweep leaves it alone', async () => {

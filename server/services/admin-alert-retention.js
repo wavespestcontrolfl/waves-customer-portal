@@ -269,16 +269,18 @@ const LIVE_CHECKS = {
     return live;
   },
   // The promised-estimate row speaks for the watcher's whole list: live while that list is not empty. Only the
-  // standing row (the newest open row with the key, the one notifyAdmin refreshes) is held; an older duplicate
-  // carries a stale list and expires.
+  // standing row (the newest row with the key, open or closed: the one notifyAdmin refreshes) is held; an older
+  // duplicate carries a stale list and expires.
   async promisedQuotesOwed(conn, rows) {
     try {
       const { _private } = require('./promised-estimate-watcher');
       if (!(await _private.loadUnkeptPromises(conn)).length) return new Set();
-      const standing = conn ? await conn('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+      // Same pick as notifyAdmin's dedupe probe: the newest keyed row, open or closed.
+      const standing = conn ? await conn('notifications').where({ recipient_type: 'admin' })
         .whereRaw("metadata->>'dedupeKey' = ?", ['ops-digest:promised-estimate'])
         .orderBy('created_at', 'desc').first('id') : null;
-      return new Set(rows.filter((r) => !standing || r.id === standing.id).map((r) => r.id));
+      // No connection (a unit call): hold every candidate, as before the standing-row pick.
+      return new Set(rows.filter((r) => !conn || (standing && r.id === standing.id)).map((r) => r.id));
     } catch (err) {
       logger.warn(`[alert-retention] promisedQuotesOwed live check failed (${err.message}) — treating the row as live`);
       return new Set(rows.map((r) => r.id));
