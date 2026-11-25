@@ -780,8 +780,8 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
           You don’t need to sign in. Choose Bank account, then pick “Enter bank details manually”
           in the bank window, type your routing and account number, and press Pay. Stripe sends{' '}
           {microdepositSavedPhrases(null).deposits} to your account in 1–2 business days; follow the
-          email you get to verify your account, and the payment goes through. Bank payments have no
-          added fee.
+          email you get to verify your account. The payment then starts processing, and we email
+          your receipt once it clears. Bank payments have no added fee.
         </PayFaqItem>
         <PayFaqItem question="The page or my bank link isn’t working. What do I do?">
           Reload this page and try once more. If your bank still won’t connect, enter your bank
