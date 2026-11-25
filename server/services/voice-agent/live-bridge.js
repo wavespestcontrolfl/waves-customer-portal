@@ -799,10 +799,15 @@ class LiveBridge {
       const range = this.openRange(offsetMs); // this delegation's words, bound now, not when it reaches the front of the queue
       // A timer armed at ARRIVAL: a delegation still waiting for its turn (or for the brain to open) when its 20 s run out is
       // answered with the timeout line then, not whenever the queue reaches it. One already running is bounded by the brain's own deadline.
-      const entry = { id, expired: false, started: false, timer: null };
+      const entry = { id, expired: false, started: false, timer: null, softTimer: null, stillSaid: false };
       entry.timer = setTimeout(() => this.expireQueued(entry), this.deps.brainHardMs);
       if (entry.timer.unref) entry.timer.unref();
       this.delegationTimers.add(entry.timer);
+      // The holding line ("Still pulling that up.") is armed at ARRIVAL too: a delegation waiting in the queue hears it at its own 6 s,
+      // not when its ask finally starts. It is said once per delegation (entry.stillSaid), by whichever timer reaches it first.
+      entry.softTimer = setTimeout(() => this.sayStill(entry), this.deps.brainSoftMs);
+      if (entry.softTimer.unref) entry.softTimer.unref();
+      this.delegationTimers.add(entry.softTimer);
       this.brainChain = this.brainChain.then(() => this.answerWithBrain(id, receivedAt, range, entry)).catch(() => {});
       return;
     }
@@ -812,11 +817,32 @@ class LiveBridge {
   // ── tools mode: the brain answers ────────────────────────────────────────
   // Transcript fragments, caller's and GPT-Live's, kept in memory (never logged
   // or stored). A gap between fragments starts a new utterance.
+  // Join transcript text. Deltas of ONE utterance are a token stream that carries its own spaces ("2" + ",500",
+  // "pest" + "icide", " pest control"): they join RAW. Between two separate utterances (`fresh`: the audio-time gap
+  // that starts a new utterance) one space goes in unless either side already has whitespace there.
+  static joinFragments(prev, next, fresh = false) {
+    if (!prev) return next;
+    if (!next) return prev;
+    if (!fresh || /\s$/.test(prev) || /^\s/.test(next)) return prev + next;
+    return `${prev} ${next}`;
+  }
+
+  // Whether a fragment starts a new utterance: nothing before it, or its audio time starts a gap after the last one's end.
+  static startsUtterance(hasText, endMs, msg) {
+    if (!hasText) return true;
+    const start = Number.isFinite(msg.start_ms) ? msg.start_ms : null;
+    return start !== null && endMs !== null && endMs !== undefined && start - endMs >= UTTERANCE_GAP_MS;
+  }
+
   static addFragment(list, endMs, msg, keep) {
     const text = typeof msg.delta === 'string' ? msg.delta : '';
-    if (!text.trim()) return endMs;
+    if (!text.trim()) {
+      // a whitespace-only delta is the space between two words of the utterance in progress: kept, never a fragment of its own
+      if (list.length) list[list.length - 1].text = (list[list.length - 1].text + text).slice(-CALLER_TEXT_MAX_CHARS);
+      return endMs;
+    }
     const start = Number.isFinite(msg.start_ms) ? msg.start_ms : null;
-    const fresh = !list.length || (start !== null && endMs !== null && start - endMs >= UTTERANCE_GAP_MS);
+    const fresh = LiveBridge.startsUtterance(list.length > 0, endMs, msg);
     if (fresh) list.push({ text: text.slice(-CALLER_TEXT_MAX_CHARS), startMs: start });
     else list[list.length - 1].text = (list[list.length - 1].text + text).slice(-CALLER_TEXT_MAX_CHARS);
     if (list.length > keep) list.shift();
@@ -836,12 +862,20 @@ class LiveBridge {
 
   noteCallerText(msg) {
     const text = typeof msg.delta === 'string' ? msg.delta : '';
-    if (!text.trim()) return;
+    if (!text.trim()) {
+      // the space between two words of the utterance in progress: kept in the range, not counted as a fragment
+      const open = this.callerLate && this.callerLate.open && LiveBridge.belongsToLate(this.callerLate, msg) ? this.callerLate : this.callerPending;
+      if (open.text) open.text = (open.text + text).slice(-CALLER_TEXT_MAX_CHARS);
+      LiveBridge.addFragment(this.callerRecent, this.callerFragmentEndMs, msg, 2);
+      return;
+    }
     this.callerFragments += 1;
+    // A new utterance (an audio-time gap after the last fragment) gets one separating space; deltas of one utterance join raw.
+    const fresh = LiveBridge.startsUtterance(this.callerRecent.length > 0, this.callerFragmentEndMs, msg);
     const range = this.callerLate && this.callerLate.open && LiveBridge.belongsToLate(this.callerLate, msg) ? this.callerLate : this.callerPending;
     if (range === this.callerLate && Number.isFinite(msg.end_ms)) range.endMs = Math.max(range.endMs ?? msg.end_ms, msg.end_ms);
     if (!range.text && Number.isFinite(msg.start_ms)) range.startMs = msg.start_ms;
-    range.text = (range.text + text).slice(-CALLER_TEXT_MAX_CHARS);
+    range.text = LiveBridge.joinFragments(range.text, text, fresh).slice(-CALLER_TEXT_MAX_CHARS);
     this.callerFragmentEndMs = LiveBridge.addFragment(this.callerRecent, this.callerFragmentEndMs, msg, 2);
     // Where the NEWEST caller utterance of this range began: GPT-Live's line that prompted the selection is the one
     // right before it ("hello" / the offer of two services / "the second one" names the offer, not the greeting).
@@ -946,10 +980,19 @@ class LiveBridge {
   // What to say for one delegation, and whether the brain was asked (so its
   // times are kept). Never throws. A delegation past the soft deadline gets a
   // holding line through say(), then this returns the real answer.
+  sayStill(entry) {
+    this.delegationTimers.delete(entry.softTimer);
+    if (entry.stillSaid || entry.expired || entry.answered || this._finalizing) return;
+    entry.stillSaid = true;
+    this.speak(entry.id, BRAIN_STILL_REPLY);
+  }
+
   expireQueued(entry) {
     this.delegationTimers.delete(entry.timer);
     if (entry.started || entry.expired || this._finalizing) return;
     entry.expired = true;
+    clearTimeout(entry.softTimer);
+    this.delegationTimers.delete(entry.softTimer);
     this.noteError('brain_expired_in_queue');
     this.speak(entry.id, TIMEOUT_REPLY);
   }
@@ -991,7 +1034,7 @@ class LiveBridge {
     let reply;
     try {
       reply = await brain.ask(words, {
-        onSoft: () => say(BRAIN_STILL_REPLY),
+        onSoft: () => { if (!entry.stillSaid) { entry.stillSaid = true; say(BRAIN_STILL_REPLY); } }, // the arrival timer may have said it already
         softMs: Math.max(0, brainSoftMs - waited),
         deadlineMs: brainHardMs - waited,
       });
@@ -1020,8 +1063,11 @@ class LiveBridge {
     if (this._finalizing) return;
     const { reply, startedAt, endedAt, skipped } = await this.brainReply((line) => this.speak(id, line), range, receivedAt, entry);
     if (skipped) return; // its timeout line already went out (expireQueued): it never runs the brain
+    entry.answered = true;
     clearTimeout(entry.timer);
     this.delegationTimers.delete(entry.timer);
+    clearTimeout(entry.softTimer);
+    this.delegationTimers.delete(entry.softTimer);
     this.speak(id, reply); // nothing is sent if the call ended while the brain worked
     if (startedAt === undefined) return;
     const ms = (from, to) => Math.max(0, to - from);

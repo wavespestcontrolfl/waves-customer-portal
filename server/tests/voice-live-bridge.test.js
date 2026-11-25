@@ -1468,7 +1468,7 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     await waitFor(() => answers(t).length > 0);
     t.openai.receive(created('d2')); // nothing said since
     await waitFor(() => answers(t).length > 1);
-    expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['First thing.Second thing.Third thing.', 'Second thing. Third thing.']);
+    expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['First thing. Second thing. Third thing.', 'Second thing. Third thing.']);
   });
 
   test('the fallback prompt is bounded: a long uninterrupted utterance is never resent whole', async () => {
@@ -1726,18 +1726,113 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     t.openai.receive(said('two', 6000, 6300));
     t.openai.receive(created('d2'));
     // d1's ask runs on; d2 waits behind it and its own 60 ms run out
-    await waitFor(() => answers(t).some((m) => m.delegation_id === 'd2'));
-    expect(answers(t).filter((m) => m.delegation_id === 'd2')).toEqual([{ type: 'session.commentary.append', delegation_id: 'd2', content: TIMEOUT_REPLY }]);
+    await waitFor(() => answers(t).filter((m) => m.delegation_id === 'd2').length === 2);
+    // its holding line at its own 30 ms (armed at arrival), then the timeout line at 60 ms
+    expect(answers(t).filter((m) => m.delegation_id === 'd2').map((m) => m.content)).toEqual(['Still pulling that up.', TIMEOUT_REPLY]);
     expect(brain.ask).toHaveBeenCalledTimes(1);
     releaseFirst();
     await waitFor(() => answers(t).some((m) => m.delegation_id === 'd1'));
     await flush();
-    expect(answers(t).filter((m) => m.delegation_id === 'd2')).toHaveLength(1); // its turn came and skipped it: no second line, no ask
+    expect(answers(t).filter((m) => m.delegation_id === 'd2')).toHaveLength(2); // its turn came and skipped it: no further line, no ask
     expect(brain.ask).toHaveBeenCalledTimes(1);
     t.twilioStop();
     await finalized(t);
     expect(summaryOf(t)).toMatchObject({ brain_asks: 1 });
     expect(summaryOf(t).errors).toContain('brain_expired_in_queue');
+  });
+
+  test('the holding line is armed at ARRIVAL: a queued delegation hears it at its own soft deadline, once, never again when its ask runs', async () => {
+    let releaseFirst;
+    const { t, brain } = toolsSetup({
+      reply: (text, opts) => new Promise((resolve) => {
+        if (text.includes('two') && opts.onSoft) opts.onSoft(); // the brain's own timer also fires for the second ask
+        resolve(text.includes('one') ? undefined : 'reply two');
+      }).then((r) => r || new Promise((resolve) => { releaseFirst = () => resolve('reply one'); })),
+      deps: { brainHardMs: 2000, brainSoftMs: 40 },
+    });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    t.openai.receive(said('two', 6000, 6300));
+    t.openai.receive(created('d2'));
+    // d2 is still queued behind d1's running ask, yet it hears its own holding line at ~40 ms after ITS arrival
+    await waitFor(() => answers(t).some((m) => m.delegation_id === 'd2'));
+    expect(brain.ask).toHaveBeenCalledTimes(1);
+    expect(answers(t).filter((m) => m.delegation_id === 'd2')).toEqual([{ type: 'session.commentary.append', delegation_id: 'd2', content: 'Still pulling that up.' }]);
+    releaseFirst();
+    await waitFor(() => answers(t).some((m) => m.delegation_id === 'd2' && m.content === 'reply two'));
+    // d2's ask ran later and its brain timer called onSoft too: still one holding line for d2, one for d1 at most
+    const d2 = answers(t).filter((m) => m.delegation_id === 'd2').map((m) => m.content);
+    expect(d2).toEqual(['Still pulling that up.', 'reply two']);
+    t.twilioStop();
+    await finalized(t);
+  });
+
+  test('a delegation that expires in the queue hears the holding line first, then the timeout line, and nothing else', async () => {
+    const { TIMEOUT_REPLY } = require('../services/voice-agent/live-brain');
+    const { t, brain } = toolsSetup({ reply: () => new Promise(() => {}), deps: { brainHardMs: 200, brainSoftMs: 40 } });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    t.openai.receive(said('two', 6000, 6300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).filter((m) => m.delegation_id === 'd2').length === 2, 3000);
+    expect(answers(t).filter((m) => m.delegation_id === 'd2').map((m) => m.content)).toEqual(['Still pulling that up.', TIMEOUT_REPLY]);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(answers(t).filter((m) => m.delegation_id === 'd2')).toHaveLength(2);
+    expect(brain.ask).toHaveBeenCalledTimes(1);
+    t.twilioStop();
+    await finalized(t);
+  });
+
+  test('a delegation answered before its soft deadline never hears the holding line', async () => {
+    const { t } = toolsSetup({ deps: { brainHardMs: 2000, brainSoftMs: 80 } });
+    await t.ready();
+    t.openai.receive(said('quick one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    await new Promise((r) => setTimeout(r, 160));
+    expect(answers(t).map((m) => m.content)).toEqual(['Your next visit is Tuesday.']);
+    t.twilioStop();
+    await finalized(t);
+  });
+
+  describe('caller words keep their boundaries across fragments', () => {
+    const asked = async (frags) => {
+      const { t, brain } = toolsSetup();
+      await t.ready();
+      for (const [text, start, end] of frags) t.openai.receive(said(text, start, end));
+      t.openai.receive(created('d1'));
+      await waitFor(() => brain.ask.mock.calls.length === 1);
+      const text = brain.ask.mock.calls[0][0];
+      t.twilioStop();
+      await finalized(t);
+      return text;
+    };
+
+    test('deltas of one utterance join raw: a number or a word split across deltas stays whole', async () => {
+      expect(await asked([['how much for a 2', 0, 300], [',500', 300, 600], [' square foot home, pest', 600, 900], ['icide', 900, 1100]])).toBe('how much for a 2,500 square foot home, pesticide');
+    });
+
+    test('fragments that carry their own spaces are not double-spaced', async () => {
+      expect(await asked([['how much for ', 0, 300], ['a 2400', 300, 600], [' square foot ', 600, 900], ['home', 900, 1100]])).toBe('how much for a 2400 square foot home');
+    });
+
+    test('two utterances get one space between them, whether or not a side carries whitespace', async () => {
+      expect(await asked([['First thing.', 0, 800], ['Second thing.', 3000, 3800]])).toBe('First thing. Second thing.');
+      expect(await asked([['First thing. ', 0, 800], [' Second thing.', 3000, 3800]])).toBe('First thing. Second thing.');
+    });
+
+    test('two spoken measurements in separate utterances reach the brain as two numbers', async () => {
+      expect(await asked([['forty', 0, 400], ['five hundred square feet', 2500, 3000]])).toBe('forty five hundred square feet');
+      expect(await asked([['1800', 0, 400], ['2200', 2500, 3000]])).toBe('1800 2200');
+    });
+
+    test('a whitespace-only fragment and closing punctuation keep the words apart without stray spaces', async () => {
+      expect(await asked([['two', 0, 200], [' ', 200, 250], ['bedrooms', 250, 600], ['?', 600, 650]])).toBe('two bedrooms?');
+    });
   });
 
   test('a stalled brain open never holds a delegation past its own hard deadline: the open wait is capped to what is left', async () => {
@@ -1748,8 +1843,10 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     t.openai.receive(created('d1'));
     t.openai.receive(said('second', 6000, 6300));
     t.openai.receive(created('d2'));
-    await waitFor(() => answers(t).length === 2, 3000); // both well before the 4 s open wait would have ended
-    expect(answers(t).map((m) => m.content)).toEqual([TIMEOUT_REPLY, TIMEOUT_REPLY]);
+    await waitFor(() => answers(t).filter((m) => m.content === TIMEOUT_REPLY).length === 2, 3000); // both well before the 4 s open wait would have ended
+    // each hears its holding line at its own 20 ms (armed at arrival) before the timeout line
+    expect(answers(t).filter((m) => m.delegation_id === 'd1').map((m) => m.content)).toEqual(['Still pulling that up.', TIMEOUT_REPLY]);
+    expect(answers(t).filter((m) => m.delegation_id === 'd2').map((m) => m.content)).toEqual(['Still pulling that up.', TIMEOUT_REPLY]);
     expect(brain.ask).not.toHaveBeenCalled();
     t.twilioStop();
     await finalized(t);
