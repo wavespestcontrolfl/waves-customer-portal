@@ -29,24 +29,31 @@ const el = (spec = {}) => ({ visible: true, text: '', attrs: {}, value: '', chec
 
 function makeWorld(over = {}) {
   const w = {
-    url: 'about:blank', clicks: [], fills: [], gotos: [], cart: [], po: '', step: 'order-type', radioChecked: false,
+    url: 'about:blank', clicks: [], fills: [], gotos: [], cart: [], po: '', poDraft: null, poSticky: false, bodyThrows: false, entrySeq: 0, flipOnRead: 0, flipCount: 0, removeNoop: false, step: 'order-type', radioChecked: false,
     signedOut: false, signInFails: false, identifierValue: 'owner-prefilled', closeCalls: 0, pageCloseCalls: 0,
     brandText: `CSI-PEST : ${SKU}`, formSku: SKU, formStore: '238', uomRows: [], searchHits: 1,
     pickupClass: 'cart-top-fulfillment-method__tile fullfillment-pickup fullfilment-select', pickupText: 'Pickup #238,5115 Lena Rd',
     cartTotalText: '$105.93', addBehavior: 'normal', checkoutLocText: 'Pickup at #238, 5115 Lena Rd',
     reviewBody: 'Review your order. Reference 5500990. Store 238.', reviewTenderText: 'Payment Method Pay At branch, Lakewood Ranch 238',
-    reviewPickupText: 'Pickup Lakewood Ranch 238', hideTender: false, oktaAction: 'https://www.siteone.com/en/login', oktaFormMissing: false, oktaButtonForm: 'same', oktaButtonFormAction: null, confirmEverywhere: false, confirmationField: true, poOccupied: '', signInUrl: null,
+    reviewPickupText: 'Pickup Lakewood Ranch 238', hideTender: false, confirmEverywhere: false, confirmationField: true, poOccupied: '', signInUrl: null,
     checkoutUrl: null, confirmUrl: null, reviewCode: `Item # : ${SKU}`, reviewQtyText: 'Qty: 2',
     reviewQtyNode: true, closeOrder: [], reviewTotalText: '$110.40', placeButtons: 1, cardField: false, noRadioCheck: false,
     confirmationBody: 'Order Number: 7700123', noConfirmation: false, placeClickThrows: false, placed: 0, qty: 0,
-    formA: { id: 'a' }, formB: { id: 'b' },
     ...over,
   };
   w.cartRowEls = () => w.cart.map((row) => el({
-    attrs: { 'data-itemnumber': row.sku, 'data-requestedqty': String(row.qty) },
+    attrs: {
+      'data-itemnumber': row.sku,
+      'data-cartentry': row.entry || '',
+      // A getter: a test can flip the quantity between two reads of the same row.
+      get 'data-requestedqty'() {
+        if (w.flipOnRead) { w.flipCount += 1; if (w.flipCount === w.flipOnRead) row.qty = 9; }
+        return String(row.qty);
+      },
+    },
     children: {
       [S.cartQtyInput]: [el({ value: String(row.qty) })],
-      [S.cartRemoveLine]: [el({ name: `remove:${row.sku}`, onClick: () => { w.cart = w.cart.filter((r) => r !== row); } })],
+      [S.cartRemoveLine]: [el({ name: `remove:${row.sku}`, onClick: () => { if (!w.removeNoop) w.cart = w.cart.filter((r) => r !== row); } })],
     },
   }));
   return w;
@@ -70,13 +77,18 @@ function screens(w) {
     [S.orderTypeForm]: [el({ visible: false })],
     [S.pickupLocation]: [el({ text: w.checkoutLocText })],
     [S.checkoutStoreId]: [el({ visible: false, value: '238' })],
-    [S.poInput]: [el({ value: w.po || w.poOccupied, onFill: (v) => { w.po = v; w.poOccupied = ''; } })],
-    [S.orderTypeSubmit]: [el({ name: 'order-type-submit', onClick: () => { w.step = 'payment'; } })],
+    [S.poInput]: [el({ value: w.poDraft ?? (w.po || w.poOccupied), onFill: (v) => { w.poDraft = v; w.fills.push(v); } })],
+    [S.orderTypeSubmit]: [el({ name: 'order-type-submit', onClick: () => {
+      // The PO is saved with the form; a sticky server ignores an empty save.
+      if (w.poDraft != null && !(w.poSticky && w.poDraft === '')) { w.po = w.poDraft; w.poOccupied = ''; }
+      w.poDraft = null;
+      w.step = 'payment';
+    } })],
     ...payment,
   };
   const placeBtn = () => el({ name: 'place-order', text: 'Place Your Order', onClick: () => { w.placed += 1; if (w.placeClickThrows) throw new Error('Target page closed'); if (!w.noConfirmation) { w.url = w.confirmUrl || 'https://www.siteone.com/en/checkout/orderConfirmation/7700123'; } } });
   const review = {
-    [S.body]: [el({ text: w.reviewBody })],
+    [S.body]: [el({ text: w.reviewBody, throws: w.bodyThrows })],
     [S.reviewTender]: w.hideTender ? [] : [el({ text: w.reviewTenderText })],
     [S.reviewPickup]: [el({ text: w.reviewPickupText })],
     [S.reviewItemCode]: [el({ text: w.reviewCode, children: { [S.reviewItemBlock]: [el({ children: { [S.reviewQty]: w.reviewQtyNode ? [el({ text: w.reviewQtyText })] : [] } })] } })],
@@ -92,19 +104,13 @@ function screens(w) {
     [S.uomSelected]: w.uomRows.filter((r) => r.selected).map((r) => el({ attrs: { 'data-inventorymultiplier': String(r.mult) } })),
     [S.pdpQty]: [el({ onFill: (v) => { w.qty = Number(v); } })],
     [S.addToCart]: [el({ name: 'add-to-cart', onClick: () => {
-      w.cart.push({ sku: SKU, qty: w.addBehavior === 'wrongQty' ? w.qty + 1 : w.qty });
-      if (w.addBehavior === 'extraRow') w.cart.push({ sku: 'OTHER-1', qty: 1 });
+      w.entrySeq += 1;
+      w.cart.push({ sku: SKU, qty: w.addBehavior === 'wrongQty' ? w.qty + 1 : w.qty, entry: `E${w.entrySeq}` });
+      if (w.addBehavior === 'extraRow') w.cart.push({ sku: 'OTHER-1', qty: 1, entry: 'X1' });
     } })],
   };
   const search = { [S.searchResult]: Array.from({ length: w.searchHits }, () => el({ attrs: { href: '/p/PRODUCT-1' } })) };
-  // What the browser would report: the form owner and the RESOLVED submission URL.
-  const formA = w.oktaFormMissing ? null : w.formA; // one DOM object per form, stable across reads
-  const buttonForm = w.oktaButtonForm === 'same' ? formA : w.formB;
-  const submitUrl = w.oktaButtonFormAction ?? w.oktaAction;
-  const okta = {
-    [S.oktaIdentifier]: [el({ value: w.identifierValue, dom: { form: formA } })],
-    [S.oktaSubmit]: [el({ name: 'okta-sign-in', dom: { form: buttonForm, formAction: submitUrl }, onClick: () => { if (!w.signInFails) w.signedOut = false; } })],
-  };
+  const okta = { [S.oktaIdentifier]: [el({ name: 'okta-identifier', value: w.identifierValue })] };
   const byPath = { '/en/cart': cart, '/en/checkout/multi/siteOne-checkout': checkout, '/en/checkout/multi/order-summary/view': review, '/en/search': search, '/p/PRODUCT-1': product };
   return { byPath, okta, confirmation };
 }
@@ -117,13 +123,12 @@ function wrap(spec) {
     isVisible: async () => spec.visible,
     isEnabled: async () => spec.enabled,
     isChecked: async () => spec.checked,
-    innerText: async () => spec.text,
+    innerText: async () => { if (spec.throws) throw new Error('detached'); return spec.text; },
     inputValue: async () => spec.value,
     getAttribute: async (name) => (name in spec.attrs ? spec.attrs[name] : null),
     click: async () => { if (spec.name) spec.world?.clicks.push(spec.name); if (spec.onClick) spec.onClick(); },
     fill: async (v) => { if (spec.onFill) spec.onFill(v); },
     locator: (sel) => collection(spec.children[sel] || []),
-    elementHandle: async () => ({ dom: spec.dom || {}, dispose: async () => {} }),
   };
 }
 
@@ -140,12 +145,11 @@ function makeBrowser(w) {
   };
   const page = {
     url: () => (w.signedOut && w.signInUrl ? w.signInUrl : w.url),
-    goto: async (url) => { w.gotos.push(url); w.url = url; },
+    goto: async (url) => { w.gotos.push(url); w.url = url; w.poDraft = null; },
     waitForTimeout: async () => {},
     setDefaultTimeout: () => {},
     locator: (sel) => collection(current()[sel] || []),
     close: async () => { w.pageCloseCalls += 1; w.closeOrder.push('page'); },
-    evaluate: async (fn, arg) => fn(arg.map((h) => h.dom)),
   };
   const browser = {
     contexts: () => [{ newPage: async () => page }],
@@ -217,7 +221,7 @@ test('happy live path: one add, pay at branch, one Place click, order number + r
   expect(calls).toEqual([10593, 11040, 11040]); // cart pre-check, the review total, then the claim re-asserted at the click
   expect(w.placed).toBe(1);
   expect(w.po).toBe('PO-77');
-  expect(w.cart).toEqual([{ sku: SKU, qty: 2 }]); // submitted: nothing cleaned up
+  expect(w.cart).toEqual([{ sku: SKU, qty: 2, entry: 'E1' }]); // submitted: nothing cleaned up
   expectSafe(w);
 });
 
@@ -269,14 +273,14 @@ test('cart mismatch removes ONLY our row (when it is exactly what we added) and 
   // A quantity that is not what we set belongs to the owner now: left alone.
   const wrong = await run({ addBehavior: 'wrongQty' });
   expect(wrong.error.refuse).toBe('cart_mismatch');
-  expect(wrong.w.cart).toEqual([{ sku: SKU, qty: 3 }]);
+  expect(wrong.w.cart).toEqual([{ sku: SKU, qty: 3, entry: 'E1' }]);
   expect(wrong.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
   expect(wrong.error.evidence).toMatchObject({ cleanup: 'cart_left_for_owner', cart_left_for_owner: true });
   expect(wrong.w.clicks).not.toContain('continue-checkout');
   // Someone else's line appears beside ours: theirs stays.
   const extra = await run({ addBehavior: 'extraRow' });
   expect(extra.error.refuse).toBe('cart_mismatch');
-  expect(extra.w.cart).toEqual([{ sku: 'OTHER-1', qty: 1 }]);
+  expect(extra.w.cart).toEqual([{ sku: 'OTHER-1', qty: 1, entry: 'X1' }]);
   expect(extra.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([`remove:${SKU}`]);
   expectSafe(wrong.w);
   expectSafe(extra.w);
@@ -357,7 +361,9 @@ test('a cap check that throws is run-level, not a parked order', async () => {
 test('dry run never clicks Place order and removes only our row', async () => {
   const { w, result } = await run({}, { env: { ...ENV, SITEONE_BOT_DRY_RUN: 'true' }, args: { poNumber: 'PO-5' } });
   expect(result).toMatchObject({ dryRun: true, amountCents: 11040, externalOrderNumber: null });
-  expect(result.evidence).toMatchObject({ reviewTotalCents: 11040, reviewItem: SKU, placeButton: 'place your order', cleanup: 'row_removed', poCleared: true });
+  expect(result.evidence).toMatchObject({ reviewTotalCents: 11040, reviewItem: SKU, placeButton: 'place your order', cleanup: 'row_removed', poSkipped: 'dry_run' });
+  expect(w.fills).toEqual([]); // a dry run never types a PO
+  expect(result.evidence.poCleared).toBeUndefined();
   expect(w.placed).toBe(0);
   expect(w.po).toBe('');
   expect(w.cart).toEqual([]);
@@ -384,7 +390,7 @@ test('live click with no order number is ambiguous, never re-clicked, and leaves
   expect(error.evidence).toMatchObject({ poNumber: 'PO-3' });
   expect(error.evidence.url).toMatch(/order-summary/);
   expect(w.placed).toBe(1);
-  expect(w.cart).toEqual([{ sku: SKU, qty: 2 }]); // submitted: no cleanup
+  expect(w.cart).toEqual([{ sku: SKU, qty: 2, entry: 'E1' }]); // submitted: no cleanup
   expect(w.po).toBe('PO-3');
   expectSafe(w);
 });
@@ -393,7 +399,7 @@ test('an error after the Place click is ambiguous', async () => {
   const { w, error } = await run({ placeClickThrows: true });
   expect(error.ambiguous).toBe(true);
   expect(w.placed).toBe(1);
-  expect(w.cart).toEqual([{ sku: SKU, qty: 2 }]);
+  expect(w.cart).toEqual([{ sku: SKU, qty: 2, entry: 'E1' }]);
   expectSafe(w);
 });
 
@@ -415,21 +421,6 @@ test('Chrome unreachable is run-level; a non-local DevTools URL is run-level and
   expect(w.closeCalls).toBe(0);
 });
 
-test('Okta sign-in: one click on the prefilled form; still signed out, or not prefilled, is run-level', async () => {
-  const ok = await run({ signedOut: true });
-  expect(ok.result.dryRun).toBe(false);
-  expect(ok.w.clicks.filter((c) => c === 'okta-sign-in').length).toBeGreaterThanOrEqual(1);
-  expectSafe(ok.w);
-  const stuck = await run({ signedOut: true, signInFails: true });
-  expect(stuck.error.runLevel).toBe(true);
-  expect(stuck.w.cart).toEqual([]);
-  const empty = await run({ signedOut: true, identifierValue: '' });
-  expect(empty.error.runLevel).toBe(true);
-  expect(empty.w.clicks).not.toContain('okta-sign-in');
-  expectSafe(stuck.w);
-  expectSafe(empty.w);
-});
-
 test('bad arguments refuse before any browser work', async () => {
   const connect = jest.fn();
   const base = { vendorSku: SKU, quantity: 2, beforeSubmit: async () => ({ ok: true }) };
@@ -441,33 +432,6 @@ test('bad arguments refuse before any browser work', async () => {
 });
 
 // ---- pre-push Codex round: P0 1-5, P1 x2 -----------------------------------------
-
-test('P0 1: sign-in is clicked only on an approved identity-provider origin with an approved form action', async () => {
-  const { isApprovedSignInOrigin } = adapter._internals;
-  expect(isApprovedSignInOrigin('https://www.siteone.com/login', {})).toBe(true);
-  expect(isApprovedSignInOrigin('https://sso.siteone.com/login', {})).toBe(true);
-  for (const bad of ['http://www.siteone.com/', 'https://siteone.com.evil.example/', 'https://evilsiteone.com/', 'https://www.siteone.com:8443/', 'https://login.example-idp.test/']) {
-    expect(isApprovedSignInOrigin(bad, {})).toBe(false);
-  }
-  // An exact Okta host is added by env, https only.
-  expect(isApprovedSignInOrigin('https://login.example-idp.test/x', { SITEONE_SIGN_IN_ORIGINS: 'https://login.example-idp.test' })).toBe(true);
-  expect(isApprovedSignInOrigin('http://login.example-idp.test/x', { SITEONE_SIGN_IN_ORIGINS: 'http://login.example-idp.test' })).toBe(false);
-  expect(isApprovedSignInOrigin('https://other.example-idp.test/x', { SITEONE_SIGN_IN_ORIGINS: 'https://login.example-idp.test' })).toBe(false);
-
-  const offOrigin = await run({ signedOut: true, signInUrl: 'https://siteone.com.evil.example/login' });
-  expect(offOrigin.error.runLevel).toBe(true);
-  expect(offOrigin.w.clicks).not.toContain('okta-sign-in');
-  const badAction = await run({ signedOut: true, oktaAction: 'https://evil.example/collect' });
-  expect(badAction.error.runLevel).toBe(true);
-  expect(badAction.w.clicks).not.toContain('okta-sign-in');
-  const noForm = await run({ signedOut: true, oktaFormMissing: true });
-  expect(noForm.error.runLevel).toBe(true);
-  expect(noForm.w.clicks).not.toContain('okta-sign-in');
-  const okIdp = await run({ signedOut: true, signInUrl: 'https://login.example-idp.test/signin' }, { env: { ...ENV, SITEONE_SIGN_IN_ORIGINS: 'https://login.example-idp.test' } });
-  expect(okIdp.result.dryRun).toBe(false);
-  expect(okIdp.w.clicks).toContain('okta-sign-in');
-  for (const r of [offOrigin, badAction, noForm, okIdp]) expectSafe(r.w);
-});
 
 test('P0 2: transitions parse the URL: exact origin and pathname, never a substring', async () => {
   const lookalike = await run({ checkoutUrl: 'https://www.siteone.com.evil.example/en/checkout/multi/siteOne-checkout' });
@@ -552,7 +516,7 @@ test('P1: cleanup removes our row only when its quantity is exactly what we adde
   // Merged / changed quantity after the add: left alone.
   const merged = await run({}, { verdicts: [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }], onCall: (n, w) => { if (n === 2) w.cart[0].qty = 5; } });
   expect(merged.error.refuse).toBe('over_monthly_cap');
-  expect(merged.w.cart).toEqual([{ sku: SKU, qty: 5 }]);
+  expect(merged.w.cart).toEqual([{ sku: SKU, qty: 5, entry: 'E1' }]);
   expect(merged.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
   expect(merged.error.evidence.cart_left_for_owner).toBe(true);
   // A second line with our item number: ambiguous, left alone.
@@ -595,40 +559,100 @@ test('R3 P0: the order number is read only on the vendor confirmation path (one 
   }
 });
 
-test('R3 P0: sign-in needs one form owner and an approved browser-resolved submission URL', async () => {
-  const split = await run({ signedOut: true, oktaButtonForm: 'other' });
-  expect(split.error.runLevel).toBe(true);
-  expect(split.w.clicks).not.toContain('okta-sign-in');
-  // A button formaction overrides the form's action: the resolved URL is judged.
-  const override = await run({ signedOut: true, oktaButtonFormAction: 'https://evil.example/collect' });
-  expect(override.error.runLevel).toBe(true);
-  expect(override.w.clicks).not.toContain('okta-sign-in');
-  const lookalike = await run({ signedOut: true, oktaButtonFormAction: 'https://www.siteone.com.evil.example/login' });
-  expect(lookalike.error.runLevel).toBe(true);
-  const unresolved = await run({ signedOut: true, oktaButtonFormAction: '' , oktaAction: '' });
-  expect(unresolved.error.runLevel).toBe(true);
-  const relative = await run({ signedOut: true, oktaButtonFormAction: '/en/login' });
-  expect(relative.error.runLevel).toBe(true); // the browser reports an absolute URL; a relative one is unproven
-  const noForm = await run({ signedOut: true, oktaFormMissing: true });
-  expect(noForm.error.runLevel).toBe(true);
-  const good = await run({ signedOut: true });
-  expect(good.w.clicks).toContain('okta-sign-in');
-  for (const r of [split, override, lookalike, unresolved, relative, noForm, good]) expectSafe(r.w);
-});
-
 test('R3 P1: a PO box that already holds a value refuses; cleanup clears it only while it still equals our PO', async () => {
   const occupied = await run({ poOccupied: 'OWNER-123' }, { args: { poNumber: 'PO-4' } });
   expect(occupied.error.refuse).toBe('po_field_occupied');
   expect(occupied.w.poOccupied).toBe('OWNER-123'); // untouched
-  expect(occupied.w.fills ?? []).toEqual([]);
+  expect(occupied.w.fills).toEqual([]);
   expect(occupied.w.cart).toEqual([]); // our row still removed
   // Our PO is cleared when it is still ours...
   const ours = await run({}, { args: { poNumber: 'PO-4' }, verdicts: [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }] });
   expect(ours.w.po).toBe('');
   expect(ours.error.evidence.poCleared).toBe(true);
+  expect(ours.w.fills).toEqual(['PO-4', '']); // typed, then cleared through the form and verified after a reload
   // ...and left alone when it changed under us.
   const changed = await run({}, { args: { poNumber: 'PO-4' }, verdicts: [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }], onCall: (n, w) => { if (n === 2) w.po = 'OWNER-999'; } });
   expect(changed.w.po).toBe('OWNER-999');
-  expect(changed.error.evidence).toMatchObject({ poCleared: false, po_left_for_owner: true });
+  expect(changed.error.evidence.po_left_for_owner).toBe(true);
+  expect(changed.error.evidence.poCleared).toBeUndefined(); // never a claim it was cleared
   for (const r of [occupied, ours, changed]) expectSafe(r.w);
+});
+
+// ---- round 4 -----------------------------------------------------------------------
+
+test('R4 sign-in: the adapter never submits a sign-in form; any sign-in page stops the run, run-level', async () => {
+  const MESSAGE = 'SiteOne signed Chrome out — sign in to siteone.com in Chrome on the Mac';
+  const cases = [
+    { signedOut: true }, // the Okta identifier box is shown
+    { signedOut: true, signInFails: true },
+    { signedOut: true, signInUrl: 'https://www.siteone.com/en/login' },
+    { signedOut: true, signInUrl: 'https://login.example-idp.test/signin' },
+    { signedOut: true, signInUrl: 'https://siteone.com.evil.example/login' },
+  ];
+  for (const over of cases) {
+    const r = await run(over);
+    expect(r.error.runLevel).toBe(true);
+    expect(r.error.message).toBe(MESSAGE);
+    expect(r.w.clicks).toEqual([]); // nothing clicked, nothing filled
+    expect(r.w.fills).toEqual([]);
+    expect(r.w.cart).toEqual([]);
+    expectSafe(r.w);
+  }
+  // An exact identity-provider origin can no longer be allowed by env.
+  const env = { ...ENV, SITEONE_SIGN_IN_ORIGINS: 'https://login.example-idp.test' };
+  const r = await run({ signedOut: true, signInUrl: 'https://login.example-idp.test/signin' }, { env });
+  expect(r.error.runLevel).toBe(true);
+  expect(r.w.clicks).toEqual([]);
+  // Signed in: no sign-in code path is involved at all.
+  expect((await run({})).result.dryRun).toBe(false);
+});
+
+test('R4 cleanup: removal is bound to the verified row (cart entry, item, quantity), re-checked on the same element, and confirmed gone', async () => {
+  const refuse = [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }];
+  // Removed: exactly the row verified after the add.
+  const exact = await run({}, { verdicts: refuse });
+  expect(exact.error.evidence.cleanup).toBe('row_removed');
+  expect(exact.w.cart).toEqual([]);
+  // The owner's phone replaced our line with a new one (same item, same quantity): not ours.
+  const replaced = await run({}, { verdicts: refuse, onCall: (n, w) => { if (n === 2) w.cart[0] = { sku: SKU, qty: 2, entry: 'REPLACED' }; } });
+  expect(replaced.w.cart).toEqual([{ sku: SKU, qty: 2, entry: 'REPLACED' }]);
+  expect(replaced.error.evidence).toMatchObject({ cleanup: 'cart_left_for_owner', cart_left_for_owner: true });
+  expect(replaced.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
+  // The quantity changes between locating the row and clicking its remove link: re-verified, left.
+  const flipped = await run({}, { verdicts: refuse, onCall: (n, w) => { if (n === 2) { w.flipOnRead = 2; w.flipCount = 0; } } });
+  expect(flipped.w.cart).toEqual([{ sku: SKU, qty: 9, entry: 'E1' }]);
+  expect(flipped.error.evidence.cart_left_for_owner).toBe(true);
+  expect(flipped.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
+  // The click did nothing: the row is not gone after a reload, so row_removed is never recorded.
+  const stuck = await run({ removeNoop: true }, { verdicts: refuse });
+  expect(stuck.w.cart).toEqual([{ sku: SKU, qty: 2, entry: 'E1' }]);
+  expect(stuck.error.evidence.cleanup).toBe('cart_left_for_owner');
+  expect(stuck.error.evidence.cart_left_for_owner).toBe(true);
+  for (const r of [exact, replaced, flipped, stuck]) expectSafe(r.w);
+});
+
+test('R4 PO: a dry run never types a PO; a live run clears it through the form and proves it after a reload, else says po_left_for_owner', async () => {
+  const dry = await run({}, { env: { ...ENV, SITEONE_BOT_DRY_RUN: 'true' }, args: { poNumber: 'PO-6' } });
+  expect(dry.w.fills).toEqual([]);
+  expect(dry.w.po).toBe('');
+  expect(dry.result.evidence.poSkipped).toBe('dry_run');
+  const refuse = [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }];
+  const cleared = await run({}, { args: { poNumber: 'PO-6' }, verdicts: refuse });
+  expect(cleared.w.po).toBe('');
+  expect(cleared.error.evidence.poCleared).toBe(true);
+  expect(cleared.error.evidence.po_left_for_owner).toBeUndefined();
+  // The server keeps the PO (the clear was not saved): after the reload it is still there, so we do not claim it.
+  const sticky = await run({ poSticky: true }, { args: { poNumber: 'PO-6' }, verdicts: refuse });
+  expect(sticky.w.po).toBe('PO-6');
+  expect(sticky.error.evidence.po_left_for_owner).toBe(true);
+  expect(sticky.error.evidence.poCleared).toBeUndefined();
+  for (const r of [dry, cleared, sticky]) expectSafe(r.w);
+});
+
+test('R4 baseline: the pre-click page text must be readable and non-empty, else nothing is clicked', async () => {
+  const empty = await run({ reviewBody: '   ' });
+  expect(empty.error.refuse).toBe('baseline_unreadable');
+  const throws = await run({ bodyThrows: true });
+  expect(throws.error.refuse).toBe('baseline_unreadable');
+  for (const r of [empty, throws]) { expect(r.w.placed).toBe(0); expect(r.w.cart).toEqual([]); expectSafe(r.w); }
 });

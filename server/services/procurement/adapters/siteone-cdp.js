@@ -24,8 +24,10 @@
  *
  * Hard rules:
  *   - Dry run unless SITEONE_BOT_DRY_RUN is exactly 'false' (fail closed).
- *   - The bot never types a credential. The Okta sign-in form is prefilled by
- *     Chrome; the bot clicks Sign in once per page load and nothing else.
+ *   - The bot never types a credential and NEVER submits a sign-in form. Any
+ *     step that lands on a sign-in page (the Okta identifier box, a sign-in
+ *     path, any origin other than https://www.siteone.com) is run-level:
+ *     "SiteOne signed Chrome out — sign in to siteone.com in Chrome on the Mac".
  *   - The cart is shared with the owner's phone app: the bot starts only from
  *     an EMPTY cart, and removes only the line it added. It never clicks
  *     "remove all".
@@ -38,17 +40,20 @@
  *     chromium.js:98-101 doClose = transport.closeAndWait; Browser.close is
  *     sent only in the launch path, browserType.js:205-222). It never closes
  *     a context, so the owner's Chrome and tabs stay up.
- *   - Sign-in: the page origin AND the browser-resolved submission URL
- *     (button.formAction, else form.action) must be an approved
- *     identity-provider origin, and the identifier box and the button must
- *     share one form (el.form identity, read in one page.evaluate) (https siteone.com hosts, plus any exact https
- *     origin in SITEONE_SIGN_IN_ORIGINS — set it to the Okta host the first
- *     dry run shows). Otherwise run-level and nothing is clicked.
  *   - After the click an order number is read only on the vendor's confirmation
  *     path (URLS.confirmationPathPrefix + one segment, UNVERIFIED) and must be
  *     NEW against the review page's strings. Any other destination is ambiguous.
- *   - A PO box that already holds a value refuses (po_field_occupied); cleanup
- *     clears it only while it still equals the PO this run typed.
+ *   - A dry run never types a PO. A live run refuses on a PO box that already
+ *     holds a value (po_field_occupied). If a live run refuses after typing its
+ *     PO, cleanup clears it only while it still equals ours, saves the form and
+ *     verifies the box is empty after a reload; otherwise evidence says
+ *     po_left_for_owner (never a claim it was cleared).
+ *   - Cleanup removes a cart line only when it is the exact row verified after
+ *     the add (data-cartentry, item number, quantity), re-checked on that same
+ *     element just before its own remove link is clicked, and gone afterwards;
+ *     otherwise evidence says cart_left_for_owner.
+ *   - The pre-click page text (the order-number baseline) must be readable and
+ *     non-empty, else baseline_unreadable and nothing is clicked.
  *   - Every transition (checkout, review, the Place click) parses page.url() and
  *     requires origin https://www.siteone.com and the exact pathname.
  *   - The reservation is bound to the click: after the cap check passes, the
@@ -68,7 +73,6 @@ try { ({ chromium } = require('playwright')); } catch { chromium = null; }
 
 const SELECTORS = Object.freeze({
   oktaIdentifier: 'input[name="identifier"]',
-  oktaSubmit: 'input[type="submit"][value="Sign in"]',
   searchResult: '.product-item a.name',
   brandItemNumber: 'div.brand-itemnumber',
   formBrandItemNumber: 'form#addToCartForm input[name="brandItemNumber"]',
@@ -131,17 +135,12 @@ const URLS = Object.freeze({
   // destination (order history, an account page) is ambiguous.
   confirmationPathPrefix: '/en/checkout/orderConfirmation/',
 });
-// Identity-provider origins the bot may press Sign in on: https siteone.com
-// hosts, plus the exact https origins in SITEONE_SIGN_IN_ORIGINS (CSV; set it
-// to the Okta host the first dry run shows). Nothing else is ever clicked.
-const SIGN_IN_HOST_SUFFIX = '.siteone.com';
 const NAV_TIMEOUT = 45000;
 const ACTION_TIMEOUT = 15000;
 const WAIT_STEP = 500;
 const STEP_WAIT = 20000; // bounded wait for the next checkout step
 const CONFIRMATION_WAIT = 30000; // bounded wait for the order number after the click
 const SETTLE_MS = 2500;
-const MAX_SIGN_INS = 3;
 const PO_PATTERN = /^[A-Z0-9-]{1,20}$/;
 
 class RefusedError extends Error {
@@ -245,63 +244,20 @@ function assertAt(run, pathname, what) {
   if (pathname != null && !atSiteOne(run.page, pathname)) throw new RefusedError('page_unrecognized', `SiteOne is not on the ${what} page`, run.evidence);
 }
 
-function isApprovedSignInOrigin(u, env) {
-  const url = parseUrl(u);
-  if (!url || url.protocol !== 'https:' || url.port !== '') return false;
-  const host = url.hostname.toLowerCase();
-  if (host === 'siteone.com' || host.endsWith(SIGN_IN_HOST_SUFFIX)) return true;
-  return csv(env.SITEONE_SIGN_IN_ORIGINS).some((o) => parseUrl(o)?.origin === url.origin && o.startsWith('https://'));
-}
-
-// ---- navigation + sign-in ---------------------------------------------------
+// ---- navigation ---------------------------------------------------------------
 
 async function signInFormShown(page) { return (await shownAll(page, SELECTORS.oktaIdentifier)).length > 0; }
 
-// One page.evaluate over both elements: same form owner (el.form identity) and
-// the browser-resolved submission URL.
-async function readSignInSubmission(page, identifier, button) {
-  const handles = [await identifier.elementHandle(), await button.elementHandle()];
-  try {
-    return await page.evaluate(([idEl, btn]) => ({
-      sameForm: !!idEl.form && idEl.form === btn.form,
-      submitUrl: btn.formAction || (btn.form && btn.form.action) || '',
-    }), handles);
-  } catch { throw runLevel('siteone cdp: the sign-in form could not be proven'); }
-  finally { for (const h of handles) await h?.dispose?.().catch(() => {}); }
-}
-
-// The Okta form is Chrome-prefilled: the bot checks the identifier is already
-// there, then clicks the one Sign in button. It never types.
-async function clickPrefilledSignIn(run) {
-  const { page, evidence, env } = run;
-  // The page's own origin first: nothing is read or clicked on an unapproved one.
-  if (!isApprovedSignInOrigin(page.url(), env)) throw runLevel('siteone cdp: the sign-in page is not on an approved identity-provider origin');
-  run.signIns += 1;
-  if (run.signIns > MAX_SIGN_INS) throw runLevel('siteone cdp: signed out again and again — the profile is not signed in');
-  const identifier = await oneShown(page, SELECTORS.oktaIdentifier, 'sign-in identifier boxes', evidence).catch(() => { throw runLevel('siteone cdp: the sign-in form is not readable'); });
-  const button = await oneShown(page, SELECTORS.oktaSubmit, 'Sign in buttons', evidence).catch(() => { throw runLevel('siteone cdp: the Sign in button is not readable'); });
-  // The identifier and the button must belong to the SAME form, and the URL the
-  // browser would submit to (button.formAction, else form.action — both already
-  // resolved against document.baseURI) must be an approved origin.
-  const submission = await readSignInSubmission(page, identifier, button);
-  if (!submission.sameForm) throw runLevel('siteone cdp: the identifier box and the Sign in button are not in the same form');
-  if (!isApprovedSignInOrigin(parseUrl(submission.submitUrl)?.href, env)) throw runLevel('siteone cdp: the sign-in form would submit to an unapproved origin');
-  if (!String(await identifier.inputValue().catch(() => '')).trim()) throw runLevel('siteone cdp: the sign-in form is not prefilled — sign in on the Mac by hand');
-  await button.click();
-  evidence.signIns = run.signIns;
-  await page.waitForTimeout(run.opts.settleMs);
-}
-
+const SIGNED_OUT_MESSAGE = 'SiteOne signed Chrome out — sign in to siteone.com in Chrome on the Mac';
+const SIGN_IN_PATH = /\/(?:log-?in|sign-?in|logon)(?:\/|$)/i;
 
 // `pathname`: when given, the page must end exactly there (the cart, checkout).
+// A sign-in page is never filled or submitted: the run stops, run-level.
 async function openPage(run, url, pathname = null) {
   const { page } = run;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-  if (await signInFormShown(page)) {
-    await clickPrefilledSignIn(run);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-    if (await signInFormShown(page)) throw runLevel('siteone cdp: still not signed in after the prefilled sign-in');
-  }
+  const here = parseUrl(page.url());
+  if (!here || here.origin !== BASE || SIGN_IN_PATH.test(here.pathname) || await signInFormShown(page)) throw runLevel(SIGNED_OUT_MESSAGE);
   assertAt(run, pathname, 'navigation');
   await page.waitForTimeout(run.opts.settleMs);
 }
@@ -312,6 +268,7 @@ async function cartRows(page) { return (await matches(page, SELECTORS.cartRow)).
 async function rowReading(row) {
   return {
     sku: String((await row.getAttribute('data-itemnumber').catch(() => '')) || '').trim(),
+    entry: String((await row.getAttribute('data-cartentry').catch(() => '')) || '').trim(),
     requested: String((await row.getAttribute('data-requestedqty').catch(() => '')) || '').trim(),
     inputQty: await row.locator(SELECTORS.cartQtyInput).count().then(async (n) => {
       if (!n) return null;
@@ -321,45 +278,75 @@ async function rowReading(row) {
   };
 }
 
-// Remove ONLY the line this run added: its row, matched by item number.
-async function removeOwnRow(run) {
-  const { page, vendorSku } = run;
-  await openPage(run, URLS.cart, PATHS.cart);
-  const ours = [];
-  for (const row of await cartRows(page)) {
+// The row is exactly what this run added: our item, the cart entry verified
+// after the add (when one was read), and the quantity we set.
+function isOwnRow(run, reading) {
+  const qtys = [reading.requested, reading.inputQty].filter((q) => q != null && q !== '');
+  return reading.sku === run.vendorSku
+    && (run.ownEntry == null || reading.entry === run.ownEntry)
+    && qtys.length > 0 && qtys.every((q) => Number(q) === run.quantity);
+}
+async function rowsWithOurItem(run) {
+  const found = [];
+  for (const row of await cartRows(run.page)) {
     const reading = await rowReading(row);
-    if (reading.sku === vendorSku) ours.push({ row, reading });
+    if (reading.sku === run.vendorSku) found.push({ row, reading });
   }
+  return found;
+}
+const leaveCart = (run, why) => { run.evidence.cleanup = why; run.evidence.cart_left_for_owner = true; };
+
+// Remove ONLY the line this run added, bound to that row's identity: located by
+// item number, checked against the verified cart entry and quantity, checked
+// AGAIN on the same element just before its own remove link is clicked, and
+// confirmed gone (after a reload) before row_removed is recorded. Anything
+// else belongs to the owner now.
+async function removeOwnRow(run) {
+  const { page } = run;
+  await openPage(run, URLS.cart, PATHS.cart);
+  const ours = await rowsWithOurItem(run);
   if (!ours.length) { run.evidence.cleanup = 'row_absent'; return; }
-  // Only a row that is exactly what this run added (one line, the quantity we
-  // set, the cart empty before) is removed. Anything else — a changed or merged
-  // quantity, a second line — belongs to the owner now: leave it.
-  const readings = ours.length === 1 ? [ours[0].reading.requested, ours[0].reading.inputQty].filter((q) => q != null && q !== '') : [];
-  const exact = run.cartEmptyBefore && readings.length > 0 && readings.every((q) => Number(q) === run.quantity);
-  if (!exact) { run.evidence.cleanup = 'cart_left_for_owner'; run.evidence.cart_left_for_owner = true; return; }
-  const link = await shownAll(ours[0].row, SELECTORS.cartRemoveLine);
-  if (link.length !== 1) { run.evidence.cleanup = 'remove_link_unreadable'; run.evidence.cart_left_for_owner = true; return; }
+  if (!run.cartEmptyBefore || ours.length !== 1 || !isOwnRow(run, ours[0].reading)) { leaveCart(run, 'cart_left_for_owner'); return; }
+  const { row } = ours[0];
+  const link = await shownAll(row, SELECTORS.cartRemoveLine);
+  if (link.length !== 1) { leaveCart(run, 'remove_link_unreadable'); return; }
+  if (!isOwnRow(run, await rowReading(row))) { leaveCart(run, 'cart_left_for_owner'); return; }
   await link[0].click();
   await page.waitForTimeout(run.opts.settleMs);
+  const gone = await poll(page, async () => {
+    await openPage(run, URLS.cart, PATHS.cart);
+    return (await rowsWithOurItem(run)).every(({ reading }) => run.ownEntry != null && reading.entry !== run.ownEntry);
+  }, 3 * run.opts.settleMs + 3 * WAIT_STEP, run.opts.settleMs || WAIT_STEP);
+  if (!gone) { leaveCart(run, 'cart_left_for_owner'); return; }
   run.evidence.cleanup = 'row_removed';
 }
 
+// A live run that typed its PO and then refused: clear it through the checkout
+// form (the PO is saved with the form) and prove it is empty after a reload.
+// Not provable → po_left_for_owner, never a claim it was cleared.
 async function clearPo(run) {
-  const { page } = run;
+  const { page, poNumber } = run;
+  const left = () => { run.evidence.po_left_for_owner = true; };
   await openPage(run, URLS.checkout, PATHS.checkout);
   const po = await shownAll(page, SELECTORS.poInput);
-  // Clear it only while it still holds exactly the PO we typed; any other value is not ours.
-  const ours = po.length === 1 && (await po[0].inputValue().catch(() => null)) === run.poNumber;
-  if (ours) await po[0].fill('');
-  run.evidence.poCleared = ours;
-  if (!ours) run.evidence.po_left_for_owner = true;
+  // Only while it still holds exactly the PO we typed.
+  if (po.length !== 1 || (await po[0].inputValue().catch(() => null)) !== poNumber) { left(); return; }
+  await po[0].fill('');
+  const submit = await shownAll(page, SELECTORS.orderTypeSubmit);
+  if (submit.length !== 1) { left(); return; }
+  await submit[0].click();
+  await page.waitForTimeout(run.opts.settleMs);
+  await openPage(run, URLS.checkout, PATHS.checkout); // reload: what the server saved
+  const after = await shownAll(page, SELECTORS.poInput);
+  if (after.length === 1 && (await after[0].inputValue().catch(() => null)) === '') run.evidence.poCleared = true;
+  else left();
 }
 
 // Best-effort cleanup of what THIS run left behind (never on a submitted order).
 async function cleanup(run) {
   if (run.submitted) return;
   if (run.poFilled) {
-    try { await clearPo(run); } catch (e) { run.evidence.poCleared = false; logger.warn(`[siteone-cdp] PO cleanup failed: ${String(e.message).slice(0, 120)}`); }
+    try { await clearPo(run); } catch (e) { run.evidence.po_left_for_owner = true; logger.warn(`[siteone-cdp] PO cleanup failed: ${String(e.message).slice(0, 120)}`); }
   }
   if (run.added) {
     try { await removeOwnRow(run); } catch (e) { run.evidence.cleanup = 'failed'; logger.warn(`[siteone-cdp] cart cleanup failed: ${String(e.message).slice(0, 120)}`); }
@@ -430,6 +417,8 @@ async function verifyOwnRow(run) {
   evidence.cartRowsAfter = rows.length;
   const readings = [];
   for (const row of rows) readings.push(await rowReading(row));
+  // The identity cleanup is bound to: this line's own cart entry.
+  if (readings.length === 1 && readings[0].sku === vendorSku) run.ownEntry = readings[0].entry || null;
   const good = readings.length === 1 && readings[0].sku === vendorSku
     && [readings[0].requested, readings[0].inputQty].filter((q) => q != null && q !== '').length > 0
     && [readings[0].requested, readings[0].inputQty].filter((q) => q != null && q !== '').every((q) => Number(q) === quantity);
@@ -476,7 +465,8 @@ async function fillOrderType(run) {
   if (!hasEveryToken(locText, pickupTokens)) throw new RefusedError('pickup_not_selected', 'SiteOne checkout: the pickup location is not the approved branch', evidence);
   const storeField = String(await (await oneAttached(page, SELECTORS.checkoutStoreId, 'checkout store fields', evidence)).inputValue().catch(() => '')).trim();
   if (storeField !== storeId) throw new RefusedError('store_mismatch', `SiteOne checkout store ${storeField || '?'} is not the approved store ${storeId}`, evidence);
-  if (poNumber) {
+  if (poNumber && run.dryRun) evidence.poSkipped = 'dry_run'; // a dry run never types a PO
+  if (poNumber && !run.dryRun) {
     const po = await oneShown(page, SELECTORS.poInput, 'PO number boxes', evidence);
     // Never overwrite a PO this run did not type (a value is left from an earlier run or the owner).
     if (String(await po.inputValue().catch(() => 'unreadable')).trim() !== '') throw new RefusedError('po_field_occupied', 'SiteOne checkout: the PO number box already holds a value — nothing typed', evidence);
@@ -628,8 +618,14 @@ async function readConfirmation(run, baseline) {
 async function bindToClick(run, first) {
   const { page, evidence } = run;
   if (!run.dryRun) await run.gate(first.totalCents, 'final claim check'); // the claim is re-asserted at the click
+  // A catch-all text read would turn a failed read into an empty baseline and
+  // let a number already on the page pass as new: it must succeed and be non-empty.
   let baseline;
-  try { baseline = numberTokens(await textOf(await oneAttached(page, SELECTORS.body, 'page bodies', evidence))); } catch { throw new RefusedError('review_fields_unreadable', 'SiteOne review: the page text could not be read before the click', evidence); }
+  try {
+    const bodyText = String(await (await oneAttached(page, SELECTORS.body, 'page bodies', evidence)).innerText());
+    if (!bodyText.trim()) throw new Error('empty');
+    baseline = numberTokens(bodyText);
+  } catch { throw new RefusedError('baseline_unreadable', 'SiteOne review: the page text could not be read before the click', evidence); }
   const again = await readReview(run);
   if (reviewKey(again) !== reviewKey(first)) throw new RefusedError('review_changed', 'SiteOne review changed after the cap check — nothing clicked', evidence, again.totalCents);
   assertAt(run, PATHS.review, 'order review');
@@ -719,7 +715,7 @@ async function place(args, opts = {}) {
   };
   const { browser, page } = await openPageInOwnerChrome(env, connect);
   const run = {
-    page, vendorSku: sku, quantity: qty, poNumber: po, dryRun, evidence, gate, signIns: 0, env, cartEmptyBefore: false, added: false, poFilled: false, submitted: false,
+    page, vendorSku: sku, quantity: qty, poNumber: po, dryRun, evidence, gate, cartEmptyBefore: false, ownEntry: null, added: false, poFilled: false, submitted: false,
     storeId: String(env.SITEONE_APPROVED_STORE_ID).trim(), pickupTokens: csv(env.SITEONE_APPROVED_PICKUP),
     opts: { settleMs: opts.settleMs ?? SETTLE_MS, confirmStep: opts.confirmStep ?? 1000 },
   };
@@ -749,5 +745,5 @@ module.exports = {
   quote: () => null,
   place,
   RefusedError,
-  _internals: { SELECTORS, URLS, PATHS, confirmationCodeOf, parseMoney, itemNumberAfterColon, orderNumberIn, numberTokens, hasToken, hasEveryToken, isDryRun, isLocalCdpUrl, isApprovedSignInOrigin },
+  _internals: { SELECTORS, URLS, PATHS, confirmationCodeOf, parseMoney, itemNumberAfterColon, orderNumberIn, numberTokens, hasToken, hasEveryToken, isDryRun, isLocalCdpUrl },
 };
