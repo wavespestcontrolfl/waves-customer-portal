@@ -51,6 +51,10 @@ async function loadStopMembers(conn, ids) {
     const day = visitDateOf(m.scheduled_date);
     dateOf.set(id, dateOf.has(id) && dateOf.get(id) !== day ? null : day);
   }
+  // A grouped row missing from its own stop read (it left the stop between the reads) has an unknown date too.
+  for (const r of rows) {
+    if (r.visit_id != null && !(stopOf.get(String(r.id)) || []).some((m) => String(m.id) === String(r.id))) dateOf.set(String(r.id), null);
+  }
   return { stopOf, memberIds: members.map((m) => String(m.id)), dateOf };
 }
 
