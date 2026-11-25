@@ -5,12 +5,13 @@
  */
 const invoices = {};
 const reportedErrors = {};
+const rungBells = {};
 jest.mock('../models/db', () => jest.fn((table) => {
   let id = null;
   const q = {
-    where: jest.fn((w) => { if (w && typeof w === 'object') id = w.id || w.invoice_id; return q; }),
+    where: jest.fn((w) => { if (w && typeof w === 'object') { id = w.id || w.invoice_id; if (w.phase) table = 'rung'; } return q; }),
     whereNot: jest.fn(() => q),
-    first: jest.fn(async () => (table === 'bill_payment_error_alerts' ? reportedErrors[id] : invoices[id]) || undefined),
+    first: jest.fn(async () => ({ rung: rungBells, bill_payment_error_alerts: reportedErrors }[table] || invoices)[id] || undefined),
   };
   return q;
 }));
@@ -41,14 +42,15 @@ function stripeWith(pages) {
   return { paymentIntents: { search } };
 }
 
-beforeEach(() => { for (const m of [invoices, reportedErrors]) for (const k of Object.keys(m)) delete m[k]; });
+beforeEach(() => { for (const m of [invoices, reportedErrors, rungBells]) for (const k of Object.keys(m)) delete m[k]; });
 
 test('rings once for an invoice left on Bank account 30+ minutes ago, through the bill-payment alert path', async () => {
   invoices['0100'] = invoice('0100', 'pi_a');
   const stripe = stripeWith([{ data: [pi('pi_a', '0100', '2026-11-24T20:20:00Z')], has_more: false }]);
   const alert = jest.fn(async () => ({ notified: true }));
   const tally = await runBankStepLeftBell({ now: NOW, stripe, alert });
-  expect(stripe.paymentIntents.search).toHaveBeenCalledWith({ query: __private.SEARCH_QUERY, limit: 100 });
+  expect(stripe.paymentIntents.search).toHaveBeenCalledWith({ query: __private.searchQuery(NOW.getTime()), limit: 100 });
+  expect(__private.searchQuery(NOW.getTime())).toBe(`${__private.SEARCH_QUERY} AND created>${Math.floor(NOW.getTime() / 1000) - 60 * 86400}`);
   expect(__private.SEARCH_QUERY).toBe("status:'requires_payment_method' AND metadata['selected_method_category']:'us_bank_account'");
   expect(alert).toHaveBeenCalledTimes(1);
   expect(alert).toHaveBeenCalledWith(expect.objectContaining({
@@ -95,7 +97,7 @@ test('follows Stripe search pages and stops when has_more is false', async () =>
   ]);
   const alert = jest.fn(async () => ({ notified: true }));
   const tally = await runBankStepLeftBell({ now: NOW, stripe, alert });
-  expect(stripe.paymentIntents.search).toHaveBeenNthCalledWith(2, { query: __private.SEARCH_QUERY, limit: 100, page: 'p2' });
+  expect(stripe.paymentIntents.search).toHaveBeenNthCalledWith(2, { query: __private.searchQuery(NOW.getTime()), limit: 100, page: 'p2' });
   expect(tally).toMatchObject({ candidates: 2, rang: 2 });
 });
 
@@ -124,4 +126,20 @@ test('counts a failed alert write as a failure, not as already rung', async () =
   invoices['0100'] = invoice('0100', 'pi_a');
   const tally = await runBankStepLeftBell({ now: NOW, stripe: stripeWith([{ data: [pi('pi_a', '0100', '2026-11-24T20:00:00Z')], has_more: false }]), alert: jest.fn(async () => ({ notified: false, error: 'write failed' })) });
   expect(tally).toMatchObject({ rang: 0, duplicate: 0, failed: 1 });
+});
+
+test('skips an invoice whose bank-step bell already rang in the last 24 h, before the alert upsert', async () => {
+  invoices['0100'] = invoice('0100', 'pi_a');
+  rungBells['0100'] = { id: 'alert-9' };
+  const alert = jest.fn();
+  const tally = await runBankStepLeftBell({ now: NOW, stripe: stripeWith([{ data: [pi('pi_a', '0100', '2026-11-24T20:00:00Z')], has_more: false }]), alert });
+  expect(alert).not.toHaveBeenCalled();
+  expect(tally.skipped).toEqual({ already_rung: 1 });
+});
+
+test('an intent too old to ring costs no invoice read', async () => {
+  const db = require('../models/db');
+  db.mockClear();
+  await runBankStepLeftBell({ now: NOW, stripe: stripeWith([{ data: [pi('pi_a', '0100', '2026-11-22T20:00:00Z')], has_more: false }]), alert: jest.fn() });
+  expect(db).not.toHaveBeenCalled();
 });

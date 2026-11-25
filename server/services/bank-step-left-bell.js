@@ -27,6 +27,13 @@ const logger = require('./logger');
 const { isInvoiceCollectibleStatus, invoiceAmountDue, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 
 const SEARCH_QUERY = "status:'requires_payment_method' AND metadata['selected_method_category']:'us_bank_account'";
+// Discovery window: intents created in the last 60 days. The pay page reuses an
+// invoice's intent, so a reused one can be older than its touch; 60 days covers
+// an invoice through the dunning ladder's first two months.
+const CREATED_WINDOW_S = 60 * 24 * 60 * 60;
+function searchQuery(nowMs) {
+  return `${SEARCH_QUERY} AND created>${Math.floor(nowMs / 1000) - CREATED_WINDOW_S}`;
+}
 const MIN_AGE_MS = 30 * 60 * 1000;
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // Stripe search pages of 100. Today the match set is a handful; a cap hit logs.
@@ -54,6 +61,8 @@ function skipReason(pi, invoice, nowMs) {
   if (pi.metadata?.selected_method_category !== 'us_bank_account') return 'method_changed';
   // A confirm that failed already rang its own "Bank payment error" bell.
   if (pi.last_payment_error) return 'payment_error_on_intent';
+  if (!pi.metadata?.waves_invoice_id) return 'no_invoice_id';
+  if (invoice === undefined) return null; // intent-only pass: the invoice is read next
   if (!invoice) return 'invoice_not_found';
   if (invoice.stripe_payment_intent_id !== pi.id) return 'intent_replaced';
   if (!isInvoiceCollectibleStatus(invoice.status)) return 'not_collectible';
@@ -77,11 +86,27 @@ async function errorAlreadyReported(invoice, pi) {
   return !!row;
 }
 
+// This invoice's bank-step bell already rang inside the 24 h window: skip before
+// the alert upsert, so ten-minute polls do not inflate occurrence_count. The
+// upsert's own dedupe still covers two runs racing.
+async function alreadyRung(invoice, nowMs) {
+  const row = await db('bill_payment_error_alerts')
+    .where({ invoice_id: invoice.id, phase: 'bank_step_left' })
+    .where('notified_at', '>', new Date(nowMs - MAX_AGE_MS))
+    .first('id');
+  return !!row;
+}
+
 // One searched intent: ring, count a duplicate, or count why it was skipped.
 async function checkIntent(pi, { nowMs, sendAlert, tally }) {
-  const invoiceId = pi.metadata?.waves_invoice_id;
-  const invoice = invoiceId ? await db('invoices').where({ id: invoiceId }).first() : null;
-  const reason = skipReason(pi, invoice, nowMs) || (await errorAlreadyReported(invoice, pi) ? 'error_already_reported' : null);
+  const skip = (why) => { tally.skipped[why] = (tally.skipped[why] || 0) + 1; };
+  // Intent-only checks first, so old or changed intents cost no database read.
+  const early = skipReason(pi, undefined, nowMs);
+  if (early) return skip(early);
+  const invoice = (await db('invoices').where({ id: pi.metadata.waves_invoice_id }).first()) || null;
+  const reason = skipReason(pi, invoice, nowMs)
+    || (await alreadyRung(invoice, nowMs) ? 'already_rung' : null)
+    || (await errorAlreadyReported(invoice, pi) ? 'error_already_reported' : null);
   if (reason) {
     tally.skipped[reason] = (tally.skipped[reason] || 0) + 1;
     return;
@@ -109,7 +134,7 @@ async function runBankStepLeftBell({ now = new Date(), stripe, alert } = {}) {
 
   let nextPage = null;
   for (let pageNo = 0; pageNo < MAX_PAGES; pageNo += 1) {
-    const page = await client.paymentIntents.search({ query: SEARCH_QUERY, limit: 100, ...(nextPage ? { page: nextPage } : {}) });
+    const page = await client.paymentIntents.search({ query: searchQuery(ctx.nowMs), limit: 100, ...(nextPage ? { page: nextPage } : {}) });
     for (const pi of page?.data || []) {
       tally.candidates += 1;
       try {
@@ -127,4 +152,4 @@ async function runBankStepLeftBell({ now = new Date(), stripe, alert } = {}) {
   return tally;
 }
 
-module.exports = { runBankStepLeftBell, __private: { skipReason, touchedAtMs, SEARCH_QUERY, MIN_AGE_MS, MAX_AGE_MS } };
+module.exports = { runBankStepLeftBell, __private: { skipReason, touchedAtMs, searchQuery, SEARCH_QUERY, MIN_AGE_MS, MAX_AGE_MS } };
