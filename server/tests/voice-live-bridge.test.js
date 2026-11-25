@@ -1648,6 +1648,22 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['Old words', 'tail', 'A brand new question']);
   });
 
+  test('a delegation with no words keeps the fallback it had on arrival: the next question, arriving while it settles, never becomes its fallback', async () => {
+    const { t, brain } = toolsSetup({ deps: { transcriptQuietMs: 60, transcriptMaxWaitMs: 1000 } });
+    await t.ready();
+    t.openai.receive(said('Old words', 0, 600));
+    t.openai.receive(created('d0'));
+    await waitFor(() => answers(t).length === 1);
+    // d1 arrives with nothing new; its settle window opens
+    t.openai.receive({ ...created('d1'), offset_ms: 5000 });
+    // the caller's next question arrives during that window, well after the delegation: it is NOT d1's tail
+    t.openai.receive(said('The next question', 9000, 9800));
+    await waitFor(() => answers(t).length === 2);
+    t.openai.receive({ ...created('d2'), offset_ms: 10000 });
+    await waitFor(() => answers(t).length === 3);
+    expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['Old words', 'Old words', 'The next question']);
+  });
+
   test('a retired brain\'s reply is neither counted as an ask nor timed', async () => {
     const { t, brain } = toolsSetup({ reply: async () => 'real answer' });
     await t.ready();

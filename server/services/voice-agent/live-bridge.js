@@ -852,6 +852,9 @@ class LiveBridge {
     const range = {
       text: this.callerPending.text, startMs: this.callerPending.startMs, open: this.deps.transcriptQuietMs > 0, // no settle wait: closed at once
       offsetMs: Number.isFinite(offsetMs) ? offsetMs : null, endMs: this.callerFragmentEndMs,
+      // The fallback for a delegation with no words of its own, fixed HERE: what the caller said before it arrived.
+      // A later question (it goes to the next delegation) never becomes this one's fallback.
+      fallback: this.callerRecent.map((u) => ({ text: u.text, startMs: u.startMs })),
     };
     this.callerPending = { text: '', startMs: null };
     this.callerLate = range;
@@ -883,8 +886,8 @@ class LiveBridge {
     let words = clean(range.text);
     let startMs = range.startMs;
     if (!words) {
-      words = clean(this.callerRecent.map((u) => u.text).join(' ')).slice(-CALLER_TEXT_MAX_CHARS);
-      startMs = this.callerRecent.length ? this.callerRecent[0].startMs : null;
+      words = clean(range.fallback.map((u) => u.text).join(' ')).slice(-CALLER_TEXT_MAX_CHARS);
+      startMs = range.fallback.length ? range.fallback[0].startMs : null;
     }
     if (!words) return '';
     const before = this.agentRecent.filter((u) => startMs === null || u.startMs === null || u.startMs < startMs);

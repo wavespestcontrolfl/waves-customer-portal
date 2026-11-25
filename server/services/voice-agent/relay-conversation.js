@@ -545,6 +545,9 @@ const INTERRUPT_FOLLOWUP_MS = 1500;
 // earlier exchange, not to this turn's endpointing.
 const CALLER_STOP_STALE_MS = 15000;
 const MAX_TOOL_ROUNDS = 6; // safety cap on tool_use loops per caller turn
+// A practice line has three cheap tools and no reason to loop: at most 3 model rounds an ask, so the call's
+// provider requests are bounded by construction (15 asks x 3 rounds = 45; no SDK retry, no provider switch).
+const PRACTICE_MAX_TOOL_ROUNDS = 3;
 const MAX_CALL_TURNS = 40; // safety cap on total caller turns for one call
 const STREAM_TIMEOUT_MS = 20000; // bound a single model stream so it can't hang
 // A failed model call, by whether the stream timed out: the switch reason it
@@ -664,8 +667,38 @@ function stampedEffortFor(provider, model, anthropicEffort) {
   }
 }
 
+// A bounded error code for logs. A provider error's message can echo the rejected request (a streamed tool
+// input holds the caller's own words: a phone, an address), so err.message is never logged on the model path.
+function errCode(err) {
+  const base = String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32);
+  return Number.isFinite(err && err.status) ? `${base}:${err.status}` : base;
+}
+
+// ⭐ PRACTICE-LINE CLIENTS: the GPT-Live trial's brain must not spend more provider requests than it counts. The
+// shared Anthropic client keeps the SDK's two automatic retries (one failed attempt = three requests), so a
+// practice line gets its own instances with maxRetries 0 (never a mutation of the shared one); the OpenAI relay
+// adapter never retries (one fetch per attempt) but gets its own instance too. Built lazily, once.
+let practiceAnthropic = null;
+let practiceOpenai = null;
+function practiceClientFor(provider) {
+  if (provider === 'openai') {
+    if (!practiceOpenai) {
+      try {
+        const { OpenAIRelayClient } = require('./relay-openai-client');
+        practiceOpenai = new OpenAIRelayClient({ apiKey: process.env.OPENAI_API_KEY });
+      } catch { practiceOpenai = null; }
+    }
+    return openaiClient ? practiceOpenai : null;
+  }
+  if (!practiceAnthropic && anthropic) {
+    try { practiceAnthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 }); } catch { practiceAnthropic = null; }
+  }
+  return practiceAnthropic;
+}
+
 /** The provider client for a resolved session — never a silent Claude substitute. */
-function clientFor(provider) {
+function clientFor(provider, practiceLine = false) {
+  if (practiceLine) return practiceClientFor(provider);
   return provider === 'openai' ? openaiClient : anthropic;
 }
 
@@ -2104,7 +2137,7 @@ class RelayConversation {
       }
       this._flushStreamChunk(state, sentence, stat, isLast);
     }).catch((err) => {
-      logger.error(`[voice-relay] stream renderer flush failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      logger.error(`[voice-relay] stream renderer flush failed callSid=${maskSid(this.callSid)} code=${errCode(err)}`);
       // NOT `withheld` — that means another socket owns the call. A failed
       // send (most plausibly a dead socket) ends the round via its own path.
       state.failed = true;
@@ -2175,7 +2208,7 @@ class RelayConversation {
       try {
         this._closeStreamEntry(streamState);
       } catch (err) {
-        logger.warn(`[voice-relay] stream renderer close after a failed send also failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+        logger.warn(`[voice-relay] stream renderer close after a failed send also failed callSid=${maskSid(this.callSid)} code=${errCode(err)}`);
         if (streamState.entry) streamState.entry.streamOpen = false;
       }
     }
@@ -2240,7 +2273,7 @@ class RelayConversation {
       fn();
       return null;
     } catch (err) {
-      logger.error(`[voice-relay] stream renderer ${label} callSid=${maskSid(this.callSid)}: ${err.message}`);
+      logger.error(`[voice-relay] stream renderer ${label} callSid=${maskSid(this.callSid)} code=${errCode(err)}`);
       return this._closeStreamedRoundEarly(streamState, msg, 'failed');
     }
   }
@@ -2492,7 +2525,7 @@ class RelayConversation {
       stat.loopStartAt = now();
       return this._runLoop(t);
     }).catch((e) => {
-      logger.error(`[voice-relay] loop error callSid=${this.callSid}: ${e.message}`);
+      logger.error(`[voice-relay] loop error callSid=${this.callSid} code=${errCode(e)}`);
     }).then(() => this._finishTurn(stat));
     return this._chain;
   }
@@ -2667,7 +2700,7 @@ class RelayConversation {
       })
       .catch((err) => {
         // executeTool has its own try/catch; this is the belt-and-braces path.
-        logger.error(`[voice-relay] tool "${name}" rejected: ${err.message}`);
+        logger.error(`[voice-relay] tool "${String(name || '').replace(/[^\w.-]/g, '').slice(0, 40)}" rejected code=${errCode(err)}`);
         return onTimeout;
       });
     work.catch(() => {}); // a late loser must never surface as unhandled
@@ -3353,7 +3386,8 @@ class RelayConversation {
    * matching how those two already share the OpenAI-eligible allowlist.
    */
   _canSwitchToClaudeFallback() {
-    return this._provider === 'openai' && !this._evalHarness && !this._modelSwitch;
+    // A practice line never switches provider mid-call: that retry is a second request for the same round.
+    return this._provider === 'openai' && !this._evalHarness && !this._modelSwitch && !this._practiceLine;
   }
 
   /**
@@ -3517,7 +3551,7 @@ class RelayConversation {
   }
 
   async _modelAttempt(stat) {
-    const client = clientFor(this._provider);
+    const client = clientFor(this._provider, this._practiceLine);
     this._controller = new AbortController();
     // PR C: fresh per attempt, never read outside it — see _newStreamState.
     const streamState = this.renderer === 'stream' ? this._newStreamState(this._controller.signal) : null;
@@ -3555,7 +3589,8 @@ class RelayConversation {
           tools: this._tools,
           messages: this.messages,
         },
-        { signal: this._controller.signal }
+        // A practice line never retries inside the SDK (the client is built with maxRetries 0 as well).
+        { signal: this._controller.signal, ...(this._practiceLine ? { maxRetries: 0 } : {}) }
       );
       // First-token latency (test doubles expose only finalMessage). The
       // first streamed CONTENT BLOCK, not the first text event: a round that
@@ -3682,7 +3717,7 @@ class RelayConversation {
       }
       stat.timedOut = stat.timedOut || timedOut;
       const failure = MODEL_FAILURE[timedOut];
-      logger[failure.level]( `[voice-relay] model round failed callSid=${maskSid(this.callSid)} timeout=${timedOut}: ${err.message}`);
+      logger[failure.level](`[voice-relay] model round failed callSid=${maskSid(this.callSid)} timeout=${timedOut} code=${errCode(err)}`);
       this._modelFailures += 1;
       // PR C: a partial streaming utterance is still "open" on Twilio's side
       // (it has only ever seen last:false frames) — close it out with a
@@ -3707,7 +3742,7 @@ class RelayConversation {
     // construction) — never re-checked against the live gate mid-call, so a
     // gate flip during an in-flight call can neither add nor remove a
     // client from under it.
-    const client = clientFor(this._provider);
+    const client = clientFor(this._provider, this._practiceLine);
     if (this.ended || !client) {
       if (!client) this.say(this._copy('unavailable'));
       return;
@@ -3865,7 +3900,8 @@ class RelayConversation {
       });
     }
 
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const maxRounds = this._practiceLine ? PRACTICE_MAX_TOOL_ROUNDS : MAX_TOOL_ROUNDS;
+    for (let round = 0; round < maxRounds; round++) {
       if (this.ended) return;
       // OpenAI provider-failure fallback (GATE_VOICE_RELAY_OPENAI_INBOUND):
       // the model call itself, plus the ONE eligible switch-and-retry, now
@@ -3921,7 +3957,7 @@ class RelayConversation {
         try {
           if (!(await this._maybeHandoffForFailure(toolCtx))) this.say(require('./relay-language').copy('modelError', this.language));
         } catch (err) {
-          logger.warn(`[voice-relay] failure copy after a failed send also failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+          logger.warn(`[voice-relay] failure copy after a failed send also failed callSid=${maskSid(this.callSid)} code=${errCode(err)}`);
         }
         return;
       }
