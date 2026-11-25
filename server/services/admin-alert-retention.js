@@ -203,11 +203,18 @@ const isActivityOnly = (meta) => meta.feed === 'activity';
 // A money row (KEEP_UNTIL_SETTLED_CATEGORIES) never ages out under age30: it stays until a person marks it done or its
 // own closer settles it (owner ruling 2026-11-05 "A"). Before this, only the quiet policy honoured the list, so the
 // nightly sweep closed unworked billing rows at 30 days. An FYI money row still follows fyi7: it asks for no action.
-const isKeptMoneyRow = (row) => KEEP_UNTIL_SETTLED_CATEGORIES.includes(row.category || '');
+// A registry trigger declared fyi (payment_succeeded, payment_refunded) is news, not money owed: an older row of it
+// without the fyi label still ages out at 30 days.
+const fyiTriggerKeys = () => {
+  const { TRIGGER_REGISTRY } = require('./notification-triggers');
+  return Object.keys(TRIGGER_REGISTRY).filter((k) => TRIGGER_REGISTRY[k]?.rule?.severity === 'fyi');
+};
+const isKeptMoneyRow = (row, meta) => KEEP_UNTIL_SETTLED_CATEGORIES.includes(row.category || '')
+  && !fyiTriggerKeys().includes(String(meta.triggerKey || ''));
 
 function ruleFor(row, meta, ageMs) {
   if (isFyiRow(row, meta) && ageMs > FYI_DAYS * DAY_MS) return 'fyi7';
-  if (!isActivityOnly(meta) && !isKeptMoneyRow(row) && ageMs > AGE_DAYS * DAY_MS) return 'age30';
+  if (!isActivityOnly(meta) && !isKeptMoneyRow(row, meta) && ageMs > AGE_DAYS * DAY_MS) return 'age30';
   return null;
 }
 
@@ -320,7 +327,8 @@ async function loadPage(conn, { now, cursor, limit, scope = null }) {
   const fyiCutoff = new Date(now.getTime() - FYI_DAYS * DAY_MS);
   return pageQuery(conn, { cursor, limit, scope }, (query) => query
     .where((q) => q.where((a) => a.where('created_at', '<', ageCutoff).whereRaw(NOT_ACTIVITY_SQL)
-      .whereRaw("NOT (COALESCE(category, '') = ANY(?::text[]))", [KEEP_UNTIL_SETTLED_CATEGORIES]))
+      .whereRaw("(NOT (COALESCE(category, '') = ANY(?::text[])) OR COALESCE(metadata->>'triggerKey', '') = ANY(?::text[]))",
+        [KEEP_UNTIL_SETTLED_CATEGORIES, fyiTriggerKeys()]))
       .orWhere((f) => f.where('created_at', '<', fyiCutoff).whereRaw(FYI_SQL))));
 }
 

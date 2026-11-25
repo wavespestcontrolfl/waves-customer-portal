@@ -368,6 +368,13 @@ describe('money rows stay until settled (owner ruling 2026-11-05 "A")', () => {
     expect(retention.judgeRow(row({ created_at: ago(90), category }), NOW)).toEqual({ expire: false, reason: 'young' });
   });
 
+  test('an unlabelled payment_succeeded row (a registry fyi type) still ages out at 30 days', () => {
+    expect(retention.judgeRow(row({ created_at: ago(40), category: 'payment', metadata: { triggerKey: 'payment_succeeded' } }), NOW))
+      .toEqual({ expire: true, rule: 'age30' });
+    expect(retention.judgeRow(row({ created_at: ago(40), category: 'payment', metadata: { triggerKey: 'payment_failed' } }), NOW).expire)
+      .toBe(false);
+  });
+
   test('an FYI money row still follows fyi7', () => {
     expect(retention.judgeRow(row({ created_at: ago(9), category: 'billing', metadata: { severity: 'fyi' } }), NOW))
       .toEqual({ expire: true, rule: 'fyi7' });
