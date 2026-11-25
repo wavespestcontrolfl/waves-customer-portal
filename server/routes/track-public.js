@@ -33,7 +33,7 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
-const { isTrackTokenLive, recipientTrackLinkOpen } = require('../services/track-token-expiry');
+const { isTrackTokenLive, recipientLinkEligible: recipientLinkEligibleRule } = require('../services/track-token-expiry');
 const logger = require('../services/logger');
 const { recordPageView, logViewFailure } = require('../services/customer-page-views');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -692,7 +692,6 @@ const PRIVACY_HEADERS = {
 // The link's lifetime keeps the reachable states to three (recipientTrackLinkOpen in track-token-expiry.js): en route, on
 // property, and complete for up to 2 hours after the visit. Scheduled, cancelled, skipped, parked and rebooking visits
 // answer 404, so the payload has no visitChange, no schedule state and no scheduled poll.
-const RECIPIENT_STATES = new Set(['en_route', 'on_property', 'complete']);
 
 function recipientTrackPayload(full) {
   const state = full.state;
@@ -724,12 +723,12 @@ function recipientTrackPayload(full) {
   };
 }
 
-// ONE eligibility rule for a recipient's link, used by the GET and both POSTs: the lifetime and state pair and the visit's expiry
-// (recipientTrackLinkOpen), and a state the page can show (en route, on property or complete, by the SAME publicTrackState the
-// payload reports: a parked customer-pick or rebooking row reads scheduled and is out). A link that fails it answers exactly as an
-// unknown token does, on every route.
+// ONE eligibility rule for a recipient's link, used by the GET and both POSTs AND by the module that resolves the token
+// (recipientLinkEligible in track-token-expiry.js): the lifetime and state pair, the visit's expiry, and a row the page can show
+// (a parked customer-pick or rebooking row reads scheduled and is out). A link that fails it answers exactly as an unknown token
+// does, on every route.
 function recipientLinkEligible(row) {
-  return Boolean(row) && recipientTrackLinkOpen(row) && RECIPIENT_STATES.has(publicTrackState(row));
+  return Boolean(row) && recipientLinkEligibleRule(row);
 }
 
 // The visit a recipient's link names while the gate is on, the row stands and the person has not declined; else null.
@@ -739,9 +738,15 @@ function recipientVisitId(token) {
 
 // The POSTs read the visit once more for the same rule the GET applies to its own row (recipientLinkEligible).
 async function recipientVisitLive(visitId) {
-  const visit = await db('scheduled_services').where({ id: visitId })
-    .first('status', 'track_state', 'completed_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
-  return recipientLinkEligible(visit);
+  try {
+    const visit = await db('scheduled_services').where({ id: visitId })
+      .first('status', 'track_state', 'completed_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
+    return recipientLinkEligible(visit);
+  } catch (err) {
+    // After the token lookup: an error answers as an unknown token, with a code-only log.
+    logger.warn(`[track-public] recipient visit recheck failed (code=${err?.code || 'none'})`);
+    return false;
+  }
 }
 
 // The visit row both token kinds read: the holder's tracker token and a visit text recipient's own.
@@ -825,7 +830,14 @@ router.get('/:token', safeRoute(async (req, res, next) => {
     if (!row) {
       const recipient = await require('../services/call-visit-recipient').visitForTrackToken(req.params.token);
       if (recipient) {
-        row = await readTrackVisit({ 's.id': recipient.visitId });
+        // After the token lookup, ANY failure answers exactly as an unknown token does (a code-only log): only an error on the
+        // token lookup itself may answer 500.
+        try {
+          row = await readTrackVisit({ 's.id': recipient.visitId });
+        } catch (err) {
+          logger.warn(`[track-public] recipient visit read failed (code=${err?.code || 'none'})`);
+          row = null;
+        }
         recipientScope = Boolean(row);
       }
     }

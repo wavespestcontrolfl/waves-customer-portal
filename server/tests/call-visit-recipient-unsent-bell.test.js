@@ -18,6 +18,25 @@ const gateBefore = process.env[GATE];
 beforeEach(() => { jest.clearAllMocks(); process.env[GATE] = 'true'; });
 afterAll(() => { if (gateBefore === undefined) delete process.env[GATE]; else process.env[GATE] = gateBefore; });
 
+describe('the bell opens the visit on its own day', () => {
+  test('the visit\'s scheduled date rides in the link as the dispatch page\'s own date parameter (when it can be read)', async () => {
+    const db = require('../models/db');
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        const q = { where: () => q, first: async () => ({ scheduled_date: '2026-12-01', status: 'confirmed', customer_id: 'c-1' }) };
+        return q;
+      }
+      throw Object.assign(new Error('connection terminated'), { code: '57P01' });
+    });
+    try {
+      await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: 'visit-1', kind: 'confirmation' });
+      expect(notifyAdmin.mock.calls[0][3].link).toBe('/admin/dispatch?tab=schedule&date=2026-12-01&appointment=visit-1');
+    } finally {
+      db.mockImplementation(() => { throw Object.assign(new Error('connection terminated'), { code: '57P01' }); });
+    }
+  });
+});
+
 describe('an unreadable recipient lookup', () => {
   test.each(['confirmation', 'reminder_72h', 'reminder_24h', 'en_route'])('%s: one bell, the holder result unchanged, nothing sent, no retry timer', async (kind) => {
     jest.useFakeTimers();

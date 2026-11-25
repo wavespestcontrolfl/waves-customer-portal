@@ -148,9 +148,11 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     await VisitRecipient.visitForTrackToken(TOKEN);
     expect(getContactPrefRow).toHaveBeenCalledWith('cust-1', '+19415550002', expect.objectContaining({ failClosed: true }));
     getContactPrefRow.mockRejectedValue(Object.assign(new Error('relation "service_contact_notification_prefs" does not exist'), { code: '42P01' }));
-    const err = await VisitRecipient.visitForTrackToken(TOKEN).catch((e) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect(err.code).toBe('42P01');
+    // for the LINK, an error after the token lookup answers null (as an unknown token does) with a code-only log; for the send, it throws
+    const logger = require('../services/logger');
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+    expect(JSON.stringify(logger.warn.mock.calls)).toContain('42P01');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('service_contact_notification_prefs');
     await expect(VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'x' })).rejects.toThrow();
   });
 
@@ -198,6 +200,36 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     } finally {
       if (gate !== undefined) process.env.GATE_CONTACT_LOGIN = gate;
     }
+  });
+
+  test('a PARKED row that reads en route (customer pick set, no placed window) is out BEFORE any permission read', async () => {
+    seed({ visit: { ...VISIT, customer_pick_by: '2026-11-20T00:00:00Z', window_start: null } });
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+    for (const read of [disclaimedNumberHeldForVisit, disclaimedNumberHeld, callVetoesForNumber, getContactPrefRow]) expect(read).not.toHaveBeenCalled();
+  });
+
+  test('ANY error after the token lookup answers null (as an unknown token), with a code-only log; only the token lookup itself throws', async () => {
+    const logger = require('../services/logger');
+    for (const failing of [disclaimedNumberHeldForVisit, disclaimedNumberHeld, callVetoesForNumber]) {
+      seed();
+      failing.mockRejectedValueOnce(Object.assign(new Error(`select where phone '+19415550002' and token '${TOKEN}'`), { code: '57P01' }));
+      expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+    }
+    const logged = JSON.stringify(logger.warn.mock.calls);
+    expect(logged).toContain('57P01');
+    expect(logged).not.toContain('9415550002');
+    expect(logged).not.toContain(TOKEN);
+    // the token lookup itself still throws (a 500 is allowed there)
+    seed();
+    mockTables.visit_text_recipients.first = () => { throw Object.assign(new Error('boom'), { code: '57P01' }); };
+    await expect(VisitRecipient.visitForTrackToken(TOKEN)).rejects.toThrow('lookup failed');
+  });
+
+  test('the visit is read again after the permission reads: a visit that closed meanwhile answers null', async () => {
+    seed();
+    let reads = 0;
+    mockTables.scheduled_services.first = () => { reads += 1; return reads >= 3 ? { ...VISIT, status: 'cancelled', track_state: 'cancelled' } : VISIT; };
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
   });
 
   test('a person no longer on the visit (row not listed for it) resolves nothing', async () => {

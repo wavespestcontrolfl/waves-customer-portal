@@ -37,7 +37,7 @@ const logger = require('./logger');
 const { toE164, isValidNanpNumber } = require('../utils/phone');
 const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
 const { dateOnlyString } = require('../utils/date-only');
-const { isTrackTokenLiveWithExpiry, recipientTrackLinkOpen } = require('./track-token-expiry');
+const { isTrackTokenLiveWithExpiry, recipientLinkEligible } = require('./track-token-expiry');
 
 const SOURCE = 'call_caller_provided';
 const CONSENT_VERSION = 'owner-ruling-2026-11-24-visit-only';
@@ -418,16 +418,29 @@ const UNSENT_WORDS = {
   reminder_24h: 'The next-day reminder',
   en_route: 'The on-the-way text',
 };
-async function raiseUnsentBell({ scheduledServiceId, kind }) {
+// The dispatch page opens a visit on its day: `date` (the visit's Eastern scheduled date, YYYY-MM-DD) rides in the link as the page's
+// own `date` parameter. The handoff path knows it from the claim key; the lookup path reads it (a failed read leaves it out).
+async function visitDateForBell(scheduledServiceId, date) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) return date;
+  try {
+    const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
+    return dateOnlyString(row && row.scheduled_date) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function raiseUnsentBell({ scheduledServiceId, kind, date = null }) {
   try {
     const { raiseAdminAlert } = require('./admin-alert-compose');
+    const day = await visitDateForBell(scheduledServiceId, date);
     await raiseAdminAlert('appointment', {
       area: 'Schedule',
       action: 'check the person named on the call before texting',
       // One sentence of at most 110 characters: what was not sent, and what staff check before texting by hand.
       why: `${UNSENT_WORDS[kind] || 'A text'} was not sent; check they are on the visit, its time and that they may be texted.`,
       severity: 'needs-you',
-      link: `/admin/dispatch?tab=schedule&appointment=${encodeURIComponent(scheduledServiceId)}`,
+      link: `/admin/dispatch?tab=schedule${day ? `&date=${encodeURIComponent(day)}` : ''}&appointment=${encodeURIComponent(scheduledServiceId)}`,
       subject: { type: 'visit', id: String(scheduledServiceId) },
       doneWhen: 'visit_checked',
       who: 'person',
@@ -509,14 +522,29 @@ async function resolveTrackToken(token, conn) {
   // The cheap check FIRST: the short lifetime (en route or on site, or up to two hours after completion; never scheduled,
   // cancelled, skipped, parked or rebooking) and a live, finite expiry on the visit's own tracker link. A closed link
   // answers here, with no permission read at all.
-  const visit = await conn('scheduled_services').where({ id: row.scheduled_service_id })
-    .first('id', 'status', 'track_state', 'completed_at', 'track_token_expires_at');
-  if (!visit || !recipientTrackLinkOpen(visit)) return null;
-  // Only a link that can still open pays for the permission reads: the same check the en-route send makes at the
-  // provider handoff, read fresh on every request.
-  const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id }, { conn, anyVisitStatus: true });
-  if (!permission.ok) return null;
-  return { visitId: visit.id, recipientId: row.id };
+  // After the token lookup, ANY failure (the visit read, the permission reads, the final recheck) answers null, exactly as an
+  // unknown token does, with a code-only log: only an error on the token lookup above may surface as an error (a 500).
+  try {
+    const visit = await readLinkVisit(row.scheduled_service_id, conn);
+    if (!visit || !recipientLinkEligible(visit)) return null;
+    // Only a link that can still open pays for the permission reads: the same check the en-route send makes at the
+    // provider handoff, read fresh on every request.
+    const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id }, { conn, anyVisitStatus: true });
+    if (!permission.ok) return null;
+    // The final recheck: the visit as it stands now, after the permission reads.
+    const again = await readLinkVisit(row.scheduled_service_id, conn);
+    if (!again || !recipientLinkEligible(again)) return null;
+    return { visitId: visit.id, recipientId: row.id };
+  } catch (err) {
+    logger.warn(`[call-visit-recipient] tracker link check unreadable (code=${err && err.code ? err.code : 'none'}), answering as unknown`);
+    return null;
+  }
+}
+
+// Every field recipientLinkEligible reads (the one rule shared with the track route).
+function readLinkVisit(scheduledServiceId, conn) {
+  return conn('scheduled_services').where({ id: scheduledServiceId })
+    .first('id', 'status', 'track_state', 'completed_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
 }
 
 // The copy and the slot the send is guarded on. null = nothing sendable.
@@ -661,21 +689,28 @@ async function providerCheck(meta, { conn = db } = {}) {
   } catch (err) {
     logger.warn(`[call-visit-recipient] handoff recheck unreadable for visit ${meta.scheduled_service_id}: ${err.code || err.name || 'error'}`);
     // Unreadable is not a decline: the text is held and may never be retried, so tell staff (the same bell, once per visit and notice).
-    await raiseUnsentBell({ scheduledServiceId: meta.scheduled_service_id, kind: meta.kind });
+    await raiseUnsentBell({ scheduledServiceId: meta.scheduled_service_id, kind: meta.kind, date: claimDate(meta.claim_key) });
     return { ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', reason: 'recheck-failed', retryable: true };
   }
 }
 
 /** The replay's fresh check, before a queued text goes out. True when still owed; throws on an unreadable answer. */
 async function recipientStillOwedDeferred(meta, { conn = db } = {}) {
-  return (await recipientStillOwed({ ...meta, replay: true }, { conn })).ok === true;
+  try {
+    return (await recipientStillOwed({ ...meta, replay: true }, { conn })).ok === true;
+  } catch (err) {
+    // The replay registry logs a thrown error's message, and a knex message carries the bound values (a phone, a claim): rethrow
+    // a fresh error with only the code. It still throws, so the registry holds the row for a retry (retryable).
+    throw Object.assign(new Error('visit-only replay recheck failed'), { code: err && err.code });
+  }
 }
 
 /** A replay that ended without sending gives ITS claim back (matched by its token), so a later sender can still owe the text. A
  *  repeat of this hook after another sender has claimed the slot deletes nothing. A failed release throws: the worker retries it. */
 function releaseDeferredClaim(meta, { conn = db } = {}) {
   if (!meta || !meta.visit_recipient_id || !meta.claim_key || !meta.claim_token) return Promise.resolve();
-  return releaseClaim(meta.visit_recipient_id, meta.claim_key, meta.claim_token, conn, { throwOnError: true });
+  return Promise.resolve(releaseClaim(meta.visit_recipient_id, meta.claim_key, meta.claim_token, conn, { throwOnError: true }))
+    .catch((err) => { throw Object.assign(new Error('visit-only replay release failed'), { code: err && err.code }); });
 }
 
 module.exports = {

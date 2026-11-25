@@ -537,6 +537,31 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(await input.providerPreSendCheck({ channel: 'sms' })).toMatchObject({ ok: false, code: 'VISIT_TEXT_GATE_OFF' });
     });
 
+    test('the replay recheck\'s failure carries a code only: the registry\'s fail-closed log holds no phone, and the row is held for a retry', async () => {
+      const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      const holds = require('../services/disclaimed-number-holds');
+      const logger = require('../services/logger');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [queuedRow] = await queued();
+      const meta = { ...queuedRow.metadata, to_phone: BOB, customer_id: customerId };
+      const spy = jest.spyOn(holds, 'disclaimedNumberHeld').mockRejectedValue(Object.assign(new Error(`select from holds where phone_e164 = '${BOB}' - connection terminated`), { code: '57P01' }));
+      try {
+        const verdict = await recheckDeferredReplay('visit_text_recipient_deferred', meta);
+        expect(verdict).toMatchObject({ eligible: false, retryable: true });
+        const logged = JSON.stringify([logger.warn.mock.calls, logger.error.mock.calls]);
+        expect(logged).toContain('holding for retry');
+        expect(logged).not.toContain(BOB.slice(-10));
+        // the claim release at a terminal replay is code-only too
+        const failingConn = Object.assign(() => { throw Object.assign(new Error(`update visit_text_recipients set deliveries ... '${BOB}'`), { code: '57P01' }); }, { raw: db.raw.bind(db) });
+        const releaseErr = await VisitRecipient.releaseDeferredClaim({ visit_recipient_id: 'r-1', claim_key: 'k', claim_token: 't' }, { conn: failingConn }).catch((e) => e);
+        expect(releaseErr.code).toBe('57P01');
+        expect(`${releaseErr.message} ${releaseErr.stack}`).not.toContain(BOB.slice(-10));
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     test('a queued window text is pinned to the arrival it quoted AND the slot; a same-day time change keeps a still-valid day-only text', async () => {
       const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
       sendCustomerMessage.mockResolvedValueOnce(HELD);
@@ -593,7 +618,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       // A failed release is thrown to the worker, which retries the hook.
       const failing = jest.fn(() => { const q = { where: () => q, whereRaw: () => q, update: () => Promise.reject(new Error('db down')) }; return q; });
       failing.raw = db.raw.bind(db);
-      await expect(VisitRecipient.releaseDeferredClaim(meta, { conn: failing })).rejects.toThrow('db down');
+      await expect(VisitRecipient.releaseDeferredClaim(meta, { conn: failing })).rejects.toMatchObject({ message: 'visit-only replay release failed' });
     });
 
     test('a failed callback-hold read is retried, never read as a hold: the handoff check says retry and the replay holds the row', async () => {
@@ -867,10 +892,12 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         const verdict = await input.providerPreSendCheck({ channel: 'sms' });
         expect(verdict).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', retryable: true });
         expect(bell).toHaveBeenCalledTimes(1);
-        const [category, title, why, opts] = bell.mock.calls[0];
+        const [category, title, , opts] = bell.mock.calls[0];
         expect(category).toBe('appointment');
         expect(title).toBe('Schedule — check the person named on the call before texting');
         expect(opts.dedupeKey).toBe(`visit-recipient-text-unsent:${visitId}:confirmation`);
+        // the bell opens the visit on its own day (the dispatch page\'s date and appointment parameters)
+        expect(opts.link).toBe(`/admin/dispatch?tab=schedule&date=${VISIT_DATE}&appointment=${visitId}`);
         expect(JSON.stringify(bell.mock.calls)).not.toContain(BOB.slice(-10));
         // a second recheck of the same notice carries the same key (the bell store keeps one row)
         await input.providerPreSendCheck({ channel: 'sms' });
@@ -918,7 +945,8 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         const q = { where: () => q, select: async () => { throw missing; } };
         return q;
       }, { raw: db.raw.bind(db), fn: db.fn });
-      await expect(VisitRecipient.visitForTrackToken(token, { conn: withoutChoicesTable })).rejects.toMatchObject({ code: '42P01' });
+      // after the token lookup, an error answers as an unknown token (null), never an error
+      expect(await VisitRecipient.visitForTrackToken(token, { conn: withoutChoicesTable })).toBeNull();
       // control: the same text goes out when the table can be read
       sendCustomerMessage.mockReset();
       sendCustomerMessage.mockResolvedValue({ sent: true });

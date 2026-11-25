@@ -37,10 +37,22 @@ function recipientTrackLinkOpen(visit, nowMs = Date.now()) {
     || (visit.status === 'on_site' && visit.track_state === 'on_property');
 }
 
+// THE full eligibility rule of a recipient's link: the lifetime and state pair above, and a row the page can show. A parked
+// customer-pick row (customer_pick_by set, no placed window) reads "scheduled" on the page, so it is out whatever its status and
+// track state say; a completed visit is the one status that is never parked. The track route's own publicTrackState agrees with
+// this on every row (pinned by a test that compares them), and the module that resolves the token and the route that answers it
+// both call THIS function, so no route can answer an ineligible token differently from an unknown one.
+function recipientLinkEligible(visit, nowMs = Date.now()) {
+  if (!recipientTrackLinkOpen(visit, nowMs)) return false;
+  if (visit.status === 'completed') return true;
+  return !(visit.customer_pick_by && !visit.window_start);
+}
+
 module.exports = {
   isTrackTokenLive,
   isTrackTokenLiveWithExpiry,
   recipientTrackLinkOpen,
+  recipientLinkEligible,
   RECIPIENT_LINK_AFTER_COMPLETE_MS,
   TRACK_TOKEN_EXPIRY_SQL,
   scheduledServiceTrackTokenExpiry,
