@@ -30,3 +30,33 @@ describe('notifications admin dedupe key index migration', () => {
     expect(knex.raw).toHaveBeenCalledWith('DROP INDEX IF EXISTS notifications_admin_dedupe_key_idx');
   });
 });
+
+const hashMigration = require('../models/migrations/20261125110000_notifications_admin_dedupe_key_hash_idx');
+
+describe('notifications admin dedupe key hash index migration', () => {
+  test('up swaps the B-tree for a hash index (no entry-size limit on long keys)', async () => {
+    const knex = knexWith();
+    await hashMigration.up(knex);
+    const sqls = knex.raw.mock.calls.map((c) => c[0]);
+    expect(sqls).toEqual([
+      'DROP INDEX IF EXISTS notifications_admin_dedupe_key_idx',
+      "CREATE INDEX IF NOT EXISTS notifications_admin_dedupe_key_hash_idx ON notifications USING hash ((metadata->>'dedupeKey')) WHERE recipient_type = 'admin'",
+    ]);
+    expect(sqls.join(' ')).not.toMatch(/CONCURRENTLY/);
+  });
+  test('up is a no-op when the table or the column is missing', async () => {
+    for (const opts of [{ table: false }, { column: false }]) {
+      const knex = knexWith(opts);
+      await hashMigration.up(knex);
+      expect(knex.raw).not.toHaveBeenCalled();
+    }
+  });
+  test('down drops the hash index and restores the B-tree', async () => {
+    const knex = knexWith();
+    await hashMigration.down(knex);
+    expect(knex.raw.mock.calls.map((c) => c[0])).toEqual([
+      'DROP INDEX IF EXISTS notifications_admin_dedupe_key_hash_idx',
+      "CREATE INDEX IF NOT EXISTS notifications_admin_dedupe_key_idx ON notifications ((metadata->>'dedupeKey')) WHERE recipient_type = 'admin'",
+    ]);
+  });
+});
