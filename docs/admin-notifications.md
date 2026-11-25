@@ -831,6 +831,14 @@ person, or closed as moot. With the
 gate off the sweep does not run, so open rows stay as they are until it runs again. A failed ring is logged with ids only and is
 tried again on the next run. It sends nothing to a customer.
 
+Bank step left bell (owner 2026-11-24, "build bell"; no gate): `server/services/bank-step-left-bell.js` runs every 10 minutes
+(scheduler job `bank-step-left-bell`, under `runExclusive`). A customer picked Bank account on the pay page, Stripe's bank sign-in
+failed or was closed, and nothing was reported. The job searches Stripe for invoice PaymentIntents in `requires_payment_method`
+whose last picked method is `us_bank_account` (metadata `selected_method_category`, refreshed with `pay_session_touched_at`).
+One that sat 30 minutes to 24 hours with no payment error, on an invoice that still points at it, is collectible, has an amount
+due and is not payer-billed or archived, rings ONE `bill_payment_error` bell (phase `bank_step_left`, title "Bank payment not
+finished") through `alertBillPaymentError`, deduped per invoice for 24 h. It sends nothing to a customer.
+
 Paid-at-the-visit receipt check (owner 2026-11-18, "the daily check"; no gate, read-only): `server/services/paid-visit-receipt-check.js`
 runs hourly at :50 from 9 AM to 7 PM Eastern (scheduler job `paid-visit-receipt-check`, under `runExclusive`). A customer paid by
 check at checkout; the dispatch check and cash tender sheets recorded it with `sendReceipt: false`, no receipt went out and nobody saw

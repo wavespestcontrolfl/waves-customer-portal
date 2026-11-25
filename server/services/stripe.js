@@ -6593,6 +6593,8 @@ function friendlyStripeError(err) {
 
 module.exports = StripeService;
 module.exports.friendlyStripeError = friendlyStripeError;
+// The shared client, for read-only sweeps (bank-step-left-bell.js).
+module.exports.getStripe = getStripe;
 module.exports.isAmbiguousStripeChargeError = isAmbiguousStripeChargeError;
 module.exports.assertNoInvoiceChargeReconciliationPending = assertNoInvoiceChargeReconciliationPending;
 module.exports.claimInvoiceSavedCardCharge = claimInvoiceSavedCardCharge;

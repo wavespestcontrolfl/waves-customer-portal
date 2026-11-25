@@ -6043,6 +6043,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 10 MIN — Bank step left bell (owner 2026-11-24, "build bell"). One
+  // Billing bell per invoice whose pay page was left on Bank account, unpaid,
+  // for 30 minutes (Stripe's bank sign-in failed or was closed). Reads Stripe;
+  // sends nothing to a customer, writes only the alert row and the admin bell.
+  // No GATE_* (owner rule 2026-11-05). Explicit minutes: node-cron 3 reads a
+  // stepped range oddly.
+  // =========================================================================
+  cron.schedule('0 7,17,27,37,47,57 * * * *', async () => {
+    try {
+      await runExclusive('bank-step-left-bell', async () => {
+        const result = await require('./bank-step-left-bell').runBankStepLeftBell();
+        logger.info(`Bank step left bell: ${result.rang ?? 0} rang (${result.candidates ?? 0} candidates)`);
+      });
+    } catch (err) {
+      logger.error(`Bank step left bell failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // HOURLY :50, 9 AM to 7 PM ET — Paid-at-the-visit receipt check (owner 2026-11-18). One
   // Billing bell per invoice paid at its visit that still has no receipt after 2
   // hours (a tender sheet recorded the payment and no receipt went out); it closes

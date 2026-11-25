@@ -22,6 +22,7 @@ const PHASE_LABELS = {
   payment_method_create: 'payment method creation',
   next_action: 'additional verification',
   payment_status: 'payment status',
+  bank_step_left: 'bank step (not paid after 30 minutes)',
 };
 
 function cleanString(value, fallback = '') {
@@ -76,6 +77,11 @@ function customerLabel(customer) {
 }
 
 function buildDedupeKey({ invoiceId, paymentIntentId, phase, methodCategory, errorMessage }) {
+  // The bank-step-left bell (bank-step-left-bell.js) rings once per invoice per
+  // 24 h: a replacement PaymentIntent between visits must not ring again.
+  if (normalizePhase(phase) === 'bank_step_left') {
+    return crypto.createHash('sha256').update(`${invoiceId || 'no_invoice'}|bank_step_left`).digest('hex');
+  }
   const raw = [
     invoiceId || 'no_invoice',
     paymentIntentId || 'no_pi',
