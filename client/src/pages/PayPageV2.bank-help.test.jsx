@@ -146,4 +146,15 @@ describe('pay page — bank help (owner 2026-11-24)', () => {
     // Type-neutral deposit wording: Stripe may send one SM-code deposit or two amounts.
     expect(screen.getByText(q).closest('details')).toHaveTextContent('a small deposit (or two)');
   });
+
+  it('hides the manual bank-entry FAQ when the payment form fails to load', async () => {
+    const { getStripe } = await import('../lib/stripeLoader');
+    getStripe.mockRejectedValue(new Error('stripe.js blocked'));
+    stubPayFetch({ base: 150, surcharge: 0, total: 150, funding: 'debit', rateBps: 290 });
+    renderPage();
+    await screen.findByRole('button', { name: 'Retry' });
+    expect(screen.getByText('Payment questions')).toBeInTheDocument();
+    expect(screen.queryByText('My bank won’t let me sign in. How do I pay by bank?')).toBeNull();
+    expect(screen.queryByText(/enter your bank details manually/)).toBeNull();
+  });
 });

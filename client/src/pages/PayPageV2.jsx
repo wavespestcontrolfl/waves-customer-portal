@@ -830,7 +830,7 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
   );
 }
 
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card' }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card', onFormReadyChange }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -854,6 +854,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // auto-retries; this surfaces a one-tap Retry once those are exhausted so the
   // customer never has to reload the whole page to recover.
   const [loadFailed, setLoadFailed] = useState(false);
+  // Tells the page whether the method tiles are actually on screen (Elements
+  // mounted, no load failure), so the FAQ's bank-entry steps only show then.
+  useEffect(() => {
+    onFormReadyChange?.(ready && !loadFailed);
+  }, [ready, loadFailed]);
+  useEffect(() => () => onFormReadyChange?.(false), []);
   const [loadNonce, setLoadNonce] = useState(0);
   // A re-mount after a tender replacement starts on the tender the fresh
   // intent was minted for (initialMethod); a first mount starts on card.
@@ -1973,6 +1979,7 @@ export default function PayPageV2() {
   const [paymentState, setPaymentState] = useState('idle');
   const [paymentError, setPaymentError] = useState(null);
   const [stripeSetup, setStripeSetup] = useState(null);
+  const [bankFormReady, setBankFormReady] = useState(false);
   // The promo code's outcome as /setup reports it (GATE_PAY_PROMO_CODE);
   // undefined until a setup answers with one.
   const [promoVerdict, setPromoVerdict] = useState(undefined);
@@ -2879,6 +2886,7 @@ export default function PayPageV2() {
             {paymentState === 'ready' && stripeSetup ? (
               <PaymentForm
                 key={stripeSetup.paymentIntentId}
+                onFormReadyChange={setBankFormReady}
                 initialMethod={stripeSetup.initialMethod || 'card'}
                 publishableKey={stripeSetup.publishableKey}
                 clientSecret={stripeSetup.clientSecret}
@@ -3233,7 +3241,7 @@ export default function PayPageV2() {
               zelle={!!data.manualPayOptions?.zelle?.recipient && !stripeSetup?.combined && !(data.manualPayOptions?.creditPending && !stripeSetup)}
               saveRequired={!payer && saveCardRequired}
               thirdPartyBilled={!!payer}
-              bankFormReady={!!stripeSetup?.clientSecret}
+              bankFormReady={bankFormReady}
             />
             {/* Hidden once /setup reports a combined-balance PI (the server
                 already withholds the block when siblings preview; this
