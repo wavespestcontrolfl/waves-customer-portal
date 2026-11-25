@@ -203,14 +203,15 @@ describe('server with SITEONE_ORDER_RUNNER=mac', () => {
 });
 
 describe('the Mac run', () => {
-  test('never claims a request the watchdog handed to the office', async () => {
+  test('never claims a request the watchdog handed to the office, and re-rings its hand-off', async () => {
     const place = jest.fn();
     const state = baseState({ request: request({ metadata: { vendorId: 'v-siteone', macHandedOffAt: NOW.toISOString() } }) });
     const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: { siteone: { quotesAtPlace: true, packagedQuantity: true, configured: () => true, place } }, now: NOW, env: {} });
-    expect(out).toEqual({ requestId: 'r1', skipped: 'handed_to_office' });
+    expect(out).toMatchObject({ requestId: 'r1', skipped: 'handed_to_office', macHandedOff: true, belled: true });
     expect(place).not.toHaveBeenCalled();
     expect(state.inserts).toHaveLength(0);
-    expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
+    // The hand-off bell is re-rung (request-id deduped), so a bell that failed to land is not lost.
+    expect(autoReorder.ringRestockBell).toHaveBeenCalledTimes(1);
   });
 
   test('onlyAdapters skips another vendor\'s request; reconcile:false runs no reconciliation', async () => {

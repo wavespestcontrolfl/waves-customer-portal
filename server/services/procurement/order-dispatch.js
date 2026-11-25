@@ -1522,7 +1522,10 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   const registry = adapters || loadAdapters();
   const login = await prefetchVendorLogin(conn, requestId, registry, deadAdapters);
   const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login, now }));
-  if (claim.skipped === 'remote_runner') return { requestId, skipped: claim.skipped, ...(await macWatchdog(conn, requestId, notify, now, env)) };
+  // A request the watchdog handed to the office keeps going through the watchdog's locked, eligibility-
+  // checked hand-off under EITHER runner (the server after SITEONE_ORDER_RUNNER is unset, or the Mac): a
+  // hand-off bell that failed to land is re-rung, and a need that is gone is cancelled.
+  if (claim.skipped === 'remote_runner' || claim.skipped === 'handed_to_office') return { requestId, skipped: claim.skipped, ...(await macWatchdog(conn, requestId, notify, now, env)) };
   if (claim.skipped) {
     // A lost hand-off bell is reported, not swallowed: the request stays open
     // and unclaimed, so the next run re-rings it — and this run goes red.
