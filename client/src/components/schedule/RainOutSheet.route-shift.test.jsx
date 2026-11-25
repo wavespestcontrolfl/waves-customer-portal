@@ -14,7 +14,7 @@ import RainOutSheet from './RainOutSheet';
 
 // GATE_TECH_SHIFT_HOURS (D4): the office's Quick Move sheet says, before the tap, how many later
 // stops a "rest of route" move would land outside the technician's shift (routeShiftConflicts on
-// an option and on the live target check). The office's move is allowed all the same.
+// an option and on the live target check). The shift hours do not block the office's move.
 const json = (body) => ({ ok: true, json: async () => body });
 const late = { windowStart: '17:00', windowEnd: '18:00' };
 const later = { windowStart: '20:00', windowEnd: '21:00' };
@@ -60,11 +60,21 @@ describe('RainOutSheet: stops a rest-of-route move would land outside the shift'
     await open();
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
     restOfRoute();
-    expect(screen.getByText("⚠️ With the rest of the route, 2 stops land outside the technician's shift hours (first: 5:00 PM-6:00 PM). The move is still allowed.")).toBeInTheDocument();
+    expect(screen.getByText("⚠️ With the rest of the route, 2 stops land outside the technician's shift hours (first: 5:00 PM-6:00 PM). Shift hours alone do not block this move.")).toBeInTheDocument();
     // The office's move is allowed.
     expect(screen.getByRole('button', { name: /^Move/ })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'This stop' }));
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+  });
+
+  it('with an overlap on the same move, both lines show, and the shift line does not say the move is allowed', async () => {
+    todayRow.routeShiftConflicts = [late];
+    todayRow.routeConflicts = [{ isRouteSelfCollision: true, windowStart: '15:00', windowEnd: '16:00' }];
+    await open();
+    restOfRoute();
+    expect(screen.getByText(/the schedule will block this move\. Pick a different time\./)).toBeInTheDocument();
+    expect(screen.getByText("⚠️ With the rest of the route, 1 stop lands outside the technician's shift hours (5:00 PM-6:00 PM). Shift hours alone do not block this move.")).toBeInTheDocument();
+    expect(screen.queryByText(/still allowed/)).not.toBeInTheDocument();
   });
 
   it('says nothing when the option has no such stop', async () => {
@@ -78,7 +88,7 @@ describe('RainOutSheet: stops a rest-of-route move would land outside the shift'
     liveAnswer = { ok: true, conflicts: [], routeConflicts: [], routeShiftConflicts: [later] };
     await open();
     restOfRoute();
-    expect(await screen.findByText("⚠️ With the rest of the route, 1 stop lands outside the technician's shift hours (8:00 PM-9:00 PM). The move is still allowed.")).toBeInTheDocument();
+    expect(await screen.findByText("⚠️ With the rest of the route, 1 stop lands outside the technician's shift hours (8:00 PM-9:00 PM). Shift hours alone do not block this move.")).toBeInTheDocument();
     expect(liveChecks().length).toBeGreaterThan(0);
   });
 

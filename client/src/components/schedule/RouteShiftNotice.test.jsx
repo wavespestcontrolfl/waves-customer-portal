@@ -17,14 +17,14 @@ describe('RouteShiftNotice', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('the office: one stop, its window, and the move is still allowed', () => {
+  it('the office: one stop, its window, and the shift hours alone do not block the move', () => {
     render(<RouteShiftNotice rows={[late]} formatTime={upper} />);
-    expect(screen.getByText("⚠️ With the rest of the route, 1 stop lands outside the technician's shift hours (<17:00>-<18:00>). The move is still allowed.")).toBeInTheDocument();
+    expect(screen.getByText("⚠️ With the rest of the route, 1 stop lands outside the technician's shift hours (<17:00>-<18:00>). Shift hours alone do not block this move.")).toBeInTheDocument();
   });
 
   it('the office: several stops are counted and the first window is named', () => {
     render(<RouteShiftNotice rows={[late, later, later]} formatTime={upper} />);
-    expect(screen.getByText("⚠️ With the rest of the route, 3 stops land outside the technician's shift hours (first: <17:00>-<18:00>). The move is still allowed.")).toBeInTheDocument();
+    expect(screen.getByText("⚠️ With the rest of the route, 3 stops land outside the technician's shift hours (first: <17:00>-<18:00>). Shift hours alone do not block this move.")).toBeInTheDocument();
   });
 
   it('the technician: the stop will not move', () => {
@@ -41,7 +41,7 @@ describe('RouteShiftNotice', () => {
     const noEnd = { windowStart: '10:45', windowEnd: null };
     const strict = (value) => { if (value == null) throw new Error('no time to format'); return upper(value); };
     render(<RouteShiftNotice rows={[noEnd]} formatTime={strict} />);
-    expect(screen.getByText("⚠️ With the rest of the route, 1 stop lands outside the technician's shift hours (from <10:45>). The move is still allowed.")).toBeInTheDocument();
+    expect(screen.getByText("⚠️ With the rest of the route, 1 stop lands outside the technician's shift hours (from <10:45>). Shift hours alone do not block this move.")).toBeInTheDocument();
     cleanup();
     render(<RouteShiftNotice own rows={[noEnd, late]} formatTime={strict} />);
     expect(screen.getByText('⚠️ With the rest of the route, 2 stops land outside your shift hours (first: from <10:45>) — those stops will not move. Pick a different time.')).toBeInTheDocument();

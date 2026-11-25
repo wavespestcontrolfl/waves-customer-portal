@@ -5,7 +5,8 @@
 //
 // `own`: the technician's own sheet. That commit refuses each of those stops while the other
 // stops move, so the line says they will not move. The office's commit moves them and is told a
-// line for each afterwards, so its line says the move is still allowed.
+// line for each afterwards, so its line says the shift hours alone do not block the move: the
+// overlap line beside it can say, of the same move, that the schedule will block it.
 //
 // A row's windowEnd is null for a stop with no stored end (it is judged on its length): the
 // line then names the start alone.
@@ -26,7 +27,7 @@ export default function RouteShiftNotice({ rows, formatTime, own = false, style 
     <div style={style}>
       {own
         ? `⚠️ With the rest of the route, ${count} outside your shift hours (${where}) — ${one ? 'that stop' : 'those stops'} will not move. Pick a different time.`
-        : `⚠️ With the rest of the route, ${count} outside the technician's shift hours (${where}). The move is still allowed.`}
+        : `⚠️ With the rest of the route, ${count} outside the technician's shift hours (${where}). Shift hours alone do not block this move.`}
     </div>
   );
 }
