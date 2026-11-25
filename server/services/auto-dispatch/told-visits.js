@@ -63,8 +63,9 @@ async function loadStopMembers(conn, ids) {
 function visitDateOf(value) {
   try {
     if (value == null || value === '') return null;
-    const day = require('../../utils/date-only').dateOnlyString(value);
-    return typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+    const { dateOnlyString, validDateOnly } = require('../../utils/date-only');
+    const day = dateOnlyString(value);
+    return validDateOnly(day) ? day : null;
   } catch {
     return null;
   }
