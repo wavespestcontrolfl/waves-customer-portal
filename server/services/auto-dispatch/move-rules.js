@@ -117,8 +117,10 @@ function minutesRuleFloor(service, config) {
 // The customer's own preference credit: the preference score without the
 // service-type default window or the dry-time credit (neither is the
 // customer's choice; see moveGain).
+// In whole hundredths, so equal credits compare equal (16.67 - 4.17 is not 12.5 in floating point).
 function ownPreferenceScore(score) {
-  return (Number(score.customer_preference_score) || 0) - (Number(score.default_time_score) || 0) - (Number(score.dry_time_score) || 0);
+  const hundredths = (v) => Math.round((Number(v) || 0) * 100);
+  return hundredths(score.customer_preference_score) - hundredths(score.default_time_score) - hundredths(score.dry_time_score);
 }
 
 // The rule needs the ordinary drive floor on (> 0): with it off the run has

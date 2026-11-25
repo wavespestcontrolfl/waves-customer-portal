@@ -153,6 +153,22 @@ test('apply mode moves the visit and logs a changed decision', async () => {
   }
 });
 
+// Owner 2026-11-24 "do whatever you rec": an APPLIED minutes-rule move keeps its audit marker
+// (the audit is rebuilt after apply.js, from the settings the evaluation carried).
+test('apply mode: a second move on minutes logs a changed row with the 15-minute floor', async () => {
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    servicesResult = [svc({ auto_dispatch_change_count: 1 })];
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_MODERATE] });
+    const res = await runAutoDispatch({ mode: 'apply' });
+    expect(res).toMatchObject({ changed: 1 });
+    expect(lastDecision('changed').constraints.minutes_rule).toEqual({ saving_floor_minutes: 15 });
+  } finally {
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
+});
+
 test('every run ends by telling the move-check-down notice what the check did (owner audit 2026-10-22, finding 1)', async () => {
   const checkDown = require('../services/auto-dispatch/check-down-notice');
   await runAutoDispatch({ mode: 'dry_run' });

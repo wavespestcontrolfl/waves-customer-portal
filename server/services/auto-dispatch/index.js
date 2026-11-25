@@ -482,10 +482,15 @@ function minutesRuleNote({ service, current, currentScore, cand, candScore, thre
   return { minutes_rule: { saving_floor_minutes: moveRules.minutesRuleFloor(service, config) } };
 }
 
-// The two minutes-rule settings a move evaluation carries, so an audit rebuilt
-// after apply.js (no config there) can work the note out again.
+// The settings the minutes rule reads (move-rules.js minutesRuleOk), carried on
+// a move evaluation so an audit rebuilt after apply.js (no config there) can
+// work the note out again.
 function minutesRuleConfigOf(config) {
-  return { minutesRuleSavingMinutes: config.minutesRuleSavingMinutes, minutesRuleSecondMoveSavingMinutes: config.minutesRuleSecondMoveSavingMinutes };
+  return {
+    minDayMoveDriveSavingMinutes: config.minDayMoveDriveSavingMinutes,
+    minutesRuleSavingMinutes: config.minutesRuleSavingMinutes,
+    minutesRuleSecondMoveSavingMinutes: config.minutesRuleSecondMoveSavingMinutes,
+  };
 }
 
 // GATE_AUTO_DISPATCH_DRY_TIME_ORDER (owner 2026-11-01): constraints_checked.dry_time.

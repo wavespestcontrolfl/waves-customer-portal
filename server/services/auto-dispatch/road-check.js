@@ -154,8 +154,8 @@ async function confirmOnRoads(ranked, ctx) {
   if (moveRules.mustMove(ctx.service, ctx.current)) return withProjectionChecked(ranked, ctx);
   if (!ranked.qualifies) return ranked;
   const floor = ctx.config.minDayMoveDriveSavingMinutes;
+  const failed = [];
   try {
-    const failed = [];
     for (const row of ranked.rankedRows.slice(0, ROAD_CHECK_SLOTS)) {
       const road = await roadSaving(ctx.current, row.cand, ctx.travel);
       // No road answer for the best slot: the model's result stands, and the
@@ -169,7 +169,8 @@ async function confirmOnRoads(ranked, ctx) {
     return settled(ranked, failed[0], false);
   } catch (err) {
     logger.warn(`[auto-dispatch] road check failed (model kept): ${err.message}`);
-    return ranked;
+    // A slot roads already refused stays refused: the error only stops the search.
+    return failed.length ? settled(ranked, failed[0], false) : ranked;
   }
 }
 

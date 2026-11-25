@@ -285,6 +285,11 @@ describe('minutes rule', () => {
     expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: cand }], { currentScore: cur })).toMatchObject({ qualifies: true, byMinutes: true });
   });
 
+  test('equal own preference compares equal despite floating point (16.67 - 4.17 vs 12.5)', () => {
+    const cur = { ...full(50, 16.67), default_time_score: 4.17 };
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(58, 12.5) }], { currentScore: cur }).qualifies).toBe(true);
+  });
+
   test('a second move needs 15 minutes saved: 16 moves, 14 does not, and 0 turns that half off', () => {
     const moved = { ...SERVICE, auto_dispatch_change_count: 1 };
     const second = { ...MINUTES, minutesRuleSecondMoveSavingMinutes: 15 };
