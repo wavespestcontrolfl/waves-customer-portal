@@ -8,25 +8,37 @@
  * request for the product. The close is deliberately narrow: it happens only
  * when the invoice line can be tied to the robot's own order without
  * guessing:
- *   1. the product has exactly ONE live (open|ordered) request, of any
+ *   1. the invoice's printed purchase order equals the PO the Mac adapter
+ *      typed into SiteOne for THAT order (order-dispatch.js poNumberFor of
+ *      the request's ledger row, compared trimmed and case-insensitively). A
+ *      different or missing PO closes nothing: an unrelated SiteOne invoice
+ *      of the same product (a counter purchase) must never clear the guard
+ *      on an order that is still out, or the sweep would order a second time;
+ *   2. the product has exactly ONE live (open|ordered) request, of any
  *      source, and it is 'ordered' with source 'auto_reorder';
- *   2. its vendor_orders row is a 'placed' SiteOne order with placed_at set,
+ *   3. its vendor_orders row is a 'placed' SiteOne order with placed_at set,
  *      not revoked, placed BEFORE the invoice email was received;
- *   3. the invoice line's quantity, in the line's unit, is at least what the
- *      ledger says was ordered (orderedQuantityFor, else requested_quantity).
+ *   4. the ledger recorded the dispatched quantity (orderedQuantityFor), and
+ *      the invoice line's quantity, in the line's unit, is at least that. No
+ *      fallback to requested_quantity: SiteOne rounds up to whole packages.
  * Anything else (a hand-raised request, an 'open' one, two live requests, a
- * short quantity, an order placed after the email) is left alone, and the
- * logged bell still tells a person to cancel it.
+ * short quantity, an order placed after the email, no PO) is left alone, and
+ * the logged bell still tells a person to cancel it.
  *
  * The request becomes 'received' WITHOUT a second stock movement (the
  * receipt movement already added the stock) and its ledger bells settle the
  * way a manual receive settles them (settleRequestLedgerBells).
  *
  * Locks: the caller holds the product row lock. This takes vendor_orders,
- * then the request, FOR UPDATE SKIP LOCKED. A manual receive takes
- * vendor_orders -> request -> product, the reverse of the product-first order
- * here, so waiting would deadlock against it; a row somebody else holds is
- * simply left (the person who holds it is already handling the request).
+ * then the request, FOR UPDATE NOWAIT, after the checks above passed on an
+ * unlocked read. A manual receive takes vendor_orders -> request -> product,
+ * the reverse of the product-first order here, so waiting would deadlock
+ * against it. When the matched request is held, this THROWS: the receipt
+ * line's transaction rolls back (its stock too) and the next sweep retries
+ * the line, whose duplicate check then sees the manual receive's committed
+ * movement. Skipping the lock instead would commit this invoice's stock
+ * while the manual receive, waiting on the product row, added the same
+ * delivery again.
  */
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { restockMeta } = require('../inventory-restock-queue');
@@ -34,6 +46,8 @@ const { convertInventoryQuantity } = require('../inventory-units');
 
 const ROBOT_SOURCE = 'auto_reorder';
 const ROBOT_ADAPTER = 'siteone';
+// Postgres lock_not_available: what FOR UPDATE NOWAIT raises on a held row.
+const LOCK_NOT_AVAILABLE = '55P03';
 
 function round4(value) {
   return Math.round(value * 10000) / 10000;
@@ -74,11 +88,21 @@ function lineCoversOrder(lineQty, orderedQty) {
   return round4(line) >= round4(ordered);
 }
 
-// What the order bought, in the invoice line's unit; null when it cannot be
-// read or converted (nothing closes then).
+// The PO the Mac adapter typed for this order, against the invoice's printed
+// one. Blank on either side never matches.
+function purchaseOrderMatches(ledger, purchaseOrder) {
+  const printed = typeof purchaseOrder === 'string' ? purchaseOrder.trim().toLowerCase() : '';
+  if (!printed || !ledger?.id) return false;
+  const { _internals } = require('../procurement/order-dispatch');
+  return printed === String(_internals.poNumberFor(ledger)).trim().toLowerCase();
+}
+
+// What the order bought, in the invoice line's unit; null when the ledger
+// recorded no dispatched quantity, or it cannot be converted (nothing closes
+// then).
 async function orderedQuantityInUnit(trx, request, product, lineUnit) {
   const { orderedQuantityFor } = require('../procurement/order-dispatch');
-  const quantity = (await orderedQuantityFor(trx, request.id)) ?? Number(request.requested_quantity);
+  const quantity = await orderedQuantityFor(trx, request.id);
   const unit = request.unit || product?.inventory_unit;
   if (!(quantity > 0) || !unit || !lineUnit) return null;
   return convertInventoryQuantity(quantity, unit, lineUnit);
@@ -90,36 +114,55 @@ async function onlyLiveRequest(trx, productId) {
   return live.length === 1 && isRobotOrderedRequest(live[0]) ? live[0] : null;
 }
 
-async function lockRobotRequest(trx, requestId) {
-  // Ledger first, then the request: the manual paths' order. SKIP LOCKED so a
-  // holder that now waits for the product row (ours) never deadlocks with us.
-  const ledger = await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().skipLocked().first();
-  if (!ledger) return null;
-  const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().skipLocked().first();
-  return request ? { ledger, request } : null;
+// Read the request and its ledger row; locked = vendor_orders then request,
+// FOR UPDATE NOWAIT. A held row throws (see the header).
+async function readRobotRequest(trx, requestId, locked) {
+  try {
+    const ledgerQuery = trx('vendor_orders').where({ restock_request_id: requestId });
+    const requestQuery = trx('product_restock_requests').where({ id: requestId });
+    const ledger = await (locked ? ledgerQuery.forUpdate().noWait() : ledgerQuery).first();
+    const request = ledger ? await (locked ? requestQuery.forUpdate().noWait() : requestQuery).first() : null;
+    return { ledger, request };
+  } catch (err) {
+    if (err?.code !== LOCK_NOT_AVAILABLE) throw err;
+    throw new Error(`restock request ${requestId} is held by another action; this invoice line retries on the next sweep`);
+  }
+}
+
+// Every condition, on one read of the rows; the order dispatched is what the
+// line must cover.
+async function coveredRequest(trx, args, requestId, locked) {
+  const { ledger, request } = await readRobotRequest(trx, requestId, locked);
+  if (!isRobotOrderedRequest(request) || !ledgerPlacedBefore(ledger, args.email.received_at)) return null;
+  if (!purchaseOrderMatches(ledger, args.purchaseOrder)) return null;
+  const ordered = await orderedQuantityInUnit(trx, request, args.product, args.receivedUnit);
+  return lineCoversOrder(args.receivedQty, ordered) ? request : null;
 }
 
 /**
  * Close the robot's own SiteOne request this logged invoice line covers.
  * Call in the line's transaction after its movement, with the product row
  * locked. Returns the closed request id, or null when nothing was closed.
+ * Throws when the matched request is held by another transaction.
  */
-async function closeRequestCoveredByLine(trx, { vendor, productId, product, email, orderNumber, lineNo, movementId, receivedQty, receivedUnit }) {
-  if (vendor !== 'siteone') return null;
+async function closeRequestCoveredByLine(trx, args) {
+  const { vendor, productId, email, orderNumber, lineNo, movementId } = args;
+  if (vendor !== 'siteone' || !args.purchaseOrder) return null;
   const candidate = await onlyLiveRequest(trx, productId);
-  if (!candidate) return null;
-  const locked = await lockRobotRequest(trx, candidate.id);
-  if (!locked || !isRobotOrderedRequest(locked.request) || !ledgerPlacedBefore(locked.ledger, email.received_at)) return null;
-  const ordered = await orderedQuantityInUnit(trx, locked.request, product, receivedUnit);
-  if (!lineCoversOrder(receivedQty, ordered)) return null;
+  if (!candidate || !(await coveredRequest(trx, args, candidate.id, false))) return null;
+  const request = await coveredRequest(trx, args, candidate.id, true);
+  if (!request) return null;
 
   const closed = await trx('product_restock_requests').where({ id: candidate.id, status: 'ordered' }).update({
     status: 'received', closed_at: new Date(), closed_by: null, updated_at: new Date(),
-    metadata: { ...restockMeta(locked.request.metadata), closedByReceipt: { emailId: email.id, orderNumber: orderNumber || null, lineNo, movementId: movementId || null } },
+    metadata: {
+      ...restockMeta(request.metadata),
+      closedByReceipt: { emailId: email.id, orderNumber: orderNumber || null, lineNo, movementId: movementId || null, purchaseOrder: String(args.purchaseOrder).trim() },
+    },
   });
   if (!closed) return null;
   await require('../procurement/order-dispatch').settleRequestLedgerBells(trx, candidate.id);
   return candidate.id;
 }
 
-module.exports = { closeRequestCoveredByLine, isRobotOrderedRequest, ledgerPlacedBefore, lineCoversOrder };
+module.exports = { closeRequestCoveredByLine, isRobotOrderedRequest, ledgerPlacedBefore, lineCoversOrder, purchaseOrderMatches };

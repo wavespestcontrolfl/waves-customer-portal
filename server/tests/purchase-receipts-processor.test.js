@@ -485,9 +485,9 @@ describe('processReceiptLine', () => {
     mockCloseRequest.mockResolvedValueOnce('req-1');
     const siteOneLine = { vendor: 'siteone', email, orderNumber: '900000001-001', shipmentKey: '900000001-001', lineNo: 4,
       item: { title: 'CSI-Pest Taurus SC Broad Spectrum Liquid Concentrate Termiticide/Insecticide 78 fl oz. Bottle (QGCY) UOM:EA', quantity: 1 } };
-    expect(await processReceiptLine(siteOneLine)).toMatchObject({ status: 'logged', closedRestockRequestId: 'req-1', hasOpenRestockRequest: false });
+    expect(await processReceiptLine({ ...siteOneLine, purchaseOrder: 'WAVES-AB12CD34' })).toMatchObject({ status: 'logged', closedRestockRequestId: 'req-1', hasOpenRestockRequest: false });
     expect(mockCloseRequest).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      vendor: 'siteone', productId: 'p-taurus', orderNumber: '900000001-001', lineNo: 4, movementId: 'mv-1', receivedQty: 78, receivedUnit: 'fl_oz',
+      vendor: 'siteone', productId: 'p-taurus', orderNumber: '900000001-001', lineNo: 4, movementId: 'mv-1', receivedQty: 78, receivedUnit: 'fl_oz', purchaseOrder: 'WAVES-AB12CD34',
     }));
   });
 

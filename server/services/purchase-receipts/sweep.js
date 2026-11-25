@@ -250,11 +250,11 @@ function lineBell(notifyAdmin, receipt, email, item) {
 // its summary bucket. A failure here is recorded and never stops the
 // email's other lines; nothing of the failed line was committed, so the
 // next sweep retries it.
-async function recordLineOutcome({ receipt, email, orderNumber, shipmentKey, item, lineNo, forcedStatus, holdAs, notifyAdmin, summary }) {
+async function recordLineOutcome({ receipt, email, orderNumber, shipmentKey, item, lineNo, forcedStatus, holdAs, purchaseOrder, notifyAdmin, summary }) {
   let outcome;
   try {
     outcome = await processReceiptLine({
-      vendor: receipt.vendor, email, orderNumber, shipmentKey, item, lineNo, forcedStatus, holdAs,
+      vendor: receipt.vendor, email, orderNumber, shipmentKey, item, lineNo, forcedStatus, holdAs, purchaseOrder,
       ringBell: lineBell(notifyAdmin, receipt, email, item),
     });
   } catch (err) {
@@ -347,7 +347,7 @@ async function siteOneInvoiceLines(email, { now, since }) {
   // invoice that reconciles. On one that doesn't, a 0 may be the misread, so
   // every line is recorded and a stocked one still gets its bell.
   const lines = invoice.lines.filter((line) => invoice.problem || line.quantity !== 0).map(({ title, quantity, lineNo, uom }) => ({
-    item: { title, quantity }, lineNo, holdAs: siteOneHold(invoice.problem, quantity, uom, title),
+    item: { title, quantity }, lineNo, holdAs: siteOneHold(invoice.problem, quantity, uom, title), purchaseOrder: invoice.purchaseOrder,
   }));
   return { invoice, lines };
 }

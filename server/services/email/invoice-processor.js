@@ -34,6 +34,14 @@ function isUsableInvoiceTotal(total) {
   return Number.isFinite(n) && Math.abs(n) < 1e10;
 }
 
+// The customer PO printed on the invoice ("PO #"): optional, never degrades the
+// answer. Anything but a short non-blank string is null. The SiteOne receipt
+// lane closes a restock request only on an exact match (siteone-request-close.js).
+function readPurchaseOrder(value) {
+  const po = typeof value === 'string' ? value.trim() : '';
+  return po && po.length <= INVOICE_NUMBER_MAX ? po : null;
+}
+
 // The one read of the extraction: everything downstream uses these values,
 // never the raw reply. A present field that is off the prompt's contract is
 // dropped to null (so the classifier's own figure is used instead) and marks
@@ -65,6 +73,7 @@ function readParsedInvoice(raw) {
     if (n && n.length <= INVOICE_NUMBER_MAX) invoice.invoice_number = n;
     else degraded = true;
   }
+  invoice.purchase_order = readPurchaseOrder(raw.purchase_order);
   invoice.invoice_date = null;
   if (present(raw.invoice_date)) {
     // The shared calendar check (the same one taxPeriodFor applies): a hand-
@@ -481,6 +490,7 @@ async function processVendorInvoice(email, classification) {
   "tax": number,
   "total": number,
   "payment_terms": "NET 30, etc.",
+  "purchase_order": "the customer PO / PO # printed on the invoice, exactly as printed, or null when none is printed (never guess)",
   "line_items": [
     { "description": "string", "quantity": number, "unit_price": number, "total": number, "uom": "the line's unit of measure exactly as printed (EA, CS, ...) or null", "product_name": "if identifiable" }
   ]

@@ -122,6 +122,7 @@ async function invoiceExtraction(emailId, conn) {
  *   pending: not read into lines yet, still inside the grace window.
  *   problem: null (use the lines), 'unreadable' (never read, or read with
  *   no usable lines or a quantity that isn't a number), or the failed check.
+ *   purchaseOrder: the PO printed on the invoice, or null.
  *   lines: [{ title, quantity, lineNo, uom }] — lineNo is the invoice line's
  *   own position, so both copies of an invoice key the same line the same
  *   way; uom is the line's unit of measure, upper-cased, or null.
@@ -142,7 +143,14 @@ async function readSiteOneInvoice(email, now = Date.now(), conn = db) {
   const lines = items.map((line, index) => ({
     title: String(line.description || ''), quantity: Number(line.quantity), lineNo: index + 1, uom: lineUom(line),
   }));
-  return { number, problem, lines };
+  return { number, problem, lines, purchaseOrder: extractedPurchaseOrder(extracted) };
+}
+
+// The PO printed on the invoice (the extraction's optional purchase_order), or
+// null: a blank or non-string value never reaches the receipt lane.
+function extractedPurchaseOrder(extracted) {
+  const po = typeof extracted.purchase_order === 'string' ? extracted.purchase_order.trim() : '';
+  return po || null;
 }
 
 
