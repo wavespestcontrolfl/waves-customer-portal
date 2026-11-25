@@ -77,7 +77,26 @@ async function invoiceSkipReason(sel, invoice, nowMs) {
     .where('last_seen_at', '>=', new Date(sel.selected_at))
     .first('id');
   if (reported) return 'error_already_reported';
+  if (await paymentHeld(invoice)) return 'payment_hold';
   return null;
+}
+
+// The pay route's own collection holds, read-only: an unsettled deposit, a
+// saved-card charge awaiting reconciliation, or a termite renewal that is not
+// payable. The route refuses payment then, so no "help them pay" bell. Any
+// failure to read a hold fails closed (no bell).
+async function paymentHeld(invoice) {
+  try {
+    await require('./estimate-deposits').assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
+    await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, db, { readOnly: true });
+    if (invoice.annual_prepay_term_id) {
+      const refusal = await require('./termite-annual-renewal-charge').renewalPaymentRefusal(invoice);
+      if (refusal) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 // The live intent, re-checked: still waiting for a method, on Bank account.
@@ -90,14 +109,36 @@ function intentSkipReason(pi) {
   return null;
 }
 
-async function checkSelection(sel, { nowMs, client, sendAlert, tally }) {
-  const skip = (why) => { tally.skipped[why] = (tally.skipped[why] || 0) + 1; };
+// A selection that has been judged (rang, already rung, or no longer a
+// candidate) leaves the table, so the next run's batch reaches newer rows. Only
+// the exact scanned selection is removed: a newer pick on the invoice stays.
+async function retire(sel) {
+  await db('pay_bank_selections')
+    .where({ invoice_id: sel.invoice_id, payment_intent_id: sel.payment_intent_id, selected_at: sel.selected_at })
+    .del();
+}
+
+async function checkSelection(sel, ctx) {
+  const outcome = await judgeSelection(sel, ctx);
+  // A failed alert write stays, so the next run tries again.
+  if (outcome !== 'failed') await retire(sel);
+}
+
+async function judgeSelection(sel, { nowMs, client, sendAlert, tally }) {
+  const skip = (why) => { tally.skipped[why] = (tally.skipped[why] || 0) + 1; return why; };
   const invoice = (await db('invoices').where({ id: sel.invoice_id }).first()) || null;
   const invoiceReason = await invoiceSkipReason(sel, invoice, nowMs);
   if (invoiceReason) return skip(invoiceReason);
   const pi = await client.paymentIntents.retrieve(sel.payment_intent_id);
   const intentReason = intentSkipReason(pi);
   if (intentReason) return skip(intentReason);
+  // The customer may have picked Bank again while this run was working: only
+  // the exact selection that was scanned may ring (a newer row stays for later).
+  const still = await db('pay_bank_selections').where({ invoice_id: sel.invoice_id }).first('payment_intent_id', 'selected_at');
+  if (!still || still.payment_intent_id !== sel.payment_intent_id
+    || new Date(still.selected_at).getTime() !== new Date(sel.selected_at).getTime()) {
+    return skip('reselected');
+  }
   const result = await sendAlert({
     invoice,
     phase: 'bank_step_left',
@@ -106,11 +147,10 @@ async function checkSelection(sel, { nowMs, client, sendAlert, tally }) {
     message: MESSAGE,
     source: 'server',
   });
-  if (result?.notified) tally.rang += 1;
-  else if (result?.duplicate) tally.duplicate += 1;
-  else if (result?.error) tally.failed += 1;
-  else skip(result?.reason || 'alert_skipped');
-  return undefined;
+  if (result?.notified) { tally.rang += 1; return 'rang'; }
+  if (result?.duplicate) { tally.duplicate += 1; return 'duplicate'; }
+  if (result?.error) { tally.failed += 1; return 'failed'; }
+  return skip(result?.reason || 'alert_skipped');
 }
 
 async function runBankStepLeftBell({ now = new Date(), stripe, alert } = {}) {
@@ -124,6 +164,8 @@ async function runBankStepLeftBell({ now = new Date(), stripe, alert } = {}) {
     tally: { candidates: 0, rang: 0, duplicate: 0, skipped: {}, failed: 0 },
   };
   const { tally } = ctx;
+  // Rows past the 24 h window can never ring: clear them.
+  await db('pay_bank_selections').where('selected_at', '<', new Date(nowMs - MAX_AGE_MS)).del();
   const rows = await db('pay_bank_selections')
     .where('selected_at', '<=', new Date(nowMs - MIN_AGE_MS))
     .where('selected_at', '>=', new Date(nowMs - MAX_AGE_MS))

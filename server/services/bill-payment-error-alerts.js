@@ -227,13 +227,13 @@ async function alertBillPaymentError(input = {}) {
   // The dispatch itself failed (not a preference that silenced the bell):
   // clear this ring's stamp so the next occurrence rings again instead of
   // being deduped for 24 h behind a bell nobody got.
-  if (dispatched?.error) {
+  if (dispatched?.error || dispatched?.prefsUnavailable || (dispatched?.pushFailed === 'recipient_lookup' && !dispatched?.bellWritten)) {
     try {
       await db('bill_payment_error_alerts').where({ id: row.id }).update({ notified_at: null });
     } catch (err) {
       logger.error(`[bill-payment-alerts] could not clear notified_at for alert ${row?.id}: ${err.message}`);
     }
-    return { notified: false, error: dispatched.error, alertId: row?.id || null };
+    return { notified: false, error: dispatched.error || (dispatched.prefsUnavailable ? 'prefs_unavailable' : 'recipient_lookup'), alertId: row?.id || null };
   }
 
   return { notified: true, alertId: row?.id || null };

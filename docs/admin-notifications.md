@@ -839,8 +839,9 @@ minutes to 24 hours ago rings ONE `bill_payment_error` bell (phase `bank_step_le
 `alertBillPaymentError` when the invoice still points at that intent, is collectible, has an amount due, is not archived, has no
 third-party payer right now (`invoicePayerOwnership`, unverifiable fails closed), had no checkout error reported since the
 selection and no bank-step bell in 24 h, and the LIVE Stripe intent still waits for a payment method on Bank account with no
-payment error. It sends nothing to a customer. A bell dispatch that fails outright clears that alert's `notified_at`, so the
-next occurrence rings again (all `bill_payment_error` callers).
+payment error, and no pay-route hold applies (unsettled deposit, saved-card reconciliation, unpayable renewal). Each judged row
+leaves the table (a failed alert write stays for the next run); a row re-picked during the run does not ring. It sends nothing to a customer. A bell dispatch that fails outright clears that alert's `notified_at`, so the
+next occurrence rings again (all `bill_payment_error` callers; also a dispatch with preferences or recipients unreadable).
 
 Paid-at-the-visit receipt check (owner 2026-11-18, "the daily check"; no gate, read-only): `server/services/paid-visit-receipt-check.js`
 runs hourly at :50 from 9 AM to 7 PM Eastern (scheduler job `paid-visit-receipt-check`, under `runExclusive`). A customer paid by

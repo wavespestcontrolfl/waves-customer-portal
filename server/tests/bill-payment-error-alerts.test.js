@@ -277,4 +277,25 @@ describe('bill-payment-error-alerts', () => {
     expect(update).toHaveBeenCalledWith({ notified_at: null });
     expect(result).toEqual({ notified: false, error: 'insert failed', alertId: 'alert-1' });
   });
+
+  test.each([
+    [{ bellWritten: false, push: null, prefsUnavailable: true }, 'prefs_unavailable'],
+    [{ bellWritten: false, push: null, pushFailed: 'recipient_lookup' }, 'recipient_lookup'],
+  ])('a no-delivery dispatch %j also stays retryable', async (dispatched, error) => {
+    triggerNotification.mockResolvedValueOnce(dispatched);
+    const update = jest.fn().mockResolvedValue(1);
+    const baseDb = dbMock.getMockImplementation();
+    dbMock.mockImplementation((table) => {
+      const q = baseDb(table);
+      if (table === 'bill_payment_error_alerts') q.where = jest.fn(() => ({ update }));
+      return q;
+    });
+    const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
+    const result = await alertBillPaymentError({
+      invoice: { id: 'inv_123', invoice_number: 'WPC-2026-0100', customer_id: 'cust_123', total: '125.50', stripe_payment_intent_id: 'pi_123' },
+      phase: 'stripe_confirm', methodCategory: 'us_bank_account', message: 'Bank declined',
+    });
+    expect(update).toHaveBeenCalledWith({ notified_at: null });
+    expect(result).toMatchObject({ notified: false, error });
+  });
 });

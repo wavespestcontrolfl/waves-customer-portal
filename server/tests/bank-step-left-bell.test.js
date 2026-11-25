@@ -20,6 +20,7 @@ jest.mock('../models/db', () => jest.fn((table) => {
     }),
     first: jest.fn(async () => {
       if (table === 'invoices') return state.invoices[filters.id];
+      if (table === 'pay_bank_selections') return state.selections.find((x) => x.invoice_id === filters.invoice_id);
       if (table === 'bill_payment_error_alerts') return (filters.phase ? state.rung : state.reported)[filters.invoice_id];
       return undefined;
     }),
@@ -29,6 +30,13 @@ jest.mock('../models/db', () => jest.fn((table) => {
   return q;
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const holds = { deposit: null, reconciliation: null, renewal: null };
+jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => { if (holds.deposit) throw holds.deposit; }) }));
+jest.mock('../services/stripe', () => ({
+  getStripe: jest.fn(() => null),
+  assertNoInvoiceChargeReconciliationPending: jest.fn(async () => { if (holds.reconciliation) throw holds.reconciliation; }),
+}));
+jest.mock('../services/termite-annual-renewal-charge', () => ({ renewalPaymentRefusal: jest.fn(async () => holds.renewal) }));
 const ownership = { value: null };
 jest.mock('../services/invoice-payer-ownership', () => ({ invoicePayerOwnership: jest.fn(async () => ownership.value) }));
 
@@ -54,6 +62,7 @@ function seed({ selectedAt = '2026-11-24T20:20:00Z', inv = invoice() } = {}) {
 beforeEach(() => {
   state.selections = []; state.invoices = {}; state.rung = {}; state.reported = {}; state.calls = [];
   ownership.value = null;
+  holds.deposit = null; holds.reconciliation = null; holds.renewal = null;
 });
 
 describe('recordBankSelection', () => {
@@ -107,6 +116,9 @@ describe('runBankStepLeftBell', () => {
     ['payer_unverifiable', () => { seed(); ownership.value = 'payer_unverifiable'; }],
     ['already_rung', () => { seed(); state.rung['inv-1'] = { id: 'a1' }; }],
     ['error_already_reported', () => { seed(); state.reported['inv-1'] = { id: 'a2' }; }],
+    ['payment_hold', () => { seed(); holds.deposit = Object.assign(new Error('deposit'), { code: 'DEPOSIT_RECONCILIATION_REQUIRED' }); }],
+    ['payment_hold', () => { seed(); holds.reconciliation = new Error('saved card charge pending'); }],
+    ['payment_hold', () => { seed({ inv: invoice({ annual_prepay_term_id: 'term-1' }) }); holds.renewal = { message: 'not payable' }; }],
   ])('invoice check, does not ring: %s', async (reason, arrange) => {
     arrange();
     const stripe = stripeReturning(livePi());
@@ -144,5 +156,29 @@ describe('runBankStepLeftBell', () => {
 
   test('does nothing without a Stripe client', async () => {
     expect(await runBankStepLeftBell({ now: NOW, stripe: null })).toEqual({ skipped: 'stripe_unavailable', candidates: 0, rang: 0 });
+  });
+
+  test('a selection re-picked while the run worked does not ring, and the newer row stays', async () => {
+    seed();
+    const stripe = { paymentIntents: { retrieve: jest.fn(async () => {
+      state.selections[0] = { ...state.selections[0], selected_at: at('2026-11-24T20:59:00Z') };
+      return livePi();
+    }) } };
+    const alert = jest.fn();
+    const tally = await runBankStepLeftBell({ now: NOW, stripe, alert });
+    expect(alert).not.toHaveBeenCalled();
+    expect(tally.skipped).toEqual({ reselected: 1 });
+    const dels = state.calls.filter(([k, t]) => k === 'del' && t === 'pay_bank_selections');
+    expect(dels.at(-1)[2]).toMatchObject({ invoice_id: 'inv-1', selected_at: at('2026-11-24T20:20:00Z') });
+  });
+
+  test('a judged selection is retired; a failed alert write keeps it for the next run', async () => {
+    seed();
+    await runBankStepLeftBell({ now: NOW, stripe: stripeReturning(livePi()), alert: jest.fn(async () => ({ notified: true })) });
+    const retired = state.calls.filter(([k, t, f]) => k === 'del' && t === 'pay_bank_selections' && f.invoice_id);
+    expect(retired).toHaveLength(1);
+    state.calls = [];
+    await runBankStepLeftBell({ now: NOW, stripe: stripeReturning(livePi()), alert: jest.fn(async () => ({ notified: false, error: 'bell' })) });
+    expect(state.calls.filter(([k, t, f]) => k === 'del' && t === 'pay_bank_selections' && f.invoice_id)).toHaveLength(0);
   });
 });
