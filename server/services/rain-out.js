@@ -1158,16 +1158,19 @@ async function keptShiftHolds(service) {
   const unitRefuses = await require('./visit-groups').unitShiftTest(db, service);
   if (unitRefuses) return (date, window) => !unitRefuses(date, window.start, window.end);
   if (!service.technician_id) return null;
-  const { loadTechShifts, shiftBounds } = require('./technician-eligibility');
-  const shiftOf = await loadTechShifts(db, { technicianIds: [service.technician_id] });
-  const { rowBlockMinutes } = require('./scheduling/window-rules');
-  return (date, window) => {
-    const { startMin, endMin } = rowBlockMinutes({
-      window_start: window.start, window_end: window.end, estimated_duration_minutes: service.estimated_duration_minutes });
-    if (startMin == null) return true;
-    const held = shiftBounds(shiftOf(service.technician_id, date), startMin, endMin);
-    return held.openMin <= startMin && held.closeMin >= endMin;
-  };
+  const shiftOf = await require('./technician-eligibility').loadTechShifts(db, { technicianIds: [service.technician_id] });
+  return (date, window) => shiftHoldsBlock(shiftOf(service.technician_id, date), service, window);
+}
+
+// True when `shift` (shiftOf's answer for the technician and the date; null = no set hours, or the gate
+// off) holds `row` at `window`: the window, and the later of its end and the start plus the row's stored
+// length (rowBlockMinutes), which is the block the mover judges. A window with no start is not judged.
+function shiftHoldsBlock(shift, row, window) {
+  const { startMin, endMin } = require('./scheduling/window-rules').rowBlockMinutes({
+    window_start: window.start, window_end: window.end, estimated_duration_minutes: row.estimated_duration_minutes });
+  if (startMin == null) return true;
+  const held = require('./technician-eligibility').shiftBounds(shift, startMin, endMin);
+  return held.openMin <= startMin && held.closeMin >= endMin;
 }
 
 // Advisory overlap probe for the Quick Move sheets (owner ask 2026-08-12:
@@ -1331,53 +1334,8 @@ function conflictsForTarget(occupancy, serviceId, date, window, {
 // next lands.
 function routeScopeConflicts({ occupancy, serviceId, service, route, target }) {
   if (!route.length) return [];
-  const targetDate = String(target.date).split('T')[0];
-  const anchorDateStr = service.scheduled_date
-    ? String(service.scheduled_date instanceof Date
-        ? service.scheduled_date.toISOString()
-        : service.scheduled_date).slice(0, 10)
-    : null;
-  const isSameDay = targetDate === anchorDateStr;
-  const anchorStartMin = hhmmToMinutes(toHHMM(service.window_start));
-  const targetStartMin = hhmmToMinutes(target.window.start);
-  const siblingDelta = (isSameDay && anchorStartMin != null && targetStartMin != null)
-    ? targetStartMin - anchorStartMin
-    : 0;
+  const { targetDate, isSameDay, siblingDelta, windows } = routeLandings({ service, route, target });
   const sweptIds = [...new Set([String(serviceId), ...route.map((j) => String(j.id))])];
-
-  const windows = route.map((job) => {
-    if (isSameDay) {
-      const startMin = hhmmToMinutes(toHHMM(job.window_start));
-      const endMin = hhmmToMinutes(toHHMM(job.window_end));
-      return (startMin != null && endMin != null)
-        ? { start: minutesToHHMM(startMin + siblingDelta), end: minutesToHHMM(endMin + siblingDelta) }
-        : target.window;
-    }
-    const start = toHHMM(job.window_start);
-    if (!start) return null;
-    const end = toHHMM(job.window_end);
-    if (end) return { start, end };
-    // A day-move row with a start but NO stored end now lands behind a
-    // REAL commit gate: rebooker.reschedule derives its occupancy span via
-    // the canonical deriveWindowEnd (duration-or-60, the read predicate's
-    // own COALESCE) and probes it, so the advisory projects the SAME
-    // helper's output. Keyed on the gate's kill switch: with
-    // REBOOKER_NULL_END_OCCUPANCY=off commit skips the check again and a
-    // warning here would be a false "the schedule will block this move" —
-    // the advisory must never disagree with what commit enforces, in
-    // either direction.
-    if (process.env.REBOOKER_NULL_END_OCCUPANCY === 'off') return null;
-    const duration = Number(job.estimated_duration_minutes) > 0
-      ? Number(job.estimated_duration_minutes)
-      : 60;
-    const derived = deriveWindowEnd(start, duration);
-    // null = the span would cross midnight. Commit REJECTS that move
-    // outright (INVALID_WINDOW — deriveWindowEnd's null-means-validation-
-    // failure contract), so there is no landing to overlap-check; the
-    // dispatcher gets the clear rejection at the tap instead of an
-    // occupancy warning.
-    return derived ? { start, end: derived } : null;
-  });
   // Member-vs-member collisions: simulate commit()'s own sweep. commit
   // probes each member's target against every OTHER member's row — it
   // excludes only the row it is moving — so a not-yet-processed member
@@ -1481,6 +1439,100 @@ function routeScopeConflicts({ occupancy, serviceId, service, route, target }) {
   // stale between here and the tap.
   return [...selfCollisions, ...byId.values()].slice(0, TARGET_CONFLICT_LIMIT);
 }
+// Where a rest-of-route move lands each remaining stop (`windows`, in `route` order; null = a windowless
+// stop of a day move, which lands nowhere a check can read), projected the way commit() moves them: see
+// routeScopeConflicts above.
+function routeLandings({ service, route, target }) {
+  const targetDate = String(target.date).split('T')[0];
+  const anchorDateStr = service.scheduled_date
+    ? String(service.scheduled_date instanceof Date
+        ? service.scheduled_date.toISOString()
+        : service.scheduled_date).slice(0, 10)
+    : null;
+  const isSameDay = targetDate === anchorDateStr;
+  const anchorStartMin = hhmmToMinutes(toHHMM(service.window_start));
+  const targetStartMin = hhmmToMinutes(target.window.start);
+  const siblingDelta = (isSameDay && anchorStartMin != null && targetStartMin != null)
+    ? targetStartMin - anchorStartMin
+    : 0;
+  const windows = route.map((job) => {
+    if (isSameDay) {
+      const startMin = hhmmToMinutes(toHHMM(job.window_start));
+      const endMin = hhmmToMinutes(toHHMM(job.window_end));
+      return (startMin != null && endMin != null)
+        ? { start: minutesToHHMM(startMin + siblingDelta), end: minutesToHHMM(endMin + siblingDelta) }
+        : target.window;
+    }
+    const start = toHHMM(job.window_start);
+    if (!start) return null;
+    const end = toHHMM(job.window_end);
+    if (end) return { start, end };
+    // A day-move row with a start but NO stored end now lands behind a
+    // REAL commit gate: rebooker.reschedule derives its occupancy span via
+    // the canonical deriveWindowEnd (duration-or-60, the read predicate's
+    // own COALESCE) and probes it, so the advisory projects the SAME
+    // helper's output. Keyed on the gate's kill switch: with
+    // REBOOKER_NULL_END_OCCUPANCY=off commit skips the check again and a
+    // warning here would be a false "the schedule will block this move" —
+    // the advisory must never disagree with what commit enforces, in
+    // either direction.
+    if (process.env.REBOOKER_NULL_END_OCCUPANCY === 'off') return null;
+    const duration = Number(job.estimated_duration_minutes) > 0
+      ? Number(job.estimated_duration_minutes)
+      : 60;
+    const derived = deriveWindowEnd(start, duration);
+    // null = the span would cross midnight. Commit REJECTS that move
+    // outright (INVALID_WINDOW — deriveWindowEnd's null-means-validation-
+    // failure contract), so there is no landing to overlap-check; the
+    // dispatcher gets the clear rejection at the tap instead of an
+    // occupancy warning.
+    return derived ? { start, end: derived } : null;
+  });
+  return { targetDate, isSameDay, siblingDelta, windows };
+}
+
+// GATE_TECH_SHIFT_HOURS (D4): the stops a rest-of-route move would land outside the route technician's
+// shift. The technician's own commit refuses each of them (rebooker.js: an automatic move obeys the shift)
+// while the other stops move and text, so the route ends up partly moved. The office's commit moves them
+// and is told a line for each afterwards. The sheet's answers carry the rows, so a sheet can say so
+// before the tap.
+// Answers (target) => { routeShiftConflicts: [{ windowStart, windowEnd }, ...] }: one row for each such
+// stop, in route order. {} (no key, the answer main gives) when the shift holds every landing, with no
+// set hours, and with the gate off (loadTechShifts then reads nothing).
+// `office`: the sheet whose move commits as the office. The office is told the shift line on a day the
+// technician works only (dayWarningsFor: the shift is not an off day's), so an off day gives it no row.
+// The technician's own move is judged on the shift whatever the day, and so is its sheet.
+// Each stop is judged on the route's technician and its own stored length, as the mover judges it; a
+// grouped stop's partner on another technician is not read here. Advisory: a read that fails is logged and
+// gives {}, and the sheet opens as before.
+async function routeShiftRows(service, route, { office = false } = {}) {
+  const none = () => ({});
+  // No other stop on the route (a visit with no technician has none, remainingRouteJobs): nothing to read.
+  if (!route.length) return none;
+  const unread = (err) => {
+    logger.info(`[rain-out] route-scope shift probe failed for ${service.id}: ${err.message}`);
+    return {};
+  };
+  try {
+    const { loadTechShifts, isOffDay } = require('./technician-eligibility');
+    const shiftOf = await loadTechShifts(db, { technicianIds: [service.technician_id] });
+    if (!shiftOf(service.technician_id, etDateString())) return none;
+    const workDays = office ? await db('technicians').where({ id: service.technician_id }).first('id', 'work_days') : null;
+    return (target) => {
+      try {
+        const { targetDate, windows } = routeLandings({ service, route, target });
+        const shift = isOffDay(workDays, targetDate) ? null : shiftOf(service.technician_id, targetDate);
+        const outside = windows.filter((window, i) => window && !shiftHoldsBlock(shift, route[i], window));
+        return outside.length ? { routeShiftConflicts: outside.map((w) => ({ windowStart: w.start, windowEnd: w.end })) } : {};
+      } catch (err) {
+        return unread(err);
+      }
+    };
+  } catch (err) {
+    unread(err);
+    return none;
+  }
+}
 
 /**
  * Advisory overlap check for a sheet-picked target (the admin sheet's
@@ -1529,7 +1581,8 @@ async function checkTarget({ serviceId, target, caller = null, reasonCode = null
   } catch (err) {
     logger.info(`[rain-out] route-scope conflict probe failed for ${serviceId}: ${err.message}`);
   }
-  return { ok: true, conflicts, routeConflicts };
+  // The one caller is the office's sheet (admin-dispatch target-check), whose move commits as the office.
+  return { ok: true, conflicts, routeConflicts, ...(await routeShiftRows(service, route, { office: true }))(target) };
 }
 
 // Batch advisory probe for the generic date/time pickers (edit, reschedule,
@@ -1745,6 +1798,8 @@ async function getOptions(serviceId, { caller = null, reasonCode, initiatedBy = 
   } catch (err) {
     logger.info(`[rain-out] occupancy snapshot failed for ${serviceId}: ${err.message}`);
   }
+  // GATE_TECH_SHIFT_HOURS: the stops a rest-of-route move would land outside the shift (routeShiftRows).
+  const shiftRows = await routeShiftRows(service, route, { office: initiatedBy === 'admin' });
   for (const opt of sameDay) {
     opt.conflicts = conflictsForTarget(occupancy, serviceId, opt.date, opt.window, {
       routeSiblingIds, technicianId: service.technician_id,
@@ -1754,6 +1809,7 @@ async function getOptions(serviceId, { caller = null, reasonCode, initiatedBy = 
     opt.routeConflicts = routeScopeConflicts({
       occupancy, serviceId, service, route, target: { date: opt.date, window: opt.window },
     });
+    Object.assign(opt, shiftRows({ date: opt.date, window: opt.window }));
   }
 
   // Day options need the route-scope probe too (codex #3375 P1): the
@@ -1768,6 +1824,7 @@ async function getOptions(serviceId, { caller = null, reasonCode, initiatedBy = 
     opt.routeConflicts = routeScopeConflicts({
       occupancy, serviceId, service, route, target: { date: opt.date, window: opt.window },
     });
+    Object.assign(opt, shiftRows({ date: opt.date, window: opt.window }));
   }
 
   // Custom-reason availability for the sheet: the option renders only when
