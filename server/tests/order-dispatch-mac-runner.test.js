@@ -84,6 +84,20 @@ describe('server with SITEONE_ORDER_RUNNER=mac', () => {
     expect(siteoneRunsOnMac({ SITEONE_ORDER_RUNNER: 'server' })).toBe(false);
   });
 
+  test('an unknown SITEONE_ORDER_RUNNER value never loads the server adapter: the request goes to the office', async () => {
+    for (const typo of ['server', 'macc', 'true']) {
+      jest.clearAllMocks();
+      process.env.SITEONE_ORDER_RUNNER = typo;
+      expect(await dispatch.canAutoOrder({ vendor: SITEONE })).toBe(false);
+      const state = baseState({ request: request() });
+      const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), now: NOW, env: {} });
+      expect(out).toMatchObject({ requestId: 'r1', skipped: 'adapter_unconfigured' });
+      expect(state.inserts).toHaveLength(0);
+      expect(autoReorder.ringRestockBell).toHaveBeenCalledTimes(1);
+    }
+    delete process.env.SITEONE_ORDER_RUNNER;
+  });
+
   test('a fresh SiteOne request is not claimed and rings nothing', async () => {
     const state = baseState({ request: request() });
     const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });

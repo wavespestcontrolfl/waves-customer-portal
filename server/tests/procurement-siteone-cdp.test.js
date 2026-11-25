@@ -135,7 +135,7 @@ function screens(w) {
     [S.reviewTotal]: [rv.total],
     [S.placeOrder]: placeBtns(),
   };
-  const confirmation = { [S.body]: [el({ text: w.confirmationBody })], ...(w.confirmationField ? { [S.confirmationNumber]: [el({ text: w.confirmationBody })] } : {}), [S.heading]: [el({ text: 'Order Received' })], [S.confirmationTotal]: w.confirmTotalText == null ? (w.onConfirmRead ? (w.onConfirmRead((w.confirmReads = (w.confirmReads || 0) + 1), w), []) : []) : [el({ text: w.confirmTotalText })] };
+  const confirmation = { [S.body]: [el({ text: w.confirmationBody })], ...(w.confirmationField ? { [S.confirmationNumber]: [el({ text: w.confirmationBody })] } : {}), [S.heading]: [el({ text: 'Order Received' })], [S.confirmationTotal]: w.confirmTotalText == null ? (w.onConfirmRead && w.url.includes('/orderConfirmation/') ? (w.onConfirmRead((w.confirmReads = (w.confirmReads || 0) + 1), w), []) : []) : [el({ text: w.confirmTotalText })] };
   const product = {
     [S.accountNode]: (w.productAccountText ?? w.accountText) === '' ? [] : [el({ text: w.productAccountText ?? w.accountText, attrs: w.accountAttr ? { 'data-account-number': w.accountAttr } : {} })],
     [S.brandItemNumber]: [el({ text: w.brandText })],
@@ -1011,17 +1011,29 @@ test('R12 shared cart: the placed order total on the confirmation page must equa
   expect(late.result).toMatchObject({ externalOrderNumber: '7700123', amountCents: 11040 });
 });
 
-test('R13 live needs the robot\'s own cart: without SITEONE_CART_ISOLATED=true nothing is added or clicked', async () => {
+test('R13 every run needs the robot\'s own cart: without SITEONE_CART_ISOLATED=true nothing is added or clicked', async () => {
   for (const iso of [undefined, '', 'TRUE', 'yes']) {
-    const env = { ...ENV, SITEONE_CART_ISOLATED: iso };
-    const r = await run({}, { env });
-    expect(r.error.runLevel).toBe(true);
-    expect(r.error.message).toMatch(/SITEONE_CART_ISOLATED/);
-    expect(r.w.cart).toEqual([]);
-    expect(r.w.placed).toBe(0);
+    for (const dry of ['false', 'true']) {
+      const r = await run({}, { env: { ...ENV, SITEONE_CART_ISOLATED: iso, SITEONE_BOT_DRY_RUN: dry } });
+      expect(r.error.runLevel).toBe(true);
+      expect(r.error.message).toMatch(/SITEONE_CART_ISOLATED/);
+      expect(r.w.cart).toEqual([]);
+      expect(r.w.placed).toBe(0);
+    }
   }
-  // A dry run does not need it.
-  expect((await run({}, { env: { ...ENV, SITEONE_CART_ISOLATED: undefined, SITEONE_BOT_DRY_RUN: 'true' } })).result.dryRun).toBe(true);
+});
+
+test('R14 confirmation identity: the total must come from the same order page; a changed page parks with the number', async () => {
+  // The number is read on the first confirmation screens; the tab moves during the total's polling.
+  const MOVE_AT = 3;
+  // The tab moves to another confirmation while the total renders: parked, the number kept, never "placed".
+  const moved = await run({ confirmTotalText: null, onConfirmRead: (n, w) => { if (n === MOVE_AT) { w.url = 'https://www.siteone.com/en/checkout/orderConfirmation/7700999'; w.confirmationBody = 'Order Number: 7700999'; w.confirmTotalText = '$110.40'; } } });
+  expect(moved.error.ambiguous).toBe(true);
+  expect(moved.error.externalOrderNumber).toBe('7700123');
+  expect(moved.result).toBeUndefined();
+  // The mismatch error carries the confirmed number for the ledger.
+  const grown = await run({ confirmTotalText: '$320.80' });
+  expect(grown.error.externalOrderNumber).toBe('7700123');
 });
 
 test('R12 confirmation: an overlength order number never matches by its prefix', async () => {

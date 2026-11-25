@@ -856,20 +856,30 @@ async function bindReviewFields(run, first) {
 // order's own total, on the confirmation page, must equal the approved total. A different or
 // unreadable total parks the order for a person (needs_review, with its order number), never
 // records it as placed at the approved amount.
-async function provePlacedTotal(run, number, approvedCents) {
+async function provePlacedTotal(run, number, bound) {
+  const approvedCents = bound.totalCents;
   const evidence = { ...run.evidence, confirmed: true, externalOrderNumber: number };
-  // The total can render after the URL changes: poll the same confirmation page for it.
+  const parked = (message, cents) => Object.assign(ambiguousError(message, evidence), { cents, externalOrderNumber: number });
+  // The total can render after the URL changes: poll THIS confirmation page for it. Each read is
+  // bound to the order whose number was read: the same URL, and the same number on it, before and
+  // after the total is read. A page that changed identity parks the order.
+  const href = run.page.url();
+  const sameOrder = async () => run.page.url() === href && (await readConfirmation(run, bound.baseline)) === number;
   const readTotalOnce = async () => {
-    if (confirmationCodeOf((parseUrl(run.page.url()) || {}).pathname || '') == null) return null;
+    if (!(await sameOrder())) throw parked(`SiteOne order ${number}: the confirmation page changed before its total was read — check the order with the vendor`, approvedCents);
     const nodes = await shownAll(run.page, SELECTORS.confirmationTotal);
-    return nodes.length === 1 ? parseMoney(String(await nodes[0].innerText()).trim()) : null;
+    const cents = nodes.length === 1 ? parseMoney(String(await nodes[0].innerText()).trim()) : null;
+    if (cents == null) return null;
+    if (!(await sameOrder())) throw parked(`SiteOne order ${number}: the confirmation page changed while its total was read — check the order with the vendor`, approvedCents);
+    return cents;
   };
-  const placedCents = await poll(run.page, readTotalOnce, CONFIRMATION_WAIT, run.opts.confirmStep).catch(() => null);
+  let placedCents;
+  try { placedCents = await poll(run.page, readTotalOnce, CONFIRMATION_WAIT, run.opts.confirmStep); } catch (e) { if (e.ambiguous) throw e; placedCents = null; }
   evidence.confirmationTotalCents = placedCents;
   if (placedCents !== approvedCents) {
     // Count the purchase at what SiteOne confirmed (when readable, and never below the approved
     // total), so the monthly cap is not left with room the order already spent.
-    throw Object.assign(ambiguousError(`SiteOne order ${number} was placed, but its confirmation total ${placedCents == null ? 'could not be read' : `(${(placedCents / 100).toFixed(2)})`} is not the approved total (${(approvedCents / 100).toFixed(2)}) — check the order with the vendor`, evidence), { cents: Math.max(placedCents || 0, approvedCents) });
+    throw parked(`SiteOne order ${number} was placed, but its confirmation total ${placedCents == null ? 'could not be read' : `(${(placedCents / 100).toFixed(2)})`} is not the approved total (${(approvedCents / 100).toFixed(2)}) — check the order with the vendor`, Math.max(placedCents || 0, approvedCents));
   }
   return { externalOrderNumber: number, amountCents: approvedCents, evidence, dryRun: false };
 }
@@ -905,7 +915,7 @@ async function clickPlaceOrder(run, bound) {
   run.submitted = true;
   try {
     const number = await poll(page, () => readConfirmation(run, bound.baseline), CONFIRMATION_WAIT, run.opts.confirmStep);
-    if (number) return await provePlacedTotal(run, number, bound.totalCents);
+    if (number) return await provePlacedTotal(run, number, bound);
   } catch (err) {
     if (err.ambiguous && err.evidence) throw err; // already classified, with its own evidence (provePlacedTotal)
     throw ambiguousError(`SiteOne Place order was clicked and failed after it: ${String(err.message).slice(0, 120)} — verify with the vendor`, { ...(await afterClickEvidence(page, poNumber).catch(() => ({ poNumber: poNumber || null }))), error: String(err.message).slice(0, 120) });
@@ -972,11 +982,11 @@ async function place(args, opts = {}) {
   if (!configured(env)) throw runLevel('siteone cdp: SITEONE_CDP_URL, SITEONE_APPROVED_STORE_ID, SITEONE_APPROVED_PICKUP and SITEONE_APPROVED_ACCOUNT must all be set');
   if (typeof args.beforeSubmit !== 'function') throw new RefusedError('no_cap_check', 'no cap check was supplied — the bot never orders without one');
   const dryRun = isDryRun(env, args.dryRun);
-  // SiteOne submits its server-side cart, and a cart shared with the owner's phone app can change
-  // between the page checks and the click. A live click therefore needs the robot's OWN SiteOne
-  // login (a separate web user on the account, signed in only in the robot's Chrome), which the
-  // owner confirms with SITEONE_CART_ISOLATED=true. Without it the path stays dry run only.
-  if (!dryRun && env.SITEONE_CART_ISOLATED !== 'true') throw runLevel('siteone cdp: a live order needs SITEONE_CART_ISOLATED=true (the robot\'s own SiteOne login, not a cart shared with the phone app) — nothing was added or clicked');
+  // SiteOne submits (and removes from) its server-side cart, and a cart shared with the owner's phone
+  // app can change where this page cannot see it. Every run — a dry run adds and removes a line too —
+  // needs the robot's OWN SiteOne login (a separate web user on the account, signed in only in the
+  // robot's Chrome), which the owner confirms with SITEONE_CART_ISOLATED=true.
+  if (env.SITEONE_CART_ISOLATED !== 'true') throw runLevel('siteone cdp: SITEONE_CART_ISOLATED=true is required (the robot\'s own SiteOne login, not a cart shared with the phone app) — nothing was added or clicked');
   const evidence = { adapter: 'siteone-cdp', dryRun };
   // A { ok: false } verdict is an ordinary refusal. The cap check THROWING is
   // the environment's problem (run-level), never a parked order.

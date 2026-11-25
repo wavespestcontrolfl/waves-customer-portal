@@ -138,10 +138,18 @@ const VENDOR_GATE = { siteone: 'GATE_AUTO_ORDER_SITEONE', stickermule: 'GATE_AUT
 const REMOTE_RUNNER = 'mac';
 const siteoneRunsOnMac = (env = process.env) => String(env.SITEONE_ORDER_RUNNER || '').trim().toLowerCase() === REMOTE_RUNNER;
 const MAC_RUNNER_MARKER = Object.freeze({ remoteRunner: REMOTE_RUNNER });
+// Any other non-empty value is a typo, never the server's own adapter (which can submit for real):
+// its SiteOne requests go to the office with the "order manually" bell.
+const INVALID_RUNNER_MARKER = Object.freeze({ invalidRunner: true });
+const siteoneSlot = (env) => {
+  if (siteoneRunsOnMac(env)) return MAC_RUNNER_MARKER;
+  if (String(env.SITEONE_ORDER_RUNNER || '').trim() !== '') return INVALID_RUNNER_MARKER;
+  return require('./adapters/siteone');
+};
 
 function loadAdapters(env = process.env) {
   return {
-    siteone: siteoneRunsOnMac(env) ? MAC_RUNNER_MARKER : require('./adapters/siteone'),
+    siteone: siteoneSlot(env),
     stickermule: require('./adapters/stickermule'),
   };
 }
@@ -187,6 +195,7 @@ async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
   if (!row || row.active === false) return false;
   const key = adapterKeyFor(row);
   const adapter = key ? loadAdapters()[key] : null;
+  if (adapter && adapter.invalidRunner) return false; // a SITEONE_ORDER_RUNNER typo: the sweep's manual bell stays
   // An adapter without its credential must not own requests: the sweep would
   // stand down its manual bell and the dispatcher would park every claim as
   // "no prior order" — a misleading, non-reclaimable needs_review (Codex r20
@@ -758,6 +767,7 @@ function claimIneligibility({ product, request, vendor }) {
 // vendor edit after the unlocked pre-filter makes a request out of scope, never a "no adapter"
 // hand-off.)
 function macRunnerSkip(adapter, m) {
+  if (adapter.invalidRunner) return 'adapter_unconfigured';
   if (adapter.remoteRunner) return 'remote_runner';
   if (m.macHandedOffAt) return 'handed_to_office';
   return null;
@@ -1066,8 +1076,11 @@ async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
     // order that MAY exist — a replacement purchase. Attach it as a late
     // placement (marker replaced, request ordered, reconcile bell) that
     // blocks a replacement until reconciled (hook P0).
-    if (reserved.reason === 'claim_lost') return recordPlaced(conn, { ctx, placed: { externalOrderNumber: null, amountCents, response: err.body || null, evidence: err.evidence || null, ambiguous: true }, finalCents: amountCents, quoteCents });
-    return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.${counted}`, amountCents, evidence: err.evidence || null, placed: err.body ? { response: err.body } : null });
+    if (reserved.reason === 'claim_lost') return recordPlaced(conn, { ctx, placed: { externalOrderNumber: err.externalOrderNumber || null, amountCents, response: err.body || null, evidence: err.evidence || null, ambiguous: true }, finalCents: amountCents, quoteCents });
+    // A known vendor order number (the order exists, its total differed) rides into the ledger and
+    // the audit row, so staff can find the purchase.
+    const placed = err.body || err.externalOrderNumber ? { ...(err.body ? { response: err.body } : {}), externalOrderNumber: err.externalOrderNumber || null } : null;
+    return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.${counted}`, amountCents, evidence: err.evidence || null, placed });
   }
   return park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
 }
