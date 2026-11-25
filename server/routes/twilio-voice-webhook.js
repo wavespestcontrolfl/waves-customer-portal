@@ -1020,8 +1020,10 @@ function appendVoicemailRecording(twiml, { language = null } = {}) {
     maxLength: 120,
     action: VOICEMAIL_COMPLETE_ACTION,
     method: 'POST',
-    transcribe: true,
-    transcribeCallback: '/api/webhooks/twilio/transcription',
+    // No Twilio built-in transcription (owner 2026-11-24): it bills per
+    // minute on every voicemail and filled a row 7 times in 90 days; the
+    // recording processor transcribes every recording itself. The
+    // /transcription route below stays for callbacks still in flight.
     playBeep: true,
     recordingStatusCallback: '/api/webhooks/twilio/recording-status',
     recordingStatusCallbackEvent: 'completed',

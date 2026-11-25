@@ -198,7 +198,7 @@ describe('Spanish voicemail failover', () => {
     expect(a.toString()).toMatch(/<Say [^>]*language="es-US"[^>]*>Su mensaje será grabado y transcrito\.<\/Say>/);
     expect(a.toString()).not.toContain('<Play>');
     expect(a.toString()).not.toContain('Your message will be recorded');
-    expect(a.toString()).toContain('transcribeCallback="/api/webhooks/twilio/transcription"');
+    expect(a.toString()).not.toContain('transcribe');
     process.env.WAVES_VOICEMAIL_URL_ES = 'https://assets.example/vm-es.mp3';
     const b = new VoiceResponse();
     appendVoicemailRecording(b, { language: 'es-US' });
