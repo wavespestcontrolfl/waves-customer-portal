@@ -724,15 +724,24 @@ function recipientTrackPayload(full) {
   };
 }
 
+// ONE eligibility rule for a recipient's link, used by the GET and both POSTs: the lifetime and state pair and the visit's expiry
+// (recipientTrackLinkOpen), and a state the page can show (en route, on property or complete, by the SAME publicTrackState the
+// payload reports: a parked customer-pick or rebooking row reads scheduled and is out). A link that fails it answers exactly as an
+// unknown token does, on every route.
+function recipientLinkEligible(row) {
+  return Boolean(row) && recipientTrackLinkOpen(row) && RECIPIENT_STATES.has(publicTrackState(row));
+}
+
 // The visit a recipient's link names while the gate is on, the row stands and the person has not declined; else null.
 function recipientVisitId(token) {
   return require('../services/call-visit-recipient').visitForTrackToken(token).then((hit) => (hit ? hit.visitId : null));
 }
 
-// The link's lifetime (recipientTrackLinkOpen): en route or on site, or up to 2 h after completion, with a live finite expiry.
+// The POSTs read the visit once more for the same rule the GET applies to its own row (recipientLinkEligible).
 async function recipientVisitLive(visitId) {
-  const visit = await db('scheduled_services').where({ id: visitId }).first('status', 'track_state', 'completed_at', 'track_token_expires_at');
-  return recipientTrackLinkOpen(visit);
+  const visit = await db('scheduled_services').where({ id: visitId })
+    .first('status', 'track_state', 'completed_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
+  return recipientLinkEligible(visit);
 }
 
 // The visit row both token kinds read: the holder's tracker token and a visit text recipient's own.
@@ -822,15 +831,12 @@ router.get('/:token', safeRoute(async (req, res, next) => {
     }
 
     if (!row) return res.status(404).json({ error: 'Not found' });
-    if (recipientScope ? !recipientTrackLinkOpen(row) : !isTrackTokenLive(row.track_token_expires_at)) {
+    if (recipientScope ? !recipientLinkEligible(row) : !isTrackTokenLive(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });
     }
     const officeRebooking = row.status === 'rescheduled';
     const unplacedCustomerPick = isUnplacedCustomerPick(row);
     const customerState = publicTrackState(row);
-    // The recipient's link shows only en route, on property and complete (the lifetime check above agrees; this is the same
-    // rule on the state the payload reports).
-    if (recipientScope && !RECIPIENT_STATES.has(customerState)) return res.status(404).json({ error: 'Not found' });
     // A recipient's link never writes or calls a geocoder: it uses the stored pin, or the page's no-map fallback.
     if (!officeRebooking && !unplacedCustomerPick && !recipientScope) row = await ensureEnRouteDestinationGeocoded(row);
 

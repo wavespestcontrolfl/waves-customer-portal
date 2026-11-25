@@ -28,8 +28,11 @@ describe('an unreadable recipient lookup', () => {
       expect(notifyAdmin).toHaveBeenCalledTimes(1);
       const [category, title, body, opts] = notifyAdmin.mock.calls[0];
       expect(category).toBe('appointment');
-      expect(title).toBe('Schedule — text the person named on the call');
-      expect(body).toMatch(/for the person named on the call was not sent; text them if needed\.$/);
+      expect(title).toBe('Schedule — check the person named on the call before texting');
+      expect(title.length).toBeLessThanOrEqual(60);
+      // staff are told what to check before texting by hand: still on the visit, the time, and that they may be texted
+      expect(body).toMatch(/ was not sent; check they are on the visit, its time and that they may be texted\.$/);
+      expect(body.length).toBeLessThanOrEqual(110);
       expect(opts.dedupeKey).toBe(`visit-recipient-text-unsent:visit-1:${kind}`);
       expect(opts.bell).toBe(true);
       expect(opts.link).toBe('/admin/dispatch?tab=schedule&appointment=visit-1');

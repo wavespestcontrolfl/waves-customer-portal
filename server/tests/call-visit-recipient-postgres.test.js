@@ -849,6 +849,37 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       });
     });
 
+    test('an unreadable veto read at the provider handoff holds the text and raises the one deduped bell (the initial lookup was fine)', async () => {
+      const notifications = require('../services/notification-service');
+      const bell = jest.spyOn(notifications, 'notifyAdmin').mockResolvedValue({ id: 'n-1' });
+      try {
+        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+        sendCustomerMessage.mockReset();
+        sendCustomerMessage.mockResolvedValue({ sent: true });
+        // call_log is readable for the initial lookup (which does not touch it) and fails at the handoff recheck
+        const failingAtHandoff = Object.assign((table) => {
+          if (table === 'call_log') throw Object.assign(new Error(`select from call_log where phone '${BOB}' - connection terminated`), { code: '57P01' });
+          return db(table);
+        }, { raw: db.raw.bind(db), fn: db.fn });
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'confirmation', excludePhones: [HOLDER], conn: failingAtHandoff });
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        const input = sendCustomerMessage.mock.calls[0][0];
+        const verdict = await input.providerPreSendCheck({ channel: 'sms' });
+        expect(verdict).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', retryable: true });
+        expect(bell).toHaveBeenCalledTimes(1);
+        const [category, title, why, opts] = bell.mock.calls[0];
+        expect(category).toBe('appointment');
+        expect(title).toBe('Schedule — check the person named on the call before texting');
+        expect(opts.dedupeKey).toBe(`visit-recipient-text-unsent:${visitId}:confirmation`);
+        expect(JSON.stringify(bell.mock.calls)).not.toContain(BOB.slice(-10));
+        // a second recheck of the same notice carries the same key (the bell store keeps one row)
+        await input.providerPreSendCheck({ channel: 'sms' });
+        expect(bell.mock.calls.map((c) => c[3].dedupeKey)).toEqual([opts.dedupeKey, opts.dedupeKey]);
+      } finally {
+        bell.mockRestore();
+      }
+    });
+
     test('a decline SAVED in the choices table binds the link and the text with GATE_CONTACT_LOGIN off (the default)', async () => {
       expect(process.env.GATE_CONTACT_LOGIN).toBeUndefined();
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });

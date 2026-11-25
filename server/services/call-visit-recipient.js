@@ -423,8 +423,9 @@ async function raiseUnsentBell({ scheduledServiceId, kind }) {
     const { raiseAdminAlert } = require('./admin-alert-compose');
     await raiseAdminAlert('appointment', {
       area: 'Schedule',
-      action: 'text the person named on the call',
-      why: `${UNSENT_WORDS[kind] || 'A text'} for the person named on the call was not sent; text them if needed.`,
+      action: 'check the person named on the call before texting',
+      // One sentence of at most 110 characters: what was not sent, and what staff check before texting by hand.
+      why: `${UNSENT_WORDS[kind] || 'A text'} was not sent; check they are on the visit, its time and that they may be texted.`,
       severity: 'needs-you',
       link: `/admin/dispatch?tab=schedule&appointment=${encodeURIComponent(scheduledServiceId)}`,
       subject: { type: 'visit', id: String(scheduledServiceId) },
@@ -659,6 +660,8 @@ async function providerCheck(meta, { conn = db } = {}) {
     return await recipientStillOwed(meta, { conn });
   } catch (err) {
     logger.warn(`[call-visit-recipient] handoff recheck unreadable for visit ${meta.scheduled_service_id}: ${err.code || err.name || 'error'}`);
+    // Unreadable is not a decline: the text is held and may never be retried, so tell staff (the same bell, once per visit and notice).
+    await raiseUnsentBell({ scheduledServiceId: meta.scheduled_service_id, kind: meta.kind });
     return { ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', reason: 'recheck-failed', retryable: true };
   }
 }

@@ -318,6 +318,50 @@ describe('GET /:token with a visit text recipient\'s token: the reduced payload'
   });
 });
 
+describe('ONE eligibility rule: an ineligible recipient token answers exactly as an unknown token, on all three routes', () => {
+  const run = async (path, method, token = RECIPIENT_TOKEN) => {
+    const res = { statusCode: 200, body: undefined, headers: {}, set: jest.fn((h) => { Object.assign(res.headers, h); return res; }), status: jest.fn((c) => { res.statusCode = c; return res; }), json: jest.fn((b) => { res.body = b; return res; }), end: jest.fn(() => res) };
+    await find(path, method)({ params: { token }, headers: {}, get: () => null }, res, jest.fn());
+    return { statusCode: res.statusCode, body: res.body, headers: res.headers };
+  };
+  const ROUTES = [['/:token', 'get'], ['/:token/stops-ahead', 'post'], ['/:token/view', 'post']];
+  const unknown = async (path, method) => {
+    install(null);
+    mockVisitForTrackToken.mockResolvedValue(null);
+    const out = await run(path, method);
+    mockVisitForTrackToken.mockResolvedValue({ visitId: 'visit-1', recipientId: 'r-1' });
+    return out;
+  };
+
+  test.each(ROUTES)('%s (%s): a PARKED row that is en route by status and track state (customer pick set, no window) is the same 404 as an unknown token', async (path, method) => {
+    const expected = await unknown(path, method);
+    expect(expected.statusCode).toBe(404);
+    install(visitRow({ ...ENROUTE, customer_pick_by: '2026-11-20T00:00:00Z', window_start: null, window_end: null }));
+    expect(await run(path, method)).toEqual(expected);
+  });
+
+  test.each(ROUTES)('%s (%s): every other ineligible row is the same 404 as an unknown token', async (path, method) => {
+    const expected = await unknown(path, method);
+    for (const over of [
+      { status: 'confirmed', track_state: 'scheduled' },
+      { status: 'rescheduled', track_state: 'en_route' },
+      { status: 'on_site', track_state: 'en_route' },
+      { ...ENROUTE, track_token_expires_at: null },
+      DONE(130),
+      { status: 'cancelled', track_state: 'cancelled' },
+    ]) {
+      install(visitRow(over));
+      expect(await run(path, method)).toEqual(expected);
+    }
+  });
+
+  test.each(ROUTES)('%s (%s): an eligible row is NOT the unknown answer', async (path, method) => {
+    const expected = await unknown(path, method);
+    install(visitRow(ENROUTE));
+    expect((await run(path, method)).statusCode).not.toBe(expected.statusCode);
+  });
+});
+
 describe('POST /:token/stops-ahead and /:token/view with a recipient token', () => {
   const post = async (path, token = RECIPIENT_TOKEN) => {
     const res = { statusCode: 200, body: undefined, set: jest.fn(() => res), status: jest.fn((c) => { res.statusCode = c; return res; }), json: jest.fn((b) => { res.body = b; return res; }), end: jest.fn(() => res) };
