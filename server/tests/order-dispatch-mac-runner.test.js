@@ -51,7 +51,7 @@ function baseState({ request, ledger = null, vendors = { 'v-siteone': SITEONE, '
   state.read = (table, q, cols) => {
     if (table === 'product_restock_requests') return state.requests[q.where.id] || null;
     if (table === 'vendors') return vendors[q.where.id] || null;
-    if (table === 'vendor_orders as vo') return null; // findLiveAutoOrder: no order out
+    if (cols[0] === 'vo.status') return null; // findLiveAutoOrder: no order out
     if (table === 'vendor_order_emails') return null;
     if (table === 'vendor_orders') {
       return ledger;
@@ -132,6 +132,24 @@ describe('server with SITEONE_ORDER_RUNNER=mac', () => {
     const cancel = state.updates.find((u) => u.table === 'product_restock_requests' && u.row.status === 'cancelled');
     expect(cancel).toBeTruthy();
     expect(JSON.parse(cancel.row.metadata).macHandedOffAt).toBeUndefined();
+    expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
+  });
+
+  test('a fertilizer blackout or an order already out never stamps the hand-off', async () => {
+    const blackout = require('../services/procurement/fertilizer-blackout');
+    const spy = jest.spyOn(blackout, 'fertilizerBlackoutHold').mockReturnValue(true);
+    try {
+      const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 31 * 3600e3) }) });
+      const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
+      expect(out).toEqual({ requestId: 'r1', skipped: 'remote_runner', held: 'fertilizer_blackout' });
+      expect(state.updates).toHaveLength(0);
+    } finally { spy.mockRestore(); }
+    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 31 * 3600e3) }) });
+    const read = state.read;
+    state.read = (table, q, cols) => (cols[0] === 'vo.status' ? { status: 'placed' } : read(table, q, cols));
+    const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
+    expect(out).toEqual({ requestId: 'r1', skipped: 'remote_runner', autoOrderLive: true });
+    expect(state.updates).toHaveLength(0);
     expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
   });
 

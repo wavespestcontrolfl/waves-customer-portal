@@ -1472,11 +1472,17 @@ async function macWatchdogLocked(trx, requestId, now, env) {
   const lastTouch = Math.max(new Date(request.created_at).getTime(), ledger ? new Date(ledger.updated_at).getTime() : 0);
   if (now.getTime() - lastTouch < macStaleMs(env)) return {};
   const vendor = m.vendorId ? await trx('vendors').where({ id: m.vendorId }).forUpdate().first('id', 'name', 'code', 'active', 'updated_at') : null;
-  const { FERTILIZER_COLUMNS } = require('./fertilizer-blackout');
+  const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
   const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit', ...FERTILIZER_COLUMNS);
   if (!product || !vendor) return {};
   const ineligible = claimIneligibility({ product, request, vendor });
   if (ineligible) return { result: await cancelAtClaim(trx, { request, product, m, ineligible }) };
+  // A temporary hold is not a missed Mac run: an N/P fertilizer blackout (June 1 - Sept 30), an
+  // automatic order already out for the product, or an emailed order. bellUndispatchable would ring
+  // nothing for these, and a stamp written now would keep the Mac off the request after the hold ends.
+  if (fertilizerBlackoutHold(product, now)) return { result: { held: 'fertilizer_blackout' } };
+  if (await findLiveAutoOrder(trx, request.product_id)) return { result: { autoOrderLive: true } };
+  if (await emailOrderOutFor(trx, requestId)) return { result: { emailOrderOut: true } };
   await trx('product_restock_requests').where({ id: requestId, status: 'open' })
     .update({ metadata: JSON.stringify({ ...m, macHandedOffAt: now.toISOString() }), updated_at: now });
   logger.warn(`[order-dispatch] SiteOne request ${requestId} not touched by the Mac runner for ${Math.round((now.getTime() - lastTouch) / 3600000)} h — handed to the office`);

@@ -47,7 +47,9 @@ if (require.main === module) {
   run()
     .then((result) => { console.log(summarize(result)); process.exitCode = 0; })
     .catch((err) => { logger.error(`${JOB} failed: ${err.message}`); console.error(`${JOB} FAILED: ${err.message}`); process.exitCode = 1; })
-    .finally(async () => { try { await require('../models/db').destroy(); } catch { /* already closed */ } });
+    // Exit explicitly: the Chrome DevTools socket is never closed by the adapter (closing it could
+    // close the owner's Chrome), and an open socket would keep this process alive past its summary.
+    .finally(async () => { try { await require('../models/db').destroy(); } catch { /* already closed */ } process.exit(process.exitCode || 0); });
 }
 
 module.exports = { run, summarize, JOB };
