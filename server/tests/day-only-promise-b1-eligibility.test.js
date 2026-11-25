@@ -375,6 +375,11 @@ describe('loadTimeDisplay', () => {
       expect((await loadTimeDisplay(leftFirst, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
       const emptied = fakeConn({ servicesByRead: [same, same, same, []], reminders: [office('s1'), office('s2')] });
       expect((await loadTimeDisplay(emptied, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const regrouped = fakeConn({ servicesByRead: [[m('s1', '2026-11-20')], [m('s1', '2026-11-20')], [m('s1', '2026-11-20')], same], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(regrouped, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const withEnded = [...same, m('s3', '2026-11-20')].map((r) => (r.id === 's3' ? { ...r, status: 'cancelled' } : r));
+      const endedSibling = fakeConn({ servicesByRead: [withEnded, withEnded, withEnded, same], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(endedSibling, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
       const steady = fakeConn({ services: same, reminders: [office('s1'), office('s2')] });
       expect((await loadTimeDisplay(steady, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
     });

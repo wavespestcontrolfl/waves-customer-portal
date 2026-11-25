@@ -310,6 +310,7 @@ async function readLevels(conn, ids, now, { ignoreLevel, onDate }) {
   return {
     levels: new Map([...promiseFacts].map(([id, fact]) => [id, fact.level])),
     moved: new Set([...promiseFacts].filter(([, fact]) => fact.mismatch === true).map(([id]) => id)),
+    judged: new Map([...promiseFacts].map(([id, fact]) => [id, fact.members || null])),
   };
 }
 
@@ -318,14 +319,23 @@ function renderedDateOf(onDate, id) {
   return typeof onDate === 'string' ? onDate : onDate instanceof Map ? onDate.get(String(id)) || null : null;
 }
 
-/** Adds to `moved` every id whose own row in the later stop read is off its rendered date (a move between the two
- *  reads; pre-push Codex P1). */
-function addMovedInStopRead(moved, facts, ids, onDate) {
+/** The live member ids the promise read judged for one id, sorted: its stop's non-ended members, or itself alone. */
+function judgedLiveIds(judged, id) {
+  const live = (judged || []).filter((m) => !ENDED_STATUSES.includes(String(m.status || ''))).map((m) => m.id);
+  return (judged && judged.length ? live : [String(id)]).sort();
+}
+
+/** Adds to `moved` every id whose later stop read disagrees with the promise read: its own row is off the rendered
+ *  date or gone, or the stop's live members differ (a regroup between the reads; pre-push Codex P1). */
+function addMovedInStopRead(moved, facts, ids, onDate, judged) {
   for (const id of onDate ? ids : []) {
     const expected = renderedDateOf(onDate, id);
-    const own = (facts.get(String(id)) || []).find((m) => String(m.id) === String(id));
+    const members = facts.get(String(id)) || [];
+    const own = members.find((m) => String(m.id) === String(id));
     // A missing own row (it left its stop between the stop reads) is unverified too: siblings never speak for it.
-    if (expected && (!own || dateOnlyString(own.scheduled_date) !== expected)) moved.add(id);
+    if (expected && (!own || dateOnlyString(own.scheduled_date) !== expected)) { moved.add(id); continue; }
+    const seen = members.map((m) => String(m.id)).sort();
+    if (expected && judged && judged.has(id) && judgedLiveIds(judged.get(id), id).join() !== seen.join()) moved.add(id);
   }
 }
 
@@ -336,9 +346,9 @@ async function dayOnlyEligibility(conn, ids, now = new Date(), { ignoreLevel = f
     // A MOVE replaces the old promise (part B2), so its decision ignores the level: every visit reads as 'none'.
     // `onDate` (a send's or screen row's own rendered date) pins both reads to it: a visit seen off that date in either
     // read is unverified (not eligible, 'hour', failed), so a screen keeps the hour and an AI context withholds it.
-    const { levels, moved } = await readLevels(conn, ids, now, { ignoreLevel, onDate });
+    const { levels, moved, judged } = await readLevels(conn, ids, now, { ignoreLevel, onDate });
     const facts = await loadStopFacts(conn, ids);
-    addMovedInStopRead(moved, facts, ids, onDate);
+    addMovedInStopRead(moved, facts, ids, onDate, judged);
     const memberIds = [...new Set([...facts.values()].flat().map((m) => String(m.id)))];
     const sources = await loadBookingSources(conn, memberIds);
     for (const id of ids) {

@@ -93,7 +93,7 @@ function onVisitDate(promise, visitDate) {
  *  supersession rule (a newer notice still replaces an older one, even when the newer one is the off-date one), so
  *  nothing it replaced comes back. A single visit's off-date latest reads null; in a stop, stopPromise's `keep` test
  *  drops off-date candidates before its newest/earliest choice, so a sibling's current hour still stands. */
-async function resolvePromises(conn, ids, now, { sameDateOnly = false } = {}) {
+async function resolvePromises(conn, ids, now, { sameDateOnly = false, membersOut = null } = {}) {
   const detector = require('../no-show-detector');
   const wanted = ids.map(String);
   const { stopOf, memberIds, dateOf } = await loadStopMembers(conn, wanted);
@@ -109,6 +109,8 @@ async function resolvePromises(conn, ids, now, { sameDateOnly = false } = {}) {
   return new Map(ids.map((id) => {
     const expected = expectedOf(id);
     const stop = stopOf.get(String(id)) || [];
+    // `membersOut` (an expected-date read): the stop members this read judged, so a later read can prove it saw the same.
+    if (membersOut) membersOut.set(id, stop.map((m) => ({ id: String(m.id), status: m.status })));
     if (expected && dateOf.get(String(id)) !== expected) {
       return [id, { visit_id: id, start_at: null, communicated_at: null, date_mismatch: true }];
     }
@@ -164,7 +166,9 @@ function promiseLevelOf(promise) {
 async function loadPromiseFacts(conn, ids, now = new Date(), { sameDateOnly = true } = {}) {
   const facts = new Map();
   if (!ids || ids.length === 0) return facts;
-  const promises = await resolvePromises(conn, ids, now, { sameDateOnly });
+  const expectedRead = typeof sameDateOnly === 'string' || sameDateOnly instanceof Map;
+  const membersOut = expectedRead ? new Map() : null;
+  const promises = await resolvePromises(conn, ids, now, membersOut ? { sameDateOnly, membersOut } : { sameDateOnly });
   for (const id of ids) {
     const promise = promises.get(id);
     const level = promiseLevelOf(promise);
@@ -174,7 +178,9 @@ async function loadPromiseFacts(conn, ids, now = new Date(), { sameDateOnly = tr
       if (!Number.isNaN(at.getTime())) start = at;
     }
     // A visit seen off its expected date (date_mismatch) is unverified: callers keep the hour and mark the read failed.
-    facts.set(id, promise?.date_mismatch === true ? { level, start, mismatch: true } : { level, start });
+    const fact = promise?.date_mismatch === true ? { level, start, mismatch: true } : { level, start };
+    if (membersOut) fact.members = membersOut.get(id) || [];
+    facts.set(id, fact);
   }
   return facts;
 }
