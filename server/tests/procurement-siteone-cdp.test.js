@@ -341,9 +341,12 @@ test('Case / Pallet unit of measure refuses uom_mismatch; Each / Bag passes', as
   expect((await run({ uomRows: [{ label: 'Each', mult: 1, selected: true }, { label: 'Case(4)', mult: 4 }] })).result.evidence.uom).toBe('multiplier_1');
 });
 
-test('a non-empty cart refuses cart_not_empty and touches nothing', async () => {
+test('a non-empty cart stops the run (run-level: no request is parked) and touches nothing', async () => {
   const { w, error } = await run({ cart: [{ sku: 'PHONE-APP-1', qty: 3 }] });
-  expect(error.refuse).toBe('cart_not_empty');
+  expect(error.runLevel).toBe(true);
+  expect(error.refuse).toBeUndefined();
+  expect(error.cartNotEmpty).toBe(true);
+  expect(error.message).toMatch(/cart already holds 1 line/);
   expect(w.clicks).toEqual([]);
   expect(w.cart).toEqual([{ sku: 'PHONE-APP-1', qty: 3 }]);
   expect(w.gotos).toEqual(['https://www.siteone.com/en/cart']);
@@ -921,7 +924,7 @@ test('R6 empty cart: positive evidence is required (the cart\'s own empty state)
     expectSafe(r.w);
   }
   expect((await run({})).result.dryRun).toBe(false);
-  expect((await run({ cart: [{ sku: 'PHONE-APP-1', qty: 3 }] })).error.refuse).toBe('cart_not_empty');
+  expect((await run({ cart: [{ sku: 'PHONE-APP-1', qty: 3 }] })).error.cartNotEmpty).toBe(true);
 });
 
 test('R6 sign-out marker: a shown header "Sign In" (no redirect, no Okta box) is run-level, checked before the account read', async () => {

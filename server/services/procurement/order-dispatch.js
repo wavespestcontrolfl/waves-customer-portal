@@ -1501,6 +1501,13 @@ async function macHandOffBlocker(trx, { request, m, now }) {
   return null;
 }
 
+// Withdraws the sweep's "order manually" bell for this request (dedupeKey auto-reorder:<id>).
+async function withdrawHandOffBell(trx, requestId) {
+  const { openToCloser, doneColumns } = require('../notification-service')._private;
+  await openToCloser(trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]), 'procurement')
+    .update(doneColumns({ by: 'procurement', resolution: 'Another order or a hold now covers this restock', keepExisting: true, conn: trx }));
+}
+
 async function macWatchdogLocked(trx, requestId, now, env) {
   const peek = await trx('product_restock_requests').where({ id: requestId }).first('product_id');
   if (!peek) return {};
@@ -1520,7 +1527,14 @@ async function macWatchdogLocked(trx, requestId, now, env) {
     if (now.getTime() - lastTouch < macStaleMs(env)) return {};
   }
   const blocker = await macHandOffBlocker(trx, { request, m, now });
-  if (blocker) return { result: blocker.hold };
+  if (blocker) {
+    // A request already handed to the office whose hand-off is now blocked (another order for the
+    // product opened, a hold, a gone need): its standing "order manually" bell is withdrawn under the
+    // same locks, so nobody orders a second time from it. The stamp stays; a later eligible pass
+    // re-rings it through bellUndispatchable.
+    if (m.macHandedOffAt) await withdrawHandOffBell(trx, requestId);
+    return { result: { ...blocker.hold, ...(m.macHandedOffAt ? { handOffBellWithdrawn: true } : {}) } };
+  }
   if (m.macHandedOffAt) return { handOff: true };
   // A stale dry-run park's own bell ("turn dry run off to order for real") and any pending copy of it
   // are withdrawn with the hand-off: the office gets one instruction, order it by hand.
