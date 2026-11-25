@@ -29,17 +29,30 @@
  * (rate-review.js VISIT_INVOICE_LINK_SQL: direct, service record, first application, completion packet), for the visit and every visit of
  * its package (included follow-ups, both directions), plus, for a visit stamped as an annual prepay payment (the stamp, not the term link,
  * says so: production-share.js isAnnualPrepayStamp), the prepay invoice of its term and the invoices stamped to the term:
- *   pay:<payment id>:<cents | state>:<id hash>  a payment shows a refund, matched by metadata.invoice_id OR payment intent OR charge id OR the
+ *   pay:<payment id>:<cents | state>[:<id hash>][:<status>]  a payment shows a refund, matched by the metadata invoice keys (dispute_invoice_id,
+ *                                            invoice_id, waves_invoice_id: payment-refund-facts.js, the list the webhook's findInvoiceForPayment
+ *                                            reads) OR payment intent OR charge id OR the
  *                                            manual description 'Invoice <number> — ' (any of them; a combined charge flags every invoice it
  *                                            paid). The cents (or the status of a refunded/disputed row with no amount) and the Stripe
  *                                            refund identity are in the id, so a second or a replacement refund is a new signal.
  *   stmt:<payment id>:<cents | state>:<hash>  the same for a payer-statement payment (payments.statement_id = the invoice's statement)
  *   deposit:<estimate_deposits id>:<cents>   an estimate deposit applied to the invoice (deposit_credit line) was refunded (the commission rule)
- *   orphan:<stripe_orphan_charges id>        a parked refund: source combined_pay_webhook with the key '<pi>:partial-refund:<refund id>' (not
- *                                            one the bank bounced: its refund id is in stripe_failed_refunds), or a statement charge's parked
- *                                            case (source statement_pay_webhook: it holds a partial refund before settlement and a stale or
- *                                            orphan success, and the table cannot tell them apart without reading free text, so both are kept:
- *                                            over-detecting on purpose). A won dispute parks under ':dispute-won:' and is not a refund.
+ *   orphan:<stripe_orphan_charges id>        a parked case, matched by invoice, charge or payment intent. Every key family the webhooks write
+ *                                            to stripe_orphan_charges for a combined or statement charge, and what is done with it:
+ *                                            '<pi>:partial-refund:<refund id>' (source combined_pay_webhook, a partial refund that cannot be
+ *                                              attributed): MATCHED, unless the bank bounced it (its refund id is in stripe_failed_refunds);
+ *                                            '<pi>:partial-dispute:<dispute id>' (combined_pay_webhook, funds withdrawn by a partial
+ *                                              dispute, constituent payments left unchanged): MATCHED while the case is OPEN. The webhook
+ *                                              resolves it when the dispute closes won or warning_closed (Stripe restored the money); a
+ *                                              lost dispute stays open and keeps flagging;
+ *                                            statement_pay_webhook rows (a partial refund before settlement, or a stale or orphan success on
+ *                                              a statement charge): MATCHED; the table cannot tell the two apart without reading free text,
+ *                                              so both are kept (over-detecting on purpose);
+ *                                            '<pi>:dispute-won:<dispute id>:<invoice id>' (reinstated funds after a won dispute): EXCLUDED,
+ *                                              the money came back to Waves;
+ *                                            '<pi>:<invoice id>' residual shares and provisional cash of a combined debit, the card-hold and
+ *                                              invoice-payment webhook rows and every other source: EXCLUDED, unmatched or failed cash,
+ *                                              not a refund.
  *   credit:<customer_credit_ledger id>       the credit row a full refund writes: source 'adjustment', delta above 0 and exactly the note of
  *                                            customer-credit.js refundCreditNote (a payer transfer or a void write other notes)
  *   inv-refunded:<invoice id>                the invoice status is 'refunded'
@@ -63,7 +76,7 @@ const db = require('../models/db');
 const { PayrollError } = require('./payroll-w4');
 const { ANNUAL_PREPAY_PREPAID_METHOD } = require('./billing-lane');
 const {
-  VOIDED_INVOICE, COLLECTED_DEPOSITS, depositApplications, depositReversal, paymentRefundShownSql,
+  VOIDED_INVOICE, COLLECTED_DEPOSITS, depositApplications, depositReversal, paymentRefundShownSql, paymentNamesInvoiceSql,
 } = require('./payment-refund-facts');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -83,6 +96,9 @@ const REFUND_IDENTITY_SQL = `COALESCE((SELECT ':' || left(md5(string_agg(x.id, '
 
 // 'pay:<id>:<refunded cents>' when the row records an amount; a 'refunded' row with no amount and a 'disputed' row show the whole payment
 // refunded, so the state stands in for the cents.
+// A refund amount beside a 'disputed' or 'refunded' status is a different state from the same amount on a 'paid' row (a chargeback after a
+// partial refund keeps the amount): the status is in the id then. A row with no amount already carries its status above.
+const STATUS_SUFFIX_SQL = "CASE WHEN COALESCE(p.refund_amount, 0) > 0 AND p.status IN ('refunded', 'disputed') THEN ':' || p.status ELSE '' END";
 const AMOUNT_OR_STATE_SQL = "CASE WHEN COALESCE(p.refund_amount, 0) > 0 THEN round(p.refund_amount * 100)::bigint::text ELSE p.status END";
 
 const asUuids = (list) => [...new Set((list || []).map(String).filter((id) => UUID_RE.test(id)).map(canonicalId))];
@@ -147,7 +163,7 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
       FROM invoices AS i WHERE i.id IN (SELECT invoice_id FROM invs)
       UNION
       SELECT i.id, p.stripe_payment_intent_id, p.stripe_charge_id
-      FROM invoices AS i JOIN payments p ON p.metadata ->> 'invoice_id' = i.id::text
+      FROM invoices AS i JOIN payments p ON ${paymentNamesInvoiceSql('p', 'i.id')}
       WHERE i.id IN (SELECT invoice_id FROM invs)
       UNION
       SELECT i.id, ps.stripe_payment_intent_id, NULL
@@ -158,17 +174,17 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
       FROM invoices AS i JOIN payments p ON p.statement_id = i.payer_statement_id
       WHERE i.payer_statement_id IS NOT NULL AND i.id IN (SELECT invoice_id FROM invs)
     ), found AS (
-      SELECT v.origin, 'pay:' || p.id::text || ':' || ${AMOUNT_OR_STATE_SQL} || ${REFUND_IDENTITY_SQL} AS signal
+      SELECT v.origin, 'pay:' || p.id::text || ':' || ${AMOUNT_OR_STATE_SQL} || ${REFUND_IDENTITY_SQL} || ${STATUS_SUFFIX_SQL} AS signal
       FROM invs v
       JOIN invoices vi ON vi.id = v.invoice_id
       JOIN payments p ON ${paymentRefundShownSql('p')} AND (
-        p.metadata ->> 'invoice_id' = v.invoice_id::text
+        ${paymentNamesInvoiceSql('p', 'v.invoice_id')}
         OR (p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id IN (SELECT k.pi FROM keys k WHERE k.invoice_id = v.invoice_id))
         OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id IN (SELECT k.ch FROM keys k WHERE k.invoice_id = v.invoice_id))
         -- a manual payment names its invoice in the description the office writer builds, 'Invoice <number> — <method>' (as the commission ledger reads it)
         OR (p.customer_id = vi.customer_id AND vi.invoice_number IS NOT NULL AND starts_with(p.description, 'Invoice ' || vi.invoice_number || ' — ')))
       UNION
-      SELECT v.origin, 'stmt:' || p.id::text || ':' || ${AMOUNT_OR_STATE_SQL} || ${REFUND_IDENTITY_SQL}
+      SELECT v.origin, 'stmt:' || p.id::text || ':' || ${AMOUNT_OR_STATE_SQL} || ${REFUND_IDENTITY_SQL} || ${STATUS_SUFFIX_SQL}
       FROM invs v
       JOIN invoices i ON i.id = v.invoice_id AND i.payer_statement_id IS NOT NULL
       JOIN payments p ON p.statement_id = i.payer_statement_id AND ${paymentRefundShownSql('p')}
@@ -181,8 +197,10 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
       JOIN stripe_orphan_charges o ON (o.invoice_id = v.invoice_id
         OR (o.stripe_charge_id IS NOT NULL AND o.stripe_charge_id IN (SELECT k.ch FROM keys k WHERE k.invoice_id = v.invoice_id))
         OR split_part(o.stripe_payment_intent_id, ':', 1) IN (SELECT k.pi FROM keys k WHERE k.invoice_id = v.invoice_id))
-      WHERE ((o.source = 'combined_pay_webhook' AND o.stripe_payment_intent_id LIKE '%:partial-refund:%'
-          AND NOT EXISTS (SELECT 1 FROM stripe_failed_refunds ff WHERE ff.stripe_refund_id = split_part(o.stripe_payment_intent_id, ':partial-refund:', 2)))
+      WHERE ((o.source = 'combined_pay_webhook' AND (
+          (o.stripe_payment_intent_id LIKE '%:partial-refund:%'
+            AND NOT EXISTS (SELECT 1 FROM stripe_failed_refunds ff WHERE ff.stripe_refund_id = split_part(o.stripe_payment_intent_id, ':partial-refund:', 2)))
+          OR (o.stripe_payment_intent_id LIKE '%:partial-dispute:%' AND NOT o.resolved)))
         OR o.source = 'statement_pay_webhook')
       UNION
       -- The credit row returnAppliedCreditOnRefund writes for a full refund, by its exact note (customer-credit.js refundCreditNote).
@@ -220,11 +238,11 @@ async function depositSignalsOf(conn, invoices) {
   const out = new Map();
   const wanted = [...new Set([...invoices.values()].flatMap((set) => [...set]))];
   if (!wanted.length) return out;
-  const rows = await conn('invoices').whereIn('id', wanted).select('id', 'status', 'notes', 'line_items');
+  const rows = await conn('invoices').whereRaw('id = ANY(?::uuid[])', [wanted]).select('id', 'status', 'notes', 'line_items');
   const estimatesOf = new Map(rows.filter((row) => !VOIDED_INVOICE.includes(row.status)).map((row) => [row.id, [...depositApplications(row).keys()]]));
   const estimateIds = [...new Set([...estimatesOf.values()].flat())];
   if (!estimateIds.length) return out;
-  const deposits = await conn('estimate_deposits').whereIn('estimate_id', estimateIds).whereIn('status', COLLECTED_DEPOSITS)
+  const deposits = await conn('estimate_deposits').whereRaw('estimate_id = ANY(?::uuid[])', [estimateIds]).whereIn('status', COLLECTED_DEPOSITS)
     .select('id', 'estimate_id', 'status', 'amount', 'credited_amount', 'refunded_amount');
   const signalsOfEstimate = new Map();
   for (const row of deposits) {
@@ -282,7 +300,7 @@ async function answersOf(conn, technicianIds, weekStart) {
     .join('payroll_checks as c', 'c.id', 'b.source_check_id')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
     .where({ 'c.status': 'finalized', 'r.status': 'finalized' }).where('c.production_share_cents', '>', 0)
-    .whereIn('c.technician_id', technicianIds).where('c.week_start', '<', weekStart)
+    .whereRaw('c.technician_id = ANY(?::uuid[])', [technicianIds]).where('c.week_start', '<', weekStart)
     .select('b.id', 'b.source_check_id', 'b.visit_id', 'b.signals', 'b.cents', 'b.note', 'b.updated_at', conn.raw(UPDATED_TEXT_SQL));
   return new Map(rows.map((row) => [sourceKey(row.source_check_id, row.visit_id), {
     id: Number(row.id), sourceCheckId: canonicalId(row.source_check_id), visitId: canonicalId(row.visit_id),
@@ -355,7 +373,7 @@ function addSource(mine, row, { signals, answer, history, visit }) {
 
 // What tells two stops apart on the page: service type, scheduled day, window and completion time (no customer data). A deleted visit has none.
 async function visitsOf(conn, visitIds) {
-  const rows = await conn('scheduled_services').whereIn('id', visitIds)
+  const rows = await conn('scheduled_services').whereRaw('id = ANY(?::uuid[])', [visitIds])
     .select('id', 'service_type', 'window_display', 'completed_at', conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS scheduled_date"));
   return new Map(rows.map((row) => [canonicalId(row.id), {
     serviceType: row.service_type || null, scheduledDate: row.scheduled_date, windowDisplay: row.window_display || null,

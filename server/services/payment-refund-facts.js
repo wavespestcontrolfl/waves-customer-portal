@@ -55,6 +55,21 @@ const showsFullRefund = (status, refundedTotal) => status === 'disputed' || (sta
 // The SQL twin for a payments alias: a row that shows any refund (an amount, or the whole payment by status).
 const paymentRefundShownSql = (alias) => `(COALESCE(${alias}.refund_amount, 0) > 0 OR ${alias}.status IN ('refunded', 'disputed'))`;
 
+// The durable keys a payment row carries to name its invoice (metadata), in the order the Stripe webhook reads them (stripe-webhook.js
+// findInvoiceForPayment): a dispute reopen writes dispute_invoice_id and clears the Stripe ids on the invoice, so these keys, not the
+// invoice's own ids, still tie the payment to it. findInvoiceForPayment reads this same list.
+const PAYMENT_INVOICE_METADATA_KEYS = ['dispute_invoice_id', 'invoice_id', 'waves_invoice_id'];
+
+// The invoice id a payment's metadata (an object) names, by that order; null when none.
+const metadataInvoiceId = (meta) => {
+  const found = PAYMENT_INVOICE_METADATA_KEYS.map((key) => (meta || {})[key]).find(Boolean);
+  return found || null;
+};
+
+// SQL: the payment `p` names the invoice `invoiceRef` (an id expression) in any of those metadata keys.
+const paymentNamesInvoiceSql = (alias, invoiceRef) => `(${PAYMENT_INVOICE_METADATA_KEYS.map((key) => `${alias}.metadata ->> '${key}' = ${invoiceRef}::text`).join(' OR ')})`;
+
 module.exports = {
+  PAYMENT_INVOICE_METADATA_KEYS, metadataInvoiceId, paymentNamesInvoiceSql,
   AUTO_MINT_RE, namedIn, COLLECTED_DEPOSITS, UUID_RE, VOIDED_INVOICE, invoiceLines, depositApplications, depositReversal, showsFullRefund, paymentRefundShownSql,
 };

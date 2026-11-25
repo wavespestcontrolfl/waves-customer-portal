@@ -750,6 +750,74 @@ postgres('production share refunds', () => {
     });
   });
 
+  describe('payment state, durable invoice keys, partial disputes, and big lists', () => {
+    it('puts a disputed or refunded status in the signal beside a refund amount, so a chargeback after a partial refund is a new signal', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_payment_intent_id: 'pi_cb' });
+      const payment = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_cb', refund_amount: '10.00' });
+      expect((await signals([visit])).get(visit)).toEqual([`pay:${payment}:1000`]);
+      await trx('payments').where({ id: payment }).update({ status: 'disputed' });
+      expect((await signals([visit])).get(visit)).toEqual([`pay:${payment}:1000:disputed`]);
+      await trx('payments').where({ id: payment }).update({ status: 'refunded' });
+      expect((await signals([visit])).get(visit)).toEqual([`pay:${payment}:1000:refunded`]);
+    });
+
+    it('reopens an answered take-back when the refunded payment is charged back', async () => {
+      const world = await paidWorld('cb2');
+      const payment = await refundOn(world, '30.00');
+      const open = await week(world, W2, '500.00');
+      await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 30000, signals: open.takeBackToSet[0].newSignals });
+      expect((await preview(world.id, W2)).takeBackToSet).toEqual([]);
+      await trx('payments').where({ id: payment }).update({ status: 'disputed' });
+      const shown = await preview(world.id, W2);
+      expect(shown.takeBackToSet).toEqual([expect.objectContaining({ reason: 'new', previousCents: 30000, newSignals: [`pay:${payment}:3000:disputed`] })]);
+    });
+
+    it('ties a payment to its invoice by dispute_invoice_id and waves_invoice_id, as the webhook does, when the invoice kept no Stripe id', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const reopened = await stop(id, W1, '100.00', customerId);
+      const tagged = await stop(id, W1, '100.00', customerId);
+      const reopenedInvoice = await invoiceFor(customerId, '100.00', { scheduled_service_id: reopened, status: 'sent' });
+      const taggedInvoice = await invoiceFor(customerId, '100.00', { scheduled_service_id: tagged, status: 'sent' });
+      // A dispute reopen clears the invoice's Stripe ids and writes dispute_invoice_id on the payment.
+      const a = await paymentOf(customerId, { metadata: JSON.stringify({ dispute_invoice_id: reopenedInvoice }), refund_amount: '10.00', status: 'disputed' });
+      const b = await paymentOf(customerId, { metadata: JSON.stringify({ waves_invoice_id: taggedInvoice }), refund_amount: '5.00' });
+      const found = await signals([reopened, tagged]);
+      expect(found.get(reopened)).toEqual([`pay:${a}:1000:disputed`]);
+      expect(found.get(tagged)).toEqual([`pay:${b}:500`]);
+    });
+
+    it('flags an OPEN partial dispute parked on a combined charge, and stops when it is resolved (won), but keeps a lost one', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_charge_id: 'ch_pd', stripe_payment_intent_id: 'pi_pd' });
+      const [open] = await trx('stripe_orphan_charges').insert({
+        stripe_payment_intent_id: 'pi_pd:partial-dispute:du_1', stripe_charge_id: 'ch_pd', amount: '20.00', source: 'combined_pay_webhook',
+        original_db_error: 'Partial dispute du_1 on a combined balance charge',
+      }).returning('id');
+      expect((await signals([visit])).get(visit)).toEqual([`orphan:${open.id}`]);
+      // Closed won or warning_closed: the webhook resolves the case, Stripe restored the money.
+      await trx('stripe_orphan_charges').where({ id: open.id }).update({ resolved: true, resolved_at: new Date() });
+      expect((await signals([visit])).get(visit)).toEqual([]);
+      // Closed lost: the case stays open (money gone) and keeps flagging.
+      const [lost] = await trx('stripe_orphan_charges').insert({
+        stripe_payment_intent_id: 'pi_pd:partial-dispute:du_2', stripe_charge_id: 'ch_pd', amount: '20.00', source: 'combined_pay_webhook', original_db_error: 'Partial dispute du_2',
+      }).returning('id');
+      expect((await signals([visit])).get(visit)).toEqual([`orphan:${lost.id}`]);
+    });
+
+    it('reads a very long list of visits in one statement (a single array parameter, not one per id)', async () => {
+      const ids = Array.from({ length: 70000 }, () => randomUUID());
+      const found = await signals(ids);
+      expect(found.size).toBe(70000);
+      expect([...found.values()].every((list) => list.length === 0)).toBe(true);
+    });
+  });
+
   describe('a parked refund the bank bounced is not a refund signal', () => {
     it('skips a parked refund whose id is fenced as failed, and keeps a reconciled one', async () => {
       const id = await tech('Sample Alpha');

@@ -7207,7 +7207,7 @@ async function findInvoiceForPayment(payment) {
       ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
       : {};
   } catch (e) { /* unparseable metadata — fall through to PI lookup */ }
-  const metaInvoiceId = meta.dispute_invoice_id || meta.invoice_id || meta.waves_invoice_id || null;
+  const metaInvoiceId = require('../services/payment-refund-facts').metadataInvoiceId(meta);
   if (metaInvoiceId) {
     const invoice = await db('invoices').where({ id: metaInvoiceId }).first();
     if (invoice) return invoice;

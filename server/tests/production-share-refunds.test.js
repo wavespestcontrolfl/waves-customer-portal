@@ -151,3 +151,17 @@ describe('the review token takes the invoices a paid stop froze', () => {
     expect(rev(toSet({ reason: 'new', previousCents: null }))).not.toBe(rev(toSet({ reason: 'changed', previousCents: 300 })));
   });
 });
+
+describe('historical lookups bind one array, never a parameter for each id', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  it('the refund reads use = ANY(?::uuid[]) for every list that grows with history', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/production-share-refunds.js'), 'utf8')
+      .split('\n').filter((line) => !/^\s*(?:\/\/|\/?\*)/.test(line)).join('\n');
+    // whereIn is allowed only for the fixed status lists.
+    const lists = [...source.matchAll(/whereIn\('([^']+)'/g)].map((match) => match[1]);
+    expect(lists.filter((column) => column !== 'status')).toEqual([]);
+    expect(source).toMatch(/id = ANY\(\?::uuid\[\]\)/);
+  });
+});
