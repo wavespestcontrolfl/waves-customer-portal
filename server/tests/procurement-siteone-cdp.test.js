@@ -21,6 +21,7 @@ const ENV = Object.freeze({
   SITEONE_APPROVED_PICKUP: '#238,5115 Lena Rd',
   SITEONE_APPROVED_ACCOUNT: '5550123',
   SITEONE_BOT_DRY_RUN: 'false',
+  SITEONE_CART_ISOLATED: 'true',
 });
 const OPTS = { settleMs: 0, confirmStep: 1 };
 
@@ -134,7 +135,7 @@ function screens(w) {
     [S.reviewTotal]: [rv.total],
     [S.placeOrder]: placeBtns(),
   };
-  const confirmation = { [S.body]: [el({ text: w.confirmationBody })], ...(w.confirmationField ? { [S.confirmationNumber]: [el({ text: w.confirmationBody })] } : {}), [S.heading]: [el({ text: 'Order Received' })], [S.confirmationTotal]: w.confirmTotalText == null ? [] : [el({ text: w.confirmTotalText })] };
+  const confirmation = { [S.body]: [el({ text: w.confirmationBody })], ...(w.confirmationField ? { [S.confirmationNumber]: [el({ text: w.confirmationBody })] } : {}), [S.heading]: [el({ text: 'Order Received' })], [S.confirmationTotal]: w.confirmTotalText == null ? (w.onConfirmRead ? (w.onConfirmRead((w.confirmReads = (w.confirmReads || 0) + 1), w), []) : []) : [el({ text: w.confirmTotalText })] };
   const product = {
     [S.accountNode]: (w.productAccountText ?? w.accountText) === '' ? [] : [el({ text: w.productAccountText ?? w.accountText, attrs: w.accountAttr ? { 'data-account-number': w.accountAttr } : {} })],
     [S.brandItemNumber]: [el({ text: w.brandText })],
@@ -999,10 +1000,28 @@ test('R12 shared cart: the placed order total on the confirmation page must equa
   expect(grown.w.placed).toBe(1);
   expect(grown.error.ambiguous).toBe(true);
   expect(grown.error.evidence).toMatchObject({ externalOrderNumber: '7700123', confirmationTotalCents: 32080 });
+  expect(grown.error.cents).toBe(32080); // the dispatcher counts the purchase at the confirmed total
   // No readable total: also parked for a person, with the order number kept.
   const unread = await run({ confirmTotalText: null });
   expect(unread.error.ambiguous).toBe(true);
   expect(unread.error.evidence.externalOrderNumber).toBe('7700123');
+  expect(unread.error.cents).toBe(11040);
+  // A total that renders a moment after the URL changed is waited for: the order is placed.
+  const late = await run({ confirmTotalText: null, onConfirmRead: (n, w) => { if (n === 2) w.confirmTotalText = '$110.40'; } });
+  expect(late.result).toMatchObject({ externalOrderNumber: '7700123', amountCents: 11040 });
+});
+
+test('R13 live needs the robot\'s own cart: without SITEONE_CART_ISOLATED=true nothing is added or clicked', async () => {
+  for (const iso of [undefined, '', 'TRUE', 'yes']) {
+    const env = { ...ENV, SITEONE_CART_ISOLATED: iso };
+    const r = await run({}, { env });
+    expect(r.error.runLevel).toBe(true);
+    expect(r.error.message).toMatch(/SITEONE_CART_ISOLATED/);
+    expect(r.w.cart).toEqual([]);
+    expect(r.w.placed).toBe(0);
+  }
+  // A dry run does not need it.
+  expect((await run({}, { env: { ...ENV, SITEONE_CART_ISOLATED: undefined, SITEONE_BOT_DRY_RUN: 'true' } })).result.dryRun).toBe(true);
 });
 
 test('R12 confirmation: an overlength order number never matches by its prefix', async () => {

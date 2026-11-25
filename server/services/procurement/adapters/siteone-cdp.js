@@ -858,11 +858,18 @@ async function bindReviewFields(run, first) {
 // records it as placed at the approved amount.
 async function provePlacedTotal(run, number, approvedCents) {
   const evidence = { ...run.evidence, confirmed: true, externalOrderNumber: number };
-  const nodes = await shownAll(run.page, SELECTORS.confirmationTotal).catch(() => []);
-  const placedCents = nodes.length === 1 ? parseMoney(String(await nodes[0].innerText().catch(() => '')).trim()) : null;
+  // The total can render after the URL changes: poll the same confirmation page for it.
+  const readTotalOnce = async () => {
+    if (confirmationCodeOf((parseUrl(run.page.url()) || {}).pathname || '') == null) return null;
+    const nodes = await shownAll(run.page, SELECTORS.confirmationTotal);
+    return nodes.length === 1 ? parseMoney(String(await nodes[0].innerText()).trim()) : null;
+  };
+  const placedCents = await poll(run.page, readTotalOnce, CONFIRMATION_WAIT, run.opts.confirmStep).catch(() => null);
   evidence.confirmationTotalCents = placedCents;
   if (placedCents !== approvedCents) {
-    throw ambiguousError(`SiteOne order ${number} was placed, but its confirmation total ${placedCents == null ? 'could not be read' : `(${(placedCents / 100).toFixed(2)})`} is not the approved total (${(approvedCents / 100).toFixed(2)}) — check the order with the vendor`, evidence);
+    // Count the purchase at what SiteOne confirmed (when readable, and never below the approved
+    // total), so the monthly cap is not left with room the order already spent.
+    throw Object.assign(ambiguousError(`SiteOne order ${number} was placed, but its confirmation total ${placedCents == null ? 'could not be read' : `(${(placedCents / 100).toFixed(2)})`} is not the approved total (${(approvedCents / 100).toFixed(2)}) — check the order with the vendor`, evidence), { cents: Math.max(placedCents || 0, approvedCents) });
   }
   return { externalOrderNumber: number, amountCents: approvedCents, evidence, dryRun: false };
 }
@@ -965,6 +972,11 @@ async function place(args, opts = {}) {
   if (!configured(env)) throw runLevel('siteone cdp: SITEONE_CDP_URL, SITEONE_APPROVED_STORE_ID, SITEONE_APPROVED_PICKUP and SITEONE_APPROVED_ACCOUNT must all be set');
   if (typeof args.beforeSubmit !== 'function') throw new RefusedError('no_cap_check', 'no cap check was supplied — the bot never orders without one');
   const dryRun = isDryRun(env, args.dryRun);
+  // SiteOne submits its server-side cart, and a cart shared with the owner's phone app can change
+  // between the page checks and the click. A live click therefore needs the robot's OWN SiteOne
+  // login (a separate web user on the account, signed in only in the robot's Chrome), which the
+  // owner confirms with SITEONE_CART_ISOLATED=true. Without it the path stays dry run only.
+  if (!dryRun && env.SITEONE_CART_ISOLATED !== 'true') throw runLevel('siteone cdp: a live order needs SITEONE_CART_ISOLATED=true (the robot\'s own SiteOne login, not a cart shared with the phone app) — nothing was added or clicked');
   const evidence = { adapter: 'siteone-cdp', dryRun };
   // A { ok: false } verdict is an ordinary refusal. The cap check THROWING is
   // the environment's problem (run-level), never a parked order.

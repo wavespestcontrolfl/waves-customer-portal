@@ -309,6 +309,7 @@ describe('the Mac run', () => {
     expect(liveStopReason({ ...on, SITEONE_ORDER_RUNNER: '' }, launch)).toMatch(/no longer mac/);
     expect(liveStopReason({ ...on, SITEONE_BOT_DRY_RUN: 'true' }, launch)).toMatch(/changed since launch/);
     expect(liveStopReason({ ...on, SITEONE_BOT_DRY_RUN: 'false ' }, launch)).toMatch(/changed since launch/); // a dry run now: no trim
+    expect(liveStopReason({ ...on, SITEONE_CART_ISOLATED: 'true' }, launch)).toMatch(/SITEONE_CART_ISOLATED changed/);
     const capped = { ...launch, AUTO_ORDER_MAX_PER_ORDER_CENTS: '35000', AUTO_ORDER_MAX_MONTHLY_CENTS: '40000' };
     const liveCapped = { ...on, AUTO_ORDER_MAX_PER_ORDER_CENTS: '35000', AUTO_ORDER_MAX_MONTHLY_CENTS: '40000' };
     expect(liveStopReason(liveCapped, capped)).toBeNull();

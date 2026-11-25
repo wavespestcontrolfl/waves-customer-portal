@@ -55,7 +55,7 @@ function liveStopReason(live, launch) {
   // The caps the reservation enforces are the launch values; a cap changed since launch (lowered or
   // raised) stops the run rather than reserve against a limit the owner has replaced.
   // Exact strings, no trimming: the adapter decides dry run by an exact match, so any edit counts.
-  for (const k of ['SITEONE_BOT_DRY_RUN', 'AUTO_ORDER_MAX_PER_ORDER_CENTS', 'AUTO_ORDER_MAX_MONTHLY_CENTS']) {
+  for (const k of ['SITEONE_BOT_DRY_RUN', 'SITEONE_CART_ISOLATED', 'AUTO_ORDER_MAX_PER_ORDER_CENTS', 'AUTO_ORDER_MAX_MONTHLY_CENTS']) {
     if (String(live[k] ?? '') !== String(launch[k] ?? '')) return `${k} changed since launch`;
   }
   return null;
