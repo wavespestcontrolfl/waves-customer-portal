@@ -2282,14 +2282,22 @@ const TwilioService = {
             techName: customerTechName,
             etaMinutes,
             trackUrlFor: async (recipientToken) => {
-              const long = `${origin}/track/${recipientToken}`;
-              return (await shortenOrPassthrough(long, {
-                kind: "tracking",
-                entityType: "visit_text_recipients",
-                // No customerId: the timeline counts a click on a customer's short code as that customer's own
-                // engagement, and this link is clicked by a third party.
-                expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-              })) || long;
+              // createShortCode, not shortenOrPassthrough: that one logs the error message (a knex message carries the
+              // bound URL, which holds the token) and falls back to the long URL. Any failure here sends no link and
+              // logs a code only.
+              try {
+                const { shortUrl } = await require("./short-url").createShortCode(`${origin}/track/${recipientToken}`, {
+                  kind: "tracking",
+                  entityType: "visit_text_recipients",
+                  // No customerId: the timeline counts a click on a customer's short code as that customer's own
+                  // engagement, and this link is clicked by a third party.
+                  expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+                });
+                return shortUrl || null;
+              } catch (err) {
+                logger.warn(`[twilio] visit recipient tracker link not shortened (code=${(err && err.code) || "none"})`);
+                return null;
+              }
             },
           },
         });

@@ -196,6 +196,17 @@ describe('GET /:token with a visit text recipient\'s token', () => {
     expect((await get()).body.meta).toEqual({ pollIntervalSeconds: 0 });
   });
 
+  test.each([
+    ['a visit parked for the holder to pick a day (customer pick, no placed window)', { customer_pick_by: '2026-11-20T00:00:00Z', window_start: null, window_end: null }],
+    ['a visit the office is rebooking', { status: 'rescheduled' }],
+  ])('%s: reports scheduled but never polls, even on its own day', async (_label, over) => {
+    mockIsToday.mockReturnValue(true);
+    install(visitRow(over));
+    const { body } = await get();
+    expect(body.state).toBe('scheduled');
+    expect(body.meta).toEqual({ pollIntervalSeconds: 0 });
+  });
+
   test('complete is a plain done state: no summary, no links, no cards', async () => {
     install(visitRow({ status: 'completed', track_state: 'complete', completed_at: '2026-12-01T15:00:00.000Z' }));
     const { body } = await get();

@@ -142,7 +142,8 @@ async function createShortCode(targetUrl, opts = {}) {
       throw err;
     }
   }
-  logger.error(`[short-url] Exhausted retries on code collision: ${lastErr && lastErr.message}`);
+  // Code only: a knex error message carries the bound values, and target_url can hold a bearer token.
+  logger.error(`[short-url] Exhausted retries on code collision (code=${(lastErr && lastErr.code) || 'none'})`);
   throw new Error('short-url: code-generation retries exhausted');
 }
 

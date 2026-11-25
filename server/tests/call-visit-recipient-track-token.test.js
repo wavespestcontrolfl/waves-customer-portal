@@ -24,8 +24,8 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/contact-notification-prefs', () => ({ contactPhoneDeclinesText: jest.fn(async () => false) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
-jest.mock('../services/disclaimed-number-holds', () => ({ disclaimedNumberHeldForVisit: jest.fn(async () => false) }));
-const { disclaimedNumberHeldForVisit } = require('../services/disclaimed-number-holds');
+jest.mock('../services/disclaimed-number-holds', () => ({ disclaimedNumberHeldForVisit: jest.fn(async () => false), disclaimedNumberHeld: jest.fn(async () => false) }));
+const { disclaimedNumberHeldForVisit, disclaimedNumberHeld } = require('../services/disclaimed-number-holds');
 
 const { contactPhoneDeclinesText } = require('../services/contact-notification-prefs');
 const VisitRecipient = require('../services/call-visit-recipient');
@@ -43,6 +43,7 @@ beforeEach(() => {
   process.env[GATE] = 'true';
   contactPhoneDeclinesText.mockResolvedValue(false);
   disclaimedNumberHeldForVisit.mockResolvedValue(false);
+  disclaimedNumberHeld.mockResolvedValue(false);
 });
 afterAll(() => { if (gateBefore === undefined) delete process.env[GATE]; else process.env[GATE] = gateBefore; });
 
@@ -103,6 +104,23 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('CALLBACK_NUMBER_HOLD');
   });
 
+  test('a callback-number hold on the RECIPIENT\'s own number closes the link and the send recheck', async () => {
+    seed();
+    disclaimedNumberHeld.mockResolvedValue(true);
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+    expect(disclaimedNumberHeld).toHaveBeenCalledWith('+19415550002', expect.anything());
+    expect((await VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' })).code).toBe('RECIPIENT_NUMBER_HOLD');
+  });
+
+  test('a lookup error is rethrown without the bound token (a knex message carries its bindings)', async () => {
+    seed();
+    mockTables.visit_text_recipients.first = () => { throw Object.assign(new Error(`select * from "visit_text_recipients" where "track_token" = '${TOKEN}' - boom`), { code: '57P01' }); };
+    const err = await VisitRecipient.visitForTrackToken(TOKEN).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.code).toBe('57P01');
+    expect(`${err.message} ${err.stack}`).not.toContain(TOKEN);
+  });
+
   test('a person no longer on the visit (row not listed for it) resolves nothing', async () => {
     seed();
     mockTables.visit_text_recipients.list = [];
@@ -132,7 +150,7 @@ describe('visitForTrackToken: who a recipient link opens', () => {
   test('an unreadable answer throws instead of opening the view', async () => {
     seed();
     mockTables.visit_text_recipients.first = () => { throw new Error('db down'); };
-    await expect(VisitRecipient.visitForTrackToken(TOKEN)).rejects.toThrow('db down');
+    await expect(VisitRecipient.visitForTrackToken(TOKEN)).rejects.toThrow('lookup failed');
   });
 });
 

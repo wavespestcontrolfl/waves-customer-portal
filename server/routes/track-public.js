@@ -675,12 +675,12 @@ function recipientVisitChange(visitChange) {
 }
 
 const RECIPIENT_SCHEDULED_POLL_SECONDS = 120;
-function recipientPollSeconds(state, visitIsToday) {
+function recipientPollSeconds(state, scheduledPoll) {
   if (state === 'en_route' || state === 'on_property') return EN_ROUTE_POLL_SECONDS;
-  return state === 'scheduled' && visitIsToday === true ? RECIPIENT_SCHEDULED_POLL_SECONDS : 0;
+  return state === 'scheduled' && scheduledPoll === true ? RECIPIENT_SCHEDULED_POLL_SECONDS : 0;
 }
 
-function recipientTrackPayload(full, { visitIsToday = false } = {}) {
+function recipientTrackPayload(full, { scheduledPoll = false } = {}) {
   const state = full.state;
   const property = full.property || {};
   return {
@@ -707,8 +707,8 @@ function recipientTrackPayload(full, { visitIsToday = false } = {}) {
     visitChange: recipientVisitChange(full.visitChange),
     meta: {
       // The page's poll is the only live update this link has (no socket). Quick while the tech is on the way or on site;
-      // a slow, bounded one on the visit's own day while scheduled, so a visit that goes en route (again) refreshes.
-      pollIntervalSeconds: recipientPollSeconds(state, visitIsToday),
+      // a slow, bounded one on the visit's own day while scheduled AND placed (a parked, customer-pick or rebooking visit does not poll), so a visit that goes en route (again) refreshes.
+      pollIntervalSeconds: recipientPollSeconds(state, scheduledPoll),
     },
   };
 }
@@ -965,7 +965,7 @@ router.get('/:token', async (req, res, next) => {
         || null;
     }
 
-    res.json(recipientScope ? recipientTrackPayload(response, { visitIsToday: isServiceDateToday(row.scheduled_date) }) : response);
+    res.json(recipientScope ? recipientTrackPayload(response, { scheduledPoll: scheduledRouteTracking && isServiceDateToday(row.scheduled_date) }) : response);
   } catch (err) {
     next(err);
   }

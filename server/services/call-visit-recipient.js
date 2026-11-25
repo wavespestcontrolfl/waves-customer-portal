@@ -451,6 +451,15 @@ const TRACK_TOKEN_RE = /^[a-f0-9]{64}$/;
  */
 async function visitForTrackToken(token, { conn = db } = {}) {
   if (!gateLive() || !TRACK_TOKEN_RE.test(token || '')) return null;
+  try {
+    return await resolveTrackToken(token, conn);
+  } catch (err) {
+    // A knex error message carries the bound values: never let the token reach a log through it.
+    throw Object.assign(new Error('visit-only tracker link lookup failed'), { code: err && err.code });
+  }
+}
+
+async function resolveTrackToken(token, conn) {
   const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id');
   if (!row) return null;
   // The same permission check the en-route send makes at the provider handoff, read fresh on every request.
@@ -558,6 +567,10 @@ async function recipientPermission(meta, { conn = db, anyVisitStatus = false } =
   const contacts = await contactsForVisit(meta.scheduled_service_id, meta.kind, { conn, throwOnError: true, anyVisitStatus });
   const mine = contacts.find((contact) => contact.visitRecipientId === meta.visit_recipient_id);
   if (!mine) return noVerdict('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
+  // The hold on the visit above is the HOLDER's number; the person's own number can be held by another call.
+  if (await require('./disclaimed-number-holds').disclaimedNumberHeld(mine.phone, conn)) {
+    return noVerdict('RECIPIENT_NUMBER_HOLD', 'recipient-number-hold');
+  }
   return { ok: true, mine };
 }
 

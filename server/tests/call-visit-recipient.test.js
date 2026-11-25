@@ -50,7 +50,10 @@ jest.mock('../services/disclaimed-number-holds', () => ({
   disclaimedNumberHeldForVisit: jest.fn(async () => false),
   disclaimedNumberHeld: jest.fn(async () => false),
 }));
-jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url) }));
+jest.mock('../services/short-url', () => ({
+  shortenOrPassthrough: jest.fn(async (url) => url),
+  createShortCode: jest.fn(async () => ({ code: 'abc', shortUrl: 'https://go.test/l/abc' })),
+}));
 // The recipient module's database reads (who is on this visit, the once-per-slot claim) run on real
 // PostgreSQL in call-visit-recipient-postgres.test.js; here the senders' use of it is what is pinned.
 jest.mock('../services/call-visit-recipient', () => {
@@ -424,16 +427,38 @@ describe('sendTechEnRoute hands the en-route text to the visit-only recipients',
     const [{ context }] = VisitRecipient.notifyVisitRecipients.mock.calls[0];
     // No trackUrl of any kind in the context: only a builder that takes the recipient's token.
     expect(Object.keys(context).sort()).toEqual(['etaMinutes', 'techName', 'trackUrlFor']);
-    const { shortenOrPassthrough } = require('../services/short-url');
+    const { createShortCode, shortenOrPassthrough } = require('../services/short-url');
     const url = await context.trackUrlFor('r'.repeat(64));
+    const [target, opts] = createShortCode.mock.calls.at(-1);
+    expect(target).toMatch(/^https:\/\/\S+\/track\/r{64}$/);
+    expect(target).not.toContain('tok-1');
     // The short code carries no customer: the timeline counts a click on a customer's code as that customer's own.
-    const opts = shortenOrPassthrough.mock.calls.at(-1)[1];
     expect(opts).toMatchObject({ kind: 'tracking', entityType: 'visit_text_recipients' });
     expect(opts.customerId).toBeUndefined();
     expect(opts.entityId).toBeUndefined();
-    expect(url).toMatch(/^https:\/\/\S+\/track\/r{64}$/);
-    expect(url).not.toContain('tok-1');
+    expect(url).toBe('https://go.test/l/abc');
+    // Never the pass-through shortener: it logs the error message and falls back to the long URL.
+    expect(shortenOrPassthrough.mock.calls.filter(([u]) => String(u).includes('r'.repeat(64)))).toEqual([]);
     expect(JSON.stringify(VisitRecipient.notifyVisitRecipients.mock.calls)).not.toContain('tok-1');
+  });
+
+  test('gate ON: a shortener failure sends no link and logs no token or URL, only a code', async () => {
+    process.env[GATE] = 'true';
+    const logger = require('../services/logger');
+    const { createShortCode } = require('../services/short-url');
+    const recipientToken = 'q'.repeat(64);
+    // A knex error message carries its bound values: the target URL, token included.
+    createShortCode.mockRejectedValueOnce(Object.assign(
+      new Error(`insert into "short_codes" ("target_url") values ('https://portal.test/track/${recipientToken}') - boom`),
+      { code: '08006' },
+    ));
+    await enRoute();
+    const [{ context }] = VisitRecipient.notifyVisitRecipients.mock.calls[0];
+    expect(await context.trackUrlFor(recipientToken)).toBeNull();
+    const logged = JSON.stringify([logger.warn.mock.calls, logger.error.mock.calls, logger.info.mock.calls]);
+    expect(logged).not.toContain(recipientToken);
+    expect(logged).not.toContain('/track/');
+    expect(logged).toContain('code=08006');
   });
 
   test('gate ON: the holder result is the same when the holder send is blocked', async () => {

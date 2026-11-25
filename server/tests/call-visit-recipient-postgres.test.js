@@ -677,6 +677,17 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
     });
 
+    test('a callback-number hold on the recipient\'s OWN number closes the link', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      await db('disclaimed_number_holds').insert({ phone_e164: BOB, customer_id: null, source_call_log_id: callLogId, held_at: new Date() });
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      await db('disclaimed_number_holds').where({ source_call_log_id: callLogId }).del();
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+    });
+
     test('a completed or on-site visit still opens the link', async () => {
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'completed' });
       const [{ id }] = await rows();
