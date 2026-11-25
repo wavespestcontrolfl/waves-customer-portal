@@ -286,6 +286,22 @@ describe('minutes rule', () => {
     expect(rankM([{ cand: sameDay({ detour_minutes: 7 }), sc: full(62) }]).qualifies).toBe(false);
   });
 
+  test('Sunday stays last: a minutes-rule Saturday beats a Sunday that clears the bar', () => {
+    const r = rankM([
+      { cand: dayMove({ date: '2026-12-06', detour_minutes: 12 }), sc: full(66) }, // Sunday, clears the bar
+      { cand: dayMove({ date: '2026-12-05', detour_minutes: 7 }), sc: full(62) }, // Saturday, minutes rule
+    ]);
+    expect(r.ranked.map((c) => c.date)).toEqual(['2026-12-05', '2026-12-06']);
+    expect(r.byMinutes).toBe(true);
+  });
+
+  test('a visit in conflict: the move it would make once the conflict is gone counts the minutes rule too', () => {
+    const conflicted = { ...CUR, conflict: { kind: 'overlap' } };
+    const r = rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62) }], { current: conflicted });
+    expect(r.movesWithoutConflict).toBe(true);
+    expect(r.normalBestMinutesFloor).toBe(10);
+  });
+
   test('a slot that clears the bar ranks first; minutes-rule slots rank by the bigger saving', () => {
     const r = rankM([
       { cand: dayMove({ date: '2026-12-02', detour_minutes: 10 }), sc: full(63) }, // 13 min, gain 13

@@ -108,8 +108,11 @@ async function roadSaving(current, cand, travel) {
 
 // The check can measure this visit at all: gate on, a floor to hold, and a
 // current placement whose drive the model can see.
-function measurable({ current, config, travel }) {
-  return !!(config.roadCheckEnabled && travel && (config.minDayMoveDriveSavingMinutes || 0) > 0 && !current.detour_group_blind);
+// A minutes-rule slot (move-rules.js minutesRuleOk) has its own positive floor,
+// so it is measured even when the ordinary drive floor is 0.
+function measurable({ current, config, travel }, ranked) {
+  const minutesRows = !!(ranked && (ranked.rankedRows || []).some((row) => row.byMinutes)) || !!(ranked && ranked.normalBestMinutesFloor);
+  return !!(config.roadCheckEnabled && travel && ((config.minDayMoveDriveSavingMinutes || 0) > 0 || minutesRows) && !current.detour_group_blind);
 }
 
 // A visit in conflict moves whatever the roads say (its repair is exempt).
@@ -121,7 +124,8 @@ async function withProjectionChecked(ranked, ctx) {
   if (!ranked.normalBest) return ranked;
   try {
     const road = await roadSaving(ctx.current, ranked.normalBest, ctx.travel);
-    if (road && road.saving_minutes < ctx.config.minDayMoveDriveSavingMinutes) {
+    const floor = Math.max(ctx.config.minDayMoveDriveSavingMinutes || 0, ranked.normalBestMinutesFloor || 0);
+    if (road && road.saving_minutes < floor) {
       const { normalBest: _slot, normalBestScore: _score, ...rest } = ranked;
       return rest;
     }
@@ -149,7 +153,7 @@ const withRoad = (row, road) => ({ ...row, cand: { ...row.cand, [ROAD_RESULT]: r
  */
 async function confirmOnRoads(ranked, ctx) {
   const moveRules = require('./move-rules');
-  if (!measurable(ctx)) return ranked;
+  if (!measurable(ctx, ranked)) return ranked;
   if (moveRules.mustMove(ctx.service, ctx.current)) return withProjectionChecked(ranked, ctx);
   if (!ranked.qualifies) return ranked;
   const floor = ctx.config.minDayMoveDriveSavingMinutes;
@@ -160,10 +164,9 @@ async function confirmOnRoads(ranked, ctx) {
       // No road answer for the best slot: the model's result stands, and the
       // audit row says the number is the estimate (r2).
       if (!road && !failed.length) return { ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } };
-      const checked = withRoad(row, road);
-      // A minutes-rule slot (move-rules.js minutesRuleOk) must keep its own 10 minutes on real roads.
-      const rowFloor = row.byMinutes ? Math.max(floor, moveRules.minutesRuleFloor(ctx.service, ctx.config)) : floor;
-      if (!road || road.saving_minutes >= rowFloor) return settled(ranked, checked, true);
+      // A minutes-rule slot (move-rules.js minutesRuleOk) must keep its own minutes on real roads.
+      const checked = { ...withRoad(row, road), floor: row.byMinutes ? Math.max(floor || 0, moveRules.minutesRuleFloor(ctx.service, ctx.config)) : floor };
+      if (!road || road.saving_minutes >= checked.floor) return settled(ranked, checked, true);
       failed.push(checked);
     }
     return settled(ranked, failed[0], false);
@@ -182,6 +185,8 @@ function settled(ranked, row, passed) {
     qualifies: passed,
     byMinutes: passed && !!row.byMinutes,
     roadFailed: !passed,
+    // The floor the road check held this slot to (index.js noMoveReason).
+    roadFloor: row.floor,
     ranked: passed ? [row.cand] : [],
     rankedRows: passed ? [{ cand: row.cand, sc: row.sc, gain: row.gain, byMinutes: row.byMinutes }] : [],
   };

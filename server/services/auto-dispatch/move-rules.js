@@ -146,12 +146,16 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     const normalFloorOk = meetsDriveFloor({ current, cand, config });
     const floorOk = forced || normalFloorOk;
     const ceilingOk = !conflict || withinConflictCeiling({ current, cand, config });
-    const byMinutes = !forced && !conflict && normalFloorOk && gain < threshold
+    // Qualifies on minutes alone (no conflict to force it). A visit in conflict
+    // still uses it for the move it would make once the conflict is gone (normalOk).
+    const minutesOk = normalFloorOk && gain < threshold
       && minutesRuleOk({ service, current, cand, currentScore, candScore: sc, gain, config });
+    const byMinutes = !forced && minutesOk;
     return {
       cand, sc, gain, index, floorOk, ceilingOk,
       // Would this slot move the visit with no conflict to force it?
-      normalOk: normalFloorOk && gain >= threshold,
+      normalOk: (normalFloorOk && gain >= threshold) || minutesOk,
+      minutesOk,
       saving: driveSavingMinutes(current, cand),
       qualifies: forced ? ceilingOk : (floorOk && (gain >= threshold || byMinutes)),
       byMinutes,
@@ -165,12 +169,9 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
   const byGain = (a, b) => (sameDayFirst ? Number(b.sameDay) - Number(a.sameDay) : 0)
     || Number(a.sunday) - Number(b.sunday)
     || (conflict ? b.saving - a.saving : 0) || b.gain - a.gain || a.index - b.index;
-  // A slot that clears the score bar comes before a minutes-rule slot; among
-  // minutes-rule slots the bigger drive saving comes first (Sunday still last).
-  const byBarThenSaving = (a, b) => Number(a.byMinutes) - Number(b.byMinutes)
-    || (a.byMinutes && b.byMinutes ? Number(a.sunday) - Number(b.sunday) || b.saving - a.saving : 0)
-    || byGain(a, b);
-  const qualifying = rows.filter((r) => r.qualifies).sort(byBarThenSaving);
+  // A same-day free hour still comes first for an overlap; then Sunday last, then bar before minutes rule.
+  const qualifying = rows.filter((r) => r.qualifies).sort((a, b) => (sameDayFirst ? Number(b.sameDay) - Number(a.sameDay) : 0)
+    || byBarThenSaving(a, b, 'byMinutes', byGain));
   // Nothing qualifies: the audit shows the nearest miss.
   const top = qualifying[0] || rows.slice().sort(byGain)[0] || null;
   return {
@@ -189,19 +190,32 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     movesWithoutConflict: !!conflict && rows.some((r) => r.normalOk && !r.cand.past_cap),
     // ...and the slot it would take then: ranked by gain alone, the order of
     // a visit with no conflict (Codex #6207 r10 P2).
-    ...normalBestOf(conflict, rows),
+    ...normalBestOf(conflict, rows, service, config),
     ranked: qualifying.map((r) => r.cand),
     // The same list with each slot's score and gain (road-check.js).
     rankedRows: qualifying.map((r) => ({ cand: r.cand, sc: r.sc, gain: r.gain, byMinutes: r.byMinutes })),
   };
 }
 
-function normalBestOf(conflict, rows) {
+// Order of qualifying slots: Sunday last (owner 2026-10-24); then a slot that clears
+// the score bar before a minutes-rule slot (key `flag`); minutes-rule slots by
+// the bigger drive saving; then `rest`.
+function byBarThenSaving(a, b, flag, rest) {
+  return Number(a.sunday) - Number(b.sunday)
+    || Number(a[flag]) - Number(b[flag])
+    || (a[flag] && b[flag] ? b.saving - a.saving : 0)
+    || rest(a, b);
+}
+
+function normalBestOf(conflict, rows, service, config) {
   if (!conflict) return {};
   // A past_cap slot is in the list only for the conflict repair (legacyCap).
+  // Ranked like an ordinary move: Sunday last, bar before minutes rule.
   const top = rows.filter((r) => r.normalOk && !r.cand.past_cap)
-    .sort((a, b) => Number(a.sunday) - Number(b.sunday) || b.gain - a.gain || a.index - b.index)[0];
-  return top ? { normalBest: top.cand, normalBestScore: top.sc } : {};
+    .sort((a, b) => byBarThenSaving(a, b, 'minutesOk', (x, y) => y.gain - x.gain || x.index - y.index))[0];
+  if (!top) return {};
+  // The road floor the projected move must keep (road-check.js withProjectionChecked).
+  return { normalBest: top.cand, normalBestScore: top.sc, ...(top.minutesOk ? { normalBestMinutesFloor: minutesRuleFloor(service, config) } : {}) };
 }
 
 module.exports = {

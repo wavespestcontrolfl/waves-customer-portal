@@ -103,7 +103,15 @@ describe('confirmOnRoads', () => {
     const secondRanked = rankedOf('first');
     secondRanked.rankedRows = secondRanked.rankedRows.map((row) => ({ ...row, byMinutes: true }));
     const refused = await run(secondRanked, { now: [20, 20, 10], first: [14, 14, 10] }, { service: moved, config: { ...minutesConfig, minutesRuleSecondMoveSavingMinutes: 15 } });
-    expect(refused).toMatchObject({ qualifies: false, roadFailed: true });
+    expect(refused).toMatchObject({ qualifies: false, roadFailed: true, roadFloor: 15 });
+  });
+
+  test('with the ordinary floor at 0, a minutes-rule slot is still measured on roads', async () => {
+    const zeroFloor = { ...config, minDayMoveDriveSavingMinutes: 0, minutesRuleSavingMinutes: 10 };
+    const ranked = rankedOf('first');
+    ranked.rankedRows = ranked.rankedRows.map((row) => ({ ...row, byMinutes: true }));
+    const out = await run(ranked, { now: [20, 20, 10], first: [16, 16, 10] }, { config: zeroFloor });
+    expect(out).toMatchObject({ qualifies: false, roadFailed: true, roadFloor: 10 });
   });
 
   test('every measured slot fails: nothing moves, and the row names the best slot\'s road numbers', async () => {

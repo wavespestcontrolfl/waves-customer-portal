@@ -761,6 +761,9 @@ test('idempotency: an already-moved visit needs a much larger gain to move again
   db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
   const byMinutes = await runAutoDispatch({ mode: 'dry_run' });
   expect(byMinutes.recommended).toBe(1);
+  // The audit row names the second-move floor that applied (15), not the first-move 10.
+  const row = audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.constraints && d.constraints.minutes_rule).pop();
+  expect(row.constraints.minutes_rule).toEqual({ saving_floor_minutes: 15 });
 });
 
 
@@ -1369,7 +1372,9 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
       current: { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: [service.id === 'sameday' ? 'daymove' : 'sameday'] } },
       candidates: [service.id === 'sameday' ? SAME_DAY : CAND_BIG],
     }));
-    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    // Minutes rule off: CAND_BIG saves 10 minutes and would move 'daymove' on minutes once its
+    // partner leaves (owner 2026-11-24); this test is about which of the pair moves.
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true, minutesRuleSavingMinutes: 0 });
     expect(res).toMatchObject({ recommended: 1 });
     expect(lastDecision('recommended').service.id).toBe('sameday');
     expect(lastDecision('no_change')).toMatchObject({ reason_code: 'CONFLICT_PARTNER_MOVES' });
