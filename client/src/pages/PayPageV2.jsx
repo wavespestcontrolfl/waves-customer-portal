@@ -738,7 +738,7 @@ function PayFaqItem({ question, children }) {
     </details>
   );
 }
-function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBilled }) {
+function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBilled, bankFormReady = false }) {
   if (!enabled) return null;
   // Same derivation as PaymentForm's tile: the /setup rate when it has
   // answered, else the client mirror of the configured rate.
@@ -776,9 +776,21 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
             emailing billing@wavespestcontrol.com or calling us.
           </PayFaqItem>
         )}
+        {/* Manual-entry steps only while the payment form (with its Bank
+            account tile) is on the page; a setup failure hides the form. */}
+        {bankFormReady && (
+        <PayFaqItem question="My bank won’t let me sign in. How do I pay by bank?">
+          You don’t need to sign in. Choose Bank account, then pick “Enter bank details manually”
+          in the bank window, type your routing and account number, and press Pay. Stripe sends{' '}
+          {microdepositSavedPhrases(null).deposits} to your account in 1–2 business days; follow the
+          email you get to verify your account. The payment then starts processing, and we email
+          your receipt once it clears. Bank payments have no added fee.
+        </PayFaqItem>
+        )}
         <PayFaqItem question="The page or my bank link isn’t working. What do I do?">
-          Reload this page and try once more. If your bank still won’t connect, you can pay with a
-          card or a different account instead. Still stuck? Give us a call and we’ll sort it out
+          Reload this page and try once more. If your bank still won’t connect,{' '}
+          {bankFormReady ? 'enter your bank details manually (see above), or ' : 'you can '}pay with
+          a card or a different account instead. Still stuck? Give us a call and we’ll sort it out
           — <HelpPhoneLink tone="dark" inline />.
         </PayFaqItem>
         <PayFaqItem question="Will I get a receipt, and where is my invoice copy?">
@@ -818,7 +830,7 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
   );
 }
 
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card' }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card', onFormReadyChange }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -842,6 +854,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // auto-retries; this surfaces a one-tap Retry once those are exhausted so the
   // customer never has to reload the whole page to recover.
   const [loadFailed, setLoadFailed] = useState(false);
+  // Tells the page whether the method tiles are actually on screen (Elements
+  // mounted, no load failure), so the FAQ's bank-entry steps only show then.
+  useEffect(() => {
+    onFormReadyChange?.(ready && !loadFailed);
+  }, [ready, loadFailed]);
+  useEffect(() => () => onFormReadyChange?.(false), []);
   const [loadNonce, setLoadNonce] = useState(0);
   // A re-mount after a tender replacement starts on the tender the fresh
   // intent was minted for (initialMethod); a first mount starts on card.
@@ -1741,20 +1759,25 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       )}
 
-      {showManualEntryHint && !isCardFamily && (
-        <div style={{
+      {/* Bank help line (owner 2026-11-24, "build it"): shown as soon as Bank
+          account is picked, not only after a failed link. A customer whose
+          bank sign-in will not work closes Stripe's window before Pay and
+          never saw the old after-failure hint. */}
+      {!isCardFamily && (
+        <div data-testid="bank-manual-entry-help" style={{
           background: 'var(--surface-subtle, rgba(0,0,0,0.03))',
-          border: `1px solid ${DOC.border}`,
+          border: `1px solid ${showManualEntryHint ? DOC.navyLiteral : DOC.border}`,
           borderRadius: RADIUS.input,
           padding: '12px 16px',
           fontSize: FS.body,
           lineHeight: LH.body,
           color: DOC.ink,
         }}>
-          <strong>Trouble linking your bank?</strong> Some banks don't support instant
-          linking. Choose <strong>“Enter bank details manually”</strong> above and type
-          your routing and account number instead — it avoids this issue, and bank
-          payments still have no added fee.
+          <strong>{showManualEntryHint ? 'Trouble linking your bank?' : 'Can’t sign in to your bank?'}</strong>{' '}
+          Some banks don't support instant linking. In the bank window, choose{' '}
+          <strong>“Enter bank details manually”</strong> and type your routing and account
+          number, then press Pay. Stripe then sends {microdepositSavedPhrases(null).deposits} in
+          1–2 business days to verify your account, and bank payments have no added fee.
         </div>
       )}
 
@@ -1956,6 +1979,7 @@ export default function PayPageV2() {
   const [paymentState, setPaymentState] = useState('idle');
   const [paymentError, setPaymentError] = useState(null);
   const [stripeSetup, setStripeSetup] = useState(null);
+  const [bankFormReady, setBankFormReady] = useState(false);
   // The promo code's outcome as /setup reports it (GATE_PAY_PROMO_CODE);
   // undefined until a setup answers with one.
   const [promoVerdict, setPromoVerdict] = useState(undefined);
@@ -2862,6 +2886,7 @@ export default function PayPageV2() {
             {paymentState === 'ready' && stripeSetup ? (
               <PaymentForm
                 key={stripeSetup.paymentIntentId}
+                onFormReadyChange={setBankFormReady}
                 initialMethod={stripeSetup.initialMethod || 'card'}
                 publishableKey={stripeSetup.publishableKey}
                 clientSecret={stripeSetup.clientSecret}
@@ -3216,6 +3241,7 @@ export default function PayPageV2() {
               zelle={!!data.manualPayOptions?.zelle?.recipient && !stripeSetup?.combined && !(data.manualPayOptions?.creditPending && !stripeSetup)}
               saveRequired={!payer && saveCardRequired}
               thirdPartyBilled={!!payer}
+              bankFormReady={bankFormReady}
             />
             {/* Hidden once /setup reports a combined-balance PI (the server
                 already withholds the block when siblings preview; this
