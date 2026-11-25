@@ -3574,14 +3574,25 @@ describe('rain-out service', () => {
         expect((await check(oneMinute, { shift: ['08:00', '12:00'] })).result.routeShiftConflicts).toHaveLength(2);
       });
 
-      test('gate on: a member of a visit group with no window of its own is not judged on a push today', async () => {
+      test('gate on: a stored time with seconds is a change of hours, as the mover reads it', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
-        // The group moves as a unit, and its planner can leave this member with no time.
-        const member = { ...WINDOWLESS, id: 'svc-9', visit_id: 'visit-1' };
-        expect((await check(laterToday(), { shift: ['08:00', '14:30'], route: [member] })).result).not.toHaveProperty('routeShiftConflicts');
-        // A member with its own hours is judged where the push lands it.
+        // No push. The move writes 12:00 over a stored 12:00:30, and the mover judges a stop whose hours it writes.
+        const sameStart = { date: etDateString(), window: { start: '09:00', end: '10:30' } };
+        const seconds = { id: 'svc-11', window_start: '12:00:30', window_end: '13:00:00', estimated_duration_minutes: 60 };
+        const lateEnd = { id: 'svc-12', window_start: '12:30:00', window_end: '13:30:30', estimated_duration_minutes: 60 };
+        expect((await check(sameStart, { shift: ['08:00', '12:00'], route: [ROUTE[1], seconds, lateEnd] })).result.routeShiftConflicts)
+          .toEqual([{ windowStart: '12:00', windowEnd: '13:00' }, { windowStart: '12:30', windowEnd: '13:30' }]);
+      });
+
+      test('gate on: a member of a visit group is not judged, today or on a day move', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // The group moves as a unit through its own planner; this advisory does not follow it.
+        const windowless = { ...WINDOWLESS, id: 'svc-9', visit_id: 'visit-1' };
         const timed = { ...ROUTE[1], id: 'svc-10', visit_id: 'visit-1' };
-        expect((await check(laterToday(), { route: [timed] })).result.routeShiftConflicts).toEqual([{ windowStart: '17:00', windowEnd: '18:00' }]);
+        expect((await check(laterToday(), { shift: ['08:00', '14:30'], route: [windowless, timed] })).result).not.toHaveProperty('routeShiftConflicts');
+        expect((await check(onDay(THU), { shift: ['08:00', '12:00'], route: [timed] })).result).not.toHaveProperty('routeShiftConflicts');
+        // The stops of the route that are not grouped are judged beside it.
+        expect((await check(laterToday(), { route: [timed, ROUTE[1]] })).result.routeShiftConflicts).toEqual([{ windowStart: '17:00', windowEnd: '18:00' }]);
       });
 
       test('gate on: no row on a day the technician does not work (the shift is not that day\'s)', async () => {

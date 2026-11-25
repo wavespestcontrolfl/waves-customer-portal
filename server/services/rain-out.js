@@ -1503,9 +1503,9 @@ function routeLandings({ service, route, target }) {
 // technician works only (dayWarningsFor: the shift is not an off day's), so an off day gives it no row.
 // The technician's own move is judged on the shift whatever the day, and so is its sheet.
 // Each stop is judged on the route's technician, on the hours the move gives it (shiftLanding) and its
-// own stored length, as the mover judges it; a grouped stop's partner on another technician is not read
-// here. A row's windowEnd is null for a stop with no stored end. Advisory: a read that fails is logged and
-// gives {}, and the sheet opens as before.
+// own stored length, as the mover judges it. A member of a visit group is not judged. A row's windowEnd
+// is null for a stop with no stored end. Advisory: a read that fails is logged and gives {}, and the sheet
+// opens as before.
 async function routeShiftRows(service, route, { office = false } = {}) {
   const none = () => ({});
   // No other stop on the route (a visit with no technician has none, remainingRouteJobs): nothing to read.
@@ -1537,20 +1537,21 @@ async function routeShiftRows(service, route, { office = false } = {}) {
 }
 
 // The hours a rest-of-route move gives `job` for the shift check, as commit() writes them, or null when
-// the mover does not judge the stop on the shift:
+// this advisory does not judge the stop:
+//   - a member of a visit group. The group moves as a unit through its own planner (visit-groups.js
+//     moveVisitAsUnit), which the flat projection here does not follow. No visit has been made since
+//     2026-10-22 (owner: appointments are no longer grouped), so these are old stops only.
 //   - a day move keeps the stop's own hours. Its start with no stored end is still judged, on the stored
 //     length, whatever the overlap advisory reads of that row (REBOOKER_NULL_END_OCCUPANCY is the occupancy
 //     check's switch, not the shift's). No start: no hours to judge (shiftHoldsBlock).
-//   - a push today (`pushed`, routeLandings: the start and the end move together) that leaves the stop on
-//     its own stored start is no move of that stop: a stop the office placed outside the shift stays the
-//     office's.
-//   - a stop with no window of its own lands on the target's hours, but not as a member of a visit group:
-//     the group moves as a unit, and its planner can leave that member with no time.
+//   - a push today (`pushed`, routeLandings) that does not change the stop's stored hours is no move of
+//     that stop, by the mover's own test (hoursChangedBy: a stored time with seconds is a change). A stop
+//     the office placed outside the shift stays the office's.
 function shiftLanding(job, pushed, isSameDay) {
-  const own = { start: toHHMM(job.window_start), end: toHHMM(job.window_end) };
-  if (!isSameDay) return own;
-  const unjudged = own.start && own.end ? own.start === pushed.start : job.visit_id;
-  return unjudged ? null : pushed;
+  if (job.visit_id) return null;
+  if (!isSameDay) return { start: toHHMM(job.window_start), end: toHHMM(job.window_end) };
+  const changed = require('./scheduling/window-rules').hoursChangedBy({ window_start: pushed.start, window_end: pushed.end }, job);
+  return changed ? pushed : null;
 }
 
 /**

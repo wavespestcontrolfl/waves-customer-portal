@@ -117,9 +117,13 @@ postgres('the stops a rest-of-route move would land outside the shift (real Post
   });
 
   test('a target that leaves the later stops on their own hours today judges none of them', async () => {
-    const { anchor } = await makeRoute({ shift_end: '12:00' });
+    const { anchor, technicianId } = await makeRoute({ shift_end: '12:00' });
     // The tapped stop keeps its 09:00 start: no push, and no stop's hours are written.
     expect(await check(anchor, today, '09:00', '09:30')).not.toHaveProperty('routeShiftConflicts');
+    // A stored time with seconds is rewritten to the minute, so the mover judges that stop.
+    const seconds = await makeStop(technicianId, '12:30:30', '13:30:00');
+    expect((await check(anchor, today, '09:00', '09:30')).routeShiftConflicts).toEqual([{ windowStart: '12:30', windowEnd: '13:30' }]);
+    await db('scheduled_services').where({ id: seconds }).del();
     expect((await check(anchor, today, '09:01', '10:01')).routeShiftConflicts).toEqual([
       { windowStart: '11:31', windowEnd: '12:01' },
       { windowStart: '12:01', windowEnd: '13:01' },
