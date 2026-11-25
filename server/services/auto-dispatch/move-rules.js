@@ -114,12 +114,21 @@ function minutesRuleFloor(service, config) {
     : (config.minutesRuleSavingMinutes || 0);
 }
 
+// The customer's own preference credit: the preference score without the
+// service-type default window or the dry-time credit (neither is the
+// customer's choice; see moveGain).
+function ownPreferenceScore(score) {
+  return (Number(score.customer_preference_score) || 0) - (Number(score.default_time_score) || 0) - (Number(score.dry_time_score) || 0);
+}
+
+// The rule needs the ordinary drive floor on (> 0): with it off the run has
+// no drive test and the road check does not run, so minutes cannot be checked.
 function minutesRuleOk({ service, current, cand, currentScore, candScore, gain, config }) {
   const floor = minutesRuleFloor(service, config);
-  if (floor <= 0 || !current || !cand || !isDayMove(current, cand)) return false;
-  if (current.detour_group_blind || !(gain > 0)) return false;
+  if (floor <= 0 || !((config.minDayMoveDriveSavingMinutes || 0) > 0)) return false;
+  if (!current || !cand || !isDayMove(current, cand) || current.detour_group_blind || !(gain > 0)) return false;
   return driveSavingMinutes(current, cand) >= floor
-    && (Number(candScore.customer_preference_score) || 0) >= (Number(currentScore.customer_preference_score) || 0)
+    && ownPreferenceScore(candScore) >= ownPreferenceScore(currentScore)
     && (Number(candScore.technician_score) || 0) >= (Number(currentScore.technician_score) || 0);
 }
 

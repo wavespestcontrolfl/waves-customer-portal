@@ -273,6 +273,18 @@ describe('minutes rule', () => {
   });
 
   // Owner 2026-11-24 "do whatever you rec": a visit already moved needs 15 minutes, not the 20-point bar.
+  test('off when the ordinary drive floor is 0: with no drive test there is no road check either', () => {
+    const zero = { ...MINUTES, minDayMoveDriveSavingMinutes: 0 };
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62) }], { config: zero }).qualifies).toBe(false);
+  });
+
+  test('the service default window is not the customer\'s preference: losing it does not block the rule', () => {
+    // Current sits in the default window (6.25 of its 12.5 preference is default credit); the candidate does not.
+    const cur = { ...full(56.25), default_time_score: 6.25 };
+    const cand = full(62, 6.25);
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: cand }], { currentScore: cur })).toMatchObject({ qualifies: true, byMinutes: true });
+  });
+
   test('a second move needs 15 minutes saved: 16 moves, 14 does not, and 0 turns that half off', () => {
     const moved = { ...SERVICE, auto_dispatch_change_count: 1 };
     const second = { ...MINUTES, minutesRuleSecondMoveSavingMinutes: 15 };

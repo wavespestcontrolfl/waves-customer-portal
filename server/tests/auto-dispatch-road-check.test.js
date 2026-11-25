@@ -106,22 +106,13 @@ describe('confirmOnRoads', () => {
     expect(refused).toMatchObject({ qualifies: false, roadFailed: true, roadFloor: 15 });
   });
 
-  test('with the ordinary floor at 0, a minutes-rule slot is still measured on roads', async () => {
-    const zeroFloor = { ...config, minDayMoveDriveSavingMinutes: 0, minutesRuleSavingMinutes: 10 };
-    const ranked = rankedOf('first');
-    ranked.rankedRows = ranked.rankedRows.map((row) => ({ ...row, byMinutes: true }));
-    const out = await run(ranked, { now: [20, 20, 10], first: [16, 16, 10] }, { config: zeroFloor });
-    expect(out).toMatchObject({ qualifies: false, roadFailed: true, roadFloor: 10 });
-  });
-
-  test('with the ordinary floor at 0, a score-bar slot ranked above a minutes-rule slot moves without a road check', async () => {
-    const zeroFloor = { ...config, minDayMoveDriveSavingMinutes: 0, minutesRuleSavingMinutes: 10 };
-    const asked = [];
-    const ranked = rankedOf('first', 'second');
+  test('no road answer for the best slot: the fallback list drops the unchecked minutes-rule slots below it', async () => {
+    const minutesConfig = { ...config, minutesRuleSavingMinutes: 10 };
+    const ranked = rankedOf('first', 'second', 'third');
     ranked.rankedRows = ranked.rankedRows.map((row, i) => ({ ...row, byMinutes: i === 1 }));
-    const out = await confirmOnRoads(ranked, { service, current, config: zeroFloor, travel: travelWith({ now: [20, 20, 10], first: [30, 30, 10] }, asked) });
-    expect(out).toBe(ranked);
-    expect(asked).toEqual([]);
+    const noAnswer = { preload: jest.fn(async () => {}), lookup: () => null };
+    const out = await confirmOnRoads(ranked, { service, current, config: minutesConfig, travel: noAnswer });
+    expect(out.ranked.map((c) => c.name)).toEqual(['first', 'third']);
   });
 
   test('every measured slot fails: nothing moves, and the row names the best slot\'s road numbers', async () => {
