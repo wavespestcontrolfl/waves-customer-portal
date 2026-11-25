@@ -542,7 +542,8 @@ describe('no route forwards or logs the bearer token when the FIRST query fails'
   });
 
   test('a handler that throws (not just next(err)) is sanitized too', async () => {
-    const token = 'd'.repeat(64);
+    // A recipient-shape token: its lookup is the module's, and the module rejecting is a throw inside the handler.
+    const token = `vr_${'d'.repeat(48)}`;
     mockVisitForTrackToken.mockRejectedValue(knexLike(token));
     install(null);
     const { next } = await run('/:token', 'get', token);
@@ -568,9 +569,14 @@ describe('the offer and referral cards never see a recipient token', () => {
     if (gateBefore === undefined) delete process.env.GATE_DOC_CROSS_SELL; else process.env.GATE_DOC_CROSS_SELL = gateBefore;
   });
 
-  test('the route never calls trackCards or buildSummary for a recipient scope', () => {
+  test('the recipient handler never calls trackCards, buildSummary, stops or geocoding; a vr_ token always reaches it', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'track-public.js'), 'utf8');
-    expect(src).toContain("customerState === 'complete' && !recipientScope ? await buildSummary(row)");
-    expect(src).toContain("customerState === 'complete' && !recipientScope ? await trackCards(req.params.token)");
+    const start = src.indexOf('async function recipientTrackGet(');
+    const body = src.slice(start, src.indexOf('\n}\n', start));
+    expect(start).toBeGreaterThan(-1);
+    for (const forbidden of ['buildSummary', 'trackCards', 'computeStopsAhead', 'buildApproxVehicle', 'ensureEnRouteDestinationGeocoded', 'prep_token', 'readOnly: false']) {
+      expect(body).not.toContain(forbidden);
+    }
+    expect(src).toContain('isRecipientTrackToken(req.params.token) ? recipientTrackGet(req, res) : holderTrackGet(req, res, next)');
   });
 });
