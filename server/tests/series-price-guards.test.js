@@ -178,23 +178,6 @@ describe('unbilledCompletionAlertDue', () => {
   });
 });
 
-describe('extension wiring (source contract)', () => {
-  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-  test('a child the guard passed closes the series\' plan-price bell, gated, after the insert and its add-ons', () => {
-    const at = src.indexOf('SeriesPriceGuards.closeCancelledRootAlertAfterCommit(conn, { verdict: priceVerdict, parentId, child: nextData })');
-    expect(at).toBeGreaterThan(src.indexOf('const [autoExtRow] = await conn(\'scheduled_services\').insert(nextData)'));
-    expect(at).toBeGreaterThan(src.indexOf('await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons, restackedAddonDollars)'));
-    expect(src.slice(at - 80, at)).toContain('SeriesPriceGuards.seriesPriceGuardsLive()');
-  });
-  test('extensionPassedGuard: only a compared, priced, non-callback, non-free child with no verdict', () => {
-    const child = { estimated_price: 100, service_type: 'Monthly Pest Control Service' };
-    expect(guards.extensionPassedGuard(null, child)).toBe(true);
-    expect(guards.extensionPassedGuard({ skip: true, kind: 'cancelled_root' }, child)).toBe(false);
-    expect(guards.extensionPassedGuard(null, { ...child, estimated_price: null })).toBe(false);
-    expect(guards.extensionPassedGuard(null, { ...child, is_callback: true })).toBe(false);
-  });
-});
-
 describe('completion wiring (source contract)', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
   const at = src.indexOf('SeriesPriceGuards.unbilledCompletionAlertDue({');

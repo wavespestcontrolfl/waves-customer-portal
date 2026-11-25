@@ -7,11 +7,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-jest.mock('../services/retry-collectibility', () => ({
-  ...jest.requireActual('../services/retry-collectibility'),
-  findCollectedMonthlyPayment: jest.fn(),
-}));
-const { findCollectedMonthlyPayment } = require('../services/retry-collectibility');
 const knex = require('knex')({ client: 'pg' });
 const logger = require('../services/logger');
 const { closePaymentFailedAlertsForPaidInvoice, sweepSettledPaymentFailedAlerts, RESOLUTION } = require('../services/payment-failed-alert-close');
@@ -19,8 +14,7 @@ const PaymentPlans = require('../services/payment-plans');
 
 const INV_A = '11111111-1111-4111-8111-111111111111';
 const INV_B = '22222222-2222-4222-8222-222222222222';
-const CUST = '33333333-3333-4333-8333-333333333333';
-const bell = (id, payload, triggerKey = 'payment_failed') => ({ id, created_at: '2026-11-01T12:00:00Z', metadata: { triggerKey, payload } });
+const bell = (id, payload, triggerKey = 'payment_failed') => ({ id, metadata: { triggerKey, payload } });
 
 // A connection whose queries are compiled, never executed. `responses[table]`
 // is a queue of results for the awaited queries on that table, in order.
@@ -200,54 +194,6 @@ describe('repair sweep', () => {
     expect(invoiceReads[0].bindings).toEqual(expect.arrayContaining([INV_A]));
     expect(captured.find((q) => q.table === 'notifications' && q.sql.startsWith('update')).bindings).toEqual(expect.arrayContaining([7]));
     expect(captured.find((q) => q.table === 'notifications' && q.sql.startsWith('update')).bindings).not.toContain(8);
-  });
-
-  describe('a payment_failed bell with no invoice (monthly dues)', () => {
-    const noInvoice = (extra = {}) => bell(7, { amount: 113.6, customerId: CUST, invoiceId: null, paymentIntentId: 'pi_nov', ...extra });
-    const failedRow = (extra = {}) => ({ id: 'pay-failed', description: 'WaveGuard Monthly - November', metadata: { billed_month: '2026-11' }, payment_date: '2026-11-01', ...extra });
-    // payments queue: the allocation's ledger read twice (settled check, then the fallback's own), then the failed row by PaymentIntent.
-    const run = async ({ collected = { id: 'pay-paid' }, failed = failedRow(), notification = noInvoice() } = {}) => {
-      findCollectedMonthlyPayment.mockResolvedValue(collected);
-      const { conn, captured } = compilingConn({ responses: { notifications: [[notification], 1], payments: [[{ metadata: {} }], [{ metadata: {} }], failed], invoices: [[]] } });
-      return { closed: await sweepSettledPaymentFailedAlerts({ conn }), captured };
-    };
-    beforeEach(() => findCollectedMonthlyPayment.mockReset());
-
-    test('closes when the failed attempt\'s own billed month was collected by another paid row', async () => {
-      const { closed, captured } = await run();
-      expect(closed).toBe(1);
-      const [customerId, window, options] = findCollectedMonthlyPayment.mock.calls[0];
-      expect(customerId).toBe(CUST);
-      expect(window).toEqual({ monthKey: '2026-11', monthStart: '2026-11-01', monthEnd: '2026-11-30' });
-      expect(options).toMatchObject({ statuses: ['paid'], withDuesInvoice: false, excludePaymentId: 'pay-failed' });
-      const lookup = captured.find((q) => q.table === 'payments' && q.sql.includes('"stripe_payment_intent_id" = $') && q.sql.includes('"customer_id" = $') && q.sql.includes('limit'));
-      expect(lookup.bindings).toEqual(expect.arrayContaining(['pi_nov', CUST]));
-    });
-
-    test('the month comes from the payment date when no billed_month is stamped', async () => {
-      await run({ failed: failedRow({ metadata: {}, payment_date: new Date('2026-10-03T00:00:00Z') }) });
-      expect(findCollectedMonthlyPayment.mock.calls[0][1].monthKey).toBe('2026-10');
-    });
-
-    test('stays open when that month was not collected (another month\'s payment of the same amount does not count)', async () => {
-      expect((await run({ collected: null })).closed).toBe(0);
-    });
-
-    test.each([
-      ['no PaymentIntent', { notification: noInvoice({ paymentIntentId: null }) }],
-      ['no ledger row for the PaymentIntent', { failed: null }],
-      ['a ledger row that is not monthly dues', { failed: failedRow({ description: 'Pest Control' }) }],
-      ['no month on the ledger row', { failed: failedRow({ metadata: {}, payment_date: null }) }],
-      ['a malformed billed month', { failed: failedRow({ metadata: { billed_month: '2026-13' } }) }],
-      ['no customer id', { notification: noInvoice({ customerId: null }) }],
-      ['a non-UUID customer id', { notification: noInvoice({ customerId: 'cus_123' }) }],
-      ['an unreadable allocation', { notification: noInvoice({ allocationUnreadable: true }) }],
-      ['a declared allocation of malformed ids', { notification: noInvoice({ allocationInvoiceIds: ['not-a-uuid'] }) }],
-      ['a named invoice', { notification: noInvoice({ invoiceId: INV_B }) }],
-    ])('never closes with %s', async (_label, args) => {
-      expect((await run(args)).closed).toBe(0);
-      expect(findCollectedMonthlyPayment).not.toHaveBeenCalled();
-    });
   });
 
   test('a failure is logged and closes nothing', async () => {

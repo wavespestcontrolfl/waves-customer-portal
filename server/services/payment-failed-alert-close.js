@@ -12,10 +12,9 @@
 // Two bells are closed here (TRIGGER_KEYS): payment_failed (a charge that was
 // declined) and bill_payment_error (a customer's checkout on the pay page
 // failed, e.g. "Bank payment error"). Both are about an invoice that was not
-// collected, and both are obsolete once it is paid. A payment_failed bell for
-// an autopay charge with NO invoice (payload.invoiceId null, no ledger invoice)
-// has no invoice to watch: it closes when the monthly dues month it failed for
-// was collected by another paid row (settledByCollectedMonth).
+// collected, and both are obsolete once it is paid. A bill_payment_error bell
+// is judged on payload.invoiceId alone; a payment_failed bell on its whole
+// allocation, as before.
 //
 // A bell closes only when its whole allocation is settled (see
 // payment-failed-allocation.js): a combined PaymentIntent's bell stays open
@@ -27,45 +26,15 @@
 //     attempt's own ledger row; covers alerts raised before the stamp fix).
 const db = require('../models/db');
 const logger = require('./logger');
-const { dateOnlyString } = require('../utils/date-only');
-const { parseJson, isUuid, failedAllocationInvoiceIds, isFailedAllocationSettled } = require('./payment-failed-allocation');
+const { parseJson, isFailedAllocationSettled } = require('./payment-failed-allocation');
 
 const RESOLUTION = 'The invoice was paid';
 const TRIGGER_KEYS = ['payment_failed', 'bill_payment_error'];
 const TRIGGER_KEYS_SQL = "metadata->>'triggerKey' IN (?, ?)";
 
-// An autopay failure with no invoice (a monthly dues charge): obsolete when that
-// same MONTH's dues were collected by another paid row. The failed attempt is
-// resolved through its own PaymentIntent's ledger row; its billed month
-// (metadata.billed_month, else its payment date) and the shared
-// findCollectedMonthlyPayment predicate decide, so another month's payment of the
-// same amount, or an unrelated invoice payment, never closes it. Anything that
-// cannot be identified (no PaymentIntent, no ledger row, not a monthly dues row,
-// no month) leaves the bell open. Never for a bell that names or declares an
-// invoice allocation, even a malformed one.
-async function settledByCollectedMonth(conn, payload) {
-  const declaresAllocation = Array.isArray(payload.allocationInvoiceIds) ? payload.allocationInvoiceIds.length > 0 : payload.allocationInvoiceIds != null;
-  if (payload.invoiceId != null || declaresAllocation || payload.allocationUnreadable) return false;
-  if (!isUuid(String(payload.customerId || '')) || !payload.paymentIntentId) return false;
-  if ((await failedAllocationInvoiceIds(conn, payload)).length) return false;
-  const retry = require('./retry-collectibility');
-  const failed = await conn('payments')
-    .where({ stripe_payment_intent_id: String(payload.paymentIntentId), customer_id: String(payload.customerId) })
-    .first('id', 'description', 'metadata', 'payment_date');
-  if (!failed || !retry.isMonthlyObligationRow(failed)) return false;
-  const month = parseJson(failed.metadata).billed_month || retry.monthKeyOf(dateOnlyString(failed.payment_date));
-  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(month || ''))) return false;
-  const [year, mon] = month.split('-').map(Number);
-  const lastDay = String(new Date(Date.UTC(year, mon, 0)).getUTCDate()).padStart(2, '0');
-  const window = { monthKey: month, monthStart: `${month}-01`, monthEnd: `${month}-${lastDay}` };
-  return Boolean(await retry.findCollectedMonthlyPayment(String(payload.customerId), window, {
-    conn, statuses: ['paid'], withDuesInvoice: false, excludePaymentId: failed.id,
-  }));
-}
-
 // Which of these open bells are obsolete. A bill_payment_error bell is about
 // payload.invoiceId alone (its PaymentIntent may be a combined one); a
-// payment_failed bell judges its whole allocation, else the collected-month rule.
+// payment_failed bell judges its whole allocation.
 async function settledBellIds(conn, rows) {
   const closable = [];
   for (const row of rows || []) {
@@ -74,10 +43,7 @@ async function settledBellIds(conn, rows) {
     const attempt = meta.triggerKey === 'bill_payment_error'
       ? { invoiceId: payload.invoiceId }
       : { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId, allocationInvoiceIds: payload.allocationInvoiceIds, allocationUnreadable: payload.allocationUnreadable };
-    if (await isFailedAllocationSettled(conn, attempt)
-      || (meta.triggerKey !== 'bill_payment_error' && await settledByCollectedMonth(conn, payload))) {
-      closable.push(row.id);
-    }
+    if (await isFailedAllocationSettled(conn, attempt)) closable.push(row.id);
   }
   return closable;
 }

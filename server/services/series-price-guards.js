@@ -194,101 +194,6 @@ function raiseExtensionPriceAlertAfterCommit(conn, verdict, context) {
   });
 }
 
-// Closing the cancelled-root bell. The bell ("check <name>'s plan price") says a
-// plan visit was NOT added because the series' first visit is cancelled and what
-// the plan collected does not back its price. It is obsolete exactly when the
-// guard would no longer refuse. Two closers, both admin-bell state only:
-//   1. closeCancelledRootAlertAfterCommit: a LATER EXTENSION of the series that
-//      the guard actually compared (a priced, non-callback, non-free child) and
-//      passed. That child carries the live price the extension code computes from
-//      the current template, so a corrected template closes the bell at once.
-//   2. sweepSettledCancelledRootAlerts: re-runs extensionPriceVerdict on the
-//      price stored in the bell, for a series nobody extends (no live child
-//      calculation is available outside the extension). It only closes: it stays
-//      open while the root is cancelled and no comparable paid visit backs the
-//      stored price; it closes when a paid completed visit now backs it, the root
-//      is no longer cancelled, or prepay covers the series. A later visit
-//      existing is NOT evidence. Each run reads one page from a durable cursor
-//      and wraps at the end (the payment-failed sweep's pattern), so a settled
-//      bell is reached however many others stay unresolved.
-const CANCELLED_ROOT_KEY_PREFIX = 'series-price-guard:cancelled-root:';
-const CANCELLED_ROOT_RESOLUTION = 'The plan price now checks out';
-const CANCELLED_ROOT_DONE_BY = 'series-price-guard';
-const CANCELLED_ROOT_SWEEP_PAGE = 200;
-const CANCELLED_ROOT_CURSOR_KEY = 'series_price_cancelled_root_sweep_cursor';
-
-// The open cancelled-root bells (all of them, or one series' when `rootId` is given).
-function openCancelledRootBells(conn, openToCloser, rootId = null) {
-  const q = conn('notifications')
-    .where({ recipient_type: 'admin', category: 'billing' })
-    .whereRaw("metadata->>'doneWhen' = 'plan_price_checked'");
-  if (rootId) q.whereRaw("metadata->>'dedupeKey' = ?", [`${CANCELLED_ROOT_KEY_PREFIX}${rootId}`]);
-  else q.whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [CANCELLED_ROOT_KEY_PREFIX.length, CANCELLED_ROOT_KEY_PREFIX]);
-  return openToCloser(q, CANCELLED_ROOT_DONE_BY);
-}
-
-function closeCancelledRootBells(conn, ids) {
-  const { doneColumns, openToCloser } = require('./notification-service')._private;
-  return openToCloser(conn('notifications').whereIn('id', ids), CANCELLED_ROOT_DONE_BY)
-    .update(doneColumns({ by: CANCELLED_ROOT_DONE_BY, resolution: CANCELLED_ROOT_RESOLUTION, keepExisting: true, conn }));
-}
-
-async function cancelledRootAlertSettled(conn, meta) {
-  const price = positiveAmount(meta.price);
-  const rootId = meta.seriesRootId;
-  if (price == null || !rootId) return false;
-  const root = await conn('scheduled_services').where({ id: rootId })
-    .first('id', 'status', 'service_type', 'annual_prepay_term_id');
-  if (!root) return false;
-  const verdict = await extensionPriceVerdict(conn, {
-    parent: root, parentId: root.id, child: { estimated_price: price, service_type: root.service_type, is_callback: false },
-  });
-  return verdict?.kind !== 'cancelled_root';
-}
-
-async function sweepSettledCancelledRootAlerts({ conn = db, page = CANCELLED_ROOT_SWEEP_PAGE } = {}) {
-  try {
-    const { openToCloser } = require('./notification-service')._private;
-    const cursorRow = await conn('system_settings').where({ key: CANCELLED_ROOT_CURSOR_KEY }).first('value');
-    const afterId = /^[0-9a-f-]{36}$/i.test(cursorRow?.value || '') ? cursorRow.value : null;
-    const rows = await openCancelledRootBells(conn, openToCloser)
-      .modify((q) => { if (afterId) q.where('id', '>', afterId); })
-      .orderBy('id', 'asc').limit(page).select('id', 'metadata');
-    const nextCursor = (rows || []).length === page ? rows[rows.length - 1].id : null;
-    await conn('system_settings').insert({ key: CANCELLED_ROOT_CURSOR_KEY, value: nextCursor, category: 'notifications' })
-      .onConflict('key').merge({ value: nextCursor, updated_at: conn.fn.now() });
-    const closable = [];
-    for (const row of rows || []) {
-      const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-      if (await cancelledRootAlertSettled(conn, meta)) closable.push(row.id);
-    }
-    return closable.length ? await closeCancelledRootBells(conn, closable) : 0;
-  } catch (err) {
-    logger.warn(`[series-price-guard] cancelled-root alert sweep failed: ${err.message}`);
-    return 0;
-  }
-}
-
-// An extension the guard really compared and let through: a priced child that is
-// not a callback or always-free (those return no verdict without any comparison).
-const extensionPassedGuard = (verdict, child) => !verdict && positiveAmount(child?.estimated_price) != null
-  && !child.is_callback && !isAlwaysFreeServiceType(child.service_type);
-
-// Called by the extension after it inserted a child; closes the series' open
-// cancelled-root bell once the transaction commits (never on rollback).
-function closeCancelledRootAlertAfterCommit(conn, { verdict, parentId, child }) {
-  if (!extensionPassedGuard(verdict, child)) return;
-  require('./customer-credit').afterCommit(conn, async () => {
-    try {
-      const { openToCloser } = require('./notification-service')._private;
-      const rows = await openCancelledRootBells(db, openToCloser, parentId).select('id');
-      if (rows?.length) await closeCancelledRootBells(db, rows.map((r) => r.id));
-    } catch (err) {
-      logger.warn(`[series-price-guard] closing the cancelled-root alert for series ${parentId} failed: ${err.message}`);
-    }
-  });
-}
-
 // A performed visit that completed with no billable amount and nothing
 // billed or covering it. Pure — the completion flow passes its own hoisted
 // derivations. A reviewed price (set at completion, $0 included) is the
@@ -343,10 +248,6 @@ module.exports = {
   insertedRowIsPrepaid,
   raiseExtensionPriceAlert,
   raiseExtensionPriceAlertAfterCommit,
-  sweepSettledCancelledRootAlerts,
-  closeCancelledRootAlertAfterCommit,
-  extensionPassedGuard,
-  CANCELLED_ROOT_RESOLUTION,
   unbilledCompletionAlertDue,
   raiseUnbilledCompletionAlert,
 };

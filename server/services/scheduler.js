@@ -5280,9 +5280,7 @@ function initScheduledJobs() {
   // EVERY 15 MIN — Close payment-failed admin bells whose invoices are now
   // paid. The paid-invoice hook (payment-failed-alert-close.js) runs inside the
   // payment transaction; this repair pass re-judges from committed state, so a
-  // bell that raced the payment still closes within one tick. Also closes
-  // bill_payment_error bells, invoice-less autopay failures (a later paid payment
-  // of the same amount) and cancelled-root plan-price bells. Read + admin
+  // bell that raced the payment still closes within one tick. Read + admin
   // bell state only: no charge, receipt or customer message.
   // =========================================================================
   cron.schedule('*/15 * * * *', async () => {
@@ -5290,9 +5288,6 @@ function initScheduledJobs() {
       await runExclusive('payment-failed-alert-sweep', async () => {
         const closed = await require('./payment-failed-alert-close').sweepSettledPaymentFailedAlerts();
         if (closed) logger.info(`[payment-failed-alert-close] repair sweep closed ${closed} bell(s)`);
-        // Same tick, same read-only admin-bell housekeeping: plan-price bells whose guard no longer refuses.
-        const priceClosed = await require('./series-price-guards').sweepSettledCancelledRootAlerts();
-        if (priceClosed) logger.info(`[series-price-guard] sweep closed ${priceClosed} bell(s)`);
       });
     } catch (err) {
       logger.error(`Payment-failed alert sweep failed: ${err.message}`);

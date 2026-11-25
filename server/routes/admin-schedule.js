@@ -21937,8 +21937,6 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
         if (priceVerdict && !(await SeriesPriceGuards.insertedRowIsPrepaid(conn, autoExtRow.id))) {
           SeriesPriceGuards.raiseExtensionPriceAlertAfterCommit(conn, priceVerdict, { ...priceAlertContext, childId: autoExtRow.id });
         }
-        // A child the guard compared and passed (a corrected template): the series' "check plan price" bell is obsolete.
-        if (SeriesPriceGuards.seriesPriceGuardsLive()) SeriesPriceGuards.closeCancelledRootAlertAfterCommit(conn, { verdict: priceVerdict, parentId, child: nextData });
         spawnedVisit = {
           scheduledServiceId: autoExtRow.id,
           customerId: parent.customer_id,
