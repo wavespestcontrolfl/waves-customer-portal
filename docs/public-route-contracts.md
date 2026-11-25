@@ -9146,16 +9146,21 @@ visits, invoices, estimates, messages or calls, whoever called. The conversation
 locally and starts no provider request), and `capture_lead` (validated, then answered as a practice dry run: nothing is
 saved, no lead, no text, no callback promised; its `use_account_details` option is forced off). **No allowlisted tool
 starts a paid provider request** (no geocode, weather forecast, date parser or road time): open appointment times are
-not offered, and GPT-Live is told to say the practice line cannot check them. The only paid calls on the socket are the
-brain's own model rounds. The conversation has no transfer tool and no automatic handoff, so no
+not offered, and GPT-Live is told to say the practice line cannot check them. The only provider requests the tools make are the
+brain's own model rounds (the only paid calls besides GPT-Live's voice time itself). The conversation has no transfer tool and no automatic handoff, so no
 handoff packet is ever written, and it never texts. The bridge keeps the caller's and GPT-Live's transcript fragments in
 memory only and the summary stores counts and times only. Before any write, the cell
 route verifies the request's Twilio signature itself (the shared middleware lets unsigned requests through in its
 `log` and `disabled` modes); unsigned or invalid = refused with no ledger write and no Twilio update. The cell route
-reserves one call's worst-case OpenAI cost in its own ledger table (`voice_gpt_live_ledger`, one row per CallSid)
+reserves one call's worst-case GPT-Live voice cost in its own ledger table (`voice_gpt_live_ledger`, one row per CallSid)
 under an advisory lock before it issues the token (first releasing at $0 any reservation whose stream never opened
 within the token's life), and refuses the call
 when that reservation does not fit under `VOICE_GPT_LIVE_TEST_MAX_USD` (default 5), and on any database error there.
+What the $5 ledger covers: GPT-Live voice minutes only (the session cap plus close wait at the voice price, settled from the
+usage OpenAI reports). It does NOT count the brain's model requests. Those are separate spend (the text model the brain calls,
+billed by that model's own provider), outside the dollar ledger and not stopped by it: they are bounded only by count, at
+most 15 asks a call and 45 provider requests a call (3 model rounds an ask), and the 20 s hard deadline of each ask. The $5 ledger
+therefore is not a cap on total spend with `GATE_VOICE_GPT_LIVE_TOOLS` on; the brain's requests add on top of it.
 Reply delay and cost land on `call_log.metadata.gpt_live`; the call's words are never stored.)
 `/api/webhooks/twilio/tech-voice` (POST; machine-to-machine TwiML webhook —
 the voice URL of the staff-only "Waves Tech" voice line, `TECH_VOICE_NUMBER`,
