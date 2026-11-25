@@ -124,7 +124,7 @@ describe('confirmOnRoads', () => {
     expect(roadResultOf(out.best)).toEqual({ source: 'estimate' });
   });
 
-  test('a road error after a refused slot keeps the refusal: the rejected slot is not reinstated', async () => {
+  test('a road error after a refused slot: the first stays refused, the next slot moves on the model\'s number', async () => {
     let calls = 0;
     const throwing = {
       preload: jest.fn(async () => {}),
@@ -135,8 +135,10 @@ describe('confirmOnRoads', () => {
       },
     };
     const out = await confirmOnRoads(rankedOf('first', 'second'), { service, current, config, travel: throwing });
-    expect(out).toMatchObject({ qualifies: false, roadFailed: true });
-    expect(out.best.name).toBe('first');
+    expect(out).toMatchObject({ qualifies: true });
+    expect(out.best.name).toBe('second');
+    expect(out.ranked.map((c) => c.name)).toEqual(['second']);
+    expect(roadResultOf(out.best)).toEqual({ source: 'estimate' });
   });
 
   test('every measured slot fails: nothing moves, and the row names the best slot\'s road numbers', async () => {

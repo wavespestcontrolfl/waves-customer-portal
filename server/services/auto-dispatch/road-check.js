@@ -157,7 +157,7 @@ async function confirmOnRoads(ranked, ctx) {
   const failed = [];
   try {
     for (const row of ranked.rankedRows.slice(0, ROAD_CHECK_SLOTS)) {
-      const road = await roadSaving(ctx.current, row.cand, ctx.travel);
+      const road = await roadSavingOrNull(ctx.current, row.cand, ctx.travel);
       // No road answer for the best slot: the model's result stands, and the
       // audit row says the number is the estimate (r2). The fallback list keeps
       // no unchecked minutes-rule slot below it (apply.js retries take that list).
@@ -174,6 +174,17 @@ async function confirmOnRoads(ranked, ctx) {
     // for it, and no unchecked minutes-rule slot stays in the fallback list.
     return failed.length ? settled(ranked, failed[0], false)
       : withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
+  }
+}
+
+// A lookup that throws is no answer for THAT slot only (the model's number
+// stands for it, as when Google has none); slots already refused stay refused.
+async function roadSavingOrNull(current, cand, travel) {
+  try {
+    return await roadSaving(current, cand, travel);
+  } catch (err) {
+    logger.warn(`[auto-dispatch] road check failed for one slot (model kept): ${err.message}`);
+    return null;
   }
 }
 
