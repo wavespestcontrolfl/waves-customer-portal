@@ -579,7 +579,41 @@ async function recipientPermission(meta, { conn = db, anyVisitStatus = false } =
   if (await require('./disclaimed-number-holds').disclaimedNumberHeld(mine.phone, conn)) {
     return noVerdict('RECIPIENT_NUMBER_HOLD', 'recipient-number-hold');
   }
+  const revoked = await revokedOnSendPath(mine, meta.kind, conn);
+  if (revoked) return revoked;
   return { ok: true, mine };
+}
+
+/**
+ * Every other revocation the send path honors for a text to this person about this visit, so the tracker link closes
+ * wherever the text would stop. null = none. Throws on an unreadable answer (never reads as "not revoked"):
+ *   - an unconfirmed street-level address hold on the visit (send step 6.35);
+ *   - a do-not-contact request, or an explicit "no texts", heard on any call with the person's number (auto-text-holds);
+ *   - the send layer's own suppression and consent validators, run on the input the send builds: STOP, wrong number,
+ *     staff do-not-contact, landline, and the account's SMS switch and its notice toggles (property toggles included).
+ * The callback-number holds (the visit's, then the person's own) are checked by the caller.
+ */
+async function revokedOnSendPath(mine, kind, conn) {
+  const phone = mine.phone;
+  if (await require('./street-level-hold').isStreetLevelHoldVisit(mine.visit.id, conn)) return noVerdict('STREET_LEVEL_HOLD', 'address-hold');
+  const holds = require('./messaging/auto-text-holds');
+  if (await holds.askedNotToBeContactedOnAnyCall(phone, { dbi: conn })) return noVerdict('CALL_DO_NOT_CONTACT', 'asked-not-to-be-contacted');
+  if (await holds.saidNoTextsOnAnyCall(phone, { dbi: conn })) return noVerdict('CALL_SMS_DECLINED', 'said-no-texts');
+  const purpose = KINDS[kind].purpose;
+  const input = {
+    channel: 'sms', audience: 'customer', purpose, customerId: mine.visit.customerId, appointmentId: mine.visit.id,
+    to: phone, identityTrustLevel: 'phone_matches_customer', metadata: {},
+  };
+  const policy = require('./messaging/policy').resolvePolicy('customer', purpose);
+  let state = await require('./messaging/validators/consent').loadContactState(input, conn);
+  state = await require('./messaging/validators/suppression').loadSuppressionState(input, state, conn);
+  // The loaders swallow a read error into a flag; here an unreadable answer must retry, never pass or drop.
+  if (state.lookupFailed || state.suppressionLookupFailed) throw new Error('send-layer contact state unreadable');
+  for (const check of [require('./messaging/validators/suppression').checkSuppression, require('./messaging/validators/consent').checkConsentForPurpose]) {
+    const verdict = await check(input, policy, state);
+    if (!verdict.ok) return noVerdict(verdict.code || 'SEND_LAYER_REFUSED', 'send-layer-refused');
+  }
+  return null;
 }
 
 async function recipientStillOwed(meta, { conn = db } = {}) {

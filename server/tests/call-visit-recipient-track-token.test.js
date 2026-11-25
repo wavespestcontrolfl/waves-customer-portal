@@ -26,6 +26,24 @@ jest.mock('../services/contact-notification-prefs', () => ({ contactPhoneDecline
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
 jest.mock('../services/disclaimed-number-holds', () => ({ disclaimedNumberHeldForVisit: jest.fn(async () => false), disclaimedNumberHeld: jest.fn(async () => false) }));
 const { disclaimedNumberHeldForVisit, disclaimedNumberHeld } = require('../services/disclaimed-number-holds');
+// The other revocations the send path honors, each a module of its own (their SQL runs on PostgreSQL in the Postgres suite).
+jest.mock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: jest.fn(async () => false) }));
+jest.mock('../services/messaging/auto-text-holds', () => ({
+  askedNotToBeContactedOnAnyCall: jest.fn(async () => false),
+  saidNoTextsOnAnyCall: jest.fn(async () => false),
+}));
+jest.mock('../services/messaging/validators/consent', () => ({
+  loadContactState: jest.fn(async () => ({ prefs: {}, customer: { id: 'cust-1' }, lookupFailed: false })),
+  checkConsentForPurpose: jest.fn(async () => ({ ok: true })),
+}));
+jest.mock('../services/messaging/validators/suppression', () => ({
+  loadSuppressionState: jest.fn(async (input, state) => ({ ...state, suppressionLoaded: true })),
+  checkSuppression: jest.fn(async () => ({ ok: true })),
+}));
+const { isStreetLevelHoldVisit } = require('../services/street-level-hold');
+const { askedNotToBeContactedOnAnyCall, saidNoTextsOnAnyCall } = require('../services/messaging/auto-text-holds');
+const consentValidator = require('../services/messaging/validators/consent');
+const suppressionValidator = require('../services/messaging/validators/suppression');
 
 const { contactPhoneDeclinesText } = require('../services/contact-notification-prefs');
 const VisitRecipient = require('../services/call-visit-recipient');
@@ -44,6 +62,12 @@ beforeEach(() => {
   contactPhoneDeclinesText.mockResolvedValue(false);
   disclaimedNumberHeldForVisit.mockResolvedValue(false);
   disclaimedNumberHeld.mockResolvedValue(false);
+  isStreetLevelHoldVisit.mockResolvedValue(false);
+  askedNotToBeContactedOnAnyCall.mockResolvedValue(false);
+  saidNoTextsOnAnyCall.mockResolvedValue(false);
+  consentValidator.loadContactState.mockResolvedValue({ prefs: {}, customer: { id: 'cust-1' }, lookupFailed: false });
+  consentValidator.checkConsentForPurpose.mockResolvedValue({ ok: true });
+  suppressionValidator.checkSuppression.mockResolvedValue({ ok: true });
 });
 afterAll(() => { if (gateBefore === undefined) delete process.env[GATE]; else process.env[GATE] = gateBefore; });
 
@@ -119,6 +143,62 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.code).toBe('57P01');
     expect(`${err.message} ${err.stack}`).not.toContain(TOKEN);
+  });
+
+  describe('every other revocation the send path honors closes the link and the send recheck alike', () => {
+    const META = { scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'en_route:2026-12-01T09:00' };
+    const both = async (code) => {
+      expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+      expect((await VisitRecipient.recipientStillOwed(META)).code).toBe(code);
+    };
+
+    test('a do-not-contact request recorded on a call with the recipient\'s number', async () => {
+      seed();
+      askedNotToBeContactedOnAnyCall.mockResolvedValue(true);
+      await both('CALL_DO_NOT_CONTACT');
+      expect(askedNotToBeContactedOnAnyCall).toHaveBeenCalledWith('+19415550002', expect.objectContaining({ dbi: expect.anything() }));
+    });
+
+    test('an explicit "no texts" heard on a call with the recipient\'s number', async () => {
+      seed();
+      saidNoTextsOnAnyCall.mockResolvedValue(true);
+      await both('CALL_SMS_DECLINED');
+    });
+
+    test('an unconfirmed street-level address hold on the visit', async () => {
+      seed();
+      isStreetLevelHoldVisit.mockResolvedValue(true);
+      await both('STREET_LEVEL_HOLD');
+      expect(isStreetLevelHoldVisit).toHaveBeenCalledWith('ss-1', expect.anything());
+    });
+
+    test('the send layer\'s own suppression verdict (STOP, wrong number, staff DNC, landline)', async () => {
+      seed();
+      suppressionValidator.checkSuppression.mockResolvedValue({ ok: false, code: 'SUPPRESSED_MANUAL_DNC' });
+      await both('SUPPRESSED_MANUAL_DNC');
+    });
+
+    test('the send layer\'s own consent verdict (the account\'s SMS switch, the notice toggles)', async () => {
+      seed();
+      consentValidator.checkConsentForPurpose.mockResolvedValue({ ok: false, code: 'SMS_OPTED_OUT' });
+      await both('SMS_OPTED_OUT');
+      const [input, policy] = consentValidator.checkConsentForPurpose.mock.calls[0];
+      // the input the send builds: the en-route purpose, the visit and the holder as customer, the recipient's number
+      expect(input).toMatchObject({ channel: 'sms', audience: 'customer', purpose: 'tech_en_route', customerId: 'cust-1', appointmentId: 'ss-1', to: '+19415550002' });
+      expect(policy.prefsColumn).toBe('tech_en_route');
+    });
+
+    test('an unreadable contact state throws (retry), never passes', async () => {
+      seed();
+      consentValidator.loadContactState.mockResolvedValue({ prefs: null, customer: null, lookupFailed: true });
+      await expect(VisitRecipient.visitForTrackToken(TOKEN)).rejects.toThrow('lookup failed');
+      await expect(VisitRecipient.recipientStillOwed(META)).rejects.toThrow('unreadable');
+    });
+
+    test('with none of them, the link opens', async () => {
+      seed();
+      expect(await VisitRecipient.visitForTrackToken(TOKEN)).toEqual({ visitId: 'ss-1', recipientId: 'r-1' });
+    });
   });
 
   test('a person no longer on the visit (row not listed for it) resolves nothing', async () => {

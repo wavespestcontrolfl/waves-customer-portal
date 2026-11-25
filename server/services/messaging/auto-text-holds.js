@@ -124,6 +124,17 @@ async function saidNoTextsOnAnyCall(phone, { originCallId = null, dbi = db } = {
   return !!row;
 }
 
+// A do-not-contact request on any call with this number (either direction, the call setting a text off included), in
+// either stored shape. Exported on its own for senders that honour this one veto (the visit-only recipient's text and
+// tracker link). Both DNC shapes: the V2 consent object, and the legacy extraction's flat field (a call processed
+// with V2 off, unavailable or schema-failed); read from ANY stored extraction, valid or not.
+async function askedNotToBeContactedOnAnyCall(phone, { originCallId = null, dbi = db } = {}) {
+  const digits = phoneDigits(phone);
+  if (!digits) return false;
+  const row = await whereCallDoNotContact(callsWith(dbi, digits, originCallId)).first('id');
+  return !!row;
+}
+
 /**
  * @param {string} phone                        the number about to be texted
  * @param {object} [opts]
@@ -160,9 +171,7 @@ async function autoTextHoldReason(phone, {
   // field (a call processed with V2 off, unavailable or schema-failed). Read
   // from ANY stored extraction, valid or not, and from the call setting this
   // text off too: an opt-out is honoured wherever it was heard.
-  const doNotContact = await whereCallDoNotContact(callsWith(dbi, digits, originCallId))
-    .first('id');
-  if (doNotContact) return 'asked_not_to_be_contacted';
+  if (await askedNotToBeContactedOnAnyCall(phone, { originCallId, dbi })) return 'asked_not_to_be_contacted';
 
   if (await saidNoTextsOnAnyCall(phone, { originCallId, dbi })) return 'said_no_texts';
 
@@ -225,6 +234,7 @@ async function autoTextHoldReason(phone, {
 module.exports = {
   autoTextHoldReason,
   saidNoTextsOnAnyCall,
+  askedNotToBeContactedOnAnyCall,
   deliveredTexts,
   RECENT_CONVERSATION_MS,
   NOT_A_PROSPECT_NATURES,

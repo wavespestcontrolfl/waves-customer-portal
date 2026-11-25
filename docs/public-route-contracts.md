@@ -7847,12 +7847,12 @@ visit text recipient's own `visit_text_recipients.track_token` (64 hex, minted
 when their en-route text is built). It returns a reduced whitelist payload with
 `scope: 'visit_recipient'` for that one visit: state, technician first name and
 photo, window, lat/lng and town (no street, zip or names), service name, live
-vehicle and ETA, arrival time, `visitChange` only as `{ kind: 'pending_rebook' }`.
+vehicle and ETA, arrival time, `visitChange` only as `{ kind: 'pending_rebook' }` or `{ kind: 'skipped' }` (kind only, never `nextVisit`).
 It never returns `summary`, the report, invoice, prep or review tokens, photos,
 the offer and referral cards, `customer`, `cancellation`, stops count or route
 progress, and the cards and summary reads do not run. The recipient path is strictly read-only (no geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the send's own permission check (`recipientPermission`) passes. Its stops-ahead POST
 answers nulls and its view POST records nothing. Gate off, a deleted row, a
-declined person, an unknown token, an expired visit link or a visit with no expiry on record answer the same 404. A customer-pick visit awaiting the holder shows `{ kind: 'pending_rebook' }`.
+declined person, an unknown token, an expired visit link or a visit with no expiry on record answer the same 404. A customer-pick visit awaiting the holder shows `{ kind: 'pending_rebook' }`. Every handler on this router runs inside `safeRoute`: a thrown or `next(err)` error leaves as a fresh Error with only the driver `code`, never the knex message (it carries the bound token).
 A
 cancelled or missed visit returns only that the office is the next actor. An
 operational `rescheduled` row adds `visitChange.kind = pending_rebook`; its

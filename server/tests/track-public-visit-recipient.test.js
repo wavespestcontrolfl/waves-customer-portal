@@ -227,6 +227,12 @@ describe('GET /:token with a visit text recipient\'s token', () => {
     expect(JSON.stringify(out)).not.toMatch(/zz-rain|tab=schedule|Open Visits|pickBy/);
   });
 
+  test('a skipped visit keeps only its kind: never the holder\'s next visit', () => {
+    const out = trackPublicRouter._test.recipientTrackPayload({ state: 'cancelled', visitChange: { kind: 'skipped', nextVisit: { date: '2026-12-20' } } });
+    expect(out.visitChange).toEqual({ kind: 'skipped' });
+    expect(JSON.stringify(out)).not.toContain('2026-12-20');
+  });
+
   test('a visit the office is rebooking says so, with no reason, action or other visit', async () => {
     install(visitRow({ status: 'rescheduled' }));
     const { body } = await get();
@@ -235,7 +241,6 @@ describe('GET /:token with a visit text recipient\'s token', () => {
 
   test.each([
     [{ kind: 'customer_pick', stage: 'booked', reason: 'zz', current: { date: '2026-12-20' } }],
-    [{ kind: 'skipped', nextVisit: { date: '2026-12-20' } }],
     [{ kind: 'office_move', reason: 'zz' }],
   ])('a visit change that names the holder\'s other visits or an action never reaches the recipient (%j)', (visitChange) => {
     const out = trackPublicRouter._test.recipientTrackPayload({ state: 'scheduled', visitChange, customer: { name: 'zz' }, summary: { x: 1 }, prepToken: 'zz' });
@@ -324,6 +329,68 @@ describe('POST /:token/stops-ahead and /:token/view with a recipient token', () 
   test.each(['/:token/stops-ahead', '/:token/view'])('%s: 404 when the visit has no expiry on record', async (path) => {
     install(visitRow({ track_token_expires_at: null }));
     expect((await post(path)).statusCode).toBe(404);
+  });
+});
+
+describe('no route forwards or logs the bearer token when the FIRST query fails', () => {
+  const logger = require('../services/logger');
+  const knexLike = (token) => Object.assign(
+    new Error(`select "s"."id" from "scheduled_services" as "s" where "s"."track_view_token" = '${token}' - connection terminated`),
+    { code: '57P01' },
+  );
+  const failFirstQuery = (token) => {
+    mockDb.raw = jest.fn((sql) => sql);
+    mockDb.mockImplementation(() => {
+      const q = {};
+      for (const m of ['where', 'leftJoin', 'whereNotNull', 'orderBy', 'whereRaw', 'select', 'limit']) q[m] = jest.fn(() => q);
+      q.first = jest.fn(async () => { throw knexLike(token); });
+      return q;
+    });
+  };
+  const run = async (path, method, token) => {
+    const res = { statusCode: 200, set: jest.fn(() => res), status: jest.fn((c) => { res.statusCode = c; return res; }), json: jest.fn(() => res), end: jest.fn(() => res) };
+    const next = jest.fn();
+    await find(path, method)({ params: { token }, headers: {}, get: () => null }, res, next);
+    return { res, next };
+  };
+
+  test.each([
+    ['/:token', 'get'],
+    ['/:token/stops-ahead', 'post'],
+  ])('%s: next() gets a fresh error with only the driver code', async (path, method) => {
+    const token = 'c'.repeat(64);
+    failFirstQuery(token);
+    const { next } = await run(path, method, token);
+    expect(next).toHaveBeenCalledTimes(1);
+    const [err] = next.mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect(err.code).toBe('57P01');
+    expect(`${err.message}\n${err.stack}`).not.toContain(token);
+    expect(JSON.stringify([logger.warn.mock.calls, logger.error.mock.calls, logger.info.mock.calls])).not.toContain(token);
+  });
+
+  test('/:token/view: answers 204, forwards nothing, logs no token', async () => {
+    const token = 'c'.repeat(64);
+    failFirstQuery(token);
+    const { res, next } = await run('/:token/view', 'post', token);
+    expect(res.statusCode).toBe(204);
+    expect(next).not.toHaveBeenCalled();
+    expect(JSON.stringify([logger.warn.mock.calls, logger.error.mock.calls])).not.toContain(token);
+  });
+
+  test('every token route in the router is wrapped by the one sanitizer', () => {
+    const routes = trackPublicRouter.stack.filter((l) => l.route);
+    expect(routes.length).toBeGreaterThanOrEqual(3);
+    for (const layer of routes) expect(layer.route.stack[0].handle.name).toBe('trackRoute');
+  });
+
+  test('a handler that throws (not just next(err)) is sanitized too', async () => {
+    const token = 'd'.repeat(64);
+    mockVisitForTrackToken.mockRejectedValue(knexLike(token));
+    install(null);
+    const { next } = await run('/:token', 'get', token);
+    const [err] = next.mock.calls[0];
+    expect(`${err.message}\n${err.stack}`).not.toContain(token);
   });
 });
 

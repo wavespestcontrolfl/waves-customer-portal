@@ -77,6 +77,13 @@ describe('TrackPage for a visit text recipient', () => {
     expect(screen.queryByText(/Thanks for choosing Waves/i)).not.toBeInTheDocument();
   });
 
+  it('a skipped visit shows the skipped state, not a cancellation, with no next-visit date', async () => {
+    renderTrack(payload('cancelled', { visitChange: { kind: 'skipped' } }));
+    expect(await screen.findByText(/visit was skipped/i)).toBeInTheDocument();
+    expect(screen.queryByText(/was cancelled/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Your next regular visit/i)).not.toBeInTheDocument();
+  });
+
   it('cancelled renders without a reason', async () => {
     renderTrack(payload('cancelled'));
     expect(await screen.findByText(/was cancelled/i)).toBeInTheDocument();

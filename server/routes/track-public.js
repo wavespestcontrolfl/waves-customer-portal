@@ -90,6 +90,24 @@ router.use(rateLimit({
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
 
+// EVERY route here is keyed by a bearer token, and a knex error message carries its bound values: the first holder
+// lookup binds the token itself. The one chokepoint: whatever a handler throws or passes to next() becomes a fresh
+// Error carrying only the driver code, so no token reaches the global handler's log through message or stack.
+function sanitizedTrackError(err) {
+  const code = err && (typeof err.code === 'string' || typeof err.code === 'number') ? err.code : undefined;
+  return Object.assign(new Error('track request failed'), { code });
+}
+function safeRoute(handler) {
+  return async function trackRoute(req, res, next) {
+    const safeNext = (err) => (err ? next(sanitizedTrackError(err)) : next());
+    try {
+      await handler(req, res, safeNext);
+    } catch (err) {
+      safeNext(err);
+    }
+  };
+}
+
 function firstNameOf(fullName) {
   if (!fullName) return null;
   const trimmed = String(fullName).trim();
@@ -665,7 +683,9 @@ const PRIVACY_HEADERS = {
 // referral cards, the reschedule and sign-in actions, the cancellation reason, the next visit of the plan, and every key
 // not named below. `scope` tells the page to hide what only the holder sees. After the visit it is the plain
 // "complete" state, with the tech and the service name and nothing about the work (no summary, no links).
-const RECIPIENT_VISIT_CHANGE_KINDS = new Set(['pending_rebook']);
+// pending_rebook (the office is rebooking) and skipped (the plan skipped this visit): the kind only. A skipped visit's
+// nextVisit is the holder's plan, never sent.
+const RECIPIENT_VISIT_CHANGE_KINDS = new Set(['pending_rebook', 'skipped']);
 // A visit parked for the HOLDER to pick a new day (customer_pick, awaiting_customer) has no booked time yet: the
 // recipient sees the same neutral pending_rebook as an office rebooking, with no reason and no scheduling action.
 function recipientVisitChange(visitChange) {
@@ -792,7 +812,7 @@ function readTrackVisit(where) {
     );
 }
 
-router.get('/:token', async (req, res, next) => {
+router.get('/:token', safeRoute(async (req, res, next) => {
   res.set(PRIVACY_HEADERS);
   if (!TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
@@ -969,7 +989,7 @@ router.get('/:token', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}));
 
 // Explicit write path for the stops-ahead clamp floor. The GET above is
 // contractually read-only, so when it reports stopsAheadPending the page
@@ -978,7 +998,7 @@ router.get('/:token', async (req, res, next) => {
 // atomically before the number is displayed. Same token gate, same
 // router-level rate limit, monotone + skip-unchanged writes, so retries
 // are harmless. Returns the displayable payload or nulls (generic state).
-router.post('/:token/stops-ahead', async (req, res, next) => {
+router.post('/:token/stops-ahead', safeRoute(async (req, res, next) => {
   res.set(PRIVACY_HEADERS);
   if (!TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
@@ -1016,7 +1036,7 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}));
 
 // Customer-page-view write companion. The GET above is contractually
 // read-only (it is also the 30s en-route poll), so the page opens ONE view by
@@ -1026,7 +1046,7 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
 // Answers 204 immediately; the insert is fire-and-forget (bots, staff
 // browsers and repeat opens inside the dedupe window are skipped by the
 // recorder).
-router.post('/:token/view', async (req, res) => {
+router.post('/:token/view', safeRoute(async (req, res) => {
   res.set(PRIVACY_HEADERS);
   if (!TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
@@ -1057,7 +1077,7 @@ router.post('/:token/view', async (req, res) => {
     logViewFailure('lookup', 'track', 'scheduled_service', err);
     return res.status(204).end();
   }
-});
+}));
 
 // ── Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21) ──
 // On a COMPLETED visit's tracker. Each card is a link into the Waves app;

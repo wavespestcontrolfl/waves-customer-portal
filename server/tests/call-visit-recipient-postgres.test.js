@@ -712,6 +712,63 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
     });
 
+    describe('an already-issued link closes on a revocation recorded after it was sent', () => {
+      let token;
+      beforeEach(async () => {
+        await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+        const [{ id }] = await rows();
+        token = await VisitRecipient.ensureTrackToken(id);
+        expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      });
+      const noMoreLink = async () => expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+
+      test('a do-not-contact request on a call with Bob\'s number (V2 shape, then the legacy shape)', async () => {
+        const [{ id: dncCall }] = await db('call_log').insert({
+          direction: 'inbound', from_phone: BOB, to_phone: OUR_LINE,
+          ai_extraction_enriched: JSON.stringify({ consent: { do_not_contact_request: true } }),
+        }).returning('id');
+        try {
+          await noMoreLink();
+          await db('call_log').where({ id: dncCall }).update({ ai_extraction_enriched: null, ai_extraction: '{"do_not_contact_request": true}' });
+          await noMoreLink();
+          await db('call_log').where({ id: dncCall }).update({ ai_extraction: '{"do_not_contact_request": false}' });
+          expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+        } finally {
+          await db('call_log').where({ id: dncCall }).del();
+        }
+      });
+
+      test('an explicit "no texts" on a call with Bob\'s number', async () => {
+        const [{ id: noTexts }] = await db('call_log').insert({
+          direction: 'inbound', from_phone: BOB, to_phone: OUR_LINE, v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }),
+        }).returning('id');
+        try {
+          await noMoreLink();
+        } finally {
+          await db('call_log').where({ id: noTexts }).del();
+        }
+      });
+
+      test('the account\'s SMS switch turned off', async () => {
+        await db('notification_prefs').insert({ customer_id: customerId, sms_enabled: false }).onConflict('customer_id').merge({ sms_enabled: false });
+        await noMoreLink();
+        await db('notification_prefs').where({ customer_id: customerId }).update({ sms_enabled: true });
+        expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      });
+
+      test('the account\'s en-route notice switched off', async () => {
+        await db('notification_prefs').insert({ customer_id: customerId, sms_enabled: true, tech_en_route: false }).onConflict('customer_id').merge({ tech_en_route: false });
+        await noMoreLink();
+      });
+
+      test('a staff do-not-contact on Bob\'s number', async () => {
+        await suppress(BOB);
+        await db('messaging_suppression').where({ phone: BOB }).update({ reason: 'manual_dnc' });
+        await noMoreLink();
+      });
+    });
+
     test('a completed or on-site visit still opens the link', async () => {
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'completed' });
       const [{ id }] = await rows();
