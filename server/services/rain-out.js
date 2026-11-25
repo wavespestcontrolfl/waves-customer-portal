@@ -1631,7 +1631,7 @@ async function checkTarget({ serviceId, target, caller = null, reasonCode = null
   // the tapped stop's own shift line, and the rows of the rest of the route. The line is about the window
   // the commit books (bookedTarget: a recurring visit's day move lands on the hour), as commit() reads it.
   const booked = bookedTarget(service, { date: targetDate, window: target.window }, dateOnlyString(service.scheduled_date) || etDateString());
-  const [shiftWarning] = await pickedShiftLines([{ technicianId: service.technician_id, date: targetDate, block: pickedBlock(booked.window, service.estimated_duration_minutes) }]);
+  const [shiftWarning] = await pickedShiftLines([{ technicianId: service.technician_id, date: targetDate, block: pickedBlock(booked.window, service.estimated_duration_minutes) }], caller);
   return {
     ok: true, conflicts, routeConflicts, ...(shiftWarning ? { shiftWarning } : {}),
     ...(await routeShiftRows(service, route, { office: true }))(target),
@@ -1645,10 +1645,11 @@ async function checkTarget({ serviceId, target, caller = null, reasonCode = null
 // (technician-eligibility.js shiftLinesFor): the shift line alone, none on a day the technician does not
 // work (the shift is not that day's), none for a time it cannot read, no read with the gate off, and one
 // pair of reads for each technician asked about. No technician: no line. Advisory: a failure is logged
-// and gives no line.
-async function pickedShiftLines(asks) {
+// and gives no line. `caller` is who asks: an ask the caller may not make (mayAskShiftOf) reads nothing
+// and has no line.
+async function pickedShiftLines(asks, caller) {
   const lines = asks.map(() => null);
-  const idOf = (ask) => (ask.technicianId ? String(ask.technicianId) : null);
+  const idOf = (ask) => (ask.technicianId && mayAskShiftOf(caller, ask.technicianId) ? String(ask.technicianId) : null);
   for (const technicianId of new Set(asks.map(idOf).filter(Boolean))) {
     const own = asks.map((_ask, i) => i).filter((i) => idOf(asks[i]) === technicianId);
     try {
@@ -1661,15 +1662,22 @@ async function pickedShiftLines(asks) {
   return lines;
 }
 
+// Whose shift a caller may ask about before a save: an admin any technician's, a technician its own.
+// The line names the technician and the shift's hours (today's follow the clock-in), and these reads
+// change nothing, so a technician-role login never learns another technician's hours from them,
+// whatever GATE_TECH_LOGIN_PRIVACY says. No caller: no one's.
+const mayAskShiftOf = (caller, technicianId) => caller?.isAdmin === true
+  || (caller?.technicianId != null && String(caller.technicianId).toLowerCase() === String(technicianId).toLowerCase());
+
 // A visit as a save of the picked window would leave it: that window, and the visit's length.
 const pickedBlock = (window, minutes) => ({ window_start: window.start, window_end: window.end, estimated_duration_minutes: minutes });
 
 // The office's sheet states the shift line of each hour it offers (pickedShiftLines), as `shiftWarning` on
 // the option. A technician's own options are held to the shift already (sameDayChoices, findRescheduleOptions).
-async function tellOfferedShiftLines(service, options, initiatedBy) {
+async function tellOfferedShiftLines(service, options, { initiatedBy, caller }) {
   if (initiatedBy !== 'admin') return;
   const lines = await pickedShiftLines(options.map((opt) => ({
-    technicianId: service.technician_id, date: opt.date, block: pickedBlock(opt.window, service.estimated_duration_minutes) })));
+    technicianId: service.technician_id, date: opt.date, block: pickedBlock(opt.window, service.estimated_duration_minutes) })), caller);
   options.forEach((opt, i) => { if (lines[i]) opt.shiftWarning = lines[i]; });
 }
 
@@ -1771,7 +1779,7 @@ async function checkSlots({ targets, caller = null } = {}) {
   }));
   // The office's shift line for each picked slot that names a technician (pickedShiftLines), beside its
   // overlap answer and never in it: `conflicts` is what the pickers count and word as a double booking.
-  const lines = await pickedShiftLines(parsed.map((p) => ({ technicianId: p.technicianId, date: p.date, block: pickedBlock(p.window, p.durationMinutes) })));
+  const lines = await pickedShiftLines(parsed.map((p) => ({ technicianId: p.technicianId, date: p.date, block: pickedBlock(p.window, p.durationMinutes) })), caller);
   return { ok: true, results: results.map((result, i) => (lines[i] ? { ...result, shiftWarning: lines[i] } : result)) };
 }
 
@@ -1917,7 +1925,7 @@ async function getOptions(serviceId, { caller = null, reasonCode, initiatedBy = 
     });
     Object.assign(opt, shiftRows({ date: opt.date, window: opt.window }));
   }
-  await tellOfferedShiftLines(service, [...sameDay, ...days], initiatedBy);
+  await tellOfferedShiftLines(service, [...sameDay, ...days], { initiatedBy, caller });
 
   // Custom-reason availability for the sheet: the option renders only when
   // the gate is on AND the template row is live — a missing/disabled row

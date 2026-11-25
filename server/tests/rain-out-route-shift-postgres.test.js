@@ -241,6 +241,23 @@ postgres('the stops a rest-of-route move would land outside the shift (real Post
       ])).toEqual([null, line, line, line, null, null, null, null]);
     });
 
+    test('a picked slot: a technician caller is answered about itself only, and an id in another spelling is the same technician', async () => {
+      const technicianId = await makeTech({ shift_end: '12:00' });
+      const other = await makeTech();
+      const line = await lineOf(technicianId, '12:00 PM');
+      const lineFor = async (caller, id) => (await RainOut.checkSlots({
+        targets: [{ date: laterDay, window: { start: '11:30', end: '12:30' }, technicianId: id }], caller,
+      })).results[0].shiftWarning ?? null;
+      expect(await lineFor({ isAdmin: false, technicianId }, technicianId)).toBe(line);
+      expect(await lineFor({ isAdmin: false, technicianId: other }, technicianId)).toBeNull();
+      expect(await lineFor(null, technicianId)).toBeNull();
+      // The check takes a uuid in braces, with no hyphens, or in capitals, and so does PostgreSQL.
+      const admin = { isAdmin: true, technicianId: null };
+      expect(await lineFor(admin, `{${technicianId}}`)).toBe(line);
+      expect(await lineFor(admin, technicianId.replace(/-/g, ''))).toBe(line);
+      expect(await lineFor(admin, technicianId.toUpperCase())).toBe(line);
+    });
+
     test('a picked slot: no line on a day the technician does not work, and none with the gate off', async () => {
       process.env.GATE_TECH_WORK_DAYS = 'true';
       const weekday = weekdayOf(laterDay);

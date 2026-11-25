@@ -198,14 +198,17 @@ async function officeLineReads(technicianId, conn, withShift) {
  * line or null. For a screen that asks before a save about each hour it offers or the office picked
  * (D4 picked-hour hints). The same answer as `dayWarningFor(technicianId, date, { block, shiftOnly: true })`
  * for each ask: no line on a day the technician does not work, none for a time it cannot read, and no
- * read with GATE_TECH_SHIFT_HOURS off, with no technician, or with no ask it can read.
+ * read with GATE_TECH_SHIFT_HOURS off, with no technician, or with no ask it can read. The id may be any
+ * spelling PostgreSQL takes for the uuid (braces, no hyphens): the shift is asked for by the id the
+ * technician's row carries. Who may ask is the caller's rule (rain-out.js mayAskShiftOf).
  */
 async function shiftLinesFor(technicianId, asks, { conn = db } = {}) {
   const { rowBlockMinutes } = require('./scheduling/window-rules');
   const hours = asks.map((ask) => (techShiftHoursLive() && ask.date && ask.block ? rowBlockMinutes(ask.block) : null));
   if (!technicianId || !hours.some(isBlock)) return asks.map(() => null);
   const { tech, shiftOf } = await officeLineReads(technicianId, conn, true);
-  return asks.map((ask, i) => (isBlock(hours[i]) && !offDayWarning(tech, ask.date) ? shiftWarning(tech, shiftOf(technicianId, ask.date), hours[i]) : null));
+  const id = tech?.id || technicianId;
+  return asks.map((ask, i) => (isBlock(hours[i]) && !offDayWarning(tech, ask.date) ? shiftWarning(tech, shiftOf(id, ask.date), hours[i]) : null));
 }
 
 /** dayWarningsFor for one date: its line (the day-off line or the shift line), or null. */

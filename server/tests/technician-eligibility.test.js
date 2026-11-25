@@ -1149,6 +1149,12 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
           await quiet('tech-1', [{ date: TOMORROW, block: null }, ask(null, '19:00', '20:00'), ask(TOMORROW, null, null, 60), ask(TOMORROW, 'noon', '13:00')]);
         });
 
+        test('an id in another spelling PostgreSQL takes is the same technician: the shift is asked for by the row\'s id', async () => {
+          gateOn();
+          // PostgreSQL reads a uuid in braces or with no hyphens; the row comes back with the id as it is stored.
+          expect(await shiftLinesFor('{tech-1}', [NIGHT], { conn: commitConn().conn })).toEqual([LINE]);
+        });
+
         test('an ask it cannot read has no line beside one it can', async () => {
           gateOn();
           expect(await shiftLinesFor('tech-1', [ask(null, '19:00', '20:00'), NIGHT, { date: TOMORROW, block: null }, ask(TOMORROW, 'noon', '13:00')], { conn: commitConn().conn }))

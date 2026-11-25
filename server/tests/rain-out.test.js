@@ -434,7 +434,7 @@ describe('rain-out service', () => {
       // and each day it offers carries the shift line the move would state (shiftWarning, tellOfferedShiftLines).
       describe('the office\'s sheet: the shift line of each hour it offers', () => {
         const LINE = "Synthetic Tech's shift is 8:00 AM to 1:00 PM. This visit is outside those hours.";
-        const offered = async ({ office = true, service = {} } = {}) => {
+        const offered = async ({ office = true, service = {}, caller = { isAdmin: true, technicianId: 'admin-1' } } = {}) => {
           finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
           SmartRebooker.findRescheduleOptions.mockResolvedValue([
             { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
@@ -451,7 +451,7 @@ describe('rain-out service', () => {
             }),
           });
           const options = await RainOut.getOptions('svc-1', office
-            ? { caller: { isAdmin: true, technicianId: 'admin-1' }, initiatedBy: 'admin' }
+            ? { caller, initiatedBy: 'admin' }
             : { caller: { isAdmin: false, technicianId: 'tech-1' } });
           expect(options.ok).toBe(true);
           return [...options.sameDay, ...options.days];
@@ -486,6 +486,14 @@ describe('rain-out service', () => {
           offeredLines.mockImplementation(async (_id, asks) => asks.map(() => LINE));
           for (const option of await offered({ service: { technician_id: null } })) expect(option).not.toHaveProperty('shiftWarning');
           expect(offeredLines).not.toHaveBeenCalled();
+        });
+
+        // The dispatch board's route commits as the office for every caller, a technician-role login too.
+        test('a technician-role login on the office\'s sheet is answered about its own visit only', async () => {
+          offeredLines.mockImplementation(async (_id, asks) => asks.map(() => LINE));
+          for (const option of await offered({ caller: { isAdmin: false, technicianId: 'tech-2' } })) expect(option).not.toHaveProperty('shiftWarning');
+          expect(offeredLines).not.toHaveBeenCalled();
+          expect((await offered({ caller: { isAdmin: false, technicianId: 'tech-1' } })).map((o) => o.shiftWarning)).toEqual([LINE, LINE, LINE]);
         });
 
         test('a reader that fails: the options come back with no line, and the failure is logged', async () => {
@@ -3563,7 +3571,7 @@ describe('rain-out service', () => {
       beforeEach(() => { reader = jest.spyOn(eligibility, 'shiftLinesFor').mockImplementation(async (_id, asks) => asks.map(() => null)); });
       afterEach(() => { reader.mockRestore(); delete process.env.GATE_TECH_SHIFT_HOURS; });
       // A visit alone on its route: the rows of the rest of the route read nothing.
-      const check = async (target, service = {}) => {
+      const check = async (target, service = {}, caller = { isAdmin: true, technicianId: 'admin-1' }) => {
         listOccupiedWindows.mockResolvedValue([]);
         wireDb({
           scheduled_services: [
@@ -3574,7 +3582,7 @@ describe('rain-out service', () => {
             chain({ rows: [] }),
           ],
         });
-        return RainOut.checkTarget({ serviceId: 'svc-1', caller: { isAdmin: true, technicianId: 'admin-1' }, target });
+        return RainOut.checkTarget({ serviceId: 'svc-1', caller, target });
       };
       const target = { date: '2031-03-07T00:00:00.000Z', window: { start: '16:30', end: '17:00' } };
 
@@ -3596,6 +3604,18 @@ describe('rain-out service', () => {
         reader.mockResolvedValue([LINE]);
         expect(await check(target, { technician_id: null })).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
         expect(reader).not.toHaveBeenCalled();
+      });
+
+      // The route takes a technician-role login too, with no assignment check: the line names a technician
+      // and the shift's hours, so such a caller is answered about its own visit only (mayAskShiftOf).
+      test('a technician caller is answered about its own visit only, and no caller about none', async () => {
+        reader.mockResolvedValue([LINE]);
+        for (const caller of [{ isAdmin: false, technicianId: 'tech-2' }, { isAdmin: false, technicianId: null }, { isAdmin: 'true', technicianId: 'tech-2' }, null]) {
+          expect(await check(target, {}, caller)).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        }
+        expect(reader).not.toHaveBeenCalled();
+        expect((await check(target, {}, { isAdmin: false, technicianId: 'TECH-1' })).shiftWarning).toBe(LINE);
+        expect(reader).toHaveBeenCalledTimes(1);
       });
 
       test('a reader that fails gives no line, is logged, and the check still answers', async () => {
@@ -5224,6 +5244,21 @@ describe('rain-out service', () => {
       test('no slot names a technician (the bulk bar): the reader is not asked', async () => {
         const result = await RainOut.checkSlots({ targets: [slot('13:00', '14:00'), slot('15:00', '16:00', { technicianId: null })], caller: ADMIN });
         expect(result.results).toEqual([{ conflicts: [] }, { conflicts: [] }]);
+        expect(reader).not.toHaveBeenCalled();
+      });
+
+      // The route takes a technician-role login too: the line names a technician and the shift's hours, so
+      // such a caller is answered about itself only, whatever GATE_TECH_LOGIN_PRIVACY says (mayAskShiftOf).
+      test('a technician caller is answered about itself only, and no caller about no one', async () => {
+        reader.mockImplementation(async (_id, asks) => asks.map(() => LINE));
+        const targets = [slot('13:00', '14:00', { technicianId: TECH_A }), slot('13:00', '14:00', { technicianId: TECH_B })];
+        const own = await RainOut.checkSlots({ targets, caller: { isAdmin: false, technicianId: TECH_B.toUpperCase() } });
+        expect(own.results).toEqual([{ conflicts: [] }, { conflicts: [], shiftWarning: LINE }]);
+        expect(reader.mock.calls.map(([id]) => id)).toEqual([TECH_B]);
+        reader.mockClear();
+        for (const caller of [null, undefined, {}, { isAdmin: false, technicianId: null }, { isAdmin: 'true', technicianId: 'admin-1' }]) {
+          expect((await RainOut.checkSlots({ targets, caller })).results).toEqual([{ conflicts: [] }, { conflicts: [] }]);
+        }
         expect(reader).not.toHaveBeenCalled();
       });
 
