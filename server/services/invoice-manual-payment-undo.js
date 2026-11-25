@@ -257,7 +257,13 @@ async function reopenPaymentFailedBells(trx, invoiceId, since) {
     .select('id', 'metadata');
   const reopen = [];
   for (const bell of closed) {
-    const { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds } = parseJson(bell.metadata).payload || {};
+    const meta = parseJson(bell.metadata);
+    const { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds } = meta.payload || {};
+    // A bill_payment_error bell closes on payload.invoiceId alone (payment-failed-alert-close.js), so it reopens on that alone.
+    if (meta.triggerKey === 'bill_payment_error') {
+      if (bellInvoiceId != null && String(bellInvoiceId) === String(invoiceId)) reopen.push(bell.id);
+      continue;
+    }
     const allocation = await failedAllocationInvoiceIds(trx, { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds });
     if (allocation.includes(String(invoiceId))) reopen.push(bell.id);
   }
@@ -365,4 +371,4 @@ async function undoManualPayment(invoiceId, { reason, paymentId, undoneBy = 'adm
   };
 }
 
-module.exports = { undoManualPayment, describeManualPaymentUndo, manualPaymentUndoRefusal };
+module.exports = { undoManualPayment, describeManualPaymentUndo, manualPaymentUndoRefusal, reopenPaymentFailedBells };

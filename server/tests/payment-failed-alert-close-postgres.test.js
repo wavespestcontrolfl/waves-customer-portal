@@ -282,55 +282,79 @@ postgres('payment_failed bells close when their invoice is paid', () => {
     expect((await state(stillOwed)).done_at).toBeNull();
   });
 
-  describe('an autopay failure with no invoice', () => {
+  describe('an autopay failure with no invoice (monthly dues)', () => {
     const { sweepSettledPaymentFailedAlerts } = require('../services/payment-failed-alert-close');
-    const failedAt = new Date('2026-11-01T15:00:00Z');
-    const alertFor = (extraPayload = {}) => insertAlert({
-      paymentIntentId: `pi_${randomUUID()}`, createdAt: failedAt, extraPayload: { amount: 113.6, customerId, ...extraPayload },
+    let piId;
+    const monthly = (month, patch = {}) => ({
+      customer_id: customerId, processor: 'stripe', amount: 113.6, status: 'paid', payment_date: `${month}-03`,
+      description: 'WaveGuard Monthly', metadata: JSON.stringify({ billed_month: month }), ...patch,
     });
-    const paidPayment = (patch = {}) => db('payments').insert({
-      customer_id: customerId, processor: 'stripe', stripe_payment_intent_id: `pi_${randomUUID()}`, amount: 113.6,
-      status: 'paid', payment_date: '2026-11-03', created_at: new Date('2026-11-03T15:00:00Z'), ...patch,
-    });
+    const alertFor = async (extraPayload = {}) => {
+      piId = `pi_${randomUUID()}`;
+      await db('payments').insert(monthly('2026-11', { status: 'failed', stripe_payment_intent_id: piId, payment_date: '2026-11-01' }));
+      return insertAlert({ paymentIntentId: piId, extraPayload: { amount: 113.6, customerId, ...extraPayload } });
+    };
     const sweep = async () => {
       await db('system_settings').where({ key: 'payment_failed_alert_sweep_cursor' }).del();
       await sweepSettledPaymentFailedAlerts({ conn: db });
     };
 
-    test('closes on a later paid payment of the same amount for the same customer', async () => {
+    test('closes once the failed attempt\'s own month is collected by another paid row', async () => {
       const alert = await alertFor();
       await sweep();
       expect((await state(alert)).done_at).toBeNull();
-      await paidPayment();
+      await db('payments').insert(monthly('2026-11'));
       await sweep();
       expect(await state(alert)).toMatchObject({ done_by: 'payments', resolution: 'The invoice was paid' });
     });
 
-    test('stays open for a different amount, an earlier payment, a failed payment, or another customer', async () => {
+    test('stays open for another month\'s payment of the same amount, a processing row, an unrelated payment, or another customer', async () => {
       const alert = await alertFor();
-      await paidPayment({ amount: 113.61 });
-      await paidPayment({ created_at: new Date('2026-10-30T15:00:00Z') });
-      await paidPayment({ status: 'failed' });
-      const otherCustomer = randomUUID();
+      await db('payments').insert(monthly('2026-12')); // December paid, November still owed
+      await db('payments').insert(monthly('2026-11', { status: 'processing' }));
+      await db('payments').insert(monthly('2026-11', { description: 'Pest Control', metadata: JSON.stringify({ invoice_id: invoiceA }) })); // unrelated invoice payment
+      const other = randomUUID();
       await db('customers').insert({
-        id: otherCustomer, first_name: 'Other', last_name: 'Fixture', email: `${otherCustomer}@example.invalid`,
+        id: other, first_name: 'Other', last_name: 'Fixture', email: `${other}@example.invalid`,
         phone: '+19415550144', address_line1: '101 Test Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer',
       });
       try {
-        await paidPayment({ customer_id: otherCustomer });
+        await db('payments').insert(monthly('2026-11', { customer_id: other }));
         await sweep();
         expect((await state(alert)).done_at).toBeNull();
       } finally {
-        await db('payments').where({ customer_id: otherCustomer }).del();
-        await db('customers').where({ id: otherCustomer }).del();
+        await db('payments').where({ customer_id: other }).del();
+        await db('customers').where({ id: other }).del();
       }
     });
 
-    test('a bell that names an invoice is not closed by a same-amount payment', async () => {
-      const alert = await alertFor({ invoiceId: invoiceA });
-      await paidPayment();
+    test('stays open when the attempt cannot be identified or declares an allocation', async () => {
+      const noLedger = await insertAlert({ paymentIntentId: `pi_${randomUUID()}`, extraPayload: { amount: 113.6, customerId } });
+      const malformed = await alertFor({ allocationInvoiceIds: ['not-a-uuid'] });
+      await db('payments').insert(monthly('2026-11'));
       await sweep();
-      expect((await state(alert)).done_at).toBeNull();
+      expect((await state(noLedger)).done_at).toBeNull();
+      expect((await state(malformed)).done_at).toBeNull();
     });
+  });
+
+  test('undoing a payment reopens a bill_payment_error bell only for its own invoice, not its PaymentIntent\'s other invoices', async () => {
+    const { reopenPaymentFailedBells } = require('../services/invoice-manual-payment-undo');
+    expect(reopenPaymentFailedBells).toBeInstanceOf(Function);
+    const piId = `pi_${randomUUID()}`;
+    await failedLedgerRow(invoiceA, piId);
+    await failedLedgerRow(invoiceB, piId);
+    const forA = await insertAlert({ paymentIntentId: piId, invoiceId: invoiceA, triggerKey: 'bill_payment_error' });
+    const failedForA = await insertAlert({ paymentIntentId: piId, invoiceId: invoiceA });
+    await db('invoices').whereIn('id', [invoiceA, invoiceB]).update({ status: 'paid', paid_at: new Date() });
+    await PaymentPlans.completeActivePlansForInvoice(invoiceA);
+    await PaymentPlans.completeActivePlansForInvoice(invoiceB);
+    expect((await state(forA)).done_at).not.toBeNull();
+    // invoice B's payment is undone: A's checkout bell stays closed; a payment_failed bell for the combined attempt reopens (existing rule)
+    await db.transaction((trx) => reopenPaymentFailedBells(trx, invoiceB, new Date(Date.now() - 60000)));
+    expect((await state(forA)).done_at).not.toBeNull();
+    expect((await state(failedForA)).done_at).toBeNull();
+    await db.transaction((trx) => reopenPaymentFailedBells(trx, invoiceA, new Date(Date.now() - 60000)));
+    expect((await state(forA)).done_at).toBeNull();
   });
 });

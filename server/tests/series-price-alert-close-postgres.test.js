@@ -29,6 +29,7 @@ postgres('plan-price bell closes when the guard stops refusing', () => {
     });
     rootId = await visit({ status: 'cancelled', scheduled_date: '2040-01-15' });
   });
+  const CURSOR_KEY = 'series_price_cancelled_root_sweep_cursor';
   afterEach(async () => {
     await db('notifications').whereIn('id', bellIds.splice(0)).del();
     await db('invoices').where({ customer_id: customerId }).del();
@@ -112,5 +113,53 @@ postgres('plan-price bell closes when the guard stops refusing', () => {
     await db('notifications').where({ id }).update({ done_at: personDone, done_by: randomUUID(), resolution: 'Checked' });
     await sweep();
     expect((await state(id)).resolution).toBe('Checked');
+  });
+
+  test('the sweep pages past unresolved bells with a wrapping cursor and reaches a settled one', async () => {
+    await db('system_settings').where({ key: CURSOR_KEY }).del();
+    const unresolved = [];
+    for (let i = 0; i < 3; i += 1) {
+      const otherRoot = await visit({ status: 'cancelled', scheduled_date: `2040-0${i + 3}-15` });
+      unresolved.push(await bell({ root: otherRoot }));
+    }
+    const settled = await bell();
+    await db('scheduled_services').where({ id: rootId }).update({ status: 'pending' });
+    // Page size 1: every run examines one bell and moves the cursor on, so the settled one is reached.
+    for (let run = 0; run < 200 && (await state(settled)).done_at == null; run += 1) {
+      await guards.sweepSettledCancelledRootAlerts({ conn: db, page: 1 });
+    }
+    expect(await state(settled)).toMatchObject({ done_by: 'series-price-guard' });
+    for (const id of unresolved) expect((await state(id)).done_at).toBeNull();
+    await db('system_settings').where({ key: CURSOR_KEY }).del();
+  });
+
+  describe('a later extension that passes the guard (corrected template)', () => {
+    const commit = (verdict, child) => db.transaction(async (trx) => {
+      guards.closeCancelledRootAlertAfterCommit(trx, { verdict, parentId: rootId, child });
+    }).then(() => new Promise((resolve) => setTimeout(resolve, 150)));
+
+    test('closes the bell for that series only', async () => {
+      const id = await bell({ price: 200 }); // raised against a $200 template
+      const otherRoot = await visit({ status: 'cancelled', scheduled_date: '2040-05-15' });
+      const otherBell = await bell({ root: otherRoot });
+      const paid = await visit({ recurring_parent_id: rootId, status: 'completed', scheduled_date: '2039-12-15' });
+      await paidInvoiceFor(paid, 100);
+      // staff corrected the template to $100: the live extension is compared and passes
+      const child = { estimated_price: 100, service_type: 'Monthly Pest Control Service', is_callback: false };
+      const verdict = await guards.extensionPriceVerdict(db, { parent: { status: 'cancelled' }, parentId: rootId, child });
+      expect(verdict).toBeNull();
+      await commit(verdict, child);
+      expect(await state(id)).toMatchObject({ done_by: 'series-price-guard', resolution: guards.CANCELLED_ROOT_RESOLUTION });
+      expect((await state(otherBell)).done_at).toBeNull();
+      // the stale stored price alone would still have kept the sweep refusing
+    });
+
+    test('does nothing for a refused verdict or a child the guard never compared', async () => {
+      const id = await bell();
+      await commit({ skip: true, kind: 'cancelled_root' }, { estimated_price: 100, service_type: 'Monthly Pest Control Service' });
+      await commit(null, { estimated_price: null, service_type: 'Monthly Pest Control Service' });
+      await commit(null, { estimated_price: 100, service_type: 'Monthly Pest Control Service', is_callback: true });
+      expect((await state(id)).done_at).toBeNull();
+    });
   });
 });

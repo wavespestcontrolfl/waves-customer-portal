@@ -7,6 +7,11 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+jest.mock('../services/retry-collectibility', () => ({
+  ...jest.requireActual('../services/retry-collectibility'),
+  findCollectedMonthlyPayment: jest.fn(),
+}));
+const { findCollectedMonthlyPayment } = require('../services/retry-collectibility');
 const knex = require('knex')({ client: 'pg' });
 const logger = require('../services/logger');
 const { closePaymentFailedAlertsForPaidInvoice, sweepSettledPaymentFailedAlerts, RESOLUTION } = require('../services/payment-failed-alert-close');
@@ -197,49 +202,51 @@ describe('repair sweep', () => {
     expect(captured.find((q) => q.table === 'notifications' && q.sql.startsWith('update')).bindings).not.toContain(8);
   });
 
-  describe('a payment_failed bell with no invoice', () => {
-    const noInvoice = (extra = {}) => bell(7, { amount: 113.6, customerId: CUST, invoiceId: null, ...extra });
-    const run = (paidRow, notification = noInvoice()) => {
-      const { conn, captured } = compilingConn({ responses: { notifications: [[notification], 1], payments: [[]], invoices: [[]] } });
-      // the later-payment probe is the payments query that ends in .first(); answer it directly
-      const wrapped = (table) => {
-        const b = conn(table);
-        if (table === 'payments') b.first = async () => { captured.push({ table, ...b.toSQL().toNative() }); return paidRow; };
-        return b;
-      };
-      Object.assign(wrapped, conn);
-      return sweepSettledPaymentFailedAlerts({ conn: wrapped }).then((closed) => ({ closed, captured }));
+  describe('a payment_failed bell with no invoice (monthly dues)', () => {
+    const noInvoice = (extra = {}) => bell(7, { amount: 113.6, customerId: CUST, invoiceId: null, paymentIntentId: 'pi_nov', ...extra });
+    const failedRow = (extra = {}) => ({ id: 'pay-failed', description: 'WaveGuard Monthly - November', metadata: { billed_month: '2026-11' }, payment_date: '2026-11-01', ...extra });
+    // payments queue: the allocation's ledger read twice (settled check, then the fallback's own), then the failed row by PaymentIntent.
+    const run = async ({ collected = { id: 'pay-paid' }, failed = failedRow(), notification = noInvoice() } = {}) => {
+      findCollectedMonthlyPayment.mockResolvedValue(collected);
+      const { conn, captured } = compilingConn({ responses: { notifications: [[notification], 1], payments: [[{ metadata: {} }], [{ metadata: {} }], failed], invoices: [[]] } });
+      return { closed: await sweepSettledPaymentFailedAlerts({ conn }), captured };
     };
+    beforeEach(() => findCollectedMonthlyPayment.mockReset());
 
-    test('closes when the same customer has a later paid payment of the same amount', async () => {
-      const { closed, captured } = await run({ id: 'pay-1' });
+    test('closes when the failed attempt\'s own billed month was collected by another paid row', async () => {
+      const { closed, captured } = await run();
       expect(closed).toBe(1);
-      const probe = captured.find((q) => q.table === 'payments' && q.sql.includes('"superseded_by_payment_id" is null'));
-      expect(probe.sql).toContain('"status" = $');
-      expect(probe.sql).toContain('amount::numeric = $');
-      expect(probe.sql).toContain('"created_at" >= $');
-      expect(probe.bindings).toEqual(expect.arrayContaining([CUST, 'paid', '113.60', '2026-11-01T12:00:00Z']));
+      const [customerId, window, options] = findCollectedMonthlyPayment.mock.calls[0];
+      expect(customerId).toBe(CUST);
+      expect(window).toEqual({ monthKey: '2026-11', monthStart: '2026-11-01', monthEnd: '2026-11-30' });
+      expect(options).toMatchObject({ statuses: ['paid'], withDuesInvoice: false, excludePaymentId: 'pay-failed' });
+      const lookup = captured.find((q) => q.table === 'payments' && q.sql.includes('"stripe_payment_intent_id" = $') && q.sql.includes('"customer_id" = $') && q.sql.includes('limit'));
+      expect(lookup.bindings).toEqual(expect.arrayContaining(['pi_nov', CUST]));
     });
 
-    test('stays open with no such payment', async () => {
-      expect((await run(undefined)).closed).toBe(0);
+    test('the month comes from the payment date when no billed_month is stamped', async () => {
+      await run({ failed: failedRow({ metadata: {}, payment_date: new Date('2026-10-03T00:00:00Z') }) });
+      expect(findCollectedMonthlyPayment.mock.calls[0][1].monthKey).toBe('2026-10');
+    });
+
+    test('stays open when that month was not collected (another month\'s payment of the same amount does not count)', async () => {
+      expect((await run({ collected: null })).closed).toBe(0);
     });
 
     test.each([
-      ['no customer id', { customerId: null }],
-      ['a non-UUID customer id', { customerId: 'cus_123' }],
-      ['no amount', { amount: 0 }],
-      ['a combined allocation that could not be read', { allocationUnreadable: true }],
-    ])('never closes on a payment match with %s', async (_label, extra) => {
-      const { closed, captured } = await run({ id: 'pay-1' }, noInvoice(extra));
-      expect(closed).toBe(0);
-      expect(captured.some((q) => q.sql.includes('superseded_by_payment_id'))).toBe(false);
-    });
-
-    test('a bell that names an invoice is judged by that invoice, never by a same-amount payment', async () => {
-      const { closed, captured } = await run({ id: 'pay-1' }, noInvoice({ invoiceId: INV_B }));
-      expect(closed).toBe(0);
-      expect(captured.some((q) => q.sql.includes('superseded_by_payment_id'))).toBe(false);
+      ['no PaymentIntent', { notification: noInvoice({ paymentIntentId: null }) }],
+      ['no ledger row for the PaymentIntent', { failed: null }],
+      ['a ledger row that is not monthly dues', { failed: failedRow({ description: 'Pest Control' }) }],
+      ['no month on the ledger row', { failed: failedRow({ metadata: {}, payment_date: null }) }],
+      ['a malformed billed month', { failed: failedRow({ metadata: { billed_month: '2026-13' } }) }],
+      ['no customer id', { notification: noInvoice({ customerId: null }) }],
+      ['a non-UUID customer id', { notification: noInvoice({ customerId: 'cus_123' }) }],
+      ['an unreadable allocation', { notification: noInvoice({ allocationUnreadable: true }) }],
+      ['a declared allocation of malformed ids', { notification: noInvoice({ allocationInvoiceIds: ['not-a-uuid'] }) }],
+      ['a named invoice', { notification: noInvoice({ invoiceId: INV_B }) }],
+    ])('never closes with %s', async (_label, args) => {
+      expect((await run(args)).closed).toBe(0);
+      expect(findCollectedMonthlyPayment).not.toHaveBeenCalled();
     });
   });
 
