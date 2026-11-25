@@ -89,6 +89,38 @@ describe('a recipient-shape token with GATE_CALL_GIVEN_VISIT_TEXTS off: the gene
     expect(database).toHaveBeenCalledTimes(1);
   });
 
+  // Express decodes the :token param once, so these all reach the route as the plain recipient token
+  const encodeSome = (token) => `%76${token.slice(1)}`; // 'v' as %76
+  const encodeAll = (token) => [...token].map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+  const ENCODED = [encodeSome(RECIPIENT), encodeAll(RECIPIENT), encodeSome(RECIPIENT).replace('_', '%5F')];
+  test.each(ENCODED.flatMap((enc) => [['GET', `/${enc}`], ['POST', `/${enc}/stops-ahead`], ['POST', `/${enc}/view`]]))('%s %s (percent-encoded): gate off is the same 404 before any limiter, parser or database read', (method, requestPath) => {
+    delete process.env[GATE];
+    expect(decodeURIComponent(requestPath.split('/')[1])).toBe(RECIPIENT);
+    const { res, limiter, bodyParser, database } = drive(method, requestPath);
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ error: 'Not found' });
+    expect(limiter).not.toHaveBeenCalled();
+    expect(bodyParser).not.toHaveBeenCalled();
+    expect(database).not.toHaveBeenCalled();
+  });
+
+  test.each([['GET', '/%E0%A4%A'], ['POST', '/%zz/stops-ahead'], ['POST', '/%E0%A4%A/view']])('%s %s: a malformed percent-encoding is the generic 404, nothing downstream runs', (method, requestPath) => {
+    process.env[GATE] = 'true';
+    const { res, limiter, bodyParser, database } = drive(method, requestPath);
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ error: 'Not found' });
+    expect(limiter).not.toHaveBeenCalled();
+    expect(bodyParser).not.toHaveBeenCalled();
+    expect(database).not.toHaveBeenCalled();
+  });
+
+  test('with the gate on, an encoded recipient token passes (and an encoded holder token is judged on its decoded value)', () => {
+    process.env[GATE] = 'true';
+    expect(drive('GET', `/${encodeAll(RECIPIENT)}`).database).toHaveBeenCalledTimes(1);
+    expect(drive('POST', `/${encodeAll(HOLDER)}/view`).database).toHaveBeenCalledTimes(1);
+    expect(drive('POST', `/${encodeAll(HOLDER)}x/view`).database).not.toHaveBeenCalled();
+  });
+
   test('a holder-shape token is never affected by the gate', () => {
     delete process.env[GATE];
     for (const [method, requestPath] of [['GET', `/${HOLDER}`], ['POST', `/${HOLDER}/stops-ahead`], ['POST', `/${HOLDER}/view`]]) {

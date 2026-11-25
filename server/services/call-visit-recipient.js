@@ -37,7 +37,7 @@ const logger = require('./logger');
 const { toE164, isValidNanpNumber } = require('../utils/phone');
 const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
 const { dateOnlyString } = require('../utils/date-only');
-const { isTrackTokenLiveWithExpiry, recipientLinkEligible } = require('./track-token-expiry');
+const { recipientLinkEligible } = require('./track-token-expiry');
 const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
 
 const SOURCE = 'call_caller_provided';
@@ -533,9 +533,11 @@ async function ensureTrackToken(visitRecipientId, customerId, conn = db) {
 async function recipientTrackUrl(contact, context, conn) {
   if (!context || typeof context.trackUrlFor !== 'function') return null;
   try {
-    // No link for a visit whose own tracker link has no live expiry on record: the recipient's link ends with it.
-    const visit = await conn('scheduled_services').where({ id: contact.visit.id }).first('track_token_expires_at');
-    if (!visit || !isTrackTokenLiveWithExpiry(visit.track_token_expires_at)) return null;
+    // Nothing is minted for a link that could not open right now: the visit must satisfy the SAME eligibility rule the tracker
+    // route and the resolver apply (a live finite expiry on the visit's own link, and a live state: en route, on site or just
+    // completed; not parked or rebooking). Otherwise the text goes without the link and no token is made.
+    const visit = await readLinkVisit(contact.visit.id, conn);
+    if (!visit || !recipientLinkEligible(visit)) return null;
     const token = await ensureTrackToken(contact.visitRecipientId, contact.visit.customerId, conn);
     return token ? await context.trackUrlFor(token) : null;
   } catch (err) {
@@ -703,7 +705,8 @@ async function recipientPermission(meta, { conn = db, anyVisitStatus = false } =
   const mine = contacts.find((contact) => contact.visitRecipientId === meta.visit_recipient_id);
   if (!mine) return noVerdict('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
   // The row must be the one the send was built with: its id (found above) AND its customer binding. A caller with no recorded
-  // customer (an old queued text) is not owed.
+  // customer is not owed. This also drops any text queued before the binding existed, deliberately and with no backfill:
+  // GATE_CALL_GIVEN_VISIT_TEXTS has never been on in production, so no such queued row exists.
   if (!meta.recipient_customer_id || String(mine.recipientCustomerId || '') !== String(meta.recipient_customer_id)) {
     return noVerdict('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
   }

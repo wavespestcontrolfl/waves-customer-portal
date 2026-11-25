@@ -380,9 +380,12 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(input.body).not.toMatch(/https?:|www\.|reschedule|track/i);
     });
 
+    // the visit as it is when the en-route text goes: en route by status AND tracker, with its start on record
+    const EN_ROUTE_NOW = () => ({ status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 60 * 1000) });
+
     test('each kind is its own text; the reminders carry no link and the en-route text carries only Bob\'s OWN tracker link', async () => {
       const HOLDER_TOKEN = 'a'.repeat(64);
-      await db('scheduled_services').where({ id: visitId }).update({ track_view_token: HOLDER_TOKEN, track_token_expires_at: new Date(Date.now() + 86400000) });
+      await db('scheduled_services').where({ id: visitId }).update({ track_view_token: HOLDER_TOKEN, track_token_expires_at: new Date(Date.now() + 86400000), ...EN_ROUTE_NOW() });
       for (const kind of ['confirmation', 'reminder_72h', 'reminder_24h']) await notify(kind);
       await notify('en_route', { context: { techName: 'Pat', etaMinutes: 12, trackUrlFor: async (token) => `https://x.test/track/${token}` } });
       expect(sendCustomerMessage.mock.calls.map(([i]) => i.purpose)).toEqual([
@@ -419,8 +422,40 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(builder).not.toHaveBeenCalled();
     });
 
+    test('a visit the tracker route would NOT open (not en route / on site / just completed, parked, a stale start) gets the text without a link, and no token is minted', async () => {
+      const builder = jest.fn(async (token) => `https://x.test/track/${token}`);
+      const live = new Date(Date.now() + 86400000);
+      const HOUR = 60 * 60 * 1000;
+      const states = [
+        { status: 'confirmed', track_state: 'scheduled' },
+        { status: 'cancelled', track_state: 'cancelled' },
+        { status: 'en_route', track_state: 'en_route', en_route_at: null },
+        { status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 4 * HOUR) },
+        { status: 'en_route', track_state: 'scheduled', en_route_at: new Date(Date.now() - 60000) },
+        { ...EN_ROUTE_NOW(), customer_pick_by: new Date(Date.now() + HOUR), window_start: null },
+      ];
+      for (const state of states) {
+        sendCustomerMessage.mockClear();
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ deliveries: '{}' });
+        await db('scheduled_services').where({ id: visitId }).update({ status: 'confirmed', track_state: 'scheduled', en_route_at: null, customer_pick_by: null, window_start: '09:00', track_token_expires_at: live, ...state });
+        await notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
+        if (state.status === 'cancelled') { expect(sendCustomerMessage).not.toHaveBeenCalled(); continue; }
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Track live');
+        expect((await rows())[0].track_token).toBeNull();
+      }
+      expect(builder).not.toHaveBeenCalled();
+      // control: the same visit en route now gets its link
+      sendCustomerMessage.mockClear();
+      await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ deliveries: '{}' });
+      await db('scheduled_services').where({ id: visitId }).update({ ...EN_ROUTE_NOW(), customer_pick_by: null, window_start: '09:00' });
+      await notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Track live');
+      expect((await rows())[0].track_token).toMatch(/^vr_[a-f0-9]{48}$/);
+    });
+
     test('the link is made only after the slot claim is won: repeated or concurrent attempts mint one link and one token, a skipped attempt mints nothing', async () => {
-      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), ...EN_ROUTE_NOW() });
       const builder = jest.fn(async (token) => `https://x.test/track/${token}`);
       const attempt = () => notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
       await Promise.all([attempt(), attempt(), attempt()]);
@@ -434,7 +469,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     });
 
     test('a skipped attempt mints no token: with the slot already claimed, no token and no link are made', async () => {
-      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), ...EN_ROUTE_NOW() });
       await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ deliveries: JSON.stringify({ [`en_route:${VISIT_DATE}T09:00`]: 'claimed-elsewhere' }) });
       const builder = jest.fn(async (token) => `https://x.test/track/${token}`);
       await notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
@@ -444,7 +479,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     });
 
     test('a link builder that fails sends the text without a link', async () => {
-      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), ...EN_ROUTE_NOW() });
       await notify('en_route', { context: { techName: 'Pat', trackUrlFor: async () => { throw new Error('shortener down'); } } });
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Track live');
