@@ -31,7 +31,7 @@
  * Refunds (PR 3a; production-share-refunds.js): the code never measures a refund. It detects one and the owner sets the take-back.
  * A stop with a refund signal in its own week is $0 and needs review (kind refund_flagged). Every stop row also freezes refundSignals (the
  * signal ids at finalize, only when there are any). Later a signal not in that list, on a stop a final check paid, is listed in the
- * week's snapshot as takeBackToSet [{ checkId, visitId, workDate, paidWeekStart, creditCents, newSignals }] until the owner answers with
+ * week's snapshot as takeBackToSet [{ checkId, visitId, workDate, paidWeekStart, creditCents, newSignals, reason, previousCents }] until the owner answers with
  * the TOTAL to take back for that stop. His answers move credit between weeks: the snapshot lists takeBacks [{ sourceCheckId, visitId,
  * workDate, paidWeekStart, cents, dependsOnRuns }] (signed: negative = credit given back) and refundTakeBackCents (their net), and
  * creditedCents is after them, never below $0; what does not fit stays owed for the next week. It is credit accounting for the technician
@@ -85,7 +85,7 @@ function snapshotOf({ weekStart, settings, result, stops, degraded = false, take
     ...(takeBackToSet.length ? {
       takeBackToSet: takeBackToSet.map((one) => ({
         checkId: one.checkId, visitId: one.visitId, workDate: one.workDate || null, paidWeekStart: one.paidWeekStart, creditCents: one.creditCents,
-        newSignals: [...one.newSignals].sort(),
+        newSignals: [...one.newSignals].sort(), reason: one.reason, previousCents: one.previousCents == null ? null : one.previousCents,
       })),
     } : {}),
     stops: stops.map((stop) => ({
@@ -189,10 +189,11 @@ function basesSignature(bases, invoices) {
 const sortedJson = (rows) => rows.map((one) => JSON.stringify(one)).sort();
 const takeBackSignature = (takeBacks, toSet, answers = []) => [
   sortedJson((takeBacks || []).map((one) => [one.sourceCheckId || null, one.visitId, one.paidWeekStart, one.workDate || null, Number(one.cents), [...(one.dependsOnRuns || [])].sort()])),
-  sortedJson((toSet || []).map((one) => [one.checkId, one.visitId, one.paidWeekStart, Number(one.creditCents), [...one.newSignals].sort()])),
+  sortedJson((toSet || []).map((one) => [one.checkId, one.visitId, one.paidWeekStart, Number(one.creditCents), [...one.newSignals].sort(), one.reason || null, one.previousCents == null ? null : Number(one.previousCents)])),
   sortedJson(answers.map((one) => [one.sourceCheckId, one.visitId, Number(one.cents), one.revision])),
 ];
-const stopRefundSignature = (stop) => [...(stop.refundSignals || [])].sort();
+// A stop's refund signals and, for a paid stop (credit above $0), the sorted invoice ids they were read from: both are frozen with the check.
+const stopRefundSignature = (stop) => [[...(stop.refundSignals || [])].sort(), Number(stop.creditCents) > 0 ? [...(stop.refundInvoices || [])].sort() : []];
 
 function revisionOf(inputs) {
   const rows = [...inputs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([id, input]) => {
@@ -333,7 +334,7 @@ function reviewNote(name, count) {
 /** The plain note a draft shows for paid stops with a refund the owner has not answered, or null. */
 function takeBackNote(name, count) {
   if (!(count > 0)) return null;
-  return `${name}: ${count} paid ${count === 1 ? 'stop has' : 'stops have'} a new refund. Open the production share preview for the week and set the take-back for ${count === 1 ? 'it' : 'each'}, then recompute.`;
+  return `${name}: ${count} paid ${count === 1 ? 'stop has' : 'stops have'} a new or changed refund. Open the production share preview for the week and set the take-back for ${count === 1 ? 'it' : 'each'}, then recompute.`;
 }
 
 /** Raises the refund bells for the flags a draft or a preview read (production-share-refund-alerts.js). Never throws. */

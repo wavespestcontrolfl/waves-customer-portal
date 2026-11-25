@@ -48,9 +48,12 @@ describe('the refund bell', () => {
 
   it('lists the flagged stop of the own week and the paid stop to set, nothing else', () => {
     expect(flagsOf(week)).toEqual([
-      { kind: 'own', visitId: 'v1', signals: ['pay:x:100'] },
-      { kind: 'paid', visitId: 'v3', signals: ['orphan:y', 'pay:x:100'] },
+      { kind: 'own', visitId: 'v1', signals: ['pay:x:100', 'kind:refund_flagged'] },
+      { kind: 'paid', visitId: 'v3', signals: ['orphan:y', 'pay:x:100', 'answer:none'] },
     ]);
+    // A refund the owner answered that changed rings as its own kind.
+    expect(flagsOf({ takeBackToSet: [{ visitId: 'v4', newSignals: [], reason: 'changed', answerRevision: '7:t' }] }))
+      .toEqual([{ kind: 'changed', visitId: 'v4', signals: ['answer:7:t'] }]);
   });
 
   it('keys a flag by visit and sorted signals, so the same refund is one bell and a new signal is another', () => {
@@ -116,7 +119,35 @@ describe('what a check shows of its refunds', () => {
 
   it('writes a plain draft note for paid stops with a new refund', () => {
     expect(payShare.takeBackNote('Sample Alpha', 0)).toBeNull();
-    expect(payShare.takeBackNote('Sample Alpha', 1)).toMatch(/^Sample Alpha: 1 paid stop has a new refund\./);
-    expect(payShare.takeBackNote('Sample Alpha', 2)).toMatch(/2 paid stops have a new refund\..*each/);
+    expect(payShare.takeBackNote('Sample Alpha', 1)).toMatch(/^Sample Alpha: 1 paid stop has a new or changed refund\./);
+    expect(payShare.takeBackNote('Sample Alpha', 2)).toMatch(/2 paid stops have a new or changed refund\..*each/);
+  });
+});
+
+describe('the review token takes the invoices a paid stop froze', () => {
+  const settings = { id: 1, rateBps: 1500, barType: 'per_shift', barCents: 10000, callbackStopValueCents: 9500 };
+  const stop = (patch) => ({ visitId: 'v1', workDate: '2026-09-14', kind: 'priced', creditCents: 50000, needsReview: false, refundSignals: [], ...patch });
+  const inputsOf = (rows) => new Map([['t1', { settings, stops: rows, takeBackOwed: [], takeBackToSet: [], takeBackAnswers: [] }]]);
+
+  it('changes the revision with the sorted refundInvoices of a positive-credit stop, whatever their order', () => {
+    const a = payShare.revisionOf(inputsOf([stop({ refundInvoices: ['i-1', 'i-2'] })]));
+    expect(payShare.revisionOf(inputsOf([stop({ refundInvoices: ['i-2', 'i-1'] })]))).toBe(a);
+    expect(payShare.revisionOf(inputsOf([stop({ refundInvoices: ['i-1', 'i-3'] })]))).not.toBe(a);
+    // A $0 stop never freezes them, so they do not move its revision.
+    expect(payShare.revisionOf(inputsOf([stop({ creditCents: 0, refundInvoices: ['i-1'] })]))).toBe(payShare.revisionOf(inputsOf([stop({ creditCents: 0 })])));
+  });
+
+  it('changes the signature of a stored check with them too', () => {
+    const snapshot = (refundInvoices) => ({ settingsId: 1, rateBps: 1500, barType: 'per_shift', barPerUnitCents: 10000, shifts: 1, creditedCents: 50000, barCents: 10000,
+      aboveBarCents: 40000, shareCents: 6000, stops: [{ visitId: 'v1', workDate: '2026-09-14', kind: 'priced', creditCents: 50000, needsReview: false, refundInvoices }] });
+    const sig = (refundInvoices) => payShare.signature({ production_share_cents: 6000, production_share: snapshot(refundInvoices) });
+    expect(sig(['i-1', 'i-2'])).toEqual(sig(['i-2', 'i-1']));
+    expect(sig(['i-1', 'i-2'])).not.toEqual(sig(['i-1', 'i-3']));
+  });
+
+  it('changes the revision and the signature with a changed answer state of a paid stop (reason, previous total)', () => {
+    const toSet = (patch) => ({ checkId: 'c', visitId: 'v9', paidWeekStart: '2026-09-07', creditCents: 100, newSignals: ['a'], ...patch });
+    const rev = (one) => payShare.revisionOf(new Map([['t1', { settings, stops: [], takeBackOwed: [], takeBackToSet: [one], takeBackAnswers: [] }]]));
+    expect(rev(toSet({ reason: 'new', previousCents: null }))).not.toBe(rev(toSet({ reason: 'changed', previousCents: 300 })));
   });
 });

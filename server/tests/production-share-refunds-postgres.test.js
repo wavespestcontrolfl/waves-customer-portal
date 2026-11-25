@@ -369,11 +369,13 @@ postgres('production share refunds', () => {
       const shown = await week(world, W2, '500.00');
       expect(shown.takeBackToSet).toEqual([{
         checkId: world.checkId, visitId: world.visit, workDate: W1, paidWeekStart: W1, creditCents: 100000, newSignals: [`pay:${payment}:3000`], answerRevision: 'none',
+        reason: 'new', previousCents: null,
+        visit: { serviceType: 'General Pest Control', scheduledDate: W1, windowDisplay: null, completedAt: `${W1}T16:00:00.000Z` },
       }]);
       expect(shown.takeBacks).toEqual([]);
       expect(shown.creditedCents).toBe(50000);
       const created = (await draft(W2)).body.run;
-      expect(created.productionShareNotes).toEqual([expect.stringMatching(/1 paid stop has a new refund/)]);
+      expect(created.productionShareNotes).toEqual([expect.stringMatching(/1 paid stop has a new or changed refund/)]);
       const row = await trx('payroll_checks').where({ id: byName(created, 'Sample Alpha').id }).first('calc_snapshot');
       expect(row.calc_snapshot.productionShare.takeBackToSet).toHaveLength(1);
       expect(await bells()).toBe(1);
@@ -602,6 +604,100 @@ postgres('production share refunds', () => {
       // A legacy row (no refund id recorded) keeps the cents-only form.
       await trx('payments').where({ id: payment }).update({ stripe_refund_id: null, metadata: null });
       expect((await signals([visit])).get(visit)).toEqual([`pay:${payment}:1000`]);
+    });
+  });
+
+  describe('an answer is in force only while the refunds equal the ones he saw', () => {
+    // A $300.00 answer taken in week 2, then the refunds change.
+    const answered = async (tag) => {
+      const world = await paidWorld(tag);
+      const first = await refundOn(world, '30.00');
+      const open = await week(world, W2, '500.00');
+      await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 30000, signals: open.takeBackToSet[0].newSignals });
+      const { done } = await finalWeek(W2);
+      await stop(world.id, W3, '800.00', world.customerId);
+      return { world, first, done };
+    };
+
+    it('stores exactly the signals he saw, and a new signal reopens the stop: previous total shown, nothing more moves, a bell rings', async () => {
+      const { world, first } = await answered('eq1');
+      const stored = await trx('production_share_refund_take_backs').first('signals', 'cents');
+      expect(stored.signals).toEqual([`pay:${first}:3000`]);
+      expect((await preview(world.id, W3)).takeBacks).toEqual([expect.objectContaining({ cents: 0 })]);
+      const before = await bells();
+      const second = await refundOn(world, '40.00');
+      const shown = await preview(world.id, W3);
+      expect(shown.takeBackToSet).toEqual([expect.objectContaining({ visitId: world.visit, reason: 'new', previousCents: 30000, newSignals: [`pay:${first}:3000`, `pay:${second}:4000`].sort() })]);
+      expect(shown.takeBackAnswers).toEqual([expect.objectContaining({ cents: 30000, inForce: false })]);
+      // Out of force: not even more of the $300.00 is taken; only the 0 entry that keeps its dependency.
+      expect(shown.takeBacks.map((one) => [one.cents, one.dependsOnRuns.length])).toEqual([[0, 2]]);
+      expect(shown.creditedCents).toBe(80000);
+      expect(await bells()).toBe(before + 1);
+    });
+
+    it('reopens the stop when a refund he answered is reversed, and a new answer against the refunds now moves the credit again', async () => {
+      const { world, first, done } = await answered('eq2');
+      expect(byName(done, 'Sample Alpha').productionShare.refundTakeBackCents).toBe(30000);
+      const before = await bells();
+      // Stripe reversed the refund: the payment row goes back to no refund.
+      await trx('payments').where({ id: first }).update({ refund_amount: '0.00' });
+      const shown = await preview(world.id, W3);
+      expect(shown.takeBackToSet).toEqual([expect.objectContaining({ visitId: world.visit, reason: 'changed', previousCents: 30000, newSignals: [], answerRevision: expect.stringMatching(/^\d+:/) })]);
+      expect(shown.takeBackAnswers).toEqual([expect.objectContaining({ cents: 30000, inForce: false })]);
+      // Still $300.00 taken, nothing given back and nothing more taken until he answers again.
+      expect(shown.takeBacks).toEqual([expect.objectContaining({ cents: 0 })]);
+      expect(await bells()).toBe(before + 1);
+      // A stale page (still sending the old signal) is refused; the current ones (none) are accepted and give the $300.00 back.
+      const stale = await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 0, signals: [`pay:${first}:3000`] });
+      expect(stale.status).toBe(409);
+      expect((await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 0, signals: [] })).status).toBe(200);
+      const after = await preview(world.id, W3);
+      expect(after.takeBackToSet).toEqual([]);
+      expect(after.takeBacks).toEqual([expect.objectContaining({ cents: -30000 })]);
+    });
+
+    it('does not take anything from an answered stop whose refund reversed even when the first answer had been taken in full', async () => {
+      const { world, first } = await answered('eq3');
+      await trx('payments').where({ id: first }).update({ refund_amount: '0.00' });
+      const week3 = await preview(world.id, W3);
+      expect(week3.refundTakeBackCents).toBe(0);
+      expect(week3.owedTakeBackCents).toBe(0);
+    });
+  });
+
+  describe('a parked refund the bank bounced is not a refund signal', () => {
+    it('skips a parked refund whose id is fenced as failed or whose case was resolved FAILED at the bank, and keeps a reconciled one', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_charge_id: 'ch_p' });
+      const parked = (key, patch = {}) => trx('stripe_orphan_charges').insert({
+        stripe_payment_intent_id: `pi_p:partial-refund:${key}`, stripe_charge_id: 'ch_p', amount: '10.00', source: 'combined_pay_webhook',
+        original_db_error: `Partial refund ${key} of $10 on a combined balance charge`, ...patch,
+      }).returning('id');
+      const [bounced] = await parked('re_bounced');
+      await trx('stripe_failed_refunds').insert({ stripe_refund_id: 're_bounced', stripe_charge_id: 'ch_p' });
+      await parked('re_noted', { resolved: true, resolution_notes: 'Automatically resolved: refund re_noted FAILED at the bank - Stripe kept the money, no movement to reconcile' });
+      expect(bounced).toBeTruthy();
+      expect((await signals([visit])).get(visit)).toEqual([]);
+      // Reconciled successfully (resolved, no failure marker): still a refund that happened.
+      const [kept] = await parked('re_ok', { resolved: true, resolution_notes: 'Reconciled by the office' });
+      expect((await signals([visit])).get(visit)).toEqual([`orphan:${kept.id}`]);
+    });
+  });
+
+  describe('a refund an owner credit was set against, compared by equality (own week)', () => {
+    it('puts the owner\'s credit aside when a refund he saw is gone, and names that as the cause', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id);
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_payment_intent_id: 'pi_gone' });
+      const payment = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_gone', refund_amount: '10.00' });
+      expect((await override({ technicianId: id, visitId: visit, weekStart: W1, creditCents: 9000, reason: 'Refund was $10' })).status).toBe(200);
+      expect(rowOf(await preview(id, W1), visit)).toMatchObject({ kind: 'owner_set', creditCents: 9000 });
+      await trx('payments').where({ id: payment }).update({ refund_amount: '0.00' });
+      expect(rowOf(await preview(id, W1), visit)).toMatchObject({ kind: 'owner_override_refund_changed', creditCents: 0, reason: expect.stringMatching(/is gone/) });
     });
   });
 

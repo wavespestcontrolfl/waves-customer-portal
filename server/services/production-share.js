@@ -1035,12 +1035,18 @@ function applyLedger(rows, paid, overrides = new Map()) {
       return { ...review(row, 'owner_override_closeout_changed', 'The closeout of this stop changed since the owner set its credit (its work is no longer confirmed): clear that credit in the production share preview.'), overrideRevision: set.revision };
     }
     // A NEW conflict (an invoice or package of the stop paid elsewhere since the owner set the credit) is checked before the credit is used.
-    const added = tuples.filter((tuple) => !(set.conflictTuples || []).includes(tuple));
-    // A new REFUND signal says so (its own kind, the refund bell, a reason that names the refund); it comes first because the owner
-    // looks at the stop again either way.
-    if (added.some((tuple) => tuple.startsWith('refund:'))) {
-      return { ...review(row, 'owner_override_refund_changed', 'A new refund is recorded on this visit since the owner set its credit: clear that credit, then set it again in the production share preview.'), overrideRevision: set.revision, dependsOnRuns: dependsOnRunsOf(row) };
+    // The refund signals are compared by EQUALITY (a new one, or one the owner saw that is gone, puts his credit aside); every other
+    // conflict tuple (a paid row elsewhere) only by what is new.
+    const isRefund = (tuple) => tuple.startsWith('refund:');
+    const [storedRefunds, nowRefunds] = [(set.conflictTuples || []).filter(isRefund), tuples.filter(isRefund)];
+    const newRefund = nowRefunds.some((tuple) => !storedRefunds.includes(tuple));
+    if (newRefund || storedRefunds.some((tuple) => !nowRefunds.includes(tuple))) {
+      const reason = newRefund
+        ? 'A new refund is recorded on this visit since the owner set its credit: clear that credit, then set it again in the production share preview.'
+        : 'A refund the owner saw on this visit is gone since he set its credit: clear that credit, then set it again in the production share preview.';
+      return { ...review(row, 'owner_override_refund_changed', reason), overrideRevision: set.revision, dependsOnRuns: dependsOnRunsOf(row) };
     }
+    const added = tuples.filter((tuple) => !(set.conflictTuples || []).includes(tuple));
     if (added.length) {
       return { ...review(row, 'owner_override_conflict_changed', 'This stop, its invoice or its package was paid elsewhere since the owner set its credit: clear that credit and look at the stop again in the production share preview.'), overrideRevision: set.revision, dependsOnRuns: dependsOnRunsOf(row) };
     }

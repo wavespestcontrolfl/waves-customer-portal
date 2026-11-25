@@ -190,8 +190,23 @@ function StopCreditForm({ call, technicianId, weekStart, stop, generation, onCha
 
 // A refund on a stop a pay run already paid: the owner sets the TOTAL credit to take back for it (the code never works a refund out).
 // A paid stop with a new refund is listed with an empty box; a stop he answered keeps its row, with his total, so he can change or clear it.
+// Which paid visit a take-back row is: a short id, its service, window and completion time, and a link to the day it was scheduled for (the
+// schedule link the stop review rows use). A visit that is gone shows its id only.
+function PaidVisitReference({ row }) {
+  const visit = row.visit || {};
+  const parts = [`Visit ${String(row.visitId || '').slice(0, 8)}`];
+  if (visit.serviceType) parts.push(visit.serviceType);
+  if (visit.windowDisplay) parts.push(visit.windowDisplay);
+  if (visit.completedAt) parts.push(`done ${formatETTime(visit.completedAt)}`);
+  return <p className="m-0 mt-1 text-ui-caption text-ink-secondary" aria-label="Visit reference">
+    {parts.join(' · ')}
+    {visit.scheduledDate && <> · <a className="underline" href={`/admin/schedule?date=${encodeURIComponent(visit.scheduledDate)}`} target="_blank" rel="noreferrer">Open the day</a></>}
+  </p>;
+}
+
 function RefundTakeBackRow({ call, row, generation, onChanged }) {
-  const [text, setText] = useState(row.cents == null ? '' : centsToPlain(row.cents));
+  // A stop that needs an answer starts empty: the owner saves a new total against the refunds now.
+  const [text, setText] = useState(row.cents == null || row.isNew ? '' : centsToPlain(row.cents));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const cents = dollarsToCents(text);
@@ -208,10 +223,18 @@ function RefundTakeBackRow({ call, row, generation, onChanged }) {
     setBusy(false);
   }
   return <TR>
-    <TD>{dayLabel(row.workDate)}</TD>
+    <TD>
+      {dayLabel(row.workDate)}
+      <PaidVisitReference row={row} />
+    </TD>
     <TD>{dayLabel(row.paidWeekStart)}</TD>
     <TD nums align="right">{centsToDollars(row.creditCents)}</TD>
-    <TD>{row.isNew ? <span className="text-warn-fg">New refund</span> : 'Answered'}</TD>
+    <TD>
+      {row.isNew ? <span className="text-warn-fg">{row.reason === 'changed' ? 'A refund you answered changed' : 'New refund'}</span> : 'Answered'}
+      {row.isNew && row.previousCents != null && <p className="m-0 text-ui-caption text-ink-secondary">
+        Previous total {centsToDollars(row.previousCents)}. Nothing more is taken from this stop until you save a new total.
+      </p>}
+    </TD>
     <TD>
       <form className="flex flex-wrap items-end gap-2" aria-label="Set the refund take-back of this paid stop"
         onSubmit={event => { event.preventDefault(); run('PUT', { checkId: row.checkId, visitId: row.visitId, cents, signals: row.newSignals, answerRevision: row.answerRevision || 'none' }); }}>
@@ -238,7 +261,7 @@ function RefundTakeBacks({ call, preview, generation, onChanged }) {
     {rows.size > 0 && <Table aria-label="Paid stops with a refund">
       <THead><TR><TH>Visit day</TH><TH>Paid in week of</TH><TH align="right">Credit paid</TH><TH>State</TH><TH>Take-back</TH></TR></THead>
       <TBody>
-        {[...rows.values()].map(row => <RefundTakeBackRow key={`${row.checkId}:${row.visitId}:${row.cents}:${(row.newSignals || []).join(',')}`}
+        {[...rows.values()].map(row => <RefundTakeBackRow key={`${row.checkId}:${row.visitId}:${row.answerRevision}:${(row.newSignals || []).join(',')}`}
           call={call} row={row} generation={generation} onChanged={onChanged} />)}
       </TBody>
     </Table>}

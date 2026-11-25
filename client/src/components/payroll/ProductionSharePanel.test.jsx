@@ -114,7 +114,8 @@ describe('Production share preview', () => {
   });
 
   describe('refunds on paid stops', () => {
-    const toSet = { checkId: 'check-1', visitId: 'v-paid', workDate: '2026-09-08', paidWeekStart: '2026-09-07', creditCents: 100000, newSignals: ['pay:x:3000'], answerRevision: 'none' };
+    const toSet = { checkId: 'check-1', visitId: 'v-paid', workDate: '2026-09-08', paidWeekStart: '2026-09-07', creditCents: 100000, newSignals: ['pay:x:3000'], answerRevision: 'none', reason: 'new', previousCents: null,
+      visit: { serviceType: 'Pest Control', scheduledDate: '2026-09-08', windowDisplay: '9-11 AM', completedAt: '2026-09-08T15:10:00.000Z' } };
     const open = async (patch) => {
       const call = vi.fn(async (path) => (path.startsWith('/production-share/preview') ? answerFor(path, patch) : {}));
       render(<ProductionSharePanel call={call} technicians={TECHS} />);
@@ -139,6 +140,20 @@ describe('Production share preview', () => {
         .toEqual({ checkId: 'check-1', visitId: 'v-paid', cents: 30000, signals: ['pay:x:3000'], answerRevision: 'none' });
       // The week is read again after a save.
       await waitFor(() => expect(call.mock.calls.filter(([path]) => path.startsWith('/production-share/preview')).length).toBe(2));
+    });
+
+    it('tells paid visits apart: id, service, window, completion time and a link to the day', async () => {
+      await open({ takeBackToSet: [toSet], takeBackAnswers: [], takeBacks: [] });
+      const reference = screen.getByText(/Visit v-paid · Pest Control · 9-11 AM · done /).closest('p');
+      expect(within(reference).getByRole('link', { name: 'Open the day' })).toHaveAttribute('href', '/admin/schedule?date=2026-09-08');
+    });
+
+    it('shows the previous total and says nothing more is taken when an answered refund changed', async () => {
+      const answered = { ...toSet, cents: 30000, signals: ['pay:x:3000'], newSignals: [] };
+      await open({ takeBackToSet: [{ ...toSet, newSignals: [], reason: 'changed', previousCents: 30000, answerRevision: '7:t' }], takeBackAnswers: [{ ...answered, answerRevision: '7:t' }], takeBacks: [] });
+      expect(screen.getByText('A refund you answered changed')).toBeInTheDocument();
+      expect(screen.getByText(/Previous total \$300\.00\. Nothing more is taken from this stop until you save a new total\./)).toBeInTheDocument();
+      expect(screen.getByLabelText('Take back ($, up to the credit paid)')).toHaveValue('');
     });
 
     it('keeps an answered stop with the total he set, lets him clear it, and says what was taken or given back', async () => {

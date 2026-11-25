@@ -10,8 +10,8 @@
  *    override's conflict tuples, so an override set before a new signal is no longer used.
  * 3. Paid week. A finalized check freezes the signals of each paid stop (stops[].refundSignals). Later, a signal that is not in that
  *    list is a NEW refund on a paid stop: the stop is listed (takeBackToSet) until the owner answers with a TOTAL to take back for it
- *    (production_share_refund_take_backs, 0 up to the credit the check paid). An answer covers the signals it names; a later signal
- *    outside them lists the stop again.
+ *    (production_share_refund_take_backs, 0 up to the credit the check paid). An answer stores exactly the signals the owner saw and
+ *    is in force only while the signals now equal them (a new one, or a covered one gone, lists the stop again).
  * 4. Ledger. For each answered source (check id, visit id): moved = the owner's total minus the sum of the takeBacks entries finalized
  *    checks already hold for that same source. A positive amount comes off the week's credited production (oldest paid week first), never
  *    below $0: what does not fit stays owed and is moved next week. A negative amount (the owner lowered or cleared the total) adds credit
@@ -30,7 +30,8 @@
  *                                            second refund on the same payment row is a new signal.
  *   stmt:<payment id>:<refunded cents>       a refund on a payer-statement payment (payments.statement_id) whose statement covers the invoice
  *   orphan:<stripe_orphan_charges id>        a parked or unattributed refund (stripe-webhook.js parks partial refunds on combined and
- *                                            statement charges there) for the invoice, its payment intent or its charge
+ *                                            statement charges there) for the invoice, its payment intent or its charge; not one the bank
+ *                                            bounced (stripe_failed_refunds holds its refund id, or the case was resolved "FAILED at the bank")
  *   credit:<customer_credit_ledger id>       account credit returned on the invoice by a refund
  *   inv-refunded:<invoice id>                the invoice status is 'refunded'
  * A take-back SOURCE is exactly what paidLedger (production-share.js) counts as paid: a stop row with creditCents > 0 on a finalized check
@@ -39,6 +40,10 @@
  * latter also holding an annual term's prepay invoice) UNION the live visit links, so a deleted visit or a relinked invoice still asks.
  * pay and stmt signals carry the Stripe refund identity when the webhooks recorded it (payments.stripe_refund_id and
  * metadata.stamped_refund_ids): a failed refund followed by a new one of the same amount is a new signal. Legacy rows fall back to cents.
+ * ONE RULE for an owner answer: it is IN FORCE only while the current signals of its source (the refund signals now, minus the ones the
+ * check froze) EQUAL the signals it stored, which are exactly the ones the owner saw. Any difference, a new signal or a covered signal
+ * gone (a refund reversed), lists the source in takeBackToSet again (reason 'new' or 'changed', the answer shown as the previous total),
+ * moves nothing from it (a 0 entry keeps its dependency) and rings the bell, until the owner saves a new answer against the signals now.
  * Every owner mutation names the answer it was shown (answerRevision, 'none' when there is no answer) and is refused (409) when the
  * stored answer is another one, under the payroll lock; the answers a week used are frozen in its snapshot and in its review token.
  * Same gate as the share: GATE_PAYROLL_PRODUCTION_SHARE. No new gate.
@@ -53,6 +58,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MAX_CENTS = 100000000;
 const PACKAGE_DEPTH = 12;
 const canonicalId = (id) => (id == null ? id : String(id).toLowerCase());
+const sameList = (a, b) => a.length === b.length && a.every((value, index) => value === b[index]);
 
 // ---------------------------------------------------------------- signals
 
@@ -152,7 +158,12 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
       JOIN stripe_orphan_charges o ON (o.invoice_id = v.invoice_id
         OR (o.stripe_charge_id IS NOT NULL AND o.stripe_charge_id IN (SELECT k.ch FROM keys k WHERE k.invoice_id = v.invoice_id))
         OR split_part(o.stripe_payment_intent_id, ':', 1) IN (SELECT k.pi FROM keys k WHERE k.invoice_id = v.invoice_id))
-      WHERE o.original_db_error ILIKE '%refund%' OR o.stripe_payment_intent_id LIKE '%:partial-refund:%'
+      WHERE (o.original_db_error ILIKE '%refund%' OR o.stripe_payment_intent_id LIKE '%:partial-refund:%')
+        -- A parked refund the bank bounced is no refund: the webhook fences its id in stripe_failed_refunds and resolves the case with
+        -- 'FAILED at the bank' (Stripe kept the money). A parked refund that was reconciled successfully keeps its signal.
+        AND NOT (o.stripe_payment_intent_id LIKE '%:partial-refund:%' AND EXISTS (
+          SELECT 1 FROM stripe_failed_refunds ff WHERE ff.stripe_refund_id = split_part(o.stripe_payment_intent_id, ':partial-refund:', 2)))
+        AND NOT (o.resolved AND COALESCE(o.resolution_notes, '') ILIKE '%FAILED at the bank%')
       UNION
       SELECT v.origin, 'credit:' || l.id::text
       FROM invs v
@@ -253,18 +264,33 @@ const byWeekVisit = (a, b) => {
   return x < y ? -1 : (x > y ? 1 : 0);
 };
 
+// The take-back to set for a source whose answer is not in force: 'new' when a signal is new (or there is no answer), 'changed' when only a
+// covered one is gone. null when nothing needs an answer (no signals and no answer, or an answer in force).
+function reopenOf(current, answer) {
+  if (answer && sameList(current, answer.signals)) return null;
+  if (!answer) return current.length ? { reason: 'new', previousCents: null } : null;
+  return { reason: current.some((id) => !answer.signals.includes(id)) ? 'new' : 'changed', previousCents: answer.cents };
+}
+
+// What a source moves this week: no answer (cleared) is a target of 0, so what was taken is given back; an answer that is not in force
+// moves nothing.
+const deltaOf = (answer, inForce, history) => (answer && !inForce ? 0 : (answer ? answer.cents : 0) - (history ? history.cents : 0));
+
 // One paid stop row against the refund signals now, the owner's answer and what finalized weeks took: fills the technician's lists.
-function addSource(mine, row, { signals, answer, history }) {
+// An answer is in force only while the signals now (minus the frozen ones) equal the ones it stored; otherwise the source is listed again
+// (reopenOf) and moves nothing until the owner answers again.
+function addSource(mine, row, { signals, answer, history, visit }) {
   const frozen = new Set(row.frozen);
-  const newSignals = signals.filter((id) => !frozen.has(id));
+  const current = signals.filter((id) => !frozen.has(id));
   const where = {
     checkId: canonicalId(row.check_id), visitId: canonicalId(row.visit_id), workDate: row.work_date || null, paidWeekStart: row.week_start,
-    creditCents: Number(row.credit_cents), answerRevision: answer ? answer.revision : NO_ANSWER,
+    creditCents: Number(row.credit_cents), answerRevision: answer ? answer.revision : NO_ANSWER, visit: visit || null,
   };
-  if (newSignals.length && !(answer && newSignals.every((id) => answer.signals.includes(id)))) mine.toSet.push({ ...where, newSignals });
-  if (answer) mine.answers.push({ ...where, id: answer.id, cents: answer.cents, note: answer.note, signals: answer.signals, newSignals, updatedAt: answer.updatedAt, revision: answer.revision });
+  const reopen = reopenOf(current, answer);
+  if (reopen) mine.toSet.push({ ...where, newSignals: current, ...reopen });
+  if (answer) mine.answers.push({ ...where, id: answer.id, cents: answer.cents, note: answer.note, signals: answer.signals, newSignals: current, updatedAt: answer.updatedAt, revision: answer.revision, inForce: !reopen });
   if (!answer && !history) return;
-  const delta = (answer ? answer.cents : 0) - (history ? history.cents : 0);
+  const delta = deltaOf(answer, !reopen, history);
   // ONE RULE for dependencies: a source with any finalized history is evaluated every week; its entry (0 cents when nothing moves)
   // carries the run of the source check and every run that holds an entry for it.
   if (delta === 0 && !(history && history.runs.size)) return;
@@ -274,11 +300,21 @@ function addSource(mine, row, { signals, answer, history }) {
   });
 }
 
+// What tells two stops apart on the page: service type, scheduled day, window and completion time (no customer data). A deleted visit has none.
+async function visitsOf(conn, visitIds) {
+  const rows = await conn('scheduled_services').whereIn('id', visitIds)
+    .select('id', 'service_type', 'window_display', 'completed_at', conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS scheduled_date"));
+  return new Map(rows.map((row) => [canonicalId(row.id), {
+    serviceType: row.service_type || null, scheduledDate: row.scheduled_date, windowDisplay: row.window_display || null,
+    completedAt: row.completed_at ? new Date(row.completed_at).toISOString() : null,
+  }]));
+}
+
 /**
  * What the paid weeks ask of a week and what the owner answered, per technician (the one the CHECK paid, whoever holds the visit now):
  * Map id -> { owed, toSet, answers }.
- *   toSet:   [{ checkId, visitId, workDate, paidWeekStart, creditCents, newSignals }] paid stops with a refund signal the check did not
- *            freeze and no answer covers.
+ *   toSet:   [{ checkId, visitId, workDate, paidWeekStart, creditCents, newSignals, reason: 'new' | 'changed', previousCents, answerRevision,
+ *            visit }] paid stops whose signals now (minus the frozen ones) are not the ones an answer stored, or that have no answer.
  *   answers: [{ checkId, visitId, workDate, paidWeekStart, creditCents, cents, note, signals, newSignals, id, updatedAt }] the owner's answers.
  *   owed:    [{ visitId, sourceCheckId, paidWeekStart, workDate, cents, dependsOnRuns }] (signed) what the week moves: the answer minus
  *            what finalized checks already took for that source; a 0 entry for a source with finalized history, to keep its dependency.
@@ -293,14 +329,15 @@ async function refundLedgerOf(conn, technicianIds, weekStart) {
   // The invoices the paid rows froze count with the live links of the visit: a deleted visit or a relinked invoice still asks.
   const frozenInvoices = new Map();
   for (const row of paid) frozenInvoices.set(canonicalId(row.visit_id), [...(frozenInvoices.get(canonicalId(row.visit_id)) || []), ...frozenInvoicesOf(row)]);
-  const [signals, answers, taken] = await Promise.all([
+  const [signals, answers, taken, visits] = await Promise.all([
     refundSignalsOf(conn, visitIds, frozenInvoices), answersOf(conn, technicianIds, weekStart), takenBackOf(conn, visitIds, weekStart),
+    visitsOf(conn, visitIds),
   ]);
   for (const row of paid) {
     const mine = out.get(canonicalId(row.technician_id));
     if (!mine) continue;
     const key = sourceKey(row.check_id, row.visit_id);
-    addSource(mine, row, { signals: signals.get(canonicalId(row.visit_id)) || [], answer: answers.get(key), history: taken.get(key) });
+    addSource(mine, row, { signals: signals.get(canonicalId(row.visit_id)) || [], answer: answers.get(key), history: taken.get(key), visit: visits.get(canonicalId(row.visit_id)) });
   }
   return out;
 }
@@ -373,8 +410,6 @@ function requireSameAnswer(stored, revision) {
   if (answerRevisionOf(stored) !== revision) throw new PayrollError(409, 'The take-back for this stop changed since you loaded the week. Reload the week and look at it again.');
 }
 
-const sameList = (a, b) => a.length === b.length && a.every((value, index) => value === b[index]);
-
 /**
  * Sets the TOTAL credit to take back for one paid stop (the owner account's alone; the route checks it), replacing an earlier answer. The
  * check must be final and the total 0 up to the credit it paid for the stop. The page sends the signals it saw: refused (409) when the
@@ -398,8 +433,8 @@ async function setRefundTakeBack(input, actor, conn = db) {
     const current = ((await refundSignalsOf(trx, [visitId], frozenInvoices)).get(visitId) || []).filter((id) => !frozen.has(id));
     if (!current.length && !before) throw new PayrollError(409, 'No new refund is recorded on this stop.');
     if (!sameList([...v.signals].sort(), current)) throw new PayrollError(409, 'The refunds on this stop changed since you loaded the week. Reload the week and look at it again.');
-    // The answer covers every signal it saw and every one an earlier answer covered.
-    const signals = [...new Set([...current, ...(before && Array.isArray(before.signals) ? before.signals : [])])].sort();
+    // The answer stores exactly the signals the owner saw (the ones now): it is in force only while they stay the same.
+    const signals = current;
     await trx('production_share_refund_take_backs').insert({
       source_check_id: checkId, visit_id: visitId, signals: JSON.stringify(signals), cents: v.cents, note: v.note || null,
       set_by: actorId, set_at: trx.fn.now(), updated_at: trx.fn.now(),

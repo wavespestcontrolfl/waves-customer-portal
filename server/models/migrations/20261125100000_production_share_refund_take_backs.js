@@ -4,7 +4,7 @@
  * share week takes back.
  *   source_check_id  the finalized payroll check whose frozen stop row paid the credit (payroll_checks.id)
  *   visit_id         the visit of that stop row (scheduled_services.id; no foreign key: a deleted visit must not block payroll evidence)
- *   signals          the sorted refund signal ids the answer covers (jsonb array of text). A later signal outside them lists the stop again.
+ *   signals          the sorted refund signal ids the owner saw when he answered (jsonb array of text). The answer is in force only while the stop's signals now equal them.
  *   cents            the TOTAL credit to take back for that paid stop, 0 up to the credit the check paid (the service enforces the cap)
  *   note             the owner's words, optional
  *   set_by           the admin who set it

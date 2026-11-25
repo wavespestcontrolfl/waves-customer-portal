@@ -20,6 +20,11 @@ const KINDS = {
     why: 'A refund landed on a stop a pay run already paid; open the production share preview.',
     doneWhen: 'take_back_set',
   },
+  changed: {
+    action: 'check the take-back after a refund change',
+    why: 'A refund you answered changed on a paid stop, so nothing more is taken; open the production share preview.',
+    doneWhen: 'take_back_set',
+  },
   own: {
     action: 'set the production share credit for a refund',
     why: 'A refund is on a stop in a share week not yet paid; open the production share preview.',
@@ -30,8 +35,11 @@ const KINDS = {
 // The refund flags in a technician's week: [{ kind: 'own' | 'paid', visitId, signals }]. Pure.
 function flagsOf({ stops = [], takeBackToSet = [] }) {
   return [
-    ...stops.filter((stop) => OWN_KINDS.has(stop.kind)).map((stop) => ({ kind: 'own', visitId: stop.visitId, signals: stop.refundSignals || [] })),
-    ...takeBackToSet.map((one) => ({ kind: 'paid', visitId: one.visitId, signals: one.newSignals || [] })),
+    // The stop's kind and the answer revision are in the key, so the same refund rings once and a changed state rings again.
+    ...stops.filter((stop) => OWN_KINDS.has(stop.kind)).map((stop) => ({ kind: 'own', visitId: stop.visitId, signals: [...(stop.refundSignals || []), `kind:${stop.kind}`] })),
+    ...takeBackToSet.map((one) => ({
+      kind: one.reason === 'changed' ? 'changed' : 'paid', visitId: one.visitId, signals: [...(one.newSignals || []), `answer:${one.answerRevision || 'none'}`],
+    })),
   ];
 }
 
