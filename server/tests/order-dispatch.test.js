@@ -420,6 +420,16 @@ test('an ambiguous submit whose vendor response carried no order number persists
   expect(parkedRow.external_order_number).toBeNull();
 });
 
+test('a confirmed order whose total differed parks at the CONFIRMED amount with its order number on the ledger and the audit', async () => {
+  const err = new Error('SiteOne order 7700123 was placed, but its confirmation total differs'); err.ambiguous = true; err.cents = 32080; err.externalOrderNumber = '7700123';
+  const r = await run(mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async () => { throw err; }) }));
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
+  const parkedRow = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review').pop().row;
+  expect(parkedRow.amount_cents).toBe(32080);
+  expect(parkedRow.external_order_number).toBe('7700123');
+  expect(auditVendorOrder.mock.calls[0][0]).toMatchObject({ external_order_number: '7700123', amount_cents: 32080 });
+});
+
 test('ambiguous post-submit error → needs_review, never retried', async () => {
   const err = new Error('504 after POST'); err.ambiguous = true;
   expect(await run(mockAdapter({ place: jest.fn(async () => { throw err; }) }))).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
