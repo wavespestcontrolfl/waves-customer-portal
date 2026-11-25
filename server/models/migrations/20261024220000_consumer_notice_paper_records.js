@@ -1,5 +1,5 @@
 /**
- * Paper FDACS-13692 consumer notices (owner 2026-10-24).
+ * Paper FDACS-13692 consumer notices (GATE_WARRANTY_13692_CHECK, owner 2026-10-24).
  *
  * Rule 5E-14.105(1), F.A.C.: the owner or authorized agent signs the Consumer Notice Form FDACS-13692 before a
  * wood-destroying-organism contract. A customer who signed the paper form has no e-signed contract row, so the office
