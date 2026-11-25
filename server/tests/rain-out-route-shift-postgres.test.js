@@ -187,6 +187,25 @@ postgres('the stops a rest-of-route move would land outside the shift (real Post
       expect(await check(anchor, laterDay, '15:00', '15:30')).not.toHaveProperty('shiftWarning');
     });
 
+    test('the tapped stop: a recurring visit\'s day move is judged on the hour the commit books', async () => {
+      const technicianId = await makeTech();
+      const line = await lineOf(technicianId);
+      const anchor = await makeStop(technicianId, '09:00', '10:00', { is_recurring: true });
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      try {
+        // The commit books 16:30 on another day as 16:00 to 17:00, which the shift holds; 17:30 as 17:00 to 18:00.
+        expect(await check(anchor, laterDay, '16:30', '17:30')).not.toHaveProperty('shiftWarning');
+        expect((await check(anchor, laterDay, '17:30', '18:30')).shiftWarning).toBe(line);
+        // A later hour today is no day move: the picked window books as it is.
+        expect((await check(anchor, today, '16:30', '17:30')).shiftWarning).toBe(line);
+        // A visit that is not recurring books the picked window.
+        await db('scheduled_services').where({ id: anchor }).update({ is_recurring: false });
+        expect((await check(anchor, laterDay, '16:30', '17:30')).shiftWarning).toBe(line);
+      } finally {
+        delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+      }
+    });
+
     test('the tapped stop: no line on a day the technician does not work, with no set hours, or with the gate off', async () => {
       process.env.GATE_TECH_WORK_DAYS = 'true';
       const weekday = weekdayOf(laterDay);

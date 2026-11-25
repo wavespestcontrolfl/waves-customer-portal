@@ -3610,6 +3610,34 @@ describe('rain-out service', () => {
         expect(await check(target)).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
         expect(db.mock.calls.map(([table]) => table)).toEqual(['scheduled_services', 'scheduled_services']);
       });
+
+      // commit() books a recurring visit's day move on the hour (bookedTarget, GATE_COLLECTIVE_SERIES_ANCHOR),
+      // and the office's line after the tap is about the window it wrote: the line before the tap asks about that window.
+      describe('the window the commit books', () => {
+        afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
+        // The visit is on 2031-03-06; 08:30 on another day is an off-hour start.
+        const offHour = { date: '2031-03-07', window: { start: '08:30', end: '09:30' } };
+        const picked = { window_start: '08:30', window_end: '09:30', estimated_duration_minutes: 90 };
+        const asked = async (to, service) => {
+          reader.mockClear();
+          await check(to, service);
+          return reader.mock.calls[0][1][0].block;
+        };
+
+        test('a recurring visit moved to another day at an off-hour start is asked about on the hour', async () => {
+          process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+          expect(await asked(offHour, { is_recurring: true })).toEqual({ window_start: '08:00', window_end: '09:00', estimated_duration_minutes: 90 });
+        });
+
+        test('the picked window stands: the series gate off, a visit that is not recurring, the same day, a start on the hour', async () => {
+          expect(await asked(offHour, { is_recurring: true })).toEqual(picked);
+          process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+          expect(await asked(offHour, { is_recurring: false })).toEqual(picked);
+          expect(await asked({ ...offHour, date: '2031-03-06' }, { is_recurring: true })).toEqual(picked);
+          expect(await asked({ date: '2031-03-07', window: { start: '09:00', end: '11:00' } }, { is_recurring: true }))
+            .toEqual({ window_start: '09:00', window_end: '11:00', estimated_duration_minutes: 90 });
+        });
+      });
     });
 
     describe('route scope: the stops a move would land outside the shift', () => {

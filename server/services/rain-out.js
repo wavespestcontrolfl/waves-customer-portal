@@ -868,6 +868,23 @@ function oneHourWindow(startHHMM) {
   };
 }
 
+// The target a move of `service` books: `target`, or the same day with its
+// on-the-hour block. Owner rule: windows are ALWAYS on the hour. The series
+// mover writes its anchor's start to every shifted occurrence, so an off-hour
+// TECH-SUPPLIED target (custom input passes the routes' date-only validation)
+// would mint a whole off-hour series — normalize through the same on-the-hour
+// block the options sheet books (codex P1). Scoped to the rain-out's own
+// anchor on a day move (`anchorDateStr` is the date it is on): route SIBLINGS
+// keep their existing windows, and rounding a legacy half-hour window would
+// silently shift that customer's time. commit() books this target; a read that
+// says what the commit would state (checkTarget's shift line) asks about it too.
+function bookedTarget(service, target, anchorDateStr) {
+  const offHour = (hhmmToMinutes(target.window.start) ?? 0) % 60 !== 0;
+  return process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true' && !!service.is_recurring && String(target.date) !== anchorDateStr && offHour
+    ? { ...target, window: oneHourWindow(target.window.start) }
+    : target;
+}
+
 async function loadServiceWithCustomer(serviceId) {
   return db('scheduled_services')
     .where('scheduled_services.id', serviceId)
@@ -1578,7 +1595,7 @@ async function checkTarget({ serviceId, target, caller = null, reasonCode = null
     // occupied span, not just its start — a sibling can land on the row the
     // anchor has not vacated yet.
     .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
-      'estimated_duration_minutes', 'route_order');
+      'estimated_duration_minutes', 'route_order', 'is_recurring');
   if (!service) return { ok: false, reason: 'not_found' };
   // Route siblings flagged (not excluded) so one response serves both
   // scopes — the sheet filters by its live scope toggle without refetching.
@@ -1611,8 +1628,10 @@ async function checkTarget({ serviceId, target, caller = null, reasonCode = null
     logger.info(`[rain-out] route-scope conflict probe failed for ${serviceId}: ${err.message}`);
   }
   // The one caller is the office's sheet (admin-dispatch target-check), whose move commits as the office:
-  // the tapped stop's own shift line, and the rows of the rest of the route.
-  const [shiftWarning] = await pickedShiftLines([{ technicianId: service.technician_id, date: targetDate, block: pickedBlock(target.window, service.estimated_duration_minutes) }]);
+  // the tapped stop's own shift line, and the rows of the rest of the route. The line is about the window
+  // the commit books (bookedTarget: a recurring visit's day move lands on the hour), as commit() reads it.
+  const booked = bookedTarget(service, { date: targetDate, window: target.window }, dateOnlyString(service.scheduled_date) || etDateString());
+  const [shiftWarning] = await pickedShiftLines([{ technicianId: service.technician_id, date: targetDate, block: pickedBlock(booked.window, service.estimated_duration_minutes) }]);
   return {
     ok: true, conflicts, routeConflicts, ...(shiftWarning ? { shiftWarning } : {}),
     ...(await routeShiftRows(service, route, { office: true }))(target),
@@ -2546,23 +2565,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         ? service.scheduled_date.toISOString()
         : service.scheduled_date).slice(0, 10)
     : todayStr;
-  // Owner rule: windows are ALWAYS on the hour. The series mover writes
-  // its anchor's start to every shifted occurrence, so an off-hour
-  // TECH-SUPPLIED target (custom input passes the routes' date-only
-  // validation) would mint a whole off-hour series — normalize through
-  // the same on-the-hour block the options sheet books (codex P1).
-  // Hoisted ABOVE the custom-move pre-render: everything downstream —
-  // the prebuilt SMS body included — must see the window that actually
-  // books, or the text quotes a time the schedule doesn't hold (codex
-  // r2 P1). Scoped to the rain-out's own anchor: route SIBLINGS keep
-  // their existing windows on a day move, and rounding a legacy
-  // half-hour window would silently shift that customer's time.
-  if (process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
-    && !!service.is_recurring
-    && String(target.date) !== anchorDateStr
-    && (hhmmToMinutes(target.window.start) ?? 0) % 60 !== 0) {
-    target = { ...target, window: oneHourWindow(target.window.start) };
-  }
+  // The window that books (bookedTarget). Hoisted ABOVE the custom-move
+  // pre-render: everything downstream — the prebuilt SMS body included —
+  // must see the window that actually books, or the text quotes a time the
+  // schedule doesn't hold (codex r2 P1).
+  target = bookedTarget(service, target, anchorDateStr);
   // A no-show is about THIS customer only — route scope would move every
   // remaining stop, text each unrelated customer "we missed you", and stamp
   // each with a customer_noshow log row that counts toward the
