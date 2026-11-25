@@ -147,6 +147,8 @@ const SELECTORS = Object.freeze({
   // UNVERIFIED: the confirmation page's own order-number node. Without it the
   // number comes from the confirmation URL's <code> segment.
   confirmationNumber: '[data-test="order-number"], .order-confirmation__number, .confirmation-number',
+  // UNVERIFIED (first live order shows it): the order total on the confirmation page.
+  confirmationTotal: '[data-test="order-total"], .order-confirmation__total, [class*="order-total" i]',
   placeOrder: 'button#placeOrder, #placeOrder2',
   body: 'body',
   heading: 'h1',
@@ -352,6 +354,20 @@ const READ_ROW_AND_LINK = ([row, link, qtySel]) => {
 
 // The row is exactly what this run added: our item, the cart entry verified
 // after the add, and the quantity we set. No verified entry id → never ours.
+// Ownership proven and the remove link clicked in ONE browser task: the row cannot change between
+// the check and the click (an in-place quantity edit from the owner's phone app is never removed).
+const REMOVE_IF_OWN = ([row, link, qtySel, want]) => {
+  if (!(row.isConnected && link.isConnected && row.contains(link))) return { clicked: false };
+  const q = row.querySelector(qtySel);
+  const qtys = [String(row.getAttribute('data-requestedqty') || '').trim(), q ? String(q.value).trim() : ''].filter((x) => x !== '');
+  const own = String(row.getAttribute('data-cartentry') || '').trim() === want.entry
+    && String(row.getAttribute('data-itemnumber') || '').trim() === want.sku
+    && qtys.length > 0 && qtys.every((x) => Number(x) === want.qty);
+  if (!own) return { clicked: false };
+  link.click();
+  return { clicked: true };
+};
+
 function isOwnRow(run, reading) {
   const qtys = [reading.requested, reading.inputQty].filter((q) => q != null && q !== '');
   return !!run.ownEntry && reading.entry === run.ownEntry && reading.sku === run.vendorSku
@@ -389,7 +405,11 @@ async function removeOwnRow(run) {
     now = await page.evaluate(READ_ROW_AND_LINK, [rowHandle, linkHandle, SELECTORS.cartQtyInput]);
   } catch { leaveCart(run, 'cart_left_for_owner'); return; }
   if (!now.linked || !isOwnRow(run, now)) { leaveCart(run, 'cart_left_for_owner'); return; }
-  await linkHandle.click({ force: true, noWaitAfter: true, timeout: 1000 });
+  let removed;
+  try {
+    removed = await page.evaluate(REMOVE_IF_OWN, [rowHandle, linkHandle, SELECTORS.cartQtyInput, { entry: run.ownEntry, sku: run.vendorSku, qty: run.quantity }]);
+  } catch { removed = null; }
+  if (!removed || removed.clicked !== true) { leaveCart(run, 'cart_left_for_owner'); return; }
   await page.waitForTimeout(run.opts.settleMs);
   const gone = await poll(page, async () => {
     await openPage(run, URLS.cart, PATHS.cart);
@@ -701,7 +721,8 @@ function numberTokens(text) {
 
 // Order numbers after a confirmation label that are NOT in `exclude`
 // (the review page's own strings and our PO); one distinct candidate or none.
-const CONFIRMATION_RE = /(?:order\s*(?:#|number|no\.?|id)|confirmation(?:\s*(?:#|number|no\.?|id))?)\s*[:#]?\s*([A-Z0-9][A-Z0-9-]{3,19})/gi;
+// The whole identifier must match: an overlength number never matches by its prefix.
+const CONFIRMATION_RE = /(?:order\s*(?:#|number|no\.?|id)|confirmation(?:\s*(?:#|number|no\.?|id))?)\s*[:#]?\s*([A-Z0-9][A-Z0-9-]{3,19})(?![A-Z0-9-])/gi;
 function orderNumberIn(text, exclude = []) {
   const skip = new Set([...(typeof exclude === 'string' ? [exclude] : (exclude || []))].filter(Boolean).map((x) => String(x).toUpperCase()));
   const found = new Set();
@@ -830,6 +851,22 @@ async function bindReviewFields(run, first) {
   return fields;
 }
 
+// The cart is shared with the owner's phone app, and SiteOne submits ITS server-side cart: an edit
+// from the phone in the last moments before the click cannot be seen in this page. So the placed
+// order's own total, on the confirmation page, must equal the approved total. A different or
+// unreadable total parks the order for a person (needs_review, with its order number), never
+// records it as placed at the approved amount.
+async function provePlacedTotal(run, number, approvedCents) {
+  const evidence = { ...run.evidence, confirmed: true, externalOrderNumber: number };
+  const nodes = await shownAll(run.page, SELECTORS.confirmationTotal).catch(() => []);
+  const placedCents = nodes.length === 1 ? parseMoney(String(await nodes[0].innerText().catch(() => '')).trim()) : null;
+  evidence.confirmationTotalCents = placedCents;
+  if (placedCents !== approvedCents) {
+    throw ambiguousError(`SiteOne order ${number} was placed, but its confirmation total ${placedCents == null ? 'could not be read' : `(${(placedCents / 100).toFixed(2)})`} is not the approved total (${(approvedCents / 100).toFixed(2)}) — check the order with the vendor`, evidence);
+  }
+  return { externalOrderNumber: number, amountCents: approvedCents, evidence, dryRun: false };
+}
+
 // From the click on, every failure is ambiguous: the order may exist.
 async function clickPlaceOrder(run, bound) {
   const { page, poNumber } = run;
@@ -861,8 +898,9 @@ async function clickPlaceOrder(run, bound) {
   run.submitted = true;
   try {
     const number = await poll(page, () => readConfirmation(run, bound.baseline), CONFIRMATION_WAIT, run.opts.confirmStep);
-    if (number) return { externalOrderNumber: number, amountCents: bound.totalCents, evidence: { ...run.evidence, confirmed: true }, dryRun: false };
+    if (number) return await provePlacedTotal(run, number, bound.totalCents);
   } catch (err) {
+    if (err.ambiguous && err.evidence) throw err; // already classified, with its own evidence (provePlacedTotal)
     throw ambiguousError(`SiteOne Place order was clicked and failed after it: ${String(err.message).slice(0, 120)} — verify with the vendor`, { ...(await afterClickEvidence(page, poNumber).catch(() => ({ poNumber: poNumber || null }))), error: String(err.message).slice(0, 120) });
   }
   throw ambiguousError('SiteOne Place order was clicked but no new order number was found on a confirmation page — verify with the vendor', await afterClickEvidence(page, poNumber).catch(() => ({ poNumber: poNumber || null })));

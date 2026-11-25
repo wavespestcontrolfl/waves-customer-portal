@@ -17,7 +17,12 @@
  * Exit: 0 = ran (orders placed, parked or nothing to do), 1 = failed (Chrome unreachable, DB, any
  * unrecorded outcome). Prints one summary line.
  *
- * Usage (from the server directory, inside the Railway env): node scripts/siteone-mac-order-run.js
+ * Database: Railway's DATABASE_URL for the portal is a private host the Mac cannot reach. The Mac
+ * wrapper (outside the repo) sets DATABASE_URL to DATABASE_PUBLIC_URL before this script starts, and
+ * fails the run (exit 1, the failure bell) when no public URL is in the env.
+ *
+ * Usage (from the server directory, inside the Railway env, DATABASE_URL = the public URL):
+ *   node scripts/siteone-mac-order-run.js
  */
 const logger = require('../services/logger');
 

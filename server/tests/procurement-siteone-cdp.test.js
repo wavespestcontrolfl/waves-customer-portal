@@ -42,7 +42,7 @@ function makeWorld(over = {}) {
     reviewAccountText: 'Bill to account 5550123', hideReviewAccount: false, locators: [],
     checkoutUrl: null, confirmUrl: null, reviewCode: `Item # : ${SKU}`, reviewQtyText: 'Qty: 2',
     reviewQtyNode: true, closeOrder: [], reviewTotalText: '$110.40', placeButtons: 1, cardField: false, noRadioCheck: false,
-    confirmationBody: 'Order Number: 7700123', noConfirmation: false, placeClickThrows: false, placed: 0, qty: 0,
+    confirmationBody: 'Order Number: 7700123', confirmTotalText: '$110.40', noConfirmation: false, placeClickThrows: false, placed: 0, qty: 0,
     ...over,
   };
   w.cartRowEls = () => w.cart.map((row) => el({
@@ -134,7 +134,7 @@ function screens(w) {
     [S.reviewTotal]: [rv.total],
     [S.placeOrder]: placeBtns(),
   };
-  const confirmation = { [S.body]: [el({ text: w.confirmationBody })], ...(w.confirmationField ? { [S.confirmationNumber]: [el({ text: w.confirmationBody })] } : {}), [S.heading]: [el({ text: 'Order Received' })] };
+  const confirmation = { [S.body]: [el({ text: w.confirmationBody })], ...(w.confirmationField ? { [S.confirmationNumber]: [el({ text: w.confirmationBody })] } : {}), [S.heading]: [el({ text: 'Order Received' })], [S.confirmationTotal]: w.confirmTotalText == null ? [] : [el({ text: w.confirmTotalText })] };
   const product = {
     [S.accountNode]: (w.productAccountText ?? w.accountText) === '' ? [] : [el({ text: w.productAccountText ?? w.accountText, attrs: w.accountAttr ? { 'data-account-number': w.accountAttr } : {} })],
     [S.brandItemNumber]: [el({ text: w.brandText })],
@@ -960,7 +960,7 @@ test('R7 money: the WHOLE text must be one amount with exactly two decimals', as
   const review = await run({ reviewTotalText: '$1 250.00' });
   expect(review.error.refuse).toBe('review_total_unreadable');
   expect(review.w.placed).toBe(0);
-  expect((await run({ reviewTotalText: '$1,250.00' })).result.amountCents).toBe(125000);
+  expect((await run({ reviewTotalText: '$1,250.00', confirmTotalText: '$1,250.00' })).result.amountCents).toBe(125000);
   for (const r of [cart, review]) { expect(r.w.cart).toEqual([]); expectSafe(r.w); }
 });
 
@@ -982,11 +982,42 @@ test('R7 account: re-proven on the product page before Add to Cart and on the ch
   for (const r of [product, productGone, checkout]) expectSafe(r.w);
 });
 
+test('R12 cleanup: a quantity edited in place between the last check and the remove is never removed', async () => {
+  const refuse = [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }];
+  // Row reads: the remove step's own in-browser read is the last one; the owner's phone edits the line just before it.
+  const edited = await run({}, { verdicts: refuse, onCall: (n, w) => { if (n === 2) w.onRowRead = (reads, world) => { if (reads === 2) world.cart[0].qty = 5; }; } });
+  expect(edited.error.evidence).toMatchObject({ cleanup: 'cart_left_for_owner' });
+  expect(edited.w.handleClicks).toEqual([]);
+  expect(edited.w.cart).toHaveLength(1);
+  expect(edited.w.rowReads).toBe(3); // the third read is the one-step remove itself: it refused there
+  expectSafe(edited.w);
+});
+
+test('R12 shared cart: the placed order total on the confirmation page must equal the approved total', async () => {
+  // The phone app grew the server-side cart in the last moment: the order exists, at a bigger total.
+  const grown = await run({ confirmTotalText: '$320.80' });
+  expect(grown.w.placed).toBe(1);
+  expect(grown.error.ambiguous).toBe(true);
+  expect(grown.error.evidence).toMatchObject({ externalOrderNumber: '7700123', confirmationTotalCents: 32080 });
+  // No readable total: also parked for a person, with the order number kept.
+  const unread = await run({ confirmTotalText: null });
+  expect(unread.error.ambiguous).toBe(true);
+  expect(unread.error.evidence.externalOrderNumber).toBe('7700123');
+});
+
+test('R12 confirmation: an overlength order number never matches by its prefix', async () => {
+  const long = await run({ confirmationBody: 'Order Number: 77001234567890123456789' });
+  expect(long.w.placed).toBe(1);
+  // The field is present but unreadable: an unknown outcome, never the 20-character prefix.
+  expect(long.error && long.error.ambiguous).toBe(true);
+});
+
 test('R7 cleanup: the remove click goes to the link handle inside the verified row handle; a row replaced in between is never clicked', async () => {
   const refuse = [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }];
   const exact = await run({}, { verdicts: refuse });
   expect(exact.error.evidence.cleanup).toBe('row_removed');
-  expect(exact.w.handleClicks).toEqual([{ force: true, noWaitAfter: true, timeout: 1000 }]);
+  // A DOM click inside the one browser step that re-proves the row is ours.
+  expect(exact.w.handleClicks).toEqual([{ dom: true }]);
   // The row is replaced by an identical-looking one after the handle was read: the old handle is detached.
   const replaced = await run({}, { verdicts: refuse, onCall: (n, w) => { if (n === 2) w.onRowRead = (reads, world) => { if (reads === 1) world.cart[0] = { sku: SKU, qty: 2, entry: 'E1' }; }; } });
   expect(replaced.error.evidence).toMatchObject({ cleanup: 'cart_left_for_owner', cart_left_for_owner: true });
