@@ -9911,7 +9911,12 @@ again just because its customer_visible flag serves an unrelated
 customer-facing surface,
 the /api/public/pricing-ranges payload via its shared fail-closed producer,
 the service-areas table, and a static description of the
-/api/public/quote/calculate HTTP contract (how_to_request_quote). No
+/api/public/quote/calculate HTTP contract (how_to_request_quote). Each tool
+advertises a human-readable top-level title (mirrored in annotations for
+2025-03-26 clients) and truthful closed-world annotations (`readOnlyHint:
+true`, `destructiveHint: false`, `openWorldHint: false`);
+the shared serializer includes those fields only for this public registry,
+leaving the internal /api/mcp and /api/mcp-admin payloads unchanged. No
 customer-PII tools and no write tools may be added here — exact quotes and
 lead capture stay on /api/public/quote/calculate behind its four-field
 contact gate; this surface documents that endpoint, never wraps it. Treat
