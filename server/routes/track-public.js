@@ -690,8 +690,8 @@ const PRIVACY_HEADERS = {
 // not named below. `scope` tells the page to hide what only the holder sees. After the visit it is the plain
 // "complete" state, with the tech and the service name and nothing about the work (no summary, no links).
 // The link's lifetime keeps the reachable states to three (recipientTrackLinkOpen in track-token-expiry.js): en route, on
-// property, and complete for up to 2 hours after the visit. Scheduled, cancelled, skipped, parked and rebooking visits
-// answer 404, so the payload has no visitChange, no schedule state and no scheduled poll.
+// property (each capped: 3 h from en_route_at, 4 h from arrived_at), and complete for up to 2 hours after the visit. Scheduled,
+// cancelled, skipped, parked and rebooking visits answer 404, so the payload has no visitChange, no schedule state and no scheduled poll.
 
 function recipientTrackPayload(full) {
   const state = full.state;

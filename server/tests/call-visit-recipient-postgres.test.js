@@ -635,6 +635,33 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       } finally { spy.mockRestore(); }
     });
 
+    test('a DEFERRED replay rings the manual-text bell only on its LAST attempt; an immediate send rings at once', async () => {
+      const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('../services/messaging/scheduled-sms-limits');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [row] = await queued();
+      const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
+      const notifications = require('../services/notification-service');
+      const bell = jest.spyOn(notifications, 'notifyAdmin').mockResolvedValue({ id: 'n-1' });
+      const spy = jest.spyOn(Holds, 'disclaimedNumberHeldForVisit').mockRejectedValue(new Error('read failed'));
+      try {
+        // earlier attempts: held for a retry, quietly
+        for (let attempt = 1; attempt < SCHEDULED_SMS_MAX_ATTEMPTS; attempt += 1) {
+          expect(await VisitRecipient.providerCheck({ ...meta, replay: true, scheduled_sms_attempts: attempt })).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', retryable: true });
+        }
+        expect(await VisitRecipient.providerCheck({ ...meta, replay: true })).toMatchObject({ retryable: true });
+        expect(bell).not.toHaveBeenCalled();
+        // the last attempt ends undelivered: the bell rings, naming the person by first name and last 4 only
+        expect(await VisitRecipient.providerCheck({ ...meta, replay: true, scheduled_sms_attempts: SCHEDULED_SMS_MAX_ATTEMPTS })).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED' });
+        expect(bell).toHaveBeenCalledTimes(1);
+        expect(bell.mock.calls[0][3].detail).toContain(`Bob, ending ${BOB.slice(-4)}`);
+        // an immediate send is never retried: it rings on its first failed check
+        bell.mockClear();
+        await VisitRecipient.providerCheck({ ...meta, replay: false, scheduled_sms_attempts: undefined });
+        expect(bell).toHaveBeenCalledTimes(1);
+      } finally { spy.mockRestore(); bell.mockRestore(); }
+    });
+
     test('a queued day-only text is revalidated at the replay handoff (the 24 h reminder switched off, a later promise delivered); a fresh send is not asked again', async () => {
       const Reminders = require('../services/appointment-reminders');
       sendCustomerMessage.mockResolvedValueOnce(HELD);

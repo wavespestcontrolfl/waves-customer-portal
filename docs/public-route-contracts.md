@@ -7844,11 +7844,25 @@ polling, and the stops-ahead POST does not compute or persist a count for it.
 The track payload never returns or mints a reschedule token. A second
 token kind resolves on this route while GATE_CALL_GIVEN_VISIT_TEXTS is on: a
 visit text recipient's own `visit_text_recipients.track_token` (64 hex, minted
-when their en-route text wins its send claim). LIFETIME RULE: it opens only
-while the visit is en route (status and track state both `en_route`) or on site (`on_site` with `on_property`; a mixed pair answers 404), and for 2 hours after `completed_at`;
-scheduled, cancelled, skipped, parked, rebooking and later answer 404, as does
-a visit with no live finite `track_token_expires_at` (the holder's legacy null
-expiry still opens for the holder token only). It returns a reduced whitelist
+when their en-route text wins its send claim). LIFETIME RULE (one function, `recipientLinkEligible` in
+`server/services/track-token-expiry.js`, used by the module that resolves the
+token and by the GET and both POST routes): the token opens only while the
+visit has a live, finite `track_token_expires_at` (a null expiry answers 404;
+the holder's legacy null expiry still opens for the holder token only) AND one of: (1)
+EN ROUTE: status and track state both `en_route` and `en_route_at` within the
+last 3 hours; an en-route visit with no `en_route_at` answers 404 (the link is
+closed, it does not open with the vehicle hidden); (2) ON SITE: status `on_site`
+and track state `on_property`, within 4 hours of `arrived_at` (or of
+`en_route_at` when `arrived_at` is null; neither on record answers 404); (3)
+COMPLETE: status `completed` with `completed_at` no more than 2 hours ago (and
+not in the future beyond 5 minutes). A mixed status and track-state pair is a
+stale row and answers 404. Scheduled, cancelled, skipped, rebooking and any
+other state answer 404, as does a parked customer-pick row (`customer_pick_by`
+set and no `window_start`; a completed visit is never parked). An ineligible
+token and any error after the token lookup (the visit read, a permission read,
+the final recheck, the route's own visit read) all answer exactly as an unknown
+token does on every route: the same 404, body and headers, with a code-only
+log. Only an error on the token lookup itself may surface as an error. It returns a reduced whitelist
 payload with `scope: 'visit_recipient'` for that one visit and only in the
 `en_route`, `on_property` and `complete` states: state, technician first name
 and photo, window, lat/lng and town (no street, zip or names), service name,
@@ -7860,7 +7874,7 @@ summary reads do not run. The recipient path is strictly read-only (no
 geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while
 the plain permission reads pass (`recipientPermission`: gate, person on the
 visit, no decline, no callback-number hold on the visit or the person's number,
-no call do-not-contact or "no texts"; the choices row is read fail-closed and regardless of `GATE_CONTACT_LOGIN`), and only after the cheap lifetime check passes (a closed link answers 404 with no permission read). Any error after the token lookup answers 404 like an unknown token (code-only log); only the token lookup itself may answer an error. The live vehicle shows only while `tech_status.current_job_id` is exactly this visit's own id (no visit-group lookup) and the cached fix was reported and received strictly after the visit's `en_route_at` (no `en_route_at`, no vehicle). Its stops-ahead POST answers nulls and its view POST
+no call do-not-contact or "no texts"; the choices row is read fail-closed and regardless of `GATE_CONTACT_LOGIN`), and only after the cheap lifetime check passes (a closed link answers 404 with no permission read; the visit is read again after the permission reads and must still be eligible). The live vehicle shows only while the visit is en route, `tech_status.current_job_id` is exactly this visit's own id (no visit-group lookup) and the cached fix was reported and received strictly after the visit's `en_route_at`; otherwise `vehicle` is null. The `tech_status` read is STRICT (`resolveFreshTechPosition` with `strict: true`, used only for this scope): a FAILED read answers 404 exactly like an unknown token (code-only log), while a successful read with no usable fix answers 200 with `vehicle: null`. Its stops-ahead POST answers nulls and its view POST
 records nothing. The page never opens the live socket for this scope. Every
 handler on this router runs inside `safeRoute`: a thrown or `next(err)` error
 leaves as a fresh Error with only the driver `code`, never the knex message (it

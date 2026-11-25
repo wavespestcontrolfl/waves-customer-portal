@@ -106,14 +106,39 @@ describe.each(ROUTES)('%s (%s)', (path, method) => {
     expect(await run(path, method)).toEqual(expected);
   });
 
-  test('the visit read AFTER the token lookup failing (route side) answers as unknown too', async () => {
+  test('the ROUTE-SIDE visit read failing (every module read succeeds) answers as unknown too, and that read really ran', async () => {
     const expected = await unknownAnswer();
+    // pass 1, all healthy: count the scheduled_services reads the module itself makes, and the route's own reads
     world();
-    let reads = 0;
-    // the module reads the visit twice (before and after the permission reads); the route reads it once more by id
-    mockTables.scheduled_services.first = () => { reads += 1; if (reads > 2) throw Object.assign(new Error('x'), { code: '57P01' }); return EN_ROUTE; };
-    mockTables['scheduled_services as s'].first = () => { throw Object.assign(new Error('x'), { code: '57P01' }); };
+    let moduleReads = 0;
+    let routeReads = 0;
+    mockTables.scheduled_services.first = () => { moduleReads += 1; return EN_ROUTE; };
+    mockTables['scheduled_services as s'].first = () => { routeReads += 1; return EN_ROUTE; };
+    await run(path, method);
+    // GET: the module reads the visit 3 times and the route reads it by id once (table "s"); the two POSTs read it by id through
+    // recipientVisitLive (a 4th scheduled_services read) and never the joined table
+    const routeUsesJoin = method === 'get';
+    expect(moduleReads).toBeGreaterThanOrEqual(3);
+    const MODULE_READS = routeUsesJoin ? moduleReads : moduleReads - 1;
+    expect(routeUsesJoin ? routeReads : 1).toBeGreaterThanOrEqual(1);
+
+    // pass 2: the module's reads all succeed, ONLY the route-side read fails
+    world();
+    let seen = 0;
+    let routeQueryRan = 0;
+    mockTables.scheduled_services.first = () => {
+      seen += 1;
+      if (!routeUsesJoin && seen > MODULE_READS) { routeQueryRan += 1; throw Object.assign(new Error('x'), { code: '57P01' }); }
+      return EN_ROUTE;
+    };
+    mockTables['scheduled_services as s'].first = () => {
+      if (!routeUsesJoin) return EN_ROUTE;
+      routeQueryRan += 1;
+      throw Object.assign(new Error('x'), { code: '57P01' });
+    };
     expect(await run(path, method)).toEqual(expected);
+    expect(routeQueryRan).toBeGreaterThanOrEqual(1);
+    expect(seen).toBeGreaterThanOrEqual(MODULE_READS);
   });
 
   test('an error on the token lookup ITSELF is the only one allowed to surface as an error', async () => {

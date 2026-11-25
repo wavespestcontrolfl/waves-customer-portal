@@ -38,6 +38,7 @@ const { toE164, isValidNanpNumber } = require('../utils/phone');
 const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
 const { dateOnlyString } = require('../utils/date-only');
 const { isTrackTokenLiveWithExpiry, recipientLinkEligible } = require('./track-token-expiry');
+const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
 
 const SOURCE = 'call_caller_provided';
 const CONSENT_VERSION = 'owner-ruling-2026-11-24-visit-only';
@@ -531,7 +532,8 @@ async function visitForTrackToken(token, { conn = db } = {}) {
 async function resolveTrackToken(token, conn) {
   const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id');
   if (!row) return null;
-  // The cheap check FIRST: the short lifetime (en route or on site, or up to two hours after completion; never scheduled,
+  // The cheap check FIRST: the short lifetime (en route within 3 h of en_route_at, on site within 4 h of arrived_at, or up to two
+  // hours after completion; never scheduled,
   // cancelled, skipped, parked or rebooking) and a live, finite expiry on the visit's own tracker link. A closed link
   // answers here, with no permission read at all.
   // After the token lookup, ANY failure (the visit read, the permission reads, the final recheck) answers null, exactly as an
@@ -703,6 +705,11 @@ async function providerCheck(meta, { conn = db } = {}) {
   } catch (err) {
     logger.warn(`[call-visit-recipient] handoff recheck unreadable for visit ${meta.scheduled_service_id}: ${err.code || err.name || 'error'}`);
     // Unreadable is not a decline: the text is held and may never be retried, so tell staff (the same bell, once per visit and notice).
+    // An immediate send is never retried, so it rings now. A deferred replay retries a retryable check failure: it rings only when
+    // THIS is the replay's last attempt (the scheduler counts the attempt in scheduled_sms_attempts and gives up at the cap).
+    if (meta.replay && (Number(meta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+      return { ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', reason: 'recheck-failed', retryable: true };
+    }
     await raiseUnsentBell({ scheduledServiceId: meta.scheduled_service_id, kind: meta.kind, date: claimDate(meta.claim_key), hint: meta.recipient_hint });
     return { ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', reason: 'recheck-failed', retryable: true };
   }
