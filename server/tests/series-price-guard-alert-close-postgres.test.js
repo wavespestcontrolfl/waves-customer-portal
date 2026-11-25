@@ -208,6 +208,60 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
     });
   });
 
+  describe('a person\'s Done between the standing-row probe and the refresh', () => {
+    const NotificationService = () => require('../services/notification-service');
+    const verdict = { skip: true, kind: 'cancelled_root', price: 333.45, lastPaid: 117 };
+    const openBells = (rootId) => db('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`series-price-guard:cancelled-root:${rootId}`]).whereNull('done_at');
+
+    test('the raise asks for the open-only refresh', async () => {
+      const s = await series({ refusedDate: null });
+      const spy = jest.spyOn(NotificationService(), 'notifyAdmin');
+      try {
+        await guards.raiseExtensionPriceAlert(verdict, { parent: { customer_id: s.customer.id }, parentId: s.root.id, childDate: DATE, serviceLabel: 'Quarterly Pest Control' });
+        expect(spy.mock.calls[0][3]).toMatchObject({ refreshOnDedupe: true, refreshOnlyOpen: true, dedupeOpenOnly: true, dedupeVersion: DATE });
+      } finally { spy.mockRestore(); }
+    });
+
+    test('Done lands after the probe: the refresh does not write the new date onto the closed row; one open bell has it', async () => {
+      const s = await series({ refusedDate: null });
+      const key = `series-price-guard:cancelled-root:${s.root.id}`;
+      const person = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
+      // ringOnRefresh runs after the standing row was read and before it is rewritten: close it right there.
+      const doneInBetween = async () => {
+        await db('notifications').where({ id: s.bell.id }).update({ done_at: new Date(), done_by: person, resolution: 'Checked' });
+        return false;
+      };
+      const result = await NotificationService().notifyAdmin('billing', 'Schedule - check a plan price', 'Not added: the Jun 3 visit.', {
+        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, refreshOnlyOpen: true, dedupeVersion: OTHER_DATE, ringOnRefresh: doneInBetween,
+        metadata: { kind: 'cancelled_root', seriesRootId: s.root.id, refusedDate: OTHER_DATE },
+      });
+      expect(result.deduped).toBe(false);
+      made.notifications.push(result.id);
+      const closed = await get(s.bell.id);
+      expect([closed.done_by, closed.metadata.refusedDate]).toEqual([person, undefined]);
+      const open = await openBells(s.root.id);
+      expect(open).toHaveLength(1);
+      expect(open[0].id).toBe(result.id);
+      expect(open[0].metadata.refusedDate).toBe(OTHER_DATE);
+    });
+
+    test('without the option the old write stands (other callers are unchanged)', async () => {
+      const s = await series({ refusedDate: null });
+      const key = `series-price-guard:cancelled-root:${s.root.id}`;
+      const doneInBetween = async () => {
+        await db('notifications').where({ id: s.bell.id }).update({ done_at: new Date(), done_by: 'someone' });
+        return false;
+      };
+      const result = await NotificationService().notifyAdmin('billing', 'Schedule - check a plan price', 'Not added: the Jun 3 visit.', {
+        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, dedupeVersion: OTHER_DATE, ringOnRefresh: doneInBetween,
+        metadata: { kind: 'cancelled_root', refusedDate: OTHER_DATE },
+      });
+      expect(result.deduped).toBe(true);
+      expect(await openBells(s.root.id)).toHaveLength(0);
+    });
+  });
+
   describe('the refused date on the standing bell', () => {
     const verdict = { skip: true, kind: 'cancelled_root', price: 333.45, lastPaid: 117 };
     const ctx = (s, childDate) => ({ parent: { customer_id: s.customer.id }, parentId: s.root.id, childDate, serviceLabel: 'Quarterly Pest Control' });

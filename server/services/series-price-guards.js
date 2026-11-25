@@ -27,6 +27,9 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+// A failure log line carries a fixed code only: a Knex error's message echoes the SQL and its bound values,
+// which here include the bell's text (a customer's name).
+const safeErrorSummary = (err) => require('./notification-service').safeErrorSummary(err);
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 
 // Child price may exceed the last paid amount by at most this ratio.
@@ -156,7 +159,8 @@ function visitLink(visitId, dateStr) {
 async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, childDate, serviceLabel }, trx = null) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const names = require('./admin-alert-names');
-  const name = await names.lookupCustomerName(db, parent.customer_id) || 'a customer';
+  // On the caller's transaction when it has one: no second pool connection while the series lock is held.
+  const name = await names.lookupCustomerName(trx || db, parent.customer_id) || 'a customer';
   const day = names.shortDateET(new Date(`${childDate}T12:00:00Z`));
   const service = serviceLabel || 'service';
   const lastPaidWords = verdict.lastPaid != null ? `the last paid visit was ${money(verdict.lastPaid)}` : 'no paid visit to compare';
@@ -190,9 +194,11 @@ async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, ch
   // refresh-on-dedupe (under its dedupe lock): body, detail and refusedDate
   // change together, quietly (no ring, no bump). The refused date is the
   // dedupeVersion, so a row raised before the date existed picks it up even when
-  // its text is the same. A closed row is never touched (dedupeOpenOnly).
+  // its text is the same. A closed row is never touched: the probe skips done rows (dedupeOpenOnly), and
+  // refreshOnlyOpen makes the write itself conditional on the row still being open, so a person's Done between
+  // the probe and the write gets a fresh open bell instead of a new date on a closed row.
   const refresh = cancelled
-    ? { refreshOnDedupe: true, dedupeVersion: childDate, ringOnRefresh: () => false }
+    ? { refreshOnDedupe: true, refreshOnlyOpen: true, dedupeVersion: childDate, ringOnRefresh: () => false }
     : {};
   return raiseAdminAlert('billing', { ...spec, severity: 'needs-you', who: 'person' }, {
     bell: true,
@@ -243,7 +249,7 @@ async function closeRefusedPriceAlertAfterInsert(conn, args) {
   try {
     return await conn.transaction((sp) => closeStandingRefusedAlert(sp, args));
   } catch (err) {
-    logger.warn(`[series-price-guard] could not close the plan price alert for series ${args.parentId}: ${err.message}`);
+    logger.warn(`[series-price-guard] could not close the plan price alert for series ${args.parentId}: ${safeErrorSummary(err)}`);
     return false;
   }
 }
@@ -261,7 +267,7 @@ async function raiseExtensionPriceAlertInTransaction(conn, verdict, context) {
     const created = await conn.transaction((sp) => raiseExtensionPriceAlert(verdict, context, sp));
     if (!created) logger.error(`[series-price-guard] ${verdict.kind} alert NOT recorded for series ${context.parentId}`);
   } catch (err) {
-    logger.error(`[series-price-guard] ${verdict.kind} alert failed for series ${context.parentId}: ${err.message}`);
+    logger.error(`[series-price-guard] ${verdict.kind} alert failed for series ${context.parentId}: ${safeErrorSummary(err)}`);
   }
 }
 
@@ -273,7 +279,7 @@ function raiseExtensionPriceAlertAfterCommit(conn, verdict, context) {
       const created = await raiseExtensionPriceAlert(verdict, context);
       if (!created) logger.error(`[series-price-guard] ${verdict.kind} alert NOT recorded for series ${context.parentId}`);
     } catch (err) {
-      logger.error(`[series-price-guard] ${verdict.kind} alert failed for series ${context.parentId}: ${err.message}`);
+      logger.error(`[series-price-guard] ${verdict.kind} alert failed for series ${context.parentId}: ${safeErrorSummary(err)}`);
     }
   });
 }
