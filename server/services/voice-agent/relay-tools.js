@@ -547,7 +547,7 @@ async function knownCallerAvailabilityLocation(input = {}, ctx = {}) {
   } catch (err) {
     // Fail to the ordinary path: its offers are not account offers, and
     // request_booking refuses to book those for this caller.
-    logger.warn(`[voice-relay] account location for availability failed callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+    logger.warn(`[voice-relay] account location for availability failed callSid=${ctx.callSid || 'n/a'} code=${errCode(err)}`);
     return null;
   }
 }
@@ -718,6 +718,13 @@ const ATTESTATION_ONLY_TOOLS = Object.freeze({
   get_call_history: 'any-tier',
   get_message_history: 'any-tier',
 });
+
+// A bounded error code for logs. A database error's message can echo its bindings
+// (caller-supplied names, streets, phone numbers), so err.message is never logged
+// on the tool path.
+function errCode(err) {
+  return String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32);
+}
 
 function callerAttested(ctx = {}) {
   return ctx.callerAttested === true;
@@ -1413,7 +1420,7 @@ async function executeTool(name, input = {}, ctx = {}) {
         } catch (err) {
           // The lead still records the request; a failed suppression must not
           // lose the lead, and the owner alert below still pages a human.
-          logger.error(`[voice-relay] verbal do-not-contact could NOT be recorded callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
+          logger.error(`[voice-relay] verbal do-not-contact could NOT be recorded callSid=${ctx.callSid || 'n/a'} code=${errCode(err)}`);
         }
       }
       // ⭐ A RECOGNISED CONTACT GETS AN OFFICE BELL, NEVER A LEAD (owner ruling
@@ -1756,7 +1763,7 @@ async function executeTool(name, input = {}, ctx = {}) {
     // arbitrary string straight back into the tool result.
     return `Unknown tool "${String(name || '').replace(/[^\w.-]/g, '').slice(0, 40)}". Do not retry; continue the conversation.`;
   } catch (err) {
-    logger.error(`[voice-relay] tool "${name}" failed: ${err.message}`);
+    logger.error(`[voice-relay] tool "${String(name || '').replace(/[^\w.-]/g, '').slice(0, 40)}" failed code=${errCode(err)}`);
     // The failure is answered with a string; the session reads this flag so
     // the handoff record never reports a failed tool as ok.
     if (ctx && typeof ctx === 'object') ctx.toolFailed = true;

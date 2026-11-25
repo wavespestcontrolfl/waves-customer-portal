@@ -200,6 +200,16 @@ describe('ask', () => {
     // the old turn's late tokens reach no later ask, and the later ask never reaches the conversation
     await expect(brain.ask('next question')).resolves.toBe(TIMEOUT_REPLY);
     expect(convo.handlePrompt).toHaveBeenCalledTimes(1);
+    expect(brain.lastRan).toBe(false); // the retired brain ran nothing for this ask
+  });
+
+  test('lastRan is true only for an ask that reached the conversation', async () => {
+    const { brain } = await open();
+    await brain.ask('hello');
+    expect(brain.lastRan).toBe(true);
+    await brain.end('twilio_stop');
+    await brain.ask('after end');
+    expect(brain.lastRan).toBe(false);
   });
 
   test('a second ask that starts before the first settles waits its turn: tokens never cross', async () => {

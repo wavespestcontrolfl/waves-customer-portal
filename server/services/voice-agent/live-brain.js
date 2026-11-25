@@ -83,6 +83,7 @@ class LiveBrain {
     this.deadlineMs = deadlineMs;
     this.softMs = softMs;
     this.ended = false;
+    this.lastRan = false; // whether the latest ask reached the conversation (a retired or closed brain answers without running)
     this.retired = false; // a hard timeout retires the conversation: its turn may still be running
     this.queue = Promise.resolve(); // asks run one at a time
     this.softTimeouts = 0; // asks still running at the soft deadline (they may still answer)
@@ -154,9 +155,11 @@ class LiveBrain {
   }
 
   async runAsk(text, { onSoft } = {}) {
+    this.lastRan = false;
     const prompt = String(text || '').trim();
     if (this.ended || !prompt) return CLOSED_REPLY;
     if (this.retired) return TIMEOUT_REPLY;
+    this.lastRan = true;
     const turn = { tokens: [], closed: false };
     this.turn = turn;
     let timer;

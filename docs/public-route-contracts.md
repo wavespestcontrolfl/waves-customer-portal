@@ -9143,10 +9143,21 @@ independently of the shared `TWILIO_SIGNATURE_VALIDATION` mode); the brain refus
 attestation differs from the stamp, or the stamp has no number. The conversation then decides on the STAMPED
 attestation only (`signedIdentity` into `verifyInboundCaller`): the row's own `stir_verstat` is never read for it. The
 read tools reachable on the socket are the relay's own split-tier set, with the same tier and attestation rules as
-`/ws/voice-agent` (see that entry): `lookup_customer`, `get_account_overview`, `get_service_history`, `get_today_eta`,
+`/ws/voice-agent` (see that entry): `get_account_overview`, `get_service_history`, `get_today_eta`,
 `get_open_estimates`, `get_services_catalog`, `get_pricing`, `get_availability` and `find_slots` need only the ANI
-match; `get_invoice_history` and the balance figure, `get_service_report`, and the bodies of calls and texts
-(`get_call_history`, `get_message_history`) need attestation A on the stamp, and without it are refused before they run.
+match for the caller's own account; `get_invoice_history` and the balance figure, `get_service_report`, and the bodies of
+calls and texts (`get_call_history`, `get_message_history`) need attestation A on the stamp, and without it are refused
+before they run. A third path needs NO customer match: `lookup_customer`. A caller whose number is verified against the
+call row (the call is real, current and claimed) but matches no customer account can give two independent criteria
+(the account holder's name AND the property's street, or either one with a phone number on the account); a single
+criterion is refused before any query, with text that does not reveal whether anything matched. A match returns at most
+a first name, a city and an opaque per-call `customer_ref` (no id, address, email or phone), or "narrow it down" when more
+than 5 match. At most 3 lookups that reach the database are allowed per call; the next is refused. The `customer_ref`
+is accepted only for an account looked up on that same call, and unlocks the REDACTED tier of `get_account_overview`,
+`get_service_history`, `get_today_eta` and `get_open_estimates`: visit dates and service names, the next appointment, open
+estimate existence and whether a balance is open, but no amounts, no visit summaries and no addresses. A ref never opens
+`get_invoice_history`, `get_service_report`, `get_call_history` or `get_message_history` (each refuses a ref). A ref that
+resolves to the caller's own matched account reaches only the tier the ANI match earned.
 Writes are practice only: a lead, booking request or
 re-service request is validated and answered "practice line, nothing was booked or saved" and nothing is written; the
 conversation has no transfer tool and no automatic handoff, so no handoff packet is ever written; it never texts. The

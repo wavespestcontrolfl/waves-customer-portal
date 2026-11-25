@@ -1602,6 +1602,41 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     expect(summaryOf(t).errors).toContain('brain_open_timeout');
   });
 
+  test('overlapping delegations with a settle wait: the first one\'s prompt is frozen when the next arrives, and its timer never replaces it', async () => {
+    const { t, brain } = toolsSetup({ deps: { transcriptQuietMs: 40, transcriptMaxWaitMs: 1000 } });
+    await t.ready();
+    t.openai.receive(said('Old words', 0, 600));
+    t.openai.receive(created('d0'));
+    await waitFor(() => answers(t).length === 1);
+    // d1 arrives with nothing new, then d2 arrives before d1's settle wait is over
+    t.openai.receive(created('d1'));
+    t.openai.receive(created('d2'));
+    // the caller's next question is spoken after both delegations arrived: it belongs to d2's open range
+    t.openai.receive(said('Late question', 9000, 9600));
+    await waitFor(() => answers(t).length === 3);
+    expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['Old words', 'Old words', 'Late question']);
+  });
+
+  test('a retired brain\'s reply is neither counted as an ask nor timed', async () => {
+    const { t, brain } = toolsSetup({ reply: async () => 'real answer' });
+    await t.ready();
+    t.openai.receive(said('first', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    brain.ask.mockImplementation(async () => { brain.lastRan = false; return "I can't pull that up right now. You can call or text the office for that."; });
+    t.openai.receive(said('second', 6000, 6300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 2);
+    expect(answers(t)[1].content).toMatch(/can't pull that up/);
+    t.twilioStop();
+    await finalized(t);
+    const summary = summaryOf(t);
+    expect(summary.brain_asks).toBe(1);
+    expect(summary.brain_ms).toHaveLength(1);
+    expect(summary.brain_wait_ms).toHaveLength(1);
+    expect(summary.brain_total_ms).toHaveLength(1);
+  });
+
   test('a delegation\'s context is frozen when its range closes: later speech changes neither its words nor its fallback', async () => {
     let releaseFirst;
     let calls = 0;

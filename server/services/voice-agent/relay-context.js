@@ -735,7 +735,7 @@ async function verifyInboundCaller({ callSid, from, sessionKey = null, sessionGe
     return { verified: true, attestation };
   } catch (err) {
     // FAIL CLOSED: an unverifiable caller is an unknown caller.
-    logger.warn(`[voice-relay-context] caller verification failed for ${maskPhone(from)} — treating as unknown: ${err.message}`);
+    logger.warn(`[voice-relay-context] caller verification failed for ${maskPhone(from)} — treating as unknown code=${String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32)}`);
     return { verified: false, reason: 'error' };
   }
 }
@@ -1204,7 +1204,7 @@ async function resolveCallerContext(from, { callSid = null, sessionKey = null, s
     // CALLER block — not their proven identity.
     return await Promise.race([work, timeout]);
   } catch (err) {
-    logger.warn(`[voice-relay-context] context resolve failed for ${maskPhone(from)} — treating as unknown: ${err.message}`);
+    logger.warn(`[voice-relay-context] context resolve failed for ${maskPhone(from)} — treating as unknown code=${String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32)}`);
     return null;
   } finally {
     clearTimeout(timer);

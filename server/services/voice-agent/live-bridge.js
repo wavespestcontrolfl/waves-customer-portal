@@ -829,22 +829,29 @@ class LiveBridge {
   // transcript settles (noteCallerText) or the next delegation arrives. Queued
   // delegations each keep their own range, however long they wait.
   openRange() {
+    // The delegation before this one closes now, with its context frozen as of now: it never
+    // reads the shared fragments again, whatever is said after this delegation arrives.
+    if (this.callerLate) this.freezeRange(this.callerLate);
     const range = { text: this.callerPending.text, startMs: this.callerPending.startMs, open: this.deps.transcriptQuietMs > 0 }; // no settle wait: closed at once
     this.callerPending = { text: '', startMs: null };
-    if (this.callerLate) this.callerLate.open = false;
     this.callerLate = range;
     // The context is FROZEN as the range closes (its words, the fallback utterances and the
     // agent line before them): later speech never changes what this delegation asks.
     if (!range.open) {
-      range.prompt = this.takeCallerText(range);
+      this.freezeRange(range);
       range.settled = Promise.resolve();
     } else {
-      range.settled = this.settleTranscript().then(() => {
-        range.open = false;
-        range.prompt = this.takeCallerText(range);
-      });
+      range.settled = this.settleTranscript().then(() => this.freezeRange(range));
     }
     return range;
+  }
+
+  // The first close wins: later calls (the settle timer after the next delegation arrived) change nothing.
+  freezeRange(range) {
+    if (range.frozen) return;
+    range.frozen = true;
+    range.open = false;
+    range.prompt = this.takeCallerText(range);
   }
 
   // The words for one ask: its range, else the latest two utterances; with what
@@ -917,6 +924,11 @@ class LiveBridge {
     let reply;
     try {
       reply = await brain.ask(words, { onSoft: () => say(BRAIN_STILL_REPLY) });
+      if (brain.lastRan === false) {
+        // A retired or closed brain answered without running anything: no paid call, so not counted or timed.
+        this.brainAsks -= 1;
+        return { reply: capReply(reply) || DELEGATION_REPLY };
+      }
     } catch (err) {
       this.noteError('brain_error');
       logger.warn(`[voice-live] brain ask failed callSid=${this.callSid} code=${errCode(err)}`);
