@@ -192,11 +192,32 @@ describe('server with SITEONE_ORDER_RUNNER=mac', () => {
     expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
   });
 
+  test('a HANDED-OFF request blocked by a sibling manual order withdraws its standing "order manually" bell', async () => {
+    const state = baseState({ request: request({ metadata: { vendorId: 'v-siteone', macHandedOffAt: '2026-11-24T11:10:00.000Z' } }) });
+    const read = state.read;
+    state.read = (table, q, cols) => (table === 'product_restock_requests' && q.where.product_id === 'p1' ? { id: 'r-manual', source: 'manual', status: 'ordered' } : read(table, q, cols));
+    const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
+    expect(out).toMatchObject({ requestId: 'r1', skipped: 'sibling_live_request', handOffBellWithdrawn: true });
+    expect(state.updates.filter((u) => u.table === 'notifications')).toHaveLength(1);
+    expect(state.updates.filter((u) => u.table === 'product_restock_requests')).toHaveLength(0); // the stamp stays
+    expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
+  });
+
+  test('with the SiteOne gate now off, a handed-off request blocked by a sibling still keeps its bell withdrawn', async () => {
+    process.env.GATE_AUTO_ORDER_SITEONE = 'false';
+    const state = baseState({ request: request({ metadata: { vendorId: 'v-siteone', macHandedOffAt: '2026-11-24T11:10:00.000Z' } }) });
+    const read = state.read;
+    state.read = (table, q, cols) => (table === 'product_restock_requests' && q.where.product_id === 'p1' ? { id: 'r-manual', source: 'manual', status: 'ordered' } : read(table, q, cols));
+    const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), now: NOW, env: {} });
+    expect(out).toMatchObject({ requestId: 'r1', handOffBellWithdrawn: true }); // the watchdog's blocker names the reason
+    expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
+  });
+
   test('a handed-off request whose need is gone is cancelled, not re-belled', async () => {
     const state = baseState({ request: request({ metadata: { vendorId: 'v-siteone', macHandedOffAt: '2026-11-24T11:10:00.000Z' } }) });
     state.onHand = '3';
     const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
-    expect(out).toEqual({ requestId: 'r1', skipped: 'stock_no_longer_low', cancelled: true });
+    expect(out).toEqual({ requestId: 'r1', skipped: 'stock_no_longer_low', cancelled: true, handOffBellWithdrawn: true });
     expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
   });
 
