@@ -210,9 +210,10 @@ const fyiTriggerKeys = () => {
   return Object.keys(TRIGGER_REGISTRY).filter((k) => TRIGGER_REGISTRY[k]?.rule?.severity === 'fyi');
 };
 // Finished-outcome notices are news too (stripe-webhook.js, no metadata): a deposited payout, and a plain dispute that
-// closed won or lost. A failed payout, an open dispute and any "needs reconciliation" or combined-payment dispute stay.
+// closed won, lost or warning_closed. A failed payout, an open dispute and any "needs reconciliation" or combined-payment dispute stay.
 // One SQL LIKE per prefix; the JS check reads the same list.
-const SETTLED_NOTICE_PREFIXES = [['payout', 'Payout deposited'], ['dispute', 'Dispute won:'], ['dispute', 'Dispute lost:']];
+const SETTLED_NOTICE_PREFIXES = [['payout', 'Payout deposited'], ['dispute', 'Dispute won:'], ['dispute', 'Dispute lost:'],
+  ['dispute', 'Dispute warning_closed:']];
 const isSettledNotice = (row) => SETTLED_NOTICE_PREFIXES
   .some(([category, prefix]) => row.category === category && String(row.title || '').startsWith(prefix));
 const isKeptMoneyRow = (row, meta) => KEEP_UNTIL_SETTLED_CATEGORIES.includes(row.category || '')

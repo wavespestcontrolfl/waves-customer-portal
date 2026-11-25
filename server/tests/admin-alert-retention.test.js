@@ -384,6 +384,7 @@ describe('money rows stay until settled (owner ruling 2026-11-05 "A")', () => {
     const d = (title) => retention.judgeRow(row({ created_at: ago(40), category: 'dispute', title, metadata: null }), NOW).expire;
     expect(d('Dispute won: $1.00')).toBe(true);
     expect(d('Dispute lost: $1.00')).toBe(true);
+    expect(d('Dispute warning_closed: $1.00')).toBe(true);
     expect(d('Dispute opened: $1.00')).toBe(false);
     expect(d('Won dispute needs reconciliation: $1.00')).toBe(false);
     expect(d('Combined-payment dispute won: $1.00')).toBe(false);
