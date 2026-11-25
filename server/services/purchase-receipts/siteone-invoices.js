@@ -156,6 +156,9 @@ async function queuedLinePurchaseOrder(line, conn = db) {
   if (!invoice || invoice.pending || invoice.problem || invoice.number !== line.order_number) return null;
   const same = invoice.lines.find((l) => l.lineNo === Number(line.line_no));
   if (!same || same.title !== String(line.raw_title || '') || same.quantity !== Number(line.quantity)) return null;
+  // The same unit-of-measure rule the sweep holds a line by (a case, or no unit, is unverified).
+  // Required lazily: sweep.js requires this module.
+  if (require('./sweep').siteOneHold(invoice.problem, same.quantity, same.uom, same.title) !== undefined) return null;
   return invoice.purchaseOrder;
 }
 

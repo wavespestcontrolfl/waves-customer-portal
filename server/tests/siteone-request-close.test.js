@@ -12,7 +12,7 @@ const mockOrderDispatch = {
 jest.mock('../services/procurement/order-dispatch', () => mockOrderDispatch);
 
 const {
-  closeRequestCoveredByLine, isRobotOrderedRequest, ledgerPlacedBefore, lineCoversOrder, purchaseOrderMatches,
+  closeRequestCoveredByLine, isRobotOrderedRequest, ledgerPlacedBefore, lineCoversOrder, purchaseOrderMatches, REQUEST_HELD,
 } = require('../services/purchase-receipts/siteone-request-close');
 
 const RECEIVED = '2026-11-20T15:00:00Z';
@@ -127,7 +127,15 @@ describe('closeRequestCoveredByLine', () => {
     expect(calls.updates).toEqual([]);
   });
 
-  test('the ordered quantity is converted to the line\'s unit', async () => {
+  test('the line is compared in the ORDER\'s unit, at the four decimals dispatch rounded to', async () => {
+    // Dispatch ordered a 78 fl oz package as 0.6094 gal; 0.6094 gal back in fl oz is 78.0032, more than the line.
+    const gallon = { ...robot, unit: 'gal' };
+    mockOrderDispatch.orderedQuantityFor.mockResolvedValue(0.6094);
+    const { trx } = scriptedTrx({ live: [gallon], ledger: placed, request: gallon });
+    expect(await closeRequestCoveredByLine(trx, args)).toBe('r1');
+  });
+
+  test('the ordered quantity and the line are compared in one unit', async () => {
     const gallon = { ...robot, unit: 'gal' };
     mockOrderDispatch.orderedQuantityFor.mockResolvedValue(1);
     const { trx } = scriptedTrx({ live: [gallon], ledger: placed, request: gallon });
@@ -145,7 +153,7 @@ describe('closeRequestCoveredByLine', () => {
 
   test('the matched request held by another transaction throws, so the line rolls back and retries', async () => {
     const { trx, calls } = scriptedTrx({ live: [robot], ledger: placed, request: robot, lockHeld: true });
-    await expect(closeRequestCoveredByLine(trx, args)).rejects.toThrow(/held by another action.*retries on the next sweep/);
+    await expect(closeRequestCoveredByLine(trx, args)).rejects.toMatchObject({ code: REQUEST_HELD, message: expect.stringMatching(/held by another action.*retries on the next sweep/) });
     expect(calls.updates).toEqual([]);
   });
 

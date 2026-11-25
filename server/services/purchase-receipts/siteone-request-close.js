@@ -100,13 +100,19 @@ function purchaseOrderMatches(ledger, purchaseOrder) {
 // What the order bought, in the invoice line's unit; null when the ledger
 // recorded no dispatched quantity, or it cannot be converted (nothing closes
 // then).
-async function orderedQuantityInUnit(trx, request, product, lineUnit) {
+// Both sides in the ORDER's unit (where dispatch rounded the ordered quantity to four decimals): a
+// 78 fl oz package ordered as 0.6094 gal converts back to 78.0032 fl oz, and would never be covered
+// by a 78 fl oz line. Returns { line, ordered }, or null when either side cannot be converted.
+async function quantitiesInOrderUnit(trx, request, product, lineQty, lineUnit) {
   const { orderedQuantityFor } = require('../procurement/order-dispatch');
-  const quantity = await orderedQuantityFor(trx, request.id);
+  const ordered = await orderedQuantityFor(trx, request.id);
   const unit = request.unit || product?.inventory_unit;
-  if (!(quantity > 0) || !unit || !lineUnit) return null;
-  return convertInventoryQuantity(quantity, unit, lineUnit);
+  if (!(ordered > 0) || !unit || !lineUnit) return null;
+  const line = convertInventoryQuantity(Number(lineQty), lineUnit, unit);
+  return line == null ? null : { line, ordered };
 }
+
+const REQUEST_HELD = 'RESTOCK_REQUEST_HELD';
 
 async function onlyLiveRequest(trx, productId) {
   const live = await trx('product_restock_requests').where({ product_id: productId })
@@ -125,7 +131,8 @@ async function readRobotRequest(trx, requestId, locked) {
     return { ledger, request };
   } catch (err) {
     if (err?.code !== LOCK_NOT_AVAILABLE) throw err;
-    throw new Error(`restock request ${requestId} is held by another action; this invoice line retries on the next sweep`);
+    // A recognizable code: the inventory agent leaves its queued line pending without spending an attempt.
+    throw Object.assign(new Error(`restock request ${requestId} is held by another action; this invoice line retries on the next sweep`), { code: REQUEST_HELD });
   }
 }
 
@@ -135,8 +142,8 @@ async function coveredRequest(trx, args, requestId, locked) {
   const { ledger, request } = await readRobotRequest(trx, requestId, locked);
   if (!isRobotOrderedRequest(request) || !ledgerPlacedBefore(ledger, args.email.received_at)) return null;
   if (!purchaseOrderMatches(ledger, args.purchaseOrder)) return null;
-  const ordered = await orderedQuantityInUnit(trx, request, args.product, args.receivedUnit);
-  return lineCoversOrder(args.receivedQty, ordered) ? request : null;
+  const both = await quantitiesInOrderUnit(trx, request, args.product, args.receivedQty, args.receivedUnit);
+  return both && lineCoversOrder(both.line, both.ordered) ? request : null;
 }
 
 /**
@@ -165,4 +172,4 @@ async function closeRequestCoveredByLine(trx, args) {
   return candidate.id;
 }
 
-module.exports = { closeRequestCoveredByLine, isRobotOrderedRequest, ledgerPlacedBefore, lineCoversOrder, purchaseOrderMatches };
+module.exports = { closeRequestCoveredByLine, isRobotOrderedRequest, ledgerPlacedBefore, lineCoversOrder, purchaseOrderMatches, REQUEST_HELD };

@@ -476,4 +476,6 @@ module.exports = {
   // this sweep records — authentication, copy ownership, placeholders and
   // holds included — never a re-implementation of them.
   amazonEmailLines, siteOneInvoiceLines, authenticated,
+  // The SiteOne line hold, reused by siteone-invoices.js queuedLinePurchaseOrder (a queued line's PO).
+  siteOneHold,
 };
