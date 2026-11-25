@@ -22,6 +22,7 @@ const PHASE_LABELS = {
   payment_method_create: 'payment method creation',
   next_action: 'additional verification',
   payment_status: 'payment status',
+  bank_step_left: 'bank step (left without paying)',
 };
 
 function cleanString(value, fallback = '') {

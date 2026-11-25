@@ -134,6 +134,22 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/invoices?invoice=inv_123');
   });
 
+  test('a customer who left the bank step without paying gets its own bell, not an error', () => {
+    const built = TRIGGER_REGISTRY.bill_payment_error.build({
+      invoiceId: 'inv_123',
+      invoiceNumber: 'WPC-2026-0100',
+      customerName: 'Virginia Demo',
+      methodLabel: 'Bank account',
+      phase: 'bank_step_left',
+      phaseLabel: 'bank step (left without paying)',
+      reason: 'Customer picked Bank account and left the pay page without paying',
+    });
+
+    expect(built.title).toBe('Bank payment not finished');
+    expect(built.body).toBe('Invoice WPC-2026-0100 - Virginia Demo picked Bank account and left without paying. Their bank sign-in may not work: they can enter bank details manually.');
+    expect(built.link).toBe('/admin/invoices?invoice=inv_123');
+  });
+
   test('a quiz lead\'s bell names the quiz and its answers in place of the service line', () => {
     const built = TRIGGER_REGISTRY.new_lead.build({
       name: 'Pat Sample', source: 'Pest Quiz', zip: '34202', service: 'Cockroach Control',

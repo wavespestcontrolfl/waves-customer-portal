@@ -1023,6 +1023,15 @@ const TRIGGER_REGISTRY = {
       const invoiceLabel = p.invoiceNumber ? `Invoice ${p.invoiceNumber}` : 'Invoice payment';
       const method = p.methodLabel || 'Payment method';
       const phase = p.phaseLabel || p.phase || 'checkout';
+      // A customer who picked Bank account and left without paying (pay page,
+      // owner 2026-11-24): not an error, a stuck customer the office can help.
+      if (p.phase === 'bank_step_left') {
+        return {
+          title: 'Bank payment not finished',
+          body: `${invoiceLabel} - ${p.customerName || 'customer'} picked Bank account and left without paying. Their bank sign-in may not work: they can enter bank details manually.`,
+          link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}` : '/admin/invoices',
+        };
+      }
       return {
         title: method === 'Bank account' ? 'Bank payment error' : 'Bill payment error',
         body: `${invoiceLabel} - ${p.customerName || 'customer'} - ${method} during ${phase}${p.reason ? ': ' + p.reason : ''}`,

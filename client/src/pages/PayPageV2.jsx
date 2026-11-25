@@ -776,10 +776,16 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
             emailing billing@wavespestcontrol.com or calling us.
           </PayFaqItem>
         )}
+        <PayFaqItem question="My bank won’t let me sign in. How do I pay by bank?">
+          You don’t need to sign in. Choose Bank account, then pick “Enter bank details manually”
+          in the bank window and type your routing and account number. Stripe sends two small test
+          deposits to your account in 1–2 business days; confirm them from the email you get, and
+          the payment goes through. Bank payments have no added fee.
+        </PayFaqItem>
         <PayFaqItem question="The page or my bank link isn’t working. What do I do?">
-          Reload this page and try once more. If your bank still won’t connect, you can pay with a
-          card or a different account instead. Still stuck? Give us a call and we’ll sort it out
-          — <HelpPhoneLink tone="dark" inline />.
+          Reload this page and try once more. If your bank still won’t connect, enter your bank
+          details manually (see above), or pay with a card or a different account instead. Still
+          stuck? Give us a call and we’ll sort it out — <HelpPhoneLink tone="dark" inline />.
         </PayFaqItem>
         <PayFaqItem question="Will I get a receipt, and where is my invoice copy?">
           Yes — we email your receipt once the payment goes through (a bank transfer, once it
@@ -859,6 +865,32 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const [syncingAmount, setSyncingAmount] = useState(false);
   const [amountSyncError, setAmountSyncError] = useState(false);
   const selectedMethodRef = useRef(initialMethod || 'card');
+  // Office bell when a customer picks Bank account and leaves without
+  // pressing Pay (owner 2026-11-24, "build it"). Stripe reports nothing
+  // when its bank sign-in window is closed, so the office only heard of a
+  // stuck bank payment when the customer texted. One report per page load,
+  // through the same /error path (deduped per invoice for 24 h server-side).
+  const bankPayTriedRef = useRef(false);
+  const bankLeaveReportedRef = useRef(false);
+  const paymentIntentIdRef = useRef(paymentIntentId);
+  paymentIntentIdRef.current = paymentIntentId;
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onPageHide = () => {
+      if (selectedMethodRef.current !== 'us_bank_account') return;
+      if (bankPayTriedRef.current || bankLeaveReportedRef.current || processingRef.current) return;
+      bankLeaveReportedRef.current = true;
+      reportPaymentError(token, {
+        message: 'Customer picked Bank account and left the pay page without paying',
+        phase: 'bank_step_left',
+        code: 'bank_step_left',
+        methodCategory: 'us_bank_account',
+        paymentIntentId: paymentIntentIdRef.current || undefined,
+      });
+    };
+    window.addEventListener('pagehide', onPageHide);
+    return () => window.removeEventListener('pagehide', onPageHide);
+  }, [token]);
   const syncingAmountRef = useRef(false);
   const amountSyncSeqRef = useRef(0);
   // Counts ALL in-flight /update-amount requests, not just the latest sequence.
@@ -1272,6 +1304,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
     // ACH: use the existing confirmPayment flow (no surcharge)
     if (selectedMethodRef.current === 'us_bank_account') {
+      bankPayTriedRef.current = true;
       // The invoice PaymentIntent is locked to ONE tender family server-side,
       // and reusing an open intent on a pay-page reload resets it to card-only.
       // If we confirm a bank PaymentMethod against a still-card-only intent,
@@ -1741,20 +1774,25 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       )}
 
-      {showManualEntryHint && !isCardFamily && (
-        <div style={{
+      {/* Bank help line (owner 2026-11-24, "build it"): shown as soon as Bank
+          account is picked, not only after a failed link. A customer whose
+          bank sign-in will not work closes Stripe's window before Pay and
+          never saw the old after-failure hint. */}
+      {!isCardFamily && (
+        <div data-testid="bank-manual-entry-help" style={{
           background: 'var(--surface-subtle, rgba(0,0,0,0.03))',
-          border: `1px solid ${DOC.border}`,
+          border: `1px solid ${showManualEntryHint ? DOC.navyLiteral : DOC.border}`,
           borderRadius: RADIUS.input,
           padding: '12px 16px',
           fontSize: FS.body,
           lineHeight: LH.body,
           color: DOC.ink,
         }}>
-          <strong>Trouble linking your bank?</strong> Some banks don't support instant
-          linking. Choose <strong>“Enter bank details manually”</strong> above and type
-          your routing and account number instead — it avoids this issue, and bank
-          payments still have no added fee.
+          <strong>{showManualEntryHint ? 'Trouble linking your bank?' : 'Can’t sign in to your bank?'}</strong>{' '}
+          Some banks don't support instant linking. In the bank window, choose{' '}
+          <strong>“Enter bank details manually”</strong> and type your routing and account
+          number. You'll confirm two small test deposits in 1–2 business days, and bank
+          payments have no added fee.
         </div>
       )}
 
