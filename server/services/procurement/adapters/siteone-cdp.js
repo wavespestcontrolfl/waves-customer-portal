@@ -14,7 +14,7 @@
  *   loginRequired = false    the Chrome profile is the login — no stored one
  *   configured()             true only when SITEONE_CDP_URL AND
  *                            SITEONE_APPROVED_STORE_ID AND SITEONE_APPROVED_PICKUP
- *                            are all set
+ *                            AND SITEONE_APPROVED_ACCOUNT are all set
  *   place({ vendorSku, quantity, beforeSubmit, dryRun, poNumber }) →
  *     { externalOrderNumber, amountCents, evidence, dryRun }
  *   RefusedError (err.refuse) = parked, nothing submitted.
@@ -28,6 +28,12 @@
  *     step that lands on a sign-in page (the Okta identifier box, a sign-in
  *     path, any origin other than https://www.siteone.com) is run-level:
  *     "SiteOne signed Chrome out — sign in to siteone.com in Chrome on the Mac".
+ *   - The signed-in account must be exactly SITEONE_APPROVED_ACCOUNT (the only
+ *     4+ digit run in its node, UNVERIFIED selector), read before the cart is
+ *     touched and again on the review page before the click: account_mismatch /
+ *     account_unreadable.
+ *   - After every navigation or submit in checkout the sign-out detection of
+ *     openPage runs again (run-level, so the claim is released and retried).
  *   - The cart is shared with the owner's phone app: the bot starts only from
  *     an EMPTY cart, and removes only the line it added. It never clicks
  *     "remove all".
@@ -110,6 +116,11 @@ const SELECTORS = Object.freeze({
   reviewItemBlock: 'xpath=ancestor::*[.//*[contains(@class,"item__qty") or contains(@class,"item__quantity")]][1]',
   reviewQty: '[class*="item__qty"], [class*="item__quantity"]',
   reviewTotal: 'strong#totalPriceWithTax',
+  // UNVERIFIED: the signed-in account node (the 10-26 walk read "Signed in as
+  // account 2330739"; an attribute is preferred over the menu text) and the
+  // review page's account / bill-to field. Unreadable → account_unreadable.
+  accountNode: '[data-account-number], [data-test="account-number"], .js-account-number, [data-account-menu]',
+  reviewAccount: '[data-test="bill-to-account"], [data-test="account-number"], .order-summary__account, [class*="bill-to" i]',
   // UNVERIFIED: the confirmation page's own order-number node. Without it the
   // number comes from the confirmation URL's <code> segment.
   confirmationNumber: '[data-test="order-number"], .order-confirmation__number, .confirmation-number',
@@ -167,7 +178,8 @@ const isLocalCdpUrl = (u) => {
 function configured(env = process.env) {
   return !!String(env.SITEONE_CDP_URL || '').trim()
     && !!String(env.SITEONE_APPROVED_STORE_ID || '').trim()
-    && csv(env.SITEONE_APPROVED_PICKUP).length > 0;
+    && csv(env.SITEONE_APPROVED_PICKUP).length > 0
+    && !!String(env.SITEONE_APPROVED_ACCOUNT || '').trim();
 }
 // Fail closed: only the exact string 'false' turns the dry run off.
 const isDryRun = (env, dryRun) => dryRun === true || env.SITEONE_BOT_DRY_RUN !== 'false';
@@ -253,11 +265,18 @@ const SIGN_IN_PATH = /\/(?:log-?in|sign-?in|logon)(?:\/|$)/i;
 
 // `pathname`: when given, the page must end exactly there (the cart, checkout).
 // A sign-in page is never filled or submitted: the run stops, run-level.
+// After every navigation or submit: off siteone.com, a sign-in path, or the
+// identifier box means Chrome was signed out — run-level, so the claim is
+// released and retried.
+async function assertSignedIn(run) {
+  const here = parseUrl(run.page.url());
+  if (!here || here.origin !== BASE || SIGN_IN_PATH.test(here.pathname) || await signInFormShown(run.page)) throw runLevel(SIGNED_OUT_MESSAGE);
+}
+
 async function openPage(run, url, pathname = null) {
   const { page } = run;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-  const here = parseUrl(page.url());
-  if (!here || here.origin !== BASE || SIGN_IN_PATH.test(here.pathname) || await signInFormShown(page)) throw runLevel(SIGNED_OUT_MESSAGE);
+  await assertSignedIn(run);
   assertAt(run, pathname, 'navigation');
   await page.waitForTimeout(run.opts.settleMs);
 }
@@ -279,35 +298,29 @@ async function rowReading(row) {
 }
 
 // The row is exactly what this run added: our item, the cart entry verified
-// after the add (when one was read), and the quantity we set.
+// after the add, and the quantity we set. No verified entry id → never ours.
 function isOwnRow(run, reading) {
   const qtys = [reading.requested, reading.inputQty].filter((q) => q != null && q !== '');
-  return reading.sku === run.vendorSku
-    && (run.ownEntry == null || reading.entry === run.ownEntry)
+  return !!run.ownEntry && reading.entry === run.ownEntry && reading.sku === run.vendorSku
     && qtys.length > 0 && qtys.every((q) => Number(q) === run.quantity);
 }
-async function rowsWithOurItem(run) {
-  const found = [];
-  for (const row of await cartRows(run.page)) {
-    const reading = await rowReading(row);
-    if (reading.sku === run.vendorSku) found.push({ row, reading });
-  }
-  return found;
-}
+// The one row with this cart entry: `.js-cart-items-row[data-cartentry="<id>"]`.
+const rowSelectorFor = (entry) => `${SELECTORS.cartRow}[data-cartentry="${entry}"]`;
 const leaveCart = (run, why) => { run.evidence.cleanup = why; run.evidence.cart_left_for_owner = true; };
 
-// Remove ONLY the line this run added, bound to that row's identity: located by
-// item number, checked against the verified cart entry and quantity, checked
-// AGAIN on the same element just before its own remove link is clicked, and
-// confirmed gone (after a reload) before row_removed is recorded. Anything
-// else belongs to the owner now.
+// Remove ONLY the line this run added, bound to that row's identity: the
+// locator is the verified data-cartentry, the row is checked against the item
+// and quantity, checked AGAIN on the same element just before its own remove
+// link is clicked, and confirmed gone (after a reload) before row_removed is
+// recorded. No verified entry id, or anything else, belongs to the owner now.
 async function removeOwnRow(run) {
   const { page } = run;
+  if (!run.ownEntry || !/^[A-Za-z0-9_-]{1,64}$/.test(run.ownEntry)) { leaveCart(run, 'cart_left_for_owner'); return; }
   await openPage(run, URLS.cart, PATHS.cart);
-  const ours = await rowsWithOurItem(run);
-  if (!ours.length) { run.evidence.cleanup = 'row_absent'; return; }
-  if (!run.cartEmptyBefore || ours.length !== 1 || !isOwnRow(run, ours[0].reading)) { leaveCart(run, 'cart_left_for_owner'); return; }
-  const { row } = ours[0];
+  const bound = (await matches(page, rowSelectorFor(run.ownEntry))).all;
+  if (!bound.length) { run.evidence.cleanup = 'row_absent'; return; }
+  if (!run.cartEmptyBefore || bound.length !== 1 || !isOwnRow(run, await rowReading(bound[0]))) { leaveCart(run, 'cart_left_for_owner'); return; }
+  const row = bound[0];
   const link = await shownAll(row, SELECTORS.cartRemoveLine);
   if (link.length !== 1) { leaveCart(run, 'remove_link_unreadable'); return; }
   if (!isOwnRow(run, await rowReading(row))) { leaveCart(run, 'cart_left_for_owner'); return; }
@@ -315,7 +328,7 @@ async function removeOwnRow(run) {
   await page.waitForTimeout(run.opts.settleMs);
   const gone = await poll(page, async () => {
     await openPage(run, URLS.cart, PATHS.cart);
-    return (await rowsWithOurItem(run)).every(({ reading }) => run.ownEntry != null && reading.entry !== run.ownEntry);
+    return (await matches(page, rowSelectorFor(run.ownEntry))).all.length === 0;
   }, 3 * run.opts.settleMs + 3 * WAIT_STEP, run.opts.settleMs || WAIT_STEP);
   if (!gone) { leaveCart(run, 'cart_left_for_owner'); return; }
   run.evidence.cleanup = 'row_removed';
@@ -349,14 +362,34 @@ async function cleanup(run) {
     try { await clearPo(run); } catch (e) { run.evidence.po_left_for_owner = true; logger.warn(`[siteone-cdp] PO cleanup failed: ${String(e.message).slice(0, 120)}`); }
   }
   if (run.added) {
-    try { await removeOwnRow(run); } catch (e) { run.evidence.cleanup = 'failed'; logger.warn(`[siteone-cdp] cart cleanup failed: ${String(e.message).slice(0, 120)}`); }
+    try { await removeOwnRow(run); } catch (e) { run.evidence.cleanup = 'failed'; run.evidence.cart_left_for_owner = true; logger.warn(`[siteone-cdp] cart cleanup failed: ${String(e.message).slice(0, 120)}`); }
   }
 }
 
 // ---- stages -----------------------------------------------------------------
 
+// The ONE account number in a reading must be exactly the approved one (every
+// run of 4+ digits is a candidate: "12330739" or two accounts both refuse).
+function checkAccountText(run, text, where) {
+  const runs = [...new Set(String(text || '').match(/\d{4,}/g) || [])];
+  run.evidence.accountChecked = where;
+  if (!runs.length) throw new RefusedError('account_unreadable', `SiteOne ${where}: no account number could be read`, run.evidence);
+  if (runs.length !== 1 || runs[0] !== run.account) throw new RefusedError('account_mismatch', `SiteOne ${where}: the account is not the approved one`, run.evidence);
+}
+
+// Before the cart is touched: Chrome is signed in as the approved account.
+async function verifyAccount(run) {
+  const nodes = (await matches(run.page, SELECTORS.accountNode)).all;
+  const texts = [];
+  for (const node of nodes) texts.push(String((await node.getAttribute('data-account-number').catch(() => null)) || (await textOf(node))).trim());
+  const readings = texts.filter(Boolean);
+  if (!readings.length) throw new RefusedError('account_unreadable', 'SiteOne signed-in account could not be read', run.evidence);
+  for (const text of readings) checkAccountText(run, text, 'signed-in account');
+}
+
 async function assertCartEmpty(run) {
   await openPage(run, URLS.cart, PATHS.cart);
+  await verifyAccount(run);
   const rows = await cartRows(run.page);
   run.evidence.cartRowsBefore = rows.length;
   run.cartEmptyBefore = rows.length === 0;
@@ -418,7 +451,8 @@ async function verifyOwnRow(run) {
   const readings = [];
   for (const row of rows) readings.push(await rowReading(row));
   // The identity cleanup is bound to: this line's own cart entry.
-  if (readings.length === 1 && readings[0].sku === vendorSku) run.ownEntry = readings[0].entry || null;
+  const withOurItem = readings.filter((r) => r.sku === vendorSku);
+  if (withOurItem.length === 1) run.ownEntry = withOurItem[0].entry || null;
   const good = readings.length === 1 && readings[0].sku === vendorSku
     && [readings[0].requested, readings[0].inputQty].filter((q) => q != null && q !== '').length > 0
     && [readings[0].requested, readings[0].inputQty].filter((q) => q != null && q !== '').every((q) => Number(q) === quantity);
@@ -451,8 +485,9 @@ async function verifyCartAndGate(run) {
   await run.gate(evidence.cartTotalCents, 'cart total');
   const go = await oneShown(page, SELECTORS.continueCheckout, 'checkout buttons', evidence);
   await go.click();
-  const reached = await poll(page, async () => atSiteOne(page, PATHS.checkout), STEP_WAIT);
+  const reached = await poll(page, async () => { await assertSignedIn(run); return atSiteOne(page, PATHS.checkout); }, STEP_WAIT);
   if (!reached) { assertAt(run, PATHS.checkout, 'checkout'); throw new RefusedError('page_unrecognized', 'SiteOne did not reach the checkout page', evidence); }
+  await assertSignedIn(run);
   await page.waitForTimeout(run.opts.settleMs);
 }
 
@@ -483,7 +518,7 @@ async function assertNoPaymentPrompt(page, evidence) {
 
 async function choosePayAtBranch(run) {
   const { page, evidence } = run;
-  const label = await poll(page, async () => { const s = await shownAll(page, SELECTORS.payAtBranchLabel); return s.length === 1 ? s[0] : null; }, STEP_WAIT);
+  const label = await poll(page, async () => { await assertSignedIn(run); const s = await shownAll(page, SELECTORS.payAtBranchLabel); return s.length === 1 ? s[0] : null; }, STEP_WAIT);
   if (!label) throw new RefusedError('not_pay_at_branch', 'SiteOne checkout: no Pay at Branch choice appeared', evidence);
   await assertNoPaymentPrompt(page, evidence);
   await label.click();
@@ -492,8 +527,9 @@ async function choosePayAtBranch(run) {
   await assertNoPaymentPrompt(page, evidence);
   const review = await oneShown(page, SELECTORS.reviewButton, 'Review Your Order buttons', evidence);
   await review.click();
-  const reached = await poll(page, async () => atSiteOne(page, PATHS.review), STEP_WAIT);
+  const reached = await poll(page, async () => { await assertSignedIn(run); return atSiteOne(page, PATHS.review); }, STEP_WAIT);
   if (!reached) { assertAt(run, PATHS.review, 'order review'); throw new RefusedError('page_unrecognized', 'SiteOne did not reach the order review page', evidence); }
+  await assertSignedIn(run);
   await page.waitForTimeout(run.opts.settleMs);
 }
 
@@ -543,6 +579,9 @@ async function readReview(run) {
   evidence.reviewPickup = pickup.slice(0, 120);
   if (tenderOf(tender) !== 'pay at branch') throw new RefusedError('not_pay_at_branch', 'SiteOne review: the payment method is not exactly Pay at Branch', evidence);
   if (!hasToken(pickup, storeId)) throw new RefusedError('pickup_not_selected', `SiteOne review: the pickup location does not show store ${storeId}`, evidence);
+  const accountNodes = await shownAll(page, SELECTORS.reviewAccount);
+  if (accountNodes.length !== 1) throw new RefusedError('account_unreadable', `SiteOne review: ${accountNodes.length} account fields shown (expected exactly one)`, evidence);
+  checkAccountText(run, await textOf(accountNodes[0]), 'review account');
   const { code, qty } = await readReviewItem(run);
   const totalCents = await readTotal(page, SELECTORS.reviewTotal, 'review total', evidence);
   evidence.reviewTotalCents = totalCents;
@@ -629,6 +668,7 @@ async function bindToClick(run, first) {
   const again = await readReview(run);
   if (reviewKey(again) !== reviewKey(first)) throw new RefusedError('review_changed', 'SiteOne review changed after the cap check — nothing clicked', evidence, again.totalCents);
   assertAt(run, PATHS.review, 'order review');
+  await assertSignedIn(run);
   return { button: again.button, baseline, totalCents: again.totalCents };
 }
 
@@ -702,7 +742,7 @@ async function place(args, opts = {}) {
   const env = opts.env || process.env;
   const connect = opts.connect || defaultConnect;
   const { sku, qty, po } = validateArgs(args);
-  if (!configured(env)) throw runLevel('siteone cdp: SITEONE_CDP_URL, SITEONE_APPROVED_STORE_ID and SITEONE_APPROVED_PICKUP must all be set');
+  if (!configured(env)) throw runLevel('siteone cdp: SITEONE_CDP_URL, SITEONE_APPROVED_STORE_ID, SITEONE_APPROVED_PICKUP and SITEONE_APPROVED_ACCOUNT must all be set');
   if (typeof args.beforeSubmit !== 'function') throw new RefusedError('no_cap_check', 'no cap check was supplied — the bot never orders without one');
   const dryRun = isDryRun(env, args.dryRun);
   const evidence = { adapter: 'siteone-cdp', dryRun };
@@ -715,7 +755,7 @@ async function place(args, opts = {}) {
   };
   const { browser, page } = await openPageInOwnerChrome(env, connect);
   const run = {
-    page, vendorSku: sku, quantity: qty, poNumber: po, dryRun, evidence, gate, cartEmptyBefore: false, ownEntry: null, added: false, poFilled: false, submitted: false,
+    page, vendorSku: sku, quantity: qty, poNumber: po, dryRun, evidence, gate, account: String(env.SITEONE_APPROVED_ACCOUNT).trim(), cartEmptyBefore: false, ownEntry: null, added: false, poFilled: false, submitted: false,
     storeId: String(env.SITEONE_APPROVED_STORE_ID).trim(), pickupTokens: csv(env.SITEONE_APPROVED_PICKUP),
     opts: { settleMs: opts.settleMs ?? SETTLE_MS, confirmStep: opts.confirmStep ?? 1000 },
   };

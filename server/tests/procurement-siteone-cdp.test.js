@@ -19,6 +19,7 @@ const ENV = Object.freeze({
   SITEONE_CDP_URL: 'http://127.0.0.1:9222',
   SITEONE_APPROVED_STORE_ID: '238',
   SITEONE_APPROVED_PICKUP: '#238,5115 Lena Rd',
+  SITEONE_APPROVED_ACCOUNT: '2330739',
   SITEONE_BOT_DRY_RUN: 'false',
 });
 const OPTS = { settleMs: 0, confirmStep: 1 };
@@ -35,7 +36,8 @@ function makeWorld(over = {}) {
     pickupClass: 'cart-top-fulfillment-method__tile fullfillment-pickup fullfilment-select', pickupText: 'Pickup #238,5115 Lena Rd',
     cartTotalText: '$105.93', addBehavior: 'normal', checkoutLocText: 'Pickup at #238, 5115 Lena Rd',
     reviewBody: 'Review your order. Reference 5500990. Store 238.', reviewTenderText: 'Payment Method Pay At branch, Lakewood Ranch 238',
-    reviewPickupText: 'Pickup Lakewood Ranch 238', hideTender: false, confirmEverywhere: false, confirmationField: true, poOccupied: '', signInUrl: null,
+    reviewPickupText: 'Pickup Lakewood Ranch 238', hideTender: false, confirmEverywhere: false, confirmationField: true, poOccupied: '', signInUrl: null, signOutAfter: null, accountText: 'Signed in as account 2330739', accountAttr: null, hideAccount: false,
+    reviewAccountText: 'Bill to account 2330739', hideReviewAccount: false, locators: [],
     checkoutUrl: null, confirmUrl: null, reviewCode: `Item # : ${SKU}`, reviewQtyText: 'Qty: 2',
     reviewQtyNode: true, closeOrder: [], reviewTotalText: '$110.40', placeButtons: 1, cardField: false, noRadioCheck: false,
     confirmationBody: 'Order Number: 7700123', noConfirmation: false, placeClickThrows: false, placed: 0, qty: 0,
@@ -65,13 +67,14 @@ function screens(w) {
     [S.cartRow]: w.cartRowEls(),
     [S.pickupTile]: [el({ attrs: { class: w.pickupClass }, text: w.pickupText })],
     [S.cartTotal]: [el({ text: w.cartTotalText })],
-    [S.continueCheckout]: [el({ name: 'continue-checkout', onClick: () => { w.url = w.checkoutUrl || 'https://www.siteone.com/en/checkout/multi/siteOne-checkout'; } })],
+    [S.accountNode]: w.hideAccount ? [] : [el({ text: w.accountText, attrs: w.accountAttr ? { 'data-account-number': w.accountAttr } : {} })],
+    [S.continueCheckout]: [el({ name: 'continue-checkout', onClick: () => { w.url = w.checkoutUrl || 'https://www.siteone.com/en/checkout/multi/siteOne-checkout'; if (w.signOutAfter === 'continue') w.signedOut = true; } })],
   };
   const payment = w.step === 'payment' ? {
     [S.payAtBranchLabel]: [el({ name: 'label:PAY_AT_BRANCH', onClick: () => { w.radioChecked = !w.noRadioCheck; } })],
     [S.payAtBranchRadio]: [el({ visible: false, checked: w.radioChecked })],
     [S.paymentBlockers]: w.cardField ? [el({ name: 'card-field' })] : [],
-    [S.reviewButton]: [el({ name: 'review-your-order', onClick: go('/en/checkout/multi/order-summary/view') })],
+    [S.reviewButton]: [el({ name: 'review-your-order', onClick: () => { go('/en/checkout/multi/order-summary/view')(); if (w.signOutAfter === 'review') w.signedOut = true; } })],
   } : {};
   const checkout = {
     [S.orderTypeForm]: [el({ visible: false })],
@@ -83,6 +86,7 @@ function screens(w) {
       if (w.poDraft != null && !(w.poSticky && w.poDraft === '')) { w.po = w.poDraft; w.poOccupied = ''; }
       w.poDraft = null;
       w.step = 'payment';
+      if (w.signOutAfter === 'order-type') w.signedOut = true;
     } })],
     ...payment,
   };
@@ -91,6 +95,7 @@ function screens(w) {
     [S.body]: [el({ text: w.reviewBody, throws: w.bodyThrows })],
     [S.reviewTender]: w.hideTender ? [] : [el({ text: w.reviewTenderText })],
     [S.reviewPickup]: [el({ text: w.reviewPickupText })],
+    [S.reviewAccount]: w.hideReviewAccount ? [] : [el({ text: w.reviewAccountText })],
     [S.reviewItemCode]: [el({ text: w.reviewCode, children: { [S.reviewItemBlock]: [el({ children: { [S.reviewQty]: w.reviewQtyNode ? [el({ text: w.reviewQtyText })] : [] } })] } })],
     [S.reviewTotal]: [el({ text: w.reviewTotalText })],
     [S.placeOrder]: Array.from({ length: w.placeButtons }, placeBtn),
@@ -106,6 +111,7 @@ function screens(w) {
     [S.addToCart]: [el({ name: 'add-to-cart', onClick: () => {
       w.entrySeq += 1;
       w.cart.push({ sku: SKU, qty: w.addBehavior === 'wrongQty' ? w.qty + 1 : w.qty, entry: `E${w.entrySeq}` });
+      if (w.addBehavior === 'noEntry') w.cart[w.cart.length - 1].entry = '';
       if (w.addBehavior === 'extraRow') w.cart.push({ sku: 'OTHER-1', qty: 1, entry: 'X1' });
     } })],
   };
@@ -148,7 +154,13 @@ function makeBrowser(w) {
     goto: async (url) => { w.gotos.push(url); w.url = url; w.poDraft = null; },
     waitForTimeout: async () => {},
     setDefaultTimeout: () => {},
-    locator: (sel) => collection(current()[sel] || []),
+    locator: (sel) => {
+      w.locators.push(sel);
+      // A row bound to its cart entry: `.js-cart-items-row[data-cartentry="<id>"]`.
+      const bound = sel.match(/^(.*)\[data-cartentry="([^"]+)"\]$/);
+      if (bound && bound[1] === S.cartRow) return collection((current()[S.cartRow] || []).filter((r) => r.attrs['data-cartentry'] === bound[2]));
+      return collection(current()[sel] || []);
+    },
     close: async () => { w.pageCloseCalls += 1; w.closeOrder.push('page'); },
   };
   const browser = {
@@ -200,6 +212,7 @@ test('configured() is false without SITEONE_CDP_URL, store id or pickup', () => 
   expect(adapter.configured({ ...ENV, SITEONE_CDP_URL: '' })).toBe(false);
   expect(adapter.configured({ ...ENV, SITEONE_APPROVED_STORE_ID: '' })).toBe(false);
   expect(adapter.configured({ ...ENV, SITEONE_APPROVED_PICKUP: ' , ' })).toBe(false);
+  expect(adapter.configured({ ...ENV, SITEONE_APPROVED_ACCOUNT: '' })).toBe(false);
   expect(adapter.configured(ENV)).toBe(true);
   const saved = process.env.SITEONE_CDP_URL;
   delete process.env.SITEONE_CDP_URL;
@@ -519,10 +532,10 @@ test('P1: cleanup removes our row only when its quantity is exactly what we adde
   expect(merged.w.cart).toEqual([{ sku: SKU, qty: 5, entry: 'E1' }]);
   expect(merged.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
   expect(merged.error.evidence.cart_left_for_owner).toBe(true);
-  // A second line with our item number: ambiguous, left alone.
-  const twice = await run({}, { verdicts: [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }], onCall: (n, w) => { if (n === 2) w.cart.push({ sku: SKU, qty: 2 }); } });
-  expect(twice.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
-  expect(twice.error.evidence.cart_left_for_owner).toBe(true);
+  // The owner adds another line of the same item: ours is found by its own cart entry, theirs stays.
+  const twice = await run({}, { verdicts: [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }], onCall: (n, w) => { if (n === 2) w.cart.push({ sku: SKU, qty: 2, entry: 'THEIRS' }); } });
+  expect(twice.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([`remove:${SKU}`]);
+  expect(twice.w.cart).toEqual([{ sku: SKU, qty: 2, entry: 'THEIRS' }]);
   // Exactly what we added: removed.
   const exact = await run({}, { verdicts: [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }] });
   expect(exact.w.cart).toEqual([]);
@@ -616,7 +629,7 @@ test('R4 cleanup: removal is bound to the verified row (cart entry, item, quanti
   // The owner's phone replaced our line with a new one (same item, same quantity): not ours.
   const replaced = await run({}, { verdicts: refuse, onCall: (n, w) => { if (n === 2) w.cart[0] = { sku: SKU, qty: 2, entry: 'REPLACED' }; } });
   expect(replaced.w.cart).toEqual([{ sku: SKU, qty: 2, entry: 'REPLACED' }]);
-  expect(replaced.error.evidence).toMatchObject({ cleanup: 'cart_left_for_owner', cart_left_for_owner: true });
+  expect(replaced.error.evidence.cleanup).toBe('row_absent'); // our entry is gone; the new line is not ours
   expect(replaced.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
   // The quantity changes between locating the row and clicking its remove link: re-verified, left.
   const flipped = await run({}, { verdicts: refuse, onCall: (n, w) => { if (n === 2) { w.flipOnRead = 2; w.flipCount = 0; } } });
@@ -655,4 +668,68 @@ test('R4 baseline: the pre-click page text must be readable and non-empty, else 
   const throws = await run({ bodyThrows: true });
   expect(throws.error.refuse).toBe('baseline_unreadable');
   for (const r of [empty, throws]) { expect(r.w.placed).toBe(0); expect(r.w.cart).toEqual([]); expectSafe(r.w); }
+});
+
+// ---- round 5 -----------------------------------------------------------------------
+
+test('R5 account: the signed-in account must be exactly the approved one, before the cart is touched and again at the click', async () => {
+  const MISMATCH = ['Signed in as account 12330739', 'Signed in as account 233073', 'Signed in as account 2330739 and 5550001', 'account 2330738'];
+  for (const accountText of MISMATCH) {
+    const r = await run({ accountText, cart: [{ sku: 'PHONE-APP-1', qty: 3 }] });
+    expect(r.error.refuse).toBe('account_mismatch');
+    expect(r.w.clicks).toEqual([]); // nothing touched, not even the cart read's follow-ups
+    expect(r.w.cart).toEqual([{ sku: 'PHONE-APP-1', qty: 3 }]);
+    expectSafe(r.w);
+  }
+  for (const over of [{ hideAccount: true }, { accountText: 'Signed in' }, { accountText: '  ' }]) {
+    const r = await run(over);
+    expect(r.error.refuse).toBe('account_unreadable');
+    expect(r.w.clicks).toEqual([]);
+    expect(r.w.cart).toEqual([]);
+    expectSafe(r.w);
+  }
+  // An attribute reading is preferred over the node text.
+  expect((await run({ accountText: 'menu', accountAttr: '2330739' })).result.dryRun).toBe(false);
+  expect((await run({ accountText: 'Signed in as account 2330739', accountAttr: '9999999' })).error.refuse).toBe('account_mismatch');
+  // Final review page: a different or unreadable bill-to account refuses with no click, and cleans up.
+  const wrongAtReview = await run({}, { onCall: (n, w) => { if (n === 3) w.reviewAccountText = 'Bill to account 5550001'; } });
+  expect(wrongAtReview.error.refuse).toBe('account_mismatch');
+  const noReviewAccount = await run({ hideReviewAccount: true });
+  expect(noReviewAccount.error.refuse).toBe('account_unreadable');
+  for (const r of [wrongAtReview, noReviewAccount]) { expect(r.w.placed).toBe(0); expect(r.w.cart).toEqual([]); expectSafe(r.w); }
+});
+
+test('R5 cleanup: no verified cart entry id → never remove; the remove locator is bound to the entry', async () => {
+  const refuse = [{ ok: true }, { ok: false, reason: 'over_monthly_cap' }];
+  const noEntry = await run({ addBehavior: 'noEntry' }, { verdicts: refuse });
+  expect(noEntry.error.evidence).toMatchObject({ cleanup: 'cart_left_for_owner', cart_left_for_owner: true });
+  expect(noEntry.w.cart).toHaveLength(1);
+  expect(noEntry.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
+  const ok = await run({}, { verdicts: refuse });
+  expect(ok.error.evidence.cleanup).toBe('row_removed');
+  expect(ok.w.locators).toContain(`${S.cartRow}[data-cartentry="E1"]`);
+  // An unsafe id is never put in a selector.
+  const odd = await run({}, { verdicts: refuse, onCall: (n, w) => { if (n === 2) w.cart[0].entry = 'a"]'; } });
+  expect(odd.w.locators.some((l) => l.includes('a"]'))).toBe(false);
+  for (const r of [noEntry, ok, odd]) expectSafe(r.w);
+});
+
+test('R5 sign-out after any checkout step is run-level (the claim is released), never a refusal', async () => {
+  const MESSAGE = 'SiteOne signed Chrome out — sign in to siteone.com in Chrome on the Mac';
+  for (const signOutAfter of ['continue', 'order-type', 'review']) {
+    const r = await run({ signOutAfter });
+    expect(r.error.runLevel).toBe(true);
+    expect(r.error.message).toBe(MESSAGE);
+    expect(r.error.refuse).toBeUndefined();
+    expect(r.w.placed).toBe(0);
+    expect(r.w.clicks).not.toContain('place-order');
+    // Cleanup cannot sign in either, so our line stays (the owner empties it); nothing was clicked after the sign-out.
+    expect(r.w.cart).toHaveLength(1);
+    expect(r.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
+    expectSafe(r.w);
+  }
+  // Redirected to a sign-in path on siteone.com is the same.
+  const viaPath = await run({ signOutAfter: 'continue', checkoutUrl: 'https://www.siteone.com/en/login' });
+  expect(viaPath.error.runLevel).toBe(true);
+  expect(viaPath.w.placed).toBe(0);
 });
