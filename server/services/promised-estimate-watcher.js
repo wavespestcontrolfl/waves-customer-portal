@@ -177,9 +177,11 @@ const DUPLICATE_OWNER_LEG = `
                    )))
 `;
 
-async function loadUnkeptPromises() {
+// conn: the caller's connection (the retention sweep's live check passes its own); defaults to the app db.
+async function loadUnkeptPromises(conn) {
+  const q = conn || db;
   const { PLACEHOLDER_NAME_SQL_RE } = require('./call-commitments');
-  const { rows } = await db.raw(
+  const { rows } = await q.raw(
     `
     SELECT c.id, c.created_at, c.customer_id, c.disposition,
            c.ai_extraction_enriched AS asked_source,
@@ -382,6 +384,10 @@ async function runPromisedEstimateWatcher(opts = {}) {
       // the clean run, so a new episode still rings (pre-push audit P1).
       dedupeKey: 'ops-digest:promised-estimate',
       refreshOnDedupe: true,
+      // The quiet policy holds this row while the list stands (RERING
+      // 'promised-estimate'); a row it closed before that hold shipped rings
+      // again on the next run instead of staying done with 94 calls owed.
+      ringAfterQuietClose: true,
       sendEmail: () => mailer.sendOne({
         to,
         fromEmail: fromEmail(),

@@ -4,7 +4,8 @@
  * (runAdminAlertRetention, scheduler.js 1:32 AM ET):
  *   - age30: an admin row not done whose last activity is older than 30 days
  *     is marked done, read or unread. Bell rows only: a row that lives in the
- *     Activity feed (metadata.feed = 'activity') has no bell to leave.
+ *     Activity feed (metadata.feed = 'activity') has no bell to leave. A money
+ *     row (KEEP_UNTIL_SETTLED_CATEGORIES) is never aged out by this rule.
  *   - fyi7: an FYI row (metadata.severity = 'fyi', and an ops_digest row of
  *     audience 'fyi') not done and idle for 7 days is marked done. This is the
  *     09-30 rule (docs/admin-notifications.md section 4 item 4), Activity rows
@@ -142,6 +143,10 @@ const RERING = [
     decision: 'expire, capped: a funnel that is still dead raises one fresh row (and the owner text it sends)' },
   { emitter: 'promise-overdue', files: ['services/sms-operational-actions.js', 'services/email-operational-actions.js'], prefixes: ['sms-commitment-customer:', 'email-commitment:'], kind: 'periodic', live: 'promiseOpen',
     decision: 'skip while a promise it covers is still open; expire once none is' },
+  // Not a dedupeOpenOnly emitter: its refresh of an identical list never rings, so a row closed here stays done
+  // and the list goes unseen (the 94-call row closed by the quiet policy 2026-11-19 and never came back).
+  { emitter: 'promised-estimate', files: ['services/promised-estimate-watcher.js'], prefixes: ['ops-digest:promised-estimate'], kind: 'periodic', live: 'promisedQuotesOwed',
+    decision: 'hold while a promised quote is still unsent (the quiet policy never closes it, the 30-day one skips it); expire once none is' },
   { emitter: 'truck-kit', files: ['services/truck-kit.js'], prefixes: ['truck-kit:'], kind: 'event',
     decision: 'expire: only a new truck check that still finds tools missing raises it again' },
   { emitter: 'lead-agent-hold', files: ['services/lead-response-tools.js'], prefixes: ['lead-agent-hold:'], kind: 'event',
@@ -195,9 +200,30 @@ const isActivityOnly = (meta) => meta.feed === 'activity';
 
 // The rule a row falls under at `ageMs` of idleness, or null. Strictly older than
 // the limit: a row exactly 30 days idle stays.
+// A money row (KEEP_UNTIL_SETTLED_CATEGORIES) never ages out under age30: it stays until a person marks it done or its
+// own closer settles it (owner ruling 2026-11-05 "A"). Before this, only the quiet policy honoured the list, so the
+// nightly sweep closed unworked billing rows at 30 days. An FYI money row still follows fyi7: it asks for no action.
+// A registry trigger declared fyi (payment_succeeded, payment_refunded) is news, not money owed: an older row of it
+// without the fyi label still ages out at 30 days.
+const fyiTriggerKeys = () => {
+  const { TRIGGER_REGISTRY } = require('./notification-triggers');
+  return Object.keys(TRIGGER_REGISTRY).filter((k) => TRIGGER_REGISTRY[k]?.rule?.severity === 'fyi');
+};
+// Finished-outcome notices are news too (stripe-webhook.js, no metadata): a deposited payout, and a plain dispute that
+// closed won, lost or warning_closed. A failed payout, an open dispute and any "needs reconciliation" or combined-payment dispute stay.
+// One SQL LIKE per prefix; the JS check reads the same list.
+const SETTLED_NOTICE_PREFIXES = [['payout', 'Payout deposited'], ['dispute', 'Dispute won:'], ['dispute', 'Dispute lost:'],
+  ['dispute', 'Dispute warning_closed:']];
+const isSettledNotice = (row) => SETTLED_NOTICE_PREFIXES
+  .some(([category, prefix]) => row.category === category && String(row.title || '').startsWith(prefix));
+const isKeptMoneyRow = (row, meta) => KEEP_UNTIL_SETTLED_CATEGORIES.includes(row.category || '')
+  && !fyiTriggerKeys().includes(String(meta.triggerKey || '')) && !isSettledNotice(row);
+const SETTLED_NOTICE_SQL = SETTLED_NOTICE_PREFIXES.map(() => '(category = ? AND title LIKE ?)').join(' OR ');
+const settledNoticeBindings = () => SETTLED_NOTICE_PREFIXES.flatMap(([category, prefix]) => [category, `${prefix}%`]);
+
 function ruleFor(row, meta, ageMs) {
   if (isFyiRow(row, meta) && ageMs > FYI_DAYS * DAY_MS) return 'fyi7';
-  if (!isActivityOnly(meta) && ageMs > AGE_DAYS * DAY_MS) return 'age30';
+  if (!isActivityOnly(meta) && !isKeptMoneyRow(row, meta) && ageMs > AGE_DAYS * DAY_MS) return 'age30';
   return null;
 }
 
@@ -258,6 +284,24 @@ const LIVE_CHECKS = {
     }
     return live;
   },
+  // The promised-estimate row speaks for the watcher's whole list: live while that list is not empty. Only the
+  // standing row (the newest row with the key, open or closed: the one notifyAdmin refreshes) is held; an older
+  // duplicate carries a stale list and expires.
+  async promisedQuotesOwed(conn, rows) {
+    try {
+      const { _private } = require('./promised-estimate-watcher');
+      if (!(await _private.loadUnkeptPromises(conn)).length) return new Set();
+      // Same pick as notifyAdmin's dedupe probe: the newest keyed row, open or closed.
+      const standing = conn ? await conn('notifications').where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'dedupeKey' = ?", ['ops-digest:promised-estimate'])
+        .orderBy('created_at', 'desc').first('id') : null;
+      // No connection (a unit call): hold every candidate, as before the standing-row pick.
+      return new Set(rows.filter((r) => !conn || (standing && r.id === standing.id)).map((r) => r.id));
+    } catch (err) {
+      logger.warn(`[alert-retention] promisedQuotesOwed live check failed (${err.message}) — treating the row as live`);
+      return new Set(rows.map((r) => r.id));
+    }
+  },
 };
 
 // judgeRow's isActivityOnly in SQL. A non-FYI Activity-feed row can never expire
@@ -281,7 +325,7 @@ function pageQuery(conn, { cursor, limit, scope = null }, narrow) {
   if (cursor) query.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id]);
   if (scope) scope(query);
   return query
-    .select('id', 'category', 'created_at', 'read_at', 'metadata',
+    .select('id', 'category', 'title', 'created_at', 'read_at', 'metadata',
       conn.raw(`${NOTIFICATION_VERSION_SQL} AS version`), conn.raw('created_at::text AS created_at_cursor'))
     .orderByRaw('created_at ASC, id ASC')
     .limit(limit);
@@ -291,7 +335,9 @@ async function loadPage(conn, { now, cursor, limit, scope = null }) {
   const ageCutoff = new Date(now.getTime() - AGE_DAYS * DAY_MS);
   const fyiCutoff = new Date(now.getTime() - FYI_DAYS * DAY_MS);
   return pageQuery(conn, { cursor, limit, scope }, (query) => query
-    .where((q) => q.where((a) => a.where('created_at', '<', ageCutoff).whereRaw(NOT_ACTIVITY_SQL))
+    .where((q) => q.where((a) => a.where('created_at', '<', ageCutoff).whereRaw(NOT_ACTIVITY_SQL)
+      .whereRaw(`(NOT (COALESCE(category, '') = ANY(?::text[])) OR COALESCE(metadata->>'triggerKey', '') = ANY(?::text[]) OR ${SETTLED_NOTICE_SQL})`,
+        [KEEP_UNTIL_SETTLED_CATEGORIES, fyiTriggerKeys(), ...settledNoticeBindings()]))
       .orWhere((f) => f.where('created_at', '<', fyiCutoff).whereRaw(FYI_SQL))));
 }
 

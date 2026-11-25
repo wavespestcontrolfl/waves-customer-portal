@@ -107,6 +107,7 @@ describe('re-ring list', () => {
     expect(retention.ringRiskFor(keyed('email-commitment:9')).live).toBe('promiseOpen');
     expect(retention.ringRiskFor(keyed('sms-commitment-customer:c1')).live).toBe('promiseOpen');
     expect(retention.ringRiskFor(keyed('truck-kit:v1')).emitter).toBe('truck-kit');
+    expect(retention.ringRiskFor(keyed('ops-digest:promised-estimate'))).toMatchObject({ emitter: 'promised-estimate', kind: 'periodic', live: 'promisedQuotesOwed' });
     expect(retention.ringRiskFor(keyed('autopay_hold_charge:declined:inv-1')).kind).toBe('event');
     expect(retention.ringRiskFor(keyed('lead-agent-hold:lead-1')).emitter).toBe('lead-agent-hold');
     expect(retention.ringRiskFor(keyed('payroll-mercury-key')).kind).toBe('periodic');
@@ -164,7 +165,7 @@ function fakeIo(rows, { live = {}, cursors = {} } = {}) {
 describe('runAdminAlertRetention: the sweep', () => {
   const rows = () => [
     row({ created_at: ago(60), category: 'alert' }),
-    row({ created_at: ago(35), category: 'billing', read_at: ago(34) }),
+    row({ created_at: ago(35), category: 'schedule', read_at: ago(34) }),
     row({ created_at: ago(20), category: 'alert' }),
     row({ created_at: ago(9), category: 'lead', metadata: { severity: 'fyi' } }),
     row({ created_at: ago(90), category: 'alert', metadata: { rungAt: ago(1).toISOString() } }),
@@ -176,7 +177,7 @@ describe('runAdminAlertRetention: the sweep', () => {
     const summary = await retention.runAdminAlertRetention({ now: NOW, io });
     expect(summary).toMatchObject({
       scanned: 5, written: 3, kept: { refreshed: 1 },
-      expire: { total: 3, unread: 2, byRule: { age30: 2, fyi7: 1 }, byCategory: { alert: 1, billing: 1, lead: 1 } },
+      expire: { total: 3, unread: 2, byRule: { age30: 2, fyi7: 1 }, byCategory: { alert: 1, lead: 1, schedule: 1 } },
     });
     expect(io.calls.expire.map((c) => c.rule).sort()).toEqual(['age30', 'fyi7']);
     expect(io.calls.expire.find((c) => c.rule === 'age30').ids).toEqual([data[0].id, data[1].id]);
@@ -247,6 +248,64 @@ describe('runAdminAlertRetention: re-ring accounting', () => {
   });
 });
 
+describe('the promised-quotes row: held while the list stands', () => {
+  const promised = () => row({ category: 'ops_digest', created_at: ago(80), metadata: { dedupeKey: 'ops-digest:promised-estimate' } });
+  const owed = (n) => jest.spyOn(require('../services/promised-estimate-watcher')._private, 'loadUnkeptPromises')
+    .mockImplementation(async () => (n instanceof Error ? Promise.reject(n) : Array.from({ length: n }, (_, i) => ({ id: i }))));
+  afterEach(() => jest.restoreAllMocks());
+
+  test('live while any promised quote is unsent; expired (capped) once none is', async () => {
+    const r = promised();
+    owed(3);
+    expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(null, [r])]).toEqual([r.id]);
+    jest.restoreAllMocks();
+    owed(0);
+    expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(null, [r])]).toEqual([]);
+  });
+
+  test('the check reads through the sweep\'s own connection', async () => {
+    const spy = owed(1);
+    const conn = { marker: 'sweep-conn' };
+    await retention.LIVE_CHECKS.promisedQuotesOwed(conn, [promised()]);
+    expect(spy).toHaveBeenCalledWith(conn);
+  });
+
+  test('only the standing (newest open) row is held; an older duplicate expires', async () => {
+    owed(2);
+    const newer = promised();
+    const older = promised();
+    const first = jest.fn(async () => ({ id: newer.id }));
+    const chain = { where: () => chain, whereRaw: () => chain, orderBy: () => chain, first };
+    const conn = jest.fn(() => chain);
+    expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(conn, [older, newer])]).toEqual([newer.id]);
+    expect(conn).toHaveBeenCalledWith('notifications');
+    expect(chain.whereNull).toBeUndefined();
+  });
+
+  test('a newer CLOSED keyed row means the older open duplicate is not held', async () => {
+    owed(2);
+    const older = promised();
+    const chain = { where: () => chain, whereRaw: () => chain, orderBy: () => chain, first: jest.fn(async () => ({ id: 'newer-closed' })) };
+    expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(jest.fn(() => chain), [older])]).toEqual([]);
+  });
+
+  test('a failed check calls the row live, so the sweep leaves it alone', async () => {
+    owed(new Error('db down'));
+    const r = promised();
+    expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(null, [r])]).toEqual([r.id]);
+  });
+
+  test('the 30-day sweep skips it while quotes are owed', async () => {
+    owed(5);
+    const r = promised();
+    const io = fakeIo([r]);
+    io.live = async (name, subset) => retention.LIVE_CHECKS[name](null, subset);
+    const summary = await retention.runAdminAlertRetention({ now: NOW, io });
+    expect(summary.held.livePromise).toBe(1);
+    expect(io.calls.expire).toEqual([]);
+  });
+});
+
 describe('scan budget and the continuation cursor', () => {
   // 25 old promise rows whose promise is still open (kept for now), then one eligible alert behind them.
   const setup = () => {
@@ -301,5 +360,46 @@ describe('the sweep never takes a row lock', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'admin-alert-retention.js'), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     expect(source).not.toMatch(/forUpdate|forShare|FOR UPDATE|FOR SHARE|skipLocked/);
+  });
+});
+
+describe('money rows stay until settled (owner ruling 2026-11-05 "A")', () => {
+  test.each(retention.KEEP_UNTIL_SETTLED_CATEGORIES)('a %s row idle 90 days is not aged out', (category) => {
+    expect(retention.judgeRow(row({ created_at: ago(90), category }), NOW)).toEqual({ expire: false, reason: 'young' });
+  });
+
+  test('an unlabelled payment_succeeded row (a registry fyi type) still ages out at 30 days', () => {
+    expect(retention.judgeRow(row({ created_at: ago(40), category: 'payment', metadata: { triggerKey: 'payment_succeeded' } }), NOW))
+      .toEqual({ expire: true, rule: 'age30' });
+    expect(retention.judgeRow(row({ created_at: ago(40), category: 'payment', metadata: { triggerKey: 'payment_failed' } }), NOW).expire)
+      .toBe(false);
+  });
+
+  test('a deposited payout notice ages out; a failed payout stays', () => {
+    expect(retention.judgeRow(row({ created_at: ago(40), category: 'payout', title: 'Payout deposited', metadata: null }), NOW).rule).toBe('age30');
+    expect(retention.judgeRow(row({ created_at: ago(40), category: 'payout', title: 'Payout FAILED: $1.00', metadata: null }), NOW).expire).toBe(false);
+  });
+
+  test('a dispute won or lost ages out; an open dispute or a reconciliation stays', () => {
+    const d = (title) => retention.judgeRow(row({ created_at: ago(40), category: 'dispute', title, metadata: null }), NOW).expire;
+    expect(d('Dispute won: $1.00')).toBe(true);
+    expect(d('Dispute lost: $1.00')).toBe(true);
+    expect(d('Dispute warning_closed: $1.00')).toBe(true);
+    expect(d('Dispute opened: $1.00')).toBe(false);
+    expect(d('Won dispute needs reconciliation: $1.00')).toBe(false);
+    expect(d('Combined-payment dispute won: $1.00')).toBe(false);
+  });
+
+  test('an FYI money row still follows fyi7', () => {
+    expect(retention.judgeRow(row({ created_at: ago(9), category: 'billing', metadata: { severity: 'fyi' } }), NOW))
+      .toEqual({ expire: true, rule: 'fyi7' });
+  });
+
+  test('the sweep leaves an old billing row open and still expires an old alert', async () => {
+    const data = [row({ created_at: ago(40), category: 'billing' }), row({ created_at: ago(40), category: 'alert' })];
+    const io = fakeIo(data);
+    const summary = await retention.runAdminAlertRetention({ now: NOW, io });
+    expect(summary.written).toBe(1);
+    expect(io.calls.expire).toEqual([{ rule: 'age30', ids: [data[1].id] }]);
   });
 });
