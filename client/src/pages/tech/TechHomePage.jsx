@@ -69,6 +69,7 @@ import { completionBillingFacts, wrapUpSheetFields } from '../../lib/completion-
 import { accessSheetFields } from '../../lib/schedule-access';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
+import RouteShiftNotice from '../../components/schedule/RouteShiftNotice';
 import TechRecapCapture from './TechRecapCapture';
 import { useRecapRecoveryHold } from '../../lib/recapUploads';
 import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
@@ -2039,6 +2040,9 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
     ...(scope === 'route' && !routeStale ? (src?.routeConflicts || []) : []),
   ];
   const selectedConflicts = conflictsFor(selected);
+  // GATE_TECH_SHIFT_HOURS: the stops a rest-of-route move would land outside the shift (one
+  // row for each stop). Real only while the scope is the route, as routeConflicts.
+  const shiftRowsOf = (src) => (scope === 'route' && !routeStale ? (src?.routeShiftConflicts || []) : []);
   const conflictLabel = (c) => {
     // A self-collision is two of THIS route's own stops projected onto one
     // window — naming a customer would be wrong, the fix is a different time.
@@ -2331,6 +2335,16 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
                 {' — the schedule will block this move. Pick a different time.'}
               </div>
             )}
+
+            <RouteShiftNotice
+              own
+              rows={shiftRowsOf(selected)}
+              formatTime={fmtHHMM}
+              style={{
+                fontSize: 14, padding: '8px 10px', borderRadius: 4, marginTop: -8, marginBottom: 16,
+                background: 'rgba(133, 77, 14, .1)', border: '1px solid #854d0e', color: '#854d0e',
+              }}
+            />
 
             {!pickSelected && options.remainingRouteCount > 0 && !SINGLE_STOP_REASONS.has(reason) && (
               <>
