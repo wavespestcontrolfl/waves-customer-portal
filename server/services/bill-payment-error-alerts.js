@@ -132,6 +132,12 @@ async function alertBillPaymentError(input = {}) {
   if (isClientFormValidationError(input)) {
     return { notified: false, skipped: true, reason: 'client_validation_error' };
   }
+  // `bank_step_left` belongs to the server sweep (bank-step-left-bell.js) and its
+  // eligibility checks. A browser report naming it (POST /pay/:token/error takes
+  // the phase from the request) is filed as a plain client error instead.
+  if (normalizePhase(input.phase) === 'bank_step_left' && normalizePhase(input.source || 'server') !== 'server') {
+    input = { ...input, phase: 'client' };
+  }
 
   const phase = normalizePhase(input.phase);
   const methodCategory = normalizeMethod(input.methodCategory || invoice.payment_method || 'unknown');

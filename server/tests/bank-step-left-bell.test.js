@@ -4,11 +4,13 @@
  * writer are injected; the invoice read is a mocked db.
  */
 const invoices = {};
-jest.mock('../models/db', () => jest.fn(() => {
+const reportedErrors = {};
+jest.mock('../models/db', () => jest.fn((table) => {
   let id = null;
   const q = {
-    where: jest.fn((w) => { id = w.id; return q; }),
-    first: jest.fn(async () => invoices[id] || undefined),
+    where: jest.fn((w) => { if (w && typeof w === 'object') id = w.id || w.invoice_id; return q; }),
+    whereNot: jest.fn(() => q),
+    first: jest.fn(async () => (table === 'bill_payment_error_alerts' ? reportedErrors[id] : invoices[id]) || undefined),
   };
   return q;
 }));
@@ -23,6 +25,7 @@ function pi(id, invoiceId, touchedIso, extra = {}) {
   return {
     id,
     created: Math.floor(new Date('2026-11-24T12:00:00Z').getTime() / 1000),
+    status: 'requires_payment_method',
     metadata: { waves_invoice_id: invoiceId, selected_method_category: 'us_bank_account', pay_session_touched_at: sec(touchedIso) },
     last_payment_error: null,
     ...extra,
@@ -38,7 +41,7 @@ function stripeWith(pages) {
   return { paymentIntents: { search } };
 }
 
-beforeEach(() => { for (const k of Object.keys(invoices)) delete invoices[k]; });
+beforeEach(() => { for (const m of [invoices, reportedErrors]) for (const k of Object.keys(m)) delete m[k]; });
 
 test('rings once for an invoice left on Bank account 30+ minutes ago, through the bill-payment alert path', async () => {
   invoices['0100'] = invoice('0100', 'pi_a');
@@ -65,6 +68,8 @@ test.each([
   ['too_recent', () => pi('pi_a', '0100', '2026-11-24T20:45:00Z'), () => invoice('0100', 'pi_a')],
   ['too_old', () => pi('pi_a', '0100', '2026-11-23T20:00:00Z'), () => invoice('0100', 'pi_a')],
   ['payment_error_on_intent', () => pi('pi_a', '0100', '2026-11-24T20:00:00Z', { last_payment_error: { code: 'x' } }), () => invoice('0100', 'pi_a')],
+  ['status_changed', () => pi('pi_a', '0100', '2026-11-24T20:00:00Z', { status: 'processing' }), () => invoice('0100', 'pi_a')],
+  ['method_changed', () => ({ ...pi('pi_a', '0100', '2026-11-24T20:00:00Z'), metadata: { ...pi('pi_a', '0100', '2026-11-24T20:00:00Z').metadata, selected_method_category: 'card' } }), () => invoice('0100', 'pi_a')],
   ['invoice_not_found', () => pi('pi_a', '0100', '2026-11-24T20:00:00Z'), () => null],
   ['intent_replaced', () => pi('pi_a', '0100', '2026-11-24T20:00:00Z'), () => invoice('0100', 'pi_newer')],
   ['not_collectible', () => pi('pi_a', '0100', '2026-11-24T20:00:00Z'), () => invoice('0100', 'pi_a', { status: 'paid' })],
@@ -104,4 +109,19 @@ test('one failing intent is logged and the rest still run', async () => {
 
 test('does nothing without a Stripe client', async () => {
   expect(await runBankStepLeftBell({ now: NOW, stripe: null })).toEqual({ skipped: 'stripe_unavailable', candidates: 0, rang: 0 });
+});
+
+test('does not ring when the office already got a checkout error for the invoice since the last touch', async () => {
+  invoices['0100'] = invoice('0100', 'pi_a');
+  reportedErrors['0100'] = { id: 'alert-1' };
+  const alert = jest.fn();
+  const tally = await runBankStepLeftBell({ now: NOW, stripe: stripeWith([{ data: [pi('pi_a', '0100', '2026-11-24T20:00:00Z')], has_more: false }]), alert });
+  expect(alert).not.toHaveBeenCalled();
+  expect(tally.skipped).toEqual({ error_already_reported: 1 });
+});
+
+test('counts a failed alert write as a failure, not as already rung', async () => {
+  invoices['0100'] = invoice('0100', 'pi_a');
+  const tally = await runBankStepLeftBell({ now: NOW, stripe: stripeWith([{ data: [pi('pi_a', '0100', '2026-11-24T20:00:00Z')], has_more: false }]), alert: jest.fn(async () => ({ notified: false, error: 'write failed' })) });
+  expect(tally).toMatchObject({ rang: 0, duplicate: 0, failed: 1 });
 });

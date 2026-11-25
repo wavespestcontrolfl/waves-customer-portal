@@ -244,4 +244,17 @@ describe('bill-payment-error-alerts', () => {
     expect(key('inv_123', 'pi_old', 'bank_step_left', 'a')).not.toBe(key('inv_456', 'pi_old', 'bank_step_left', 'a'));
     expect(key('inv_123', 'pi_old', 'bank_step_left', 'a')).not.toBe(key('inv_123', 'pi_old', 'stripe_confirm', 'a'));
   });
+
+  test('a browser report cannot use the server-only bank_step_left phase', async () => {
+    const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
+    await alertBillPaymentError({
+      invoice: { id: 'inv_123', invoice_number: 'WPC-2026-0100', customer_id: 'cust_123', total: '125.50', stripe_payment_intent_id: 'pi_123' },
+      phase: 'bank_step_left',
+      methodCategory: 'us_bank_account',
+      message: 'forged',
+      source: 'client',
+    });
+    expect(triggerNotification).toHaveBeenCalledWith('bill_payment_error', expect.objectContaining({ phase: 'client' }));
+    expect(insertFn).toHaveBeenCalledWith(expect.objectContaining({ phase: 'client' }));
+  });
 });

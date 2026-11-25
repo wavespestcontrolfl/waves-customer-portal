@@ -29,7 +29,8 @@ const { isInvoiceCollectibleStatus, invoiceAmountDue, invoiceWithdrawnFromCustom
 const SEARCH_QUERY = "status:'requires_payment_method' AND metadata['selected_method_category']:'us_bank_account'";
 const MIN_AGE_MS = 30 * 60 * 1000;
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const MAX_PAGES = 5;
+// Stripe search pages of 100. Today the match set is a handful; a cap hit logs.
+const MAX_PAGES = 100;
 const MESSAGE = 'Bank account picked on the pay page, not paid after 30 minutes';
 
 function touchedAtMs(pi) {
@@ -46,6 +47,11 @@ function skipReason(pi, invoice, nowMs) {
   const age = nowMs - touched;
   if (age < MIN_AGE_MS) return 'too_recent';
   if (age > MAX_AGE_MS) return 'too_old';
+  // Stripe search can match on a lagging index and return the CURRENT intent:
+  // re-check the live state (an ACH debit processing or awaiting verification
+  // must not ring).
+  if (pi.status !== 'requires_payment_method') return 'status_changed';
+  if (pi.metadata?.selected_method_category !== 'us_bank_account') return 'method_changed';
   // A confirm that failed already rang its own "Bank payment error" bell.
   if (pi.last_payment_error) return 'payment_error_on_intent';
   if (!invoice) return 'invoice_not_found';
@@ -58,11 +64,24 @@ function skipReason(pi, invoice, nowMs) {
   return null;
 }
 
+// A checkout error the office already got for this invoice since the customer's
+// last touch (a browser-side bank confirm or network failure reported through
+// POST /pay/:token/error can leave last_payment_error empty): no second bell.
+async function errorAlreadyReported(invoice, pi) {
+  const touched = touchedAtMs(pi);
+  const row = await db('bill_payment_error_alerts')
+    .where({ invoice_id: invoice.id })
+    .whereNot({ phase: 'bank_step_left' })
+    .where('last_seen_at', '>=', new Date(touched))
+    .first('id');
+  return !!row;
+}
+
 // One searched intent: ring, count a duplicate, or count why it was skipped.
 async function checkIntent(pi, { nowMs, sendAlert, tally }) {
   const invoiceId = pi.metadata?.waves_invoice_id;
   const invoice = invoiceId ? await db('invoices').where({ id: invoiceId }).first() : null;
-  const reason = skipReason(pi, invoice, nowMs);
+  const reason = skipReason(pi, invoice, nowMs) || (await errorAlreadyReported(invoice, pi) ? 'error_already_reported' : null);
   if (reason) {
     tally.skipped[reason] = (tally.skipped[reason] || 0) + 1;
     return;
@@ -76,7 +95,9 @@ async function checkIntent(pi, { nowMs, sendAlert, tally }) {
     source: 'server',
   });
   if (result?.notified) tally.rang += 1;
-  else tally.duplicate += 1;
+  else if (result?.duplicate) tally.duplicate += 1;
+  else if (result?.error) tally.failed += 1;
+  else tally.skipped[result?.reason || 'alert_skipped'] = (tally.skipped[result?.reason || 'alert_skipped'] || 0) + 1;
 }
 
 async function runBankStepLeftBell({ now = new Date(), stripe, alert } = {}) {
@@ -100,6 +121,7 @@ async function runBankStepLeftBell({ now = new Date(), stripe, alert } = {}) {
     }
     nextPage = page?.has_more ? page.next_page : null;
     if (!nextPage) break;
+    if (pageNo === MAX_PAGES - 1) logger.warn(`[bank-step-left-bell] stopped at the ${MAX_PAGES}-page cap with more results`);
   }
   logger.info(`[bank-step-left-bell] ${tally.candidates} bank-picked intents, ${tally.rang} rang, ${tally.duplicate} already rung, ${tally.failed} failed, skipped ${JSON.stringify(tally.skipped)}`);
   return tally;
