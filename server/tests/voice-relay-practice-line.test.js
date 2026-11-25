@@ -169,3 +169,96 @@ describe('failure copy and the end of the session', () => {
     expect(PRACTICE_LINE_ADDENDUM.length).toBeLessThan(900);
   });
 });
+
+describe('no practice-reachable result promises a callback', () => {
+  const PROMISE = /follow up|follow-up|will call|call you|call back|callback to|reach out|team member will|capture the lead|confirm specifics|go over exact pricing/i;
+  const noPromise = (text) => {
+    // "Do not promise a callback" is a prohibition, not a promise: drop it before checking.
+    expect(String(text).replace(/do not promise a callback/gi, '')).not.toMatch(PROMISE);
+  };
+
+  test.each([
+    ['a property type outside residential pricing', { service: 'pest_control', property_type: 'commercial' }],
+    ['a property beyond standard size', { service: 'pest_control', property_type: 'single_family', home_sqft: 25000, lot_sqft: 9000 }],
+  ])('get_pricing for %s tells the caller to call or text the office', async (_name, input) => {
+    const out = await executeTool('get_pricing', input, { practiceLine: true, sandbox: true, callSid: 'CA-practice-1' });
+    expect(out).toMatch(/custom quote|outside standard|beyond standard/i);
+    expect(out).toMatch(/practice line: tell the caller to call or text the Waves office/);
+    noPromise(out);
+    // and the production text for the same input still says a team member will follow up
+    const production = await executeTool('get_pricing', input, { callSid: 'CA-prod' });
+    expect(production).toMatch(/team member will follow up/);
+  });
+
+  test('the tool descriptions a practice line is offered promise no follow-up or confirmation', () => {
+    for (const tool of activeTools({ practiceLine: true })) {
+      const description = String(tool.description).replace(/nobody follows up/gi, '');
+      expect(description).not.toMatch(/follow up|team member|confirms the appointment|human can/i);
+    }
+    // an ordinary session keeps the production descriptions
+    const ordinary = activeTools({ officeOpen: false }).find((t) => t.name === 'capture_lead');
+    expect(ordinary.description).toMatch(/human\s+can follow up/);
+  });
+
+  test('the services catalog fallback does not hand the caller to "a team member"', async () => {
+    const out = await relayContext.servicesCatalogText({ practiceLine: true });
+    noPromise(out);
+    const production = await relayContext.servicesCatalogText();
+    expect(production).toMatch(/let a team member confirm specifics|Services Waves offers/);
+  });
+
+  describe('the bounded tool timeout', () => {
+    afterEach(() => jest.useRealTimers());
+    const slow = () => jest.spyOn(require('../services/voice-agent/relay-tools'), 'executeTool').mockImplementation(() => new Promise(() => {}));
+
+    test('a read that blows its 3 s budget gets practice wording, and an ordinary session keeps the production one', async () => {
+      jest.useFakeTimers();
+      const spy = slow();
+      try {
+        const convo = practice();
+        const pending = convo._executeToolBounded('find_slots', {}, convo._buildToolCtx());
+        await jest.advanceTimersByTimeAsync(3001);
+        const out = await pending;
+        expect(out).toMatch(/This is a practice line: tell the caller to call or text the Waves office/);
+        noPromise(out);
+        const ordinary = new RelayConversation({ callSid: 'CA-sb-3', from: '+19415551234', send: jest.fn(), sandbox: true });
+        const pendingOrdinary = ordinary._executeToolBounded('find_slots', {}, ordinary._buildToolCtx());
+        await jest.advanceTimersByTimeAsync(3001);
+        expect(await pendingOrdinary).toMatch(/Waves team member will follow up/);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('a write that blows its 8 s budget, and a retry while it is in flight, get practice wording', async () => {
+      jest.useFakeTimers();
+      const spy = slow();
+      try {
+        const convo = practice();
+        const ctx = convo._buildToolCtx();
+        const first = convo._executeToolBounded('capture_lead', {}, ctx);
+        await jest.advanceTimersByTimeAsync(8001);
+        const out = await first;
+        expect(out).toMatch(/practice line and nothing is saved/);
+        noPromise(out);
+        const retry = await convo._executeToolBounded('capture_lead', {}, ctx); // the first is still in flight
+        expect(retry).toMatch(/practice line/);
+        noPromise(retry);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('the tool-attempt record counts a dispatch at its start, even one that never returns', async () => {
+      jest.useFakeTimers();
+      const spy = slow();
+      try {
+        const convo = practice();
+        void convo._executeToolBounded('find_slots', {}, convo._buildToolCtx());
+        expect(convo._toolAttempts).toEqual(['find_slots']);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+});

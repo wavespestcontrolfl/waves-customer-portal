@@ -440,8 +440,22 @@ const TOOLS_WITH_ACCOUNT_DETAILS = TOOLS.map((tool) => (tool.name !== 'capture_l
 // no re-service, no transfer. request_booking is out too: it needs a matched customer.
 const PRACTICE_LINE_TOOLS = Object.freeze(['get_services_catalog', 'get_pricing', 'get_availability', 'find_slots', 'capture_lead']);
 
+// The two tool descriptions that tell the model a human will follow up or confirm: on a practice line
+// nothing is filed, so they say what actually happens.
+const PRACTICE_DESCRIPTIONS = Object.freeze({
+  capture_lead: 'Practice run of saving a new-customer request. Call it once you have the caller\'s reason for calling and '
+    + 'the contact and location detail they give. On this practice line NOTHING is saved and nobody follows up: the result '
+    + 'says so, and you tell the caller plainly. Safe to call with partial information.',
+  get_availability: 'Look up the soonest open appointment windows near a service location. Use this when the caller asks '
+    + 'when you can come out and has not named a specific day. Requires the service address or at least the city/ZIP. '
+    + 'READ-ONLY: this does NOT book or hold anything. It only returns times you can read out; this practice line cannot reserve them.',
+});
+
 function activeTools({ officeOpen = null, practiceLine = false } = {}) {
-  if (practiceLine === true) return [...TOOLS, ...CONTEXT_TOOLS].filter((tool) => PRACTICE_LINE_TOOLS.includes(tool.name));
+  if (practiceLine === true) {
+    return [...TOOLS, ...CONTEXT_TOOLS].filter((tool) => PRACTICE_LINE_TOOLS.includes(tool.name))
+      .map((tool) => (PRACTICE_DESCRIPTIONS[tool.name] ? { ...tool, description: PRACTICE_DESCRIPTIONS[tool.name] } : tool));
+  }
   const { isContextEnabled } = require('./relay-context');
   // PR 2A: transfer_to_office rides every tool set — it needs no account
   // context, only the gate and an OPEN office (null = unknown = closed).
@@ -590,7 +604,7 @@ function knownCallerRefusal(account, input = {}, ctx = {}) {
   return account.kind === 'which_property' ? WHICH_PROPERTY_TEXT : OTHER_PROPERTY_TEXT;
 }
 
-async function resolveAvailability({ address_line1, city, zip, when, account = null, isCancelled = () => false }) {
+async function resolveAvailability({ address_line1, city, zip, when, account = null, isCancelled = () => false, signal = null }) {
   const { isEnabled } = require('../../config/feature-gates');
   if (!isEnabled('selfBooking')) return { status: 'unavailable' };
   // Call-scoped cancellation (a practice line whose brain ended or was retired): checked before every
@@ -599,6 +613,7 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
 
   const booking = require('../../routes/booking')._internals;
   const config = await booking.loadBookingConfig();
+  if (isCancelled()) return { status: 'cancelled' }; // the call may have ended while the config loaded
 
   const street = String(address_line1 || '').trim();
   const cityStr = String(city || '').trim();
@@ -613,6 +628,7 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
   const coords = account ? account.coords : await booking.resolveBookingCoords({
     address: (street || zipStr) && addrParts.length ? `${addrParts.join(', ')}, FL` : null,
     city: cityStr || null,
+    ...(signal ? { signal } : {}),
   });
   if (isCancelled()) return { status: 'cancelled' };
   if (!coords.lat || !coords.lng) return { status: 'need_location' };
@@ -631,12 +647,13 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
       minDaysOut: config.advance_days_min ?? 1,
       maxDaysOut: booking.MAX_BOOKING_HORIZON_DAYS,
       defaultWindowDays: config.advance_days_max ?? 14,
+      ...(signal ? { signal } : {}),
     });
     if (isCancelled()) return { status: 'cancelled' };
     const availability = await booking.buildBookingAvailability({
       lat: coords.lat, lng: coords.lng, duration,
       rangeFrom: w.dateFrom, rangeTo: w.dateTo, config, today,
-      timeOfDay: w.timeOfDay, expandOpenDays: true, surface: 'voice',
+      timeOfDay: w.timeOfDay, expandOpenDays: true, surface: 'voice', ...(signal ? { signal } : {}),
     });
     const count = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
     return {
@@ -659,7 +676,7 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
   const rangeTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
   if (isCancelled()) return { status: 'cancelled' };
   const availability = await booking.buildBookingAvailability({
-    lat: coords.lat, lng: coords.lng, duration, rangeFrom, rangeTo, config, today, surface: 'voice',
+    lat: coords.lat, lng: coords.lng, duration, rangeFrom, rangeTo, config, today, surface: 'voice', ...(signal ? { signal } : {}),
   });
   return {
     status: 'ok',
@@ -831,8 +848,8 @@ async function executeTool(name, input = {}, ctx = {}) {
       if (typeof ctx.isCancelled === 'function' && ctx.isCancelled()) return 'Could not check that right now. Tell the caller they can call or text the Waves office.';
       if (name === 'capture_lead') input = { ...input, use_account_details: false }; // no account is ever read here
       // The two public reads run whether or not the account-context gate is on: they read no account.
-      if (name === 'get_pricing') return await require('./relay-context').pricingText(input);
-      if (name === 'get_services_catalog') return await require('./relay-context').servicesCatalogText();
+      if (name === 'get_pricing') return await require('./relay-context').pricingText(input, { practiceLine: true });
+      if (name === 'get_services_catalog') return await require('./relay-context').servicesCatalogText({ practiceLine: true });
     }
     if (name === 'transfer_to_office') {
       // Gate + office state re-checked inside (fail closed); the packet is
@@ -1791,7 +1808,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       const account = await knownCallerAvailabilityLocation(input, ctx);
       const refusal = knownCallerRefusal(account, input, ctx);
       if (refusal) return refusal;
-      const res = await resolveAvailability({ address_line1: input.address_line1, city: input.city, zip: input.zip, account, isCancelled: ctx.isCancelled });
+      const res = await resolveAvailability({ address_line1: input.address_line1, city: input.city, zip: input.zip, account, isCancelled: ctx.isCancelled, signal: ctx.signal });
       return availabilityResultToText(res, ctx) + (account && res.status === 'ok' ? ACCOUNT_LOCATION_NOTE : '');
     }
 
@@ -1802,7 +1819,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       const refusal = knownCallerRefusal(account, input, ctx);
       if (refusal) return refusal;
       if (!input.when) return 'Ask the caller what day or timeframe they prefer, then call find_slots with that.';
-      const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip, account, isCancelled: ctx.isCancelled });
+      const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip, account, isCancelled: ctx.isCancelled, signal: ctx.signal });
       return availabilityResultToText(res, ctx) + (account && res.status === 'ok' ? ACCOUNT_LOCATION_NOTE : '');
     }
 

@@ -60,7 +60,7 @@ function errCode(err) {
 class LiveBrain {
   // `convo` is the one conversation. Build it with LiveBrain.open(): the
   // constructor is public for tests only and takes the conversation built.
-  constructor({ callSid, convo, deadlineMs = ASK_DEADLINE_MS, softMs = SOFT_DEADLINE_MS }) {
+  constructor({ callSid, convo, deadlineMs = ASK_DEADLINE_MS, softMs = SOFT_DEADLINE_MS, cancel = null }) {
     this.callSid = callSid;
     this.convo = convo;
     this.deadlineMs = deadlineMs;
@@ -72,22 +72,22 @@ class LiveBrain {
     this.queue = Promise.resolve(); // asks run one at a time
     this.softTimeouts = 0; // asks still running at the soft deadline (they may still answer)
     this.hardTimeouts = 0; // asks given up at the hard deadline
+    this.cancel = cancel || new AbortController(); // call-scoped: aborted on a hard timeout or the close; paid stages of a tool check it before each request
     this.turn = null; // the turn collecting tokens: { tokens: [], closed: false }
     this.wakeEnded = null;
     this.endedPromise = new Promise((resolve) => { this.wakeEnded = resolve; });
   }
 
-  // Model rounds and paid tool calls the conversation has made so far, from its own per-turn stats
-  // (counts only: a round counts when it STARTS, so a timed-out or aborted one is still a round).
+  // Model rounds and paid tool calls the conversation has made so far (counts only: a round and a tool
+  // call each count when they START, so a timed-out or aborted one is still counted).
   usage() {
     const stats = this.convo && Array.isArray(this.convo._turnStats) ? this.convo._turnStats : [];
+    const attempts = this.convo && Array.isArray(this.convo._toolAttempts) ? this.convo._toolAttempts : [];
     let rounds = 0;
-    let paidToolCalls = 0;
-    for (const stat of stats) {
-      rounds += Number(stat.rounds) || 0;
-      for (const tool of (Array.isArray(stat.tools) ? stat.tools : [])) if (PAID_TOOLS.has(tool.name)) paidToolCalls += 1;
-    }
-    return { rounds, paidToolCalls };
+    for (const stat of stats) rounds += Number(stat.rounds) || 0;
+    // Paid tools are counted when they START (the conversation records the dispatch), not from the
+    // completed turn stats: a lookup still running when the call ends or the deadline passes still counts.
+    return { rounds, paidToolCalls: attempts.filter((name) => PAID_TOOLS.has(name)).length };
   }
 
   // The collector the conversation's `send` writes to. Tokens of a turn that
@@ -108,6 +108,7 @@ class LiveBrain {
     const row = await db('call_log').where({ twilio_call_sid: sid }).first('source', 'from_phone', 'to_phone');
     if (!row || row.source !== VOICE_RELAY_SANDBOX_SOURCE) throw new Error('live_brain_not_sandbox');
     let brain = null;
+    const cancelController = new AbortController();
     const build = make || ((args) => {
       const { RelayConversation } = require('./relay-conversation');
       return new RelayConversation(args);
@@ -122,13 +123,14 @@ class LiveBrain {
       language: null,
       sandbox: true, // always: a write tool never runs on this line
       practiceLine: true, // no transfer, explicit dry-run wording, never ends itself
+      cancelSignal: cancelController.signal,
       send: (token) => brain.collect(token),
       endSession: () => {
         logger.info(`[voice-live-brain] end/handoff frame ignored callSid=${sid}`);
         return false;
       },
     });
-    brain = new LiveBrain({ callSid: sid, convo, deadlineMs, softMs });
+    brain = new LiveBrain({ callSid: sid, convo, deadlineMs, softMs, cancel: cancelController });
     if (convo && convo.sandbox !== true) {
       // Belt and braces: a conversation that is not in dry-run mode never serves a call.
       throw new Error('live_brain_not_sandbox');
@@ -181,6 +183,7 @@ class LiveBrain {
         // the conversation is retired for good: ended (queued turns stop), aborted, and
         // never asked again. Later asks answer TIMEOUT_REPLY without touching it.
         this.retired = true;
+        this.cancel.abort();
         try {
           this.convo.ended = true;
           this.convo.interrupt();
@@ -207,6 +210,7 @@ class LiveBrain {
   async end(reason) {
     if (this.ended) return;
     this.ended = true;
+    this.cancel.abort();
     if (this.turn) this.turn.closed = true;
     this.wakeEnded();
     try {

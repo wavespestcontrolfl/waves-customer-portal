@@ -1561,7 +1561,9 @@ function positiveNumber(value) {
  * db-bridge. One service per call (list pricing, no bundle discount implied).
  * Missing inputs → say what's missing, never guess.
  */
-async function pricingText(input = {}) {
+async function pricingText(input = {}, { practiceLine = false } = {}) {
+  // A practice line files no lead and promises no callback: its custom-quote answers point to the office.
+  const customQuote = (production, practice) => (practiceLine ? practice : production);
   const service = String(input.service || '').trim();
   if (!PRICEABLE_SERVICES.includes(service)) {
     return `I can price these recurring plans: ${PRICEABLE_SERVICES.join(', ')}. Call get_pricing again with one of those as \`service\`.`;
@@ -1577,8 +1579,9 @@ async function pricingText(input = {}) {
   const statedTypeEarly = String(input.property_type || '').trim().toLowerCase();
   if (statedTypeEarly && !PRICEABLE_PROPERTY_TYPES.includes(statedTypeEarly)) {
     return 'That property type is outside standard residential pricing — it needs a custom quote. '
-      + 'Do NOT state a price. Capture the lead and tell the caller a Waves team member will follow up '
-      + 'with exact pricing for the property.';
+      + customQuote('Do NOT state a price. Capture the lead and tell the caller a Waves team member will follow up '
+        + 'with exact pricing for the property.', 'Do NOT state a price. This is a practice line: tell the caller to call or text the Waves '
+        + 'office for exact pricing. Do not promise a callback.');
   }
 
   const missing = [];
@@ -1597,8 +1600,9 @@ async function pricingText(input = {}) {
   // orders Sandy to state as exact.
   if (homeSqFt > 20000 || (lotSqFt && lotSqFt > 200000) || (lawnSqFt && lawnSqFt > 200000)) {
     return 'A property this size is beyond standard residential pricing — it needs a custom quote. '
-      + 'Do NOT state a price. Capture the lead and tell the caller a Waves team member will follow up '
-      + 'with exact pricing.';
+      + customQuote('Do NOT state a price. Capture the lead and tell the caller a Waves team member will follow up '
+        + 'with exact pricing.', 'Do NOT state a price. This is a practice line: tell the caller to call or text the Waves '
+        + 'office for exact pricing. Do not promise a callback.');
   }
 
   // Same residential bounds as public-quote.js /calculate (low-end floors only
@@ -1657,7 +1661,10 @@ async function pricingText(input = {}) {
   const line = (est && est.lineItems || []).find((l) => l && l.service === service);
   if (!line || line.requiresManualReview || line.quoteRequired || line.requiresQuote
     || engineLineIsLowConfidence(line)) {
-    return 'This one needs a custom quote — do not state a price. Tell the caller a Waves team member will go over exact pricing on the follow-up call.';
+    return customQuote(
+      'This one needs a custom quote — do not state a price. Tell the caller a Waves team member will go over exact pricing on the follow-up call.',
+      'This one needs a custom quote — do not state a price. This is a practice line: tell the caller to call or text the Waves office for exact pricing. Do not promise a callback.',
+    );
   }
 
   const monthly = fmtMoney(line.monthlyAfterDiscount ?? line.monthly);
@@ -1736,7 +1743,10 @@ async function pricingText(input = {}) {
     if (visitsPerYear) bits.push(`${visitsPerYear} applications per year`);
   }
   if (!bits.length) {
-    return 'Pricing came back empty — do not state a price; a Waves team member will follow up with exact numbers.';
+    return customQuote(
+      'Pricing came back empty — do not state a price; a Waves team member will follow up with exact numbers.',
+      'Pricing came back empty — do not state a price. This is a practice line: tell the caller to call or text the Waves office for exact numbers. Do not promise a callback.',
+    );
   }
   return `Standard ${service.replace(/_/g, ' ')} pricing for this property size: ${bits.join('; ')}. `
     + 'Quote ONLY these numbers — never negotiate, discount, or estimate beyond them. Recurring prices are '
@@ -1762,7 +1772,7 @@ async function pricingText(input = {}) {
  * returns NULL rather than 0 for an unpriced row — get_pricing is the only
  * price path.
  */
-async function servicesCatalogText() {
+async function servicesCatalogText({ practiceLine = false } = {}) {
   const db = require('../../models/db');
   const { loadBookableCallServices } = require('../call-booking-catalog');
   const rows = await loadBookableCallServices(db);
@@ -1785,8 +1795,9 @@ async function servicesCatalogText() {
   )];
   if (!names.length) {
     return 'The service list is not available right now. Describe what Waves does in general terms only — '
-      + 'pest control, lawn care, mosquito, tree and shrub, termite and rodent work — and let a team member '
-      + 'confirm specifics. Do not invent a service name.';
+      + 'pest control, lawn care, mosquito, tree and shrub, termite and rodent work — and '
+      + (practiceLine ? 'suggest the caller call or text the Waves office for specifics' : 'let a team member confirm specifics')
+      + '. Do not invent a service name.';
   }
   return `Services Waves offers (customer-facing names, straight from the catalog): ${names.join('; ')}. `
     + 'Name only what is on this list — never invent or promise a service. For what something costs, call '

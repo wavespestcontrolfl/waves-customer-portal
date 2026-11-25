@@ -585,6 +585,21 @@ const WRITE_TOOL_IN_FLIGHT_TEXT =
   'That request is still being processed from your previous call to this tool — it was NOT started again. '
   + 'Do not call it again. Tell the caller a Waves team member will follow up to confirm, and do not say '
   + 'anything is booked, filed, or saved.';
+// A practice line files nothing and calls nobody back, so its degradation strings promise no follow-up.
+const PRACTICE_TOOL_TIMEOUT_TEXT =
+  'Could not look that up right now. Do not guess. This is a practice line: tell the caller to call or text the '
+  + 'Waves office for that, and do not promise a callback.';
+const PRACTICE_WRITE_TOOL_TIMEOUT_TEXT =
+  'That is taking longer than expected and I do not have confirmation either way. Do NOT call it again. This is a '
+  + 'practice line and nothing is saved: tell the caller to call or text the Waves office, do not say anything is '
+  + 'booked, filed, or saved, and do not promise a callback.';
+const PRACTICE_WRITE_TOOL_IN_FLIGHT_TEXT =
+  'That request is still being checked from your previous call to this tool — it was NOT started again. Do not call '
+  + 'it again. This is a practice line: do not say anything is booked, filed, or saved, and do not promise a callback.';
+const TOOL_DEGRADATION_TEXTS = [
+  TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT,
+  PRACTICE_TOOL_TIMEOUT_TEXT, PRACTICE_WRITE_TOOL_TIMEOUT_TEXT, PRACTICE_WRITE_TOOL_IN_FLIGHT_TEXT,
+];
 // Hangup drain bound: a detached write must be allowed to finish (and set its
 // capture latch) before the capture floor decides whether to write a lead, but
 // a wedged one must never hold the socket-close handler open forever.
@@ -1082,7 +1097,7 @@ const PRACTICE_COPY = {
 };
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, practiceLine = false, resumed = false, evalHarness = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, practiceLine = false, cancelSignal = null, resumed = false, evalHarness = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -1097,6 +1112,9 @@ class RelayConversation {
     // transfer tool, no provider-failure handoff, no packet), and it never ends
     // itself after a captured lead: the host owns the call and its close.
     this._practiceLine = practiceLine === true && this.sandbox;
+    // A call-scoped AbortSignal owned by the host (LiveBrain): aborted on a hard timeout or the close, it
+    // stops every paid stage a tool has not started yet (geocode, date parser, road times).
+    this._cancelSignal = this._practiceLine && cancelSignal ? cancelSignal : null;
     // Resolved ONCE, here, and pinned for the rest of this session — see the
     // file header + resolveSessionModel(). Every model request and version
     // stamp below reads this.model, never the module-level MODEL, so a
@@ -1187,6 +1205,10 @@ class RelayConversation {
     // PR 2A: every tool call's outcome (name + ok) for the handoff packet;
     // the one-per-call transfer latch.
     this._toolOutcomes = [];
+    // Every tool the model asked for, counted when it is DISPATCHED (names only), so a host that
+    // meters paid tools sees one that is still running when the call ends (the per-turn stats
+    // record a tool only after it returns).
+    this._toolAttempts = [];
     this._transferRequested = false;
     // PR 2B — session recovery. `resumed` is the reconnected leg's HINT
     // (unverified frame input); `_resume` is the row's proof, loaded below.
@@ -2619,9 +2641,12 @@ class RelayConversation {
    * a degradation string, so the caller hears a sentence instead of silence.
    */
   async _executeToolBounded(name, input, ctx) {
+    this._toolAttempts.push(String(name || '').slice(0, 40));
     const isWrite = WRITE_TOOLS.has(name);
     const ms = isWrite ? WRITE_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
-    const onTimeout = isWrite ? WRITE_TOOL_TIMEOUT_TEXT : TOOL_TIMEOUT_TEXT;
+    const practice = this._practiceLine === true;
+    let onTimeout = isWrite ? WRITE_TOOL_TIMEOUT_TEXT : TOOL_TIMEOUT_TEXT;
+    if (practice) onTimeout = isWrite ? PRACTICE_WRITE_TOOL_TIMEOUT_TEXT : PRACTICE_TOOL_TIMEOUT_TEXT;
     // ⭐ A SUPERSEDED SESSION LOSES ITS TOOLS — the same boundary check the
     // turn entry and the close-time writes take (_sessionSuperseded).
     if (this.sessionKey && await this._sessionSuperseded().catch(() => false)) {
@@ -2637,7 +2662,7 @@ class RelayConversation {
     // racing the first; the latch clears when the detached write settles.
     if (isWrite && this._inFlightWrites.has(name)) {
       logger.warn(`[voice-relay] tool "${name}" re-invoked while still in flight callSid=${this.callSid} — refused (no second write)`);
-      return WRITE_TOOL_IN_FLIGHT_TEXT;
+      return practice ? PRACTICE_WRITE_TOOL_IN_FLIGHT_TEXT : WRITE_TOOL_IN_FLIGHT_TEXT;
     }
     // Resolved at call time (not destructured at module load) so the timeout
     // wrapper is the only thing between the loop and the tool.
@@ -2645,7 +2670,7 @@ class RelayConversation {
     const work = Promise.resolve()
       .then(() => run(name, input, ctx))
       .then((out) => {
-        if (ctx.toolOutcome) ctx.toolOutcome.ok = ![TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out) && ctx.toolFailed !== true;
+        if (ctx.toolOutcome) ctx.toolOutcome.ok = !TOOL_DEGRADATION_TEXTS.includes(out) && ctx.toolFailed !== true;
         return out;
       })
       .catch((err) => {
@@ -2691,7 +2716,8 @@ class RelayConversation {
       // Practice line: dry runs say so, and transfer_to_office is refused before any packet (relay-tools).
       practiceLine: this._practiceLine,
       // Call-scoped cancellation: once the brain ends or is retired (convo.ended), no new paid stage starts.
-      isCancelled: () => convo.ended === true,
+      isCancelled: () => convo.ended === true || convo._cancelSignal?.aborted === true,
+      signal: convo._cancelSignal,
       // The claim-owner nonce — every WRITE transaction re-proves ownership
       // against it INSIDE the transaction (the supersession fences outside
       // are check-then-act; the in-trx check is the atomic one). LIVE getter,
@@ -3286,7 +3312,7 @@ class RelayConversation {
       // ok = the tool answered without failing (a timeout / in-flight
       // refusal / caught failure is not a success — the handoff card
       // must not tell staff a failed lookup succeeded, codex r1 P2).
-      const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
+      const sentinel = TOOL_DEGRADATION_TEXTS.includes(out);
       const toolOk = !sentinel && invocationCtx.toolFailed !== true;
       if (block.name === 'lookup_customer' && toolOk && typeof out === 'string' && out.includes('customer_ref:') && require('./relay-recovery').isRecoveryGateOn()) this._lookupResults.push(out);
       this._toolOutcomes.push(outcome);

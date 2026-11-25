@@ -155,6 +155,25 @@ describe('call-scoped cancellation of paid stages', () => {
     noPaidCall();
   });
 
+  test('cancelled while the booking config loads: no geocode starts', async () => {
+    let cancelled = false;
+    mockBooking.loadBookingConfig.mockImplementationOnce(async () => { cancelled = true; return { slot_duration_minutes: 60 }; });
+    await expect(resolveAvailability({ ...where, isCancelled: () => cancelled })).resolves.toEqual({ status: 'cancelled' });
+    noPaidCall();
+  });
+
+  test('the call-scoped signal is handed to every paid stage (geocode, date parser, road times)', async () => {
+    const controller = new AbortController();
+    await resolveAvailability({ ...where, signal: controller.signal });
+    expect(mockBooking.resolveBookingCoords.mock.calls[0][0].signal).toBe(controller.signal);
+    expect(mockParse.parseWhen.mock.calls[0][1].signal).toBe(controller.signal);
+    expect(mockBooking.buildBookingAvailability.mock.calls[0][0].signal).toBe(controller.signal);
+    // the no-timeframe path (get_availability) reaches road times with it too
+    mockBooking.buildBookingAvailability.mockClear();
+    await resolveAvailability({ address_line1: where.address_line1, city: where.city, zip: where.zip, signal: controller.signal });
+    expect(mockBooking.buildBookingAvailability.mock.calls[0][0].signal).toBe(controller.signal);
+  });
+
   test('after LiveBrain.end() or a retirement the conversation reports cancelled, and no paid stub is called', async () => {
     const make = (args) => new RelayConversation(args);
     const db = jest.fn(() => ({ where: () => ({ first: async () => ({ source: 'voice_relay_sandbox', from_phone: '+19415551234', to_phone: '+19412412993' }) }) }));
