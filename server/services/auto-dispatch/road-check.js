@@ -161,7 +161,9 @@ async function confirmOnRoads(ranked, ctx) {
       // audit row says the number is the estimate (r2).
       if (!road && !failed.length) return { ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } };
       const checked = withRoad(row, road);
-      if (!road || road.saving_minutes >= floor) return settled(ranked, checked, true);
+      // A minutes-rule slot (move-rules.js minutesRuleOk) must keep its own 10 minutes on real roads.
+      const rowFloor = row.byMinutes ? Math.max(floor, ctx.config.minutesRuleSavingMinutes || 0) : floor;
+      if (!road || road.saving_minutes >= rowFloor) return settled(ranked, checked, true);
       failed.push(checked);
     }
     return settled(ranked, failed[0], false);
@@ -178,9 +180,10 @@ function settled(ranked, row, passed) {
     bestScore: row.sc,
     gain: row.gain,
     qualifies: passed,
+    byMinutes: passed && !!row.byMinutes,
     roadFailed: !passed,
     ranked: passed ? [row.cand] : [],
-    rankedRows: passed ? [{ cand: row.cand, sc: row.sc, gain: row.gain }] : [],
+    rankedRows: passed ? [{ cand: row.cand, sc: row.sc, gain: row.gain, byMinutes: row.byMinutes }] : [],
   };
 }
 

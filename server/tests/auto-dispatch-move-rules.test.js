@@ -241,3 +241,53 @@ test('a day move compares totals clamped WITHOUT the default-time credit (Codex 
   const current = { total_score: 60, default_time_score: 0, total_without_default_time: 60 };
   expect(moveGain({ service: { window_start: '10:00' }, current: { date: '2026-12-07' }, currentScore: current, cand: { date: '2026-12-09' }, candScore: cand })).toBe(32.5);
 });
+
+// Owner 2026-11-24 *all rec* (minutes rule): a first day move that saves 10 modeled detour minutes
+// qualifies below the score bar when customer preference and technician fit do not drop.
+describe('minutes rule', () => {
+  const MINUTES = { ...CONFIG, minutesRuleSavingMinutes: 10 };
+  const full = (total, pref = 12.5, tech = 9.75) => ({
+    total_score: total, default_time_score: 0, customer_preference_score: pref, technician_score: tech,
+  });
+  const CUR = { ...CURRENT, detour_minutes: 23 };
+  const rankM = (scored, { service = SERVICE, current = CUR, threshold = 15, config = MINUTES, currentScore = full(50) } = {}) => rankCandidates({
+    service, current, currentScore, scored, threshold, config,
+  });
+
+  test('a day move that saves 16 min but gains only 12 points now moves, marked as the minutes rule', () => {
+    const r = rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62) }]);
+    expect(r).toMatchObject({ qualifies: true, byMinutes: true, gain: 12 });
+    expect(r.rankedRows[0].byMinutes).toBe(true);
+  });
+
+  test('off when the setting is 0 or missing: the score bar alone decides, as before', () => {
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62) }], { config: CONFIG }).qualifies).toBe(false);
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62) }], { config: { ...MINUTES, minutesRuleSavingMinutes: 0 } }).qualifies).toBe(false);
+  });
+
+  test('a saving under 10 min, a lost preference or technician fit, or no point gain does not qualify', () => {
+    expect(rankM([{ cand: dayMove({ detour_minutes: 14 }), sc: full(62) }]).qualifies).toBe(false); // 9 min
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62, 6.25) }]).qualifies).toBe(false);
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62, 12.5, 6) }]).qualifies).toBe(false);
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(50) }]).qualifies).toBe(false);
+  });
+
+  test('a second move keeps the re-move bar (owner 10-26): the minutes rule is for first moves only', () => {
+    const moved = { ...SERVICE, auto_dispatch_change_count: 1 };
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(69) }], { service: moved, threshold: 20 }).qualifies).toBe(false);
+  });
+
+  test('a same-day re-time is not a day move: the minutes rule does not apply', () => {
+    expect(rankM([{ cand: sameDay({ detour_minutes: 7 }), sc: full(62) }]).qualifies).toBe(false);
+  });
+
+  test('a slot that clears the bar ranks first; minutes-rule slots rank by the bigger saving', () => {
+    const r = rankM([
+      { cand: dayMove({ date: '2026-12-02', detour_minutes: 10 }), sc: full(63) }, // 13 min, gain 13
+      { cand: dayMove({ date: '2026-12-04', detour_minutes: 3 }), sc: full(61) }, // 20 min, gain 11
+      { cand: dayMove({ date: '2026-12-05', detour_minutes: 12 }), sc: full(66) }, // clears the bar
+    ]);
+    expect(r.ranked.map((c) => c.date)).toEqual(['2026-12-05', '2026-12-04', '2026-12-02']);
+    expect(r.byMinutes).toBe(false);
+  });
+});

@@ -87,6 +87,19 @@ describe('confirmOnRoads', () => {
     expect(roadResultOf(out.best).saving_minutes).toBe(16);
   });
 
+  // Owner 2026-11-24 *all rec*: a minutes-rule slot must keep its 10 minutes on real roads, not only the 6-minute floor.
+  test('a minutes-rule slot needs the minutes-rule saving on real roads; a bar slot needs only the floor', async () => {
+    const minutesConfig = { ...config, minutesRuleSavingMinutes: 10 };
+    const ranked = rankedOf('first', 'second');
+    ranked.rankedRows = ranked.rankedRows.map((row) => ({ ...row, byMinutes: true }));
+    // now detour 30; first saves 8 on roads (under 10), second saves 16.
+    const out = await run(ranked, { now: [20, 20, 10], first: [16, 16, 10], second: [12, 12, 10] }, { config: minutesConfig });
+    expect(out).toMatchObject({ qualifies: true, byMinutes: true });
+    expect(out.best.name).toBe('second');
+    const bar = await run(rankedOf('first'), { now: [20, 20, 10], first: [16, 16, 10] }, { config: minutesConfig });
+    expect(bar).toMatchObject({ qualifies: true, byMinutes: false });
+  });
+
   test('every measured slot fails: nothing moves, and the row names the best slot\'s road numbers', async () => {
     const out = await run(rankedOf('first', 'second', 'third', 'fourth'), { now: [20, 20, 10], first: [18, 18, 10], second: [19, 19, 10], third: [20, 20, 10], fourth: [1, 1, 10] });
     expect(out).toMatchObject({ qualifies: false, roadFailed: true, ranked: [] });

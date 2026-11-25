@@ -99,6 +99,22 @@ function withinConflictCeiling({ current, cand, config }) {
   return -driveSavingMinutes(current, cand) <= ceiling;
 }
 
+// Owner 2026-11-24 *all rec* (minutes rule): a FIRST day move that takes at
+// least config.minutesRuleSavingMinutes (10) off the visit's modeled detour
+// qualifies below the score bar when it gives up no customer preference and no
+// technician fit and still gains points. 10 minutes is only 8.9 route points,
+// so before this a clear drive saving could miss the 15-point bar. A second
+// move keeps the higher re-move bar (owner 10-26), and real roads must confirm
+// the same 10 minutes (road-check.js). 0 turns it off.
+function minutesRuleOk({ service, current, cand, currentScore, candScore, gain, config }) {
+  const floor = config.minutesRuleSavingMinutes || 0;
+  if (floor <= 0 || !current || !cand || !isDayMove(current, cand)) return false;
+  if ((service.auto_dispatch_change_count || 0) > 0 || current.detour_group_blind || !(gain > 0)) return false;
+  return driveSavingMinutes(current, cand) >= floor
+    && (Number(candScore.customer_preference_score) || 0) >= (Number(currentScore.customer_preference_score) || 0)
+    && (Number(candScore.technician_score) || 0) >= (Number(currentScore.technician_score) || 0);
+}
+
 // A visit that must leave its slot whatever the score says.
 function mustMove(service, current) {
   return isUnplacedDueDate(service) || !!(current && current.conflict);
@@ -122,12 +138,15 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     const normalFloorOk = meetsDriveFloor({ current, cand, config });
     const floorOk = forced || normalFloorOk;
     const ceilingOk = !conflict || withinConflictCeiling({ current, cand, config });
+    const byMinutes = !forced && !conflict && normalFloorOk && gain < threshold
+      && minutesRuleOk({ service, current, cand, currentScore, candScore: sc, gain, config });
     return {
       cand, sc, gain, index, floorOk, ceilingOk,
       // Would this slot move the visit with no conflict to force it?
       normalOk: normalFloorOk && gain >= threshold,
       saving: driveSavingMinutes(current, cand),
-      qualifies: forced ? ceilingOk : (floorOk && gain >= threshold),
+      qualifies: forced ? ceilingOk : (floorOk && (gain >= threshold || byMinutes)),
+      byMinutes,
       sameDay: !isDayMove(current, cand),
       sunday: isSundayDate(cand.date),
     };
@@ -138,7 +157,12 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
   const byGain = (a, b) => (sameDayFirst ? Number(b.sameDay) - Number(a.sameDay) : 0)
     || Number(a.sunday) - Number(b.sunday)
     || (conflict ? b.saving - a.saving : 0) || b.gain - a.gain || a.index - b.index;
-  const qualifying = rows.filter((r) => r.qualifies).sort(byGain);
+  // A slot that clears the score bar comes before a minutes-rule slot; among
+  // minutes-rule slots the bigger drive saving comes first (Sunday still last).
+  const byBarThenSaving = (a, b) => Number(a.byMinutes) - Number(b.byMinutes)
+    || (a.byMinutes && b.byMinutes ? Number(a.sunday) - Number(b.sunday) || b.saving - a.saving : 0)
+    || byGain(a, b);
+  const qualifying = rows.filter((r) => r.qualifies).sort(byBarThenSaving);
   // Nothing qualifies: the audit shows the nearest miss.
   const top = qualifying[0] || rows.slice().sort(byGain)[0] || null;
   return {
@@ -146,6 +170,8 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     bestScore: top && top.sc,
     gain: top ? top.gain : 0,
     qualifies: qualifying.length > 0,
+    // The slot taken qualifies only by the minutes rule (audit + road floor).
+    byMinutes: !!(qualifying[0] && qualifying[0].byMinutes),
     // The nearest miss cleared the score bar and was refused by the drive floor.
     floorFailed: qualifying.length === 0 && !!top && !forced && !top.floorOk && top.gain >= threshold,
     // A visit in conflict whose every slot adds too much drive.
@@ -158,7 +184,7 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     ...normalBestOf(conflict, rows),
     ranked: qualifying.map((r) => r.cand),
     // The same list with each slot's score and gain (road-check.js).
-    rankedRows: qualifying.map((r) => ({ cand: r.cand, sc: r.sc, gain: r.gain })),
+    rankedRows: qualifying.map((r) => ({ cand: r.cand, sc: r.sc, gain: r.gain, byMinutes: r.byMinutes })),
   };
 }
 
@@ -172,5 +198,5 @@ function normalBestOf(conflict, rows) {
 
 module.exports = {
   isUnplacedDueDate, isDayMove, driveSavingMinutes, moveGain, meetsDriveFloor, withinConflictCeiling, mustMove, rankCandidates,
-  isSundayDate,
+  isSundayDate, minutesRuleOk,
 };

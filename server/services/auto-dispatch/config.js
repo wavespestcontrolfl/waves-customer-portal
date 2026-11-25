@@ -157,6 +157,12 @@ function moveRuleConfig(overrides, flexTierEnabled) {
     // with no drive saved). A same-day re-time is held to it too. 0 = off.
     minDayMoveDriveSavingMinutes: overrides.minDayMoveDriveSavingMinutes
       ?? intEnv('AUTO_DISPATCH_MIN_DAY_MOVE_DRIVE_SAVING_MINUTES', 6, { min: 0, max: 120 }),
+    // MINUTES RULE (owner 2026-11-24 *all rec*): a first day move saving this
+    // many modeled detour minutes (and as many on real roads) qualifies below
+    // the score bar when preference and technician fit do not drop
+    // (move-rules.js minutesRuleOk). 0 = off.
+    minutesRuleSavingMinutes: overrides.minutesRuleSavingMinutes
+      ?? intEnv('AUTO_DISPATCH_MINUTES_RULE_SAVING_MINUTES', 10, { min: 0, max: 120 }),
     // CONFLICT MOVES (GATE_AUTO_DISPATCH_CONFLICT_MOVES): a visit that overlaps
     // another customer's stop, or sits on an owner blackout day, moves to the
     // best legal slot without the score bar. See current-conflict.js.

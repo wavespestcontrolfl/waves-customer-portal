@@ -442,6 +442,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   });
   // Far-south day rule: the audit row names the slots it kept out, move or not (south-day-kept.js).
   if (southKept(drops)) constraints.south_day_kept = drops.south_day_kept;
+  Object.assign(constraints, minutesRuleNote(ranked, config));
   const shadowPool = dryShadowCandidates.length ? candidates.concat(dryShadowCandidates) : candidates;
   const live = ranked.qualifies ? best : null;
   Object.assign(constraints, dryTimeConstraint(prefs, {
@@ -465,6 +466,12 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx,
     withoutConflict: ordinaryMoveOf(ranked, { current, currentScore, service, prefs, lockBoundary, ctx, threshold, prefsSnapshot }),
   };
+}
+
+// The move qualifies only by the minutes rule (move-rules.js minutesRuleOk):
+// the audit row says so in constraints_checked.minutes_rule.
+function minutesRuleNote(ranked, config) {
+  return ranked.qualifies && ranked.byMinutes ? { minutes_rule: { saving_floor_minutes: config.minutesRuleSavingMinutes } } : {};
 }
 
 // GATE_AUTO_DISPATCH_DRY_TIME_ORDER (owner 2026-11-01): constraints_checked.dry_time.
