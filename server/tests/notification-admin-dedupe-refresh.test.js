@@ -561,7 +561,7 @@ describe('standingRefresh (decided inside the keyed lock)', () => {
 describe('refreshQuietClosed (identical emission after a quiet close)', () => {
   const { ringOnRefreshFrom } = require('../services/ops-digest');
   const emit = (extra = {}) => NotificationService.notifyAdmin('ops_digest', 'Promised quotes', 'Oldest is 5 days.', {
-    dedupeKey: 'ops-digest:promised-estimate', refreshOnDedupe: true, refreshQuietClosed: true,
+    dedupeKey: 'ops-digest:promised-estimate', refreshOnDedupe: true, refreshQuietClosed: true, bumpOnRefresh: true,
     ringOnRefresh: ringOnRefreshFrom({ count: 4, itemKeys: ['a'], itemSetHash: 'h', ringAfterQuietClose: true }),
     metadata: { count: 4, itemKeys: ['a'], itemSetHash: 'h' }, ...extra,
   });
@@ -574,6 +574,15 @@ describe('refreshQuietClosed (identical emission after a quiet close)', () => {
     expect(again).toMatchObject({ deduped: true, refreshed: true, rung: true });
     expect(mockRows.notifications).toHaveLength(1);
     expect(mockRows.notifications[0]).toMatchObject({ done_at: null, done_by: null, read_at: null });
+  });
+
+  test('a recovered row moves up in the bell (created_at advances)', async () => {
+    await emit();
+    const old = new Date('2026-09-24T11:00:00Z');
+    mockRows.notifications[0].created_at = old;
+    close('quiet-72h');
+    await emit();
+    expect(new Date(mockRows.notifications[0].created_at).getTime()).toBeGreaterThan(old.getTime());
   });
 
   test('a close by the nightly retention sweep is cleared the same way', async () => {

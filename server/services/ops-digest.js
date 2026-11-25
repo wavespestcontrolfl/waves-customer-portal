@@ -422,7 +422,8 @@ function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAu
       ...(dedupeWindowMs ? { dedupeWindowMs } : {}),
       ...(refreshOnDedupe ? {
         refreshOnDedupe: true,
-        ...(ringAfterQuietClose ? { refreshQuietClosed: true } : {}),
+        // A recovered row moves to the top of the newest-first bell (bumpOnRefresh), so a reopen is seen.
+        ...(ringAfterQuietClose ? { refreshQuietClosed: true, bumpOnRefresh: true } : {}),
         ...(ownerAudience ? { ringOnRefresh: ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash, ringOnFirstIdentity, ringAfterQuietClose }) } : {}),
       } : {}),
     };
