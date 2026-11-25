@@ -24,7 +24,7 @@ const notifications = require('../services/notification-service');
 const { alertUndeliveredShipments, closeDeliveredUndeliveredBells } = require('../services/purchase-receipts/undelivered-shipments');
 const { runPurchaseReceiptRestockSweep, processReceiptEmail } = require('../services/purchase-receipts/sweep');
 
-const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments'];
+const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'vendor_orders', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments'];
 const RECEIVED_AT = new Date('2026-09-27T15:00:00Z');
 const TITLE = 'Control Solutions Taurus SC Termiticide 78 oz';
 const HOUR = 60 * 60 * 1000;
@@ -557,6 +557,116 @@ jest.setTimeout(30000);
       await runPurchaseReceiptRestockSweep({ notify });
       expect(await stock()).toBe(0);
       expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' }).first()).toMatchObject({ status: 'unverified' });
+    });
+  });
+
+  // siteone-request-close.js: a logged SiteOne line closes the one request the
+  // robot itself placed from SiteOne, with no second stock movement.
+  describe('a SiteOne invoice closes the robot\'s own restock request', () => {
+    const siteone = (overrides = {}) => line({ vendor: 'siteone', orderNumber: '900000009-001', shipmentKey: '900000009-001', ...overrides });
+    // An 'ordered' request the robot raised, with its placed SiteOne ledger row (placed 2 h before the email) and its bell.
+    async function robotOrder({ request = {}, order = {}, withOrder = true } = {}) {
+      const [req] = await mockConn('product_restock_requests').insert({
+        product_id: taurus.id, status: 'ordered', source: 'auto_reorder', requested_quantity: 78, unit: 'fl_oz', ...request,
+      }).returning('*');
+      if (!withOrder) return { req };
+      const [vo] = await mockConn('vendor_orders').insert({
+        restock_request_id: req.id, adapter: 'siteone', status: 'placed', external_order_number: 'SO-SYNTH-1',
+        placed_at: new Date(RECEIVED_AT.getTime() - 2 * HOUR), request_payload: JSON.stringify({ orderedQuantity: 78 }),
+        evidence: JSON.stringify({ bell: { title: 'Synthetic bell' }, bellAt: RECEIVED_AT.toISOString() }), ...order,
+      }).returning('*');
+      const [bell] = await mockConn('notifications').insert({
+        recipient_type: 'admin', category: 'procurement', title: 'Synthetic auto-order bell', metadata: JSON.stringify({ dedupeKey: `auto-order:${vo.id}` }),
+      }).returning('*');
+      return { req, vo, bell };
+    }
+    const requestRow = (id) => mockConn('product_restock_requests').where({ id }).first();
+    const movements = () => mockConn('product_inventory_movements').where({ product_id: taurus.id });
+
+    test('closes the one placed request without a second movement and settles its ledger bell like a manual receive', async () => {
+      const { req, vo, bell } = await robotOrder();
+      const outcome = await processReceiptLine(siteone());
+      expect(outcome).toMatchObject({ status: 'logged', receivedQty: 156, hasOpenRestockRequest: false, closedRestockRequestId: req.id });
+      expect(await stock()).toBe(156);
+      expect(await movements()).toHaveLength(1);
+      const closed = await requestRow(req.id);
+      expect(closed).toMatchObject({ status: 'received', closed_by: null });
+      expect(closed.closed_at).not.toBeNull();
+      expect(closed.metadata.closedByReceipt).toMatchObject({ orderNumber: '900000009-001', lineNo: 1, movementId: outcome.movement.id });
+      expect((await mockConn('notifications').where({ id: bell.id }).first()).done_at).not.toBeNull();
+      const ledger = await mockConn('vendor_orders').where({ id: vo.id }).first();
+      expect(ledger.evidence).not.toHaveProperty('bell');
+      expect(ledger.evidence).not.toHaveProperty('bellAt');
+      // A received request no longer counts as a live automatic order.
+      expect(await require('../services/procurement/order-dispatch').findLiveAutoOrder(mockConn, taurus.id)).toBeFalsy();
+    });
+
+    test('a line bigger than the order closes it too', async () => {
+      const { req } = await robotOrder();
+      await processReceiptLine(siteone({ item: { title: TITLE, quantity: 3 } }));
+      expect((await requestRow(req.id)).status).toBe('received');
+    });
+
+    test('processing the same line again changes nothing', async () => {
+      const { req } = await robotOrder();
+      await processReceiptLine(siteone());
+      const before = await requestRow(req.id);
+      expect(await processReceiptLine(siteone())).toEqual({ skipped: true, reason: 'already_processed' });
+      expect(await movements()).toHaveLength(1);
+      expect(await requestRow(req.id)).toEqual(before);
+    });
+
+    test.each([
+      ['an open request (not yet ordered)', { request: { status: 'open' } }],
+      ['a request the robot did not raise', { request: { source: 'manual' } }],
+      ['a request with no ledger row', { withOrder: false }],
+      ['a ledger row that never placed', { order: { status: 'needs_review', placed_at: null } }],
+      ['a ledger row of another vendor', { order: { adapter: 'stickermule' } }],
+      ['a revoked order', { order: { evidence: JSON.stringify({ revokedAt: RECEIVED_AT.toISOString() }) } }],
+      ['an order placed after the email arrived', { order: { placed_at: new Date(RECEIVED_AT.getTime() + HOUR) } }],
+      ['a line short of the ordered quantity', { order: { request_payload: JSON.stringify({ orderedQuantity: 200 }) } }],
+    ])('leaves %s alone', async (_label, setup) => {
+      const { req } = await robotOrder(setup);
+      const outcome = await processReceiptLine(siteone());
+      expect(outcome).toMatchObject({ status: 'logged', hasOpenRestockRequest: true });
+      expect(outcome.closedRestockRequestId).toBeUndefined();
+      expect(await stock()).toBe(156);
+      expect((await requestRow(req.id)).status).toBe(setup.request?.status || 'ordered');
+      expect((await requestRow(req.id)).metadata).not.toHaveProperty('closedByReceipt');
+    });
+
+    test('two live requests: nothing closes', async () => {
+      const { req } = await robotOrder();
+      const [hand] = await mockConn('product_restock_requests').insert({ product_id: taurus.id, status: 'open', source: 'manual', requested_quantity: 78 }).returning('*');
+      const outcome = await processReceiptLine(siteone());
+      expect(outcome).toMatchObject({ status: 'logged', hasOpenRestockRequest: true });
+      expect((await requestRow(req.id)).status).toBe('ordered');
+      expect((await requestRow(hand.id)).status).toBe('open');
+    });
+
+    test('an Amazon delivery never closes a request', async () => {
+      const { req } = await robotOrder();
+      await processReceiptLine(line());
+      expect((await requestRow(req.id)).status).toBe('ordered');
+    });
+
+    test('a request a manual receive holds is left, not waited on (no deadlock with its product lock)', async () => {
+      const { req } = await robotOrder();
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      let locked;
+      const holder = mockConn.transaction(async (trx) => {
+        await trx('vendor_orders').where({ restock_request_id: req.id }).forUpdate().first('id');
+        await trx('product_restock_requests').where({ id: req.id }).forUpdate().first('id');
+        locked();
+        await held;
+      });
+      await new Promise((resolve) => { locked = resolve; });
+      const outcome = await processReceiptLine(siteone());
+      release();
+      await holder;
+      expect(outcome).toMatchObject({ status: 'logged', hasOpenRestockRequest: true });
+      expect((await requestRow(req.id)).status).toBe('ordered');
     });
   });
 
