@@ -85,7 +85,7 @@ describe('server with SITEONE_ORDER_RUNNER=mac', () => {
   });
 
   test('an unknown SITEONE_ORDER_RUNNER value never loads the server adapter: the request goes to the office', async () => {
-    for (const typo of ['server', 'macc', 'true']) {
+    for (const typo of ['server', 'macc', 'true', '   ']) {
       jest.clearAllMocks();
       process.env.SITEONE_ORDER_RUNNER = typo;
       expect(await dispatch.canAutoOrder({ vendor: SITEONE })).toBe(false);

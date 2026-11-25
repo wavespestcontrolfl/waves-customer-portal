@@ -1006,6 +1006,8 @@ test('R12 shared cart: the placed order total on the confirmation page must equa
   expect(unread.error.ambiguous).toBe(true);
   expect(unread.error.evidence.externalOrderNumber).toBe('7700123');
   expect(unread.error.cents).toBe(11040);
+  // A LOWER confirmed total is recorded as confirmed, not at the approved total.
+  expect((await run({ confirmTotalText: '$90.10' })).error.cents).toBe(9010);
   // A total that renders a moment after the URL changed is waited for: the order is placed.
   const late = await run({ confirmTotalText: null, onConfirmRead: (n, w) => { if (n === 2) w.confirmTotalText = '$110.40'; } });
   expect(late.result).toMatchObject({ externalOrderNumber: '7700123', amountCents: 11040 });

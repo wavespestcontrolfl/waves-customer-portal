@@ -877,9 +877,9 @@ async function provePlacedTotal(run, number, bound) {
   try { placedCents = await poll(run.page, readTotalOnce, CONFIRMATION_WAIT, run.opts.confirmStep); } catch (e) { if (e.ambiguous) throw e; placedCents = null; }
   evidence.confirmationTotalCents = placedCents;
   if (placedCents !== approvedCents) {
-    // Count the purchase at what SiteOne confirmed (when readable, and never below the approved
-    // total), so the monthly cap is not left with room the order already spent.
-    throw parked(`SiteOne order ${number} was placed, but its confirmation total ${placedCents == null ? 'could not be read' : `(${(placedCents / 100).toFixed(2)})`} is not the approved total (${(approvedCents / 100).toFixed(2)}) — check the order with the vendor`, Math.max(placedCents || 0, approvedCents));
+    // Count the purchase at what SiteOne confirmed when it is readable (higher or lower); the
+    // approved total only when the confirmation total cannot be read.
+    throw parked(`SiteOne order ${number} was placed, but its confirmation total ${placedCents == null ? 'could not be read' : `(${(placedCents / 100).toFixed(2)})`} is not the approved total (${(approvedCents / 100).toFixed(2)}) — check the order with the vendor`, placedCents ?? approvedCents);
   }
   return { externalOrderNumber: number, amountCents: approvedCents, evidence, dryRun: false };
 }

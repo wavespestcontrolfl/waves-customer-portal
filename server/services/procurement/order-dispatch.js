@@ -143,7 +143,8 @@ const MAC_RUNNER_MARKER = Object.freeze({ remoteRunner: REMOTE_RUNNER });
 const INVALID_RUNNER_MARKER = Object.freeze({ invalidRunner: true });
 const siteoneSlot = (env) => {
   if (siteoneRunsOnMac(env)) return MAC_RUNNER_MARKER;
-  if (String(env.SITEONE_ORDER_RUNNER || '').trim() !== '') return INVALID_RUNNER_MARKER;
+  // Only an absent or empty value keeps the server's own adapter; anything else (spaces included) is invalid.
+  if (env.SITEONE_ORDER_RUNNER != null && env.SITEONE_ORDER_RUNNER !== '') return INVALID_RUNNER_MARKER;
   return require('./adapters/siteone');
 };
 
