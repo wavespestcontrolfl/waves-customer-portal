@@ -12,6 +12,7 @@ const {
   buildProjectCloseoutPreview,
   buildServiceRecordInsert,
   buildServiceRecordProjectCompletionUpdate,
+  closeoutReportLink,
   hasMembership,
   prepaidCoversAmount,
   projectCompletionInvoiceAmount,
@@ -654,6 +655,39 @@ describe('project completion helpers', () => {
         findings: { traps_set: 'Attic' },
       },
     });
+  });
+});
+
+describe('closeoutReportLink: a closeout never publishes a report held until its invoice is paid', () => {
+  const customer = { id: 'cust-1' };
+  test.each(['held', 'releasing'])('a %s report mints no token and no report path, and keeps the stored token as it is', async (report_hold_status) => {
+    const trx = jest.fn();
+    await expect(closeoutReportLink(trx, { id: 'p1', report_token: null, report_hold_status }, customer)).resolves.toEqual({ held: true, token: null, reportPath: null });
+    // a release that stamped its token before this closeout read the row: the closeout hands it back unchanged
+    await expect(closeoutReportLink(trx, { id: 'p1', report_token: 'b'.repeat(32), report_hold_status }, customer)).resolves.toEqual({ held: true, token: 'b'.repeat(32), reportPath: null });
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('any other project still gets its token and report path', async () => {
+    const trx = jest.fn();
+    const { held, token, reportPath } = await closeoutReportLink(trx, { id: 'p1', report_token: null, report_hold_status: null, project_type: 'pest_inspection' }, customer);
+    expect(held).toBe(false);
+    expect(token).toMatch(/^[a-f0-9]{32}$/);
+    expect(reportPath).toMatch(/^\/report\/project\//);
+    const kept = await closeoutReportLink(trx, { id: 'p1', report_token: 'a'.repeat(32), report_hold_status: 'released', project_type: 'pest_inspection' }, customer);
+    expect(kept.token).toBe('a'.repeat(32));
+  });
+});
+
+describe('closeout never writes report_token while a hold is live', () => {
+  test('the closed-status update names report_token only when the closeout owns the link', () => {
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/project-completion.js'), 'utf8');
+    const update = source.slice(source.indexOf('const projectUpdate = {'), source.indexOf('const projectUpdate = {') + 200);
+    expect(update).toContain("...(reportHeld ? {} : { report_token: token })");
+    expect(update).not.toMatch(/^\s+report_token: token,/m);
+    // one predicate, shared with the sweep, the release and the manual sends
+    expect(source).toContain("const { isReportHeld } = require('./project-report-hold');");
+    expect(source).not.toContain("['held', 'releasing']");
   });
 });
 

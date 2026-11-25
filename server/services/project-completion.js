@@ -22,6 +22,7 @@ const { settleOwedCompletionSupplies, completionSuppliesOwed, completionSupplies
 const { INVOICE_DELIVERED_STATUSES } = require('./closeout-status');
 const { hasAuthoritativeZeroPrice } = require('./billing-lane');
 const { promoteStagedServicePhotos } = require('./service-photos');
+const { isReportHeld } = require('./project-report-hold');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
 const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
@@ -151,6 +152,16 @@ function shouldAttachProjectToPortal({ profile = {}, customer = {}, recurringCus
 
 function projectReviewedForPortalAttachment(project = {}) {
   return String(project.status || '').toLowerCase() === 'sent' || Boolean(project.sent_at);
+}
+
+// A closeout mints the report's public link, except for a WDO report held until its invoice is paid
+// (GATE_WDO_REPORT_HOLD): while the hold is live (held or releasing) the closeout never touches the project's
+// report token or path (the release owns both) and the visit closes without them. The project row is read
+// under FOR UPDATE, so the hold state is the arming transaction's, not a stale read.
+async function closeoutReportLink(trx, project, customer) {
+  if (isReportHeld(project)) return { held: true, token: project.report_token || null, reportPath: null };
+  const token = project.report_token || crypto.randomBytes(16).toString('hex');
+  return { held: false, token, reportPath: await projectReportPathForProject(trx, { ...project, report_token: token }, customer) };
 }
 
 function positiveMoney(value) {
@@ -752,9 +763,7 @@ async function completeProjectBackedService({
       : portalAllowedByPolicy && !portalReviewed
         ? 'report_not_sent'
         : 'policy_not_met';
-    const token = project.report_token || crypto.randomBytes(16).toString('hex');
-    const reportProjectForPath = { ...project, report_token: token };
-    const reportPath = await projectReportPathForProject(trx, reportProjectForPath, customer);
+    const { held: reportHeld, token, reportPath } = await closeoutReportLink(trx, project, customer);
 
     let serviceRecord = null;
     if (project.service_record_id) {
@@ -1034,7 +1043,7 @@ async function completeProjectBackedService({
 
     const projectUpdate = {
       status: 'closed',
-      report_token: token,
+      ...(reportHeld ? {} : { report_token: token }),
       service_record_id: serviceRecord.id,
       updated_at: trx.fn.now(),
     };
@@ -1325,6 +1334,7 @@ module.exports = {
   buildProjectCloseoutPreview,
   buildServiceRecordInsert,
   buildServiceRecordProjectCompletionUpdate,
+  closeoutReportLink,
   completeProjectBackedService,
   createProjectFollowupAlert,
   findExistingCompletionInvoice,

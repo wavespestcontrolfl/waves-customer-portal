@@ -4,8 +4,10 @@
  * Nothing noticed a WDO that stalled BEFORE send. The July 2026 audit found
  * two flavors sitting silently in prod: inspections stuck on_site/pending
  * days past their date with no report ever created, and reports signed and
- * then never sent. Each is a legal filing a realtor/closing is waiting on —
- * this sweep rings ONE admin bell when any of them exists.
+ * then never sent. A third flavor (GATE_WDO_REPORT_HOLD): a paid, held
+ * report whose automatic release keeps failing. Each is a legal filing a
+ * realtor/closing is waiting on — this sweep rings ONE admin bell when any
+ * of them exists.
  *
  * Exception-based by design (owner's standing rule): quiet when the lane is
  * clean, one deduped notification when it isn't. A bell re-rings only when a
@@ -33,6 +35,8 @@ const { etDateString } = require('../utils/datetime-et');
 
 const SIGNED_UNSENT_HOURS = 48;
 const STUCK_APPT_HOURS = 24;
+const HOLD_ATTENTION_ATTEMPTS = 5;
+const UNSETTLEABLE_INVOICE_STATUSES = ['void', 'refunded', 'canceled', 'cancelled', 'uncollectible'];
 const REMIND_DAYS = 7;
 const CATEGORY = 'wdo_report_attention';
 const CLEARED_RESOLUTION = 'All WDO reports are sent and no WDO inspection is waiting.';
@@ -60,6 +64,10 @@ async function findAttentionItems(now = new Date()) {
     .whereNull('sent_at')
     .whereNull('sent_outside_portal_at')
     .whereNotNull('wdo_signature')
+    // A report held until paid (GATE_WDO_REPORT_HOLD) parks its signed draft ON PURPOSE: it sends by
+    // itself once the invoice is paid. It is not stalled. A hold whose release keeps failing rings
+    // through the stuck-hold bucket below instead.
+    .whereRaw("coalesce(report_hold_status, '') NOT IN ('held', 'releasing')")
     .whereRaw("coalesce((wdo_signature->>'signed_at')::timestamptz, updated_at) < ?", [
       new Date(now.getTime() - SIGNED_UNSENT_HOURS * 3600e3),
     ])
@@ -86,13 +94,27 @@ async function findAttentionItems(now = new Date()) {
     .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
     .select('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.customer_id');
 
-  return { signedUnsent, stuckAppts };
+  // A held report nobody is releasing: the release keeps failing (it retries forever by design, so after enough
+  // attempts a person reads report_hold_last_error), or its invoice can no longer settle (voided, refunded,
+  // cancelled, uncollectible, or gone): the sweep never selects it, so its attempt count stays at zero.
+  const stuckHolds = await db('projects as p')
+    .leftJoin('invoices as i', 'i.id', 'p.invoice_id')
+    .whereIn('p.project_type', ['wdo_inspection'])
+    .where('p.report_hold_status', 'held')
+    .where((q) => q
+      .where('p.report_hold_attempts', '>=', HOLD_ATTENTION_ATTEMPTS)
+      .orWhereNull('i.id')
+      .orWhereIn('i.status', UNSETTLEABLE_INVOICE_STATUSES))
+    .select('p.id', 'p.report_hold_attempts', 'p.report_hold_last_error');
+
+  return { signedUnsent, stuckAppts, stuckHolds };
 }
 
-function itemIds({ signedUnsent, stuckAppts }) {
+function itemIds({ signedUnsent, stuckAppts, stuckHolds }) {
   return [
     ...signedUnsent.map((p) => `signed_unsent:${p.id}`),
     ...stuckAppts.map((a) => `stuck_appt:${a.id}`),
+    ...stuckHolds.map((p) => `stuck_hold:${p.id}`),
   ].sort();
 }
 
@@ -118,13 +140,16 @@ async function priorBellCovers(currentIds, now = new Date()) {
   return currentIds.every((id) => covered.has(id));
 }
 
-function summarize({ signedUnsent, stuckAppts }) {
+function summarize({ signedUnsent, stuckAppts, stuckHolds }) {
   const parts = [];
   if (signedUnsent.length) {
     parts.push(`${signedUnsent.length} WDO report${signedUnsent.length === 1 ? '' : 's'} signed but never sent`);
   }
   if (stuckAppts.length) {
     parts.push(`${stuckAppts.length} WDO inspection${stuckAppts.length === 1 ? '' : 's'} past date without a completed report`);
+  }
+  if (stuckHolds.length) {
+    parts.push(`${stuckHolds.length} held report${stuckHolds.length === 1 ? '' : 's'} not releasing`);
   }
   return parts.join(' · ');
 }
@@ -141,6 +166,7 @@ function bellMetadata(items, ids) {
     item_ids: ids,
     signed_unsent: items.signedUnsent.map((p) => p.id),
     stuck_appointments: items.stuckAppts.map((a) => a.id),
+    stuck_holds: items.stuckHolds.map((p) => p.id),
   };
 }
 
