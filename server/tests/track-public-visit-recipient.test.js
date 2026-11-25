@@ -270,6 +270,7 @@ describe('GET /:token with a visit text recipient\'s token: the reduced payload'
       ['moved to another stop (another date) but still holding the old visit_id', { scheduled_date: '2026-12-09' }],
       ['moved to another property', { property_id: 'prop-2' }],
       ['moved to another customer', { customer_id: 'cust-2' }],
+      ['with no property on file (null property_id)', { property_id: null }],
       ['on another technician', { technician_id: 'tech-2' }],
       ['no technician', { technician_id: null }],
       ['its window no longer chains to the stop', { window_start: '15:00:00', window_end: '16:00:00' }],
@@ -279,6 +280,14 @@ describe('GET /:token with a visit text recipient\'s token: the reduced payload'
       ['en route in a DIFFERENT drive (stamped an hour later)', { en_route_at: minutesAgo(-50) }],
     ])('a sibling %s is never this drive: no truck', async (_label, over) => {
       expect(await vehicleFor([member('visit-1'), member('sib-1', over)])).toBeNull();
+      expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1']);
+    });
+
+    test('two addresses with NO property on file (this row, the visit and the sibling all null) never share a truck', async () => {
+      const nullStop = { v_property_id: null, property_id: null };
+      install(visitRow({ ...ENROUTE, en_route_at: START, visit_id: 'group-1', property_id: null }), { members: [member('visit-1', nullStop), member('sib-1', nullStop)] });
+      techOnSibling();
+      expect((await get()).body.vehicle).toBeNull();
       expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1']);
     });
 

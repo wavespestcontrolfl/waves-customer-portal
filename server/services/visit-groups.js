@@ -1061,6 +1061,8 @@ const SAME_DRIVE_EN_ROUTE_MS = 5 * 60 * 1000;
  * last sibling it advances). A sibling is admitted only when ALL hold, judged on the rows as this one read saw them:
  *   - `service` itself is still a live member of an OPEN visit, on the visit's technician, and at the visit's stop
  *     (rowStillAtVisitStop, the rule the fan-out applies to its own primary);
+ *   - BOTH rows have a non-null property_id and they are EQUAL: a null property_id proves nothing about the address (two different
+ *     addresses of one customer can both be null), so any null means no sibling position;
  *   - the sibling has the same visit_id, the SAME technician_id, and is at the visit's stop by the same rule (same date, customer
  *     and property, window still connected): a row moved to another stop or tech that still holds the old visit_id is out;
  *   - the sibling is itself en_route by status AND tracker, with an en_route_at within SAME_DRIVE_EN_ROUTE_MS of the service's.
@@ -1087,10 +1089,11 @@ async function sameDriveSiblingIds(service, { conn = db } = {}) {
   };
   const techId = String(service.technician_id);
   if (String(me.technician_id || '') !== techId || (me.v_technician_id && String(me.v_technician_id) !== techId)) return [];
-  if (!rowStillAtVisitStop(me, visit, rows.filter((o) => o.id !== me.id))) return [];
+  if (!me.property_id || !rowStillAtVisitStop(me, visit, rows.filter((o) => o.id !== me.id))) return [];
   return rows
     .filter((s) => String(s.id) !== String(me.id))
-    .filter((s) => String(s.technician_id || '') === techId
+    .filter((s) => s.property_id && String(s.property_id) === String(me.property_id)
+      && String(s.technician_id || '') === techId
       && s.status === 'en_route' && s.track_state === 'en_route' && s.en_route_at
       && Math.abs(new Date(s.en_route_at).getTime() - startMs) <= SAME_DRIVE_EN_ROUTE_MS
       && rowStillAtVisitStop(s, visit, rows.filter((o) => o.id !== s.id)))

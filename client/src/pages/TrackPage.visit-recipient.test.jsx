@@ -113,6 +113,36 @@ describe('the live socket', () => {
     await waitFor(() => expect(io).toHaveBeenCalledTimes(1));
   });
 
+  it('the holder page refetches on socket connect AND on every reconnect, and a recipient (no socket) has nothing to refetch', async () => {
+    io.mockClear();
+    const handlers = {};
+    const socket = { on: vi.fn((event, fn) => { handlers[event] = fn; }), off: vi.fn(), disconnect: vi.fn() };
+    io.mockImplementation(() => socket);
+    let gets = 0;
+    global.fetch = vi.fn(async (url, init) => {
+      if (init?.method === 'POST') return { ok: true, status: 204 };
+      gets += 1;
+      return { ok: true, status: 200, json: async () => ({ ...payload('en_route', { meta: { pollIntervalSeconds: 0 } }), scope: undefined }) };
+    });
+    render(
+      <MemoryRouter initialEntries={['/track/token']}>
+        <Routes><Route path="/track/:token" element={<TrackPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
+    await waitFor(() => expect(handlers.connect).toBeTypeOf('function'));
+    const before = gets;
+    await act(async () => { handlers.connect(); });
+    await waitFor(() => expect(gets).toBe(before + 1));
+    // a reconnect fires the same event again
+    await act(async () => { handlers.connect(); });
+    await waitFor(() => expect(gets).toBe(before + 2));
+    // the job-update broadcast still refetches
+    await act(async () => { handlers['customer:job_update'](); });
+    await waitFor(() => expect(gets).toBe(before + 3));
+    io.mockImplementation(() => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }));
+  });
+
   it('navigating from a holder URL to a recipient URL in the same page never opens a socket with the recipient token', async () => {
     io.mockClear();
     const HOLDER = 'h'.repeat(64);

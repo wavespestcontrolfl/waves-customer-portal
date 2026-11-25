@@ -1080,9 +1080,13 @@ export default function TrackPage() {
       fetchTrack();
     }
     socket.on('customer:job_update', handleJobUpdate);
+    // A broadcast sent while the socket was down (or before it had joined the room) is gone: refetch on every connect and
+    // reconnect (socket.io emits 'connect' for both), so the page never waits for a poll or the next transition to catch up.
+    socket.on('connect', handleJobUpdate);
 
     return () => {
       socket.off('customer:job_update', handleJobUpdate);
+      socket.off('connect', handleJobUpdate);
       socket.disconnect();
     };
   }, [token, notFound, socketAllowed, fetchTrack]);

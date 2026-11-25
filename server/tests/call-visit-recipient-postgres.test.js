@@ -696,6 +696,9 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     test('call_log_v1_phone is IMMUTABLE and PARALLEL UNSAFE (its exception block opens a subtransaction)', async () => {
       const { rows } = await db.raw("SELECT provolatile, proparallel FROM pg_proc WHERE proname = 'call_log_v1_phone'");
       expect(rows).toEqual([{ provolatile: 'i', proparallel: 'u' }]);
+      // 20261124195000 set call_log parallel_workers = 0 for the index builds, 20261124220000 reset it once the function was UNSAFE
+      const { rows: opts } = await db.raw("SELECT reloptions FROM pg_class WHERE relname = 'call_log'");
+      expect(opts[0].reloptions || []).not.toContain('parallel_workers=0');
     });
 
     test('a queued day-only text is revalidated at the replay handoff (the 24 h reminder switched off, a later promise delivered); a fresh send is not asked again', async () => {
