@@ -101,7 +101,7 @@ beforeEach(() => {
 });
 
 const minutesAgo = (n) => new Date(Date.now() - n * 60 * 1000).toISOString();
-const ENROUTE = { status: 'en_route', track_state: 'en_route' };
+const ENROUTE = { status: 'en_route', track_state: 'en_route', en_route_at: minutesAgo(10) };
 const ONSITE = { status: 'on_site', track_state: 'on_property', arrived_at: '2026-12-01T14:00:00.000Z' };
 const DONE = (minutes) => ({ status: 'completed', track_state: 'complete', completed_at: minutesAgo(minutes) });
 
@@ -242,6 +242,20 @@ describe('GET /:token with a visit text recipient\'s token: the reduced payload'
     mockDb.raw = jest.fn((sql) => sql);
     await get();
     expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1', 'sibling-9']);
+  });
+
+  test('the cached fix must be from THIS drive: the resolver is asked for fixes strictly after the visit\'s en_route_at', async () => {
+    install(visitRow(ENROUTE));
+    await get();
+    expect(mockResolvePosition.mock.calls.at(-1)[0].requireFixAfter).toBe(ENROUTE.en_route_at);
+  });
+
+  test('en route with no en_route_at on record: no vehicle, and no position is read', async () => {
+    install(visitRow({ ...ENROUTE, en_route_at: null }));
+    const { body } = await get();
+    expect(body.state).toBe('en_route');
+    expect(body.vehicle).toBeNull();
+    expect(mockResolvePosition).not.toHaveBeenCalled();
   });
 
   test('the technician has moved on to another stop (the resolver answers no position): no vehicle at all', async () => {

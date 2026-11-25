@@ -761,6 +761,22 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         }
       });
 
+      test('a do-not-contact request on a call that SPOKE Bob\'s number as the callback, with "no texts" unset', async () => {
+        const holds = require('../services/messaging/auto-text-holds');
+        const [{ id: spokenDnc }] = await db('call_log').insert({
+          direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE,
+          ai_extraction_enriched: JSON.stringify({ caller: { phone_e164: BOB }, consent: { do_not_contact_request: true } }),
+        }).returning('id');
+        try {
+          await noMoreLink();
+          // the first-touch lane's own reach is unchanged: without the option the spoken number is not matched
+          expect(await holds.askedNotToBeContactedOnAnyCall(BOB)).toBe(false);
+          expect(await holds.askedNotToBeContactedOnAnyCall(BOB, { includeSpokenNumber: true })).toBe(true);
+        } finally {
+          await db('call_log').where({ id: spokenDnc }).del();
+        }
+      });
+
       test('a staff do-not-contact on Bob\'s number', async () => {
         await suppress(BOB);
         await db('messaging_suppression').where({ phone: BOB }).update({ reason: 'manual_dnc' });

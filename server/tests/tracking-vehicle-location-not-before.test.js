@@ -62,6 +62,39 @@ describe('requireCurrentJobIds: a visit text recipient sees the truck only while
   });
 });
 
+describe('requireFixAfter: the cached fix must be from THIS drive (strictly after the visit\'s en_route_at)', () => {
+  const AFTER = new Date('2026-05-05T11:50:00.000Z');
+  const at = (iso) => new Date(iso);
+  beforeEach(() => { jest.useFakeTimers().setSystemTime(new Date('2026-05-05T11:52:00.000Z')); });
+  afterEach(() => { jest.useRealTimers(); });
+  const ask = () => resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1'], requireFixAfter: AFTER });
+  const world_ = (fix, received) => ({ lat: '27.1', lng: '-82.2', current_job_id: 'visit-1', location_updated_at: at(fix), location_received_at: received === undefined ? at(fix) : (received && at(received)) });
+
+  test('a fix reported and received after en_route_at is served', async () => {
+    install({ ts: world_('2026-05-05T11:51:00.000Z') });
+    expect((await ask()).source).toBe('tech_status');
+  });
+  test('the previous stop\'s fix (older than en_route_at) is not served, though the active job already matches', async () => {
+    install({ ts: world_('2026-05-05T11:49:00.000Z') });
+    expect(await ask()).toBeNull();
+  });
+  test('a fix exactly AT en_route_at is not served (strictly after)', async () => {
+    install({ ts: world_('2026-05-05T11:50:00.000Z') });
+    expect(await ask()).toBeNull();
+  });
+  test('a fix reported after but RECEIVED before it, or with no receipt time, is not served', async () => {
+    install({ ts: world_('2026-05-05T11:51:00.000Z', '2026-05-05T11:49:00.000Z') });
+    expect(await ask()).toBeNull();
+    install({ ts: world_('2026-05-05T11:51:00.000Z', null) });
+    expect(await ask()).toBeNull();
+  });
+  test('an unreadable en_route_at serves nothing; without the requirement the fix is served as before', async () => {
+    install({ ts: world_('2026-05-05T11:51:00.000Z') });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireFixAfter: 'not-a-date' })).toBeNull();
+    expect((await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false })).source).toBe('tech_status');
+  });
+});
+
 describe('one statement: current mapping + cache', () => {
   test('the query joins technicians to tech_status and selects the mapping columns with the cache columns', async () => {
     install({ ts: fixRow(1) });

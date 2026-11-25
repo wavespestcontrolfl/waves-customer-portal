@@ -4,8 +4,8 @@
 // must show no report, invoice, review or offer.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { io } from 'socket.io-client';
 import TrackPage from './TrackPage';
@@ -111,5 +111,40 @@ describe('the live socket', () => {
     release();
     expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
     await waitFor(() => expect(io).toHaveBeenCalledTimes(1));
+  });
+
+  it('navigating from a holder URL to a recipient URL in the same page never opens a socket with the recipient token', async () => {
+    io.mockClear();
+    const HOLDER = 'h'.repeat(64);
+    const RECIPIENT = 'r'.repeat(64);
+    let releaseRecipient;
+    const recipientGate = new Promise((resolve) => { releaseRecipient = resolve; });
+    global.fetch = vi.fn(async (url, init) => {
+      if (init?.method === 'POST') return { ok: true, status: 204 };
+      if (String(url).includes(HOLDER)) return { ok: true, status: 200, json: async () => ({ ...payload('en_route', { meta: { pollIntervalSeconds: 0 } }), scope: undefined }) };
+      await recipientGate;
+      return { ok: true, status: 200, json: async () => payload('en_route', { meta: { pollIntervalSeconds: 0 } }) };
+    });
+    function GoToRecipient() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate(`/track/${RECIPIENT}`)}>go</button>;
+    }
+    render(
+      <MemoryRouter initialEntries={[`/track/${HOLDER}`]}>
+        <GoToRecipient />
+        <Routes><Route path="/track/:token" element={<TrackPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
+    await waitFor(() => expect(io).toHaveBeenCalledTimes(1));
+    expect(io.mock.calls[0][0].auth.trackToken).toBe(HOLDER);
+    // Navigate: the old (holder) answer must not authorize a socket for the new token, before or after the recipient answer.
+    await act(async () => { fireEvent.click(screen.getByText('go')); });
+    releaseRecipient();
+    expect(await screen.findByText(/Pat is on the way/i)).toBeInTheDocument();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    const handshakes = io.mock.calls.map((call) => (call[1] || call[0]).auth.trackToken);
+    expect(handshakes).not.toContain(RECIPIENT);
+    expect(io).toHaveBeenCalledTimes(1);
   });
 });

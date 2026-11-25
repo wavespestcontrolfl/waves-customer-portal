@@ -92,10 +92,13 @@ function deliveredTexts(dbi = db) {
 // text off by its id (a reprocess after a deferral can re-judge it, and its
 // text may go to a number its row does not carry) — never a Sandy sandbox
 // test call, whose extraction says nothing about the real caller.
-function callsWith(dbi, digits, originCallId) {
+// `spoken`: also a call whose caller SPOKE this number as their own ("call me at ..."), the extraction's caller.phone_e164
+// (saidNoTextsOnAnyCall matches it for the same reason). Off by default: the first-touch holds keep their own reach.
+function callsWith(dbi, digits, originCallId, { spoken = false } = {}) {
   return dbi('call_log')
     .modify((q) => whereNotSandboxCall(q))
     .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits))
+      .modify((either) => { if (spoken) either.orWhereRaw(...matches("(ai_extraction_enriched->'caller'->>'phone_e164')", digits)); })
       .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }));
 }
 
@@ -128,10 +131,11 @@ async function saidNoTextsOnAnyCall(phone, { originCallId = null, dbi = db } = {
 // either stored shape. Exported on its own for senders that honour this one veto (the visit-only recipient's text and
 // tracker link). Both DNC shapes: the V2 consent object, and the legacy extraction's flat field (a call processed
 // with V2 off, unavailable or schema-failed); read from ANY stored extraction, valid or not.
-async function askedNotToBeContactedOnAnyCall(phone, { originCallId = null, dbi = db } = {}) {
+// `includeSpokenNumber`: also a call that spoke the number as the caller's callback (the visit-only recipient's veto).
+async function askedNotToBeContactedOnAnyCall(phone, { originCallId = null, dbi = db, includeSpokenNumber = false } = {}) {
   const digits = phoneDigits(phone);
   if (!digits) return false;
-  const row = await whereCallDoNotContact(callsWith(dbi, digits, originCallId)).first('id');
+  const row = await whereCallDoNotContact(callsWith(dbi, digits, originCallId, { spoken: includeSpokenNumber })).first('id');
   return !!row;
 }
 

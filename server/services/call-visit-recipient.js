@@ -587,7 +587,8 @@ async function recipientPermission(meta, { conn = db, anyVisitStatus = false } =
   }
   // A do-not-contact request heard on any call with the person's number (a plain read of call_log).
   const holds = require('./messaging/auto-text-holds');
-  if (await holds.askedNotToBeContactedOnAnyCall(mine.phone, { dbi: conn })) {
+  // includeSpokenNumber: the same reach as the "no texts" check below (a call that spoke the number as a callback).
+  if (await holds.askedNotToBeContactedOnAnyCall(mine.phone, { dbi: conn, includeSpokenNumber: true })) {
     return noVerdict('CALL_DO_NOT_CONTACT', 'asked-not-to-be-contacted');
   }
   // An explicit "no texts" heard on any call with the number, the spoken callback number included (a plain read, no logging).

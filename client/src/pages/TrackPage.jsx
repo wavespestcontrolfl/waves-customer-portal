@@ -953,6 +953,8 @@ export default function TrackPage() {
 
   const { token } = useParams();
   const [data, setData] = useState(null);
+  // The token the current `data` was fetched FOR: after a navigation to another token the old answer must never gate the new socket.
+  const [dataToken, setDataToken] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   // React reuses this page instance across /track/:token navigations —
@@ -995,6 +997,7 @@ export default function TrackPage() {
       if (stale()) return;
       if (body?.state) {
         setData(body);
+        setDataToken(token);
         if (viewSentRef.current !== token) {
           viewSentRef.current = token;
           // Fire-and-forget: a failed view report must never touch the page.
@@ -1036,6 +1039,7 @@ export default function TrackPage() {
     let cancelled = false;
     tokenRef.current = token;
     setData(null);
+    setDataToken(null);
     setNotFound(false);
     setLoading(true);
     (async () => {
@@ -1064,7 +1068,7 @@ export default function TrackPage() {
   // Not before the GET has answered, and never for a visit text recipient's link (scope 'visit_recipient'): the socket
   // joins the HOLDER's customer room, and a recipient's token is not a socket credential. Recipients refresh by poll.
   // A boolean, not `data`, so a refetch never reconnects the socket.
-  const socketAllowed = Boolean(data) && data.scope !== 'visit_recipient';
+  const socketAllowed = Boolean(data) && dataToken === token && data.scope !== 'visit_recipient';
   useEffect(() => {
     if (!token || notFound || !socketAllowed) return undefined;
     const origin = socketOrigin();

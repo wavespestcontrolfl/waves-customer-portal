@@ -35,7 +35,7 @@ async function readMappingAndCache(techId, dbh = db) {
 
 // `requiredJobIds` (a visit text recipient's link): the cached fix counts only while the technician's ACTIVE job is one of these
 // visits. A technician who has moved on to another stop is at another customer's home, whatever this visit's state still says.
-function cachedPositionFrom(row, extraFloor = null, requiredJobIds = null) {
+function cachedPositionFrom(row, extraFloor = null, requiredJobIds = null, requiredAfter = null) {
   if (requiredJobIds && !requiredJobIds.map(String).includes(String(row?.current_job_id))) return null;
   const lat = finiteNumber(row?.lat);
   const lng = finiteNumber(row?.lng);
@@ -55,6 +55,14 @@ function cachedPositionFrom(row, extraFloor = null, requiredJobIds = null) {
     if (!(fixMs > mappedMs) || !(receivedMs > mappedMs)) return null;
   }
   if (extraFloor != null && !(fixMs >= new Date(extraFloor).getTime())) return null;
+  // `requiredAfter` (a recipient's link: this visit's en_route_at): the active job can already be this visit while the cached fix
+  // is still the previous stop's (the technician's last ping before the switch). Both the fix time and the server's receipt time
+  // must be STRICTLY after it; a missing receipt cannot prove it.
+  if (requiredAfter != null) {
+    const afterMs = new Date(requiredAfter).getTime();
+    const receivedMs = row.location_received_at ? new Date(row.location_received_at).getTime() : NaN;
+    if (!Number.isFinite(afterMs) || !(fixMs > afterMs) || !(receivedMs > afterMs)) return null;
+  }
   return {
     lat,
     lng,
@@ -76,6 +84,7 @@ async function resolveBouncieFallback({
   dbh = db,
   cachedNotBefore = null,
   requireCurrentJobIds = null,
+  requireFixAfter = null,
 }) {
   try {
     const svc = bouncieService || require('./bouncie');
@@ -128,7 +137,7 @@ async function resolveBouncieFallback({
     // remap-cutoff acceptance as any cached fix) — never the older fetched coordinates.
     const committedMs = new Date(written.location_updated_at).getTime();
     if (Number.isFinite(committedMs) && committedMs > new Date(lastReportedAt).getTime()) {
-      return cachedPositionFrom(await readMappingAndCache(techId, dbh), cachedNotBefore, requireCurrentJobIds);
+      return cachedPositionFrom(await readMappingAndCache(techId, dbh), cachedNotBefore, requireCurrentJobIds, requireFixAfter);
     }
 
     return {
@@ -158,6 +167,8 @@ async function resolveFreshTechPosition({
   dbh = db,
   // Only the cached fix of a technician whose active job (tech_status.current_job_id) is one of these visits.
   requireCurrentJobIds = null,
+  // Only a cached fix reported AND received strictly after this instant (this visit's en_route_at).
+  requireFixAfter = null,
 } = {}) {
   if (!techId) return null;
 
@@ -170,13 +181,13 @@ async function resolveFreshTechPosition({
   }
   if (!row) return null;
 
-  const cached = cachedPositionFrom(row, cachedNotBefore, requireCurrentJobIds);
+  const cached = cachedPositionFrom(row, cachedNotBefore, requireCurrentJobIds, requireFixAfter);
   if (cached) return cached;
 
   if (!allowBouncieFallback) return null;
   const imei = String(row.bouncie_imei || '').trim();
   if (!imei) return null;
-  return resolveBouncieFallback({ techId, imei, bouncieService, timeoutMs, logPrefix, dbh, cachedNotBefore, requireCurrentJobIds });
+  return resolveBouncieFallback({ techId, imei, bouncieService, timeoutMs, logPrefix, dbh, cachedNotBefore, requireCurrentJobIds, requireFixAfter });
 }
 
 module.exports = {

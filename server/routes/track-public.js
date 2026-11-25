@@ -465,6 +465,8 @@ async function buildVehicle(service, { readOnly = false } = {}) {
   // hiccups degrade to null silently.
   if (!service.technician_id) return null;
   if (finiteNumber(service.latitude) == null || finiteNumber(service.longitude) == null) return null;
+  // A recipient's truck needs a known en-route start: without it nothing proves a fix is from THIS drive.
+  if (readOnly && !service.en_route_at) return null;
 
   const position = await resolveFreshTechPosition({
     techId: service.technician_id,
@@ -475,7 +477,7 @@ async function buildVehicle(service, { readOnly = false } = {}) {
     logPrefix: 'track-public',
     // A recipient sees the truck only while the technician's ACTIVE job is this visit (or one in its visit group): a tech
     // who has moved on to another stop is at another customer's home, whatever this visit's state still says.
-    ...(readOnly ? { allowBouncieFallback: false, requireCurrentJobIds: await activeJobIdsOf(service) } : {}),
+    ...(readOnly ? { allowBouncieFallback: false, requireCurrentJobIds: await activeJobIdsOf(service), requireFixAfter: service.en_route_at } : {}),
   });
   if (!position) return null;
 
