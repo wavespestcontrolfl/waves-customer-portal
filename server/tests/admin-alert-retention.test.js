@@ -375,6 +375,11 @@ describe('money rows stay until settled (owner ruling 2026-11-05 "A")', () => {
       .toBe(false);
   });
 
+  test('a deposited payout notice ages out; a failed payout stays', () => {
+    expect(retention.judgeRow(row({ created_at: ago(40), category: 'payout', title: 'Payout deposited', metadata: null }), NOW).rule).toBe('age30');
+    expect(retention.judgeRow(row({ created_at: ago(40), category: 'payout', title: 'Payout failed', metadata: null }), NOW).expire).toBe(false);
+  });
+
   test('an FYI money row still follows fyi7', () => {
     expect(retention.judgeRow(row({ created_at: ago(9), category: 'billing', metadata: { severity: 'fyi' } }), NOW))
       .toEqual({ expire: true, rule: 'fyi7' });

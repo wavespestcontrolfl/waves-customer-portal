@@ -209,8 +209,11 @@ const fyiTriggerKeys = () => {
   const { TRIGGER_REGISTRY } = require('./notification-triggers');
   return Object.keys(TRIGGER_REGISTRY).filter((k) => TRIGGER_REGISTRY[k]?.rule?.severity === 'fyi');
 };
+// A deposited-payout notice (stripe-webhook payout.paid, no metadata) is news too; a failed or held payout stays.
+const DEPOSITED_PAYOUT_TITLE = 'Payout deposited';
 const isKeptMoneyRow = (row, meta) => KEEP_UNTIL_SETTLED_CATEGORIES.includes(row.category || '')
-  && !fyiTriggerKeys().includes(String(meta.triggerKey || ''));
+  && !fyiTriggerKeys().includes(String(meta.triggerKey || ''))
+  && !(row.category === 'payout' && String(row.title || '').startsWith(DEPOSITED_PAYOUT_TITLE));
 
 function ruleFor(row, meta, ageMs) {
   if (isFyiRow(row, meta) && ageMs > FYI_DAYS * DAY_MS) return 'fyi7';
@@ -316,7 +319,7 @@ function pageQuery(conn, { cursor, limit, scope = null }, narrow) {
   if (cursor) query.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id]);
   if (scope) scope(query);
   return query
-    .select('id', 'category', 'created_at', 'read_at', 'metadata',
+    .select('id', 'category', 'title', 'created_at', 'read_at', 'metadata',
       conn.raw(`${NOTIFICATION_VERSION_SQL} AS version`), conn.raw('created_at::text AS created_at_cursor'))
     .orderByRaw('created_at ASC, id ASC')
     .limit(limit);
@@ -327,8 +330,8 @@ async function loadPage(conn, { now, cursor, limit, scope = null }) {
   const fyiCutoff = new Date(now.getTime() - FYI_DAYS * DAY_MS);
   return pageQuery(conn, { cursor, limit, scope }, (query) => query
     .where((q) => q.where((a) => a.where('created_at', '<', ageCutoff).whereRaw(NOT_ACTIVITY_SQL)
-      .whereRaw("(NOT (COALESCE(category, '') = ANY(?::text[])) OR COALESCE(metadata->>'triggerKey', '') = ANY(?::text[]))",
-        [KEEP_UNTIL_SETTLED_CATEGORIES, fyiTriggerKeys()]))
+      .whereRaw("(NOT (COALESCE(category, '') = ANY(?::text[])) OR COALESCE(metadata->>'triggerKey', '') = ANY(?::text[]) OR (category = 'payout' AND title LIKE ?))",
+        [KEEP_UNTIL_SETTLED_CATEGORIES, fyiTriggerKeys(), `${DEPOSITED_PAYOUT_TITLE}%`]))
       .orWhere((f) => f.where('created_at', '<', fyiCutoff).whereRaw(FYI_SQL))));
 }
 
