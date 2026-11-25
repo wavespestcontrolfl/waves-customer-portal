@@ -555,3 +555,58 @@ describe('standingRefresh (decided inside the keyed lock)', () => {
     expect(mockRows.notifications[0].created_at).toEqual(new Date('2026-10-01T15:00:00Z'));
   });
 });
+
+// refreshQuietClosed (promised-quotes bell): the quiet policy closed the standing row while its list still
+// stands. An IDENTICAL emission must still reach ringOnRefresh and reopen the row; a person's Done must not.
+describe('refreshQuietClosed (identical emission after a quiet close)', () => {
+  const { ringOnRefreshFrom } = require('../services/ops-digest');
+  const emit = (extra = {}) => NotificationService.notifyAdmin('ops_digest', 'Promised quotes', 'Oldest is 5 days.', {
+    dedupeKey: 'ops-digest:promised-estimate', refreshOnDedupe: true, refreshQuietClosed: true, bumpOnRefresh: true,
+    ringOnRefresh: ringOnRefreshFrom({ count: 4, itemKeys: ['a'], itemSetHash: 'h', ringAfterQuietClose: true }),
+    metadata: { count: 4, itemKeys: ['a'], itemSetHash: 'h' }, ...extra,
+  });
+  const close = (done_by) => Object.assign(mockRows.notifications[0], { done_at: new Date('2026-11-19T12:00:00Z'), done_by, resolution: 'closed' });
+
+  test('a quiet close is cleared by the identical emission and rings', async () => {
+    await emit();
+    close('quiet-72h');
+    const again = await emit();
+    expect(again).toMatchObject({ deduped: true, refreshed: true, rung: true });
+    expect(mockRows.notifications).toHaveLength(1);
+    expect(mockRows.notifications[0]).toMatchObject({ done_at: null, done_by: null, read_at: null });
+  });
+
+  test('a recovered row moves up in the bell (created_at advances)', async () => {
+    await emit();
+    const old = new Date('2026-09-24T11:00:00Z');
+    mockRows.notifications[0].created_at = old;
+    close('quiet-72h');
+    await emit();
+    expect(new Date(mockRows.notifications[0].created_at).getTime()).toBeGreaterThan(old.getTime());
+  });
+
+  test('a close by the nightly retention sweep is cleared the same way', async () => {
+    await emit();
+    close('retention');
+    const again = await emit();
+    expect(again).toMatchObject({ deduped: true, refreshed: true, rung: true });
+    expect(mockRows.notifications[0]).toMatchObject({ done_at: null, done_by: null });
+  });
+
+  test('a person\'s Done stays done on the identical emission', async () => {
+    await emit();
+    close('42');
+    const again = await emit();
+    expect(again.refreshed).toBeUndefined();
+    expect(mockRows.notifications[0].done_by).toBe('42');
+    expect(mockUpdates).toEqual([]);
+  });
+
+  test('without the option a quiet close stays closed on an identical emission', async () => {
+    await emit();
+    close('quiet-72h');
+    const again = await emit({ refreshQuietClosed: false });
+    expect(again.refreshed).toBeUndefined();
+    expect(mockRows.notifications[0].done_by).toBe('quiet-72h');
+  });
+});

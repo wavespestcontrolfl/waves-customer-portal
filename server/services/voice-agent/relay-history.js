@@ -272,7 +272,7 @@ async function buildRecentTextsBlock(fromPhone, identity = {}) {
     ];
     return lines.join('\n');
   } catch (err) {
-    logger.warn(`[voice-relay-history] recent-texts block skipped: ${err.message}`);
+    logger.warn(`[voice-relay-history] recent-texts block skipped code=${String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32)}`);
     return null; // optional context — never blocks the session
   }
 }

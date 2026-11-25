@@ -1020,8 +1020,10 @@ function appendVoicemailRecording(twiml, { language = null } = {}) {
     maxLength: 120,
     action: VOICEMAIL_COMPLETE_ACTION,
     method: 'POST',
-    transcribe: true,
-    transcribeCallback: '/api/webhooks/twilio/transcription',
+    // No Twilio built-in transcription (owner 2026-11-24): it bills per
+    // minute on every voicemail and filled a row 7 times in 90 days; the
+    // recording processor transcribes every recording itself. The
+    // /transcription route below stays for callbacks still in flight.
     playBeep: true,
     recordingStatusCallback: '/api/webhooks/twilio/recording-status',
     recordingStatusCallbackEvent: 'completed',
@@ -2813,7 +2815,8 @@ async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
     logger.info(`[gpt-live] cell ${cell} voice ${voice} ${maskSid(callSid)}`);
     return res.type('text/xml').send(gptLiveStreamXml(req, callSid, token));
   } catch (err) {
-    logger.error(`[gpt-live] refused ${maskSid(callSid)} (fail closed): ${err.message}`);
+    // A bounded code only: the stamp update binds the caller's numbers, and a database error message can echo bindings.
+    logger.error(`[gpt-live] refused ${maskSid(callSid)} (fail closed) code=${String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32)}`);
     return gptLiveSayAndHangup(res, 'The GPT-Live test is not available right now. Goodbye.');
   }
 }

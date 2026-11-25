@@ -1380,6 +1380,757 @@ describe('delegation', () => {
   });
 });
 
+describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
+  const created = (id, target = 'client') => ({ type: 'session.delegation.created', delegation: { id, target }, offset_ms: 100 });
+  const said = (words, start, end) => ({ type: 'session.input_transcript.delta', delta: words, start_ms: start, end_ms: end });
+  const answers = (t) => t.openai.sent.filter((m) => m.type === 'session.commentary.append' && m.delegation_id);
+
+  // A fake brain: ask() resolves what `reply` returns, and records every ask.
+  function toolsSetup({ reply = async () => 'Your next visit is Tuesday.', brainOpen, deps = {} } = {}) {
+    const brain = { ask: jest.fn((text, opts) => reply(text, opts)), end: jest.fn(async () => {}), softTimeouts: 0, hardTimeouts: 0 };
+    const brainFactory = jest.fn(brainOpen || (async () => brain));
+    const t = setup({ deps: { toolsOn: () => true, brainFactory, transcriptQuietMs: 0, ...deps } });
+    return { t, brain, brainFactory };
+  }
+
+  test('gate off: the brain never opens, the fixed sentence is the answer, and the summary has no brain counts', async () => {
+    const brainFactory = jest.fn();
+    const t = setup({ deps: { toolsOn: () => false, brainFactory } });
+    await t.ready();
+    t.openai.receive(said('When is my next visit', 0, 900));
+    t.openai.receive(created('d1'));
+    expect(answers(t)).toEqual([{ type: 'session.commentary.append', delegation_id: 'd1', content: DELEGATION_REPLY }]);
+    t.twilioStop();
+    await finalized(t);
+    expect(brainFactory).not.toHaveBeenCalled();
+    expect(summaryOf(t)).not.toHaveProperty('brain_asks');
+  });
+
+  test('a gate read that throws counts as off', async () => {
+    const t = setup({ deps: { toolsOn: () => { throw new Error('boom'); } } });
+    await t.ready();
+    t.openai.receive(created('d1'));
+    expect(answers(t)[0].content).toBe(DELEGATION_REPLY);
+  });
+
+  test('the session instructions are built for tools mode only when the gate is on', async () => {
+    const buildInstructions = jest.fn(() => 'INSTRUCTIONS');
+    const on = toolsSetup({ deps: { buildInstructions } });
+    await on.t.ready();
+    expect(buildInstructions).toHaveBeenLastCalledWith({ tools: true });
+    const off = setup({ deps: { buildInstructions } });
+    await off.ready();
+    expect(buildInstructions).toHaveBeenLastCalledWith({ tools: false });
+    const tools = bridgeMod.buildLiveInstructions({ tools: true });
+    expect(tools.endsWith(bridgeMod.TOOLS_LIMITS)).toBe(true);
+    expect(tools).not.toContain(bridgeMod.TRIAL_LIMITS);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/Delegate only these: prices, services offered, and a new-customer request/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/cannot check open appointment times, accounts/);
+    expect(bridgeMod.TOOLS_LIMITS).not.toMatch(/Delegate[^.]*open (appointment )?times/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/never guess or invent a price or service/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/estimates, messages or call history: if asked,\s+say this practice line cannot check that/);
+    expect(bridgeMod.TOOLS_LIMITS.length).toBeLessThan(700);
+    expect(bridgeMod.buildLiveInstructions().endsWith(bridgeMod.TRIAL_LIMITS)).toBe(true);
+  });
+
+  test('the brain opens at session.started for this call, from the bridge\'s own db', async () => {
+    const { t, brainFactory } = toolsSetup();
+    await t.ready();
+    expect(brainFactory).toHaveBeenCalledTimes(1);
+    expect(brainFactory).toHaveBeenCalledWith({ callSid: CALL_SID, db: t.db });
+  });
+
+  test('a delegation asks the brain with the caller words since the last delegation and speaks ONE commentary append', async () => {
+    const { t, brain } = toolsSetup();
+    await t.ready();
+    t.openai.receive(said('When is ', 0, 400));
+    t.openai.receive(said('my next visit?', 400, 900));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length > 0);
+    expect(brain.ask).toHaveBeenCalledTimes(1);
+    expect(brain.ask).toHaveBeenCalledWith('When is my next visit?', expect.objectContaining({ onSoft: expect.any(Function), softMs: 6000, deadlineMs: 20000 }));
+    expect(answers(t)).toEqual([{ type: 'session.commentary.append', delegation_id: 'd1', content: 'Your next visit is Tuesday.' }]);
+    // a second delegation gets only the words after the first
+    t.openai.receive(said('And how much is it?', 6000, 7000));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length > 1);
+    expect(brain.ask).toHaveBeenLastCalledWith('And how much is it?', expect.objectContaining({ onSoft: expect.any(Function) }));
+    expect(answers(t).map((m) => m.delegation_id)).toEqual(['d1', 'd2']);
+  });
+
+  test('a delegation with no new words uses the last two caller utterances', async () => {
+    const { t, brain } = toolsSetup();
+    await t.ready();
+    t.openai.receive(said('First thing.', 0, 800));
+    t.openai.receive(said('Second thing.', 3000, 3800)); // 2.2 s later: a new utterance
+    t.openai.receive(said('Third thing.', 7000, 7800));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length > 0);
+    t.openai.receive(created('d2')); // nothing said since
+    await waitFor(() => answers(t).length > 1);
+    expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['First thing. Second thing. Third thing.', 'Second thing. Third thing.']);
+  });
+
+  test('the fallback prompt is bounded: a long uninterrupted utterance is never resent whole', async () => {
+    const { t, brain } = toolsSetup();
+    await t.ready();
+    const long = 'word '.repeat(2000); // 10,000 characters of one utterance
+    t.openai.receive(said(long, 0, 30000));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    t.openai.receive(created('d2')); // nothing new: the fallback is the latest utterances
+    await waitFor(() => answers(t).length === 2);
+    for (const call of brain.ask.mock.calls) expect(call[0].length).toBeLessThanOrEqual(1000 + 'Agent just said: '.length + 300 + '\nCaller said: '.length);
+    expect(brain.ask.mock.calls[1][0].length).toBeLessThanOrEqual(1000);
+  });
+
+  test('no caller words at all: a "say it again" sentence, and the brain is not asked', async () => {
+    const { t, brain } = toolsSetup();
+    await t.ready();
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length > 0);
+    expect(brain.ask).not.toHaveBeenCalled();
+    expect(answers(t)[0].content).toMatch(/didn't catch that/);
+  });
+
+  test('the delegation waits for the caller transcript to go quiet before it asks', async () => {
+    const { t, brain } = toolsSetup({ deps: { transcriptQuietMs: 30, transcriptMaxWaitMs: 1000 } });
+    await t.ready();
+    t.openai.receive(created('d1'));
+    setTimeout(() => t.openai.receive(said('late words', 0, 500)), 10);
+    await waitFor(() => answers(t).length > 0);
+    expect(brain.ask.mock.calls[0][0]).toBe('late words');
+  });
+
+  test('a long reply is cut to the 450-byte bound (tokens never exceed bytes) at a sentence end', async () => {
+    const sentence = 'Your technician arrives between nine and eleven in the morning on Tuesday. ';
+    const { t } = toolsSetup({ reply: async () => sentence.repeat(60) });
+    await t.ready();
+    t.openai.receive(said('When?', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length > 0);
+    const content = answers(t)[0].content;
+    expect(content.length).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_CHARS);
+    expect(content.length).toBeGreaterThan(300);
+    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_TOKENS);
+    expect(content.endsWith('Tuesday.')).toBe(true);
+    expect(answers(t)).toHaveLength(1);
+  });
+
+  test('capReply keeps a short reply, cuts at a word when no sentence end is near, and handles one long word', () => {
+    expect(bridgeMod.capReply('  Short.  ')).toBe('Short.');
+    expect(bridgeMod.capReply(`${'word '.repeat(600)}`, 100)).toBe('word '.repeat(20).trim());
+    expect(bridgeMod.capReply('x'.repeat(50), 10)).toBe('x'.repeat(10));
+  });
+
+  test('each delegation keeps ITS OWN words, bound when it arrives, however long it waits in the queue', async () => {
+    let releaseFirst;
+    const { t, brain } = toolsSetup({
+      reply: (text) => (text === 'one' ? new Promise((resolve) => { releaseFirst = () => resolve('reply one'); }) : Promise.resolve(`reply to ${text}`)),
+    });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    // two more questions arrive while the first answer runs
+    t.openai.receive(said('second question', 5000, 5600));
+    t.openai.receive(created('d2'));
+    t.openai.receive(said('third question', 9000, 9600));
+    t.openai.receive(created('d3'));
+    releaseFirst();
+    await waitFor(() => answers(t).length === 3);
+    expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['one', 'second question', 'third question']);
+    expect(answers(t).map((m) => m.content)).toEqual(['reply one', 'reply to second question', 'reply to third question']);
+  });
+
+  test('late fragments of a question join the delegation that is waiting for them, not the next one', async () => {
+    const { t, brain } = toolsSetup({ deps: { transcriptQuietMs: 30, transcriptMaxWaitMs: 1000 } });
+    await t.ready();
+    t.openai.receive(said('When is ', 0, 300));
+    t.openai.receive(created('d1'));
+    setTimeout(() => t.openai.receive(said('my visit?', 300, 700)), 10); // the rest of the same question, late
+    await waitFor(() => answers(t).length === 1);
+    expect(brain.ask.mock.calls[0][0]).toBe('When is my visit?');
+    // after d1's transcript settled, new words belong to the next delegation
+    t.openai.receive(said('And the price?', 4000, 4600));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 2);
+    expect(brain.ask.mock.calls[1][0]).toBe('And the price?');
+  });
+
+  test('a reply that is digit-heavy is cut to fit 500 tokens although it is under 1,800 characters', async () => {
+    const invoice = 'Invoice 20260412345 for 1234.56 dollars was paid on 2026-03-04 by card 1111. ';
+    const reply = invoice.repeat(22); // 1,700 characters
+    expect(reply.length).toBeLessThan(bridgeMod.BRAIN_REPLY_MAX_CHARS);
+    expect(bridgeMod.estimateTokens(reply)).toBeGreaterThan(500);
+    const { t } = toolsSetup({ reply: async () => reply });
+    await t.ready();
+    t.openai.receive(said('invoices?', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    const content = answers(t)[0].content;
+    expect(bridgeMod.estimateTokens(content)).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_TOKENS);
+    expect(content.length).toBeLessThan(reply.length);
+    expect(content.endsWith('1111.')).toBe(true); // at a sentence end
+  });
+
+  test('the token bound is the UTF-8 byte count: a token is at least a byte, so tokens never exceed it', () => {
+    expect(bridgeMod.estimateTokens('1234')).toBe(4);
+    expect(bridgeMod.estimateTokens('héllo')).toBe(6); // é is two bytes
+    expect(bridgeMod.estimateTokens('日本語')).toBe(9);
+    expect(bridgeMod.estimateTokens('')).toBe(0);
+  });
+
+  test('capReply fits the byte bound whatever the text: punctuation, identifiers, digits and other scripts', () => {
+    const samples = [
+      'Su próxima visita está programada para mañana por la tarde. '.repeat(30),
+      'ID: a1-b2_c3/d4#e5@f6 | '.repeat(80),
+      '日本語のテキストです。'.repeat(80),
+      '1234567890 '.repeat(120),
+    ];
+    for (const sample of samples) {
+      const cut = bridgeMod.capReply(sample);
+      expect(Buffer.byteLength(cut, 'utf8')).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_TOKENS);
+      expect(cut.length).toBeLessThanOrEqual(bridgeMod.BRAIN_REPLY_MAX_CHARS);
+      expect(cut.length).toBeGreaterThan(0);
+    }
+    expect(bridgeMod.capReply('A short one. ')).toBe('A short one.');
+  });
+
+  test('a brain that is slow to open: the first delegation gets the fixed sentence within the bound, then the late brain serves the next', async () => {
+    let open;
+    const brain = { ask: jest.fn(async () => 'late brain answer'), end: jest.fn(async () => {}), softTimeouts: 0, hardTimeouts: 0 };
+    const { t } = toolsSetup({ brainOpen: () => new Promise((resolve) => { open = () => resolve(brain); }), deps: { brainOpenMs: 30 } });
+    await t.ready();
+    t.openai.receive(said('first', 0, 300));
+    t.openai.receive(created('d1'));
+    t.openai.receive(said('second', 6000, 6300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 1);
+    expect(answers(t)[0]).toEqual({ type: 'session.commentary.append', delegation_id: 'd1', content: DELEGATION_REPLY });
+    open(); // the brain finishes opening after the bound
+    await waitFor(() => answers(t).length === 2);
+    t.twilioStop();
+    await finalized(t);
+    expect(summaryOf(t).errors).toContain('brain_open_timeout');
+  });
+
+  test('overlapping delegations with a settle wait: the first one\'s prompt is frozen when the next arrives, and its timer never replaces it', async () => {
+    const { t, brain } = toolsSetup({ deps: { transcriptQuietMs: 40, transcriptMaxWaitMs: 1000 } });
+    await t.ready();
+    t.openai.receive(said('Old words', 0, 600));
+    t.openai.receive(created('d0'));
+    await waitFor(() => answers(t).length === 1);
+    // d1 arrives with nothing new, then d2 arrives before d1's settle wait is over
+    t.openai.receive(created('d1'));
+    t.openai.receive(created('d2'));
+    // the late tail of d2's own question (its audio runs on from the delegation): it joins d2's open range
+    t.openai.receive(said('Late question', 700, 1100));
+    await waitFor(() => answers(t).length === 3);
+    expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['Old words', 'Old words', 'Late question']);
+  });
+
+  test('a new question that starts after the delegation (a delayed transcript batch) is kept out of the preceding delegation', async () => {
+    const { t, brain } = toolsSetup({ deps: { transcriptQuietMs: 60, transcriptMaxWaitMs: 1000 } });
+    await t.ready();
+    t.openai.receive(said('Old words', 0, 600));
+    t.openai.receive(created('d0'));
+    await waitFor(() => answers(t).length === 1);
+    // d1 arrives (GPT-Live's clock at 5,000 ms) with nothing new, and its settle window is open...
+    t.openai.receive({ ...created('d1'), offset_ms: 5000 });
+    // ...a late tail of d1's own question (audio before the delegation) joins it
+    t.openai.receive(said('tail', 4800, 5000));
+    // ...and the caller's NEXT question, whose audio starts well after the delegation, does not
+    t.openai.receive(said('A brand new question', 9000, 10000));
+    await waitFor(() => answers(t).length === 2);
+    t.openai.receive({ ...created('d2'), offset_ms: 10500 });
+    await waitFor(() => answers(t).length === 3);
+    expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['Old words', 'tail', 'A brand new question']);
+  });
+
+  test('a delegation with no words keeps the fallback it had on arrival: the next question, arriving while it settles, never becomes its fallback', async () => {
+    const { t, brain } = toolsSetup({ deps: { transcriptQuietMs: 60, transcriptMaxWaitMs: 1000 } });
+    await t.ready();
+    t.openai.receive(said('Old words', 0, 600));
+    t.openai.receive(created('d0'));
+    await waitFor(() => answers(t).length === 1);
+    // d1 arrives with nothing new; its settle window opens
+    t.openai.receive({ ...created('d1'), offset_ms: 5000 });
+    // the caller's next question arrives during that window, well after the delegation: it is NOT d1's tail
+    t.openai.receive(said('The next question', 9000, 9800));
+    await waitFor(() => answers(t).length === 2);
+    t.openai.receive({ ...created('d2'), offset_ms: 10000 });
+    await waitFor(() => answers(t).length === 3);
+    expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['Old words', 'Old words', 'The next question']);
+  });
+
+  test('the agent line is the one right before the caller\'s NEWEST utterance: "the second one" names the offer, not the greeting', async () => {
+    const { t, brain } = toolsSetup();
+    await t.ready();
+    const agent = (words, start, end) => ({ type: 'session.output_transcript.delta', delta: words, start_ms: start, end_ms: end });
+    t.openai.receive(agent('Thanks for calling Waves, how can I help?', 0, 2500));
+    t.openai.receive(said('Hello.', 3000, 3600));
+    t.openai.receive(agent('I can help with pest control or lawn care. Which one?', 4500, 8000));
+    t.openai.receive(said(' What is the price of the second one?', 9500, 11000));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    expect(brain.ask.mock.calls[0][0]).toBe('Agent just said: I can help with pest control or lawn care. Which one?\nCaller said: Hello. What is the price of the second one?');
+  });
+
+  test('deadlines count from the delegation\'s arrival: a queued delegation gets what is left, and one past its hard deadline gets the timeout line with no model call', async () => {
+    const { TIMEOUT_REPLY } = require('../services/voice-agent/live-brain');
+    let releaseFirst;
+    let n = 0;
+    const { t, brain } = toolsSetup({
+      reply: (text) => {
+        n += 1;
+        if (n === 1) return new Promise((resolve) => { releaseFirst = () => resolve('reply one'); });
+        t.advance(3000); // the second answer itself takes 3 s
+        return Promise.resolve('reply two');
+      },
+    });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    t.openai.receive(said('two', 6000, 6300));
+    t.openai.receive(created('d2'));
+    t.openai.receive(said('three', 12000, 12300));
+    t.openai.receive(created('d3'));
+    t.advance(18000); // the first lookup runs 18 s; d2 and d3 wait behind it
+    releaseFirst();
+    await waitFor(() => answers(t).length === 3);
+    // d2 waited 18 s: its holding line is already due and it has 2 s left
+    expect(brain.ask.mock.calls[1][1]).toMatchObject({ softMs: 0, deadlineMs: 2000 });
+    // d3 waited 18 s + 3 s = 21 s: past 20 s, so no model call, the timeout line
+    expect(brain.ask).toHaveBeenCalledTimes(2);
+    expect(answers(t)[2]).toEqual({ type: 'session.commentary.append', delegation_id: 'd3', content: TIMEOUT_REPLY });
+    t.twilioStop();
+    await finalized(t);
+    const summary = summaryOf(t);
+    expect(summary.brain_asks).toBe(2); // the expired one is not an ask
+    expect(summary.errors).toContain('brain_expired_in_queue');
+  });
+
+  test('an arrival timer answers a delegation still queued at its hard deadline, while the ask ahead of it runs, and its turn then skips it', async () => {
+    const { TIMEOUT_REPLY } = require('../services/voice-agent/live-brain');
+    let releaseFirst;
+    const { t, brain } = toolsSetup({
+      reply: () => new Promise((resolve) => { releaseFirst = () => resolve('reply one'); }),
+      deps: { brainHardMs: 60, brainSoftMs: 30 },
+    });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    t.openai.receive(said('two', 6000, 6300));
+    t.openai.receive(created('d2'));
+    // d1's ask runs on; d2 waits behind it and its own 60 ms run out
+    await waitFor(() => answers(t).filter((m) => m.delegation_id === 'd2').length === 2);
+    // its holding line at its own 30 ms (armed at arrival), then the timeout line at 60 ms
+    expect(answers(t).filter((m) => m.delegation_id === 'd2').map((m) => m.content)).toEqual(['Still pulling that up.', TIMEOUT_REPLY]);
+    expect(brain.ask).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await waitFor(() => answers(t).some((m) => m.delegation_id === 'd1'));
+    await flush();
+    expect(answers(t).filter((m) => m.delegation_id === 'd2')).toHaveLength(2); // its turn came and skipped it: no further line, no ask
+    expect(brain.ask).toHaveBeenCalledTimes(1);
+    t.twilioStop();
+    await finalized(t);
+    expect(summaryOf(t)).toMatchObject({ brain_asks: 1 });
+    expect(summaryOf(t).errors).toContain('brain_expired_in_queue');
+  });
+
+  test('the holding line is armed at ARRIVAL: a queued delegation hears it at its own soft deadline, once, never again when its ask runs', async () => {
+    let releaseFirst;
+    const { t, brain } = toolsSetup({
+      reply: (text, opts) => new Promise((resolve) => {
+        if (text.includes('two') && opts.onSoft) opts.onSoft(); // the brain's own timer also fires for the second ask
+        resolve(text.includes('one') ? undefined : 'reply two');
+      }).then((r) => r || new Promise((resolve) => { releaseFirst = () => resolve('reply one'); })),
+      deps: { brainHardMs: 2000, brainSoftMs: 40 },
+    });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    t.openai.receive(said('two', 6000, 6300));
+    t.openai.receive(created('d2'));
+    // d2 is still queued behind d1's running ask, yet it hears its own holding line at ~40 ms after ITS arrival
+    await waitFor(() => answers(t).some((m) => m.delegation_id === 'd2'));
+    expect(brain.ask).toHaveBeenCalledTimes(1);
+    expect(answers(t).filter((m) => m.delegation_id === 'd2')).toEqual([{ type: 'session.commentary.append', delegation_id: 'd2', content: 'Still pulling that up.' }]);
+    releaseFirst();
+    await waitFor(() => answers(t).some((m) => m.delegation_id === 'd2' && m.content === 'reply two'));
+    // d2's ask ran later and its brain timer called onSoft too: still one holding line for d2, one for d1 at most
+    const d2 = answers(t).filter((m) => m.delegation_id === 'd2').map((m) => m.content);
+    expect(d2).toEqual(['Still pulling that up.', 'reply two']);
+    t.twilioStop();
+    await finalized(t);
+  });
+
+  test('a delegation that expires in the queue hears the holding line first, then the timeout line, and nothing else', async () => {
+    const { TIMEOUT_REPLY } = require('../services/voice-agent/live-brain');
+    const { t, brain } = toolsSetup({ reply: () => new Promise(() => {}), deps: { brainHardMs: 200, brainSoftMs: 40 } });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    t.openai.receive(said('two', 6000, 6300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).filter((m) => m.delegation_id === 'd2').length === 2, 3000);
+    expect(answers(t).filter((m) => m.delegation_id === 'd2').map((m) => m.content)).toEqual(['Still pulling that up.', TIMEOUT_REPLY]);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(answers(t).filter((m) => m.delegation_id === 'd2')).toHaveLength(2);
+    expect(brain.ask).toHaveBeenCalledTimes(1);
+    t.twilioStop();
+    await finalized(t);
+  });
+
+  test('a delegation answered before its soft deadline never hears the holding line', async () => {
+    const { t } = toolsSetup({ deps: { brainHardMs: 2000, brainSoftMs: 80 } });
+    await t.ready();
+    t.openai.receive(said('quick one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    await new Promise((r) => setTimeout(r, 160));
+    expect(answers(t).map((m) => m.content)).toEqual(['Your next visit is Tuesday.']);
+    t.twilioStop();
+    await finalized(t);
+  });
+
+  describe('caller words keep their boundaries across fragments', () => {
+    const asked = async (frags) => {
+      const { t, brain } = toolsSetup();
+      await t.ready();
+      for (const [text, start, end] of frags) t.openai.receive(said(text, start, end));
+      t.openai.receive(created('d1'));
+      await waitFor(() => brain.ask.mock.calls.length === 1);
+      const text = brain.ask.mock.calls[0][0];
+      t.twilioStop();
+      await finalized(t);
+      return text;
+    };
+
+    test('deltas of one utterance join raw: a number or a word split across deltas stays whole', async () => {
+      expect(await asked([['how much for a 2', 0, 300], [',500', 300, 600], [' square foot home, pest', 600, 900], ['icide', 900, 1100]])).toBe('how much for a 2,500 square foot home, pesticide');
+    });
+
+    test('fragments that carry their own spaces are not double-spaced', async () => {
+      expect(await asked([['how much for ', 0, 300], ['a 2400', 300, 600], [' square foot ', 600, 900], ['home', 900, 1100]])).toBe('how much for a 2400 square foot home');
+    });
+
+    test('two utterances get one space between them, whether or not a side carries whitespace', async () => {
+      expect(await asked([['First thing.', 0, 800], ['Second thing.', 3000, 3800]])).toBe('First thing. Second thing.');
+      expect(await asked([['First thing. ', 0, 800], [' Second thing.', 3000, 3800]])).toBe('First thing. Second thing.');
+    });
+
+    test('two spoken measurements in separate utterances reach the brain as two numbers', async () => {
+      expect(await asked([['forty', 0, 400], ['five hundred square feet', 2500, 3000]])).toBe('forty five hundred square feet');
+      expect(await asked([['1800', 0, 400], ['2200', 2500, 3000]])).toBe('1800 2200');
+    });
+
+    test('a whitespace-only fragment and closing punctuation keep the words apart without stray spaces', async () => {
+      expect(await asked([['two', 0, 200], [' ', 200, 250], ['bedrooms', 250, 600], ['?', 600, 650]])).toBe('two bedrooms?');
+    });
+  });
+
+  test('a stalled brain open never holds a delegation past its own hard deadline: the open wait is capped to what is left', async () => {
+    const { TIMEOUT_REPLY } = require('../services/voice-agent/live-brain');
+    const { t, brain } = toolsSetup({ brainOpen: () => new Promise(() => {}), deps: { brainHardMs: 50, brainOpenMs: 4000, brainSoftMs: 20, closeWaitMs: 20 } });
+    await t.ready();
+    t.openai.receive(said('first', 0, 300));
+    t.openai.receive(created('d1'));
+    t.openai.receive(said('second', 6000, 6300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).filter((m) => m.content === TIMEOUT_REPLY).length === 2, 3000); // both well before the 4 s open wait would have ended
+    // each hears its holding line at its own 20 ms (armed at arrival) before the timeout line
+    expect(answers(t).filter((m) => m.delegation_id === 'd1').map((m) => m.content)).toEqual(['Still pulling that up.', TIMEOUT_REPLY]);
+    expect(answers(t).filter((m) => m.delegation_id === 'd2').map((m) => m.content)).toEqual(['Still pulling that up.', TIMEOUT_REPLY]);
+    expect(brain.ask).not.toHaveBeenCalled();
+    t.twilioStop();
+    await finalized(t);
+    expect(summaryOf(t).errors).toContain('brain_expired_in_queue');
+  });
+
+  test('a retired brain\'s reply is neither counted as an ask nor timed', async () => {
+    const { t, brain } = toolsSetup({ reply: async () => 'real answer' });
+    await t.ready();
+    t.openai.receive(said('first', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    brain.ask.mockImplementation(async () => { brain.lastRan = false; return "I can't pull that up right now. You can call or text the office for that."; });
+    t.openai.receive(said('second', 6000, 6300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 2);
+    expect(answers(t)[1].content).toMatch(/can't pull that up/);
+    t.twilioStop();
+    await finalized(t);
+    const summary = summaryOf(t);
+    expect(summary.brain_asks).toBe(1);
+    expect(summary.brain_ms).toHaveLength(1);
+    expect(summary.brain_wait_ms).toHaveLength(1);
+    expect(summary.brain_total_ms).toHaveLength(1);
+  });
+
+  test('a delegation\'s context is frozen when its range closes: later speech changes neither its words nor its fallback', async () => {
+    let releaseFirst;
+    let calls = 0;
+    const { t, brain } = toolsSetup({
+      reply: () => { calls += 1; return calls === 1 ? new Promise((resolve) => { releaseFirst = () => resolve('r1'); }) : Promise.resolve('r2'); },
+    });
+    await t.ready();
+    t.openai.receive(said('question one', 0, 600));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    // d2 arrives with no new words (its fallback is the latest two utterances AS OF NOW)...
+    t.openai.receive(created('d2'));
+    // ...and the caller then asks something else, and GPT-Live speaks, before d2 reaches the front
+    t.openai.receive(said('a different question', 9000, 9600));
+    t.openai.receive({ type: 'session.output_transcript.delta', delta: 'Sure thing.', start_ms: 9700, end_ms: 10000 });
+    releaseFirst();
+    await waitFor(() => answers(t).length === 2);
+    expect(brain.ask.mock.calls[1][0]).toBe('question one'); // frozen: not 'a different question'
+  });
+
+  test('two delegations are served one at a time, in order: the second brain ask starts after the first reply is sent', async () => {
+    let releaseFirst;
+    const events = [];
+    const { t, brain } = toolsSetup({
+      reply: (text) => {
+        events.push(`ask:${text}`);
+        if (text === 'one') return new Promise((resolve) => { releaseFirst = () => resolve('reply one'); });
+        return Promise.resolve('reply two');
+      },
+    });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    t.openai.receive(said('two', 5000, 5300));
+    t.openai.receive(created('d2'));
+    await flush();
+    expect(brain.ask).toHaveBeenCalledTimes(1); // d2 waits behind d1
+    expect(answers(t)).toHaveLength(0);
+    releaseFirst();
+    await waitFor(() => answers(t).length === 2);
+    expect(events).toEqual(['ask:one', 'ask:two']);
+    expect(answers(t)).toEqual([
+      { type: 'session.commentary.append', delegation_id: 'd1', content: 'reply one' },
+      { type: 'session.commentary.append', delegation_id: 'd2', content: 'reply two' },
+    ]);
+  });
+
+  test(`after ${bridgeMod.BRAIN_ASK_CAP} asks the call goes back to the fixed sentence`, async () => {
+    const { t, brain } = toolsSetup();
+    await t.ready();
+    for (let i = 1; i <= bridgeMod.BRAIN_ASK_CAP + 2; i++) {
+      t.openai.receive(said(`question ${i}`, i * 5000, i * 5000 + 400));
+      t.openai.receive(created(`d${i}`));
+    }
+    await waitFor(() => answers(t).length === bridgeMod.BRAIN_ASK_CAP + 2);
+    expect(brain.ask).toHaveBeenCalledTimes(bridgeMod.BRAIN_ASK_CAP);
+    expect(answers(t).slice(-2).map((m) => m.content)).toEqual([DELEGATION_REPLY, DELEGATION_REPLY]);
+    t.twilioStop();
+    await finalized(t);
+    expect(summaryOf(t)).toMatchObject({ brain_asks: bridgeMod.BRAIN_ASK_CAP, delegations: bridgeMod.BRAIN_ASK_CAP + 2 });
+  });
+
+  test('a brain error answers the fixed sentence, notes a code, and the next delegation still asks', async () => {
+    let n = 0;
+    const { t, brain } = toolsSetup({ reply: async () => { n += 1; if (n === 1) throw new Error('model down'); return 'ok now'; } });
+    await t.ready();
+    t.openai.receive(said('first', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    t.openai.receive(said('second', 6000, 6300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 2);
+    expect(brain.ask).toHaveBeenCalledTimes(2);
+    expect(answers(t).map((m) => m.content)).toEqual([DELEGATION_REPLY, 'ok now']);
+    t.twilioStop();
+    await finalized(t);
+    expect(summaryOf(t).errors).toEqual(['brain_error']);
+  });
+
+  test('a brain that cannot open (not a sandbox row, or any failure) answers the fixed sentence', async () => {
+    const { t } = toolsSetup({ brainOpen: async () => { throw new Error('live_brain_not_sandbox'); } });
+    await t.ready();
+    t.openai.receive(said('hello there', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    expect(answers(t)[0].content).toBe(DELEGATION_REPLY);
+    t.twilioStop();
+    await finalized(t);
+    expect(summaryOf(t).errors).toEqual(['brain_open_failed']);
+    expect(summaryOf(t)).toMatchObject({ brain_asks: 0 });
+  });
+
+  test('an empty reply is never sent as silence', async () => {
+    const { t } = toolsSetup({ reply: async () => '  ' });
+    await t.ready();
+    t.openai.receive(said('anything', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    expect(answers(t)[0].content).toMatch(/wasn't able to get that/);
+  });
+
+  test('finalize ends the brain, and a reply that lands after the call ended is not sent', async () => {
+    let release;
+    const { t, brain } = toolsSetup({ reply: () => new Promise((resolve) => { release = () => resolve('too late'); }) });
+    await t.ready();
+    t.openai.receive(said('slow one', 0, 300));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    t.twilioStop();
+    await finalized(t);
+    expect(brain.end).toHaveBeenCalledTimes(1);
+    release();
+    await flush();
+    expect(answers(t)).toHaveLength(0);
+  });
+
+  test('a brain that finishes opening after the call ended is ended at once', async () => {
+    let open;
+    const brain = { ask: jest.fn(), end: jest.fn(async () => {}), softTimeouts: 0, hardTimeouts: 0 };
+    const { t } = toolsSetup({ brainOpen: () => new Promise((resolve) => { open = () => resolve(brain); }), deps: { closeWaitMs: 20 } });
+    await t.ready();
+    t.twilioStop();
+    await finalized(t);
+    open();
+    await flush();
+    expect(brain.end).toHaveBeenCalledWith('bridge_closed');
+  });
+
+  test('a slow ask speaks a holding line on the same delegation id, then the real answer as a second append', async () => {
+    let finish;
+    const { t, brain } = toolsSetup({
+      reply: (text, opts) => new Promise((resolve) => { opts.onSoft(); finish = () => resolve('Tuesday at nine.'); }),
+    });
+    await t.ready();
+    t.openai.receive(said('When is my visit?', 0, 800));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    expect(answers(t)).toEqual([{ type: 'session.commentary.append', delegation_id: 'd1', content: 'Still pulling that up.' }]);
+    finish();
+    await waitFor(() => answers(t).length === 2);
+    expect(answers(t).map((m) => [m.delegation_id, m.content])).toEqual([['d1', 'Still pulling that up.'], ['d1', 'Tuesday at nine.']]);
+    expect(brain.ask).toHaveBeenCalledTimes(1);
+  });
+
+  test('a holding line is not sent once the call is closing', async () => {
+    let soft;
+    const { t, brain } = toolsSetup({ reply: (text, opts) => new Promise(() => { soft = opts.onSoft; }) });
+    await t.ready();
+    t.openai.receive(said('hello there', 0, 800));
+    t.openai.receive(created('d1'));
+    await waitFor(() => brain.ask.mock.calls.length === 1);
+    t.twilioStop();
+    await finalized(t);
+    soft();
+    expect(answers(t)).toHaveLength(0);
+  });
+
+  test('the brain gets what GPT-Live said just before the caller\'s words, labelled', async () => {
+    const { t, brain } = toolsSetup();
+    await t.ready();
+    const agent = (words, start, end) => ({ type: 'session.output_transcript.delta', delta: words, start_ms: start, end_ms: end });
+    t.openai.receive(agent('I have Tuesday at nine or Wednesday at ten. ', 1000, 4000));
+    t.openai.receive(agent('Which works?', 4000, 5000));
+    t.openai.receive(said('Yes, the second one.', 6500, 7500));
+    t.openai.receive(agent('One sec, checking that.', 8000, 9000)); // after the caller: not context
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    expect(brain.ask.mock.calls[0][0]).toBe('Agent just said: I have Tuesday at nine or Wednesday at ten. Which works?\nCaller said: Yes, the second one.');
+  });
+
+  test('the agent context is the latest 300 characters, and absent when GPT-Live said nothing before', async () => {
+    const { t, brain } = toolsSetup();
+    await t.ready();
+    t.openai.receive(said('Hello, who is this?', 100, 900));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    expect(brain.ask.mock.calls[0][0]).toBe('Hello, who is this?');
+    t.openai.receive({ type: 'session.output_transcript.delta', delta: `${'a'.repeat(400)}END`, start_ms: 2000, end_ms: 3000 });
+    t.openai.receive(said('Okay.', 5000, 5500));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 2);
+    const prompt = brain.ask.mock.calls[1][0];
+    expect(prompt.startsWith('Agent just said: ')).toBe(true);
+    expect(prompt.endsWith('END\nCaller said: Okay.')).toBe(true);
+    expect(prompt.split('\n')[0].length).toBe('Agent just said: '.length + 300);
+  });
+
+  test('gate off: GPT-Live\'s transcript is not kept and nothing is asked', async () => {
+    const t = setup({ deps: { toolsOn: () => false } });
+    await t.ready();
+    t.openai.receive({ type: 'session.output_transcript.delta', delta: 'hi', start_ms: 0, end_ms: 100 });
+    expect(t.bridge.agentRecent).toEqual([]);
+  });
+
+  test('the summary counts asks, soft and hard timeouts and each ask\'s timing parts, and holds no words', async () => {
+    const { t, brain } = toolsSetup({
+      reply: async () => { t.advance(700); return 'Your next visit is Tuesday, the secret-gate-code reply.'; },
+    });
+    await t.ready();
+    brain.softTimeouts = 2; // what the real brain counts
+    brain.hardTimeouts = 1;
+    t.advance(300);
+    t.openai.receive(said('my card is 4111 1111 1111 1111', 0, 900));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    t.twilioStop();
+    await finalized(t);
+    const summary = summaryOf(t);
+    expect(summary).toMatchObject({
+      delegations: 1, brain_asks: 1, brain_soft_timeouts: 2, brain_hard_timeouts: 1, brain_wait_ms: [0], brain_ms: [700], brain_total_ms: [700],
+    });
+    const stored = JSON.stringify(summary);
+    expect(stored).not.toMatch(/4111|secret-gate-code|visit is Tuesday/);
+    // nothing the caller or the brain said reaches a log line either
+    const logged = JSON.stringify([logger.info.mock.calls, logger.warn.mock.calls, logger.error.mock.calls]);
+    expect(logged).not.toMatch(/4111|secret-gate-code|visit is Tuesday/);
+  });
+
+  test('the summary records, per ask, the model rounds (counts only; the practice line has no paid tool)', async () => {
+    let n = 0;
+    const { t, brain } = toolsSetup({ reply: async () => { n += 1; brain.lastUsage = { rounds: n + 1 }; return `reply ${n}`; } });
+    await t.ready();
+    t.openai.receive(said('first', 0, 300));
+    t.openai.receive(created('d1'));
+    t.openai.receive(said('second', 6000, 6300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 2);
+    t.twilioStop();
+    await finalized(t);
+    const summary = summaryOf(t);
+    expect(summary).toMatchObject({ brain_asks: 2, brain_rounds: [2, 3] });
+    expect(summary).not.toHaveProperty('brain_paid_tool_calls');
+  });
+
+  test('a queued delegation\'s wait before the brain starts includes the ask ahead of it', async () => {
+    const { t } = toolsSetup({ reply: async () => { t.advance(1000); return 'ok'; } });
+    await t.ready();
+    t.openai.receive(said('one', 0, 300));
+    t.openai.receive(created('d1'));
+    t.openai.receive(said('two', 5000, 5300));
+    t.openai.receive(created('d2'));
+    await waitFor(() => answers(t).length === 2);
+    t.twilioStop();
+    await finalized(t);
+    expect(summaryOf(t)).toMatchObject({ brain_wait_ms: [0, 1000], brain_ms: [1000, 1000], brain_total_ms: [1000, 2000] });
+  });
+
+  test('a delegation to another target still ends the call in tools mode, and asks nothing', async () => {
+    const { t, brain } = toolsSetup();
+    await t.ready();
+    t.openai.receive(created('d2', 'responses'));
+    await flush();
+    expect(brain.ask).not.toHaveBeenCalled();
+    expect(summaryOf(t)).toMatchObject({ close_reason: 'unexpected_delegation' });
+  });
+});
+
 describe('finish', () => {
   test('stop AND both socket closes write the summary exactly once, after session.close and the final usage', async () => {
     const t = setup();

@@ -1487,7 +1487,9 @@ async function delayedSendIsStale(scheduledServiceId, notice = null) {
   if (!scheduledServiceId) return false;
   try {
     const timePromise = require('./time-promise');
-    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date());
+    // The RAW rule (sameDateOnly: false): a delayed body may be for an older date, so an hour told for any date still blocks
+    // it (owner 11-24 *narrow*: only fresh decisions drop an off-date hour; told-visits loadPromiseFacts header).
+    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date(), { sameDateOnly: false });
     if (levels.get(scheduledServiceId) !== 'hour') return false;
     if (!notice) return true;
     const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date())).get(scheduledServiceId);

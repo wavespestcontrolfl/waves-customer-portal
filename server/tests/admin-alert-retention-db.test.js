@@ -110,11 +110,13 @@ maybeDescribe('admin alert retention (live Postgres)', () => {
     const onlyMine = (q) => q.whereIn('id', mine);
 
     const live = await retention.runAdminAlertRetention({ now: runNow, scope: onlyMine, batchSize: 2 });
-    expect(live).toMatchObject({ written: 5, batches: 3, scanned: 6, kept: { refreshed: 1 } });
-    expect(live.expire.byRule).toEqual({ age30: 4, fyi7: 1 });
+    // old3 is a billing row: money stays until settled, so the query never returns it.
+    expect(live).toMatchObject({ written: 4, batches: 3, scanned: 5, kept: { refreshed: 1 } });
+    expect(live.expire.byRule).toEqual({ age30: 3, fyi7: 1 });
     expect(live.ringRisk.emitters['sms-draft-canary'].ringsWithoutNewEvent).toBe(1);
     const done = await db('notifications').whereIn('id', mine).whereNotNull('done_at').pluck('id');
-    expect(done.sort()).toEqual([old1.id, old2.id, old3.id, fyi.id, canary.id].sort());
+    expect(done.sort()).toEqual([old1.id, old2.id, fyi.id, canary.id].sort());
+    expect((await get(old3.id)).done_at).toBeNull();
     expect((await get(young.id)).done_at).toBeNull();
     expect((await get(standing.id)).done_at).toBeNull();
     expect((await get(old2.id)).read_at).not.toBeNull();

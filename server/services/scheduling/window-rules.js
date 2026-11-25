@@ -217,6 +217,16 @@ function unreadableBound(value, isEnd = false) {
   return parseHHMM(text) == null || !WHOLE_MINUTE.test(text);
 }
 
+// Does a write of `update` ({ window_start, window_end }) change `row`'s hours, start or end, to the
+// minute? Each value is read as its clock minute. One the shift check cannot read exactly
+// (unreadableBound) stays text, and text never equals a minute: PostgreSQL can still store "10:00 PM",
+// which begins like a stored "10:00" and is 22:00, and it keeps the seconds of "10:00:30".
+function hoursChangedBy(update, row) {
+  const text = (value) => (value ? String(value).slice(0, 5) : null);
+  const read = (value, isEnd) => (unreadableBound(value, isEnd) ? String(value) : parseHHMM(value) ?? text(value));
+  return read(update.window_start) !== read(row.window_start) || read(update.window_end, true) !== read(row.window_end, true);
+}
+
 // The block a shift judges for a row a move writes (GATE_TECH_SHIFT_HOURS), in minutes. A start or an
 // end that is there but is no clock time the check reads exactly (unreadableBound) gives no block to
 // trust, and the write can still store it. Such a row is judged as a block no shift holds: one minute
@@ -269,6 +279,7 @@ module.exports = {
   rowBlockMinutes,
   shiftBlockMinutes,
   unreadableBound,
+  hoursChangedBy,
   seriesCandidateDateClashRows,
   minutesToHHMM,
   assertAdminAppointmentWindow,

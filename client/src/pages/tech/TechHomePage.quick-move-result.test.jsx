@@ -392,3 +392,76 @@ describe('Tech Home Quick Move: let the customer pick a day', () => {
     expect(screen.queryByText(/pick a day/i)).not.toBeInTheDocument();
   });
 });
+
+// GATE_TECH_SHIFT_HOURS (D4): the technician's own rest-of-route move refuses each later stop it
+// would land outside the shift while the other stops move. The sheet says so before the tap
+// (routeShiftConflicts on an option).
+describe('Tech Home Quick Move: stops a rest-of-route move would land outside the shift', () => {
+  const NOTICE = /With the rest of the route/;
+  const outside = (rows) => ({ ...dayRow, routeShiftConflicts: rows });
+  async function openSheet() {
+    mount();
+    await screen.findByText('Property brief for one');
+    fireEvent.click(screen.getByRole('button', { name: 'Quick Move' }));
+    await screen.findByText(/Today, 2:00 PM-3:00 PM/);
+  }
+
+  it('says nothing for this stop only, and for the rest of the route names the stop that will not move', async () => {
+    optionsExtra = { days: [outside([{ windowStart: '17:00', windowEnd: '18:00' }])] };
+    await openSheet();
+    fireEvent.click(screen.getByText(/Fri, Jan 2, 9:00 AM-10:00 AM/));
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Rest of route/ }));
+    expect(screen.getByText('⚠️ With the rest of the route, 1 stop lands outside your shift hours (5:00 PM-6:00 PM) — that stop will not move. Pick a different time.')).toBeInTheDocument();
+    // Another time with no such stop: no line.
+    fireEvent.click(screen.getByText(/Today, 2:00 PM-3:00 PM/));
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    // Back on the day, then this stop only: no line.
+    fireEvent.click(screen.getByText(/Fri, Jan 2, 9:00 AM-10:00 AM/));
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'This stop only' }));
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+  });
+
+  it('says nothing while the route list of a new reason is loading: the rows are the old list\'s', async () => {
+    // The rain list carries the rows on today's time; the list for another reason never answers.
+    const base = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (path, init) => {
+      if (!String(path).split('?')[0].endsWith('/rain-out-options')) return base(path, init);
+      if (!String(path).includes('reasonCode=weather_rain')) return new Promise(() => {});
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          ok: true, days: [], extraReasonsEnabled: true, remainingRouteCount: 2, service: { window: { start: '09:00', end: '10:00' } }, today: {},
+          sameDay: [{
+            kind: 'same_day', date: '2099-01-01', window: { start: '14:00', end: '15:00' }, label: 'Later today', display: 'Today, 2:00 PM-3:00 PM',
+            routeShiftConflicts: [{ windowStart: '17:00', windowEnd: '18:00' }],
+          }],
+        }),
+      };
+    });
+    await openSheet();
+    fireEvent.click(screen.getByRole('button', { name: /^Rest of route/ }));
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Emergency' }));
+    expect(await screen.findByRole('button', { name: 'Rest of route (…)' })).toBeInTheDocument();
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+  });
+
+  it('counts several stops and names the first window', async () => {
+    optionsExtra = { days: [outside([{ windowStart: '17:00', windowEnd: '18:00' }, { windowStart: '20:00', windowEnd: '21:00' }])] };
+    await openSheet();
+    fireEvent.click(screen.getByText(/Fri, Jan 2, 9:00 AM-10:00 AM/));
+    fireEvent.click(screen.getByRole('button', { name: /^Rest of route/ }));
+    expect(screen.getByText('⚠️ With the rest of the route, 2 stops land outside your shift hours (first: 5:00 PM-6:00 PM) — those stops will not move. Pick a different time.')).toBeInTheDocument();
+  });
+
+  it('a stop stored with a 24:00 start and no end reads as midnight, not noon', async () => {
+    // The server's row for such a stop on a day move (the mover refuses it).
+    optionsExtra = { days: [outside([{ windowStart: '24:00', windowEnd: null }])] };
+    await openSheet();
+    fireEvent.click(screen.getByText(/Fri, Jan 2, 9:00 AM-10:00 AM/));
+    fireEvent.click(screen.getByRole('button', { name: /^Rest of route/ }));
+    expect(screen.getByText('⚠️ With the rest of the route, 1 stop lands outside your shift hours (from 12:00 AM) — that stop will not move. Pick a different time.')).toBeInTheDocument();
+  });
+});

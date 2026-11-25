@@ -164,15 +164,9 @@ function hhmm(value) {
   return value ? String(value).slice(0, 5) : null;
 }
 
-// Does this write change the row's hours (start or end, to the minute)? Each value is read as its
-// clock minute. One the shift check cannot read exactly (unreadableBound) stays text, and text never
-// equals a minute: PostgreSQL can still store "10:00 PM", which begins like a stored "10:00" and is
-// 22:00, and it keeps the seconds of "10:00:30".
-function hoursChangedBy(update, row) {
-  const { parseHHMM, unreadableBound } = require('./scheduling/window-rules');
-  const read = (value, isEnd) => (unreadableBound(value, isEnd) ? String(value) : parseHHMM(value) ?? hhmm(value));
-  return read(update.window_start) !== read(row.window_start) || read(update.window_end, true) !== read(row.window_end, true);
-}
+// Does this write change the row's hours? One definition, in window-rules: the Quick Move sheet asks
+// the same question of each route stop before the tap (rain-out.js shiftLanding).
+const hoursChangedBy = (update, row) => require('./scheduling/window-rules').hoursChangedBy(update, row);
 
 // GATE_TECH_SHIFT_HOURS (D4 part 3b-2c): the shift check for one row of a stop a series move judges,
 // the plan's visit there or a grouped partner. `row` is the row as read and `update` its write:

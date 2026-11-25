@@ -194,4 +194,137 @@ describe('loadPromiseFacts', () => {
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
   });
+  // Owner 2026-11-24 "fix": an hour told for ANOTHER date (a no-show, then an office move with no text) is not an hour
+  // for the visit's new date. SLOT is 2026-11-12 09:00 ET.
+  describe('an hour told for another date', () => {
+    const row = (date, over = {}) => ({ id: 's1', visit_id: null, status: 'pending', scheduled_date: date, ...over });
+
+    test('a slot on the visit date stays hour with its start', async () => {
+      const out = await facts(fakeConn({ messages: [msg('s1')], members: [row('2026-11-12')] }));
+      expect(out.s1.level).toBe('hour');
+      expect(out.s1.start).toEqual(new Date(SLOT));
+    });
+
+    test('a slot on an older date reads as none, with no start', async () => {
+      expect(await facts(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }))).toEqual({ s1: { level: 'none', start: null } });
+      expect(Object.fromEntries(await loadPromiseLevels(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }), ['s1'], NOW))).toEqual({ s1: 'none' });
+    });
+
+    test('a pg Date value for the visit date is read as its calendar day', async () => {
+      const out = await facts(fakeConn({ messages: [msg('s1')], members: [row(new Date('2026-11-12T00:00:00Z'))] }));
+      expect(out.s1.level).toBe('hour');
+    });
+
+    test('an unknown visit date, or an unknown window, keeps hour (fail closed)', async () => {
+      expect((await facts(fakeConn({ messages: [msg('s1')] }))).s1.level).toBe('hour');
+      expect((await facts(fakeConn({ messages: [msg('s1')], members: [row(null)] }))).s1.level).toBe('hour');
+      expect((await facts(fakeConn({ messages: [msg('s1')], members: [row('not a date')] }))).s1.level).toBe('hour');
+      expect((await facts(fakeConn({ messages: [msg('s1')], members: [row(new Date('invalid'))] }))).s1.level).toBe('hour');
+      const legacy = msg('s1', { purpose: 'appointment', metadata: { rendered_slot_ms: undefined, original_message_type: 'reschedule_series_confirmation' } });
+      expect(await facts(fakeConn({ messages: [legacy], members: [row('2026-11-23')] }))).toEqual({ s1: { level: 'hour', start: null } });
+    });
+
+    test('a day promise is untouched by the date check', async () => {
+      expect(await facts(fakeConn({ messages: [dayMsg('s1')], members: [row('2026-11-23')] }))).toEqual({ s1: { level: 'day', start: null } });
+    });
+
+    test('a grouped stop: a sibling\'s current-date hour still stands over a member\'s old-date one (codex P1)', async () => {
+      const NEW_SLOT = Date.parse('2026-11-23T14:00:00Z');
+      const members = [
+        { id: 's1', visit_id: 'v1', status: 'pending', scheduled_date: '2026-11-23' },
+        { id: 's2', visit_id: 'v1', status: 'pending', scheduled_date: '2026-11-23' },
+      ];
+      const messages = [msg('s1'), msg('s2', { id: 3, metadata: { rendered_slot_ms: NEW_SLOT } })];
+      const out = await facts(fakeConn({ messages, members }), ['s1', 's2']);
+      expect(out.s1).toEqual({ level: 'hour', start: new Date(NEW_SLOT) });
+      expect(out.s2).toEqual({ level: 'hour', start: new Date(NEW_SLOT) });
+      const onlyOld = await facts(fakeConn({ messages: [msg('s1')], members }), ['s1', 's2']);
+      expect(onlyOld).toEqual({ s1: { level: 'none', start: null }, s2: { level: 'none', start: null } });
+    });
+
+    test('a newer off-date notice still replaces an older on-date one: nothing revives (codex P1)', async () => {
+      // Told Nov 12 at 9 on Nov 9, then Nov 13 at 11 on Nov 9 later; the visit was then moved back to Nov 12 with no text.
+      const later = msg('s1', { id: 4, metadata: { rendered_slot_ms: Date.parse('2026-11-13T16:00:00Z') }, row: { sent_at: '2026-11-09T18:00:00Z' } });
+      const out = await facts(fakeConn({ messages: [msg('s1'), later], members: [row('2026-11-12')] }));
+      expect(out.s1).toEqual({ level: 'none', start: null });
+    });
+
+    test('a grouped reminder on a cancelled member is judged by the live member\'s date (codex P1)', async () => {
+      const members = [
+        { id: 's1', visit_id: 'v1', status: 'cancelled', scheduled_date: '2026-11-12' },
+        { id: 's2', visit_id: 'v1', status: 'pending', scheduled_date: '2026-11-20' },
+      ];
+      const grouped = msg('s1', { metadata: { notificationEventKey: 'appointment_reminder_24h:visit:v1' } });
+      const out = await facts(fakeConn({ messages: [grouped], members }), ['s2']);
+      expect(out.s2).toEqual({ level: 'none', start: null });
+      const sameDay = members.map((m) => ({ ...m, scheduled_date: '2026-11-12' }));
+      expect((await facts(fakeConn({ messages: [grouped], members: sameDay }), ['s2'])).s2).toEqual({ level: 'hour', start: new Date(SLOT) });
+    });
+
+    test('a pick hand-off still stands when its sibling holds only an old-date hour (codex P1)', async () => {
+      const members = [
+        { id: 's1', visit_id: 'v1', status: 'pending', scheduled_date: '2026-11-20' },
+        { id: 's2', visit_id: 'v1', status: 'pending', scheduled_date: '2026-11-20' },
+      ];
+      const handoff = msg('s1', { id: 5, purpose: 'appointment', metadata: { rendered_slot_ms: undefined, original_message_type: 'rain_out_customer_pick_v1' }, row: { sent_at: '2026-11-09T18:00:00Z' } });
+      const out = await facts(fakeConn({ messages: [handoff, msg('s2')], members }), ['s2']);
+      expect(out.s2).toEqual({ level: 'hour', start: null });
+    });
+
+    test('the raw rule (sameDateOnly false, delayed sends): an old-date hour still reads hour', async () => {
+      const levels = await loadPromiseLevels(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }), ['s1'], NOW, { sameDateOnly: false });
+      expect(Object.fromEntries(levels)).toEqual({ s1: 'hour' });
+    });
+
+    test('an expected date (a delayed body): filters by it, and a visit seen on another date reads hour (codex P1)', async () => {
+      const levels = (date, members) => loadPromiseLevels(fakeConn({ messages: [msg('s1')], members }), ['s1'], NOW, { sameDateOnly: date });
+      expect(Object.fromEntries(await levels('2026-11-23', [row('2026-11-23')]))).toEqual({ s1: 'none' });
+      expect(Object.fromEntries(await levels('2026-11-23', [row('2026-11-24')]))).toEqual({ s1: 'hour' });
+      expect(Object.fromEntries(await levels('2026-11-23', [row(null)]))).toEqual({ s1: 'hour' });
+    });
+
+    test('loadToldVisitIds (the night freeze) is unchanged: the old-date hour still freezes', async () => {
+      const told = await loadToldVisitIds(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }), ['s1'], NOW);
+      expect([...told]).toEqual(['s1']);
+    });
+  });
+});
+
+describe('readSnapshot: one read-only REPEATABLE READ snapshot per decision (owner 2026-11-24 *snapshot*)', () => {
+  const { readSnapshot } = require('../services/auto-dispatch/told-visits');
+  const timePromise = require('../services/time-promise');
+
+  test('a base connection opens one read-only repeatable-read transaction and runs every read on it', async () => {
+    const trx = { isTransaction: true };
+    const base = { transaction: jest.fn(async (fn) => fn(trx)) };
+    expect(await readSnapshot(base, async (c) => (c === trx ? 'on-snapshot' : 'elsewhere'))).toBe('on-snapshot');
+    expect(base.transaction).toHaveBeenCalledTimes(1);
+    expect(base.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+  });
+
+  test('resolvePromises on a base connection opens the snapshot itself', async () => {
+    const { resolvePromises } = require('../services/auto-dispatch/told-visits');
+    const base = { transaction: jest.fn(async () => { throw new Error('no pool'); }) };
+    await expect(resolvePromises(base, ['s1'], NOW)).rejects.toThrow('no pool');
+    expect(base.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+  });
+
+  test("a caller's own transaction is used as is (no nested snapshot)", async () => {
+    const trx = { isTransaction: true, transaction: jest.fn() };
+    expect(await readSnapshot(trx, async (c) => c)).toBe(trx);
+    expect(trx.transaction).not.toHaveBeenCalled();
+  });
+
+  test('the eligibility decision runs inside the snapshot; a snapshot that cannot open is a failed read', async () => {
+    const base = { transaction: jest.fn(async () => { throw new Error('pool exhausted'); }) };
+    expect(Object.fromEntries(await timePromise.dayOnlyEligibility(base, ['s1'], NOW))).toEqual({ s1: { eligible: false, level: 'hour', failed: true } });
+    expect(base.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+  });
+
+  test('the replay decision runs inside one snapshot; a snapshot that cannot open sends no day-only copy', async () => {
+    const base = { transaction: jest.fn(async () => { throw new Error('pool exhausted'); }) };
+    const far = new Date(NOW.getTime() + 5 * 24 * 3600 * 1000);
+    expect(await timePromise.dayOnlyReplayDecision(base, { id: 's1', startAt: far, now: NOW, reminder24hEnabled: true })).toBe(false);
+    expect(base.transaction).toHaveBeenCalledTimes(1);
+  });
 });

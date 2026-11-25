@@ -1018,7 +1018,8 @@ const TRIGGER_REGISTRY = {
     category: 'payment',
     priority: 'high',
     group: 'Payments',
-    rule: { area: 'Billing', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    // Money stays until settled: payment-failed-alert-close.js closes it when payload.invoiceId is paid (#8503).
+    rule: { area: 'Billing', severity: 'needs-you', who: 'person', doneWhen: 'invoice_paid', closedBy: 'server/services/payment-failed-alert-close.js' },
     build: (p) => {
       const invoiceLabel = p.invoiceNumber ? `Invoice ${p.invoiceNumber}` : 'Invoice payment';
       const method = p.methodLabel || 'Payment method';

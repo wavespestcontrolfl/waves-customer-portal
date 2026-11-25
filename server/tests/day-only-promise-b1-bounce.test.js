@@ -186,7 +186,7 @@ describe('a delayed bounce of a day-only text is revalidated before it recovers 
   test('still early with nothing newer: the day-only email, as before', async () => {
     groupedWorld({ metadata: DAY_META });
     await bounce('SM_early');
-    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date));
+    expect(timePromise.loadPromiseLevels).toHaveBeenCalledWith(db, ['ss-owner'], expect.any(Date), { sameDateOnly: false });
     expect(AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0]).toMatchObject({ dayOnly: true });
   });
 

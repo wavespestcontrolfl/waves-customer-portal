@@ -241,10 +241,29 @@ describe('dayOnlyReplayDecision: a held or merged move notice re-sent as a confi
       expect(await replay(fakeConn({ services: [member('s1'), member('s2', { customer_asked_time: true, status: 'cancelled' })] }))).toBe(true);
     });
 
+    test('a sibling\'s hour for THIS date blocks even when another member holds an older-date hour (codex P1)', async () => {
+      const current = { ...hourFor('2026-11-15'), id: 2, appointment_id: 's2' };
+      expect(await replay(fakeConn({ services: [member('s1'), member('s2')], messages: [hourFor('2026-11-12'), current] }))).toBe(false);
+    });
+
     test('an old hour level does not block (the move replaced it), a stop-wide read failure is false', async () => {
       expect(await replay(fakeConn({ services: [member('s1'), member('s2')], messages: [hourFor('2026-11-12')] }))).toBe(true);
       expect(await replay(fakeConn({ services: [member('s1'), member('s2')], failOn: 'appointment_reminders' }))).toBe(false);
     });
+  });
+
+  test('the visit moved off the rendered date (Monday body, visit now Tuesday): the window copy, never day only (codex P1)', async () => {
+    const conn = fakeConn({ services: [svc('s1', { customer_asked_time: false, scheduled_date: '2026-11-16' })], messages: [hourFor('2026-11-15')] });
+    expect(await replay(conn)).toBe(false);
+  });
+
+  test('the send decision (confirmation, 3-day text) is pinned to the rendered date too: a told Monday window stands (codex P1)', async () => {
+    const send = (date) => timePromise.dayOnlySendDecision(fakeConn({ services: [svc('s1', { customer_asked_time: false, scheduled_date: date })], messages: [hourFor('2026-11-15')] }), { id: 's1', startAt: FAR, now: NOW, reminder24hEnabled: true });
+    expect((await send('2026-11-16')).dayOnly).toBe(false);
+    expect((await send('2026-11-15')).dayOnly).toBe(false);
+    const old = { ...hourFor('2026-11-12') };
+    const moved = await timePromise.dayOnlySendDecision(fakeConn({ services: [svc('s1', { customer_asked_time: false })], messages: [old] }), { id: 's1', startAt: FAR, now: NOW, reminder24hEnabled: true });
+    expect(moved.dayOnly).toBe(true);
   });
 
   test('a set time (true) stays a window; an unrecorded intent (NULL) is today\'s rules, not this one', async () => {

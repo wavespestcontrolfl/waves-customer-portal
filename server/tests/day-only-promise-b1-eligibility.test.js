@@ -20,7 +20,7 @@ const svc = (id, over = {}) => ({
 const child = (id, over = {}) => svc(id, { is_recurring: true, recurring_parent_id: 'parent-1', ...over });
 
 /** A knex-shaped fake over rows per table. `calls` counts how many reads each table got. */
-function fakeConn({ services = [], reminders = [], moves = {}, messages = [], emails = [], failOn = null } = {}) {
+function fakeConn({ services = [], servicesByRead = null, reminders = [], moves = {}, messages = [], emails = [], failOn = null } = {}) {
   const calls = {};
   const conn = (table) => {
     calls[table] = (calls[table] || 0) + 1;
@@ -41,7 +41,8 @@ function fakeConn({ services = [], reminders = [], moves = {}, messages = [], em
       if (table === 'reschedule_log') return moves[eq.scheduled_service_id] || [];
       const pick = (rows) => rows.filter((r) => ins.every(([col, vals]) => r[col] != null && vals.includes(String(r[col])))
         && notIns.every(([col, vals]) => !vals.includes(String(r[col]))));
-      if (table === 'scheduled_services') return pick(services);
+      // servicesByRead: the Nth scheduled_services read sees the Nth list (the last one repeats), a move between reads.
+      if (table === 'scheduled_services') return pick(servicesByRead ? servicesByRead[Math.min(calls[table], servicesByRead.length) - 1] : services);
       if (table === 'appointment_reminders') return pick(reminders).filter((r) => r.cancelled !== true);
       return [];
     };
@@ -319,7 +320,7 @@ describe('dayOnlySendDecision', () => {
   });
 
   test('recurring child 3 days out: day only; a customer-picked child: not', async () => {
-    const free = fakeConn({ services: [child('s1')], reminders: [office('s1', 'recurring_auto_extend')] });
+    const free = fakeConn({ services: [child('s1', { scheduled_date: '2026-11-13' })], reminders: [office('s1', 'recurring_auto_extend')] });
     expect((await decide(free, { startAt: new Date('2026-11-13T14:00:00Z') })).dayOnly).toBe(true);
     const moves = { s1: [{ created_at: '2026-11-08T10:00:00Z', new_date: '2026-11-15', initiated_by: 'customer_portal' }] };
     const picked = fakeConn({ services: [child('s1')], moves });
@@ -345,19 +346,60 @@ describe('loadTimeDisplay', () => {
 
   describe('judged by the reads', () => {
     test('an eligible visit far out: the day only', async () => {
-      const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')] });
+      const conn = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-20' })], reminders: [office('s1')] });
       const out = await loadTimeDisplay(conn, [row('s1', '2026-11-20')], NOW);
       expect(out.get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
     });
 
+    test('a row rendered on a date the visit has left keeps the hour told for that date (codex P1)', async () => {
+      const told = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: Date.parse('2026-11-20T14:00:00Z') } };
+      const moved = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-21' })], reminders: [office('s1')], messages: [told] });
+      expect((await loadTimeDisplay(moved, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: true, level: 'hour', eligible: false, failed: true });
+    });
+
+    test('a visit moved between the promise read and the stop read is unverified too (codex P1)', async () => {
+      const told = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: Date.parse('2026-11-21T14:00:00Z') } };
+      const conn = fakeConn({ servicesByRead: [[svc('s1', { scheduled_date: '2026-11-20' })], [svc('s1', { scheduled_date: '2026-11-21' })]], reminders: [office('s1')], messages: [told] });
+      expect((await loadTimeDisplay(conn, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: true, level: 'hour', eligible: false, failed: true });
+    });
+
+    test('a grouped visit: two reads that disagree on its date, or its own row gone from the stop, are unverified (codex P1)', async () => {
+      const m = (id, date) => svc(id, { visit_id: 'v1', scheduled_date: date });
+      const unverified = { showHour: true, level: 'hour', eligible: false, failed: true };
+      const disagree = fakeConn({ servicesByRead: [[m('s1', '2026-11-20')], [m('s1', '2026-11-21'), m('s2', '2026-11-21')], [m('s1', '2026-11-20'), m('s2', '2026-11-20')]], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(disagree, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const same = [m('s1', '2026-11-20'), m('s2', '2026-11-20')];
+      const left = fakeConn({ servicesByRead: [same, same, same, [m('s2', '2026-11-20')]], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(left, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const leftFirst = fakeConn({ servicesByRead: [same, [m('s2', '2026-11-20')], same], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(leftFirst, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const emptied = fakeConn({ servicesByRead: [same, same, same, []], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(emptied, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const regrouped = fakeConn({ servicesByRead: [[m('s1', '2026-11-20')], [m('s1', '2026-11-20')], [m('s1', '2026-11-20')], same], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(regrouped, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const withEnded = [...same, m('s3', '2026-11-20')].map((r) => (r.id === 's3' ? { ...r, status: 'cancelled' } : r));
+      const endedSibling = fakeConn({ servicesByRead: [withEnded, withEnded, withEnded, same], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(endedSibling, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
+      const pendingAgain = [m('s1', '2026-11-20'), { ...m('s2', '2026-11-20'), status: 'rescheduled' }];
+      const restatused = fakeConn({ servicesByRead: [pendingAgain, pendingAgain, pendingAgain, same], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(restatused, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const alone = svc('s1', { scheduled_date: '2026-11-20' });
+      const joined = fakeConn({ servicesByRead: [[alone], [m('s1', '2026-11-20')], same], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(joined, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const aloneSteady = fakeConn({ services: [alone], reminders: [office('s1')] });
+      expect((await loadTimeDisplay(aloneSteady, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
+      const steady = fakeConn({ services: same, reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(steady, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
+    });
+
     test('an eligible visit inside the cutoff: the hour', async () => {
-      const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')] });
+      const conn = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-11' })], reminders: [office('s1')] });
       const out = await loadTimeDisplay(conn, [row('s1', '2026-11-11', '08:00:00')], NOW); // 18 h out (ET 08:00 = 13:00Z)
       expect(out.get('s1')).toMatchObject({ showHour: true, eligible: true });
     });
 
     test('an ineligible visit: the hour', async () => {
-      const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1', 'booking_new')] });
+      const conn = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-20' })], reminders: [office('s1', 'booking_new')] });
       const out = await loadTimeDisplay(conn, [row('s1', '2026-11-20')], NOW);
       expect(out.get('s1')).toEqual({ showHour: true, level: 'none', eligible: false });
     });
@@ -377,18 +419,18 @@ describe('loadTimeDisplay', () => {
     });
 
     test('the failed marker is only on a failed read: a real hour verdict and a good read carry none', async () => {
-      const hour = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: SLOT } };
-      const told = fakeConn({ services: [svc('s1')], reminders: [office('s1')], messages: [hour] });
+      const hour = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: Date.parse('2026-11-20T14:00:00Z') } };
+      const told = fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-20' })], reminders: [office('s1')], messages: [hour] });
       const out = await loadTimeDisplay(told, [row('s1', '2026-11-20')], NOW);
       expect(out.get('s1')).toEqual({ showHour: true, level: 'hour', eligible: false });
       expect('failed' in out.get('s1')).toBe(false);
-      const good = fakeConn({ services: [svc('s2')], reminders: [office('s2')] });
+      const good = fakeConn({ services: [svc('s2', { scheduled_date: '2026-11-20' })], reminders: [office('s2')] });
       expect('failed' in (await loadTimeDisplay(good, [row('s2', '2026-11-20')], NOW)).get('s2')).toBe(false);
     });
 
     test('one bulk read for many rows', async () => {
       const ids = ['s1', 's2', 's3', 's4'];
-      const conn = fakeConn({ services: ids.map((id) => svc(id)), reminders: ids.map((id) => office(id)) });
+      const conn = fakeConn({ services: ids.map((id) => svc(id, { scheduled_date: '2026-11-20' })), reminders: ids.map((id) => office(id)) });
       const out = await loadTimeDisplay(conn, ids.map((id) => row(id, '2026-11-20')), NOW);
       expect([...out.values()].every((v) => v.showHour === false)).toBe(true);
       expect(conn.calls.appointment_reminders).toBe(1);

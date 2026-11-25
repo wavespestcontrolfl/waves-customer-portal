@@ -14,7 +14,7 @@ A callback is any return visit where the customer reports the original treatment
 1. Route callback to the original tech first — always offer it before assigning elsewhere
 2. If original tech unavailable same day: offer next available slot within 5 days
 3. If original tech unavailable within 5 days: assign to best-rated tech for that service type
-4. Never assign a callback to Tech 3 if the original service was Adam or Tech 2 — step down in capability is not acceptable
+4. Never assign a callback to a tech who could not have done the original job: same service line, plus its Adam-only exceptions (Aggressive Colony Surcharge, Arborjet injection) and any license it needs (WDO). The split is by service line, not ZIP
 
 ## Scheduling Rules
 - Must complete within 5 business days of original service date
@@ -49,13 +49,13 @@ policy decision.
 
 ## Steps
 1. Mark job status = cancelled
-2. Check unscheduled job queue for same date, same tech territory
+2. Check unscheduled job queue for same date, nearby address, any service line the tech covers
 3. If match found: assign to tech, insert at cancelled job's position
 4. If no match: compress route (move stop N+1 forward), reduce drive time estimate
 5. Log result with message for dispatch board
 
 ## Priority for Fill Jobs
-1. Same zip cluster as cancelled job
+1. Closest by drive time to the cancelled job
 2. Highest job score of available unscheduled jobs
 3. Compatible with tech's license and service lines
 4. Estimated duration ≤ cancelled job's duration + 15 min

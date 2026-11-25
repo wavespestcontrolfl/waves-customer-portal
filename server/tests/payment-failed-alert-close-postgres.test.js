@@ -266,4 +266,38 @@ postgres('payment_failed bells close when their invoice is paid', () => {
     const job = await db('stripe_payment_notification_log').where({ payment_intent_id: piId }).first('pending_payload');
     expect(job.pending_payload).toBeNull();
   });
+
+  test('a bill_payment_error bell ("Bank payment error") closes when its invoice is paid, by the hook and by the sweep', async () => {
+    const { sweepSettledPaymentFailedAlerts } = require('../services/payment-failed-alert-close');
+    const byHook = await insertAlert({ paymentIntentId: null, invoiceId: invoiceA, triggerKey: 'bill_payment_error' });
+    const bySweep = await insertAlert({ paymentIntentId: null, invoiceId: invoiceB, triggerKey: 'bill_payment_error' });
+    const stillOwed = await insertAlert({ paymentIntentId: null, invoiceId: randomUUID(), triggerKey: 'bill_payment_error' });
+    await pay(invoiceA);
+    expect(await state(byHook)).toMatchObject({ done_by: 'payments', resolution: 'The invoice was paid' });
+    await db('invoices').where({ id: invoiceB }).update({ status: 'paid', paid_at: new Date() });
+    await db('system_settings').where({ key: 'payment_failed_alert_sweep_cursor' }).del();
+    await sweepSettledPaymentFailedAlerts({ conn: db });
+    expect(await state(bySweep)).toMatchObject({ done_by: 'payments' });
+    expect((await state(stillOwed)).done_at).toBeNull();
+  });
+
+  test('undoing a payment reopens a bill_payment_error bell only for its own invoice, not its PaymentIntent\'s other invoices', async () => {
+    const { reopenPaymentFailedBells } = require('../services/invoice-manual-payment-undo');
+    expect(reopenPaymentFailedBells).toBeInstanceOf(Function);
+    const piId = `pi_${randomUUID()}`;
+    await failedLedgerRow(invoiceA, piId);
+    await failedLedgerRow(invoiceB, piId);
+    const forA = await insertAlert({ paymentIntentId: piId, invoiceId: invoiceA, triggerKey: 'bill_payment_error' });
+    const failedForA = await insertAlert({ paymentIntentId: piId, invoiceId: invoiceA });
+    await db('invoices').whereIn('id', [invoiceA, invoiceB]).update({ status: 'paid', paid_at: new Date() });
+    await PaymentPlans.completeActivePlansForInvoice(invoiceA);
+    await PaymentPlans.completeActivePlansForInvoice(invoiceB);
+    expect((await state(forA)).done_at).not.toBeNull();
+    // invoice B's payment is undone: A's checkout bell stays closed; a payment_failed bell for the combined attempt reopens (existing rule)
+    await db.transaction((trx) => reopenPaymentFailedBells(trx, invoiceB, new Date(Date.now() - 60000)));
+    expect((await state(forA)).done_at).not.toBeNull();
+    expect((await state(failedForA)).done_at).toBeNull();
+    await db.transaction((trx) => reopenPaymentFailedBells(trx, invoiceA, new Date(Date.now() - 60000)));
+    expect((await state(forA)).done_at).toBeNull();
+  });
 });

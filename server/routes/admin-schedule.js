@@ -15855,6 +15855,13 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         throw httpError(422, 'Change the address and the recurrence in separate saves.');
       }
 
+      // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): the plan's open rows as this save finds them. Read
+      // HERE: no row has been written yet, and the locks this save takes ahead of its writes are held (the
+      // fences, the plan's maintenance lock when this save takes it, the customer's comms lock and row), so
+      // the waits for them are over and a writer that takes one of them cannot change the plan before the
+      // save's last step. That step compares these rows with the rows the save leaves and tells the office
+      // about the plan's other visits (planOfficeLines). Gate off: null, no read.
+      const planBefore = await require('../services/scheduling/plan-office-lines').planRowsBefore(trx, req.params.id);
       if (assignmentPlan && JSON.stringify(await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope))
         !== JSON.stringify(assignmentPlan)) {
         throw Object.assign(httpError(409, 'Appointments changed routes while saving — reload and save again.'), {
@@ -18073,6 +18080,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           }
         }
       }
+      // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): every write of this save to the plan's visits is done
+      // (the assignment's scope, the cadence rewrite, the hours it copies, the visits it adds). The office is
+      // told about the plan's OTHER visits from the rows the save leaves: the day-off line, or the shift line,
+      // of each one it added or left on another day, technician or block. The edited visit was told above.
+      editWarnings.push(...(await require('../services/scheduling/plan-office-lines').planOfficeLines(trx, req.params.id, planBefore))
+        .filter((line) => !editWarnings.includes(line)));
       // Staff route insertion:
       // an edit that moved this visit (another day, start or technician)
       // numbers its technician's day in the order the save check certified,

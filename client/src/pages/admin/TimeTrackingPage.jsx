@@ -3496,11 +3496,12 @@ export function TeamTab({ showToast }) {
         // remaining-assignment notice as the Deactivate button: future work
         // stays on the schedule for manual reassignment.
         const pending = (res && res.futureAssignedVisits) || [];
-        showToast(
-          pending.length
-            ? `Technician updated — ${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
-            : "Technician updated",
-        );
+        // New shift hours (GATE_TECH_SHIFT_HOURS): the visits those hours do not hold stay where they are.
+        const outside = (res && res.outsideShiftVisits) || [];
+        const stillThere = pending.length
+          ? `${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
+          : outside.length && `${outside.length} upcoming visit${outside.length === 1 ? "" : "s"} outside the new shift hours; move or reassign on the Schedule`;
+        showToast(stillThere ? `Technician updated — ${stillThere}` : "Technician updated");
         await saveGoogleSignin(editingId);
       } else {
         const { startMode, startText, startPoint, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;

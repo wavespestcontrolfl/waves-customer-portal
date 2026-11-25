@@ -392,8 +392,16 @@ const RING_METADATA_KEYS = ['count', 'newCount', 'itemKeys', 'itemSetHash'];
 
 // Did this emission change anything a standing keyed row shows, routes by,
 // or rings on?
-function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged }) {
-  return versionChanged || existing.title !== nextTitle || existing.body !== nextBody
+// refreshQuietClosed (opt-in): the quiet policy closed the standing row, so an identical
+// emission still enters the refresh branch and lets ringOnRefresh decide whether it comes back.
+// A row the quiet policy or the nightly retention sweep closed, never a person's close.
+// 'retention' = admin-alert-retention RETENTION_BY (the nightly age30 / fyi7 sweep); an older close of an opted-in row
+// by that sweep is recovered the same way as a quiet close.
+const AGED_OUT_DONE_BY = new Set([QUIET_FALL_OFF_DONE_BY, 'retention']);
+const closedByQuietPolicy = (row) => Boolean(row.done_at) && AGED_OUT_DONE_BY.has(row.done_by);
+
+function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged, refreshQuietClosed }) {
+  return (refreshQuietClosed && closedByQuietPolicy(existing)) || versionChanged || existing.title !== nextTitle || existing.body !== nextBody
     || existing.link !== nextLink || detailChanged || routingChanged || ringMetadataChanged;
 }
 
@@ -704,11 +712,13 @@ const NotificationService = {
     // and the row it gates can never observe each other's in-between state.
     // dedupeOpenOnly (optional, with dedupeKey): the dedupe probe skips rows with
     // done_at set, so a closed row never hides a new ring (see the probe below).
+    // refreshQuietClosed (optional, with refreshOnDedupe): an identical emission still reaches ringOnRefresh
+    // when the quiet policy closed the standing row; a person's Done never does.
     // bumpOnRefresh (optional, with refreshOnDedupe): a refresh that rings also
     // moves the row's created_at to now, so a standing row that keeps getting
     // newer news (one row per customer thread: "3 texts") rises to the top of
     // the newest-first bell instead of staying where its first text put it.
-    const { dedupeKey, dedupeWindowMs, dedupeOpenOnly = false, dedupeVersion, refreshOnDedupe = false, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    const { dedupeKey, dedupeWindowMs, dedupeOpenOnly = false, dedupeVersion, refreshOnDedupe = false, refreshQuietClosed, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
@@ -791,7 +801,7 @@ const NotificationService = {
           // Compared by JSON so an itemKeys array compares by value.
           const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
             && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(useMeta[k] ?? null));
-          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
+          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged, refreshQuietClosed })) {
             // A row that newly enters the owner audience (engineering/fyi ->
             // owner) is news to the owner even at an equal count: it may
             // have been read in Activity, so it must ring into the bell.
@@ -1445,6 +1455,7 @@ module.exports._private = {
   REOPENABLE_DONE_BY_SQL,
   KEEP_DB_HOLD_SQL,
   QUIET_FALL_OFF_DONE_BY,
+  closedByQuietPolicy,
   QUIET_HOLD_KEY,
   DONE_CLEARED,
   MAX_ADMIN_TITLE_CHARS,

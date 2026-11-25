@@ -8,7 +8,7 @@
 ---
 
 ## General Pest Control
-- **Who:** Any licensed tech (all 3)
+- **Who:** Adam today; the second tech after hire (pest is the second tech's line)
 - **License required:** Pest control
 - **Estimated time:** 30–45 min residential, 45–60 min commercial
 - **Recurring:** Yes — backbone of route
@@ -16,7 +16,7 @@
 - **Callback rule:** Route to original tech when available same day
 
 ## Termite (Bora-Care / Termidor / Foam Drill)
-- **Who:** Adam ONLY
+- **Who:** Adam today; the second tech after hire (termite is the second tech's line; needs the license category)
 - **License required:** Termite treatment license
 - **Estimated time:** 2–4 hours (Bora-Care full install), 60–90 min (spot/foam)
 - **Recurring:** Bora-Care is one-time + annual renewal; Termidor pre-slab is pre-construction only
@@ -24,15 +24,15 @@
 - **Hard limit:** Max 2 termite jobs per day — never schedule back-to-back with full route day
 
 ## WDO Inspection
-- **Who:** Adam ONLY
-- **License required:** WDO license (only Adam holds it)
+- **Who:** Adam today; the second tech after hire, once licensed for WDO
+- **License required:** WDO license (only Adam holds it today)
 - **Estimated time:** 45–90 min depending on property size
 - **Recurring:** No — pre-sale or annual
 - **Upsell flags:** Termite treatment if evidence found, full pest program enrollment
 - **Priority:** High revenue + high upsell conversion — protect slot, never bump
 
 ## Lawn Care (Fertilization / Weed / Fungicide)
-- **Who:** Adam or Tech 2
+- **Who:** Adam (lawn stays with Adam after the second tech is hired)
 - **License required:** Lawn & Ornamental (FDACS)
 - **Estimated time:** 20–45 min by sq footage
 - **Recurring:** Yes — 6x or 8x per year programs
@@ -57,7 +57,7 @@
 - **Protocol:** See `wiki/protocols/mosquito-misting-systems.md`.
 
 ## Tree & Shrub Care
-- **Who:** Adam (Arborjet-certified) for injection; Tech 2 for foliar spray only
+- **Who:** Adam (tree & shrub stays with Adam; Arborjet injection is Adam only)
 - **License required:** Lawn & Ornamental; Arborjet cert for injections
 - **Estimated time:** 45–90 min
 - **Recurring:** 4x or 6x per year
@@ -65,7 +65,7 @@
 - **Hard rule:** Arborjet palm injection is Adam only — no exceptions
 
 ## German Roach Treatment
-- **Who:** Adam preferred; Tech 2 acceptable
+- **Who:** Adam today; the second tech after hire (pest is the second tech's line), Adam as backup
 - **License required:** Pest control
 - **Estimated time:** 60–90 min (full protocol — gel, IGR, crack/crevice)
 - **Recurring:** Book 14-day and 30-day follow-ups immediately at time of first service
@@ -73,7 +73,7 @@
 - **Flag:** Auto-schedule follow-up slot at booking
 
 ## Stinging Insect Removal
-- **Who:** Any tech for standard nests; Adam only for Aggressive Colony Surcharge jobs
+- **Who:** Adam today; after the second tech is hired, the second tech for standard nests and Adam for Aggressive Colony Surcharge jobs
 - **License required:** Pest control
 - **Estimated time:** 30–60 min
 - **Recurring:** No — one-time
