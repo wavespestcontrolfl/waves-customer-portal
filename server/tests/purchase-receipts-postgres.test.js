@@ -606,25 +606,41 @@ jest.setTimeout(30000);
       expect(await liveAutoOrder()).toBeFalsy();
     });
 
-    test('a queued SiteOne line that posts later recovers the PO from its stored invoice and closes the request', async () => {
-      const { req, po } = await robotOrder();
+    // A line handed to the inventory agent (no stock yet) whose invoice email + extraction are stored.
+    async function queuedSiteOneLine({ invoiceNumber = '900000009-001', extractedNumber = invoiceNumber, po, quantity = 2 }) {
       const [email] = await mockConn('emails').insert({
-        gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'AB00000@siteone.com', subject: 'SiteOne Confirmation : Invoice #SYN-1',
-        received_at: RECEIVED_AT,
+        gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'AB00000@siteone.com', subject: `SiteOne Confirmation : Invoice #${invoiceNumber}`,
+        authentication_results: 'dkim=pass header.i=@siteone.com', received_at: RECEIVED_AT,
       }).returning('*');
       await mockConn('email_attachments').insert({
         email_id: email.id, filename: 'invoice.pdf', mime_type: 'application/pdf', is_invoice: true,
-        extracted_data: JSON.stringify({ invoice_number: 'SYN-1', purchase_order: po, line_items: [] }),
+        extracted_data: JSON.stringify({ invoice_number: extractedNumber, purchase_order: po, subtotal: 25 * quantity, tax: 0, total: 25 * quantity, line_items: [{ description: TITLE, quantity, unit_price: 25, total: 25 * quantity }] }),
       });
-      // The line was handed to the inventory agent (no stock yet); staff then fixed the catalog size.
       const [queued] = await mockConn('purchase_receipt_lines').insert({
-        vendor: 'siteone', order_number: '900000009-001', shipment_key: '900000009-001', line_no: 1, email_id: email.id,
+        vendor: 'siteone', order_number: invoiceNumber, shipment_key: invoiceNumber, line_no: 1, email_id: email.id,
         raw_title: TITLE, quantity: 2, status: 'agent_pending',
       }).returning('*');
+      return { email, queued };
+    }
+
+    test('a queued SiteOne line that posts later recovers the PO from its verified invoice and closes the request', async () => {
+      const { req, po } = await robotOrder();
+      const { email, queued } = await queuedSiteOneLine({ po });
       const outcome = await mockConn.transaction((trx) => logQueuedLine(trx, { line: queued, email }));
       expect(outcome).toMatchObject({ status: 'logged', closedRestockRequestId: req.id });
       expect((await requestRow(req.id)).status).toBe('received');
       expect(await movements()).toHaveLength(1);
+    });
+
+    test.each([
+      ['a replaced extraction for another invoice', { extractedNumber: '900000777-001' }],
+      ['an extraction whose line quantity changed', { quantity: 3 }],
+    ])('a queued line whose stored invoice no longer matches (%s) logs its stock but never closes the request', async (_label, over) => {
+      const { req, po } = await robotOrder();
+      const { email, queued } = await queuedSiteOneLine({ po, ...over });
+      const outcome = await mockConn.transaction((trx) => logQueuedLine(trx, { line: queued, email }));
+      expect(outcome.closedRestockRequestId).toBeUndefined();
+      expect((await requestRow(req.id)).status).toBe('ordered');
     });
 
     test('the PO matches however the extraction cased or padded it', async () => {

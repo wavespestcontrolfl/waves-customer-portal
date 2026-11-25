@@ -146,11 +146,17 @@ async function readSiteOneInvoice(email, now = Date.now(), conn = db) {
   return { number, problem, lines, purchaseOrder: extractedPurchaseOrder(extracted) };
 }
 
-// The PO printed on a stored invoice email (null when unread or absent): a line queued for the
-// inventory agent posts later through logQueuedLine, which recovers the PO here.
-async function invoicePurchaseOrder(emailId, conn = db) {
-  const extracted = emailId ? await invoiceExtraction(emailId, conn) : null;
-  return extracted ? extractedPurchaseOrder(extracted) : null;
+// The PO of a queued SiteOne line (one handed to the inventory agent that posts later through
+// logQueuedLine), or null. The stored extraction can be replaced after the line was queued, so the
+// PO counts only when that invoice still verifies, carries the line's own invoice number, and shows
+// the same line (position, title and quantity) the line was queued from.
+async function queuedLinePurchaseOrder(line, conn = db) {
+  const email = line && line.email_id ? await conn('emails').where({ id: line.email_id }).first() : null;
+  const invoice = email ? await readSiteOneInvoice(email, Date.now(), conn) : null;
+  if (!invoice || invoice.pending || invoice.problem || invoice.number !== line.order_number) return null;
+  const same = invoice.lines.find((l) => l.lineNo === Number(line.line_no));
+  if (!same || same.title !== String(line.raw_title || '') || same.quantity !== Number(line.quantity)) return null;
+  return invoice.purchaseOrder;
 }
 
 // The PO printed on the invoice (the extraction's optional purchase_order), or
@@ -169,5 +175,5 @@ function lineUom(line) {
 
 module.exports = {
   VENDOR, isSiteOneInvoiceEmail, findSiteOneInvoiceEmails, copyReceivedBefore, readSiteOneInvoice, verificationProblem, emailInvoiceNumber,
-  invoicePurchaseOrder,
+  queuedLinePurchaseOrder,
 };
