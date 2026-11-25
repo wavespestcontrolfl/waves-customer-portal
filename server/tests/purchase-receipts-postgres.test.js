@@ -19,7 +19,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
+const { processReceiptLine, logQueuedLine } = require('../services/purchase-receipts/receipt-processor');
 const notifications = require('../services/notification-service');
 const { alertUndeliveredShipments, closeDeliveredUndeliveredBells } = require('../services/purchase-receipts/undelivered-shipments');
 const { runPurchaseReceiptRestockSweep, processReceiptEmail } = require('../services/purchase-receipts/sweep');
@@ -606,6 +606,27 @@ jest.setTimeout(30000);
       expect(await liveAutoOrder()).toBeFalsy();
     });
 
+    test('a queued SiteOne line that posts later recovers the PO from its stored invoice and closes the request', async () => {
+      const { req, po } = await robotOrder();
+      const [email] = await mockConn('emails').insert({
+        gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'AB00000@siteone.com', subject: 'SiteOne Confirmation : Invoice #SYN-1',
+        received_at: RECEIVED_AT,
+      }).returning('*');
+      await mockConn('email_attachments').insert({
+        email_id: email.id, filename: 'invoice.pdf', mime_type: 'application/pdf', is_invoice: true,
+        extracted_data: JSON.stringify({ invoice_number: 'SYN-1', purchase_order: po, line_items: [] }),
+      });
+      // The line was handed to the inventory agent (no stock yet); staff then fixed the catalog size.
+      const [queued] = await mockConn('purchase_receipt_lines').insert({
+        vendor: 'siteone', order_number: '900000009-001', shipment_key: '900000009-001', line_no: 1, email_id: email.id,
+        raw_title: TITLE, quantity: 2, status: 'agent_pending',
+      }).returning('*');
+      const outcome = await mockConn.transaction((trx) => logQueuedLine(trx, { line: queued, email }));
+      expect(outcome).toMatchObject({ status: 'logged', closedRestockRequestId: req.id });
+      expect((await requestRow(req.id)).status).toBe('received');
+      expect(await movements()).toHaveLength(1);
+    });
+
     test('the PO matches however the extraction cased or padded it', async () => {
       const { req, po } = await robotOrder();
       await processReceiptLine(siteone({ purchaseOrder: ` ${po.toLowerCase()} ` }));
@@ -730,13 +751,21 @@ jest.setTimeout(30000);
       });
       await new Promise((resolve) => { ready = resolve; });
 
+      // Every started transaction settles before the test ends, even when a wait times out: the holder is
+      // released in finally and the others are awaited, so a failure never blocks afterEach's TRUNCATE.
       const invoiceLine = processReceiptLine(siteone({ purchaseOrder: po })).then((outcome) => outcome, (err) => err);
-      await waitFor('select "id" from "products_catalog"%for update%');
-      const manual = inventory.updateRestockRequest(req.id, { action: 'receive' }, { actorId: null });
-      await waitFor('%row_version%from "products_catalog"%');
-      release();
-      await holder;
-      const [lineResult, manualResult] = await Promise.all([invoiceLine, manual]);
+      let manual = null;
+      let lineResult;
+      let manualResult;
+      try {
+        await waitFor('select "id" from "products_catalog"%for update%');
+        manual = inventory.updateRestockRequest(req.id, { action: 'receive' }, { actorId: null }).then((r) => r, (err) => err);
+        await waitFor('%row_version%from "products_catalog"%');
+      } finally {
+        release();
+        await holder;
+        [lineResult, manualResult] = await Promise.all([invoiceLine, manual]);
+      }
 
       expect(manualResult).toMatchObject({ success: true });
       expect(lineResult).toBeInstanceOf(Error);

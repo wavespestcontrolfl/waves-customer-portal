@@ -146,6 +146,13 @@ async function readSiteOneInvoice(email, now = Date.now(), conn = db) {
   return { number, problem, lines, purchaseOrder: extractedPurchaseOrder(extracted) };
 }
 
+// The PO printed on a stored invoice email (null when unread or absent): a line queued for the
+// inventory agent posts later through logQueuedLine, which recovers the PO here.
+async function invoicePurchaseOrder(emailId, conn = db) {
+  const extracted = emailId ? await invoiceExtraction(emailId, conn) : null;
+  return extracted ? extractedPurchaseOrder(extracted) : null;
+}
+
 // The PO printed on the invoice (the extraction's optional purchase_order), or
 // null: a blank or non-string value never reaches the receipt lane.
 function extractedPurchaseOrder(extracted) {
@@ -162,4 +169,5 @@ function lineUom(line) {
 
 module.exports = {
   VENDOR, isSiteOneInvoiceEmail, findSiteOneInvoiceEmails, copyReceivedBefore, readSiteOneInvoice, verificationProblem, emailInvoiceNumber,
+  invoicePurchaseOrder,
 };

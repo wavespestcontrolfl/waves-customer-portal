@@ -85,6 +85,7 @@ const { convertInventoryQuantity } = require('../inventory-units');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { adjustStock } = require('../inventory-operations');
 const { closeRequestCoveredByLine } = require('./siteone-request-close');
+const { VENDOR: SITEONE_VENDOR, invoicePurchaseOrder } = require('./siteone-invoices');
 
 // GATE_INVENTORY_AGENT (inventory-agent.js): read at call time here too, so
 // a flip needs no redeploy. Off, these three statuses are held for a
@@ -463,7 +464,10 @@ async function logQueuedLine(trx, { line, email }) {
     status: 'logged', product_id: classified.productId, received_qty: classified.receivedQty, received_unit: classified.receivedUnit,
   });
   const orderNumber = line.order_number === UNKNOWN_ORDER ? null : line.order_number;
-  return performLoggedMovement(trx, { vendor: line.vendor, claim: line, classified, orderNumber, email, item });
+  // A SiteOne line keeps its invoice's printed PO (read from the stored extraction), so a queued
+  // line that posts later can still close the robot's own request (siteone-request-close.js).
+  const purchaseOrder = line.vendor === SITEONE_VENDOR ? await invoicePurchaseOrder(line.email_id || email?.id, trx) : undefined;
+  return performLoggedMovement(trx, { vendor: line.vendor, claim: line, classified, orderNumber, email, item, purchaseOrder });
 }
 
 module.exports = {
