@@ -126,6 +126,8 @@ describe('GET /:token with a visit text recipient\'s token: the link\'s lifetime
     ['parked for the holder to pick a day', { status: 'confirmed', track_state: 'scheduled', customer_pick_by: '2026-11-20T00:00:00Z', window_start: null, window_end: null }],
     ['a stale en-route state on a rebooked visit', { status: 'rescheduled', track_state: 'en_route' }],
     ['en route by status but scheduled by track state', { status: 'en_route', track_state: 'scheduled' }],
+    ['on site by status but en route by track state (mixed: no GPS)', { status: 'on_site', track_state: 'en_route' }],
+    ['en route by status but on property by track state (mixed)', { status: 'en_route', track_state: 'on_property' }],
     ['complete, 121 minutes ago', DONE(121)],
     ['complete, a day ago', DONE(24 * 60)],
     ['complete with no completed_at', { status: 'completed', track_state: 'complete', completed_at: null }],
@@ -248,6 +250,18 @@ describe('GET /:token with a visit text recipient\'s token: the reduced payload'
     install(visitRow(ENROUTE));
     await get();
     expect(mockResolvePosition.mock.calls.at(-1)[0].requireFixAfter).toBe(ENROUTE.en_route_at);
+  });
+
+  test('buildVehicle for a recipient serves coordinates only when status AND track state are both en route', async () => {
+    const { buildVehicle } = trackPublicRouter._test;
+    const base_ = visitRow(ENROUTE);
+    for (const mixed of [{ status: 'on_site' }, { track_state: 'on_property' }, { status: 'confirmed' }, { track_state: 'scheduled' }]) {
+      mockResolvePosition.mockClear();
+      expect(await buildVehicle({ ...base_, ...mixed }, { readOnly: true })).toBeNull();
+      expect(mockResolvePosition).not.toHaveBeenCalled();
+    }
+    install(visitRow(ENROUTE));
+    expect(await buildVehicle(base_, { readOnly: true })).not.toBeNull();
   });
 
   test('en route with no en_route_at on record: no vehicle, and no position is read', async () => {

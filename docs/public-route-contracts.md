@@ -7845,7 +7845,7 @@ The track payload never returns or mints a reschedule token. A second
 token kind resolves on this route while GATE_CALL_GIVEN_VISIT_TEXTS is on: a
 visit text recipient's own `visit_text_recipients.track_token` (64 hex, minted
 when their en-route text wins its send claim). LIFETIME RULE: it opens only
-while the visit is en route or on site, and for 2 hours after `completed_at`;
+while the visit is en route (status and track state both `en_route`) or on site (`on_site` with `on_property`; a mixed pair answers 404), and for 2 hours after `completed_at`;
 scheduled, cancelled, skipped, parked, rebooking and later answer 404, as does
 a visit with no live finite `track_token_expires_at` (the holder's legacy null
 expiry still opens for the holder token only). It returns a reduced whitelist
@@ -7860,7 +7860,7 @@ summary reads do not run. The recipient path is strictly read-only (no
 geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while
 the plain permission reads pass (`recipientPermission`: gate, person on the
 visit, no decline, no callback-number hold on the visit or the person's number,
-no call do-not-contact or "no texts"; the choices row is read fail-closed). The live vehicle shows only while `tech_status.current_job_id` is this visit or one in its visit group and the cached fix was reported and received strictly after the visit's `en_route_at` (no `en_route_at`, no vehicle). Its stops-ahead POST answers nulls and its view POST
+no call do-not-contact or "no texts"; the choices row is read fail-closed and regardless of `GATE_CONTACT_LOGIN`), and only after the cheap lifetime check passes (a closed link answers 404 with no permission read). The live vehicle shows only while `tech_status.current_job_id` is this visit or one in its visit group and the cached fix was reported and received strictly after the visit's `en_route_at` (no `en_route_at`, no vehicle). Its stops-ahead POST answers nulls and its view POST
 records nothing. The page never opens the live socket for this scope. Every
 handler on this router runs inside `safeRoute`: a thrown or `next(err)` error
 leaves as a fresh Error with only the driver `code`, never the knex message (it

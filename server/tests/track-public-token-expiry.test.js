@@ -73,6 +73,9 @@ describe('public track token expiry', () => {
     expect(recipientTrackLinkOpen({ status: 'en_route', track_state: 'en_route', track_token_expires_at: live })).toBe(true);
     expect(recipientTrackLinkOpen({ status: 'on_site', track_state: 'on_property', track_token_expires_at: live })).toBe(true);
     expect(recipientTrackLinkOpen({ status: 'en_route', track_state: 'en_route', track_token_expires_at: null })).toBe(false);
+    // a mixed pair is a stale row: no link
+    expect(recipientTrackLinkOpen({ status: 'on_site', track_state: 'en_route', track_token_expires_at: live })).toBe(false);
+    expect(recipientTrackLinkOpen({ status: 'en_route', track_state: 'on_property', track_token_expires_at: live })).toBe(false);
     expect(recipientTrackLinkOpen({ status: 'confirmed', track_state: 'scheduled', track_token_expires_at: live })).toBe(false);
     expect(recipientTrackLinkOpen({ status: 'completed', completed_at: ago(2 * 60 * 60 * 1000), track_token_expires_at: live })).toBe(true);
     expect(recipientTrackLinkOpen({ status: 'completed', completed_at: ago(2 * 60 * 60 * 1000 + 1), track_token_expires_at: live })).toBe(false);

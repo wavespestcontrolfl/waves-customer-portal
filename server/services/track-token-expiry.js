@@ -32,8 +32,9 @@ function recipientTrackLinkOpen(visit, nowMs = Date.now()) {
     const doneMs = visit.completed_at ? new Date(visit.completed_at).getTime() : NaN;
     return Number.isFinite(doneMs) && doneMs <= nowMs + 5 * 60 * 1000 && nowMs - doneMs <= RECIPIENT_LINK_AFTER_COMPLETE_MS;
   }
-  return (visit.status === 'en_route' || visit.status === 'on_site')
-    && (visit.track_state === 'en_route' || visit.track_state === 'on_property');
+  // The two live pairs only: a mixed pair (on site by status but en route by track state, or the reverse) is a stale row.
+  return (visit.status === 'en_route' && visit.track_state === 'en_route')
+    || (visit.status === 'on_site' && visit.track_state === 'on_property');
 }
 
 module.exports = {

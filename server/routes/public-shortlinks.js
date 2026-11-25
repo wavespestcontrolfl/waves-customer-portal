@@ -80,7 +80,8 @@ router.get('/:code', async (req, res) => {
 
     return res.redirect(302, row.target_url);
   } catch (err) {
-    logger.error(`[shortlink] resolve failed for ${code}: ${err.message}`);
+    // Code only: the short code fronts a bearer-token URL, and a knex message carries its bound values.
+    logger.error(`[shortlink] resolve failed (code=${(err && err.code) || 'none'})`);
     return res.status(500).type('html').send(genericErrorPage());
   }
 });

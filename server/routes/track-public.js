@@ -465,8 +465,9 @@ async function buildVehicle(service, { readOnly = false } = {}) {
   // hiccups degrade to null silently.
   if (!service.technician_id) return null;
   if (finiteNumber(service.latitude) == null || finiteNumber(service.longitude) == null) return null;
-  // A recipient's truck needs a known en-route start: without it nothing proves a fix is from THIS drive.
-  if (readOnly && !service.en_route_at) return null;
+  // A recipient's truck needs the visit en route by status AND track state (a mixed row is stale), and a known en-route start:
+  // without it nothing proves a fix is from THIS drive.
+  if (readOnly && (service.status !== 'en_route' || service.track_state !== 'en_route' || !service.en_route_at)) return null;
 
   const position = await resolveFreshTechPosition({
     techId: service.technician_id,

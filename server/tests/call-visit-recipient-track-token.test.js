@@ -24,7 +24,6 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The person's own text choices: a direct read of their choices row (contactPhoneDeclinesText logs err.message, so it is not used).
 jest.mock('../services/contact-notification-prefs', () => ({
-  contactPrefsLive: jest.fn(() => true),
   getContactPrefRow: jest.fn(async () => null),
   contactAllows: jest.fn((row, column) => !(row && (row.sms_enabled === false || (column && row[column] === false)))),
 }));
@@ -154,6 +153,51 @@ describe('visitForTrackToken: who a recipient link opens', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.code).toBe('42P01');
     await expect(VisitRecipient.recipientStillOwed({ scheduled_service_id: 'ss-1', kind: 'en_route', visit_recipient_id: 'r-1', claim_key: 'x' })).rejects.toThrow();
+  });
+
+  test('the cheap lifetime check runs FIRST: a closed link answers with no permission read at all', async () => {
+    const minutesAgoIso = (n) => new Date(Date.now() - n * 60 * 1000).toISOString();
+    for (const closed of [
+      { status: 'confirmed', track_state: 'scheduled' },
+      { status: 'cancelled', track_state: 'cancelled' },
+      { status: 'completed', track_state: 'complete', completed_at: minutesAgoIso(200) },
+      { status: 'on_site', track_state: 'en_route' },
+      { track_token_expires_at: null },
+    ]) {
+      seed({ visit: { ...VISIT, ...closed } });
+      disclaimedNumberHeldForVisit.mockClear();
+      disclaimedNumberHeld.mockClear();
+      askedNotToBeContactedOnAnyCall.mockClear();
+      saidNoTextsOnAnyCall.mockClear();
+      getContactPrefRow.mockClear();
+      expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+      for (const read of [disclaimedNumberHeldForVisit, disclaimedNumberHeld, askedNotToBeContactedOnAnyCall, saidNoTextsOnAnyCall, getContactPrefRow]) {
+        expect(read).not.toHaveBeenCalled();
+      }
+      expect(mockTables.recipient_optin?.reads || []).toEqual([]);
+      expect(mockTables.messaging_suppression?.reads || []).toEqual([]);
+    }
+  });
+
+  test('an open link pays for every permission read', async () => {
+    seed();
+    expect(await VisitRecipient.visitForTrackToken(TOKEN)).not.toBeNull();
+    for (const read of [disclaimedNumberHeldForVisit, disclaimedNumberHeld, askedNotToBeContactedOnAnyCall, saidNoTextsOnAnyCall, getContactPrefRow]) {
+      expect(read).toHaveBeenCalled();
+    }
+  });
+
+  test('the choices row is read whatever GATE_CONTACT_LOGIN says (a saved decline binds this feature with that gate off)', async () => {
+    const gate = process.env.GATE_CONTACT_LOGIN;
+    delete process.env.GATE_CONTACT_LOGIN;
+    try {
+      seed();
+      getContactPrefRow.mockResolvedValue({ tech_en_route: false });
+      expect(await VisitRecipient.visitForTrackToken(TOKEN)).toBeNull();
+      expect(getContactPrefRow).toHaveBeenCalledWith('cust-1', '+19415550002', expect.objectContaining({ failClosed: true }));
+    } finally {
+      if (gate !== undefined) process.env.GATE_CONTACT_LOGIN = gate;
+    }
   });
 
   test('a person no longer on the visit (row not listed for it) resolves nothing', async () => {

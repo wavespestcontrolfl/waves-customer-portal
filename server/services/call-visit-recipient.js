@@ -186,11 +186,12 @@ async function recordForCall({ scheduledServiceId, customerId, call, contactPhon
  * suppression. Read only. Throws on an unreadable answer; callers fail closed.
  */
 async function declinedByRecipient({ customerId, phoneKey, phoneE164, purpose, conn = db }) {
-  // The person's own text choice as a service contact: a direct read of their choices row (code-only errors, no write).
-  // contactPhoneDeclinesText logs err.message, so it is not used here. failClosed: a missing or unreadable choices table
-  // THROWS (a send is held and retried, the link answers an error) instead of reading as "no choices".
+  // The person's own saved choices row: a direct read (code-only errors, no write), whatever GATE_CONTACT_LOGIN says. That gate
+  // only governs whether the contact pages and the holder's senders use the table; a decline saved there is a decline for this
+  // feature too. contactPhoneDeclinesText is not used (it skips with the gate off and logs err.message). failClosed: a missing
+  // or unreadable choices table THROWS (a send is held and retried, the link answers an error) instead of reading as "no choices".
   const prefs = require('./contact-notification-prefs');
-  if (prefs.contactPrefsLive() && !prefs.contactAllows(await prefs.getContactPrefRow(customerId, phoneE164, { dbh: conn, failClosed: true }), KINDS_BY_PURPOSE[purpose]?.prefsColumn ?? null, 'sms')) return true;
+  if (!prefs.contactAllows(await prefs.getContactPrefRow(customerId, phoneE164, { dbh: conn, failClosed: true }), KINDS_BY_PURPOSE[purpose]?.prefsColumn ?? null, 'sms')) return true;
   const optin = await conn('recipient_optin').where({ customer_id: customerId, phone_key: phoneKey, status: 'declined' }).first('status');
   if (optin) return true;
   return suppressedNumber(phoneKey, conn);
@@ -465,14 +466,16 @@ async function visitForTrackToken(token, { conn = db } = {}) {
 async function resolveTrackToken(token, conn) {
   const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id');
   if (!row) return null;
-  // The same permission check the en-route send makes at the provider handoff, read fresh on every request.
-  const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id }, { conn, anyVisitStatus: true });
-  if (!permission.ok) return null;
-  // The short lifetime: en route or on site, or up to two hours after completion; never scheduled, cancelled, skipped,
-  // parked or rebooking. Plus a live, finite expiry on the visit's own tracker link.
+  // The cheap check FIRST: the short lifetime (en route or on site, or up to two hours after completion; never scheduled,
+  // cancelled, skipped, parked or rebooking) and a live, finite expiry on the visit's own tracker link. A closed link
+  // answers here, with no permission read at all.
   const visit = await conn('scheduled_services').where({ id: row.scheduled_service_id })
     .first('id', 'status', 'track_state', 'completed_at', 'track_token_expires_at');
   if (!visit || !recipientTrackLinkOpen(visit)) return null;
+  // Only a link that can still open pays for the permission reads: the same check the en-route send makes at the
+  // provider handoff, read fresh on every request.
+  const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id }, { conn, anyVisitStatus: true });
+  if (!permission.ok) return null;
   return { visitId: visit.id, recipientId: row.id };
 }
 
