@@ -474,8 +474,14 @@ async function resolveTrackToken(token, conn) {
 async function buildMessage(contact, kind, context, dayOnly, conn) {
   const firstName = String(contact.name || '').trim().split(/\s+/)[0] || null;
   if (kind === 'en_route') {
-    const trackUrl = await recipientTrackUrl(contact, context, conn);
-    return { body: informationalBody(kind, firstName, { ...context, trackUrl }), slotMs: null, arrivalStart: null };
+    // The tracker link (a minted token and a short-code row, each a bearer credential) is made only AFTER this send wins
+    // the once-per-slot claim, by withLink: a skipped or repeated attempt mints nothing. `body` is the copy without it.
+    return {
+      body: informationalBody(kind, firstName, { ...context, trackUrl: null }),
+      slotMs: null,
+      arrivalStart: null,
+      withLink: async () => informationalBody(kind, firstName, { ...context, trackUrl: await recipientTrackUrl(contact, context, conn) }),
+    };
   }
   const { buildServiceLabel } = require('./appointment-reminders');
   const { parseETDateTime, formatETDay, formatETDate } = require('../utils/datetime-et');
@@ -495,7 +501,7 @@ async function buildMessage(contact, kind, context, dayOnly, conn) {
 async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
   const message = await buildMessage(contact, kind, context, dayOnly, conn);
   if (!message) return;
-  const { body, slotMs, arrivalStart } = message;
+  const { body, slotMs, arrivalStart, withLink } = message;
   const { sendCustomerMessage } = require('./messaging/send-customer-message');
   // A day promise carries the same marker the holder's day text records, so the visit's promise history stays one story.
   const promiseMeta = dayOnly
@@ -511,10 +517,12 @@ async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
     ...(arrivalStart && !dayOnly ? { arrival_start: arrivalStart } : {}),
   };
   const outcome = await sendOnce(contact, async (claimToken) => {
+    // The claim is won: only now is the en-route link made.
+    const sendBody = withLink ? await withLink() : body;
     // No customerInitiated: this text goes to someone who did not call, so the send window applies.
     const result = await sendCustomerMessage({
       to: contact.phone,
-      body,
+      body: sendBody,
       channel: 'sms',
       audience: 'customer',
       purpose: KINDS[kind].purpose,

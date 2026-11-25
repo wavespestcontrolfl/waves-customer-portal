@@ -341,6 +341,30 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(builder).not.toHaveBeenCalled();
     });
 
+    test('the link is made only after the slot claim is won: repeated or concurrent attempts mint one link and one token, a skipped attempt mints nothing', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const builder = jest.fn(async (token) => `https://x.test/track/${token}`);
+      const attempt = () => notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
+      await Promise.all([attempt(), attempt(), attempt()]);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(builder).toHaveBeenCalledTimes(1);
+      await attempt();
+      await attempt();
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(builder).toHaveBeenCalledTimes(1);
+      expect((await rows())[0].track_token).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    test('a skipped attempt mints no token: with the slot already claimed, no token and no link are made', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ deliveries: JSON.stringify({ [`en_route:${VISIT_DATE}T09:00`]: 'claimed-elsewhere' }) });
+      const builder = jest.fn(async (token) => `https://x.test/track/${token}`);
+      await notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
+      expect(builder).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect((await rows())[0].track_token).toBeNull();
+    });
+
     test('a link builder that fails sends the text without a link', async () => {
       await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
       await notify('en_route', { context: { techName: 'Pat', trackUrlFor: async () => { throw new Error('shortener down'); } } });
