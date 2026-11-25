@@ -124,7 +124,7 @@
     "services/llm-dispatch-metrics.js": 1,
     "services/messaging/send-window.js": 1,
     "services/mrms-qpe.js": 1,
-    "services/no-show-detector.js": 3,
+    "services/no-show-detector.js": 4,
     "services/pricing-engine/area-addon-limits.js": 1,
     "services/property-alerts.js": 1,
     "services/review-ask-drafter.js": 3,

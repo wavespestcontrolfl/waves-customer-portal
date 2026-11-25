@@ -71,9 +71,9 @@ const USE = [
 ].join(' ');
 // One day in ms, as a literal: 86400000, 24 * 60 * 60 * 1000, ...
 const ONE_DAY_MS = '(?:86400000|86_400_000|864e5|8\\.64e7|24 *\\* *60 *\\* *60 *\\* *1000|60 *\\* *60 *\\* *24 *\\* *1000|1000 *\\* *60 *\\* *60 *\\* *24|60 *\\* *24 *\\* *60 *\\* *1000|24 *\\* *3600 *\\* *1000|3600 *\\* *24 *\\* *1000|1000 *\\* *3600 *\\* *24|86400 *\\* *1000|1000 *\\* *86400)';
-const ANY_DAY_MS = new RegExp(`(?<![\\w.])${ONE_DAY_MS}(?![\\w.])`);
+const ANY_DAY_MS = new RegExp(`(?<![\\w.])${ONE_DAY_MS}(?![\\w.])`, 'g');
 // n * DAY_MS written with a named constant (local or imported)
-const DAY_MS_NAME = /\b(?:(?:[A-Z][A-Z0-9_]*_)?DAY_?(?:MS|MILLIS|MILLISECONDS)|(?:MS|MILLIS)_(?:PER|IN)_DAY|ONE_DAY\w*|dayMs|DAY_IN_MS)\b/;
+const DAY_MS_NAME = /\b(?:(?:[A-Z][A-Z0-9_]*_)?DAY_?(?:MS|MILLIS|MILLISECONDS)|(?:MS|MILLIS)_(?:PER|IN)_DAY|ONE_DAY\w*|dayMs|DAY_IN_MS)\b\b/g;
 
 // Calendar-day sinks: every export of the helper modules whose name mentions a
 // date or a day, read from the modules so a new helper is covered at once.
@@ -110,20 +110,22 @@ const RULES = [
   {
     id: 'calendar-day-mutation',
     // d.setDate(d.getDate() + n), d.setUTCDate(d.getUTCDate() - n)
-    signature: /\bset(?:UTC)?Date\([^;]*\bget(?:UTC)?Date\(\)\s*[+-]/g,
+    signature: /\bset(?:UTC)?Date\((?:(?!\bset(?:UTC)?Date\()[^;])*?\bget(?:UTC)?Date\(\)\s*[+-]/g,
     use: `Do not step a Date a day at a time with setDate(getDate() + n). ${USE}`,
   },
   {
     id: 'day-ms-math',
-    // a one-day ms step (literal or DAY_MS-style name) and a calendar-day sink on one line
-    countLine: (rel, line) => ((ANY_DAY_MS.test(line) || DAY_MS_NAME.test(line)) && CALENDAR_DAY_SINK.test(line) ? 1 : 0),
+    // each one-day ms step (literal or DAY_MS-style name) on a line that has a calendar-day sink
+    countLine: (rel, line) => (CALENDAR_DAY_SINK.test(line)
+      ? (line.match(ANY_DAY_MS) || []).length + (line.match(DAY_MS_NAME) || []).length
+      : 0),
     use: `Do not add or subtract n * 86400000 (24 * 60 * 60 * 1000) to move a calendar day; a day is 23 or 25 hours across a DST seam. ${USE}`,
   },
   {
     id: 'date-only-regex',
     // /^\d{4}-\d{2}-\d{2}$/, /^(\d{4}-\d{2}-\d{2})/, [0-9] forms, new RegExp('^\\d{4}-...')
     signature: DATE_ONLY_REGEX,
-    use: `Do not write your own YYYY-MM-DD check. Use validDateOnly or dateOnlyString (server/utils/date-only.js), or validCalendarDate (server/utils/datetime-et.js). ${USE}`,
+    use: 'Do not write your own YYYY-MM-DD regex. To validate strictly, use validDateOnly (server/utils/date-only.js) or validCalendarDate (server/utils/datetime-et.js). To extract the YYYY-MM-DD prefix of a value, use dateOnlyString (server/utils/date-only.js).',
   },
 ];
 
@@ -248,6 +250,7 @@ const MUST_COUNT = [
   ['add-days-function', 'function plusDays(d, n) {'],
   // calendar-day-mutation
   ['calendar-day-mutation', 'd.setDate(d.getDate() + 1);'],
+  ['calendar-day-mutation', 'a.setDate(a.getDate() + 1), b.setUTCDate(b.getUTCDate() - 2);'],
   ['calendar-day-mutation', 'd.setUTCDate(d.getUTCDate() - n);'],
   ['calendar-day-mutation', 'const x = new Date(s); x.setDate(start.getDate() + i);'],
   // day-ms-math
@@ -255,6 +258,7 @@ const MUST_COUNT = [
   ['day-ms-math', 'return etDateString(new Date(d.getTime() + n * 24 * 60 * 60 * 1000));'],
   ['day-ms-math', 'const t = formatETDate(new Date(base.getTime() + n * DAY_MS));'],
   ['day-ms-math', 'const t = dateOnlyString(new Date(base.getTime() + n * 24 * 3600 * 1000));'],
+  ['day-ms-math', 'x([etDateString(new Date(now.getTime() - 60 * 86400000)), etDateString(new Date(now.getTime() + 100 * 86400000))]);'],
   ['day-ms-math', 'const label = formatETDate(new Date(Date.now() + 86400000));'],
   ['day-ms-math', 'const days = etCalendarDaysUntil(new Date(x.getTime() + 86400000));'],
   ['day-ms-math', 'const d = new Date(t + 86400000).toISOString().substring(0, 10);'],
@@ -331,6 +335,19 @@ describe('matcher tables', () => {
   test('the day sinks come from the real helper exports', () => {
     expect(SINK_NAMES).toEqual(expect.arrayContaining(['etDateString', 'formatETDate', 'addETDays', 'dateOnlyString', 'validDateOnly', 'staffWorkDate', 'addStaffWorkDays']));
     expect(SINK_NAMES).not.toContain('TZ');
+  });
+
+  test('a line with two matches counts both', () => {
+    expect(countSample('add-days-function', 'const addDays = (a) => a; const addBusinessDays = (a) => a;')).toBe(2);
+    expect(countSample('calendar-day-mutation', 'a.setDate(a.getDate() + 1), b.setUTCDate(b.getUTCDate() - 2);')).toBe(2);
+    expect(countSample('day-ms-math', 'f(etDateString(new Date(t - 60 * 86400000)), etDateString(new Date(t + 100 * 86400000)));')).toBe(2);
+    expect(countSample('date-only-regex', 'const ok = /^\\d{4}-\\d{2}-\\d{2}$/.test(a) && /^(\\d{4})-(\\d{2})-(\\d{2})/.test(b);')).toBe(2);
+  });
+
+  test('the date-only-regex message separates strict validation from prefix extraction', () => {
+    const { use } = RULES.find((rule) => rule.id === 'date-only-regex');
+    expect(use).toMatch(/validate strictly, use validDateOnly .*validCalendarDate/);
+    expect(use).toMatch(/extract the YYYY-MM-DD prefix.*dateOnlyString/);
   });
 
   test('a local addETDays definition counts and a shared import passes', () => {
