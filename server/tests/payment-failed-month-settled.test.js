@@ -8,7 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const logger = require('../services/logger');
 const {
-  closeIfMonthCollected, isInvoicelessMonthUncollected, isInvoicelessPayload, obligationMonthOf,
+  closeIfMonthCollected, isInvoicelessMonthSettled, isInvoicelessPayload, obligationMonthOf,
 } = require('../services/payment-failed-month-settled');
 
 const CUSTOMER = '33333333-3333-4333-8333-333333333333';
@@ -73,7 +73,7 @@ describe('doubt reads nothing or leaves the bell open', () => {
   test('a payload that is not the dues-failure shape runs no query', async () => {
     const { conn, reads } = fakeConn();
     expect(await closeIfMonthCollected(conn, { ...PAYLOAD, invoiceId: 'x' }, close)).toBe(0);
-    expect(await isInvoicelessMonthUncollected(conn, { ...PAYLOAD, allocationUnreadable: true })).toBe(false);
+    expect(await isInvoicelessMonthSettled(conn, { ...PAYLOAD, allocationUnreadable: true })).toBe(false);
     expect(reads).toEqual([]);
     expect(close).not.toHaveBeenCalled();
   });
@@ -95,7 +95,7 @@ describe('doubt reads nothing or leaves the bell open', () => {
     ]) {
       const { conn, reads } = fakeConn({ payments: [bad] });
       expect(await closeIfMonthCollected(conn, PAYLOAD, close)).toBe(0);
-      expect(await isInvoicelessMonthUncollected(conn, PAYLOAD)).toBe(false);
+      expect(await isInvoicelessMonthSettled(conn, PAYLOAD)).toBe(false);
       expect(reads).toEqual(['payments', 'payments']);
     }
   });
@@ -103,7 +103,7 @@ describe('doubt reads nothing or leaves the bell open', () => {
   test('a failing read is logged and leaves the bell open, never thrown', async () => {
     const { conn } = fakeConn({ failWith: new Error('db down') });
     expect(await closeIfMonthCollected(conn, PAYLOAD, close)).toBe(0);
-    expect(await isInvoicelessMonthUncollected(conn, PAYLOAD)).toBe(false);
+    expect(await isInvoicelessMonthSettled(conn, PAYLOAD)).toBe(false);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('db down'));
   });
 });
@@ -126,6 +126,6 @@ describe('lock order is pinned to Undo\'s', () => {
     expect(ascending(order(src, ['lockCombinedCustomerStable(trx', 'lockInvoiceReceiptClaim(trx, id)', ".forUpdate().select('id')"]))).toBe(true);
     // the lock helper runs inside the same transaction callback that calls close(trx)
     const body = src.slice(src.indexOf('async function closeIfMonthCollected'));
-    expect(ascending(order(body, ['conn.transaction(async (trx)', 'lockSettlingInvoices(trx, attempt)).length ? close(trx)']))).toBe(true);
+    expect(ascending(order(body, ['conn.transaction(async (trx)', 'lockSettlingInvoices(trx, attempt)).length ? close(trx, attempt)']))).toBe(true);
   });
 });

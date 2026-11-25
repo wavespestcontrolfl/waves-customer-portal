@@ -334,13 +334,21 @@ postgres('invoice-less payment_failed bells close by billed month', () => {
     });
   });
 
-  describe('undoing the collecting payment reopens it', () => {
-    const undo = (invoiceId) => {
+  describe('Undo reopens month-closed bells without judging anything', () => {
+    const undo = (invoiceId, since = new Date(Date.now() - 60000)) => {
       const { reopenPaymentFailedBells } = require('../services/invoice-manual-payment-undo');
-      return db.transaction((trx) => reopenPaymentFailedBells(trx, invoiceId, new Date(Date.now() - 60000)));
+      return db.transaction((trx) => reopenPaymentFailedBells(trx, invoiceId, since));
     };
+    const meta = async (id) => (await db('notifications').where({ id }).first('metadata')).metadata;
 
-    test('a bell closed by a paid dues invoice reopens when that invoice is unpaid again', async () => {
+    test('the close marks the bell with closedBy and its month', async () => {
+      const bell = await failedBell();
+      await insertPayment(paidNov());
+      await sweep();
+      expect(await meta(bell)).toMatchObject({ closedBy: 'month-settled', closedMonth: '2026-11' });
+    });
+
+    test('a bell closed by a paid dues invoice reopens when that invoice is unpaid again, and the sweep leaves it open', async () => {
       const bell = await failedBell();
       const invoice = await insertDuesInvoice('paid');
       await PaymentPlans.completeActivePlansForInvoice(invoice);
@@ -348,35 +356,134 @@ postgres('invoice-less payment_failed bells close by billed month', () => {
       await db('invoices').where({ id: invoice }).update({ status: 'overdue', paid_at: null });
       await undo(invoice);
       expect(await isOpen(bell)).toBe(true);
-      // and the sweep does not close it again while the month is uncollected
+      expect(await meta(bell)).not.toHaveProperty('closedBy');
       await sweep();
       expect(await isOpen(bell)).toBe(true);
     });
 
-    test('it stays closed when the month is still collected another way', async () => {
+    test('Undo reopens even when the month is still collected another way; the sweep then closes it again', async () => {
       const bell = await failedBell();
       const invoice = await insertDuesInvoice('paid');
       await insertPayment(paidNov());
       await PaymentPlans.completeActivePlansForInvoice(invoice);
+      await sweep();
       expect((await state(bell)).done_by).toBe('payments');
       await db('invoices').where({ id: invoice }).update({ status: 'overdue', paid_at: null });
       await undo(invoice);
+      expect(await isOpen(bell)).toBe(true);
+      await sweep();
       expect((await state(bell)).done_by).toBe('payments');
     });
 
-    test('another customer\'s closed bell, and a bell a person closed, are left alone', async () => {
-      const piId = `pi_${randomUUID()}`;
-      await insertPayment({ piId, customer: otherCustomerId, ...failedNov() });
-      const theirs = await insertBell({ customerId: otherCustomerId }, piId);
-      await insertPayment(paidNov({ customer: otherCustomerId }));
-      const mine = await failedBell();
-      await db('notifications').where({ id: mine }).update({ done_at: new Date(), done_by: randomUUID(), resolution: 'Called the customer' });
+    test('a bell closed BEFORE the undone payment was recorded reopens too (A closed, then B recorded, then B undone)', async () => {
+      const bellA = await failedBell();
+      await insertPayment(paidNov());
       await sweep();
-      expect((await state(theirs)).done_by).toBe('payments');
+      expect((await state(bellA)).done_by).toBe('payments');
       const invoice = await insertDuesInvoice('overdue');
-      await undo(invoice);
+      const recordedAfter = new Date(Date.now() + 3600000);
+      await undo(invoice, recordedAfter);
+      expect(await isOpen(bellA)).toBe(true);
+    });
+
+    test('a DB error in any settlement read cannot stop the reopen: Undo reads no settlement', async () => {
+      const bell = await failedBell();
+      await insertPayment(paidNov());
+      await sweep();
+      expect((await state(bell)).done_by).toBe('payments');
+      const invoice = await insertDuesInvoice('overdue');
+      const settled = require('../services/payment-failed-month-settled');
+      const boom = () => { throw new Error('settlement read down'); };
+      const spies = ['isMonthCollected', 'invoicelessAttempt', 'isInvoicelessMonthSettled', 'closeIfMonthCollected']
+        .map((name) => jest.spyOn(settled, name).mockImplementation(boom));
+      try {
+        await expect(undo(invoice)).resolves.toBeDefined();
+      } finally { spies.forEach((spy) => spy.mockRestore()); }
+      expect(await isOpen(bell)).toBe(true);
+    });
+
+    test('only the undone invoice\'s dues month, the same customer, and system month-closes are reopened', async () => {
+      const closeFor = async (customer, month) => {
+        const piId = `pi_${randomUUID()}`;
+        await insertPayment({ customer, piId, status: 'failed', date: `${month}-01`, description: MONTHLY, metadata: { billed_month: month } });
+        const bell = await insertBell({ customerId: customer }, piId);
+        await insertPayment({ customer, status: 'paid', date: `${month}-03`, description: MONTHLY, metadata: { billed_month: month } });
+        return bell;
+      };
+      const october = await closeFor(customerId, '2026-10');
+      const november = await closeFor(customerId, '2026-11');
+      const theirs = await closeFor(otherCustomerId, '2026-11');
+      const personClosed = await closeFor(customerId, '2026-11');
+      await sweep();
+      await db('notifications').where({ id: personClosed }).update({ done_by: randomUUID(), resolution: 'Called the customer' });
+      for (const id of [october, november, theirs]) expect((await state(id)).done_by).toBe('payments');
+      const stamped = await insertDuesInvoice('overdue', '2026-11');
+      await undo(stamped);
+      expect(await isOpen(november)).toBe(true);
+      expect((await state(october)).done_by).toBe('payments');
       expect((await state(theirs)).done_by).toBe('payments');
-      expect((await state(mine)).resolution).toBe('Called the customer');
+      expect((await state(personClosed)).resolution).toBe('Called the customer');
+      // an invoice with no dues stamp reopens every month-closed bell of that customer
+      const plain = await insertPlainInvoice('overdue');
+      await undo(plain);
+      expect(await isOpen(october)).toBe(true);
+      expect((await state(theirs)).done_by).toBe('payments');
+      expect((await state(personClosed)).resolution).toBe('Called the customer');
+    });
+  });
+
+  describe('dispatch of the failure alert', () => {
+    let Dispatch; let triggerNotification;
+    beforeAll(() => {
+      Dispatch = require('../services/payment-failure-notifications');
+      ({ triggerNotification } = require('../services/notification-triggers'));
+    });
+    const jobs = [];
+    afterEach(async () => {
+      await db('stripe_payment_notification_log').whereIn('payment_intent_id', jobs.splice(0)).del();
+      triggerNotification.mockReset();
+      triggerNotification.mockImplementation(async () => ({ bellWritten: true }));
+    });
+    async function queueJob(piId) {
+      jobs.push(piId);
+      await db('stripe_payment_notification_log').insert({
+        payment_intent_id: piId, outcome: 'failed', attempt_id: 'ch_x',
+        pending_payload: JSON.stringify({ amount: 113.6, customerId, reason: 'Card declined' }),
+      });
+    }
+    const rang = (piId) => triggerNotification.mock.calls.some(([, payload]) => payload.paymentIntentId === piId);
+
+    test('a month already collected before dispatch raises nothing and clears the job', async () => {
+      const piId = `pi_${randomUUID()}`;
+      await insertPayment({ piId, ...failedNov() });
+      await insertPayment(paidNov());
+      await queueJob(piId);
+      await Dispatch.processPendingPaymentFailureNotifications({ limit: 50 });
+      expect(rang(piId)).toBe(false);
+      expect((await db('stripe_payment_notification_log').where({ payment_intent_id: piId }).first('pending_payload')).pending_payload).toBeNull();
+    });
+
+    test('an uncollected month, or only another month collected, still rings', async () => {
+      const piId = `pi_${randomUUID()}`;
+      await insertPayment({ piId, ...failedNov() });
+      await insertPayment({ status: 'paid', date: '2026-12-03', description: MONTHLY, metadata: { billed_month: '2026-12' } });
+      await queueJob(piId);
+      await Dispatch.processPendingPaymentFailureNotifications({ limit: 50 });
+      expect(rang(piId)).toBe(true);
+    });
+
+    test('the pre-push recheck stops the push when the month is collected during the fan-out', async () => {
+      const piId = `pi_${randomUUID()}`;
+      await insertPayment({ piId, ...failedNov() });
+      await queueJob(piId);
+      let continued;
+      triggerNotification.mockImplementation(async (_key, _payload, opts) => {
+        await insertPayment(paidNov());
+        continued = await opts.beforePush();
+        return continued ? { bellWritten: true } : { suppressed: true };
+      });
+      await Dispatch.processPendingPaymentFailureNotifications({ limit: 50 });
+      expect(continued).toBe(false);
     });
   });
 });

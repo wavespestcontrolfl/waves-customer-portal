@@ -247,34 +247,58 @@ async function describeManualPaymentUndo(invoiceId) {
 // payload.paymentIntentId through the ledger's metadata.invoice_id, which also covers legacy bells and combined allocations whose
 // representative invoice is another one). Only a bell closed since the payment: one a person closed earlier keeps its earlier done_at
 // (or a resolution of their own) and is left.
-// An invoice-less dues failure bell (payment-failed-month-settled.js) names no invoice: it closed because its billed month was collected,
-// possibly by this invoice (a dues invoice). It reopens when the same customer's bell is of that shape and its month is no longer collected.
+// An invoice-less dues failure bell closed by the billed-month rule (payment-failed-month-settled.js) names no invoice: Undo does not judge
+// it. It reopens EVERY such bell of the invoice's customer (marked metadata.closedBy, done by 'payments', still carrying the closer's
+// resolution, so a bell a person closed is untouched) for the invoice's stamped dues month, or all of the customer's when the invoice has
+// no readable stamp, whenever it closed. No settlement is read here, so nothing can fail the Undo or leave a bell closed. The 15-minute
+// sweep closes again any whose month is still collected.
+function duesMonthsOf(lineItems) {
+  const { MEMBERSHIP_DUES_LINE_KEY } = require('./billing-lane');
+  try {
+    const items = typeof lineItems === 'string' ? JSON.parse(lineItems) : lineItems;
+    return [...new Set((Array.isArray(items) ? items : []).map((item) => item?.[MEMBERSHIP_DUES_LINE_KEY]).filter((m) => typeof m === 'string'))];
+  } catch { return []; }
+}
+
+async function reopenMonthClosedBells(trx, invoiceId) {
+  const { RESOLUTION } = require('./payment-failed-alert-close');
+  const { CLOSED_BY } = require('./payment-failed-month-settled');
+  const invoice = await trx('invoices').where({ id: invoiceId }).first('customer_id', 'line_items');
+  if (!invoice?.customer_id) return 0;
+  const months = duesMonthsOf(invoice.line_items);
+  const query = trx('notifications')
+    .where({ recipient_type: 'admin', category: 'payment', done_by: 'payments', resolution: RESOLUTION })
+    .whereRaw("metadata->>'triggerKey' = 'payment_failed'")
+    .whereRaw("metadata->>'closedBy' = ?", [CLOSED_BY])
+    .whereRaw("metadata->'payload'->>'customerId' = ?", [String(invoice.customer_id)]);
+  if (months.length) query.whereRaw(`metadata->>'closedMonth' IN (${months.map(() => '?').join(', ')})`, months);
+  return query.update({ done_at: null, done_by: null, resolution: null, metadata: trx.raw("metadata - 'closedBy' - 'closedMonth'") });
+}
+
 async function reopenPaymentFailedBells(trx, invoiceId, since) {
   const { RESOLUTION, TRIGGER_KEYS } = require('./payment-failed-alert-close');
   const { parseJson, failedAllocationInvoiceIds } = require('./payment-failed-allocation');
-  const { isInvoicelessMonthUncollected } = require('./payment-failed-month-settled');
   const closed = await trx('notifications')
     .where({ recipient_type: 'admin', category: 'payment', done_by: 'payments', resolution: RESOLUTION })
     .whereRaw("metadata->>'triggerKey' IN (?, ?)", TRIGGER_KEYS)
     .where('done_at', '>=', since)
     .select('id', 'metadata');
-  const customerId = (await trx('invoices').where({ id: invoiceId }).first('customer_id'))?.customer_id;
   const reopen = [];
   for (const bell of closed) {
     const meta = parseJson(bell.metadata);
-    const payload = meta.payload || {};
-    const { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds } = payload;
+    const { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds } = meta.payload || {};
     // A bill_payment_error bell closes on payload.invoiceId alone (payment-failed-alert-close.js), so it reopens on that alone.
     if (meta.triggerKey === 'bill_payment_error') {
       if (bellInvoiceId != null && String(bellInvoiceId) === String(invoiceId)) reopen.push(bell.id);
       continue;
     }
     const allocation = await failedAllocationInvoiceIds(trx, { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds });
-    if (allocation.includes(String(invoiceId))) { reopen.push(bell.id); continue; }
-    if (customerId && String(payload.customerId) === String(customerId) && await isInvoicelessMonthUncollected(trx, payload)) reopen.push(bell.id);
+    if (allocation.includes(String(invoiceId))) reopen.push(bell.id);
   }
-  if (!reopen.length) return 0;
-  return trx('notifications').whereIn('id', reopen).update({ done_at: null, done_by: null, resolution: null });
+  const reopened = reopen.length
+    ? await trx('notifications').whereIn('id', reopen).update({ done_at: null, done_by: null, resolution: null })
+    : 0;
+  return reopened + await reopenMonthClosedBells(trx, invoiceId);
 }
 
 async function undoManualPayment(invoiceId, { reason, paymentId, undoneBy = 'admin', undoneByTechnicianId = null } = {}) {

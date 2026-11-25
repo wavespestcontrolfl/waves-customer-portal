@@ -23,9 +23,12 @@
 //
 // The sweep closes under the locks manual payment Undo takes (see
 // closeIfMonthCollected), so an Undo cannot commit between the check and the close.
+// A bell closed this way carries metadata.closedBy = CLOSED_BY and closedMonth, so
+// Undo can reopen it WITHOUT judging anything (invoice-manual-payment-undo.js).
 const logger = require('./logger');
 const { isUuid, parseJson, SETTLED_INVOICE_STATUSES } = require('./payment-failed-allocation');
 
+const CLOSED_BY = 'month-settled';
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
 // Step 1: the bell payload's own shape.
@@ -114,13 +117,14 @@ async function lockSettlingInvoices(trx, attempt) {
 //     to the sweep, which locks it.
 // Returns how many bells `close` closed; 0 on any doubt or failed read.
 async function closeIfMonthCollected(conn, payload, close, { onlyInvoiceId = null } = {}) {
+  if (!isInvoicelessPayload(payload)) return 0;
   try {
     return await conn.transaction(async (trx) => {
       const attempt = await invoicelessAttempt(trx, payload);
       if (!attempt) return 0;
-      if (await paidPaymentForMonth(trx, attempt)) return close(trx);
-      if (onlyInvoiceId) return (await settledDuesInvoiceIds(trx, attempt, { onlyInvoiceId })).length ? close(trx) : 0;
-      return (await lockSettlingInvoices(trx, attempt)).length ? close(trx) : 0;
+      if (await paidPaymentForMonth(trx, attempt)) return close(trx, attempt);
+      if (onlyInvoiceId) return (await settledDuesInvoiceIds(trx, attempt, { onlyInvoiceId })).length ? close(trx, attempt) : 0;
+      return (await lockSettlingInvoices(trx, attempt)).length ? close(trx, attempt) : 0;
     });
   } catch (err) {
     logger.warn(`[payment-failed-month-settled] ${err.message}`);
@@ -128,16 +132,17 @@ async function closeIfMonthCollected(conn, payload, close, { onlyInvoiceId = nul
   }
 }
 
-// The reverse question, for a bell closed by the rule above: true only when the
-// bell is a genuine invoice-less dues failure and its month is NOT collected
-// any more (a collecting payment was undone). Any doubt, or a failed read, is
-// false: the bell is not reopened. Own savepoint, so a failed read cannot abort
-// the caller's transaction.
-async function isInvoicelessMonthUncollected(conn, payload) {
+// Read-only: is this invoice-less bell's month collected right now? For the
+// dispatch of a failure alert (payment-failure-notifications.js), which must not
+// ring for a month already collected. Fails OPEN: any doubt or failed read is
+// false, so the alert goes out as it always did. Own savepoint, so a failed read
+// cannot abort the caller's transaction.
+async function isInvoicelessMonthSettled(conn, payload) {
+  if (!isInvoicelessPayload(payload)) return false;
   try {
     return await conn.transaction(async (trx) => {
       const attempt = await invoicelessAttempt(trx, payload);
-      return attempt ? !(await isMonthCollected(trx, attempt)) : false;
+      return attempt ? await isMonthCollected(trx, attempt) : false;
     });
   } catch (err) {
     logger.warn(`[payment-failed-month-settled] ${err.message}`);
@@ -146,5 +151,5 @@ async function isInvoicelessMonthUncollected(conn, payload) {
 }
 
 module.exports = {
-  closeIfMonthCollected, isInvoicelessMonthUncollected, invoicelessAttempt, isMonthCollected, isInvoicelessPayload, obligationMonthOf,
+  closeIfMonthCollected, isInvoicelessMonthSettled, invoicelessAttempt, isMonthCollected, isInvoicelessPayload, obligationMonthOf, CLOSED_BY,
 };

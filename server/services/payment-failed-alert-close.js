@@ -34,7 +34,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { parseJson, isUuid, isFailedAllocationSettled } = require('./payment-failed-allocation');
-const { closeIfMonthCollected } = require('./payment-failed-month-settled');
+const { closeIfMonthCollected, CLOSED_BY: MONTH_CLOSED_BY } = require('./payment-failed-month-settled');
 
 const RESOLUTION = 'The invoice was paid';
 const TRIGGER_KEYS = ['payment_failed', 'bill_payment_error'];
@@ -42,10 +42,15 @@ const TRIGGER_KEYS_SQL = "metadata->>'triggerKey' IN (?, ?)";
 
 // Close these bells as the payments closer (a row a person marked Done is taken
 // over; see openToCloser). Returns how many rows were updated.
-async function closeBells(conn, ids) {
+// `monthKey`: a bell closed by the billed-month rule is marked (metadata.closedBy
+// + closedMonth) so manual payment Undo can reopen it without a settlement read.
+async function closeBells(conn, ids, { monthKey = null } = {}) {
   const { doneColumns, openToCloser } = require('./notification-service')._private;
-  return openToCloser(conn('notifications').whereIn('id', ids), 'payments')
-    .update(doneColumns({ by: 'payments', resolution: RESOLUTION, keepExisting: true, conn }));
+  const columns = doneColumns({ by: 'payments', resolution: RESOLUTION, keepExisting: true, conn });
+  if (monthKey) {
+    columns.metadata = conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ closedBy: MONTH_CLOSED_BY, closedMonth: monthKey })]);
+  }
+  return openToCloser(conn('notifications').whereIn('id', ids), 'payments').update(columns);
 }
 
 // Is this bell obsolete by its invoice allocation? A bill_payment_error bell is
@@ -70,7 +75,7 @@ async function closeSettledBells(conn, rows, { hookInvoiceId = null } = {}) {
     const meta = parseJson(row.metadata);
     if (await isAllocationSettled(conn, meta)) closable.push(row.id);
     else if (meta.triggerKey === 'payment_failed') {
-      closed += await closeIfMonthCollected(conn, meta.payload, (trx) => closeBells(trx, [row.id]), { onlyInvoiceId: hookInvoiceId });
+      closed += await closeIfMonthCollected(conn, meta.payload, (trx, attempt) => closeBells(trx, [row.id], { monthKey: attempt.monthKey }), { onlyInvoiceId: hookInvoiceId });
     }
   }
   return closable.length ? closed + await closeBells(conn, closable) : closed;

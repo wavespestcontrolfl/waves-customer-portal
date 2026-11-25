@@ -2,6 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { triggerNotification } = require('./notification-triggers');
 const { isUuid, ledgerInvoiceId, isFailedAllocationSettled } = require('./payment-failed-allocation');
+const { isInvoicelessMonthSettled } = require('./payment-failed-month-settled');
 
 const TABLE = 'stripe_payment_notification_log';
 const SETTLED_STATUSES = ['paid', 'refunded', 'disputed'];
@@ -71,6 +72,14 @@ function allocationOf(payload) {
   return Array.isArray(payload?.allocationInvoiceIds) ? { allocationInvoiceIds: payload.allocationInvoiceIds } : {};
 }
 
+// Settled by its allocation, or (a monthly-dues failure with no invoice) by its billed month
+// (payment-failed-month-settled.js). The month read fails open: an error means "send as today".
+async function isAttemptSettled(trx, { piId, invoiceId, payload, ledgerRow }) {
+  const allocation = { paymentIntentId: piId, invoiceId, ...allocationOf(payload) };
+  if (await isFailedAllocationSettled(trx, allocation)) return true;
+  return isInvoicelessMonthSettled(trx, { ...allocation, customerId: payload?.customerId || ledgerRow.customer_id });
+}
+
 async function dispatchPendingNotification(trx, key) {
   const job = await trx(TABLE).where(key).whereNotNull('pending_payload')
     .forUpdate().skipLocked().first();
@@ -87,7 +96,7 @@ async function dispatchPendingNotification(trx, key) {
     // The customer may have paid the whole allocation through a NEW
     // PaymentIntent before this job ran (the closer found no bell then): the
     // alert would be stale on arrival, so it is suppressed like a settled PI.
-    settled = await isFailedAllocationSettled(trx, { paymentIntentId: piId, invoiceId: alertInvoiceId, ...allocationOf(job.pending_payload) });
+    settled = await isAttemptSettled(trx, { piId, invoiceId: alertInvoiceId, payload: job.pending_payload, ledgerRow });
   }
   if (!settled) {
     const payload = job.pending_payload;
@@ -103,7 +112,7 @@ async function dispatchPendingNotification(trx, key) {
         const settledRow = await trx('payments').where({ stripe_payment_intent_id: piId })
           .whereIn('status', SETTLED_STATUSES).first('id');
         settled = settled || Boolean(settledRow)
-          || await isFailedAllocationSettled(trx, { paymentIntentId: piId, invoiceId: alertInvoiceId, ...allocationOf(payload) });
+          || await isAttemptSettled(trx, { piId, invoiceId: alertInvoiceId, payload, ledgerRow });
         return !settled && !recheckError;
       } catch (error) {
         // The trigger's beforePush error fallback is fail-open; return false
