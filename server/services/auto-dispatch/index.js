@@ -442,6 +442,9 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   });
   // Far-south day rule: the audit row names the slots it kept out, move or not (south-day-kept.js).
   if (southKept(drops)) constraints.south_day_kept = drops.south_day_kept;
+  Object.assign(constraints, minutesRuleNote({
+    service, current, currentScore, cand: ranked.qualifies ? best : null, candScore: ranked.bestScore, threshold, config,
+  }));
   const shadowPool = dryShadowCandidates.length ? candidates.concat(dryShadowCandidates) : candidates;
   const live = ranked.qualifies ? best : null;
   Object.assign(constraints, dryTimeConstraint(prefs, {
@@ -462,8 +465,32 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     };
   }
   return {
-    kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx,
+    kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx, minutesRuleConfig: minutesRuleConfigOf(config),
     withoutConflict: ordinaryMoveOf(ranked, { current, currentScore, service, prefs, lockBoundary, ctx, threshold, prefsSnapshot }),
+  };
+}
+
+// The slot moves only by the minutes rule (move-rules.js minutesRuleOk): the
+// audit row says so in constraints_checked.minutes_rule, with the floor that
+// applied (10 for a first move, 15 for a visit already moved). Worked out
+// again for the slot apply.js actually took (buildAppliedPlacementAudit,
+// failedPlacementAudit), so a fallback slot carries its own answer.
+function minutesRuleNote({ service, current, currentScore, cand, candScore, threshold, config }) {
+  if (!config || !cand || !current || !candScore || moveRules.mustMove(service, current)) return {};
+  const gain = moveRules.moveGain({ service, current, currentScore, cand, candScore });
+  if (gain >= threshold || !moveRules.minutesRuleOk({ service, current, cand, currentScore, candScore, gain, config })) return {};
+  return { minutes_rule: { saving_floor_minutes: moveRules.minutesRuleFloor(service, config) } };
+}
+
+// The settings the minutes rule reads (move-rules.js minutesRuleOk), carried on
+// a move evaluation so an audit rebuilt after apply.js (no config there) can
+// work the note out again.
+function minutesRuleConfigOf(config) {
+  return {
+    roadCheckEnabled: config.roadCheckEnabled,
+    minDayMoveDriveSavingMinutes: config.minDayMoveDriveSavingMinutes,
+    minutesRuleSavingMinutes: config.minutesRuleSavingMinutes,
+    minutesRuleSecondMoveSavingMinutes: config.minutesRuleSecondMoveSavingMinutes,
   };
 }
 
@@ -547,6 +574,8 @@ function ordinaryMoveOf(ranked, { current, prefsSnapshot, ...rest }) {
   const {
     improvement, newPlacement, scores, routeMetrics, constraints,
   } = buildPlacementAudit({ ...rest, current: clear, candidate: ranked.normalBest, candidateScore: ranked.normalBestScore });
+  // The projected slot may qualify on minutes alone (move-rules.js normalBestOf): the row says so.
+  if (ranked.normalBestMinutesFloor) constraints.minutes_rule = { saving_floor_minutes: ranked.normalBestMinutesFloor };
   return { improvement, best: ranked.normalBest, current: clear, audit: { newPlacement, scores, prefsSnapshot, routeMetrics, constraints } };
 }
 
@@ -625,7 +654,7 @@ function noMoveReason(ranked, improvement, threshold, routeMetrics, config) {
   if (ranked.roadFailed) {
     return {
       reason_code: 'NO_ROAD_DRIVE_SAVING',
-      reason_description: `The model says the move saves ${routeMetrics.drive_saving_minutes} drive minutes; real roads say ${routeMetrics.road.saving_minutes} < ${config.minDayMoveDriveSavingMinutes} required`,
+      reason_description: `The model says the move saves ${routeMetrics.drive_saving_minutes} drive minutes; real roads say ${routeMetrics.road.saving_minutes} < ${ranked.roadFloor ?? config.minDayMoveDriveSavingMinutes} required`,
     };
   }
   if (ranked.floorFailed) {
@@ -659,7 +688,10 @@ function buildAppliedPlacementAudit(fresh, service, prefs, ctx, lockBoundary, re
   // attempts (ids/numbers only): how many candidates apply.js tried before
   // this one landed — 1 when the first attempt succeeded, or when the
   // applier didn't report it (a plain mock, or a pre-lane version).
-  return { ...carryDryTime(built, evaluation, appliedCandidate), attempts: result.attempts || 1 };
+  const carried = withMinutesRule(carryDryTime(built, evaluation, appliedCandidate), {
+    service, evaluation, cand: appliedCandidate, candScore: appliedScore,
+  });
+  return { ...carried, attempts: result.attempts || 1 };
 }
 
 // The audit fields for a FAILED apply: the candidate apply.js tried LAST
@@ -686,8 +718,19 @@ function failedPlacementAudit(fresh, pm, lockBoundary, applyErr) {
     scores: built.scores,
     prefsSnapshot: prefs.raw_snapshot,
     routeMetrics: { ...built.routeMetrics, attempts: applyErr.attemptsTried || 1 },
-    constraints: carryDryTime(built, evaluation, applyErr.lastAttempted).constraints,
+    constraints: withMinutesRule(carryDryTime(built, evaluation, applyErr.lastAttempted), {
+      service, evaluation, cand: applyErr.lastAttempted, candScore: attemptedScore,
+    }).constraints,
   };
+}
+
+// A rebuilt audit gets the minutes-rule note of the slot it describes.
+function withMinutesRule(built, { service, evaluation, cand, candScore }) {
+  const note = minutesRuleNote({
+    service, current: evaluation.current, currentScore: evaluation.currentScore, cand, candScore,
+    threshold: evaluation.threshold, config: evaluation.minutesRuleConfig,
+  });
+  return note.minutes_rule ? { ...built, constraints: { ...built.constraints, ...note } } : built;
 }
 
 // The `scheduled_date` floor loadEligibleServices() queries with. ROUTE-TIERS
