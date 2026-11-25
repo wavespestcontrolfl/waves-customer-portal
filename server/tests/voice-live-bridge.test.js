@@ -52,7 +52,7 @@ const silence = (bytes) => Buffer.alloc(bytes, 0xff).toString('base64');
 // With it, every clock advance after session.started also delivers the
 // caller's audio for that time, as Twilio does: voiced inside a span, silent
 // outside it. The bridge reads the reply delay from that audio.
-function setup({ closeReply = true, deps = {}, speech = [], caller } = {}) {
+function setup({ closeReply = true, deps = {}, speech = [] } = {}) {
   let clock = 1_000_000;
   const twilio = new FakeSocket();
   const openai = new FakeSocket({
@@ -70,7 +70,7 @@ function setup({ closeReply = true, deps = {}, speech = [], caller } = {}) {
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   const openaiFactory = jest.fn(() => openai);
   const admit = jest.fn(async () => true);
-  const bridge = runLiveBridge(twilio, { callSid: CALL_SID, voice: 'marin', cell: '71', caller }, {
+  const bridge = runLiveBridge(twilio, { callSid: CALL_SID, voice: 'marin', cell: '71' }, {
     openaiFactory,
     now: () => clock,
     admit,
@@ -1424,20 +1424,19 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     const tools = bridgeMod.buildLiveInstructions({ tools: true });
     expect(tools.endsWith(bridgeMod.TOOLS_LIMITS)).toBe(true);
     expect(tools).not.toContain(bridgeMod.TRIAL_LIMITS);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/Delegate every question about the caller's account, visits/);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/never guess or invent/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/Delegate only these: prices, services offered, open appointment times, and a\s+new-customer booking/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/never\s+guess or invent/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/cannot see accounts, visits, invoices, estimates, messages or call history/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/this practice line cannot see accounts/);
     expect(bridgeMod.TOOLS_LIMITS.length).toBeLessThan(700);
     expect(bridgeMod.buildLiveInstructions().endsWith(bridgeMod.TRIAL_LIMITS)).toBe(true);
   });
 
-  test('the brain opens at session.started for this call, from the bridge\'s own db, with the signed stamp\'s caller', async () => {
-    const caller = { from: '+19415550100', to: '+19412412993', stirVerstat: null };
-    const brain = { ask: jest.fn(), end: jest.fn(async () => {}), softTimeouts: 0, hardTimeouts: 0 };
-    const brainFactory = jest.fn(async () => brain);
-    const t = setup({ caller, deps: { toolsOn: () => true, brainFactory, transcriptQuietMs: 0 } });
+  test('the brain opens at session.started for this call, from the bridge\'s own db', async () => {
+    const { t, brainFactory } = toolsSetup();
     await t.ready();
     expect(brainFactory).toHaveBeenCalledTimes(1);
-    expect(brainFactory).toHaveBeenCalledWith({ callSid: CALL_SID, db: t.db, caller });
+    expect(brainFactory).toHaveBeenCalledWith({ callSid: CALL_SID, db: t.db });
   });
 
   test('a delegation asks the brain with the caller words since the last delegation and speaks ONE commentary append', async () => {
@@ -1469,6 +1468,19 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     t.openai.receive(created('d2')); // nothing said since
     await waitFor(() => answers(t).length > 1);
     expect(brain.ask.mock.calls.map((c) => c[0])).toEqual(['First thing.Second thing.Third thing.', 'Second thing. Third thing.']);
+  });
+
+  test('the fallback prompt is bounded: a long uninterrupted utterance is never resent whole', async () => {
+    const { t, brain } = toolsSetup();
+    await t.ready();
+    const long = 'word '.repeat(2000); // 10,000 characters of one utterance
+    t.openai.receive(said(long, 0, 30000));
+    t.openai.receive(created('d1'));
+    await waitFor(() => answers(t).length === 1);
+    t.openai.receive(created('d2')); // nothing new: the fallback is the latest utterances
+    await waitFor(() => answers(t).length === 2);
+    for (const call of brain.ask.mock.calls) expect(call[0].length).toBeLessThanOrEqual(1000 + 'Agent just said: '.length + 300 + '\nCaller said: '.length);
+    expect(brain.ask.mock.calls[1][0].length).toBeLessThanOrEqual(1000);
   });
 
   test('no caller words at all: a "say it again" sentence, and the brain is not asked', async () => {

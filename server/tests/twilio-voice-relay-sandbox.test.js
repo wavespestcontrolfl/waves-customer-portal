@@ -592,22 +592,9 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     expect(stamp).toEqual({
       cell: '71', voice: 'marin', started_at: expect.any(String), reserved_usd: PER_CALL_RESERVE_USD,
       stream_token_sha256: callTokenDigest(url.split('/').pop()),
-      from: null, to: SANDBOX, stir_verstat: null, // no From on this request
     });
     expect(update.mock.calls[0][0].metadata.sql).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
     delete process.env.TWILIO_ACCOUNT_SID;
-    delete process.env.TWILIO_AUTH_TOKEN;
-  });
-
-  test('gate on: the stamp carries the caller identity of the SIGNED request (From, To, StirVerstat) for tools mode', async () => {
-    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    process.env.TWILIO_AUTH_TOKEN = 'test-token';
-    const { update } = primeLive();
-    const res = mockRes();
-    await handlerFor('/relay-sandbox/cell')(cell('71', 'CA-sb-live', { extra: { From: '+19415550100', StirVerstat: 'TN-Validation-Passed-A' } }), res);
-    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).gpt_live).toMatchObject({
-      from: '+19415550100', to: SANDBOX, stir_verstat: 'TN-Validation-Passed-A',
-    });
     delete process.env.TWILIO_AUTH_TOKEN;
   });
 
@@ -699,7 +686,7 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     update.mockImplementation(() => Promise.reject(Object.assign(new Error('update call_log set metadata = {"from":"+19415550100","to":"+19412412993"}'), { code: '57014' })));
     logger.error.mockClear();
     const res = mockRes();
-    await handlerFor('/relay-sandbox/cell')(cell('71', 'CA-sb-live', { extra: { From: '+19415550100' } }), res);
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
     expect(res.body).toContain('not available right now');
     const logged = JSON.stringify(logger.error.mock.calls);
     expect(logged).toContain('code=57014');

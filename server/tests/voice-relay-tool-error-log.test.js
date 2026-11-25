@@ -25,7 +25,7 @@ const everyLogLine = () => JSON.stringify(['info', 'warn', 'error'].map((level) 
 
 test('a failing lookup_customer query logs a bounded code and none of the caller\'s words or numbers', async () => {
   const ctx = {
-    callSid: 'CA-err-1', from: '+19415550100', callerVerified: true, sandbox: true, practiceLine: true,
+    callSid: 'CA-err-1', from: '+19415550100', callerVerified: true,
     rememberLookup: jest.fn(), consumeLookup: jest.fn(() => true),
   };
   const out = await executeTool('lookup_customer', { name: 'Pat Smith', street: '12 Palm Ave', phone: '941-555-0123' }, ctx);
@@ -41,4 +41,12 @@ test('a tool name the model made up is bounded in the log line too', async () =>
   const ctx = { callSid: 'CA-err-2' };
   const out = await run('not_a_tool', {}, ctx);
   expect(out).toMatch(/Unknown tool/);
+});
+
+test('a failed recent-text hydration logs a bounded code, never the query that bound the caller\'s number', async () => {
+  const { buildRecentTextsBlock } = require('../services/voice-agent/relay-history');
+  const out = await buildRecentTextsBlock('+19415550123', { customerId: 'c-1', tier: 'full' });
+  expect(out).toBe(null);
+  expect(logger.warn).toHaveBeenCalledWith('[voice-relay-history] recent-texts block skipped code=57014');
+  expect(everyLogLine()).not.toMatch(/9415550123|ilike|Palm Ave/);
 });

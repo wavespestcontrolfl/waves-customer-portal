@@ -1064,15 +1064,25 @@ function getVoiceProfileTextNonBlocking() {
 // Appended to the base prompt of a practice-line session (GPT-Live trial brain).
 const PRACTICE_LINE_ADDENDUM = [
   'PRACTICE LINE (this overrides anything above):',
-  '- This is a practice line. You cannot transfer the call, and nothing you file here is saved: a lead,',
-  '  a booking request or a re-service request is only checked, never created.',
-  '- When a tool result says so, tell the caller plainly that this is a practice line and nothing was',
-  '  booked or saved. Do NOT promise a callback, a call from the office or a confirmation.',
+  '- This is a practice line. You can only quote prices, describe services, find open times and take',
+  '  a new-customer request. You cannot see accounts, visits, invoices, estimates, messages or call',
+  '  history, and you cannot transfer the call. If asked about an account, say this practice line cannot',
+  '  see accounts and the caller can call or text the Waves office.',
+  '- Nothing you file here is saved: a request is only checked, never created. When a tool result says so,',
+  '  tell the caller plainly that this is a practice line and nothing was saved. Do NOT promise a callback,',
+  '  a call from the office or a confirmation.',
   '- Keep answering questions after that.',
 ].join('\n');
 
+// Deterministic closes for a practice line: no promise of a callback or a note for the team.
+const PRACTICE_COPY = {
+  turnCap: 'That is all this practice line can do for now. You can call or text the Waves office. Thanks for calling!',
+  unavailable: "Sorry, I can't answer that right now. You can call or text the Waves office.",
+  toolRounds: "Sorry, that is taking longer than it should. You can call or text the Waves office. Is there anything else I can help with?",
+};
+
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, practiceLine = false, signedAttestation = null, resumed = false, evalHarness = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, practiceLine = false, resumed = false, evalHarness = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -1304,7 +1314,9 @@ class RelayConversation {
     // every turn so the time stays live without a per-turn DB read.
     this._officeHours = null;
     this._officeHoursReady = null;
-    if (isContextEnabled()) {
+    // A practice line resolves NO caller context at all: no call_log claim, no account match, no
+    // recent-text hydration. It serves public information only (see PRACTICE_LINE_TOOLS).
+    if (isContextEnabled() && !this._practiceLine) {
       // ONE relay session per CallSid — burned atomically inside
       // verifyInboundCaller (relay-context), where every instance can see it.
       // A replayed setup frame simply resolves to no caller context: a
@@ -1326,8 +1338,6 @@ class RelayConversation {
         callSid: this.callSid,
         sessionKey: this.sessionKey,
         sessionGeneration: this.sessionGeneration,
-        // A practice line decides on the attestation its signed request stamped, never the row's.
-        signedIdentity: this._practiceLine ? { attestation: signedAttestation || null } : null,
         onVerified: (ok) => { this._callerVerified = ok === true; },
         // A hydration that settles AFTER the 4s race still upgrades the
         // session (the late-verification doctrine): without this, a slow
@@ -1357,7 +1367,7 @@ class RelayConversation {
       // contact-slot match is a shared number and does not speak for the
       // account holder.
       this._contextReady.then(() => { void this._persistLanguagePreference(); }).catch(() => {});
-    } else if (this.callSid && this.sessionKey && require('./relay-recovery').isRecoveryGateOn()) {
+    } else if (!this._practiceLine && this.callSid && this.sessionKey && require('./relay-recovery').isRecoveryGateOn()) {
       // PR 2B (codex r2 P1): recovery's proof is the CallSid/ANI claim, not
       // the optional account context. With VOICE_RELAY_CONTEXT_ENABLED off
       // the claim still has to be won — the segment append at close and the
@@ -2365,13 +2375,21 @@ class RelayConversation {
     logger.warn(`[voice-relay] call turn cap (${MAX_CALL_TURNS}) reached callSid=${this.callSid} — ending`);
     // Neutral copy ON PURPOSE — this line is spoken directly (no model in
     // the loop to consult CLOCK DATA), so it must be true at 2 AM too.
-    this.say(require('./relay-language').copy('turnCap', this.language));
+    this.say(this._copy('turnCap'));
     this._ending = true;
     try {
       if (this._endSession) this._endSession({ reason: 'turn_cap', captured: this.leadCaptured });
     } catch (e) {
       logger.error(`[voice-relay] endSession (turn cap) failed callSid=${this.callSid}: ${e.message}`);
     }
+  }
+
+  // Deterministic closes. A practice line files nothing and calls nobody back, so its copy
+  // promises neither (the production copy says "a team member will call you back" and "I've
+  // made a note for the team").
+  _copy(key) {
+    if (this._practiceLine && PRACTICE_COPY[key]) return PRACTICE_COPY[key];
+    return require('./relay-language').copy(key, this.language);
   }
 
   /** Handle one transcribed caller turn. Serialized so turns never interleave. */
@@ -3674,7 +3692,7 @@ class RelayConversation {
     // client from under it.
     const client = clientFor(this._provider);
     if (this.ended || !client) {
-      if (!client) this.say(require('./relay-language').copy('unavailable', this.language));
+      if (!client) this.say(this._copy('unavailable'));
       return;
     }
     // Identity must be settled before the first model round: the tool ctx and
@@ -3781,7 +3799,7 @@ class RelayConversation {
       }];
       // Frozen with the system prompt: tools render BEFORE system, so a tool
       // list that changed mid-call (a gate flipped) would invalidate everything.
-      this._tools = activeTools({ officeOpen });
+      this._tools = activeTools({ officeOpen, practiceLine: this._practiceLine });
       // Version stamps: the prompt WITHOUT the per-caller block (so two calls
       // on the same prompt hash alike), the caller block on its own, and the
       // tool schemas the model saw. Hashes only — nothing is stored twice.
@@ -3915,7 +3933,7 @@ class RelayConversation {
     // simpler next question), and the lead/booking writes that did land are
     // already durable.
     logger.warn(`[voice-relay] hit MAX_TOOL_ROUNDS callSid=${this.callSid}`);
-    this.say(require('./relay-language').copy('toolRounds', this.language));
+    this.say(this._copy('toolRounds'));
     this._maybeEndAfterTurn();
   }
 

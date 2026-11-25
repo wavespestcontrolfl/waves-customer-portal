@@ -32,13 +32,9 @@ function fakeConvo(args, script = async (convo) => { convo.send('One moment. ', 
   return convo;
 }
 
-// The Twilio-signed cell request's From / To / StirVerstat, as the stamp carries them.
-const CALLER = { from: '+19415550100', to: '+19412412993', stirVerstat: 'TN-Validation-Passed-A' };
-const ROW = {
-  source: VOICE_RELAY_SANDBOX_SOURCE, from_phone: '+19415550100', to_phone: '+19412412993', metadata: { stir_verstat: 'TN-Validation-Passed-A' },
-};
+const ROW = { source: VOICE_RELAY_SANDBOX_SOURCE, from_phone: '+19415550100', to_phone: '+19412412993' };
 
-async function open({ script, deadlineMs, softMs, caller = CALLER, row = ROW } = {}) {
+async function open({ script, deadlineMs, softMs, row = ROW } = {}) {
   const made = [];
   const d = fakeDb(row);
   const brain = await LiveBrain.open({
@@ -46,7 +42,6 @@ async function open({ script, deadlineMs, softMs, caller = CALLER, row = ROW } =
     db: d.db,
     deadlineMs,
     softMs,
-    caller,
     make: (args) => { const c = fakeConvo(args, script); made.push(c); return c; },
   });
   return { brain, convo: made[0], made, d };
@@ -58,9 +53,10 @@ describe('LiveBrain.open', () => {
     expect(d.db).toHaveBeenCalledWith('call_log');
     expect(d.where).toHaveBeenCalledWith({ twilio_call_sid: CALL_SID });
     expect(convo.args).toMatchObject({
-      callSid: CALL_SID, from: '+19415550100', to: '+19412412993', sandbox: true, practiceLine: true, callTokenVerified: true,
-      signedAttestation: 'TN-Validation-Passed-A', // the stamped attestation, never the row's
+      callSid: CALL_SID, from: '+19415550100', to: '+19412412993', sandbox: true, practiceLine: true,
+      callTokenVerified: false, // a practice line proves and grants no identity
     });
+    expect(convo.args).not.toHaveProperty('sessionKey'); // no claim to own: no caller context is resolved
     expect(typeof convo.args.send).toBe('function');
   });
 
@@ -69,7 +65,7 @@ describe('LiveBrain.open', () => {
     ['a missing row', undefined],
   ])('refuses %s and builds nothing', async (_name, row) => {
     const made = jest.fn();
-    await expect(LiveBrain.open({ callSid: CALL_SID, db: fakeDb(row).db, make: made, caller: CALLER })).rejects.toThrow('live_brain_not_sandbox');
+    await expect(LiveBrain.open({ callSid: CALL_SID, db: fakeDb(row).db, make: made })).rejects.toThrow('live_brain_not_sandbox');
     expect(made).not.toHaveBeenCalled();
   });
 
@@ -77,45 +73,14 @@ describe('LiveBrain.open', () => {
     await expect(LiveBrain.open({
       callSid: CALL_SID,
       db: fakeDb(ROW).db,
-      caller: CALLER,
       make: () => ({ sandbox: false, interrupt: jest.fn(), handlePrompt: jest.fn() }),
     })).rejects.toThrow('live_brain_not_sandbox');
   });
 
   test('refuses a blank CallSid before any read', async () => {
     const d = fakeDb({ source: VOICE_RELAY_SANDBOX_SOURCE });
-    await expect(LiveBrain.open({ callSid: ' ', db: d.db, make: jest.fn(), caller: CALLER })).rejects.toThrow('live_brain_no_callsid');
+    await expect(LiveBrain.open({ callSid: ' ', db: d.db, make: jest.fn() })).rejects.toThrow('live_brain_no_callsid');
     expect(d.db).not.toHaveBeenCalled();
-  });
-
-  describe('caller identity comes from the signed cell request, not the row alone', () => {
-    const refused = async (opts) => {
-      const make = jest.fn();
-      await expect(LiveBrain.open({ callSid: CALL_SID, make, ...opts })).rejects.toThrow('live_brain_identity_mismatch');
-      expect(make).not.toHaveBeenCalled(); // no conversation, so no account read
-    };
-
-    test('a row whose number differs from the stamped one is refused', async () => {
-      await refused({ db: fakeDb({ ...ROW, from_phone: '+19415559999' }).db, caller: CALLER });
-    });
-
-    test('a row whose carrier attestation differs from the stamped one is refused', async () => {
-      await refused({ db: fakeDb({ ...ROW, metadata: { stir_verstat: 'TN-Validation-Passed-A', relay: 1 } }).db, caller: { ...CALLER, stirVerstat: 'TN-Validation-Failed-C' } });
-      await refused({ db: fakeDb({ ...ROW, metadata: JSON.stringify({ stir_verstat: 'TN-Validation-Passed-A' }) }).db, caller: { ...CALLER, stirVerstat: null } });
-    });
-
-    test('no stamped number (an old stamp, or an unsigned path) is refused', async () => {
-      await refused({ db: fakeDb(ROW).db, caller: { from: '', to: '', stirVerstat: null } });
-      await refused({ db: fakeDb(ROW).db, caller: undefined });
-    });
-
-    test('the same number in another format, and an attestation-free call, pass', async () => {
-      const { convo } = await open({
-        caller: { from: '(941) 555-0100', to: '', stirVerstat: null },
-        row: { ...ROW, metadata: '{}' },
-      });
-      expect(convo.args.from).toBe('(941) 555-0100');
-    });
   });
 
   test('the end/handoff callback answers "not sent", so no tool claims a transfer or a hangup', async () => {

@@ -613,17 +613,7 @@ describe('ws upgrade — GPT-Live path', () => {
     mockHandleUpgrade.mockImplementation((req, socket, head, cb) => cb(ws));
     const socket = await upgradeLive(liveUrl());
     expect(socket.destroy).not.toHaveBeenCalled();
-    expect(runLiveBridge).toHaveBeenCalledWith(ws, { callSid: LIVE_SID, voice: 'marin', cell: '71', caller: { from: '', to: '', stirVerstat: null } });
-  });
-
-  test('the caller identity the signed cell request stamped rides to the bridge (tools mode reads it there)', async () => {
-    mockCallLogRow = { source: 'voice_relay_sandbox', metadata: { gpt_live: { ...STAMP.gpt_live, from: '+19415550100', to: '+19412412993', stir_verstat: 'TN-Validation-Passed-A' } } };
-    const ws = { id: 'twilio-ws' };
-    mockHandleUpgrade.mockImplementation((req, socket, head, cb) => cb(ws));
-    await upgradeLive(liveUrl());
-    expect(runLiveBridge).toHaveBeenCalledWith(ws, {
-      callSid: LIVE_SID, voice: 'marin', cell: '71', caller: { from: '+19415550100', to: '+19412412993', stirVerstat: 'TN-Validation-Passed-A' },
-    });
+    expect(runLiveBridge).toHaveBeenCalledWith(ws, { callSid: LIVE_SID, voice: 'marin', cell: '71' });
   });
 
   test('a GPT-Live token never opens the relay socket, and a relay token never opens the live socket', async () => {

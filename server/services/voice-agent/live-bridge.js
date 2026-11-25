@@ -22,15 +22,17 @@
  *     texts or transfers.
  *   - Tools (GATE_VOICE_GPT_LIVE_TOOLS on, owner 2026-11-24): the delegation is
  *     answered by one Sandy conversation per call (live-brain.js, a
- *     RelayConversation in sandbox mode: reads run for real, writes are dry
- *     runs). GPT-Live's delegation names no task, so the bridge keeps the
+ *     RelayConversation as a sandbox PRACTICE LINE: public information only,
+ *     prices, services, open times and a dry-run new-customer request; no
+ *     account tools and no caller recognition; writes are dry runs).
+ *     GPT-Live's delegation names no task, so the bridge keeps the
  *     caller's transcript fragments IN MEMORY, hands the words since the last
  *     delegation to the brain (with what GPT-Live said just before, labelled),
  *     one ask at a time, and speaks its reply as a session.commentary.append
  *     (1,800 characters and 450 UTF-8 bytes at most, which bounds the tokens). An ask still running after 6 s gets
  *     one holding line on the same delegation id and the real answer follows as
- *     a second append; after 20 s the brain gives up with a fixed "the office
- *     will confirm" line. At most BRAIN_ASK_CAP asks a call, then the fixed
+ *     a second append; after 20 s the brain gives up with a fixed "call or text
+ *     the office" line. At most BRAIN_ASK_CAP asks a call, then the fixed
  *     sentence. Still nothing texts or transfers, and nothing books or files
  *     for real.
  *
@@ -132,11 +134,12 @@ const TRIAL_LIMITS = [
 // Tools mode replaces TRIAL_LIMITS (which says nothing can be looked up).
 const TOOLS_LIMITS = [
   'TRIAL LIMITS (this overrides everything above):',
-  'You can look things up by delegating. Delegate every question about the caller\'s account, visits,',
-  'schedule, open times, prices, invoices or estimates, and every booking or re-service request. For those,',
-  'say only what the delegation result says; never guess or invent a time, price or record. This is a test',
-  'line: a booking, lead or re-service request is practice and changes nothing, and the result says so.',
-  'You cannot send a text or transfer the call, and nobody will call back from this line.',
+  'This is a practice line. Delegate only these: prices, services offered, open appointment times, and a',
+  'new-customer booking or service request. For those, say only what the delegation result says; never',
+  'guess or invent a time, price or service. A booking or request is practice and changes nothing, and the',
+  'result says so. You cannot see accounts, visits, invoices, estimates, messages or call history: if asked,',
+  'say this practice line cannot see accounts, and they can call or text the Waves office. You cannot send',
+  'a text or transfer the call, and nobody will call back from this line.',
 ].join('\n');
 
 // ── Session setup pieces (pure, exported for tests) ────────────────────────
@@ -277,13 +280,12 @@ function defaultDeps() {
 }
 
 class LiveBridge {
-  constructor(twilioWs, { callSid, voice, cell, caller }, deps = {}) {
+  constructor(twilioWs, { callSid, voice, cell }, deps = {}) {
     this.deps = { ...defaultDeps(), ...deps };
     this.twilio = twilioWs;
     this.callSid = callSid;
     this.voice = voice;
     this.cell = cell;
-    this.caller = caller || null; // the Twilio-signed cell request's From / To / StirVerstat (the brain's identity proof)
     this.openai = null;
     this.streamSid = null;
     this.ready = false; // session.started seen: caller audio may flow
@@ -804,8 +806,8 @@ class LiveBridge {
     if (!text.trim()) return endMs;
     const start = Number.isFinite(msg.start_ms) ? msg.start_ms : null;
     const fresh = !list.length || (start !== null && endMs !== null && start - endMs >= UTTERANCE_GAP_MS);
-    if (fresh) list.push({ text, startMs: start });
-    else list[list.length - 1].text += text;
+    if (fresh) list.push({ text: text.slice(-CALLER_TEXT_MAX_CHARS), startMs: start });
+    else list[list.length - 1].text = (list[list.length - 1].text + text).slice(-CALLER_TEXT_MAX_CHARS);
     if (list.length > keep) list.shift();
     return Number.isFinite(msg.end_ms) ? msg.end_ms : endMs;
   }
@@ -863,7 +865,7 @@ class LiveBridge {
     let words = clean(range.text);
     let startMs = range.startMs;
     if (!words) {
-      words = clean(this.callerRecent.map((u) => u.text).join(' '));
+      words = clean(this.callerRecent.map((u) => u.text).join(' ')).slice(-CALLER_TEXT_MAX_CHARS);
       startMs = this.callerRecent.length ? this.callerRecent[0].startMs : null;
     }
     if (!words) return '';
@@ -889,7 +891,7 @@ class LiveBridge {
   ensureBrain() {
     if (!this.brainPromise) {
       this.brainPromise = Promise.resolve()
-        .then(() => this.deps.brainFactory({ callSid: this.callSid, db: this.deps.db(), caller: this.caller }))
+        .then(() => this.deps.brainFactory({ callSid: this.callSid, db: this.deps.db() }))
         .then((brain) => {
           this.brain = brain;
           if (this._finalizing) void brain.end('bridge_closed');

@@ -2,11 +2,13 @@
  * The brain behind the GPT-Live trial line's client delegations
  * (GATE_VOICE_GPT_LIVE_TOOLS, owner 2026-11-24 "ok lets give it read and write").
  *
- * One RelayConversation (Sandy's own Claude/OpenAI agent and its 16 tools) per
- * call, always built with sandbox: true. The conversation runs as it does on
- * the ConversationRelay sandbox line: reads (account, visits, open times,
- * prices, invoices, estimates) run for real, and writes (capture_lead,
- * request_booking, request_reservice) are answered without running. The
+ * One RelayConversation (Sandy's own Claude/OpenAI agent) per call, always
+ * built with sandbox: true and practiceLine: true. It is a PUBLIC-INFORMATION
+ * line: five tools only (relay-tools PRACTICE_LINE_TOOLS: the services
+ * catalog, pricing, availability, find_slots, and capture_lead as a dry run),
+ * and NO caller context at all: no caller recognition, no account match, no
+ * call_log claim, no recent-text hydration. It cannot see accounts, visits,
+ * invoices, estimates, messages or call history, whatever number called. The
  * bridge (live-bridge.js) feeds it the caller's words and speaks its reply
  * through GPT-Live.
  *
@@ -24,13 +26,7 @@
  * never ends itself, so questions after a dry-run booking still get answers.
  * The end/handoff callback answers false ("not sent") as a last backstop.
  *
- * Who the caller is: the account tools run only for the caller number (and
- * carrier attestation) the Twilio-SIGNED live-cell request stamped on the
- * call (`caller`, passed in by the bridge). open() refuses when the call_log
- * row's own number or attestation differs from the stamp, since an unsigned
- * webhook (the shared signature check can be in log or disabled mode) could
- * have changed the row.
- *
+
  * The close does not run RelayConversation.end(). end() writes the call's
  * transcript (the caller's words) into call_log, stamps the row ai_handled and
  * completed, syncs a message row and records commitments: the bridge's own
@@ -56,22 +52,6 @@ const CLOSED_REPLY = "I can't check that right now.";
 
 function errCode(err) {
   return String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32);
-}
-
-const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
-
-// The row must agree with what the signed cell request stamped: the same caller
-// number, and the same attestation (metadata.stir_verstat, which
-// verifyInboundCaller reads). No stamped number: no account access.
-function identityMatches(row, caller) {
-  const stampedFrom = lastTen(caller && caller.from);
-  if (stampedFrom.length !== 10 || lastTen(row.from_phone) !== stampedFrom) return false;
-  let meta = row.metadata;
-  if (typeof meta === 'string') {
-    try { meta = JSON.parse(meta); } catch { meta = null; }
-  }
-  const rowAttestation = (meta && meta.stir_verstat) || null;
-  return rowAttestation === ((caller && caller.stirVerstat) || null);
 }
 
 class LiveBrain {
@@ -104,13 +84,12 @@ class LiveBrain {
   // from the call's own row: the bridge proved it at the door, and this refuses
   // anything but a sandbox-sourced inbound row, whatever the caller asks.
   // `make` is injected by tests (and builds a RelayConversation by default).
-  static async open({ callSid, db, make, deadlineMs, softMs, caller }) {
+  static async open({ callSid, db, make, deadlineMs, softMs }) {
     const { VOICE_RELAY_SANDBOX_SOURCE } = require('./relay-protocol');
     const sid = String(callSid || '').trim();
     if (!sid) throw new Error('live_brain_no_callsid');
-    const row = await db('call_log').where({ twilio_call_sid: sid }).first('source', 'from_phone', 'to_phone', 'metadata');
+    const row = await db('call_log').where({ twilio_call_sid: sid }).first('source', 'from_phone', 'to_phone');
     if (!row || row.source !== VOICE_RELAY_SANDBOX_SOURCE) throw new Error('live_brain_not_sandbox');
-    if (!identityMatches(row, caller)) throw new Error('live_brain_identity_mismatch');
     let brain = null;
     const build = make || ((args) => {
       const { RelayConversation } = require('./relay-conversation');
@@ -118,16 +97,14 @@ class LiveBrain {
     });
     const convo = build({
       callSid: sid,
-      // The live door verified the signed per-call token for this CallSid and
-      // burned it; the row is the proof ANI checks read.
-      callTokenVerified: true,
-      from: caller.from, // the signed request's number, which the row was just checked against
-      to: caller.to || row.to_phone || null,
+      // No caller context is resolved on a practice line, so nothing here proves or grants an
+      // identity. The number only fills a dry-run capture_lead's callback field.
+      callTokenVerified: false,
+      from: row.from_phone || null,
+      to: row.to_phone || null,
       language: null,
       sandbox: true, // always: a write tool never runs on this line
       practiceLine: true, // no transfer, explicit dry-run wording, never ends itself
-      // The attestation the signed request stamped: the conversation decides on this, and never reads the row's.
-      signedAttestation: caller.stirVerstat || null,
       send: (token) => brain.collect(token),
       endSession: () => {
         logger.info(`[voice-live-brain] end/handoff frame ignored callSid=${sid}`);

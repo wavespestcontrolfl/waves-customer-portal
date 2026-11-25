@@ -433,7 +433,15 @@ const TOOLS_WITH_ACCOUNT_DETAILS = TOOLS.map((tool) => (tool.name !== 'capture_l
   input_schema: { ...tool.input_schema, properties: { ...tool.input_schema.properties, use_account_details: USE_ACCOUNT_DETAILS_PROPERTY } },
 }));
 
-function activeTools({ officeOpen = null } = {}) {
+// ⭐ A PRACTICE LINE'S WHOLE TOOL SET (RelayConversation practiceLine: the GPT-Live trial's brain).
+// Public information and one dry-run write, and nothing that reads a customer account: it resolves no
+// caller context, so there is no matched customer, and executeTool refuses every other name before any
+// database call. No lookup_customer, no account overview, history, invoices, estimates, ETA or reports,
+// no re-service, no transfer. request_booking is out too: it needs a matched customer.
+const PRACTICE_LINE_TOOLS = Object.freeze(['get_services_catalog', 'get_pricing', 'get_availability', 'find_slots', 'capture_lead']);
+
+function activeTools({ officeOpen = null, practiceLine = false } = {}) {
+  if (practiceLine === true) return [...TOOLS, ...CONTEXT_TOOLS].filter((tool) => PRACTICE_LINE_TOOLS.includes(tool.name));
   const { isContextEnabled } = require('./relay-context');
   // PR 2A: transfer_to_office rides every tool set — it needs no account
   // context, only the gate and an OPEN office (null = unknown = closed).
@@ -783,9 +791,14 @@ function sandboxDryRunText(name, input = {}, ctx = {}, { estimateMissing = [] } 
  */
 async function executeTool(name, input = {}, ctx = {}) {
   try {
-    if (name === 'transfer_to_office' && ctx.practiceLine === true) {
-      // A practice line never transfers: refused before any handoff packet exists.
-      return 'This is a practice line and cannot transfer the call. Do NOT try again. Tell the caller the office can be called or texted directly.';
+    if (ctx.practiceLine === true) {
+      // The allowlist is the first thing a practice line meets: any other tool, however the model got its
+      // name (an account read, a lookup, a transfer, a made-up one), is refused before any database call.
+      if (!PRACTICE_LINE_TOOLS.includes(name)) {
+        return 'This is a practice line. It cannot look at accounts, visits, invoices, messages or history, '
+          + 'and it cannot transfer the call. Do NOT try again. Tell the caller to call or text the Waves office for that.';
+      }
+      if (name === 'capture_lead') input = { ...input, use_account_details: false }; // no account is ever read here
     }
     if (name === 'transfer_to_office') {
       // Gate + office state re-checked inside (fail closed); the packet is
@@ -1785,4 +1798,4 @@ async function executeTool(name, input = {}, ctx = {}) {
   }
 }
 
-module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, sandboxDryRunText, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier, ATTESTATION_ONLY_TOOLS };
+module.exports = { PRACTICE_LINE_TOOLS, TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, sandboxDryRunText, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier, ATTESTATION_ONLY_TOOLS };

@@ -694,7 +694,7 @@ async function findUniqueCustomerByAni(phone) {
  * customers. It is LOGGED here so the distribution can be measured before
  * anyone decides.
  */
-async function verifyInboundCaller({ callSid, from, sessionKey = null, sessionGeneration = null, signedIdentity = null } = {}) {
+async function verifyInboundCaller({ callSid, from, sessionKey = null, sessionGeneration = null } = {}) {
   const aniKey = aniDigitKey(from);
   if (!callSid || !aniKey) return { verified: false, reason: 'no_call_sid_or_ani' };
   try {
@@ -726,11 +726,6 @@ async function verifyInboundCaller({ callSid, from, sessionKey = null, sessionGe
     if (!(await beginRelaySessionClaim(callSid, sessionKey, sessionGeneration))) {
       return { verified: false, reason: 'call_sid_already_claimed' };
     }
-    // ⭐ A SIGNED IDENTITY REPLACES THE ROW'S ATTESTATION. A practice line (the GPT-Live trial's brain)
-    // passes the attestation its Twilio-signed cell request stamped; the row's own stir_verstat is
-    // then never read, so a webhook that rewrote it (the shared signature check can be in log or
-    // disabled mode) cannot move the decision that grants attestation-only reads.
-    if (signedIdentity && typeof signedIdentity === 'object') return { verified: true, attestation: signedIdentity.attestation || null };
     const attestation = (meta && meta.stir_verstat) || null;
     return { verified: true, attestation };
   } catch (err) {
@@ -1006,7 +1001,7 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
  * { verified, attested } — the race verdict resolveCallerContext hydrates
  * from.
  */
-function verifyRelaySession({ callSid = null, from = null, sessionKey = null, sessionGeneration = null, onVerified = null, signedIdentity = null } = {}) {
+function verifyRelaySession({ callSid = null, from = null, sessionKey = null, sessionGeneration = null, onVerified = null } = {}) {
   // Reported to the SESSION through the callback, not only returned: a caller can be verified and still
   // match no account (an unmatched-but-real caller may use lookup_customer; a
   // WS client that declared an ANI may not), and it is decided only after
@@ -1041,7 +1036,7 @@ function verifyRelaySession({ callSid = null, from = null, sessionKey = null, se
     // signature-verified /voice webhook's call_log row BEFORE any account read.
     // Bounded on its own below: a stalled call_log read or claim degrades to
     // "unknown caller", never hangs the first turn.
-    const verification = await verifyInboundCaller({ callSid, from, sessionKey, sessionGeneration, signedIdentity });
+    const verification = await verifyInboundCaller({ callSid, from, sessionKey, sessionGeneration });
     if (!verification.verified) {
       logger.info(`[voice-relay-context] caller ${maskPhone(from)} NOT verified against call_log (${verification.reason}) — treating as unknown, no account access`);
       return { verified: false };
@@ -1134,9 +1129,9 @@ function verifyRelaySession({ callSid = null, from = null, sessionKey = null, se
  * instruction is most likely to be obeyed — it is injected as a user-role data
  * turn by relay-conversation instead.
  */
-async function resolveCallerContext(from, { callSid = null, sessionKey = null, sessionGeneration = null, onVerified = null, onLateContext = null, signedIdentity = null } = {}) {
+async function resolveCallerContext(from, { callSid = null, sessionKey = null, sessionGeneration = null, onVerified = null, onLateContext = null } = {}) {
   if (!isContextEnabled()) return null;
-  const verified = verifyRelaySession({ callSid, from, sessionKey, sessionGeneration, onVerified, signedIdentity });
+  const verified = verifyRelaySession({ callSid, from, sessionKey, sessionGeneration, onVerified });
   const work = (async () => {
     const v = await verified;
     if (!v.verified) return null;
