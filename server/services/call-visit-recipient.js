@@ -145,7 +145,7 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
   if (!holder || !holder.customer_id || (customerId && String(customerId) !== String(holder.customer_id))) {
     return { ...result, skipped: [{ reason: 'customer_mismatch' }] };
   }
-  for (const entry of eligibleEntries(v2Extraction, { excludePhones: [...excludePhones, holder?.phone] })) {
+  for (const entry of eligibleEntries(v2Extraction, { excludePhones: [...excludePhones, holder.phone] })) {
     if (await disclaimedNumberHeld(entry.phoneE164, conn, { strict: true })) { result.skipped.push({ reason: 'disclaimed_number' }); continue; }
     if (await suppressedNumber(entry.phoneKey, conn)) { result.skipped.push({ reason: 'suppressed' }); continue; }
     const fresh = {
@@ -175,8 +175,7 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       return 'created';
     });
     if (outcome === 'customer_mismatch') { result.skipped.push({ reason: 'customer_mismatch' }); continue; }
-    const rows = outcome === 'created' ? [1] : [];
-    result.recorded.push({ phoneKey: entry.phoneKey, created: rows.length > 0 });
+    result.recorded.push({ phoneKey: entry.phoneKey, created: outcome === 'created' });
   }
   return result;
 }
