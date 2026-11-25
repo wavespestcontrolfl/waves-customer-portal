@@ -423,6 +423,7 @@ function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAu
       ...(dedupeWindowMs ? { dedupeWindowMs } : {}),
       ...(refreshOnDedupe ? {
         refreshOnDedupe: true,
+        ...(ringAfterQuietClose ? { refreshQuietClosed: true } : {}),
         ...(ownerAudience ? { ringOnRefresh: ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash, ringOnFirstIdentity, ringAfterQuietClose }) } : {}),
       } : {}),
     };

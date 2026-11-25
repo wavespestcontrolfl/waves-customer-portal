@@ -392,8 +392,13 @@ const RING_METADATA_KEYS = ['count', 'newCount', 'itemKeys', 'itemSetHash'];
 
 // Did this emission change anything a standing keyed row shows, routes by,
 // or rings on?
-function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged }) {
-  return versionChanged || existing.title !== nextTitle || existing.body !== nextBody
+// quietClosed (opt-in refreshQuietClosed): the quiet policy closed the standing row, so an identical
+// emission still enters the refresh branch and lets ringOnRefresh decide whether it comes back.
+// A row the quiet policy closed (done_by 'quiet-72h'), never a person's close.
+const closedByQuietPolicy = (row) => Boolean(row.done_at) && row.done_by === QUIET_FALL_OFF_DONE_BY;
+
+function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged, quietClosed = false }) {
+  return quietClosed || versionChanged || existing.title !== nextTitle || existing.body !== nextBody
     || existing.link !== nextLink || detailChanged || routingChanged || ringMetadataChanged;
 }
 
@@ -704,11 +709,13 @@ const NotificationService = {
     // and the row it gates can never observe each other's in-between state.
     // dedupeOpenOnly (optional, with dedupeKey): the dedupe probe skips rows with
     // done_at set, so a closed row never hides a new ring (see the probe below).
+    // refreshQuietClosed (optional, with refreshOnDedupe): an identical emission still reaches ringOnRefresh
+    // when the quiet policy closed the standing row; a person's Done never does.
     // bumpOnRefresh (optional, with refreshOnDedupe): a refresh that rings also
     // moves the row's created_at to now, so a standing row that keeps getting
     // newer news (one row per customer thread: "3 texts") rises to the top of
     // the newest-first bell instead of staying where its first text put it.
-    const { dedupeKey, dedupeWindowMs, dedupeOpenOnly = false, dedupeVersion, refreshOnDedupe = false, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    const { dedupeKey, dedupeWindowMs, dedupeOpenOnly = false, dedupeVersion, refreshOnDedupe = false, refreshQuietClosed = false, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
@@ -791,7 +798,7 @@ const NotificationService = {
           // Compared by JSON so an itemKeys array compares by value.
           const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
             && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(useMeta[k] ?? null));
-          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
+          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged, quietClosed: refreshQuietClosed && closedByQuietPolicy(existing) })) {
             // A row that newly enters the owner audience (engineering/fyi ->
             // owner) is news to the owner even at an equal count: it may
             // have been read in Activity, so it must ring into the bell.
