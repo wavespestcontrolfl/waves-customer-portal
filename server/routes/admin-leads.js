@@ -2341,9 +2341,11 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       await assertAssignableTechnician(technicianId || null, { conn: trx, date: String(date).slice(0, 10) });
       // Work days (GATE_TECH_WORK_DAYS): an office booking onto a day the
       // technician does not work still saves; the response warns.
-      if (technicianId && require('../config/feature-gates').techWorkDaysLive()) {
-        bookingWarnings.push(...await require('../services/technician-eligibility').offDayWarningsFor(technicianId, [String(date).slice(0, 10)], { conn: trx }));
-      }
+      // Shift hours (GATE_TECH_SHIFT_HOURS): on a day the technician works, the same
+      // read says when the shift does not hold the visit (dayWarningsFor).
+      bookingWarnings.push(...await require('../services/technician-eligibility').dayWarningsFor(technicianId, [String(date).slice(0, 10)], {
+        conn: trx, block: { window_start: windowStart, window_end: windowEnd, estimated_duration_minutes: duration },
+      }));
       // Job type (GATE_TECH_JOB_TYPE_CHECKS): the technician is set to Off for this service's
       // category. Advisory, never a block ([] with the gate off).
       if (technicianId) {

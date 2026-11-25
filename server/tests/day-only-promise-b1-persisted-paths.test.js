@@ -211,6 +211,7 @@ describe('persist and replay paths are accounted for', () => {
   // appointment purpose is a persist path. A new one fails here until it is listed with its decision.
   const KNOWN = {
     'services/appointment-reminders.js': 'WRITER: queueHeldNoticeContacts stores promiseMetaOf(metaExtra); the scheduler replay applies promiseMetaOf(claimMeta)',
+    'services/call-visit-recipient.js': 'WRITER: queueDeferred stores the visit-only text\'s day promise (the same marker as the holder\'s text); the scheduler replay applies promiseMetaOf(claimMeta) and the registry rechecks it with dayPromiseStillValid',
     'services/scheduler.js': 'REPLAY: the one reader of those rows; spreads promiseMetaOf(claimMeta) into the replayed send',
     'services/call-recording-processor.js': 'NO CHANGE: the AI call agent\'s booking confirmation is the customer\'s own pick, never day-only',
     'services/recipient-optin.js': 'NO CHANGE: the opt-in ask promises no visit time',

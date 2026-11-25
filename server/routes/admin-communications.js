@@ -1246,6 +1246,7 @@ async function sendSmsHandler(req, res, next) {
             checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id }),
+            checks.followupProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
             checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody }),
             // Bar only (undefined, and filtered out, for the composer): the customer has not texted again since the card.
             barPins ? async ({ dbi } = {}) => (await require('../services/sms-suggest-mode')

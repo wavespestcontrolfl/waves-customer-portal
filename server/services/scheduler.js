@@ -6080,9 +6080,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // TUESDAYS 9:40AM — Stale-rule check (owner request 2026-11-24). Reads the last 30 days of admin
+  // TUESDAYS 9:40AM — Stale-rule check (owner request 2026-11-24). Reads the last 60 days of admin
   // bells that say the system held an action for a person, and rings ONE bell a week (key = ISO week)
-  // when a held action was closed by hand 3+ times: the rule behind it may be out of date. No bell
+  // when a held action was handled by hand in at least half of 3+ bells: the rule behind it may be out of date. No bell
   // when nothing is flagged. Read-only: sends nothing to a customer, writes one admin notification
   // row. No GATE_* (owner rule 2026-11-05).
   // =========================================================================
@@ -6774,17 +6774,27 @@ function initScheduledJobs() {
               try {
                 // Scoped to drafts that recorded an escalation (Codex r5):
                 // wording alone never blocks a scheduled reply.
-                const { followupPromiseBlockReason, slaDraftedAt } = require('./sms-followup-sla');
+                const { followupPromiseBlockReason, slaDraftedAt, replyPromisesFollowup, loadFollowupClosedDates } = require('./sms-followup-sla');
+                // the phrase can name the next open day when Waves is closed: read the closed days only for a body that carries one
+                const slaClosedDates = replyPromisesFollowup(msg.message_body) ? await loadFollowupClosedDates(new Date()) : null;
                 const slaDecision = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
                   .first('input_snapshot', 'prompt_version', 'suggested_message', 'created_at');
-                if (followupPromiseBlockReason({
+                const slaReason = followupPromiseBlockReason({
+                  closedDates: slaClosedDates,
                   inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version,
                   originalBody: slaDecision?.suggested_message ?? null, body: msg.message_body,
                   // Codex #5194 P2: the drafter's own facts-generated instant
                   // when the decision carries one, else created_at.
                   draftedAt: slaDraftedAt(slaDecision),
-                })) slaStale = true;
+                });
+                // The closed days could not be read just now: says nothing about the message (same as the open-loop and ETA legs):
+                // do not retire it. The provider-boundary follow-up check re-reads and, if still unreadable, refuses retryably.
+                if (slaReason === 'closed_days_unreadable') {
+                  logger.warn(`[scheduled-sms] ${msg.id} closed days unreadable for the follow-up promise; deferring to the provider-boundary check`);
+                } else if (slaReason) {
+                  slaStale = true;
+                }
               } catch (err) {
                 logger.warn(`[scheduler] SLA phrase revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
                 slaStale = true;
@@ -7178,6 +7188,11 @@ function initScheduledJobs() {
               // and the lane stamped at enqueue ride along in metadata for
               // the owner autopay digest to classify the send.
               ...(claimMeta.entry_point ? { original_entry_point: String(claimMeta.entry_point) } : {}),
+              // A held visit-only text (call-visit-recipient.js) keeps the visit and the role it was written for, so a bounce of the
+              // replay is recognised as that person's and never recovered by emailing the account holder.
+              ...(claimMeta.entry_point === 'visit_text_recipient_deferred'
+                ? { appointment_contact_role: String(claimMeta.appointment_contact_role || ''), scheduled_service_id: claimMeta.scheduled_service_id }
+                : {}),
               // The queued invoice notice's trusted dispute-hold exemption (an operator's send, the
               // customer's own accept) rides into the replay's stored Email context.
               ...(claimMeta.entry_point === 'invoice_send_deferred' && ['operator', 'customer'].includes(claimMeta.hold_exempt)
@@ -7222,7 +7237,7 @@ function initScheduledJobs() {
           // check also runs as the replay's providerPreSendCheck (twilio.js, immediately before
           // its request), composed AFTER any predicate the entry point registered.
           if (claimMeta.agent_decision_id) {
-            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, followupProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
             replayInput.providerPreSendCheck = composeProviderPreSendChecks(
               replayInput.providerPreSendCheck,
               etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
@@ -7230,6 +7245,8 @@ function initScheduledJobs() {
               labelFactsProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
               // open-loop facts (PR #5499) at the same boundary
               openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id }),
+              // the follow-up promise against the closed days as they are now: an unreadable read refuses retryably
+              followupProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
               // BILLING at the same boundary (Codex round-50 P1): the rows the amount recheck judged are unchanged, and a Zelle offer's
               // invoice has no card / bank payment in flight
               billingBoundary

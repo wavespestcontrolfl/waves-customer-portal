@@ -243,7 +243,7 @@ describe('pay run with pay lines', () => {
     const table = await openRun();
     expect(within(table).getByText('Bonus, commission, allowance')).toBeInTheDocument();
     expect(within(table).getByText('$76.15')).toBeInTheDocument();
-    expect(within(table).getByText('Overtime on those')).toBeInTheDocument();
+    expect(within(table).getByText('Overtime on additional earnings')).toBeInTheDocument();
     expect(within(table).getByText('$1.81')).toBeInTheDocument();
     expect(within(table).getByText('HSA from Waves')).toBeInTheDocument();
     expect(within(table).getByText('$200.00')).toBeInTheDocument();
@@ -285,7 +285,7 @@ describe('pay run with pay lines', () => {
     const amounts = within(stub.getByRole('table', { name: 'Pay stub amounts' }));
     expect(amounts.getByText('Review bonus')).toBeInTheDocument();
     expect(amounts.getByText('Health allowance')).toBeInTheDocument();
-    expect(amounts.getByText('Overtime on bonus, commission and allowance')).toBeInTheDocument();
+    expect(amounts.getByText('Overtime on additional earnings')).toBeInTheDocument();
     expect(amounts.queryByText('Commission')).toBeNull();
     expect(stub.getByText('Employer contributions')).toBeInTheDocument();
     expect(stub.getByText('HSA from Waves (not part of gross pay or taxes)')).toBeInTheDocument();

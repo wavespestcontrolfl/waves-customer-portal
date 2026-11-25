@@ -1,6 +1,6 @@
 /**
  * Tech Rewards yearly pay statement (Plan D5-6, owner ruling 2026-11-20). One technician's pay for one calendar year,
- * read only: wages, commission, review pay, the health allowance, the season bonus, stay bonus and December gift, Waves'
+ * read only: wages, commission, review pay, the health allowance, the production share, the season bonus, stay bonus and December gift, Waves'
  * own money on top of pay (its 2% SIMPLE IRA contribution and the HSA money, as each paycheck stored them; the deposits
  * themselves are not recorded in the portal), the taxes withheld, the technician's own SIMPLE IRA savings and net pay.
  * It writes nothing: no pay line, no pay run row, no message.
@@ -110,6 +110,10 @@ function composeStatement({ technician, year, currentYear, sums, rewards = {}, y
     commissionCents: cents(sums.commission),
     reviewBonusCents: cents(sums.reviewBonus),
     healthAllowanceCents: cents(sums.healthAllowance),
+    // The weekly production share (GATE_PAYROLL_PRODUCTION_SHARE): one stored figure on each check that has settings behind it.
+    // The row is there only when a check of the year stored one (a stored 0 shows 0); a year of checks made with the gate off
+    // keeps exactly its earlier keys.
+    ...(sums.productionShare == null ? {} : { productionShareCents: cents(sums.productionShare) }),
     ...Object.fromEntries(Object.entries(REWARD_ROWS).map(([kind, key]) => [key, cents(rewards[kind])])),
     lineOvertimePremiumCents: cents(sums.lineOvertimePremium),
   };
@@ -153,6 +157,8 @@ async function readStatement(conn, technicianId, year, currentYear) {
     conn.raw(`to_char(MIN(c.pay_date), 'YYYY-MM-DD') AS "firstPayDate"`),
     conn.raw(`to_char(MAX(c.pay_date), 'YYYY-MM-DD') AS "lastPayDate"`),
     ...Object.entries(CHECK_SUMS).map(([column, name]) => conn.raw('COALESCE(SUM(c.??), 0) AS ??', [column, name])),
+    // No COALESCE: null = no check of the year stored a production share figure.
+    conn.raw('SUM(c.production_share_cents) AS "productionShare"'),
   );
   const rewardChecks = await inYear(finalChecks(conn, technicianId), year)
     .where('c.tech_rewards_cents', '>', 0)

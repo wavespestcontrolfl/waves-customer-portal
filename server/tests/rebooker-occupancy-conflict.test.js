@@ -353,15 +353,106 @@ describe('reschedule — shared occupancy conflict gate', () => {
         expect(trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
       });
 
-      test('gate on, the office\'s own move outside the shift commits: no shift read, no extra pin', async () => {
+      // D4 part 3c: the office decides, and is told. The line is the answer's warning. The write pins the
+      // technician and the stored length the line was about (both from the unlocked first read), so the
+      // line is about the row the move wrote.
+      test('gate on, the office\'s own move outside the shift commits and is told the shift; the write pins the technician and the length it was told about', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
-        const { trx, trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
-        expect(await SmartRebooker.reschedule(
+        const { trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
+        const result = await SmartRebooker.reschedule(
           'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true },
-        )).toMatchObject({ success: true });
-        expect(reads(trx, 'time_entries')).toBe(false);
+        );
+        expect(result).toMatchObject({ success: true, warnings: ["Tech's shift is 8:00 AM to 10:00 AM. This visit is outside those hours."] });
+        expect(trxScheduled.update).toHaveBeenCalled();
+        expect(trxScheduled.where).toHaveBeenCalledWith({ technician_id: 'tech-1' });
+        expect(trxScheduled.where).toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
+      });
+
+      // On main the office's own move on the same day and technician asks nothing. With the gate on it is
+      // told when the new hours are outside the shift, and its write pins what the line was about.
+      test('gate on, the office\'s own move that changes only the hours is told the shift, and the write pins the technician and the length', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const officeHours = (techShift) => {
+          const wired = wireRescheduleMocks(service(tech), { techShift });
+          return SmartRebooker.reschedule('svc-1', BASE, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true })
+            .then((result) => ({ result, ...wired }));
+        };
+        const outside = await officeHours(['08:00', '12:00']);
+        expect(outside.result).toMatchObject({ success: true, warnings: ["Tech's shift is 8:00 AM to 12:00 PM. This visit is outside those hours."] });
+        expect(outside.trxScheduled.where).toHaveBeenCalledWith({ technician_id: 'tech-1' });
+        expect(outside.trxScheduled.where).toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
+        const inside = await officeHours(['08:00', '16:00']);
+        expect(inside.result.success).toBe(true);
+        expect(inside.result.warnings).toBeUndefined();
+      });
+
+      test('gate on, the office\'s own hours-only move is told the shift alone: a technician marked out is not refused, and a day off gives no line', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        try {
+          const baseDow = new Date(`${BASE}T12:00:00Z`).getUTCDay();
+          const markedOut = { techShift: ['08:00', '12:00'], absentTechRow: { id: 'absence-1' } };
+          const officeHours = () => SmartRebooker.reschedule('svc-1', BASE, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true });
+          const { trx } = wireRescheduleMocks(service(tech), markedOut);
+          expect((await officeHours()).warnings).toEqual(["Tech's shift is 8:00 AM to 12:00 PM. This visit is outside those hours."]);
+          expect(reads(trx, 'technician_absences')).toBe(false);
+          // The visit is on a day the technician does not work: the office put it there and was told then.
+          wireRescheduleMocks(service(tech), { ...markedOut, techWorkDays: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== baseDow) });
+          const offDay = await officeHours();
+          expect(offDay.success).toBe(true);
+          expect(offDay.warnings).toBeUndefined();
+        } finally {
+          delete process.env.GATE_TECH_WORK_DAYS;
+        }
+      });
+
+      test('gate off, the office\'s own hours-only move reads nothing about the technician and pins nothing more', async () => {
+        const { trx, trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '12:00'] });
+        const result = await SmartRebooker.reschedule('svc-1', BASE, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true });
+        expect(result.success).toBe(true);
+        expect(result.warnings).toBeUndefined();
+        expect(reads(trx, 'technicians')).toBe(false);
         expect(trxScheduled.where).not.toHaveBeenCalledWith({ technician_id: 'tech-1' });
         expect(trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
+      });
+
+      test('gate on, the office\'s own move: the new hours and the stored length are what the shift is asked about', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // 13:00 to 13:30 with a stored 45 minutes ends at 13:45: a shift to 13:30 does not hold it, one to 13:45 does.
+        const office = (techShift) => {
+          wireRescheduleMocks(service(tech), { techShift });
+          return SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '13:30' }, 'admin', 'admin', { overlapAdvisory: true });
+        };
+        expect((await office(['08:00', '13:30'])).warnings).toEqual(["Tech's shift is 8:00 AM to 1:30 PM. This visit is outside those hours."]);
+        expect((await office(['08:00', '13:45'])).warnings).toBeUndefined();
+        expect((await office(['13:01', '18:00'])).warnings).toEqual(["Tech's shift is 1:01 PM to 6:00 PM. This visit is outside those hours."]);
+        expect((await office(null)).warnings).toBeUndefined();
+      });
+
+      test('gate off, the office\'s own move outside the set hours: no line, and the hours are not read', async () => {
+        const { trx } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
+        const result = await SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true },
+        );
+        expect(result.success).toBe(true);
+        expect(result.warnings).toBeUndefined();
+        expect(reads(trx, 'time_entries')).toBe(false);
+      });
+
+      test('both gates on, the office\'s own move onto a day off outside the shift: the day-off line alone', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        try {
+          const targetDow = new Date(`${TARGET}T12:00:00Z`).getUTCDay();
+          wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'], techWorkDays: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== targetDow) });
+          const result = await SmartRebooker.reschedule(
+            'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true },
+          );
+          expect(result.warnings).toHaveLength(1);
+          expect(result.warnings[0]).toMatch(/^Tech does not work on \w+days\.$/);
+        } finally {
+          delete process.env.GATE_TECH_WORK_DAYS;
+        }
       });
 
       // A visit group moves each member through reschedule (skipVisitSeam) and judges the group as one unit.
@@ -374,6 +465,48 @@ describe('reschedule — shared occupancy conflict gate', () => {
         expect(reads(trx, 'time_entries')).toBe(false);
         expect(trxScheduled.where).not.toHaveBeenCalledWith({ technician_id: 'tech-1' });
         expect(trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
+      });
+
+      // The unit's move may hand the member to another technician after this call, so the shift is not this call's to state.
+      test('gate on, the office\'s own move of a visit group\'s member is not told the shift here, and the hours are not read', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const { trx } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
+        const result = await SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true },
+        );
+        expect(result.success).toBe(true);
+        expect(result.warnings).toBeUndefined();
+        expect(reads(trx, 'time_entries')).toBe(false);
+        // The member's hours-only move: nothing is asked about the technician, as on main.
+        const hoursOnly = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
+        const sameDay = await SmartRebooker.reschedule(
+          'svc-1', BASE, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true },
+        );
+        expect(sameDay.warnings).toBeUndefined();
+        expect(reads(hoursOnly.trx, 'technicians')).toBe(false);
+      });
+
+      // With the shift gate on the unit tells the office once every write is done, from the rows the move leaves
+      // (visit-groups unitOfficeLines), so the member's own move states no line. Gate off: its day-off line, as before.
+      test('the office\'s own move of a visit group\'s member onto a day off: no line with the shift gate on, the day-off line with it off', async () => {
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        try {
+          const targetDow = new Date(`${TARGET}T12:00:00Z`).getUTCDay();
+          const dayOff = { techShift: ['08:00', '10:00'], techWorkDays: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== targetDow) };
+          const member = () => SmartRebooker.reschedule(
+            'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true },
+          );
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          wireRescheduleMocks(service(tech), dayOff);
+          expect(await member()).toMatchObject({ success: true });
+          wireRescheduleMocks(service(tech), dayOff);
+          expect((await member()).warnings).toBeUndefined();
+          delete process.env.GATE_TECH_SHIFT_HOURS;
+          wireRescheduleMocks(service(tech), dayOff);
+          expect((await member()).warnings).toEqual([expect.stringMatching(/^Tech does not work on \w+days\.$/)]);
+        } finally {
+          delete process.env.GATE_TECH_WORK_DAYS;
+        }
       });
 
       test('gate off: a non-admin move outside the set hours commits as before, an hours-only move reads nothing, and neither pins more', async () => {

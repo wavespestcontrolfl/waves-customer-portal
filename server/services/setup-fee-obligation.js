@@ -466,6 +466,13 @@ function settledLineCents(li) {
   return Number.isFinite(amt) ? Math.round(amt * 100) : null;
 }
 
+// Whether an invoice carries a WaveGuard setup or membership fee line of any amount, a $0 waiver included
+// (settledFeeLineName: description or category; never a bait-station setup), whatever its status. The bell's Bill and
+// send reads drafts with it.
+function carriesWaveguardFeeLine(row) {
+  return invoiceLineItems(row).some((li) => settledFeeLineName(li));
+}
+
 async function settledVisitDate(conn, visitId) {
   if (!visitId) return null;
   const row = await conn('scheduled_services').where({ id: visitId }).first('scheduled_date');
@@ -885,6 +892,7 @@ module.exports = {
   officeParkedSetupFeeSeries,
   findUnmintedSetupFeeObligation,
   setupFeeSettledElsewhere,
+  carriesWaveguardFeeLine,
   partialElsewhereCents,
   settledVisitDate,
   parkSetupFeeStampForOffice,

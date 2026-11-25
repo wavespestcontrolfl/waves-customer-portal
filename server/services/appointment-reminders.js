@@ -842,7 +842,57 @@ function cancellationNoticeReport(noticeSent, emailed) {
 // blockedCode and leave their row unmarked so the next cron tick re-decides
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null, dayState }) {
+// GATE_CALL_GIVEN_VISIT_TEXTS (owner 2026-11-24, "yes, visit only"): a person the caller named on the call that booked THIS
+// visit gets this visit's confirmation and 72 h / 24 h reminders, and nothing else, whatever channel the account holder
+// chose (a holder on email still has the person texted). Dispatched ONCE per notice from here, after the holder's own
+// delivery, with its own entry checks and its own outcome: the holder's result below is never changed by it. Entry rule
+// as for the account contacts: no account contact at all, or a callback-number hold on the visit, sends nothing.
+// call-visit-recipient.js decides who is owed the text, writes its informational copy (no reschedule or tracker link,
+// the same day-only promise as the holder's), honors their existing declines and the send window, and persists a held
+// text; no customer, slot, consent stamp or opt-in row is written. Never throws.
+async function dispatchVisitOnlyLeg({ kind, customerId, scheduledServiceId, dayOnly, stillOwnsClaim, servedPhones = [] }) {
+  const visitRecipients = require('./call-visit-recipient');
+  const recipientKind = visitRecipients.gateLive() && scheduledServiceId ? visitRecipients.kindForNotice(kind) : null;
+  if (!recipientKind) return;
+  try {
+    if (stillOwnsClaim && !(await stillOwnsClaim())) return;
+    const { customer } = await getCustomerAndTech(customerId, null);
+    // A customer with no preferences row is on the defaults, as for every other transactional sender; only an UNREADABLE row holds.
+    const prefs = (await visitPrefsRow(customerId, scheduledServiceId)) ?? {};
+    if (!customer || prefs === PREFS_UNAVAILABLE || prefs.__prefsUnavailable === true) return;
+    if (await callbackNumberHoldActiveForVisit({ scheduledServiceId })) return;
+    const { contacts } = await resolveNoticeContacts(customer, prefs, visitRecipients.messageTypeFor(recipientKind), visitRecipients.purposeFor(recipientKind));
+    if (!contacts.length) return;
+    await visitRecipients.notifyVisitRecipients({
+      scheduledServiceId,
+      kind: recipientKind,
+      // Only the numbers the notice really TEXTED: a holder on email, or a contact whose text was held or failed, is not covered.
+      excludePhones: servedPhones,
+      dayOnly: dayOnly === true,
+      // A confirmation another sender already logged to this number (the call pipeline's own contact fan-out) is not sent twice.
+      ...(recipientKind === 'confirmation'
+        ? { gate: async (contact) => ((await confirmationLoggedForVisitPhone({ scheduledServiceId, phone: contact.phone }).catch(() => false)) ? 'skip' : 'send') }
+        : {}),
+    });
+  } catch (err) {
+    logger.warn(`[appt-remind] visit-only ${kind} for visit ${scheduledServiceId} skipped: ${err.code || err.name || 'error'}`);
+  }
+}
+
+async function deliverAppointmentNotice(args) {
+  const reached = await deliverHolderNotice(args);
+  await dispatchVisitOnlyLeg({
+    kind: args.kind,
+    customerId: args.customerId,
+    scheduledServiceId: args.scheduledServiceId,
+    dayOnly: args.dayState?.dayOnly,
+    stillOwnsClaim: args.stillOwnsClaim,
+    servedPhones: args.smsOutcome?.servedPhones,
+  });
+  return reached;
+}
+
+async function deliverHolderNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null, dayState }) {
   // LAST-moment unit-move hold check, at the one chokepoint every
   // confirmation/72h/24h leg passes — inline creation confirmations
   // included (codex #3609 r30 P1): a grouped move stamped after a caller's
@@ -1124,6 +1174,10 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   if (channel === 'sms' || channel === 'push' || !confirmationOn) {
     if (!(await visitStillLive())) return false;
     const smsOk = await smsAttempt();
+    // The default-channel booking confirmation (the call pipeline's) does not pass deliverAppointmentNotice: the
+    // visit-only leg is dispatched here, once, after the holder's own send. The call pipeline's own texts to the
+    // account contacts are not tracked here, so the confirmation log (dispatchVisitOnlyLeg) keeps it from a repeat.
+    await dispatchVisitOnlyLeg({ kind: 'confirmation', customerId, scheduledServiceId, dayOnly: false, stillOwnsClaim });
     if (smsOk || !smsPermanentlyBlocked || !confirmationOn || !prefsKnown) return smsOk;
     // Consent-blocked text on the default channel: reach them by email.
     // deliverAppointmentEmailFallback raises the no-channel human alert
@@ -2551,6 +2605,8 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // a caller that finalizes on acceptance (handleCancellation) reads it to report a partial delivery. Contacts held
   // for a later send (quiet hours queue, move-hold office hand-off) have their own rail and are not listed.
   sharedOutcome.failedRecipients = [];
+  // The numbers this fan-out really texted (accepted by the provider): the visit-only leg skips exactly these.
+  sharedOutcome.servedPhones = [];
   // Only the holder can use App. Resolve that leg before accepting any
   // contact text, so a pending push can leave the whole reminder open.
   const primaryPhone = lastTenDigits(customer.phone);
@@ -2603,6 +2659,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       continue;
     }
     recordFailedRecipient(sharedOutcome, contact, sent, { heldIsFailure: sendOptions.noDeferredQueue === true });
+    if (sent) sharedOutcome.servedPhones.push(contact.phone);
     sentAny = sentAny || sent;
   }
   if (sentAny && moveHeldRoles.length) {
@@ -2619,7 +2676,8 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // callers' own defer/skip paths re-fire the whole notice, so queueing
   // here too would double-text — rows are queued only on partial success.
   if (sentAny && heldContacts.length) {
-    await queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra });
+    // A contact whose held text was QUEUED is served too: the visit-only leg must not text the same number again.
+    sharedOutcome.servedPhones.push(...(await queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra })));
   }
   return sentAny;
 }
@@ -2635,7 +2693,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
 async function queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra }) {
   if (purpose === 'appointment_reminder_24h') {
     logger.info(`[appt-remind] ${heldContacts.length} held 24h-reminder contact(s) for customer ${customer.id} SKIPPED — an 8AM replay would land on the visit's own day`);
-    return;
+    return [];
   }
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
   // Which visit state the notice DESCRIBES (codex r22). A confirmation or
@@ -2686,6 +2744,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
       logger.warn(`[appt-remind] slot snapshot read failed for ${metaExtra.scheduled_service_id} — queueing without one: ${slotErr.message}`);
     }
   }
+  const queuedPhones = [];
   for (const held of heldContacts) {
     const heldRow = {
       customer_id: customer.id,
@@ -2733,6 +2792,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
     }
     if (queued) {
       logger.info(`[appt-remind] ${messageType} to ${held.contact.role || 'contact'} held outside the 8AM-8PM ET send window — queued for ${held.nextAllowedAt}`);
+      queuedPhones.push(held.contact.phone);
       continue;
     }
     logger.error(`[appt-remind] held ${messageType} requeue failed for ${held.contact.role || 'contact'} (customer ${customer.id}) after 3 attempts: ${lastErr?.message}`);
@@ -2757,6 +2817,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
       logger.error(`[appt-remind] held-notice exception alert failed for customer ${customer.id}: ${notifyErr.message}`);
     }
   }
+  return queuedPhones;
 }
 
 // ── Get customer + tech info ──
@@ -5587,6 +5648,9 @@ const AppointmentReminders = {
       if (!customer) return;
 
       const scheduledServiceId = audit.metadata?.scheduled_service_id || null;
+      // A bounce of a visit-only recipient's text (call-visit-recipient.js) is that person's, never the holder's: no
+      // landline cache, no account email, no alert.
+      if (audit.metadata?.appointment_contact_role === require('./call-visit-recipient').ROLE) return;
       const primaryDigits = lastTenDigits(customer.phone);
       const targetDigits = lastTenDigits(to);
 

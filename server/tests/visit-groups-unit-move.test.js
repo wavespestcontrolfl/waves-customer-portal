@@ -1320,6 +1320,158 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       expect((await unit(fakeRebooker(), undefined)).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
     });
 
+    // The rows are the visit's rows as the mover reads them FOR UPDATE to retarget the visit, after every write (unitOfficeLines).
+    describe('the office\'s own move is told from the rows it leaves (D4 part 3c)', () => {
+      const LINE = "Tech's shift is 8:00 AM to 12:00 PM. This visit is outside those hours.";
+      const left = (id, over = {}) => ({ id, technician_id: 't1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 45, ...over });
+      const pairLeft = (a = {}, b = {}) => [left('a', a), left('b', { window_start: '14:00', window_end: '15:00', ...b })];
+      const stop = (rows) => script({ members: pair(), landed: rows });
+      const refuse = (...ids) => assignDispatchJob.mockImplementation(async ({ jobId }) => {
+        if (ids.includes(jobId)) throw Object.assign(new Error('refused'), { statusCode: 409, isOperational: true });
+        return { changed: true };
+      });
+      let dayWarningFor;
+      const asked = () => dayWarningFor.mock.calls.map((c) => [c[0], c[1], c[2].shiftOnly]);
+      beforeEach(() => { dayWarningFor = jest.spyOn(eligibility, 'dayWarningFor').mockResolvedValue(LINE); });
+      afterEach(() => { dayWarningFor.mockRestore(); assignDispatchJob.mockResolvedValue({ changed: true }); });
+
+      test('each moved member is asked once, about its row as the mover read it under its lock; a line two members state comes back once, after the members\' other lines', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const rows = pairLeft({}, { estimated_duration_minutes: 90 });
+        db.__script = stop(rows);
+        const out = await unit(fakeRebooker({ a: { warnings: ['x'] }, b: { warnings: ['x'] } }), '13:00-14:00', 'admin');
+        expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(out.warnings).toEqual(['x', 'x', LINE]);
+        // The stop changed day (08-30 to 09-02): the day-off line or the shift line, on the stored length too.
+        expect(dayWarningFor.mock.calls).toEqual([
+          ['t1', '2026-09-02', { block: rows[0], shiftOnly: false }],
+          ['t1', '2026-09-02', { block: rows[1], shiftOnly: false }],
+        ]);
+        // That read is the retarget's own locked read of the visit's rows; it carries the stored length.
+        const has = (c, op) => c.ops.some((o) => o[0] === op);
+        const locked = db.__calls.filter((c) => c.table === 'scheduled_services' && c.op === 'select' && has(c, 'orderBy') && has(c, 'forUpdate'));
+        expect(locked.map((c) => c.cols)).toEqual([['id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'estimated_duration_minutes']]);
+      });
+
+      test('the technician is the one the row has: the named one where the assignment was written, the one who keeps the member where it was refused', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        refuse('a');
+        db.__script = stop(pairLeft({}, { technician_id: 't9' }));
+        dayWarningFor.mockImplementation(async (technicianId) => `a line about ${technicianId}`);
+        const out = await unit(fakeRebooker(), '13:00-14:00', 'admin', { technicianId: 't9' });
+        expect(out.visitMove.failed.map((x) => x.id)).toEqual(['a']);
+        expect(out.warnings).toEqual([expect.stringContaining('technician reassignment failed'), 'a line about t1', 'a line about t9']);
+        expect(asked()).toEqual([['t1', '2026-09-02', false], ['t9', '2026-09-02', false]]);
+      });
+
+      // The single mover's answer is lost when a member's own move throws after its commit; the row is asked all the same.
+      test('a member whose own move failed after its commit is asked all the same', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const base = stop(pairLeft());
+        const landedAt = { scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', visit_id: 'v1', technician_id: 't1' };
+        const first = (ops, cols) => (cols.includes('visit_id') && cols.includes('window_start') ? landedAt : null);
+        db.__script = { ...base, scheduled_services: { ...base.scheduled_services, first } };
+        const out = await unit(fakeRebooker({ a: 'throw' }), '13:00-14:00', 'admin');
+        expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(out.warnings).toEqual([expect.stringContaining('post-move cleanup failed'), LINE]);
+        expect(asked()).toEqual([['t1', '2026-09-02', false], ['t1', '2026-09-02', false]]);
+      });
+
+      describe('a stop that keeps its day', () => {
+        const DAY = '2026-08-30';
+        const sameDay = (newWindow, options = {}) => moveVisitAsUnit({
+          rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: DAY, newWindow, reason: 'office', initiatedBy: 'admin', options,
+        });
+
+        test('new hours: each member is asked the shift alone', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          db.__script = stop(pairLeft({ scheduled_date: DAY }, { scheduled_date: DAY }));
+          expect((await sameDay('13:00-14:00')).warnings).toEqual([LINE]);
+          expect(asked()).toEqual([['t1', DAY, true], ['t1', DAY, true]]);
+        });
+
+        test('another technician, the hours kept: the full line where the assignment was written; a member whose assignment was refused has the day, hours and technician it had, and is not asked', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          refuse('b');
+          db.__script = stop(pairLeft({ scheduled_date: DAY, technician_id: 't9', window_start: '09:00', window_end: '10:00' }, { scheduled_date: DAY, window_start: '10:00', window_end: '11:00' }));
+          const out = await sameDay('09:00-10:00', { technicianId: 't9' });
+          expect(out.visitMove.failed.map((x) => x.id)).toEqual(['b']);
+          expect(asked()).toEqual([['t9', DAY, false]]);
+          expect(out.warnings).toEqual([expect.stringContaining('technician reassignment failed'), LINE]);
+        });
+
+        // memberOfficeLine(row, target): `expect` and `plannedMinutes` are the row as the plan read it. The blocks are compared as a shift reads them.
+        test('the block is the hours and the stored length: an end the member\'s own move derived is no change, a later end is', async () => {
+          const { memberOfficeLine } = vg._test;
+          const plan = { scheduled_date: DAY, technician_id: 't1', window_start: '09:00:00', window_end: '10:00:00' };
+          const ask = async (row, expect = plan, plannedMinutes = 60) => { dayWarningFor.mockClear(); return [await memberOfficeLine(row, { expect, plannedMinutes }), asked()]; };
+          const row = left('a', { scheduled_date: DAY, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 });
+          expect(await ask(row)).toEqual([undefined, []]);
+          expect(await ask({ ...row, window_end: '10:30' })).toEqual([LINE, [['t1', DAY, true]]]);
+          expect(await ask({ ...row, window_start: '09:30', window_end: '10:30' })).toEqual([LINE, [['t1', DAY, true]]]);
+          // An earlier start with the end kept (30 minutes stored: the block ends at 10:00 both times).
+          expect(await ask({ ...row, window_start: '08:30', estimated_duration_minutes: 30 }, plan, 30)).toEqual([LINE, [['t1', DAY, true]]]);
+          // A stored length that runs past the end both times: the same block.
+          expect(await ask({ ...row, estimated_duration_minutes: 240 }, plan, 240)).toEqual([undefined, []]);
+          // The office set the end to 11:00, and another editor made the length 120 minutes after the plan: the block
+          // the member had ends at 10:00 (the 60 minutes the plan read), so it changed.
+          expect(await ask({ ...row, window_end: '11:00', estimated_duration_minutes: 120 })).toEqual([LINE, [['t1', DAY, true]]]);
+          // The plan read no end. The end the member's own move derived from the 60 minutes is no change; an end the office set later is.
+          const open = { ...plan, window_end: null };
+          expect(await ask(row, open)).toEqual([undefined, []]);
+          expect(await ask({ ...row, window_end: '11:00' }, open)).toEqual([LINE, [['t1', DAY, true]]]);
+          // A row the mover did not read, and a row with no technician, are not asked.
+          expect(await ask(undefined)).toEqual([undefined, []]);
+          expect(await ask({ ...row, technician_id: null, window_end: '11:00' })).toEqual([undefined, []]);
+        });
+      });
+
+      test('a member that did not move, one another editor moved again before the visit was retargeted, and one with no technician are not asked', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // b's own move fails: it is not in `moved`, though the visit's rows hold it.
+        db.__script = stop(pairLeft({ technician_id: null }));
+        const out = await unit(fakeRebooker({ b: 'throw' }), '13:00-14:00', 'admin');
+        expect(out.visitMove).toMatchObject({ moved: ['a'], failed: [expect.objectContaining({ id: 'b' })] });
+        expect(dayWarningFor).not.toHaveBeenCalled();
+        expect(out.warnings).toEqual([expect.stringContaining('did not move with this stop')]);
+        // b moved, and then sits at 16:00 on another technician under the retarget's lock: that row is another editor's.
+        db.__script = stop(pairLeft({}, { window_start: '16:00', window_end: '17:00', technician_id: 't9' }));
+        const diverged = await unit(fakeRebooker(), '13:00-14:00', 'admin');
+        expect(diverged.visitMove).toMatchObject({ moved: ['a'], failed: [expect.objectContaining({ id: 'b', code: 'VISIT_MEMBER_DIVERGED' })] });
+        expect(asked()).toEqual([['t1', '2026-09-02', false]]);
+        // The same, for a member whose assignment was refused (the mover does not test that one for divergence): b moved
+        // to 14:00, stayed on t1, and another editor then put it at 16:00.
+        dayWarningFor.mockClear();
+        refuse('b');
+        db.__script = stop(pairLeft({ technician_id: 't9' }, { window_start: '16:00', window_end: '17:00' }));
+        const refused = await unit(fakeRebooker(), '13:00-14:00', 'admin', { technicianId: 't9' });
+        expect(refused.visitMove.failed.map((x) => x.id)).toEqual(['b']);
+        expect(asked()).toEqual([['t9', '2026-09-02', false]]);
+      });
+
+      test('a line that cannot be read is logged; the move is committed and is not failed for a line', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        db.__script = stop(pairLeft());
+        dayWarningFor.mockRejectedValue(new Error('read failed'));
+        const out = await unit(fakeRebooker(), '13:00-14:00', 'admin');
+        expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(out.warnings).toBeUndefined();
+        expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('the office line of moved member a was not read: read failed'));
+      });
+
+      test('gate off, or a move the office did not start: nobody is asked; the members\' own lines come back as they are', async () => {
+        const lines = () => fakeRebooker({ a: { warnings: [LINE] }, b: { warnings: [LINE] } });
+        db.__script = stop(pairLeft());
+        expect((await unit(lines(), '13:00-14:00', 'admin')).warnings).toEqual([LINE, LINE]);
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        db.__script = stop(landed('10:00', '11:00'));
+        expect((await unit(lines(), '10:00-11:00', 'tech')).warnings).toEqual([LINE, LINE]);
+        db.__script = stop(landed('10:00', '11:00', 't9'));
+        expect((await unit(fakeRebooker(), '10:00-11:00', 'auto_dispatch', { technicianId: 't9' })).warnings).toBeUndefined();
+        expect(dayWarningFor).not.toHaveBeenCalled();
+      });
+    });
+
     test('the office\'s own move is not judged, and no shift is read', async () => {
       db.__script = script({ members: pair(), landed: landed('14:00', '15:00') });
       const rebooker = fakeRebooker();

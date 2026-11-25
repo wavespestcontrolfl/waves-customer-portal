@@ -44,7 +44,6 @@ const {
 } = require('./scheduling/window-rules');
 const { findConflictingVisits } = require('./scheduling/occupancy');
 const { assertAssignableTechnician } = require('./technician-eligibility');
-const { techWorkDaysLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { completeScheduledServiceInsert } = require('./booking/create-scheduled-service');
 const { placeAutoSavedVisit } = require('./scheduling/staff-save-route-check');
@@ -513,8 +512,8 @@ async function commitFollowup({ svc, date, cols, insertData, technicianOverride,
           if (blind.length && !overlapWarning) overlapWarning = slotOverlapWarning(date);
         }
       }
-      if (technicianOverride && insertData.technician_id && techWorkDaysLive()) {
-        const offDay = await require('./technician-eligibility').offDayWarningFor(insertData.technician_id, String(date).slice(0, 10), { conn: trx });
+      if (technicianOverride) {
+        const offDay = await require('./technician-eligibility').dayWarningFor(insertData.technician_id, String(date).slice(0, 10), { conn: trx, block: insertData });
         if (offDay) overlapWarning = [overlapWarning, offDay].filter(Boolean).join(' ');
       }
     }

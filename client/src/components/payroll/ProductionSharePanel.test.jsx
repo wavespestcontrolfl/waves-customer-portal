@@ -61,6 +61,11 @@ describe('Production share preview', () => {
     await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/settings', expect.objectContaining({ method: 'PUT' })));
     const put = call.mock.calls.find(([path]) => path === '/production-share/settings')[1];
     expect(put.body).toEqual({ technicianId: 'tech-a', rateBps: 1600, barType: 'per_shift', barCents: 42550, callbackStopValueCents: 9500 });
+    // the words no longer say a pay run pays nothing: the preview is an estimate, and a pay run uses these numbers when it is on
+    expect(await screen.findByText(/Saved\. A pay run uses these numbers/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/pays nothing yet|Nothing is paid|not paid/i);
+    expect(screen.getByText(/This is an estimate/)).toBeInTheDocument();
+    expect(screen.getByText('Share (estimate)')).toBeInTheDocument();
   });
 
   it('shows refunds on shared invoices that could not be split', async () => {
@@ -165,5 +170,199 @@ describe('Production share preview', () => {
     // The save finished for tech-a: nothing is loaded for tech-b, and nothing is shown for either.
     expect(previews()).toBe(1);
     expect(screen.queryByLabelText('Week summary')).toBeNull();
+  });
+
+  describe('the credit the owner sets for a stop', () => {
+    const forms = (stops) => async () => {
+      const call = vi.fn(async (path) => (path.startsWith('/production-share/preview') ? answerFor(path, { stops }) : {}));
+      render(<ProductionSharePanel call={call} technicians={TECHS} />);
+      open();
+      await show(call);
+      return call;
+    };
+
+    it('a review row gets a Set credit form that sends cents and the reason, then reloads the week', async () => {
+      const call = await forms(PREVIEW.stops)();
+      // only the review stop has the form
+      expect(screen.getAllByRole('form', { name: 'Set the credit of this stop' })).toHaveLength(1);
+      const set = screen.getByRole('button', { name: 'Set credit' });
+      expect(set).toBeDisabled();
+      fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '45.50' } });
+      expect(set).toBeDisabled(); // a reason is required
+      fireEvent.change(screen.getByLabelText('Reason'), { target: { value: ' checked the invoice ' } });
+      fireEvent.click(set);
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', expect.anything()));
+      expect(call.mock.calls.find(([path]) => path === '/production-share/stop-override')[1]).toEqual({
+        method: 'PUT', body: { technicianId: 'tech-a', visitId: 'v2', weekStart: '2026-09-14', creditCents: 4550, reason: 'checked the invoice', stopRevision: '' },
+      });
+      await waitFor(() => expect(call).toHaveBeenLastCalledWith('/production-share/preview?technicianId=tech-a&weekStart=2026-09-14'));
+    });
+
+    it('shows the server refusal (a paid week) and keeps the form', async () => {
+      const call = vi.fn(async (path) => {
+        if (path === '/production-share/stop-override') throw new Error('This week is already paid.');
+        return answerFor(path);
+      });
+      render(<ProductionSharePanel call={call} technicians={TECHS} />);
+      open();
+      await show(call);
+      fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '10' } });
+      fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'why' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Set credit' }));
+      expect(await screen.findByText('This week is already paid.')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Set credit' })).toBeInTheDocument();
+    });
+
+    it('AUDIT :249: a change finished after the employee or week was switched does not reload the old answer', async () => {
+      let finish;
+      const call = vi.fn((path) => {
+        if (path === '/production-share/stop-override') return new Promise((resolve) => { finish = () => resolve({}); });
+        return Promise.resolve(answerFor(path));
+      });
+      render(<ProductionSharePanel call={call} technicians={[...TECHS, { id: 'tech-b', name: 'Sample Bravo' }]} />);
+      open();
+      await show(call);
+      fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '10' } });
+      fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'why' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Set credit' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', expect.anything()));
+      const previews = () => call.mock.calls.filter(([path]) => path.startsWith('/production-share/preview')).length;
+      expect(previews()).toBe(1);
+      fireEvent.change(screen.getByLabelText('Employee'), { target: { value: 'tech-b' } });
+      await act(async () => { finish(); });
+      expect(previews()).toBe(1);
+      expect(screen.queryByLabelText('Week summary')).toBeNull();
+    });
+
+    it('a reassigned stop shows Clear the old credit; a stop with no closeout record shows no form', async () => {
+      const call = await forms([
+        { visitId: 'v5', workDate: '2026-09-15', overrideRevision: 'rev-5', serviceType: 'Pest Control', kind: 'owner_override_reassigned', creditCents: 0, reason: 'reassigned', needsReview: true, refundCents: 0 },
+        { visitId: 'v6', workDate: '2026-09-16', serviceType: 'Pest Control', kind: 'unverified', creditCents: 0, reason: 'No closeout', needsReview: true, refundCents: 0 },
+      ])();
+      expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Clear the old credit' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
+        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v5', weekStart: '2026-09-14', revision: 'rev-5' },
+      }));
+    });
+
+    it('AUDIT :257: a review row names its visit: short id, time, address and a link to its scheduled day (not the pay date) before the Set credit form', async () => {
+      await forms([
+        { visitId: '3fa85f64-5717-4562-b3fc-2c963f66afa6', workDate: '2026-09-15', scheduledDate: '2026-09-14', completedAt: '2026-09-15T18:15:00Z', address: '123 Example St 34202',
+          serviceType: 'Pest Control', kind: 'unpriced', creditCents: 0, reason: 'No price', needsReview: true, refundCents: 0 },
+      ])();
+      const reference = screen.getByLabelText('Visit reference');
+      expect(reference).toHaveTextContent('Visit 3fa85f64 · 2:15 PM · 123 Example St 34202');
+      expect(within(reference).getByRole('link', { name: 'Open the day' })).toHaveAttribute('href', '/admin/schedule?date=2026-09-14');
+      expect(reference.compareDocumentPosition(screen.getByRole('form', { name: 'Set the credit of this stop' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('AUDIT :160: an unconfirmed or already-paid review row shows its visit and says what to do instead of a form', async () => {
+      await forms([
+        { visitId: 'v9', workDate: '2026-09-15', scheduledDate: '2026-09-15', address: '9 Example Rd 34202', serviceType: 'Pest Control', kind: 'unverified', creditCents: 0, reason: 'No closeout record', needsReview: true, refundCents: 0 },
+        { visitId: 'v10', workDate: '2026-09-16', scheduledDate: '2026-09-16', serviceType: 'Pest Control', kind: 'already_paid', creditCents: 0, reason: 'Already paid in the week of 2026-09-07: a pay run already credited this visit.', needsReview: true, refundCents: 0 },
+      ])();
+      expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
+      const references = screen.getAllByLabelText('Visit reference');
+      expect(references).toHaveLength(2);
+      expect(references[0]).toHaveTextContent('Visit v9 · 9 Example Rd 34202');
+      expect(screen.getByText(/Fix the closeout first/)).toBeInTheDocument();
+      expect(screen.getByText(/Already paid in the week of Sep 7, 2026\. Its credit cannot change here\./)).toBeInTheDocument();
+    });
+
+    it('AUDIT :126: a row with no scheduled day offers no Open the day link (the pay work date is not the schedule day)', async () => {
+      await forms([
+        { visitId: 'v8', workDate: '2026-09-15', serviceType: 'Pest Control', kind: 'unpriced', creditCents: 0, reason: 'No price', needsReview: true, refundCents: 0 },
+      ])();
+      expect(screen.getByLabelText('Visit reference')).toHaveTextContent('Visit v8');
+      expect(screen.queryByRole('link', { name: 'Open the day' })).toBeNull();
+    });
+
+    it('AUDIT :259: a save or clear reloads the week while the employee and week are unchanged, even after another load started', async () => {
+      let finish;
+      const call = vi.fn((path) => {
+        if (path === '/production-share/stop-override') return new Promise((resolve) => { finish = () => resolve({}); });
+        return Promise.resolve(answerFor(path));
+      });
+      render(<ProductionSharePanel call={call} technicians={TECHS} />);
+      open();
+      await show(call);
+      const previews = () => call.mock.calls.filter(([path]) => path.startsWith('/production-share/preview')).length;
+      fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '10' } });
+      fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'why' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Set credit' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', expect.anything()));
+      // the owner reloads the same week while the save is on its way: that is a new request, not a new selection
+      fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+      await waitFor(() => expect(previews()).toBe(2));
+      await act(async () => { finish(); });
+      await waitFor(() => expect(previews()).toBe(3));
+    });
+
+    it('a stop whose closeout changed since the owner set its credit shows Clear and sends DELETE', async () => {
+      const call = await forms([
+        { visitId: 'v7', workDate: '2026-09-15', overrideRevision: 'rev-7', serviceType: 'Pest Control', kind: 'owner_override_closeout_changed', creditCents: 0, reason: 'The closeout of this stop changed', needsReview: true, refundCents: 0 },
+      ])();
+      expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Clear the old credit' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
+        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v7', weekStart: '2026-09-14', revision: 'rev-7' },
+      }));
+    });
+
+    it('AUDIT :1210: Set credit sends the revision of the stop as the page showed it', async () => {
+      const call = await forms([
+        { visitId: 'v12', workDate: '2026-09-15', stopRevision: '0123456789abcdef', serviceType: 'Pest Control', kind: 'invoice_paid_elsewhere', creditCents: 0,
+          reason: 'This invoice also covers a visit paid', needsReview: true, refundCents: 0 },
+      ])();
+      fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '12' } });
+      fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'why' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Set credit' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
+        method: 'PUT', body: { technicianId: 'tech-a', visitId: 'v12', weekStart: '2026-09-14', creditCents: 1200, reason: 'why', stopRevision: '0123456789abcdef' },
+      }));
+    });
+
+    it('AUDIT :292: a stop whose revision changed on reload resets the typed amount and reason', async () => {
+      const row = (stopRevision) => ({ visitId: 'v13', workDate: '2026-09-15', stopRevision, serviceType: 'Pest Control', kind: 'unpriced', creditCents: 0, reason: 'No price', needsReview: true, refundCents: 0 });
+      let revision = 'rev-a';
+      const call = vi.fn(async (path) => (path.startsWith('/production-share/preview') ? answerFor(path, { stops: [row(revision)] }) : {}));
+      render(<ProductionSharePanel call={call} technicians={TECHS} />);
+      open();
+      await show(call);
+      fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '33' } });
+      fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'typed' } });
+      // the stop changed behind the page: a reload brings another revision, and the old typing must not stay in the form
+      revision = 'rev-b';
+      fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+      await waitFor(() => expect(call.mock.calls.filter(([path]) => path.startsWith('/production-share/preview'))).toHaveLength(2));
+      await waitFor(() => expect(screen.getByLabelText('Credit ($)')).toHaveValue(''));
+      expect(screen.getByLabelText('Reason')).toHaveValue('');
+    });
+
+    it('a stop that was paid elsewhere since the owner set its credit shows Clear and sends DELETE with the revision', async () => {
+      const call = await forms([
+        { visitId: 'v11', workDate: '2026-09-15', overrideRevision: 'rev-11', serviceType: 'Pest Control', kind: 'owner_override_conflict_changed', creditCents: 0,
+          reason: 'This stop, its invoice or its package was paid elsewhere since the owner set its credit', needsReview: true, refundCents: 0 },
+      ])();
+      expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
+      expect(screen.getByText('Paid elsewhere since you set it')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Clear the old credit' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
+        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v11', weekStart: '2026-09-14', revision: 'rev-11' },
+      }));
+    });
+
+    it('a stop the owner set shows Clear; a stop a pay run already paid shows no form', async () => {
+      const call = await forms([
+        { visitId: 'v3', workDate: '2026-09-15', overrideRevision: 'rev-3', serviceType: 'Pest Control', kind: 'owner_set', creditCents: 4550, reason: 'Set by the owner: checked', needsReview: false, refundCents: 0 },
+        { visitId: 'v4', workDate: '2026-09-16', serviceType: 'Pest Control', kind: 'already_paid', creditCents: 0, reason: 'Already paid in the week of 2026-09-07', needsReview: true, refundCents: 0 },
+      ])();
+      expect(screen.queryByRole('form', { name: 'Set the credit of this stop' })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Clear the credit I set' }));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
+        method: 'DELETE', body: { technicianId: 'tech-a', visitId: 'v3', weekStart: '2026-09-14', revision: 'rev-3' },
+      }));
+    });
   });
 });

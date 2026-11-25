@@ -14,28 +14,47 @@ const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gate
 //
 // Work days (GATE_TECH_WORK_DAYS): every non-admin move is automatic (customer,
 // rain-out, auto-dispatch, AI), so a kept technician who does not work that
-// weekday is refused the same way. An admin move only warns: the line is added
-// to `warnings` (a Set the caller reads) and the move proceeds.
+// weekday is refused the same way. An admin move only warns
+// (officeSlotTechnician below): the office decides.
 //
 // Shift hours (GATE_TECH_SHIFT_HOURS, D4): `block` is the visit as the move will
 // leave it: its window and its stored length. The caller passes it only for a
-// move that must obey the hours (reschedule: `shiftLive`). A kept technician
-// whose shift that day does not hold the block is refused the same way.
-//
-// shiftBlockMinutes: the block a shift judges, in minutes. A start or an end
-// that is there but is no clock time the check reads exactly (unreadableBound,
-// the unit mover's rule) gives no block to trust, and the write can still
-// store it: PostgreSQL reads "4:05 PM" as 16:05 and keeps the seconds of
-// "12:00:30". Such a row is judged as the whole day, which no set shift holds.
-const WHOLE_DAY = { window_start: '00:00', window_end: '24:00' };
-function shiftBlockMinutes(block) {
-  const { rowBlockMinutes, unreadableBound } = require('./scheduling/window-rules');
-  return rowBlockMinutes(unreadableBound(block.window_start) || unreadableBound(block.window_end, true) ? WHOLE_DAY : block);
+// move whose shift is read (reschedule: `shiftRead`). An automatic move is judged
+// on it: a kept technician whose shift that day does not hold the block is
+// refused the same way. The block is judged through shiftBlockMinutes
+// (window-rules.js): PostgreSQL reads "4:05 PM" as 16:05 and keeps the seconds
+// of "12:00:30", so a time the check cannot read exactly is a block no shift holds.
+const slotNoLongerAvailable = () => Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
+  statusCode: 409,
+  status: 409,
+  isOperational: true,
+  code: 'SLOT_TAKEN',
+});
+// Is this a move that obeys the shift hours (GATE_TECH_SHIFT_HOURS)? An automatic
+// one: the office's own move does not, the office decides.
+const automaticShiftLive = (initiatedBy) => initiatedBy !== 'admin' && techShiftHoursLive();
+// The office's own move (D4 part 3c): told, never refused for a work day or a shift.
+// The day's other rules are asked as before (not of a move that keeps the day and
+// the technician: `shiftOnly`). Then one line is added to `warnings` (a Set the caller
+// reads): the day-off line, or, on a day the technician works, the shift line when the
+// shift does not hold `landed`, the row as the move leaves it
+// (technician-eligibility.dayWarningFor). A move that changes only the hours is told
+// the shift line alone. A grouped stop's member (`unitMember`) states nothing with the
+// shift gate on: the unit's move may hand it to another technician after this call, so
+// the unit tells the office once every write is done, from the rows the move leaves
+// (visit-groups unitOfficeLines). Gate off: the member's day-off line, as before.
+async function officeSlotTechnician(technicianId, trx, date, { warnings, shiftOnly, landed, unitMember }) {
+  if (!shiftOnly) await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: false });
+  if (!warnings || (unitMember && techShiftHoursLive())) return;
+  const line = await require('./technician-eligibility').dayWarningFor(technicianId, String(date).slice(0, 10), {
+    conn: trx, block: landed, shiftOnly,
+  });
+  if (line) warnings.add(line);
 }
-async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null, shiftOnly = false } = {}) {
-  const staffMove = initiatedBy === 'admin';
+async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null, shiftOnly = false, landed = null, unitMember } = {}) {
   try {
-    const hours = block ? shiftBlockMinutes(block) : undefined;
+    if (initiatedBy === 'admin') return await officeSlotTechnician(technicianId, trx, date, { warnings, shiftOnly, landed, unitMember });
+    const hours = block ? require('./scheduling/window-rules').shiftBlockMinutes(block) : undefined;
     // shiftOnly: a move that changes only the hours. It keeps the day and the
     // technician dispatch gave the visit, so it is judged on the shift alone
     // (shiftExcluding), not on the day's other rules, and refused the same way.
@@ -45,19 +64,10 @@ async function assertAssignableSlotTechnician(technicianId, trx, date, { initiat
       }
       return;
     }
-    await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: !staffMove, hours });
-    if (staffMove && warnings && technicianId && techWorkDaysLive()) {
-      const line = await require('./technician-eligibility').offDayWarningFor(technicianId, String(date).slice(0, 10), { conn: trx });
-      if (line) warnings.add(line);
-    }
+    await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: true, hours });
   } catch (err) {
     if (err.code !== NOT_ASSIGNABLE) throw err;
-    throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
-      statusCode: 409,
-      status: 409,
-      isOperational: true,
-      code: 'SLOT_TAKEN',
-    });
+    throw slotNoLongerAvailable();
   }
 }
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
@@ -172,18 +182,27 @@ function hoursChangedBy(update, row) {
 //     hold its block (its hours and its stored length).
 //   - A later stop keeps its hours and changes its day only. It is refused only when the move takes
 //     it from inside the shift to outside it: a block the shift did not hold on the day it leaves is
-//     the office's placement, and stays the office's.
+//     the office's placement, and stays the office's (shiftLostByDayChange, the rule a call-booked
+//     follow-up that moves with its visit is judged by too).
 // Judged on the shift alone (shiftOnly): the day's other rules are asked where they were. A landing
-// with no window has no hours to judge, and a time that is no clock time is the whole day
-// (shiftBlockMinutes).
-async function assertSeriesRowInsideShift(trx, { live, tapped, row, update, dateStr, dayChanges, initiatedBy }) {
+// with no window has no hours to judge, and a time that is no clock time is refused wherever the
+// technician has a shift (shiftBlockMinutes).
+// The office's own move (D4 part 3c) is never refused here, and `live` is true for its tapped stop
+// only (stopShiftLive). Its move of a day or a technician is told where the day's rules are asked.
+// This tells the one case that is left: the stop keeps its day and its technician and takes new
+// hours (`warnings`, the shift line alone).
+async function assertSeriesRowInsideShift(trx, { live, tapped, row, update, dateStr, dayChanges, initiatedBy, warnings }) {
   if (!live) return;
   const landed = { ...row, ...update };
   const technicianId = landed.technician_id || null;
-  if (!dayChanges && !hoursChangedBy(update, row) && technicianId === (row.technician_id || null)) return;
-  const leftDay = dateOnlyString(row.scheduled_date);
-  if (!tapped && await require('./technician-eligibility').shiftExcluding(trx, technicianId, leftDay, shiftBlockMinutes(landed))) return;
-  await assertAssignableSlotTechnician(technicianId, trx, dateStr, { initiatedBy, shiftOnly: true, block: landed });
+  const dayOrTechMove = dayChanges || technicianId !== (row.technician_id || null);
+  if (!dayOrTechMove && !hoursChangedBy(update, row)) return;
+  if (initiatedBy === 'admin') {
+    if (!dayOrTechMove) await assertAssignableSlotTechnician(technicianId, trx, dateStr, { initiatedBy, warnings, shiftOnly: true, landed });
+    return;
+  }
+  if (tapped) return assertAssignableSlotTechnician(technicianId, trx, dateStr, { initiatedBy, shiftOnly: true, block: landed });
+  if (await require('./technician-eligibility').shiftLostByDayChange(trx, technicianId, landed, dateOnlyString(row.scheduled_date), dateStr)) throw slotNoLongerAvailable();
 }
 
 // Did this single move change the slot (the date or the window start)? Only then does it record an intent (moveIntentColumns).
@@ -1090,13 +1109,13 @@ async function planCarriedFollowUps(conn, carryPartners, siblings, projectedById
 
 // Shift those follow-ups inside the sweep's transaction, only for a partner
 // that actually landed on the day it was planned for, against the locked plan.
-async function shiftCarriedFollowUps(conn, partnerPlans, carriedMembers, report) {
+async function shiftCarriedFollowUps(conn, partnerPlans, carriedMembers, report, shiftLive) {
   const landed = new Map(carriedMembers.map((k) => [String(k.id), dateOnly(k.date)]));
   for (const p of partnerPlans) {
     if (landed.get(p.partnerId) !== p.toDate) continue;
     await shiftCallFollowUpsForParentMove({
       conn, parentServiceId: p.partnerId, fromDate: p.fromDate, toDate: p.toDate,
-      occupancyHeld: true, suppressTechNotice: true, plan: p.plan, report,
+      occupancyHeld: true, suppressTechNotice: true, plan: p.plan, report, shiftLive,
     });
   }
 }
@@ -2480,30 +2499,38 @@ class SmartRebooker {
       // (tech-out P1) — keptTechId is the tech the row will actually carry
       // after this commit either way. A same-date, same-tech window-only
       // edit stays untouched: no new query.
-      // GATE_TECH_SHIFT_HOURS (shiftLive): an automatic (non-admin) move obeys
+      // GATE_TECH_SHIFT_HOURS (shiftRead): an automatic (non-admin) move obeys
       // the kept technician's shift hours. The office's own move does not: the
-      // office decides (D4 part 3c warns it). A visit group moves its members
+      // office decides, and is told (D4 part 3c: `landed`). A visit group moves its members
       // through this function one by one (skipVisitSeam), and may name a
-      // technician this call does not see, so a member is not judged alone
-      // here: the group is judged as one unit (D4 part 3b-2b).
-      // With shiftLive, a move that changes only the hours is checked too. The
+      // technician this call does not see, so a member is not judged or told
+      // alone here: an automatic move of the group is judged as one unit (D4
+      // part 3b-2b), the office's own is told by the unit (unitOfficeLines).
+      // With shiftRead, a move that changes only the hours is checked too. The
       // day and the technician are the same, but the new hours may be outside
-      // the shift.
+      // the shift: an automatic move is refused, the office's own is told.
       const techChangeForEligibility = Object.prototype.hasOwnProperty.call(updates, 'technician_id');
-      const shiftLive = initiatedBy !== 'admin' && options.skipVisitSeam !== true && techShiftHoursLive();
-      const hoursMoveForShift = shiftLive && hoursChangedBy(updates, service);
+      const unitMember = options.skipVisitSeam === true;
+      const shiftRead = !unitMember && techShiftHoursLive();
+      const hoursMoveForShift = shiftRead && hoursChangedBy(updates, service);
       const dayOrTechMove = techChangeForEligibility || !sameDayTarget;
       const eligibilityChecked = dayOrTechMove || hoursMoveForShift;
       if (eligibilityChecked) {
-        // An hours-only move is judged on the shift alone (shiftOnly): the day's
-        // other rules were not asked of it before, and are not asked now.
+        // An hours-only move is judged, or told, on the shift alone (shiftOnly): the
+        // day's other rules were not asked of it before, and are not asked now.
+        // `landed`: the row as this move leaves it. An automatic move is judged on it
+        // (`block`); the office's own move is told when the shift does not hold it,
+        // but not for a grouped stop's member (`unitMember`, officeSlotTechnician).
+        const landed = { window_start: updates.window_start, window_end: updates.window_end, estimated_duration_minutes: service.estimated_duration_minutes };
         await assertAssignableSlotTechnician(keptTechId, trx, newDateStr, { initiatedBy, warnings: offDayWarnings, shiftOnly: !dayOrTechMove,
-          block: shiftLive ? { window_start: updates.window_start, window_end: updates.window_end, estimated_duration_minutes: service.estimated_duration_minutes } : null });
+          block: shiftRead ? landed : null, landed, unitMember });
       }
       // The shift check judged the technician and the length of the unlocked
-      // pre-read. The write below pins both (shiftJudged), so a reassignment or
-      // a length edit that landed since misses, as every other pinned field does.
-      const shiftJudged = shiftLive && eligibilityChecked;
+      // pre-read, or told the office about them. The write below pins both
+      // (shiftJudged), so a reassignment or a length edit that landed since
+      // misses, as every other pinned field does: the office's line is then about
+      // the row its move wrote.
+      const shiftJudged = shiftRead && eligibilityChecked;
       // Caller-supplied guard for THIS row on the move transaction (auto-dispatch
       // re-reads the receiving tech's capabilities here; the unit mover runs the
       // matching options.memberGuard for grouped members). Refuses before the
@@ -2830,6 +2857,8 @@ class SmartRebooker {
         // Reported so the route refresh below covers the child's own two
         // days, not just the parent's (codex #4295 r1 P2).
         report: followUpReport,
+        // A grouped stop's member too (skipVisitSeam): its follow-up is its own row.
+        shiftLive: automaticShiftLive(initiatedBy),
       });
       if (shifted > 0) {
         logger.info(`[rebooker] shifted ${shifted} call-created follow-up visit(s) with parent ${serviceId} (-> ${newDateStr})`);
@@ -2973,9 +3002,9 @@ class SmartRebooker {
     const offDayWarnings = new Set();
     // GATE_TECH_SHIFT_HOURS (D4 part 3b-2c): an automatic (non-admin) series
     // move obeys the shift hours for the stop it places, as a single visit's
-    // move does (reschedule: shiftLive). The office's own series move does
-    // not: the office decides.
-    const seriesShiftLive = initiatedBy !== 'admin' && techShiftHoursLive();
+    // move does (reschedule: shiftRead). The office's own series move does
+    // not: the office decides, and is told (stopShiftLive below).
+    const seriesShiftLive = automaticShiftLive(initiatedBy);
     // Today (Eastern): the one day whose shift follows a clock-in (the sweep's stopShiftLive).
     const shiftToday = etDateString();
     // Customer intent reserves the selected visit only. Future cadence dates
@@ -4019,8 +4048,8 @@ class SmartRebooker {
           });
         }
         if (partnerDateChanges) await assertPartnerPlanDayFree(trx, partner, dateStr, [...sweptIds, ...carry.partnerIds]);
-        if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr, { initiatedBy, warnings: offDayWarnings });
-        await assertSeriesRowInsideShift(trx, { live: shiftLive, tapped, row: partner, update: pUpdate, dateStr, dayChanges: partnerDateChanges, initiatedBy });
+        if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr, { initiatedBy, warnings: offDayWarnings, landed: { ...partner, ...pUpdate } });
+        await assertSeriesRowInsideShift(trx, { live: shiftLive, tapped, row: partner, update: pUpdate, dateStr, dayChanges: partnerDateChanges, initiatedBy, warnings: offDayWarnings });
         if (keptTech) {
           await trx.raw(
             'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -4157,8 +4186,12 @@ class SmartRebooker {
         // shift on one day and outside it on the other: that stop is judged
         // too. Any other later visit is not, and one the office placed
         // outside the shift does not stop the plan.
-        const stopShiftLive = seriesShiftLive
-          && (isAnchor || [dateOnly(sib.scheduled_date), String(date).split('T')[0]].includes(shiftToday));
+        // The office's own move reads the shift for the tapped stop only: it
+        // is told about that stop (D4 part 3c), and the stop's writes pin the
+        // stored length the line was about, as a judged stop's do.
+        const stopShiftLive = isAnchor
+          ? techShiftHoursLive()
+          : seriesShiftLive && [dateOnly(sib.scheduled_date), String(date).split('T')[0]].includes(shiftToday);
         // A series move mutates the DATE dimension it owns (owner ruling
         // 2026-08-28): the anchor takes the caller's window and lands on
         // 'confirmed' like any reschedule; every sibling KEEPS its own
@@ -4286,7 +4319,7 @@ class SmartRebooker {
         const anchorTechChanges = isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId');
         if (isAnchor && (anchorTechChanges || sibDateChanges)) {
           const anchorKeptTechId = anchorTechChanges ? (options.technicianId || null) : (sib.technician_id || null);
-          await assertAssignableSlotTechnician(anchorKeptTechId, trx, String(date).split('T')[0], { initiatedBy, warnings: offDayWarnings });
+          await assertAssignableSlotTechnician(anchorKeptTechId, trx, String(date).split('T')[0], { initiatedBy, warnings: offDayWarnings, landed: { ...sib, ...updateData } });
         }
         // Same save-time eligibility check for every NON-anchor sibling
         // that lands on a new date (tech-out P1): a follower keeps its own
@@ -4298,7 +4331,7 @@ class SmartRebooker {
         // move).
         if (!isAnchor && sibDateChanges) {
           const sibKeptTechId = sib.technician_id || null;
-          await assertAssignableSlotTechnician(sibKeptTechId, trx, String(date).split('T')[0], { initiatedBy, warnings: offDayWarnings });
+          await assertAssignableSlotTechnician(sibKeptTechId, trx, String(date).split('T')[0], { initiatedBy, warnings: offDayWarnings, landed: { ...sib, ...updateData } });
         }
         if (anchorTechChanges) {
           updateData.technician_id = options.technicianId || null;
@@ -4510,7 +4543,7 @@ class SmartRebooker {
         // GATE_TECH_SHIFT_HOURS: a judged stop's visit against the shift of
         // the technician it carries after this write (its final hours, after
         // the clash handling).
-        await assertSeriesRowInsideShift(trx, { live: stopShiftLive, tapped: isAnchor, row: sib, update: updateData, dateStr: String(date).split('T')[0], dayChanges: sibDateChanges, initiatedBy });
+        await assertSeriesRowInsideShift(trx, { live: stopShiftLive, tapped: isAnchor, row: sib, update: updateData, dateStr: String(date).split('T')[0], dayChanges: sibDateChanges, initiatedBy, warnings: offDayWarnings });
 
         // Existing handoffs survive later staff/SMS/gate-off moves. Rebase
         // an untimed visit to its new due date; only a timed landing ends
@@ -4569,7 +4602,7 @@ class SmartRebooker {
               // same rationale as the single-path CAS (codex #3377 P1).
               // Also pinned when a start-only move derived this row's end
               // from its own duration (seriesOccurrenceWindow).
-              // stopShiftLive: the shift check read the stored length too.
+              // stopShiftLive: the shift check, or the office's line, read the stored length too.
               ...((Array.isArray(options.expectOccurrences)
                 || (!updateData.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off')
                 || (win.start && !win.end)
@@ -4675,6 +4708,7 @@ class SmartRebooker {
         // unlocked day (codex r12 P1).
         plan: followUpPlan,
         report: followUpReport,
+        shiftLive: seriesShiftLive,
       });
       if (followUpsShifted > 0) {
         logger.info(`[rebooker] shifted ${followUpsShifted} call-created follow-up visit(s) with series anchor ${serviceId} (-> ${seriesDateStr})`);
@@ -4682,7 +4716,7 @@ class SmartRebooker {
       // Same shift for each carried partner that landed on its planned day
       // (one that did not move, or moved elsewhere, keeps its follow-ups);
       // shifted and skipped children join the same report.
-      await shiftCarriedFollowUps(trx, partnerFollowUpPlans, carriedMembers, followUpReport);
+      await shiftCarriedFollowUps(trx, partnerFollowUpPlans, carriedMembers, followUpReport, seriesShiftLive);
       // Shifted call follow-ups ride the operation so the durable effects
       // pass syncs THEIR reminder rows too (codex r19 P1) — never part of
       // the cadence set (counts, ack, close, text).
@@ -4693,7 +4727,8 @@ class SmartRebooker {
       const followUpOccurrences = (followUpReport.shifted || []).map((k) => ({ id: k.id, date: k.date, windowStart: k.windowStart, windowEnd: k.windowEnd }));
       seriesFollowUpDates.push(...(followUpReport.shifted || []).flatMap((k) => [k.previousDate, k.date]));
       const followUpWarnings = (followUpReport.skipped || []).map((k) => (
-        `The call-booked follow-up visit on ${k.day} kept its date — its shifted slot on ${k.newDay} is already booked; set it from dispatch`
+        `The call-booked follow-up visit on ${k.day} kept its date — ${k.reason === 'shift'
+          ? `its technician's shift on ${k.newDay} does not hold it` : `its shifted slot on ${k.newDay} is already booked`}; set it from dispatch`
       ));
 
       // One operation row per shift — the audit boundary, the idempotency

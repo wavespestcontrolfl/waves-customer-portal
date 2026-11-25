@@ -7349,6 +7349,27 @@ router.get('/', async (req, res, next) => {
     // runs from the clock; any other day's from the booked plan.
     const legsToday = date === etDateString();
     Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services, { now: legsToday ? new Date() : null }));
+    // Planned arrival + on-site minutes per stop for the Day grid's blocks
+    // (display only, straight-line model, no paid call).
+    // Same departure time and tech start points as the day-quality model:
+    // two small reads for the whole request (the start-point read is none
+    // with GATE_TECH_START_POINTS off); a failed read plans from the office
+    // at the legacy 08:00.
+    const plannedTechs = Object.values(byTech);
+    if (plannedTechs.length) {
+      const departureMin = await require('../services/scheduling/departure-time').dayDepartureMinutes(db);
+      const startPoints = await loadTechStartPoints(db, plannedTechs.map((tech) => tech.technicianId)).catch(() => new Map());
+      // Tech unavailability (capacity mode), one read for the day: the route
+      // runs around it as arrival-route.js does. A failed read plans without.
+      const arrivalRoute = require('../services/scheduling/arrival-route');
+      const dayBlocks = await arrivalRoute.loadDayScheduleBlocks(db, date).catch(() => []);
+      plannedTechs.forEach((tech) => require('../services/scheduling/planned-blocks')
+        .attachPlannedBlocks(tech.services, {
+          departureMin,
+          home: homeFromMap(startPoints, tech.technicianId),
+          blockedIntervals: arrivalRoute.blockedIntervalsFor(dayBlocks, tech.technicianId),
+        }));
+    }
 
     // Calculate tech summaries
     Object.values(byTech).forEach(tech => {
@@ -9973,11 +9994,13 @@ async function scheduleCreateHandler(req, res, next) {
       // Work days (GATE_TECH_WORK_DAYS): the office may put a technician on a day
       // they do not work; the save proceeds and the response says so, for the
       // parent date and every child/booster date.
-      if (resolvedTechId && techWorkDaysLive()) {
-        const { offDayWarningsFor } = require('../services/technician-eligibility');
-        const offDayDates = [String(scheduledDate).slice(0, 10), ...[...plannedChildDates, ...plannedBoosterDates].filter(Boolean)];
-        bookingWarnings.push(...await offDayWarningsFor(resolvedTechId, offDayDates, { conn: trx }));
-      }
+      // Shift hours (GATE_TECH_SHIFT_HOURS): on a day the technician works, the same
+      // read says when the shift does not hold the visit (dayWarningsFor). Every
+      // date of the plan carries the parent's hours and length.
+      const offDayDates = [String(scheduledDate).slice(0, 10), ...[...plannedChildDates, ...plannedBoosterDates].filter(Boolean)];
+      bookingWarnings.push(...await require('../services/technician-eligibility').dayWarningsFor(resolvedTechId, offDayDates, {
+        conn: trx, block: { window_start: windowStart, window_end: computedEnd, estimated_duration_minutes: duration },
+      }));
       // Job type (GATE_TECH_JOB_TYPE_CHECKS): the chosen technician is set to Off for this
       // service's category - the same advisory path, never a block ([] with the gate off).
       if (resolvedTechId) {
@@ -15361,6 +15384,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
     // (move probe + recurrence guards) — returned as `warnings` so the
     // modal can say what stacked.
     const editWarnings = [];
+    // The day-off / shift line of the edited visit was asked for a new day or a new technician.
+    let dayLineAsked = false;
     const useArrivalWindows = require('../services/scheduling/arrival-route').arrivalWindowRoutingEnabled();
     // Rung-1 lock set for every date this save's recurrence paths can write
     // (cadence rewrite moves, make-recurring spawn, visit-count / ongoing
@@ -15656,7 +15681,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // as the create-appointment path.
       if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined) {
         const eligibilityRow = await trx('scheduled_services').where({ id: req.params.id })
-          .first('technician_id', 'service_type', 'service_id', 'service_key_snapshot', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+          .first('technician_id', 'service_type', 'service_id', 'service_key_snapshot', 'window_start', 'window_end', 'estimated_duration_minutes',
+            trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
         const finalTechnicianId = hasTechnicianIdUpdate
           ? requestedTechnicianId
           : (eligibilityRow?.technician_id || null);
@@ -15673,11 +15699,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           await assertAssignableTechnician(finalTechnicianId, { conn: trx, date: finalDate });
           // Work days (GATE_TECH_WORK_DAYS): an office save onto a day the
           // technician does not work still goes through; the modal is told.
-          if (techWorkDaysLive()) {
-            const { offDayWarningFor } = require('../services/technician-eligibility');
-            const offDayLine = await offDayWarningFor(finalTechnicianId, finalDate, { conn: trx });
-            if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
-          }
+          // Shift hours (GATE_TECH_SHIFT_HOURS): on a day the technician works, the
+          // same read says when the shift does not hold the visit as this save
+          // leaves it: the row's hours and length, with this save's own (dayWarningFor).
+          const offDayLine = await require('../services/technician-eligibility').dayWarningFor(finalTechnicianId, finalDate, { conn: trx, block: { ...eligibilityRow, ...updates } });
+          dayLineAsked = true;
+          if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
           // Job type (GATE_TECH_JOB_TYPE_CHECKS): a technician set to Off for this visit's
           // category. Advisory, never a block ([] with the gate off).
           if (finalTechChanging) {
@@ -15828,6 +15855,13 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         throw httpError(422, 'Change the address and the recurrence in separate saves.');
       }
 
+      // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): the plan's open rows as this save finds them. Read
+      // HERE: no row has been written yet, and the locks this save takes ahead of its writes are held (the
+      // fences, the plan's maintenance lock when this save takes it, the customer's comms lock and row), so
+      // the waits for them are over and a writer that takes one of them cannot change the plan before the
+      // save's last step. That step compares these rows with the rows the save leaves and tells the office
+      // about the plan's other visits (planOfficeLines). Gate off: null, no read.
+      const planBefore = await require('../services/scheduling/plan-office-lines').planRowsBefore(trx, req.params.id);
       if (assignmentPlan && JSON.stringify(await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope))
         !== JSON.stringify(assignmentPlan)) {
         throw Object.assign(httpError(409, 'Appointments changed routes while saving — reload and save again.'), {
@@ -16234,11 +16268,25 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             // non-null end and the visit went invisible to occupancy.
             updates.window_end = occEnd;
           }
+          const lengthChanged = updates.estimated_duration_minutes !== undefined
+            && Number(updates.estimated_duration_minutes) !== Number(occRow.estimated_duration_minutes);
+          // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): a save that keeps the
+          // visit's day and technician and changes its hours or its length is told
+          // when the technician's shift does not hold the visit as this save leaves
+          // it: the locked row with this save's values. The shift line alone
+          // (`shiftOnly`): this save put no one on a new day. A save that changes the
+          // day or the technician was asked above (dayLineAsked), and is asked once.
+          // Gate off: no read.
+          if (!dayLineAsked && (!slotUnchanged || lengthChanged)) {
+            const shiftLine = await require('../services/technician-eligibility').dayWarningFor(savedTechnicianId(updates, occRow), occDate, {
+              conn: trx, block: { ...occRow, ...updates }, shiftOnly: true,
+            });
+            if (shiftLine) editWarnings.push(shiftLine);
+          }
           // A longer job or a different technician/order can break arrival
           // promises even when the nominal calendar block is unchanged.
           const arrivalRouteChanged = useArrivalWindows && (assignmentNeedsChange
-            || (updates.estimated_duration_minutes !== undefined
-              && Number(updates.estimated_duration_minutes) !== Number(occRow.estimated_duration_minutes))
+            || lengthChanged
             || (updates.route_order !== undefined && updates.route_order !== occRow.route_order));
           if ((!slotUnchanged || arrivalRouteChanged) && occDate && occStart && occEnd) {
             const adminMoveClash = await findConflictingVisits({
@@ -17475,16 +17523,19 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           //    series — spawning from it creates grandchildren under a second
           //    parent inside one family. The shipped UI can't send this, but
           //    the API accepted it.
-          //  - A completed/cancelled/terminal or past-dated row anchors the
+          //  - A cancelled/rescheduled/skipped or past-dated row anchors the
           //    children to a stale date, back-filling phantom visits.
+          //  - A visit dated today that is en route, on site or completed is a
+          //    live anchor (owner 2026-11-24: the plan is set up at the door):
+          //    children are dated from its date and always land after today.
           // Throwing here rolls the whole edit back (still inside the trx):
           // better a clean 400 than a committed edit plus a refused spawn.
           if (parent.recurring_parent_id) {
             throw httpError(400, 'This visit is part of an existing recurring series — edit the series parent to change the schedule instead of spawning a new series from a child visit.');
           }
           const spawnAnchorDate = dateOnly(parent.scheduled_date);
-          if (!['pending', 'confirmed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
-            throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from an upcoming pending or confirmed visit.`);
+          if (!['pending', 'confirmed', 'en_route', 'on_site', 'completed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
+            throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from a visit dated today or later that is not cancelled, rescheduled or skipped.`);
           }
           // Customer row lock: taken up front in this transaction's
           // comms-lock section (Codex #4716 r2 P1 — moved off its original
@@ -18029,6 +18080,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           }
         }
       }
+      // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): every write of this save to the plan's visits is done
+      // (the assignment's scope, the cadence rewrite, the hours it copies, the visits it adds). The office is
+      // told about the plan's OTHER visits from the rows the save leaves: the day-off line, or the shift line,
+      // of each one it added or left on another day, technician or block. The edited visit was told above.
+      editWarnings.push(...(await require('../services/scheduling/plan-office-lines').planOfficeLines(trx, req.params.id, planBefore))
+        .filter((line) => !editWarnings.includes(line)));
       // Staff route insertion:
       // an edit that moved this visit (another day, start or technician)
       // numbers its technician's day in the order the save check certified,

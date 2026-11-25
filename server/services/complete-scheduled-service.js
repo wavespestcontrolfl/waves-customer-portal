@@ -12128,6 +12128,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}. Use the EXACT line description "First service application" for the application charge and "WaveGuard Membership — one-time setup fee" for the fee, AND include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes — that linkage is how the system recognizes the charges as billed and retires this alert.`;
           }
           alertBody += unmintedSetupFeeObligation.setupFeeParkedNote || '';
+          // The bell's Bill and send button (GATE_SETUP_FEE_BILL_BUTTON): only the plain case, both charges unbilled
+          // in full and nothing else on the visit; the button's own handler checks the records again on the tap.
+          const billBothPlain = !feeCoveredBy && !applicationCoveredBy && !applicationCoveredOutOfBand && !liveOnVisit
+            && liveFeeCentsNow === 0 && appCentsNow === 0 && expectedSetupFeeCents > 0 && expectedAppCentsThisVisit > 0
+            && !unmintedSetupFeeObligation.setupFeeParkedNote
+            && !svc.prepaid_method && !(Number(svc.prepaid_amount) > 0)
+            && svc.primary_line_price == null && Math.round(Number(svc.estimated_price) * 100) === expectedAppCentsThisVisit
+            && !(await trx('scheduled_service_addons').where({ scheduled_service_id: svc.id }).first('id'));
           if (already) {
             // resolvedCovered flips back to false: a re-park after a
             // resolved round means the obligation REOPENED (coverage
@@ -12159,7 +12167,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             'billing',
             'Completed first visit needs manual billing — setup fee was never invoiced',
             alertBody,
-            { link: `/admin/customers?customerId=${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, expectedSetupFeeCents, ...(expectedAppCentsThisVisit > 0 ? { expectedApplicationCentsByVisit: { [String(svc.id)]: expectedAppCentsThisVisit } } : {}), ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+            { link: `/admin/customers?customerId=${svc.customer_id}`, bell: true, metadata: { ...(billBothPlain ? { buttons: require('../services/setup-fee-bill-button').billButtons({ applicationCents: expectedAppCentsThisVisit, feeCents: expectedSetupFeeCents, visit: svc }) } : {}), scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, expectedSetupFeeCents, ...(expectedAppCentsThisVisit > 0 ? { expectedApplicationCentsByVisit: { [String(svc.id)]: expectedAppCentsThisVisit } } : {}), ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('unminted-setup-fee notification insert failed');
           return true;

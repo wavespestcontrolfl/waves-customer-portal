@@ -3937,9 +3937,12 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
     sendCustomerMessage.mockClear();
     sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-sla' });
     require('../services/sms-suggest-mode').supersedeStaleDecision.mockClear();
+    // the closed-day read is its own seam: these cases are about the ET window on an open calendar
+    jest.spyOn(require('../services/sms-followup-sla'), 'loadFollowupClosedDates').mockResolvedValue(new Set());
   });
   afterEach(() => {
     jest.useRealTimers();
+    jest.restoreAllMocks();
   });
 
   test('a phrase that no longer matches the current ET window refuses the send and supersedes the decision', async () => {
@@ -3972,6 +3975,20 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
     });
     expect(sendCustomerMessage).toHaveBeenCalled();
     expect(claimUpdates.some((u) => u.status === 'accepted')).toBe(true);
+    expect(require('../services/sms-suggest-mode').supersedeStaleDecision).not.toHaveBeenCalled();
+  });
+
+  test('unreadable closed days at send time refuse the send but keep the card: a retryable read failure, not a stale phrase', async () => {
+    jest.useFakeTimers(FAKE_TIMERS_OPTS);
+    jest.setSystemTime(new Date('2026-09-28T14:00:00.000Z')); // 10:00 ET, the phrase itself is current
+    require('../services/sms-followup-sla').loadFollowupClosedDates.mockResolvedValue(require('../services/sms-followup-sla').CLOSED_DAYS_UNREADABLE);
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow(), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, {});
+      expect(res.status).toBe(409);
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(require('../services/sms-suggest-mode').supersedeStaleDecision).not.toHaveBeenCalled();
   });
 

@@ -166,8 +166,145 @@ function effectiveDuration(svc) {
   return 30;
 }
 
+// The booking's own length: its window span. The feed fills a missing
+// estimate with 60, so the estimate is only the base when the window is not
+// a valid span.
+function bookedLength(svc) {
+  const start = parseHHMM(svc?.windowStart);
+  const end = parseHHMM(svc?.windowEnd);
+  return start != null && end != null && end > start ? end - start : effectiveDuration(svc);
+}
+
 function minutesToTopPx(min) {
   return ((min - DAY_START_HOUR * 60) / SLOT_MIN) * SLOT_HEIGHT;
+}
+
+// The arrival window quoted to a customer is 2 hours from the start (server
+// ARRIVAL_WINDOW_MINUTES), while the booked row stays one hour.
+const ARRIVAL_WINDOW_MIN = 120;
+// Planned arrival outside the window the customer was told: a genuine alert (red left edge).
+const OUTSIDE_WINDOW_EDGE = '#DC2626';
+// A hairline across the middle of a 30-minute row (the 15-minute mark).
+const QUARTER_LINE = 'linear-gradient(to bottom, transparent calc(50% - 0.5px), #F7F7F8 calc(50% - 0.5px), #F7F7F8 calc(50% + 0.5px), transparent calc(50% + 0.5px))';
+
+// Where the visit sits on the day's PLANNED route (GET /admin/schedule stamps
+// plannedArrivalMin / plannedMinutes from the route model, owner 2026-11-24):
+// the block starts at the planned arrival and is as tall as the planned
+// on-site minutes. Null (draw the booked window as before) when either field
+// is missing, or the arrival falls outside the grid.
+function plannedInterval(svc) {
+  const at = svc?.plannedArrivalMin;
+  const mins = svc?.plannedMinutes;
+  if (!Number.isFinite(at) || !Number.isFinite(mins) || mins <= 0) return null;
+  if (at < DAY_START_HOUR * 60 || at >= DAY_END_HOUR * 60) return null;
+  // The real planned end: lanes and height follow the route, not a 30-minute
+  // floor (a 15-minute re-service must not share a lane with the stop after).
+  return { start: at, end: Math.min(DAY_END_HOUR * 60, at + mins), minutes: mins };
+}
+
+// A moved or resized row's plan is the old route's: until the refreshed
+// plan arrives it draws from its booked window (optimistic edits only).
+function withoutPlan(s) {
+  return { ...s, plannedArrivalMin: null, plannedMinutes: null, plannedStopArrivalMin: null, plannedStopKey: null };
+}
+// Shortest drawn planned block: one 14px text line. Smaller real heights
+// (a 15-minute stop is 16px) are drawn as they are down to this.
+const MIN_PLANNED_PX = 16;
+
+// "10:45" (the axis carries AM/PM).
+function plannedClock(min) {
+  const h12 = Math.floor(min / 60) % 12 || 12;
+  return `${h12}:${String(min % 60).padStart(2, '0')}`;
+}
+
+// "8" or "8:30": an hour-aligned window reads as bare hours.
+function windowHour(min) {
+  const h12 = Math.floor(min / 60) % 12 || 12;
+  return min % 60 === 0 ? String(h12) : `${h12}:${String(min % 60).padStart(2, '0')}`;
+}
+
+// "9:00 AM - 11:00 AM" (the feed's told.window) as minutes, or null.
+function parseToldWindow(text) {
+  const m = String(text || '').match(/(\d{1,2}):(\d{2})\s*([AP]M)\s*[-–—]\s*(\d{1,2}):(\d{2})\s*([AP]M)/i);
+  if (!m) return null;
+  const at = (h, mm, ap) => ((Number(h) % 12) + (/p/i.test(ap) ? 12 : 0)) * 60 + Number(mm);
+  const start = at(m[1], m[2], m[3]);
+  const end = at(m[4], m[5], m[6]);
+  // A window across midnight (11 PM - 1 AM) ends the next day.
+  return { start, end: end < start ? end + 24 * 60 : end };
+}
+
+// "5–7 PM" / "11 AM–1 PM" for the tooltips.
+function windowSpanText(start, end) {
+  const ap = (m) => (m < 12 * 60 || m >= 24 * 60 ? 'AM' : 'PM');
+  const h = (m) => windowHour(m % (24 * 60));
+  return ap(start) === ap(end) ? `${h(start)}–${h(end)} ${ap(end)}` : `${h(start)} ${ap(start)}–${h(end)} ${ap(end)}`;
+}
+
+// "8:15 PM" for the tooltips.
+function clockWithAp(min) {
+  // Past midnight (the route runs on): the next day's clock, marked.
+  const day = min >= 24 * 60;
+  const clock = min % (24 * 60);
+  return `${plannedClock(clock)} ${clock < 12 * 60 ? 'AM' : 'PM'}${day ? ' (+1 day)' : ''}`;
+}
+
+// The arrival window a planned block is held to:
+// { label: "window 8–10", range: "8–10 AM", outside, side, source }.
+//  - source 'told': the promise the customer was told (feed `told`, hour
+//    level, for this day); a planned arrival outside it is the alert;
+//  - a day-only promise has no hour: null (no chip, no alert);
+//  - source 'booked': no recorded promise (none, unreadable, another day, a
+//    technician's feed): the booked start plus 2 hours as a chip only, never
+//    the red edge.
+function plannedWindow(svc, plannedStart) {
+  const told = svc.told;
+  if (told?.level === 'day') return null;
+  const recorded = told?.level === 'hour' ? parseToldWindow(told.window) : null;
+  const sameDay = !told?.date || !svc.scheduledDate || String(told.date).slice(0, 10) === String(svc.scheduledDate).slice(0, 10);
+  if (recorded && sameDay) {
+    return {
+      label: `window ${windowHour(recorded.start)}–${windowHour(recorded.end)}`,
+      range: windowSpanText(recorded.start, recorded.end),
+      outside: plannedStart < recorded.start || plannedStart > recorded.end,
+      side: plannedStart < recorded.start ? 'before' : 'after',
+      at: plannedStart,
+      source: 'told',
+    };
+  }
+  const ws = parseHHMM(svc.windowStart);
+  if (ws == null) return null;
+  return {
+    label: `window ${windowHour(ws)}–${windowHour(ws + ARRIVAL_WINDOW_MIN)}`,
+    range: windowSpanText(ws, ws + ARRIVAL_WINDOW_MIN),
+    outside: false,
+    at: plannedStart,
+    source: 'booked',
+    // Why no promise is held against: nothing on this feed (no `told`: the
+    // technician's feed, a day past the 14-day read, a gate off), none made,
+    // a promise whose time cannot be read, or one made for another date.
+    reason: !told ? 'not-shown' : told.level !== 'hour' ? 'none' : !recorded ? 'unreadable' : 'other-date',
+  };
+}
+
+// A planned time the grid cannot draw (before 6 AM or from 8 PM): the block
+// keeps its booked spot, but the promise is still checked against this time.
+function offGridPlannedStart(svc) {
+  const at = svc?.plannedArrivalMin;
+  const mins = svc?.plannedMinutes;
+  return Number.isFinite(at) && Number.isFinite(mins) && mins > 0 ? at : null;
+}
+
+// Tooltip line for a block drawn at its booked spot with a planned time off the grid.
+function offGridTitleLine(at, promise) {
+  // Both times, labelled: the service's own planned start, and where the van
+  // reaches the stop (which the promise is judged at; they differ for a later
+  // service of a group).
+  const own = `Service planned ${clockWithAp(at)} (off the grid)`;
+  if (!promise) return `\n${own}`;
+  const window = `${promise.source === 'told' ? 'window' : 'booked window'} ${promise.range}`;
+  const verdict = promise.outside ? ` · ${promise.side} the promise` : '';
+  return `\n${own} · stop reached ${clockWithAp(promise.at)} · ${window}${verdict}`;
 }
 
 // Square-style flat color blocks. Default/scheduled → blue-500;
@@ -206,6 +343,10 @@ function computeLanes(services) {
   const result = new Map();
   const items = services
     .map((s) => {
+      // A planned block is laid out by the interval it is DRAWN at, so
+      // back-to-back stops stack full width.
+      const planned = plannedInterval(s);
+      if (planned) return { svc: s, start: planned.start, end: planned.end };
       const start = parseHHMM(s.windowStart);
       const endRaw = parseHHMM(s.windowEnd);
       const dur = effectiveDuration(s);
@@ -363,7 +504,70 @@ function driveInLabel(service) {
   return `~${service.driveFromPrevMin} min drive in`;
 }
 
-function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent, routeStale = false }) {
+// The promise check of a block: against the planned stop arrival when the
+// block is drawn at its planned time, else (planned time off the grid) against
+// that time with the block kept at its booked spot.
+function blockPromise(service, planned) {
+  const offGridAt = planned ? null : offGridPlannedStart(service);
+  const checkedAt = planned ? planned.start : offGridAt;
+  if (checkedAt == null) return { promise: null, offGridAt };
+  const at = Number.isFinite(service.plannedStopArrivalMin) ? service.plannedStopArrivalMin : checkedAt;
+  return { promise: plannedWindow(service, at), offGridAt };
+}
+
+// The window chip's tooltip: what the window is, and when it is not a promise, why.
+const BOOKED_WINDOW_WHY = {
+  'none': 'no promise on record',
+  'not-shown': 'promise not shown on this feed',
+  'unreadable': 'promise time not readable',
+  'other-date': 'promise was for another date',
+};
+function promiseChipTitle(promise) {
+  if (promise?.source === 'told') return 'Promised arrival window';
+  return `Booked arrival window (${BOOKED_WINDOW_WHY[promise?.reason] || BOOKED_WINDOW_WHY.none})`;
+}
+
+// Tooltip line for a planned block.
+function plannedTitleLine(planned, promise) {
+  // The alert is judged at the stop arrival: quote that time, not a later
+  // service's own start.
+  const outside = promise?.outside
+    ? ` — outside the ${promise.label} (stop reached ${plannedClock(promise.at)})`
+    : '';
+  return `\nPlanned arrival ${plannedClock(planned.start)} · ${planned.minutes} min${outside}`;
+}
+
+// A planned block's head row: route number (one-line blocks only), planned
+// arrival, and the promised-window chip at the right. A one-line block also
+// carries the name, service and minutes on this row.
+function PlannedHeadline({ service, planned, promise, promiseTitle, oneLine, routeOrder, gutter, nameRow }) {
+  return (
+    <div className="flex items-center gap-1 min-w-0" style={{ paddingRight: gutter }}>
+      {oneLine && routeOrder != null && (
+        <span
+          className="shrink-0 u-nums text-14 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs"
+          style={{ minWidth: 14, textAlign: 'center', lineHeight: '14px' }}
+        >{routeOrder}</span>
+      )}
+      <span className="u-nums shrink-0 opacity-90">{plannedClock(planned.start)}</span>
+      {oneLine && nameRow}
+      {oneLine && (
+        <span className="opacity-80 truncate min-w-0">
+          · {serviceDisplayName(service)} · <span className="u-nums">{planned.minutes} min</span>
+        </span>
+      )}
+      {promise && (
+        <span
+          className="shrink-0 ml-auto rounded-xs bg-white/20 px-1 u-nums opacity-90 whitespace-nowrap"
+          style={{ fontSize: 14 }}
+          title={promiseTitle}
+        >{promise.label}</span>
+      )}
+    </div>
+  );
+}
+
+function AppointmentBlock({ service, top, height, planned = null, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent, routeStale = false }) {
   // A move awaiting confirmation changes the route: the server's legs are
   // stale until the refresh, so they hide.
   const drive = routeStale ? null : driveInLabel(service);
@@ -373,7 +577,8 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
   });
 
   const [resizeHeight, setResizeHeight] = useState(null);
-  const effectiveHeight = resizeHeight != null ? resizeHeight : Math.max(height, SLOT_HEIGHT - 2);
+  const minHeight = planned ? MIN_PLANNED_PX : SLOT_HEIGHT - 2;
+  const effectiveHeight = resizeHeight != null ? resizeHeight : Math.max(height, minHeight);
   const hasAuditAction = service.status === 'completed' && onViewAudit && (service.customerId || service.customer_id);
   const hasProtocolAction = !!onProtocol;
   const hasPlanAction = isLawnService(service) && onTreatmentPlan;
@@ -389,6 +594,19 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
   // The drive into this stop needs a one-hour block, and stays off one whose
   // foot carries the readiness strip; the tooltip always carries it.
   const showDrive = drive && effectiveHeight >= SLOT_HEIGHT * 2 && !readinessAtFoot;
+  // Planned block (route model): the planned arrival leads, the promised
+  // window moves to a chip, and a short block is one line.
+  // The promise is kept or missed when the van reaches the stop (a group's
+  // later service starts after earlier ones, still inside the same promise).
+  const { promise, offGridAt } = blockPromise(service, planned);
+  const outsideWindow = promise?.outside === true;
+  const promiseTitle = promiseChipTitle(promise);
+  const oneLine = planned != null && compact;
+  // A 15-minute stop is drawn at its real 16px: one text line, small buttons.
+  const tiny = planned != null && effectiveHeight < SLOT_HEIGHT - 2;
+  const actionBox = tiny ? 'top-0 h-4 w-4' : 'top-0.5 h-5 w-5';
+  // Room for the absolute action buttons at the block's right edge.
+  const actionGutter = (actionCount + (routeOrder != null && !oneLine ? 1 : 0)) * 24;
 
   const dragStyle = transform
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
@@ -399,35 +617,83 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
     e.preventDefault();
     e.stopPropagation();
     const startY = e.clientY;
-    const startHeight = Math.max(height, SLOT_HEIGHT - 2);
-    let finalHeight = startHeight;
+    const startHeight = Math.max(height, minHeight);
+    // Whole slots moved by the pointer, signed: the save applies them to the
+    // booked length, so a planned block (whose drawn height is not the
+    // booking) drags up one slot as 30 minutes less, whatever the preview
+    // clamp shows.
+    let slots = 0;
 
     const onMove = (ev) => {
-      const dy = ev.clientY - startY;
-      const raw = startHeight + dy;
-      const snapped = Math.max(SLOT_HEIGHT, Math.round(raw / SLOT_HEIGHT) * SLOT_HEIGHT);
-      finalHeight = snapped;
-      setResizeHeight(snapped);
+      slots = Math.round((ev.clientY - startY) / SLOT_HEIGHT);
+      setResizeHeight(Math.max(SLOT_HEIGHT, startHeight + slots * SLOT_HEIGHT));
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       setResizeHeight(null);
-      if (finalHeight !== startHeight) {
+      if (slots !== 0) {
         // Delta-based on the visit's REAL duration, not the drawn height: a
         // block clipped at the grid's first row (05:00–07:00 draws 60 min)
         // must keep its hidden pre-grid minutes when the operator drags the
         // bottom edge, or the resize would silently shorten the visit.
-        const deltaMin = ((finalHeight - startHeight) / SLOT_HEIGHT) * SLOT_MIN;
         const baseMin = Number.isFinite(durationMin) && durationMin > 0
           ? durationMin
           : (startHeight / SLOT_HEIGHT) * SLOT_MIN;
-        onResize(service, Math.max(SLOT_MIN, baseMin + deltaMin));
+        // The 30-minute floor must never lengthen a shorter booking: an
+        // up-drag only ever shortens, and where the floor would raise the
+        // length (a 15-minute or 30-minute booking) nothing is sent.
+        const floored = Math.max(SLOT_MIN, baseMin + slots * SLOT_MIN);
+        const nextMin = slots < 0 ? Math.min(baseMin, floored) : floored;
+        if (nextMin !== baseMin) onResize(service, nextMin);
       }
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-  }, [onResize, service, height]);
+  }, [onResize, service, height, durationMin, minHeight]);
+
+  const nameRow = (
+    <div className={cn('flex items-center gap-1 min-w-0', oneLine && 'max-w-[45%]')}>
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          const customerId = service.customerId || service.customer_id;
+          if (customerId) onViewCustomer?.(service);
+        }}
+        className={cn(
+          'text-left text-14 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
+          'text-inherit bg-transparent border-0 p-0 cursor-pointer'
+        )}
+        title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
+      >
+        {service.customerName || 'Unassigned'}
+      </button>
+      {owesCompletion?.(service) && <CloseoutOwedChip />}
+      {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && effectiveHeight >= SLOT_HEIGHT * 2 && (
+        <span
+          className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
+          style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 14 }}
+          title="Prepaid"
+        >$</span>
+      )}
+      {/* Visit group (visit-group-scope.md §3): this row is one of N
+          services at the same stop — one route card, one En Route /
+          On Site tap for the tech. Monochrome chip; the schedule feed
+          attaches `visit` only to grouped rows. */}
+      {service.visit && Number(service.visit.serviceCount) > 1 && (
+        <span
+          className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium bg-zinc-200 text-zinc-800"
+          // A one-slot (30 min) block carries the chip on its first row
+          // (the time shares it), which leaves room for the 18px pill.
+          style={{ height: 18, padding: '0 6px', fontSize: 14 }}
+          title={`Visit of ${service.visit.serviceCount} services: ${(service.visit.serviceTypes || []).join(' + ')}`}
+          data-testid="visit-chip"
+        >Visit · {service.visit.serviceCount}</span>
+      )}
+    </div>
+  );
 
   return (
     <div
@@ -444,7 +710,8 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         onEdit?.(service);
       }}
       className={cn(
-        'absolute px-2 py-1 rounded-[3px] cursor-grab active:cursor-grabbing select-none overflow-hidden text-14 leading-tight u-focus-ring',
+        tiny ? 'py-0' : 'py-1',
+        'absolute px-2 rounded-[3px] cursor-grab active:cursor-grabbing select-none overflow-hidden text-14 leading-tight u-focus-ring',
         statusBlockClasses(service.status),
         isDragging && 'opacity-90 z-50 shadow-2xl ring-2 ring-zinc-900',
         isSelected && !isDragging && 'ring-2 ring-zinc-900 ring-offset-1 ring-offset-white z-30',
@@ -455,12 +722,12 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         left: `calc(${laneIdx * (100 / laneCount)}% + 2px)`,
         width: `calc(${100 / laneCount}% - 4px)`,
         background: statusBlockFill(service.status) || undefined,
-        borderLeft: accent ? `3px solid ${accent}` : undefined,
+        borderLeft: outsideWindow ? `3px solid ${OUTSIDE_WINDOW_EDGE}` : accent ? `3px solid ${accent}` : undefined,
         ...dragStyle,
       }}
-      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}${drive ? `\nDrive: ${drive}` : ''}\nShift+click to select for bulk actions`}
+      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}${planned ? plannedTitleLine(planned, promise) : (offGridAt != null ? offGridTitleLine(offGridAt, promise) : '')}${drive ? `\nDrive: ${drive}` : ''}\nShift+click to select for bulk actions`}
     >
-      {routeOrder != null && (
+      {routeOrder != null && !oneLine && (
         <div
           className={cn(
             'absolute top-0.5 u-nums text-14 font-medium bg-white/85 text-zinc-700 px-1 rounded-xs',
@@ -479,7 +746,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
             e.stopPropagation();
             onViewAudit(service);
           }}
-          className="absolute z-[1] top-0.5 right-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring"
+          className={cn('absolute z-[1] right-0.5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring', actionBox)}
           title="View completion audit"
           aria-label="View completion audit"
         >
@@ -496,7 +763,8 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
             onProtocol(service);
           }}
           className={cn(
-            'absolute z-[1] top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            'absolute z-[1] inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            actionBox,
             hasAuditAction ? 'right-6' : 'right-0.5'
           )}
           title="Protocol"
@@ -514,7 +782,8 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
             onTreatmentPlan(service);
           }}
           className={cn(
-            'absolute z-[1] top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            'absolute z-[1] inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            actionBox,
             hasAuditAction && hasProtocolAction ? 'right-11' : hasAuditAction || hasProtocolAction ? 'right-6' : 'right-0.5'
           )}
           title="Treatment plan"
@@ -523,57 +792,35 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
           <Leaf size={12} strokeWidth={1.75} />
         </button>
       )}
-      <div className={compact ? 'flex items-center gap-1 min-w-0' : undefined}>
-      <div className={cn('opacity-90 truncate', compact && 'shrink-0 max-w-[50%]')}>
-        {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)}
-      </div>
-      <div className="flex items-center gap-1 min-w-0">
-        <button
-          type="button"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            const customerId = service.customerId || service.customer_id;
-            if (customerId) onViewCustomer?.(service);
-          }}
-          className={cn(
-            'text-left text-14 leading-tight font-medium truncate u-focus-ring rounded-[3px]',
-            'text-inherit bg-transparent border-0 p-0 cursor-pointer'
-          )}
-          title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
-        >
-          {service.customerName || 'Unassigned'}
-        </button>
-        {owesCompletion?.(service) && <CloseoutOwedChip />}
-        {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && effectiveHeight >= SLOT_HEIGHT * 2 && (
-          <span
-            className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 14 }}
-            title="Prepaid"
-          >$</span>
-        )}
-        {/* Visit group (visit-group-scope.md §3): this row is one of N
-            services at the same stop — one route card, one En Route /
-            On Site tap for the tech. Monochrome chip; the schedule feed
-            attaches `visit` only to grouped rows. */}
-        {service.visit && Number(service.visit.serviceCount) > 1 && (
-          <span
-            className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium bg-zinc-200 text-zinc-800"
-            // A one-slot (30 min) block carries the chip on its first row
-            // (the time shares it), which leaves room for the 18px pill.
-            style={{ height: 18, padding: '0 6px', fontSize: 14 }}
-            title={`Visit of ${service.visit.serviceCount} services: ${(service.visit.serviceTypes || []).join(' + ')}`}
-            data-testid="visit-chip"
-          >Visit · {service.visit.serviceCount}</span>
-        )}
-      </div>
-      </div>
+      {planned ? (
+        <>
+          <PlannedHeadline
+            service={service}
+            planned={planned}
+            promise={promise}
+            promiseTitle={promiseTitle}
+            oneLine={oneLine}
+            routeOrder={routeOrder}
+            gutter={actionGutter}
+            nameRow={nameRow}
+          />
+          {!oneLine && nameRow}
+        </>
+      ) : (
+        <div className={compact ? 'flex items-center gap-1 min-w-0' : undefined}>
+          <div className={cn('opacity-90 truncate', compact && 'shrink-0 max-w-[50%]')}>
+            {service.windowDisplay || minutesToHHMM(parseHHMM(service.windowStart) || 0)}
+          </div>
+          {nameRow}
+        </div>
+      )}
       {/* At 14px a one-hour block holds three rows (time, name, service),
           so the drive rides on the service row; the service name truncates
           first. */}
-      {effectiveHeight > SLOT_HEIGHT && (
+      {effectiveHeight > SLOT_HEIGHT && !oneLine && (
         <div className="flex items-center gap-1 min-w-0">
           <span className="opacity-80 truncate min-w-0">{serviceDisplayName(service)}</span>
+          {planned && <span className="opacity-80 shrink-0 u-nums">· {planned.minutes} min</span>}
           {showDrive && (
             <>
               <span className="opacity-70 shrink-0" aria-hidden="true">·</span>
@@ -623,6 +870,13 @@ export function isBookableSlotIdx(slotIdx, durationMin = 60) {
   return startMin + dur <= DAY_END_HOUR * 60;
 }
 
+// A drop that leaves the booked time alone: onto the rail, or a block drawn
+// at its planned time that was not dragged a slot up or down.
+function keepsBookedTime(svc, drop, delta) {
+  if (drop.slotMin == null) return true;
+  return plannedInterval(svc) != null && Math.abs(delta?.y || 0) < SLOT_HEIGHT;
+}
+
 function SlotDroppable({ techId, slotIdx, onCreateStart, takesNew = true }) {
   const slotMin = snapSlotIdxToHourMin(slotIdx);
   // The visit being dragged (same payload onDragEnd reads) sizes the fit
@@ -633,16 +887,20 @@ function SlotDroppable({ techId, slotIdx, onCreateStart, takesNew = true }) {
   // hour: a same-day move on the same technician is not an assignment, and
   // the server accepts it.
   const laneOpen = takesNew || (activeSvc != null && activeSvc.technicianId === techId);
-  const bookable = laneOpen && isBookableSlotIdx(slotIdx, activeSvc ? effectiveDuration(activeSvc) : 60);
+  const bookable = laneOpen && isBookableSlotIdx(slotIdx, activeSvc ? bookedLength(activeSvc) : 60);
+  // Registered whenever the lane takes the visit: whether the visit fits
+  // the day is decided in onDragEnd, once the gesture is known (a block
+  // dragged straight across keeps its booking and needs no fit). `bookable`
+  // is only the visual hint and the drag-create gate.
   const { setNodeRef, isOver } = useDroppable({
     id: `slot-${techId}-${slotIdx}`,
     data: { techId, slotMin },
-    disabled: !bookable,
+    disabled: !laneOpen,
   });
   const isHour = slotIdx % 2 === 0;
   return (
     <div
-      ref={bookable ? setNodeRef : undefined}
+      ref={laneOpen ? setNodeRef : undefined}
       onPointerDown={onCreateStart && bookable ? (e) => onCreateStart(e, slotIdx) : undefined}
       aria-disabled={bookable ? undefined : true}
       data-slot-min={slotMin}
@@ -655,6 +913,9 @@ function SlotDroppable({ techId, slotIdx, onCreateStart, takesNew = true }) {
       style={{
         height: SLOT_HEIGHT,
         borderTop: `1px solid ${isHour ? '#E4E4E7' : '#F4F4F5'}`,
+        // Planned blocks start on route minutes, not on the hour: a faint
+        // 15-minute line (mid-row) to read them against.
+        backgroundImage: QUARTER_LINE,
       }}
     />
   );
@@ -717,6 +978,13 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
   })));
   const freedHours = freedBy(['cancelled', 'skipped']);
   const doneHours = freedBy(['completed', 'no_show']);
+  // An Open marker is opaque and sits above the blocks: never drawn over a
+  // visit drawn at its planned time (the hour stays open for booking; its
+  // button stays for the keyboard and screen readers, out of sight).
+  const underPlanned = new Set(openHours.filter((h) => services.some((svc) => {
+    const planned = plannedInterval(svc);
+    return planned && planned.start < (h + 1) * 60 && planned.end > h * 60;
+  })));
 
   const selTop = sel ? Math.min(sel.startIdx, sel.endIdx) * SLOT_HEIGHT : 0;
   const selHeight = sel
@@ -769,11 +1037,18 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             type="button"
             onClick={() => onCreateSlot?.({ techId: tech.id, windowStart: hourToHHMM(h), windowEnd: hourToHHMM(h + 1) })}
             aria-label={`Book open hour ${formatOpenHour(h)} for ${tech.name}`}
-            className={cn(
-              'absolute z-[2] flex items-center justify-between rounded-xs border border-dashed border-zinc-300 bg-zinc-50 text-ink-tertiary focus-visible:border-zinc-900 u-focus-ring',
-              freedHours.has(h) ? 'cursor-pointer hover:border-zinc-900' : 'pointer-events-none',
-            )}
-            style={{ top: minutesToTopPx(h * 60) + 3, height: (60 / SLOT_MIN) * SLOT_HEIGHT - 6, left: 6, right: 6, padding: '0 10px', fontSize: 14 }}
+            className={underPlanned.has(h)
+              // Under a visit drawn here: out of sight and out of the way of
+              // the mouse, still a keyboard / screen-reader way to book the
+              // hour (it shows while focused).
+              ? 'sr-only focus-visible:not-sr-only focus-visible:absolute focus-visible:z-[3] focus-visible:flex focus-visible:items-center focus-visible:gap-2 focus-visible:rounded-xs focus-visible:border focus-visible:border-zinc-900 focus-visible:bg-zinc-50 focus-visible:px-2 focus-visible:text-ink-tertiary u-focus-ring'
+              : cn(
+                'absolute z-[2] flex items-center justify-between rounded-xs border border-dashed border-zinc-300 bg-zinc-50 text-ink-tertiary focus-visible:border-zinc-900 u-focus-ring',
+                freedHours.has(h) ? 'cursor-pointer hover:border-zinc-900' : 'pointer-events-none',
+              )}
+            style={underPlanned.has(h)
+              ? { top: minutesToTopPx(h * 60) + 3, left: 6, fontSize: 14 }
+              : { top: minutesToTopPx(h * 60) + 3, height: (60 / SLOT_MIN) * SLOT_HEIGHT - 6, left: 6, right: 6, padding: '0 10px', fontSize: 14 }}
           >
             <span className="u-nums">Open · {formatOpenHour(h)}</span>
             <span className="font-medium">+ Book</span>
@@ -804,8 +1079,9 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             // visit); one wholly before it is a compact block pinned on the
             // first row. The block still carries its real window label.
             const dur = effectiveDuration(svc);
-            const dispStart = Math.max(startMin, DAY_START_HOUR * 60);
-            const dispEnd = Math.max(startMin + dur, dispStart + SLOT_MIN);
+            const planned = plannedInterval(svc);
+            const dispStart = planned ? planned.start : Math.max(startMin, DAY_START_HOUR * 60);
+            const dispEnd = planned ? planned.end : Math.max(startMin + dur, dispStart + SLOT_MIN);
             const top = minutesToTopPx(dispStart);
             const height = ((dispEnd - dispStart) / SLOT_MIN) * SLOT_HEIGHT;
             const lane = lanes.get(svc.id) || { laneIdx: 0, laneCount: 1 };
@@ -818,7 +1094,8 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
                 routeStale={routeStale}
                 top={top}
                 height={height}
-                durationMin={dur}
+                planned={planned}
+                durationMin={bookedLength(svc)}
                 laneIdx={lane.laneIdx}
                 laneCount={lane.laneCount}
                 onEdit={onEdit}
@@ -1262,7 +1539,7 @@ export default function TimeGridDay({
   const [dragging, setDragging] = useState(null);
   const { fits: dragFits, best: bestFit } = useBoardOpenTimes({
     service: dragging,
-    durationOf: effectiveDuration,
+    durationOf: bookedLength,
     dates: [date],
   });
 
@@ -1308,7 +1585,7 @@ export default function TimeGridDay({
 
   const onDragEnd = useCallback((event) => {
     setDragging(null);
-    const { active, over } = event;
+    const { active, over, delta } = event;
     if (!over) return;
     const svc = active.data.current?.service;
     const drop = over.data.current;
@@ -1318,20 +1595,23 @@ export default function TimeGridDay({
     const toTech = drop.techId;
     const fromMin = parseHHMM(svc.windowStart);
     // Rail droppable has no slotMin — keep the original time when unassigning.
-    const toMin = drop.slotMin != null ? Math.floor(drop.slotMin / 60) * 60 : fromMin;
+    // A block drawn at its PLANNED time that was not dragged up or down (under
+    // one slot) is a technician-only move: the booking is not touched.
+    const keepBooked = keepsBookedTime(svc, drop, delta);
+    const toMin = keepBooked ? fromMin : Math.floor(drop.slotMin / 60) * 60;
     // Past-day-end landings are disabled droppables; belt-and-braces for a
     // stale drop payload — the server would 422 it anyway.
-    if (drop.slotMin != null && toMin + effectiveDuration(svc) > DAY_END_HOUR * 60) return;
+    if (!keepBooked && toMin + bookedLength(svc) > DAY_END_HOUR * 60) return;
     if (dropRefused(fromTech, toTech, fromMin, toMin, techList.find((lane) => lane.id === toTech))) return;
 
-    const dur = effectiveDuration(svc);
+    const dur = bookedLength(svc);
     const newWindow = `${minutesToHHMM(toMin)}-${minutesToHHMM(toMin + dur)}`;
     const newWindowDisplay = `${minutesToLabel(toMin)} – ${minutesToLabel(toMin + dur)}`;
 
     const next = allServices.map((s) =>
       s.id === svc.id
         ? {
-            ...s,
+            ...withoutPlan(s),
             technicianId: toTech === '__unassigned__' ? null : toTech,
             technicianName: toTech === '__unassigned__'
               ? null
@@ -1439,7 +1719,7 @@ export default function TimeGridDay({
     const optimisticNext = allServices.map((s) =>
       s.id === svc.id
         ? {
-            ...s,
+            ...withoutPlan(s),
             windowEnd: minutesToHHMM(newEndMin),
             windowDisplay: newWindowDisplay,
             estimatedDuration: newDurationMin,
@@ -1569,7 +1849,7 @@ export default function TimeGridDay({
     if (selection.size === 0) return;
     const ids = Array.from(selection);
     setOptimistic(allServices.map((s) =>
-      ids.includes(s.id) ? { ...s, technicianId: null, technicianName: null } : s,
+      ids.includes(s.id) ? { ...withoutPlan(s), technicianId: null, technicianName: null } : s,
     ));
     setBusy(true);
     try {
@@ -1748,7 +2028,7 @@ export default function TimeGridDay({
         serviceId={pending?.svc?.id}
         toWindow={pending?.newWindow}
         customerId={pending?.svc?.customerId || pending?.svc?.customer_id}
-        durationMinutes={pending?.svc ? effectiveDuration(pending.svc) : undefined}
+        durationMinutes={pending?.svc ? bookedLength(pending.svc) : undefined}
         technicianId={pending?.toTech && pending.toTech !== '__unassigned__' ? pending.toTech : undefined}
         pickTimes
         onConfirm={commitReschedule}
@@ -1757,3 +2037,11 @@ export default function TimeGridDay({
     </div>
   );
 }
+
+// Shared with the Route list (RouteListDay.jsx): one rule for a stop's window,
+// promise alert, status look and wording on both layouts.
+export {
+  blockPromise, plannedTitleLine, promiseChipTitle, plannedClock, clockWithAp,
+  OUTSIDE_WINDOW_EDGE, statusBlockClasses, statusBlockFill, serviceDisplayName,
+  parseHHMM, CloseoutOwedChip, driveInLabel,
+};

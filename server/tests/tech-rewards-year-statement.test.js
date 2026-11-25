@@ -16,7 +16,7 @@ describe('composeStatement', () => {
   // PostgreSQL returns a bigint sum as text.
   const SUMS = {
     checkCount: 3, firstPayDate: '2027-01-08', lastPayDate: '2027-12-24',
-    gross: '1000000', regularPay: '700000', overtimePay: '50000', ptoPay: '20000', holidayPay: '10000',
+    gross: '1000000', regularPay: '683800', productionShare: '16200', overtimePay: '50000', ptoPay: '20000', holidayPay: '10000',
     commission: '60000', reviewBonus: '4500', healthAllowance: '30000', techRewards: '120000', lineOvertimePremium: '5500',
     hsaEmployer: '12000', simpleEmployer: '20000', simpleDeferral: '30000',
     federalIncomeTax: '90000', socialSecurity: '62000', medicare: '14500', additionalMedicare: '0', net: '803500',
@@ -32,8 +32,8 @@ describe('composeStatement', () => {
       firstPayDate: '2027-01-08',
       lastPayDate: '2027-12-24',
       pay: {
-        regularPayCents: 700000, overtimePayCents: 50000, ptoPayCents: 20000, holidayPayCents: 10000, minimumWeekPayCents: 0, holidayWorkPremiumCents: 0,
-        commissionCents: 60000, reviewBonusCents: 4500, healthAllowanceCents: 30000,
+        regularPayCents: 683800, overtimePayCents: 50000, ptoPayCents: 20000, holidayPayCents: 10000, minimumWeekPayCents: 0, holidayWorkPremiumCents: 0,
+        commissionCents: 60000, reviewBonusCents: 4500, healthAllowanceCents: 30000, productionShareCents: 16200,
         seasonBonusCents: 80000, stayBonusCents: 10000, decemberGiftCents: 30000,
         lineOvertimePremiumCents: 5500, otherCents: 0, grossCents: 1000000,
       },
@@ -43,6 +43,14 @@ describe('composeStatement', () => {
       simpleSavingsCents: 30000,
       netCents: 803500,
     });
+  });
+
+  test('the production share row is there only when a check of the year stored a share figure (a stored 0 shows 0)', () => {
+    const { productionShare, ...none } = SUMS;
+    expect(compose(none, REWARDS).pay).not.toHaveProperty('productionShareCents');
+    expect(compose({ ...none, productionShare: null }, REWARDS).pay).not.toHaveProperty('productionShareCents');
+    expect(compose({ ...none, productionShare: '0' }, REWARDS).pay).toHaveProperty('productionShareCents', 0);
+    expect(compose(SUMS, REWARDS).pay.productionShareCents).toBe(16200);
   });
 
   test('gross less the taxes and the savings is net pay, as payroll-calc.js works a paycheck out', () => {

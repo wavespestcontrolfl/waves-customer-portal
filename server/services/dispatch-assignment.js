@@ -5,7 +5,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { stampedDivergesSql, stampedLine2Sql } = require('./stamped-address');
 const { assertAssignableTechnician } = require('./technician-eligibility');
-const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gates');
+const { techShiftHoursLive } = require('../config/feature-gates');
 
 const ADMIN_ROOM = 'dispatch:admins';
 const ADMIN_EVENT = 'dispatch:job_update';
@@ -206,19 +206,12 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // back to the row's own date when no snapshot date is given.
   const eligibilityDate = dateOnly(noticeSnapshot?.date) || dateOnly(job.scheduled_date);
   const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn, date: eligibilityDate }) : null;
-  // Work days (GATE_TECH_WORK_DAYS): an office assignment or board drag onto a
-  // day the technician does not work is allowed; the result carries one plain
-  // warning line for the route to return. Gate off: no read, no `warnings` key.
-  const offDayLine = newTechId && (job.technician_id || null) !== newTechId && techWorkDaysLive()
-    ? await require('./technician-eligibility').offDayWarningFor(newTechId, eligibilityDate, { conn })
-    : null;
   // Job type (GATE_TECH_JOB_TYPE_CHECKS): the same office paths also say so when the
   // technician is set to Off for this visit's job type. Warns, never blocks; the helper
   // returns [] with the gate off (no read).
   const capabilityLines = newTechId && (job.technician_id || null) !== newTechId
     ? await require('./technician-eligibility').capabilityOffWarningsFor(newTechId, [job], { conn })
     : [];
-  const assignWarnings = [offDayLine, ...capabilityLines].filter(Boolean);
 
   if ((job.technician_id || null) === newTechId) {
     return {
@@ -356,6 +349,22 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     // (noticeSnapshot) moves the visit off the row's slot (Codex #5783/#5786).
     previous: noticePrevious || (Object.keys(overrides).length ? rowSnapshot : null),
   });
+
+  // Work days (GATE_TECH_WORK_DAYS): an office assignment or board drag onto a
+  // day the technician does not work is allowed; the result carries one plain
+  // warning line for the route to return. Gate off: no read, no `warnings` key.
+  // Shift hours (GATE_TECH_SHIFT_HOURS): on a day the technician works, the same
+  // read says when the shift does not hold the visit (dayWarningFor). The visit is
+  // the row the write returned, with the day and the hours the caller's same
+  // transaction is about to write (`noticeSnapshot`): an edit of the day, the hours or
+  // the length that landed before this write is in the line. An unassign asks nothing.
+  const landed = { ...rowSnapshot, ...overrides };
+  const dayLine = newTechId
+    ? await require('./technician-eligibility').dayWarningFor(newTechId, dateOnly(noticeSnapshot?.date) || dateOnly(updatedRow.scheduled_date), {
+      conn, block: { window_start: landed.windowStart, window_end: landed.windowEnd, estimated_duration_minutes: updatedRow.estimated_duration_minutes },
+    })
+    : null;
+  const assignWarnings = [dayLine, ...capabilityLines].filter(Boolean);
 
   if (emit) {
     const emitUpdate = () => emitDispatchJobUpdate({ jobId, actorId, previousTechnicianId: fromTechId })
