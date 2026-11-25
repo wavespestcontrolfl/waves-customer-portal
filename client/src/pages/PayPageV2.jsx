@@ -178,6 +178,17 @@ function serverReportedError(message, {
   return err;
 }
 
+// Page-driven navigations (a promo reload, the annual-prepay pay URL, a
+// stale-balance reload, a bank-redirect cleanup) mark themselves first, so the
+// bank-step leave report (PaymentForm's pagehide) never rings the office while
+// checkout is still going on.
+let payPageNavigatingOnPurpose = false;
+function payPageLeftOnPurpose() { return payPageNavigatingOnPurpose; }
+function resetPayPageNavigation() { payPageNavigatingOnPurpose = false; }
+function reloadPayPage() { payPageNavigatingOnPurpose = true; window.location.reload(); }
+function replacePayPage(url) { payPageNavigatingOnPurpose = true; window.location.replace(url); }
+function assignPayPage(url) { payPageNavigatingOnPurpose = true; window.location.assign(url); }
+
 function reportPaymentError(token, payload = {}) {
   if (!token || !payload.message) return;
   try {
@@ -778,7 +789,7 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
         )}
         <PayFaqItem question="My bank won’t let me sign in. How do I pay by bank?">
           You don’t need to sign in. Choose Bank account, then pick “Enter bank details manually”
-          in the bank window and type your routing and account number. Stripe sends{' '}
+          in the bank window, type your routing and account number, and press Pay. Stripe sends{' '}
           {microdepositSavedPhrases(null).deposits} to your account in 1–2 business days; follow the
           email you get to verify your account, and the payment goes through. Bank payments have no
           added fee.
@@ -882,7 +893,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     if (typeof window === 'undefined') return undefined;
     const onPageHide = () => {
       if (selectedMethodRef.current !== 'us_bank_account') return;
-      if (bankLeave.current.tried || bankLeave.current.reported || processingRef.current) return;
+      if (bankLeave.current.tried || bankLeave.current.reported || processingRef.current || payPageLeftOnPurpose()) return;
       bankLeave.current.reported = true;
       reportPaymentError(token, {
         message: 'Customer picked Bank account and left the pay page without paying',
@@ -942,7 +953,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         // server's locked re-verification): reload to live amounts — same
         // contract as the /setup staleBalance path.
         if (data.staleBalance) {
-          window.location.reload();
+          reloadPayPage();
           return new Promise(() => {});
         }
         // The consent text changed under this tab: refresh prompt, never a
@@ -1480,7 +1491,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         // of re-quoting into the same 409 (codex #5434 r7 P2). Same contract
         // as the /setup and /update-amount staleBalance paths.
         if (result.staleBalance) {
-          window.location.reload();
+          reloadPayPage();
           return new Promise(() => {});
         }
         throw serverReportedError(result.error || (isConsentVersionStale(result) ? CONSENT_VERSION_STALE_MESSAGE : 'Payment failed'));
@@ -1795,8 +1806,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           <strong>{showManualEntryHint ? 'Trouble linking your bank?' : 'Can’t sign in to your bank?'}</strong>{' '}
           Some banks don't support instant linking. In the bank window, choose{' '}
           <strong>“Enter bank details manually”</strong> and type your routing and account
-          number. Stripe then sends {microdepositSavedPhrases(null).deposits} in 1–2 business
-          days to verify your account, and bank payments have no added fee.
+          number, then press Pay. Stripe then sends {microdepositSavedPhrases(null).deposits} in
+          1–2 business days to verify your account, and bank payments have no added fee.
         </div>
       )}
 
@@ -1990,6 +2001,13 @@ export default function PayPageV2() {
   const navigate = useNavigate();
   // Bank-step leave report state for this page load (see PaymentForm).
   const bankLeaveRef = useRef({ tried: false, reported: false });
+  // A bfcache restore after a page-driven navigation starts a fresh visit.
+  useEffect(() => {
+    resetPayPageNavigation();
+    const onShow = (e) => { if (e.persisted) resetPayPageNavigation(); };
+    window.addEventListener('pageshow', onShow);
+    return () => window.removeEventListener('pageshow', onShow);
+  }, []);
   const location = useLocation();
   const urlSaveRequiredHint = shouldRequireSaveCard(location.search);
   const saveCardDefault = shouldDefaultSaveCard(location.search) || urlSaveRequiredHint;
@@ -2123,7 +2141,7 @@ export default function PayPageV2() {
               // the invoice is still payable; re-derive real state instead
               // of showing "covered, nothing due".
               if (body?.settled === false) {
-                window.location.replace(window.location.pathname);
+                replacePayPage(window.location.pathname);
                 return;
               }
               setSetupCapture({ status: 'done' });
@@ -2223,7 +2241,7 @@ export default function PayPageV2() {
           // invoice is still payable; re-derive real state instead of
           // showing "covered, nothing due" (Codex #2507 round-9).
           if (body.settled === false) {
-            window.location.replace(window.location.pathname);
+            replacePayPage(window.location.pathname);
             return;
           }
           setSetupCapture({ status: 'done' });
@@ -2318,7 +2336,7 @@ export default function PayPageV2() {
             // other open invoices) changed since this page rendered — reload
             // to show the customer the updated amounts before they pay.
             // Never-resolving promise: the navigation supersedes this chain.
-            window.location.reload();
+            reloadPayPage();
             return new Promise(() => {});
           }
           throw serverReportedError(setup.error || 'Failed to initialize payment', {
@@ -2693,7 +2711,7 @@ export default function PayPageV2() {
                       // is still payable, so re-derive real state instead
                       // of showing "covered, nothing due".
                       if (body?.settled === false) {
-                        window.location.replace(window.location.pathname);
+                        replacePayPage(window.location.pathname);
                         return;
                       }
                       setSetupCapture({ status: 'done' });
@@ -3212,7 +3230,7 @@ export default function PayPageV2() {
             <PayPlanChoice
               planChoice={data.planChoice}
               panelStyle={subtlePanel}
-              onChosen={(payUrl) => window.location.assign(payUrl)}
+              onChosen={(payUrl) => assignPayPage(payUrl)}
               choosePrepay={async () => {
                 const response = await fetch(`${API_BASE}/pay/${token}/plan-choice`, {
                   method: 'POST',
@@ -3232,7 +3250,7 @@ export default function PayPageV2() {
             <PayPromoCode
               promoCode={promoVerdict === undefined ? data.promoCode : promoVerdict}
               panelStyle={subtlePanel}
-              onSaved={() => window.location.reload()}
+              onSaved={() => reloadPayPage()}
               submitCode={async (code) => {
                 const response = await fetch(`${API_BASE}/pay/${token}/promo-code`, {
                   method: 'POST',
@@ -3283,7 +3301,7 @@ export default function PayPageV2() {
                   // invoice takes the SAME full reload the staleInvoice 409
                   // path uses — never a data swap beside the old client
                   // secret. Before /setup answers there is no PI to strand.
-                  if (stripeSetup) { window.location.reload(); return; }
+                  if (stripeSetup) { reloadPayPage(); return; }
                   setData(fresh);
                 }}
               />
