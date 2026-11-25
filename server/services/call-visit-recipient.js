@@ -238,15 +238,14 @@ async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], 
   try {
     const visit = await conn('scheduled_services').where({ id: scheduledServiceId }).first('id', 'status', 'scheduled_date', 'window_start', 'customer_id', 'service_type');
     // `anyVisitStatus`: the tracker link also serves a visit that is on site or just completed (its own lifetime rule limits it); a send never does.
-    if (!visit || (!anyVisitStatus && !LIVE_STATUSES.includes(String(visit.status || '')))) return [];
+    if (!visit || (!anyVisitStatus && !LIVE_STATUSES.includes(String(visit.status)))) return [];
     const rows = await conn(TABLE).where({ scheduled_service_id: scheduledServiceId }).orderBy('created_at', 'asc');
     if (!rows.length) return [];
     const holder = await conn('customers').where({ id: visit.customer_id }).first('phone');
     const taken = new Set([...excludePhones, holder?.phone].map(lastTen).filter(Boolean));
     const contacts = [];
     for (const row of rows) {
-      // A row bound to another customer (the visit was reassigned) or to none is nobody's to text.
-      const contact = taken.has(row.phone_key) || !rowBelongsToVisitCustomer(row, visit) ? null : await ownedContact(row, visit, kind, conn);
+      const contact = await ownedContact(row, visit, kind, conn, taken);
       if (contact) contacts.push(contact);
     }
     return contacts;
@@ -262,8 +261,10 @@ function rowBelongsToVisitCustomer(row, visit) {
   return Boolean(row && visit && row.customer_id && visit.customer_id && String(row.customer_id) === String(visit.customer_id));
 }
 
-// One recipient row as a contact a sender can text, or null when they have declined.
-async function ownedContact(row, visit, kind, conn) {
+// One recipient row as a contact a sender can text, or null: a number already texted (`taken`), a row bound to another customer (the
+// visit was reassigned) or to none, or a person who has declined.
+async function ownedContact(row, visit, kind, conn, taken) {
+  if (taken.has(row.phone_key) || !rowBelongsToVisitCustomer(row, visit)) return null;
   if (await declinedByRecipient({ customerId: visit.customer_id, phoneKey: row.phone_key, phoneE164: row.phone_e164, purpose: KINDS[kind].purpose, conn })) return null;
   const windowStart = visit.window_start ? String(visit.window_start).slice(0, 5) : null;
   const scheduledDate = dateOnlyString(visit.scheduled_date);
