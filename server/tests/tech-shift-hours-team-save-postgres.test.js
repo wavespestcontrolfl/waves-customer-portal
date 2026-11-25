@@ -2,8 +2,8 @@
  * GATE_TECH_SHIFT_HOURS (D4): a Team save of the shift hours lists the technician's
  * coming visits the new hours do not hold (routes/admin-timetracking.js,
  * outsideNewShiftReply), on REAL Postgres rows: the DATE and TIME columns as pg reads
- * them back, the real save (its lock, its update), the real readers of the hours and
- * of the work days.
+ * them back, the real save (its lock, its update, its commit), the real readers of the
+ * hours and of the work days, and a statement that fails inside the list's savepoint.
  *
  * Runs in the DB-gated CI step (DATABASE_URL on the migrated waves_test database) or a
  * local scratch Postgres; it skips without one. Fixtures are fictitious. Every row it
@@ -13,6 +13,11 @@ const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The real readers. loadTechShifts is wrapped so that one test can make the list's first read fail.
+jest.mock('../services/technician-eligibility', () => {
+  const real = jest.requireActual('../services/technician-eligibility');
+  return { ...real, loadTechShifts: jest.fn(real.loadTechShifts) };
+});
 jest.mock('../services/push-notifications', () => ({ deactivateStaffUser: jest.fn(async () => 1) }));
 jest.mock('../sockets', () => ({ disconnectStaffSockets: jest.fn() }));
 jest.mock('../services/tech-photo', () => ({ resolveTechPhotoUrl: jest.fn(async (_k, fallback) => fallback) }));
@@ -154,6 +159,28 @@ postgres('a Team save of the shift hours lists the visits the new hours do not h
     expect(await storedHours(tech)).toEqual([null, null]);
     // Hours set where there were none are new hours.
     expect((await save(tech, hours('08:00', '12:00'))).outsideShiftVisits).toHaveLength(1);
+  });
+
+  test('a list read that fails: the hours are saved all the same, with no list, and the failure is logged', async () => {
+    const logger = require('../services/logger');
+    const tech = await makeTech();
+    await makeVisit(tech, { window_start: '13:00', window_end: '14:00' });
+    // A statement that fails on the connection, as a failed read does: PostgreSQL then refuses
+    // every later statement of the transaction, the commit included, unless a savepoint holds it.
+    require('../services/technician-eligibility').loadTechShifts.mockImplementationOnce((conn) => conn.raw('select 1 / 0'));
+    logger.warn.mockClear();
+
+    const body = await save(tech, { ...hours('08:00', '12:00'), phone: '+19415550101' });
+    expect(body).not.toHaveProperty('outsideShiftVisits');
+    expect(body.technician).toMatchObject({ shift_start: '08:00', shift_end: '12:00' });
+    // The save is committed: the hours and the other field are in the table.
+    expect(await storedHours(tech)).toEqual(['08:00:00', '12:00:00']);
+    expect((await db('technicians').where({ id: tech.id }).first('phone')).phone).toBe('+19415550101');
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls[0][0]).toMatch(/visits outside the new shift hours were not read \(.*division by zero\)/);
+
+    // The next save lists again.
+    expect(ids(await save(tech, hours('08:00', '11:00')))).toHaveLength(1);
   });
 
   test('GATE_TECH_SHIFT_HOURS off: the hours are not written and nothing is listed', async () => {

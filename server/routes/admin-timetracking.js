@@ -1060,15 +1060,24 @@ function formatFutureAssignedVisits(rows) {
 // left out (the filter of occupancy.js and tech-open-visit-nudge.js).
 // {} and no read with the gate off, when the save left the hours as they were, or when the technician now
 // has no set hours.
+// The reads run in a savepoint of the save's transaction (as dayWarningsFor): a read that fails is logged
+// and gives no list, and the save goes on to its commit. The list never fails a save.
 async function outsideNewShiftReply(conn, before, tech) {
   const [was, now] = [storedShift(before), storedShift(tech)];
   if (!techShiftHoursOn() || !now || (was && was.startMin === now.startMin && was.endMin === now.endMin)) return {};
-  const shiftOf = await loadTechShifts(conn, { technicianIds: [tech.id] });
-  const visits = await listFutureAssignedVisits(conn, tech.id)
-    .where((q) => q.whereNotNull('s.customer_id').orWhereNull('s.reservation_expires_at'));
-  const outside = visits.filter((visit) => !isOffDay(tech, visit.scheduled_date)
-    && shiftWarning(tech, shiftOf(tech.id, visit.scheduled_date), rowBlockMinutes(visit)));
-  return { outsideShiftVisits: formatFutureAssignedVisits(outside) };
+  try {
+    return await conn.transaction(async (sp) => {
+      const shiftOf = await loadTechShifts(sp, { technicianIds: [tech.id] });
+      const visits = await listFutureAssignedVisits(sp, tech.id)
+        .where((q) => q.whereNotNull('s.customer_id').orWhereNull('s.reservation_expires_at'));
+      const outside = visits.filter((visit) => !isOffDay(tech, visit.scheduled_date)
+        && shiftWarning(tech, shiftOf(tech.id, visit.scheduled_date), rowBlockMinutes(visit)));
+      return { outsideShiftVisits: formatFutureAssignedVisits(outside) };
+    });
+  } catch (err) {
+    logger.warn(`[admin-timetracking] the visits outside the new shift hours were not read (${err.message}): the hours are saved, with no list`);
+    return {};
+  }
 }
 
 // A staff row with any operational or pay history is a person, not a slot.

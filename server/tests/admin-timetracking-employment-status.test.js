@@ -83,6 +83,8 @@ function installTransaction(techChains, { history = {}, futureVisits = [] } = {}
   });
   trx.raw = jest.fn(async () => undefined);
   trx.fn = { now: jest.fn(() => 'NOW') };
+  // A savepoint of the save's transaction (the shift-hours list reads in one).
+  trx.transaction = jest.fn(async (cb) => cb(trx));
   db.transaction = jest.fn(async (cb) => cb(trx));
   return trx;
 }
