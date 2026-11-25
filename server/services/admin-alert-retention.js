@@ -268,11 +268,17 @@ const LIVE_CHECKS = {
     }
     return live;
   },
-  // The promised-estimate row speaks for the watcher's whole list: live while that list is not empty.
+  // The promised-estimate row speaks for the watcher's whole list: live while that list is not empty. Only the
+  // standing row (the newest open row with the key, the one notifyAdmin refreshes) is held; an older duplicate
+  // carries a stale list and expires.
   async promisedQuotesOwed(conn, rows) {
     try {
       const { _private } = require('./promised-estimate-watcher');
-      return (await _private.loadUnkeptPromises(conn)).length ? new Set(rows.map((r) => r.id)) : new Set();
+      if (!(await _private.loadUnkeptPromises(conn)).length) return new Set();
+      const standing = conn ? await conn('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+        .whereRaw("metadata->>'dedupeKey' = ?", ['ops-digest:promised-estimate'])
+        .orderBy('created_at', 'desc').first('id') : null;
+      return new Set(rows.filter((r) => !standing || r.id === standing.id).map((r) => r.id));
     } catch (err) {
       logger.warn(`[alert-retention] promisedQuotesOwed live check failed (${err.message}) — treating the row as live`);
       return new Set(rows.map((r) => r.id));

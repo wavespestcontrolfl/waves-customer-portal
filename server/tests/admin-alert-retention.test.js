@@ -270,6 +270,17 @@ describe('the promised-quotes row: held while the list stands', () => {
     expect(spy).toHaveBeenCalledWith(conn);
   });
 
+  test('only the standing (newest open) row is held; an older duplicate expires', async () => {
+    owed(2);
+    const newer = promised();
+    const older = promised();
+    const first = jest.fn(async () => ({ id: newer.id }));
+    const chain = { where: () => chain, whereNull: () => chain, whereRaw: () => chain, orderBy: () => chain, first };
+    const conn = jest.fn(() => chain);
+    expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(conn, [older, newer])]).toEqual([newer.id]);
+    expect(conn).toHaveBeenCalledWith('notifications');
+  });
+
   test('a failed check calls the row live, so the sweep leaves it alone', async () => {
     owed(new Error('db down'));
     const r = promised();
