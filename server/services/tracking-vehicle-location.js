@@ -119,7 +119,7 @@ async function resolveBouncieFallback({
         requireBouncieImei: imei,
       }), timeoutMs, UNVERIFIED);
     } catch (err) {
-      logger.warn(`[${logPrefix}] tech_status fallback write failed: ${err.message}`);
+      logger.warn(`[${logPrefix}] tech_status fallback write failed (code=${(err && err.code) || 'none'})`);
       return null;
     }
     if (written === UNVERIFIED) {
@@ -151,7 +151,7 @@ async function resolveBouncieFallback({
       source: 'bouncie_api',
     };
   } catch (err) {
-    logger.warn(`[${logPrefix}] Bouncie location fallback failed: ${err.message}`);
+    logger.warn(`[${logPrefix}] Bouncie location fallback failed (code=${(err && err.code) || 'none'})`);
     return null;
   }
 }
@@ -169,6 +169,9 @@ async function resolveFreshTechPosition({
   requireCurrentJobIds = null,
   // Only a cached fix reported AND received strictly after this instant (this visit's en_route_at).
   requireFixAfter = null,
+  // A recipient's link must tell a FAILED tech_status read from "no usable fix": strict throws (a fresh error carrying only the
+  // code) where the default answers null for both.
+  strict = false,
 } = {}) {
   if (!techId) return null;
 
@@ -176,7 +179,8 @@ async function resolveFreshTechPosition({
   try {
     row = await readMappingAndCache(techId, dbh);
   } catch (err) {
-    logger.warn(`[${logPrefix}] tracker mapping / tech_status lookup failed: ${err.message}`);
+    logger.warn(`[${logPrefix}] tracker mapping / tech_status lookup failed (code=${(err && err.code) || 'none'})`);
+    if (strict) throw Object.assign(new Error('tech_status read failed'), { code: err && err.code });
     return null; // cannot prove which vehicle this is -> no position
   }
   if (!row) return null;

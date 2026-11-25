@@ -146,7 +146,7 @@ describe('the module and the route share ONE eligibility rule', () => {
       for (const track_state of states) {
         for (const parked of [false, true]) {
           for (const completed_at of [null, minutesAgo(30), minutesAgo(300)]) {
-            const row = { status, track_state, completed_at, track_token_expires_at: LIVE, customer_pick_by: parked ? '2026-11-20T00:00:00Z' : null, window_start: parked ? null : '09:00:00' };
+            const row = { status, track_state, completed_at, en_route_at: minutesAgo(30), arrived_at: minutesAgo(10), track_token_expires_at: LIVE, customer_pick_by: parked ? '2026-11-20T00:00:00Z' : null, window_start: parked ? null : '09:00:00' };
             const viaRoute = recipientTrackLinkOpen(row) && RECIPIENT_STATES.has(publicTrackState(row));
             expect(recipientLinkEligible(row)).toBe(viaRoute);
           }

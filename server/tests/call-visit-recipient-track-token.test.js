@@ -41,7 +41,7 @@ const gateBefore = process.env[GATE];
 const TOKEN = 'b'.repeat(64);
 const ROW = { id: 'r-1', scheduled_service_id: 'ss-1', phone_key: '9415550002', phone_e164: '+19415550002', first_name: 'Bob', last_name: 'Roe' };
 const LIVE = new Date(Date.now() + 86400000).toISOString();
-const VISIT = { id: 'ss-1', customer_id: 'cust-1', status: 'en_route', track_state: 'en_route', completed_at: null, scheduled_date: '2026-12-01', window_start: '09:00:00', service_type: 'Pest Control', track_token_expires_at: LIVE };
+const VISIT = { id: 'ss-1', customer_id: 'cust-1', status: 'en_route', track_state: 'en_route', completed_at: null, en_route_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(), scheduled_date: '2026-12-01', window_start: '09:00:00', service_type: 'Pest Control', track_token_expires_at: LIVE };
 
 beforeEach(() => {
   jest.clearAllMocks();

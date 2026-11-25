@@ -95,6 +95,33 @@ describe('requireFixAfter: the cached fix must be from THIS drive (strictly afte
   });
 });
 
+describe('strict: a recipient\'s link tells a FAILED tech_status read from "no usable fix"', () => {
+  const logger = require('../services/logger');
+  const failingRead = () => {
+    db.mockImplementation(() => ({
+      leftJoin: () => ({ where: () => ({ first: async () => { throw Object.assign(new Error('select ... tech_id = \'tech-secret-1\' - connection terminated +19415550123'), { code: '57P01' }); } }) }),
+    }));
+  };
+  test('a failed read THROWS with a code only; the default still answers null; the log never carries the message', async () => {
+    failingRead();
+    const err = await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, strict: true }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.code).toBe('57P01');
+    expect(`${err.message} ${err.stack}`).not.toContain('9415550123');
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false })).toBeNull();
+    const logged = JSON.stringify(logger.warn.mock.calls);
+    expect(logged).toContain('code=57P01');
+    expect(logged).not.toContain('9415550123');
+    expect(logged).not.toContain('connection terminated');
+  });
+  test('a successful read with no usable fix is null, not an error, in strict mode too', async () => {
+    install({ ts: { ...fixRow(1), current_job_id: 'other' } });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, strict: true, requireCurrentJobIds: ['visit-1'] })).toBeNull();
+    install({ ts: null });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, strict: true })).toBeNull();
+  });
+});
+
 describe('one statement: current mapping + cache', () => {
   test('the query joins technicians to tech_status and selects the mapping columns with the cache columns', async () => {
     install({ ts: fixRow(1) });

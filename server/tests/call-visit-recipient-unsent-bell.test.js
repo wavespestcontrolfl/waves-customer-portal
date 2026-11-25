@@ -58,6 +58,8 @@ describe('an unreadable recipient lookup', () => {
       expect(opts.metadata).toMatchObject({ severity: 'needs-you', subject: { type: 'visit', id: 'visit-1' }, doneWhen: 'visit_checked', who: 'person', kind });
       // no number, name or tracker/short link anywhere in what the bell carries
       expect(JSON.stringify(notifyAdmin.mock.calls)).not.toMatch(/\+?1?9415550\d{3}|\/track\/|\/l\//);
+      // the lookup failed, so the recipients are unknown: staff are told to check every person named on the visit
+      expect(opts.detail).toMatch(/Check every person the caller named on this visit before texting/);
       // the log has the driver code only; nothing is scheduled to run later
       expect(JSON.stringify(logger.warn.mock.calls)).toContain('57P01');
       expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('9415550002');

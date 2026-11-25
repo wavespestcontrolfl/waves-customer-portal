@@ -697,7 +697,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       ({ getContactPrefRow } = require('../services/contact-notification-prefs'));
       await record();
       // The link's lifetime: en route (or on site, or just completed). The tests below move the visit through the others.
-      await db('scheduled_services').where({ id: visitId }).update({ status: 'en_route', track_state: 'en_route' });
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
     });
     afterEach(() => { delete process.env[GATE]; });
 
@@ -896,6 +896,10 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(category).toBe('appointment');
         expect(title).toBe('Schedule — check the person named on the call before texting');
         expect(opts.dedupeKey).toBe(`visit-recipient-text-unsent:${visitId}:confirmation`);
+        // the recipient is known on this path: first name and the LAST 4 digits only, never the full number
+        expect(opts.detail).toContain(`Bob, ending ${BOB.slice(-4)}`);
+        expect(opts.detail).toMatch(/still on the visit, the visit time, and that they may be texted/);
+        expect(JSON.stringify(bell.mock.calls)).not.toContain(BOB.slice(-10));
         // the bell opens the visit on its own day (the dispatch page\'s date and appointment parameters)
         expect(opts.link).toBe(`/admin/dispatch?tab=schedule&date=${VISIT_DATE}&appointment=${visitId}`);
         expect(JSON.stringify(bell.mock.calls)).not.toContain(BOB.slice(-10));
@@ -965,9 +969,9 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       const token = await VisitRecipient.ensureTrackToken(id);
       const setVisit = (patch) => db('scheduled_services').where({ id: visitId }).update(patch);
       const open = async () => (await VisitRecipient.visitForTrackToken(token)) !== null;
-      await setVisit({ status: 'en_route', track_state: 'en_route' });
+      await setVisit({ status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
       expect(await open()).toBe(true);
-      await setVisit({ status: 'on_site', track_state: 'on_property' });
+      await setVisit({ status: 'on_site', track_state: 'on_property', arrived_at: new Date(Date.now() - 5 * 60 * 1000) });
       expect(await open()).toBe(true);
       await setVisit({ status: 'completed', track_state: 'complete', completed_at: new Date(Date.now() - 60 * 60 * 1000) });
       expect(await open()).toBe(true);

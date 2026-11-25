@@ -102,7 +102,7 @@ beforeEach(() => {
 
 const minutesAgo = (n) => new Date(Date.now() - n * 60 * 1000).toISOString();
 const ENROUTE = { status: 'en_route', track_state: 'en_route', en_route_at: minutesAgo(10) };
-const ONSITE = { status: 'on_site', track_state: 'on_property', arrived_at: '2026-12-01T14:00:00.000Z' };
+const ONSITE = { status: 'on_site', track_state: 'on_property', en_route_at: minutesAgo(40), arrived_at: minutesAgo(20) };
 const DONE = (minutes) => ({ status: 'completed', track_state: 'complete', completed_at: minutesAgo(minutes) });
 
 describe('GET /:token with a visit text recipient\'s token: the link\'s lifetime', () => {
@@ -256,12 +256,45 @@ describe('GET /:token with a visit text recipient\'s token: the reduced payload'
     expect(await buildVehicle(base_, { readOnly: true })).not.toBeNull();
   });
 
-  test('en route with no en_route_at on record: no vehicle, and no position is read', async () => {
+  test('en route with no en_route_at on record: the link is ineligible (404), and buildVehicle itself reads no position', async () => {
     install(visitRow({ ...ENROUTE, en_route_at: null }));
-    const { body } = await get();
-    expect(body.state).toBe('en_route');
-    expect(body.vehicle).toBeNull();
+    expect((await get()).statusCode).toBe(404);
+    const { buildVehicle } = trackPublicRouter._test;
+    mockResolvePosition.mockClear();
+    expect(await buildVehicle({ ...visitRow(ENROUTE), en_route_at: null }, { readOnly: true })).toBeNull();
     expect(mockResolvePosition).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['en route more than 3 h ago', { ...ENROUTE, en_route_at: minutesAgo(181) }],
+    ['on site more than 4 h after arrival', { ...ONSITE, arrived_at: minutesAgo(241) }],
+    ['on site with neither arrived_at nor en_route_at', { ...ONSITE, arrived_at: null, en_route_at: null }],
+  ])('the live-state cap: %s answers 404 on the GET', async (_label, over) => {
+    install(visitRow(over));
+    expect((await get()).statusCode).toBe(404);
+  });
+
+  test('a FAILED tech_status read (strict) answers 404 exactly as an unknown token, with a code-only log; a read with no usable fix is a 200 with vehicle null', async () => {
+    const logger = require('../services/logger');
+    // the unknown-token baseline
+    install(null);
+    mockVisitForTrackToken.mockResolvedValueOnce(null);
+    const unknownAnswer = await get().then((r) => ({ statusCode: r.statusCode, body: r.body }));
+    // a failed read
+    install(visitRow(ENROUTE));
+    mockResolvePosition.mockRejectedValueOnce(Object.assign(new Error('select ... tech-secret-1 - connection terminated +19415550123'), { code: '57P01' }));
+    const failed = await get();
+    expect({ statusCode: failed.statusCode, body: failed.body }).toEqual(unknownAnswer);
+    expect(mockResolvePosition.mock.calls.at(-1)[0].strict).toBe(true);
+    expect(JSON.stringify(logger.warn.mock.calls)).toContain('code=57P01');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('9415550123');
+    // a successful read with no usable fix
+    install(visitRow(ENROUTE));
+    mockResolvePosition.mockResolvedValueOnce(null);
+    const noFix = await get();
+    expect(noFix.statusCode).toBe(200);
+    expect(noFix.body.state).toBe('en_route');
+    expect(noFix.body.vehicle).toBeNull();
   });
 
   test('the technician has moved on to another stop (the resolver answers no position): no vehicle at all', async () => {
@@ -349,6 +382,11 @@ describe('ONE eligibility rule: an ineligible recipient token answers exactly as
       { ...ENROUTE, track_token_expires_at: null },
       DONE(130),
       { status: 'cancelled', track_state: 'cancelled' },
+      // the live-state caps: a tech who never tapped on or off must not keep the link open
+      { ...ENROUTE, en_route_at: minutesAgo(181) },
+      { ...ENROUTE, en_route_at: null },
+      { ...ONSITE, arrived_at: minutesAgo(241) },
+      { ...ONSITE, arrived_at: null, en_route_at: null },
     ]) {
       install(visitRow(over));
       expect(await run(path, method)).toEqual(expected);

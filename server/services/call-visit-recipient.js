@@ -359,6 +359,7 @@ async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, re
       original_block_code: 'QUIET_HOURS_HOLD',
       ...promiseMeta,
       ...(recheckMeta.arrival_start ? { arrival_start: recheckMeta.arrival_start } : {}),
+      ...(recheckMeta.recipient_hint ? { recipient_hint: recheckMeta.recipient_hint } : {}),
       replay_purpose: KINDS[kind].purpose,
       slot_scheduled_date: contact.visit.scheduledDate,
       ...(contact.visit.windowStart ? { slot_window_start: contact.visit.windowStart } : {}),
@@ -430,7 +431,14 @@ async function visitDateForBell(scheduledServiceId, date) {
   }
 }
 
-async function raiseUnsentBell({ scheduledServiceId, kind, date = null }) {
+// "Bob, ending 0002": a first name and the last 4 digits, enough for staff to tell who; never the full number.
+function recipientHint(contact) {
+  const first = String(contact.name || '').trim().split(/\s+/)[0] || 'The person';
+  const last4 = String(contact.phone || '').replace(/\D/g, '').slice(-4);
+  return last4 ? `${first}, ending ${last4}` : first;
+}
+
+async function raiseUnsentBell({ scheduledServiceId, kind, date = null, hint = null }) {
   try {
     const { raiseAdminAlert } = require('./admin-alert-compose');
     const day = await visitDateForBell(scheduledServiceId, date);
@@ -446,6 +454,10 @@ async function raiseUnsentBell({ scheduledServiceId, kind, date = null }) {
       who: 'person',
     }, {
       bell: true,
+      // Who to check: the recipient when it is known (the handoff path), every named person when the lookup itself failed.
+      detail: hint
+        ? `${hint} was not sent this text. Check them, and anyone else named on the call, before texting: still on the visit, the visit time, and that they may be texted.`
+        : 'The people named on the call could not be read, so none of them may have been sent this text. Check every person the caller named on this visit before texting: still on the visit, the visit time, and that they may be texted.',
       dedupeKey: `visit-recipient-text-unsent:${scheduledServiceId}:${kind}`,
       metadata: { scheduledServiceId: String(scheduledServiceId), kind },
     });
@@ -544,7 +556,7 @@ async function resolveTrackToken(token, conn) {
 // Every field recipientLinkEligible reads (the one rule shared with the track route).
 function readLinkVisit(scheduledServiceId, conn) {
   return conn('scheduled_services').where({ id: scheduledServiceId })
-    .first('id', 'status', 'track_state', 'completed_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
+    .first('id', 'status', 'track_state', 'completed_at', 'en_route_at', 'arrived_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
 }
 
 // The copy and the slot the send is guarded on. null = nothing sendable.
@@ -590,6 +602,8 @@ async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
     kind,
     visit_recipient_id: contact.visitRecipientId,
     claim_key: contact.claimKey,
+    // Who staff should check if this text cannot be confirmed at the handoff: the first name and the LAST 4 digits only.
+    recipient_hint: recipientHint(contact),
     ...(dayOnly ? { promise_level: 'day' } : {}),
     ...(arrivalStart && !dayOnly ? { arrival_start: arrivalStart } : {}),
   };
@@ -689,7 +703,7 @@ async function providerCheck(meta, { conn = db } = {}) {
   } catch (err) {
     logger.warn(`[call-visit-recipient] handoff recheck unreadable for visit ${meta.scheduled_service_id}: ${err.code || err.name || 'error'}`);
     // Unreadable is not a decline: the text is held and may never be retried, so tell staff (the same bell, once per visit and notice).
-    await raiseUnsentBell({ scheduledServiceId: meta.scheduled_service_id, kind: meta.kind, date: claimDate(meta.claim_key) });
+    await raiseUnsentBell({ scheduledServiceId: meta.scheduled_service_id, kind: meta.kind, date: claimDate(meta.claim_key), hint: meta.recipient_hint });
     return { ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', reason: 'recheck-failed', retryable: true };
   }
 }

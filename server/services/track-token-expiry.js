@@ -24,7 +24,8 @@ function isTrackTokenLiveWithExpiry(expiresAt) {
 
 // How long a visit text recipient's tracker link outlives the visit (GATE_CALL_GIVEN_VISIT_TEXTS): it opens only while the
 // visit is en route or on site, and for this long after completed_at (a plain "complete" card). Never while scheduled,
-// cancelled, skipped, parked or rebooking. It also needs a live, finite track_token_expires_at.
+// cancelled, skipped, parked or rebooking. It also needs a live, finite track_token_expires_at, and the live states are capped:
+// en route within 3 h of en_route_at, on site within 4 h of arrived_at (or en_route_at).
 const RECIPIENT_LINK_AFTER_COMPLETE_MS = 2 * 60 * 60 * 1000;
 function recipientTrackLinkOpen(visit, nowMs = Date.now()) {
   if (!visit || !isTrackTokenLiveWithExpiry(visit.track_token_expires_at)) return false;
@@ -33,8 +34,23 @@ function recipientTrackLinkOpen(visit, nowMs = Date.now()) {
     return Number.isFinite(doneMs) && doneMs <= nowMs + 5 * 60 * 1000 && nowMs - doneMs <= RECIPIENT_LINK_AFTER_COMPLETE_MS;
   }
   // The two live pairs only: a mixed pair (on site by status but en route by track state, or the reverse) is a stale row.
-  return (visit.status === 'en_route' && visit.track_state === 'en_route')
-    || (visit.status === 'on_site' && visit.track_state === 'on_property');
+  // And a live-state CAP: a visit left en route or on site (a tech who never tapped on) must not keep the link open until the
+  // visit's own link expiry. En route counts from en_route_at (none on record: ineligible); on site counts from arrived_at, or
+  // en_route_at when there is none.
+  if (visit.status === 'en_route' && visit.track_state === 'en_route') {
+    return withinCap(visit.en_route_at, nowMs, RECIPIENT_EN_ROUTE_CAP_MS);
+  }
+  if (visit.status === 'on_site' && visit.track_state === 'on_property') {
+    return withinCap(visit.arrived_at || visit.en_route_at, nowMs, RECIPIENT_ON_SITE_CAP_MS);
+  }
+  return false;
+}
+
+const RECIPIENT_EN_ROUTE_CAP_MS = 3 * 60 * 60 * 1000;
+const RECIPIENT_ON_SITE_CAP_MS = 4 * 60 * 60 * 1000;
+function withinCap(sinceAt, nowMs, capMs) {
+  const sinceMs = sinceAt ? new Date(sinceAt).getTime() : NaN;
+  return Number.isFinite(sinceMs) && sinceMs <= nowMs + 5 * 60 * 1000 && nowMs - sinceMs <= capMs;
 }
 
 // THE full eligibility rule of a recipient's link: the lifetime and state pair above, and a row the page can show. A parked
@@ -54,6 +70,8 @@ module.exports = {
   recipientTrackLinkOpen,
   recipientLinkEligible,
   RECIPIENT_LINK_AFTER_COMPLETE_MS,
+  RECIPIENT_EN_ROUTE_CAP_MS,
+  RECIPIENT_ON_SITE_CAP_MS,
   TRACK_TOKEN_EXPIRY_SQL,
   scheduledServiceTrackTokenExpiry,
 };

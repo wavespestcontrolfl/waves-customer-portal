@@ -469,7 +469,7 @@ async function buildVehicle(service, { readOnly = false } = {}) {
     // A recipient sees the truck only while the technician's ACTIVE job is exactly THIS visit (tech_status.current_job_id ===
     // this visit's own id; no visit-group lookup): a tech who has moved on to another stop, a sibling's included, is at another
     // customer's home, whatever this visit's state still says.
-    ...(readOnly ? { allowBouncieFallback: false, requireCurrentJobIds: [service.id], requireFixAfter: service.en_route_at } : {}),
+    ...(readOnly ? { allowBouncieFallback: false, strict: true, requireCurrentJobIds: [service.id], requireFixAfter: service.en_route_at } : {}),
   });
   if (!position) return null;
 
@@ -740,7 +740,7 @@ function recipientVisitId(token) {
 async function recipientVisitLive(visitId) {
   try {
     const visit = await db('scheduled_services').where({ id: visitId })
-      .first('status', 'track_state', 'completed_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
+      .first('status', 'track_state', 'completed_at', 'en_route_at', 'arrived_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
     return recipientLinkEligible(visit);
   } catch (err) {
     // After the token lookup: an error answers as an unknown token, with a code-only log.
@@ -888,6 +888,18 @@ router.get('/:token', safeRoute(async (req, res, next) => {
     const dayOnlyAutoPlaced = customerState === 'scheduled' ? await autoPlacedDayOnly(row) : false;
     const visitChange = await buildVisitChange(row, customerState, new Date(), { dayOnlyAutoPlaced });
 
+    // A recipient's truck: a FAILED tech_status read (strict) answers 404 exactly as an unknown token does (code-only log); a
+    // successful read with no usable fix is a 200 with vehicle null.
+    let recipientVehicle = null;
+    if (recipientScope && customerState === 'en_route') {
+      try {
+        recipientVehicle = await buildVehicle(row, { readOnly: true });
+      } catch (err) {
+        logger.warn(`[track-public] recipient vehicle read failed (code=${err?.code || 'none'})`);
+        return res.status(404).json({ error: 'Not found' });
+      }
+    }
+
     const response = {
       state: customerState,
       tech: row.technician_id
@@ -925,7 +937,7 @@ router.get('/:token', safeRoute(async (req, res, next) => {
       // leaves track_state='en_route', and keying off it here would keep
       // streaming fresh tech GPS coords and polling until token expiry
       // even though the customer is shown a terminal missed-visit card.
-      vehicle: customerState === 'en_route' ? await buildVehicle(row, { readOnly: recipientScope }) : null,
+      vehicle: customerState === 'en_route' ? (recipientScope ? recipientVehicle : await buildVehicle(row, { readOnly: false })) : null,
       stopsAhead: stopsReady ? stopsReady.stopsAhead : null,
       // True when a count exists but is not yet the durable clamp floor —
       // the page must POST /:token/stops-ahead (the explicit write path)
