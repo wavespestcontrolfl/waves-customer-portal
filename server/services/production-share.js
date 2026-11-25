@@ -1407,6 +1407,30 @@ async function clearStopOverride(input, actor, conn = db) {
   });
 }
 
+// The credit each stop of a week was PAID with, Map visit id -> cents, when a finalized check of the technician covers the week; null when none does.
+async function finalizedWeekOf(conn, technicianId, weekStart) {
+  const rows = (await conn.raw(`SELECT stop.value->>'visitId' AS visit_id, COALESCE((stop.value->>'creditCents')::bigint, 0) AS credit_cents
+    FROM payroll_checks c
+    JOIN payroll_runs r ON r.id = c.run_id
+    CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(c.calc_snapshot->'productionShare'->'stops') = 'array'
+      THEN c.calc_snapshot->'productionShare'->'stops' ELSE '[]'::jsonb END) AS stop(value)
+    WHERE c.status = 'finalized' AND r.status = 'finalized' AND c.technician_id = ?::uuid AND c.week_start = ?::date`, [technicianId, weekStart])).rows;
+  if (rows.length) return new Map(rows.map((row) => [canonicalId(row.visit_id), Number(row.credit_cents)]));
+  const covered = await conn('payroll_checks as c').join('payroll_runs as r', 'r.id', 'c.run_id')
+    .where({ 'c.status': 'finalized', 'r.status': 'finalized', 'c.technician_id': technicianId, 'c.week_start': weekStart }).first('c.id');
+  return covered ? new Map() : null;
+}
+
+// A stop a refund flagged (or whose owner credit a new refund put aside) in a week a final check covers is shown as paid, with what it was paid.
+const REFUND_OWN_KINDS = new Set(['refund_flagged', 'owner_override_refund_changed']);
+function showAsPaid(row, paidWeek, weekStart) {
+  if (!REFUND_OWN_KINDS.has(row.kind) || !paidWeek.has(canonicalId(row.visitId))) return row;
+  return {
+    ...row, kind: 'already_paid', creditCents: paidWeek.get(canonicalId(row.visitId)), needsReview: false,
+    reason: `Already paid in the week of ${weekStart}: a final pay run paid it. A refund on it is answered under "Refunds on paid stops" in a later week's preview.`,
+  };
+}
+
 /**
  * Everything the preview shows for one technician and week: the credit rows, the shifts, the settings in force, the
  * share it would be, the stops to review and the refund total. A preview only: nothing is stored or paid.
@@ -1422,12 +1446,15 @@ async function previewWeek(technicianId, weekStart, conn = db) {
   // The week as the pay run works it out: every W-2 technician with numbers in force is read together (an invoice or a package shared
   // by two technicians is split once), and this technician's rows are returned.
   const week = await weekOfTechnician(conn, id, weekStart, settings);
-  const stops = week.rows;
+  // A week a final check covers keeps what it paid: a refund on one of its stops is answered as a take-back in a later week, never as an
+  // own-week credit the guard would refuse (and no own-week bell rings for it).
+  const paidWeek = await finalizedWeekOf(conn, id, weekStart);
+  const stops = paidWeek ? week.rows.map((row) => showAsPaid(row, paidWeek, weekStart)) : week.rows;
   const days = shiftDays(stops);
   // A take-back the owner set for a refund on a paid stop comes off the week's credited production, as the pay run takes it.
   const applied = refunds.applyTakeBacks(stops, week.takeBackOwed);
   const result = shareForWeek({ credits: [applied.creditedCents], shifts: days.length, settings });
-  await require('./production-share-refund-alerts').raiseRefundFlagAlerts({ technicianId: id, stops, takeBackToSet: week.takeBackToSet });
+  await require('./production-share-refund-alerts').raiseRefundFlagAlerts({ technicianId: id, stops: paidWeek ? [] : stops, takeBackToSet: week.takeBackToSet });
   // The conflict tuples stay on the server: the page gets the stop's revision.
   const shown = stops.map((stop) => { const copy = { ...stop }; delete copy.conflictTuples; delete copy.refundInvoices; return copy; });
   return {

@@ -40,7 +40,8 @@
  *   orphan:<stripe_orphan_charges id>        a parked case, matched by invoice, charge or payment intent. Every key family the webhooks write
  *                                            to stripe_orphan_charges for a combined or statement charge, and what is done with it:
  *                                            '<pi>:partial-refund:<refund id>' (source combined_pay_webhook, a partial refund that cannot be
- *                                              attributed): MATCHED, unless the bank bounced it (its refund id is in stripe_failed_refunds);
+ *                                              attributed): MATCHED, unless the bank bounced it (its refund id is in stripe_failed_refunds, or after settlement in
+ *                                              metadata.failed_refund_ids of a payment row of the charge or intent);
  *                                            '<pi>:partial-dispute:<dispute id>' (combined_pay_webhook, funds withdrawn by a partial
  *                                              dispute, constituent payments left unchanged): MATCHED while the case is OPEN. The webhook
  *                                              resolves it when the dispute closes won or warning_closed (Stripe restored the money); a
@@ -83,6 +84,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MAX_CENTS = 100000000;
 const PACKAGE_DEPTH = 12;
 const canonicalId = (id) => (id == null ? id : String(id).toLowerCase());
+// A fixed-size revision of a signal list (sorted): what the page sends back instead of the list itself, so a stop with any number of
+// signals round-trips, and what PUT and DELETE compare under the payroll lock with the signals the server reads then.
+const signalRevisionOf = (list) => crypto.createHash('sha256').update(JSON.stringify([...list].sort())).digest('hex');
 const sameList = (a, b) => a.length === b.length && a.every((value, index) => value === b[index]);
 
 // ---------------------------------------------------------------- signals
@@ -92,7 +96,7 @@ const sameList = (a, b) => a.length === b.length && a.every((value, index) => va
 const REFUND_IDENTITY_SQL = `COALESCE((SELECT ':' || left(md5(string_agg(x.id, ',' ORDER BY x.id)), 10) FROM (
       SELECT p.stripe_refund_id AS id WHERE p.stripe_refund_id IS NOT NULL
       UNION SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(p.metadata -> 'stamped_refund_ids') = 'array' THEN p.metadata -> 'stamped_refund_ids' ELSE '[]'::jsonb END)
-    ) x), '')`;
+    ) x WHERE NOT COALESCE(jsonb_typeof(p.metadata -> 'failed_refund_ids') = 'array' AND jsonb_exists(p.metadata -> 'failed_refund_ids', x.id), false)), '')`;
 
 // 'pay:<id>:<refunded cents>' when the row records an amount; a 'refunded' row with no amount and a 'disputed' row show the whole payment
 // refunded, so the state stands in for the cents.
@@ -199,7 +203,12 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
         OR split_part(o.stripe_payment_intent_id, ':', 1) IN (SELECT k.pi FROM keys k WHERE k.invoice_id = v.invoice_id))
       WHERE ((o.source = 'combined_pay_webhook' AND (
           (o.stripe_payment_intent_id LIKE '%:partial-refund:%'
-            AND NOT EXISTS (SELECT 1 FROM stripe_failed_refunds ff WHERE ff.stripe_refund_id = split_part(o.stripe_payment_intent_id, ':partial-refund:', 2)))
+            AND NOT EXISTS (SELECT 1 FROM stripe_failed_refunds ff WHERE ff.stripe_refund_id = split_part(o.stripe_payment_intent_id, ':partial-refund:', 2))
+            -- after settlement the bounce is recorded on the charge's payment rows instead (metadata.failed_refund_ids)
+            AND NOT EXISTS (SELECT 1 FROM payments fp
+              WHERE (fp.stripe_charge_id = o.stripe_charge_id OR fp.stripe_payment_intent_id = split_part(o.stripe_payment_intent_id, ':partial-refund:', 1))
+                AND jsonb_typeof(fp.metadata -> 'failed_refund_ids') = 'array'
+                AND jsonb_exists(fp.metadata -> 'failed_refund_ids', split_part(o.stripe_payment_intent_id, ':partial-refund:', 2))))
           OR (o.stripe_payment_intent_id LIKE '%:partial-dispute:%' AND NOT o.resolved)))
         OR o.source = 'statement_pay_webhook')
       UNION
@@ -355,7 +364,7 @@ function addSource(mine, row, { signals, answer, history, visit }) {
   const current = signals.filter((id) => !frozen.has(id));
   const where = {
     checkId: canonicalId(row.check_id), visitId: canonicalId(row.visit_id), workDate: row.work_date || null, paidWeekStart: row.week_start,
-    creditCents: Number(row.credit_cents), answerRevision: answer ? answer.revision : NO_ANSWER, visit: visit || null,
+    creditCents: Number(row.credit_cents), answerRevision: answer ? answer.revision : NO_ANSWER, signalRevision: signalRevisionOf(current), visit: visit || null,
   };
   const reopen = reopenOf(current, answer);
   if (reopen) mine.toSet.push({ ...where, newSignals: current, ...reopen });
@@ -444,13 +453,14 @@ const answerSchema = Joi.object({
   checkId: Joi.string().pattern(UUID_RE).required().error(new Error('Choose a paid stop')),
   visitId: Joi.string().pattern(UUID_RE).required().error(new Error('Choose a paid stop')),
   cents: Joi.number().integer().min(0).max(MAX_CENTS).required().error(new Error('Enter the amount to take back as whole cents, $0 or more')),
-  // The refund signals the page was showing for this stop: refused (409) when they changed since.
-  signals: Joi.array().items(Joi.string().max(200)).max(200).required().error(new Error('Reload the week: the refunds on the stop must be sent')),
+  // The revision of the refund signals the page was showing for this stop (its signalRevision, a hash of the sorted list): refused (409) when
+  // the signals the server reads under the lock are others.
+  signalRevision: Joi.string().max(80).required().error(new Error('Reload the week: the refunds on the stop must be sent with their revision')),
   note: Joi.string().trim().max(500).allow('', null).error(new Error('The note is up to 500 characters')),
   // The answer the page was showing (its answerRevision; 'none' when it showed none): refused (409) when the stored answer is another one.
   answerRevision: Joi.string().max(80).required().error(new Error('Reload the week: the answer must be sent with its revision')),
 });
-const answerKeySchema = answerSchema.fork(['cents', 'signals', 'note'], (field) => field.optional());
+const answerKeySchema = answerSchema.fork(['cents', 'note'], (field) => field.optional());
 
 function validated(schema, input) {
   const { value, error } = schema.validate(input || {}, { abortEarly: true, convert: true, allowUnknown: false });
@@ -458,18 +468,37 @@ function validated(schema, input) {
   return value;
 }
 
-// The finalized check that paid the stop, and the stop's frozen row. Throws the plain refusal when it is not one.
-async function paidStopOf(trx, checkId, visitId) {
+// The check and the stop's frozen row on it (any check status): { check, stop }, check null when there is none.
+async function stopOfCheck(trx, checkId, visitId) {
   const check = await trx('payroll_checks as c').join('payroll_runs as r', 'r.id', 'c.run_id').where({ 'c.id': checkId })
     .first('c.id', 'c.status', 'c.production_share_cents', 'r.status as run_status', trx.raw(`(SELECT s.value FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.calc_snapshot->'productionShare'->'stops') = 'array'
       THEN c.calc_snapshot->'productionShare'->'stops' ELSE '[]'::jsonb END) s(value) WHERE s.value->>'visitId' = ?) AS stop`, [visitId]));
+  return { check: check || null, stop: check ? check.stop : null };
+}
+
+// The finalized check that paid the stop, and the stop's frozen row. Throws the plain refusal when it is not one.
+async function paidStopOf(trx, checkId, visitId) {
+  const { check, stop } = await stopOfCheck(trx, checkId, visitId);
   if (!check) throw new PayrollError(404, 'Pay check not found.');
   if (check.status !== 'finalized' || check.run_status !== 'finalized') throw new PayrollError(409, 'That pay check is not final. A take-back is set only for credit a final pay check paid.');
   // The same rule as paidLedger: a credit above $0 on a check whose share is above $0. A $0-share week paid no share.
-  if (!check.stop || !(Number(check.stop.creditCents) > 0) || !(Number(check.production_share_cents) > 0)) {
+  if (!stop || !(Number(stop.creditCents) > 0) || !(Number(check.production_share_cents) > 0)) {
     throw new PayrollError(400, 'That stop is not a paid stop of this pay check (it needs a credit above $0 on a check that paid a share).');
   }
-  return check.stop;
+  return stop;
+}
+
+// The refund signals of a paid stop now that its check did not freeze, sorted: the live links of the visit and the invoices the check froze
+// (a deleted visit or a relinked invoice still counts), read under the lock by PUT and DELETE.
+async function currentSignalsOf(trx, visitId, stop) {
+  const frozen = new Set(Array.isArray(stop.refundSignals) ? stop.refundSignals : []);
+  const frozenInvoices = new Map([[visitId, asUuids([...(stop.invoices || []), ...(stop.refundInvoices || [])])]]);
+  return ((await refundSignalsOf(trx, [visitId], frozenInvoices)).get(visitId) || []).filter((id) => !frozen.has(id));
+}
+
+// The page's view of the refunds must be the one the server reads under the lock.
+function requireSameSignals(current, revision) {
+  if (signalRevisionOf(current) !== revision) throw new PayrollError(409, 'The refunds on this stop changed since you loaded the week. Reload the week and look at it again.');
 }
 
 // The stored answer of a source, with its revision: null when there is none.
@@ -498,13 +527,10 @@ async function setRefundTakeBack(input, actor, conn = db) {
     if (v.cents > Number(stop.creditCents)) throw new PayrollError(400, 'The take-back cannot be more than the credit the pay check paid for this stop.');
     const before = await storedAnswer(trx, checkId, visitId);
     requireSameAnswer(before, v.answerRevision);
-    const frozen = new Set(Array.isArray(stop.refundSignals) ? stop.refundSignals : []);
-    // The refunds on the stop now: its live links and the invoices its check froze (a deleted visit or a relinked invoice still counts).
-    const frozenInvoices = new Map([[visitId, asUuids([...(stop.invoices || []), ...(stop.refundInvoices || [])])]]);
-    const current = ((await refundSignalsOf(trx, [visitId], frozenInvoices)).get(visitId) || []).filter((id) => !frozen.has(id));
+    const current = await currentSignalsOf(trx, visitId, stop);
     if (!current.length && !before) throw new PayrollError(409, 'No new refund is recorded on this stop.');
-    if (!sameList([...v.signals].sort(), current)) throw new PayrollError(409, 'The refunds on this stop changed since you loaded the week. Reload the week and look at it again.');
-    // The answer stores exactly the signals the owner saw (the ones now): it is in force only while they stay the same.
+    requireSameSignals(current, v.signalRevision);
+    // The answer stores the FULL list the server read (the page sent only its revision): it is in force only while they stay the same.
     const signals = current;
     await trx('production_share_refund_take_backs').insert({
       source_check_id: checkId, visit_id: visitId, signals: JSON.stringify(signals), cents: v.cents, note: v.note || null,
@@ -531,6 +557,10 @@ async function clearRefundTakeBack(input, actor, conn = db) {
     const before = await storedAnswer(trx, checkId, visitId);
     if (!before) throw new PayrollError(404, 'No take-back was set for that stop.');
     requireSameAnswer(before, v.answerRevision);
+    // A clear from a stale page would give back credit a new refund has put under review: the refunds must be the ones the page showed. A check
+    // that is gone or no longer a source has nothing to compare (the clear is only a cleanup then).
+    const { stop } = await stopOfCheck(trx, checkId, visitId);
+    if (stop) requireSameSignals(await currentSignalsOf(trx, visitId, stop), v.signalRevision);
     await trx('production_share_refund_take_backs').where({ source_check_id: checkId, visit_id: visitId }).del();
     await recordAuditEvent({
       trx, critical: true, actor_type: 'admin', actor_id: actorId,
@@ -545,5 +575,5 @@ async function clearRefundTakeBack(input, actor, conn = db) {
 const flagKeyOf = (visitId, signals) => crypto.createHash('sha1').update(JSON.stringify([canonicalId(visitId), [...signals].sort()])).digest('hex').slice(0, 20);
 
 module.exports = {
-  refundSignalsOf, refundSourcesOf, refundLedgerOf, applyTakeBacks, setRefundTakeBack, clearRefundTakeBack, flagKeyOf,
+  refundSignalsOf, refundSourcesOf, refundLedgerOf, applyTakeBacks, setRefundTakeBack, clearRefundTakeBack, flagKeyOf, signalRevisionOf,
 };

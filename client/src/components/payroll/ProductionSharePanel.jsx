@@ -237,12 +237,12 @@ function RefundTakeBackRow({ call, row, generation, onChanged }) {
     </TD>
     <TD>
       <form className="flex flex-wrap items-end gap-2" aria-label="Set the refund take-back of this paid stop"
-        onSubmit={event => { event.preventDefault(); run('PUT', { checkId: row.checkId, visitId: row.visitId, cents, signals: row.newSignals, answerRevision: row.answerRevision || 'none' }); }}>
+        onSubmit={event => { event.preventDefault(); run('PUT', { checkId: row.checkId, visitId: row.visitId, cents, signalRevision: row.signalRevision, answerRevision: row.answerRevision || 'none' }); }}>
         <Field label="Take back ($, up to the credit paid)">
           <Input inputMode="decimal" autoComplete="off" value={text} onChange={event => setText(event.target.value)} />
         </Field>
         <Button type="submit" variant="secondary" disabled={busy || cents == null || tooMuch}>Save</Button>
-        {row.cents != null && <Button type="button" variant="secondary" disabled={busy} onClick={() => run('DELETE', { checkId: row.checkId, visitId: row.visitId, answerRevision: row.answerRevision || 'none' })}>Clear</Button>}
+        {row.cents != null && <Button type="button" variant="secondary" disabled={busy} onClick={() => run('DELETE', { checkId: row.checkId, visitId: row.visitId, signalRevision: row.signalRevision, answerRevision: row.answerRevision || 'none' })}>Clear</Button>}
         {tooMuch && <span role="alert" className="text-ui-caption text-alert-fg">More than the {centsToDollars(row.creditCents)} paid.</span>}
         {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
       </form>

@@ -114,7 +114,7 @@ describe('Production share preview', () => {
   });
 
   describe('refunds on paid stops', () => {
-    const toSet = { checkId: 'check-1', visitId: 'v-paid', workDate: '2026-09-08', paidWeekStart: '2026-09-07', creditCents: 100000, newSignals: ['pay:x:3000'], answerRevision: 'none', reason: 'new', previousCents: null,
+    const toSet = { checkId: 'check-1', visitId: 'v-paid', workDate: '2026-09-08', paidWeekStart: '2026-09-07', creditCents: 100000, newSignals: ['pay:x:3000'], answerRevision: 'none', signalRevision: 'sig-1', reason: 'new', previousCents: null,
       visit: { serviceType: 'Pest Control', scheduledDate: '2026-09-08', windowDisplay: '9-11 AM', completedAt: '2026-09-08T15:10:00.000Z' } };
     const open = async (patch) => {
       const call = vi.fn(async (path) => (path.startsWith('/production-share/preview') ? answerFor(path, patch) : {}));
@@ -137,7 +137,7 @@ describe('Production share preview', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/refund-take-back', expect.objectContaining({ method: 'PUT' })));
       expect(call.mock.calls.find(([path]) => path === '/production-share/refund-take-back')[1].body)
-        .toEqual({ checkId: 'check-1', visitId: 'v-paid', cents: 30000, signals: ['pay:x:3000'], answerRevision: 'none' });
+        .toEqual({ checkId: 'check-1', visitId: 'v-paid', cents: 30000, signalRevision: 'sig-1', answerRevision: 'none' });
       // The week is read again after a save.
       await waitFor(() => expect(call.mock.calls.filter(([path]) => path.startsWith('/production-share/preview')).length).toBe(2));
     });
@@ -174,7 +174,7 @@ describe('Production share preview', () => {
       expect(screen.getByText(/Still owed and not yet taken: \$100\.00/)).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
       await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/refund-take-back', expect.objectContaining({ method: 'DELETE' })));
-      expect(call.mock.calls.find(([path]) => path === '/production-share/refund-take-back')[1].body).toEqual({ checkId: 'check-1', visitId: 'v-paid', answerRevision: '7:2026-09-20T10:00:00.000001' });
+      expect(call.mock.calls.find(([path]) => path === '/production-share/refund-take-back')[1].body).toEqual({ checkId: 'check-1', visitId: 'v-paid', signalRevision: 'sig-1', answerRevision: '7:2026-09-20T10:00:00.000001' });
     });
 
     it('shows no section for a week with no refunds on paid stops', async () => {
