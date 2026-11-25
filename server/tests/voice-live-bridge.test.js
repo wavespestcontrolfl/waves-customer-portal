@@ -1812,12 +1812,17 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
       return text;
     };
 
-    test('fragments without leading spaces do not run together', async () => {
-      expect(await asked([['how much for', 0, 300], ['a 2400', 300, 600], ['square foot', 600, 900], ['home', 900, 1100]])).toBe('how much for a 2400 square foot home');
+    test('deltas of one utterance join raw: a number or a word split across deltas stays whole', async () => {
+      expect(await asked([['how much for a 2', 0, 300], [',500', 300, 600], [' square foot home, pest', 600, 900], ['icide', 900, 1100]])).toBe('how much for a 2,500 square foot home, pesticide');
     });
 
     test('fragments that carry their own spaces are not double-spaced', async () => {
-      expect(await asked([['how much for ', 0, 300], [' a 2400', 300, 600], [' square foot ', 600, 900], ['home', 900, 1100]])).toBe('how much for a 2400 square foot home');
+      expect(await asked([['how much for ', 0, 300], ['a 2400', 300, 600], [' square foot ', 600, 900], ['home', 900, 1100]])).toBe('how much for a 2400 square foot home');
+    });
+
+    test('two utterances get one space between them, whether or not a side carries whitespace', async () => {
+      expect(await asked([['First thing.', 0, 800], ['Second thing.', 3000, 3800]])).toBe('First thing. Second thing.');
+      expect(await asked([['First thing. ', 0, 800], [' Second thing.', 3000, 3800]])).toBe('First thing. Second thing.');
     });
 
     test('two spoken measurements in separate utterances reach the brain as two numbers', async () => {

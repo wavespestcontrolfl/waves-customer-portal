@@ -817,23 +817,34 @@ class LiveBridge {
   // ── tools mode: the brain answers ────────────────────────────────────────
   // Transcript fragments, caller's and GPT-Live's, kept in memory (never logged
   // or stored). A gap between fragments starts a new utterance.
-  // Join two transcript fragments so words never run together: a fragment may or may not carry its own
-  // leading space, so one space goes between them unless either side already has whitespace there, or the
-  // next one opens with closing punctuation or an apostrophe ("hello" + "," / "it" + "'s").
-  static joinFragments(prev, next) {
+  // Join transcript text. Deltas of ONE utterance are a token stream that carries its own spaces ("2" + ",500",
+  // "pest" + "icide", " pest control"): they join RAW. Between two separate utterances (`fresh`: the audio-time gap
+  // that starts a new utterance) one space goes in unless either side already has whitespace there.
+  static joinFragments(prev, next, fresh = false) {
     if (!prev) return next;
     if (!next) return prev;
-    if (/\s$/.test(prev) || /^\s/.test(next) || /^[,.;:!?%)\]'\u2019]/.test(next)) return prev + next;
+    if (!fresh || /\s$/.test(prev) || /^\s/.test(next)) return prev + next;
     return `${prev} ${next}`;
+  }
+
+  // Whether a fragment starts a new utterance: nothing before it, or its audio time starts a gap after the last one's end.
+  static startsUtterance(hasText, endMs, msg) {
+    if (!hasText) return true;
+    const start = Number.isFinite(msg.start_ms) ? msg.start_ms : null;
+    return start !== null && endMs !== null && endMs !== undefined && start - endMs >= UTTERANCE_GAP_MS;
   }
 
   static addFragment(list, endMs, msg, keep) {
     const text = typeof msg.delta === 'string' ? msg.delta : '';
-    if (!text.trim()) return endMs;
+    if (!text.trim()) {
+      // a whitespace-only delta is the space between two words of the utterance in progress: kept, never a fragment of its own
+      if (list.length) list[list.length - 1].text = (list[list.length - 1].text + text).slice(-CALLER_TEXT_MAX_CHARS);
+      return endMs;
+    }
     const start = Number.isFinite(msg.start_ms) ? msg.start_ms : null;
-    const fresh = !list.length || (start !== null && endMs !== null && start - endMs >= UTTERANCE_GAP_MS);
+    const fresh = LiveBridge.startsUtterance(list.length > 0, endMs, msg);
     if (fresh) list.push({ text: text.slice(-CALLER_TEXT_MAX_CHARS), startMs: start });
-    else list[list.length - 1].text = LiveBridge.joinFragments(list[list.length - 1].text, text).slice(-CALLER_TEXT_MAX_CHARS);
+    else list[list.length - 1].text = (list[list.length - 1].text + text).slice(-CALLER_TEXT_MAX_CHARS);
     if (list.length > keep) list.shift();
     return Number.isFinite(msg.end_ms) ? msg.end_ms : endMs;
   }
@@ -851,12 +862,20 @@ class LiveBridge {
 
   noteCallerText(msg) {
     const text = typeof msg.delta === 'string' ? msg.delta : '';
-    if (!text.trim()) return;
+    if (!text.trim()) {
+      // the space between two words of the utterance in progress: kept in the range, not counted as a fragment
+      const open = this.callerLate && this.callerLate.open && LiveBridge.belongsToLate(this.callerLate, msg) ? this.callerLate : this.callerPending;
+      if (open.text) open.text = (open.text + text).slice(-CALLER_TEXT_MAX_CHARS);
+      LiveBridge.addFragment(this.callerRecent, this.callerFragmentEndMs, msg, 2);
+      return;
+    }
     this.callerFragments += 1;
+    // A new utterance (an audio-time gap after the last fragment) gets one separating space; deltas of one utterance join raw.
+    const fresh = LiveBridge.startsUtterance(this.callerRecent.length > 0, this.callerFragmentEndMs, msg);
     const range = this.callerLate && this.callerLate.open && LiveBridge.belongsToLate(this.callerLate, msg) ? this.callerLate : this.callerPending;
     if (range === this.callerLate && Number.isFinite(msg.end_ms)) range.endMs = Math.max(range.endMs ?? msg.end_ms, msg.end_ms);
     if (!range.text && Number.isFinite(msg.start_ms)) range.startMs = msg.start_ms;
-    range.text = LiveBridge.joinFragments(range.text, text).slice(-CALLER_TEXT_MAX_CHARS);
+    range.text = LiveBridge.joinFragments(range.text, text, fresh).slice(-CALLER_TEXT_MAX_CHARS);
     this.callerFragmentEndMs = LiveBridge.addFragment(this.callerRecent, this.callerFragmentEndMs, msg, 2);
     // Where the NEWEST caller utterance of this range began: GPT-Live's line that prompted the selection is the one
     // right before it ("hello" / the offer of two services / "the second one" names the offer, not the greeting).
