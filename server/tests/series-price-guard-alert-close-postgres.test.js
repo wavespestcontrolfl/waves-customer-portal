@@ -152,6 +152,62 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
     expect((await get(s.bell.id)).resolution).toBe('Checked by hand');
   });
 
+  describe('the refusal bell is written inside the refusal\'s own transaction', () => {
+    const verdict = { skip: true, kind: 'cancelled_root', price: 333.45, lastPaid: 117 };
+    const openBells = (s) => db('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`series-price-guard:cancelled-root:${s.root.id}`]).whereNull('done_at');
+    const refuse = (s, { commit = true, after } = {}) => db.transaction(async (trx) => {
+      await guards.raiseExtensionPriceAlertInTransaction(trx, verdict, {
+        parent: { customer_id: s.customer.id }, parentId: s.root.id, childDate: DATE, serviceLabel: 'Quarterly Pest Control',
+      });
+      if (after) await after(trx);
+      if (!commit) throw new Error('dry-run rollback');
+    });
+
+    // No bell row to start: the series has had no refusal yet.
+    async function bare() {
+      const s = await series({ refusedDate: null });
+      await db('notifications').where({ id: s.bell.id }).del();
+      return s;
+    }
+
+    test('a refusal then a corrected retry that adds the same date: no open bell remains (a late bell cannot appear)', async () => {
+      const s = await bare();
+      let insideRefusal;
+      await refuse(s, { after: async (trx) => { insideRefusal = (await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`series-price-guard:cancelled-root:${s.root.id}`])).length; } });
+      expect(insideRefusal).toBe(1);
+      // Committed with the refusal: the retry finds the bell and closes it.
+      const bells = await openBells(s);
+      expect(bells).toHaveLength(1);
+      made.notifications.push(bells[0].id);
+      expect(bells[0].metadata.refusedDate).toBe(DATE);
+      expect(await run(s)).toBe(true);
+      expect(await openBells(s)).toHaveLength(0);
+      // Nothing is written after the fact: still none a moment later.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await openBells(s)).toHaveLength(0);
+    });
+
+    test('a rolled-back refusal (the top-up dry run) leaves no bell', async () => {
+      const s = await bare();
+      await expect(refuse(s, { commit: false })).rejects.toThrow('dry-run rollback');
+      expect(await openBells(s)).toHaveLength(0);
+    });
+
+    test('a bell write that fails is logged and does not abort the transaction', async () => {
+      const s = await bare();
+      let later;
+      await db.transaction(async (trx) => {
+        await guards.raiseExtensionPriceAlertInTransaction(trx, verdict, {
+          parent: null, parentId: s.root.id, childDate: DATE, serviceLabel: 'Quarterly Pest Control',
+        });
+        later = (await trx('scheduled_services').where({ id: s.root.id }).first('id')).id;
+      });
+      expect(later).toBe(s.root.id);
+      expect(await openBells(s)).toHaveLength(0);
+    });
+  });
+
   describe('the refused date on the standing bell', () => {
     const verdict = { skip: true, kind: 'cancelled_root', price: 333.45, lastPaid: 117 };
     const ctx = (s, childDate) => ({ parent: { customer_id: s.customer.id }, parentId: s.root.id, childDate, serviceLabel: 'Quarterly Pest Control' });

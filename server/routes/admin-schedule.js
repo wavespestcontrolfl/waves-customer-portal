@@ -21882,7 +21882,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       const priceAlertContext = { parent, parentId, childDate: nextStr, serviceLabel: childIdentity.service_type };
       if (priceVerdict?.skip) {
         logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — ${nextStr} price ${priceVerdict.price} is templated from a cancelled series root and not backed by the last paid visit (${priceVerdict.lastPaid ?? 'none'})`);
-        SeriesPriceGuards.raiseExtensionPriceAlertAfterCommit(conn, priceVerdict, priceAlertContext);
+        await SeriesPriceGuards.raiseExtensionPriceAlertInTransaction(conn, priceVerdict, priceAlertContext);
         onSkip?.('cancelled_root_price');
         return spawnedVisit;
       }

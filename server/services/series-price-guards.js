@@ -153,7 +153,7 @@ function visitLink(visitId, dateStr) {
   return `/admin/dispatch?tab=schedule&date=${encodeURIComponent(dateStr)}&appointment=${encodeURIComponent(visitId)}`;
 }
 
-async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, childDate, serviceLabel }) {
+async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, childDate, serviceLabel }, trx = null) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const names = require('./admin-alert-names');
   const name = await names.lookupCustomerName(db, parent.customer_id) || 'a customer';
@@ -199,6 +199,7 @@ async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, ch
     dedupeKey,
     dedupeOpenOnly: true,
     ...refresh,
+    ...(trx ? { trx } : {}),
     detail,
     metadata: {
       dedupeKey, kind: verdict.kind, seriesRootId: parentId, scheduledServiceId: childId || null,
@@ -247,7 +248,25 @@ async function closeRefusedPriceAlertAfterInsert(conn, args) {
   }
 }
 
-// Raise the alert once `conn`'s transaction commits (never on rollback).
+// The cancelled-root refusal bell, written INSIDE the refusal's own transaction
+// (notifyAdmin's `trx`: its dedupe lock, probe and insert run on `conn`, and its
+// phone banner waits for the outermost commit). The refusal and its bell commit
+// or roll back together (a dry run leaves no bell), and the series lock the
+// extension holds also covers the bell: a corrected retry can only run after
+// this commit, so it finds the bell and closes it, and a bell for a visit that
+// was already added can never appear late. Savepoint: a failed write is logged and
+// never aborts the extension's transaction.
+async function raiseExtensionPriceAlertInTransaction(conn, verdict, context) {
+  try {
+    const created = await conn.transaction((sp) => raiseExtensionPriceAlert(verdict, context, sp));
+    if (!created) logger.error(`[series-price-guard] ${verdict.kind} alert NOT recorded for series ${context.parentId}`);
+  } catch (err) {
+    logger.error(`[series-price-guard] ${verdict.kind} alert failed for series ${context.parentId}: ${err.message}`);
+  }
+}
+
+// Raise the alert once `conn`'s transaction commits (never on rollback). Only
+// the over-last-paid alert: its visit is already inserted, so a late row is harmless.
 function raiseExtensionPriceAlertAfterCommit(conn, verdict, context) {
   require('./customer-credit').afterCommit(conn, async () => {
     try {
@@ -313,6 +332,7 @@ module.exports = {
   insertedRowIsPrepaid,
   closeRefusedPriceAlertAfterInsert,
   raiseExtensionPriceAlert,
+  raiseExtensionPriceAlertInTransaction,
   raiseExtensionPriceAlertAfterCommit,
   unbilledCompletionAlertDue,
   raiseUnbilledCompletionAlert,

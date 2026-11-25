@@ -1716,11 +1716,12 @@ describe('classifySeriesOutcome (scripts/recurring-series-topup.js) — the no_c
 // auto-extend) acts on each verdict, and that the gate-off path never asks.
 describe('extendSeriesOnceLocked — series price guards', () => {
   const SeriesPriceGuards = require('../services/series-price-guards');
-  let live; let verdict; let raise; let prepaid; let close;
+  let live; let verdict; let raise; let raiseNow; let prepaid; let close;
   beforeEach(() => {
     live = jest.spyOn(SeriesPriceGuards, 'seriesPriceGuardsLive').mockReturnValue(true);
     verdict = jest.spyOn(SeriesPriceGuards, 'extensionPriceVerdict').mockResolvedValue(null);
     raise = jest.spyOn(SeriesPriceGuards, 'raiseExtensionPriceAlertAfterCommit').mockImplementation(() => {});
+    raiseNow = jest.spyOn(SeriesPriceGuards, 'raiseExtensionPriceAlertInTransaction').mockResolvedValue(undefined);
     prepaid = jest.spyOn(SeriesPriceGuards, 'insertedRowIsPrepaid').mockResolvedValue(false);
     close = jest.spyOn(SeriesPriceGuards, 'closeRefusedPriceAlertAfterInsert').mockResolvedValue(false);
   });
@@ -1735,6 +1736,7 @@ describe('extendSeriesOnceLocked — series price guards', () => {
     expect(verdict).not.toHaveBeenCalled();
     expect(prepaid).not.toHaveBeenCalled();
     expect(raise).not.toHaveBeenCalled();
+    expect(raiseNow).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
   });
 
@@ -1763,8 +1765,10 @@ describe('extendSeriesOnceLocked — series price guards', () => {
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 21 });
     expect(inserted).toHaveLength(0);
     expect(result.skipped).toBe('cancelled_root_price');
-    expect(raise).toHaveBeenCalledTimes(1);
-    const [, v, ctx] = raise.mock.calls[0];
+    // Written in the refusal's own transaction, never after the commit.
+    expect(raise).not.toHaveBeenCalled();
+    expect(raiseNow).toHaveBeenCalledTimes(1);
+    const [, v, ctx] = raiseNow.mock.calls[0];
     expect(v.kind).toBe('cancelled_root');
     expect(ctx).toMatchObject({ parentId: 10 });
     expect(ctx.childId).toBeUndefined();
