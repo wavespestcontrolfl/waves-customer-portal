@@ -46,7 +46,7 @@ function fakeConn(state) {
   return conn;
 }
 
-function baseState({ request, ledger = null, dryRunLedger = false, vendors = { 'v-siteone': SITEONE, 'v-sticker': STICKER } }) {
+function baseState({ request, ledger = null, vendors = { 'v-siteone': SITEONE, 'v-sticker': STICKER } }) {
   const state = { updates: [], inserts: [], requests: { [request.id]: request } };
   state.read = (table, q, cols) => {
     if (table === 'product_restock_requests') return state.requests[q.where.id] || null;
@@ -54,10 +54,9 @@ function baseState({ request, ledger = null, dryRunLedger = false, vendors = { '
     if (table === 'vendor_orders as vo') return null; // findLiveAutoOrder: no order out
     if (table === 'vendor_order_emails') return null;
     if (table === 'vendor_orders') {
-      if (q.where.status === 'needs_review') return dryRunLedger ? { id: ledger.id } : null;
       return ledger;
     }
-    if (table === 'products_catalog') return { id: 'p1', name: 'LESCO Crosscheck Plus', inventory_unit: 'gal', inventory_on_hand: '1.3', analysis_n: null, analysis_p: null, product_type: 'insecticide', category: 'insecticide' };
+    if (table === 'products_catalog') return { id: 'p1', name: 'LESCO Crosscheck Plus', active: true, auto_reorder_enabled: true, inventory_unit: 'gal', inventory_on_hand: state.onHand ?? '1.3', low_stock_threshold: '1.5', reorder_quantity: '2', auto_reorder_vendor_id: 'v-siteone', analysis_n: null, analysis_p: null, product_type: 'insecticide', category: 'insecticide' };
     return null;
   };
   return state;
@@ -90,46 +89,58 @@ describe('server with SITEONE_ORDER_RUNNER=mac', () => {
     expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
   });
 
-  test('a request the Mac missed for 20 h is marked handed off, then belled', async () => {
-    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 21 * 3600e3) }) });
+  test('a request the Mac missed for 30 h is marked handed off, then belled', async () => {
+    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 31 * 3600e3) }) });
     const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
     expect(out).toMatchObject({ skipped: 'remote_runner', macHandedOff: true, belled: true });
     const mark = state.updates.find((u) => u.table === 'product_restock_requests');
     expect(mark.where).toEqual({ id: 'r1', status: 'open' });
-    expect(mark.row.metadata.b).toEqual([NOW.toISOString()]);
+    expect(JSON.parse(mark.row.metadata)).toEqual({ vendorId: 'v-siteone', macHandedOffAt: NOW.toISOString() });
+    expect(autoReorder.lockProductPricing).toHaveBeenCalledWith(expect.anything(), 'p1');
     expect(autoReorder.ringRestockBell).toHaveBeenCalledTimes(1);
   });
 
-  test('SITEONE_MAC_STALE_HOURS moves the line; a bad value keeps 20 h', async () => {
+  test('SITEONE_MAC_STALE_HOURS moves the line; a bad value keeps 30 h', async () => {
     const { macStaleMs } = dispatch._internals;
-    expect(macStaleMs({ SITEONE_MAC_STALE_HOURS: '30' })).toBe(30 * 3600e3);
-    expect(macStaleMs({ SITEONE_MAC_STALE_HOURS: 'x' })).toBe(20 * 3600e3);
-    expect(macStaleMs({ SITEONE_MAC_STALE_HOURS: '-1' })).toBe(20 * 3600e3);
+    expect(macStaleMs({ SITEONE_MAC_STALE_HOURS: '40' })).toBe(40 * 3600e3);
+    expect(macStaleMs({ SITEONE_MAC_STALE_HOURS: 'x' })).toBe(30 * 3600e3);
+    expect(macStaleMs({ SITEONE_MAC_STALE_HOURS: '-1' })).toBe(30 * 3600e3);
   });
 
-  test('a recent dry-run park by the Mac counts as a touch', async () => {
-    const ledger = { id: 'l1', updated_at: new Date(NOW.getTime() - 3600e3) };
-    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 72 * 3600e3) }), ledger, dryRunLedger: true });
+  test('yesterday\'s dry-run park by the Mac (~23.7 h old at the 6:10 run) counts as a touch', async () => {
+    const ledger = { id: 'l1', status: 'needs_review', error: 'dry_run: dry run', updated_at: new Date(NOW.getTime() - 23.7 * 3600e3) };
+    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 72 * 3600e3) }), ledger });
     const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
     expect(out).toEqual({ requestId: 'r1', skipped: 'remote_runner' });
     expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
   });
 
   test('an old ledger row that is not a dry-run park is never handed to the office', async () => {
-    const ledger = { id: 'l1', updated_at: new Date(NOW.getTime() - 72 * 3600e3) };
-    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 72 * 3600e3) }), ledger, dryRunLedger: false });
+    const ledger = { id: 'l1', status: 'needs_review', error: 'no_price: no eligible price row', updated_at: new Date(NOW.getTime() - 72 * 3600e3) };
+    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 72 * 3600e3) }), ledger });
     const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
     expect(out).toEqual({ requestId: 'r1', skipped: 'remote_runner' });
     expect(state.updates).toHaveLength(0);
     expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
   });
 
-  test('a lost mark race (another run marked it) rings nothing more', async () => {
-    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 21 * 3600e3) }) });
-    state.updateCount = 0;
+  test('a need that is gone is cancelled at the hand-off, never belled', async () => {
+    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 31 * 3600e3) }) });
+    state.onHand = '1.8'; // a hand buy landed: above the 1.5 order point
     const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
-    expect(out).toEqual({ requestId: 'r1', skipped: 'remote_runner' });
+    expect(out).toEqual({ requestId: 'r1', skipped: 'stock_no_longer_low', cancelled: true });
+    const cancel = state.updates.find((u) => u.table === 'product_restock_requests' && u.row.status === 'cancelled');
+    expect(cancel).toBeTruthy();
+    expect(JSON.parse(cancel.row.metadata).macHandedOffAt).toBeUndefined();
     expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
+  });
+
+  test('a request already handed off is re-belled (deduped) without a second mark', async () => {
+    const state = baseState({ request: request({ metadata: { vendorId: 'v-siteone', macHandedOffAt: '2026-11-24T11:10:00.000Z' } }) });
+    const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
+    expect(out).toMatchObject({ skipped: 'remote_runner', macHandedOff: true });
+    expect(state.updates.filter((u) => u.table === 'product_restock_requests')).toHaveLength(0);
+    expect(autoReorder.ringRestockBell).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -161,13 +172,32 @@ describe('the Mac run', () => {
   });
 
   test('the script refuses without SITEONE_CDP_URL', async () => {
-    await expect(macRun({ env: {}, adapters: {}, runExclusive: jest.fn(), dispatch: jest.fn() })).rejects.toThrow(/SITEONE_CDP_URL/);
+    await expect(macRun({ env: { SITEONE_ORDER_RUNNER: 'mac' }, adapters: {}, runExclusive: jest.fn(), dispatch: jest.fn() })).rejects.toThrow(/SITEONE_CDP_URL/);
+  });
+
+  test('the script claims nothing when the live env hands SiteOne back to the server', async () => {
+    const runDispatch = jest.fn();
+    const exclusive = jest.fn();
+    await expect(macRun({ env: { SITEONE_CDP_URL: 'http://127.0.0.1:9222' }, adapters: {}, runExclusive: exclusive, dispatch: runDispatch })).rejects.toThrow(/SITEONE_ORDER_RUNNER/);
+    expect(exclusive).not.toHaveBeenCalled();
+    expect(runDispatch).not.toHaveBeenCalled();
+  });
+
+  test('the default registry is the Chrome adapter and it loads', async () => {
+    const runDispatch = jest.fn(async () => ({ results: [] }));
+    await macRun({ env: { SITEONE_ORDER_RUNNER: 'mac', SITEONE_CDP_URL: 'http://127.0.0.1:9222' }, runExclusive: async (n, fn) => fn(), dispatch: runDispatch });
+    const cdp = require('../services/procurement/adapters/siteone-cdp');
+    expect(runDispatch.mock.calls[0][0].adapters).toEqual({ siteone: cdp });
+    expect(cdp.quotesAtPlace).toBe(true);
+    expect(cdp.packagedQuantity).toBe(true);
+    expect(cdp.acceptsPoNumber).toBe(true);
+    expect(typeof cdp.place).toBe('function');
   });
 
   test('the script dispatches SiteOne only, with no reconciliation, under its own lease', async () => {
     const runDispatch = jest.fn(async () => ({ results: [] }));
     const exclusive = jest.fn(async (name, fn) => fn());
-    const env = { SITEONE_CDP_URL: 'http://127.0.0.1:9222' };
+    const env = { SITEONE_ORDER_RUNNER: 'mac', SITEONE_CDP_URL: 'http://127.0.0.1:9222' };
     await macRun({ env, adapters: { siteone: {} }, runExclusive: exclusive, dispatch: runDispatch });
     expect(exclusive.mock.calls[0][0]).toBe('siteone-mac-order');
     expect(runDispatch).toHaveBeenCalledWith({ adapters: { siteone: {} }, onlyAdapters: ['siteone'], reconcile: false, env });
@@ -175,6 +205,6 @@ describe('the Mac run', () => {
 
   test('a held lease is a failure, not a silent day', async () => {
     const exclusive = jest.fn(async () => ({ skipped: true, reason: 'lease_held' }));
-    await expect(macRun({ env: { SITEONE_CDP_URL: 'http://127.0.0.1:9222' }, adapters: {}, runExclusive: exclusive, dispatch: jest.fn() })).rejects.toThrow(/lease_held/);
+    await expect(macRun({ env: { SITEONE_ORDER_RUNNER: 'mac', SITEONE_CDP_URL: 'http://127.0.0.1:9222' }, adapters: {}, runExclusive: exclusive, dispatch: jest.fn() })).rejects.toThrow(/lease_held/);
   });
 });

@@ -573,6 +573,7 @@ module.exports = {
   loginRequired: false,
   quotesAtPlace: true,
   packagedQuantity: true,
+  acceptsPoNumber: true, // the dispatcher passes WAVES-<ledger id>: the order can be found by it after an ambiguous click
   preSubmitTotal: 'vendor', // the review total is read live, immediately before the click
   configured,
   quote: () => null,

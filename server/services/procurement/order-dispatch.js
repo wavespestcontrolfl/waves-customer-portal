@@ -1443,32 +1443,49 @@ async function bellUndispatchable(conn, requestId, notify, now = new Date()) {
 
 // The Mac runner's watchdog (server side). The Mac job runs every morning after the sweep and touches
 // each SiteOne request it sees: a claim, a dry-run park, a placed order. A request with no such touch
-// for SITEONE_MAC_STALE_HOURS (default 20: one missed morning) means the Mac, its Chrome or its login
-// is down. The request is then marked handed off — the Mac never claims it after that — and the office
-// gets the sweep's own "order manually" bell. Marking first, then ringing: a lost bell is re-rung by
-// the next run (bellUndispatchable is request-id deduped); a Mac claim can never race a bell.
-const DEFAULT_MAC_STALE_HOURS = 20;
+// for SITEONE_MAC_STALE_HOURS (default 30: the Mac's daily run lands ~24 h apart, so a healthy dry-run
+// park is ~23.7 h old at the next 6:10 server run; 30 h means one whole Mac morning was missed) means
+// the Mac, its Chrome or its login is down. The Mac job's own failures ring at once from its wrapper;
+// this catches a Mac that never ran at all. The check runs under the claim's own lock order (pricing
+// advisory lock, ledger row, request row, vendor, product) so it cannot race a Mac claim, and it
+// re-applies the claim's eligibility check: a need that is gone is cancelled, never belled. A live
+// request is then marked macHandedOffAt — the Mac never claims it after that — and the office gets
+// the sweep's own "order manually" bell (request-id deduped, so a lost bell is re-rung next run).
+const DEFAULT_MAC_STALE_HOURS = 30;
 function macStaleMs(env = process.env) {
   const h = Number(env.SITEONE_MAC_STALE_HOURS);
   return (Number.isFinite(h) && h > 0 ? h : DEFAULT_MAC_STALE_HOURS) * 3600 * 1000;
 }
-async function macWatchdog(conn, requestId, notify, now = new Date(), env = process.env) {
-  const request = await conn('product_restock_requests').where({ id: requestId }).first('id', 'status', 'source', 'created_at', 'metadata');
+const isDryRunPark = (ledger) => !!ledger && ledger.status === 'needs_review' && String(ledger.error || '').startsWith('dry_run:');
+
+async function macWatchdogLocked(trx, requestId, now, env) {
+  const peek = await trx('product_restock_requests').where({ id: requestId }).first('product_id');
+  if (!peek) return {};
+  await require('./auto-reorder').lockProductPricing(trx, peek.product_id);
+  const ledger = await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id', 'status', 'error', 'updated_at');
+  const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request || request.status !== 'open' || request.source !== 'auto_reorder') return {};
   const m = meta(request.metadata);
-  if (!m.macHandedOffAt) {
-    const ledger = await conn('vendor_orders').where({ restock_request_id: requestId }).first('id', 'updated_at');
-    // A ledger row other than a dry-run park (findDispatchable only returns those) means an order is
-    // out or parked with its own bell: never hand that to the office.
-    if (ledger && !(await conn('vendor_orders').where({ id: ledger.id, status: 'needs_review' }).whereRaw("error LIKE 'dry_run:%'").first('id'))) return {};
-    const lastTouch = Math.max(new Date(request.created_at).getTime(), ledger ? new Date(ledger.updated_at).getTime() : 0);
-    if (now.getTime() - lastTouch < macStaleMs(env)) return {};
-    const marked = await conn('product_restock_requests').where({ id: requestId, status: 'open' })
-      .whereRaw("NULLIF(metadata->>'macHandedOffAt', '') IS NULL")
-      .update({ metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('macHandedOffAt', ?::text)", [now.toISOString()]), updated_at: now });
-    if (!marked) return {};
-    logger.warn(`[order-dispatch] SiteOne request ${requestId} not touched by the Mac runner for ${Math.round((now.getTime() - lastTouch) / 3600000)} h — handed to the office`);
-  }
+  if (m.macHandedOffAt) return { handOff: true };
+  // Any ledger row but a dry-run park = an order is out or parked with its own bell: never the office's.
+  if (ledger && !isDryRunPark(ledger)) return {};
+  const lastTouch = Math.max(new Date(request.created_at).getTime(), ledger ? new Date(ledger.updated_at).getTime() : 0);
+  if (now.getTime() - lastTouch < macStaleMs(env)) return {};
+  const vendor = m.vendorId ? await trx('vendors').where({ id: m.vendorId }).forUpdate().first('id', 'name', 'code', 'active', 'updated_at') : null;
+  const { FERTILIZER_COLUMNS } = require('./fertilizer-blackout');
+  const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit', ...FERTILIZER_COLUMNS);
+  if (!product || !vendor) return {};
+  const ineligible = claimIneligibility({ product, request, vendor });
+  if (ineligible) return { result: await cancelAtClaim(trx, { request, product, m, ineligible }) };
+  await trx('product_restock_requests').where({ id: requestId, status: 'open' })
+    .update({ metadata: JSON.stringify({ ...m, macHandedOffAt: now.toISOString() }), updated_at: now });
+  logger.warn(`[order-dispatch] SiteOne request ${requestId} not touched by the Mac runner for ${Math.round((now.getTime() - lastTouch) / 3600000)} h — handed to the office`);
+  return { handOff: true };
+}
+
+async function macWatchdog(conn, requestId, notify, now = new Date(), env = process.env) {
+  const verdict = await conn.transaction((trx) => macWatchdogLocked(trx, requestId, now, env));
+  if (!verdict.handOff) return verdict.result || {};
   return { macHandedOff: true, ...(await bellUndispatchable(conn, requestId, notify, now)) };
 }
 

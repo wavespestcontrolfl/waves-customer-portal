@@ -30,10 +30,14 @@ function summarize(result) {
 }
 
 async function run({ env = process.env, adapters = null, runExclusive = null, dispatch = null } = {}) {
+  const { runVendorOrderDispatch, _internals: { siteoneRunsOnMac } } = require('../services/procurement/order-dispatch');
+  // The switch that hands SiteOne back to the server stops the Mac too: with it unset the server's
+  // own adapter owns SiteOne again, and a Mac order beside it could buy the same need twice.
+  if (!siteoneRunsOnMac(env)) throw new Error(`${JOB}: SITEONE_ORDER_RUNNER is not 'mac' in the live env — the server owns SiteOne orders, nothing claimed`);
   if (!String(env.SITEONE_CDP_URL || '').trim()) throw new Error(`${JOB}: SITEONE_CDP_URL is not set (this job runs only on the Mac with Chrome on :9222)`);
   const registry = adapters || { siteone: require('../services/procurement/adapters/siteone-cdp') };
   const exclusive = runExclusive || require('../utils/cron-lock').runExclusive;
-  const runDispatch = dispatch || require('../services/procurement/order-dispatch').runVendorOrderDispatch;
+  const runDispatch = dispatch || runVendorOrderDispatch;
   const result = await exclusive(JOB, () => runDispatch({ adapters: registry, onlyAdapters: ['siteone'], reconcile: false, env }), { waitForSlot: false });
   if (result && result.skipped === true) throw new Error(`${JOB}: skipped (${result.reason || 'lease held'})`);
   return result;
