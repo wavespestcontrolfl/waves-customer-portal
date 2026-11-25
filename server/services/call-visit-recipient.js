@@ -36,7 +36,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { toE164, isValidNanpNumber } = require('../utils/phone');
 const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
-const { dateOnlyString } = require('../utils/date-only');
+const { dateOnlyString, validDateOnly } = require('../utils/date-only');
 const { recipientLinkEligible } = require('./track-token-expiry');
 const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
 
@@ -455,7 +455,7 @@ const UNSENT_WORDS = {
 // The dispatch page opens a visit on its day: `date` (the visit's Eastern scheduled date, YYYY-MM-DD) rides in the link as the page's
 // own `date` parameter. The handoff path knows it from the claim key; the lookup path reads it (a failed read leaves it out).
 async function visitDateForBell(scheduledServiceId, date) {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) return date;
+  if (validDateOnly(date)) return date;
   try {
     const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
     return dateOnlyString(row && row.scheduled_date) || null;
