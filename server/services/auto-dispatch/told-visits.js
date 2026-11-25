@@ -55,7 +55,8 @@ async function loadStopMembers(conn, ids) {
   for (const r of rows) {
     if (r.visit_id != null && !(stopOf.get(String(r.id)) || []).some((m) => String(m.id) === String(r.id))) dateOf.set(String(r.id), null);
   }
-  return { stopOf, memberIds: members.map((m) => String(m.id)), dateOf };
+  const rowOf = new Map(rows.map((r) => [String(r.id), r]));
+  return { stopOf, memberIds: members.map((m) => String(m.id)), dateOf, rowOf };
 }
 
 /** A visit's calendar date as 'YYYY-MM-DD', or null when it is missing or unreadable (the caller then fails closed). */
@@ -110,7 +111,7 @@ async function resolvePromises(conn, ids, now, options = {}) {
   const { sameDateOnly = false, membersOut = null } = options;
   const detector = require('../no-show-detector');
   const wanted = ids.map(String);
-  const { stopOf, memberIds, dateOf } = await loadStopMembers(conn, wanted);
+  const { stopOf, memberIds, dateOf, rowOf } = await loadStopMembers(conn, wanted);
   const events = await detector.loadPromiseEvents(conn, [...new Set([...wanted, ...memberIds])], { now });
   const latest = detector.latestPromises(events, now);
   const eventsByVisit = detector.byVisit(events);
@@ -124,7 +125,9 @@ async function resolvePromises(conn, ids, now, options = {}) {
     const expected = expectedOf(id);
     const stop = stopOf.get(String(id)) || [];
     // `membersOut` (an expected-date read): the stop members this read judged, so a later read can prove it saw the same.
-    if (membersOut) membersOut.set(id, stop.map((m) => ({ id: String(m.id), status: m.status })));
+    // A standalone visit is its own one member, so joining a stop between the reads is a change too (Codex P1).
+    const judged = stop.length ? stop : [rowOf.get(String(id))].filter(Boolean);
+    if (membersOut) membersOut.set(id, judged.map((m) => ({ id: String(m.id), status: m.status })));
     if (expected && dateOf.get(String(id)) !== expected) {
       return [id, { visit_id: id, start_at: null, communicated_at: null, date_mismatch: true }];
     }

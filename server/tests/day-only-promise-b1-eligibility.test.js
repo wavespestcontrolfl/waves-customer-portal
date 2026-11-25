@@ -383,6 +383,11 @@ describe('loadTimeDisplay', () => {
       const pendingAgain = [m('s1', '2026-11-20'), { ...m('s2', '2026-11-20'), status: 'rescheduled' }];
       const restatused = fakeConn({ servicesByRead: [pendingAgain, pendingAgain, pendingAgain, same], reminders: [office('s1'), office('s2')] });
       expect((await loadTimeDisplay(restatused, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const alone = svc('s1', { scheduled_date: '2026-11-20' });
+      const joined = fakeConn({ servicesByRead: [[alone], [m('s1', '2026-11-20')], same], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(joined, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const aloneSteady = fakeConn({ services: [alone], reminders: [office('s1')] });
+      expect((await loadTimeDisplay(aloneSteady, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
       const steady = fakeConn({ services: same, reminders: [office('s1'), office('s2')] });
       expect((await loadTimeDisplay(steady, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
     });
