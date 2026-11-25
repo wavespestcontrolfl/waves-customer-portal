@@ -1501,13 +1501,6 @@ async function macHandOffBlocker(trx, { request, m, now }) {
   return null;
 }
 
-// Withdraws the sweep's "order manually" bell for this request (dedupeKey auto-reorder:<id>).
-async function withdrawHandOffBell(trx, requestId) {
-  const { openToCloser, doneColumns } = require('../notification-service')._private;
-  await openToCloser(trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]), 'procurement')
-    .update(doneColumns({ by: 'procurement', resolution: 'Another order or a hold now covers this restock', keepExisting: true, conn: trx }));
-}
-
 async function macWatchdogLocked(trx, requestId, now, env) {
   const peek = await trx('product_restock_requests').where({ id: requestId }).first('product_id');
   if (!peek) return {};
@@ -1532,7 +1525,7 @@ async function macWatchdogLocked(trx, requestId, now, env) {
     // product opened, a hold, a gone need): its standing "order manually" bell is withdrawn under the
     // same locks, so nobody orders a second time from it. The stamp stays; a later eligible pass
     // re-rings it through bellUndispatchable.
-    if (m.macHandedOffAt) await withdrawHandOffBell(trx, requestId);
+    if (m.macHandedOffAt) await retireRequestBell(trx, requestId);
     return { result: { ...blocker.hold, ...(m.macHandedOffAt ? { handOffBellWithdrawn: true } : {}) } };
   }
   if (m.macHandedOffAt) return { handOff: true };
@@ -1551,12 +1544,21 @@ async function macWatchdog(conn, requestId, notify, now = new Date(), env = proc
   return { macHandedOff: true, ...(await bellUndispatchable(conn, requestId, notify, now)) };
 }
 
+// The "order manually" hand-off for a request the dispatcher will not place. A request the Mac
+// watchdog already handed to the office goes back through the watchdog, so a sibling order or hold
+// that blocked its hand-off keeps the bell withdrawn even when a gate closes meanwhile.
+async function handOffBell(conn, requestId, notify, now, env) {
+  const request = await conn('product_restock_requests').where({ id: requestId }).first('metadata');
+  if (request && meta(request.metadata).macHandedOffAt) return macWatchdog(conn, requestId, notify, now, env);
+  return bellUndispatchable(conn, requestId, notify, now);
+}
+
 async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env, deadAdapters = null, onlyAdapters = null } = {}) {
   // The master gate closing between the 6:10 sweep (which stood down its own
   // bell because this lane would order) and the dispatch is the same
   // hand-off as a vendor gate: the request gets the sweep's deduped bell
   // now, not after another silent day (Codex r18 P2).
-  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await bellUndispatchable(conn, requestId, notify, now)) };
+  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await handOffBell(conn, requestId, notify, now, env)) };
   const registry = adapters || loadAdapters();
   const login = await prefetchVendorLogin(conn, requestId, registry, deadAdapters);
   const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login, now, onlyAdapters }));
@@ -1567,7 +1569,7 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   if (claim.skipped) {
     // A lost hand-off bell is reported, not swallowed: the request stays open
     // and unclaimed, so the next run re-rings it — and this run goes red.
-    const bellState = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify, now) : {};
+    const bellState = HANDOFF_SKIPS.has(claim.skipped) ? await handOffBell(conn, requestId, notify, now, env) : {};
     return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}), ...bellState };
   }
   return dispatchClaimed(conn, claim, { registry, notify, now, env });
