@@ -114,6 +114,16 @@ describe('confirmOnRoads', () => {
     expect(out).toMatchObject({ qualifies: false, roadFailed: true, roadFloor: 10 });
   });
 
+  test('with the ordinary floor at 0, a score-bar slot ranked above a minutes-rule slot moves without a road check', async () => {
+    const zeroFloor = { ...config, minDayMoveDriveSavingMinutes: 0, minutesRuleSavingMinutes: 10 };
+    const asked = [];
+    const ranked = rankedOf('first', 'second');
+    ranked.rankedRows = ranked.rankedRows.map((row, i) => ({ ...row, byMinutes: i === 1 }));
+    const out = await confirmOnRoads(ranked, { service, current, config: zeroFloor, travel: travelWith({ now: [20, 20, 10], first: [30, 30, 10] }, asked) });
+    expect(out).toBe(ranked);
+    expect(asked).toEqual([]);
+  });
+
   test('every measured slot fails: nothing moves, and the row names the best slot\'s road numbers', async () => {
     const out = await run(rankedOf('first', 'second', 'third', 'fourth'), { now: [20, 20, 10], first: [18, 18, 10], second: [19, 19, 10], third: [20, 20, 10], fourth: [1, 1, 10] });
     expect(out).toMatchObject({ qualifies: false, roadFailed: true, ranked: [] });

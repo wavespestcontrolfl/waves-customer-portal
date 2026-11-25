@@ -568,6 +568,8 @@ function ordinaryMoveOf(ranked, { current, prefsSnapshot, ...rest }) {
   const {
     improvement, newPlacement, scores, routeMetrics, constraints,
   } = buildPlacementAudit({ ...rest, current: clear, candidate: ranked.normalBest, candidateScore: ranked.normalBestScore });
+  // The projected slot may qualify on minutes alone (move-rules.js normalBestOf): the row says so.
+  if (ranked.normalBestMinutesFloor) constraints.minutes_rule = { saving_floor_minutes: ranked.normalBestMinutesFloor };
   return { improvement, best: ranked.normalBest, current: clear, audit: { newPlacement, scores, prefsSnapshot, routeMetrics, constraints } };
 }
 

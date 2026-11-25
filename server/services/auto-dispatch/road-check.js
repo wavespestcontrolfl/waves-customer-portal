@@ -160,12 +160,15 @@ async function confirmOnRoads(ranked, ctx) {
   try {
     const failed = [];
     for (const row of ranked.rankedRows.slice(0, ROAD_CHECK_SLOTS)) {
+      const rowFloor = floorOfRow(row, floor, ctx);
+      // A score-bar slot with the ordinary floor off is not measured: it moves as before.
+      if (rowFloor <= 0 && !failed.length) return ranked;
+      if (rowFloor <= 0) return settled(ranked, { ...row, floor: rowFloor }, true);
       const road = await roadSaving(ctx.current, row.cand, ctx.travel);
       // No road answer for the best slot: the model's result stands, and the
       // audit row says the number is the estimate (r2).
       if (!road && !failed.length) return { ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } };
-      // A minutes-rule slot (move-rules.js minutesRuleOk) must keep its own minutes on real roads.
-      const checked = { ...withRoad(row, road), floor: row.byMinutes ? Math.max(floor || 0, moveRules.minutesRuleFloor(ctx.service, ctx.config)) : floor };
+      const checked = { ...withRoad(row, road), floor: rowFloor };
       if (!road || road.saving_minutes >= checked.floor) return settled(ranked, checked, true);
       failed.push(checked);
     }
@@ -174,6 +177,13 @@ async function confirmOnRoads(ranked, ctx) {
     logger.warn(`[auto-dispatch] road check failed (model kept): ${err.message}`);
     return ranked;
   }
+}
+
+// The road floor of one slot: the ordinary drive floor, or for a minutes-rule
+// slot (move-rules.js minutesRuleOk) its own minutes, whichever is higher.
+function floorOfRow(row, floor, ctx) {
+  const moveRules = require('./move-rules');
+  return row.byMinutes ? Math.max(floor || 0, moveRules.minutesRuleFloor(ctx.service, ctx.config)) : (floor || 0);
 }
 
 function settled(ranked, row, passed) {
