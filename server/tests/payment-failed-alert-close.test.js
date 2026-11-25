@@ -59,7 +59,10 @@ test('selects bells by invoice id OR by the failed attempt ledger row, then clos
   expect(select.sql).not.toMatch(/::uuid/i);
   // a row already closed by a system component is left alone (openToCloser)
   expect(select.sql).toMatch(/"done_at" is null or COALESCE\(/);
-  expect(select.bindings.filter((b) => b === INV_A)).toHaveLength(2);
+  expect(select.bindings.filter((b) => b === INV_A)).toHaveLength(3);
+  // the customer branch: only invoice-less payment_failed bells of the paid invoice's customer are extra candidates
+  expect(select.sql).toContain("metadata->'payload'->>'customerId' = (SELECT i.customer_id::text FROM invoices i WHERE i.id = $");
+  expect(select.sql).toContain("metadata->'payload'->>'invoiceId' IS NULL");
   const update = captured.find((q) => q.sql.startsWith('update'));
   expect(update.sql).toContain('"done_by" = $');
   expect(update.sql).toContain('COALESCE(done_at');

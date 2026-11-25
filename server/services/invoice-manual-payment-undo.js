@@ -247,25 +247,31 @@ async function describeManualPaymentUndo(invoiceId) {
 // payload.paymentIntentId through the ledger's metadata.invoice_id, which also covers legacy bells and combined allocations whose
 // representative invoice is another one). Only a bell closed since the payment: one a person closed earlier keeps its earlier done_at
 // (or a resolution of their own) and is left.
+// An invoice-less dues failure bell (payment-failed-month-settled.js) names no invoice: it closed because its billed month was collected,
+// possibly by this invoice (a dues invoice). It reopens when the same customer's bell is of that shape and its month is no longer collected.
 async function reopenPaymentFailedBells(trx, invoiceId, since) {
   const { RESOLUTION, TRIGGER_KEYS } = require('./payment-failed-alert-close');
   const { parseJson, failedAllocationInvoiceIds } = require('./payment-failed-allocation');
+  const { isInvoicelessMonthUncollected } = require('./payment-failed-month-settled');
   const closed = await trx('notifications')
     .where({ recipient_type: 'admin', category: 'payment', done_by: 'payments', resolution: RESOLUTION })
     .whereRaw("metadata->>'triggerKey' IN (?, ?)", TRIGGER_KEYS)
     .where('done_at', '>=', since)
     .select('id', 'metadata');
+  const customerId = (await trx('invoices').where({ id: invoiceId }).first('customer_id'))?.customer_id;
   const reopen = [];
   for (const bell of closed) {
     const meta = parseJson(bell.metadata);
-    const { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds } = meta.payload || {};
+    const payload = meta.payload || {};
+    const { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds } = payload;
     // A bill_payment_error bell closes on payload.invoiceId alone (payment-failed-alert-close.js), so it reopens on that alone.
     if (meta.triggerKey === 'bill_payment_error') {
       if (bellInvoiceId != null && String(bellInvoiceId) === String(invoiceId)) reopen.push(bell.id);
       continue;
     }
     const allocation = await failedAllocationInvoiceIds(trx, { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds });
-    if (allocation.includes(String(invoiceId))) reopen.push(bell.id);
+    if (allocation.includes(String(invoiceId))) { reopen.push(bell.id); continue; }
+    if (customerId && String(payload.customerId) === String(customerId) && await isInvoicelessMonthUncollected(trx, payload)) reopen.push(bell.id);
   }
   if (!reopen.length) return 0;
   return trx('notifications').whereIn('id', reopen).update({ done_at: null, done_by: null, resolution: null });

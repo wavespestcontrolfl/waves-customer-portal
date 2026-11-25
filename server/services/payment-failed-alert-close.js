@@ -16,6 +16,13 @@
 // is judged on payload.invoiceId alone; a payment_failed bell on its whole
 // allocation, as before.
 //
+// A payment_failed bell with NO invoice (a monthly-dues autopay charge, nothing
+// in its payload or its attempt's ledger row names one) cannot close on an
+// invoice. It closes once the SAME billed month's dues are collected: see
+// payment-failed-month-settled.js for the exact rule and why it never goes by
+// customer + amount. Both this hook (for a paid dues invoice) and the repair
+// sweep judge it.
+//
 // A bell closes only when its whole allocation is settled (see
 // payment-failed-allocation.js): a combined PaymentIntent's bell stays open
 // until every invoice it covered is paid. A bell matches the invoice by EITHER key:
@@ -26,7 +33,8 @@
 //     attempt's own ledger row; covers alerts raised before the stamp fix).
 const db = require('../models/db');
 const logger = require('./logger');
-const { parseJson, isFailedAllocationSettled } = require('./payment-failed-allocation');
+const { parseJson, isUuid, isFailedAllocationSettled } = require('./payment-failed-allocation');
+const { isInvoicelessMonthSettled } = require('./payment-failed-month-settled');
 
 const RESOLUTION = 'The invoice was paid';
 const TRIGGER_KEYS = ['payment_failed', 'bill_payment_error'];
@@ -34,16 +42,20 @@ const TRIGGER_KEYS_SQL = "metadata->>'triggerKey' IN (?, ?)";
 
 // Which of these open bells are obsolete. A bill_payment_error bell is about
 // payload.invoiceId alone (its PaymentIntent may be a combined one); a
-// payment_failed bell judges its whole allocation.
+// payment_failed bell judges its whole allocation. A payment_failed bell with
+// no invoice at all (a monthly-dues autopay charge) is judged by its billed
+// month instead (payment-failed-month-settled.js).
+async function isBellSettled(conn, meta) {
+  const payload = meta.payload || {};
+  if (meta.triggerKey === 'bill_payment_error') return isFailedAllocationSettled(conn, { invoiceId: payload.invoiceId });
+  const attempt = { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId, allocationInvoiceIds: payload.allocationInvoiceIds, allocationUnreadable: payload.allocationUnreadable };
+  return (await isFailedAllocationSettled(conn, attempt)) || isInvoicelessMonthSettled(conn, payload);
+}
+
 async function settledBellIds(conn, rows) {
   const closable = [];
   for (const row of rows || []) {
-    const meta = parseJson(row.metadata);
-    const payload = meta.payload || {};
-    const attempt = meta.triggerKey === 'bill_payment_error'
-      ? { invoiceId: payload.invoiceId }
-      : { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId, allocationInvoiceIds: payload.allocationInvoiceIds, allocationUnreadable: payload.allocationUnreadable };
-    if (await isFailedAllocationSettled(conn, attempt)) closable.push(row.id);
+    if (await isBellSettled(conn, parseJson(row.metadata))) closable.push(row.id);
   }
   return closable;
 }
@@ -64,6 +76,16 @@ async function closeRows(invoiceId, conn) {
             WHERE p.metadata->>'invoice_id' = ? AND p.stripe_payment_intent_id IS NOT NULL)`,
           [id],
         );
+      // A paid dues invoice may be what collected an invoice-less dues failure's
+      // month: that customer's invoice-less payment_failed bells are candidates
+      // too (judged by their own billed month, never by this invoice alone).
+      if (isUuid(id)) {
+        this.orWhere(function duesFailureOfThisCustomer() {
+          this.whereRaw("metadata->>'triggerKey' = 'payment_failed'")
+            .whereRaw("metadata->'payload'->>'invoiceId' IS NULL")
+            .whereRaw("metadata->'payload'->>'customerId' = (SELECT i.customer_id::text FROM invoices i WHERE i.id = ?)", [id]);
+        });
+      }
     })
     .select('id', 'metadata');
   // A combined attempt's one bell covers several invoices: close it only when
