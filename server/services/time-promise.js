@@ -223,7 +223,9 @@ async function loadStopFacts(conn, ids) {
   }
   return new Map(own.map((r) => {
     if (ENDED_STATUSES.includes(String(r.status || ''))) return [String(r.id), []];
-    return [String(r.id), r.visit_id != null ? membersOfVisit.get(String(r.visit_id)) || [r] : [r]];
+    // A live grouped row whose member read lists nobody changed between the two reads: no members (not eligible, and an
+    // expected-date check reads it as unverified), never the stale first-read row (pre-push Codex P1).
+    return [String(r.id), r.visit_id != null ? membersOfVisit.get(String(r.visit_id)) || [] : [r]];
   }));
 }
 

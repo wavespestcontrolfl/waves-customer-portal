@@ -373,6 +373,8 @@ describe('loadTimeDisplay', () => {
       expect((await loadTimeDisplay(left, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
       const leftFirst = fakeConn({ servicesByRead: [same, [m('s2', '2026-11-20')], same], reminders: [office('s1'), office('s2')] });
       expect((await loadTimeDisplay(leftFirst, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
+      const emptied = fakeConn({ servicesByRead: [same, same, same, []], reminders: [office('s1'), office('s2')] });
+      expect((await loadTimeDisplay(emptied, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual(unverified);
       const steady = fakeConn({ services: same, reminders: [office('s1'), office('s2')] });
       expect((await loadTimeDisplay(steady, [row('s1', '2026-11-20')], NOW)).get('s1')).toEqual({ showHour: false, level: 'none', eligible: true });
     });
