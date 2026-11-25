@@ -34,6 +34,8 @@ const router = require('../routes/admin-payroll');
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 const productionSharePay = require('../services/payroll-production-share');
 const productionShareRefunds = require('../services/production-share-refunds');
+const { REFUND_CREDIT_NOTE_PREFIX, REFUND_CREDIT_NOTE_SUFFIX } = require('../services/customer-credit');
+const refundCreditNote = (invoice) => `${REFUND_CREDIT_NOTE_PREFIX}${invoice.invoice_number || invoice.id}${REFUND_CREDIT_NOTE_SUFFIX}`;
 
 jest.setTimeout(60000);
 
@@ -254,6 +256,7 @@ postgres('production share refunds', () => {
       const noise = await stop(id, W1, '100.00', customerId);
       await invoiceFor(customerId, '100.00', { scheduled_service_id: parked, stripe_charge_id: 'ch_parked' });
       const creditInvoice = await invoiceFor(customerId, '100.00', { scheduled_service_id: credit });
+      const creditInvoiceNumber = (await trx('invoices').where({ id: creditInvoice }).first('invoice_number')).invoice_number;
       const refundedInvoice = await invoiceFor(customerId, '100.00', { scheduled_service_id: refunded, status: 'refunded' });
       const [payer] = await trx('payers').insert({ display_name: 'Sample Payer' }).returning('id');
       const [stmt] = await trx('payer_statements').insert({
@@ -271,7 +274,7 @@ postgres('production share refunds', () => {
       });
       const ledger = await trx('customer_credit_ledger').insert({
         customer_id: customerId, delta: '20.00', balance_after: '20.00', source: 'adjustment', invoice_id: creditInvoice,
-        note: 'Account credit returned - invoice fully refunded',
+        note: refundCreditNote({ invoice_number: creditInvoiceNumber, id: creditInvoice }),
       }).returning('id');
       const stmtPayment = await paymentOf(customerId, { statement_id: stmt.id, refund_amount: '8.00', customer_id: null, stripe_payment_intent_id: 'pi_stmt' });
       const found = await signals([parked, credit, refunded, statement, noise]);
@@ -665,8 +668,90 @@ postgres('production share refunds', () => {
     });
   });
 
+  describe('what is a refund is what the commission ledger already says, plus exact writer keys', () => {
+    it('flags an estimate deposit applied to the invoice once its refund reached applied money, and not before', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      const [estimate] = await trx('estimates').insert({ customer_id: customerId, status: 'accepted', accepted_at: `${W1}T14:00:00Z` }).returning('id');
+      const credit = { description: 'Deposit credit (paid at acceptance)', quantity: 1, unit_price: -20, amount: -20, category: 'deposit_credit', estimate_id: estimate.id };
+      await invoiceFor(customerId, '80.00', { scheduled_service_id: visit, line_items: JSON.stringify([{ description: 'Service', amount: 100 }, credit]) });
+      const [deposit] = await trx('estimate_deposits').insert({
+        estimate_id: estimate.id, customer_id: customerId, amount: '20.00', credited_amount: '20.00', status: 'credited', stripe_payment_intent_id: `pi_dep_${randomUUID()}`,
+      }).returning('id');
+      expect((await signals([visit])).get(visit)).toEqual([]);
+      // Refunded in full: no payments row exists, only the deposit ledger says so.
+      await trx('estimate_deposits').where({ id: deposit.id }).update({ status: 'refunded', refunded_amount: '20.00' });
+      expect((await signals([visit])).get(visit)).toEqual([`deposit:${deposit.id}:2000`]);
+      // A refund of a deposit that was never applied does not reach this invoice (the commission rule).
+      await trx('estimate_deposits').where({ id: deposit.id }).update({ status: 'refunded', refunded_amount: '5.00', credited_amount: '5.00', amount: '25.00' });
+      expect((await signals([visit])).get(visit)).toEqual([]);
+      // A voided invoice gave its credit back to the deposit: nothing here either.
+      await trx('estimate_deposits').where({ id: deposit.id }).update({ amount: '20.00', credited_amount: '20.00', refunded_amount: '20.00' });
+      await trx('invoices').where({ scheduled_service_id: visit }).update({ status: 'void' });
+      expect((await signals([visit])).get(visit)).toEqual([]);
+    });
+
+    it('flags a refunded or disputed payment with no refund amount, by its state, through the intent, the invoice id and the manual description', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const byIntent = await stop(id, W1, '100.00', customerId);
+      const byMeta = await stop(id, W1, '100.00', customerId);
+      const byManual = await stop(id, W1, '100.00', customerId);
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: byIntent, stripe_payment_intent_id: 'pi_nil', status: 'sent' });
+      const metaInvoice = await invoiceFor(customerId, '100.00', { scheduled_service_id: byMeta, status: 'sent' });
+      const manualInvoice = await invoiceFor(customerId, '100.00', { scheduled_service_id: byManual, status: 'sent' });
+      const manualNumber = (await trx('invoices').where({ id: manualInvoice }).first('invoice_number')).invoice_number;
+      const refunded = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_nil', status: 'refunded', refund_amount: null });
+      const disputed = await paymentOf(customerId, { metadata: JSON.stringify({ invoice_id: metaInvoice }), status: 'disputed', refund_amount: '0.00' });
+      const manual = await paymentOf(customerId, { description: `Invoice ${manualNumber} — Zelle`, status: 'refunded', refund_amount: '0.00' });
+      // An ordinary paid row with no refund is not a signal.
+      await paymentOf(customerId, { stripe_payment_intent_id: 'pi_nil', status: 'paid', refund_amount: '0.00' });
+      const found = await signals([byIntent, byMeta, byManual]);
+      expect(found.get(byIntent)).toEqual([`pay:${refunded}:refunded`]);
+      expect(found.get(byMeta)).toEqual([`pay:${disputed}:disputed`]);
+      expect(found.get(byManual)).toEqual([`pay:${manual}:refunded`]);
+    });
+
+    it('does not read a payer transfer, a void or a won dispute as a refund, by exact note and key', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const transfer = await stop(id, W1, '100.00', customerId);
+      const voided = await stop(id, W1, '100.00', customerId);
+      const won = await stop(id, W1, '100.00', customerId);
+      const transferInvoice = await invoiceFor(customerId, '100.00', { scheduled_service_id: transfer });
+      const voidedInvoice = await invoiceFor(customerId, '100.00', { scheduled_service_id: voided });
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: won, stripe_charge_id: 'ch_won', stripe_payment_intent_id: 'pi_won' });
+      const credit = (invoiceId, note) => trx('customer_credit_ledger').insert({ customer_id: customerId, delta: '20.00', balance_after: '20.00', source: 'adjustment', invoice_id: invoiceId, note });
+      // The three notes other writers use for credit that comes back: a payer transfer (two writers) and a void.
+      await credit(transferInvoice, 'Bill-To moved to payer 7 — homeowner credit returned');
+      await credit(transferInvoice, 'Account credit returned — invoice re-routed to third-party payer');
+      await credit(voidedInvoice, 'Account credit returned — invoice S-1 voided');
+      await trx('stripe_orphan_charges').insert({
+        stripe_payment_intent_id: 'pi_won:dispute-won:du_1:inv', stripe_charge_id: 'ch_won', amount: '20.00', source: 'combined_pay_webhook',
+        original_db_error: 'Dispute du_1 won reinstated $20.00 for invoice x, but a replacement payment owns the invoice — credit or refund the reinstated share manually',
+      });
+      const found = await signals([transfer, voided, won]);
+      expect(found.get(transfer)).toEqual([]);
+      expect(found.get(voided)).toEqual([]);
+      expect(found.get(won)).toEqual([]);
+    });
+
+    it('reads the credit row a full refund writes, by exactly the note the writer builds', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '100.00', { scheduled_service_id: visit });
+      const number = (await trx('invoices').where({ id: invoiceId }).first('invoice_number')).invoice_number;
+      const [row] = await trx('customer_credit_ledger').insert({
+        customer_id: customerId, delta: '20.00', balance_after: '20.00', source: 'adjustment', invoice_id: invoiceId, note: refundCreditNote({ invoice_number: number, id: invoiceId }),
+      }).returning('id');
+      expect((await signals([visit])).get(visit)).toEqual([`credit:${row.id}`]);
+    });
+  });
+
   describe('a parked refund the bank bounced is not a refund signal', () => {
-    it('skips a parked refund whose id is fenced as failed or whose case was resolved FAILED at the bank, and keeps a reconciled one', async () => {
+    it('skips a parked refund whose id is fenced as failed, and keeps a reconciled one', async () => {
       const id = await tech('Sample Alpha');
       const customerId = await customer();
       const visit = await stop(id, W1, '100.00', customerId);
@@ -677,7 +762,6 @@ postgres('production share refunds', () => {
       }).returning('id');
       const [bounced] = await parked('re_bounced');
       await trx('stripe_failed_refunds').insert({ stripe_refund_id: 're_bounced', stripe_charge_id: 'ch_p' });
-      await parked('re_noted', { resolved: true, resolution_notes: 'Automatically resolved: refund re_noted FAILED at the bank - Stripe kept the money, no movement to reconcile' });
       expect(bounced).toBeTruthy();
       expect((await signals([visit])).get(visit)).toEqual([]);
       // Reconciled successfully (resolved, no failure marker): still a refund that happened.

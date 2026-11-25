@@ -21,18 +21,27 @@
  *    refused while a later final check relied on it (payroll-production-share.js dependentChecksOf). A source with any finalized history
  *    keeps a 0-cent entry each week so that dependency is not lost.
  *
- * Signal sources (all read-only; one statement for a batch of visits). Invoices linked to a visit by the links the credit uses
+ * Signal sources (all read-only; one statement for a batch of visits plus one read of the deposit ledger). Nothing here is a free-text match: each
+ * is an exact column, state, key or note constant the writer uses. Base = what the commission ledger already treats as a refund
+ * (payment-refund-facts.js, shared; payroll-commission.js reads the same helper): a payment row that shows a refund (refund_amount above 0,
+ * or status 'refunded' / 'disputed' with no amount) and an estimate deposit applied to the invoice whose refund reached applied money.
+ * Added here: parked refunds, returned account credit and statement refunds. Invoices linked to a visit by the links the credit uses
  * (rate-review.js VISIT_INVOICE_LINK_SQL: direct, service record, first application, completion packet), for the visit and every visit of
  * its package (included follow-ups, both directions), plus, for a visit stamped as an annual prepay payment (the stamp, not the term link,
  * says so: production-share.js isAnnualPrepayStamp), the prepay invoice of its term and the invoices stamped to the term:
- *   pay:<payment id>:<refunded cents>        payments.refund_amount > 0 matched by metadata.invoice_id, OR payment intent, OR charge id
- *                                            (any of them; a combined charge flags every invoice it paid). The cents are in the id so a
- *                                            second refund on the same payment row is a new signal.
- *   stmt:<payment id>:<refunded cents>       a refund on a payer-statement payment (payments.statement_id) whose statement covers the invoice
- *   orphan:<stripe_orphan_charges id>        a parked or unattributed refund (stripe-webhook.js parks partial refunds on combined and
- *                                            statement charges there) for the invoice, its payment intent or its charge; not one the bank
- *                                            bounced (stripe_failed_refunds holds its refund id, or the case was resolved "FAILED at the bank")
- *   credit:<customer_credit_ledger id>       account credit returned on the invoice by a refund
+ *   pay:<payment id>:<cents | state>:<id hash>  a payment shows a refund, matched by metadata.invoice_id OR payment intent OR charge id OR the
+ *                                            manual description 'Invoice <number> — ' (any of them; a combined charge flags every invoice it
+ *                                            paid). The cents (or the status of a refunded/disputed row with no amount) and the Stripe
+ *                                            refund identity are in the id, so a second or a replacement refund is a new signal.
+ *   stmt:<payment id>:<cents | state>:<hash>  the same for a payer-statement payment (payments.statement_id = the invoice's statement)
+ *   deposit:<estimate_deposits id>:<cents>   an estimate deposit applied to the invoice (deposit_credit line) was refunded (the commission rule)
+ *   orphan:<stripe_orphan_charges id>        a parked refund: source combined_pay_webhook with the key '<pi>:partial-refund:<refund id>' (not
+ *                                            one the bank bounced: its refund id is in stripe_failed_refunds), or a statement charge's parked
+ *                                            case (source statement_pay_webhook: it holds a partial refund before settlement and a stale or
+ *                                            orphan success, and the table cannot tell them apart without reading free text, so both are kept:
+ *                                            over-detecting on purpose). A won dispute parks under ':dispute-won:' and is not a refund.
+ *   credit:<customer_credit_ledger id>       the credit row a full refund writes: source 'adjustment', delta above 0 and exactly the note of
+ *                                            customer-credit.js refundCreditNote (a payer transfer or a void write other notes)
  *   inv-refunded:<invoice id>                the invoice status is 'refunded'
  * A take-back SOURCE is exactly what paidLedger (production-share.js) counts as paid: a stop row with creditCents > 0 on a finalized check
  * of a finalized run whose share is above $0. A refund on a stop of a $0-share check is no take-back source: that week paid no share.
@@ -53,6 +62,9 @@ const crypto = require('node:crypto');
 const db = require('../models/db');
 const { PayrollError } = require('./payroll-w4');
 const { ANNUAL_PREPAY_PREPAID_METHOD } = require('./billing-lane');
+const {
+  VOIDED_INVOICE, COLLECTED_DEPOSITS, depositApplications, depositReversal, paymentRefundShownSql,
+} = require('./payment-refund-facts');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_CENTS = 100000000;
@@ -68,6 +80,10 @@ const REFUND_IDENTITY_SQL = `COALESCE((SELECT ':' || left(md5(string_agg(x.id, '
       SELECT p.stripe_refund_id AS id WHERE p.stripe_refund_id IS NOT NULL
       UNION SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(p.metadata -> 'stamped_refund_ids') = 'array' THEN p.metadata -> 'stamped_refund_ids' ELSE '[]'::jsonb END)
     ) x), '')`;
+
+// 'pay:<id>:<refunded cents>' when the row records an amount; a 'refunded' row with no amount and a 'disputed' row show the whole payment
+// refunded, so the state stands in for the cents.
+const AMOUNT_OR_STATE_SQL = "CASE WHEN COALESCE(p.refund_amount, 0) > 0 THEN round(p.refund_amount * 100)::bigint::text ELSE p.status END";
 
 const asUuids = (list) => [...new Set((list || []).map(String).filter((id) => UUID_RE.test(id)).map(canonicalId))];
 
@@ -90,6 +106,7 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
   if (!ids.length) return out;
   const pairs = [...frozen].flatMap(([visit, list]) => asUuids(list).map((invoice) => [canonicalId(visit), invoice]));
   const { VISIT_INVOICE_LINK_SQL } = require('./rate-review');
+  const { REFUND_CREDIT_NOTE_PREFIX, REFUND_CREDIT_NOTE_SUFFIX } = require('./customer-credit');
   const { rows } = await conn.raw(`
     WITH RECURSIVE grp(origin, id, depth) AS (
       SELECT s.id, s.id, 0 FROM scheduled_services s WHERE s.id = ANY(?::uuid[])
@@ -141,34 +158,39 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
       FROM invoices AS i JOIN payments p ON p.statement_id = i.payer_statement_id
       WHERE i.payer_statement_id IS NOT NULL AND i.id IN (SELECT invoice_id FROM invs)
     ), found AS (
-      SELECT v.origin, 'pay:' || p.id::text || ':' || round(p.refund_amount * 100)::bigint::text || ${REFUND_IDENTITY_SQL} AS signal
+      SELECT v.origin, 'pay:' || p.id::text || ':' || ${AMOUNT_OR_STATE_SQL} || ${REFUND_IDENTITY_SQL} AS signal
       FROM invs v
-      JOIN payments p ON COALESCE(p.refund_amount, 0) > 0 AND (
+      JOIN invoices vi ON vi.id = v.invoice_id
+      JOIN payments p ON ${paymentRefundShownSql('p')} AND (
         p.metadata ->> 'invoice_id' = v.invoice_id::text
         OR (p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id IN (SELECT k.pi FROM keys k WHERE k.invoice_id = v.invoice_id))
-        OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id IN (SELECT k.ch FROM keys k WHERE k.invoice_id = v.invoice_id)))
+        OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id IN (SELECT k.ch FROM keys k WHERE k.invoice_id = v.invoice_id))
+        -- a manual payment names its invoice in the description the office writer builds, 'Invoice <number> — <method>' (as the commission ledger reads it)
+        OR (p.customer_id = vi.customer_id AND vi.invoice_number IS NOT NULL AND starts_with(p.description, 'Invoice ' || vi.invoice_number || ' — ')))
       UNION
-      SELECT v.origin, 'stmt:' || p.id::text || ':' || round(p.refund_amount * 100)::bigint::text || ${REFUND_IDENTITY_SQL}
+      SELECT v.origin, 'stmt:' || p.id::text || ':' || ${AMOUNT_OR_STATE_SQL} || ${REFUND_IDENTITY_SQL}
       FROM invs v
       JOIN invoices i ON i.id = v.invoice_id AND i.payer_statement_id IS NOT NULL
-      JOIN payments p ON p.statement_id = i.payer_statement_id AND COALESCE(p.refund_amount, 0) > 0
+      JOIN payments p ON p.statement_id = i.payer_statement_id AND ${paymentRefundShownSql('p')}
       UNION
+      -- Parked refunds, by the exact key or source the webhook writes: a partial refund on a combined charge (source combined_pay_webhook,
+      -- key '<pi>:partial-refund:<refund id>'), and a statement charge's parked case (source statement_pay_webhook). A won dispute parks under
+      -- its own key (':dispute-won:') and is no refund. A refund the bank bounced is fenced in stripe_failed_refunds and is no refund either.
       SELECT v.origin, 'orphan:' || o.id::text
       FROM invs v
       JOIN stripe_orphan_charges o ON (o.invoice_id = v.invoice_id
         OR (o.stripe_charge_id IS NOT NULL AND o.stripe_charge_id IN (SELECT k.ch FROM keys k WHERE k.invoice_id = v.invoice_id))
         OR split_part(o.stripe_payment_intent_id, ':', 1) IN (SELECT k.pi FROM keys k WHERE k.invoice_id = v.invoice_id))
-      WHERE (o.original_db_error ILIKE '%refund%' OR o.stripe_payment_intent_id LIKE '%:partial-refund:%')
-        -- A parked refund the bank bounced is no refund: the webhook fences its id in stripe_failed_refunds and resolves the case with
-        -- 'FAILED at the bank' (Stripe kept the money). A parked refund that was reconciled successfully keeps its signal.
-        AND NOT (o.stripe_payment_intent_id LIKE '%:partial-refund:%' AND EXISTS (
-          SELECT 1 FROM stripe_failed_refunds ff WHERE ff.stripe_refund_id = split_part(o.stripe_payment_intent_id, ':partial-refund:', 2)))
-        AND NOT (o.resolved AND COALESCE(o.resolution_notes, '') ILIKE '%FAILED at the bank%')
+      WHERE ((o.source = 'combined_pay_webhook' AND o.stripe_payment_intent_id LIKE '%:partial-refund:%'
+          AND NOT EXISTS (SELECT 1 FROM stripe_failed_refunds ff WHERE ff.stripe_refund_id = split_part(o.stripe_payment_intent_id, ':partial-refund:', 2)))
+        OR o.source = 'statement_pay_webhook')
       UNION
+      -- The credit row returnAppliedCreditOnRefund writes for a full refund, by its exact note (customer-credit.js refundCreditNote).
       SELECT v.origin, 'credit:' || l.id::text
       FROM invs v
-      JOIN customer_credit_ledger l ON l.invoice_id = v.invoice_id AND l.delta > 0
-        AND (l.note ILIKE '%refund%' OR l.note ILIKE '%returned%')
+      JOIN invoices ci ON ci.id = v.invoice_id
+      JOIN customer_credit_ledger l ON l.invoice_id = v.invoice_id AND l.source = 'adjustment' AND l.delta > 0
+        AND l.note = ? || COALESCE(NULLIF(ci.invoice_number, ''), ci.id::text) || ?
       UNION
       SELECT v.origin, 'inv-refunded:' || i.id::text
       FROM invs v JOIN invoices i ON i.id = v.invoice_id WHERE i.status = 'refunded'
@@ -176,14 +198,45 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
     SELECT origin::text AS visit_id, signal, NULL AS invoice_id FROM found
     UNION ALL
     SELECT origin::text, NULL, invoice_id::text FROM invs`, [ids, PACKAGE_DEPTH, ANNUAL_PREPAY_PREPAID_METHOD, ANNUAL_PREPAY_PREPAID_METHOD,
-    pairs.map((pair) => pair[0]), pairs.map((pair) => pair[1])]);
+    pairs.map((pair) => pair[0]), pairs.map((pair) => pair[1]), REFUND_CREDIT_NOTE_PREFIX, REFUND_CREDIT_NOTE_SUFFIX]);
   const signals = new Map(ids.map((id) => [id, new Set()]));
   const invoices = new Map(ids.map((id) => [id, new Set()]));
   for (const row of rows) {
     if (row.signal) signals.get(canonicalId(row.visit_id)).add(row.signal);
     if (row.invoice_id) invoices.get(canonicalId(row.visit_id)).add(row.invoice_id);
   }
+  for (const [id, signal] of await depositSignalsOf(conn, invoices)) for (const one of signal) signals.get(id).add(one);
   for (const id of ids) out.set(id, { signals: [...signals.get(id)].sort(), invoiceIds: [...invoices.get(id)].sort() });
+  return out;
+}
+
+/**
+ * Refunds of estimate deposits applied to the invoices (the commission ledger's rule, payment-refund-facts.js): a deposit has no payments row,
+ * the invoice carries it as a deposit_credit line (depositApplications) and estimate_deposits records what a refund or dispute reversed
+ * (depositReversal). A deposit whose refund reached applied money is a signal 'deposit:<deposit id>:<refunded cents>' for each visit whose
+ * invoice carries it; a voided invoice gave its credit back and is left out. `invoices` = Map visit id -> Set of invoice ids.
+ */
+async function depositSignalsOf(conn, invoices) {
+  const out = new Map();
+  const wanted = [...new Set([...invoices.values()].flatMap((set) => [...set]))];
+  if (!wanted.length) return out;
+  const rows = await conn('invoices').whereIn('id', wanted).select('id', 'status', 'notes', 'line_items');
+  const estimatesOf = new Map(rows.filter((row) => !VOIDED_INVOICE.includes(row.status)).map((row) => [row.id, [...depositApplications(row).keys()]]));
+  const estimateIds = [...new Set([...estimatesOf.values()].flat())];
+  if (!estimateIds.length) return out;
+  const deposits = await conn('estimate_deposits').whereIn('estimate_id', estimateIds).whereIn('status', COLLECTED_DEPOSITS)
+    .select('id', 'estimate_id', 'status', 'amount', 'credited_amount', 'refunded_amount');
+  const signalsOfEstimate = new Map();
+  for (const row of deposits) {
+    const { reversed, refunded } = depositReversal(row);
+    if (!(reversed > 0n)) continue;
+    const key = canonicalId(row.estimate_id);
+    signalsOfEstimate.set(key, [...(signalsOfEstimate.get(key) || []), `deposit:${row.id}:${refunded}`]);
+  }
+  for (const [visit, set] of invoices) {
+    const found = [...set].flatMap((invoiceId) => (estimatesOf.get(invoiceId) || []).flatMap((estimateId) => signalsOfEstimate.get(estimateId) || []));
+    if (found.length) out.set(visit, found);
+  }
   return out;
 }
 
