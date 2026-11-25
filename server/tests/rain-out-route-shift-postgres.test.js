@@ -107,6 +107,11 @@ postgres('the stops a rest-of-route move would land outside the shift (real Post
       { windowStart: '12:00', windowEnd: '13:00' },
     ];
     expect((await check(anchor, laterDay, '09:00', '10:00')).routeShiftConflicts).toEqual(rows);
+    // A stored 24:00 start (PostgreSQL keeps it) is no start the office's line reads: no row for the office.
+    const midnight = await makeStop(technicianId, '24:00', null);
+    expect((await db('scheduled_services').where({ id: midnight }).first('window_start')).window_start).toBe('24:00:00');
+    expect((await check(anchor, laterDay, '09:00', '10:00')).routeShiftConflicts).toEqual(rows);
+    await db('scheduled_services').where({ id: midnight }).del();
     // The occupancy check's switch is not the shift's.
     process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
     try {

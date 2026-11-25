@@ -434,7 +434,7 @@ describe('rain-out service', () => {
         ];
         const hours = () => chain({ whereNotNull: jest.fn().mockReturnThis(), rows: [{ id: 'tech-1', shift_start: '08:00', shift_end: '17:30' }] });
         const clockIns = (at) => chain({ groupBy: jest.fn().mockReturnThis(), min: jest.fn().mockResolvedValue(at ? [{ technician_id: 'tech-1', clock_in: at }] : []) });
-        const optionsFor = async ({ office = false, workDays = null, clockIn = null } = {}) => {
+        const optionsFor = async ({ office = false, workDays = null, clockIn = null, route = ROUTE } = {}) => {
           finder.mockResolvedValue({ slots: [slot('12:00', 5)] });
           SmartRebooker.findRescheduleOptions.mockResolvedValue([
             { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
@@ -442,7 +442,7 @@ describe('rain-out service', () => {
           wireDb({
             scheduled_services: [
               chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed' }) }),
-              chain({ rows: ROUTE.map((job) => ({ scheduled_date: etDateString(), ...job })) }),
+              chain({ rows: route.map((job) => ({ scheduled_date: etDateString(), ...job })) }),
             ],
             // The technician's sheet reads the hours twice (its own hours, then the route's) and no work
             // days: a third read would throw, and the rows would be gone. The office's sheet does not hold
@@ -456,6 +456,16 @@ describe('rain-out service', () => {
           expect(options.ok).toBe(true);
           return options;
         };
+
+        test('gate on: a start the mover cannot read (a stored 24:00) is a row on the technician\'s sheet; the office is told nothing of it', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          // PostgreSQL stores 24:00:00 as a TIME. A day move keeps it; the mover reads it as a block no
+          // shift holds and refuses the technician's move of that stop.
+          const route = [ROUTE[0], { id: 'svc-7', window_start: '24:00:00', window_end: null, estimated_duration_minutes: 60 }];
+          expect((await optionsFor({ route })).days.map((o) => o.routeShiftConflicts)).toEqual([[{ windowStart: '24:00', windowEnd: null }]]);
+          // The office's line reads the block to the minute: no start it can read, no line, no row.
+          expect((await optionsFor({ office: true, route })).days[0]).not.toHaveProperty('routeShiftConflicts');
+        });
 
         test('gate on: an hour and a day each carry the stops they would land outside the shift', async () => {
           process.env.GATE_TECH_SHIFT_HOURS = 'true';

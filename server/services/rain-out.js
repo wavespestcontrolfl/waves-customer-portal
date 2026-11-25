@@ -1165,8 +1165,10 @@ async function keptShiftHolds(service) {
 // True when `shift` (shiftOf's answer for the technician and the date; null = no set hours, or the gate
 // off) holds `row` at `window`: the window, and the later of its end and the start plus the row's stored
 // length (rowBlockMinutes), which is the block the mover judges. A window with no start is not judged.
-function shiftHoldsBlock(shift, row, window) {
-  const { startMin, endMin } = require('./scheduling/window-rules').rowBlockMinutes({
+// `blockOf` is the window-rules reader of the block: rowBlockMinutes, or the mover's own for a move it can
+// refuse (shiftBlockMinutes: a bound it cannot read exactly is a block no shift holds).
+function shiftHoldsBlock(shift, row, window, blockOf = 'rowBlockMinutes') {
+  const { startMin, endMin } = require('./scheduling/window-rules')[blockOf]({
     window_start: window.start, window_end: window.end, estimated_duration_minutes: row.estimated_duration_minutes });
   if (startMin == null) return true;
   const held = require('./technician-eligibility').shiftBounds(shift, startMin, endMin);
@@ -1519,12 +1521,15 @@ async function routeShiftRows(service, route, { office = false } = {}) {
     const shiftOf = await loadTechShifts(db, { technicianIds: [service.technician_id] });
     if (!shiftOf(service.technician_id, etDateString())) return none;
     const workDays = office ? await db('technicians').where({ id: service.technician_id }).first('id', 'work_days') : null;
+    // The block each commit judges: the technician's move is refused on the mover's block, the office is
+    // told on the block read to the minute (technician-eligibility.js dayWarningsFor).
+    const blockOf = office ? 'rowBlockMinutes' : 'shiftBlockMinutes';
     return (target) => {
       try {
         const { targetDate, isSameDay, windows } = routeLandings({ service, route, target });
         const shift = isOffDay(workDays, targetDate) ? null : shiftOf(service.technician_id, targetDate);
         const outside = route.map((job, i) => shiftLanding(job, windows[i], isSameDay, targetDate))
-          .filter((window, i) => window && !shiftHoldsBlock(shift, route[i], window));
+          .filter((window, i) => window && !shiftHoldsBlock(shift, route[i], window, blockOf));
         return outside.length ? { routeShiftConflicts: outside.map((w) => ({ windowStart: w.start, windowEnd: w.end })) } : {};
       } catch (err) {
         return unread(err);
