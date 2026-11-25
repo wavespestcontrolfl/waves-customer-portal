@@ -19,7 +19,7 @@ const ENV = Object.freeze({
   SITEONE_CDP_URL: 'http://127.0.0.1:9222',
   SITEONE_APPROVED_STORE_ID: '238',
   SITEONE_APPROVED_PICKUP: '#238,5115 Lena Rd',
-  SITEONE_APPROVED_ACCOUNT: '2330739',
+  SITEONE_APPROVED_ACCOUNT: '5550123',
   SITEONE_BOT_DRY_RUN: 'false',
 });
 const OPTS = { settleMs: 0, confirmStep: 1 };
@@ -27,6 +27,8 @@ const OPTS = { settleMs: 0, confirmStep: 1 };
 // ---- fake storefront ----------------------------------------------------------
 
 const el = (spec = {}) => ({ visible: true, text: '', attrs: {}, value: '', checked: false, enabled: true, children: {}, ...spec });
+// A node whose text is read live (the browser's innerText), so a change after the node was found shows.
+const live = (spec, read) => Object.defineProperty(spec, 'text', { configurable: true, get: read });
 
 function makeWorld(over = {}) {
   const w = {
@@ -36,8 +38,8 @@ function makeWorld(over = {}) {
     pickupClass: 'cart-top-fulfillment-method__tile fullfillment-pickup fullfilment-select', pickupText: 'Pickup #238,5115 Lena Rd',
     cartTotalText: '$105.93', addBehavior: 'normal', checkoutLocText: 'Pickup at #238, 5115 Lena Rd',
     reviewBody: 'Review your order. Reference 5500990. Store 238.', reviewTenderText: 'Payment Method Pay At branch, Lakewood Ranch 238',
-    reviewPickupText: 'Pickup Lakewood Ranch 238', hideTender: false, confirmEverywhere: false, confirmationField: true, poOccupied: '', signInUrl: null, signOutAfter: null, accountText: 'Signed in as account 2330739', accountAttr: null, hideAccount: false,
-    reviewAccountText: 'Bill to account 2330739', hideReviewAccount: false, locators: [],
+    reviewPickupText: 'Pickup Lakewood Ranch 238', hideTender: false, confirmEverywhere: false, confirmationField: true, poOccupied: '', signInUrl: null, signOutAfter: null, accountText: 'Signed in as account 5550123', accountAttr: null, hideAccount: false,
+    reviewAccountText: 'Bill to account 5550123', hideReviewAccount: false, locators: [],
     checkoutUrl: null, confirmUrl: null, reviewCode: `Item # : ${SKU}`, reviewQtyText: 'Qty: 2',
     reviewQtyNode: true, closeOrder: [], reviewTotalText: '$110.40', placeButtons: 1, cardField: false, noRadioCheck: false,
     confirmationBody: 'Order Number: 7700123', noConfirmation: false, placeClickThrows: false, placed: 0, qty: 0,
@@ -113,11 +115,11 @@ function screens(w) {
   const placeBtn = () => el({ name: 'place-order', text: 'Place Your Order', onClick: () => { w.placed += 1; if (w.placeClickThrows) throw new Error('Target page closed'); if (!w.noConfirmation) { w.url = w.confirmUrl || 'https://www.siteone.com/en/checkout/orderConfirmation/7700123'; } } });
   const review = {
     [S.body]: [el({ text: w.reviewBody, throws: w.bodyThrows })],
-    [S.reviewTender]: w.hideTender ? [] : [el({ text: w.reviewTenderText, onRead: () => { w.tenderReads += 1; if (w.onTenderRead) w.onTenderRead(w.tenderReads, w); } })],
+    [S.reviewTender]: w.hideTender ? [] : [live(el({ onRead: () => { w.tenderReads += 1; if (w.onTenderRead) w.onTenderRead(w.tenderReads, w); } }), () => w.reviewTenderText)],
     [S.reviewPickup]: [el({ text: w.reviewPickupText })],
     [S.reviewAccount]: w.hideReviewAccount ? [] : [el({ text: w.reviewAccountText })],
     [S.reviewItemCode]: [el({ text: w.reviewCode, children: { [S.reviewItemBlock]: [el({ children: { [S.reviewQty]: w.reviewQtyNode ? [el({ text: w.reviewQtyText })] : [] } })] } })],
-    [S.reviewTotal]: [el({ text: w.reviewTotalText })],
+    [S.reviewTotal]: [live(el({}), () => w.reviewTotalText)],
     [S.placeOrder]: placeBtns(),
   };
   const confirmation = { [S.body]: [el({ text: w.confirmationBody })], ...(w.confirmationField ? { [S.confirmationNumber]: [el({ text: w.confirmationBody })] } : {}), [S.heading]: [el({ text: 'Order Received' })] };
@@ -156,6 +158,12 @@ function wrap(spec) {
     click: async () => { if (spec.name === 'place-order') spec.world.locatorPlaceClicks += 1; if (spec.name) spec.world?.clicks.push(spec.name); if (spec.onClick) spec.onClick(); },
     elementHandle: async () => {
       spec.dom = spec.dom || { isConnected: true };
+      // What page.evaluate sees for this handle: live text, disabled state and a DOM click.
+      if (!Object.getOwnPropertyDescriptor(spec.dom, 'innerText')) {
+        Object.defineProperty(spec.dom, 'innerText', { configurable: true, get: () => { if (spec.onRead) spec.onRead(); return spec.text; } });
+        Object.defineProperty(spec.dom, 'disabled', { configurable: true, get: () => !spec.enabled });
+        spec.dom.click = () => { spec.world.handleClicks.push({ dom: true }); if (spec.name) spec.world.clicks.push(spec.name); if (spec.onClick) spec.onClick(); };
+      }
       return {
         dom: spec.dom,
         isVisible: async () => spec.visible,
@@ -706,7 +714,7 @@ test('R4 baseline: the pre-click page text must be readable and non-empty, else 
 // ---- round 5 -----------------------------------------------------------------------
 
 test('R5 account: the signed-in account must be exactly the approved one, before the cart is touched and again at the click', async () => {
-  const MISMATCH = ['Signed in as account 12330739', 'Signed in as account 233073', 'Signed in as account 2330739 and 5550001', 'account 2330738'];
+  const MISMATCH = ['Signed in as account 15550123', 'Signed in as account 233073', 'Signed in as account 5550123 and 5550001', 'account 2330738'];
   for (const accountText of MISMATCH) {
     const r = await run({ accountText, cart: [{ sku: 'PHONE-APP-1', qty: 3 }] });
     expect(r.error.refuse).toBe('account_mismatch');
@@ -722,8 +730,8 @@ test('R5 account: the signed-in account must be exactly the approved one, before
     expectSafe(r.w);
   }
   // An attribute reading is preferred over the node text.
-  expect((await run({ accountText: 'menu', accountAttr: '2330739' })).result.dryRun).toBe(false);
-  expect((await run({ accountText: 'Signed in as account 2330739', accountAttr: '9999999' })).error.refuse).toBe('account_mismatch');
+  expect((await run({ accountText: 'menu', accountAttr: '5550123' })).result.dryRun).toBe(false);
+  expect((await run({ accountText: 'Signed in as account 5550123', accountAttr: '9999999' })).error.refuse).toBe('account_mismatch');
   // Final review page: a different or unreadable bill-to account refuses with no click, and cleans up.
   const wrongAtReview = await run({}, { onCall: (n, w) => { if (n === 3) w.reviewAccountText = 'Bill to account 5550001'; } });
   expect(wrongAtReview.error.refuse).toBe('account_mismatch');
@@ -774,25 +782,26 @@ test('R5 sign-out after any checkout step is run-level (the claim is released), 
 // ---- round 6 -----------------------------------------------------------------------
 
 test('R6 account: the WHOLE token incl. any suffix must equal the approved account string', async () => {
-  for (const accountText of ['Signed in as account 2330739-01', 'Signed in as account 2330739 - 01', 'Signed in as account 2330739.01', 'Account 2330739-', 'Accounts 2330739 2330739-01']) {
+  for (const accountText of ['Signed in as account 5550123-01', 'Signed in as account 5550123 - 01', 'Signed in as account 5550123.01', 'Account 5550123-', 'Accounts 5550123 5550123-01']) {
     const r = await run({ accountText });
     expect(r.error.refuse).toBe('account_mismatch');
     expect(r.w.clicks).toEqual([]);
     expectSafe(r.w);
   }
-  expect((await run({ accountText: 'Signed in as account 2330739' })).result.dryRun).toBe(false);
+  expect((await run({ accountText: 'Signed in as account 5550123' })).result.dryRun).toBe(false);
   // A short suffix on the final review page: refuse, nothing clicked, cleanup touches nothing.
-  const suffix = await run({}, { onCall: (n, w) => { if (n === 3) w.reviewAccountText = 'Bill to account 2330739-01'; } });
+  const suffix = await run({}, { onCall: (n, w) => { if (n === 3) w.reviewAccountText = 'Bill to account 5550123-01'; } });
   expect(suffix.error.refuse).toBe('account_mismatch');
   expect(suffix.w.placed).toBe(0);
   expect(suffix.w.clicks.filter((c) => c.startsWith('remove:'))).toEqual([]);
   expectSafe(suffix.w);
 });
 
-test('R6 click: the click goes to the element handle that passed review, with force / noWaitAfter / 1 s, never a locator click', async () => {
+test('R6 click: the click goes to the element that passed review, inside one browser step, never a locator click', async () => {
   const ok = await run({});
   expect(ok.result.externalOrderNumber).toBe('7700123');
-  expect(ok.w.handleClicks).toEqual([{ force: true, noWaitAfter: true, timeout: 1000 }]);
+  // One synchronous in-browser step checks the total, the tender and the button, then clicks it (a DOM click).
+  expect(ok.w.handleClicks).toEqual([{ dom: true }]);
   expect(ok.w.locatorPlaceClicks).toBe(0);
   // Replaced between resolving the handle and the final re-read.
   const replaced = await run({ onTenderRead: (n, w) => { if (n === 2) w.placeBtns = null; } });
@@ -812,17 +821,24 @@ test('R6 click: the click goes to the element handle that passed review, with fo
 });
 
 test('R8 click: the total and tender are the last reads before the click; a change there refuses with no click', async () => {
-  // Tender reads: 1 = review, 2 = re-read, 3 = the last read right before the click.
-  const total = await run({ onTenderRead: (n, w) => { if (n === 3) w.reviewTotalText = '$190.40'; } });
-  expect(total.error.refuse).toBe('review_changed');
-  // The fake captures a node's text before its read hook runs, so a change set during read 2 shows at read 3.
-  const tender = await run({ onTenderRead: (n, w) => { if (n === 2) w.reviewTenderText = 'Payment Method Credit Card, Spark-6646'; } });
-  expect(tender.error.refuse).toBe('review_changed');
-  for (const r of [total, tender]) {
+  // Tender reads: 1 = review, 2 = re-read, 3 = the last read in node, 4 = inside the one browser step that clicks.
+  const atBind = await run({ onTenderRead: (n, w) => { if (n === 3) w.reviewTotalText = '$190.40'; } });
+  expect(atBind.error.refuse).toBe('review_changed');
+  // A switch to a saved card DURING the final step (after the total was read there): refused, no click.
+  const inStep = await run({ onTenderRead: (n, w) => { if (n === 4) w.reviewTenderText = 'Payment Method Credit Card, Spark-6646'; } });
+  expect(inStep.error.refuse).toBe('review_changed');
+  expect(inStep.error.message).toMatch(/changed/);
+  for (const r of [atBind, inStep]) {
     expect(r.w.placed).toBe(0);
     expect(r.w.clicks).not.toContain('place-order');
     expectSafe(r.w);
   }
+});
+
+test('R9 confirmation: a confirmation field that is present but ambiguous is unknown, never the URL code', async () => {
+  const twoNumbers = await run({ confirmationBody: 'Order Number: 7700123 Order Number: 7700124' });
+  expect(twoNumbers.error.ambiguous).toBe(true);
+  expect(twoNumbers.w.placed).toBe(1);
 });
 
 test('R6 cleanup: the approved account is proven on each cleanup page, else the cart and PO are left for the owner', async () => {

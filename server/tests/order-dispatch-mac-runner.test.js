@@ -18,7 +18,7 @@ jest.mock('../models/db', () => ({}));
 
 const autoReorder = require('../services/procurement/auto-reorder');
 const dispatch = require('../services/procurement/order-dispatch');
-const { run: macRun } = require('../scripts/siteone-mac-order-run');
+const { run: macRun, withLiveSwitches, liveStopReason } = require('../scripts/siteone-mac-order-run');
 
 const SITEONE = { id: 'v-siteone', name: 'SiteOne', code: 1, active: true, updated_at: new Date('2026-11-01T00:00:00Z') };
 const STICKER = { id: 'v-sticker', name: 'Sticker Mule', code: 25, active: true, updated_at: new Date('2026-11-01T00:00:00Z') };
@@ -255,8 +255,12 @@ describe('the Mac run', () => {
     const spy = jest.spyOn(cdp, 'configured').mockReturnValue(true);
     await macRun({ runExclusive: async (n, fn) => fn(), dispatch: runDispatch });
     spy.mockRestore();
-    expect(runDispatch.mock.calls[0][0].adapters).toEqual({ siteone: cdp });
-    expect(cdp.quotesAtPlace).toBe(true);
+    const used = runDispatch.mock.calls[0][0].adapters.siteone;
+    // The Chrome adapter, wrapped so every cap check re-reads the live Railway switches.
+    expect(used).not.toBe(cdp);
+    expect(typeof used.configured).toBe("function");
+    expect(used.key).toBe(cdp.key);
+    expect(used.quotesAtPlace).toBe(true);
     expect(cdp.packagedQuantity).toBe(true);
     expect(cdp.acceptsPoNumber).toBe(true);
     expect(typeof cdp.place).toBe('function');
@@ -279,6 +283,28 @@ describe('the Mac run', () => {
     const exclusive = jest.fn(async (n, fn) => fn());
     await expect(macRun({ adapters: { siteone: { configured: () => false } }, runExclusive: exclusive, dispatch: runDispatch })).rejects.toThrow(/not configured/);
     expect(runDispatch).not.toHaveBeenCalled();
+  });
+
+  test('every cap check re-reads the live Railway switches; off or changed is a run-level stop before the check', async () => {
+    const launch = { SITEONE_BOT_DRY_RUN: 'false' };
+    const on = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_SITEONE: 'true', SITEONE_ORDER_RUNNER: 'mac', SITEONE_BOT_DRY_RUN: 'false' };
+    expect(liveStopReason(on, launch)).toBeNull();
+    expect(liveStopReason({ ...on, GATE_AUTO_ORDER_SITEONE: 'false' }, launch)).toMatch(/gate is off/);
+    expect(liveStopReason({ ...on, GATE_AUTO_ORDER: '' }, launch)).toMatch(/gate is off/);
+    expect(liveStopReason({ ...on, SITEONE_ORDER_RUNNER: '' }, launch)).toMatch(/no longer mac/);
+    expect(liveStopReason({ ...on, SITEONE_BOT_DRY_RUN: 'true' }, launch)).toMatch(/changed since launch/);
+
+    let live = on;
+    const cap = jest.fn(async () => ({ ok: true }));
+    const inner = { quotesAtPlace: true, place: async (args) => { await args.beforeSubmit(100); live = { ...on, GATE_AUTO_ORDER_SITEONE: 'false' }; await args.beforeSubmit(200); return { placed: true }; } };
+    const wrapped = withLiveSwitches(inner, { readLive: async () => live, launch });
+    const err = await wrapped.place({ beforeSubmit: cap }).catch((e) => e);
+    expect(err.runLevel).toBe(true);
+    expect(err.message).toMatch(/gate is off/);
+    expect(cap).toHaveBeenCalledTimes(1); // the second (final) check never reached the cap reservation
+
+    const unreadable = withLiveSwitches(inner, { readLive: async () => { throw new Error('railway down'); }, launch });
+    await expect(unreadable.place({ beforeSubmit: cap })).rejects.toThrow(/railway down/);
   });
 
   test('a held lease is a failure, not a silent day', async () => {

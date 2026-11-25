@@ -21,7 +21,48 @@
  */
 const logger = require('../services/logger');
 
+const { execFile } = require('child_process');
+const path = require('path');
+
 const JOB = 'siteone-mac-order';
+
+// The Mac inherits Railway's variables once, at launch. A switch the owner turns off while a run is
+// in checkout must still stop it: before every cap check the adapter asks for (cart, review, and the
+// final claim check right before the click) the LIVE values are read again from Railway. Off, changed
+// or unreadable = a run-level stop: the claim is released, nothing is clicked, the job fails (its
+// wrapper rings) and tomorrow's run follows the switches as they are then.
+const ON = (v) => ['1', 'true', 'on'].includes(String(v || '').toLowerCase());
+function readLiveRailwayVars() {
+  const env = { ...process.env };
+  delete env.RAILWAY_TOKEN; // the portal service's own token is not the CLI login (2026-10-21)
+  return new Promise((resolve, reject) => {
+    execFile('railway', ['variables', '--service', 'waves-customer-portal', '--kv'], { cwd: path.resolve(__dirname, '..', '..'), env, timeout: 20000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      if (err) return reject(new Error(`live Railway variables unreadable: ${String(err.message).slice(0, 80)}`));
+      const vars = {};
+      for (const line of String(stdout).split('\n')) { const i = line.indexOf('='); if (i > 0) vars[line.slice(0, i)] = line.slice(i + 1); }
+      return resolve(vars);
+    });
+  });
+}
+function liveStopReason(live, launch) {
+  if (!ON(live.GATE_AUTO_ORDER) || !ON(live.GATE_AUTO_ORDER_SITEONE)) return 'an auto-order gate is off now';
+  if (String(live.SITEONE_ORDER_RUNNER || '').trim().toLowerCase() !== 'mac') return 'SITEONE_ORDER_RUNNER is no longer mac';
+  if (String(live.SITEONE_BOT_DRY_RUN ?? '') !== String(launch.SITEONE_BOT_DRY_RUN ?? '')) return 'SITEONE_BOT_DRY_RUN changed since launch';
+  return null;
+}
+function withLiveSwitches(adapter, { readLive = readLiveRailwayVars, launch = process.env } = {}) {
+  return {
+    ...adapter,
+    place: (args, opts) => adapter.place({
+      ...args,
+      beforeSubmit: async (cents) => {
+        const reason = liveStopReason(await readLive(), launch);
+        if (reason) { const e = new Error(`${JOB}: stopped — ${reason}`); e.runLevel = true; throw e; }
+        return args.beforeSubmit(cents);
+      },
+    }, opts),
+  };
+}
 
 function summarize(result) {
   const results = (result && result.results) || [];
@@ -39,7 +80,7 @@ async function run({ adapters = null, runExclusive = null, dispatch = null } = {
   // own adapter owns SiteOne again, and a Mac order beside it could buy the same need twice.
   if (!siteoneRunsOnMac(env)) throw new Error(`${JOB}: SITEONE_ORDER_RUNNER is not 'mac' in the live env — the server owns SiteOne orders, nothing claimed`);
   if (!String(env.SITEONE_CDP_URL || '').trim()) throw new Error(`${JOB}: SITEONE_CDP_URL is not set (this job runs only on the Mac with Chrome on :9222)`);
-  const registry = adapters || { siteone: require('../services/procurement/adapters/siteone-cdp') };
+  const registry = adapters || { siteone: withLiveSwitches(require('../services/procurement/adapters/siteone-cdp')) };
   // An unconfigured Mac (no approved account, store or pickup) is a broken job, not a hand-off: the
   // dispatcher would ring "order manually" with no macHandedOffAt stamp, and a later fixed run could
   // buy it a second time. Fail the run instead (its wrapper rings the failure bell); the server's
@@ -61,4 +102,4 @@ if (require.main === module) {
     .finally(async () => { try { await require('../models/db').destroy(); } catch { /* already closed */ } process.exit(process.exitCode || 0); });
 }
 
-module.exports = { run, summarize, JOB };
+module.exports = { run, summarize, JOB, withLiveSwitches, liveStopReason };

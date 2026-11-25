@@ -140,7 +140,7 @@ const SELECTORS = Object.freeze({
   reviewQty: '[class*="item__qty"], [class*="item__quantity"]',
   reviewTotal: 'strong#totalPriceWithTax',
   // UNVERIFIED: the signed-in account node (the 10-26 walk read "Signed in as
-  // account 2330739"; an attribute is preferred over the menu text) and the
+  // account <number>"; an attribute is preferred over the menu text) and the
   // review page's account / bill-to field. Unreadable → account_unreadable.
   accountNode: '[data-account-number], [data-test="account-number"], .js-account-number, [data-account-menu]',
   reviewAccount: '[data-test="bill-to-account"], [data-test="account-number"], .order-summary__account, [class*="bill-to" i]',
@@ -753,6 +753,9 @@ async function readConfirmation(run, baseline) {
     const text = await textOf(nodes[0]);
     const bare = text.trim().toUpperCase();
     fieldNumber = orderNumberIn(text, skip) || (/^[A-Z0-9][A-Z0-9-]{3,19}$/.test(bare) && /\d/.test(bare) && !skip.has(bare) ? bare : null);
+    // A confirmation field that is present but unreadable or ambiguous is an unknown outcome: the URL
+    // code is the fallback only when the field is absent.
+    if (!fieldNumber) return null;
   }
   return fieldNumber || (skip.has(urlCode) ? null : urlCode);
 }
@@ -785,20 +788,41 @@ async function bindToClick(run, first) {
   const same = await page.evaluate(([x, y]) => x === y && x.isConnected, [handle, current]).catch(() => false);
   if (!same || !(await handle.isEnabled().catch(() => false))) throw new RefusedError('place_button_replaced', 'SiteOne review: the Place order button was replaced or detached after the checks — nothing clicked', evidence);
   // The payable total and the tender are the LAST reads before the click (after every other check),
-  // so a recalculation during those awaits refuses instead of being submitted.
-  const lastTender = await readReviewField(run, SELECTORS.reviewTender, 'payment method');
-  const lastTotal = await readTotal(page, SELECTORS.reviewTotal, 'review total', evidence);
-  if (lastTotal !== first.totalCents || lastTender !== first.tender) throw new RefusedError('review_changed', 'SiteOne review changed at the click — nothing clicked', evidence, lastTotal);
-  return { handle, baseline, totalCents: again.totalCents };
+  // read from the exact nodes the click step re-checks inside the browser.
+  const tenderNodes = await shownAll(page, SELECTORS.reviewTender);
+  const totalNodes = await shownAll(page, SELECTORS.reviewTotal);
+  if (tenderNodes.length !== 1 || totalNodes.length !== 1) throw new RefusedError('review_fields_unreadable', 'SiteOne review: the payment method or total is not exactly one shown field at the click', evidence);
+  const rawTender = String(await tenderNodes[0].innerText()).trim();
+  const rawTotal = String(await totalNodes[0].innerText()).trim();
+  if (parseMoney(rawTotal) !== first.totalCents || normalizeText(rawTender) !== first.tender) throw new RefusedError('review_changed', 'SiteOne review changed at the click — nothing clicked', evidence, parseMoney(rawTotal));
+  const tenderHandle = await tenderNodes[0].elementHandle();
+  const totalHandle = await totalNodes[0].elementHandle();
+  if (!tenderHandle || !totalHandle) throw new RefusedError('review_fields_unreadable', 'SiteOne review: the payment method or total node could not be bound at the click', evidence);
+  return { handle, baseline, totalCents: again.totalCents, tenderHandle, totalHandle, rawTender, rawTotal };
 }
 
 // From the click on, every failure is ambiguous: the order may exist.
 async function clickPlaceOrder(run, bound) {
   const { page, poNumber } = run;
+  // ONE synchronous browser task: the same attached, enabled button, and the exact total and tender
+  // text the cap check approved, then the click — nothing can change between the check and the click.
+  let fired;
+  try {
+    fired = await page.evaluate(([btn, total, tender, wantTotal, wantTender]) => {
+      if (!btn || !btn.isConnected || btn.disabled) return { clicked: false, why: 'button' };
+      if (!total || !total.isConnected || !tender || !tender.isConnected) return { clicked: false, why: 'fields' };
+      if (String(total.innerText).trim() !== wantTotal || String(tender.innerText).trim() !== wantTender) return { clicked: false, why: 'changed' };
+      btn.click();
+      return { clicked: true };
+    }, [bound.handle, bound.totalHandle, bound.tenderHandle, bound.rawTotal, bound.rawTender]);
+  } catch (err) {
+    // The task may have run the click before it failed: the order may exist.
+    run.submitted = true;
+    throw ambiguousError(`SiteOne Place order step failed: ${String(err.message).slice(0, 120)} — verify with the vendor`, await afterClickEvidence(page, poNumber).catch(() => ({ poNumber: poNumber || null })));
+  }
+  if (!fired || fired.clicked !== true) throw new RefusedError('review_changed', `SiteOne review changed at the click (${(fired && fired.why) || 'unknown'}) — nothing clicked`, run.evidence);
   run.submitted = true;
   try {
-    // The element that passed review, dispatched at once: no actionability wait.
-    await bound.handle.click({ force: true, noWaitAfter: true, timeout: 1000 });
     const number = await poll(page, () => readConfirmation(run, bound.baseline), CONFIRMATION_WAIT, run.opts.confirmStep);
     if (number) return { externalOrderNumber: number, amountCents: bound.totalCents, evidence: { ...run.evidence, confirmed: true }, dryRun: false };
   } catch (err) {
