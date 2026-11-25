@@ -554,7 +554,8 @@ async function recordTouchpoint(opts) {
     });
     return { thread, message };
   } catch (err) {
-    logger.error(`[conversations] recordTouchpoint failed: ${err.message}`, { stack: err.stack });
+    // Code only: the insert binds the message body and the phone, and a knex message and its stack carry both.
+    logger.error(`[conversations] recordTouchpoint failed (code=${err?.code || 'none'})`);
     return null;
   }
 }
@@ -570,7 +571,7 @@ async function updateByTwilioSid(twilioSid, patch, refine = (query) => query) {
     const updated = await refine(db('messages').where({ twilio_sid: twilioSid })).update(patch).returning('*');
     return updated[0] || null;
   } catch (err) {
-    logger.error(`[conversations] updateByTwilioSid failed: ${err.message}`);
+    logger.error(`[conversations] updateByTwilioSid failed (code=${err?.code || 'none'})`);
     return null;
   }
 }

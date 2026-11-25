@@ -165,7 +165,7 @@ function auditInternalAlertDeliveryIssue(details) {
     const { auditInternalAdminAlertDeliveryIssue } = require("./audit-log");
     auditInternalAdminAlertDeliveryIssue(details);
   } catch (err) {
-    logger.error(`[twilio] internal alert delivery audit failed: ${err.message}`);
+    logger.error(`[twilio] internal alert delivery audit failed: (code=${err?.code || 'none'})`);
   }
 }
 
@@ -185,7 +185,7 @@ async function notifySmsGuardBlocked({ to, body, reason, messageType }) {
       originalToMasked: maskPhone(to),
     });
   } catch (err) {
-    logger.error(`[sms-guard] blocked-send admin notification failed: ${err.message}`);
+    logger.error(`[sms-guard] blocked-send admin notification failed: (code=${err?.code || 'none'})`);
   }
 }
 
@@ -236,7 +236,7 @@ async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
       notificationRedirected: true,
     };
   } catch (err) {
-    logger.error(`[twilio] internal alert notification redirect failed; suppressed owner/admin SMS fallback: ${err.message}`);
+    logger.error(`[twilio] internal alert notification redirect failed; suppressed owner/admin SMS fallback: (code=${err?.code || 'none'})`);
     auditInternalAlertDeliveryIssue({
       outcome: "error",
       message_type: options.messageType || null,
@@ -523,7 +523,7 @@ const TwilioService = {
       );
       return { success: true, status: verification.status };
     } catch (err) {
-      logger.error(`Twilio verification send failed: ${err.message}`);
+      logger.error(`Twilio verification send failed: (code=${err?.code || 'none'})`);
       throw new Error("Failed to send verification code");
     }
   },
@@ -568,7 +568,7 @@ const TwilioService = {
         );
         return { success: false, status: "max_attempts_reached" };
       }
-      logger.error(`Twilio verification check failed: ${err.message}`);
+      logger.error(`Twilio verification check failed: (code=${err?.code || 'none'})`);
       throw new Error("Verification check failed");
     }
   },
@@ -679,7 +679,7 @@ const TwilioService = {
           // still runs on whatever body reaches it and fails CLOSED on its
           // own lookup error, so a rewrite-lookup hiccup degrades to
           // "refused this one time", never to "sent the raw withheld link".
-          logger.warn(`[twilio] withheld-link rewrite failed for ${maskPhone(to)}: ${err.message}`);
+          logger.warn(`[twilio] withheld-link rewrite failed for ${maskPhone(to)}: (code=${err?.code || 'none'})`);
         }
       }
 
@@ -1395,7 +1395,7 @@ const TwilioService = {
           // as ambiguous forever, when it is provably safe to retry.
           const abortMarker = async (why) => {
             if (typeof options.onDispatchAbort === 'function') {
-              try { await options.onDispatchAbort(); } catch (undoErr) { logger.error(`[twilio] onDispatchAbort failed after ${why}: ${undoErr.message}`); }
+              try { await options.onDispatchAbort(); } catch (undoErr) { logger.error(`[twilio] onDispatchAbort failed after ${why}: (code=${undoErr?.code || 'none'})`); }
             }
           };
           // Predicates that declare themselves safe to repeat (`afterMarker`, the live-ETA checks) run ONCE MORE after the
@@ -1471,7 +1471,7 @@ const TwilioService = {
             try {
               await options.onDispatchRejected();
             } catch (hookErr) {
-              logger.error(`[twilio] onDispatchRejected failed: ${hookErr.message}`);
+              logger.error(`[twilio] onDispatchRejected failed: (code=${hookErr?.code || 'none'})`);
             }
           }
           throw createErr;
@@ -1541,7 +1541,7 @@ const TwilioService = {
               await insertLogRow(db);
             }
           } catch (logErr) {
-            logger.error(`SMS log failed: ${logErr.message}`);
+            logger.error(`SMS log failed: (code=${logErr?.code || 'none'})`);
             if (trx) {
               // Recover INSIDE this still-open transaction, on a FRESH
               // savepoint, idempotent on twilio_sid exactly like the
@@ -1562,7 +1562,7 @@ const TwilioService = {
                   if (!alreadyLogged) await insertLogRow(sp);
                 });
               } catch (recoverErr) {
-                logger.error(`SMS log in-handoff recovery also failed, falling back to post-rollback recovery: ${recoverErr.message}`);
+                logger.error(`SMS log in-handoff recovery also failed, falling back to post-rollback recovery: (code=${recoverErr?.code || 'none'})`);
                 throw logErr;
               }
             }
@@ -1707,7 +1707,7 @@ const TwilioService = {
                   if (!alreadyLogged) await trx('sms_log').insert(buildSmsLogRow());
                 });
               } catch (recoveryErr) {
-                logger.error(`SMS log recovery insert failed after handoff rollback: ${recoveryErr.message}`);
+                logger.error(`SMS log recovery insert failed after handoff rollback: (code=${recoveryErr?.code || 'none'})`);
               }
             }
           }
@@ -1759,7 +1759,7 @@ const TwilioService = {
         try {
           await db("sms_log").insert(buildSmsLogRow());
         } catch (logErr) {
-          logger.error(`SMS log failed: ${logErr.message}`);
+          logger.error(`SMS log failed: (code=${logErr?.code || 'none'})`);
         }
       }
       // The dual-write to unified messages below is unaffected either way —
@@ -1879,7 +1879,7 @@ const TwilioService = {
             phone: to, attemptAt: smsAttemptAt, source: 'twilio_send_21610',
           });
         } catch (optoutErr) {
-          logger.error(`[twilio] sync-optout recording threw: ${optoutErr.message}`);
+          logger.error(`[twilio] sync-optout recording threw: (code=${optoutErr?.code || 'none'})`);
         }
       }
       const wrapped = new Error(`Failed to send SMS: ${providerError}`);

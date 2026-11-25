@@ -49,14 +49,6 @@ const BOB = phone(2);
 const ANI = phone(10);
 const OUR_LINE = phone(11);
 
-const waitFor = async (predicate, ms = 4000) => {
-  const until = Date.now() + ms;
-  while (!predicate()) {
-    if (Date.now() > until) throw new Error('timed out waiting');
-    await new Promise((resolve) => setTimeout(resolve, 15));
-  }
-};
-
 const entry = (over = {}) => ({
   first_name: 'Bob', last_name: 'Roe', phone_e164: BOB, role: 'spouse_partner', wants_appointment_texts: true, ...over,
 });
@@ -855,99 +847,6 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         await db('messaging_suppression').where({ phone: BOB }).update({ reason: 'manual_dnc' });
         await noMoreLink();
       });
-    });
-
-    test('a retry carries the slot it was for: a visit REBOOKED before the retry sends nothing and leaves the new slot\'s claim untouched', async () => {
-      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-      const logger = require('../services/logger');
-      sendCustomerMessage.mockReset();
-      sendCustomerMessage.mockResolvedValue({ sent: true });
-      VisitRecipient._test.setLookupRetryDelays([60, 60]);
-      try {
-        let failures = 1;
-        const flaky = Object.assign((table) => {
-          if (table === 'visit_text_recipients' && failures > 0) { failures -= 1; throw Object.assign(new Error('connection terminated'), { code: '57P01' }); }
-          return db(table);
-        }, { raw: db.raw.bind(db), fn: db.fn });
-        expect(await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'reminder_24h', excludePhones: [HOLDER], conn: flaky })).toBe(true);
-        // the visit is rebooked to another day before the retry runs
-        await db('scheduled_services').where({ id: visitId }).update({ scheduled_date: MOVED_DATE });
-        await waitFor(() => logger.info.mock.calls.some(([line]) => /retry for visit .* dropped/.test(line)));
-        expect(sendCustomerMessage).not.toHaveBeenCalled();
-        expect((await rows())[0].deliveries).toEqual({});
-        // and the new slot's own notice still goes out, with its own claim
-        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'reminder_24h', excludePhones: [HOLDER] });
-        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-        expect(Object.keys((await rows())[0].deliveries)).toEqual([`reminder_24h:${MOVED_DATE}T09:00`]);
-      } finally {
-        VisitRecipient._test.setLookupRetryDelays([15000, 60000, 300000]);
-      }
-    });
-
-    test('an en-route retry is for the en_route_at it was raised for: a re-dispatch before the retry drops it', async () => {
-      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-      const logger = require('../services/logger');
-      sendCustomerMessage.mockReset();
-      sendCustomerMessage.mockResolvedValue({ sent: true });
-      VisitRecipient._test.setLookupRetryDelays([60]);
-      try {
-        await db('scheduled_services').where({ id: visitId }).update({ en_route_at: new Date(Date.now() - 600000), status: 'en_route', track_state: 'en_route' });
-        let failures = 1;
-        const flaky = Object.assign((table) => {
-          if (table === 'visit_text_recipients' && failures > 0) { failures -= 1; throw Object.assign(new Error('connection terminated'), { code: '57P01' }); }
-          return db(table);
-        }, { raw: db.raw.bind(db), fn: db.fn });
-        logger.info.mockClear();
-        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER], conn: flaky });
-        await db('scheduled_services').where({ id: visitId }).update({ en_route_at: new Date() });
-        await waitFor(() => logger.info.mock.calls.some(([line]) => /retry for visit .* dropped/.test(line)));
-        expect(sendCustomerMessage).not.toHaveBeenCalled();
-      } finally {
-        VisitRecipient._test.setLookupRetryDelays([15000, 60000, 300000]);
-      }
-    });
-
-    test('a recipient lookup that throws is retried for the recipients only (the holder\'s result is untouched), then sent once', async () => {
-      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-      sendCustomerMessage.mockReset();
-      sendCustomerMessage.mockResolvedValue({ sent: true });
-      VisitRecipient._test.setLookupRetryDelays([20, 20, 20]);
-      try {
-        let failures = 2;
-        const flaky = Object.assign((table) => {
-          if (table === 'visit_text_recipients' && failures > 0) { failures -= 1; throw Object.assign(new Error('connection terminated'), { code: '57P01' }); }
-          return db(table);
-        }, { raw: db.raw.bind(db), fn: db.fn });
-        const result = await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'confirmation', excludePhones: [HOLDER], conn: flaky });
-        expect(result).toBe(true);
-        expect(sendCustomerMessage).not.toHaveBeenCalled();
-        await waitFor(() => sendCustomerMessage.mock.calls.length >= 1);
-        // the claim keeps it to one text however many retries and senders ask
-        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'confirmation', excludePhones: [HOLDER] });
-        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-        expect(sendCustomerMessage.mock.calls[0][0].to).toBe(BOB);
-      } finally {
-        VisitRecipient._test.setLookupRetryDelays([15000, 60000, 300000]);
-      }
-    });
-
-    test('a lookup that stays unreadable gives up after the bounded retries: nothing is sent, the holder result is still true, an error line names no number', async () => {
-      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-      const logger = require('../services/logger');
-      sendCustomerMessage.mockReset();
-      VisitRecipient._test.setLookupRetryDelays([10, 10]);
-      try {
-        const broken = Object.assign((table) => {
-          if (table === 'visit_text_recipients') throw Object.assign(new Error(`select * from visit_text_recipients where phone_e164 = '${BOB}'`), { code: '57P01' });
-          return db(table);
-        }, { raw: db.raw.bind(db), fn: db.fn });
-        expect(await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'confirmation', excludePhones: [HOLDER], conn: broken })).toBe(true);
-        await waitFor(() => logger.error.mock.calls.some(([line]) => /stayed unreadable/.test(line)));
-        expect(sendCustomerMessage).not.toHaveBeenCalled();
-        expect(JSON.stringify([logger.warn.mock.calls, logger.error.mock.calls])).not.toContain(BOB);
-      } finally {
-        VisitRecipient._test.setLookupRetryDelays([15000, 60000, 300000]);
-      }
     });
 
     test('a decline SAVED in the choices table binds the link and the text with GATE_CONTACT_LOGIN off (the default)', async () => {

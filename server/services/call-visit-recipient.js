@@ -385,59 +385,16 @@ async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, re
  * `gate(contact)`: optional per-recipient check by the sender, 'send' (default), 'skip' or 'abort'
  * (the pipeline lost its claim). Never throws into the sender. Returns false only when a gate aborted.
  */
-async function notifyVisitRecipients(args) {
-  return notifyAttempt(args, 0);
-}
-
-// A recipient lookup that throws (a database blip, the choices table unreadable) is NOT "nobody is owed": the notice is retried for
-// the recipients only, a few times over minutes, each attempt re-reading everything fresh (the gate, the visit, the declines)
-// and each send still guarded by the once-per-slot claim, so a retry can never double a text. The holder's result is never touched
-// (this function returns true either way). Not the deferred-replay registry: that entry replays a frozen per-recipient text row,
-// and a failed lookup is the one case where the recipients are not yet known. In-process and bounded, like the quiet-hours rule
-// for the 24 h and en-route texts: a notice that stays unreadable past the last attempt is dropped, with an error line.
-let lookupRetryDelaysMs = [15 * 1000, 60 * 1000, 5 * 60 * 1000];
-
-function scheduleLookupRetry(args, attempt) {
-  if (attempt >= lookupRetryDelaysMs.length) {
-    logger.error(`[call-visit-recipient] ${args.kind} for visit ${args.scheduledServiceId} not sent: recipients stayed unreadable after ${attempt} retries`);
-    return;
-  }
-  const timer = setTimeout(() => {
-    notifyAttempt(args, attempt + 1).catch((err) => logger.warn(`[call-visit-recipient] ${args.kind} retry for visit ${args.scheduledServiceId} failed: ${err.code || err.name || 'error'}`));
-  }, lookupRetryDelaysMs[attempt]);
-  if (timer && typeof timer.unref === 'function') timer.unref();
-}
-
-// The slot a notice is about: the visit's date and start (the claim key's slot) and, for the en-route text, the en-route start.
-// A retry carries the slot it was for and is dropped when the visit has since moved, so a late retry never sends a text for the
-// visit's NEW slot or uses its claim: the notices of the new slot are the new slot's own.
-async function slotOfVisit(scheduledServiceId, conn) {
-  const row = await conn('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date', 'window_start', 'en_route_at');
-  if (!row) return null;
-  const start = row.window_start ? String(row.window_start).slice(0, 5) : '';
-  return { date: dateOnlyString(row.scheduled_date) || '', start, enRouteAt: row.en_route_at ? new Date(row.en_route_at).getTime() : null };
-}
-
-function sameSlot(a, b, { kind, dayOnly }) {
-  if (!a || !b || a.date !== b.date) return false;
-  if (!(dayOnly === true && KINDS[kind].dayOnlyOk) && a.start !== b.start) return false;
-  return kind !== 'en_route' || a.enRouteAt === b.enRouteAt;
-}
-
-async function notifyAttempt(args, attempt) {
-  const { scheduledServiceId, kind, excludePhones = [], context = {}, dayOnly = false, gate = null, conn = db } = args;
+async function notifyVisitRecipients({ scheduledServiceId, kind, excludePhones = [], context = {}, dayOnly = false, gate = null, conn = db }) {
   if (!gateLive() || !KINDS[kind] || !scheduledServiceId) return true;
   let contacts;
   try {
-    if (attempt === 0) args.originSlot = await slotOfVisit(scheduledServiceId, conn).catch(() => null);
-    else if (!sameSlot(args.originSlot, await slotOfVisit(scheduledServiceId, conn), { kind, dayOnly })) {
-      logger.info(`[call-visit-recipient] ${kind} retry for visit ${scheduledServiceId} dropped: the visit's slot changed (or was never read)`);
-      return true;
-    }
     contacts = await contactsForVisit(scheduledServiceId, kind, { excludePhones, conn, throwOnError: true });
   } catch (err) {
-    logger.warn(`[call-visit-recipient] ${kind} for visit ${scheduledServiceId}: recipients unreadable (${err.code || err.name || 'error'}), retrying`);
-    scheduleLookupRetry(args, attempt);
+    // A lookup that throws is NOT "nobody is owed": the person named on the call may have been left without a text. No retry
+    // (a late retry cannot prove it is still for the same slot); ONE admin bell per visit and notice, so someone can text them.
+    logger.warn(`[call-visit-recipient] ${kind} for visit ${scheduledServiceId}: recipients unreadable (${err.code || err.name || 'error'})`);
+    await raiseUnsentBell({ scheduledServiceId, kind });
     return true;
   }
   try {
@@ -451,6 +408,36 @@ async function notifyAttempt(args, attempt) {
     logger.warn(`[call-visit-recipient] ${kind} for visit ${scheduledServiceId} skipped: ${err.code || err.name || 'error'}`);
   }
   return true;
+}
+
+// The bell for a notice that could not be sent because the recipients could not be read. The copy and the dedupe key carry no
+// phone number, name or link (the row is about the visit, whose page lists the person); one bell per visit and kind.
+const UNSENT_WORDS = {
+  confirmation: 'The booking text',
+  reminder_72h: 'The 3-day reminder',
+  reminder_24h: 'The next-day reminder',
+  en_route: 'The on-the-way text',
+};
+async function raiseUnsentBell({ scheduledServiceId, kind }) {
+  try {
+    const { raiseAdminAlert } = require('./admin-alert-compose');
+    await raiseAdminAlert('appointment', {
+      area: 'Schedule',
+      action: 'text the person named on the call',
+      why: `${UNSENT_WORDS[kind] || 'A text'} for the person named on the call was not sent; text them if needed.`,
+      severity: 'needs-you',
+      link: `/admin/dispatch?tab=schedule&appointment=${encodeURIComponent(scheduledServiceId)}`,
+      subject: { type: 'visit', id: String(scheduledServiceId) },
+      doneWhen: 'visit_checked',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `visit-recipient-text-unsent:${scheduledServiceId}:${kind}`,
+      metadata: { scheduledServiceId: String(scheduledServiceId), kind },
+    });
+  } catch (err) {
+    logger.warn(`[call-visit-recipient] unsent bell for visit ${scheduledServiceId} not raised: ${err.code || err.name || 'error'}`);
+  }
 }
 
 // The arrival the copy quotes AND the move guard compares, from one read: a later service in a combined reservation
@@ -689,7 +676,6 @@ function releaseDeferredClaim(meta, { conn = db } = {}) {
 }
 
 module.exports = {
-  _test: { setLookupRetryDelays: (delays) => { lookupRetryDelaysMs = delays; } },
   gateLive,
   SOURCE,
   CONSENT_VERSION,
