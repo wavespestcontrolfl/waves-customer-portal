@@ -115,6 +115,17 @@ describe('server with SITEONE_ORDER_RUNNER=mac', () => {
     expect(autoReorder.ringRestockBell).not.toHaveBeenCalled();
   });
 
+  test('handing off a stale dry-run park withdraws its dry-run bell first', async () => {
+    const ledger = { id: 'l1', status: 'needs_review', error: 'dry_run: dry run', updated_at: new Date(NOW.getTime() - 31 * 3600e3) };
+    const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 72 * 3600e3) }), ledger });
+    const out = await dispatch.dispatchRestockOrder('r1', { conn: fakeConn(state), adapters: MAC_REGISTRY, now: NOW, env: {} });
+    expect(out).toMatchObject({ macHandedOff: true, belled: true });
+    const tables = state.updates.map((u) => u.table);
+    expect(tables.indexOf('notifications')).toBeGreaterThanOrEqual(0);
+    expect(tables.indexOf('vendor_orders')).toBeGreaterThan(tables.indexOf('notifications'));
+    expect(tables.indexOf('product_restock_requests')).toBeGreaterThan(tables.indexOf('vendor_orders'));
+  });
+
   test('an old ledger row that is not a dry-run park is never handed to the office', async () => {
     const ledger = { id: 'l1', status: 'needs_review', error: 'no_price: no eligible price row', updated_at: new Date(NOW.getTime() - 72 * 3600e3) };
     const state = baseState({ request: request({ created_at: new Date(NOW.getTime() - 72 * 3600e3) }), ledger });

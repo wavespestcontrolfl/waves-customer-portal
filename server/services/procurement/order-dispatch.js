@@ -1498,6 +1498,9 @@ async function macWatchdogLocked(trx, requestId, now, env) {
   const blocker = await macHandOffBlocker(trx, { request, m, now });
   if (blocker) return { result: blocker.hold };
   if (m.macHandedOffAt) return { handOff: true };
+  // A stale dry-run park's own bell ("turn dry run off to order for real") and any pending copy of it
+  // are withdrawn with the hand-off: the office gets one instruction, order it by hand.
+  await settleRequestLedgerBells(trx, requestId);
   await trx('product_restock_requests').where({ id: requestId, status: 'open' })
     .update({ metadata: JSON.stringify({ ...m, macHandedOffAt: now.toISOString() }), updated_at: now });
   logger.warn(`[order-dispatch] SiteOne request ${requestId} not touched by the Mac runner for ${Math.round((now.getTime() - lastTouch) / 3600000)} h — handed to the office`);
