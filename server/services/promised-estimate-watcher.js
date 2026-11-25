@@ -382,6 +382,10 @@ async function runPromisedEstimateWatcher(opts = {}) {
       // the clean run, so a new episode still rings (pre-push audit P1).
       dedupeKey: 'ops-digest:promised-estimate',
       refreshOnDedupe: true,
+      // The quiet policy holds this row while the list stands (RERING
+      // 'promised-estimate'); a row it closed before that hold shipped rings
+      // again on the next run instead of staying done with 94 calls owed.
+      ringAfterQuietClose: true,
       sendEmail: () => mailer.sendOne({
         to,
         fromEmail: fromEmail(),

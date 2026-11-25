@@ -143,6 +143,10 @@ const RERING = [
     decision: 'expire, capped: a funnel that is still dead raises one fresh row (and the owner text it sends)' },
   { emitter: 'promise-overdue', files: ['services/sms-operational-actions.js', 'services/email-operational-actions.js'], prefixes: ['sms-commitment-customer:', 'email-commitment:'], kind: 'periodic', live: 'promiseOpen',
     decision: 'skip while a promise it covers is still open; expire once none is' },
+  // Not a dedupeOpenOnly emitter: its refresh of an identical list never rings, so a row closed here stays done
+  // and the list goes unseen (the 94-call row closed by the quiet policy 2026-11-19 and never came back).
+  { emitter: 'promised-estimate', files: ['services/promised-estimate-watcher.js'], prefixes: ['ops-digest:promised-estimate'], kind: 'periodic', live: 'promisedQuotesOwed',
+    decision: 'hold while a promised quote is still unsent (the quiet policy never closes it, the 30-day one skips it); expire once none is' },
   { emitter: 'truck-kit', files: ['services/truck-kit.js'], prefixes: ['truck-kit:'], kind: 'event',
     decision: 'expire: only a new truck check that still finds tools missing raises it again' },
   { emitter: 'lead-agent-hold', files: ['services/lead-response-tools.js'], prefixes: ['lead-agent-hold:'], kind: 'event',
@@ -263,6 +267,16 @@ const LIVE_CHECKS = {
       for (const { ref } of open) (byCommitment.get(ref) || []).forEach((id) => live.add(id));
     }
     return live;
+  },
+  // The promised-estimate row speaks for the watcher's whole list: live while that list is not empty.
+  async promisedQuotesOwed(_conn, rows) {
+    try {
+      const { _private } = require('./promised-estimate-watcher');
+      return (await _private.loadUnkeptPromises()).length ? new Set(rows.map((r) => r.id)) : new Set();
+    } catch (err) {
+      logger.warn(`[alert-retention] promisedQuotesOwed live check failed (${err.message}) — treating the row as live`);
+      return new Set(rows.map((r) => r.id));
+    }
   },
 };
 

@@ -107,6 +107,7 @@ describe('re-ring list', () => {
     expect(retention.ringRiskFor(keyed('email-commitment:9')).live).toBe('promiseOpen');
     expect(retention.ringRiskFor(keyed('sms-commitment-customer:c1')).live).toBe('promiseOpen');
     expect(retention.ringRiskFor(keyed('truck-kit:v1')).emitter).toBe('truck-kit');
+    expect(retention.ringRiskFor(keyed('ops-digest:promised-estimate'))).toMatchObject({ emitter: 'promised-estimate', kind: 'periodic', live: 'promisedQuotesOwed' });
     expect(retention.ringRiskFor(keyed('autopay_hold_charge:declined:inv-1')).kind).toBe('event');
     expect(retention.ringRiskFor(keyed('lead-agent-hold:lead-1')).emitter).toBe('lead-agent-hold');
     expect(retention.ringRiskFor(keyed('payroll-mercury-key')).kind).toBe('periodic');
@@ -244,6 +245,38 @@ describe('runAdminAlertRetention: re-ring accounting', () => {
     expect(summary.held.livePromise).toBe(1);
     expect(io.calls.expire[0].ids).toEqual([closed.id]);
     expect(summary.ringRisk.emitters['promise-overdue']).toMatchObject({ held: 1, expire: 1 });
+  });
+});
+
+describe('the promised-quotes row: held while the list stands', () => {
+  const promised = () => row({ category: 'ops_digest', created_at: ago(80), metadata: { dedupeKey: 'ops-digest:promised-estimate' } });
+  const owed = (n) => jest.spyOn(require('../services/promised-estimate-watcher')._private, 'loadUnkeptPromises')
+    .mockImplementation(async () => (n instanceof Error ? Promise.reject(n) : Array.from({ length: n }, (_, i) => ({ id: i }))));
+  afterEach(() => jest.restoreAllMocks());
+
+  test('live while any promised quote is unsent; expired (capped) once none is', async () => {
+    const r = promised();
+    owed(3);
+    expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(null, [r])]).toEqual([r.id]);
+    jest.restoreAllMocks();
+    owed(0);
+    expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(null, [r])]).toEqual([]);
+  });
+
+  test('a failed check calls the row live, so the sweep leaves it alone', async () => {
+    owed(new Error('db down'));
+    const r = promised();
+    expect([...await retention.LIVE_CHECKS.promisedQuotesOwed(null, [r])]).toEqual([r.id]);
+  });
+
+  test('the 30-day sweep skips it while quotes are owed', async () => {
+    owed(5);
+    const r = promised();
+    const io = fakeIo([r]);
+    io.live = async (name, subset) => retention.LIVE_CHECKS[name](null, subset);
+    const summary = await retention.runAdminAlertRetention({ now: NOW, io });
+    expect(summary.held.livePromise).toBe(1);
+    expect(io.calls.expire).toEqual([]);
   });
 });
 

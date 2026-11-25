@@ -5,6 +5,7 @@
 // crons keys and synthetic in-process ones.
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ _private: { QUIET_FALL_OFF_DONE_BY: 'quiet-72h' } }));
 
 const {
   alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom,
@@ -197,6 +198,21 @@ describe('ringOnRefreshFrom — ringOnFirstIdentity', () => {
   });
   test('once the row carries identity, the normal comparison applies', () => {
     expect(ringOnRefreshFrom({ count: 4, itemKeys: ['a'], itemSetHash: 'h', ringOnFirstIdentity: true })({}, { count: 4, itemKeys: ['a'], itemSetHash: 'h' })).toBe(false);
+  });
+});
+
+describe('ringOnRefreshFrom — ringAfterQuietClose', () => {
+  // The standing list is unchanged (same count, same keys): without the opt-in nothing rings.
+  const same = { count: 94, itemKeys: ['a', 'b'], itemSetHash: 'h' };
+  const args = { count: 94, itemKeys: ['a', 'b'], itemSetHash: 'h' };
+  const closed = (done_by) => ({ done_at: new Date(), done_by });
+  test('a row the quiet policy closed rings again while the same list stands', () => {
+    expect(ringOnRefreshFrom({ ...args, ringAfterQuietClose: true })(closed('quiet-72h'), same)).toBe(true);
+  });
+  test('a person close, an open row and a sender without the opt-in stay quiet', () => {
+    expect(ringOnRefreshFrom({ ...args, ringAfterQuietClose: true })(closed('42'), same)).toBe(false);
+    expect(ringOnRefreshFrom({ ...args, ringAfterQuietClose: true })({ done_at: null, done_by: null }, same)).toBe(false);
+    expect(ringOnRefreshFrom(args)(closed('quiet-72h'), same)).toBe(false);
   });
 });
 
