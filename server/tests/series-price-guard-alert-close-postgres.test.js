@@ -61,23 +61,21 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
     });
     return { customer, root, bell, child };
   }
-  const run = (s, { childDate = DATE, price = 117, commit = true, childId } = {}) => db.transaction(async (trx) => {
+  const run = (s, { childDate = DATE, price = 117, commit = true, childId, after } = {}) => db.transaction(async (trx) => {
     const parent = await trx('scheduled_services').where({ id: s.root.id }).first();
     const closed = await guards.closeRefusedPriceAlertAfterInsert(trx, {
       parent, parentId: s.root.id, child: { estimated_price: price, service_type: 'Quarterly Pest Control' },
       childDate, childId: childId || s.child.id,
     });
+    if (after) await after(trx);
     if (!commit) throw Object.assign(new Error('rollback'), { rolledBack: true, closed });
     return closed;
   });
-  // The close runs after the transaction commits: wait for it (positive) or give it time to show up (negative).
-  const settle = () => new Promise((r) => setTimeout(r, 300));
   const get = (id) => db('notifications').where({ id }).first();
 
   test('the same occurrence added at a price the last paid visit backs closes the bell', async () => {
     const s = await series();
     expect(await run(s)).toBe(true);
-    await settle();
     const row = await get(s.bell.id);
     expect(row.done_at).not.toBeNull();
     expect(row.done_by).toBe('series-price-guard');
@@ -87,35 +85,30 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
   test('a different date proves nothing: the bell stays open', async () => {
     const s = await series({ refusedDate: OTHER_DATE });
     expect(await run(s)).toBe(false);
-    await settle();
     expect((await get(s.bell.id)).done_at).toBeNull();
   });
 
   test('a bell with no recorded refused date (raised before it existed) stays open', async () => {
     const s = await series({ refusedDate: null });
     expect(await run(s)).toBe(false);
-    await settle();
     expect((await get(s.bell.id)).done_at).toBeNull();
   });
 
   test('the price the last paid visit does not back (over 125%) stays open', async () => {
     const s = await series();
     expect(await run(s, { price: 333.45 })).toBe(false);
-    await settle();
     expect((await get(s.bell.id)).done_at).toBeNull();
   });
 
   test('no paid visit to back the price stays open', async () => {
     const s = await series({ paid: null });
     expect(await run(s)).toBe(false);
-    await settle();
     expect((await get(s.bell.id)).done_at).toBeNull();
   });
 
   test('an unpriced occurrence stays open', async () => {
     const s = await series();
     expect(await run(s, { price: null })).toBe(false);
-    await settle();
     expect((await get(s.bell.id)).done_at).toBeNull();
   });
 
@@ -123,14 +116,24 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
     const s = await series();
     await db('scheduled_services').where({ id: s.child.id }).update({ prepaid_method: 'cash', prepaid_amount: 117 });
     expect(await run(s)).toBe(false);
-    await settle();
     expect((await get(s.bell.id)).done_at).toBeNull();
   });
 
-  test('a rolled-back extension (the top-up dry run) closes nothing', async () => {
+  test('the close is inside the extension transaction: a rolled-back extension (the top-up dry run) undoes it', async () => {
     const s = await series();
-    await expect(run(s, { commit: false })).rejects.toMatchObject({ rolledBack: true, closed: true });
-    await settle();
+    let inside;
+    await expect(run(s, { commit: false, after: async (trx) => { inside = (await trx('notifications').where({ id: s.bell.id }).first()).done_by; } }))
+      .rejects.toMatchObject({ rolledBack: true, closed: true });
+    expect(inside).toBe('series-price-guard');
+    expect((await get(s.bell.id)).done_at).toBeNull();
+  });
+
+  test('a close that fails runs in a savepoint: logged, the bell stays open, the transaction goes on', async () => {
+    const s = await series();
+    let later;
+    // A child id that is not a uuid makes the prepay probe fail inside the close.
+    expect(await run(s, { childId: 'not-a-uuid', after: async (trx) => { later = (await trx('scheduled_services').where({ id: s.root.id }).first('id')).id; } })).toBe(false);
+    expect(later).toBe(s.root.id);
     expect((await get(s.bell.id)).done_at).toBeNull();
   });
 
@@ -138,7 +141,6 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
     const mine = await series();
     const other = await series();
     expect(await run(mine)).toBe(true);
-    await settle();
     expect((await get(other.bell.id)).done_at).toBeNull();
   });
 
@@ -147,7 +149,6 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
     const at = new Date(Date.now() - 3600000);
     await db('notifications').where({ id: s.bell.id }).update({ done_at: at, done_by: '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10', resolution: 'Checked by hand' });
     expect(await run(s)).toBe(false);
-    await settle();
     expect((await get(s.bell.id)).resolution).toBe('Checked by hand');
   });
 
@@ -157,17 +158,32 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
     const openBells = (s) => db('notifications').where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'dedupeKey' = ?", [`series-price-guard:cancelled-root:${s.root.id}`]).whereNull('done_at');
 
-    test('a refusal on a later date moves the open bell\'s refused date; no second bell', async () => {
+    test('a refusal on a later date moves the open bell\'s text and refused date together; no second bell, no ring', async () => {
       const s = await series({ refusedDate: null });
       await guards.raiseExtensionPriceAlert(verdict, ctx(s, DATE));
       const bells = await openBells(s);
       expect(bells).toHaveLength(1);
       expect(bells[0].id).toBe(s.bell.id);
       expect(bells[0].metadata.refusedDate).toBe(DATE);
+      const readAt = bells[0].read_at;
       await guards.raiseExtensionPriceAlert(verdict, ctx(s, OTHER_DATE));
       const after = await openBells(s);
       expect(after).toHaveLength(1);
       expect(after[0].metadata.refusedDate).toBe(OTHER_DATE);
+      expect(after[0].metadata.dedupeVersion).toBe(OTHER_DATE);
+      // Text and date move together; quiet: no ring (read state and created_at stay), no second row.
+      expect(after[0].body).toMatch(/Jun 3/);
+      expect(after[0].read_at).toEqual(readAt);
+      expect(after[0].created_at).toEqual(bells[0].created_at);
+      expect(after[0].done_at).toBeNull();
+    });
+
+    test('the same refusal again changes nothing', async () => {
+      const s = await series({ refusedDate: null });
+      await guards.raiseExtensionPriceAlert(verdict, ctx(s, DATE));
+      const before = await get(s.bell.id);
+      await guards.raiseExtensionPriceAlert(verdict, ctx(s, DATE));
+      expect(await get(s.bell.id)).toEqual(before);
     });
 
     test('a fresh bell carries the refused date; a closed bell is never stamped', async () => {

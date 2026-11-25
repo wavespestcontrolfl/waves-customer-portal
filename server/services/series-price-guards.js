@@ -184,10 +184,21 @@ async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, ch
   // One open row per series and kind: a top-up run can add many children at
   // the same price, and the nightly run re-meets a cancelled root every night.
   const dedupeKey = cancelled ? cancelledRootDedupeKey(parentId) : `series-price-guard:over-last-paid:${parentId}`;
-  const raised = await raiseAdminAlert('billing', { ...spec, severity: 'needs-you', who: 'person' }, {
+  // The cancelled-root bell names the occurrence the top-up refused NOW
+  // (metadata.refusedDate). The nightly run meets the same cancelled root every
+  // night, so the standing open row is refreshed through notifyAdmin's own
+  // refresh-on-dedupe (under its dedupe lock): body, detail and refusedDate
+  // change together, quietly (no ring, no bump). The refused date is the
+  // dedupeVersion, so a row raised before the date existed picks it up even when
+  // its text is the same. A closed row is never touched (dedupeOpenOnly).
+  const refresh = cancelled
+    ? { refreshOnDedupe: true, dedupeVersion: childDate, ringOnRefresh: () => false }
+    : {};
+  return raiseAdminAlert('billing', { ...spec, severity: 'needs-you', who: 'person' }, {
     bell: true,
     dedupeKey,
     dedupeOpenOnly: true,
+    ...refresh,
     detail,
     metadata: {
       dedupeKey, kind: verdict.kind, seriesRootId: parentId, scheduledServiceId: childId || null,
@@ -195,27 +206,25 @@ async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, ch
       ...(cancelled ? { refusedDate: childDate } : {}),
     },
   });
-  if (cancelled) await stampRefusedDate(raised, childDate);
-  return raised;
 }
 
 const cancelledRootDedupeKey = (rootId) => `series-price-guard:cancelled-root:${rootId}`;
 
-// The standing cancelled-root bell names the occurrence the top-up refused NOW
-// (metadata.refusedDate), not the first one it ever refused: the nightly run
-// meets the same cancelled root every night and a deduped raise writes nothing,
-// so a row raised before the date existed, or for an earlier date that has since
-// passed, is brought up to date here. Open rows only; a failed stamp is logged
-// and never fails the alert.
-async function stampRefusedDate(raised, refusedDate) {
-  if (!raised?.id || !raised.deduped || !refusedDate) return;
-  try {
-    await db('notifications')
-      .where({ id: raised.id, recipient_type: 'admin' }).whereNull('done_at')
-      .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ refusedDate })]) });
-  } catch (err) {
-    logger.warn(`[series-price-guard] could not record the refused date on alert ${raised.id}: ${err.message}`);
-  }
+// The conditional close, on the savepoint `sp` of the extension's transaction.
+async function closeStandingRefusedAlert(sp, { parent, parentId, child, childDate, childId }) {
+  const standing = () => sp('notifications')
+    .where({ recipient_type: 'admin' }).whereNull('done_at')
+    .whereRaw("metadata->>'dedupeKey' = ?", [cancelledRootDedupeKey(parentId)])
+    .whereRaw("metadata->>'refusedDate' = ?", [childDate]);
+  if (!(await standing().first('id'))) return false;
+  if (await insertedRowIsPrepaid(sp, childId)) return false;
+  const facts = await extensionPriceFacts(sp, { parent, parentId, child });
+  if (!facts || facts.lastPaid == null || facts.over) return false;
+  const { doneColumns } = require('./notification-service')._private;
+  const closed = await standing().update(doneColumns({
+    by: CLOSED_BY, resolution: 'The plan added the visit it had held, at a price its last paid visit backs', conn: sp,
+  })).returning('id');
+  return closed.length > 0;
 }
 
 // The bell closes itself only on this proof: the guard's own extension later
@@ -224,31 +233,18 @@ async function stampRefusedDate(raised, refusedDate) {
 // due add-ons, and a paid visit of the series backs that price (not over 125% of
 // it). No stored price is re-read, and a cheaper occurrence on another date
 // proves nothing. Called inside the extension's transaction right after the
-// insert, only when the guard is live and returned no verdict; the close itself
-// waits for the commit (a rolled-back dry run closes nothing).
-async function closeRefusedPriceAlertAfterInsert(conn, { parent, parentId, child, childDate, childId }) {
-  if (!seriesPriceGuardsLive() || !childDate || !childId) return false;
-  const standing = () => conn('notifications')
-    .where({ recipient_type: 'admin' }).whereNull('done_at')
-    .whereRaw("metadata->>'dedupeKey' = ?", [cancelledRootDedupeKey(parentId)])
-    .whereRaw("metadata->>'refusedDate' = ?", [childDate]);
-  if (!(await standing().first('id'))) return false;
-  if (await insertedRowIsPrepaid(conn, childId)) return false;
-  const facts = await extensionPriceFacts(conn, { parent, parentId, child });
-  if (!facts || facts.lastPaid == null || facts.over) return false;
-  require('./customer-credit').afterCommit(conn, async () => {
-    try {
-      const { doneColumns } = require('./notification-service')._private;
-      await db('notifications')
-        .where({ recipient_type: 'admin' }).whereNull('done_at')
-        .whereRaw("metadata->>'dedupeKey' = ?", [cancelledRootDedupeKey(parentId)])
-        .whereRaw("metadata->>'refusedDate' = ?", [childDate])
-        .update(doneColumns({ by: CLOSED_BY, resolution: 'The plan added the visit it had held, at a price its last paid visit backs' }));
-    } catch (err) {
-      logger.warn(`[series-price-guard] could not close the plan price alert for series ${parentId}: ${err.message}`);
-    }
-  });
-  return true;
+// insert, only when the guard is live and returned no verdict. The close is a
+// conditional update in that same transaction, so a rolled-back dry run undoes
+// the insert and the close together; it runs in a savepoint, so a failed close
+// is logged and can never abort the visit insert.
+async function closeRefusedPriceAlertAfterInsert(conn, args) {
+  if (!seriesPriceGuardsLive() || !args.childDate || !args.childId) return false;
+  try {
+    return await conn.transaction((sp) => closeStandingRefusedAlert(sp, args));
+  } catch (err) {
+    logger.warn(`[series-price-guard] could not close the plan price alert for series ${args.parentId}: ${err.message}`);
+    return false;
+  }
 }
 
 // Raise the alert once `conn`'s transaction commits (never on rollback).
