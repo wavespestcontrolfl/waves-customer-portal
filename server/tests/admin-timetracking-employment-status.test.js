@@ -83,6 +83,8 @@ function installTransaction(techChains, { history = {}, futureVisits = [] } = {}
   });
   trx.raw = jest.fn(async () => undefined);
   trx.fn = { now: jest.fn(() => 'NOW') };
+  // A savepoint of the save's transaction (the shift-hours list reads in one).
+  trx.transaction = jest.fn(async (cb) => cb(trx));
   db.transaction = jest.fn(async (cb) => cb(trx));
   return trx;
 }
@@ -438,17 +440,81 @@ describe('shiftHours on create and update', () => {
   test('update, gate on: shiftHours writes both columns, and null clears both', async () => {
     gateOn();
     const write = makeChain();
-    installTransaction([makeChain({ first: ADAM }), write, makeChain({ first: { ...ADAM, shift_start: '08:00:00', shift_end: '18:00:00' } })]);
+    installTransaction([makeChain({ first: ADAM }), write, makeChain({ first: { ...ADAM, shift_start: '08:00:00', shift_end: '18:00:00' } }), HOURS_8_TO_18()]);
     const res = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { shiftHours: { start: '08:00', end: '18:00' } }, technicianId: 'admin-1' });
     expect(res.statusCode).toBe(200);
     expect(write.update).toHaveBeenCalledWith(expect.objectContaining({ shift_start: '08:00', shift_end: '18:00' }));
     expect(res.body.technician).toMatchObject({ shift_start: '08:00', shift_end: '18:00' });
+    // New hours and no coming visit: the list is there and empty.
+    expect(res.body.outsideShiftVisits).toEqual([]);
 
     const clear = makeChain();
     installTransaction([makeChain({ first: { ...ADAM, shift_start: '08:00:00', shift_end: '18:00:00' } }), clear, makeChain({ first: { ...ADAM, shift_start: null, shift_end: null } })]);
     const cleared = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { shiftHours: null }, technicianId: 'admin-1' });
     expect(clear.update).toHaveBeenCalledWith(expect.objectContaining({ shift_start: null, shift_end: null }));
     expect(cleared.body.technician).toMatchObject({ shift_start: null, shift_end: null });
+    // No set hours hold every visit: no list, and no read for one (the queue has no fourth technicians read).
+    expect(cleared.body).not.toHaveProperty('outsideShiftVisits');
+  });
+
+  // The read of the set hours the list makes (loadTechShifts), after the save's own three.
+  const HOURS_8_TO_18 = () => makeChain({ rows: [{ id: 'adam', shift_start: '08:00:00', shift_end: '18:00:00' }] });
+  const visit = (id, over) => ({
+    id, scheduled_date: '2031-03-03', service_type: 'Pest Control', first_name: 'Synthetic', last_name: id,
+    window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60, ...over,
+  });
+
+  test('update, gate on: new hours list the coming visits they do not hold, and only those', async () => {
+    gateOn();
+    const futureVisits = [
+      visit('inside'),
+      visit('ends-late', { window_start: '17:30:00', window_end: '18:30:00' }),
+      visit('starts-early', { scheduled_date: '2031-03-04', window_start: '07:00:00', window_end: '08:00:00' }),
+      visit('long', { scheduled_date: '2031-03-05', window_start: '17:00:00', window_end: '17:30:00', estimated_duration_minutes: 90 }),
+      visit('no-time', { window_start: null, window_end: null }),
+    ];
+    installTransaction(
+      [makeChain({ first: { ...ADAM, shift_start: '07:00:00', shift_end: '19:00:00' } }), makeChain(), makeChain({ first: { ...ADAM, shift_start: '08:00:00', shift_end: '18:00:00' } }), HOURS_8_TO_18()],
+      { futureVisits },
+    );
+    const res = await invoke(updateTechnician, { params: { id: 'adam' }, body: { shiftHours: { start: '08:00', end: '18:00' } }, technicianId: 'admin-1' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.outsideShiftVisits).toEqual([
+      { id: 'ends-late', scheduledDate: '2031-03-03', serviceType: 'Pest Control', customerName: 'Synthetic ends-late' },
+      { id: 'starts-early', scheduledDate: '2031-03-04', serviceType: 'Pest Control', customerName: 'Synthetic starts-early' },
+      { id: 'long', scheduledDate: '2031-03-05', serviceType: 'Pest Control', customerName: 'Synthetic long' },
+    ]);
+    // The technician stays in the pool: the offboarding list is not this one.
+    expect(res.body.futureAssignedVisits).toEqual([]);
+  });
+
+  test('update, gate on: a visit on a day the technician does not work is not listed (the shift is not that day\'s)', async () => {
+    gateOn();
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    try {
+      // 2031-03-03 is a Monday, 2031-03-07 a Friday. Monday to Thursday.
+      const weekdays = { ...ADAM, work_days: [1, 2, 3, 4] };
+      const late = { window_start: '18:30:00', window_end: '19:30:00' };
+      installTransaction(
+        [makeChain({ first: weekdays }), makeChain(), makeChain({ first: { ...weekdays, shift_start: '08:00:00', shift_end: '18:00:00' } }), HOURS_8_TO_18()],
+        { futureVisits: [visit('monday', late), visit('friday', { ...late, scheduled_date: '2031-03-07' })] },
+      );
+      const res = await invoke(updateTechnician, { params: { id: 'adam' }, body: { shiftHours: { start: '08:00', end: '18:00' } }, technicianId: 'admin-1' });
+      expect(res.body.outsideShiftVisits.map((v) => v.id)).toEqual(['monday']);
+    } finally {
+      delete process.env.GATE_TECH_WORK_DAYS;
+    }
+  });
+
+  test('update, gate on: the same hours sent again list nothing and read nothing', async () => {
+    gateOn();
+    const same = { ...ADAM, shift_start: '08:00:00', shift_end: '18:00:00' };
+    // Three technicians reads only: a fourth (the list's) would throw.
+    const trx = installTransaction([makeChain({ first: same }), makeChain(), makeChain({ first: same })], { futureVisits: [visit('late', { window_start: '19:00:00', window_end: '20:00:00' })] });
+    const res = await invoke(updateTechnician, { params: { id: 'adam' }, body: { shiftHours: { start: '08:00', end: '18:00' }, name: 'Adam' }, technicianId: 'admin-1' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toHaveProperty('outsideShiftVisits');
+    expect(trx.mock.calls.map(([table]) => table)).not.toContain('scheduled_services as s');
   });
 
   test('update, gate on: an edit that omits shiftHours leaves both columns alone', async () => {
@@ -475,5 +541,7 @@ describe('shiftHours on create and update', () => {
     expect(res.statusCode).toBe(200);
     expect(write.update.mock.calls[0][0]).not.toHaveProperty('shift_start');
     expect(res.body.technician).not.toHaveProperty('shift_start');
+    // Gate off: no list and no read for one, also for a row whose stored hours differ.
+    expect(res.body).not.toHaveProperty('outsideShiftVisits');
   });
 });

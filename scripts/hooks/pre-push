@@ -326,6 +326,36 @@ ${hits}
   fi
 fi
 
+# ── Changed-function complexity report (advisory, no LLM) ─────────────────
+# Prints every function the branch ADDS, rewrites or makes worse that is over
+# ESLint `complexity` 20 or `max-depth` 4 (the two QUALITY_WARN rules in
+# eslint.config.js), as a loud `[changed-complexity] NEW/WORSE:` section ahead
+# of the Codex audit. Codex raises each as a P2, so fix them before the first
+# push. A touched legacy function already over the limit with an equal or lower
+# score only prints a WARN. The base is BASE (CODEX_REVIEW_BASE, default origin/main). It never blocks: AGENTS.md treats structural lint
+# as advice. Only the changed files are linted, read at the pushed sha. A check
+# that cannot run (no node_modules, no origin/main, git or ESLint error) warns
+# and carries on.
+#   SKIP_CHANGED_COMPLEXITY=1 git push   — skip this report
+if [ "${SKIP_CHANGED_COMPLEXITY:-0}" = "1" ]; then
+  echo "[changed-complexity] SKIP_CHANGED_COMPLEXITY=1 set — skipping complexity report." >&2
+elif ! command -v node >/dev/null 2>&1 || [ ! -f scripts/check-changed-complexity.js ]; then
+  echo "[changed-complexity] node or scripts/check-changed-complexity.js missing — skipping complexity report." >&2
+elif ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+  echo "[changed-complexity] $BASE not found locally — skipping complexity report (git fetch origin to enable it)." >&2
+else
+  CC_SEEN=" "
+  for cc_sha in "${GUARD_SHAS[@]}"; do
+    case "$CC_SEEN" in *" $cc_sha "*) continue ;; esac
+    CC_SEEN="$CC_SEEN$cc_sha "
+    node scripts/check-changed-complexity.js --base "$BASE" --head "$cc_sha" >&2
+    cc_rc=$?
+    if [ "$cc_rc" -ne 0 ]; then
+      echo "[changed-complexity] the check could not run (exit $cc_rc) — carrying on." >&2
+    fi
+  done
+fi
+
 # ── Round log ────────────────────────────────────────────────────────────
 # One line for each pushed commit, in the clone's COMMON git dir, so every
 # worktree of this clone appends to the same files:
