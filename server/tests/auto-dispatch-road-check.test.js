@@ -98,6 +98,12 @@ describe('confirmOnRoads', () => {
     expect(out.best.name).toBe('second');
     const bar = await run(rankedOf('first'), { now: [20, 20, 10], first: [16, 16, 10] }, { config: minutesConfig });
     expect(bar).toMatchObject({ qualifies: true, byMinutes: false });
+    // A visit already moved needs the second-move minutes (15) on roads: 12 saved is refused.
+    const moved = { ...service, auto_dispatch_change_count: 1 };
+    const secondRanked = rankedOf('first');
+    secondRanked.rankedRows = secondRanked.rankedRows.map((row) => ({ ...row, byMinutes: true }));
+    const refused = await run(secondRanked, { now: [20, 20, 10], first: [14, 14, 10] }, { service: moved, config: { ...minutesConfig, minutesRuleSecondMoveSavingMinutes: 15 } });
+    expect(refused).toMatchObject({ qualifies: false, roadFailed: true });
   });
 
   test('every measured slot fails: nothing moves, and the row names the best slot\'s road numbers', async () => {

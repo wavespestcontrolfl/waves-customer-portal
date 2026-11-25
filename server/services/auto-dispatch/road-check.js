@@ -162,7 +162,7 @@ async function confirmOnRoads(ranked, ctx) {
       if (!road && !failed.length) return { ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } };
       const checked = withRoad(row, road);
       // A minutes-rule slot (move-rules.js minutesRuleOk) must keep its own 10 minutes on real roads.
-      const rowFloor = row.byMinutes ? Math.max(floor, ctx.config.minutesRuleSavingMinutes || 0) : floor;
+      const rowFloor = row.byMinutes ? Math.max(floor, moveRules.minutesRuleFloor(ctx.service, ctx.config)) : floor;
       if (!road || road.saving_minutes >= rowFloor) return settled(ranked, checked, true);
       failed.push(checked);
     }

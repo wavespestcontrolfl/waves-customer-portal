@@ -272,9 +272,14 @@ describe('minutes rule', () => {
     expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(50) }]).qualifies).toBe(false);
   });
 
-  test('a second move keeps the re-move bar (owner 10-26): the minutes rule is for first moves only', () => {
+  // Owner 2026-11-24 "do whatever you rec": a visit already moved needs 15 minutes, not the 20-point bar.
+  test('a second move needs 15 minutes saved: 16 moves, 14 does not, and 0 turns that half off', () => {
     const moved = { ...SERVICE, auto_dispatch_change_count: 1 };
-    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(69) }], { service: moved, threshold: 20 }).qualifies).toBe(false);
+    const second = { ...MINUTES, minutesRuleSecondMoveSavingMinutes: 15 };
+    const at = (detour, config = second) => rankM([{ cand: dayMove({ detour_minutes: detour }), sc: full(69) }], { service: moved, threshold: 20, config });
+    expect(at(7)).toMatchObject({ qualifies: true, byMinutes: true }); // 16 min
+    expect(at(9).qualifies).toBe(false); // 14 min
+    expect(at(7, MINUTES).qualifies).toBe(false); // second-move half not set
   });
 
   test('a same-day re-time is not a day move: the minutes rule does not apply', () => {

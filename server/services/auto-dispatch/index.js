@@ -442,7 +442,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   });
   // Far-south day rule: the audit row names the slots it kept out, move or not (south-day-kept.js).
   if (southKept(drops)) constraints.south_day_kept = drops.south_day_kept;
-  Object.assign(constraints, minutesRuleNote(ranked, config));
+  Object.assign(constraints, minutesRuleNote(ranked, service, config));
   const shadowPool = dryShadowCandidates.length ? candidates.concat(dryShadowCandidates) : candidates;
   const live = ranked.qualifies ? best : null;
   Object.assign(constraints, dryTimeConstraint(prefs, {
@@ -470,7 +470,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
 
 // The move qualifies only by the minutes rule (move-rules.js minutesRuleOk):
 // the audit row says so in constraints_checked.minutes_rule.
-function minutesRuleNote(ranked, config) {
+function minutesRuleNote(ranked, service, config) {
   return ranked.qualifies && ranked.byMinutes ? { minutes_rule: { saving_floor_minutes: config.minutesRuleSavingMinutes } } : {};
 }
 

@@ -163,6 +163,10 @@ function moveRuleConfig(overrides, flexTierEnabled) {
     // (move-rules.js minutesRuleOk). 0 = off.
     minutesRuleSavingMinutes: overrides.minutesRuleSavingMinutes
       ?? intEnv('AUTO_DISPATCH_MINUTES_RULE_SAVING_MINUTES', 10, { min: 0, max: 120 }),
+    // The same rule for a visit already moved once (owner 2026-11-24 "do whatever
+    // you rec": 15 minutes in place of the 20-point re-move bar). 0 = off.
+    minutesRuleSecondMoveSavingMinutes: overrides.minutesRuleSecondMoveSavingMinutes
+      ?? intEnv('AUTO_DISPATCH_MINUTES_RULE_SECOND_MOVE_SAVING_MINUTES', 15, { min: 0, max: 120 }),
     // CONFLICT MOVES (GATE_AUTO_DISPATCH_CONFLICT_MOVES): a visit that overlaps
     // another customer's stop, or sits on an owner blackout day, moves to the
     // best legal slot without the score bar. See current-conflict.js.

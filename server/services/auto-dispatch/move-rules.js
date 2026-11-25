@@ -99,17 +99,25 @@ function withinConflictCeiling({ current, cand, config }) {
   return -driveSavingMinutes(current, cand) <= ceiling;
 }
 
-// Owner 2026-11-24 *all rec* (minutes rule): a FIRST day move that takes at
-// least config.minutesRuleSavingMinutes (10) off the visit's modeled detour
-// qualifies below the score bar when it gives up no customer preference and no
-// technician fit and still gains points. 10 minutes is only 8.9 route points,
-// so before this a clear drive saving could miss the 15-point bar. A second
-// move keeps the higher re-move bar (owner 10-26), and real roads must confirm
-// the same 10 minutes (road-check.js). 0 turns it off.
+// Owner 2026-11-24 *all rec* (minutes rule): a day move that takes at least
+// minutesRuleFloor off the visit's modeled detour qualifies below the score bar
+// when it gives up no customer preference and no technician fit and still gains
+// points. 10 minutes is only 8.9 route points, so before this a clear drive
+// saving could miss the 15-point bar. A first move needs
+// config.minutesRuleSavingMinutes (10); a visit already moved needs
+// config.minutesRuleSecondMoveSavingMinutes (15; owner "do whatever you rec",
+// row 90) in place of the 20-point re-move bar. Real roads must confirm the
+// same minutes (road-check.js). 0 turns that half off.
+function minutesRuleFloor(service, config) {
+  return (service.auto_dispatch_change_count || 0) > 0
+    ? (config.minutesRuleSecondMoveSavingMinutes || 0)
+    : (config.minutesRuleSavingMinutes || 0);
+}
+
 function minutesRuleOk({ service, current, cand, currentScore, candScore, gain, config }) {
-  const floor = config.minutesRuleSavingMinutes || 0;
+  const floor = minutesRuleFloor(service, config);
   if (floor <= 0 || !current || !cand || !isDayMove(current, cand)) return false;
-  if ((service.auto_dispatch_change_count || 0) > 0 || current.detour_group_blind || !(gain > 0)) return false;
+  if (current.detour_group_blind || !(gain > 0)) return false;
   return driveSavingMinutes(current, cand) >= floor
     && (Number(candScore.customer_preference_score) || 0) >= (Number(currentScore.customer_preference_score) || 0)
     && (Number(candScore.technician_score) || 0) >= (Number(currentScore.technician_score) || 0);
@@ -198,5 +206,5 @@ function normalBestOf(conflict, rows) {
 
 module.exports = {
   isUnplacedDueDate, isDayMove, driveSavingMinutes, moveGain, meetsDriveFloor, withinConflictCeiling, mustMove, rankCandidates,
-  isSundayDate, minutesRuleOk,
+  isSundayDate, minutesRuleOk, minutesRuleFloor,
 };

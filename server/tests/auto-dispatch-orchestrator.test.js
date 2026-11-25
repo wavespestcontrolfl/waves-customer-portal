@@ -747,9 +747,20 @@ test('idempotency: an already-moved visit needs a much larger gain to move again
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
   servicesResult = [svc({ auto_dispatch_change_count: 1 })];
   db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
-  const moved = await runAutoDispatch({ mode: 'dry_run' });
+  // The second-move minutes rule off: the raised bar alone decides.
+  const moved = await runAutoDispatch({ mode: 'dry_run', minutesRuleSecondMoveSavingMinutes: 0 });
   expect(moved.recommended).toBe(0);
   expect(lastDecision('no_change').reason_code).toBe('NO_SCORE_IMPROVEMENT');
+
+  // Owner 2026-11-24 "do whatever you rec": with the default 15-minute second-move rule, this
+  // 30-minute saving moves the visit again below the raised bar.
+  jest.clearAllMocks();
+  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_MODERATE] });
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: true });
+  eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
+  const byMinutes = await runAutoDispatch({ mode: 'dry_run' });
+  expect(byMinutes.recommended).toBe(1);
 });
 
 
