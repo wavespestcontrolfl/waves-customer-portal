@@ -96,8 +96,10 @@ function deliveredTexts(dbi = db) {
 const SPOKEN_NUMBER_EXPRS = Object.freeze({
   v2Phone: "(ai_extraction_enriched->'caller'->>'phone_e164')",
   v2TextPhone: "(ai_extraction_enriched->'caller'->>'text_phone_e164')",
-  // The legacy V1 extraction's phone: the first "phone" key of its JSON text (the caller's own sits before any nested contact).
-  v1Phone: 'substring(ai_extraction from \'"phone"\\s*:\\s*"([^"]*)"\')',
+  // The legacy V1 extraction's phone: the TOP-LEVEL "phone" key of its JSON text (a nested secondary contact's phone is another
+  // person's), read by call_log_v1_phone() (migration 20261124200000), which answers NULL for malformed text (ai_extraction is
+  // a text column) instead of failing the query.
+  v1Phone: 'call_log_v1_phone(ai_extraction)',
 });
 const ALL_SPOKEN_NUMBER_EXPRS = Object.freeze(Object.values(SPOKEN_NUMBER_EXPRS));
 

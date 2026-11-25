@@ -810,6 +810,28 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
       });
 
+      test('the legacy V1 phone is the TOP-LEVEL key only, and malformed extraction text is safe', async () => {
+        const insertCall = async (row) => (await db('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE, ...row }).returning('id'))[0].id;
+        const made = [];
+        try {
+          // a malformed extraction text in the log must not fail the read (the function answers NULL), whatever else is in it
+          made.push(await insertCall({ ai_extraction: `not json {{{ "phone": "${BOB}" do_not_contact_request true` }));
+          made.push(await insertCall({ ai_extraction: '[1,2' }));
+          made.push(await insertCall({ ai_extraction: '"just a string"' }));
+          made.push(await insertCall({ ai_extraction: '' }));
+          expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+          // top-level phone null, a secondary contact's phone is Bob's: Bob's number is NOT the caller's, so no match
+          made.push(await insertCall({ ai_extraction: JSON.stringify({ phone: null, do_not_contact_request: true, secondary_contact: { first_name: 'Bob', phone: BOB } }) }));
+          expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+          // a nested object with a phone BEFORE the caller's own top-level phone: the top-level one is what matches
+          made.push(await insertCall({ ai_extraction: `{"secondary_contact":{"phone":"+19415550999"},"phone":"${BOB}","do_not_contact_request":true}` }));
+          await noMoreLink();
+        } finally {
+          await db('call_log').whereIn('id', made).del();
+        }
+        expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      });
+
       test('ONE call_log query per open-link request, covering both vetoes, and its plan uses the call_log last-10 indexes', async () => {
         const seen = [];
         const counting = Object.assign((table) => { if (table === 'call_log') seen.push(table); return db(table); }, { raw: db.raw.bind(db), fn: db.fn });
@@ -833,6 +855,56 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         await db('messaging_suppression').where({ phone: BOB }).update({ reason: 'manual_dnc' });
         await noMoreLink();
       });
+    });
+
+    test('a retry carries the slot it was for: a visit REBOOKED before the retry sends nothing and leaves the new slot\'s claim untouched', async () => {
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      const logger = require('../services/logger');
+      sendCustomerMessage.mockReset();
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+      VisitRecipient._test.setLookupRetryDelays([60, 60]);
+      try {
+        let failures = 1;
+        const flaky = Object.assign((table) => {
+          if (table === 'visit_text_recipients' && failures > 0) { failures -= 1; throw Object.assign(new Error('connection terminated'), { code: '57P01' }); }
+          return db(table);
+        }, { raw: db.raw.bind(db), fn: db.fn });
+        expect(await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'reminder_24h', excludePhones: [HOLDER], conn: flaky })).toBe(true);
+        // the visit is rebooked to another day before the retry runs
+        await db('scheduled_services').where({ id: visitId }).update({ scheduled_date: MOVED_DATE });
+        await waitFor(() => logger.info.mock.calls.some(([line]) => /retry for visit .* dropped/.test(line)));
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        expect((await rows())[0].deliveries).toEqual({});
+        // and the new slot's own notice still goes out, with its own claim
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'reminder_24h', excludePhones: [HOLDER] });
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(Object.keys((await rows())[0].deliveries)).toEqual([`reminder_24h:${MOVED_DATE}T09:00`]);
+      } finally {
+        VisitRecipient._test.setLookupRetryDelays([15000, 60000, 300000]);
+      }
+    });
+
+    test('an en-route retry is for the en_route_at it was raised for: a re-dispatch before the retry drops it', async () => {
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      const logger = require('../services/logger');
+      sendCustomerMessage.mockReset();
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+      VisitRecipient._test.setLookupRetryDelays([60]);
+      try {
+        await db('scheduled_services').where({ id: visitId }).update({ en_route_at: new Date(Date.now() - 600000), status: 'en_route', track_state: 'en_route' });
+        let failures = 1;
+        const flaky = Object.assign((table) => {
+          if (table === 'visit_text_recipients' && failures > 0) { failures -= 1; throw Object.assign(new Error('connection terminated'), { code: '57P01' }); }
+          return db(table);
+        }, { raw: db.raw.bind(db), fn: db.fn });
+        logger.info.mockClear();
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER], conn: flaky });
+        await db('scheduled_services').where({ id: visitId }).update({ en_route_at: new Date() });
+        await waitFor(() => logger.info.mock.calls.some(([line]) => /retry for visit .* dropped/.test(line)));
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      } finally {
+        VisitRecipient._test.setLookupRetryDelays([15000, 60000, 300000]);
+      }
     });
 
     test('a recipient lookup that throws is retried for the recipients only (the holder\'s result is untouched), then sent once', async () => {

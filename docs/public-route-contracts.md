@@ -7860,7 +7860,7 @@ summary reads do not run. The recipient path is strictly read-only (no
 geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while
 the plain permission reads pass (`recipientPermission`: gate, person on the
 visit, no decline, no callback-number hold on the visit or the person's number,
-no call do-not-contact or "no texts"; the choices row is read fail-closed and regardless of `GATE_CONTACT_LOGIN`), and only after the cheap lifetime check passes (a closed link answers 404 with no permission read). The live vehicle shows only while `tech_status.current_job_id` is this visit or one in its visit group and the cached fix was reported and received strictly after the visit's `en_route_at` (no `en_route_at`, no vehicle). Its stops-ahead POST answers nulls and its view POST
+no call do-not-contact or "no texts"; the choices row is read fail-closed and regardless of `GATE_CONTACT_LOGIN`), and only after the cheap lifetime check passes (a closed link answers 404 with no permission read). The live vehicle shows only while `tech_status.current_job_id` is exactly this visit's own id (no visit-group lookup) and the cached fix was reported and received strictly after the visit's `en_route_at` (no `en_route_at`, no vehicle). Its stops-ahead POST answers nulls and its view POST
 records nothing. The page never opens the live socket for this scope. Every
 handler on this router runs inside `safeRoute`: a thrown or `next(err)` error
 leaves as a fresh Error with only the driver `code`, never the knex message (it

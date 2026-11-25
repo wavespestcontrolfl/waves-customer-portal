@@ -46,9 +46,9 @@ describe('requireCurrentJobIds: a visit text recipient sees the truck only while
     install({ ts: { ...fixRow(1), current_job_id: 'visit-1' } });
     expect((await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1'] })).source).toBe('tech_status');
   });
-  test('the active job is another visit of the same visit group: served', async () => {
+  test('the active job is a SIBLING visit of the same group (no group lookup for a recipient, who asks for its own id only): no position', async () => {
     install({ ts: { ...fixRow(1), current_job_id: 'sibling-2' } });
-    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1', 'sibling-2'] })).not.toBeNull();
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1'] })).toBeNull();
   });
   test('the technician has moved on to another stop (a different active job, or none): no position', async () => {
     install({ ts: { ...fixRow(1), current_job_id: 'other-customer-visit' } });

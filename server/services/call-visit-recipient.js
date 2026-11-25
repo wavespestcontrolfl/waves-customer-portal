@@ -408,11 +408,32 @@ function scheduleLookupRetry(args, attempt) {
   if (timer && typeof timer.unref === 'function') timer.unref();
 }
 
+// The slot a notice is about: the visit's date and start (the claim key's slot) and, for the en-route text, the en-route start.
+// A retry carries the slot it was for and is dropped when the visit has since moved, so a late retry never sends a text for the
+// visit's NEW slot or uses its claim: the notices of the new slot are the new slot's own.
+async function slotOfVisit(scheduledServiceId, conn) {
+  const row = await conn('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date', 'window_start', 'en_route_at');
+  if (!row) return null;
+  const start = row.window_start ? String(row.window_start).slice(0, 5) : '';
+  return { date: dateOnlyString(row.scheduled_date) || '', start, enRouteAt: row.en_route_at ? new Date(row.en_route_at).getTime() : null };
+}
+
+function sameSlot(a, b, { kind, dayOnly }) {
+  if (!a || !b || a.date !== b.date) return false;
+  if (!(dayOnly === true && KINDS[kind].dayOnlyOk) && a.start !== b.start) return false;
+  return kind !== 'en_route' || a.enRouteAt === b.enRouteAt;
+}
+
 async function notifyAttempt(args, attempt) {
   const { scheduledServiceId, kind, excludePhones = [], context = {}, dayOnly = false, gate = null, conn = db } = args;
   if (!gateLive() || !KINDS[kind] || !scheduledServiceId) return true;
   let contacts;
   try {
+    if (attempt === 0) args.originSlot = await slotOfVisit(scheduledServiceId, conn).catch(() => null);
+    else if (!sameSlot(args.originSlot, await slotOfVisit(scheduledServiceId, conn), { kind, dayOnly })) {
+      logger.info(`[call-visit-recipient] ${kind} retry for visit ${scheduledServiceId} dropped: the visit's slot changed (or was never read)`);
+      return true;
+    }
     contacts = await contactsForVisit(scheduledServiceId, kind, { excludePhones, conn, throwOnError: true });
   } catch (err) {
     logger.warn(`[call-visit-recipient] ${kind} for visit ${scheduledServiceId}: recipients unreadable (${err.code || err.name || 'error'}), retrying`);

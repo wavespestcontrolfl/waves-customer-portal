@@ -226,24 +226,16 @@ describe('GET /:token with a visit text recipient\'s token: the reduced payload'
     for (const [arg] of mockEta.mock.calls) expect(arg.allowProvider).toBe(false);
   });
 
-  test('the truck shows only while the technician\'s active job is THIS visit (or its visit group): the resolver is asked for those job ids', async () => {
-    install(visitRow(ENROUTE));
+  test('the truck shows only while the technician\'s active job is exactly THIS visit: the resolver is asked for this visit\'s own id and nothing else', async () => {
+    const tablesRead = install(visitRow(ENROUTE));
     await get();
     expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1']);
-    // a visit group: the other services of the group count too
+    // no visit-group lookup: a sibling visit's active job never shows this visit's truck
+    expect(tablesRead.filter((table) => table === 'scheduled_services')).toEqual([]);
     mockResolvePosition.mockClear();
-    mockDb.mockImplementation((table) => {
-      const q = {};
-      for (const m of ['where', 'leftJoin', 'whereNotNull', 'orderBy', 'whereRaw', 'limit']) q[m] = jest.fn(() => q);
-      let byToken = false;
-      q.where = jest.fn((arg, val) => { if ((arg && arg['s.track_view_token']) || (arg === 's.track_view_token' && val)) byToken = true; return q; });
-      q.select = jest.fn(async () => [{ id: 'visit-1' }, { id: 'sibling-9' }]);
-      q.first = jest.fn(async () => (table === 'scheduled_services as s' ? (byToken ? null : visitRow({ ...ENROUTE, visit_id: 'group-1' })) : null));
-      return q;
-    });
-    mockDb.raw = jest.fn((sql) => sql);
+    install(visitRow({ ...ENROUTE, visit_id: 'group-1' }));
     await get();
-    expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1', 'sibling-9']);
+    expect(mockResolvePosition.mock.calls.at(-1)[0].requireCurrentJobIds).toEqual(['visit-1']);
   });
 
   test('the cached fix must be from THIS drive: the resolver is asked for fixes strictly after the visit\'s en_route_at', async () => {
