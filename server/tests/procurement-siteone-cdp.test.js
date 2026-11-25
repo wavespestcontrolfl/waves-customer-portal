@@ -113,13 +113,25 @@ function screens(w) {
   // The SAME element objects on every read, so a handle can be proven to be the same element.
   const placeBtns = () => { if (!w.placeBtns) w.placeBtns = Array.from({ length: w.placeButtons }, placeBtn); return w.placeBtns; };
   const placeBtn = () => el({ name: 'place-order', text: 'Place Your Order', onClick: () => { w.placed += 1; if (w.placeClickThrows) throw new Error('Target page closed'); if (!w.noConfirmation) { w.url = w.confirmUrl || 'https://www.siteone.com/en/checkout/orderConfirmation/7700123'; } } });
+  // The review page's nodes are the SAME objects on every read (like a real DOM between re-renders),
+  // with live text, so a node can be proven to be the one that passed review.
+  if (!w.reviewNodes) {
+    w.reviewNodes = {
+      tender: live(el({ onRead: () => { w.tenderReads += 1; if (w.onTenderRead) w.onTenderRead(w.tenderReads, w); } }), () => w.reviewTenderText),
+      pickup: live(el({}), () => w.reviewPickupText),
+      account: live(el({}), () => w.reviewAccountText),
+      item: live(el({ children: { [S.reviewItemBlock]: [el({ children: { [S.reviewQty]: w.reviewQtyNode ? [live(el({}), () => w.reviewQtyText)] : [] } })] } }), () => w.reviewCode),
+      total: live(el({}), () => w.reviewTotalText),
+    };
+  }
+  const rv = w.reviewNodes;
   const review = {
     [S.body]: [el({ text: w.reviewBody, throws: w.bodyThrows })],
-    [S.reviewTender]: w.hideTender ? [] : [live(el({ onRead: () => { w.tenderReads += 1; if (w.onTenderRead) w.onTenderRead(w.tenderReads, w); } }), () => w.reviewTenderText)],
-    [S.reviewPickup]: [live(el({}), () => w.reviewPickupText)],
-    [S.reviewAccount]: w.hideReviewAccount ? [] : [el({ text: w.reviewAccountText })],
-    [S.reviewItemCode]: [el({ text: w.reviewCode, children: { [S.reviewItemBlock]: [el({ children: { [S.reviewQty]: w.reviewQtyNode ? [el({ text: w.reviewQtyText })] : [] } })] } })],
-    [S.reviewTotal]: [live(el({}), () => w.reviewTotalText)],
+    [S.reviewTender]: w.hideTender ? [] : [rv.tender],
+    [S.reviewPickup]: [rv.pickup],
+    [S.reviewAccount]: w.hideReviewAccount ? [] : [rv.account],
+    [S.reviewItemCode]: [rv.item],
+    [S.reviewTotal]: [rv.total],
     [S.placeOrder]: placeBtns(),
   };
   const confirmation = { [S.body]: [el({ text: w.confirmationBody })], ...(w.confirmationField ? { [S.confirmationNumber]: [el({ text: w.confirmationBody })] } : {}), [S.heading]: [el({ text: 'Order Received' })] };
@@ -147,6 +159,24 @@ function screens(w) {
 function collection(els) {
   return { count: async () => els.length, nth: (i) => wrap(els[i]) };
 }
+// What page.evaluate sees for a node: live text, visibility, disabled state, its children, its page
+// (URL + the matches of a selector) and a DOM click. One object per node, so identity can be checked.
+function domOf(spec) {
+  spec.dom = spec.dom || { isConnected: true };
+  if (Object.getOwnPropertyDescriptor(spec.dom, 'innerText')) return spec.dom;
+  const w = spec.world;
+  Object.defineProperty(spec.dom, 'innerText', { configurable: true, get: () => { if (spec.onRead) spec.onRead(); return spec.text; } });
+  Object.defineProperty(spec.dom, 'disabled', { configurable: true, get: () => !spec.enabled });
+  Object.defineProperty(spec.dom, 'offsetParent', { configurable: true, get: () => (spec.visible ? {} : null) });
+  spec.dom.querySelectorAll = (sel) => (spec.children[sel] || []).map((c) => domOf(Object.assign(c, { world: w })));
+  Object.defineProperty(spec.dom, 'ownerDocument', { configurable: true, get: () => ({
+    location: { get href() { return w.url; } },
+    querySelectorAll: (sel) => (w.currentScreen()[sel] || []).map(domOf),
+  }) });
+  spec.dom.click = () => { w.handleClicks.push({ dom: true }); if (spec.name) w.clicks.push(spec.name); if (spec.onClick) spec.onClick(); };
+  return spec.dom;
+}
+
 function wrap(spec) {
   return {
     isVisible: async () => spec.visible,
@@ -157,18 +187,7 @@ function wrap(spec) {
     getAttribute: async (name) => (name in spec.attrs ? spec.attrs[name] : null),
     click: async () => { if (spec.name === 'place-order') spec.world.locatorPlaceClicks += 1; if (spec.name) spec.world?.clicks.push(spec.name); if (spec.onClick) spec.onClick(); },
     elementHandle: async () => {
-      spec.dom = spec.dom || { isConnected: true };
-      // What page.evaluate sees for this handle: live text, disabled state and a DOM click.
-      if (!Object.getOwnPropertyDescriptor(spec.dom, 'innerText')) {
-        Object.defineProperty(spec.dom, 'innerText', { configurable: true, get: () => { if (spec.onRead) spec.onRead(); return spec.text; } });
-        Object.defineProperty(spec.dom, 'disabled', { configurable: true, get: () => !spec.enabled });
-        // The page this node lives on, as the click step sees it: its URL and the shown matches of a selector.
-        Object.defineProperty(spec.dom, 'ownerDocument', { configurable: true, get: () => ({
-          location: { get href() { return spec.world.url; } },
-          querySelectorAll: (sel) => (spec.world.currentScreen()[sel] || []).filter((n) => n.visible).map(() => ({ offsetParent: {} })),
-        }) });
-        spec.dom.click = () => { spec.world.handleClicks.push({ dom: true }); if (spec.name) spec.world.clicks.push(spec.name); if (spec.onClick) spec.onClick(); };
-      }
+      domOf(spec);
       return {
         dom: spec.dom,
         isVisible: async () => spec.visible,
@@ -841,7 +860,21 @@ test('R8 click: the total and tender are the last reads before the click; a chan
   const moved = await run({ onTenderRead: (n, w) => { if (n === 4) w.url += '?cart=other'; } });
   expect(moved.error.refuse).toBe('review_changed');
   expect(moved.error.message).toMatch(/\(url\)/);
-  for (const r of [atBind, inStep, pickup, moved]) {
+  // A re-render hides the approved total (still connected, same text) and shows a new one: refused.
+  const swapped = await run({ onTenderRead: (n, w) => {
+    if (n !== 4) return;
+    const old = w.reviewNodes.total;
+    old.visible = false;
+    w.reviewNodes.total = Object.assign(el({ text: '$190.40' }), { world: w });
+    w.reviewNodesExtra = old; // the old node stays in the page, hidden
+  } });
+  expect(swapped.error.refuse).toBe('review_changed');
+  expect(swapped.error.message).toMatch(/\(fields\)/);
+  // A second visible Place order control appears: refused.
+  const twoButtons = await run({ onTenderRead: (n, w) => { if (n === 4) w.placeBtns.push(Object.assign(el({ name: 'place-order' }), { world: w })); } });
+  expect(twoButtons.error.refuse).toBe('review_changed');
+  expect(twoButtons.error.message).toMatch(/\(button\)/);
+  for (const r of [atBind, inStep, pickup, moved, swapped, twoButtons]) {
     expect(r.w.placed).toBe(0);
     expect(r.w.clicks).not.toContain('place-order');
     expectSafe(r.w);

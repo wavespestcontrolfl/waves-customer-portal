@@ -780,6 +780,8 @@ async function bindToClick(run, first) {
   // Every slow check first (URL, sign-out, button identity); the full review re-read LAST, so nothing
   // the cap check approved can change between the final read and the click (pre-push round 8 P0).
   assertAt(run, PATHS.review, 'order review');
+  // The review URL the click step must still be on, taken at the path check (before any other await).
+  const href = page.url();
   await assertSignedIn(run);
   if (!(await handle.isVisible().catch(() => false)) || !(await handle.isEnabled().catch(() => false))) throw new RefusedError('place_button_replaced', 'SiteOne review: the Place order button was replaced or detached after the checks — nothing clicked', evidence);
   const again = await readReview(run);
@@ -791,7 +793,7 @@ async function bindToClick(run, first) {
   // bound to its exact node and raw text here, proven equal to the approved review, and checked again
   // with the review URL inside the one browser step that clicks (clickPlaceOrder).
   const fields = await bindReviewFields(run, first);
-  return { handle, baseline, totalCents: again.totalCents, fields, href: page.url() };
+  return { handle, baseline, totalCents: again.totalCents, fields, href };
 }
 
 // The top-level review fields (each exactly one shown node) and what each must still read.
@@ -821,7 +823,10 @@ async function bindReviewFields(run, first) {
   const block = (await shownAll(page, SELECTORS.reviewItemCode))[0].locator(SELECTORS.reviewItemBlock);
   const qtyNodes = (await block.count().catch(() => 0)) ? await shownAll(block.nth(0), SELECTORS.reviewQty) : [];
   if (qtyNodes.length !== 1) throw new RefusedError('review_qty_unreadable', 'SiteOne review: the item quantity could not be read at the click', evidence);
-  await bindOne(qtyNodes[0], null, (raw) => { const f = raw.match(/\d+/g) || []; return f.length === 1 && Number(f[0]) === first.qty; });
+  await bindOne(qtyNodes[0], SELECTORS.reviewQty, (raw) => { const f = raw.match(/\d+/g) || []; return f.length === 1 && Number(f[0]) === first.qty; });
+  // The quantity is matched inside its own item block, not the whole page.
+  fields[fields.length - 1].scope = await block.nth(0).elementHandle();
+  if (!fields[fields.length - 1].scope) throw new RefusedError('review_qty_unreadable', 'SiteOne review: the item block could not be bound at the click', evidence);
   return fields;
 }
 
@@ -832,18 +837,21 @@ async function clickPlaceOrder(run, bound) {
   // text the cap check approved, then the click — nothing can change between the check and the click.
   let fired;
   try {
-    fired = await page.evaluate(([btn, href, fields]) => {
-      if (!btn || !btn.isConnected || btn.disabled) return { clicked: false, why: 'button' };
-      const doc = btn.ownerDocument;
-      if (!doc) return { clicked: false, why: 'url' };
+    fired = await page.evaluate(([btn, href, placeSel, fields]) => {
+      const doc = btn && btn.ownerDocument;
+      // The ONE shown match of a selector (in a scope) must be this exact node.
+      const soleShownIs = (scope, sel, node) => { const shown = [...scope.querySelectorAll(sel)].filter((e) => e.offsetParent !== null); return shown.length === 1 && shown[0] === node; };
+      if (!doc || !btn.isConnected || btn.disabled || !soleShownIs(doc, placeSel, btn)) return { clicked: false, why: 'button' };
       for (const f of fields) {
         if (!f.node || !f.node.isConnected || String(f.node.innerText).trim() !== f.raw) return { clicked: false, why: 'changed' };
-        if (f.selector && [...doc.querySelectorAll(f.selector)].filter((e) => e.offsetParent !== null).length !== 1) return { clicked: false, why: 'fields' };
+        if (!soleShownIs(f.scope || doc, f.selector, f.node)) return { clicked: false, why: 'fields' };
       }
       if (doc.location.href !== href) return { clicked: false, why: 'url' };
+      // Last, right before the click: still the one shown, enabled Place order control.
+      if (!btn.isConnected || btn.disabled || !soleShownIs(doc, placeSel, btn)) return { clicked: false, why: 'button' };
       btn.click();
       return { clicked: true };
-    }, [bound.handle, bound.href, bound.fields.map((f) => ({ node: f.handle, raw: f.raw, selector: f.selector }))]);
+    }, [bound.handle, bound.href, SELECTORS.placeOrder, bound.fields.map((f) => ({ node: f.handle, raw: f.raw, selector: f.selector, scope: f.scope || null }))]);
   } catch (err) {
     // The task may have run the click before it failed: the order may exist.
     run.submitted = true;
