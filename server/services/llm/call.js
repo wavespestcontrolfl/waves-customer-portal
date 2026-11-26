@@ -205,6 +205,9 @@ function parseRepairedJson(raw) {
 // Per-provider image block shapes (normalized input: { data: base64, mimeType, label? }).
 const toOpenAIImage = (img) => ({ type: 'input_image', image_url: `data:${img.mimeType || 'image/jpeg'};base64,${img.data}` });
 const toGeminiImage = (img) => ({ inline_data: { mime_type: img.mimeType || 'image/jpeg', data: img.data } });
+// A payload `audio` clip ({ mimeType, data: base64 }) rides the Gemini leg as an
+// inline part ahead of the prompt. No other leg takes audio (see dispatch).
+const toGeminiAudio = (clip) => ({ inline_data: { mime_type: clip.mimeType || 'audio/mpeg', data: clip.data } });
 const toAnthropicImage = (img) => ({ type: 'image', source: { type: 'base64', media_type: img.mimeType || 'image/jpeg', data: img.data } });
 // An image `label` ("Photo 2 (back)") rides as a text part placed immediately
 // before its image on every provider, so a multi-image lane's findings can
@@ -628,9 +631,9 @@ const GEMINI_BLOCK_FINISHES = new Set(['SAFETY', 'RECITATION', 'BLOCKLIST', 'PRO
 // anything else is ignored with a warning so a typo never fails the leg.
 const GEMINI_THINKING_LEVELS = new Set(['LOW', 'MEDIUM', 'HIGH']);
 
-function geminiRequest({ system, text, images, jsonMode, jsonSchema, maxTokens, temperature, thinkingLevel }) {
+function geminiRequest({ system, text, images, audio = [], jsonMode, jsonSchema, maxTokens, temperature, thinkingLevel }) {
   const promptText = system ? `${system}\n\n${text || ''}` : (text || '');
-  const parts = [...withImageLabels(images, toGeminiImage, (label) => ({ text: label })), { text: promptText }];
+  const parts = [...audio.map(toGeminiAudio), ...withImageLabels(images, toGeminiImage, (label) => ({ text: label })), { text: promptText }];
   const generationConfig = { temperature, maxOutputTokens: maxTokens };
   if (jsonMode) generationConfig.response_mime_type = 'application/json';
   if (jsonMode && jsonSchema) generationConfig.response_json_schema = jsonSchema;
@@ -662,7 +665,7 @@ function geminiVerdict(data, candidate, maxTokens) {
   return code;
 }
 
-async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, thinkingLevel, timeoutMs, signal, laneId, promptVersion, policyLabel } = {}) {
+async function callGemini({ model, system, text, images = [], audio = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, thinkingLevel, timeoutMs, signal, laneId, promptVersion, policyLabel } = {}) {
   const key = geminiKey();
   if (!key) return { ok: false, reason: 'no_key' };
   const base = { provider: 'gemini', requestedModel: model, laneId, promptVersion, policyLabel };
@@ -671,7 +674,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
     const resp = await fetch(geminiUrl(model), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify(geminiRequest({ system, text, images, jsonMode, jsonSchema, maxTokens, temperature, thinkingLevel })),
+      body: JSON.stringify(geminiRequest({ system, text, images, audio, jsonMode, jsonSchema, maxTokens, temperature, thinkingLevel })),
       ...abortAfter(timeoutMs, signal),
     });
     if (!resp.ok) {
@@ -830,7 +833,8 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
  * to callAnthropic → anthropicEffortFor, which honors it only when the model
  * actually serving the request accepts that exact level; ignored on
  * OpenAI/Gemini routes.
- * payload: { system, text, images, documents, jsonMode, jsonSchema, maxTokens, tools, temperature,
+ * payload: { system, text, images, documents, audio (Gemini only: [{ mimeType, data }], base64),
+ *            jsonMode, jsonSchema, maxTokens, tools, temperature,
  *            thinkingLevel (Gemini), reasoningEffort (OpenAI), cacheTtl (Anthropic: '1h'
  *            caches the system prompt for an hour, else 5 minutes), anthropicClient, laneId,
  *            promptVersion } (`anthropicClient` supports
@@ -840,6 +844,9 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
 async function dispatch(route, payload = {}) {
   if (!route || !route.provider || !route.model) return { ok: false, reason: 'no_route' };
   const args = { model: route.model, ...payload };
+  // `audio` is a Gemini-only field. Every other adapter would drop it and
+  // answer from the prompt alone, as if it had heard the clip.
+  if (args.audio && route.provider !== PROVIDER.GEMINI) return { ok: false, reason: 'unsupported_audio_provider' };
   switch (route.provider) {
     case PROVIDER.OPENAI: return callOpenAI(args);
     case PROVIDER.GEMINI:
