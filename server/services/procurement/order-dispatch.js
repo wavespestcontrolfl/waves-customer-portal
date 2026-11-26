@@ -1041,14 +1041,23 @@ async function reservePostSubmitAmount(conn, ledger, cents, env) {
 
 // A history-total order (Sticker Mule) was admitted on the last identical order's total; the
 // vendor's read-back total can differ. More than max(5%, $2) apart rings ONE alert (deduped per ledger row).
-async function alertHistoryTotalDrift({ ctx, adapter, vendor, finalCents, quoteCents }) {
-  if (adapter.preSubmitTotal !== 'history' || !(quoteCents > 0) || Math.abs(finalCents - quoteCents) <= Math.max(Math.round(quoteCents * 0.05), 200)) return;
+// A read-back that failed (evidence.totalSource 'quote') rings too: the real charge is unknown.
+async function alertHistoryTotalDrift({ ctx, adapter, vendor, placed, finalCents, quoteCents }) {
+  if (adapter.preSubmitTotal !== 'history' || !(quoteCents > 0)) return;
+  const unconfirmed = placed?.evidence?.totalSource === 'quote';
+  if (!unconfirmed && Math.abs(finalCents - quoteCents) <= Math.max(Math.round(quoteCents * 0.05), 200)) return;
   const { ledger, request, product, notify } = ctx;
+  const why = unconfirmed
+    ? `Placed, but ${vendor.name} did not confirm the total; the last identical order was ${dollars(quoteCents)}.`
+    : `Placed at ${dollars(finalCents)}; the last identical order was ${dollars(quoteCents)}.`;
+  const detail = unconfirmed
+    ? `${vendor.name} order for ${product.name} was placed, but the order total could not be read back. It is recorded at the last identical order's total, ${dollars(quoteCents)}. Check the charge on the ${vendor.name} account.`
+    : `${vendor.name} order for ${product.name} was placed at ${dollars(finalCents)}. The last identical order was ${dollars(quoteCents)}, so the order went out on that history total.`;
   try {
     await raiserFor(notify)('system', {
       area: 'Inventory',
       action: fitAction('Inventory', product.name, [(n) => `check the ${n} order price`, () => 'check the order price']),
-      why: `Placed at ${dollars(finalCents)}; the last identical order was ${dollars(quoteCents)}.`,
+      why,
       severity: 'needs-you',
       link: RESTOCK_TAB,
       subject: { type: 'check', id: `auto-order-price:${ledger.id}` },
@@ -1057,7 +1066,7 @@ async function alertHistoryTotalDrift({ ctx, adapter, vendor, finalCents, quoteC
     }, {
       bell: true,
       dedupeKey: `auto-order-price:${ledger.id}`,
-      detail: `${vendor.name} order for ${product.name} was placed at ${dollars(finalCents)}. The last identical order was ${dollars(quoteCents)}, so the order went out on that history total.`,
+      detail,
       metadata: { vendorOrderId: ledger.id, restockRequestId: request.id, productName: product.name, vendorName: vendor.name },
     });
   } catch (err) { logger.warn(`[order-dispatch] price-drift alert failed for ledger ${ledger.id}: ${err.message}`); }
@@ -1406,7 +1415,7 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     const overCap = await parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, finalCents, quoteCents, env });
     if (overCap) return overCap;
     const recorded = await recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
-    await alertHistoryTotalDrift({ ctx, adapter, vendor, finalCents, quoteCents });
+    await alertHistoryTotalDrift({ ctx, adapter, vendor, placed, finalCents, quoteCents });
     return recorded;
   } catch (err) {
     // Run-level failures are scoped to THIS adapter for the batch loop: the

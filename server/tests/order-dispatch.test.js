@@ -983,6 +983,13 @@ describe('history-total placement', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  test('a read-back that failed (total from the quote) rings ONE unconfirmed-total alert', async () => {
+    const a = mockAdapter({ preSubmitTotal: 'history', place: jest.fn(async () => ({ externalOrderNumber: 'SM-1', amountCents: 31400, response: {}, evidence: { totalSource: 'quote' } })) });
+    expect(await run(a)).toMatchObject({ status: 'placed', amountCents: 31400 });
+    expect(driftAlerts()).toHaveLength(1);
+    expect(driftAlerts()[0][3].detail).toMatch(/could not be read back.*\$314\.00/);
+  });
+
   test('a small order uses the $2 floor, not 5%', async () => {
     const a = mockAdapter({ preSubmitTotal: 'history', bindingQuote: jest.fn(async () => ({ cents: 1000, source: 'order SM-0' })), place: jest.fn(async () => ({ externalOrderNumber: 'SM-1', amountCents: 1190, response: {}, evidence: {} })) });
     await run(a);
