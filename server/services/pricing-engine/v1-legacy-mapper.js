@@ -729,6 +729,7 @@ function mapV1ToLegacyShape(v1Result) {
       perVisit: palmLI.perVisit,
       annualBeforeCredits: palmAnnualBeforeCredits,
       annualRounding: palmLI.annualRounding,
+      minPerVisit: palmLI.minPerVisit,
       flatCreditAnnual: palmFlatCreditAnnual,
       annualAfterCredits: palmAnnualAfterCredits,
       monthlyAfterCredits: palmMonthlyAfterCredits,

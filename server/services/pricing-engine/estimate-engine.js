@@ -1026,6 +1026,23 @@ function pestPropertyWithPhotoFacts(property, facts) {
   return { ...property, features };
 }
 
+// Price rules fixed 2026-11-26 (owner, "fix all seven"): the palm credit minimum, the one-time lawn flat-stretch rise,
+// the barrel hold, commercial interior area and the urgent removal.
+// An estimate priced BEFORE them keeps its price on every replay: the saved-estimate readers derive
+// input.legacyPricingRules from the estimate's own pricingMetadata stamp (estimate-floor-signal-replay.js), and an
+// estimate with priced lines but no stamp was priced before the fixes. A fresh quote never sets it, and the engine
+// stamps pricingMetadata.legacyPricingRules on every run, so a quote priced under the fixes replays under them.
+const PRICE_RULE_FIX_SERVICES = new Set([
+  'palm_injection', 'one_time_lawn', 'rodent_exclusion', 'exclusion', 'commercial_pest', 'stinging_insect',
+  'plugging', 'foam_drill',
+]);
+function legacyPricingRules(input, serviceKey = null) {
+  // A service this very revision ADDS (input.addedServiceKeys, the add-service rail) was never quoted: current rules.
+  // So is one an earlier revision added (input.currentRulesServices, replayed from the saved stamp).
+  return input?.legacyPricingRules === true
+    && !(serviceKey && [input.addedServiceKeys, input.currentRulesServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
+}
+
 function generateEstimate(input) {
   const services = input.services || {};
   // Lawn cost-floor ENFORCEMENT arm state (owner ruling 2026-07-17: floors
@@ -1258,6 +1275,14 @@ function generateEstimate(input) {
     lawnProgramMinimumMonthly: lawnProgramMinimumMonthlyResolved,
     // Same replay rule: a quote keeps the lawn minimum it was priced with.
     lawnMinimumPerVisitAfterDiscount: lawnMinimumPerVisitAfterDiscountResolved,
+    // Which price rules THIS run used (2026-11-26 fixes, see legacyPricingRules above): true = the rules before them.
+    // Persisted so a replay of a quote priced under the fixes prices under them, and an older quote keeps its price.
+    legacyPricingRules: legacyPricingRules(input),
+    // On a legacy estimate: the services priced under the CURRENT rules (added by this or an earlier revision), so the
+    // next revision and replay keep them there while the older lines keep theirs.
+    ...(legacyPricingRules(input)
+      ? { currentRulesServices: [...new Set([...(input.currentRulesServices || []), ...(input.addedServiceKeys || [])])] }
+      : {}),
     pestProgramFloorArmed,
     ...(pestProgramFloorPerVisitResolved != null
       ? { pestProgramFloorPerVisit: pestProgramFloorPerVisitResolved }
@@ -1357,6 +1382,8 @@ function generateEstimate(input) {
         // anything else keeps interior included, the default).
         interiorService: input.commercialInteriorService,
         floorsArmed: commercialFloorArmedFor('commercial_pest'),
+        // An estimate priced before interior-on-total-area (2026-11-26) keeps the footprint basis on replay.
+        legacyInteriorFootprint: legacyPricingRules(input, 'pest_control'),
       });
       if (result.quoteRequired) {
         // No real building footprint to size interior treatment — priceCommercialPest
@@ -1597,6 +1624,8 @@ function generateEstimate(input) {
       // Do not default palmCount to 1. Service-level count prices the number of
       // palms treated for this line; property-level count is only a resolver fallback.
       palmCount: palmCountResolution.palmCount,
+      // A replay prices under the per-visit minimum the quote was sold with (undefined on a fresh quote).
+      minPerVisit: input.palmMinPerVisitReplay,
     });
     attachPalmCountMetadata(result, palmCountResolution);
     // Historical quotes rounded this annualized value to whole dollars.
@@ -2029,6 +2058,8 @@ function generateEstimate(input) {
         track: services.oneTimeLawn.track || services.lawn?.track || 'st_augustine',
         tier: services.oneTimeLawn.tier || services.lawn?.tier || 'enhanced',
         lawnFreq: services.oneTimeLawn.lawnFreq || services.lawn?.lawnFreq || input.lawnFreq,
+        // An estimate priced before the flat-stretch rise (2026-11-26) keeps its one-time price on replay.
+        legacyOneTimePlateau: legacyPricingRules(input),
       });
       lineItems.push(result);
     }
@@ -2051,6 +2082,8 @@ function generateEstimate(input) {
         track: services.lawnPestControl.track || services.lawn?.track || 'st_augustine',
         tier: services.lawnPestControl.tier || services.lawn?.tier || 'enhanced',
         lawnFreq: services.lawnPestControl.lawnFreq || services.lawn?.lawnFreq || input.lawnFreq,
+        // An estimate priced before the flat-stretch rise (2026-11-26) keeps its one-time price on replay.
+        legacyOneTimePlateau: legacyPricingRules(input),
       });
       // Distinct display name: persistence compacts lines to service + name,
       // so without this a lawn-pest row renders as generic one_time_lawn (and
@@ -2358,6 +2391,7 @@ function generateEstimate(input) {
       ? pricePlugging(plugArea, plugSpacing, {
         urgency: services.plugging.urgency || 'ROUTINE',
         afterHours: services.plugging.afterHours || false,
+        legacyUrgency: legacyPricingRules(input),
       })
       : pluggingAreaRequiredLine(plugSpacing));
   }
@@ -2373,6 +2407,7 @@ function generateEstimate(input) {
     const result = priceFoamDrill(Object.prototype.hasOwnProperty.call(foamOptions, 'points') ? foamOptions.points : undefined, {
       urgency: foamOptions.urgency || 'ROUTINE',
       afterHours: foamOptions.afterHours || false,
+      legacyUrgency: legacyPricingRules(input),
     });
     lineItems.push(result);
   }
@@ -2404,6 +2439,7 @@ function generateEstimate(input) {
       urgency: services.stinging.urgency || 'ROUTINE',
       afterHours: services.stinging.afterHours || false,
       hasRecurringPest: activeServiceKeys.includes('pest_control'),
+      legacyUrgentRemoval: legacyPricingRules(input),
     });
     lineItems.push(result);
   }
@@ -2456,6 +2492,7 @@ function generateEstimate(input) {
         ...wholeHomeSeal,
         ...(wholeHomeSeal ? { roofType: exclusionRoofType(wholeHomeSeal.roofType) } : {}),
         ...roofStyle,
+        legacyUrgency: legacyPricingRules(input),
       });
       rodentExclusionV2Summary = result;
       // Per-section rows (wire mesh points / bird boxes / linear mesh, plus
@@ -2484,6 +2521,7 @@ function generateEstimate(input) {
         approvedTotalForWaiver: services.exclusion.approvedTotal || 0,
         urgency: services.exclusion.urgency || 'ROUTINE',
         afterHours: services.exclusion.afterHours || false,
+        legacyUrgency: legacyPricingRules(input),
       });
       // The legacy-shaped exclusion takes a barrel pick too: the same hold when no eave footage was entered.
       const barrelUnmeasured = roofStyle?.roofStyle === 'barrel_tile' && !(roofStyle.barrelEaveFt > 0)
@@ -2838,6 +2876,11 @@ function generateEstimate(input) {
       isOneTimeService: isOneTime,
       palmCount: item.palmCount,
       annualBeforeCredits: item.annualBeforeCredits ?? item.annual,
+      // The $75 per-visit minimum holds after the per-palm credit (2026-11-26); an estimate priced before it replays without.
+      palmAppsPerYear: item.service === 'palm_injection' && !legacyPricingRules(input)
+        ? item.appsPerYear
+        : undefined,
+      palmMinPerVisit: item.service === 'palm_injection' ? item.minPerVisit : undefined,
       // Frozen-ELIGIBLE rodent posture with the live map since flipped to
       // excluded (codex #3591 r44 P1): the sent quote's % holds.
       ...(item.service === 'rodent_bait'
@@ -3426,6 +3469,13 @@ function generateEstimate(input) {
     services.topDressing ||
     services.dethatching
   );
+
+  // The lines the 2026-11-26 price rules touch carry their own stamp too (see legacyPricingRules above): a save path
+  // that keeps the lines but drops pricingMetadata (the public wizard, the browser fallback) still replays them under
+  // the rules that priced them.
+  for (const line of lineItems) {
+    if (line && PRICE_RULE_FIX_SERVICES.has(line.service)) line.legacyPricingRules = legacyPricingRules(input, line.service === 'commercial_pest' ? 'pest_control' : null);
+  }
 
   // ── 8. Build estimate output ───────────────────────────────
   return {

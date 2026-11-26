@@ -792,6 +792,16 @@ export function rodentBaitPolicyNote(E = {}) {
 
 // Zero is the documented "fee disabled" value; a missing row keeps the
 // in-code default (same as db-bridge).
+// The per-visit palm minimum (pricing_config.palm_pricing.min_per_visit, applied the way the server's db-bridge does):
+// the fallback's gross visit price and the cap on the per-palm credit both read it. Default $75.
+const PALM_MIN_PER_VISIT_DEFAULT = 75;
+let PALM_MIN_PER_VISIT = PALM_MIN_PER_VISIT_DEFAULT;
+export function applyServerPalmPricingConfig(config) {
+  const min = Number(config?.min_per_visit);
+  PALM_MIN_PER_VISIT = Number.isFinite(min) && min > 0 ? min : PALM_MIN_PER_VISIT_DEFAULT;
+  return PALM_MIN_PER_VISIT;
+}
+
 export function applyServerRodentSetupFeePricingConfig(config) {
   const fee = Number(config?.value);
   RODENT_BAIT = {
@@ -1780,6 +1790,24 @@ function lawnLookup(lp, sf, freqIdx) {
   return result;
 }
 
+// One-time lawn anchor inside a FLAT stretch of the 6-visit column (owner 2026-11-26; mirrors the server's
+// oneTimeLawnPlateauMonthly): the one-time price rises linearly from the price at the start of the stretch to
+// the next higher bracket price. Returns the fractional 6x monthly, or null when the table price stands.
+function lawnPlateauMonthly(lp, sf) {
+  // The client table carries a synthetic 0 sq ft row the server table does not have; it is not a bracket.
+  const pts = (lp.pts || []).filter((pt) => pt[0] > 0);
+  if (!pts || pts.length < 3 || !(sf > pts[0][0]) || sf >= pts[pts.length - 1][0]) return null;
+  let j = 0;
+  while (j + 1 < pts.length && pts[j + 1][0] <= sf) j += 1;
+  const value = pts[j][1];
+  let start = j;
+  while (start > 0 && pts[start - 1][1] === value) start -= 1;
+  let end = j + 1;
+  while (end < pts.length && pts[end][1] === value) end += 1;
+  if (end >= pts.length || end - start < 2 || !(pts[end][1] > value) || !(sf > pts[start][0])) return null;
+  return value + ((sf - pts[start][0]) / (pts[end][0] - pts[start][0])) * (pts[end][1] - value);
+}
+
 function lawnLookupUncapped(lp, sf, freqIdx) {
   const pts = lp.pts;
   if (sf <= pts[0][0]) return { monthly: pts[0][freqIdx + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
@@ -2099,6 +2127,9 @@ export function calculateEstimate(inputs) {
     // matching the server engine's pricingMetadata stamp (codex P2 round 9
     // on #2827).
     lawnCostFloorArmed: LAWN_PRICING_V2.useLawnCostFloor === true,
+    // This fallback prices under the 2026-11-26 rules it mirrors (palm credit minimum, one-time lawn rise), so the
+    // server's saved-estimate reader replays the saved quote under them (estimate-floor-signal-replay.js).
+    legacyPricingRules: false,
     // Resolved program minimum for THIS run (0 = disarmed) — same replay
     // rule: estimate-public and the converter clamp/protect a saved fallback
     // quote at the minimum it was priced with, never the live global at
@@ -2713,7 +2744,7 @@ export function calculateEstimate(inputs) {
       // Client fallback mirrors the server adapter's explicit combo/medium protocol.
       const palmPerApp = 75;
       const appsPerYear = 2;
-      const perVisit = Math.max(ip * palmPerApp, 75);
+      const perVisit = Math.max(ip * palmPerApp, PALM_MIN_PER_VISIT);
       const inja = perVisit * appsPerYear, injMo = Math.round(inja / 12 * 100) / 100;
       R.injection = {
         palms: ip,
@@ -3033,7 +3064,10 @@ export function calculateEstimate(inputs) {
     const baselinePrice = lawnLookup(lp, turfArea.turfSf, 0);
     const baselineMonthly = baselinePrice.monthly;
     if (baselinePrice.pricingBasis === 'EXTRAPOLATED_ABOVE_TABLE_MAX') addLawnCustomQuoteNote();
-    const baselinePerApp = Math.round((baselineMonthly * 12) / 6 * 100) / 100;
+    let baselinePerApp = Math.round((baselineMonthly * 12) / 6 * 100) / 100;
+    // Flat-stretch rise (owner 2026-11-26): only on the plain market table, never below the table price.
+    const plateauMonthly = baselinePrice.pricingSource === 'MARKET_TABLE' ? lawnPlateauMonthly(lp, turfArea.turfSf) : null;
+    if (plateauMonthly !== null && plateauMonthly > baselineMonthly) baselinePerApp = (plateauMonthly * 12) / 6;
     // 2.20 = ONE_TIME.lawn.oneTimeMultiplier (owner 2026-11-04: same multiple as one-time pest).
     let bl = Math.max(115, Math.round(baselinePerApp * 2.20));
     let tm = 1.0, tl = 'Fertilization';
@@ -3867,7 +3901,11 @@ export function calculateEstimate(inputs) {
   if (R.injection) {
     const annualBeforeCredits = R.injection.ann;
     const flatCreditAnnual = wt === 'Gold' || wt === 'Platinum'
-      ? Math.min(annualBeforeCredits, R.injection.palms * 10)
+      ? Math.min(
+        R.injection.palms * 10,
+        // Mirror the server: the per-visit minimum holds after the credit.
+        Math.max(0, annualBeforeCredits - PALM_MIN_PER_VISIT * (R.injection.appsPerYear || 2)),
+      )
       : 0;
     const annualAfterCredits = Math.round((annualBeforeCredits - flatCreditAnnual) * 100) / 100;
     const monthlyAfterCredits = Math.round(annualAfterCredits / 12 * 100) / 100;

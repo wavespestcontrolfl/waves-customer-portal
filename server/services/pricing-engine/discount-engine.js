@@ -123,6 +123,12 @@ function determineWaveGuardTier(activeServices = [], { assumeQualifying = [] } =
   return             { tier: 'bronze',       discount: WAVEGUARD.tiers.bronze.discount,   qualifyingCount: count };
 }
 
+// PALM.minPerVisit x the visits a year; 0 when the caller gave no visit count (the old cap then stands).
+function palmMinimumAnnual(visitsPerYear, minPerVisit) {
+  const minimum = Number(minPerVisit) > 0 ? Number(minPerVisit) : PALM.minPerVisit;
+  return roundCurrency(minimum * Math.max(0, Number(visitsPerYear) || 0));
+}
+
 // ── Get effective discount for a specific service line ─────────
 function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
   const {
@@ -163,9 +169,13 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
         const annualBeforeCredits = Number.isFinite(options.annualBeforeCredits)
           ? options.annualBeforeCredits
           : null;
+        // The per-visit minimum holds AFTER the per-palm credit: the credit may never push the line below
+        // PALM.minPerVisit x visits a year (a 1-palm and a 2-palm nutrition line both sit on the $75 minimum;
+        // without this the 2-palm line came out cheaper than the 1-palm one).
+        const minAnnualAfterCredits = palmMinimumAnnual(options.palmAppsPerYear, options.palmMinPerVisit);
         const cappedAnnualCredit = annualBeforeCredits === null
           ? annualCredit
-          : Math.min(annualCredit, annualBeforeCredits);
+          : Math.min(annualCredit, Math.max(0, roundCurrency(annualBeforeCredits - minAnnualAfterCredits)));
 
         result.palmCount = palmCount;
         result.flatCreditPerPalm = PALM.flatCreditPerPalm;
@@ -174,6 +184,7 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
         result.flatCreditAnnualUncapped = annualCredit;
         if (annualBeforeCredits !== null) {
           result.annualBeforeCredits = annualBeforeCredits;
+          result.minAnnualAfterCredits = minAnnualAfterCredits;
           result.annualAfterCredits = roundCurrency(Math.max(0, annualBeforeCredits - cappedAnnualCredit));
           result.monthlyAfterCredits = roundCurrency(result.annualAfterCredits / 12);
         }

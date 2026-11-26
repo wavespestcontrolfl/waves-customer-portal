@@ -1339,10 +1339,15 @@ function calculatePestProductionDiagnostics(property) {
 
 // ── Urgency multiplier helper (matches v2 applyOT — urgency only, ────
 // not recurring-customer discount which is handled by discount-engine) ─
-function applyUrgency(price, urgency = 'ROUTINE', afterHours = false) {
+// The rush multipliers here stay the fixed numbers (1.25 / 1.50 soon, 1.50 / 2.00 urgent); they do NOT read the
+// onetime_urgency Settings row, which only drives the one-time lawn and pest prices. The input is upper-cased so a
+// lower-case 'urgent' is no longer silently routine (owner 2026-11-26). legacyCase: an estimate priced before this
+// change keeps the case-sensitive match it was priced with (input.legacyPricingRules, estimate-engine.js).
+function applyUrgency(price, urgency = 'ROUTINE', afterHours = false, legacyCase = false) {
+  const key = legacyCase ? urgency : String(urgency || '').toUpperCase();
   let mult = 1.0;
-  if (urgency === 'SOON') mult = afterHours ? 1.50 : 1.25;
-  else if (urgency === 'URGENT') mult = afterHours ? 2.0 : 1.50;
+  if (key === 'SOON') mult = afterHours ? 1.50 : 1.25;
+  else if (key === 'URGENT') mult = afterHours ? 2.0 : 1.50;
   return Math.round(price * mult);
 }
 
@@ -2038,6 +2043,33 @@ function lookupLawnBracketUncapped(lawnSqFt, tierIndex, track, schedule) {
     }
   }
   return { monthly: brackets[brackets.length - 1][tierIndex + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
+}
+
+// One-time lawn anchor inside a FLAT stretch of the 6-visit market column (owner 2026-11-26, "fix all seven").
+// The recurring table repeats one 6x price across several bracket rows (St. Augustine $38 a month from 3,000
+// to 5,500 sq ft), so a one-time treatment priced off it cost the same for a 3,000 and a 5,500 sq ft lawn.
+// Inside such a stretch the one-time anchor rises linearly from the price at the start of the stretch to the
+// next higher bracket price. The price at the stretch start, at the next higher bracket and everywhere
+// outside a flat stretch stays what the table gives, and the result never goes below the table price.
+// The recurring plan table and every recurring price are untouched: only priceOneTimeLawn reads this.
+// Returns the fractional 6x monthly anchor, or null when the table price already stands.
+function oneTimeLawnPlateauMonthly(lawnSqFt, track, schedule = liveLawnMarketSchedule()) {
+  const brackets = schedule?.brackets?.[track];
+  if (!brackets || brackets.length < 3) return null;
+  const col = LAWN_TIERS.standard.index + 1;
+  if (!(lawnSqFt > brackets[0][0]) || lawnSqFt >= brackets[brackets.length - 1][0]) return null;
+  let j = 0;
+  while (j + 1 < brackets.length && brackets[j + 1][0] <= lawnSqFt) j += 1;
+  const value = brackets[j][col];
+  let start = j;
+  while (start > 0 && brackets[start - 1][col] === value) start -= 1;
+  let end = j + 1;
+  while (end < brackets.length && brackets[end][col] === value) end += 1;
+  // A stretch of one row, or one with no higher bracket after it, already follows the table.
+  if (end >= brackets.length || end - start < 2 || !(brackets[end][col] > value)) return null;
+  if (!(lawnSqFt > brackets[start][0])) return null;
+  const ratio = (lawnSqFt - brackets[start][0]) / (brackets[end][0] - brackets[start][0]);
+  return value + ratio * (brackets[end][col] - value);
 }
 
 // The tuning numbers behind one cadence's cost floor. In cost-plus mode
@@ -3426,8 +3458,26 @@ function resolveCommercialPestFootprint(property = {}) {
   const perimeter = perimeterExplicit
     ? explicitPerimeter
     : (footprint > 0 ? 4 * Math.sqrt(footprint) : 0);
+  // TOTAL interior area, every floor (owner 2026-11-26, "fix all seven"). Interior treatment walks every floor,
+  // so a two-story building is not a smaller job than a one-story building of the same square footage. Resolved
+  // on its own, not from the footprint's source: a measured total living area wins (unless the lookup refused to
+  // claim a footprint, whose summed aggregate is ambiguous), else a ground-floor footprint is multiplied by its
+  // stories. A building-area field and the defaulted fallback keep the footprint (ambiguous, so no raise).
+  const measuredTotal = property.footprintUnknown === true
+    ? null
+    : (positiveFiniteNumber(property.homeSqFt) ?? positiveFiniteNumber(property.livingAreaSqFt));
+  const explicitFootprint = ['footprint', 'footprintSqFt'].includes(res.source);
+  const stackedFootprint = explicitFootprint ? footprint * positiveStories(property.stories) : footprint;
+  // A living-area source IS the total. With an explicit footprint beside it the total is capped at footprint x
+  // stories: the profile clears footprintUnknown once a footprint is entered, so an association's summed area must
+  // not price as one building's interior. Never below the footprint, so a one-story building keeps its price.
+  const interiorArea = Math.max(
+    footprint,
+    !explicitFootprint && measuredTotal !== null ? measuredTotal : Math.min(measuredTotal ?? stackedFootprint, stackedFootprint),
+  );
   return {
     footprint,
+    interiorArea,
     perimeter,
     perimeterExplicit,
     footprintSource: res.source,
@@ -3441,7 +3491,10 @@ function resolveCommercialPestFootprint(property = {}) {
 
 function priceCommercialPest(property = {}, options = {}) {
   const cfg = COMMERCIAL_PEST;
-  const { footprint, perimeter, perimeterExplicit, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
+  const { footprint, interiorArea: totalInteriorArea, perimeter, perimeterExplicit, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
+  // Interior labor and material scale with the TOTAL interior area; the exterior terms stay on the footprint and
+  // perimeter. A stored estimate replayed as sold (options.legacyInteriorFootprint) keeps the footprint basis.
+  const interiorArea = options.legacyInteriorFootprint === true ? footprint : totalInteriorArea;
   // Risk-type cadence override (office 4/yr … restaurant 12/yr); default 12.
   const visits = Number.isFinite(options.pestVisits) && options.pestVisits > 0 ? options.pestVisits : cfg.programVisits;
   // Interior service is customer-selectable (on by default, owner 2026-08-17).
@@ -3501,9 +3554,9 @@ function priceCommercialPest(property = {}, options = {}) {
   // Interior service component: footprint-driven treatment time + product.
   // No overhead/drive/admin share — those ride the exterior base.
   const intMaterialPerVisit = cfg.interior.materialPerVisitBase
-    + cfg.interior.materialPerKSqFtPerVisit * (footprint / 1000);
+    + cfg.interior.materialPerKSqFtPerVisit * (interiorArea / 1000);
   const intOnSiteMin = cfg.interior.laborMinutesBase
-    + cfg.interior.laborMinutesPerKSqFt * (footprint / 1000);
+    + cfg.interior.laborMinutesPerKSqFt * (interiorArea / 1000);
   const intLaborPerVisit = GLOBAL.LABOR_RATE * (intOnSiteMin / 60);
 
   const materialPerVisit = extMaterialPerVisit + intMaterialPerVisit;
@@ -3600,6 +3653,7 @@ function priceCommercialPest(property = {}, options = {}) {
     disclaimer: 'Estimated from property data — final price confirmed on site.',
     footprint,
     footprintUsed: footprint,
+    interiorAreaUsed: interiorArea,
     footprintSource,
     footprintEstimated: defaulted,
     perimeter: roundMoney(perimeter),
@@ -4598,8 +4652,11 @@ function pricePalmInjection(property, options) {
     throw new Error(`Unsupported palm treatment pricing type: ${treatment.pricingType}`);
   }
 
+  // The quote-time minimum rides the saved row (minPerVisit) so a replay prices under the minimum the quote was sold
+  // with, never a later Settings edit (options.minPerVisit, input.palmMinPerVisitReplay in estimate-engine.js).
+  const minPerVisit = Number(options.minPerVisit) > 0 ? Number(options.minPerVisit) : PALM.minPerVisit;
   const rawPerVisit = roundCurrency(pricePerPalm * palmCount);
-  const perVisit = roundCurrency(Math.max(rawPerVisit, PALM.minPerVisit));
+  const perVisit = roundCurrency(Math.max(rawPerVisit, minPerVisit));
   const minimumApplied = perVisit > rawPerVisit;
   const minimumShortfallPerVisit = minimumApplied ? roundCurrency(perVisit - rawPerVisit) : 0;
   const rawAnnual = roundCurrency(rawPerVisit * appsPerYear);
@@ -4628,6 +4685,7 @@ function pricePalmInjection(property, options) {
 
     rawPerVisit,
     perVisit,
+    minPerVisit,
     minimumApplied,
     minimumShortfallPerVisit,
 
@@ -6746,7 +6804,17 @@ function priceOneTimeLawn(property, options = {}) {
     // recurring program minimum (a floor on sold PLANS) must not inflate it.
     applyProgramMinimum: false,
   });
-  const base = Math.max(ONE_TIME.lawn.floor, Math.round(lawnResult.perApp * ONE_TIME.lawn.oneTimeMultiplier));
+  // Flat-stretch rise (owner 2026-11-26): only on the plain market anchor, and never for a stored estimate
+  // replayed as sold (options.legacyOneTimePlateau), which keeps the price it was quoted at.
+  const plateauMonthly = options.legacyOneTimePlateau === true || lawnResult.pricingSource !== 'MARKET_TABLE'
+    || lawnResult.pricingBasis !== 'TABLE_INTERPOLATION' || lawnResult.bermudaSuppressionPerApp
+    ? null
+    : oneTimeLawnPlateauMonthly(lawnResult.lawnSqFt, lawnResult.track);
+  const tableMonthly = Number(lawnResult.perApp) * LAWN_TIERS.standard.freq / 12;
+  const anchorPerApp = plateauMonthly !== null && plateauMonthly > tableMonthly
+    ? plateauMonthly * 12 / LAWN_TIERS.standard.freq
+    : lawnResult.perApp;
+  const base = Math.max(ONE_TIME.lawn.floor, Math.round(anchorPerApp * ONE_TIME.lawn.oneTimeMultiplier));
 
   const treatMult = ONE_TIME.lawn.treatmentMultipliers[normalizedTreatment] || 1.0;
   const preUrgencyPrice = applyOneTimeFloor(Math.round(base * treatMult), ONE_TIME.lawn.floor);
@@ -9594,7 +9662,7 @@ function pricePlugging(lawnSqFt, spacing = 12, options = {}) {
   const cost = totalPlugs * cfg.costPerPlug + (totalPlugs / cfg.laborPerPlugs) * GLOBAL.LABOR_RATE;
   // v2 parity: raw floor 250 (not r'd), raw margin 1 - 0.45 = 0.55
   let price = Math.max(250, Math.round(cost / 0.55));
-  price = applyUrgency(price, urgency, afterHours);
+  price = applyUrgency(price, urgency, afterHours, options.legacyUrgency === true);
   const perSf = Math.round(price / Math.max(1, lawnSqFt) * 100) / 100;
   return {
     service: 'plugging',
@@ -9659,7 +9727,7 @@ function priceFoamDrill(points = 5, options = {}) {
   const cost = tier.cans * cfg.canCost + tier.laborHrs * GLOBAL.LABOR_RATE + cfg.bitsCost;
   // Floor removed (owner directive 2026-06-25): true tiered cost ÷ margin.
   let price = Math.max(cfg.floor, Math.round(cost / cfg.marginDivisor));
-  price = applyUrgency(price, urgency, afterHours);
+  price = applyUrgency(price, urgency, afterHours, options.legacyUrgency === true);
   const label = foamDrillTierLabel(tier);
   return {
     service: 'foam_drill',
@@ -9848,16 +9916,26 @@ function priceStingingInsect(options = {}) {
     price += add; mods.push(`+$${add} confined`);
   }
 
-  if (urgency === 'SOON') { price += 75; mods.push('+$75 same-day'); }
-  else if (urgency === 'URGENT') { price = Math.round(price * 1.5); mods.push('+50% emergency'); }
-  if (afterHours) { price += 75; mods.push('+$75 after-hours'); }
-
   let removalPrice = 0, removalLabel = '';
   // v2 parity: raw removal values
   if (removal === 'SMALL') { removalPrice = 75; removalLabel = 'Small nest'; }
   else if (removal === 'LARGE') { removalPrice = 250; removalLabel = 'Large comb'; }
   else if (removal === 'HONEYCOMB') { removalPrice = 375; removalLabel = 'Honeycomb extraction'; }
   else if (removal === 'RELOCATE') { removalPrice = 450; removalLabel = 'Live bee relocation'; }
+
+  // The urgent multiplier covers the base AND the removal add-on (owner 2026-11-26). Before, it ran before the
+  // removal was added, so removal escaped the increase. options.legacyUrgentRemoval keeps an estimate priced
+  // before this change at the figure it was priced with (input.legacyPricingRules, estimate-engine.js).
+  // The urgency word is matched upper-case for a new quote; an estimate priced before this change
+  // (options.legacyUrgentRemoval, input.legacyPricingRules) keeps the case-sensitive match it was priced with.
+  const urgencyKey = options.legacyUrgentRemoval === true ? urgency : String(urgency || '').toUpperCase();
+  if (urgencyKey === 'SOON') { price += 75; mods.push('+$75 same-day'); }
+  else if (urgencyKey === 'URGENT') {
+    const covered = options.legacyUrgentRemoval === true ? 0 : removalPrice;
+    price = Math.round((price + covered) * 1.5) - covered;
+    mods.push('+50% emergency');
+  }
+  if (afterHours) { price += 75; mods.push('+$75 after-hours'); }
 
   const total = price + removalPrice;
   const highRiskRemovalSelected = removalPrice > 0 || mods.length > 0;
@@ -9944,7 +10022,7 @@ function priceExclusion(options = {}) {
   const minimumFloor = minBracket.minimum;
 
   const epSubtotal = Math.max(minimumFloor, Math.round(rawSubtotal / 10) * 10);
-  const subtotalWithUrgency = applyUrgency(epSubtotal, urgency, afterHours);
+  const subtotalWithUrgency = applyUrgency(epSubtotal, urgency, afterHours, options.legacyUrgency === true);
 
   // Inspection waiver: explicit waive, OR any-rodent-service opt-in (legacy),
   // OR approved-total over the waiver threshold.
@@ -10157,7 +10235,7 @@ function priceRodentExclusionV2(options = {}) {
   const floor = exclusionJobFloor(cfg, wholeHome, totalLinearMeshLF);
 
   const installPrice = Math.max(floor, Math.round(rawInstall));
-  const installWithUrgency = applyUrgency(installPrice, urgency, afterHours);
+  const installWithUrgency = applyUrgency(installPrice, urgency, afterHours, options.legacyUrgency === true);
 
   const inspectionWaived =
     waiveInspection ||
@@ -10711,6 +10789,7 @@ function applyRodentBundle(componentTotal, bundle) {
 module.exports = {
   assertFinitePriceFields,
   barrelMeasurementHold,
+  oneTimeLawnPlateauMonthly,
   calcBermudaRemovalAnnualCost,
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,

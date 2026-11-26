@@ -192,6 +192,56 @@ function savedLawnMinimumAfterDiscountSignal(estData) {
   return { lawnMinimumPerVisitAfterDiscount: stamped ?? 0 };
 }
 
+// ── price rules fixed 2026-11-26 ────────────────────────────────
+
+// Which price rules a saved quote was priced with (owner 2026-11-26, "fix all seven": palm credit minimum, one-time
+// lawn flat-stretch rise, barrel hold, commercial interior area, urgent removal). The engine stamps pricingMetadata.legacyPricingRules on every run: false = priced under the fixes, true
+// = replayed on the rules before them. An estimate with priced lines and no stamp was priced before the fixes and pins
+// the old rules, so a quote already sent never moves; an estimate with no priced lines pins nothing, so a service
+// added later takes the current rules (new quotes only). Same shape as savedLawnMinimumAfterDiscountSignal.
+// A line that carries a price. A quote-required placeholder (null prices) is not evidence the quote was priced.
+const lineCarriesPrice = (line) => !!line && typeof line === 'object'
+  && ['price', 'amount', 'annual', 'monthly', 'total', 'perApp', 'annualAfterDiscount', 'monthlyAfterDiscount', 'priceAfterDiscount',
+    'oneTimeTotal', 'anchorOneTimePrice', 'monthlyTotal', 'annualTotal']
+    .some((key) => Number(line[key]) > 0);
+
+function savedLegacyPricingRulesSignal(estData) {
+  // The authoritative stored container only (a revision can keep a stale engineResult beside the current result).
+  const container = require('./estimate-result-container').storedEstimateContainer(estData) || estData || {};
+  const metadataFlag = [container.pricingMetadata, container.routingMetadata]
+    .map((m) => m?.legacyPricingRules)
+    .find((flag) => typeof flag === 'boolean');
+  if (metadataFlag !== undefined) {
+    // The services a legacy estimate priced under the CURRENT rules (added after the fixes): they keep them across revisions.
+    const current = [container.pricingMetadata, container.routingMetadata]
+      .map((m) => m?.currentRulesServices).find((list) => Array.isArray(list));
+    return { legacyPricingRules: metadataFlag, currentRulesServices: current };
+  }
+  // A save path that keeps the lines but drops pricingMetadata: the lines the fixes touch carry the same stamp.
+  const lineFlag = [].concat(container.lineItems || [])
+    .map((line) => line?.legacyPricingRules)
+    .find((flag) => typeof flag === 'boolean');
+  if (lineFlag !== undefined) return { legacyPricingRules: lineFlag };
+  // A sent estimate can hold its prices only in the frozen send snapshot (stamped when the snapshot was built).
+  const snapshot = estData?.sendSnapshot && typeof estData.sendSnapshot === 'object' ? estData.sendSnapshot : null;
+  if (typeof snapshot?.legacyPricingRules === 'boolean') return { legacyPricingRules: snapshot.legacyPricingRules };
+  // Priced in any saved shape: engine lines, the keyed v1 results, the older one-time / recurring containers, the
+  // specialty rows (oneTime.specItems, specItems) or the frozen pricing bundle of a sent estimate.
+  const bundle = snapshot?.pricingBundle && typeof snapshot.pricingBundle === 'object' ? snapshot.pricingBundle : null;
+  // The audit's own priced-line detector; a failing detector never blocks a send, the shape checks below still run.
+  let auditedPriced = false;
+  try { auditedPriced = require('./estimate-pricing-audit').hasPricedLines(container) === true; } catch { auditedPriced = false; }
+  const priced = auditedPriced
+    || [].concat(container.lineItems || [], container.specItems || [], container.oneTime?.items || [],
+      container.oneTime?.specItems || [], container.recurring?.services || []).some(lineCarriesPrice)
+    || Object.values(container.results || {}).some((v) => v && (Array.isArray(v) ? v.length > 0 : true))
+    || (!!bundle && [].concat(bundle, bundle.oneTimeBreakdown?.items || [], bundle.services || [], bundle.frequencies || [])
+      .some(lineCarriesPrice));
+  // No evidence: the key is explicitly undefined so a value left in the stored engineInputs never selects the old
+  // rules (the public replay spreads these over the inputs).
+  return priced ? { legacyPricingRules: true } : { legacyPricingRules: undefined };
+}
+
 // ── the shared signal set ───────────────────────────────────────
 
 // Every saved floor signal this estimate carries, as engine INPUT-level keys.
@@ -215,13 +265,18 @@ function savedFloorReplaySignals(estData) {
   const palmRemoval = (Array.isArray(saved.serviceOptOut?.events) ? saved.serviceOptOut.events : [])
     .filter((event) => event?.serviceKey === 'palm_injection' && event.included === false).pop();
   const palmMode = palm ? palm.annualRounding : palmRemoval?.provenance?.floorSignals?.palmAnnualRounding;
+  const savedMinimum = Number(palm ? palm.minPerVisit : palmRemoval?.provenance?.floorSignals?.palmMinPerVisitReplay);
   const signals = { palmAnnualRounding: palm || palmRemoval ? (palmMode === 'cents' ? 'cents' : 'whole') : undefined };
+  // The per-visit palm minimum the saved quote was priced with (a replay never takes a later Settings edit).
+  // A removed palm line keeps it in the removal event, so a restore prices under the same minimum.
+  signals.palmMinPerVisitReplay = savedMinimum > 0 ? savedMinimum : undefined;
   const lawnArm = estimateLawnFloorArmed(estData);
   if (typeof lawnArm === 'boolean') signals.useLawnCostFloor = lawnArm;
   Object.assign(signals, savedLawnCostPlusSignal(estData));
   const minSignal = require('./estimate-converter').estimateLawnProgramMinimumSignal(estData);
   if (minSignal != null) signals.lawnProgramMinimumMonthly = minSignal;
   Object.assign(signals, savedLawnMinimumAfterDiscountSignal(estData));
+  Object.assign(signals, savedLegacyPricingRulesSignal(estData));
   const pest = estimatePestFloorSignal(estData);
   if (typeof pest.armed === 'boolean') signals.pestProgramFloorArmed = pest.armed;
   if (pest.perVisit != null) signals.pestProgramFloorPerVisit = pest.perVisit;
@@ -235,5 +290,6 @@ module.exports = {
   lawnRowsShowFloorEnforcement,
   estimatePestFloorSignal,
   savedLawnMinimumAfterDiscountSignal,
+  savedLegacyPricingRulesSignal,
   savedFloorReplaySignals,
 };
