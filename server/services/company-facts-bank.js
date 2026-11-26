@@ -86,17 +86,20 @@ const SAFETY_CLAIM_RE = /\bsafe(?:r|st|ly)?\b|\bnon[\s-]?toxic\b|\bharmless\b|\b
 // policy, and every attempt to tell a price from a count by wording kept leaking). So the text may hold no digit of any script (any
 // Unicode decimal digit or other number character: fullwidth, Arabic-Indic, superscripts, vulgar fractions such as a half sign) and no
 // number word: zero to nineteen, the tens, hundred, thousand, million, billion, dozen, couple, and the multiplying or fraction words
-// half/halves, quarter(s), third(s) (but not "third-party"), twice, thrice, double, triple, quadruple. NO exception for clock times:
+// half/halves, quarter(s), every fraction denominator (third(s) but not "third-party", fourth ... twelfth, tenths, hundredth), twice, thrice,
+// double, triple, quadruple, and the named clock times noon, midday, midnight and o'clock. NO exception for clock times:
 // "Office opens at nine a.m." blocks (intended; the owner rewords). "Quarterly", "monthly", "weekly", "once", "first" and "second" are
 // not numbers. "Prices" and "rates" are not numbers either: the screens for those words are the soft warnings.
 const UNIT_WORD = 'one|two|three|four|five|six|seven|eight|nine';
 const TEEN_WORD = 'ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen';
-const NUMBER_WORD_RE = new RegExp(`\\b(?:zero|${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|dozen|couple|half|halves|quarters?|thirds?(?![-\\s]party\\b)|twice|thrice|double|triple|quadruple)\\b`, 'gi');
-const NUMBER_CHAR_RE = /[\p{Nd}\p{No}]/u;
-// "one" as a pronoun or in a compound is not a number: "one of our techs", "one another", "no one", "this one", "which one", "one-time".
-// ("anyone", "someone" and "everyone" never match \b one \b.) A counting "one" ("one visit", "one acre") still blocks.
+// Fraction denominators and large ordinals ("a fifth", "one-eighth", "tenths", "hundredth"): "first" and "second" are not among them.
+const DENOMINATOR_WORD = "(?:fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|(?:thir|four|fif|six|seven|eigh|nine)teenth|(?:twen|thir|for|fif|six|seven|eigh|nine)tieth|hundredth|thousandth|millionth)s?";
+const NUMBER_WORD_RE = new RegExp(`\\b(?:zero|${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|dozen|couple|half|halves|quarters?|thirds?(?![-\\s]party\\b)|${DENOMINATOR_WORD}|twice|thrice|double|triple|quadruple|noon|noontime|midday|midnight|o'?clock)\\b`, 'gi');
+const NUMBER_CHAR_RE = /\p{N}/u; // decimal digits (Nd), letter numbers such as Roman numeral characters (Nl), other numbers (No)
+// "one" passes only in these fixed phrases: "one of", "one another", "no one", "one-time", "one-off". ("anyone", "someone" and "everyone"
+// never match \b one \b.) Every other "one" counts, so "every one business day", "each one visit" and "this one" block (intended).
 const ONE_PRONOUN_AFTER_RE = /^(?:\s+(?:of|another)\b|-(?:time|off)\b)/i;
-const ONE_PRONOUN_BEFORE_RE = /\b(?:no|this|that|which|each|every)\s+$/i;
+const ONE_PRONOUN_BEFORE_RE = /\bno\s+$/i;
 
 /** True when the text states an amount: any digit or number character, or any number word. */
 function hasNumberInFact(text) {
@@ -409,11 +412,34 @@ async function editApprovedRow(trx, row, f, actor) {
 }
 
 /** A draft is edited in place; an approved row is never touched: its edit is a NEW draft that supersedes it. */
+/** What the editor (or the discard button) saw when it opened, as sent: { baseTextSha256, baseUpdatedAt, expectStatus }, every part optional. */
+function openedState(input) {
+  const open = input && typeof input === 'object' ? input : {};
+  return {
+    base: typeof open.baseTextSha256 === 'string' ? open.baseTextSha256.trim().toLowerCase() : '',
+    baseUpdatedAt: typeof open.baseUpdatedAt === 'string' ? Date.parse(open.baseUpdatedAt) : NaN,
+    expectStatus: ['draft', 'approved'].includes(open.expectStatus) ? open.expectStatus : '',
+  };
+}
+
+/** Under the row lock: the row must still be the one that was opened. Status first, then the wording, then any other field. */
+function assertRowAsOpened(row, { base, baseUpdatedAt, expectStatus }) {
+  // A draft that was approved meanwhile is never "edited" into a replacement draft.
+  if (expectStatus && expectStatus !== row.status) throw new FactError('STATUS_CHANGED', 409, { status: row.status });
+  // The wording it opened: a concurrent edit of the wording is refused, never overwritten.
+  if (base && base !== row.text_sha256) throw new FactError('STALE_TEXT', 409);
+  // The row as it was when opened (its updated_at, which every write moves; milliseconds, the precision JSON carries): a concurrent edit of
+  // any field, such as the owner's words, is refused too.
+  if (!Number.isNaN(baseUpdatedAt) && baseUpdatedAt !== new Date(row.updated_at).getTime()) throw new FactError('STALE_FACT', 409);
+}
+
 async function editFact(id, patch, actor, { dbi = db } = {}) {
   const f = cleanFields(patch, { requireAll: false });
+  const opened = openedState(patch);
   return dbi.transaction(async (trx) => {
     const row = await lockFact(trx, id);
     if (row.status === 'retired') throw new FactError('RETIRED_USE_RESTORE', 409);
+    assertRowAsOpened(row, opened);
     return row.status === 'draft' ? editDraftRow(trx, row, f, actor) : editApprovedRow(trx, row, f, actor);
   });
 }
@@ -437,10 +463,13 @@ async function restoreAsDraft(id, actor, { dbi = db } = {}) {
   });
 }
 
-async function discardDraft(id, actor, { dbi = db } = {}) {
+/** `baseTextSha256` and `baseUpdatedAt` (what the page showed when Discard was pressed): another admin's newer version is never deleted. */
+async function discardDraft(id, actor, { dbi = db, baseTextSha256, baseUpdatedAt } = {}) {
+  const opened = openedState({ baseTextSha256, baseUpdatedAt });
   return dbi.transaction(async (trx) => {
     const row = await lockFact(trx, id);
     if (row.status !== 'draft') throw new FactError('NOT_A_DRAFT', 409);
+    assertRowAsOpened(row, opened);
     await trx('company_fact_bank').where({ id }).del();
     await addEvent(trx, id, 'discarded', actor, { text_sha256: row.text_sha256 });
     return { id, discarded: true };
@@ -456,7 +485,7 @@ async function approvedTextsExcept(trx, excludeId) {
 }
 
 /** Every approve-time check, on the server. Throws BLOCKED (with codes) or WARNINGS_NOT_ACKNOWLEDGED. */
-async function approveChecks(trx, row, { acknowledgeWarnings }) {
+async function approveChecks(trx, row, { acknowledgeWarnings, reviewedWarnings = null }) {
   // Other drafts count too, as in the draft check: a case or punctuation variant of this line must be discarded before this one is approved.
   const ctx = await loadCheckContext(trx, { statuses: ['draft', 'approved'], excludeIds: [row.id, row.supersedes_id] });
   const check = checkFactText(row.fact_text, ctx);
@@ -464,7 +493,9 @@ async function approveChecks(trx, row, { acknowledgeWarnings }) {
   if (others.length >= MAX_ACTIVE_FACTS) check.blocks.push('bank_full');
   if (!check.blocks.length && sectionHasBannedCopy([...others.map((o) => o.text), row.fact_text])) check.blocks.push('section_banned_copy');
   if (check.blocks.length) throw new FactError('BLOCKED', 422, { blocks: check.blocks, warnings: check.warnings.map((w) => w.code) });
-  if (check.warnings.length && !acknowledgeWarnings) {
+  // A tick covers the warnings the owner saw: one the checks found since (a widened screen, a changed bank) needs its own look.
+  const unseen = reviewedWarnings ? check.warnings.some((w) => !reviewedWarnings.includes(w.code)) : false;
+  if (check.warnings.length && (!acknowledgeWarnings || unseen)) {
     throw new FactError('WARNINGS_NOT_ACKNOWLEDGED', 409, { warnings: check.warnings });
   }
   return check;
@@ -491,6 +522,8 @@ async function approveFact(id, input, actor, { dbi = db } = {}) {
   if (!actor || !actor.isOwner || !actor.id) throw new FactError('OWNER_ONLY', 403);
   const ownerWords = cleanLine(input && input.ownerWords, 500) || null;
   const acknowledgeWarnings = Boolean(input) && input.acknowledgeWarnings === true;
+  // Optional: the warning codes the owner was shown and ticked for. When sent, every warning the server finds now must be among them.
+  const reviewedWarnings = Array.isArray(input && input.reviewedWarnings) ? input.reviewedWarnings.filter((c) => typeof c === 'string') : null;
   const reviewedSha = input && typeof input.textSha256 === 'string' ? input.textSha256.trim().toLowerCase() : '';
   if (!reviewedSha) throw new FactError('REVIEWED_TEXT_REQUIRED', 400);
   const approved = await dbi.transaction(async (trx) => {
@@ -505,7 +538,7 @@ async function approveFact(id, input, actor, { dbi = db } = {}) {
     const lockedSha = sha256(String(row.fact_text || '').trim());
     if (lockedSha !== reviewedSha) throw new FactError('STALE_TEXT', 409);
     if (row.text_sha256 !== lockedSha) throw new FactError('HASH_MISMATCH', 409);
-    const check = await approveChecks(trx, row, { acknowledgeWarnings });
+    const check = await approveChecks(trx, row, { acknowledgeWarnings, reviewedWarnings });
     const supersededId = await retireSuperseded(trx, row, actor);
     const [updated] = await trx('company_fact_bank').where({ id }).update({
       status: 'approved',
@@ -598,7 +631,8 @@ async function getFact(id, { dbi = db } = {}) {
 
 /** Every event of one fact, oldest first. Also answers for a discarded draft (events outlive the row). */
 async function factHistory(id, { dbi = db } = {}) {
-  return dbi('company_fact_bank_events').where({ fact_id: id }).orderBy([{ column: 'at', order: 'asc' }, { column: 'id', order: 'asc' }]).select('*');
+  return dbi('company_fact_bank_events as e').leftJoin('technicians as t', 't.id', 'e.actor_id').where('e.fact_id', id)
+    .orderBy([{ column: 'e.at', order: 'asc' }, { column: 'e.id', order: 'asc' }]).select('e.*', 't.name as actor_name');
 }
 
 /* ── Snapshot ─────────────────────────────────────────────────────────── */
@@ -648,7 +682,7 @@ function loadProblem(row, check, approvers) {
 }
 
 /** The approved rows that still pass every hard block and carry their approval, in approval order, at most MAX_ACTIVE_FACTS. */
-async function loadVerifiedFacts(dbi) {
+async function verifyApprovedRows(dbi) {
   const rows = await dbi('company_fact_bank').where({ status: 'approved' }).orderBy([{ column: 'approved_at', order: 'asc' }, { column: 'id', order: 'asc' }]).select('*');
   const base = await loadCheckContext(dbi, { statuses: [], excludeIds: [] });
   const approvers = await readApprovers(dbi, rows.map((r) => r.id));
@@ -672,8 +706,10 @@ async function loadVerifiedFacts(dbi) {
   const dropKey = dropped.join(',');
   if (dropKey && dropKey !== lastDropKey) logger.error(`[company-facts-bank] approved rows dropped at load (codes only): ${dropKey}`);
   lastDropKey = dropKey;
-  return Object.freeze(kept);
+  return { kept: Object.freeze(kept), consideredIds: rows.map((r) => r.id) };
 }
+
+const loadVerifiedFacts = async (dbi) => (await verifyApprovedRows(dbi)).kept;
 
 /**
  * Reload the snapshot. A failed read keeps the last copy (it ages out after STALE_MS). A read is applied only when no
@@ -697,6 +733,15 @@ async function refreshBankFacts({ dbi = db, now = Date.now } = {}) {
   // Through the age-checked getter: a failed read must not hand a caller a copy past its five minutes.
   return getApprovedBankFacts({ now: now() });
 }
+
+/**
+ * A fresh, verified read of the approved rows (what a snapshot load would keep), without touching the snapshot. Throws when the read fails.
+ * Answers { facts, consideredIds } from ONE read: every approved row it looked at, and the ones it kept.
+ */
+const readVerifiedFacts = async ({ dbi = db } = {}) => {
+  const { kept, consideredIds } = await verifyApprovedRows(dbi);
+  return { facts: kept, consideredIds };
+};
 
 /** The approved lines every reader may use right now. SYNC. Empty before the first load and after STALE_MS. */
 function getApprovedBankFacts({ now = Date.now() } = {}) {
@@ -744,6 +789,7 @@ module.exports = {
   getFact,
   factHistory,
   getApprovedBankFacts,
+  readVerifiedFacts,
   refreshBankFacts,
   renderBankFactsLines,
   bankVersionHash,

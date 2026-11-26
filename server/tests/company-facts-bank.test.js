@@ -185,6 +185,25 @@ describe('hard blocks', () => {
     ['a third', 'We treat a third of the yard.'],
     ['thirds', 'We treat the yard in thirds.'],
     ['halves', 'We treat the yard in halves.'],
+    // Denominators, named clock times, Roman numeral characters, and a counting "one" next to a unit.
+    ['a fifth', 'The deposit is a fifth of the total.'],
+    ['one-eighth', 'We treat the yard in one-eighth sections.'],
+    ['eighths', 'We treat the yard in eighths.'],
+    ['tenths', 'We treat it in tenths.'],
+    ['a hundredth', 'We measure to a hundredth.'],
+    ['fourth', 'We treat the yard on the fourth visit.'],
+    ['twelfth', 'We treat the twelfth section.'],
+    ['noon', 'We close at noon.'],
+    ['midnight', 'Our line is open until midnight.'],
+    ['midday', 'We call back by midday.'],
+    ["o'clock alone", "We close at o'clock sharp."],
+    ['a quarter past', 'We arrive a quarter past the hour.'],
+    ['half past', 'We arrive half past the hour.'],
+    ['a Roman numeral character', 'We cover zone \u2163.'],
+    ['a small Roman numeral character', 'We cover zone \u2173.'],
+    ['every one business day', 'We return every one business day.'],
+    ['each one visit', 'We treat each one visit separately.'],
+    ['this one', 'This one is included.'],
   ])('number_in_fact blocks %s (intended)', (_label, text) => {
     expect(blocksOf(text)).toContain('number_in_fact');
   });
@@ -194,13 +213,12 @@ describe('hard blocks', () => {
     'We work with a third-party lab, and a third party checks it.',
     'We came out once and will come back.',
     'Quarterly service keeps pests away.',
+    'The first visit and the second visit are the same.',
+    'We treat the front yard first and the back yard second.',
     'One of our techs will call you back.',
     'Ask one another.',
     'There is no one at the office overnight.',
     'Anyone can call, and someone will answer.',
-    'This one is included, and so is that one.',
-    'Which one do you need?',
-    'Each one is checked by a technician.',
     'We offer a one-time service and a one-off visit.',
     'A technician comes by, and an inspection is included.',
     'The first visit and the second visit follow the same steps.',
@@ -281,6 +299,116 @@ describe('approve is owner only in the service too', () => {
   });
 });
 
+// The admin page (client/src/pages/admin/knowledge-base/company-facts/factHash.js) sends SHA-256 hex of the UTF-8 bytes of the text it
+// shows, trimmed. These are the same vectors and digests as factHash.test.js there: both suites passing means the two agree.
+describe('the reviewed text hash the page sends', () => {
+  const VECTORS = [
+    ['We service Parrish.', 'c57a55f5bdf7d857dde8598b504227e47e0884a02575db5b0e3d4bd3e79e0844'],
+    ['  We service Parrish.  \n', 'c57a55f5bdf7d857dde8598b504227e47e0884a02575db5b0e3d4bd3e79e0844'],
+    ['Café opens early — niño, naïve, 日本語, 🦟 bugs.', 'c185faf759bc6a38d33c76975557af29856c3c47e8e4af1003ec6d846f09a311'],
+    ['', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'],
+    ['Tab\tinside', 'a8341bbb0dbef7ce24463a17edf0b5cb2b649f8baf6720de50ca6011d1337859'],
+    ['\u00a0nbsp edge\u00a0', 'cf76e3929646075b6442b7da2805bad8930fdae9a258df83eac09a64e3ff0b66'],
+    ['a\u200bb', '8df62aef5f92e4c30c0c938497f55f60078c361a476e7e0448485194ad79f884'],
+    ['e\u0301 vs \u00e9', '832caca12d18b70335221a2f851239bcaf2705d20438fbd146adffdf6099865d'],
+  ];
+  const ID = '00000000-0000-4000-8000-000000000001';
+  const owner = { id: 'o1', isOwner: true };
+
+  // A fake transaction that serves the locked row, then fails the first check read (CATALOG_UNAVAILABLE): getting that far means the hash gate passed.
+  const dbFor = (text) => {
+    const row = { id: ID, status: 'draft', fact_text: text, text_sha256: sha256(String(text).trim()), updated_at: new Date('2026-11-25T15:00:00.123Z') };
+    const trx = (table) => {
+      if (table !== 'company_fact_bank') throw new Error('past the hash gate');
+      return { where: () => ({ forUpdate: () => ({ first: async () => row }) }) };
+    };
+    trx.raw = async () => ({});
+    return { transaction: (work) => work(trx) };
+  };
+
+  test.each(VECTORS)('the page hash of %j is the hash the server computes', (text, digest) => {
+    expect(sha256(String(text).trim())).toBe(digest);
+  });
+
+  test('an edit that carries the hash of the wording the editor opened is refused when the wording changed since, and passes when it did not', async () => {
+    const text = 'We service Parrish.';
+    const opened = sha256(text);
+    await expect(Bank.editFact(ID, { topic: 'Areas', baseTextSha256: VECTORS[3][1] }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STALE_TEXT', status: 409 });
+    await expect(Bank.editFact(ID, { topic: 'Areas', baseTextSha256: opened.toUpperCase() }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
+    // No base hash (an older caller): nothing to compare, the edit goes on.
+    await expect(Bank.editFact(ID, { topic: 'Areas' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
+  });
+
+  test('an edit carries the row version and status it opened: a concurrent change of any field, or an approval meanwhile, is refused under the lock', async () => {
+    const text = 'We service Parrish.';
+    const opened = { baseTextSha256: sha256(text), baseUpdatedAt: '2026-11-25T15:00:00.123Z', expectStatus: 'draft' };
+    // Another admin saved the owner's words after this editor opened the draft: the text hash is unchanged, the version is not.
+    await expect(Bank.editFact(ID, { topic: 'Areas', ...opened, baseUpdatedAt: '2026-11-25T14:59:00.000Z' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STALE_FACT', status: 409 });
+    // The owner approved it meanwhile: this is not an in-place edit any more, and must not become a replacement draft.
+    await expect(Bank.editFact(ID, { topic: 'Areas', ...opened, expectStatus: 'approved' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STATUS_CHANGED', status: 409, detail: { status: 'draft' } });
+    // Unchanged row and status (microseconds in the sent time are beyond what JSON carries): the edit goes on.
+    await expect(Bank.editFact(ID, { topic: 'Areas', ...opened, baseUpdatedAt: '2026-11-25T15:00:00.123456Z' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
+    // A changed wording is still reported as STALE_TEXT first.
+    await expect(Bank.editFact(ID, { topic: 'Areas', ...opened, baseTextSha256: VECTORS[3][1], baseUpdatedAt: '2026-11-25T14:59:00.000Z' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STALE_TEXT' });
+  });
+
+  test('a discard carries what the page showed: another admin\'s newer draft is not deleted', async () => {
+    const text = 'We service Parrish.';
+    const deleted = [];
+    const dbDiscard = () => {
+      const row = { id: ID, status: 'draft', fact_text: text, text_sha256: sha256(text), updated_at: new Date('2026-11-25T15:00:00.123Z') };
+      const trx = (table) => ({
+        where: () => ({ forUpdate: () => ({ first: async () => row }), del: async () => { deleted.push(table); } }),
+        insert: async () => [],
+      });
+      trx.raw = () => 'now';
+      return { transaction: (work) => work(trx) };
+    };
+    await expect(Bank.discardDraft(ID, owner, { dbi: dbDiscard(), baseTextSha256: sha256(text), baseUpdatedAt: '2026-11-25T14:00:00.000Z' })).rejects.toMatchObject({ code: 'STALE_FACT', status: 409 });
+    await expect(Bank.discardDraft(ID, owner, { dbi: dbDiscard(), baseTextSha256: VECTORS[3][1], baseUpdatedAt: '2026-11-25T15:00:00.123Z' })).rejects.toMatchObject({ code: 'STALE_TEXT' });
+    expect(deleted).toEqual([]);
+    await expect(Bank.discardDraft(ID, owner, { dbi: dbDiscard(), baseTextSha256: sha256(text), baseUpdatedAt: '2026-11-25T15:00:00.123Z' })).resolves.toEqual({ id: ID, discarded: true });
+    expect(deleted).toEqual(['company_fact_bank']);
+  });
+
+  // A transaction that answers every read with "nothing" and the locked draft with `row`, enough to reach the approve checks.
+  const approveDb = (text) => {
+    const row = { id: ID, status: 'draft', fact_text: text, text_sha256: sha256(text.trim()), supersedes_id: null };
+    const chain = (table) => {
+      const q = new Proxy({}, {
+        get: (_t, prop) => {
+          if (prop === 'first') return async () => (table === 'company_fact_bank' ? row : undefined);
+          if (prop === 'then') return (resolve) => resolve([]);
+          return () => q;
+        },
+      });
+      return q;
+    };
+    chain.raw = async () => ({});
+    return { transaction: (work) => work(chain) };
+  };
+
+  test('a tick covers only the warnings the owner saw: a warning found now that was not reviewed is refused', async () => {
+    const text = 'We can reschedule a visit when the weather turns.';
+    const found = Bank.checkFactText(text, { productNames: [], codeKeys: new Set(), bankKeys: new Set() });
+    expect(found.blocks).toEqual([]);
+    const codes = found.warnings.map((w) => w.code);
+    expect(codes).toContain('promise_words');
+    const input = (reviewedWarnings) => ({ textSha256: sha256(text), acknowledgeWarnings: true, ...(reviewedWarnings ? { reviewedWarnings } : {}) });
+    await expect(Bank.approveFact(ID, input(['price_words']), owner, { dbi: approveDb(text) })).rejects.toMatchObject({ code: 'WARNINGS_NOT_ACKNOWLEDGED', status: 409, detail: { warnings: expect.any(Array) } });
+    // Reviewed codes that cover what was found (or none sent, as an older page does) get past the warning gate.
+    for (const sent of [input(codes), input()]) {
+      const outcome = await Bank.approveFact(ID, sent, owner, { dbi: approveDb(text) }).then(() => 'ok', (err) => err.code);
+      expect(outcome).not.toBe('WARNINGS_NOT_ACKNOWLEDGED');
+    }
+  });
+
+  test.each(VECTORS.filter(([text]) => text.trim()))('approve accepts the page hash of %j and refuses another wording', async (text, digest) => {
+    await expect(Bank.approveFact(ID, { textSha256: digest }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
+    await expect(Bank.approveFact(ID, { textSha256: VECTORS[3][1] }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STALE_TEXT' });
+  });
+});
+
 describe('snapshot', () => {
   const approved = (n, text, over = {}) => ({
     id: `00000000-0000-4000-8000-00000000000${n}`, topic: `Topic ${n}`, fact_text: text, text_sha256: sha256(text), approved_at: new Date(2026, 10, 25, 10, n), approved_by: OWNER, ...over,
@@ -315,6 +443,14 @@ describe('snapshot', () => {
     expect(Bank.renderBankFactsLines(facts)).toBe(`- ${CLEAN}\n- We treat honeybee swarms on request.`);
     expect(Bank.getApprovedBankFacts({ now: T0 + Bank.STALE_MS })).toHaveLength(2);
     expect(Bank.getApprovedBankFacts({ now: T0 + Bank.STALE_MS + 1 })).toEqual([]);
+  });
+
+  test('a fresh read answers the rows it kept and every approved row it considered, from one read', async () => {
+    const dropped = approved(2, 'We open at noon.');
+    const read = await Bank.readVerifiedFacts({ dbi: fakeDb([approved(1, CLEAN), dropped]) });
+    expect(read.facts.map((f) => f.text)).toEqual([CLEAN]);
+    expect(read.consideredIds).toEqual([approved(1, CLEAN).id, dropped.id]);
+    expect(Bank.getApprovedBankFacts({ now: T0 })).toEqual([]); // the snapshot is not touched
   });
 
   test('the version hash follows the approved set', async () => {

@@ -1,0 +1,51 @@
+import { useEffect, useState } from "react";
+import { ActionFeedback, Card, CardBody, CardHeader, CardTitle } from "../../../../components/ui";
+import { adminFetch } from "../../../../utils/admin-fetch";
+
+// The approved lines as the agents' snapshot serves them (GET /admin/company-facts/preview): the server re-checks every
+// approved row and leaves out any that fail, so this list can be shorter than the Approved list below it.
+// `facts` is the Approved list on screen; a change in it (an approve, a retire) reads the preview again.
+export default function HowItWillRead({ facts }) {
+  const [preview, setPreview] = useState(null);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const signature = facts.map((fact) => `${fact.id}:${fact.text_sha256}`).join(",");
+
+  useEffect(() => {
+    let live = true;
+    setError("");
+    setPreview(null);
+    adminFetch("/admin/company-facts/preview")
+      .then((body) => live && setPreview(body))
+      .catch(() => live && setError("Could not load the preview. This does not mean any fact failed its checks. Try again."));
+    return () => { live = false; };
+  }, [signature, attempt]);
+
+  // From the preview's own read only: it names the approved rows it looked at and kept, so a fact retired between this and the list never
+  // counts as a failed check. The topics come from the list when it has the row.
+  const leftOut = preview?.leftOut || [];
+  const topicOf = (id) => facts.find((fact) => fact.id === id)?.topic;
+  return (
+    <Card className="mb-4">
+      <CardHeader>
+        <CardTitle className="text-18">How it will read</CardTitle>
+      </CardHeader>
+      <CardBody className="space-y-2">
+        <p className="text-ui-caption text-ink-secondary">
+          The approved facts as the agents get them now, in the order approved, after the built-in facts. Each channel adds its own heading above the list.
+        </p>
+        {error && <ActionFeedback error onRetry={() => setAttempt((n) => n + 1)}>{error}</ActionFeedback>}
+        {!error && !preview && <ActionFeedback>Loading the preview…</ActionFeedback>}
+        {preview && preview.lines && (
+          <pre aria-label="How the approved facts will read" className="m-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xs bg-zinc-50 p-3 text-ui-body text-ink-primary">{preview.lines}</pre>
+        )}
+        {preview && !preview.lines && <p className="text-ui-body text-ink-secondary">The agents get no extra facts now, only the built-in facts.</p>}
+        {leftOut.length > 0 && (
+          <ActionFeedback error>
+            {leftOut.length === 1 ? "1 approved fact is" : `${leftOut.length} approved facts are`} not in this list ({leftOut.map((id) => topicOf(id) || "another fact").join(", ")}). It no longer passes the checks, so the agents do not get it. Retire it, or edit it as a new draft.
+          </ActionFeedback>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
