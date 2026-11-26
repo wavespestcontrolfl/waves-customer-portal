@@ -285,7 +285,9 @@ export default function VisualNotesPanel({ service }) {
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setMessage(data.message || 'Visual note saved.');
       resetForm();
-      await Promise.all([loadMoments(), loadClipWeek()]);
+      // The weekly count refreshes on its own; a slow count never holds the save.
+      loadClipWeek();
+      await loadMoments();
       window.setTimeout(() => setMessage((current) => current === 'Visual note saved.' ? '' : current), 3500);
     } catch (err) {
       setError(err.message || 'Could not save visual note');
