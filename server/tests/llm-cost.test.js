@@ -71,6 +71,9 @@ describe('model ids', () => {
     expect(llmCost.priceFor(agreeing, 'gpt-4o-2024-08-06')).toEqual({ input: 2.5, output: 10 });
     const disagreeing = new Map([['gpt-4o', { input: 2.5, output: 10 }], ['gpt-4o-2024-05-13', { input: 5, output: 15 }]]);
     expect(llmCost.priceFor(disagreeing, 'gpt-4o-2024-08-06')).toBeNull();
+    // the audio input rate is part of the price: a snapshot that differs only there disagrees too
+    const audioDiffers = new Map([['gemini-3-8-flash', { input: 0.3, output: 2.5, audioInput: 1 }], ['gemini-3-8-flash-2026-09-01', { input: 0.3, output: 2.5, audioInput: 0.3 }]]);
+    expect(llmCost.priceFor(audioDiffers, 'gemini-3-8-flash-2026-10-01')).toBeNull();
   });
 
   test('a preview build or other lookalike the feed does not list is unpriced', () => {
@@ -87,7 +90,7 @@ describe('parseFeed', () => {
     const rows = llmCost.parseFeed({
       data: [
         { id: 'anthropic/claude-opus-5.5', pricing: { prompt: '0.000005', completion: '0.000025', input_cache_read: '0.0000005', input_cache_write: '0.00000625' } },
-        { id: 'google/gemini-3.8-flash', pricing: { prompt: '0.0000003', completion: '0.0000025', internal_reasoning: '0.0000025' } },
+        { id: 'google/gemini-3.8-flash', pricing: { prompt: '0.0000003', completion: '0.0000025', internal_reasoning: '0.0000025', audio: '0.000001' } },
         { id: 'openai/gpt-5.6-sol:free', pricing: { prompt: '0', completion: '0' } },
         { id: 'meta-llama/llama-4', pricing: { prompt: '0.0000001', completion: '0.0000001' } },
         { id: 'openai/gpt-router', pricing: { prompt: '-1', completion: '-1' } },
@@ -97,8 +100,9 @@ describe('parseFeed', () => {
     }, at);
     const byKey = Object.fromEntries(rows.map((r) => [r.model_key, r]));
     expect(Object.keys(byKey).sort()).toEqual(['claude-opus-5-5', 'gemini-3-8-flash', 'gpt-5-6-sol', 'gpt-5-6-sol-2026-08-01']);
-    expect(byKey['claude-opus-5-5']).toMatchObject({ provider: 'anthropic', input_per_mtok: 5, output_per_mtok: 25, cache_read_per_mtok: 0.5, cache_write_per_mtok: 6.25, fetched_at: at });
-    expect(byKey['gemini-3-8-flash']).toMatchObject({ provider: 'gemini', cache_read_per_mtok: null, reasoning_per_mtok: 2.5 });
+    expect(byKey['claude-opus-5-5']).toMatchObject({ provider: 'anthropic', input_per_mtok: 5, output_per_mtok: 25, cache_read_per_mtok: 0.5, cache_write_per_mtok: 6.25, audio_input_per_mtok: null, fetched_at: at });
+    // audio input has its own rate, here above the text rate
+    expect(byKey['gemini-3-8-flash']).toMatchObject({ provider: 'gemini', input_per_mtok: 0.3, cache_read_per_mtok: null, reasoning_per_mtok: 2.5, audio_input_per_mtok: 1 });
     // a dated snapshot keeps its own row and price beside the alias
     expect(byKey['gpt-5-6-sol']).toMatchObject({ source_model_id: 'openai/gpt-5.6-sol', input_per_mtok: 1.5 });
     expect(byKey['gpt-5-6-sol-2026-08-01']).toMatchObject({ source_model_id: 'openai/gpt-5.6-sol-2026-08-01', input_per_mtok: 2 });
@@ -112,7 +116,7 @@ describe('long-prompt tiers', () => {
     const at = new Date('2026-10-01T11:40:00Z');
     const rows = llmCost.parseFeed({
       data: [
-        { id: 'openai/gpt-6-sol', pricing: { prompt: '0.000002', completion: '0.000008', overrides: [{ min_prompt_tokens: 272000, prompt: '0.000004', completion: '0.000015', input_cache_read: '0.0000004' }] } },
+        { id: 'openai/gpt-6-sol', pricing: { prompt: '0.000002', completion: '0.000008', overrides: [{ min_prompt_tokens: 272000, prompt: '0.000004', completion: '0.000015', input_cache_read: '0.0000004', audio: '0.000006' }] } },
         { id: 'openai/gpt-6-luna', pricing: { prompt: '0.0000001', completion: '0.0000004', overrides: [{ prompt: '0.0000002', completion: '0.00000075' }] } },
         { id: 'openai/gpt-6-astra', pricing: { prompt: '0.00001', completion: '0.00004' } },
       ],
@@ -120,7 +124,7 @@ describe('long-prompt tiers', () => {
     const byKey = Object.fromEntries(rows.map((r) => [r.model_key, r]));
     expect(Object.keys(byKey).sort()).toEqual(['gpt-6-astra', 'gpt-6-sol']);
     expect(JSON.parse(byKey['gpt-6-sol'].pricing_tiers)).toEqual([
-      { min_prompt_tokens: 272000, input_per_mtok: 4, output_per_mtok: 15, cache_read_per_mtok: 0.4, cache_write_per_mtok: null, reasoning_per_mtok: null },
+      { min_prompt_tokens: 272000, input_per_mtok: 4, output_per_mtok: 15, cache_read_per_mtok: 0.4, cache_write_per_mtok: null, reasoning_per_mtok: null, audio_input_per_mtok: 6 },
     ]);
     expect(byKey['gpt-6-astra'].pricing_tiers).toBeNull();
   });
@@ -314,6 +318,7 @@ const schema = `llm_cost_${randomUUID().replaceAll('-', '')}`;
 postgres('llm cost (PostgreSQL)', () => {
   const knex = require('knex');
   const migration = require('../models/migrations/20261001190000_llm_model_prices');
+  const audioMigration = require('../models/migrations/20261126130000_llm_model_prices_audio_input');
   let admin;
   let app;
 
@@ -344,6 +349,7 @@ postgres('llm cost (PostgreSQL)', () => {
       t.timestamp('created_at', { useTz: true }).notNullable();
     });
     await migration.up(app);
+    await audioMigration.up(app);
   });
 
   afterAll(async () => {
@@ -371,6 +377,19 @@ postgres('llm cost (PostgreSQL)', () => {
     await migration.down(app);
     await migration.up(app);
     expect(await app.schema.hasTable('llm_model_prices')).toBe(true);
+    // the audio column: added once, dropped once, and a no-op while the table is gone
+    await audioMigration.up(app);
+    await audioMigration.up(app);
+    expect(await app.schema.hasColumn('llm_model_prices', 'audio_input_per_mtok')).toBe(true);
+    await audioMigration.down(app);
+    await audioMigration.down(app);
+    expect(await app.schema.hasColumn('llm_model_prices', 'audio_input_per_mtok')).toBe(false);
+    await migration.down(app);
+    await audioMigration.up(app);
+    await audioMigration.down(app);
+    expect(await app.schema.hasTable('llm_model_prices')).toBe(false);
+    await migration.up(app);
+    await audioMigration.up(app);
   });
 
   test('a pull upserts prices, and a second pull updates them in place', async () => {
@@ -381,7 +400,18 @@ postgres('llm cost (PostgreSQL)', () => {
     expect(rows).toHaveLength(1);
     expect(Number(rows[0].input_per_mtok)).toBe(4);
     const { map } = await llmCost.loadPrices(app);
-    expect(map.get('claude-sonnet-5')).toMatchObject({ input: 4, output: 15, cacheRead: null });
+    expect(map.get('claude-sonnet-5')).toMatchObject({ input: 4, output: 15, cacheRead: null, audioInput: null });
+  });
+
+  test('a pull stores a model\'s audio input rate, and each long-prompt tier\'s own', async () => {
+    const listener = { id: 'google/gemini-3.8-flash', pricing: { prompt: '0.0000003', completion: '0.0000025', audio: '0.000001', overrides: [{ min_prompt_tokens: 200000, prompt: '0.0000006', completion: '0.000005', audio: '0.000002' }, { min_prompt_tokens: 400000, prompt: '0.0000009', completion: '0.000006' }] } };
+    await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([listener])), now: NOW });
+    const { map } = await llmCost.loadPrices(app);
+    const price = map.get('gemini-3-8-flash');
+    expect(price).toMatchObject({ input: 0.3, audioInput: 1 });
+    expect(price.tiers).toMatchObject([{ minPromptTokens: 200000, input: 0.6, audioInput: 2 }, { minPromptTokens: 400000, input: 0.9, audioInput: null }]);
+    // a filler model the feed lists no audio price for
+    expect(map.get('filler-0')).toMatchObject({ input: 1, audioInput: null });
   });
 
   test('a pull is a snapshot: a model the feed no longer lists loses its stored price', async () => {
@@ -510,11 +540,26 @@ postgres('llm cost (PostgreSQL)', () => {
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(1);
   });
 
+  // A model the feed lists an audio input price for: a table that holds one is not pulled again inside its week.
+  const LISTENER = { id: 'google/gemini-3.8-flash', pricing: { prompt: '0.0000003', completion: '0.0000025', audio: '0.000001' } };
+
+  test('a table with no audio rate was pulled before that rate was stored: the next check pulls it again, once', async () => {
+    process.env.GATE_LLM_COST_TRACKING = 'true';
+    process.env.GATE_LLM_CALL_LEDGER = 'true';
+    await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([])), now: NOW });
+    const fetchImpl = okFetch(feed([LISTENER]));
+    await llmCost.runLlmCostCheck({ now: NOW, conn: app, fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect((await llmCost.loadPrices(app)).map.get('gemini-3-8-flash')).toMatchObject({ input: 0.3, audioInput: 1 });
+    await llmCost.runLlmCostCheck({ now: NOW, conn: app, fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   test('the spend check pulls missing prices, raises one item for a spike, then closes it once spend is normal', async () => {
     process.env.GATE_LLM_COST_TRACKING = 'true';
     process.env.GATE_LLM_CALL_LEDGER = 'true';
     mockRaise.mockResolvedValue({ id: 1 });
-    const fetchImpl = okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }]));
+    const fetchImpl = okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }, LISTENER]));
     // yesterday (09-30 ET): 4M input = $12; the 7 days before: $3 in total
     await app('llm_dispatch_log').insert([
       row({ created_at: atET('2026-09-30'), input_tokens: 4_000_000 }),
