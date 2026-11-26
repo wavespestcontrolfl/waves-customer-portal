@@ -707,14 +707,12 @@ const SLOW_NAV_MS = 3000;
 
 // A page that opened from the saved copy may ask for a chunk the server no
 // longer has, and reloads once to heal (client/src/lib/staleChunkReload.js).
-// That reload must wait for the network, or it opens the same saved copy
-// again. The page sends this message first; the next page load, within
-// NETWORK_NEXT_MS and once only, skips the SLOW_NAV_MS race. The page waits
-// for the ack on the message's port, so the flag is set before it reloads.
-const NETWORK_NEXT_MESSAGE = 'waves:network-next-navigation';
-const NETWORK_NEXT_ACK = 'waves:network-next-ack';
-const NETWORK_NEXT_MS = 30000;
-let networkNextUntil = 0;
+// That reload must reach the network, or it opens the same saved copy again.
+// So it loads its own address with this query name added (the app removes it
+// at start, main.jsx), and a load that carries it never gets the saved copy.
+// The mark rides on the one load that needs it: no state in the worker, and
+// no other tab is affected.
+const NETWORK_ONLY_PARAM = 'waves-network';
 
 // The customer app's own screens: the home page (every tab is a ?tab= on
 // it) and the login page. The server sends each the plain app page. Every
@@ -726,20 +724,6 @@ function isSavedCopyPath(pathname) {
   return pathname === '/' || pathname === '/login' || pathname === '/login/';
 }
 
-// Not used up by the first load: the worker cannot tell which tab asked
-// (a reload's navigation names no client), so another tab's load must not
-// take the recovering tab's turn. Every customer-screen load in the window
-// waits for the network; the cost is only that, for at most NETWORK_NEXT_MS.
-function networkNextActive() {
-  return Date.now() < networkNextUntil;
-}
-
-self.addEventListener('message', event => {
-  if (!event.data || event.data.type !== NETWORK_NEXT_MESSAGE) return;
-  networkNextUntil = Date.now() + NETWORK_NEXT_MS;
-  const port = event.ports && event.ports[0];
-  if (port) port.postMessage({ type: NETWORK_NEXT_ACK });
-});
 
 // The network's answer to a page load. It never rejects: a failed fetch is
 // { response: null }. `copy` is cloned the moment the response lands, before
@@ -768,6 +752,10 @@ async function offlineNavigationResponse(request) {
   const currentCache = await caches.open(CACHE_NAME);
   const cached = (await currentCache.match(OFFLINE_URL)) || (await currentCache.match(request));
   if (cached) return cached;
+  return reconnectPage();
+}
+
+function reconnectPage() {
   return new Response(OFFLINE_FALLBACK_HTML, {
     status: 200,
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
@@ -807,9 +795,14 @@ async function answerNavigation(request, attempt, mayServeSaved, decide, navSeq)
           }).catch(() => {});
           return shell;
         }
-        // No saved copy, and the page's HTML broke off: the reconnect page.
-        if (first !== 'slow') return await offlineNavigationResponse(request);
       }
+      // No customer copy to give: wait for the whole page. HTML that breaks
+      // off gets the reconnect page, never a truncated page, and never the
+      // stored shell of another page (savedShell refused it already).
+      const outcome = await bodyReady;
+      if (outcome.bodyFailed) return reconnectPage();
+      if (outcome.response) return outcome.response;
+      return await offlineNavigationResponse(request);
     }
     const { response } = await attempt;
     return response || await offlineNavigationResponse(request);
@@ -869,10 +862,10 @@ self.addEventListener('fetch', event => {
     const startedAt = Date.now();
     // Only a GET load of the customer app's own screens may be answered from
     // the saved copy when the network is slow (isSavedCopyPath), and one that
-    // follows a reload for a missing chunk (NETWORK_NEXT_MESSAGE) never is.
+    // follows a reload for a missing chunk (NETWORK_ONLY_PARAM) never is.
     // Any other page load (a form POST, a link page, a staff page) leaves the
     // flag unread.
-    const mayServeSaved = event.request.method === 'GET' && isSavedCopyPath(url.pathname) && !networkNextActive();
+    const mayServeSaved = event.request.method === 'GET' && isSavedCopyPath(url.pathname) && !url.searchParams.has(NETWORK_ONLY_PARAM);
     const attempt = startNavigationFetch(event.request);
     let decide;
     const choice = new Promise(resolve => { decide = resolve; });

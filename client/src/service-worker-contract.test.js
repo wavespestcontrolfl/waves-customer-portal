@@ -149,12 +149,6 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, cli
     listeners.activate({ waitUntil(promise) { pending.push(promise); } });
     await Promise.all(pending);
   }
-  // A page's message to the worker; the reply port records the ack.
-  function dispatchMessage(data) {
-    const port = { postMessage: vi.fn() };
-    listeners.message({ data, ports: [port] });
-    return port;
-  }
   async function dispatchPush(data) {
     const pending = [];
     listeners.push({
@@ -174,7 +168,7 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, cli
     return close;
   }
   return {
-    ...sandbox.__exports, dispatchFetch, setFetch, dispatchInstall, dispatchActivate, dispatchPush, dispatchMessage,
+    ...sandbox.__exports, dispatchFetch, setFetch, dispatchInstall, dispatchActivate, dispatchPush,
     dispatchNotificationClick, showNotification, skipWaiting, workerClients, cacheNames: names,
   };
 }
@@ -1955,62 +1949,27 @@ describe('service-worker slow page loads', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  describe('the network-next message', () => {
-    it('acks, then makes every customer-screen load in the window wait for the network', async () => {
-      const { worker, network, load } = await start();
-      const port = worker.dispatchMessage({ type: 'waves:network-next-navigation' });
-      expect(port.postMessage).toHaveBeenCalledWith({ type: 'waves:network-next-ack' });
-      const first = load();
-      expect(vi.getTimerCount()).toBe(0);
-      await vi.advanceTimersByTimeAsync(20000);
-      expect(first.done).toBe(false);
-      network.release();
-      expect(bodyOf(await first.promise)).toBe(networkHtml);
-      // Not used up: another tab's load in the window must not take the
-      // recovering tab's turn, so a second load waits too.
-      const next = gatedNetwork();
-      worker.setFetch(next.serve);
-      const second = load();
-      expect(vi.getTimerCount()).toBe(0);
-      await vi.advanceTimersByTimeAsync(5000);
-      expect(second.done).toBe(false);
-      next.release();
-      expect(bodyOf(await second.promise)).toBe(networkHtml);
-    });
-
-    it('stays set through a POST, an offer link and a staff page load', async () => {
-      const { worker, network, load } = await start();
-      worker.dispatchMessage({ type: 'waves:network-next-navigation' });
-      network.release();
-      await load('/', { method: 'POST' }).promise;
-      await load(`/careers/offer/${'b'.repeat(64)}`).promise;
-      await load('/admin/dispatch').promise;
-      const next = gatedNetwork();
-      worker.setFetch(next.serve);
-      const nav = load();
+  describe('the network-only mark', () => {
+    it('makes a marked customer-screen load wait for the network', async () => {
+      const { network, load } = await start();
+      const nav = load('/?tab=visits&waves-network=1');
       expect(vi.getTimerCount()).toBe(0);
       await vi.advanceTimersByTimeAsync(20000);
       expect(nav.done).toBe(false);
+      network.release();
+      expect(bodyOf(await nav.promise)).toBe(networkHtml);
+    });
+
+    it('rides on its own load only: the next unmarked load gets the saved copy again', async () => {
+      const { worker, network, load } = await start();
+      network.release();
+      await (await load('/?waves-network=1').promise).settled();
+      const next = gatedNetwork();
+      worker.setFetch(next.serve);
+      const nav = load('/');
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(bodyOf(await nav.promise)).toBe(networkHtml); // the marked load refreshed the saved copy
       next.release();
-      await nav.promise;
-    });
-
-    it('expires after 30 s', async () => {
-      const { worker, load } = await start();
-      worker.dispatchMessage({ type: 'waves:network-next-navigation' });
-      await vi.advanceTimersByTimeAsync(30001);
-      const nav = load();
-      await vi.advanceTimersByTimeAsync(3000);
-      expect(bodyOf(await nav.promise)).toBe(savedHtml);
-    });
-
-    it('ignores any other message', async () => {
-      const { worker, load } = await start();
-      const port = worker.dispatchMessage({ type: 'something-else' });
-      expect(port.postMessage).not.toHaveBeenCalled();
-      const nav = load();
-      await vi.advanceTimersByTimeAsync(3000);
-      expect(bodyOf(await nav.promise)).toBe(savedHtml);
     });
   });
 });

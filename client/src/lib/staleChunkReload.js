@@ -97,58 +97,47 @@ export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
 // A page the service worker opened from its saved copy (public/sw.js, when the
 // network was slow) can ask for a chunk the server replaced. Its one reload
 // must reach the network, or the worker hands it the same saved copy again.
-// So the reload first tells the worker to skip the saved copy for the next
-// page load, and waits for its ack. The wait is short and bounded: with no
-// worker, no ack or a failed message the reload still runs. Every reload that
-// heals a missing chunk goes through here.
-export const NETWORK_NEXT_MESSAGE = 'waves:network-next-navigation';
-const NETWORK_NEXT_WAIT_MS = 300;
-
-// Only the customer app's own screens (home and login, as isSavedCopyPath in
-// public/sw.js) are ever answered from the saved copy, so only they need the
-// message. Every other page, staff pages above all, reloads at once: a staff
-// reload ran its guards (route, open work, holds) the moment before, and a
-// wait would let the user move or start work in between.
+// So on the screens the worker can answer that way (home and login, as
+// isSavedCopyPath in public/sw.js), the reload loads the same address with
+// NETWORK_ONLY_PARAM added, which the worker never answers from the saved
+// copy; the app removes it again at start (stripNetworkOnlyParam, main.jsx).
+// It runs at once, like location.reload, so the guards a caller just ran
+// still hold. Every other page reloads as before. Every reload that heals a
+// missing chunk goes through here.
+export const NETWORK_ONLY_PARAM = 'waves-network';
 const SAVED_COPY_PATHS = new Set(['/', '/login', '/login/']);
-function onSavedCopyPath() {
-  try { return SAVED_COPY_PATHS.has(window.location.pathname); } catch { return false; }
+
+export function networkOnlyUrl(href) {
+  const url = new URL(href);
+  if (!SAVED_COPY_PATHS.has(url.pathname)) return null;
+  url.searchParams.set(NETWORK_ONLY_PARAM, '1');
+  return url.toString();
 }
 
-export function reloadFromNetwork(reload = () => window.location.reload()) {
-  let controller = null;
-  try { controller = navigator.serviceWorker?.controller || null; } catch { /* no worker API */ }
-  if (!controller || !onSavedCopyPath()) {
-    reload();
-    return;
-  }
-  let timer = null;
-  let channel = null;
-  let reloaded = false;
-  // The wait lets the user move (Back can open a staff page). A reload then
-  // would hit a page that never ran its own reload guards, so a move cancels
-  // it, and the pending mark goes with it: the page now in view shows its
-  // own failures.
-  const startPath = window.location.pathname;
-  const go = () => {
-    if (reloaded) return;
-    reloaded = true;
-    clearTimeout(timer);
-    if (channel) channel.port1.close();
-    if (window.location.pathname !== startPath) {
-      reloadPending = false;
-      return;
-    }
-    reload();
-  };
+// Only a page a worker controls can have come from the saved copy; any other
+// page reloads plainly.
+function controlledByWorker() {
+  try { return Boolean(navigator.serviceWorker?.controller); } catch { return false; }
+}
+
+export function reloadFromNetwork(reload = () => window.location.reload(), replace = (href) => window.location.replace(href)) {
+  let target = null;
   try {
-    channel = new MessageChannel();
-    channel.port1.onmessage = go;
-    controller.postMessage({ type: NETWORK_NEXT_MESSAGE }, [channel.port2]);
-  } catch {
-    go();
-    return;
-  }
-  timer = setTimeout(go, NETWORK_NEXT_WAIT_MS);
+    if (controlledByWorker() && SAVED_COPY_PATHS.has(window.location.pathname)) target = networkOnlyUrl(window.location.href);
+  } catch { /* no usable address */ }
+  if (target) replace(target);
+  else reload();
+}
+
+// Removes NETWORK_ONLY_PARAM from the address at start, without a history
+// entry, so tab links and a later refresh never carry it.
+export function stripNetworkOnlyParam() {
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has(NETWORK_ONLY_PARAM)) return;
+    url.searchParams.delete(NETWORK_ONLY_PARAM);
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  } catch { /* the address keeps the mark; the worker only skips its saved copy */ }
 }
 
 // The error for a chunk the live build no longer serves: the browser's own

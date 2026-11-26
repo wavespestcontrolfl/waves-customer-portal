@@ -1,109 +1,96 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { handleVitePreloadError, isStaleChunkReloadPending, markStaleChunkReloadPending, NETWORK_NEXT_MESSAGE, reloadFromNetwork, resetStaleChunkReloadForTests } from './staleChunkReload';
+import {
+  handleVitePreloadError, NETWORK_ONLY_PARAM, networkOnlyUrl, reloadFromNetwork, resetStaleChunkReloadForTests, stripNetworkOnlyParam,
+} from './staleChunkReload';
 
 // A page opened from the service worker's saved copy reloads once for a chunk
-// the server replaced. The reload must reach the network, so the page first
-// asks the worker to skip the saved copy (public/sw.js NETWORK_NEXT_MESSAGE).
-function controllerThat({ ack }) {
-  return {
-    postMessage: vi.fn((message, ports) => {
-      if (ack) ports[0].postMessage({ type: 'waves:network-next-ack' });
-    }),
-  };
-}
-const withController = (controller) => vi.stubGlobal('navigator', { ...navigator, serviceWorker: { controller } });
+// the server replaced. The reload must reach the network, so on the screens
+// the worker can answer from the saved copy it loads the same address with
+// NETWORK_ONLY_PARAM (public/sw.js never answers such a load from the copy).
+const at = (href) => vi.stubGlobal('location', { ...window.location, href, pathname: new URL(href).pathname });
+const withWorker = (controller = {}) => vi.stubGlobal('navigator', { ...navigator, serviceWorker: { controller } });
 
 afterEach(() => {
-  vi.useRealTimers();
   vi.unstubAllGlobals();
   sessionStorage.clear();
   resetStaleChunkReloadForTests();
 });
 
+describe('networkOnlyUrl', () => {
+  it.each([
+    ['https://portal.test/', 'https://portal.test/?waves-network=1'],
+    ['https://portal.test/?tab=billing#top', 'https://portal.test/?tab=billing&waves-network=1#top'],
+    ['https://portal.test/login', 'https://portal.test/login?waves-network=1'],
+  ])('marks the customer screen %s', (href, expected) => {
+    expect(networkOnlyUrl(href)).toBe(expected);
+  });
+
+  it.each(['https://portal.test/admin/dispatch', 'https://portal.test/tech', `https://portal.test/report/${'a'.repeat(32)}`])(
+    'leaves %s alone: the worker never answers it from the saved copy',
+    (href) => { expect(networkOnlyUrl(href)).toBeNull(); },
+  );
+});
+
 describe('reloadFromNetwork', () => {
-  it('reloads at once when no worker controls the page', () => {
+  it('loads the marked address at once on a customer screen, without a plain reload', () => {
     const reload = vi.fn();
-    withController(null);
-    reloadFromNetwork(reload);
-    expect(reload).toHaveBeenCalledTimes(1);
-  });
-
-  it('reloads at once when the browser has no worker API', () => {
-    const reload = vi.fn();
-    vi.stubGlobal('navigator', {});
-    reloadFromNetwork(reload);
-    expect(reload).toHaveBeenCalledTimes(1);
-  });
-
-  it('posts the message with a reply port first, then reloads once the worker acks', async () => {
-    const reload = vi.fn();
-    const controller = controllerThat({ ack: true });
-    withController(controller);
-    reloadFromNetwork(reload);
-    expect(controller.postMessage).toHaveBeenCalledWith({ type: NETWORK_NEXT_MESSAGE }, [expect.anything()]);
+    const replace = vi.fn();
+    at('https://portal.test/?tab=visits');
+    withWorker();
+    reloadFromNetwork(reload, replace);
+    expect(replace).toHaveBeenCalledWith(`https://portal.test/?tab=visits&${NETWORK_ONLY_PARAM}=1`);
     expect(reload).not.toHaveBeenCalled();
-    await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
   });
 
-  it('reloads after 300 ms when the worker never acks, and only once', () => {
-    vi.useFakeTimers();
+  it.each(['https://portal.test/admin/dispatch', 'https://portal.test/tech'])('reloads %s as before, at once', (href) => {
     const reload = vi.fn();
-    withController(controllerThat({ ack: false }));
-    reloadFromNetwork(reload);
-    vi.advanceTimersByTime(299);
-    expect(reload).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
+    const replace = vi.fn();
+    at(href);
+    withWorker();
+    reloadFromNetwork(reload, replace);
     expect(reload).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(1000);
-    expect(reload).toHaveBeenCalledTimes(1);
+    expect(replace).not.toHaveBeenCalled();
   });
 
-  it.each(['/admin/dispatch', '/tech', `/report/${'a'.repeat(32)}`])('reloads at once on %s, which the worker never answers from the saved copy', (pathname) => {
+  it('reloads plainly when no worker controls the page: no saved copy can have answered it', () => {
     const reload = vi.fn();
-    const controller = controllerThat({ ack: true });
-    vi.stubGlobal('location', { ...window.location, pathname });
-    withController(controller);
-    reloadFromNetwork(reload);
+    const replace = vi.fn();
+    at('https://portal.test/');
+    withWorker(null);
+    reloadFromNetwork(reload, replace);
     expect(reload).toHaveBeenCalledTimes(1);
-    expect(controller.postMessage).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+  });
+});
+
+describe('stripNetworkOnlyParam', () => {
+  it('removes the mark without a history entry and keeps the rest of the address', () => {
+    window.history.replaceState({ k: 1 }, '', `/?tab=billing&${NETWORK_ONLY_PARAM}=1#top`);
+    const length = window.history.length;
+    stripNetworkOnlyParam();
+    expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe('/?tab=billing#top');
+    expect(window.history.length).toBe(length);
+    expect(window.history.state).toEqual({ k: 1 });
   });
 
-  it('cancels the reload, and the pending mark, when the page moves during the wait', () => {
-    vi.useFakeTimers();
-    const reload = vi.fn();
-    const where = { ...window.location, pathname: '/' };
-    vi.stubGlobal('location', where);
-    withController(controllerThat({ ack: false }));
-    markStaleChunkReloadPending();
-    reloadFromNetwork(reload);
-    where.pathname = '/admin/dispatch';
-    vi.advanceTimersByTime(300);
-    expect(reload).not.toHaveBeenCalled();
-    expect(isStaleChunkReloadPending()).toBe(false);
-  });
-
-  it('reloads at once when the message cannot be posted', () => {
-    const reload = vi.fn();
-    withController({ postMessage: () => { throw new Error('closed'); } });
-    reloadFromNetwork(reload);
-    expect(reload).toHaveBeenCalledTimes(1);
+  it('leaves an unmarked address alone', () => {
+    window.history.replaceState(null, '', '/?tab=plan');
+    const spy = vi.spyOn(window.history, 'replaceState');
+    stripNetworkOnlyParam();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });
 
 describe('the stale-chunk heal goes through it by default', () => {
-  it('a customer page that lost a chunk posts the message before location.reload runs', async () => {
-    const reload = vi.fn();
-    const controller = controllerThat({ ack: false });
-    vi.stubGlobal('location', { ...window.location, pathname: '/', reload });
-    withController(controller);
-    vi.useFakeTimers();
+  it('a customer page that lost a chunk loads its marked address', () => {
+    const replace = vi.fn();
+    vi.stubGlobal('location', { ...window.location, href: 'https://portal.test/', pathname: '/', replace, reload: vi.fn() });
+    withWorker();
     const event = new Event('vite:preloadError', { cancelable: true });
     handleVitePreloadError(event);
     expect(event.defaultPrevented).toBe(true);
-    expect(controller.postMessage).toHaveBeenCalledTimes(1);
-    expect(reload).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(300);
-    expect(reload).toHaveBeenCalledTimes(1);
+    expect(replace).toHaveBeenCalledWith(`https://portal.test/?${NETWORK_ONLY_PARAM}=1`);
   });
 });
