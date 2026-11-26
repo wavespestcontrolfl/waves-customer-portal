@@ -56,6 +56,8 @@ const POSTCARD_ATTRIBUTION = Object.freeze({
   observed: true,
   utm: Object.freeze({ source: 'new_home_postcard', medium: 'print' }),
 });
+const HOLD_LABEL = 'Postcard price held';
+const HOLD_REASON = 'mail_new_home: printed postcard price held 60 days';
 const MAX_OFFERS = 30;
 const CONTACT_ON_FILE = 'CONTACT_ON_FILE';
 const DEAD_VISIT_STATUSES = ['cancelled', 'skipped', 'rescheduled'];
@@ -82,7 +84,7 @@ async function loadHome(token) {
   const row = await db('mail_prospects')
     .where({ page_token: token, list_key: LIST_KEY, status: 'eligible', price_status: 'priced' })
     .first('id', 'address_line1', 'city', 'state', 'zip', 'price_annual', 'price_setup_fee', 'home_sqft', 'home_sqft_source',
-      'home_stories', 'lot_sqft');
+      'home_stories', 'lot_sqft', 'mailed_at');
   if (!row) return null;
   const price = toPrice(row);
   if (price.annual == null) return null;
@@ -90,7 +92,17 @@ async function loadHome(token) {
     homeSqft: numOrNull(row.home_sqft), homeSqftSource: row.home_sqft_source, stories: numOrNull(row.home_stories), lotSqft: numOrNull(row.lot_sqft),
   };
   if (facts.homeSqft == null || facts.stories == null || facts.lotSqft == null || !facts.homeSqftSource) return null;
-  return { row, facts, price };
+  return { row, facts, price, held: priceIsHeld(row.mailed_at) };
+}
+
+// The postcard's price hold (the card says "Held 60 days"): a mailed home, through the Eastern day heldUntilOf gives
+// (mailed-record.js, PRICE_HOLD_DAYS after the day it was marked mailed). Owner 2026-09-26: a quote already sent is
+// honored as sent; owner 2026-11-25 (pick A): never more than the card, and the lower live price when ours went down.
+function priceIsHeld(mailedAt, now = new Date()) {
+  const { heldUntilOf } = require('./mailed-record');
+  const { etDateString } = require('../../utils/datetime-et');
+  const until = heldUntilOf(mailedAt);
+  return !!until && etDateString(now) <= until;
 }
 
 const selfBookingLive = (deps) => (deps.gates || REAL.gates()).isEnabled('selfBooking');
@@ -230,7 +242,9 @@ function validShownPrice(price) {
 // good).
 function draftIdFor(prospectId, contact, shown) {
   const hex = crypto.createHash('sha256')
-    .update(`mail-home-book:${prospectId}:${contact.phone10}:${contact.email}:${contact.name.toLowerCase()}:${shown.annualCents}:${shown.setupCents}`)
+    // A held price's discount is part of the key (only when there is one, so every other id is unchanged): a draft saved
+    // with one discount is never reused after the live price moved again.
+    .update(`mail-home-book:${prospectId}:${contact.phone10}:${contact.email}:${contact.name.toLowerCase()}:${shown.annualCents}:${shown.setupCents}${shown.discountCents > 0 ? `:held-${shown.discountCents}` : ''}`)
     .digest('hex');
   const variant = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
@@ -241,7 +255,7 @@ const codeOf = (err) => (err && (typeof err.code === 'string' || typeof err.code
 
 /**
  * The price check before anything is written: the shadow price pass's own verdict (home-quote priceHome: the member check,
- * then a dry run of the canonical save). Returns { ok: true } or { refuse: { status, error } }.
+ * then a dry run of the canonical save). Returns { ok: true, terms } (termsFor) or { refuse: { status, error } }.
  */
 async function checkLivePrice(home, shown, deps) {
   const quote = deps.quote || REAL.quote();
@@ -255,11 +269,29 @@ async function checkLivePrice(home, shown, deps) {
   if (result.status === 'failed') return { refuse: { status: 503, error: 'not_available' } };
   // A member at the address, quote-required, review, or any line the shadow price pass would not call clean.
   if (result.status !== 'priced') return { refuse: { status: 409, error: 'not_available' } };
-  // The live price, to the cent, must be the one the page showed (annual and setup fee).
-  if (toCents(result.priceAnnual) !== shown.annualCents || toCents(result.priceSetupFee) !== shown.setupCents) {
-    return { refuse: { status: 409, error: 'price_changed' } };
-  }
-  return { ok: true };
+  const terms = termsFor(home, shown, { annualCents: toCents(result.priceAnnual), setupCents: toCents(result.priceSetupFee) });
+  return terms ? { ok: true, terms } : { refuse: { status: 409, error: 'price_changed' } };
+}
+
+/**
+ * The terms this booking is made on, in integer cents, or null (the price changed and no hold applies).
+ *   - the live price is the one the page showed: those amounts, no discount;
+ *   - it differs and the home's printed price is held: each of the annual price and the setup fee is the LOWER of the
+ *     printed and the live amount. A live annual above the printed one is brought down by a fixed discount on the
+ *     estimate (discountCents); a lower live price is simply the price.
+ * liveSetupCents is the engine's own setup fee, the one the saved estimate must still carry.
+ */
+function termsFor(home, shown, live) {
+  if (![live.annualCents, live.setupCents].every(Number.isFinite) || live.annualCents <= 0 || live.setupCents < 0) return null;
+  const same = live.annualCents === shown.annualCents && live.setupCents === shown.setupCents;
+  if (!same && !home.held) return null;
+  const annualCents = Math.min(shown.annualCents, live.annualCents);
+  return {
+    annualCents,
+    setupCents: Math.min(shown.setupCents, live.setupCents),
+    discountCents: live.annualCents - annualCents,
+    liveSetupCents: live.setupCents,
+  };
 }
 
 // ---- the customer ---------------------------------------------------------------------------------------------------
@@ -373,7 +405,7 @@ async function insertCustomer(conn, account, home, contact, pin) {
 }
 
 /** The canonical save of the estimate: the shadow price's body plus the typed contact and the customer's id. */
-async function saveEstimate(home, contact, customerId, shown, deps) {
+async function saveEstimate(home, contact, customerId, terms, deps) {
   const quote = deps.quote || REAL.quote();
   const buildEngineInput = deps.buildEngineInput || REAL.buildEngineInput();
   const save = deps.saveEstimate || REAL.save();
@@ -383,17 +415,25 @@ async function saveEstimate(home, contact, customerId, shown, deps) {
     customerName: contact.name,
     customerPhone: contact.phone,
     customerEmail: contact.email,
-    clientDraftId: draftIdFor(home.row.id, contact, shown),
+    clientDraftId: draftIdFor(home.row.id, contact, terms),
   };
+  // The held postcard price: the engine's own manual-discount path (estimate_data.operatorPriceAdjustment, replayed on
+  // every reprice of the draft), a fixed dollar amount off the one recurring pest line. Server-made, never from a request.
+  if (terms.discountCents > 0) {
+    body.estimateData = {
+      ...body.estimateData,
+      operatorPriceAdjustment: { type: 'FIXED', value: terms.discountCents / 100, label: HOLD_LABEL, internalReason: HOLD_REASON },
+    };
+  }
   return save(body);
 }
 
-// The save's own price must be the one just checked and still a clean server price (the judge the shadow pass uses).
-// Annual and setup fee both, to the cent, against the price the page showed.
-function savedPriceHolds(saved, shown, deps) {
+// The save's own price must be the terms just settled and still a clean server price (the judge the shadow pass uses):
+// the annual total to the cent (after the hold's discount, when there is one), and the engine's own setup fee.
+function savedPriceHolds(saved, terms, deps) {
   const quote = deps.quote || REAL.quote();
   const verdict = quote.judge({ estimate: saved.estimate, memberLinkageWarning: saved.memberLinkageWarning });
-  return !!verdict.price && toCents(verdict.price.annual) === shown.annualCents && toCents(verdict.price.setupFee) === shown.setupCents;
+  return !!verdict.price && toCents(verdict.price.annual) === terms.annualCents && toCents(verdict.price.setupFee) === terms.liveSetupCents;
 }
 
 // The quote-wizard draft shape the /book handoff accepts, the postcard lead source, and the setup fee the page disclosed,
@@ -404,11 +444,14 @@ function savedPriceHolds(saved, shown, deps) {
 //
 // The draft also carries the prospect it was made for (estimate_data.mailProspectId, written here, never from a request):
 // the server-side link the first-booking claim and the retry recovery follow, instead of any string a caller can send.
-async function markEstimate(estimateId, prospectId, shown, deps) {
+//
+// mailShownKey is the id a draft of this contact at the SHOWN price has (draftIdFor): with a held price the draft's own id
+// follows the terms, so the retry recovery finds a committed booking's draft by this key.
+async function markEstimate(estimateId, prospectId, terms, shownKey, deps) {
   const conn = deps.db || db;
   const set = { source: 'quote_wizard', lead_source: LEAD_SOURCE, lead_source_detail: LEAD_SOURCE_DETAIL };
-  const merged = { mailProspectId: String(prospectId) };
-  if (shown.setupCents > 0) merged.setupFeeQuote = { amount: shown.setupCents / 100, kind: 'waveguard_membership' };
+  const merged = { mailProspectId: String(prospectId), mailShownKey: shownKey };
+  if (terms.setupCents > 0) merged.setupFeeQuote = { amount: terms.setupCents / 100, kind: 'waveguard_membership' };
   set.estimate_data = conn.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(merged)]);
   await conn('estimates').where({ id: estimateId, status: 'draft' }).whereNull('archived_at').update(set);
 }
@@ -431,19 +474,21 @@ function liveProspectVisits(conn, prospectId) {
 // (`estimateId`, the contact's and price's own) at this slot whose customer has this phone, whatever stage the booking has
 // since moved the customer to. Its customer id, or null. The retry then goes to createSelfBooking unchanged, whose own
 // replay (same customer, same slot, a live visit of the same estimate) answers it.
-async function findCommittedBookingCustomer(home, contact, offer, estimateId, deps) {
+async function findCommittedBookingCustomer(home, contact, offer, shownKey, deps) {
   const conn = deps.db || db;
   const rows = await liveProspectVisits(conn, home.row.id)
-    .where('ss.source_estimate_id', estimateId)
+    // The draft of this contact at the shown price: its id is the key, or (a held price: the id follows the terms) it
+    // carries the key.
+    .where((q) => q.where('ss.source_estimate_id', shownKey).orWhereRaw("e.estimate_data->>'mailShownKey' = ?", [shownKey]))
     .join('customers as c', 'c.id', 'ss.customer_id')
     .where('sba.date', offer.date)
     .where('sba.start_time', offer.start)
     .whereNull('c.deleted_at')
     .whereRaw("regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${contact.phone10}`])
     .limit(5)
-    .select('c.id', 'c.phone');
+    .select('c.id', 'c.phone', 'ss.source_estimate_id');
   const own = rows.find((r) => phone10Of(r.phone) === contact.phone10);
-  return own ? own.id : null;
+  return own ? { customerId: own.id, estimateId: own.source_estimate_id } : null;
 }
 
 // ---- the booking ----------------------------------------------------------------------------------------------------
@@ -473,6 +518,7 @@ async function prepareEstimate(home, contact, pin, shown, deps) {
   if (!customerId && await (deps.findExistingCustomer || findExistingCustomer)(home, contact, deps)) return refuse(409, 'contact_on_file');
   const priced = await checkLivePrice(home, shown, deps);
   if (priced.refuse) return refuse(priced.refuse.status, priced.refuse.error);
+  const { terms } = priced;
   if (!customerId) {
     try {
       customerId = await (deps.mintCustomer || mintCustomer)(home, contact, pin, deps);
@@ -484,18 +530,18 @@ async function prepareEstimate(home, contact, pin, shown, deps) {
 
   let saved;
   try {
-    saved = await saveEstimate(home, contact, customerId, shown, deps);
+    saved = await saveEstimate(home, contact, customerId, terms, deps);
   } catch (err) {
     const status = httpStatus(err);
     if (status >= 400 && status < 500) return refuse(409, 'not_available');
     throw err;
   }
-  if (!savedPriceHolds(saved, shown, deps)) return refuse(409, 'price_changed');
+  if (!savedPriceHolds(saved, terms, deps)) return refuse(409, 'price_changed');
   const estimateId = saved.estimate.id;
-  await markEstimate(estimateId, home.row.id, shown, deps);
+  await markEstimate(estimateId, home.row.id, terms, draftIdFor(home.row.id, contact, shown), deps);
 
   const estimateToken = (deps.handoffToken || REAL.handoffToken())(estimateId);
-  return estimateToken ? { estimateId, estimateToken, customerId } : refuse(503, 'not_available');
+  return estimateToken ? { estimateId, estimateToken, customerId, terms } : refuse(503, 'not_available');
 }
 
 /**
@@ -503,9 +549,12 @@ async function prepareEstimate(home, contact, pin, shown, deps) {
  * runs). The draft must still exist.
  */
 async function recoverCommitted(home, contact, offer, shown, deps) {
-  const estimateId = draftIdFor(home.row.id, contact, shown);
-  const customerId = await (deps.findCommittedBookingCustomer || findCommittedBookingCustomer)(home, contact, offer, estimateId, deps);
-  if (!customerId) return null;
+  const shownKey = draftIdFor(home.row.id, contact, shown);
+  const found = await (deps.findCommittedBookingCustomer || findCommittedBookingCustomer)(home, contact, offer, shownKey, deps);
+  if (!found) return null;
+  // A test double may answer with the customer id alone: then the draft is the shown-price one.
+  const customerId = typeof found === 'object' ? found.customerId : found;
+  const estimateId = (typeof found === 'object' && found.estimateId) || shownKey;
   const draft = await (deps.db || db)('estimates').where({ id: estimateId }).first('id');
   const estimateToken = draft && (deps.handoffToken || REAL.handoffToken())(estimateId);
   return estimateToken ? { estimateId, estimateToken, customerId } : null;
@@ -531,7 +580,7 @@ async function recoverCommitted(home, contact, offer, shown, deps) {
 //   5. with pay-at-visit on, the price this booking is about to stamp on the visit and its follow-ups is exactly the one
 //      resolveBookingVisitPrice gives for the locked draft, linked to that draft (ctx is what createSelfBooking resolved);
 //   6. no other live visit of this prospect's drafts.
-function commitGuardFor(home, shown, estimateId, deps) {
+function commitGuardFor(home, shown, estimateId, deps, terms = shown) {
   return async (trx, ctx = {}) => {
     const gates = deps.gates || REAL.gates();
     if (typeof gates.mailHomePageLive !== 'function' || !gates.mailHomePageLive() || !gates.isEnabled('selfBooking')) return false;
@@ -541,7 +590,9 @@ function commitGuardFor(home, shown, estimateId, deps) {
       .forShare()
       .first('price_annual', 'price_setup_fee');
     if (!row || toCents(row.price_annual) !== shown.annualCents || toCents(row.price_setup_fee || 0) !== shown.setupCents) return false;
-    const draft = await draftHoldingShownPrice(trx, estimateId, shown);
+    // A held price ends at the end of its last Eastern day, also for a booking that started before it.
+    if ((terms.annualCents !== shown.annualCents || terms.setupCents !== shown.setupCents) && !priceIsHeld(home.row.mailed_at)) return false;
+    const draft = await draftHoldingShownPrice(trx, estimateId, terms);
     if (!draft) return false;
     if (!(await noMemberAtHome(trx, home, deps))) return false;
     if (gates.isEnabled('bookingPayAtVisit') && !stampedPriceIsDrafts(ctx, draft, estimateId, deps)) return false;
@@ -635,7 +686,8 @@ function bookingPayload({ home, contact, offer, pin, gates, estimate }) {
  * @param {string} token
  * @param {{ offer, name, phone, email }} input
  * @returns {Promise<null
- *   | { status: 200, body: { booked: true, date: string, window: { start: string, end: string|null } } }
+ *   | { status: 200, body: { booked: true, date: string, window: { start: string, end: string|null },
+ *       price?: { annual: number, monthly: number, setupFee: number } } }
  *   | { status: number, body: { error: string, offers?: object[], field?: string } }>}
  *   null = the same 404 as an unknown token.
  */
@@ -663,9 +715,9 @@ async function bookHome(token, input, deps = {}) {
   const result = await booking.createSelfBooking({
     ...bookingPayload({ home, contact, offer, pin, gates, estimate: prepared }),
     // Re-read inside the booking transaction: the gate, the prospect row (locked) and the price it still holds.
-    commitGuard: commitGuardFor(home, shown, prepared.estimateId, deps),
+    commitGuard: commitGuardFor(home, shown, prepared.estimateId, deps, prepared.terms || shown),
   });
-  return answerOf(result, offer, pin, booking);
+  return answerOf(result, offer, pin, booking, prepared.terms);
 }
 
 /** The typed body: { contact, offer, shown } or { refuse } (a 400 naming what is wrong). */
@@ -680,7 +732,7 @@ function validInput(input) {
 }
 
 // createSelfBooking's result as this page's answer.
-async function answerOf(result, offer, pin, booking) {
+async function answerOf(result, offer, pin, booking, terms) {
   if (!result.ok) {
     const refusal = refusalOf(result);
     if (refusal.error !== 'slot_taken') return { status: refusal.status, body: { error: refusal.error } };
@@ -694,10 +746,14 @@ async function answerOf(result, offer, pin, booking) {
   const start = String((result.body && result.body.booking && result.body.booking.start_time) || offer.start).slice(0, 5);
   const [from, to] = (require('../../utils/sms-time-format').arrivalWindowRange(start) || `${start}-`).split('-');
   // The row the booking wrote has no column for the mail list (mail_prospects has none that fits): nothing is recorded there.
-  return { status: 200, body: { booked: true, date: offer.date, window: { start: from, end: to || null } } };
+  const body = { booked: true, date: offer.date, window: { start: from, end: to || null } };
+  // The price this booking was made on (the lower of the card's and today's while the card's price is held), so the page
+  // can show it. Absent on the replay of an earlier booking.
+  if (terms) body.price = { annual: terms.annualCents / 100, monthly: Math.round(terms.annualCents / 12) / 100, setupFee: terms.setupCents / 100 };
+  return { status: 200, body };
 }
 
 module.exports = {
   getHomeTimes, bookHome, loadHome, draftIdFor, validContact, validOffer, validShownPrice, offersOf, findOwnCustomer, mintCustomer,
-  findCommittedBookingCustomer, commitGuardFor, offerIsSigned,
+  findCommittedBookingCustomer, commitGuardFor, offerIsSigned, termsFor, priceIsHeld,
 };

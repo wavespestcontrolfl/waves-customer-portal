@@ -24,7 +24,7 @@ const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token'
 const realQuote = require('../services/mail/home-quote');
 const {
   getHomeTimes, bookHome, draftIdFor, validContact, validOffer, validShownPrice, offersOf, findOwnCustomer: findOwnCustomerReal, mintCustomer: mintCustomerReal,
-  findCommittedBookingCustomer: findCommittedBookingCustomerReal, commitGuardFor,
+  findCommittedBookingCustomer: findCommittedBookingCustomerReal, commitGuardFor, termsFor, priceIsHeld,
 } = require('../services/mail/home-book');
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
@@ -413,13 +413,13 @@ describe('bookHome', () => {
     expect(updates[0]).toMatchObject({ source: 'quote_wizard', lead_source: 'mail_new_home' });
     expect(updates[0].estimate_data.sql).toMatch(/COALESCE\(estimate_data, '\{\}'::jsonb\) \|\| \?::jsonb/);
     // The draft also carries the prospect it was made for: the server-side link the first-booking claim follows.
-    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1', setupFeeQuote: { amount: 99, kind: 'waveguard_membership' } });
+    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toMatchObject({ mailProspectId: 'prospect-1', setupFeeQuote: { amount: 99, kind: 'waveguard_membership' } });
     updates.length = 0;
     mockRow = row();
     quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 627, priceSetupFee: 0, priceDigest: 'd' });
     quote.judge.mockReturnValue({ price: { annual: 627, setupFee: 0, digest: 'd' } });
     expect((await bookHome(TOKEN, INPUT(), deps)).status).toBe(200);
-    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1' });
+    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1', mailShownKey: draftIdFor('prospect-1', validContact(INPUT()), SHOWN) });
   });
 
   test('the booking carries a commit guard that re-reads the gates and the locked prospect row inside its transaction', async () => {
@@ -524,7 +524,7 @@ describe('bookHome', () => {
     findExistingCustomer.mockResolvedValue({ id: 'cust-1' }); // and the matcher finds it as a customer
     quote.priceHome.mockResolvedValue({ status: 'not_clean', reason: 'member_address' }); // a member at the address now
     const res = await bookHome(TOKEN, INPUT(), deps);
-    expect(res).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '11:00' } } });
+    expect(res).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '11:00' } } }); // a replay carries no price
     expect(findCommittedBookingCustomer).toHaveBeenCalledWith(expect.objectContaining({ row: mockRow }), expect.objectContaining({ phone10: '9415550142' }), expect.objectContaining({ date: '2026-12-02', start: '09:00' }), draftIdFor('prospect-1', validContact(INPUT()), SHOWN), deps);
     expect(findOwnCustomer).not.toHaveBeenCalled();
     expect(findExistingCustomer).not.toHaveBeenCalled();
@@ -549,18 +549,23 @@ describe('bookHome', () => {
   test('findCommittedBookingCustomer follows the prospect id the draft carries to a live visit at this slot, and matches the customer by phone, in any stage', async () => {
     const calls = [];
     const q = {};
-    for (const m of ['join', 'where', 'whereNot', 'whereNotIn', 'whereNull', 'whereRaw', 'limit']) q[m] = jest.fn((...a) => { calls.push([m, ...a]); return q; });
+    // A where(callback) runs its callback on the same recorder (the grouped "this draft id, or a draft carrying this key").
+    for (const m of ['join', 'where', 'whereNot', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereRaw', 'limit']) {
+      q[m] = jest.fn((...a) => { if (typeof a[0] === 'function') a[0](q); else calls.push([m, ...a]); return q; });
+    }
     const rows = [
-      { id: 'other', phone: '+19415550199' },
-      { id: 'mine', phone: '+19415550142' },
+      { id: 'other', phone: '+19415550199', source_estimate_id: 'est-other' },
+      { id: 'mine', phone: '+19415550142', source_estimate_id: 'est-held' },
     ];
     q.select = jest.fn(async () => rows);
     const conn = jest.fn(() => q);
     const id = await findCommittedBookingCustomerReal({ row: mockRow }, validContact(INPUT()), { date: '2026-12-02', start: '09:00' }, 'est-x', { db: conn });
-    expect(id).toBe('mine');
+    // The customer and the draft the committed visit is linked to (with a held price that draft's id is not the key).
+    expect(id).toEqual({ customerId: 'mine', estimateId: 'est-held' });
     expect(conn).toHaveBeenCalledWith('scheduled_services as ss');
     expect(calls).toEqual(expect.arrayContaining([
       ['whereRaw', "e.estimate_data->>'mailProspectId' = ?", ['prospect-1']], ['where', 'ss.source_estimate_id', 'est-x'],
+      ['orWhereRaw', "e.estimate_data->>'mailShownKey' = ?", ['est-x']],
       ['whereNot', 'sba.status', 'cancelled'], ['whereNotIn', 'ss.status', ['cancelled', 'skipped', 'rescheduled']],
       ['where', 'sba.date', '2026-12-02'], ['where', 'sba.start_time', '09:00'], ['whereNull', 'c.deleted_at'],
     ]));
@@ -623,7 +628,7 @@ describe('bookHome', () => {
 
   test('the success window is the customer arrival window from the committed start, whatever end the caller sent', async () => {
     const noEnd = { ...INPUT(), offer: { ...offer('2026-12-02', '09:00'), end_time: undefined } };
-    expect(await bookHome(TOKEN, noEnd, deps)).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '11:00' } } });
+    expect(await bookHome(TOKEN, noEnd, deps)).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '11:00' }, price: { annual: 627, monthly: 52.25, setupFee: 0 } } });
     // The committed booking's own start wins over the offer's.
     booking.createSelfBooking.mockResolvedValue({ ok: true, body: { booking: { start_time: '13:00:00' } } });
     expect((await bookHome(TOKEN, INPUT(), deps)).body.window).toEqual({ start: '13:00', end: '15:00' });
@@ -637,7 +642,7 @@ describe('bookHome', () => {
 
   test('saves the estimate (not a dry run) from the stored facts plus the contact, then books through createSelfBooking with a valid handoff token', async () => {
     const res = await bookHome(TOKEN, INPUT(), deps);
-    expect(res).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '11:00' } } });
+    expect(res).toEqual({ status: 200, body: { booked: true, date: '2026-12-02', window: { start: '09:00', end: '11:00' }, price: { annual: 627, monthly: 52.25, setupFee: 0 } } });
 
     // The price is checked with the stored row and its facts first.
     expect(quote.priceHome).toHaveBeenCalledWith(mockRow, { homeSqft: 2400, homeSqftSource: 'parcel_map', stories: 1, lotSqft: 9000 }, {});
@@ -663,7 +668,7 @@ describe('bookHome', () => {
     // The draft is marked as the quote-wizard draft /book accepts, with the postcard lead source.
     expect(updates).toHaveLength(1);
     expect(updates[0]).toMatchObject({ source: 'quote_wizard', lead_source: 'mail_new_home', lead_source_detail: 'new_home_postcard' });
-    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1' });
+    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1', mailShownKey: draftIdFor('prospect-1', validContact(INPUT()), SHOWN) });
 
     expect(booking.createSelfBooking).toHaveBeenCalledTimes(1);
     const payload = booking.createSelfBooking.mock.calls[0][0];
@@ -777,5 +782,122 @@ describe('bookHome', () => {
     booking.resolveOfferCoords.mockResolvedValue({ lat: null, lng: null });
     expect(await bookHome(TOKEN, INPUT(), deps)).toEqual({ status: 503, body: { error: 'not_available' } });
     expect(saveEstimate).not.toHaveBeenCalled();
+  });
+});
+
+// The postcard says "Held 60 days" (owner 2026-09-26: a sent quote is honored as sent; owner 2026-11-25: never more than
+// the card, and the lower live price when ours went down).
+describe('the printed price is held for a mailed home', () => {
+  const daysAgo = (n) => new Date(Date.now() - n * 86400000);
+  const held = (over) => row({ mailed_at: daysAgo(3), ...over });
+  const savedAt = (annual) => saveEstimate.mockImplementation(async (body) => ({ estimate: { id: 'est-1', annual_total: annual, address: body.address }, reused: false, memberLinkageWarning: null }));
+
+  test('priceIsHeld: through the 60th Eastern day after mailing, never for a home that was not mailed', () => {
+    const mailed = new Date('2026-11-24T15:00:00Z'); // held until 2027-01-23 (Eastern)
+    expect(priceIsHeld(mailed, new Date('2026-11-24T16:00:00Z'))).toBe(true);
+    expect(priceIsHeld(mailed, new Date('2027-01-24T04:30:00Z'))).toBe(true); // still Jan 23 in Eastern time
+    expect(priceIsHeld(mailed, new Date('2027-01-24T05:30:00Z'))).toBe(false); // Jan 24, 12:30 AM Eastern
+    expect(priceIsHeld(null)).toBe(false);
+    expect(priceIsHeld('not a date')).toBe(false);
+  });
+
+  test('termsFor: the lower of the printed and the live amount for each of the annual price and the setup fee', () => {
+    const shown = { annualCents: 62700, setupCents: 9900 };
+    const on = { held: true };
+    expect(termsFor(on, shown, { annualCents: 62700, setupCents: 9900 })).toEqual({ annualCents: 62700, setupCents: 9900, discountCents: 0, liveSetupCents: 9900 });
+    expect(termsFor(on, shown, { annualCents: 66000, setupCents: 9900 })).toEqual({ annualCents: 62700, setupCents: 9900, discountCents: 3300, liveSetupCents: 9900 });
+    expect(termsFor(on, shown, { annualCents: 60000, setupCents: 12900 })).toEqual({ annualCents: 60000, setupCents: 9900, discountCents: 0, liveSetupCents: 12900 });
+    expect(termsFor(on, shown, { annualCents: 66000, setupCents: 0 })).toEqual({ annualCents: 62700, setupCents: 0, discountCents: 3300, liveSetupCents: 0 });
+    // No hold: only the exact shown price books.
+    expect(termsFor({ held: false }, shown, { annualCents: 66000, setupCents: 9900 })).toBeNull();
+    expect(termsFor({ held: false }, shown, { annualCents: 62700, setupCents: 9900 })).toMatchObject({ discountCents: 0 });
+    // A live price that is no amount never books.
+    expect(termsFor(on, shown, { annualCents: NaN, setupCents: 0 })).toBeNull();
+    expect(termsFor(on, shown, { annualCents: 0, setupCents: 0 })).toBeNull();
+  });
+
+  test('our price went up: the visit books at the printed price through a fixed discount on the estimate', async () => {
+    mockRow = held();
+    quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 660, priceSetupFee: 0, priceDigest: 'd2' });
+    savedAt(627); // the save applied the discount
+    const res = await bookHome(TOKEN, INPUT(), deps);
+    expect(res).toMatchObject({ status: 200, body: { booked: true, price: { annual: 627, monthly: 52.25, setupFee: 0 } } });
+    const body = saveEstimate.mock.calls[0][0];
+    expect(body.estimateData.operatorPriceAdjustment).toEqual({ type: 'FIXED', value: 33, label: 'Postcard price held', internalReason: expect.stringMatching(/held 60 days/) });
+    // The draft's id follows the terms and the discount, and it carries the shown-price key for the retry recovery.
+    expect(body.clientDraftId).toBe(draftIdFor('prospect-1', validContact(INPUT()), { ...SHOWN, discountCents: 3300 }));
+    expect(body.clientDraftId).not.toBe(draftIdFor('prospect-1', validContact(INPUT()), SHOWN));
+    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toMatchObject({ mailShownKey: draftIdFor('prospect-1', validContact(INPUT()), SHOWN) });
+  });
+
+  test('a save that did not land on the printed price is refused, never booked', async () => {
+    mockRow = held();
+    quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 660, priceSetupFee: 0, priceDigest: 'd2' });
+    quote.judge.mockReturnValue({ price: { annual: 660, setupFee: 0, digest: 'd2' } }); // the discount did not apply
+    expect(await bookHome(TOKEN, INPUT(), deps)).toEqual({ status: 409, body: { error: 'price_changed' } });
+    expect(booking.createSelfBooking).not.toHaveBeenCalled();
+  });
+
+  test('our price went down: the visit books at the lower live price, with no discount, and the answer says the price', async () => {
+    mockRow = held();
+    quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 600, priceSetupFee: 0, priceDigest: 'd3' });
+    quote.judge.mockReturnValue({ price: { annual: 600, setupFee: 0, digest: 'd3' } });
+    const res = await bookHome(TOKEN, INPUT(), deps);
+    expect(res).toMatchObject({ status: 200, body: { booked: true, price: { annual: 600, monthly: 50, setupFee: 0 } } });
+    const body = saveEstimate.mock.calls[0][0];
+    expect(body.estimateData.operatorPriceAdjustment).toBeUndefined();
+    // Another draft than the shown-price one, so a draft saved at an older price is never handed back.
+    const terms = { annualCents: 60000, setupCents: 0 };
+    expect(body.clientDraftId).toBe(draftIdFor('prospect-1', validContact(INPUT()), terms));
+    expect(body.clientDraftId).not.toBe(draftIdFor('prospect-1', validContact(INPUT()), SHOWN));
+  });
+
+  test('a setup fee that went up stays the printed one: the draft freezes the printed fee', async () => {
+    mockRow = held({ price_setup_fee: '49.00' });
+    quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 627, priceSetupFee: 99, priceDigest: 'd4' });
+    quote.judge.mockReturnValue({ price: { annual: 627, setupFee: 99, digest: 'd4' } });
+    const res = await bookHome(TOKEN, { ...INPUT(), price: { annual: 627, setupFee: 49 } }, deps);
+    expect(res).toMatchObject({ status: 200, body: { price: { annual: 627, setupFee: 49 } } });
+    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toMatchObject({ setupFeeQuote: { amount: 49, kind: 'waveguard_membership' } });
+  });
+
+  test('after the 60 days, and for a home never mailed, a moved price is still price_changed', async () => {
+    quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 660, priceSetupFee: 0, priceDigest: 'd2' });
+    mockRow = held({ mailed_at: daysAgo(62) });
+    expect(await bookHome(TOKEN, INPUT(), deps)).toEqual({ status: 409, body: { error: 'price_changed' } });
+    mockRow = row(); // never mailed
+    expect(await bookHome(TOKEN, INPUT(), deps)).toEqual({ status: 409, body: { error: 'price_changed' } });
+    expect(saveEstimate).not.toHaveBeenCalled();
+  });
+
+  test('the page must still send the printed price: a held home does not accept another shown price', async () => {
+    mockRow = held();
+    expect(await bookHome(TOKEN, { ...INPUT(), price: { annual: 600, setupFee: 0 } }, deps)).toEqual({ status: 409, body: { error: 'price_changed' } });
+    expect(quote.priceHome).not.toHaveBeenCalled();
+  });
+
+  test('the commit guard checks the draft at the terms, and refuses held terms once the hold has ended', async () => {
+    const shown = { annualCents: 62700, setupCents: 0 };
+    const terms = { annualCents: 60000, setupCents: 0, discountCents: 0, liveSetupCents: 0 };
+    const trxFor = (draft) => {
+      const prospect = {}; prospect.where = jest.fn(() => prospect); prospect.forShare = jest.fn(() => prospect);
+      prospect.first = jest.fn(async () => ({ price_annual: '627.00', price_setup_fee: '0.00' }));
+      const estimate = {}; estimate.where = jest.fn(() => estimate); estimate.forShare = jest.fn(() => estimate); estimate.first = jest.fn(async () => draft);
+      const live = {}; for (const m of ['join', 'whereRaw', 'whereNot', 'whereNotIn']) live[m] = jest.fn(() => live);
+      live.first = jest.fn(async () => undefined);
+      const trx = jest.fn((table) => ({ mail_prospects: prospect, estimates: estimate }[table] || live));
+      trx.raw = jest.fn(async () => ({}));
+      return trx;
+    };
+    gates.isEnabled.mockImplementation((name) => name !== 'bookingPayAtVisit');
+    const draftAt = (annual) => ({ annual_total: annual, pricing_authority: 'SERVER', estimate_data: {} });
+    const home = (mailedAt) => ({ row: { ...row(), mailed_at: mailedAt } });
+    // Held: the draft must hold the terms (600), not the shown price (627).
+    expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, terms)(trxFor(draftAt('600.00')))).toBe(true);
+    expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, terms)(trxFor(draftAt('627.00')))).toBe(false);
+    // The hold ended between the price check and the commit.
+    expect(await commitGuardFor(home(daysAgo(62)), shown, 'est-1', deps, terms)(trxFor(draftAt('600.00')))).toBe(false);
+    // Terms equal to the shown price need no hold.
+    expect(await commitGuardFor(home(null), shown, 'est-1', deps)(trxFor(draftAt('627.00')))).toBe(true);
   });
 });

@@ -26,6 +26,12 @@ import { DOC, DOC_EYEBROW, FS, FW, LH, SP, docHeading } from '../theme-doc';
 // separate API origin (VITE_API_URL) would be refused by the browser.
 const API_BASE = '/api';
 
+// The booked annual price when it is lower than the one the page showed, else null.
+function lowerAnnualOf(bookedPrice, shownPrice) {
+  const annual = Number(bookedPrice && bookedPrice.annual);
+  return annual > 0 && annual < Number(shownPrice.annual) ? annual : null;
+}
+
 // Cents only when the amount is not whole: $37 a month, $37.50 a month.
 function formatMoney(value) {
   const n = Number(value);
@@ -254,7 +260,9 @@ function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged })
       });
       const body = await r.json().catch(() => ({}));
       if (r.ok && body.booked) {
-        setBooked({ date: body.date || picked.date, window: body.window || {} });
+        // The price the booking was made on, kept only when it is lower than the one this page showed (the card's price
+        // is held 60 days and never goes up; when ours went down the booking takes the lower one).
+        setBooked({ date: body.date || picked.date, window: body.window || {}, lowerAnnual: lowerAnnualOf(body.price, price) });
       } else if (body.error === 'slot_taken' || body.error === 'invalid_offer') {
         setPicked(null);
         setNotice('That time was just taken. Pick another time.');
@@ -295,6 +303,11 @@ function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged })
             {line1}
             {line1 && city ? <br /> : null}
             {city}
+          </p>
+        ) : null}
+        {booked.lowerAnnual ? (
+          <p data-testid="booked-price" style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink }}>
+            Your price is now {formatMoney(perApplication(booked.lowerAnnual))} per application.
           </p>
         ) : null}
         <p style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
