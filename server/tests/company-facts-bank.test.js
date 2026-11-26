@@ -339,6 +339,38 @@ describe('the reviewed text hash the page sends', () => {
     await expect(Bank.editFact(ID, { topic: 'Areas' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
   });
 
+  // A transaction that answers every read with "nothing" and the locked draft with `row`, enough to reach the approve checks.
+  const approveDb = (text) => {
+    const row = { id: ID, status: 'draft', fact_text: text, text_sha256: sha256(text.trim()), supersedes_id: null };
+    const chain = (table) => {
+      const q = new Proxy({}, {
+        get: (_t, prop) => {
+          if (prop === 'first') return async () => (table === 'company_fact_bank' ? row : undefined);
+          if (prop === 'then') return (resolve) => resolve([]);
+          return () => q;
+        },
+      });
+      return q;
+    };
+    chain.raw = async () => ({});
+    return { transaction: (work) => work(chain) };
+  };
+
+  test('a tick covers only the warnings the owner saw: a warning found now that was not reviewed is refused', async () => {
+    const text = 'We can reschedule a visit when the weather turns.';
+    const found = Bank.checkFactText(text, { productNames: [], codeKeys: new Set(), bankKeys: new Set() });
+    expect(found.blocks).toEqual([]);
+    const codes = found.warnings.map((w) => w.code);
+    expect(codes).toContain('promise_words');
+    const input = (reviewedWarnings) => ({ textSha256: sha256(text), acknowledgeWarnings: true, ...(reviewedWarnings ? { reviewedWarnings } : {}) });
+    await expect(Bank.approveFact(ID, input(['price_words']), owner, { dbi: approveDb(text) })).rejects.toMatchObject({ code: 'WARNINGS_NOT_ACKNOWLEDGED', status: 409, detail: { warnings: expect.any(Array) } });
+    // Reviewed codes that cover what was found (or none sent, as an older page does) get past the warning gate.
+    for (const sent of [input(codes), input()]) {
+      const outcome = await Bank.approveFact(ID, sent, owner, { dbi: approveDb(text) }).then(() => 'ok', (err) => err.code);
+      expect(outcome).not.toBe('WARNINGS_NOT_ACKNOWLEDGED');
+    }
+  });
+
   test.each(VECTORS.filter(([text]) => text.trim()))('approve accepts the page hash of %j and refuses another wording', async (text, digest) => {
     await expect(Bank.approveFact(ID, { textSha256: digest }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
     await expect(Bank.approveFact(ID, { textSha256: VECTORS[3][1] }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STALE_TEXT' });

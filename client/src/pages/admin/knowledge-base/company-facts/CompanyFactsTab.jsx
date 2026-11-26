@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { ActionFeedback, Button, Card, CardBody, CardHeader, CardTitle } from "../../../../components/ui";
 import { adminFetch } from "../../../../utils/admin-fetch";
 import FactCard from "./FactCard";
@@ -33,14 +33,14 @@ function AddDraft({ onSaved, onCancel }) {
   );
 }
 
-function FactList({ list, status, onDone, onStale }) {
+function FactList({ list, status, onDone, onStale, onEditing }) {
   if (list.loading) return <ActionFeedback className="min-h-11">Loading facts…</ActionFeedback>;
   if (list.error && !list.facts.length) return <ActionFeedback error onRetry={list.reload}>{list.error}</ActionFeedback>;
   if (!list.facts.length) return <p className="text-ui-body text-ink-secondary">{status.empty}</p>;
   return (
     <div className="grid gap-3">
       {list.facts.map((fact) => (
-        <FactCard key={fact.id} fact={fact} ownerActions={list.ownerActions} onDone={onDone} onStale={onStale} />
+        <FactCard key={fact.id} fact={fact} ownerActions={list.ownerActions} onDone={onDone} onStale={onStale} onEditing={onEditing} />
       ))}
       {list.error && <ActionFeedback error>{list.error}</ActionFeedback>}
       {list.nextCursor && <Button variant="secondary" loading={list.loadingMore} onClick={list.loadMore}>Load more</Button>}
@@ -54,10 +54,21 @@ export default function CompanyFactsTab({ showFeedback }) {
   const list = useFactList(statusKey);
   const status = STATUSES.find((item) => item.key === statusKey);
 
-  const done = (message, switchTo) => {
+  // An action reports back later, from the render it started in. These refs hold what is true NOW: the status on screen,
+  // that status's reload, and the cards with an edit form open.
+  const nowRef = useRef({});
+  nowRef.current = { statusKey, reload: list.reload };
+  const editing = useRef(new Set());
+  const onEditing = useCallback((id, open) => { if (open) editing.current.add(id); else editing.current.delete(id); }, []);
+
+  // A finished action: say so, then refresh the list on screen. It switches to the status the fact moved to only when the admin is still
+  // looking at the status the action started in and has no edit form open; otherwise it never moves the admin.
+  const done = (message, switchTo, origin) => {
     if (message) showFeedback(message);
-    if (switchTo && switchTo !== statusKey) setStatusKey(switchTo);
-    else list.reload(true);
+    const here = nowRef.current.statusKey;
+    const moves = switchTo && switchTo !== here && (!origin || origin === here) && editing.current.size === 0;
+    if (moves) setStatusKey(switchTo);
+    else nowRef.current.reload(true);
   };
 
   return (
@@ -88,7 +99,7 @@ export default function CompanyFactsTab({ showFeedback }) {
       </div>
 
       {statusKey === "approved" && !list.loading && !list.error && <HowItWillRead facts={list.facts} />}
-      <FactList list={list} status={status} onDone={done} onStale={() => list.reload(true)} />
+      <FactList list={list} status={status} onDone={done} onStale={() => nowRef.current.reload(true)} onEditing={onEditing} />
     </div>
   );
 }

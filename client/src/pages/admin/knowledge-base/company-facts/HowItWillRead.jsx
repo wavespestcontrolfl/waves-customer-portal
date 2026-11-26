@@ -8,16 +8,18 @@ import { adminFetch } from "../../../../utils/admin-fetch";
 export default function HowItWillRead({ facts }) {
   const [preview, setPreview] = useState(null);
   const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
   const signature = facts.map((fact) => `${fact.id}:${fact.text_sha256}`).join(",");
 
   useEffect(() => {
     let live = true;
     setError("");
+    setPreview(null);
     adminFetch("/admin/company-facts/preview")
       .then((body) => live && setPreview(body))
-      .catch(() => live && setError("The preview could not be loaded."));
+      .catch(() => live && setError("Could not load the preview. This does not mean any fact failed its checks. Try again."));
     return () => { live = false; };
-  }, [signature]);
+  }, [signature, attempt]);
 
   const left = preview ? facts.length - preview.count : 0;
   return (
@@ -29,7 +31,7 @@ export default function HowItWillRead({ facts }) {
         <p className="text-ui-caption text-ink-secondary">
           The approved facts as the agents get them now, in the order approved, after the built-in facts. Each channel adds its own heading above the list.
         </p>
-        {error && <ActionFeedback error>{error}</ActionFeedback>}
+        {error && <ActionFeedback error onRetry={() => setAttempt((n) => n + 1)}>{error}</ActionFeedback>}
         {!error && !preview && <ActionFeedback>Loading the preview…</ActionFeedback>}
         {preview && preview.lines && (
           <pre aria-label="How the approved facts will read" className="m-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xs bg-zinc-50 p-3 text-ui-body text-ink-primary">{preview.lines}</pre>

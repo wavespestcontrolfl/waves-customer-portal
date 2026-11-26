@@ -41,16 +41,26 @@ function previewAnswer(state) {
   return { lines: kept.map((f) => `- ${f.fact_text.trim()}`).join("\n"), count: kept.length, version: "v", ids: kept.map((f) => f.id) };
 }
 
+function readAnswer(state, method, url) {
+  if (method !== "GET") return undefined;
+  if (url.pathname === "/admin/company-facts") return listAnswer(state, url);
+  if (url.pathname.endsWith("/history")) return { events: state.events || [] };
+  if (url.pathname === "/admin/company-facts/preview") {
+    if (state.previewFails) throw Object.assign(new Error("PREVIEW_UNAVAILABLE"), { status: 503, code: "PREVIEW_UNAVAILABLE" });
+    return previewAnswer(state);
+  }
+  return state.single && /^\/admin\/company-facts\/[^/]+$/.test(url.pathname) ? { fact: state.single(), check: null } : undefined;
+}
+
 function serve(state) {
   adminFetch.mockImplementation(async (path, options = {}) => {
     const method = options.method || "GET";
     const url = new URL(path, "http://x");
-    if (method === "GET" && url.pathname === "/admin/company-facts") return listAnswer(state, url);
-    if (method === "GET" && url.pathname.endsWith("/history")) return { events: state.events || [] };
-    if (method === "GET" && url.pathname === "/admin/company-facts/preview") return previewAnswer(state);
+    const read = readAnswer(state, method, url);
+    if (read) return read;
     if (state.hold?.method === method) await state.hold.promise;
     state.onRequest?.(path, options);
-    const failure = state.fail?.[`${method} ${url.pathname.split("/").pop()}`];
+    const failure = state.failWith?.(method, url.pathname) || state.fail?.[`${method} ${url.pathname.split("/").pop()}`];
     if (failure) throw Object.assign(new Error(failure.code), failure);
     return { fact: fact(), check: null };
   });
@@ -148,7 +158,7 @@ describe("Company facts tab", () => {
     expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(bodies("/approve")).toHaveLength(1));
-    expect(bodies("/approve")[0]).toMatchObject({ acknowledgeWarnings: true });
+    expect(bodies("/approve")[0]).toMatchObject({ acknowledgeWarnings: true, reviewedWarnings: ["promise_words"] });
     expect(bodies("/approve")[0].textSha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -344,5 +354,128 @@ describe("Company facts tab", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(screen.getByText("Approved one")).toBeInTheDocument();
     expect(screen.queryByText("Service area")).not.toBeInTheDocument();
+  });
+
+  const ID_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const ID_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+  it("keeps the edit baseline fixed when the list reloads behind an open form", async () => {
+    const oldHash = "a".repeat(64);
+    const live = { a: fact({ id: ID_A, topic: "Topic A", question: "Q", text_sha256: oldHash }), b: fact({ id: ID_B, topic: "Topic B" }) };
+    const patches = [];
+    serve({
+      owner: true,
+      pages: Object.defineProperty({}, "draft", { get: () => ({ first: { facts: [live.a, live.b], nextCursor: null } }), enumerable: true }),
+      onRequest: (path, options) => { if (options.method === "PATCH") patches.push([path, JSON.parse(options.body)]); },
+    });
+    mount();
+    await screen.findByText("Topic A");
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    // Another admin changes A (new topic, new wording hash); a refresh from card B's action reloads the list behind A's open form.
+    live.a = { ...live.a, topic: "Topic A by someone else", text_sha256: "c".repeat(64) };
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    fireEvent.change(screen.getByLabelText(/Question it answers/), { target: { value: "New question" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(patches).toHaveLength(2));
+    expect(patches[1][1]).toEqual({ question: "New question", baseTextSha256: oldHash });
+  });
+
+  it("recovers from a stale wording: shows the saved wording, keeps the typed text, and retries on the new hash", async () => {
+    const savedNow = fact({ fact_text: "We service Parrish and Palmetto.", text_sha256: "d".repeat(64), topic: "Topic by other" });
+    const patches = [];
+    serve({
+      owner: true,
+      pages: { draft: { first: { facts: [fact({ text_sha256: "a".repeat(64) })], nextCursor: null } } },
+      single: () => savedNow,
+      failWith: (method, path) => (method === "PATCH" && path.endsWith("11111111-1111-4111-8111-111111111111") && patches.length === 1 ? { code: "STALE_TEXT", status: 409 } : null),
+      onRequest: (path, options) => { if (options.method === "PATCH") patches.push(JSON.parse(options.body)); },
+    });
+    mount();
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText(/The fact/), { target: { value: "My own wording of it." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(await screen.findByText(/Someone changed this wording/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Saved wording")).toHaveTextContent("We service Parrish and Palmetto.");
+    expect(screen.getByLabelText(/The fact/)).toHaveValue("My own wording of it.");
+    expect(screen.getByLabelText(/Topic/)).toHaveValue("Topic by other");
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(patches).toHaveLength(2));
+    expect(patches[1]).toEqual({ factText: "My own wording of it.", baseTextSha256: "d".repeat(64) });
+  });
+
+  it("lets the owner check a draft again after the conflict is gone", async () => {
+    let check = { blocks: ["duplicate_bank_line"], warnings: [] };
+    const patches = [];
+    serve({
+      owner: true,
+      pages: Object.defineProperty({}, "draft", { get: () => ({ first: { facts: [fact({ text_sha256: "a".repeat(64), check_result: check })], nextCursor: null } }), enumerable: true }),
+      onRequest: (path, options) => { if (options.method === "PATCH") { patches.push(JSON.parse(options.body)); check = { blocks: [], warnings: [] }; } },
+    });
+    mount();
+    await screen.findByText(/Another fact in the bank already says this/);
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled());
+    expect(patches).toEqual([{ baseTextSha256: "a".repeat(64) }]);
+    expect(screen.queryByText(/Another fact in the bank/)).not.toBeInTheDocument();
+  });
+
+  it("never moves the admin or closes an edit when a slow approve finishes", async () => {
+    let release;
+    const promise = new Promise((resolve) => { release = resolve; });
+    serve({
+      owner: true,
+      hold: { method: "POST", promise },
+      pages: { draft: { first: { facts: [fact({ id: ID_A, topic: "Topic A" }), fact({ id: ID_B, topic: "Topic B" })], nextCursor: null } } },
+    });
+    mount();
+    await screen.findByText("Topic A");
+    fireEvent.click(screen.getAllByRole("button", { name: "Approve" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]);
+    fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "Half-typed topic" } });
+    release();
+    await waitFor(() => expect(bodies("/approve")).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByLabelText(/Topic/)).toHaveValue("Half-typed topic");
+    expect(screen.getByRole("button", { name: "Drafts" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("does not pull the admin to Approved when a slow approve finishes after they moved to Retired", async () => {
+    let release;
+    const promise = new Promise((resolve) => { release = resolve; });
+    serve({
+      owner: true,
+      hold: { method: "POST", promise },
+      pages: {
+        draft: { first: { facts: [fact()], nextCursor: null } },
+        retired: { first: { facts: [fact({ id: "r1", topic: "Old one", status: "retired" })], nextCursor: null } },
+      },
+    });
+    mount();
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retired" }));
+    await screen.findByText("Old one");
+    release();
+    await waitFor(() => expect(bodies("/approve")).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByRole("button", { name: "Retired" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("Old one")).toBeInTheDocument();
+  });
+
+  it("says the preview could not be loaded, and does not blame the facts", async () => {
+    serve({
+      owner: true,
+      previewFails: true,
+      pages: { approved: { first: { facts: [fact({ status: "approved", approved_at: "2026-11-25T16:00:00Z" })], nextCursor: null } } },
+    });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Approved" }));
+    expect(await screen.findByText(/Could not load the preview/)).toBeInTheDocument();
+    expect(screen.queryByText(/not in this list/)).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Try again" }).length).toBeGreaterThan(0);
   });
 });

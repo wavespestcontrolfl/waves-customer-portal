@@ -462,7 +462,7 @@ async function approvedTextsExcept(trx, excludeId) {
 }
 
 /** Every approve-time check, on the server. Throws BLOCKED (with codes) or WARNINGS_NOT_ACKNOWLEDGED. */
-async function approveChecks(trx, row, { acknowledgeWarnings }) {
+async function approveChecks(trx, row, { acknowledgeWarnings, reviewedWarnings = null }) {
   // Other drafts count too, as in the draft check: a case or punctuation variant of this line must be discarded before this one is approved.
   const ctx = await loadCheckContext(trx, { statuses: ['draft', 'approved'], excludeIds: [row.id, row.supersedes_id] });
   const check = checkFactText(row.fact_text, ctx);
@@ -470,7 +470,9 @@ async function approveChecks(trx, row, { acknowledgeWarnings }) {
   if (others.length >= MAX_ACTIVE_FACTS) check.blocks.push('bank_full');
   if (!check.blocks.length && sectionHasBannedCopy([...others.map((o) => o.text), row.fact_text])) check.blocks.push('section_banned_copy');
   if (check.blocks.length) throw new FactError('BLOCKED', 422, { blocks: check.blocks, warnings: check.warnings.map((w) => w.code) });
-  if (check.warnings.length && !acknowledgeWarnings) {
+  // A tick covers the warnings the owner saw: one the checks found since (a widened screen, a changed bank) needs its own look.
+  const unseen = reviewedWarnings ? check.warnings.some((w) => !reviewedWarnings.includes(w.code)) : false;
+  if (check.warnings.length && (!acknowledgeWarnings || unseen)) {
     throw new FactError('WARNINGS_NOT_ACKNOWLEDGED', 409, { warnings: check.warnings });
   }
   return check;
@@ -497,6 +499,8 @@ async function approveFact(id, input, actor, { dbi = db } = {}) {
   if (!actor || !actor.isOwner || !actor.id) throw new FactError('OWNER_ONLY', 403);
   const ownerWords = cleanLine(input && input.ownerWords, 500) || null;
   const acknowledgeWarnings = Boolean(input) && input.acknowledgeWarnings === true;
+  // Optional: the warning codes the owner was shown and ticked for. When sent, every warning the server finds now must be among them.
+  const reviewedWarnings = Array.isArray(input && input.reviewedWarnings) ? input.reviewedWarnings.filter((c) => typeof c === 'string') : null;
   const reviewedSha = input && typeof input.textSha256 === 'string' ? input.textSha256.trim().toLowerCase() : '';
   if (!reviewedSha) throw new FactError('REVIEWED_TEXT_REQUIRED', 400);
   const approved = await dbi.transaction(async (trx) => {
@@ -511,7 +515,7 @@ async function approveFact(id, input, actor, { dbi = db } = {}) {
     const lockedSha = sha256(String(row.fact_text || '').trim());
     if (lockedSha !== reviewedSha) throw new FactError('STALE_TEXT', 409);
     if (row.text_sha256 !== lockedSha) throw new FactError('HASH_MISMATCH', 409);
-    const check = await approveChecks(trx, row, { acknowledgeWarnings });
+    const check = await approveChecks(trx, row, { acknowledgeWarnings, reviewedWarnings });
     const supersededId = await retireSuperseded(trx, row, actor);
     const [updated] = await trx('company_fact_bank').where({ id }).update({
       status: 'approved',
@@ -705,6 +709,9 @@ async function refreshBankFacts({ dbi = db, now = Date.now } = {}) {
   return getApprovedBankFacts({ now: now() });
 }
 
+/** A fresh, verified read of the approved rows (what a snapshot load would keep), without touching the snapshot. Throws when the read fails. */
+const readVerifiedFacts = ({ dbi = db } = {}) => loadVerifiedFacts(dbi);
+
 /** The approved lines every reader may use right now. SYNC. Empty before the first load and after STALE_MS. */
 function getApprovedBankFacts({ now = Date.now() } = {}) {
   if (!state.loadedAt || now - state.loadedAt > STALE_MS) return [];
@@ -751,6 +758,7 @@ module.exports = {
   getFact,
   factHistory,
   getApprovedBankFacts,
+  readVerifiedFacts,
   refreshBankFacts,
   renderBankFactsLines,
   bankVersionHash,

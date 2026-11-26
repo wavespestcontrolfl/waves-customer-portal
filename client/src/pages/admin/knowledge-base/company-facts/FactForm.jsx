@@ -10,33 +10,52 @@ const COPY = {
   approved: { save: "Save as a new draft", note: "The approved fact stays live until the owner approves this new draft." },
 };
 
-// Add a draft, edit a draft, or draft a replacement of an approved fact. onSubmit(values) returns a promise.
-export default function FactForm({ mode, initial = {}, onSubmit, onCancel }) {
-  const [topic, setTopic] = useState(initial.topic || "");
-  const [factText, setFactText] = useState(initial.fact_text || "");
-  const [question, setQuestion] = useState(initial.question || "");
+const startingValues = (mode, fact) => ({
+  topic: fact.topic || "",
+  factText: (fact.fact_text || "").trim(),
+  question: fact.question || "",
   // A replacement of an approved fact starts with no owner's words: the old quote does not vouch for new wording.
-  const startWords = mode === "approved" ? "" : initial.owner_words || "";
-  const [ownerWords, setOwnerWords] = useState(startWords);
+  ownerWords: mode === "approved" ? "" : fact.owner_words || "",
+});
+
+// Add a draft, edit a draft, or draft a replacement of an approved fact. onSubmit(values) returns a promise.
+// For an edit, `loadCurrent()` reads the fact as it is saved now (used to recover from a 409 STALE_TEXT).
+// The baseline (the fields and wording hash the editor opened) is fixed at open: a list reload behind the form never moves it,
+// so an untouched field is never sent and never overwrites another admin's edit. Only a STALE_TEXT recovery replaces it.
+export default function FactForm({ mode, initial = {}, onSubmit, onCancel, loadCurrent }) {
+  const [baseline, setBaseline] = useState(() => ({ values: startingValues(mode, initial), hash: initial.text_sha256 }));
+  const [fields, setFields] = useState(baseline.values);
+  const [current, setCurrent] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const setField = (key) => (event) => setFields((prev) => ({ ...prev, [key]: event.target.value }));
 
   // A new draft sends everything. An edit sends only what the editor changed, plus the hash of the wording it opened,
-  // so an untouched field never overwrites someone else's edit and a concurrent change of the wording is refused (409).
+  // so a concurrent change of the wording is refused (409).
   const valuesToSend = (now) => {
     if (mode === "new") return now;
-    const was = { topic: initial.topic || "", factText: (initial.fact_text || "").trim(), question: initial.question || "", ownerWords: startWords };
-    const changed = Object.fromEntries(Object.entries(now).filter(([key, value]) => value !== was[key]));
-    return Object.keys(changed).length ? { ...changed, baseTextSha256: initial.text_sha256 } : null;
+    const changed = Object.fromEntries(Object.entries(now).filter(([key, value]) => value !== baseline.values[key]));
+    return Object.keys(changed).length ? { ...changed, baseTextSha256: baseline.hash } : null;
+  };
+
+  // The wording was changed by someone else. Show it, keep what the editor typed (to copy), and move the baseline to the
+  // saved fact. A field the editor did not touch takes the saved value; a field they changed keeps their text.
+  const recover = async () => {
+    const saved = await loadCurrent();
+    const fresh = startingValues(mode, saved.fact);
+    setFields((prev) => Object.fromEntries(Object.keys(prev).map((key) => [key, prev[key] === baseline.values[key] ? fresh[key] : prev[key]])));
+    setBaseline({ values: fresh, hash: saved.fact.text_sha256 });
+    setCurrent(saved.fact.fact_text);
   };
 
   const save = async () => {
     if (busy) return;
-    if (!topic.trim() || !factText.trim()) {
+    const now = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value.trim()]));
+    if (!now.topic || !now.factText) {
       setError("Add a short topic and the fact.");
       return;
     }
-    const values = valuesToSend({ topic: topic.trim(), factText: factText.trim(), question: question.trim(), ownerWords: ownerWords.trim() });
+    const values = valuesToSend(now);
     if (!values) {
       setError("Nothing has changed yet.");
       return;
@@ -46,7 +65,17 @@ export default function FactForm({ mode, initial = {}, onSubmit, onCancel }) {
     try {
       await onSubmit(values);
     } catch (requestError) {
-      setError(errorMessage(requestError, "The fact could not be saved."));
+      setCurrent(null);
+      if (requestError.code === "STALE_TEXT" && loadCurrent) {
+        try {
+          await recover();
+          setError("Someone changed this wording while you had it open. Your text is still in the box. Compare it with the saved wording below, then save again.");
+        } catch {
+          setError("Someone changed this wording, and the saved wording could not be loaded. Copy your text, close this, and reload the list.");
+        }
+      } else {
+        setError(errorMessage(requestError, "The fact could not be saved."));
+      }
       setBusy(false);
     }
   };
@@ -55,17 +84,23 @@ export default function FactForm({ mode, initial = {}, onSubmit, onCancel }) {
     <fieldset disabled={busy} className="m-0 min-w-0 space-y-3 border-0 p-0">
       <p className="text-ui-body text-ink-secondary">{COPY[mode].note}</p>
       <Field label="Topic" required help="A short title for this list. Customers never see it.">
-        <Input value={topic} maxLength={120} onChange={(event) => setTopic(event.target.value)} />
+        <Input value={fields.topic} maxLength={120} onChange={setField("topic")} />
       </Field>
-      <Field label="The fact" required help={`${factText.trim().length} of ${MAX_CHARS} characters`}>
-        <Textarea value={factText} rows={3} onChange={(event) => setFactText(event.target.value)} />
+      <Field label="The fact" required help={`${fields.factText.trim().length} of ${MAX_CHARS} characters`}>
+        <Textarea value={fields.factText} rows={3} onChange={setField("factText")} />
       </Field>
       <Field label="Question it answers (optional)" help="No customer names.">
-        <Input value={question} maxLength={300} onChange={(event) => setQuestion(event.target.value)} />
+        <Input value={fields.question} maxLength={300} onChange={setField("question")} />
       </Field>
       <Field label="Owner's words (optional)" help="The owner's own answer, kept with the fact. It is not shown to customers.">
-        <Textarea value={ownerWords} rows={2} maxLength={500} onChange={(event) => setOwnerWords(event.target.value)} />
+        <Textarea value={fields.ownerWords} rows={2} maxLength={500} onChange={setField("ownerWords")} />
       </Field>
+      {current !== null && (
+        <div className="rounded-xs bg-zinc-50 p-3 text-ui-body" aria-label="Saved wording">
+          <p className="m-0 text-ui-caption text-ink-secondary">Saved wording now:</p>
+          <p className="m-0 whitespace-pre-wrap break-words">{current}</p>
+        </div>
+      )}
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex flex-wrap gap-2">
         <Button loading={busy} onClick={save}>{COPY[mode].save}</Button>

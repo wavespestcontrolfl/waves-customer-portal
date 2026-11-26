@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ActionFeedback, Button, Field, Input } from "../../../../components/ui";
 import { adminFetch } from "../../../../utils/admin-fetch";
 import FactChecks from "./FactChecks";
@@ -11,6 +11,15 @@ const send = (path, method, body) => adminFetch(`${BASE}${path}`, { method, ...(
 
 // What a tick covers: this wording and this set of warnings.
 const reviewKey = (text, warnings) => `${text}\n${warnings.map((w) => `${w.code}:${(w.words || []).join(',')}`).join(';')}`;
+
+// Tells the tab while a card has its edit form open, so a late action elsewhere never navigates away from (or closes) it.
+function useReportEditing(id, mode, onEditing) {
+  const editing = mode === "edit";
+  useEffect(() => {
+    onEditing?.(id, editing);
+    return () => onEditing?.(id, false);
+  }, [id, editing, onEditing]);
+}
 
 // One in-flight request at a time per card. run() reports success through onDone(message) and failure as one plain sentence.
 function useAction(onDone, onStale) {
@@ -36,8 +45,9 @@ function useAction(onDone, onStale) {
   return { busy, error, run, setError };
 }
 
-export function DraftActions({ fact, ownerActions, onDone, onStale }) {
+export function DraftActions({ fact, ownerActions, onDone, onStale, onEditing }) {
   const [mode, setMode] = useState("view");
+  useReportEditing(fact.id, mode, onEditing);
   // The tick and the server's fresh warnings belong to one wording: each remembers the text it was given for, and
   // counts only while the card still shows that text (an edit or a reload that changed the wording drops both).
   const [tickedFor, setTickedFor] = useState(null);
@@ -54,18 +64,23 @@ export function DraftActions({ fact, ownerActions, onDone, onStale }) {
     const reviewed = fact.fact_text;
     const textSha256 = await factTextSha256(reviewed);
     try {
-      await send(`/${fact.id}/approve`, "POST", { textSha256, ...(warnings.length ? { acknowledgeWarnings: true } : {}) });
+      // The tick covers the warnings on screen: the server refuses the approval if its checks now find one that is not among them.
+      await send(`/${fact.id}/approve`, "POST", { textSha256, ...(warnings.length ? { acknowledgeWarnings: true, reviewedWarnings: warnings.map((w) => w.code) } : {}) });
     } catch (requestError) {
       if (requestError.code === "WARNINGS_NOT_ACKNOWLEDGED") setFresh({ text: reviewed, warnings: requestError.details?.warnings || [] });
       throw requestError;
     }
   }, "Fact approved.", "approved");
 
+  // Saving the draft with nothing changed makes the server run every check again and store the new result (PATCH with just the wording hash).
+  const checkAgain = () => run(() => send(`/${fact.id}`, "PATCH", { baseTextSha256: fact.text_sha256 }), "Checked again.");
+
   if (mode === "edit") {
     return (
       <FactForm
         mode="draft"
         initial={fact}
+        loadCurrent={() => send(`/${fact.id}`, "GET")}
         onCancel={() => setMode("view")}
         onSubmit={async (values) => { await send(`/${fact.id}`, "PATCH", values); setMode("view"); onDone("Draft saved."); }}
       />
@@ -85,6 +100,7 @@ export function DraftActions({ fact, ownerActions, onDone, onStale }) {
         <div className="flex flex-wrap gap-2">
           {ownerActions && <Button loading={busy} disabled={!canApprove} onClick={approve}>Approve</Button>}
           <Button variant="secondary" onClick={() => setMode("edit")}>Edit</Button>
+          <Button variant="secondary" loading={busy} onClick={checkAgain}>Check again</Button>
           <Button variant="secondary" onClick={() => setMode("discard")}>Discard</Button>
         </div>
       )}
@@ -94,8 +110,9 @@ export function DraftActions({ fact, ownerActions, onDone, onStale }) {
   );
 }
 
-export function ApprovedActions({ fact, onDone, onStale }) {
+export function ApprovedActions({ fact, onDone, onStale, onEditing }) {
   const [mode, setMode] = useState("view");
+  useReportEditing(fact.id, mode, onEditing);
   const [reason, setReason] = useState("");
   const { busy, error, run } = useAction(onDone, onStale);
   const reasonOk = reason.trim().length >= 3;
@@ -105,6 +122,7 @@ export function ApprovedActions({ fact, onDone, onStale }) {
       <FactForm
         mode="approved"
         initial={fact}
+        loadCurrent={() => send(`/${fact.id}`, "GET")}
         onCancel={() => setMode("view")}
         onSubmit={async (values) => { await send(`/${fact.id}`, "PATCH", values); setMode("view"); onDone("New draft saved. The approved fact is unchanged until it is approved.", "draft"); }}
       />

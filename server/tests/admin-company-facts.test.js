@@ -22,7 +22,7 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const mockBank = {
   listFacts: jest.fn(async () => ({ facts: [], nextCursor: null })),
-  refreshBankFacts: jest.fn(async () => [{ id: 'f1', text: 'We service Parrish.' }, { id: 'f2', text: 'We offer a plan.' }]),
+  readVerifiedFacts: jest.fn(async () => [{ id: 'f1', text: 'We service Parrish.' }, { id: 'f2', text: 'We offer a plan.' }]),
   renderBankFactsLines: jest.fn((facts) => facts.map((f) => `- ${f.text}`).join('\n')),
   bankVersionHash: jest.fn(() => 'v1'),
   createDraft: jest.fn(async () => ({ id: 'f1', status: 'draft', check_result: { blocks: ['banned_copy'], warnings: [] } })),
@@ -138,8 +138,17 @@ describe('preview', () => {
     mockEmail = 'someone.else@example.test';
     const res = await call(url('/preview'));
     expect(res).toEqual({ status: 200, body: { lines: '- We service Parrish.\n- We offer a plan.', count: 2, version: 'v1', ids: ['f1', 'f2'] } });
-    expect(mockBank.refreshBankFacts).toHaveBeenCalledTimes(1);
+    expect(mockBank.readVerifiedFacts).toHaveBeenCalledTimes(1);
     expect(mockBank.getFact).not.toHaveBeenCalled();
+  });
+});
+
+describe('a failed preview read is an error, not an empty list', () => {
+  test('503 PREVIEW_UNAVAILABLE with a code-only log', async () => {
+    mockBank.readVerifiedFacts.mockRejectedValueOnce(Object.assign(new Error('db down with secret text'), { code: 'ECONNRESET' }));
+    expect(await call(url('/preview'))).toEqual({ status: 503, body: { error: 'PREVIEW_UNAVAILABLE', code: 'PREVIEW_UNAVAILABLE' } });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('secret text');
+    expect(JSON.stringify(logger.error.mock.calls)).toContain('ECONNRESET');
   });
 });
 
