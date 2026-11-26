@@ -219,7 +219,8 @@ describe('Gentrol Complete EC3 name is the one protocols.json and the service li
   test('protocols.json names the new catalog row, never the old one', () => {
     const text = fs.readFileSync(path.join(__dirname, '../config/protocols.json'), 'utf8');
     expect(text).not.toContain('"Gentrol IGR"');
-    // The cockroach card names it twice. The pest program's copy of that card (its third mention) is retired.
-    expect((text.match(/"Gentrol Complete EC3"/g) || []).length).toBe(2);
+    // No card names it now: Tekko Pro replaced it on the cockroach card (owner 2026-11-25, D11: "EC3 stops on cockroach jobs"), and
+    // the pest program's copy of that card is retired.
+    expect((text.match(/"Gentrol Complete EC3"/g) || []).length).toBe(0);
   });
 });

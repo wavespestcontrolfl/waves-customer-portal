@@ -70,4 +70,14 @@ describe('estimate pricing audit reads the registry service labels', () => {
     expect(cogs.matchedServiceType).toBe('German Roach');
     expect(cogs.lines.map((l) => l.productName)).toEqual(['Canonical product']);
   });
+
+  test('a product used once per package is costed once, by area, never once per visit', () => {
+    const { USAGE_AFTER } = require('../models/migrations/20261126130000_roach_growth_regulator_tekko');
+    const tekko = row('German Roach Cleanout', 'Tekko Pro IGR', { ...USAGE_AFTER, cost_per_unit: 3.3106, cost_unit: 'fl_oz' });
+    const cogs = inventoryCostFromRows('german_roach', { homeSqFt: 2000 }, { available: true, rows: [row('German Roach Cleanout', 'Alpine WSG'), tekko] });
+    // 2 fl oz per 1,000 sq ft x 2,000 sq ft = 4 fl oz at $3.3106: one fixed cost; the bait stays per visit.
+    expect(cogs.totalPerVisit).toBe(2);
+    expect(cogs.fixedCost).toBeCloseTo(13.24, 2);
+    expect(cogs.lines.find((l) => l.productName === 'Tekko Pro IGR').costTiming).toBe('fixed');
+  });
 });

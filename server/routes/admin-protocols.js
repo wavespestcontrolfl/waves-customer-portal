@@ -60,6 +60,9 @@ const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram } = require('../services/
 const { stripPriceTokensFromText, deepStripPriceTokens, stripOwnerOnlyProtocolCostFields } = require('../services/protocol-reader');
 const bermudaRemoval = require('../services/lawn-bermuda-removal');
 const roundsCatchUp = require('../services/lawn-rounds-catchup');
+const { completionRateFields } = require('../utils/protocol-label-rate');
+const { addonCardHints, labelRateFor } = require('../services/completion-product-defaults');
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -631,7 +634,7 @@ async function validateLawnProtocolForPublish(knex, protocolId) {
   };
 }
 
-function buildCompletionActions({ lines, products, programKey, visit }) {
+function buildCompletionActions({ lines, products, programKey, visit, addonHints = new Set() }) {
   // De-branded pest visits keep primary/secondary as plain strings (so every
   // existing string consumer — protocol UI tabs, /match — still works) and
   // carry per-line metadata here, keyed by the exact de-branded line text.
@@ -660,7 +663,15 @@ function buildCompletionActions({ lines, products, programKey, visit }) {
       // Prefer explicit metadata; fall back to the keyword classifier for legacy lines.
       scope: meta?.scope || actionScopeForLine(line, product),
       treatmentApplied: meta?.treatmentApplied != null ? meta.treatmentApplied : actionTreatmentApplied(kind, line),
-      product: serializeProtocolProduct(product),
+      // A line with its label's rate for this pest prefills and reviews at that rate (protocol-label-rate.js). The line's own
+      // completion method wins over the catalog's, as on the completion defaults: a crack-and-crevice line never falls to the
+      // inferred perimeter spray and its 4 oz pest default.
+      product: product ? {
+        ...serializeProtocolProduct(product),
+        ...(meta?.completionApplicationMethod ? { method: meta.completionApplicationMethod } : {}),
+        // A blank rate when a booked add-on's card lists the product too (completion-product-defaults.js labelRateFor).
+        ...completionRateFields(labelRateFor(meta, addonHints), product),
+      } : null,
     };
   });
 }
@@ -812,12 +823,21 @@ router.get('/equipment', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The product hints the booked visit's add-on cards list (addonCardHints); none with no visit named. A visit this viewer may not see
+// reads as unknown, so no card rate prefills.
+async function bookedAddonHints(req, protocols) {
+  const id = String(req.query.visitId || '');
+  if (!UUID_RE.test(id)) return new Set();
+  const seen = await technicianCurrentVisitFilter(req, db('scheduled_services').where({ 'scheduled_services.id': id })).first('scheduled_services.id');
+  return seen ? addonCardHints(db, id, protocols) : null;
+}
+
 // The card for a service name, read the way the job card reads it. ?visitId= names the booked visit the screen is open on (one this
 // viewer may see): its catalog service key decides the program before its name does, and a visit booked as a follow-up of a finished
 // visit (its name is a copy of that visit's) gets the program's follow-up card. With no visit, the name alone decides, as before.
 async function matchForBookedVisit(req, protocols, serviceType) {
   const id = String(req.query.visitId || '');
-  const visit = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+  const visit = UUID_RE.test(id)
     ? await technicianCurrentVisitFilter(req, db('scheduled_services').where({ 'scheduled_services.id': id }))
       .leftJoin('services', 'scheduled_services.service_id', 'services.id')
       .first('scheduled_services.followup_source_service_id', db.raw('COALESCE(scheduled_services.service_key_snapshot, services.service_key) as service_key'))
@@ -1332,6 +1352,8 @@ router.get('/completion-actions', async (req, res, next) => {
       products,
       programKey,
       visit,
+      // The booked visit's add-ons (?visitId=, a visit this viewer may see): a product another booked card lists prefills no card rate.
+      addonHints: await bookedAddonHints(req, protocols),
     }), actionLines));
     const actions = bermuda.decorate(settled.items);
     // GATE_LAWN_V13: this fallback never sizes a lawn product from the catalog defaults
@@ -1853,7 +1875,6 @@ router.get('/product-label/:productId', async (req, res, next) => {
 // (GATE_JOB_CARD, read at call time). Off → { enabled: false } and the tab
 // hides; nothing is read or written. Tech-or-admin like the rest of the
 // router. Raw access codes ride ONLY in strip.access.codes (tap-to-reveal).
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // The Plan tab's "Use" ticks on "if needed" lawn lines, as the treatment-plan
 // route reads them (the engine's own comma-list parse); null = not a list of product ids.
@@ -2045,6 +2066,7 @@ router.get('/programs/:track/visit/:num', async (req, res, next) => {
 });
 
 router._internals = {
+  buildCompletionActions,
   defaultProductStockPublishIssue,
   stockStatusForProduct,
   unmatchedPricedProtocolLines,

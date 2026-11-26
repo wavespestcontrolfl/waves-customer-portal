@@ -55,6 +55,7 @@ const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
 const { resolveProductIn, noProductSentence, governedRateFor, addOnKeyOfVisit } = require('./area-addon-governed-rate');
+const { labelUseRate } = require('../utils/protocol-label-rate');
 
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
@@ -1553,9 +1554,20 @@ function seasonalVisit(program, scheduledDate) {
  */
 // A card line may declare its tank rate (lineMeta.tankRatePerGallon: { amount, unit }) when its text cannot be read as one rate: grams, or
 // two products on one line. Only a line that names one product carries it. { declaredRate } or {}.
-function declaredTankRate(meta, hints) {
+// lineMeta.labelRatePerGallon is the product label's own rate for THIS pest, where the catalog row holds the label's rate for another
+// (Tekko Pro: 1 fl oz per gallon for fleas and flying insects in the catalog, 2 for cockroaches). It may sit above the catalog band, so
+// only this card's jobs get it and every other job keeps the catalog rate. protocol-label-rate-lines.test.js pins each line that has one.
+// The label rate applies only to the registered product it names (protocol-label-rate.js checks the EPA number); a
+// line whose hint resolved to another formulation falls back to its own text and the catalog band.
+function declaredTankRate(meta, hints, product) {
+  if (hints.length !== 1) return {};
+  const labelUse = labelUseRate(meta, product);
+  if (labelUse) return { declaredRate: { lo: labelUse.amount, hi: labelUse.amount, unit: labelUse.unit }, labelUseRate: true };
+  // The line names a label rate for another registration: its text states that rate too, so no rate is read from it (rateOf below
+  // honors this) and the resolved product keeps its catalog band.
+  if (meta?.labelRatePerGallon) return { labelRateRefused: true };
   const amount = Number(meta?.tankRatePerGallon?.amount);
-  if (!(amount > 0) || hints.length !== 1) return {};
+  if (!(amount > 0)) return {};
   return { declaredRate: { lo: amount, hi: amount, unit: String(meta.tankRatePerGallon.unit) } };
 }
 
@@ -1574,7 +1586,7 @@ function linesFromLineMeta(visit, catalog) {
       // Conditional when the line sits in the visit's secondary text OR is
       // phrased as a condition (isConditionalLine).
       const conditional = Boolean(raw && (secondary.includes(raw) || isConditionalLine(raw)));
-      lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional, ...declaredTankRate(meta, meta.catalogProductHints) });
+      lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional, ...declaredTankRate(meta, meta.catalogProductHints, product) });
     }
   }
   return lines;
@@ -2279,6 +2291,9 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     [!tankMixable, 'Not a tank mix — apply as labeled'],
     [!product.label_verified_at, 'Label rate not yet verified'],
     [sprayCheck.verdict === 'hold', `Spray check: ${sprayCheck.reason}`],
+    // Two services on this visit name the product at different rates: the hold names each rate, so it comes only once the
+    // label and spray checks pass and a mixing instruction may be given.
+    [Boolean(lineFacts.conflictLines), conflictText(product, labelPerGallon, lineFacts.conflictLines)],
   ].find(([applies]) => applies);
   const mix = withheld
     ? { amount: null, unit: rateUnit || null, reason: withheld[1] }
@@ -2358,8 +2373,21 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     .map((c) => ({ c, hit: resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null, isFollowup: c.isFollowup === true }).lines.find((l) => l.product.id === product.id) }))
     .filter(({ hit }) => hit);
   const owners = hits.map(({ c }) => ({ name: c.name, serviceKey: c.serviceKey || null }));
-  const selected = hits.find(({ hit }) => hit.selected !== false);
-  if (selected) return found({ addon: selected.c.addon, selected: true, rate: selected.hit.declaredRate || lineRate(selected.hit.raw), declared: Boolean(selected.hit.declaredRate), governed: Boolean(selected.hit.governed) }, owners);
+  const selectedHits = hits.filter(({ hit }) => hit.selected !== false);
+  const [selected] = selectedHits;
+  if (selected) {
+    const rateOf = ({ hit }) => (hit.labelRateRefused ? null : hit.declaredRate || lineRate(hit.raw));
+    // Two booked services can select the same product at different rates (a home cockroach visit with Tekko Pro at its label's
+    // 2 fl oz per gallon, plus a flea add-on at 0.66 in the shared tank). The request names only the product, so no one rate is the
+    // right one: the dose is withheld. Each service's line goes along (conflictLines) so the hold can name the rates that pass the
+    // same label check a single dose does (conflictText).
+    const lineOf = (h) => ({ rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate) });
+    const rates = new Set(selectedHits.map((h) => JSON.stringify(rateOf(h))));
+    // Only a card that carries its label's rate (labelUseRate) can disagree: another product's lines keep the first card's rate
+    // narrowed by the label band, as before.
+    const ratesDisagree = rates.size > 1 && selectedHits.some((h) => h.hit.labelUseRate) ? { conflictLines: selectedHits.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
+    return found({ addon: selected.c.addon, selected: true, ...lineOf(selected), governed: Boolean(selected.hit.governed), ...ratesDisagree }, owners);
+  }
   const [conditional] = hits;
   return found(conditional ? { addon: conditional.c.addon, selected: false, rate: null, ...(conditional.hit.labelHold ? { labelHold: conditional.hit.labelHold } : {}) } : null, owners);
 }
@@ -2371,7 +2399,21 @@ function protocolBand(label, protocolLine) {
   if (!label || !protocolLine?.rate) return null;
   if (!protocolLine.declared) return narrowBand(label, protocolLine.rate);
   const sameUnit = String(label.unit).toLowerCase() === String(protocolLine.rate.unit).toLowerCase();
+  // The label's own rate for this card's pest stands in for the catalog band (see declaredTankRate).
+  if (protocolLine.labelUse) return sameUnit ? protocolLine.rate : null;
   return sameUnit && protocolLine.rate.hi <= label.hi ? protocolLine.rate : null;
+}
+
+// The hold for a product two services on one visit select at different rates: each service's rate where it passes protocolBand
+// against the verified label band (the check a single dose gets), else "see its card".
+function conflictText(product, label, conflictLines) {
+  if (!conflictLines) return null;
+  const rateText = (rate) => `${rate.lo === rate.hi ? rate.lo : `${rate.lo}-${rate.hi}`} ${String(rate.unit).replace('_', ' ')} per gallon`;
+  const each = conflictLines.map((line) => {
+    const band = protocolBand(label, line);
+    return `${line.name} ${band ? rateText(band) : 'see its card'}`;
+  });
+  return `${product.name} has a different rate on each service on this visit: ${each.join('; ')}. Mix a separate tank for each`;
 }
 
 // The protocol band clipped to the verified label band, on one unit.
@@ -2453,5 +2495,5 @@ module.exports = {
   resolveVisitLines,
   describeLine,
   ALTERNATE_ADDRESS_BLOCK,
-  _test: { mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
+  _test: { protocolBand, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };

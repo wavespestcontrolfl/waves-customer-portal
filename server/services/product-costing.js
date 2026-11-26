@@ -251,6 +251,12 @@ function calcLandedCost(price, shipping, taxRate) {
   return Math.round((p + s) * (1 + t) * 100) / 100;
 }
 
+// A product applied once for a whole package, whatever its visit count (Tekko Pro on a cockroach cleanout: one treatment lasts 6
+// months). The estimate audit costs such a row once per line, not once per visit.
+function usageOncePerPackage(row) {
+  return String(row?.notes || '').includes('[usage:once_per_package]');
+}
+
 function usageAmountForArea(row, areaSqFt = 0) {
   const baseAmount = Number(row.usage_amount || 0);
   const areaAmount = Number(row.usage_per_1000sf || 0) > 0 && Number(areaSqFt || 0) > 0
@@ -389,4 +395,5 @@ module.exports = {
   parsePackSize,
   unitPriceBreakdown,
   usageAmountForArea,
+  usageOncePerPackage,
 };
