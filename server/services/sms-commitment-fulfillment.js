@@ -193,6 +193,18 @@ const customerAsk = (commitment) => commitment.kind === 'other' && commitment.sm
 // one does — besides a visit, money or a call back that reached the customer
 // (Codex #5248 r2 P1). The ask-only person-reply limits do not apply.
 const staffPromise = (commitment) => commitment.kind === 'other' && commitment.sms_context?.basis === 'promise';
+// A customer's TEXT asking for a call back (owner 2026-10-03, "we spoke to
+// her, why would we then text her"): answered once a person at Waves spoke
+// with them by phone after it, whoever dialed. Never an email ask (its own
+// lane) and never a promise Waves made: a promise made on a call is not kept
+// by the customer phoning in (owner audit 2026-10-05, call-commitments.js).
+const textCallbackAsk = (commitment) => commitment.kind === 'callback' && commitment.sms_context?.basis === 'request'
+  && commitment.sms_context?.channel !== 'email';
+// A call in that a person answered, as the Messages reader reads it
+// (sms-pending-conversations.js, PR #5860). The loader admits such a row only
+// for a text call-back ask and only when the call ENDED after the text
+// (callEndedAtSql); every other call row it returns is outbound.
+const personAnsweredCallIn = (record) => record.direction === 'inbound' && record.status === 'completed' && record.answered_by === 'human';
 // The keys a payments row names its invoice by, as the Stripe webhook's
 // findInvoiceForPayment reads them: a dispute stamps dispute_invoice_id
 // before it clears the invoice's PaymentIntent, and a won dispute restores
@@ -357,14 +369,33 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
         // property: a later property switch must not re-scope a delivered
         // notice (Codex #4816 r49). Null when the sender stamped none.
         conn.raw("sms_log.metadata->>'property_id' as linked_property_id")),
-    call: conn('call_log').where({ customer_id: customerId, direction: 'outbound' })
-      .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-      // A call back reaches the customer on ANY of their phones (primary,
-      // alternate, service contact). The query is already scoped to the
-      // customer's own call rows, so the texting number is not required.
-      .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
-      // Who placed the call and whether it reached the customer (personCallBack).
-      .select('id', 'status', 'duration_seconds', 'transcription', 'created_at', ...callContactSelects(conn)),
+    call: (async () => {
+      // A text call-back ask also reads the calls in that a person answered
+      // (textCallbackAsk). Every other ask reads outbound calls only, with
+      // exactly the fields it read before, so its evidence hash is unchanged.
+      const callIn = textCallbackAsk(commitment);
+      const { callEndedAtSql } = require('./sms-pending-conversations');
+      const rows = await conn('call_log').where({ customer_id: customerId })
+        // The call must end after the text: a row inserted after the call
+        // was over, with no end stamp from Twilio, has no end and counts for
+        // nothing (callEndedAtSql, the Messages reader's definition).
+        .where((q) => (callIn
+          ? q.where('direction', 'outbound').orWhere((w) => w.where({ direction: 'inbound', status: 'completed', answered_by: 'human' })
+            .whereRaw(`${callEndedAtSql('call_log')} > ?`, [after]).whereRaw(`${callEndedAtSql('call_log')} <= ?`, [now]))
+          : q.where('direction', 'outbound')))
+        .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
+        // A call back reaches the customer on ANY of their phones (primary,
+        // alternate, service contact), and a call in may come from any of
+        // them. The query is already scoped to the customer's own call rows,
+        // so the texting number is not required.
+        .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
+        // Who placed the call and whether it reached the customer (personCallBack).
+        .select('id', 'status', 'duration_seconds', 'transcription', 'created_at', ...callContactSelects(conn),
+          ...(callIn ? ['direction', 'answered_by'] : []));
+      // Only a call in carries its direction and who answered.
+      return callIn ? rows.map(({ direction, answered_by: answeredBy, ...row }) => (direction === 'inbound'
+        ? { ...row, direction, answered_by: answeredBy } : row)) : rows;
+    })(),
     email: conn('emails').where({ customer_id: customerId }).where('received_at', '>', after)
       .where('received_at', '<=', now).orderBy('received_at', 'desc').limit(LIMIT + 1)
       .select('id', 'label_ids', 'body_text', 'subject', 'has_attachments', 'received_at'),
@@ -909,9 +940,11 @@ function customerWitness(record, commitment, records = []) {
       // A general ask takes only a reply a person wrote after it, never an
       // automated notice; a staff promise, any text written after it.
       && (commitment.kind !== 'other' || (writtenAfterAsk(record, commitment) && (staffPromise(commitment) || operatorReply(record)))),
-    call: () => record.status === 'completed' && Number(record.duration_seconds) >= 60
+    // A call in that a person answered answers a text call-back ask only.
+    call: () => (record.direction === 'inbound' ? textCallbackAsk(commitment) && personAnsweredCallIn(record)
+      : record.status === 'completed' && Number(record.duration_seconds) >= 60
       // A general ask takes only a call back that reached the customer.
-      && (commitment.kind !== 'other' || personCallBack(record)),
+      && (commitment.kind !== 'other' || personCallBack(record))),
     // The candidate query already restricts this to a person-sent Gmail row
     // (personSentFilter), after the request (received_at > after) and
     // resolved to THIS customer (emailCustomerLink) — nothing further
@@ -992,7 +1025,9 @@ function customerWitnessTypes(commitment) {
       : ['visit', 'payment', 'sms', 'call', 'email_reply'];
   }
   // `callback` keeps its existing mix: a real call back, or the same visible
-  // field progress that answers an "other" ask (owner ruling 2026-09-24).
+  // field progress that answers an "other" ask (owner ruling 2026-09-24). A
+  // customer's text call-back ask also admits a call in that a person
+  // answered (owner 2026-10-03, textCallbackAsk), loaded as a `call` row.
   if (commitment.kind === 'callback') return [...REQUIRED_TYPES.callback, 'visit'];
   // An EMPTY allowlist (reports, paperwork) is deliberate: no channel is a
   // witness until the artifact/recipient proof exists. Every other kind is
@@ -1122,17 +1157,26 @@ function replyFulfillment(evidence, commitment, { eventOnly = false } = {}) {
   // still rang the bell); calls and emails stay with the model for a promise,
   // which judges whether they delivered it.
   const ask = customerAsk(commitment);
-  if (!ask && !staffPromise(commitment)) return null;
+  // A customer's text asking for a call back is closed once a person spoke
+  // with them by phone after it (owner 2026-10-03): they phoned in and a
+  // person answered, or a staff call back reached them (personCallBack). A
+  // text or an email is not the call they asked for.
+  const callBack = textCallbackAsk(commitment);
+  if (!ask && !callBack && !staffPromise(commitment)) return null;
   // email_reply (a person's Gmail SENT row resolved to this customer) closes
   // a general ask exactly like sms/call — NEVER email_delivery, which is an
   // automated SendGrid send (coordinator correction #1, 2026-09-29).
-  const replies = evidence.records.filter((row) => (ask ? ['sms', 'call', 'email_reply'].includes(row.type) : row.type === 'sms' && operatorReply(row))
-    && witnessAllowed(row, commitment, evidence.records, eventOnly));
+  const answers = (row) => {
+    if (ask) return ['sms', 'call', 'email_reply'].includes(row.type);
+    if (callBack) return row.type === 'call' && (personAnsweredCallIn(row) || personCallBack(row));
+    return row.type === 'sms' && operatorReply(row);
+  };
+  const replies = evidence.records.filter((row) => answers(row) && witnessAllowed(row, commitment, evidence.records, eventOnly));
   if (!replies.length) return null;
   const at = (row) => new Date(witnessTime(row, commitment)).getTime();
   const reply = replies.reduce((first, row) => (at(row) < at(first) ? row : first));
   return { verdict: 'fulfilled', record_type: reply.type, record_id: reply.id, matched_at: witnessTime(reply, commitment),
-    quote: null, basis: ask ? 'person_reply' : 'person_text_after_promise', extractor_version: VERSION };
+    quote: null, basis: ask || callBack ? 'person_reply' : 'person_text_after_promise', extractor_version: VERSION };
 }
 
 // The event page's scan watermark and attempt stamp are bookkeeping, not obligation content.

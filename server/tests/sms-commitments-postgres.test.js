@@ -2914,6 +2914,94 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect([reply.id]).toContain((await mockPg('call_commitments').first()).fulfillment.record_id);
   });
 
+  describe('owner 2026-10-03: a customer who texted for a call back and then spoke with a person by phone was answered', () => {
+    const callbackAsk = async ({ basis = 'request' } = {}) => {
+      result.facts = [];
+      result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis, answered_by_payment: false, quote: 'Can someone call me back?',
+        description: 'call the customer back', due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
+      await recordMessageOperations(mockPg, message, result, context);
+      return new Date(message.created_at.getTime() + 1000);
+    };
+    const callIn = async (created_at, extra = {}) => (await mockPg('call_log').insert({ customer_id: message.customer_id,
+      direction: 'inbound', from_phone: message.from_phone, to_phone: numbers.locations.parrish.number, status: 'completed',
+      answered_by: 'human', duration_seconds: 59, transcription: 'Customer called about the gate code.',
+      metadata: { ended_at: new Date(created_at.getTime() + 70000).toISOString() }, created_at, ...extra }).returning('id'))[0];
+
+    test('a call in a person answered closes the ask at its deadline, with no model call and no bell', async () => {
+      const after = await callbackAsk();
+      const call = await callIn(after);
+      const outcome = await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 120000) });
+      expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1 });
+      expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ basis: 'person_reply', record_type: 'call', record_id: call.id });
+      expect(dispatchWithFallback).not.toHaveBeenCalled();
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('voicemail, an unfinished call, a sandbox call or a call with no end after the text never closes it; a later answered call closes the alert that rang', async () => {
+      const actualNotifications = jest.requireActual('../services/notification-service');
+      NotificationService.notifyAdmin.mockImplementation(actualNotifications.notifyAdmin.bind(actualNotifications));
+      const after = await callbackAsk();
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+      await callIn(after, { answered_by: 'voicemail' });
+      await callIn(after, { status: 'in-progress' });
+      await callIn(after, { source: 'voice_relay_sandbox' });
+      // A row recovered after the call was over: Twilio's end stamp is before the text.
+      await callIn(after, { metadata: { ended_at: new Date(message.created_at.getTime() - 60000).toISOString() } });
+      // A recovered row with no end stamp has no trustworthy end.
+      await callIn(after, { metadata: { source: 'twilio_recording_status_recovered' } });
+      const now = new Date(after.getTime() + 120000);
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, await mockPg('call_commitments').first(), message, now);
+      expect(evidence.records.filter((r) => r.type === 'call')).toHaveLength(0);
+      expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
+      expect(await mockPg('notifications').whereNull('done_at')).toHaveLength(1);
+      const call = await callIn(new Date(now.getTime() + 60000));
+      await mockPg('system_settings').where({ key: 'sms_operations.fulfillment_cursor' }).del();
+      expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 300000) })).toMatchObject({ fulfilled: 1 });
+      expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ record_type: 'call', record_id: call.id });
+      expect(await mockPg('notifications').whereNull('done_at')).toHaveLength(0);
+    });
+
+    test('a promise Waves made to call back is not kept by the customer calling in', async () => {
+      const after = await callbackAsk({ basis: 'promise' });
+      await callIn(after);
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, await mockPg('call_commitments').first(), message, new Date(after.getTime() + 120000));
+      expect(evidence.records.filter((r) => r.type === 'call')).toHaveLength(0);
+    });
+
+    test('an email ask for a call back reads no calls in', async () => {
+      await callbackAsk();
+      await callIn(new Date(message.created_at.getTime() + 1000));
+      const row = await mockPg('call_commitments').first();
+      const email = { ...row, sms_context: { ...row.sms_context, channel: 'email' } };
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, email, message, new Date(message.created_at.getTime() + 120000));
+      expect(evidence.records.filter((r) => r.type === 'call')).toHaveLength(0);
+    });
+
+    test('a staff call back that reached the customer closes the ask with no model call; outbound rows keep their old fields', async () => {
+      const after = await callbackAsk();
+      const staffCall = await outboundCall(after, { source: 'admin-callback', duration_seconds: 178,
+        metadata: { customer_leg: { status: 'completed', duration_seconds: 163 } } });
+      const now = new Date(after.getTime() + 120000);
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, await mockPg('call_commitments').first(), message, now);
+      // No direction or answered_by on an outbound row: the evidence hash of
+      // an ask with no call in is unchanged by this rule.
+      expect(evidence.records.find((r) => r.type === 'call')).not.toHaveProperty('direction');
+      expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ fulfilled: 1 });
+      expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ basis: 'person_reply', record_type: 'call', record_id: staffCall.id });
+      expect(dispatchWithFallback).not.toHaveBeenCalled();
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('a completed outbound call with no proof a person reached the customer still goes to the model', async () => {
+      const after = await callbackAsk();
+      await outboundCall(after, { source: 'collections_voice' });
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+      expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 120000) })).toMatchObject({ fulfilled: 0 });
+      expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('Codex #5169 r1 P2: a general ask that names an email address still closes on a person\'s reply', async () => {
     const after = await generalAsk('Is sample.customer@example.com the email on my account?');
     await staffText('Yes, that is the email we have on file.', after);
