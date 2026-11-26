@@ -111,4 +111,29 @@ describeDb('repair bond template migration (PostgreSQL, rolled back)', () => {
     expect(again.active.id).toBe(after.active.id);
     expect(Number(countAgain.n)).toBe(Number(count.n));
   });
+
+  test('an admin-edited coverage paragraph pauses the template and keeps its text', async () => {
+    const before = await activeOf();
+    if (!before.active) return;
+    const top = await trx('document_template_versions').where({ template_id: before.template.id }).max('version_number as max').first();
+    const edited = SEEDED_BODY.replace('Waves will (1) re-treat', 'Waves will (1) retreat');
+    const [prior] = await trx('document_template_versions').insert({
+      template_id: before.template.id,
+      version_number: Number(top.max) + 1,
+      title: 'Termite Repair & Retreatment Bond Agreement',
+      body: edited,
+      signer_disclosure: before.active.signer_disclosure,
+      variables: typeof before.active.variables === 'string' ? before.active.variables : JSON.stringify(before.active.variables ?? []),
+      required_fields: JSON.stringify(before.active.required_fields ?? ['initials', 'signedName']),
+      created_by: null,
+      published_at: trx.fn.now(),
+    }).returning('*');
+    await trx('document_templates').where({ id: before.template.id }).update({ active_version_id: prior.id, status: 'active' });
+
+    await mig.up(trx);
+    const after = await activeOf();
+    expect(after.template.status).toBe('paused');
+    expect(after.active.id).toBe(prior.id);
+    expect(after.active.body).toBe(edited);
+  });
 });

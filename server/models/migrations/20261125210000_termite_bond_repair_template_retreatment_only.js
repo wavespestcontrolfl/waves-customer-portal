@@ -11,7 +11,8 @@
 // admin edit made since the seed is kept), insert the result as a NEW version at the next number (FOR UPDATE on
 // the template row) and repoint active_version_id. Open and signed sends froze their text at issue time and keep
 // the version they were signed on. The coverage paragraph is the one required anchor: when an admin rewrote it,
-// the template is left alone (edit it in the document library). The title, the customer-responsibilities clause
+// the repair promise cannot be proven gone, so the template is PAUSED (its text kept as edited) until the office
+// fixes it in the document library; the retreatment bond stays available. The title, the customer-responsibilities clause
 // and the e-signature sentence are rewritten when they still carry the seeded wording.
 //
 // The new coverage paragraph is the retreatment bond's own (20260623000003), which matches the Florida Rule
@@ -71,31 +72,36 @@ exports.up = async function up(knex) {
   if (!active) return;
 
   const result = toRetreatmentOnly(active.body);
+  if (result.reason === 'anchor_missing') {
+    // The coverage paragraph was edited, so the repair promise cannot be proven gone. Pause the template (the
+    // body stays as the admin left it) so no new bond goes out with it; the retreatment bond stays available.
+    if (template.status === 'active') {
+      await knex('document_templates').where({ id: template.id }).update({ status: 'paused', updated_at: knex.fn.now() });
+    }
+    return;
+  }
   if (!result.changed) return;
 
   const title = active.title === OLD_TITLE ? NEW_TITLE : active.title;
   const versions = await knex('document_template_versions')
     .where({ template_id: template.id })
     .orderBy('version_number', 'asc');
-  let next = versions.find((v) => v.body === result.body && v.title === title) || null;
-  if (!next) {
-    const nextNumber = Math.max(0, ...versions.map((v) => Number(v.version_number) || 0)) + 1;
-    [next] = await knex('document_template_versions').insert({
-      template_id: template.id,
-      version_number: nextNumber,
-      title,
-      body: result.body,
-      signer_disclosure: active.signer_disclosure,
-      variables: typeof active.variables === 'string' ? active.variables : JSON.stringify(active.variables ?? []),
-      required_fields: typeof active.required_fields === 'string'
-        ? active.required_fields
-        : JSON.stringify(active.required_fields ?? ['initials', 'signedName']),
-      created_by: null,
-      published_at: knex.fn.now(),
-    }).returning('*');
-  } else {
-    await knex('document_template_versions').where({ id: next.id }).update({ published_at: knex.fn.now() });
-  }
+  // Always a fresh version built from the ACTIVE version's own signing settings: a historical version with the
+  // same text could carry other signer_disclosure / variables / required_fields. Reruns stop at 'already_present'.
+  const nextNumber = Math.max(0, ...versions.map((v) => Number(v.version_number) || 0)) + 1;
+  const [next] = await knex('document_template_versions').insert({
+    template_id: template.id,
+    version_number: nextNumber,
+    title,
+    body: result.body,
+    signer_disclosure: active.signer_disclosure,
+    variables: typeof active.variables === 'string' ? active.variables : JSON.stringify(active.variables ?? []),
+    required_fields: typeof active.required_fields === 'string'
+      ? active.required_fields
+      : JSON.stringify(active.required_fields ?? ['initials', 'signedName']),
+    created_by: null,
+    published_at: knex.fn.now(),
+  }).returning('*');
 
   const update = { active_version_id: next.id, updated_at: knex.fn.now() };
   if (template.name === OLD_NAME) update.name = NEW_NAME;

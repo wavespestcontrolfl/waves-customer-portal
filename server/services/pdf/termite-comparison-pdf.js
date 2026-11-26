@@ -249,7 +249,7 @@ function renderTermiteComparisonPdf(content) {
       doc.moveDown(0.4);
       bullets(doc, [
         ...bondOptions.map((opt) => `${opt.label} term — adds ${money(opt.perApp)} per application`),
-        'Free retreatment if covered termites return during the term, as written in your signed bond. No repair of damage.',
+        'Free retreatment if covered termites return during the term, as written in your signed bond. New bonds do not repair damage.',
         'Transferable to a new homeowner ($250 + transfer inspection) — the buyer inherits active termite protection with its documented history.',
       ]);
       noteParagraph(doc, 'Your signed termite agreement controls the covered structures, covered organisms, warranty type, renewal, limitations, and exclusions.');

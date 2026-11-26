@@ -34,7 +34,7 @@ describe('termite bait guide matches the signed agreements', () => {
   test('retreatment row defers to the signed agreement or bond and offers no damage repair', () => {
     const row = guide.systemBox.rows.find((r) => r[0] === 'Retreatment');
     expect(row).toBeDefined();
-    expect(row[1]).toBe('As your signed agreement or bond states (no damage repair)');
+    expect(row[1]).toBe('As your signed agreement or bond states. New agreements cover retreatment only, with no damage repair');
   });
 
   test('no text promises a $1,000,000 repair amount or the WDO guarantee', () => {
@@ -50,7 +50,7 @@ describe('termite bait guide matches the signed agreements', () => {
     const notCovers = guide.faq.find((f) => f.q === 'What does the agreement NOT cover?');
     expect(covers.a).toMatch(/does not cover drywood termites, powderpost beetles or old house borers/);
     expect(notCovers.a).toMatch(/Drywood termites, powderpost beetles, old house borers/);
-    expect(notCovers.a).toMatch(/repair of any termite damage;/);
+    expect(notCovers.a).toMatch(/repair of termite damage on new agreements \(a bond signed earlier follows its own terms\);/);
     expect(notCovers.a).not.toMatch(/signed repair bond/);
   });
 
