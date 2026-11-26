@@ -20883,6 +20883,12 @@ export function CompletionPanel({
                   </div>
                 ) : (
                   <>
+                    {/* A service with no protocol card (owner pick D18): the server's own line, in place of a list of actions. */}
+                    {!specialtyCompletion && protocolActionMeta?.noProtocol && (
+                      <div role="note" style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginBottom: 8 }}>
+                        {protocolActionMeta.note}
+                      </div>
+                    )}
                     {!specialtyCompletion && protocolActionError && !protocolActions.length && (
                       <div
                         style={{
@@ -23420,6 +23426,11 @@ export function CompletionPanel({
                 </span>
               ) : (
                 <>
+                  {!specialtyCompletion && protocolActionMeta?.noProtocol && (
+                    <div role="note" style={{ fontSize: 14, color: D.muted, marginBottom: 6 }}>
+                      {protocolActionMeta.note}
+                    </div>
+                  )}
                   {!specialtyCompletion && protocolActionError && !protocolActions.length && (
                     <div
                       style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}

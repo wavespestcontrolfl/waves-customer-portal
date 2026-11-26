@@ -521,12 +521,17 @@ const RODENT_PROCEDURE_ONLY_KEYS = new Set([
   'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
   'rodent_inspection', 'rodent_exclusion', 'rodent_exclusion_only', 'rodent_trapping_exclusion',
 ]);
+// The Waves Assessment (catalog key lawn_inspection, category inspection) is a walk of the property with no product (owner pick D13,
+// 2026-11-25): its card's steps show the same way.
 // The card's visit and procedure (no product lines) for such a key, with its note, else null.
 const PROCEDURE_ONLY_NOTE = 'Trap and exclusion work: steps only, no products on this card';
+const ASSESSMENT_NOTE = 'Assessment: steps only, no products on this card';
 function procedureOnlyResolve({ category, name, serviceKey, scheduledDate, isFollowup }, protocols) {
-  if (category !== 'rodent' || !RODENT_PROCEDURE_ONLY_KEYS.has(serviceKey) || !protocols?.rodent) return null;
-  const resolved = resolveProtocolLines(name, scheduledDate, protocols, [], { programKey: 'rodent', serviceKey, isFollowup: isFollowup === true });
-  return resolved.visit && resolved.procedure ? { visit: resolved.visit, procedure: resolved.procedure, note: PROCEDURE_ONLY_NOTE } : null;
+  const [programKey, note] = category === 'rodent' && RODENT_PROCEDURE_ONLY_KEYS.has(serviceKey) ? ['rodent', PROCEDURE_ONLY_NOTE]
+    : category === 'inspection' && serviceKey === 'lawn_inspection' ? ['assessment', ASSESSMENT_NOTE] : [];
+  if (!programKey || !protocols?.[programKey]) return null;
+  const resolved = resolveProtocolLines(name, scheduledDate, protocols, [], { programKey, serviceKey, isFollowup: isFollowup === true });
+  return resolved.visit && resolved.procedure ? { visit: resolved.visit, procedure: resolved.procedure, note } : null;
 }
 
 function addonProgramKey(category, name, protocols, serviceKey = null) {

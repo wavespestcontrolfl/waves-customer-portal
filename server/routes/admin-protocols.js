@@ -160,6 +160,9 @@ function actionScopeForLine(line, product) {
 function actionTreatmentApplied(kind, line) {
   if (kind === 'inspection') return false;
   const text = normalizeText(line?.raw || '');
+  // A line that forbids or withholds work ("Do not apply the growth regulator again at this visit", "Avoid repellent spray on
+  // active trails") is a limit, not an application: ticking it records no treatment.
+  if (/^(do not|don t|never|no|not|avoid)\b/.test(text)) return false;
   if (/\b(declin|no access|not treated|unavailable|skip|skipped|customer not home)\b/.test(text)) return false;
   return true;
 }
@@ -842,6 +845,8 @@ async function bookedAddonHints(req, protocols) {
 // viewer may see): its catalog service key decides the program before its name does, and a visit booked as a follow-up of a finished
 // visit (its name is a copy of that visit's) gets the program's follow-up card, as does a later visit of a package booked up front
 // (protocol-package-stage.js). With no visit, the name alone decides, as before.
+// What a service with no card shows (owner pick D18, 2026-11-25; protocol-matcher.js reason no_protocol).
+const NO_CARD_NOTE = 'Inspection only, no product: this service has no protocol card.';
 async function matchForBookedVisit(req, protocols, serviceType) {
   const id = String(req.query.visitId || '');
   const visit = UUID_RE.test(id)
@@ -867,6 +872,10 @@ router.get('/match', async (req, res, next) => {
     // visit, never default to today's month.
     const result = await matchForBookedVisit(req, protocols, serviceType);
 
+    // A service with no card (owner pick D18): an answer, not a failed read. The panel shows no service protocol.
+    if (result.reason === 'no_protocol') {
+      return res.json({ serviceType, programKey: null, program: null, matchedVisit: null, matched: false, reason: result.reason, note: NO_CARD_NOTE });
+    }
     if (!result.program) return res.status(404).json({ error: 'Protocol program not found' });
 
     res.json(protocolCatalogForViewer(req, {
@@ -1295,6 +1304,7 @@ router.get('/completion-actions', async (req, res, next) => {
     let month = null;
     // The appointment's own month (real date): Bermuda removal's eligibility and rows follow it, not the round's recipe month.
     let appointmentMonth = null;
+    let noCard = false;
 
     if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
       programKey = 'lawn';
@@ -1328,8 +1338,11 @@ router.get('/completion-actions', async (req, res, next) => {
       programKey = matched.programKey;
       program = matched.program;
       visit = matched.matchedVisit || program?.visits?.[0] || null;
+      noCard = matched.reason === 'no_protocol';
     }
 
+    // A service with no card (owner pick D18) has no actions and no products to offer: the close-out says so.
+    if (noCard) return res.json({ serviceType, programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
     if (!program || !visit) return res.status(404).json({ error: 'Protocol actions not found' });
 
     // The visit this fallback builds its chips from is the plan's visit: a lawn step rewritten by a rule from the lawn's own data (the

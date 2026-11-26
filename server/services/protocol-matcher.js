@@ -298,17 +298,13 @@ const MATCH_RULES = [
     serviceKeys: ['termite_inspection'],
     terms: ['termite', 'wdo', 'wood destroying', 'swarmer', 'swarm'],
   },
+  // The Waves Assessment (catalog key lawn_inspection since its 2026-06 rename): a free walk of the property, no product.
   {
-    programKey: 'pest',
-    visit: 6,
-    reason: 'mosquito_barrier',
-    terms: ['mosquito', 'misting', 'barrier'],
-  },
-  {
-    programKey: 'pest',
-    visit: 5,
-    reason: 'rodent_monitoring',
-    terms: ['rodent', 'rat', 'mouse', 'mice', 'exclusion', 'trapping'],
+    programKey: 'assessment',
+    visit: 1,
+    reason: 'waves_assessment',
+    serviceKeys: ['lawn_inspection'],
+    terms: ['waves assessment'],
   },
   {
     programKey: 'pest',
@@ -414,6 +410,8 @@ function programKeyForService(serviceType) {
   const normalized = normalize(serviceType);
   // The misting SYSTEM's plan phrase is its own program (a keyless row); bare "misting" below stays the barrier program.
   if (normalized.includes('misting service plan')) return 'mosquito_misting';
+  // A keyless "Waves Assessment" row: its own card, before "lawn" or "pest" can claim a longer name.
+  if (normalized.includes('waves assessment')) return 'assessment';
   // 'turf' is the commercial turf-treatment synonym for the lawn program
   // ("Commercial Turf Treatment Program") — must route to the lawn protocol,
   // not fall through to pest.
@@ -592,6 +590,11 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
   const programKey = matchedRule?.programKey || fallbackProgramKey;
   const program = protocols?.[programKey] || null;
   if (!program) return { programKey, program: null, matchedVisit: null, matched: false, reason: 'program_missing' };
+  // No protocol = no chemical plan (owner pick D18, 2026-11-25). "pest" is where a name that says nothing lands
+  // (programKeyForService's last line), so a service no pest rule claims (bee and wasp removal, a bird box, wildlife
+  // trapping) used to get the general pest card and its products. It gets no card: every surface then shows its own
+  // "no treatment protocol" state and prefills nothing, until the service has a card.
+  if (!matchedRule && programKey === 'pest') return { programKey: null, program: null, matchedVisit: null, matched: false, reason: 'no_protocol' };
 
   const fallbackVisit = program.visits?.[0] || null;
   const ruleVisit = matchedRule ? findVisit(program, matchedRule.visit) || fallbackVisit : fallbackVisit;
