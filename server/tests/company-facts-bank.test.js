@@ -725,3 +725,57 @@ describe('snapshot', () => {
     expect(Bank.getApprovedBankFacts({ now: T0 })).toEqual([]);
   });
 });
+
+describe('the snapshot refresh starts on the first read (a process without the scheduler)', () => {
+  const db = require('../models/db');
+  const flush = async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); };
+  beforeEach(() => { jest.useFakeTimers(); Bank._test.resetSnapshot(); Bank._test.setLazyStart(true); db.mockClear(); });
+  afterEach(() => { Bank.stopBankRefresh(); Bank._test.setLazyStart(false); Bank._test.resetSnapshot(); jest.useRealTimers(); });
+
+  test('a read with no prior start answers [] at once and triggers exactly one load; more reads start no more timers or loads', async () => {
+    expect(Bank.getApprovedBankFacts()).toEqual([]);
+    await flush();
+    const callsPerLoad = db.mock.calls.length;
+    expect(callsPerLoad).toBeGreaterThan(0);
+    expect(jest.getTimerCount()).toBe(1);
+    expect(Bank.renderBankFactsSection()).toBe('');
+    expect(Bank.bankVersionHash()).toBe('');
+    Bank.getApprovedBankFacts();
+    await flush();
+    expect(db.mock.calls.length).toBe(callsPerLoad);
+    expect(jest.getTimerCount()).toBe(1);
+    jest.advanceTimersByTime(Bank.REFRESH_MS);
+    await flush();
+    expect(db.mock.calls.length).toBe(callsPerLoad * 2); // the one timer loads again every minute
+  });
+
+  test('the scheduler start stays idempotent with a read that already started it, and the other way round', async () => {
+    Bank.startBankRefresh();
+    Bank.startBankRefresh();
+    await flush();
+    const callsPerLoad = db.mock.calls.length;
+    expect(jest.getTimerCount()).toBe(1);
+    Bank.getApprovedBankFacts();
+    await flush();
+    expect(db.mock.calls.length).toBe(callsPerLoad);
+    expect(jest.getTimerCount()).toBe(1);
+  });
+
+  test('a stopped refresh stays stopped on a read; a start brings it back; a failed load never throws into the reader', async () => {
+    Bank.startBankRefresh();
+    Bank.stopBankRefresh();
+    expect(jest.getTimerCount()).toBe(0);
+    expect(() => Bank.getApprovedBankFacts()).not.toThrow();
+    expect(jest.getTimerCount()).toBe(0);
+    Bank.startBankRefresh();
+    expect(jest.getTimerCount()).toBe(1);
+  });
+
+  test('Jest skips the lazy start unless a test turns it on', async () => {
+    Bank._test.setLazyStart(false);
+    Bank.getApprovedBankFacts();
+    await flush();
+    expect(db).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
+  });
+});

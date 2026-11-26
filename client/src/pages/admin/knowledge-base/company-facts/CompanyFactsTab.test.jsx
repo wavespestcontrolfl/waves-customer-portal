@@ -809,6 +809,28 @@ describe("Company facts tab", () => {
     await waitFor(() => expect(reads.length).toBeGreaterThan(0));
   });
 
+  it.each([
+    ["approved meanwhile", { code: "NOT_A_DRAFT", status: 409 }, /already approved or changed this draft/],
+    ["deleted meanwhile", { code: "NOT_FOUND", status: 404 }, /already gone/],
+  ])("closes the discard confirmation, reloads the list and says so when the draft was %s", async (_label, failure, message) => {
+    const reads = [];
+    serve({
+      owner: true,
+      pages: { draft: { first: { facts: [fact()], nextCursor: null } } },
+      failWith: (method) => (method === "DELETE" ? failure : null),
+    });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation(async (path, options) => { if (path.startsWith("/admin/company-facts?")) reads.push(path); return base(path, options); });
+    mount();
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    reads.length = 0;
+    fireEvent.click(screen.getAllByRole("button", { name: "Discard" }).at(-1));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.queryByText("Discard this draft for good?")).not.toBeInTheDocument();
+    await waitFor(() => expect(reads.length).toBeGreaterThan(0));
+  });
+
   it("labels the preview as read by voice calls and email drafts, not texting", async () => {
     serve({ owner: true, pages: { approved: { first: { facts: [fact({ status: "approved", approved_at: "2026-11-25T16:00:00Z" })], nextCursor: null } } } });
     mount();

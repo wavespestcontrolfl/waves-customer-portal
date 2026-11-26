@@ -657,6 +657,8 @@ let generation = 0;
 let startedReads = 0; // refreshes started, in order
 let appliedRead = 0; // the newest-started read whose result is in `state`
 let refreshTimer = null;
+let lazyStartInTests = false; // test hook: Jest skips the lazy start unless a test turns it on
+let stopped = false; // stopBankRefresh() ran: a later read does not start the refresh again
 let lastDropKey = '';
 
 /**
@@ -746,7 +748,7 @@ async function refreshBankFacts({ dbi = db, now = Date.now } = {}) {
     logger.warn(`[company-facts-bank] snapshot refresh failed (code ${err?.code || 'unknown'}); keeping the last copy until it goes stale`);
   }
   // Through the age-checked getter: a failed read must not hand a caller a copy past its five minutes.
-  return getApprovedBankFacts({ now: now() });
+  return freshFacts(now());
 }
 
 /**
@@ -758,10 +760,20 @@ const readVerifiedFacts = async ({ dbi = db } = {}) => {
   return { facts: kept, consideredIds };
 };
 
-/** The approved lines every reader may use right now. SYNC. Empty before the first load and after STALE_MS. */
-function getApprovedBankFacts({ now = Date.now() } = {}) {
+// The age-checked copy, with no side effect: what refreshBankFacts hands back and what getApprovedBankFacts serves.
+function freshFacts(now) {
   if (!state.loadedAt || now - state.loadedAt > STALE_MS) return [];
   return state.facts;
+}
+
+/**
+ * The approved lines every reader may use right now. SYNC. Empty before the first load and after STALE_MS.
+ * The first read in a process that never started the refresh (managed dev, a process without the scheduler) starts it, once:
+ * that read still returns [] and never waits for the load, so a call or a draft is never held up. Jest skips this unless a test turns it on.
+ */
+function getApprovedBankFacts({ now = Date.now() } = {}) {
+  if (!refreshTimer && !stopped && (process.env.NODE_ENV !== 'test' || lazyStartInTests)) startBankRefresh();
+  return freshFacts(now);
 }
 
 /** After an approve or retire in THIS process: drop the copy (fail closed), then reload at once. */
@@ -771,15 +783,17 @@ function invalidate(opts = {}) {
   return refreshBankFacts(opts);
 }
 
-/** Boot hook (scheduler.js, before the GATE_CRON_JOBS return): load now, then every minute. */
+/** Boot hook (scheduler.js, before the GATE_CRON_JOBS return): load now, then every minute. Idempotent; a first read starts it too. */
 function startBankRefresh() {
   if (refreshTimer) return;
+  stopped = false;
   refreshBankFacts().catch(() => {});
   refreshTimer = setInterval(() => { refreshBankFacts().catch(() => {}); }, REFRESH_MS);
   if (typeof refreshTimer.unref === 'function') refreshTimer.unref();
 }
 
 function stopBankRefresh() {
+  stopped = true;
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = null;
 }
@@ -813,5 +827,5 @@ module.exports = {
   invalidate,
   startBankRefresh,
   stopBankRefresh,
-  _test: { sha256, normalise, countSentences, sectionHasBannedCopy, hasNumberInFact, loadVerifiedFacts, resetSnapshot: () => { state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
+  _test: { setLazyStart: (on) => { lazyStartInTests = on === true; }, sha256, normalise, countSentences, sectionHasBannedCopy, hasNumberInFact, loadVerifiedFacts, resetSnapshot: () => { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = null; stopped = false; state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
 };

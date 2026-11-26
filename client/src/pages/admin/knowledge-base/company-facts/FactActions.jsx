@@ -35,11 +35,16 @@ function useAction(onDone, onStale) {
       await work();
       onDone(doneMessage, switchTo);
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      const message = errorMessage(requestError);
+      setError(message);
       if (["STALE_TEXT", "STALE_FACT", "STATUS_CHANGED"].includes(requestError.code)) {
         // The fact changed under this action: refresh the card, and let the caller close what it had open.
         onStale();
         onRefused?.();
+      } else if (["NOT_A_DRAFT", "NOT_FOUND"].includes(requestError.code)) {
+        // The fact was approved or deleted meanwhile, so its card is about to leave this list: say so on the page, not on the card, and reload.
+        onRefused?.();
+        onDone(message);
       }
     } finally {
       busyRef.current = false;
