@@ -465,6 +465,10 @@ async function routeKeepsWindows(candidate, { conn, env, request, caches }) {
     ...(candidate.shiftEndMin != null ? { shiftEndMin: candidate.shiftEndMin } : {}),
   });
   if (result?.feasible !== true) return `route_${result?.reason || 'unknown'}`;
+  // The engine compares the route with and without the new visit, and both have the moved stops at their new hours.
+  // So each moved stop's own modeled end is read here: the move alone may not carry it past the shift end.
+  if (candidate.shiftEndMin != null && (result.arrivals || []).some((arrival) => moved.has(String(arrival.id))
+    && minutesOf(arrival.departure) > candidate.shiftEndMin)) return 'route_shift_end';
   // find-time's own test: `fit.detourMinutes > capFor(date, tech.id)`.
   if (request.detourCap && result.detourMinutes > request.detourCap(candidate.dateStr, candidate.techId)) return 'detour_cap';
   return true;

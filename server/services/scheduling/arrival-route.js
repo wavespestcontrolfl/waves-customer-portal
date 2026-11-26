@@ -1598,9 +1598,12 @@ async function pickedShiftEnd(context, { conn = db, date, windowStart, windowEnd
     const shiftOf = await savepointScope(conn, (c) => loadTechShifts(c, { technicianIds: [technicianId], now: context.now }));
     const shift = shiftOf(technicianId, String(date).split('T')[0]);
     if (!shift) return null;
-    // The block rule of the other shift checks: the longer of the window and the length.
+    // The block rule of the other shift checks: the longer of the window and the length. The length is
+    // the longer of the caller's and the visit's own (its stored minutes, or a pending edit of them): a
+    // save that sends no length is still judged on the minutes the engine simulates.
     const { startMin, endMin } = require('./window-rules').rowBlockMinutes({
-      window_start: windowStart, window_end: windowEnd, estimated_duration_minutes: durationMinutes,
+      window_start: windowStart, window_end: windowEnd,
+      estimated_duration_minutes: Math.max(Number(durationMinutes) || 0, Number(context.target.estimated_duration_minutes) || 0),
     });
     if (startMin == null || startMin < shift.startMin || endMin > shift.endMin) return null;
     return shift.endMin;

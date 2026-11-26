@@ -54,6 +54,17 @@ test('a block the shift does not hold on the clock gets no limit: the picked-hou
   expect(await pickedShiftEnd(context(), block('13:00', '14:00'))).toBeNull();
 });
 
+test('a saved visit with more stored work than the window is judged on that work, with or without a length from the caller', async () => {
+  const long = { target: { id: 'visit-1', technician_id: 'tech-1', estimated_duration_minutes: 90 }, now: NOW };
+  expect(await pickedShiftEnd(long, block('12:00', '13:00'))).toBeNull();
+  expect(await pickedShiftEnd(long, block('12:00', '13:00', { durationMinutes: undefined }))).toBeNull();
+  expect(await pickedShiftEnd(long, block('11:30', '12:30'))).toBe(13 * 60);
+  // The caller's longer length stands over a shorter stored one.
+  const short = { target: { id: 'visit-1', technician_id: 'tech-1', estimated_duration_minutes: 30 }, now: NOW };
+  expect(await pickedShiftEnd(short, block('12:00', null, { durationMinutes: 61 }))).toBeNull();
+  expect(await pickedShiftEnd(short, block('12:00', null, { durationMinutes: 60 }))).toBe(13 * 60);
+});
+
 test('a block is the longer of its window and its length; with no end it is its length', async () => {
   expect(await pickedShiftEnd(context(), block('12:00', '13:00', { durationMinutes: 61 }))).toBeNull();
   expect(await pickedShiftEnd(context(), block('11:00', '13:00', { durationMinutes: 30 }))).toBe(13 * 60);
