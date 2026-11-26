@@ -108,7 +108,7 @@ const MATCH_RULES = [
     reason: 'rodent_followup',
     // A visit booked as a follow-up (it carries the source visit's name) gets this card only after a trapping visit: a follow-up of a
     // bait-station service or an exclusion keeps its own card (no attic traps to reset).
-    followupOf: ['rodent_trapping_baiting', 'rodent_followup'],
+    followupOf: ['rodent_trapping_baiting', 'rodent_exclusion_trapping', 'rodent_followup'],
     serviceKeys: [
       'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'rodent_trap_check_additional',
       'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
@@ -130,6 +130,15 @@ const MATCH_RULES = [
     // A follow-up booked from an exclusion visit carries its name: the re-inspection, never the sealing card again.
     followupOf: ['rodent_exclusion'],
     terms: ['rodent exclusion follow up', 'rodent exclusion followup', 'exclusion follow up', 'exclusion followup'],
+  },
+  // The combined service ("Rodent Exclusion & Trapping Service", key rodent_exclusion) seals and places traps: its card is the
+  // exclusion card, and a follow-up of it is a trap check (above), never the exclusion re-inspection.
+  {
+    programKey: 'rodent',
+    visit: 3,
+    reason: 'rodent_exclusion_trapping',
+    serviceKeys: ['rodent_exclusion', 'rodent_trapping_exclusion', 'rodent_trapping_exclusion_sanitation'],
+    terms: ['exclusion & trapping', 'exclusion and trapping', 'trapping & exclusion', 'trapping and exclusion', 'trapping + exclusion'],
   },
   {
     programKey: 'rodent',

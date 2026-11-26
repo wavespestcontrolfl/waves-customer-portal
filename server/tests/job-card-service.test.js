@@ -2904,5 +2904,8 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     const exclusionFollow = await card({ serviceType: 'Rodent Exclusion Service', serviceKey: 'rodent_exclusion_only', isFollowup: true });
     expect(exclusionFollow.visit.visit).toBe(1);
     expect((await card({ serviceType: 'Rodent Exclusion Service', serviceKey: 'rodent_exclusion_only' })).visit.visit).toBe(3);
+    // The combined service places traps: its follow-up is a trap check.
+    const combinedFollow = await card({ serviceType: 'Rodent Exclusion & Trapping Service', serviceKey: 'rodent_exclusion', isFollowup: true });
+    expect([combinedFollow.visit.visit, combinedFollow.lines]).toEqual([4, []]);
   });
 });

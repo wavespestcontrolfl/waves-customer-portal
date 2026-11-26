@@ -118,7 +118,14 @@ describe('protocol matcher specialty routing', () => {
     for (const key of ['trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly']) {
       expect(byKey('Standard Retainer Service', key)).toEqual(['rodent', 4, 'rodent_followup']);
     }
-    expect(byKey('Rodent Exclusion & Trapping Service', 'rodent_exclusion')).toEqual(['rodent', 3, 'rodent_exclusion']);
+    // The combined service places traps too: its own reason, so a follow-up of it is a trap check.
+    expect(byKey('Rodent Exclusion & Trapping Service', 'rodent_exclusion')).toEqual(['rodent', 3, 'rodent_exclusion_trapping']);
+    expect(byKey('Rodent Exclusion Only Service', 'rodent_exclusion_only')).toEqual(['rodent', 3, 'rodent_exclusion']);
+    const followup = (serviceType, serviceKey) => followupVisitMatch(matchServiceProtocol(protocols, serviceType, { serviceKey }), true).matchedVisit.visit;
+    expect(followup('Rodent Exclusion & Trapping Service', 'rodent_exclusion')).toBe(4);
+    expect(followup('Rodent Exclusion Only Service', 'rodent_exclusion_only')).toBe(1);
+    expect(followup('Rodent Trapping Service', 'rodent_trapping')).toBe(4);
+    expect(followup('Quarterly Rodent Bait Station Service', 'rodent_bait_quarterly')).toBe(5);
   });
 
   test('routes bed bug method labels to treatment protocol', () => {

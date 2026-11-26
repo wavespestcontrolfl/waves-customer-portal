@@ -2012,7 +2012,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Do not start with bait alone when active interior activity points to an open entry. About 25 to 35 minutes."
+        "notes": "Do not start with bait alone when active interior activity points to an open entry. About 25 to 35 minutes.",
+        "lineMeta": {
+          "Ask about peanut allergies in the home before trapping": {
+            "scope": "interior",
+            "treatmentApplied": false
+          }
+        }
       },
       {
         "visit": 2,
@@ -2034,6 +2040,38 @@
               "Tomcat Bait Chunx with Bromethalin"
             ],
             "completionApplicationMethod": "bait_placement"
+          },
+          "Rodent Trapping Setup": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Set each on a top plate, joist, rafter, pipe or beam with rub marks or droppings; screw or zip-tie every trap": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "On a floor or ledge: the trap at a right angle to the wall, trigger end against it": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Bait each trap with a pea-size amount: rotate peanut butter, nut meat, raisin or prune; hazelnut spread or dried fruit if anyone has a peanut allergy": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Map each trap (A1 to A8) and photograph it in place": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Outdoors when activity is unclear: non-toxic monitoring blocks in a locked station first, no rodenticide": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "No glue boards, and no open snap trap outdoors": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Tell the customer: nobody goes into the attic, no children or pets near the traps, and call us on a snap or a dead-rat smell": {
+            "scope": "interior",
+            "treatmentApplied": false
           }
         },
         "material_cost": "inventory",
@@ -2044,10 +2082,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Trap count, placement and sealing the entries matter more than the bait. Checks come only on the customer's report.",
-        "completionDefaultProducts": [
-          "Victor Expanded Trigger Rat Snap Trap"
-        ]
+        "notes": "Trap count, placement and sealing the entries matter more than the bait. Checks come only on the customer's report. Nothing is pre-filled on the close-out yet: a snap trap has no method of its own there."
       },
       {
         "visit": 3,
@@ -2062,7 +2097,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "The exclusion visit is the last trap check (owner 2026-11-25, D15a). Exclusion is a separate scope unless the estimate includes it."
+        "notes": "The exclusion visit is the last trap check (owner 2026-11-25, D15a). Exclusion is a separate scope unless the estimate includes it.",
+        "lineMeta": {
+          "Final trap check: remove every trap, log the catches by trap (A1 to A8), and take out the trap map": {
+            "scope": "interior",
+            "treatmentApplied": false
+          }
+        }
       },
       {
         "visit": 4,
@@ -2077,12 +2118,30 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "A check visit comes only on the customer's report of a sound or a smell (owner 2026-11-23). Say what changed: catches by trap, new evidence, entries found."
+        "notes": "A check visit comes only on the customer's report of a sound or a smell (owner 2026-11-23). Say what changed: catches by trap, new evidence, entries found.",
+        "lineMeta": {
+          "Rodent Trap Check (on the customer's report)": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Re-bait and reset each sprung trap": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Log which traps caught (A1 to A8)": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Trap-only retainer: the same numbered 8-trap check, with the catch map": {
+            "scope": "interior",
+            "treatmentApplied": false
+          }
+        }
       },
       {
         "visit": 5,
         "month": "Any",
-        "primary": "Rodent Bait Station Service\nCheck each station: lock, anchor, bait eaten, droppings; log the station count",
+        "primary": "Rodent Bait Station Service\nNew stations: set each against the wall on a runway, anchor it to the ground or a paver, lock it, and number it on the station map\nEvery visit: check each station (lock, anchor, bait eaten, droppings) and log the station count",
         "secondary": "Replace the bait with the one this site uses:\nOutdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station\nCommercial sites only: Contrac Blox in locked, anchored stations\nOutdoors when activity is unclear: non-toxic monitoring blocks in a locked station first, no rodenticide\nInspect the exterior for new entry points; quote exclusion when they are active",
         "lineMeta": {
           "Commercial sites only: Contrac Blox in locked, anchored stations": {
@@ -2100,6 +2159,26 @@
               "Tomcat Bait Chunx with Bromethalin"
             ],
             "completionApplicationMethod": "bait_placement"
+          },
+          "Rodent Bait Station Service": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "New stations: set each against the wall on a runway, anchor it to the ground or a paver, lock it, and number it on the station map": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Every visit: check each station (lock, anchor, bait eaten, droppings) and log the station count": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Replace the bait with the one this site uses:": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Outdoors when activity is unclear: non-toxic monitoring blocks in a locked station first, no rodenticide": {
+            "scope": "exterior",
+            "treatmentApplied": false
           }
         },
         "material_cost": "inventory",
