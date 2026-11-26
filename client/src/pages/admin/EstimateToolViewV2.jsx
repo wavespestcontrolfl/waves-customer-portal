@@ -5141,20 +5141,16 @@ export default function EstimateToolViewV2({
         return null;
       }
 
+      // The save prices a lead-only builder for the lead's own customer (its leadId and typed contact). The
+      // preview gets the same three values, outside `options` (those are stored and replayed), so the
+      // returning-customer setup fee rule reads the same customer's visits in both. A reopened estimate sends none.
+      const lead = !editMode?.id && form.leadId
+        ? { leadId: form.leadId, customerPhone: form.customerPhone || "", customerEmail: form.customerEmail || "" }
+        : undefined;
       const r = await fetch("/api/admin/estimator/calculate-estimate", {
         method: "POST",
         headers: authHeaders,
-        body: JSON.stringify({
-          profile,
-          selectedServices,
-          options,
-          // The save prices a lead-only builder for the lead's own customer (its leadId and typed contact). The
-          // preview gets the same three values, outside `options` (those are stored and replayed), so the
-          // returning-customer setup fee rule reads the same customer's visits in both.
-          ...(!editMode?.id && form.leadId
-            ? { lead: { leadId: form.leadId, customerPhone: form.customerPhone || "", customerEmail: form.customerEmail || "" } }
-            : {}),
-        }),
+        body: JSON.stringify({ profile, selectedServices, options, lead }),
       });
       if (!r.ok) {
         const openQuestion = await scopeUnresolvedQuestion(r);
