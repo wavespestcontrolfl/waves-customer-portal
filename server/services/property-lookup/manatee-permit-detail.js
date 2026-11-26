@@ -488,24 +488,20 @@ const numOrNull = (v) => (v === null || v === undefined ? null : Number(v));
 const ADDRESS_TIER_CANDIDATES = 10;
 
 async function findPermitBuildingFacts({ parcelPin, looseKey, addressMatches = null } = {}) {
+  // The parcel tiers and the address-tier guard are the permit sync's own
+  // (a 9-digit parcel number is stored padded to 10 digits).
+  const { parcelTiers, guardAddressTier } = require('./manatee-permit-sync');
   const tiers = [
-    parcelPin ? ['parcel_pin', String(parcelPin)] : null,
-    looseKey ? ['address_loose_key', looseKey] : null,
+    ...parcelTiers(parcelPin, looseKey).map((narrow) => ({ narrow, addressTier: false })),
+    looseKey ? { narrow: (query) => guardAddressTier(query.where('address_loose_key', looseKey), parcelPin), addressTier: true } : null,
   ].filter(Boolean);
   let row = null;
-  for (const [col, val] of tiers) {
-    const addressTier = col !== 'parcel_pin';
-    const query = db('construction_permit_records')
-      .where(col, val)
+  for (const { narrow, addressTier } of tiers) {
+    const query = narrow(db('construction_permit_records')
       .where('detail_status', 'ok')
       .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')")
       .orderByRaw('issued_date DESC NULLS LAST')
-      .orderBy('detail_fetched_at', 'desc');
-    if (addressTier && parcelPin) {
-      query.where((b) => b.whereNull('parcel_pin')
-        .orWhere('parcel_pin', String(parcelPin))
-        .orWhereRaw("parcel_pin !~ '^[0-9]{10}$'"));
-    }
+      .orderBy('detail_fetched_at', 'desc'));
     if (addressTier && typeof addressMatches === 'function') {
       // The loose key (house number + first street word + ZIP) is shared by
       // "100 Oak St" and "100 Oak Ln": the caller's full-street check picks
