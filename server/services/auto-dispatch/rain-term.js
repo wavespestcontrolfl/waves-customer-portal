@@ -39,7 +39,8 @@
  * (route-tiers.js MIN_DESTINATION_DAYS_OUT) and with a 73-hour floor (an owner
  * decision pending). A visit that shares a stop with other live visits is not verified (the
  * grouped-move guard in apply.js writes, so no apply.js function is called here): its slot is
- * recorded as a `candidate` with would_move false. Nothing changes a placement, a score, a move, a text or
+ * recorded as a `candidate` with would_move false. A full day and an
+ * unverifiable route look the same to the finder: a 'none' can hide one. Nothing changes a placement, a score, a move, a text or
  * the change cap. Every function here never throws into the run.
  */
 const logger = require('../logger');
@@ -95,7 +96,6 @@ const REASONS = {
   GROUPED: 'grouped_unverified',
   OCCUPANCY: 'occupancy_unverified',
   FORECAST: 'uncertain_forecast',
-  ROUTE: 'route_unverified',
   FOUND: 'drier_date_found',
   FOUND_73H: 'drier_date_only_with_73h_floor',
   FOUND_73H_UNSURE: 'drier_date_with_73h_floor_5day_uncertain',
@@ -302,8 +302,6 @@ async function freeSlots(service, prefs, ctx, bands) {
   return {
     slots: all.filter((c) => !tech || String(c.technician_id) === tech),
     capped: all.length >= SEARCH_SCORE_CAP,
-    drops: (found && found.drops) || null,
-    search: (found && found.search) || null,
   };
 }
 
@@ -361,25 +359,11 @@ async function firstFree(options, check) {
 // One floor's answer: found, unverified (the probe could not vet the slots it was given),
 // uncertain_capped (the search list may have been cut), uncertain_forecast (a free slot sits
 // on a day the forecast did not cover in full) or none (a verified "no slot").
-function floorStatus(result, { capped, unread, route }) {
+function floorStatus(result, { capped, unread }) {
   if (result.opt) return 'found';
   if (result.unverified) return 'unverified';
   if (capped) return 'uncertain_capped';
-  if (route) return 'unverified';
   return unread ? 'uncertain_forecast' : 'none';
-}
-
-// Whether the finder reported a date this floor admits as one whose route it could not verify
-// (find-time's route_unverified rejection): that date is not a verified "no slot". The finder
-// result carries per-date rejections only if a caller passes them on; today findValidCandidateSlots
-// exposes none, so this reads whatever it does carry (a drops count, a per-date map) and a count of
-// any size makes the floor unverified.
-function routeGap({ drops, search }, { service, band }) {
-  if (Number(drops && drops.route_unverified) > 0) return true;
-  const orig = toDateStr(service.scheduled_date);
-  const byDate = (search && search.rejections_by_date) || {};
-  return Object.entries(byDate).some(([date, reasons]) => Number(reasons && reasons.route_unverified) > 0
-    && date !== orig && flexTier.flexWindowAdmits(band, orig, date));
 }
 
 // Whether a free slot the band admits sits on a day within the forecast window that is
@@ -420,7 +404,6 @@ function verdictReason({
   if (candidate) return grouped ? REASONS.GROUPED : REASONS.OCCUPANCY;
   const both = [status5, status73];
   if (both.includes('uncertain_capped')) return REASONS.CAPPED;
-  if (both.includes('unverified')) return REASONS.ROUTE;
   return both.includes('uncertain_forecast') ? REASONS.FORECAST : REASONS.NONE;
 }
 
@@ -468,7 +451,7 @@ async function searchVerdict({
   };
   const gap = { ...common, zone: area, state };
   const cov = (band, afterFloor) => ({
-    capped: found.capped, unread: forecastGap(slots, { ...gap, band, afterFloor }), route: routeGap(found, { service, band }),
+    capped: found.capped, unread: forecastGap(slots, { ...gap, band, afterFloor }),
   });
   const cov5 = cov(bands.current, false);
   const cov73 = cov(bands.pending73h, true);
