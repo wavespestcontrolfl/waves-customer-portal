@@ -14,6 +14,12 @@
  * Reading rules: a report at HH:MM covers the hour ending at HH:MM, so it belongs to the hour of HH:MM minus 30
  * minutes (the 7:53 report is hour 7). 'T' (trace) reads 0, 'M' and a missing report read null (no reading). An hour is
  * measurable at MEASURABLE_IN or more. Two reports in one hour keep the larger.
+ *
+ * Day edges, checked: the request runs from 00:00 ET of the day through 00:30 ET of the next (hour2/minute2), so a report at
+ * 00:00 to 00:29 reaches the day's 23:00 bucket; one at 00:30 or later belongs to the next day's hour 0 and the bucket-date
+ * filter drops it. A report before 00:30 on the day itself belongs to the previous day's 23:00 and is dropped the same way.
+ * Hour 0 of the day comes from a report between 00:30 and 01:29. On the fall-back night two reports share a local
+ * HH:MM; they land in one bucket and the larger stays (no work hour is affected). Nothing here reads a time zone offset.
  */
 const logger = require('../logger');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
@@ -103,7 +109,7 @@ function fetchHourlyObs(day, { fetchFn = fetch, timeoutMs = FETCH_MS, now = Date
   const [y2, m2, d2] = dayAfter(day).split('-');
   const stations = Object.keys(STATIONS).map((s) => `station=${s}`).join('&');
   const url = `${ASOS_URL}?${stations}&data=p01i&year1=${y1}&month1=${Number(m1)}&day1=${Number(d1)}`
-    + `&year2=${y2}&month2=${Number(m2)}&day2=${Number(d2)}&tz=America%2FNew_York&format=onlycomma&latlon=no&missing=M&trace=T&report_type=3`;
+    + `&year2=${y2}&month2=${Number(m2)}&day2=${Number(d2)}&hour2=0&minute2=30&tz=America%2FNew_York&format=onlycomma&latlon=no&missing=M&trace=T&report_type=3`;
   const promise = paced(async () => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);

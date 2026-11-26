@@ -38,6 +38,24 @@ describe('parseObs', () => {
     expect(obs.SRQ[23]).toBe(0.2); // a 00:15 report is the previous day's hour 23
   });
 
+  test('day edges: 00:00 to 00:29 of the next day is hour 23; 00:30 on is the next day; before 00:30 of the day is the day before', () => {
+    const edge = [
+      'station,valid,p01i',
+      'SRQ,2026-11-25 00:15,0.31', // covers 23:15 to 00:15 of the night before: not this day
+      'SRQ,2026-11-25 00:30,0.04', // hour 0 of this day
+      'SRQ,2026-11-25 23:53,0.05', // hour 23
+      'VNC,2026-11-26 00:00,0.06', // the hour ending at midnight: hour 23
+      'VNC,2026-11-26 00:29,0.07', // hour 23 as well (the max of two reports in a bucket stays)
+      'PGD,2026-11-26 00:15,0.08', // hour 23
+      'SPG,2026-11-26 00:30,0.99', // hour 0 of the next day: dropped
+    ].join('\n');
+    const obs = w.parseObs(edge, '2026-11-25');
+    expect(obs.SRQ).toEqual({ 0: 0.04, 23: 0.05 });
+    expect(obs.VNC).toEqual({ 23: 0.07 });
+    expect(obs.PGD).toEqual({ 23: 0.08 });
+    expect(obs.SPG).toEqual({});
+  });
+
   test('the response that is not the CSV (the rate limit text) is null, never dry', () => {
     expect(w.parseObs('Too many requests from your IP address, slow down.', '2026-11-25')).toBeNull();
   });
@@ -100,7 +118,7 @@ describe('fetchHourlyObs', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
     const url = fetchFn.mock.calls[0][0];
     expect(url).toMatch(/station=SRQ&station=VNC&station=PGD&station=SPG&data=p01i/);
-    expect(url).toMatch(/year1=2026&month1=11&day1=25&year2=2026&month2=11&day2=26&tz=America%2FNew_York/);
+    expect(url).toMatch(/year1=2026&month1=11&day1=25&year2=2026&month2=11&day2=26&hour2=0&minute2=30&tz=America%2FNew_York/);
     expect(first.VNC[14]).toBe(0.03);
   });
 

@@ -63,7 +63,7 @@ const rainPass = require('../auto-dispatch/rain-pass');
 const rainMode = require('../ads/rain-mode');
 const workHours = require('./work-hour-rain');
 const { withCatalogKeys, RAIN_AFTER_HOURS } = require('./rain-fit');
-const { loadSeriesRows, planMovesOf } = require('./rain-plan-moves');
+const { loadSeriesRows, planMovesOf, loadVisitSpans } = require('./rain-plan-moves');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { ZONE_COORDS } = require('./forecast-zones');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../../utils/datetime-et');
@@ -191,11 +191,34 @@ async function reorderStart(row, ctx) {
   if (toMin(row.proposal) > reach.ownStartMin && fits(toMin(row.proposal))) return toMin(row.proposal);
   const hourly = await read(row.visit.point.lat, row.visit.point.lng);
   if (!Array.isArray(hourly)) return null;
+  // The nearest later start whose own hours and drying hours read fully below DRY_PCT and are free (the earliest, as every
+  // candidate is later than the visit's own start).
+  for (const c of laterStarts(row, ctx)) {
+    const rain = rainPass.spanRain(hourly, day, c.start, c.end);
+    if (rain.complete && rain.peak < DRY_PCT && !ctx.occupied(row.visit, day, c.start, c.end) && !clashes(taken, techOf(row), day, c.start, c.end)) return c.own;
+  }
+  return null;
+}
+
+/**
+ * The same-day starts a reorder may take, from ONE list that the dry-hour search and the unread check both walk, so they
+ * cannot drift: on the hour from the day's start, the visit's own hours and drying hours inside the day (the walk of
+ * rain-pass dryStart), later than the visit's own start (owner 2026-11-26), and not before `earliestMin` (a day's own
+ * start for a stop judged today). `own` is the stop's own start; `start` and `end` its whole span (before-work members
+ * included).
+ */
+function laterStarts(row, ctx) {
+  const { reach } = row.visit;
+  const length = reach.endMin - reach.startMin;
+  const before = reach.ownStartMin - reach.startMin;
   const { startMin, endMin } = ctx.dayHours;
-  return rainPass.dryStart({
-    hourly, date: day, reach, earliestMin: Math.max(ctx.earliestMin, reach.ownStartMin + 1), dayStartMin: startMin, dayEndMin: endMin,
-    isFree: (start, end) => !ctx.occupied(row.visit, day, start, end) && !clashes(taken, techOf(row), day, start, end),
-  });
+  const out = [];
+  for (let own = startMin; own + 60 <= endMin; own += 60) {
+    const start = own - before;
+    if (own <= reach.ownStartMin || start < startMin || start + length > endMin || own < ctx.earliestMin) continue;
+    out.push({ own, start, end: start + length });
+  }
+  return out;
 }
 
 /**
@@ -204,18 +227,11 @@ async function reorderStart(row, ctx) {
  */
 function laterHourUnread(row, hourly, ctx) {
   const { day, taken } = ctx;
-  const { reach } = row.visit;
-  const length = reach.endMin - reach.startMin;
-  const before = reach.ownStartMin - reach.startMin;
-  const { startMin, endMin } = ctx.dayHours;
-  for (let own = Math.max(startMin, reach.ownStartMin + 60, ctx.earliestMin); own + 60 <= endMin; own += 60) {
-    const start = own - before;
-    if (start < startMin || start + length > endMin) continue;
-    if (ctx.occupied(row.visit, day, start, start + length) || clashes(taken, techOf(row), day, start, start + length)) continue;
-    const rain = rainPass.spanRain(hourly, day, start, start + length);
-    if (!rain.complete && !(rain.peak >= DRY_PCT)) return true;
-  }
-  return false;
+  return laterStarts(row, ctx).some((c) => {
+    if (ctx.occupied(row.visit, day, c.start, c.end) || clashes(taken, techOf(row), day, c.start, c.end)) return false;
+    const rain = rainPass.spanRain(hourly, day, c.start, c.end);
+    return !rain.complete && !(rain.peak >= DRY_PCT);
+  });
 }
 
 /**
@@ -257,7 +273,7 @@ async function proposeFor(row, ctx) {
   const { target, unread } = await dryDayFor(row, hourly, ctx);
   // No dry slot today and none on the next work day: the visit goes to the office call list (no text).
   if (!target) return unread ? { ...base, decision: 'none', reason: 'unread_forecast' } : { ...base, decision: 'call_list', reason: 'no_dry_slot' };
-  const plans = planMovesOf(row.visit, ctx.series, target.date);
+  const plans = planMovesOf(row.visit, await ctx.seriesRows(), target.date);
   if (!open) return { ...base, decision: 'cap', would: 'day_move', to_date: target.date, to_start: target.start, ...plans };
   taken.push({ tech: techOf(row), date: target.date, start: target.startMin, end: target.end });
   return { ...base, decision: 'day_move', to_date: target.date, to_start: target.start, ...plans };
@@ -346,12 +362,16 @@ async function planDay({ now, conn, day, today, read, deps }) {
     snapshot, visit.id, date, { start: toHHMM(start), end: toHHMM(end) },
     { excludeServiceIds: visit.memberIds, technicianId: visit.technician_id },
   ).length > 0;
-  // The recurrence columns of every service at a wet stop (a grouped stop has several), read once, for what a day move does
-  // to each plan (a failed read leaves every service 'whole_plan').
+  // The recurrence columns of every service at a wet stop (a grouped stop has several), for what a day move does to each plan.
   const members = [...new Set(rows.filter((row) => row.wet).flatMap((row) => row.visit.memberIds?.length ? row.visit.memberIds : [String(row.visit.id)]))];
-  const series = members.length ? await (deps.loadSeries || loadSeriesRows)(conn, members) : new Map();
+  // Read once, and only when a day move needs it. A failed read stops the run (err.planning): a plan scope is never guessed.
+  let seriesRead = null;
+  const seriesRows = () => {
+    if (!seriesRead) seriesRead = Promise.resolve().then(() => (deps.loadSeries || loadSeriesRows)(conn, members)).catch((err) => { err.planning = true; throw err; });
+    return seriesRead;
+  };
   const decided = await decideDay(rows, {
-    day, today, read: readHourly, occupied, blackouts: closedDays(conn, deps), series,
+    day, today, read: readHourly, occupied, blackouts: closedDays(conn, deps), seriesRows,
     dayHours: rainPass.serviceDay(deps),
     earliestMin: day === today ? parts.hour * 60 + parts.minute : 0,
   });
@@ -389,26 +409,36 @@ const FIELDS = ['cutoff', 'recheck'];
  * The rain in each visit's own hours (work-hour-rain.js spanWet: the visit's start through RAIN_AFTER_HOURS after its
  * end, at the nearest gauges to its point), measured once for EACH run's span: the cutoff and the recheck can hold
  * different spans for one visit (a stop re-timed between them), and each verdict is graded against its own. A visit stored
- * before the span was kept reads one hour from its start. Visits with no point (moved away, row gone) are never read and
+ * before the span was kept takes it from the visit row, else is ungraded. Visits with no point (moved away, row gone) are never read and
  * never wait; a visit with a point and an unread hour is a gap. { measured: { cutoff: { id: ... }, recheck: ... }, gaps }.
  */
-async function measureVisits(row, obs, { loadPoints, conn }) {
-  const ids = [...new Set(FIELDS.flatMap((f) => (row[f]?.proposals || []).filter((p) => p.reason !== 'no_point').map((p) => p.id)))];
+async function measureVisits(row, obs, { loadPoints, loadSpans = loadVisitSpans, conn }) {
+  const all = FIELDS.flatMap((f) => (row[f]?.proposals || []).filter((p) => p.reason !== 'no_point').map((p) => ({ field: f, p })));
+  const ids = [...new Set(all.map(({ p }) => p.id))];
   const points = ids.length ? await loadPoints(conn, ids) : new Map();
+  // A record from before spans were kept: the span comes from the visit row (its window end, else start plus duration) when
+  // that row is still the visit the record judged (same day, same start); else the visit is ungraded, never graded on a guess.
+  const oldIds = [...new Set(all.filter(({ p }) => !Array.isArray(p.span)).map(({ p }) => p.id))];
+  const stored = oldIds.length ? await loadSpans(conn, oldIds) : new Map();
+  const spanOf = (p) => {
+    if (Array.isArray(p.span)) return p.span;
+    const rec = stored.get(String(p.id));
+    const start = toMin(p.start);
+    return rec && rec.date === row.day && rec.start === start && rec.end > start ? [start, rec.end] : null;
+  };
   const measured = { cutoff: {}, recheck: {} };
   const gaps = [];
-  for (const field of FIELDS) {
-    for (const p of (row[field]?.proposals || []).filter((q) => q.reason !== 'no_point')) {
-      const point = points.get(String(p.id));
-      if (!point) { measured[field][p.id] = { wet: null, inches: null }; continue; }
-      const start = p.span ? p.span[0] : toMin(p.start);
-      const end = p.span ? p.span[1] : start + 60;
-      measured[field][p.id] = obs ? workHours.spanWet(obs, point, start, end, RAIN_AFTER_HOURS) : { wet: null, inches: null };
-      if (measured[field][p.id].wet == null) gaps.push(`${field}:${p.id}`);
-    }
+  for (const { field, p } of all) {
+    const point = points.get(String(p.id));
+    const span = point ? spanOf(p) : null;
+    if (!point || !span) { measured[field][p.id] = { wet: null, inches: null }; continue; }
+    measured[field][p.id] = spanWetOf(obs, point, span);
+    if (measured[field][p.id].wet == null) gaps.push(`${field}:${p.id}`);
   }
   return { measured, gaps };
 }
+
+const spanWetOf = (obs, point, span) => (obs ? workHours.spanWet(obs, point, span[0], span[1], RAIN_AFTER_HOURS) : { wet: null, inches: null });
 
 /**
  * Each visit's verdicts, every one graded against its own run's reading. `wet` and `inches` are the first run's reading; a
@@ -545,7 +575,7 @@ async function recordScheduleRain({ now = new Date(), conn = db, read = getNwsHo
     }
     // Scoring is its own try: a failure there never drops the day's decision made above.
     try {
-      run.scored = await scorePastDays(days, now, { fetchObs, loadPoints: deps.loadPoints || rainPass.loadPoints, conn });
+      run.scored = await scorePastDays(days, now, { fetchObs, loadPoints: deps.loadPoints || rainPass.loadPoints, loadSpans: deps.loadSpans, conn });
     } catch (err) {
       problems.push(`scoring failed: ${err.message}`);
       run.error = `scoring failed: ${err.message}`;
@@ -583,4 +613,5 @@ module.exports = {
   nextDayRow,
   recordScheduleRain,
   runScheduleRainRecord,
+  _test: { laterStarts },
 };
