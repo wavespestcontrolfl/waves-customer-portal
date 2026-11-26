@@ -427,3 +427,89 @@ describe('protocol matcher appointment month', () => {
     expect(withMonth('Palm Tree Injections', 'Apr')).toEqual(['palm_injection', 2, 'Any']);
   });
 });
+
+// Protocols audit 2026-11-26 (item 8): the follow-up rules need their words side by side ("flea recheck"), so a name that states
+// a later stage after the service name fell to the first treatment and its growth regulator.
+describe('a later stage named anywhere in a flea, cockroach or bed bug name', () => {
+  const stage = (name, serviceKey = null) => {
+    const result = matchServiceProtocol(protocols, name, { serviceKey });
+    return [result.programKey, Number(result.matchedVisit?.visit), result.reason];
+  };
+
+  test.each([
+    ['Flea Control Service Recheck', ['flea', 2, 'flea_followup']],
+    ['Flea Control Service Follow-up', ['flea', 2, 'flea_followup']],
+    ['Flea Control Service - Follow Up', ['flea', 2, 'flea_followup']],
+    ['Flea Control Service Visit 2', ['flea', 2, 'flea_followup']],
+    ['German Roach Treatment 2', ['cockroach', 3, 'cockroach_followup']],
+    ['German Roach Cleanout Recheck', ['cockroach', 3, 'cockroach_followup']],
+    ['Cockroach Treatment Service 2nd Visit', ['cockroach', 3, 'cockroach_followup']],
+    ['Native Roach Recheck', ['cockroach', 3, 'cockroach_followup']],
+    ['Bed Bug Treatment Recheck', ['bed_bug', 3, 'bed_bug_followup']],
+    ['Bed Bug Treatment Follow-Up', ['bed_bug', 3, 'bed_bug_followup']],
+    ['Bed Bug Treatment Service Visit #2', ['bed_bug', 3, 'bed_bug_followup']],
+    ['Bed Bug Treatment Service Third Treatment', ['bed_bug', 3, 'bed_bug_followup']],
+    // An explicit stage stands when the name also lists an extra.
+    ['Flea Control Service Visit 2 with Recheck', ['flea', 2, 'flea_followup']],
+    ['German Roach Treatment 2 + Follow-up', ['cockroach', 3, 'cockroach_followup']],
+    ['Flea Treatment 2', ['flea', 2, 'flea_followup']],
+    ['Bed Bug Treatment 3', ['bed_bug', 3, 'bed_bug_followup']],
+    ['Cockroach Treatment Service Visit 2 of 3', ['cockroach', 3, 'cockroach_followup']],
+    ['Flea Control Service (Visit 2)', ['flea', 2, 'flea_followup']],
+    ['Flea Treatment 2 of 2 Visits', ['flea', 2, 'flea_followup']],
+    ['Bed Bug Treatment 2 Day 14', ['bed_bug', 3, 'bed_bug_followup']],
+    ['Cockroach Treatment Service 2 - recheck', ['cockroach', 3, 'cockroach_followup']],
+  ])('%s is the later card', (name, expected) => {
+    expect(stage(name)).toEqual(expected);
+  });
+
+  test('the stage in the name outranks the catalog key, as "treatment 2" already did', () => {
+    expect(stage('Flea Control Service Recheck', 'flea_tick')).toEqual(['flea', 2, 'flea_followup']);
+    expect(stage('Flea Control Service', 'flea_tick')).toEqual(['flea', 1, 'flea_service']);
+    // A conjunction inside the service name is not a package extra (the legacy flea_tick name; without its key the name is a tick job).
+    expect(stage('Flea & Tick Yard Treatment Service Recheck', 'flea_tick')).toEqual(['flea', 2, 'flea_followup']);
+  });
+
+  // A package sold on the first visit names its later visit as an extra, or counts the visits sold.
+  test.each([
+    ['German Roach Cleanout + 14 Day Follow-up', ['cockroach', 1, 'german_roach_cleanout']],
+    ['German Roach Cleanout with Recheck', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Flea Control Service & Follow-Up', ['flea', 1, 'flea_service']],
+    ['Flea Treatment including a 14-day recheck', ['flea', 1, 'flea_service']],
+    ['Flea Control Service with a free follow-up', ['flea', 1, 'flea_service']],
+    ['German Roach Treatment (Follow-up included)', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Flea Control Service, recheck is included', ['flea', 1, 'flea_service']],
+    ['German Roach Treatment 2-Visit Package', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Bed Bug Treatment Service 2 Treatments', ['bed_bug', 2, 'bed_bug_treatment']],
+    // The older side-by-side terms read the name without its package phrases too.
+    ['Flea Treatment (2 Visits)', ['flea', 1, 'flea_service']],
+    ['Bed Bug Treatment 2-Visit Package', ['bed_bug', 2, 'bed_bug_treatment']],
+    ['Bed Bug Treatment 2 treatments', ['bed_bug', 2, 'bed_bug_treatment']],
+    // A follow-up the name rules out.
+    ['German Roach Initial Treatment (no follow-up)', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Flea Control Service without recheck', ['flea', 1, 'flea_service']],
+    ['German Roach Treatment 2-bedroom apartment', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Flea Treatment 1 of 2 Visits', ['flea', 1, 'flea_service']],
+    // A number that counts rooms is not a visit number.
+    ['German Roach Treatment 2 bedrooms', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Flea Treatment 2 rooms', ['flea', 1, 'flea_service']],
+    ['Bed Bug Treatment 3 Bedrooms', ['bed_bug', 2, 'bed_bug_treatment']],
+    ['Vehicle German Roach Treatment (2 Visits)', ['cockroach', 1, 'german_roach_cleanout']],
+    ['German Roach Initial Service (3-Visit)', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Bed Bug Treatment Service', ['bed_bug', 2, 'bed_bug_treatment']],
+    ['Cockroach Treatment Service', ['cockroach', 1, 'cockroach_control']],
+  ])('%s stays the first card', (name, expected) => {
+    expect(stage(name)).toEqual(expected);
+  });
+
+  test('a long free-text name is read in bounded time', () => {
+    const started = Date.now();
+    expect(stage(`Flea Control Service with ${'a'.repeat(5000)} ${'b '.repeat(3000)}`)).toEqual(['flea', 1, 'flea_service']);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  test('a heat name keeps its scope review, and other programs are not read for stage words', () => {
+    expect(stage('Bed Bug Heat Treatment Follow-up')).toEqual(['bed_bug', 1, 'bed_bug_heat_scope_review']);
+    expect(stage('Quarterly Pest Control Recheck')).toEqual(['pest', 1, 'general_pest']);
+  });
+});
