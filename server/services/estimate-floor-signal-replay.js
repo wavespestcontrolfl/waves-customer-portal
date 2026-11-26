@@ -209,7 +209,14 @@ const lineCarriesPrice = (line) => !!line && typeof line === 'object'
 // at pricingMetadata[key] (or routingMetadata), on the lines the rule touches, or on the frozen send snapshot, and a priced estimate with
 // none of them predates the rule. Returns { container, flag } where flag is the stamped
 // boolean, true for a priced estimate with no stamp, or undefined for an estimate with nothing priced.
-function readRuleStamp(estData, key) {
+// A stored estimate arrives as an object or as JSON text: read both the same way (every lookup below sees the parsed object).
+function normalizeStored(estData) {
+  if (typeof estData !== 'string') return estData;
+  try { const parsed = JSON.parse(estData); return parsed && typeof parsed === 'object' ? parsed : {}; } catch { return {}; }
+}
+
+function readRuleStamp(rawEstData, key) {
+  const estData = normalizeStored(rawEstData);
   // The authoritative stored container only (a revision can keep a stale engineResult beside the current result).
   const container = require('./estimate-result-container').storedEstimateContainer(estData) || estData || {};
   const metadataFlag = [container.pricingMetadata, container.routingMetadata]
@@ -263,10 +270,7 @@ function savedLegacyPricingRulesSignal(estData) {
 // current rule. The send-snapshot builder and the bundle freeze keep the plain stamp read (no fallback): a first send of an
 // inputs-only draft must price on the current rule.
 function storedRequestsExclusion(estData) {
-  let data = estData;
-  if (typeof data === 'string') {
-    try { data = JSON.parse(data); } catch { return false; }
-  }
+  const data = normalizeStored(estData);
   if (!data || typeof data !== 'object') return false;
   const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
   if (request && Array.isArray(request.selectedServices)
@@ -277,7 +281,8 @@ function storedRequestsExclusion(estData) {
       && !!(carrier.services.exclusion || carrier.services.rodentExclusion));
 }
 
-function savedLegacyTwoStoryRoofSignal(estData, { inputsOnlyIsLegacy = false } = {}) {
+function savedLegacyTwoStoryRoofSignal(rawEstData, { inputsOnlyIsLegacy = false } = {}) {
+  const estData = normalizeStored(rawEstData);
   const { flag } = readRuleStamp(estData, 'legacyTwoStoryRoof');
   if (flag === undefined && inputsOnlyIsLegacy
     && !(estData && typeof estData === 'object' && estData[require('./estimate-bahia-review').UNISSUED_ESTIMATE] === true)
@@ -285,16 +290,27 @@ function savedLegacyTwoStoryRoofSignal(estData, { inputsOnlyIsLegacy = false } =
   return { legacyTwoStoryRoof: flag };
 }
 
+// Every rule stamp a send snapshot's pricing bundle can be the only evidence for, each read from its OWN evidence (a priced,
+// unstamped snapshot is evidence for several rules at once). A later branch that adds a "which rules priced this estimate" stamp
+// adds its key here.
+const FROZEN_RULE_STAMPS = [
+  ['legacyPricingRules', (data) => readRuleStamp(data, 'legacyPricingRules').flag],
+  ['legacyTwoStoryRoof', (data) => savedLegacyTwoStoryRoofSignal(data, { inputsOnlyIsLegacy: true }).legacyTwoStoryRoof],
+];
+
 // Before a send snapshot's pricing bundle is dropped (a tier change, a relabel), freeze the rule stamps its prices were read
 // under onto the snapshot: the bundle is the only evidence of a snapshot-only quote's prices, and without a stamp the reader
-// would find nothing priced and replay it on today's rule. Mutates estData.sendSnapshot (a copy of it); no-op when the
-// snapshot already carries the stamp or the estimate prices nothing.
+// would find nothing priced and replay it on today's rules. Each missing stamp is resolved on its own, before the bundle goes.
+// Mutates estData.sendSnapshot (a copy of it); a stamp the snapshot already carries, or one with no evidence, is left alone.
 function freezeSnapshotRuleStamps(estData) {
   if (!estData || typeof estData !== 'object' || !estData.sendSnapshot || typeof estData.sendSnapshot !== 'object') return;
-  if (typeof estData.sendSnapshot.legacyTwoStoryRoof === 'boolean') return;
-  // Issued unless the caller marked it never-issued (the signal's own gate): a priced bundle reads legacy either way.
-  const { legacyTwoStoryRoof } = savedLegacyTwoStoryRoofSignal(estData, { inputsOnlyIsLegacy: true });
-  if (typeof legacyTwoStoryRoof === 'boolean') estData.sendSnapshot = { ...estData.sendSnapshot, legacyTwoStoryRoof };
+  const frozen = {};
+  for (const [key, read] of FROZEN_RULE_STAMPS) {
+    if (typeof estData.sendSnapshot[key] === 'boolean') continue;
+    const flag = read(estData);
+    if (typeof flag === 'boolean') frozen[key] = flag;
+  }
+  if (Object.keys(frozen).length) estData.sendSnapshot = { ...estData.sendSnapshot, ...frozen };
 }
 
 // ── the shared signal set ───────────────────────────────────────
@@ -349,5 +365,6 @@ module.exports = {
   savedLegacyPricingRulesSignal,
   savedLegacyTwoStoryRoofSignal,
   freezeSnapshotRuleStamps,
+  storedRequestsExclusion,
   savedFloorReplaySignals,
 };

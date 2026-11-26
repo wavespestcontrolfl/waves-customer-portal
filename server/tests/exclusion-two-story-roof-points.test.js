@@ -203,7 +203,7 @@ describe('replay: the estimate-level rule stamp decides the factor', () => {
     // Sold before the rule: the bundle prices it and no stamp exists anywhere; the invalidation freezes it first.
     const before = { engineInputs: REQUEST(), sendSnapshot: { pricingBundle: bundle(600) } };
     expect(savedLegacyTwoStoryRoofSignal(before)).toEqual({ legacyTwoStoryRoof: true });
-    expect(invalidated(before).sendSnapshot).toEqual({ legacyTwoStoryRoof: true });
+    expect(invalidated(before).sendSnapshot).toEqual({ legacyPricingRules: true, legacyTwoStoryRoof: true });
     expect(publicReplayTotal(invalidated(before))).toBe(600);
     expect(await recomputeTotal(invalidated(before))).toBe(600);
     // Sold under the rule: the snapshot builder froze the stamp (buildEstimateSendSnapshot), so the bundle can go.
@@ -268,6 +268,53 @@ describe('replay: the estimate-level rule stamp decides the factor', () => {
     expect(first.snapshot.legacyTwoStoryRoof).toBe(false);
     const route = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
     expect(route.match(/issuedBefore: estimateIssuedBeforeSend\((estimate|sibling)\)/g)).toHaveLength(3);
+  });
+
+  test('a never-issued draft priced before the rule (inputs only) is held at send, so the email and the snapshot cannot disagree', () => {
+    const { assertEstimateSendable } = require('../routes/admin-estimates')._internals;
+    const row = (data, extra = {}) => ({
+      id: 'est-1', token: 'tok', status: 'draft', sent_at: null, viewed_at: null, onetime_total: 600, estimate_data: data,
+      ...extra,
+    });
+    const holds = (data, extra) => { try { assertEstimateSendable(row(data, extra)); return null; } catch (err) { return err.code || err.message; } };
+    // Two stories, 4 advanced points, stored inputs only: the first send would mail the stored $600 and publish $780.
+    expect(holds({ engineInputs: REQUEST() })).toBe('TWO_STORY_ROOF_PRICE_STALE');
+    expect(holds(JSON.stringify({ engineInputs: REQUEST() }))).toBe('TWO_STORY_ROOF_PRICE_STALE');
+    // Nothing moves, so nothing holds: one story, standard points only, no exclusion.
+    expect(holds({ engineInputs: baseInput({ stories: 1, services: { exclusion: { pricingVersion: 'v2', ...ADV_ONLY } } }) })).toBeNull();
+    expect(holds({ engineInputs: baseInput({ stories: 2, services: { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 8, waiveInspection: true } } }) })).toBeNull();
+    expect(holds({ engineInputs: baseInput({ stories: 2, services: { flea: {} } }) })).toBeNull();
+    // A draft saved under the rule (stamped), one that carries priced rows, and an estimate already issued all agree with their stored price.
+    expect(holds(freshQuote())).toBeNull();
+    expect(holds(preChangeQuote())).toBeNull();
+    expect(holds({ engineInputs: REQUEST() }, { sent_at: '2026-11-20T15:00:00Z', status: 'sent' })).toBeNull();
+  });
+
+  test('the bundle drop freezes every rule stamp from its own evidence, not just one', () => {
+    const bundle = { oneTimeBreakdown: { items: [{ service: 'rodent_exclusion', price: 600 }] } };
+    // A priced, unstamped snapshot is evidence for BOTH rules: both read legacy before the bundle goes.
+    const data = { engineInputs: REQUEST(), sendSnapshot: { pricingBundle: bundle } };
+    const copy = JSON.parse(JSON.stringify(data));
+    invalidateSendSnapshotPricingBundle(copy);
+    expect(copy.sendSnapshot).toEqual({ legacyPricingRules: true, legacyTwoStoryRoof: true });
+    expect(savedFloorReplaySignals(copy)).toMatchObject({ legacyPricingRules: true, legacyTwoStoryRoof: true });
+    // A stamp the snapshot already carries stays as it is, and the other is still resolved on its own.
+    const partial = { engineInputs: REQUEST(), sendSnapshot: { legacyPricingRules: false, pricingBundle: bundle } };
+    invalidateSendSnapshotPricingBundle(partial);
+    expect(partial.sendSnapshot).toEqual({ legacyPricingRules: false, legacyTwoStoryRoof: true });
+  });
+
+  test('an object and its JSON text read the same stamps (snapshot flag false on an inputs-only exclusion)', () => {
+    const data = { engineInputs: REQUEST(), sendSnapshot: { legacyTwoStoryRoof: false, legacyPricingRules: false } };
+    const text = JSON.stringify(data);
+    expect(savedLegacyTwoStoryRoofSignal(data, { inputsOnlyIsLegacy: true })).toEqual({ legacyTwoStoryRoof: false });
+    expect(savedLegacyTwoStoryRoofSignal(text, { inputsOnlyIsLegacy: true })).toEqual({ legacyTwoStoryRoof: false });
+    expect(savedFloorReplaySignals(text)).toMatchObject({ legacyPricingRules: false, legacyTwoStoryRoof: false });
+    expect(savedFloorReplaySignals(text)).toEqual(savedFloorReplaySignals(data));
+    // No stamp anywhere: both read the inputs-only fallback the same way.
+    const bare = { engineInputs: REQUEST() };
+    expect(savedLegacyTwoStoryRoofSignal(JSON.stringify(bare), { inputsOnlyIsLegacy: true })).toEqual(savedLegacyTwoStoryRoofSignal(bare, { inputsOnlyIsLegacy: true }));
+    expect(savedLegacyTwoStoryRoofSignal(JSON.stringify(bare))).toEqual({ legacyTwoStoryRoof: undefined });
   });
 
   test('the send-snapshot builder freezes the stamp beside the bundle', () => {

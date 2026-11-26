@@ -109,6 +109,28 @@ function estimateHasUnmeasuredBarrelExclusion(estData) {
   return rows.some((row) => row.roofStyle === 'barrel_tile') && !rows.some(isClosureRow);
 }
 
+// A draft never issued whose stored price was reviewed BEFORE the two-story roof rule, with no evidence of how it was priced
+// (inputs only: no priced rows, no rule stamp) and an exclusion that the rule would move. The first send would email the stored
+// total while the snapshot publishes today's price, so the send is refused until staff regenerate and save it (the barrel hold's
+// pattern). True only when today's rule changes the exclusion price: one-story homes, no advanced points, and drafts that carry
+// rows or a stamp (their stored price and the snapshot agree) never trip it. Fails open (false) when the replay cannot run.
+function estimateTwoStoryPriceUnreviewed(estData) {
+  try {
+    const replay = require('./estimate-floor-signal-replay');
+    if (replay.savedLegacyTwoStoryRoofSignal(estData).legacyTwoStoryRoof !== undefined) return false;
+    if (!replay.storedRequestsExclusion(estData)) return false;
+    const data = typeof estData === 'string' ? JSON.parse(estData) : estData;
+    const base = require('../routes/estimate-public').extractEngineInputs({ ...data });
+    if (!base) return false;
+    const { generateEstimate } = require('./pricing-engine');
+    const exclusionTotal = (legacyTwoStoryRoof) => generateEstimate({ ...base, legacyTwoStoryRoof })
+      .lineItems.filter((line) => line.service === 'rodent_exclusion')
+      .reduce((sum, line) => sum + (Number(line.price) || 0), 0);
+    return exclusionTotal(false) !== exclusionTotal(true);
+  } catch { return false; }
+}
+
 module.exports = {
+  estimateTwoStoryPriceUnreviewed,
   roofStyleReplaySignal, roofStyleRowFields, parseBarrelEaveFt, invalidBarrelEaveFtError, estimateHasUnmeasuredBarrelExclusion,
 };

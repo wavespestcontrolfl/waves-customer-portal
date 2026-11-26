@@ -559,6 +559,10 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
         && require('../services/estimate-roof-style-replay').estimateHasUnmeasuredBarrelExclusion(siblingData)) {
         return { sibling, statusCode: 409, code: 'BARREL_EAVE_FOOTAGE_REQUIRED' };
       }
+      if (siblingData?.proposal?.enabled !== true && estimateNeverIssued(sibling)
+        && require('../services/estimate-roof-style-replay').estimateTwoStoryPriceUnreviewed(siblingData)) {
+        return { sibling, statusCode: 409, code: 'TWO_STORY_ROOF_PRICE_STALE' };
+      }
     }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
     // time — schedule and immediate alike — so the operator hears it now,
@@ -794,6 +798,15 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, ..
     const err = new Error('A barrel tile roof needs its eave footage entered before this quote can be sent.');
     err.statusCode = 400;
     err.code = 'BARREL_EAVE_FOOTAGE_REQUIRED';
+    throw err;
+  }
+  // A draft whose stored price was reviewed before the two-story roof rule would email that total while the send snapshot
+  // publishes today's price: hold it until staff regenerate and save (the estimate-tool save writes the rule stamp).
+  if (!isAuthoredProposal && estimateNeverIssued(estimate)
+    && require('../services/estimate-roof-style-replay').estimateTwoStoryPriceUnreviewed(parseEstimateData(estimate.estimate_data || estimate.estimateData))) {
+    const err = new Error('This draft was priced before the two-story roof rule, and its price now differs. Open it in the estimate tool, generate it again and save, then send.');
+    err.statusCode = 409;
+    err.code = 'TWO_STORY_ROOF_PRICE_STALE';
     throw err;
   }
   if (!isAuthoredProposal && estimateDataHasBlockingLeadAutomation(estimate.estimate_data || estimate.estimateData)) {
