@@ -126,7 +126,7 @@ function pestFrequencyFromText(text) {
 
 // "shrubs" after a location word ("mosquito control around shrubs") says where
 // another service happens, not that the lead wants plant care.
-const TREE_SHRUB_INTEREST = /\btree and shrub\b|(?<!\b(?:around|near|in|inside|under|by|from|on|behind|beside|along)\s(?:the\s|my\s|our\s)?)\b(?:shrubs?|ornamentals?)\b/;
+const TREE_SHRUB_INTEREST = /\btree and shrub\b|(?<!\b(?:around|near|in|inside|under|by|from|on|behind|beside|along)\s(?:the\s|my\s|our\s)?(?:(?:trees?|palms?) and )?)\b(?:shrubs?|ornamentals?)\b/;
 
 // Interest text that names work automation never prices, so the lead parks
 // for manual scoping instead of drafting a partial or wrong quote.
@@ -135,13 +135,21 @@ function interestManualScopeReason(text, wants) {
     return 'lawn_aeration_plugging_requires_manual_scope';
   }
   if (!wants(TREE_SHRUB_INTEREST)) return null;
+  // Judge the clauses that name tree & shrub, so "wasp nest removal, plus
+  // shrub care" is not an arborist request. A cadence that follows alone
+  // ("shrub care (one-time)" normalizes to its own clause) belongs to it.
+  const clauses = text.split(' . ');
+  const plantClauses = clauses
+    .map((clause, i) => (TREE_SHRUB_INTEREST.test(clause)
+      ? `${clause} ${/^one time( only)?[ .]*$/.test(clauses[i + 1] || '') ? clauses[i + 1] : ''}`
+      : null))
+    .filter(Boolean);
   // Trimming, pruning and removal are arborist work the T&S program does not price.
-  if (wants(/\b(trim\w*|prun\w*|remov\w*|cut|cutting)\b/)) {
+  if (plantClauses.some((clause) => /\b(trim\w*|prun\w*|remov\w*|cut|cutting)\b/.test(clause))) {
     return 'tree_shrub_trimming_or_removal_requires_manual_scope';
   }
-  // The only T&S draft is the recurring Standard program. Cadence is read
-  // from the clause that names it ("one-time mosquito, recurring shrub care").
-  if (text.split(' . ').some((clause) => TREE_SHRUB_INTEREST.test(clause) && isOneTimeServiceText(clause))) {
+  // The only T&S draft is the recurring Standard program.
+  if (plantClauses.some(isOneTimeServiceText)) {
     return 'tree_shrub_one_time_requires_manual_scope';
   }
   // Palm injection / nutrition is a separate catalog program; drafting T&S
@@ -167,7 +175,7 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
   // "Tree & Shrub Pest Control" is the plant program's own name, not a
   // second request for household pest control.
   const text = normalizedServiceClauses(serviceInterest)
-    .replace(/\btree and shrub (?:pest )?(?:control|care|program|service)s?\b/g, 'tree and shrub');
+    .replace(/\b(?:tree and )?shrub (?:pest )?(?:control|care|program|service)s?\b/g, 'tree and shrub');
   const services = {};
   const review = [];
 

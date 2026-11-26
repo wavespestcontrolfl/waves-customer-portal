@@ -559,6 +559,20 @@ describe('service-interest mapper hardening', () => {
       .toMatchObject({ oneTimeMosquito: {}, treeShrub: { tier: 'standard' } });
   });
 
+  test('plant lists, other removal work, parenthesized cadence and "shrub pest control"', () => {
+    expect(mapServiceInterestToEstimateServices('Mosquito control around trees and shrubs').services)
+      .toEqual({ mosquito: { tier: 'monthly12' } });
+    const wasp = mapServiceInterestToEstimateServices('Wasp nest removal, plus shrub care');
+    expect(wasp.supported).toBe(true);
+    expect(wasp.services).toMatchObject({ treeShrub: { tier: 'standard' } });
+    expect(mapServiceInterestToEstimateServices('Shrub care (one-time)')).toMatchObject({
+      supported: false,
+      unsupportedReason: 'tree_shrub_one_time_requires_manual_scope',
+    });
+    expect(mapServiceInterestToEstimateServices('Shrub pest control').services)
+      .toEqual({ treeShrub: { tier: 'standard', palmCountUnverified: true } });
+  });
+
   test('mixed pest and tree & shrub maps both services', () => {
     const mapped = mapServiceInterestToEstimateServices('Recurring pest control and tree & shrub care');
     expect(mapped).toMatchObject({
