@@ -94,7 +94,7 @@ const advance = (ms) => jest.setSystemTime(Date.now() + ms);
 const reply = (obj) => ({ stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: '...' }, { type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj) }] });
 const PEST = { intent: 'Wants quarterly pest control', service: 'pest_control', when: null, address_line1: null, city: null, zip: null, home_sqft: 2000, lot_sqft: null };
 const NO_FACTS = {
-  service: null, when: null, address_line1: null, city: null, zip: null, home_sqft: null, lot_sqft: null,
+  service: null, when: null, address_line1: null, city: null, zip: null, home_sqft: null, stories: null, lot_sqft: null,
   property_type: null, frequency: null, lawn_track: null, lawn_tier: null, mosquito_tier: null,
 };
 const SLOTS = { status: 'ok', availability: { slots: [1, 2, 3, 4].map((d) => ({ date: `2026-11-1${d}`, start_label: '9:00 AM' })) } };
@@ -220,6 +220,13 @@ describe('live call assist read', () => {
     expect(_test.validate('text')).toBeNull();
     // A card number the model writes whole is masked before it reaches the screen.
     expect(_test.validate({ intent: 'Pay with 4242 4242 4242 4242 today' }).intent).toBe('Pay with [card ending 4242] today');
+  });
+
+  test('the story count is read in the website\'s bounds: 1 to 3, a split level stays 1.5, anything else is no count', () => {
+    const stories = (value) => _test.validate({ intent: 'x', stories: value }).facts.stories;
+    expect([1, 2, 3, 1.5, '2', ' 1.5 '].map(stories)).toEqual([1, 2, 3, 1.5, 2, 1.5]);
+    expect([5, 0.5].map(stories)).toEqual([3, 1]);
+    for (const junk of [0, -2, 'two', '', null, undefined, true, [2], { value: 2 }, NaN, Infinity]) expect(stories(junk)).toBeNull();
   });
 
   test('a fact the caller said earlier stays after it leaves the window', async () => {
@@ -435,6 +442,28 @@ describe('live call assist property and plan inputs', () => {
     expect(mockPricing).toHaveBeenCalledWith({ service: 'pest_control', home_sqft: 2000, lot_sqft: undefined });
   });
 
+  test('a big home: the price tool asks for the story count, and the caller\'s answer in a later read gets the price', async () => {
+    // Pest above 5,500 sq ft is priced on the footprint (living area over the stories), so the tool asks before it prices.
+    const ASK = 'Cannot price pest control yet — still needed: how many stories the home has (stories). Ask the caller, then call get_pricing again. Do NOT guess or estimate a price yourself.';
+    const PRICE = 'Standard pest control pricing for this property size: $132 per application on the quarterly plan; 4 applications per year. Quote ONLY these numbers.';
+    mockPricing.mockImplementation(async (input) => (input.stories ? PRICE : ASK));
+    mockCreate.mockResolvedValue(reply({ ...PEST, home_sqft: 12000 }));
+    await run();
+    expect(mockPricing).toHaveBeenLastCalledWith({ service: 'pest_control', home_sqft: 12000, lot_sqft: undefined });
+    expect(assist().price).toBe('Cannot price pest control yet — still needed: how many stories the home has');
+    // The caller answers: the count is a new fact, so the price is looked up again with it.
+    await next({ home_sqft: 12000, stories: 2 });
+    expect(mockPricing).toHaveBeenCalledTimes(2);
+    expect(mockPricing).toHaveBeenLastCalledWith({ service: 'pest_control', home_sqft: 12000, stories: 2, lot_sqft: undefined });
+    expect(assist().price).toBe('Standard pest control pricing for this property size: $132 per application on the quarterly plan; 4 applications per year');
+    expect(assist().facts.stories).toBe(2);
+    // The count stays when a later read does not repeat it, and a corrected count is looked up again.
+    await next({ home_sqft: 12000 });
+    expect(mockPricing).toHaveBeenCalledTimes(2);
+    await next({ home_sqft: 12000, stories: 1 });
+    expect(mockPricing).toHaveBeenLastCalledWith(expect.objectContaining({ stories: 1 }));
+  });
+
   test('a changed input forces a new lookup, and the caller correcting it replaces the old value', async () => {
     mockCreate.mockResolvedValue(reply({ ...PEST, frequency: 'quarterly' }));
     await run();
@@ -469,9 +498,12 @@ describe('live call assist withdrawn facts', () => {
   });
 
   test('a withdrawn address drops the old property\'s sizes and type too, except what the same read says again', () => {
-    const prev = { ...NO_FACTS, service: 'pest_control', address_line1: '12 Example St', city: 'Bradenton', zip: '34202', home_sqft: 2400, lot_sqft: 9000, property_type: 'condo' };
+    const prev = { ...NO_FACTS, service: 'pest_control', address_line1: '12 Example St', city: 'Bradenton', zip: '34202', home_sqft: 2400, stories: 2, lot_sqft: 9000, property_type: 'condo' };
     const address = ['address_line1', 'city', 'zip'];
-    expect(_test.mergeFacts(prev, NO_FACTS, address)).toMatchObject({ service: 'pest_control', address_line1: null, home_sqft: null, lot_sqft: null, property_type: null });
+    expect(_test.mergeFacts(prev, NO_FACTS, address)).toMatchObject({ service: 'pest_control', address_line1: null, home_sqft: null, stories: null, lot_sqft: null, property_type: null });
+    // The story count belongs to the place: taken back by name it clears, and it stays when another fact is taken back.
+    expect(_test.mergeFacts(prev, NO_FACTS, ['stories']).stories).toBeNull();
+    expect(_test.mergeFacts(prev, NO_FACTS, ['when']).stories).toBe(2);
     expect(_test.mergeFacts(prev, { ...NO_FACTS, home_sqft: 1800 }, address)).toMatchObject({ home_sqft: 1800, lot_sqft: null, property_type: null });
     // A withdrawn plan detail is not a move: the place keeps its sizes.
     expect(_test.mergeFacts(prev, NO_FACTS, ['when'])).toMatchObject({ home_sqft: 2400, lot_sqft: 9000, property_type: 'condo' });

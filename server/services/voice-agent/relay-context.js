@@ -1591,7 +1591,8 @@ async function pricingText(input = {}, { practiceLine = false } = {}) {
   const pestAboveTable = service === 'pest_control' && !!homeSqFt && homeSqFt <= 20000
     && homeSqFt > Number(require('../pricing-engine/constants').PEST.aboveTableStartSqFt);
   const statedStories = positiveNumber(input.stories);
-  const stories = statedStories ? Math.max(1, Math.min(3, Math.round(statedStories))) : null;
+  // The website's own bounds (1 to 3), and its own arithmetic: a split level said as 1.5 stories stays 1.5.
+  const stories = statedStories ? Math.max(1, Math.min(3, statedStories)) : null;
 
   const missing = [];
   if (!homeSqFt) missing.push('the home\'s approximate square footage (home_sqft)');

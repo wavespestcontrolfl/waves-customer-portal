@@ -54,17 +54,17 @@ const ENUMS = {
 // What the plan says about the service: a different service makes these stale.
 const PLAN_KEYS = ['frequency', 'lawn_track', 'lawn_tier', 'mosquito_tier'];
 // What belongs to one place: a different street makes the others stale unless the same read says them again.
-const PLACE_KEYS = ['address_line1', 'city', 'zip', 'home_sqft', 'lot_sqft', 'property_type'];
+const PLACE_KEYS = ['address_line1', 'city', 'zip', 'home_sqft', 'stories', 'lot_sqft', 'property_type'];
 const FACT_KEYS = [
-  'service', 'when', 'address_line1', 'city', 'zip', 'home_sqft', 'lot_sqft', 'property_type', ...PLAN_KEYS,
+  'service', 'when', 'address_line1', 'city', 'zip', 'home_sqft', 'stories', 'lot_sqft', 'property_type', ...PLAN_KEYS,
 ];
 // "address" in the withdrawn list means the whole spoken place.
 const ADDRESS_KEYS = ['address_line1', 'city', 'zip'];
 const WITHDRAWN_GROUPS = { address: ADDRESS_KEYS };
 
 const SYSTEM_PROMPT = `You read the last few minutes of a live phone call to a pest control and lawn care company. "Caller:" is the customer or prospect. "Agent:" is the Waves staff member.
-Reply with ONLY this JSON: {"intent": "<one plain line, 90 characters or fewer: what the caller wants>", "service": "pest_control" | "lawn_care" | "mosquito" | "tree_shrub" | "termite_bait" | null, "when": "<the caller's own words about timing, or null>", "address_line1": "<street address the caller said, or null>", "city": "<or null>", "zip": "<5 digits or null>", "home_sqft": <number the caller said for the home's square feet, or null>, "lot_sqft": <number the caller said for the lot, or null>, "property_type": "single_family" | "townhome_end" | "townhome_interior" | "duplex" | "condo_ground" | "condo_upper" | "commercial" | null, "frequency": "quarterly" | "bimonthly" | "monthly" | null, "lawn_track": "st_augustine" | "bermuda" | "zoysia" | "bahia" | null, "lawn_tier": "enhanced" | "premium" | null, "mosquito_tier": "seasonal9" | "monthly12" | null, "withdrawn": [<fact names the caller took back>]}
-Use a service only when the caller is asking about that recurring plan. Fill address, timing, sizes and plan details only when the caller said them; never guess. Use "commercial" for any business, office, restaurant, HOA or multifamily property. A null fact means the caller did not mention it: the earlier value stays. When the caller gives a new value, put the new value. When the caller takes a fact back (for example turns down recurring service and wants a one-time treatment, or says the address was wrong), set that fact to null and list its name in "withdrawn": one of service, when, address (the street, city and zip together), home_sqft, lot_sqft, property_type, frequency, lawn_track, lawn_tier, mosquito_tier. Otherwise "withdrawn" is []. No phone numbers and no card or account digits anywhere.`;
+Reply with ONLY this JSON: {"intent": "<one plain line, 90 characters or fewer: what the caller wants>", "service": "pest_control" | "lawn_care" | "mosquito" | "tree_shrub" | "termite_bait" | null, "when": "<the caller's own words about timing, or null>", "address_line1": "<street address the caller said, or null>", "city": "<or null>", "zip": "<5 digits or null>", "home_sqft": <number the caller said for the home's square feet, or null>, "stories": <number of stories (floors) the caller said the home has, or null>, "lot_sqft": <number the caller said for the lot, or null>, "property_type": "single_family" | "townhome_end" | "townhome_interior" | "duplex" | "condo_ground" | "condo_upper" | "commercial" | null, "frequency": "quarterly" | "bimonthly" | "monthly" | null, "lawn_track": "st_augustine" | "bermuda" | "zoysia" | "bahia" | null, "lawn_tier": "enhanced" | "premium" | null, "mosquito_tier": "seasonal9" | "monthly12" | null, "withdrawn": [<fact names the caller took back>]}
+Use a service only when the caller is asking about that recurring plan. Fill address, timing, sizes and plan details only when the caller said them; never guess. Use "commercial" for any business, office, restaurant, HOA or multifamily property. A null fact means the caller did not mention it: the earlier value stays. When the caller gives a new value, put the new value. When the caller takes a fact back (for example turns down recurring service and wants a one-time treatment, or says the address was wrong), set that fact to null and list its name in "withdrawn": one of service, when, address (the street, city and zip together), home_sqft, stories, lot_sqft, property_type, frequency, lawn_track, lawn_tier, mosquito_tier. Otherwise "withdrawn" is []. No phone numbers and no card or account digits anywhere.`;
 
 const gateOn = () => require('../config/feature-gates').isEnabled('callLiveAssist');
 // The same gate resolveAvailability reads: with scheduling off no open times are looked up, reused or shown.
@@ -86,6 +86,13 @@ function text(value, max) {
 function size(value) {
   const n = typeof value === 'string' ? Number(value.replace(/[,\s]/g, '')) : value;
   return typeof n === 'number' && Number.isFinite(n) && n > 0 && n <= 5000000 ? Math.round(n) : null;
+}
+
+// How many stories the caller said the home has, in the website's own bounds (1 to 3; a split level said as 1.5 stays 1.5). The
+// price tool asks for it before it prices pest for a home above 5,500 sq ft (owner 2026-11-26: pest rises with the footprint).
+function storyCount(value) {
+  const n = typeof value === 'string' ? Number(value.trim()) : value;
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.max(1, Math.min(3, n)) : null;
 }
 
 function oneOf(set, value) {
@@ -112,6 +119,7 @@ function validate(raw) {
     city: text(raw.city, 40),
     zip: /^\d{5}(-\d{4})?$/.test(zip) ? zip.slice(0, 5) : null,
     home_sqft: size(raw.home_sqft),
+    stories: storyCount(raw.stories),
     lot_sqft: size(raw.lot_sqft),
   };
   for (const k of Object.keys(ENUMS)) facts[k] = oneOf(ENUMS[k], raw[k]);
@@ -268,6 +276,8 @@ async function lookupPrice(facts, customer) {
   const input = {
     service: facts.service,
     home_sqft: facts.home_sqft || undefined,
+    // Said by the caller only; the price tool asks for it when a large home's pest price needs it.
+    ...(facts.stories ? { stories: facts.stories } : {}),
     lot_sqft: facts.lot_sqft || customer?.lot_sqft || undefined,
     ...(facts.service === 'lawn_care' && customer?.property_sqft ? { lawn_sqft: customer.property_sqft } : {}),
     // What the caller said about the property and the plan goes to the engine's own guards and plan selection; an
@@ -301,7 +311,7 @@ async function lookupTimes(facts, customer, useAccount) {
 function lookupKey(facts, accountId, scheduling) {
   return JSON.stringify([
     facts.service, facts.when, placeText(facts.address_line1), placeText(facts.city), facts.zip,
-    facts.home_sqft, facts.lot_sqft, facts.property_type, facts.frequency, facts.lawn_track, facts.lawn_tier,
+    facts.home_sqft, facts.stories, facts.lot_sqft, facts.property_type, facts.frequency, facts.lawn_track, facts.lawn_tier,
     facts.mosquito_tier, accountId, scheduling,
   ]);
 }

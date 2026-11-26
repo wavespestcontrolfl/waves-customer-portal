@@ -1322,6 +1322,11 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     // A story count outside 1 to 3 is clamped, as on the website.
     await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, stories: 5 }, { customerId: null });
     expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ stories: 3 }));
+    // A split level said as 1.5 stories reaches the engine as 1.5, as on the website quote (an 8,000 sq ft footprint, not 6,000).
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, stories: 1.5 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ homeSqFt: 12000, stories: 1.5 }));
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, stories: '0.5' }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ stories: 1 }));
   });
 
   test('at or under 5,500 sq ft, and for every other plan, the story count is neither asked for nor used', async () => {

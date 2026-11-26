@@ -1584,7 +1584,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   // route rings the admin bell for ENGINE_ERROR only after the save's
   // transaction committed, never from a dryRun preflight (pre-push codex P1).
   // The server could not price this save, so the browser's price stands. The browser prices the flat top of the pest table, so the
-  // save may not hold a pest row for a home above 5,500 sq ft (assertPestAboveTableClientFallbackSave), and its rule stamp is the
+  // save may not name a building above 5,500 sq ft (assertPestAboveTableClientFallbackSave), and its rule stamp is the
   // server's. Both sit AFTER the log lines above: a refused save commits nothing, so the route's engine-error bell never rings, and
   // the error-level line is then the only trace of a broken engine.
   assertPestAboveTableClientFallbackSave(estimateData, { storedEstimateData });
@@ -2084,47 +2084,17 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
 
 // Pest above the 5,500 sq ft footprint table (owner 2026-11-26, new quotes only: +$8 per visit at quarterly for each 1,000 sq ft above
 // it). The browser fallback prices the flat top of the table. So a save the server could not price (the CLIENT_FALLBACK authority: no
-// replayable engine input, or an engine error) is refused when it holds a pest row for a home above the table: whatever stamp it
-// posts, and whether or not it changed (no unchanged-resave exception, so nothing to compare). At or under 5,500 sq ft the premium is
-// zero and the browser's price is the server's price. The check sits where the pricing authority is decided, not behind a
+// replayable engine input, or an engine error) is refused when it names a BUILDING above the table: whatever rows it holds, whatever
+// stamp it posts, and whether or not it changed (no unchanged-resave exception, so nothing to compare). At or under 5,500 sq ft the
+// premium is zero and the browser's price is the server's price. The check sits where the pricing authority is decided, not behind a
 // browser-shape test.
-// There is NO exemption for a row that says it is priced another way (a commercial pest row, a unit priced by its bedroom count):
-// on this branch the server verified nothing, so a row cannot prove its pricing basis, and a marker that exempts a row is a marker
-// that hides one (an exemption was tried and dropped for that reason). The cost is a reload while the engine is broken. Production
-// holds no browser-priced estimate at all (pricing_authority CLIENT_FALLBACK: 0 rows, read 2026-11-26), and the first send of one is
-// already refused (GATE_SEND_REQUIRES_SERVER_PRICING).
-const PEST_ROW_SERVICES = new Set(['pest_control', 'one_time_pest', 'commercial_pest']);
-const NOT_A_PEST_ROW_NAME = /termite|mosquito|rodent|lawn|shrub|palm|mist|wdo|exclusion|flea|roach|bed ?bug/i;
-const PEST_ROW_PRICE_KEYS = ['pa', 'perApp', 'perVisit', 'perTreatment', 'basePrice', 'mo', 'monthly', 'monthlyBase', 'ann', 'annual',
-  'annualTotal', 'annualAfterDiscount', 'price', 'amount', 'priceAfterDiscount', 'estimatedPrice', 'total'];
-const SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$/;
+// The check reads NO rows. On this branch the server verified nothing, so a row cannot prove what it is or how it was priced: a list
+// of pest row shapes is never complete (a row known by serviceKey, a catalog key, a display name), and a marker that exempts a row
+// (commercial, a unit priced by its bedroom count) is a marker that hides one. Both were tried and dropped for that reason. The size
+// alone decides. The cost is a reload while the engine is broken, for a big building with no pest row too. Production holds no
+// browser-priced estimate at all (pricing_authority CLIENT_FALLBACK: 0 rows, read 2026-11-26), about 1 estimate in 100 names a
+// building above the table, and the first send of a browser-priced estimate is already refused (GATE_SEND_REQUIRES_SERVER_PRICING).
 const isPlainRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
-// True when the saved blob holds a pest row anywhere outside its input carriers: the browser's plan rows (results.pest, pestTiers
-// under `results` or straight under the result), a recurring or one-time row, or an engine line, in `result`, `engineResult`, the
-// bare data or the send snapshot. The stamp reader's own list of saved pest shapes (storedPestServices, shared with the public
-// page) is asked first, so a shape that page can show is never one this check cannot see; a reader that fails counts as a row.
-function saveHoldsPestRow(estimateData) {
-  try {
-    if (require('./estimate-floor-signal-replay').storedPestServices(estimateData).size > 0) return true;
-  } catch { return true; }
-  const seen = new Set();
-  const walk = (node) => {
-    if (!node || typeof node !== 'object' || seen.has(node)) return false;
-    seen.add(node);
-    if (Array.isArray(node)) return node.some(walk);
-    if (PEST_ROW_SERVICES.has(String(node.service || ''))) return true;
-    // A row named for pest (the browser and the mapper name rows, they do not always key them), carrying any price.
-    const label = String(node.name || node.label || '');
-    if (/pest/i.test(label) && !NOT_A_PEST_ROW_NAME.test(label) && PEST_ROW_PRICE_KEYS.some((key) => Number(node[key]) > 0)) return true;
-    return Object.entries(node).some(([key, value]) => {
-      if (SAVE_INPUT_CARRIER_KEY.test(key)) return false;
-      if (key === 'pestTiers' && Array.isArray(value) && value.length > 0) return true;
-      if (key === 'results' && isPlainRecord(value) && isPlainRecord(value.pest)) return true;
-      return walk(value);
-    });
-  };
-  return walk(estimateData);
-}
 // Every footprint the saved blob names, anywhere in it (inputs, engine inputs and request, a result's own property or line): a key
 // that names a footprint or a building area as it is, a living area over the stories beside it (the engine's own arithmetic; the
 // builder profile calls the living area squareFootage). A size is a number or a numeric string, bare or in the estimators' wrapped
@@ -2157,15 +2127,15 @@ function savedPestFootprints(estimateData) {
 }
 
 function assertPestAboveTableClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
-  if (!isPlainRecord(estimateData) || !saveHoldsPestRow(estimateData)) return;
+  if (!isPlainRecord(estimateData)) return;
   // The stored estimate's size counts beside the posted one (revise only): a save that drops or shrinks its size fields is still
   // read at the size the server already holds.
   const footprints = [...savedPestFootprints(estimateData), ...savedPestFootprints(storedEstimateData)];
   if (!footprints.some((footprint) => footprint > Number(pricingEngine.constants.PEST.aboveTableStartSqFt))) return;
-  throw errorWithStatus('The server could not price this estimate, and the browser cannot price pest for a building above 5,500 sq ft — reload the page and regenerate the estimate so the server prices it.', 409);
+  throw errorWithStatus('The server could not price this estimate, and a browser price is not accepted for a building above 5,500 sq ft (pest keeps rising with the size there) — reload the page and regenerate the estimate so the server prices it.', 409);
 }
 // The stamp of a browser-priced save is the server's, never the browser's: a revision keeps the stored estimate's (a quote sold before
-// the rule stays on it), a first save is new. A save that passed the check above holds no pest row the two rules price differently,
+// the rule stays on it), a first save is new. A save that passed the check above names no building the two rules price differently,
 // so both are true to its prices. Written on every result container, so the reader finds it whichever one it picks.
 function stampPestAboveTableOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
   if (!isPlainRecord(estimateData)) return;

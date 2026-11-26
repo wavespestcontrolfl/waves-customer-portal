@@ -261,7 +261,7 @@ describe('the stamp rides every save shape', () => {
   });
 });
 
-describe('a save the server cannot price: no pest row above 5,500 sq ft (admin-estimate-persistence)', () => {
+describe('a save the server cannot price: no building above 5,500 sq ft (admin-estimate-persistence)', () => {
   const {
     assertPestAboveTableClientFallbackSave: assertFallback, stampPestAboveTableOnClientFallbackSave: stampFallback,
     resolveServerAuthoritativePricing,
@@ -289,7 +289,7 @@ describe('a save the server cannot price: no pest row above 5,500 sq ft (admin-e
     estimateData: data, clientPreview: { monthlyTotal: 42.67, annualTotal: 512, onetimeTotal: 0 }, quoteRequired: false, now: NOW, recompute, storedEstimateData: stored,
   });
 
-  test('a pest row for a home above 5,500 sq ft is refused, whatever stamp the browser posts; at or under it the save passes', () => {
+  test('a save for a home above 5,500 sq ft is refused, whatever stamp the browser posts; at or under it the save passes', () => {
     for (const meta of [{}, { legacyPestAboveTable: false }, { legacyPestAboveTable: true }]) {
       refused(browser(128, { inputs: { homeSqFt: 10000, stories: '1' } }, meta));
       refused(browser(128, { inputs: { homeSqFt: 5501, stories: '1' } }, meta));
@@ -312,33 +312,46 @@ describe('a save the server cannot price: no pest row above 5,500 sq ft (admin-e
     passes(browser(128, { inputs: { homeSqFt: '', stories: '1' }, engineInputs: { homeSqFt: 0, footprintSource: 'manual', footprintUnknown: true } }));
   });
 
-  test('a pest row is found in every shape and container: plan rows, a recurring or one-time row, an engine line, engineResult alone', () => {
+  test('the check reads no rows: every pest row shape is refused above 5,500 sq ft, and so is a save with no pest row at all', () => {
     const big = { inputs: { homeSqFt: 9000, stories: '1' } };
-    refused({ result: { results: { pest: row(128) } }, ...big });
-    refused({ result: { results: { pestTiers: [row(128)] } }, ...big });
-    refused({ result: { recurring: { services: [{ name: 'Pest (Quarterly)', mo: 42.67 }] } }, ...big });
-    refused({ result: { results: { recurring: { services: [{ service: 'pest_control', monthly: 42.67 }] } } }, ...big });
-    refused({ result: { oneTime: { items: [{ service: 'one_time_pest', price: 250 }] } }, ...big });
-    refused({ result: { results: { oneTime: [{ service: 'one_time_pest', price: 250 }] } }, ...big });
-    refused({ result: { lineItems: [{ service: 'pest_control', price: 128 }] }, ...big });
-    refused({ engineResult: { lineItems: [{ service: 'pest_control', price: 128 }] }, ...big });
-    refused({ result: { results: {} }, engineResult: { lineItems: [{ service: 'one_time_pest', price: 250 }] }, ...big });
-    refused({ results: { pest: row(128) }, ...big });
-    // Tier rows straight under the result with only a cadence and a price (the shape the public page's v1 reader also accepts).
-    refused({ result: { pestTiers: [{ freq: 'quarterly', pa: 128 }] }, ...big });
-    refused({ result: { pestTiers: [{ label: 'Quarterly' }] }, ...big });
-    refused({ pestTiers: [{ freq: 'quarterly', mo: 42.67 }], ...big });
-    // The frozen send bundle of a sent estimate names the plan too.
-    refused({ result: { results: {} }, sendSnapshot: { pricingBundle: { frequencies: [{ service: 'pest_control', monthly: 42.67 }] } }, ...big });
-    // A priced row named for pest with no service key, wherever the word sits in its name.
-    refused({ result: { recurring: { services: [{ name: 'Quarterly Pest Control', monthly: 42.67 }] } }, ...big });
-    refused({ result: { oneTime: { items: [{ label: 'One-Time Pest Treatment', price: 250 }] } }, ...big });
-    // A name with the word in it and no price is not a row (the company name), and another service's row is not a pest row.
-    passes({ result: { company: { name: 'Waves Pest Control' }, recurring: { services: [{ name: 'Lawn + Pest-Free Turf', service: 'lawn_care', mo: 60 }] } }, ...big });
-    // No pest row: a big home is not a reason to refuse (the browser prices the other services as it does on main).
-    passes({ result: { results: { lawn: [{ mo: 60 }] }, recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 60 }] } }, ...big });
-    // A pest REQUEST in the inputs is not a priced row.
-    passes({ result: { results: {} }, inputs: { homeSqFt: 9000, svcPest: true }, engineInputs: { homeSqFt: 9000, services: { pest: { frequency: 'quarterly' } } } });
+    const small = { inputs: { homeSqFt: 5000, stories: '1' } };
+    const shapes = [
+      { result: { results: { pest: row(128) } } },
+      { result: { results: { pestTiers: [row(128)] } } },
+      { result: { recurring: { services: [{ name: 'Pest (Quarterly)', mo: 42.67 }] } } },
+      { result: { results: { recurring: { services: [{ service: 'pest_control', monthly: 42.67 }] } } } },
+      { result: { oneTime: { items: [{ service: 'one_time_pest', price: 250 }] } } },
+      { result: { results: { oneTime: [{ service: 'one_time_pest', price: 250 }] } } },
+      { result: { lineItems: [{ service: 'pest_control', price: 128 }] } },
+      { engineResult: { lineItems: [{ service: 'pest_control', price: 128 }] } },
+      { result: { results: {} }, engineResult: { lineItems: [{ service: 'one_time_pest', price: 250 }] } },
+      { results: { pest: row(128) } },
+      // Tier rows straight under the result with only a cadence and a price (the shape the public page's v1 reader also accepts).
+      { result: { pestTiers: [{ freq: 'quarterly', pa: 128 }] } },
+      { pestTiers: [{ freq: 'quarterly', mo: 42.67 }] },
+      // The frozen send bundle of a sent estimate names the plan too.
+      { result: { results: {} }, sendSnapshot: { pricingBundle: { frequencies: [{ service: 'pest_control', monthly: 42.67 }] } } },
+      // A row known only by another identity field the public page reads, or by a catalog key: no list of shapes to keep complete.
+      { result: { recurring: { services: [{ serviceKey: 'pest_control', mo: 42.67 }] } } },
+      { result: { recurring: { services: [{ service_key: 'pest_control', mo: 42.67 }] } } },
+      { result: { recurring: { services: [{ key: 'pest_control', mo: 42.67 }] } } },
+      { result: { recurring: { services: [{ displayName: 'Pest Control (Quarterly)', mo: 42.67 }] } } },
+      { engineResult: { lineItems: [{ service: 'pest_general_quarterly', price: 128 }] } },
+      { engineResult: { lineItems: [{ catalogServiceKey: 'pest_termite_bait_quarterly', price: 240 }] } },
+      { result: { recurring: { services: [{ name: 'Pest + Termite Bait (Quarterly)', mo: 80 }] } } },
+      { result: { recurring: { services: [{ title: 'General household insects', amount: 128 }] } } },
+      // No pest row at all: a big building is refused too. A save that adds pest later is then never judged by what its rows say.
+      { result: { results: { lawn: [{ mo: 60 }] }, recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 60 }] } } },
+      { result: { company: { name: 'Waves Pest Control' }, recurring: { services: [{ name: 'Lawn + Pest-Free Turf', service: 'lawn_care', mo: 60 }] } } },
+      { result: { results: {} } },
+    ];
+    for (const shape of shapes) {
+      refused({ ...shape, ...big });
+      // The same rows at or under 5,500 sq ft pass: the premium is zero there, so the browser's price is the server's.
+      passes({ ...shape, ...small });
+    }
+    // The size alone decides, wherever the save names it: a pest REQUEST in the inputs with nothing priced is refused as well.
+    refused({ result: { results: {} }, inputs: { homeSqFt: 9000, svcPest: true }, engineInputs: { homeSqFt: 9000, services: { pest: { frequency: 'quarterly' } } } });
   });
 
   test('a footprint in the estimators\' wrapped measurement form { value, source } is read, posted or stored', () => {
@@ -514,7 +527,7 @@ describe('the client fallback estimator: the premium is server-only', () => {
     }
   });
 
-  test('above 5,500 sq ft with pest the fallback prices the flat top and leaves the stamp MISSING; the save is a 409 and the server prices it', () => {
+  test('above 5,500 sq ft the fallback prices the flat top of pest and leaves the stamp MISSING; every save there is a 409 and the server prices it', () => {
     const calculateEstimate = load();
     for (const extra of [{}, { svcPest: false, svcOnetimePest: true }]) {
       const client = calculateEstimate(input(8000, extra));
@@ -523,13 +536,14 @@ describe('the client fallback estimator: the premium is server-only', () => {
       try { save(client, input(8000, extra)); } catch (e) { error = e; }
       expect(error && error.statusCode).toBe(409);
     }
-    // The refusal reads the real browser rows, not the stamp: the same result with a forged stamp is refused too.
+    // The refusal reads the size, not the stamp: the same result with a forged stamp is refused too.
     const forged = calculateEstimate(input(8000));
     forged.pricingMetadata.legacyPestAboveTable = false;
     expect(() => save(forged, input(8000))).toThrow(/above 5,500 sq ft/);
-    // A fallback with no pest above the table has nothing to refuse: it keeps the stamp.
+    // A fallback with no pest above the table keeps its stamp, and its save is refused all the same: the check reads no rows.
     const lawnOnly = calculateEstimate(input(8000, { svcPest: false }));
     expect(lawnOnly.pricingMetadata.legacyPestAboveTable).toBe(false);
-    expect(() => save(lawnOnly, input(8000, { svcPest: false }))).not.toThrow();
+    expect(() => save(lawnOnly, input(8000, { svcPest: false }))).toThrow(/above 5,500 sq ft/);
+    expect(() => save(calculateEstimate(input(5500, { svcPest: false })), input(5500, { svcPest: false }))).not.toThrow();
   });
 });
