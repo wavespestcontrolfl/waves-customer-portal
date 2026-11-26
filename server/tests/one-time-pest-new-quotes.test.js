@@ -398,7 +398,7 @@ describe('the fallback save: the new-rule stamp (admin-estimate-persistence)', (
   const payload = (items, meta = {}) => ({
     result: {
       recurring: { discount: 0, pestProgramFloorApplied: false },
-      pricingMetadata: { pestBasePerVisit: Math.round(constants.PEST.base), legacyOneTimePestBuffer: false, ...meta },
+      pricingMetadata: { pestBasePerVisit: Math.round(constants.PEST.base), legacyOneTimePestBuffer: false, legacyPestAboveTable: false, ...meta },
       results: { pestTiers: [{ pa: 112, apps: 4, ann: 448, mo: 37.33, label: 'Quarterly' }], pest: { pa: 112, apps: 4, ann: 448, mo: 37.33, label: 'Quarterly' } },
       oneTime: { items },
     },

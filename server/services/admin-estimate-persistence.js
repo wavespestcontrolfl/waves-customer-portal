@@ -1486,6 +1486,10 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   }
 }
 
+// Staff revisions re-price on current rules; customer replays keep the sent price. A revision of a delivered estimate runs a fresh
+// engine pass on the posted inputs (no replaySavedPricingKnobs, so no stored rule stamp is read): every 2026-11-26 rule, including
+// pest above 5,500 sq ft, applies to it as it does on main. Only the public replay and the persisted-estimate recompute
+// (replaySavedPricingKnobs) read the stored stamps.
 // Decide the authoritative totals + audit columns for a save. Fails OPEN to the
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
@@ -1992,7 +1996,7 @@ function pestRowsSignature(estimateData) {
   ].filter((item) => item && item.service === 'one_time_pest');
   // The rule stamps are not part of the comparison (an older browser sends none); they are copied from the stored row when equal.
   const unstamped = (row) => (row && typeof row === 'object' && !Array.isArray(row)
-    ? Object.fromEntries(Object.entries(row).filter(([key]) => key !== 'legacyOneTimePestBuffer')) : row);
+    ? Object.fromEntries(Object.entries(row).filter(([key]) => key !== 'legacyOneTimePestBuffer' && key !== 'legacyPestAboveTable')) : row);
   return [unstamped(results.pest) ?? null, results.pestTiers ?? null, oneTime.map(unstamped)];
 }
 
@@ -2004,6 +2008,11 @@ function copyStoredPestRuleStamps(estimateData, storedEstimateData) {
   const flag = require('./estimate-floor-signal-replay').savedLegacyOneTimePestBufferSignal(storedEstimateData).legacyOneTimePestBuffer;
   if (typeof flag === 'boolean') root.pricingMetadata = { ...(root.pricingMetadata || {}), legacyOneTimePestBuffer: flag };
   else if (root.pricingMetadata) delete root.pricingMetadata.legacyOneTimePestBuffer;
+  // The estimate-wide pest-above-table stamp (new quotes only, 2026-11-26) is copied the same way: identical rows keep the stored rule,
+  // so an older browser that sends no stamp never flips a new quote onto the flat rule on a re-save.
+  const aboveTableFlag = require('./estimate-floor-signal-replay').savedLegacyPestAboveTableSignal(storedEstimateData).legacyPestAboveTable;
+  if (typeof aboveTableFlag === 'boolean') root.pricingMetadata = { ...(root.pricingMetadata || {}), legacyPestAboveTable: aboveTableFlag };
+  else if (root.pricingMetadata) delete root.pricingMetadata.legacyPestAboveTable;
   const stampOf = (row) => (row && typeof row.legacyOneTimePestBuffer === 'boolean' ? row.legacyOneTimePestBuffer : undefined);
   const copy = (target, source) => {
     if (!target || typeof target !== 'object') return;
@@ -2069,6 +2078,11 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
   }
   if (root?.pricingMetadata?.legacyOneTimePestBuffer !== false) {
     throw errorWithStatus('This estimator is out of date for one-time pest pricing — reload the page and regenerate the estimate.', 409);
+  }
+  // Pest above the 5,500 sq ft table (new quotes only, 2026-11-26): the same check. A browser bundle that predates the rule priced
+  // the flat top and sends no stamp (or true); it must not be saved as a new quote, so it reloads and regenerates.
+  if (root?.pricingMetadata?.legacyPestAboveTable !== false) {
+    throw errorWithStatus('This estimator is out of date for pest pricing above 5,500 sq ft — reload the page and regenerate the estimate.', 409);
   }
 }
 

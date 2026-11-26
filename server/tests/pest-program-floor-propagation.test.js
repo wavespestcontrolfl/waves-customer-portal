@@ -669,7 +669,7 @@ describe('assertLivePestBaseForClientPayload — stale-bundle base gate at save 
   // live PEST.base must fail the save closed — the fallback path has no
   // server recompute to correct it.
   function clientEnginePestPayload({ stamp, includePest = true } = {}) {
-    const pricingMetadata = { pestProgramFloorArmed: false, pestProgramFloorPerVisit: 89, legacyOneTimePestBuffer: false };
+    const pricingMetadata = { pestProgramFloorArmed: false, pestProgramFloorPerVisit: 89, legacyOneTimePestBuffer: false, legacyPestAboveTable: false };
     if (stamp !== undefined) pricingMetadata.pestBasePerVisit = stamp;
     return {
       result: {
@@ -727,7 +727,7 @@ describe('assertLivePestBaseForClientPayload — stale-bundle base gate at save 
   test('a one-time-only pest payload is gated too — no recurring rows, price still derives from the base (codex r3 P0)', () => {
     constants.PEST.base = 112;
     function oneTimeOnlyPayload({ stamp } = {}) {
-      const pricingMetadata = { pestProgramFloorArmed: false, pestProgramFloorPerVisit: 89, legacyOneTimePestBuffer: false };
+      const pricingMetadata = { pestProgramFloorArmed: false, pestProgramFloorPerVisit: 89, legacyOneTimePestBuffer: false, legacyPestAboveTable: false };
       if (stamp !== undefined) pricingMetadata.pestBasePerVisit = stamp;
       return {
         result: {

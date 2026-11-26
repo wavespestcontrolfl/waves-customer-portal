@@ -118,6 +118,13 @@ const PEST = {
     { sqft: 4000, adj: r(10) },
     { sqft: 5500, adj: r(16) },
   ],
+  // Above 5,500 sq ft a NEW quote adds a premium on top of the table price: +$8 per visit (quarterly list price) for each 1,000 sq ft over
+  // aboveTableStartSqFt (5,500), pro-rated to the square foot, no cap (owner 2026-11-26: 8,000 sq ft = $148, 10,000 = $164). A CODE constant, not a
+  // pricing_config row: nothing a Settings edit does can move a sent quote. A quote saved before the rule stays flat at the last
+  // bracket (legacyPestAboveTable stamp). Bimonthly, monthly and one-time pest follow through the quarterly price.
+  aboveTablePer1000: 8,
+  // Where that premium starts: a code constant too, never read from the table, so a Settings edit of the last bracket cannot move it.
+  aboveTableStartSqFt: 5500,
   additionalAdjustments: {
     indoor: r(15),              // NEW. Interior treatment adds 10-15 min + $3-5 in product.
     shrubs_light: -r(5),        // Light shrubs = sparser perimeter, less spray time. Already on the admin Pricing Logic panel; pricer was missing the branch (drift bug).

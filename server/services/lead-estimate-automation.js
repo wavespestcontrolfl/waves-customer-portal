@@ -440,6 +440,7 @@ function compactLineItem(item = {}) {
     ...(typeof item.legacyPricingRules === 'boolean' ? { legacyPricingRules: item.legacyPricingRules } : {}),
     ...(typeof item.legacyTwoStoryRoof === 'boolean' ? { legacyTwoStoryRoof: item.legacyTwoStoryRoof } : {}),
     ...(typeof item.legacyOneTimePestBuffer === 'boolean' ? { legacyOneTimePestBuffer: item.legacyOneTimePestBuffer } : {}),
+    ...(typeof item.legacyPestAboveTable === 'boolean' ? { legacyPestAboveTable: item.legacyPestAboveTable } : {}),
     annual: item.annualAfterDiscount ?? item.annual ?? null,
     monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
     price: item.priceAfterDiscount ?? item.price ?? null,
@@ -688,6 +689,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
                 : {}),
               ...(typeof estimate.pricingMetadata.legacyOneTimePestBuffer === 'boolean'
                 ? { legacyOneTimePestBuffer: estimate.pricingMetadata.legacyOneTimePestBuffer }
+                : {}),
+              ...(typeof estimate.pricingMetadata.legacyPestAboveTable === 'boolean'
+                ? { legacyPestAboveTable: estimate.pricingMetadata.legacyPestAboveTable }
                 : {}),
             } }
             : {}),

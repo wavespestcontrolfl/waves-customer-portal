@@ -1257,6 +1257,7 @@ async function sendQuoteRequestEmail({
 // commercial in the office bell (GH codex P2 on #3839).
 const RESIDENTIAL_VERIFICATION_REASONS = new Set([
   'lot_size_requires_verification',
+  'home_size_above_public_limit',
   'mosquito_treatable_area_unverified',
   'unit_in_multi_unit_building',
   'low_confidence_turf_requires_field_verification',
@@ -1372,11 +1373,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return res.status(200).json({ ok: true });
     }
     const {
-      leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt,
+      leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt: postedHomeSqFt,
       buildingSizeConfirmed,
       lotSqFt, lotSizeConfirmed, stories, propertyType, category, isCommercial, commercialSubtype,
       enriched, services: bodyServices, attribution,
     } = req.body || {};
+    // The posted home size parses exactly as it always has (a number, a numeric string; anything else falls to the 2,000 sq ft default).
+    // An infinite value is treated as unparseable text too: it is never clamped to the ceiling or priced, and never stored.
+    const postedHomeSqFtNumber = Number(postedHomeSqFt);
+    const homeSqFt = (postedHomeSqFtNumber === Infinity || postedHomeSqFtNumber === -Infinity) ? NaN : postedHomeSqFt;
     // Optional self-reported "How did you hear about us?" (+ the AI follow-up
     // prompt): fixed allowlist, unknown values silently dropped, never required.
     const wizardHeardAbout = heardAboutFromBody(req.body);
@@ -1469,6 +1474,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const HOME_CAP = commercialDetected ? 5_000_000 : 20000;
     const LOT_CAP = commercialDetected ? 50_000_000 : 200000;
     const sqft = Math.max(500, Math.min(HOME_CAP, Number(homeSqFt) || 2000));
+    // A residential home bigger than the public calculator's ceiling is never priced as the truncated size: pest keeps rising with
+    // the footprint (owner 2026-11-26), so a 24,000 sq ft two-story clamped to 20,000 would quote a 10,000 sq ft footprint. A posted
+    // size above the ceiling on a quote that asks for pest goes to the team for a hand price instead.
+    const homeSizeAbovePublicLimit = !commercialDetected && Number(homeSqFt) > HOME_CAP
+      && !!(services && (services.pest || services.oneTimePest));
+    // ONE resolved size for everything this quote stores or prices from: the engine input, the exclusion line and the lead's extracted data.
+    const resolvedHomeSqFt = homeSizeAbovePublicLimit ? Number(homeSqFt) : sqft;
     // Resolve the TRUSTED lot once (lookup-measured or customer-confirmed) and use
     // it for BOTH the measured flag AND the lot fed to the engine — otherwise we
     // could mark the lot measured off enriched.lotSqFt while still pricing off the
@@ -1779,7 +1791,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // record — codex P0 r3).
     const engineFallbackLot = !wizardShaped && Number(lotSqFt) > 0
       ? Number(lotSqFt)
-      : sqft * 4;
+      : resolvedHomeSqFt * 4;
     const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? engineFallbackLot));
     // DB-safe measured value for the customers.lot_sqft writes below — a
     // public confirmed value like 1e100 would overflow the integer column
@@ -1843,7 +1855,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       ? trustedFleaHomeSqFt(trustedTurf, trustedRecord)
       : null;
     let engineInput = {
-      homeSqFt: sqft,
+      // The posted size itself when it is above the ceiling (that quote parks for a hand price): a stored draft re-priced later by
+      // staff reads the real size, never the clamped one.
+      homeSqFt: resolvedHomeSqFt,
       ...(fleaMeasuredHomeSqFt ? { fleaMeasuredHomeSqFt, homeSqFtIsDefault: true } : {}),
       // Tree & Shrub open-parcel basis: the server-measured footprint, never
       // the body's homeSqFt; absent → the pricer parks the lot-based line.
@@ -1932,7 +1946,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // contract as the estimator translator (countyCeilingStillValid): the
     // ceiling forwards only while THIS request's dimensions still match the
     // county dimensions it was computed from (pre-push codex P0 r3).
-    if (countyCeilingStillValid(trustedTurf, { homeSqFt: sqft, lotSqFt: lot, stories: engineInput.stories })) {
+    if (countyCeilingStillValid(trustedTurf, { homeSqFt: resolvedHomeSqFt, lotSqFt: lot, stories: engineInput.stories })) {
       engineInput.countyTurfCeilingSf = trustedTurf.countyTurfCeilingSf;
     }
     if (commercialDetected) {
@@ -2084,7 +2098,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     if (services.exclusion) {
       engineInput.services.exclusion = {
-        homeSqFt: sqft,
+        homeSqFt: resolvedHomeSqFt,
         stories: engineInput.stories,
       };
     }
@@ -2318,7 +2332,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // all assume the quote is wholly priced or wholly manual. A lawn-only or
     // tree-only commercial quote has no manual line, so it prices instantly.
     const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel
-      || lotFlagForcesSiteQuote;
+      || lotFlagForcesSiteQuote || homeSizeAbovePublicLimit;
     const quoteRequiredReason = manualQuoteLine?.reason
       // The turf-review lines expose their reason via customQuoteReason /
       // manualReviewReasons, not `reason` — without these legs a parked
@@ -2329,7 +2343,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       || manualQuoteLine?.manualReviewReasons?.[0]
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
       || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null)
-      || (lotFlagForcesSiteQuote ? 'lot_size_requires_verification' : null);
+      || (lotFlagForcesSiteQuote ? 'lot_size_requires_verification' : null)
+      || (homeSizeAbovePublicLimit ? 'home_size_above_public_limit' : null);
     const quoteIsPricedByTeam = isPricedByTeamReason(quoteRequiredReason);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
@@ -2389,7 +2404,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // codex #3861 r1 P2).
       wizard_submitted_at: new Date().toISOString(),
       entry_channel: entryChannel,
-      homeSqFt: sqft,
+      homeSqFt: resolvedHomeSqFt,
       lotSqFt: lot,
       services,
       enriched: ep,
@@ -2947,7 +2962,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           leadSourceDetail: sourceMeta.leadSourceDetail,
           entryChannel,
           quoteCity,
-          sqft,
+          sqft: resolvedHomeSqFt,
           // Persist only a MEASURED/confirmed lot — the sqft×4 engine
           // fallback must never be stored: customer-pricing-ai treats
           // customers.lot_sqft as authoritative before the lookup, so a
@@ -3365,6 +3380,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               ...(typeof estimate.pricingMetadata.legacyOneTimePestBuffer === 'boolean'
                 ? { legacyOneTimePestBuffer: estimate.pricingMetadata.legacyOneTimePestBuffer }
                 : {}),
+              // Pest above the 5,500 sq ft table (new quotes only, 2026-11-26): its own stamp.
+              ...(typeof estimate.pricingMetadata.legacyPestAboveTable === 'boolean'
+                ? { legacyPestAboveTable: estimate.pricingMetadata.legacyPestAboveTable }
+                : {}),
             } }
             : {}),
           lineItems: (estimate?.lineItems || []).map(item => ({
@@ -3373,6 +3392,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             ...(typeof item.legacyPricingRules === 'boolean' ? { legacyPricingRules: item.legacyPricingRules } : {}),
             ...(typeof item.legacyTwoStoryRoof === 'boolean' ? { legacyTwoStoryRoof: item.legacyTwoStoryRoof } : {}),
             ...(typeof item.legacyOneTimePestBuffer === 'boolean' ? { legacyOneTimePestBuffer: item.legacyOneTimePestBuffer } : {}),
+            ...(typeof item.legacyPestAboveTable === 'boolean' ? { legacyPestAboveTable: item.legacyPestAboveTable } : {}),
             annual: item.annualAfterDiscount ?? item.annual ?? null,
             monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
             price: item.priceAfterDiscount ?? item.price ?? null,
@@ -4482,6 +4502,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
+          : quoteRequiredReason === 'home_size_above_public_limit'
+          ? 'A home this size is priced by our team — we\'ll review it and send your exact price shortly.'
           : quoteRequiredReason === 'mosquito_lot_above_2_acres'
           ? 'Mosquito control for a property this size is priced by our team — we\'ll review your lot and send your exact price shortly.'
           : (!RESIDENTIAL_VERIFICATION_REASONS.has(quoteRequiredReason) && isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine))
