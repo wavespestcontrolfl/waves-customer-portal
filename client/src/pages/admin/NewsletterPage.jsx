@@ -9,7 +9,7 @@
 //   - Automations   drip + trigger flows
 //
 // There is no manual composer or editorial calendar: the weekly issue is
-// drafted by the Monday autopilot and sent through the proof flow. Retired
+// drafted by the Wednesday autopilot and sent through the proof flow. Retired
 // ?tab=compose and ?tab=calendar links open History (RETIRED_TABS).
 //
 // Per-tab URL state via ?tab=dashboard|history|subscribers|events|automations
@@ -385,7 +385,7 @@ function RecentPosts({ posts, loading }) {
           {" "}
           <div className="text-14 text-ink-primary mb-1">No posts yet</div>{" "}
           <div className="text-ui-body text-ink-tertiary">
-            The weekly issue appears here after the Monday autopilot drafts it.
+            The weekly issue appears here after the Wednesday autopilot drafts it.
           </div>{" "}
         </CardBody>{" "}
       </Card>

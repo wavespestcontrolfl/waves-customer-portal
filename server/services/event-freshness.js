@@ -131,6 +131,11 @@ const ROUTINE_EVENT_TYPES = Object.freeze(['recurring_series', 'ongoing']);
 const ROUTINE_RECURRENCE_TYPES = Object.freeze(['daily', 'weekly', 'monthly', 'custom']);
 const FLAGSHIP_SEND_HOUR_ET = 6;
 const FLAGSHIP_SEND_TOLERANCE_MINUTES = 15;
+// The weekly flagship goes out Thursday (etParts dayOfWeek, Sunday = 0) and lists
+// events from Thursday 00:00 through Sunday 23:59 ET (owner 2026-11-26: moved from
+// Tuesday, window Tue–Mon). newsletter_calendar.week_of is that Thursday.
+const FLAGSHIP_SEND_DAY_ET = 4;
+const FLAGSHIP_WINDOW_DAYS = 4;
 
 // Metadata from the normalizer is the primary gate. These deliberately narrow
 // text patterns catch common source rows that were mislabeled as one_time — for
@@ -216,8 +221,9 @@ function etYearOf(value, reference = new Date()) {
   return etParts(reference).year;
 }
 
-// A weekly issue ships Tuesday 6 AM ET and lists events through the following
-// Monday night; 8 days covers that window plus a delayed send.
+// A weekly issue ships Thursday 6 AM ET and lists events through that Sunday
+// night (a 4-day window). The 8 days is kept from the older Tuesday–Monday
+// window: wider than needed, so a delayed send still counts as covered.
 const FEATURED_ISSUE_LOOKAHEAD_MS = 8 * 24 * 60 * 60 * 1000;
 
 /**
@@ -721,7 +727,7 @@ function dateRelevanceScore(startAt) {
   const nowDay = Date.UTC(nowET.year, nowET.month - 1, nowET.day);
   const daysOut = (eventDay - nowDay) / (1000 * 60 * 60 * 24);
   if (daysOut < 0) return 0;
-  // Friday–Sunday inside the active window are the point of a Tuesday guide.
+  // Friday–Sunday inside the active window are the point of a Thursday guide.
   if ([5, 6, 0].includes(eventET.dayOfWeek) && daysOut <= 7) return 100;
   if (daysOut <= 3) return 85;
   if (daysOut <= 7) return 70;
@@ -801,27 +807,37 @@ function isClosingWeek(event, reference = new Date()) {
   return days >= 0 && days <= 7;
 }
 
-// ── Newsletter Tuesday helpers ───────────────────────────────────────
+// ── Newsletter issue-day helpers (the issue day is a Thursday) ───────
 
-function getCurrentNewsletterTuesday(now = new Date()) {
+function getCurrentNewsletterIssueDay(now = new Date()) {
   const nowET = etParts(now);
-  const daysBack = (nowET.dayOfWeek - 2 + 7) % 7; // 0 on Tue, 1 Wed, ... 6 Mon
-  return etDateString(addETDays(now, -daysBack)); // most recent Tuesday
+  const daysBack = (nowET.dayOfWeek - FLAGSHIP_SEND_DAY_ET + 7) % 7; // 0 on Thu, 1 Fri, ... 6 Wed
+  return etDateString(addETDays(now, -daysBack)); // most recent Thursday
 }
 
-function getNextNewsletterTuesday(now = new Date()) {
+function getNextNewsletterIssueDay(now = new Date()) {
   const nowET = etParts(now);
-  const daysForward = (2 - nowET.dayOfWeek + 7) % 7;
+  const daysForward = (FLAGSHIP_SEND_DAY_ET - nowET.dayOfWeek + 7) % 7;
   return etDateString(addETDays(now, daysForward));
 }
 
-// Monday's draft belongs to tomorrow's issue. Tuesday through Sunday belong to
-// the most recent Tuesday, whose Tue–Mon event window contains the upcoming
-// weekend readers are planning for.
-function getActiveNewsletterTuesday(now = new Date()) {
-  return etParts(now).dayOfWeek === 1
-    ? getNextNewsletterTuesday(now)
-    : getCurrentNewsletterTuesday(now);
+// Monday through Wednesday belong to the coming Thursday: Wednesday's draft is
+// tomorrow's issue, and the Thu–Sun window is already over by Monday. Thursday
+// through Sunday belong to the most recent Thursday, whose window contains the
+// days readers are planning for.
+function getActiveNewsletterIssueDay(now = new Date()) {
+  const dow = etParts(now).dayOfWeek;
+  return dow >= 1 && dow < FLAGSHIP_SEND_DAY_ET
+    ? getNextNewsletterIssueDay(now)
+    : getCurrentNewsletterIssueDay(now);
+}
+
+// The issue's event window: Thursday 00:00 through Sunday 23:59:59 ET.
+function getNewsletterIssueWindow(weekOf) {
+  const key = calendarDateString(weekOf) || String(weekOf);
+  const start = parseETDateTime(`${key}T00:00:00`);
+  const lastDay = etDateString(addETDays(parseETDateTime(`${key}T12:00:00`), FLAGSHIP_WINDOW_DAYS - 1));
+  return { start, end: parseETDateTime(`${lastDay}T23:59:59`) };
 }
 
 function getNewsletterWeekOf(date) {
@@ -829,12 +845,12 @@ function getNewsletterWeekOf(date) {
     typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) ? `${date}T12:00:00` : date
   );
   const et = etParts(d);
-  const daysBack = (et.dayOfWeek - 2 + 7) % 7;
+  const daysBack = (et.dayOfWeek - FLAGSHIP_SEND_DAY_ET + 7) % 7;
   return etDateString(addETDays(d, -daysBack));
 }
 
 function defaultTargetSendAt(weekOf) {
-  return parseETDateTime(`${weekOf}T06:00:00`); // Tuesday 6 AM ET
+  return parseETDateTime(`${weekOf}T06:00:00`); // Thursday 6 AM ET
 }
 
 function calendarDateString(value) {
@@ -853,15 +869,15 @@ function isFlagshipTargetForWeek(date, weekOf) {
 }
 
 function getNewsletterDraftWindowStart(weekOf) {
-  const issueTuesday = parseETDateTime(`${weekOf}T12:00:00`);
-  return parseETDateTime(`${etDateString(addETDays(issueTuesday, -1))}T00:00:00`);
+  const issueDay = parseETDateTime(`${weekOf}T12:00:00`);
+  return parseETDateTime(`${etDateString(addETDays(issueDay, -1))}T00:00:00`); // Wednesday 00:00
 }
 
 function isFlagshipScheduledTime(date) {
   const value = date instanceof Date ? date : new Date(date);
   if (Number.isNaN(value.getTime())) return false;
   const et = etParts(value);
-  return et.dayOfWeek === 2
+  return et.dayOfWeek === FLAGSHIP_SEND_DAY_ET
     && et.hour === FLAGSHIP_SEND_HOUR_ET
     && et.minute === 0
     && et.second === 0
@@ -872,7 +888,7 @@ function isFlagshipDeliveryWindow(date = new Date()) {
   const value = date instanceof Date ? date : new Date(date);
   if (Number.isNaN(value.getTime())) return false;
   const et = etParts(value);
-  return et.dayOfWeek === 2
+  return et.dayOfWeek === FLAGSHIP_SEND_DAY_ET
     && et.hour === FLAGSHIP_SEND_HOUR_ET
     && et.minute >= 0
     && et.minute < FLAGSHIP_SEND_TOLERANCE_MINUTES;
@@ -881,7 +897,7 @@ function isFlagshipDeliveryWindow(date = new Date()) {
 function isCurrentFlagshipTarget(date, reference = new Date()) {
   const value = date instanceof Date ? date : new Date(date);
   if (!isFlagshipScheduledTime(value)) return false;
-  return value.getTime() === defaultTargetSendAt(getActiveNewsletterTuesday(reference)).getTime();
+  return value.getTime() === defaultTargetSendAt(getActiveNewsletterIssueDay(reference)).getTime();
 }
 
 /**
@@ -911,6 +927,8 @@ module.exports = {
   YEARLY_RECURRENCE_TYPES,
   FLAGSHIP_SEND_HOUR_ET,
   FLAGSHIP_SEND_TOLERANCE_MINUTES,
+  FLAGSHIP_SEND_DAY_ET,
+  FLAGSHIP_WINDOW_DAYS,
   FEATURED_ISSUE_LOOKAHEAD_MS,
   isRoutineRecurringEvent,
   isSeriesDebutEvent,
@@ -932,9 +950,10 @@ module.exports = {
   editorialNoveltyScore,
   isOpeningWeek,
   isClosingWeek,
-  getCurrentNewsletterTuesday,
-  getNextNewsletterTuesday,
-  getActiveNewsletterTuesday,
+  getCurrentNewsletterIssueDay,
+  getNextNewsletterIssueDay,
+  getActiveNewsletterIssueDay,
+  getNewsletterIssueWindow,
   getNewsletterWeekOf,
   defaultTargetSendAt,
   isFlagshipTargetForWeek,

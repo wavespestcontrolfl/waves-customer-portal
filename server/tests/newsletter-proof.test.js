@@ -44,6 +44,11 @@ jest.mock('../services/newsletter-event-selection', () => ({
 jest.mock('../services/notification-triggers', () => ({
   triggerNotification: mockTrigger,
 }));
+// ensureFlagshipAudience runs the real planner unless a test replaces it (a draft with no phase).
+jest.mock('../services/newsletter-weekly-audience', () => {
+  const actual = jest.requireActual('../services/newsletter-weekly-audience');
+  return { ...actual, ensureFlagshipAudience: jest.fn(actual.ensureFlagshipAudience) };
+});
 // The mailbox itself: the send-time HOLD check searches it for the FYI copy's token.
 const mockListAllMessages = jest.fn(async () => ({ messages: [], truncated: false, nextPageToken: null }));
 const mockGetMessage = jest.fn();
@@ -63,6 +68,7 @@ jest.mock('../services/email-template', () => ({
 }));
 
 const db = require('../models/db');
+const weeklyAudience = require('../services/newsletter-weekly-audience');
 const {
   parseProofToken,
   extractTopReplyText,
@@ -79,7 +85,7 @@ const {
 
 function chain(overrides = {}) {
   const q = {};
-  ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'select', 'orderBy', 'limit', 'forUpdate']
+  ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'whereExists', 'select', 'orderBy', 'limit', 'forUpdate']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => overrides.first);
   q.update = jest.fn(async () => (overrides.update !== undefined ? overrides.update : 1));
@@ -97,6 +103,7 @@ const FLAGSHIP_DRAFT = {
   html_body: '<p>events</p>',
   text_body: 'events',
   segment_filter: null,
+  audience_phase: 'all', // the first-readers step has widened (newsletter-weekly-audience.js)
   from_email: 'newsletter@wavespestcontrol.com',
   from_name: 'Waves',
   proof_token: 'ab12cd34',
@@ -109,13 +116,13 @@ const FLAGSHIP_DRAFT = {
 // sets proof_sent_at === updated_at in one update).
 const PROOF_STAMP = new Date('2026-07-09T18:00:00Z');
 const PROOFED_DRAFT = { ...FLAGSHIP_DRAFT, proof_sent_at: PROOF_STAMP, updated_at: PROOF_STAMP };
-const TARGET_SEND_AT = new Date('2026-07-21T10:00:00Z'); // Tuesday 6:00 AM EDT
+const TARGET_SEND_AT = new Date('2026-07-23T10:00:00Z'); // Thursday 6:00 AM EDT
 
 function wireDb({ sends, subscribers, calendar, issues } = {}) {
   const sendsChain = chain(sends || {});
   const subsChain = chain(subscribers || { first: undefined });
   const calendarChain = chain(calendar || {
-    first: { id: 'cal-1', week_of: '2026-07-21', target_send_at: TARGET_SEND_AT },
+    first: { id: 'cal-1', week_of: '2026-07-23', target_send_at: TARGET_SEND_AT },
   });
   // pest_insider_issues: no planned issue unless a test links one.
   const issuesChain = chain(issues || { first: undefined });
@@ -136,7 +143,7 @@ function wireDb({ sends, subscribers, calendar, issues } = {}) {
 }
 
 beforeEach(() => {
-  jest.useFakeTimers().setSystemTime(new Date('2026-07-20T12:00:00Z'));
+  jest.useFakeTimers().setSystemTime(new Date('2026-07-22T12:00:00Z'));
   jest.clearAllMocks();
   process.env.GATE_NEWSLETTER_PROOF_APPROVAL = 'true';
   // Approvers are fail-closed (no default) — tests opt in explicitly.
@@ -303,7 +310,7 @@ describe('sendNewsletterProof', () => {
     // Internal control message — newsletter suppression must not apply
     expect(args.asmGroupId).toBeUndefined();
     expect(args.html).toContain('Reply <strong>APPROVED</strong>');
-    expect(args.html).toContain('Tuesday at 6:00 AM ET');
+    expect(args.html).toContain('Thursday at 6:00 AM ET');
     expect(args.html).toContain('606');
     // Claim is whereNull-guarded, version-guarded on the fetched row's
     // updated_at (ms-truncated raw compare — node-pg precision), and
@@ -323,7 +330,28 @@ describe('sendNewsletterProof', () => {
     }));
   });
 
-  test('a non-flagship (Pest Insider) proof discloses immediate delivery, never the Tuesday target', async () => {
+  test('a first-readers issue says so: the copy names the warm audience and the issue number', async () => {
+    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null, audience_phase: 'warm' } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.sent).toBe(true);
+    const args = mockSendOne.mock.calls[0][0];
+    expect(args.html).toContain('first readers');
+    expect(args.html).toContain('opened a Waves email in the last 90 days');
+    expect(args.html).toContain('first-readers issue 1 of 3');
+    expect(args.text).toContain('first-readers issue 1 of 3');
+    expect(args.html).not.toContain('active subscribers');
+  });
+
+  test('a draft with no audience phase gets one before its copy is counted and proofed', async () => {
+    weeklyAudience.ensureFlagshipAudience.mockImplementationOnce(async (send) => ({ ...send, audience_phase: 'warm' }));
+    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null, audience_phase: null } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(weeklyAudience.ensureFlagshipAudience).toHaveBeenCalledWith(expect.objectContaining({ id: 'send-1', audience_phase: null }));
+    expect(r.sent).toBe(true);
+    expect(mockSendOne.mock.calls[0][0].html).toContain('first readers');
+  });
+
+  test('a non-flagship (Pest Insider) proof discloses immediate delivery, never the Thursday target', async () => {
     const pestInsiderDraft = {
       ...FLAGSHIP_DRAFT,
       newsletter_type: 'pest-insider-monthly',
@@ -334,14 +362,14 @@ describe('sendNewsletterProof', () => {
     expect(r.sent).toBe(true);
     const args = mockSendOne.mock.calls[0][0];
     expect(args.html).toContain('immediately');
-    expect(args.html).not.toContain('Tuesday at 6:00 AM ET');
+    expect(args.html).not.toContain('Thursday at 6:00 AM ET');
   });
 
-  test('future-issue proof validates its lineup against the linked issue Tuesday', async () => {
-    const futureTarget = new Date('2026-07-28T10:00:00Z');
+  test('future-issue proof validates its lineup against the linked issue Thursday', async () => {
+    const futureTarget = new Date('2026-07-30T10:00:00Z');
     wireDb({
       sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } },
-      calendar: { first: { id: 'cal-future', week_of: '2026-07-28', target_send_at: futureTarget } },
+      calendar: { first: { id: 'cal-future', week_of: '2026-07-30', target_send_at: futureTarget } },
     });
     const result = await sendNewsletterProof('send-1');
     expect(result.sent).toBe(true);
@@ -351,14 +379,14 @@ describe('sendNewsletterProof', () => {
     );
   });
 
-  test('proof blocks a future Tuesday target that does not match its calendar week', async () => {
+  test('proof blocks a future Thursday target that does not match its calendar week', async () => {
     wireDb({
       sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } },
       calendar: {
         first: {
           id: 'cal-mismatch',
-          week_of: '2026-07-21',
-          target_send_at: new Date('2026-07-28T10:00:00Z'),
+          week_of: '2026-07-23',
+          target_send_at: new Date('2026-07-30T10:00:00Z'),
         },
       },
     });
@@ -407,6 +435,24 @@ describe('maybeHandleProofApproval', () => {
     process.env.GATE_NEWSLETTER_PROOF_APPROVAL = 'false';
     wireDb();
     expect(await maybeHandleProofApproval(APPROVAL_EMAIL)).toBe(false);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('an APPROVED reply to a proof whose token was cleared (migration 20261126150100) finds no send: nothing is queued or dispatched', async () => {
+    const { sendsChain } = wireDb({ sends: { first: undefined } });
+    expect(await maybeHandleProofApproval(APPROVAL_EMAIL)).toBe(false);
+    expect(sendsChain.where).toHaveBeenCalledWith({ proof_token: 'ab12cd34' });
+    expect(sendsChain.update).not.toHaveBeenCalled();
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('a weekly send with its token but no calendar link is refused, never dispatched immediately', async () => {
+    const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT }, calendar: { first: undefined } });
+    expect(await maybeHandleProofApproval(APPROVAL_EMAIL)).toBe(true);
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      errors: [expect.stringContaining('linked calendar')],
+    }));
+    expect(sendsChain.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
@@ -489,7 +535,7 @@ describe('maybeHandleProofApproval', () => {
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
-  test('HTML-only reply: typed approved schedules Tuesday 6 AM without immediate dispatch', async () => {
+  test('HTML-only reply: typed approved schedules Thursday 6 AM without immediate dispatch', async () => {
     const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
     const r = await maybeHandleProofApproval({
       ...APPROVAL_EMAIL,
@@ -619,14 +665,14 @@ describe('maybeHandleProofApproval', () => {
   test('invalid or past calendar target leaves an approved draft unscheduled', async () => {
     const { sendsChain } = wireDb({
       sends: { first: PROOFED_DRAFT },
-      calendar: { first: { id: 'cal-1', week_of: '2026-07-21', target_send_at: '2026-07-14T10:00:00Z' } },
+      calendar: { first: { id: 'cal-1', week_of: '2026-07-23', target_send_at: '2026-07-16T10:00:00Z' } },
     });
     const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
     expect(r).toBe(true);
     expect(sendsChain.update).not.toHaveBeenCalled();
     expect(mockSendCampaign).not.toHaveBeenCalled();
     expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
-      errors: expect.arrayContaining([expect.stringContaining('future issue Tuesday')]),
+      errors: expect.arrayContaining([expect.stringContaining('future issue Thursday')]),
     }));
   });
 
@@ -669,7 +715,7 @@ describe('maybeHandleProofApproval', () => {
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
-  test('happy path: owner approval queues the linked Tuesday 6 AM target', async () => {
+  test('happy path: owner approval queues the linked Thursday 6 AM target', async () => {
     const { sendsChain, calendarChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
     const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
     expect(r).toBe(true);
@@ -718,7 +764,7 @@ describe('GATE_NEWSLETTER_AUTO_SEND — the weekly issue sends itself (owner 202
     from_address: 'contact@wavespestcontrol.com',
     body_text: 'HOLD\n\nOn Mon wrote:\n> To skip this week, reply HOLD',
   };
-  const SKIPPED_WEEK = { first: { id: 'cal-1', week_of: '2026-07-21', target_send_at: TARGET_SEND_AT, status: 'skipped' } };
+  const SKIPPED_WEEK = { first: { id: 'cal-1', week_of: '2026-07-23', target_send_at: TARGET_SEND_AT, status: 'skipped' } };
 
   beforeEach(() => { process.env.GATE_NEWSLETTER_AUTO_SEND = 'true'; });
   afterAll(() => { delete process.env.GATE_NEWSLETTER_AUTO_SEND; });

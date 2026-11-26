@@ -57,10 +57,12 @@ describe('newsletter future-issue planning reference', () => {
     mockLoadSharedYearPool.mockImplementation(async () => []);
   });
 
-  test('centers DB-backed identity filters on the requested future issue Tuesday', async () => {
-    const plan = await buildDigestPlan({ reference: new Date('2026-08-31T12:00:00Z') }); // Monday
-    expect(plan.weekOf).toBe('2026-09-01');
-    expect(plan.startDate.toISOString()).toBe('2026-09-01T04:00:00.000Z');
+  test('centers DB-backed identity filters on the requested future issue Thursday', async () => {
+    const plan = await buildDigestPlan({ reference: new Date('2026-09-02T12:00:00Z') }); // Wednesday
+    expect(plan.weekOf).toBe('2026-09-03');
+    expect(plan.startDate.toISOString()).toBe('2026-09-03T04:00:00.000Z');
+    // Thursday 00:00 through Sunday 23:59:59 ET
+    expect(plan.endDate.toISOString()).toBe('2026-09-07T03:59:59.000Z');
     // One shared calendar-year pool for the batch, threaded into both filters
     // (Codex P2, 2026-09-27: "Reuse the calendar-year pool across eligibility
     // filters").

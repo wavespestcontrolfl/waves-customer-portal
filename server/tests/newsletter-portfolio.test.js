@@ -10,7 +10,8 @@ const {
   unmetConstraints,
 } = require('../services/newsletter-portfolio');
 
-// Week of Tue 2026-08-04 → Mon 2026-08-10 (EDT). Times chosen mid-day ET.
+// Days of 2026-08-04 (Tue) → 2026-08-09 (Sun) (EDT). Times chosen mid-day ET. The issue window is
+// Thursday-Sunday (owner 2026-11-26); the Tue/Wed entries are for tests that mix in out-of-window days.
 const DAY = {
   tue: '2026-08-04T18:00:00Z',
   wed: '2026-08-05T18:00:00Z',
@@ -220,6 +221,30 @@ describe('portfolio coverage', () => {
     expect(result.selected.length).toBeLessThan(5);
     expect(result.unmet.length).toBeGreaterThan(0);
     expect(result.selected.every((e) => effectiveScore(e) >= 75)).toBe(true);
+  });
+});
+
+describe('a Thursday-to-Sunday issue window (owner 2026-11-26)', () => {
+  // Only Thu, Fri, Sat, Sun exist: three of four days are weekend days, so the 4-event and
+  // 2-distinct-day weekend minimums stay reachable, and Thursday is the only weekday slot.
+  const windowPool = () => [
+    ev({ editorial_score: 95, start_at: DAY.thu, region_zone: 'tampa' }),
+    ev({ editorial_score: 94, start_at: DAY.thu, region_zone: 'pinellas' }),
+    ev({ editorial_score: 93, start_at: DAY.thu, region_zone: 'manatee' }),
+    ev({ editorial_score: 92, start_at: DAY.thu, region_zone: 'sarasota' }),
+    ev({ editorial_score: 80, start_at: DAY.fri, region_zone: 'sarasota' }),
+    ev({ editorial_score: 79, start_at: DAY.sat, region_zone: 'manatee' }),
+    ev({ editorial_score: 78, start_at: DAY.sun, region_zone: 'tampa' }),
+    ev({ editorial_score: 77, start_at: DAY.sat, region_zone: 'pinellas' }),
+    ev({ editorial_score: 76, start_at: DAY.fri, region_zone: 'manatee' }),
+  ];
+
+  test('Thursday events do not count as weekend events, and the minimums still hold on a Thursday-heavy pool', () => {
+    expect(isWeekend(ev({ start_at: DAY.thu }))).toBe(false);
+    const result = selectPortfolio(windowPool());
+    expect(result.stats.weekendCount).toBeGreaterThanOrEqual(4);
+    expect(result.stats.weekendDays.length).toBeGreaterThanOrEqual(2);
+    expect(result.unmet.filter((label) => /weekend/i.test(label))).toEqual([]);
   });
 });
 

@@ -17,7 +17,7 @@ function fixture(url, options={}) {
 beforeEach(()=>{localStorage.setItem('waves_admin_token','synthetic-token');vi.stubGlobal('fetch',vi.fn(async(url,options)=>response(fixture(url,options))));Element.prototype.scrollIntoView=vi.fn();});
 afterEach(()=>{cleanup();vi.unstubAllGlobals();localStorage.clear();});
 // Manual newsletter tools were removed (owner 2026-10-30): the weekly issue
-// is drafted by the Monday autopilot and sent through the proof flow.
+// is drafted by the Wednesday autopilot and sent through the proof flow.
 const REMOVED_ROUTES=[/\/calendar/,/\/tags$/,/\/quizzes$/,/\/latest-autopilot/,/\/segment-preview$/,/\/draft-ai$/,/\/digest-plan$/,/\/preview$/,/\/validate$/,/\/approved-ids$/,/\/test$/,/\/schedule$/,/\/send$/];
 const requestedPaths=()=>fetch.mock.calls.map(([url,options])=>({path:String(url).split('?')[0],method:options?.method||'GET'}));
 const removedRequests=()=>requestedPaths().filter(({path,method})=>REMOVED_ROUTES.some(re=>re.test(path))||(method==='POST'&&path.endsWith('/sends'))||(method==='PATCH'&&/\/sends\/[^/]+$/.test(path)));
@@ -62,7 +62,7 @@ it('renders no Compose, Calendar, New Campaign, Draft, Edit or Correct copy cont
 });
 it('tells the operator the weekly issue comes from the autopilot when no campaign exists',async()=>{
  render(<MemoryRouter initialEntries={['/admin/newsletter?tab=history']}><NewsletterPage/></MemoryRouter>);
- expect(await screen.findByText('No campaigns yet. The weekly issue appears here after the Monday autopilot drafts it.')).toBeInTheDocument();
+ expect(await screen.findByText('No campaigns yet. The weekly issue appears here after the Wednesday autopilot drafts it.')).toBeInTheDocument();
 });
 it('clears stale summary badges when an automatic summary refresh fails',async()=>{
  render(<MemoryRouter><NewsletterPage/></MemoryRouter>);

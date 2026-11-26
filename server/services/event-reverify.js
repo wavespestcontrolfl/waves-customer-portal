@@ -10,7 +10,7 @@
  *     distinctive title tokens (a bare "cancelled" elsewhere on a
  *     listing page is not evidence about THIS event).
  * Everything else — timeouts, DNS failures, 403 WAFs, 5xx — passes with
- * a note: a flaky venue site must never block the Tuesday send.
+ * a note: a flaky venue site must never block the Thursday send.
  *
  * SSRF posture: event_url is INGESTED, UNTRUSTED data fetched from
  * inside Railway's network. Every fetch (and every redirect hop,
