@@ -191,19 +191,23 @@ async function ownerFieldHours(db, now, ownerId) {
     last4Weeks: hoursPerWeek(clockShort.minutes, WEEKS_SHORT),
     last12Weeks: hoursPerWeek(clockLong.minutes, WEEKS_LONG),
   };
-  const useClock = clockLong.shifts > 0;
+  // Each window picks its own source from its own shift count: a quiet 4 weeks falls back to stops even when the 12 weeks
+  // have shifts, and the reverse.
+  const sources = {
+    last4Weeks: clockShort.shifts > 0 ? 'time_clock' : 'stops_standard',
+    last12Weeks: clockLong.shifts > 0 ? 'time_clock' : 'stops_standard',
+  };
+  const pick = (window) => (sources[window] === 'time_clock' ? clock[window] : estimate[window]);
   return {
-    source: useClock ? 'time_clock' : 'stops_standard',
-    last4Weeks: useClock ? clock.last4Weeks : estimate.last4Weeks,
-    last12Weeks: useClock ? clock.last12Weeks : estimate.last12Weeks,
+    sources,
+    last4Weeks: pick('last4Weeks'),
+    last12Weeks: pick('last12Weeks'),
     timeClock: clock,
     stopsStandard: estimate,
-    basis: useClock
-      ? 'Owner shifts on the time clock, completed and edited entries, summed by work date and divided by the weeks '
-        + '(4 and 12). Shift time as clocked: breaks are not taken out.'
-      : 'No owner time-clock shifts in the last 12 weeks, so: the owner\'s completed stops x standard on-site minutes '
-        + '(pest 25, lawn 20; other types use their costed labor hours), every service of a grouped visit counted, + 20 minutes of '
-        + 'drive once per stop, divided by the weeks.',
+    basis: 'Each window uses the owner\'s time-clock shifts (completed and edited entries, summed by work date, breaks not taken '
+      + 'out) when it has any, divided by its weeks. A window with no owner shift instead uses the owner\'s completed stops x '
+      + 'standard on-site minutes (pest 25, lawn 20; other types use their costed labor hours), every service of a grouped visit '
+      + 'counted, + 20 minutes of drive once per stop. The card names the source of each window.',
     windows: { last4Weeks: short, last12Weeks: long },
   };
 }
@@ -214,8 +218,9 @@ const isReturnRecord = (row) => row.flagged === true || isReService({
 });
 
 /**
- * Completed stops in the window: { stops, returnStops, byTech: Map(technicianId|null -> stops) }. One stop per
- * COALESCE(visit_id, record id); a stop is a return visit when any of its records is one (isReturnRecord).
+ * Completed stops in the window: { stops, returnStops, stopTechs: [Set of technician ids per stop] }. One stop per
+ * COALESCE(visit_id, record id); a stop is a return visit when any of its records is one (isReturnRecord). Every
+ * technician with a record at the stop is kept, so attribution never depends on row order.
  */
 async function completedStopCounts(db, from, to) {
   const rows = await completedStopsBase(db, from, to)
@@ -231,18 +236,27 @@ async function completedStopCounts(db, from, to) {
     );
   const stops = new Map();
   for (const row of rows) {
-    const stop = stops.get(row.stop_key) || { technicianId: null, returned: false };
-    stop.technicianId = stop.technicianId || row.technician_id;
+    const stop = stops.get(row.stop_key) || { techs: new Set(), returned: false };
+    if (row.technician_id) stop.techs.add(row.technician_id);
     stop.returned = stop.returned || isReturnRecord(row);
     stops.set(row.stop_key, stop);
   }
-  const byTech = new Map();
-  let returnStops = 0;
-  for (const stop of stops.values()) {
-    byTech.set(stop.technicianId, (byTech.get(stop.technicianId) || 0) + 1);
-    if (stop.returned) returnStops += 1;
+  const all = [...stops.values()];
+  return { stops: all.length, returnStops: all.filter((stop) => stop.returned).length, stopTechs: all.map((stop) => stop.techs) };
+}
+
+/**
+ * Owner, other and unassigned stop counts. Rule: a stop the owner worked on in any record is an owner stop (the owner was
+ * there); else a stop with another technician is an other stop; a stop with no technician is unassigned.
+ */
+function splitStopsByOwner(stopTechs, ownerId) {
+  const split = { owner: 0, other: 0, unassigned: 0 };
+  for (const techs of stopTechs) {
+    if (techs.has(ownerId)) split.owner += 1;
+    else if (techs.size > 0) split.other += 1;
+    else split.unassigned += 1;
   }
-  return { stops: stops.size, returnStops, byTech };
+  return split;
 }
 
 /** Owner reliance: weekly hours and the non-owner share of the last 12 months' completed stops. */
@@ -252,12 +266,7 @@ async function ownerReliance(db, now) {
   if (!owner.id) return { ownerFieldHoursPerWeek: null, nonOwnerStopShare: null, unavailableReason: owner.reason };
   const hours = await ownerFieldHours(db, now, owner.id);
   const counts = await completedStopCounts(db, year.from, year.to);
-  const split = { owner: 0, other: 0, unassigned: 0 };
-  for (const [technicianId, stops] of counts.byTech) {
-    if (!technicianId) split.unassigned += stops;
-    else if (technicianId === owner.id) split.owner += stops;
-    else split.other += stops;
-  }
+  const split = splitStopsByOwner(counts.stopTechs, owner.id);
   return {
     ownerFieldHoursPerWeek: hours,
     nonOwnerStopShare: {
@@ -268,7 +277,7 @@ async function ownerReliance(db, now) {
       window: year,
       basis: 'Completed stops done by someone other than the owner / completed stops with a technician on them. '
         + 'The owner is the one active field technician with the admin role and a known owner phone. '
-        + 'Stops with no technician are left out.',
+        + 'A grouped stop the owner worked on in any record is an owner stop. Stops with no technician are left out.',
     },
   };
 }
@@ -304,6 +313,9 @@ async function scheduledStopCount(db, from, to) {
   const row = await db('scheduled_services as ss')
     .whereBetween('ss.scheduled_date', [from, to])
     .whereNotIn('ss.status', NOT_A_STOP_STATUSES)
+    // An unclaimed estimate slot hold (no customer yet, a reservation expiry set; expired or live) is not a stop: the same
+    // predicate as territory.js and tech-out.js. A claimed hold has a customer and counts.
+    .whereRaw('NOT (ss.customer_id IS NULL AND ss.reservation_expires_at IS NOT NULL)')
     .select(db.raw('COUNT(DISTINCT COALESCE(ss.visit_id::text, ss.id::text))::text AS stops'))
     .first();
   return num(row && row.stops);
@@ -330,7 +342,7 @@ async function routeFill(db, now) {
     activeTechnicians: techs.length,
     closedDays: [...closedDates].filter((d) => d >= from && d <= to).sort(),
     label: 'planning only, not a pay target',
-    basis: 'Scheduled stops (not cancelled, skipped, no-show or rescheduled) in the next 28 days / (route days available x 12). '
+    basis: 'Scheduled stops (not cancelled, skipped, no-show or rescheduled, and not an unclaimed estimate slot hold) in the next 28 days / (route days available x 12). '
       + 'Route days: each active field technician on each open day (no work-days list means every open day; a list counts only '
       + 'while the work-days setting is on), minus company closed days (weekly days off, one-off dates and the closed '
       + 'holidays) and technician absences.',
@@ -383,6 +395,7 @@ module.exports = {
   standardStopMinutes,
   countRouteDays,
   isReturnRecord,
+  splitStopsByOwner,
   resolveOwnerTechnician,
   trailingWindow,
   STOPS_PER_FULL_DAY,

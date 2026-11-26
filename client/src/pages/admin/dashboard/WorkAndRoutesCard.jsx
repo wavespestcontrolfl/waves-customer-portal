@@ -53,7 +53,8 @@ function OwnerBlock({ owner }) {
       value={hours(hoursRow.last4Weeks)}
       unit="per week, last 4 weeks"
       lines={[
-        `${hours(hoursRow.last12Weeks)} per week over the last 12 weeks · ${HOURS_SOURCE[hoursRow.source] || "source unknown"}`,
+        `Last 4 weeks ${HOURS_SOURCE[hoursRow.sources?.last4Weeks] || "source unknown"}`,
+        `${hours(hoursRow.last12Weeks)} per week over the last 12 weeks · ${HOURS_SOURCE[hoursRow.sources?.last12Weeks] || "source unknown"}`,
         `${pct(share.share)} of the last 12 months' stops done by someone other than the owner`
           + (share.ownerStops != null ? ` (${fmtInt(share.otherStops)} of ${fmtInt(share.ownerStops + share.otherStops)})` : ""),
       ]}

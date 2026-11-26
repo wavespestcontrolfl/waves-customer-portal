@@ -142,6 +142,21 @@ describe('return records', () => {
   });
 });
 
+describe('owner attribution of stops', () => {
+  const OWNER = 'owner';
+  const split = (...stops) => svc.splitStopsByOwner(stops.map((ids) => new Set(ids)), OWNER);
+  test('an owner-only, other-only and untouched stop', () => {
+    expect(split([OWNER], ['t1'], [])).toEqual({ owner: 1, other: 1, unassigned: 1 });
+  });
+  test('a grouped stop with the owner in any record is an owner stop, in either order', () => {
+    expect(split([OWNER, 't1'])).toEqual({ owner: 1, other: 0, unassigned: 0 });
+    expect(split(['t1', OWNER])).toEqual({ owner: 1, other: 0, unassigned: 0 });
+  });
+  test('a grouped stop with two other technicians is one other stop', () => {
+    expect(split(['t1', 't2'])).toEqual({ owner: 0, other: 1, unassigned: 0 });
+  });
+});
+
 describe('owner identity', () => {
   const dbWith = (rows) => {
     const builder = new Proxy({}, {

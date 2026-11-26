@@ -8,7 +8,7 @@ const DATA = {
   generatedFor: "2026-11-26",
   errors: {},
   ownerReliance: {
-    ownerFieldHoursPerWeek: { source: "time_clock", last4Weeks: 31.5, last12Weeks: 28, basis: "Owner shifts on the time clock." },
+    ownerFieldHoursPerWeek: { sources: { last4Weeks: "time_clock", last12Weeks: "time_clock" }, last4Weeks: 31.5, last12Weeks: 28, basis: "Owner shifts on the time clock." },
     nonOwnerStopShare: { share: 0.25, ownerStops: 300, otherStops: 100, unassignedStops: 0, basis: "Admin role is the owner." },
   },
   revenuePerRouteDay: {
@@ -30,6 +30,7 @@ describe("WorkAndRoutesCard", () => {
     render(<WorkAndRoutesCard data={DATA} />);
     expect(screen.getByText("31.5 h")).toBeInTheDocument();
     expect(screen.getByText(/28\.0 h per week over the last 12 weeks · from the time clock/)).toBeInTheDocument();
+    expect(screen.getByText("Last 4 weeks from the time clock")).toBeInTheDocument();
     expect(screen.getByText(/25% of the last 12 months' stops done by someone other than the owner \(100 of 400\)/)).toBeInTheDocument();
     expect(screen.getByText("$200")).toBeInTheDocument();
     expect(screen.getByText("$250 over the last 90 days")).toBeInTheDocument();
@@ -40,9 +41,11 @@ describe("WorkAndRoutesCard", () => {
   });
 
   test("an estimate from stops names itself as an estimate", () => {
-    const data = { ...DATA, ownerReliance: { ...DATA.ownerReliance, ownerFieldHoursPerWeek: { source: "stops_standard", last4Weeks: 20, last12Weeks: 22, basis: "" } } };
+    const data = { ...DATA, ownerReliance: { ...DATA.ownerReliance, ownerFieldHoursPerWeek: { sources: { last4Weeks: "stops_standard", last12Weeks: "time_clock" }, last4Weeks: 20, last12Weeks: 22, basis: "" } } };
     render(<WorkAndRoutesCard data={data} />);
-    expect(screen.getByText(/estimated from completed stops \(no time-clock shifts\)/)).toBeInTheDocument();
+    // each window names its own source
+    expect(screen.getByText("Last 4 weeks estimated from completed stops (no time-clock shifts)")).toBeInTheDocument();
+    expect(screen.getByText(/22\.0 h per week over the last 12 weeks · from the time clock/)).toBeInTheDocument();
   });
 
   test("a failed metric shows unavailable and the others still render", () => {
@@ -64,7 +67,7 @@ describe("WorkAndRoutesCard", () => {
   test("ratios with no denominator show a dash, never 0", () => {
     const data = {
       ...DATA,
-      ownerReliance: { ownerFieldHoursPerWeek: { source: "stops_standard", last4Weeks: 0, last12Weeks: 0 }, nonOwnerStopShare: { share: null, ownerStops: 0, otherStops: 0 } },
+      ownerReliance: { ownerFieldHoursPerWeek: { sources: { last4Weeks: "stops_standard", last12Weeks: "stops_standard" }, last4Weeks: 0, last12Weeks: 0 }, nonOwnerStopShare: { share: null, ownerStops: 0, otherStops: 0 } },
       revenuePerRouteDay: { last12Months: { routeDays: 0, revenuePerRouteDay: null }, last90Days: { routeDays: 0, revenuePerRouteDay: null } },
       routeFill: { ...DATA.routeFill, routeDaysAvailable: 0, scheduledStops: 0, fillRatio: null },
       returnVisitRate: { returnVisits: 0, completedStops: 0, rate: null },

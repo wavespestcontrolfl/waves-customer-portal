@@ -145,9 +145,19 @@ postgres('ops buyer metrics (live Postgres)', () => {
       await shift(owner, '2026-08-01T14:00:00Z', 480); // before the 12 weeks
       const { ownerReliance } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
       const hours = ownerReliance.ownerFieldHoursPerWeek;
-      expect(hours.source).toBe('time_clock');
+      expect(hours.sources).toEqual({ last4Weeks: 'time_clock', last12Weeks: 'time_clock' });
       expect(hours.last4Weeks).toBe(4); // 960 min / 60 / 4
       expect(hours.last12Weeks).toBe(2.2); // 1560 min / 60 / 12 = 2.17
+    });
+
+    it('each window picks its own source: a 12-week shift with none in the last 4 weeks leaves the 4 weeks on the stop estimate', async () => {
+      await shift(owner, '2026-09-15T14:00:00Z', 600); // inside 12 weeks, outside 4
+      await record('2026-11-02', { technician_id: owner, revenue: 100 });
+      const { ownerReliance } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      const hours = ownerReliance.ownerFieldHoursPerWeek;
+      expect(hours.sources).toEqual({ last4Weeks: 'stops_standard', last12Weeks: 'time_clock' });
+      expect(hours.last4Weeks).toBe(0.2); // one pest stop: 25 + 20 = 45 minutes / 60 / 4 = 0.19
+      expect(hours.last12Weeks).toBe(0.8); // 600 minutes / 60 / 12 = 0.83: the 12-week window has the shift
     });
 
     it('with no owner shifts the hours are estimated from completed stops at the standard minutes plus drive', async () => {
@@ -155,7 +165,7 @@ postgres('ops buyer metrics (live Postgres)', () => {
       const { ownerReliance, errors } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
       expect(errors).toEqual({});
       const hours = ownerReliance.ownerFieldHoursPerWeek;
-      expect(hours.source).toBe('stops_standard');
+      expect(hours.sources).toEqual({ last4Weeks: 'stops_standard', last12Weeks: 'stops_standard' });
       // 4 owner stops: pest 25 + pest 25 + lawn 20 + pest 25 = 95, plus 4 x 20 drive = 175 minutes
       expect(hours.stopsStandard.last4Weeks).toBe(0.7); // 175 / 60 / 4
       expect(hours.stopsStandard.last12Weeks).toBe(0.2); // 175 / 60 / 12
@@ -176,6 +186,18 @@ postgres('ops buyer metrics (live Postgres)', () => {
       await seedYear();
       const { ownerReliance } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
       expect(ownerReliance.nonOwnerStopShare).toMatchObject({ ownerStops: 4, otherStops: 4, unassignedStops: 1, share: 0.5 });
+    });
+
+    it('a grouped stop the owner worked on in any record is an owner stop, whatever order the records were written in', async () => {
+      const first = await group('2026-11-10');
+      await record('2026-11-10', { technician_id: owner, revenue: 50 }, { visit_id: first });
+      await record('2026-11-10', { technician_id: other, revenue: 50 }, { visit_id: first });
+      const second = await group('2026-11-11');
+      await record('2026-11-11', { technician_id: other, revenue: 50 }, { visit_id: second });
+      await record('2026-11-11', { technician_id: owner, revenue: 50 }, { visit_id: second });
+      await record('2026-11-12', { technician_id: other, revenue: 50 }); // another technician alone: an other stop
+      const { ownerReliance } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      expect(ownerReliance.nonOwnerStopShare).toMatchObject({ ownerStops: 2, otherStops: 1, share: 0.3333 });
     });
 
     it('with no stops the share is null and the hours are 0', async () => {
@@ -303,6 +325,22 @@ postgres('ops buyer metrics (live Postgres)', () => {
       expect(routeFill.fillRatio).toBe(0.0135); // 6 / (37 x 12)
       expect(routeFill.closedDays).toContain('2026-11-26');
       expect(routeFill.closedDays).toContain('2026-11-28');
+    });
+
+    it('an unclaimed estimate slot hold is not a stop, live or expired; claiming it adds exactly one stop', async () => {
+      await upcoming('2026-12-01', { technician_id: owner }); // a real stop
+      const hold = randomUUID();
+      await trx('scheduled_services').insert({
+        id: hold, customer_id: null, scheduled_date: '2026-12-02', service_type: 'Pest Control Visit', status: 'pending', technician_id: owner,
+        reservation_expires_at: trx.raw("NOW() + INTERVAL '10 minutes'"),
+      });
+      await trx('scheduled_services').insert({
+        customer_id: null, scheduled_date: '2026-12-03', service_type: 'Pest Control Visit', status: 'pending', technician_id: owner,
+        reservation_expires_at: trx.raw("NOW() - INTERVAL '1 hour'"),
+      });
+      expect((await svc.buildOpsBuyerMetrics({ db: trx, now: NOW })).routeFill.scheduledStops).toBe(1);
+      await trx('scheduled_services').where({ id: hold }).update({ customer_id: customerId }); // claimed by a customer
+      expect((await svc.buildOpsBuyerMetrics({ db: trx, now: NOW })).routeFill.scheduledStops).toBe(2);
     });
 
     it('with GATE_TECH_WORK_DAYS on, a technician work-days list takes off the days it leaves out, like the scheduler', async () => {
