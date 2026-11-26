@@ -341,6 +341,23 @@ describe('a save the server cannot price: no pest row above 5,500 sq ft (admin-e
     passes({ result: { results: {} }, inputs: { homeSqFt: 9000, svcPest: true }, engineInputs: { homeSqFt: 9000, services: { pest: { frequency: 'quarterly' } } } });
   });
 
+  test('a footprint in the estimators\' wrapped measurement form { value, source } is read, posted or stored', () => {
+    // Both estimators write a termite bait row's footprint this way; it can be the only size a save names.
+    const wrapped = (footprint) => ({ result: { recurring: { services: [
+      { name: 'Pest (Quarterly)', service: 'pest_control', mo: 42.67 },
+      { name: 'Termite Bait', service: 'termite_bait', mo: 35, measurements: { footprintSqFt: { value: footprint, source: 'property_footprint' } } },
+    ] } } });
+    refused(wrapped(10000));
+    refused(wrapped('10000'));
+    passes(wrapped(5500));
+    passes(wrapped(null));
+    // The stored estimate's wrapped footprint counts beside a save that names no size.
+    refused(browser(128), { storedEstimateData: wrapped(10000) });
+    // A wrapped living area is divided by the wrapped stories beside it.
+    refused({ ...browser(128), property: { homeSqFt: { value: 12000, source: 'manual' }, stories: { value: 2, source: 'manual' } } });
+    passes({ ...browser(128), property: { homeSqFt: { value: 10000, source: 'manual' }, stories: { value: 2, source: 'manual' } } });
+  });
+
   test('there is no exemption by label: a row that says it is commercial or bedroom-band priced is refused too, and hides nothing', () => {
     // On a save the server could not price, a row cannot prove how it was priced. A marker that exempted a row would hide one.
     const building = { inputs: { homeSqFt: 20000, stories: '1' }, engineInputs: { buildingSqFt: 20000, footprintSqFt: 20000 } };

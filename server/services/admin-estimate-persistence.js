@@ -2127,12 +2127,18 @@ function saveHoldsPestRow(estimateData) {
 }
 // Every footprint the saved blob names, anywhere in it (inputs, engine inputs and request, a result's own property or line): a key
 // that names a footprint or a building area as it is, a living area over the stories beside it (the engine's own arithmetic; the
-// builder profile calls the living area squareFootage). All readings are kept, so a stale field can refuse a save and never pass one.
+// builder profile calls the living area squareFootage). A size is a number or a numeric string, bare or in the estimators' wrapped
+// measurement form { value, source } (measurementObject; the termite bait row's measurements.footprintSqFt). All readings are kept,
+// so a stale field can refuse a save and never pass one.
 const PEST_LIVING_AREA_KEY = /^(home_?sq_?ft|square_?footage|living_?area(_?sq_?ft)?|living_?sq_?ft|heated_?sq_?ft)$/i;
 const PEST_FOOTPRINT_KEY = /footprint|^buildingSqFt$/i;
 function savedPestFootprints(estimateData) {
   const { resolvePestFootprint } = require('./pricing-engine/service-pricing');
-  const sizeOf = (value) => (['number', 'string'].includes(typeof value) && Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null);
+  const unwrap = (raw) => (isPlainRecord(raw) && Object.prototype.hasOwnProperty.call(raw, 'value') ? raw.value : raw);
+  const sizeOf = (raw) => {
+    const value = unwrap(raw);
+    return ['number', 'string'].includes(typeof value) && Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null;
+  };
   const found = [];
   const seen = new Set();
   const walk = (node) => {
@@ -2142,8 +2148,8 @@ function savedPestFootprints(estimateData) {
     for (const [key, value] of Object.entries(node)) {
       const size = sizeOf(value);
       if (size !== null && PEST_FOOTPRINT_KEY.test(key)) found.push(size);
-      else if (size !== null && PEST_LIVING_AREA_KEY.test(key)) found.push(resolvePestFootprint({ homeSqFt: size, stories: node.stories }).footprint);
-      else walk(value);
+      else if (size !== null && PEST_LIVING_AREA_KEY.test(key)) found.push(resolvePestFootprint({ homeSqFt: size, stories: unwrap(node.stories) }).footprint);
+      walk(value);
     }
   };
   walk(estimateData);

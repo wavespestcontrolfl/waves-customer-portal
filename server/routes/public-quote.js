@@ -1378,10 +1378,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       lotSqFt, lotSizeConfirmed, stories, propertyType, category, isCommercial, commercialSubtype,
       enriched, services: bodyServices, attribution,
     } = req.body || {};
-    // The posted home size parses exactly as it always has (a number, a numeric string; anything else falls to the 2,000 sq ft default).
-    // An infinite value is treated as unparseable text too: it is never clamped to the ceiling or priced, and never stored.
-    const postedHomeSqFtNumber = Number(postedHomeSqFt);
-    const homeSqFt = (postedHomeSqFtNumber === Infinity || postedHomeSqFtNumber === -Infinity) ? NaN : postedHomeSqFt;
+    // A posted home size is a finite number or a numeric string. Anything else is no size and takes the 2,000 sq ft default: text
+    // that is not a number, an infinite value, and a boolean, array or object (Number() would read true as 1 and [24000] as 24000).
+    // It is never clamped to the ceiling, parked or stored.
+    const homeSqFt = (typeof postedHomeSqFt === 'number' || typeof postedHomeSqFt === 'string') && Number.isFinite(Number(postedHomeSqFt))
+      ? postedHomeSqFt
+      : NaN;
     // Optional self-reported "How did you hear about us?" (+ the AI follow-up
     // prompt): fixed allowlist, unknown values silently dropped, never required.
     const wizardHeardAbout = heardAboutFromBody(req.body);

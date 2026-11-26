@@ -157,7 +157,7 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
     expect(sizes.every((v) => v === 200000)).toBe(true);
   });
 
-  test.each(['Infinity', '-Infinity', 'NaN', 'abc', '1,800'])('an unparseable or infinite home size (%s) takes main\'s fallback: priced as the 2,000 sq ft default, never clamped, parked or stored as null', async (bad) => {
+  test.each(['Infinity', '-Infinity', 'NaN', 'abc', '1,800', true, false, [24000], [12000], { value: 24000 }, null])('a home size that is no number (%p) takes the 2,000 sq ft default: never clamped, parked or stored as null', async (bad) => {
     const baseline = await calculate(2000, 1);
     const { status, json } = await calculate(bad, 1);
     expect(status).toBeLessThan(300);
