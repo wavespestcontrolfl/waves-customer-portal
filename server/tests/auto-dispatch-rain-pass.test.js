@@ -367,5 +367,20 @@ describe('auto-dispatch rain pass', () => {
       // area A once; area B twice (its one retry) and no more.
       expect(weather.getNwsHourlyRain).toHaveBeenCalledTimes(3);
     });
+
+    test('NWS down: after two unread areas the run asks no more and the rest read no_forecast', async () => {
+      weather.getNwsHourlyRain.mockResolvedValue(null);
+      const rows = await planRainPass({
+        now: NOW, db: {},
+        deps: deps([
+          wetStop(), wetStop({ id: 'v2', point: { lat: 27.5, lng: -82.4 } }),
+          wetStop({ id: 'v3', point: { lat: 27.6, lng: -82.4 } }), wetStop({ id: 'v4', point: { lat: 27.7, lng: -82.4 } }),
+        ], { nwsOnly: true }),
+      });
+      expect(rows.every((r) => r.reason === 'no_forecast')).toBe(true);
+      // two areas, two tries each; the third and fourth areas are never asked.
+      expect(weather.getNwsHourlyRain).toHaveBeenCalledTimes(4);
+      expect(weather.getHourlyRainOutlook).not.toHaveBeenCalled();
+    });
   });
 });

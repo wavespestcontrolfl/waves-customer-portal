@@ -68,16 +68,27 @@ const toHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${Stri
 // verdict reads as no_forecast: never dry. One read per forecast area (the NWS
 // grid, 2 decimals) per run, a failed one included.
 const NWS_WAIT_MS = 10000;
+// NWS down: after this many areas stay unread in one run, the rest of the run
+// asks NWS no more and reads no_forecast, so an outage cannot hold the hourly
+// run for 20 s per area.
+const NWS_MAX_FAILED_AREAS = 2;
 const areaKey = (lat, lng) => `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
 
 function nwsOnlyReader(read) {
   const reads = new Map();
+  let failed = 0;
   const once = (lat, lng) => Promise.resolve()
     .then(() => read(lat, lng, { fetchTimeoutMs: NWS_WAIT_MS }))
     .catch(() => null);
+  const twice = (lat, lng) => once(lat, lng)
+    .then((hours) => hours || once(lat, lng))
+    .then((hours) => {
+      if (!hours) failed += 1;
+      return hours || null;
+    });
   return (lat, lng) => {
     const key = areaKey(lat, lng);
-    if (!reads.has(key)) reads.set(key, once(lat, lng).then((hours) => hours || once(lat, lng)));
+    if (!reads.has(key)) reads.set(key, failed >= NWS_MAX_FAILED_AREAS ? Promise.resolve(null) : twice(lat, lng));
     return reads.get(key);
   };
 }
