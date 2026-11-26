@@ -1562,7 +1562,7 @@ describe('audit fixes', () => {
       expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(false);
     });
 
-    test('an invoice email that ends in an error (outcome unknown) keeps the hold, finalizes the invoice and rings the one bell', async () => {
+    test('an invoice email that ends in an error (outcome unknown) keeps the hold, parks the invoice for review and rings the one bell', async () => {
       ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, error: 'provider timeout', deliveryOutcome: 'uncertain' });
       const { updates } = mockTables();
       await withServer(async (baseUrl) => {
@@ -1575,7 +1575,9 @@ describe('audit fixes', () => {
       const stampIdx = projectUpdates.findIndex((u) => u.report_hold_status === 'held');
       expect(stampIdx).toBeGreaterThanOrEqual(0);
       expect(projectUpdates.findIndex((u, i) => i > stampIdx && u.report_hold_status === null)).toBe(-1);
-      expect(InvoiceService.markDeliverySent).toHaveBeenCalled();
+      // parked for review (still payable), never marked sent
+      expect(InvoiceService.markDeliverySent).not.toHaveBeenCalled();
+      expect((updates.invoices || []).some((u) => u.status === 'scheduled' && u.scheduled_send_at === null)).toBe(true);
       expect(require('../services/logger').error.mock.calls).toEqual([]);
       expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
       expect(NotificationService.notifyAdmin.mock.calls[0][3]).toEqual(expect.objectContaining({ dedupeKey: 'wdo-report-hold-invoice-email:project-1' }));
@@ -1674,9 +1676,22 @@ describe('audit fixes', () => {
       ['another request took the delivery claim', { project: { delivery_claim_token: 'someone-else' } }, 'HELD_SEND_SUPERSEDED'],
       ['the report link was minted', { project: { report_token: 'tok' } }, 'HELD_SEND_SUPERSEDED'],
       ['the hold was taken back', { project: { report_hold_status: null } }, 'HELD_SEND_SUPERSEDED'],
+      ['the report was recorded as sent another way', { project: { sent_outside_portal_at: '2026-11-26T09:00:00Z' } }, 'HELD_SEND_SUPERSEDED'],
+      ['the fee was changed to $0', { project: { findings: { ...FINDINGS, inspection_fee: '0' } } }, 'WDO_NO_CHARGE'],
+      ['a card payment was started on the pay page', { invoice: { stripe_payment_intent_id: 'pi_1' } }, 'HOLD_PAYMENT_STARTED'],
     ])('the fence refuses when %s', async (_label, world, code) => {
       const { opts, token } = await handoffOf();
       expect(await checkOn(opts, token, world)).toMatchObject({ ok: false, code });
+    });
+
+    test('the fence refuses when the customer now has account credit, the report can no longer release, or the switch is off', async () => {
+      const { opts, token } = await handoffOf();
+      mockTables({ project: wdoProject({ report_hold_status: 'held', delivery_claim_token: token, report_token: null }), invoice: invoiceRow({ status: 'sending' }), customer: { ...CUSTOMER, account_credits: 10 } });
+      expect(await opts.preSendCheck({ database: db })).toMatchObject({ ok: false, code: 'HOLD_HAS_CREDIT' });
+      mockTables({ project: wdoProject({ report_hold_status: 'held', delivery_claim_token: token, report_token: null }), invoice: invoiceRow({ status: 'sending' }), customer: { ...CUSTOMER, email: '' } });
+      expect(await opts.preSendCheck({ database: db })).toMatchObject({ ok: false, code: 'HOLD_NOT_RELEASABLE' });
+      require('../config/feature-gates').wdoReportHoldLive.mockReturnValueOnce(false);
+      expect(await checkOn(opts, token)).toMatchObject({ ok: false, code: 'HOLD_SWITCHED_OFF' });
     });
 
     test('the fence asks the collections hold on the locked handle: a fallback hold or an unreadable hold refuses, a plain dispute is exempt', async () => {
@@ -1732,11 +1747,14 @@ describe('audit fixes', () => {
       expect(projectUpdates.findIndex((u, i) => i > stampIdx && u.report_hold_status === null)).toBe(-1);
     });
 
-    test('an invoice email of unknown outcome is not recorded as an email delivery (the invoice still becomes sent)', async () => {
+    test('an invoice email of unknown outcome parks the invoice for review: payable, never stamped sent', async () => {
       ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, error: 'timeout', deliveryOutcome: 'uncertain' });
-      mockTables();
+      const { updates } = mockTables();
       await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
-      expect(InvoiceService.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({ email: false }));
+      expect(InvoiceService.markDeliverySent).not.toHaveBeenCalled();
+      const park = (updates.invoices || []).find((u) => u.status === 'scheduled');
+      expect(park).toEqual(expect.objectContaining({ scheduled_send_at: null, send_claim_token: null }));
+      expect(park.scheduled_send_error).toMatch(/delivery unverified/);
     });
 
     test('a held resend whose email is accepted closes the earlier unknown-outcome invoice bell', async () => {
