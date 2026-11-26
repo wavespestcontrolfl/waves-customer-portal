@@ -375,6 +375,11 @@ function buildEngineInput({
     // caller already has, so an add-on quote gets the combined tier discount
     // and recurring-customer perks (same key the admin save path feeds).
     ...(priorQualifyingServices.length ? { priorQualifyingServices } : {}),
+    // The owner's both-options rule added the plan as a CHOICE; the caller
+    // is not a plan member, so the one-time price stays the price a
+    // one-time-only draft carries (no recurring-customer perk). Prior
+    // qualifying services still force the perk for a real member.
+    ...(context?.ownerRuleServices?.includes('pest') ? { recurringCustomer: false } : {}),
     commercialRiskType: intent.commercial_risk_type || null,
     commercialSubtype: intent.commercial_subtype || null,
     ...(homeSqFt ? { homeSqFt } : {}),

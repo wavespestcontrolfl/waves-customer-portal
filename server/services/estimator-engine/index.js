@@ -2419,8 +2419,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     }
     const { intent, model } = composed;
     result.intent = intent;
-    // Owner ruling 2026-11-23: a one-time pest ask shows both options.
-    if (addRecurringPestForOneTimeAsk(intent)) context.ownerRuleServices = ['pest'];
     // Clarify write-back: the customer's texted unit is applied to the
     // composer's FINAL address deterministically — a model that returns
     // the whole building, or repeats the call's stale unit, must not
@@ -2885,6 +2883,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       unitBandPricing = null;
     }
     result.unitBandPricing = unitBandPricing;
+    // Owner ruling 2026-11-23: a one-time pest ask on a call shows both
+    // options (the rule and its limits: one-time-pest-both-options.js).
+    if (addRecurringPestForOneTimeAsk(intent, { channel: origin?.channel, unitBandPricing })) {
+      context.ownerRuleServices = ['pest'];
+    }
 
     let engineResult = null;
     let engineInput = null;
