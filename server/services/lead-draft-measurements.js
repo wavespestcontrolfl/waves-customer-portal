@@ -35,7 +35,7 @@ const logger = require('./logger');
 const { leadDraftPropertyLookupLive, isEnabled } = require('../config/feature-gates');
 const { lookupOptionsFor } = require('./property-lookup/lookup-callers');
 const { resolvePropertyFacts, SQFT_SOURCES } = require('./estimator-engine/source-arbitration');
-const { hasWrongPremiseFlag } = require('./lookup-confidence');
+const { hasWrongPremiseFlag, lookupDimensionIsTrustworthy } = require('./lookup-confidence');
 const { unitAnywhereOnLine } = require('../utils/address-normalizer');
 
 const MEASUREMENTS_SOURCE = 'county_assessed';
@@ -88,10 +88,14 @@ function countyMeasurements(lookup) {
   // The record's story count rides with its home size: pest prices on the footprint (living area over the stories), and above the
   // 5,500 sq ft table every 1,000 sq ft of footprint is priced (owner 2026-11-26), so a two-story 8,000 sq ft home read as one
   // floor was quoted for twice its footprint. Only a count the estimator itself prices as a looked-up fact is carried (the same
-  // grader, draft-builder storiesSourceForPricing): the AI fallback's estimate is not. A count outside 1 to 3 is no count.
-  const { storiesSourceForPricing } = require('./estimator-engine/draft-builder');
+  // grader, draft-builder storiesSourceForPricing): the AI fallback's estimate is not. The count must also name its evidence
+  // (storyCountHasEvidence) and carry no verify flag of the lookup's own. A count outside 1 to 3 is no count. A count that
+  // fails any of these is left out; the county home and lot sizes stand.
+  const { storiesSourceForPricing, storyCountHasEvidence } = require('./estimator-engine/draft-builder');
   const { statedStoryCount } = require('./voice-agent/story-count');
-  const stories = storiesSourceForPricing(facts) === 'lookup' ? statedStoryCount(facts.stories) : null;
+  const storiesKnown = storiesSourceForPricing(facts) === 'lookup' && storyCountHasEvidence(propertyRecord)
+    && lookupDimensionIsTrustworthy(lookup.enriched, 'stories');
+  const stories = storiesKnown ? statedStoryCount(facts.stories) : null;
   return { homeSqFt, lotSqFt, ...(stories ? { stories } : {}), source: MEASUREMENTS_SOURCE };
 }
 

@@ -78,9 +78,23 @@ describe('county sizes a lead draft may use', () => {
   });
 
   test('the county record\'s own story count rides with its home size; an estimated count does not', () => {
-    // A count with no AI-fallback evidence is a looked-up fact (the estimator's own grader, storiesSourceForPricing).
-    expect(countyMeasurements(lookupOf(countyRecord({ squareFootage: 8000, stories: 2 }))))
-      .toEqual({ homeSqFt: 8000, lotSqFt: 9200, stories: 2, source: 'county_assessed' });
+    // The record search's count with its own field evidence is a looked-up fact (the estimator's grader, storiesSourceForPricing).
+    const bigHome = (over = {}) => countyRecord({ squareFootage: 8000, stories: 2, ...over, _fieldEvidence: { squareFootage: { sourceType: 'county' }, ...over._fieldEvidence } });
+    const countyStories = { stories: { sourceType: 'county', fieldVerify: false } };
+    const sizesOnly = { homeSqFt: 8000, lotSqFt: 9200, source: 'county_assessed' };
+    expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: countyStories }))))
+      .toEqual({ ...sizesOnly, stories: 2 });
+    expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: { stories: [{ sourceType: 'listing' }] } })))).toEqual({ ...sizesOnly, stories: 2 });
+    // A count that names no evidence, an unknown source, or a count the lookup marked for a check is left out; the sizes stand.
+    for (const evidence of [undefined, { stories: { sourceType: 'unknown' } }, { stories: { sourceType: 'model_inference' } },
+      { stories: { sourceType: 'county', fieldVerify: true } }, { stories: [] }, { stories: null }]) {
+      expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: evidence })))).toEqual(sizesOnly);
+    }
+    // The lookup's own verify flag on the count does the same (an 8,000 sq ft home is $122 on two floors and $148 on one).
+    expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: countyStories }), { fieldVerifyFlags: [{ field: 'stories', priority: 'HIGH' }] })))
+      .toEqual(sizesOnly);
+    expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: countyStories }), { fieldVerifyFlags: [{ field: 'lotSize', priority: 'LOW' }] })))
+      .toEqual({ ...sizesOnly, stories: 2 });
     // The AI fallback's estimate (an inference, low confidence, or no source page) is not carried.
     for (const evidence of [
       { basis: 'inferred', confidence: 'high', sourceUrl: 'https://example.com/listing', sourceType: 'listing' },
@@ -96,10 +110,9 @@ describe('county sizes a lead draft may use', () => {
     })))).toMatchObject({ stories: 2 });
     // A count outside 1 to 3 is no count (a 12-story "home" is another building's record); a split level is kept.
     for (const stories of [12, 4, 0.5]) {
-      expect(countyMeasurements(lookupOf(countyRecord({ squareFootage: 8000, stories }))))
-        .toEqual({ homeSqFt: 8000, lotSqFt: 9200, source: 'county_assessed' });
+      expect(countyMeasurements(lookupOf(bigHome({ stories, _fieldEvidence: countyStories })))).toEqual(sizesOnly);
     }
-    expect(countyMeasurements(lookupOf(countyRecord({ squareFootage: 8000, stories: 1.5 })))).toMatchObject({ stories: 1.5 });
+    expect(countyMeasurements(lookupOf(bigHome({ stories: 1.5, _fieldEvidence: countyStories })))).toMatchObject({ stories: 1.5 });
   });
 
   test('only an address with no unit, in any position, describes one house', () => {

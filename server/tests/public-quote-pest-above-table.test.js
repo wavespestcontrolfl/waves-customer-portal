@@ -261,6 +261,11 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
       ['the lookup flagged its own story count for a check', 2, { enriched: { stories: 2, storiesSource: 'verified', fieldVerifyFlags: [{ field: 'stories', priority: 'HIGH' }] }, propertyRecord: null }],
       ['the lookup may describe another address', 2, { enriched: { stories: 2, storiesSource: 'verified', fieldVerifyFlags: [{ field: 'address', priority: 'HIGH' }] }, propertyRecord: null }],
       ['the count is an AI estimate with no direct source', 2, { enriched: { stories: 2, storiesSource: 'ai' }, propertyRecord: { _storiesEvidence: { basis: 'inferred', confidence: 'medium', sourceUrl: 'https://example.com/listing', sourceType: 'listing' } } }],
+      ['the AI count names no evidence at all (no record)', 2, { enriched: { stories: 2, storiesSource: 'ai' }, propertyRecord: null }],
+      ['the AI count names no evidence at all (a record without it)', 2, { enriched: { stories: 2, storiesSource: 'ai' }, propertyRecord: { stories: 2, _fieldEvidence: { squareFootage: { sourceType: 'county' } } } }],
+      ['the AI count comes from an unknown source', 2, { enriched: { stories: 2, storiesSource: 'ai' }, propertyRecord: { _fieldEvidence: { stories: { sourceType: 'unknown' } } } }],
+      ['the AI count is a model inference', 2, { enriched: { stories: 2, storiesSource: 'ai' }, propertyRecord: { _fieldEvidence: { stories: { sourceType: 'model_inference' } } } }],
+      ['the record search marked its own count for a check', 2, { enriched: { stories: 2, storiesSource: 'ai' }, propertyRecord: { _fieldEvidence: { stories: { sourceType: 'county', fieldVerify: true } } } }],
     ])('%s', async (_name, posted, lookup) => {
       mockServerLookup = lookup;
       expectHeld(await calculate(12000, posted));
@@ -290,7 +295,9 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
       ['a staff-verified count', 1, 180, { enriched: { stories: 1, storiesSource: 'verified' }, propertyRecord: null }],
       ['a staff-verified two-story count', 2, 132, { enriched: { stories: 2, storiesSource: 'verified' }, propertyRecord: null }],
       ['a building-permit count', 2, 132, { enriched: { stories: 2, storiesSource: 'permit' }, propertyRecord: null }],
-      ['a public-record count with a direct source', 2, 132, { enriched: { stories: 2, storiesSource: 'ai' }, propertyRecord: { _storiesEvidence: { basis: 'direct', confidence: 'high', sourceUrl: 'https://example.com/parcel/1', sourceType: 'county' } } }],
+      ['the AI stories fallback\'s direct answer', 2, 132, { enriched: { stories: 2, storiesSource: 'ai' }, propertyRecord: { _storiesEvidence: { basis: 'direct', confidence: 'high', sourceUrl: 'https://example.com/parcel/1', sourceType: 'county' } } }],
+      ['a record-search count with county field evidence', 2, 132, { enriched: { stories: 2, storiesSource: 'ai' }, propertyRecord: { _fieldEvidence: { stories: { sourceType: 'county', fieldVerify: false } } } }],
+      ['a record-search count with listing field evidence (list form)', 1, 180, { enriched: { stories: 1, storiesSource: 'ai' }, propertyRecord: { _fieldEvidence: { stories: [{ sourceType: 'listing' }] } } }],
     ])('%s', async (_name, posted, perVisit, lookup) => {
       mockServerLookup = lookup;
       const { status, json } = await calculate(12000, posted);

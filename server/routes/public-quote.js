@@ -221,6 +221,8 @@ const TRUSTED_STORIES_SOURCES = new Set(['ai', 'permit', 'verified', 'manual']);
 // — or the global address flag — means "verify before pricing", and a
 // footprint derived from either is not trusted (Codex #6398 r24 P1).
 // The three story-count tests above as one answer: does the SERVER-SIDE lookup vouch for its own story count?
+// A record-search 'ai' count with no fallback evidence passes here, as the Tree & Shrub footprint has always read it. The pest
+// check above the 5,500 sq ft table also asks that such a count names its evidence on the record (storyCountHasEvidence).
 function lookupStoriesAreTrusted(trustedTurf = {}, propertyRecord = null) {
   const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
   if (!TRUSTED_STORIES_SOURCES.has(t.storiesSource) || !lookupDimensionIsTrustworthy(t, 'stories')) return false;
@@ -1864,13 +1866,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       : null;
     // Pest above the 5,500 sq ft table (owner 2026-11-26, new quotes): the price rises with the footprint, the living area over
     // the stories, so the story count sets it. The count the engine gets (storiesNum) is the body's, as before: the wizard
-    // echoing a lookup, or anything a direct caller typed. Above the table it is a known count only when the server's own lookup vouches for the
-    // same number. Otherwise storiesSource 'default' puts the engine's stories_estimated review on the pest line and the quote
-    // goes to the team. The mark is set whatever the services, so pest added to this draft later is held too. A home above the
-    // 20,000 sq ft ceiling is already held for the team under its own reason.
+    // echoing a lookup, or anything a direct caller typed. Above the table it is a known count only when the server's own
+    // lookup vouches for the same number, and a count the lookup's AI found names its evidence (storyCountHasEvidence).
+    // Otherwise storiesSource 'default' puts the engine's stories_estimated review on the pest line and the quote goes to the
+    // team. The mark is set whatever the services, so pest added to this draft later is held too. A home above the 20,000 sq ft
+    // ceiling is already held for the team under its own reason.
+    const lookupVouchesForStories = lookupStoriesAreTrusted(trustedTurf, trustedRecord)
+      && (trustedTurf.storiesSource !== 'ai' || require('../services/estimator-engine/draft-builder').storyCountHasEvidence(trustedRecord))
+      && Number(trustedTurf.stories) === storiesNum;
     const storiesUnknownAboveTable = !commercialDetected && !homeSizeAbovePublicLimit
-      && resolvedHomeSqFt > Number(pricingConstants.PEST.aboveTableStartSqFt)
-      && !(lookupStoriesAreTrusted(trustedTurf, trustedRecord) && Number(trustedTurf.stories) === storiesNum);
+      && resolvedHomeSqFt > Number(pricingConstants.PEST.aboveTableStartSqFt) && !lookupVouchesForStories;
     let engineInput = {
       // The posted size itself when it is above the ceiling (that quote parks for a hand price): a stored draft re-priced later by
       // staff reads the real size, never the clamped one.
