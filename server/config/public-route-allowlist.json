@@ -60,7 +60,7 @@
         "USE /api/public/secure-card (inline function#ef6c40af)",
         "USE /api/public/secure-card (rejectUndecodablePath#852dcb49)",
         "USE /api/public/secure-card (inline function#8abc12e6)",
-        "USE /api/public/track (trackPublicPreparser#dd2725be)",
+        "USE /api/public/track (trackPublicPreparser#28c4556d)",
         "USE /api/public/email-resubscribe (preParserGuard#ea6eeb70)",
         "USE /api/public/home (preLimiterGuard#fcbfa1c4)",
         "USE /api/social/series (inline function#033624d5)",

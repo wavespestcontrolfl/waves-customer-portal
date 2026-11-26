@@ -737,12 +737,28 @@ function recipientHit(token) {
   return require('../services/call-visit-recipient').visitForTrackToken(token);
 }
 
-// The POSTs read the visit once more for the same rule the GET applies to its own row (recipientLinkEligible).
-async function recipientVisitLive(hit) {
-  if (!hit || !hit.visitId || !hit.customerId) return false;
+// The FINAL read of a recipient link names the recipient row in the SAME query that returns the visit: the row the token
+// resolved (its id), still carrying THIS token, still on THIS visit, and bound to the visit's CURRENT customer. A row deleted,
+// given a new token, moved to another visit or rebound after the permission reads matches nothing, so the link answers as an
+// unknown token. `query` reads 'scheduled_services as s' already narrowed to the visit's id.
+function withRecipientRow(query, hit, token) {
+  return query
+    .join('visit_text_recipients as r', function onRecipientRow() {
+      this.on('r.scheduled_service_id', '=', 's.id').andOn('r.customer_id', '=', 's.customer_id');
+    })
+    .where({ 'r.id': hit.recipientId, 'r.track_token': token });
+}
+
+// A resolved recipient link names a visit, a row and a customer; anything less answers as an unknown token.
+const recipientHitComplete = (hit) => Boolean(hit && hit.visitId && hit.recipientId && hit.customerId);
+
+// The POSTs read the visit once more for the same rule the GET applies to its own row (recipientLinkEligible), joined to the
+// recipient row as it stands now (withRecipientRow).
+async function recipientVisitLive(hit, token) {
+  if (!recipientHitComplete(hit)) return false;
   try {
-    const visit = await db('scheduled_services').where({ id: hit.visitId })
-      .first('customer_id', 'status', 'track_state', 'completed_at', 'en_route_at', 'arrived_at', 'track_token_expires_at', 'customer_pick_by', 'window_start');
+    const visit = await withRecipientRow(db('scheduled_services as s').where({ 's.id': hit.visitId }), hit, token)
+      .first('s.customer_id', 's.status', 's.track_state', 's.completed_at', 's.en_route_at', 's.arrived_at', 's.track_token_expires_at', 's.customer_pick_by', 's.window_start');
     // The visit must still belong to the customer the row was bound to (a reassigned visit answers like an unknown token).
     return Boolean(visit) && String(visit.customer_id) === String(hit.customerId) && recipientLinkEligible(visit);
   } catch (err) {
@@ -753,13 +769,14 @@ async function recipientVisitLive(hit) {
 }
 
 // The visit row both token kinds read: the holder's tracker token and a visit text recipient's own.
-// `where` is { 's.track_view_token': token } or { 's.id': visitId }.
-function readTrackVisit(where) {
-  return db('scheduled_services as s')
+// `where` is { 's.track_view_token': token } or { 's.id': visitId }; `narrow` adds to the query before it runs (the recipient's
+// own row, withRecipientRow).
+function readTrackVisit(where, narrow = (query) => query) {
+  return narrow(db('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .leftJoin('technicians as t', 's.technician_id', 't.id')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
-    .where(where)
+    .where(where))
     .first(
       's.id',
       's.customer_id',
@@ -826,9 +843,10 @@ function readTrackVisit(where) {
 async function recipientTrackGet(req, res) {
   const notFound = () => res.status(404).json({ error: 'Not found' });
   const hit = await recipientHit(req.params.token);
-  if (!hit) return notFound();
+  if (!recipientHitComplete(hit)) return notFound();
   try {
-    const row = await readTrackVisit({ 's.id': hit.visitId });
+    // The payload's one read of the visit is joined to the recipient row as it stands now (withRecipientRow).
+    const row = await readTrackVisit({ 's.id': hit.visitId }, (query) => withRecipientRow(query, hit, req.params.token));
     // The visit must still belong to the customer the row was bound to, as of THIS read too.
     if (!row || String(row.customer_id) !== String(hit.customerId) || !recipientLinkEligible(row)) return notFound();
     const state = publicTrackState(row);
@@ -1048,7 +1066,7 @@ router.post('/:token/stops-ahead', safeRoute(async (req, res, next) => {
     if (!row) {
       // A visit text recipient's link: valid, but the route count is the holder's, so it answers the generic state
       // (the reduced payload never asks for it) and writes nothing.
-      return await recipientVisitLive(await recipientHit(req.params.token))
+      return await recipientVisitLive(await recipientHit(req.params.token), req.params.token)
         ? res.json({ stopsAhead: null, routeProgress: null })
         : res.status(404).json({ error: 'Not found' });
     }
@@ -1092,7 +1110,7 @@ router.post('/:token/view', safeRoute(async (req, res) => {
     if (!row) {
       // A visit text recipient's link: the view counts as no customer's page view (it is not the account holder's),
       // so it records nothing; a valid link answers the same 204.
-      return await recipientVisitLive(await recipientHit(req.params.token))
+      return await recipientVisitLive(await recipientHit(req.params.token), req.params.token)
         ? res.status(204).end()
         : res.status(404).json({ error: 'Not found' });
     }

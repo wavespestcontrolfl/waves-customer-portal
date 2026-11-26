@@ -130,3 +130,48 @@ describe('a recipient-shape token with GATE_CALL_GIVEN_VISIT_TEXTS off: the gene
     }
   });
 });
+
+// Express routes case-insensitively, so `/:token/VIEW` and `/:token/View` reach the view route. The pre-parser's suffix match must
+// see them too: a malformed token is the route's generic 404 and the body is never parsed (no 400 from a malformed body).
+describe('the /view pre-parser on a mounted app: the suffix matches whatever its case', () => {
+  const express = require('express');
+  let server;
+  let base;
+  const viewed = [];
+  beforeAll(async () => {
+    const app = express();
+    app.use('/api/public/track', trackPublicPreparser);
+    app.use(express.json());
+    const router = express.Router();
+    router.post('/:token/view', (req, res) => { viewed.push(req.params.token); res.status(204).end(); });
+    app.use('/api/public/track', router);
+    await new Promise((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
+    base = `http://127.0.0.1:${server.address().port}/api/public/track`;
+  });
+  afterAll(() => new Promise((resolve) => server.close(resolve)));
+  beforeEach(() => { viewed.length = 0; process.env[GATE] = 'true'; });
+
+  const post = (path) => fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{not json' });
+
+  test.each(['view', 'VIEW', 'View', 'vIeW'])('/%s: a valid token reaches the route and the malformed body is never parsed', async (suffix) => {
+    for (const token of [HOLDER, RECIPIENT]) {
+      const res = await post(`/${token}/${suffix}`);
+      expect(res.status).toBe(204);
+    }
+    expect(viewed).toEqual([HOLDER, RECIPIENT]);
+  });
+
+  test.each(['view', 'VIEW', 'View'])('/%s: a malformed token is the generic 404, decided before any body parsing', async (suffix) => {
+    const res = await post(`/not-a-token/${suffix}`);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'Not found' });
+    expect(res.headers.get('cache-control')).toBe('private, no-store');
+    expect(viewed).toEqual([]);
+  });
+
+  test('control: Express itself routes the upper-case suffix to the view route', async () => {
+    const res = await fetch(`${base}/${HOLDER}/VIEW`, { method: 'POST' });
+    expect(res.status).toBe(204);
+    expect(viewed).toEqual([HOLDER]);
+  });
+});

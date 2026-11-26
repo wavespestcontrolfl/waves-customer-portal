@@ -63,6 +63,8 @@ function visitRow(over = {}) {
 
 // db: the holder lookup (by track_view_token) misses; the by-id read returns the visit; every other table is recorded.
 const writes = [];
+const joins = [];
+const recipientJoin = { matches: true };
 function install(row, { holderRow = null } = {}) {
   const tablesRead = [];
   mockDb.raw = jest.fn((sql) => sql);
@@ -74,8 +76,20 @@ function install(row, { holderRow = null } = {}) {
     for (const m of ['update', 'insert', 'del', 'delete', 'upsert', 'increment']) q[m] = jest.fn(() => { writes.push(`${table}.${m}`); return q; });
     q.where = jest.fn((arg, val) => { if ((arg && arg['s.track_view_token']) || (arg === 's.track_view_token' && val)) byToken = true; return q; });
     for (const m of ['leftJoin', 'whereNotNull', 'orderBy', 'whereRaw', 'select', 'limit']) q[m] = jest.fn(() => q);
+    // The recipient's final read joins its own row (track-public.js withRecipientRow): the ON pairs and the WHERE are recorded,
+    // and `recipientJoinMatches` false is a row deleted or rebound since the permission reads (the join finds nothing).
+    let joined = false;
+    q.join = jest.fn((other, on) => {
+      joined = true;
+      const pairs = [];
+      const builder = { on: (a, op, b) => { pairs.push([a, op, b]); return builder; }, andOn: (a, op, b) => { pairs.push([a, op, b]); return builder; } };
+      on.call(builder);
+      joins.push({ table: other, pairs, where: q.where.mock.calls });
+      return q;
+    });
     q.first = jest.fn(async () => {
       if (table !== 'scheduled_services as s' && table !== 'scheduled_services') return null;
+      if (joined && !recipientJoin.matches) return null;
       return byToken ? holderRow : row;
     });
     q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
@@ -98,6 +112,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockDb.mockReset();
   writes.length = 0;
+  joins.length = 0;
+  recipientJoin.matches = true;
   mockVisitForTrackToken.mockResolvedValue({ visitId: 'visit-1', recipientId: 'r-1', customerId: 'cust-1' });
 });
 
@@ -430,6 +446,43 @@ describe('ONE eligibility rule: an ineligible recipient token answers exactly as
     const expected = await unknown(path, method);
     install(visitRow(ENROUTE));
     expect((await run(path, method)).statusCode).not.toBe(expected.statusCode);
+  });
+});
+
+describe('the FINAL read is joined to the recipient row as it stands now, in the same query as the visit', () => {
+  const run = async (path, method) => {
+    const res = { statusCode: 200, body: undefined, headers: {}, set: jest.fn((h) => { Object.assign(res.headers, h); return res; }), status: jest.fn((c) => { res.statusCode = c; return res; }), json: jest.fn((b) => { res.body = b; return res; }), end: jest.fn(() => res) };
+    await find(path, method)({ params: { token: RECIPIENT_TOKEN }, headers: {}, get: () => null }, res, jest.fn());
+    return { statusCode: res.statusCode, body: res.body, headers: res.headers };
+  };
+  const ROUTES = [['/:token', 'get'], ['/:token/stops-ahead', 'post'], ['/:token/view', 'post']];
+
+  test.each(ROUTES)('%s (%s): the join names the row id, THIS token, THIS visit and the visit\'s CURRENT customer', async (path, method) => {
+    install(visitRow(ENROUTE));
+    expect((await run(path, method)).statusCode).not.toBe(404);
+    const recipientJoins = joins.filter((j) => j.table === 'visit_text_recipients as r');
+    expect(recipientJoins).toHaveLength(1);
+    expect(recipientJoins[0].pairs).toEqual([['r.scheduled_service_id', '=', 's.id'], ['r.customer_id', '=', 's.customer_id']]);
+    const where = Object.assign({}, ...recipientJoins[0].where.map((c) => (typeof c[0] === 'object' ? c[0] : {})));
+    expect(where).toMatchObject({ 's.id': 'visit-1', 'r.id': 'r-1', 'r.track_token': RECIPIENT_TOKEN });
+  });
+
+  test.each(ROUTES)('%s (%s): a row deleted or rebound after the permission reads (the join finds nothing) is the same 404 as an unknown token', async (path, method) => {
+    install(null);
+    mockVisitForTrackToken.mockResolvedValueOnce(null);
+    const expected = await run(path, method);
+    install(visitRow(ENROUTE));
+    recipientJoin.matches = false;
+    expect(await run(path, method)).toEqual(expected);
+  });
+
+  test.each(ROUTES)('%s (%s): a resolved link with no row id is never served', async (path, method) => {
+    install(null);
+    mockVisitForTrackToken.mockResolvedValueOnce(null);
+    const expected = await run(path, method);
+    install(visitRow(ENROUTE));
+    mockVisitForTrackToken.mockResolvedValueOnce({ visitId: 'visit-1', customerId: 'cust-1' });
+    expect(await run(path, method)).toEqual(expected);
   });
 });
 

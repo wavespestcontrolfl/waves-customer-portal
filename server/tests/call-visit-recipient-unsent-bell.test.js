@@ -87,3 +87,51 @@ describe('an unreadable recipient lookup', () => {
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 });
+
+// The replay's WHOLE recheck (visit_text_recipient_deferred) runs inside the exhausted-attempt guard: the visit read runs BEFORE
+// the person's permission read, so a visit read that fails on the last attempt must raise the bell too (it never reaches the
+// module's own check). The database here throws on every read.
+describe('a queued text whose replay recheck cannot read the visit', () => {
+  const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('../services/messaging/scheduled-sms-limits');
+  const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+  const META = {
+    entry_point: 'visit_text_recipient_deferred', scheduled_service_id: 'visit-1', kind: 'confirmation', visit_recipient_id: 'r-1',
+    claim_key: 'confirmation:2026-12-01T09:00', recipient_hint: 'Bob, ending 0002', recipient_customer_id: 'cust-1', to_phone: '+19415550002',
+  };
+
+  test('earlier attempts hold for a retry with no bell; the LAST attempt raises ONE deduped bell, naming the person by first name and last 4 only', async () => {
+    const owed = jest.spyOn(VisitRecipient, 'recipientStillOwedDeferred');
+    try {
+      for (let attempt = 1; attempt < SCHEDULED_SMS_MAX_ATTEMPTS; attempt += 1) {
+        expect(await recheckDeferredReplay('visit_text_recipient_deferred', { ...META, scheduled_sms_attempts: attempt })).toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
+      }
+      expect(notifyAdmin).not.toHaveBeenCalled();
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', { ...META, scheduled_sms_attempts: SCHEDULED_SMS_MAX_ATTEMPTS })).toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
+      expect(notifyAdmin).toHaveBeenCalledTimes(1);
+      const opts = notifyAdmin.mock.calls[0][3];
+      expect(opts.dedupeKey).toBe('visit-recipient-text-unsent:visit-1:confirmation');
+      expect(opts.detail).toContain('Bob, ending 0002 was not sent this text');
+      expect(JSON.stringify(notifyAdmin.mock.calls)).not.toContain('9415550002');
+      // the visit read failed first: the permission check never ran, so only the guard around the whole recheck could ring
+      expect(owed).not.toHaveBeenCalled();
+    } finally { owed.mockRestore(); }
+  });
+
+  test('a check that THROWS is held for a retry with a code-only log, and rings only on the last attempt', async () => {
+    const boom = () => Promise.reject(Object.assign(new Error('select where phone +19415550002'), { code: '57P01' }));
+    expect(await VisitRecipient.deferredReplayRecheck({ ...META, scheduled_sms_attempts: 1 }, boom)).toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    expect(await VisitRecipient.deferredReplayRecheck({ ...META, scheduled_sms_attempts: SCHEDULED_SMS_MAX_ATTEMPTS }, boom)).toMatchObject({ eligible: false, retryable: true });
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(logger.warn.mock.calls)).toContain('57P01');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('9415550002');
+  });
+
+  test('on the last attempt, a plain "no" or a retry the recheck scheduled itself (retryAt) rings nothing', async () => {
+    const last = { ...META, scheduled_sms_attempts: SCHEDULED_SMS_MAX_ATTEMPTS };
+    for (const verdict of [{ eligible: true }, { eligible: false, reason: 'recipient-not-owed' }, { eligible: false, reason: 'quiet', retryable: true, retryAt: '2026-12-01T13:00:00Z' }]) {
+      expect(await VisitRecipient.deferredReplayRecheck(last, async () => verdict)).toBe(verdict);
+    }
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+});

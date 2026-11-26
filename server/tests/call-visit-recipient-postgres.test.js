@@ -1289,6 +1289,78 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(sendCustomerMessage).not.toHaveBeenCalled();
       });
 
+      test('the mint itself requires the visit\'s CURRENT customer: a visit reassigned after the contacts were read mints nothing', async () => {
+        await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+        await record();
+        const [{ id }] = await rows();
+        // the sender read its contacts (the row bound to customerId), then the visit moved to another customer before the write
+        await reassign(otherCustomerId);
+        expect(await VisitRecipient.ensureTrackToken(id, customerId)).toBeNull();
+        expect((await rows())[0].track_token).toBeNull();
+        // control: back on the row's customer, the same call mints
+        await reassign(customerId);
+        expect(await VisitRecipient.ensureTrackToken(id, customerId)).toMatch(/^vr_[a-f0-9]{48}$/);
+      });
+
+      describe('the route\'s FINAL read joins the recipient row as it stands now (all three routes)', () => {
+        const trackPublicRouter = require('../routes/track-public');
+        const find = (path, method) => trackPublicRouter.stack.find((l) => l.route?.path === path && l.route.methods[method]).route.stack[0].handle;
+        const ROUTES = [['/:token', 'get'], ['/:token/stops-ahead', 'post'], ['/:token/view', 'post']];
+        const hit = async (path, method, token) => {
+          const res = { statusCode: 200, body: undefined, headers: {}, set: jest.fn((h) => { Object.assign(res.headers, h); return res; }), status: jest.fn((c) => { res.statusCode = c; return res; }), json: jest.fn((b) => { res.body = b; return res; }), end: jest.fn(() => res) };
+          const next = jest.fn();
+          await find(path, method)({ params: { token }, headers: {}, get: () => null }, res, next);
+          return { statusCode: res.statusCode, body: res.body, headers: res.headers, nextCalled: next.mock.calls.length };
+        };
+        const fresh = async () => {
+          await db('visit_text_recipients').whereIn('scheduled_service_id', [visitId, otherVisitId]).del();
+          await record();
+          const [{ id }] = await rows();
+          return { id, token: await VisitRecipient.ensureTrackToken(id, customerId) };
+        };
+        // Between the module's permission check and the route's final read: each change the module already passed.
+        const CHANGES = {
+          'the row deleted': ({ id }) => db('visit_text_recipients').where({ id }).del(),
+          'the row replaced (deleted, then re-inserted with the same token, visit and customer)': async ({ id, token }) => {
+            const old = await db('visit_text_recipients').where({ id }).first();
+            await db('visit_text_recipients').where({ id }).del();
+            const { id: _drop, created_at: _c, updated_at: _u, ...copy } = old;
+            await db('visit_text_recipients').insert({ ...copy, track_token: token });
+          },
+          'the row given a new token': ({ id }) => db('visit_text_recipients').where({ id }).update({ track_token: `vr_${'9'.repeat(48)}` }),
+          'the row rebound to another customer': ({ id }) => db('visit_text_recipients').where({ id }).update({ customer_id: otherCustomerId }),
+          'the row moved to another visit': ({ id }) => db('visit_text_recipients').where({ id }).update({ scheduled_service_id: otherVisitId }),
+        };
+        let spy;
+        beforeEach(async () => {
+          await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
+        });
+        afterEach(() => { if (spy) spy.mockRestore(); spy = null; });
+
+        test.each(ROUTES)('%s (%s): control, an unchanged row is served', async (path, method) => {
+          const { token } = await fresh();
+          expect((await hit(path, method, token)).statusCode).not.toBe(404);
+        });
+
+        test.each(ROUTES)('%s (%s): a row changed after the permission check answers exactly as an unknown token', async (path, method) => {
+          const unknown = await hit(path, method, `vr_${'7'.repeat(48)}`);
+          expect(unknown.statusCode).toBe(404);
+          for (const [label, change] of Object.entries(CHANGES)) {
+            const made = await fresh();
+            const real = VisitRecipient.visitForTrackToken;
+            spy = jest.spyOn(VisitRecipient, 'visitForTrackToken').mockImplementation(async (...args) => {
+              const answer = await real(...args);
+              await change(made);
+              return answer;
+            });
+            const answer = await hit(path, method, made.token);
+            spy.mockRestore();
+            spy = null;
+            expect({ label, ...answer }).toEqual({ label, ...unknown });
+          }
+        });
+      });
+
       test('the migration backfills ONLY from the call the number was given on (and only when that call\'s customer is the visit\'s current one); everything else stays NULL, and other rows are untouched', async () => {
         const migration = require('../models/migrations/20261124230000_visit_text_recipients_customer_id');
         await record();

@@ -13,6 +13,13 @@ jest.mock('../models/db', () => {
     ['where', 'whereRaw', 'whereNotNull', 'orderBy'].forEach((m) => { q[m] = jest.fn((...a) => { calls.reads.push([m, ...a]); return q; }); });
     q.first = jest.fn(async () => (typeof calls.first === 'function' ? calls.first() : (calls.first ?? null)));
     q.then = (resolve, reject) => Promise.resolve(calls.list ?? []).then(resolve, reject);
+    q.whereExists = jest.fn((fn) => {
+      // the subquery the mint requires: record its SQL pieces
+      const sub = { select: jest.fn(() => sub), from: jest.fn(() => sub), whereRaw: jest.fn(() => sub) };
+      fn.call(sub);
+      calls.reads.push(['whereExists', sub.from.mock.calls, sub.whereRaw.mock.calls]);
+      return q;
+    });
     q.update = jest.fn((patch) => { calls.updates.push(patch); return q; });
     q.returning = jest.fn(async () => calls.returning ?? []);
     q.insert = jest.fn(async () => {});
@@ -294,5 +301,14 @@ describe('ensureTrackToken: one atomic mint on the recipient row', () => {
     expect(mockTables.visit_text_recipients.updates).toHaveLength(1);
     expect(JSON.stringify(mockTables.visit_text_recipients.updates[0])).toContain("CASE WHEN track_token ~ '^vr_[a-f0-9]{48}$' THEN track_token ELSE ('vr_' || encode(gen_random_bytes(24), 'hex')) END");
     expect(mockTables.scheduled_services.updates).toEqual([]);
+  });
+
+  test('the write itself requires the visit\'s CURRENT customer to be the row\'s (an EXISTS in the same UPDATE)', async () => {
+    seed();
+    mockTables.visit_text_recipients.returning = [{ track_token: TOKEN }];
+    await VisitRecipient.ensureTrackToken('r-1', 'cust-1');
+    const exists = mockTables.visit_text_recipients.reads.find((r) => r[0] === 'whereExists');
+    expect(exists[1]).toEqual([['scheduled_services as s']]);
+    expect(exists[2][0][0]).toBe('s.id = visit_text_recipients.scheduled_service_id AND s.customer_id = visit_text_recipients.customer_id');
   });
 });

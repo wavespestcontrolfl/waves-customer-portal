@@ -521,6 +521,12 @@ async function arrivalSnapshot(visit, conn) {
 async function ensureTrackToken(visitRecipientId, customerId, conn = db) {
   const rows = await conn(TABLE)
     .where({ id: visitRecipientId, customer_id: customerId })
+    // The write itself requires the visit's CURRENT customer to be the row's: a visit reassigned after the sender read its
+    // contacts mints nothing (the same binding the tracker route's final read joins on).
+    .whereExists(function visitStillTheRowCustomers() {
+      this.select(conn.raw('1')).from('scheduled_services as s')
+        .whereRaw(`s.id = ${TABLE}.scheduled_service_id AND s.customer_id = ${TABLE}.customer_id`);
+    })
     // Minted once, in the recipient's own recognizable shape (vr_ + 48 hex); a token of any other shape is replaced by one.
     .update({ track_token: conn.raw(`CASE WHEN track_token ~ '^vr_[a-f0-9]{48}$' THEN track_token ELSE ${RECIPIENT_TRACK_TOKEN_MINT_SQL} END`) })
     .returning('track_token');
@@ -767,15 +773,31 @@ async function recipientStillOwedDeferred(meta, { conn = db } = {}) {
   try {
     return (await recipientStillOwed({ ...meta, replay: true }, { conn })).ok === true;
   } catch (err) {
-    // An unreadable answer is retried, and staff hear about it only when the LAST attempt also could not read it: the text then
-    // ends undelivered (the same deduped bell the handoff check raises). The bell never changes the rethrow below.
-    if (isLastReplayAttempt(meta)) {
-      await raiseUnsentBell({ scheduledServiceId: meta.scheduled_service_id, kind: meta.kind, date: claimDate(meta.claim_key), hint: meta.recipient_hint });
-    }
     // The replay registry logs a thrown error's message, and a knex message carries the bound values (a phone, a claim): rethrow
-    // a fresh error with only the code. It still throws, so the registry holds the row for a retry (retryable).
+    // a fresh error with only the code. It still throws, so the registry holds the row for a retry (retryable); the staff bell
+    // for an exhausted replay is raised around the whole recheck (deferredReplayRecheck).
     throw Object.assign(new Error('visit-only replay recheck failed'), { code: err && err.code });
   }
+}
+
+/**
+ * The replay registry's FULL recheck for a queued visit-only text (visit_text_recipient_deferred), run by `check`. A read that
+ * fails at any step answers "hold for a retry" (a throw becomes that answer too, with a code-only log). Staff hear about it
+ * only when the LAST attempt also could not read: the text then ends undelivered, so the deduped unsent bell rings once. A
+ * retry the recheck schedules itself (a named retryAt) is a wait, not a failed read, and rings nothing.
+ */
+async function deferredReplayRecheck(meta, check) {
+  let verdict;
+  try {
+    verdict = await check();
+  } catch (err) {
+    logger.warn(`[call-visit-recipient] replay recheck unreadable for visit ${meta.scheduled_service_id} (code=${err && err.code ? err.code : 'none'})`);
+    verdict = { eligible: false, reason: 'recheck-failed', retryable: true };
+  }
+  if (verdict && verdict.eligible === false && verdict.retryable === true && !verdict.retryAt && isLastReplayAttempt(meta)) {
+    await raiseUnsentBell({ scheduledServiceId: meta.scheduled_service_id, kind: meta.kind, date: claimDate(meta.claim_key), hint: meta.recipient_hint });
+  }
+  return verdict;
 }
 
 /** A replay that ended without sending gives ITS claim back (matched by its token), so a later sender can still owe the text. A
@@ -810,6 +832,7 @@ module.exports = {
   deliveryAccepted,
   recipientStillOwed,
   recipientStillOwedDeferred,
+  deferredReplayRecheck,
   providerCheck,
   releaseDeferredClaim,
 };

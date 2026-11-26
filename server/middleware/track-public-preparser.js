@@ -14,7 +14,8 @@
 // A holder's tracker token (64 hex) or a visit text recipient's own (`vr_` + 48 hex): the same shapes track-public accepts.
 const { isRecipientTrackToken } = require('../utils/recipient-track-token');
 const TRACK_TOKEN_RE = /^(?:[a-f0-9]{64}|vr_[a-f0-9]{48})$/;
-const VIEW_PATH_RE = /^\/([^/]+)\/view\/?$/;
+// Express routes case-insensitively (`/:token/VIEW` reaches the view route), so the suffix match is case-insensitive too.
+const VIEW_PATH_RE = /^\/([^/]+)\/view\/?$/i;
 const FIRST_SEGMENT_RE = /^\/([^/]+)/;
 
 function recipientLinksLive() {

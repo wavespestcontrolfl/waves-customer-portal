@@ -7871,7 +7871,7 @@ route or on site, else 0). It never returns `summary`, the report, invoice, prep
 or review tokens, photos, the offer and referral cards, `customer`,
 `cancellation`, `visitChange`, stops count or route progress, and the cards and
 summary reads do not run. The recipient path is strictly read-only (no
-geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the recipient row is bound to the visit's CURRENT customer (`visit_text_recipients.customer_id` equal to `scheduled_services.customer_id`, re-checked on the token lookup, the final recheck and the route's own visit read; a reassigned visit or a null binding answers 404 like an unknown token) and
+geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the recipient row is bound to the visit's CURRENT customer (`visit_text_recipients.customer_id` equal to `scheduled_services.customer_id`, re-checked on the token lookup, the final recheck and the route's own visit read; a reassigned visit or a null binding answers 404 like an unknown token; the route's FINAL read on all three routes, the GET's payload read and each POST's recheck, joins `visit_text_recipients` in the SAME query that returns the visit, on the resolved row's id AND `track_token` equal to the request token AND `scheduled_service_id` equal to the visit AND `r.customer_id = s.customer_id`, so a row deleted, replaced, given a new token, moved or rebound after the permission reads matches nothing and answers 404 like an unknown token) and
 the plain permission reads pass (`recipientPermission`: gate, person on the
 visit, no decline, no callback-number hold on the visit or the person's number,
 no call do-not-contact or "no texts"; the choices row is read fail-closed and regardless of `GATE_CONTACT_LOGIN`), and only after the cheap lifetime check passes (a closed link answers 404 with no permission read; the visit is read again after the permission reads and must still be eligible). The live vehicle shows only while the visit is en route, `tech_status.current_job_id` exactly this visit's own id, decided in the same SELECT that returns the fix (no visit-group lookup: a grouped visit whose focus moved to a sibling shows no truck) and the cached fix was reported and received strictly after the visit's `en_route_at`; otherwise `vehicle` is null. The `tech_status` read is STRICT (`resolveFreshTechPosition` with `strict: true`, used only for this scope): a FAILED read answers 404 exactly like an unknown token (code-only log), while a successful read with no usable fix answers 200 with `vehicle: null`. Its stops-ahead POST answers nulls and its view POST
@@ -7913,7 +7913,7 @@ also stamped by the `trackPublicPreparser` mount
 the global `/api/` limiter and the shared body parsers, so a limiter 429 on the
 bearer URL carries them too. The same guard answers `/view`'s malformed-token
 404 before any body parsing and drops the request Content-Type so the ignored
-body is never parsed (a malformed / oversized body cannot become a 400/413). Neither companion may grow beyond its single
+body is never parsed (a malformed / oversized body cannot become a 400/413). Its `/view` suffix match is case-insensitive, as Express's routing is (`/:token/VIEW` and `/:token/View` reach the same route and get the same guard). Neither companion may grow beyond its single
 bounded write).
 `/api/public/appointment/:token` (GET summary + `GET /:token/calendar.ics`
 + `POST /:token/confirm`; the destination the 24h reminder and booking
