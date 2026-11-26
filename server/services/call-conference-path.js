@@ -185,24 +185,28 @@ async function claimLegSid(callSid, index, sid) {
   return (await loadState(callSid))?.legs?.[String(index)]?.sid === sid ? 'same' : 'other';
 }
 
-// A placed leg: own the slot, or hang up as a duplicate. The call may also have settled while this leg was placed (the
+// A placed leg: own the slot, or hang up as a duplicate and keep the slot's owner (a create with no answer that rang
+// after all, its callback landing during the retry). The call may also have settled while this leg was placed (the
 // caller left, voicemail, another leg won, the classic ring took over), and that clean-up could not see this SID. Read
 // after the claim, so one of the two ends it. Answers the SID that owns the slot when it still rings, else null.
-async function settleLeg(api, callSid, index, sid) {
-  const hangUp = (why) => api.calls(sid).update({ status: 'completed' })
+async function settleLeg(api, callSid, index, placedSid) {
+  const hangUp = (sid, why) => api.calls(sid).update({ status: 'completed' })
     .catch((err) => logger.info(`[conference] ${why} leg ${masked(sid)} not ended (${errorCode(err)})`));
-  const claim = await claimLegSid(callSid, index, sid).catch((err) => {
+  const claim = await claimLegSid(callSid, index, placedSid).catch((err) => {
     logger.warn(`[conference] leg ${index} SID stamp failed for ${masked(callSid)} (${errorCode(err)})`);
     return 'claimed';
   });
+  let latest = await loadState(callSid).catch(() => null);
+  let sid = placedSid;
   if (claim === 'other') {
-    logger.warn(`[conference] a second call rang leg ${index} of ${masked(callSid)}: ending ${masked(sid)}`);
-    await hangUp('duplicate');
-    return null;
+    logger.warn(`[conference] a second call rang leg ${index} of ${masked(callSid)}: ending ${masked(placedSid)}`);
+    await hangUp(placedSid, 'duplicate');
+    sid = latest?.legs?.[String(index)]?.sid || null;
+    if (!sid) return null;
+    latest = await loadState(callSid).catch(() => latest);
   }
-  const latest = await loadState(callSid).catch(() => null);
   if (latest && (latest.closed_at || latest.voicemail_at || latest.fallback || (latest.accepted_leg_sid && latest.accepted_leg_sid !== sid))) {
-    await hangUp('late');
+    await hangUp(sid, 'late');
     return null;
   }
   return sid;

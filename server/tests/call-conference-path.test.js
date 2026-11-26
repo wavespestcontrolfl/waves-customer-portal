@@ -265,13 +265,31 @@ describe('claimStart + placeStaffLegs', () => {
   test('a second call for an owned slot is hung up, and its end is not the slot\'s end', async () => {
     const row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: { sid: LEG0 } } } });
     const log = fakeTwilio();
-    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG1, status: 'initiated' })).toBe('ended');
+    // The duplicate ends; the slot's owner still rings.
+    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG1, status: 'initiated' })).toBe('placed');
     expect(log.updates).toEqual([{ sid: LEG1, status: 'completed' }]);
     expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG1, status: 'completed' })).toBe('duplicate');
     expect(row.metadata.conference_path.legs[0]).toEqual({ sid: LEG0 });
     // The owner's own initiated callback changes nothing; an index past the ring is ignored.
     expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'initiated' })).toBe('placed');
     expect(await cp.onStaffLegStatus({ callSid: SID, index: 3, legSid: LEG1, status: 'initiated' })).toBe('no_state');
+  });
+
+  test('the first create rang after all and its callback lands during the retry: the retry ends, the first call is the leg', async () => {
+    jest.useFakeTimers();
+    const row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: {} } } });
+    const log = fakeTwilio();
+    mockTw.api.calls.create
+      .mockImplementationOnce(async () => { throw reset; })
+      .mockImplementationOnce(async () => {
+        await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'initiated' }); // late, past the wait
+        return { sid: LEG1 };
+      });
+    const pending = cp.placeStaffLegs(legArgs());
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(await pending).toEqual([LEG0]);
+    expect(log.updates).toEqual([{ sid: LEG1, status: 'completed' }]);
+    expect(row.metadata.conference_path.legs[0].sid).toBe(LEG0);
   });
 
   test('a call whose callback lands after its leg was stamped failed owns the slot; after voicemail it is hung up', async () => {
