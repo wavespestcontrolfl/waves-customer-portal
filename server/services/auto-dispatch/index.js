@@ -1395,7 +1395,7 @@ function inConflict(pm) {
 }
 
 // "Moved (+12.5)", naming the conflict the move cleared when there was one.
-const CONFLICT_PHRASE = { overlap: ' off an overlapping stop', closed_day: ' off a closed day', mowing_day: ' off the customer\'s mowing day', preferred_day: ' onto the customer\'s saved day' };
+const CONFLICT_PHRASE = { overlap: ' off an overlapping stop', closed_day: ' off a closed day', customer_blackout: ' out of the customer\'s away dates', mowing_day: ' off the customer\'s mowing day', preferred_day: ' onto the customer\'s saved day' };
 function movedDescription(appliedAudit) {
   const conflict = appliedAudit.constraints && appliedAudit.constraints.conflict;
   return `Moved${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (${signed(appliedAudit.improvement)})`;

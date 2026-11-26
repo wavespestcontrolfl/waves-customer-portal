@@ -108,7 +108,8 @@ test('another customer needs no place read', async () => {
   rebooker.probeMoveConflicts.mockResolvedValue({ rows: [row()] });
   const db = placesDb([]);
   await currentConflict(SERVICE, { ...CTX, db });
-  expect(db).not.toHaveBeenCalled();
+  // Only the customer's own away dates are read (customer_blackout, owner 2026-11-26).
+  expect(db.mock.calls.map(([table]) => table)).toEqual(['property_preferences']);
 });
 
 test('until the schedule is technician-scoped, another technician\'s overlapping stop IS a conflict (Codex r3 P1)', async () => {
