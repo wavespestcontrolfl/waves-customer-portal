@@ -351,4 +351,41 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     expect(await reload(wiped.id)).toBeUndefined();
     expect((await reload(fresh.id)).status).toBe('pending');
   });
+
+  // Migration 20261125200000 (owner 2026-11-25, "YES THEY DID"): the Beehiiv import rows that still
+  // hold their sign-up get the reader proof; a source label alone, or any opt-out, sunset or
+  // comeback stamp, does not.
+  test('the Beehiiv sign-up step writes the proof only on import-day rows that still hold the sign-up', async () => {
+    const migration = require('../models/migrations/20261125200000_newsletter_beehiiv_signup_proof');
+    const day = new Date('2026-04-19T16:00:00Z');
+    const confirmed = new Date('2026-04-19T16:00:01Z');
+    const bee = (over = {}) => insert({
+      email: addr(), source: 'beehiiv_migration', status: 'active', created_at: day, confirmed_at: confirmed, ...over,
+    });
+    const rows = {
+      kept: await bee(),
+      orphan: await bee({ source: 'beehiiv_migration_orphan' }),
+      upper: await bee({ email: addr().toUpperCase() }),
+      lateLabel: await bee({ created_at: new Date('2026-06-01T12:00:00Z') }),
+      website: await bee({ source: 'newsletter_footer' }),
+      optedOut: await bee({ status: 'unsubscribed', unsubscribed_at: day }),
+      unsubStamp: await bee({ unsubscribed_at: day }),
+      sunset: await bee({ deactivated_at: day }),
+      cameBack: await bee({ resubscribed_at: day }),
+      noConfirm: await bee({ confirmed_at: null }),
+      clicked: await bee({ reader_confirmed_at: new Date('2026-11-24T12:00:00Z'), reader_confirmed_email: 'clicked@example.com' }),
+    };
+    made.push(rows.upper.email);
+    await migration.up(db);
+    await migration.up(db);
+    const after = {};
+    for (const [name, r] of Object.entries(rows)) after[name] = await reload(r.id);
+    const proofed = Object.keys(rows).filter((name) => after[name].reader_confirmed_at !== null);
+    expect(proofed.sort()).toEqual(['clicked', 'kept', 'orphan', 'upper']);
+    expect(after.kept.reader_confirmed_at.getTime()).toBe(confirmed.getTime());
+    expect(after.kept.reader_confirmed_email).toBe(rows.kept.email.toLowerCase());
+    expect(after.upper.reader_confirmed_email).toBe(rows.upper.email.toLowerCase());
+    // A reader's own earlier click is left as it was.
+    expect(after.clicked.reader_confirmed_email).toBe('clicked@example.com');
+  });
 });

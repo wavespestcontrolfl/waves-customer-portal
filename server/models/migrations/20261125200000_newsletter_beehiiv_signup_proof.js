@@ -1,0 +1,62 @@
+/**
+ * Record the old Beehiiv sign-ups as the readers' own opt-in proof (owner ruling
+ * 2026-11-25, "YES THEY DID": every reader of the old Beehiiv list signed up by
+ * themselves).
+ *
+ * The Waves Pest Insider's "A tool we'd use" block goes only to a reader whose row holds
+ * reader_confirmed_at / reader_confirmed_email (migration 20261122190000, and
+ * pest-insider/tool-block.js optedIn). Those columns had no backfill, because history
+ * cannot tell a reader's click from a trusted add. The owner has now answered that for
+ * one group: the rows the Beehiiv import wrote. So this one-time step writes the proof
+ * for each import row that still holds that sign-up, and nothing else:
+ *   - source is beehiiv_migration or beehiiv_migration_orphan, AND created_at is on the
+ *     import day (2026-04-19 ET; every such row in production was created that day). A
+ *     source label alone is not evidence: the public sign-up route stores the caller's
+ *     source, and a re-signup rewrites it. A row created after the import cannot match;
+ *   - status active, confirmed_at set, and no opt-out or comeback stamp
+ *     (unsubscribed_at, deactivated_at, resubscribed_at all NULL);
+ *   - no proof on the row yet (a reader who already clicked keeps that click).
+ * reader_confirmed_at takes the row's confirmed_at (so the send rule's order check holds:
+ * an opt-out or a trusted re-activation after it voids it, as for a click), and
+ * reader_confirmed_email the row's address, lowercased.
+ *
+ * Accepted: a sunset comeback (the reader answered the win-back quiz) clears
+ * deactivated_at and leaves no stamp, so such a row also gets the proof. The reader's own
+ * quiz answer brought it back; the send rule accepts the same case for a click.
+ * Accepted: the email fanout can move an active row to a corrected address and keeps no
+ * copy of the imported one; such a row gets the proof for the corrected address (a staff
+ * correction of the reader's own address).
+ *
+ * Runs once (knex records it). Idempotent anyway: the proof-is-NULL condition skips
+ * every row it already wrote. down does nothing: the rows cannot be told apart from a
+ * later real click with the same stamps, and clearing a real click would be wrong.
+ */
+const IMPORT_SOURCES = ['beehiiv_migration', 'beehiiv_migration_orphan'];
+// 2026-04-19 00:00 to 24:00 America/New_York (EDT, UTC-4).
+const IMPORT_DAY_START = '2026-04-19T04:00:00Z';
+const IMPORT_DAY_END = '2026-04-20T04:00:00Z';
+
+exports.up = async function up(knex) {
+  if (!(await knex.schema.hasTable('newsletter_subscribers'))) return;
+  if (!(await knex.schema.hasColumn('newsletter_subscribers', 'reader_confirmed_at'))) return;
+  await knex('newsletter_subscribers')
+    .whereIn('source', IMPORT_SOURCES)
+    .where('created_at', '>=', IMPORT_DAY_START)
+    .where('created_at', '<', IMPORT_DAY_END)
+    .where('status', 'active')
+    .whereNotNull('confirmed_at')
+    .whereNull('unsubscribed_at')
+    .whereNull('deactivated_at')
+    .whereNull('resubscribed_at')
+    .whereNull('reader_confirmed_at')
+    .update({
+      reader_confirmed_at: knex.ref('confirmed_at'),
+      reader_confirmed_email: knex.raw('LOWER(email)'),
+    });
+};
+
+exports.down = async function down() {};
+
+exports.IMPORT_SOURCES = IMPORT_SOURCES;
+exports.IMPORT_DAY_START = IMPORT_DAY_START;
+exports.IMPORT_DAY_END = IMPORT_DAY_END;
