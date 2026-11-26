@@ -418,6 +418,43 @@ describe('scheduled pre-treatment application prefill', () => {
       ]);
     });
   });
+
+  test('a retired catalog row that shares a live product\'s name never puts its EPA number on the record', async () => {
+    // Two "Tekko Pro IGR" rows in the catalog: the inactive one is another registration. The prefill reads active rows only.
+    const catalog = [
+      { name: 'Tekko Pro IGR', epa_reg_number: '53883-335', active: true },
+      { name: 'Tekko Pro IGR', epa_reg_number: '53883-444', active: false },
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        return chain({ first: jest.fn(async () => ({ id: 'sched-56', customer_id: 'customer-1', technician_id: 'tech-1', service_id: 'service-2', service_type: 'German Roach Cleanout' })) });
+      }
+      if (table === 'scheduled_service_addons') return chain({ resolvesTo: [] });
+      if (table === 'services') return chain({ resolvesTo: [{ id: 'service-2', name: 'German Roach Cleanout', default_products: ['Tekko Pro IGR'] }] });
+      if (table === 'products_catalog') {
+        let activeOnly = false;
+        const c = chain();
+        c.where = jest.fn((arg) => {
+          if (typeof arg === 'function') {
+            const filter = { where: jest.fn((cond) => { if (cond?.active === true) activeOnly = true; return filter; }), orWhereNull: jest.fn(() => filter) };
+            arg.call(filter);
+          }
+          return c;
+        });
+        c.then = (onFulfilled, onRejected) => Promise.resolve(catalog.filter((row) => !activeOnly || row.active !== false)).then(onFulfilled, onRejected);
+        c.catch = (onRejected) => Promise.resolve(catalog.filter((row) => !activeOnly || row.active !== false)).catch(onRejected);
+        return c;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/scheduled-service/sched-56/application-prefill`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.applications).toEqual([expect.objectContaining({ product_name: 'Tekko Pro IGR', epa_registration: '53883-335' })]);
+    });
+  });
 });
 
 describe('send-with-invoice', () => {
