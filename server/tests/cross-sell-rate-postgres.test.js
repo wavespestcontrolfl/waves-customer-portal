@@ -266,6 +266,31 @@ postgres('cross-sell rate (live Postgres)', () => {
       expect(await counts()).toEqual({ recurringCustomers: 1, multiServiceCustomers: 1 });
     });
 
+    test('an annual or twice-a-year service stays held between its visits; a quarterly one does not', async () => {
+      const annual = await customer('Annual');
+      await visit(annual, { ...PEST });
+      await visit(annual, { ...LAWN, recurring_pattern: 'annual', scheduled_date: await dayFrom(M, -200) });
+      const semi = await customer('Semiannual');
+      await visit(semi, { ...PEST });
+      await visit(semi, { ...LAWN, recurring_pattern: 'semiannual', scheduled_date: await dayFrom(M, 150) });
+      const quarterly = await customer('QuarterlyFar');
+      await visit(quarterly, { ...PEST });
+      await visit(quarterly, { ...LAWN, recurring_pattern: 'quarterly', scheduled_date: await dayFrom(M, -150) });
+      expect(await counts()).toEqual({ recurringCustomers: 3, multiServiceCustomers: 2 });
+    });
+
+    test('a series stopped on or before the day no longer holds its family, even through completed visits', async () => {
+      const stopped = await customer('StoppedLawn');
+      await visit(stopped, { ...PEST });
+      const lawnParent = await visit(stopped, { ...LAWN, status: 'completed' });
+      await trx('recurring_plan_alerts').insert({ recurring_parent_id: lawnParent, customer_id: stopped, alert_type: 'plan_lapsed', resolved_at: '2026-10-20T15:00:00Z', resolved_action: 'cancel_series' });
+      const laterStop = await customer('StoppedLater');
+      await visit(laterStop, { ...PEST });
+      const later = await visit(laterStop, { ...LAWN, status: 'completed' });
+      await trx('recurring_plan_alerts').insert({ recurring_parent_id: later, customer_id: laterStop, alert_type: 'plan_lapsed', resolved_at: '2026-11-15T15:00:00Z', resolved_action: 'cancel_series' });
+      expect(await counts()).toEqual({ recurringCustomers: 2, multiServiceCustomers: 1 });
+    });
+
     test('a series child with no recurring flag still counts', async () => {
       const c = await customer('LegacyChild');
       const parent = await visit(c, { ...PEST, scheduled_date: '2026-01-15' });

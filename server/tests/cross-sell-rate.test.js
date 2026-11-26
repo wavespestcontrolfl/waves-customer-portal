@@ -132,7 +132,7 @@ function makeDb({ raws = [], updates = [], stored = [] } = {}) {
 }
 
 describe('crossSellForMonthEnd and the snapshot columns', () => {
-  test('reads once, as of the given day (all six date bindings), and stores the split as JSON text', async () => {
+  test('reads once, as of the given day (all seven date bindings), and stores the split as JSON text', async () => {
     const rows = [
       { customer_id: 'a', fam: 'pest', created_at: new Date('2025-01-01T00:00:00Z') },
       { customer_id: 'a', fam: 'lawn', created_at: new Date('2026-01-01T00:00:00Z'), source: 'quote-wizard' },
@@ -141,7 +141,7 @@ describe('crossSellForMonthEnd and the snapshot columns', () => {
     const db = makeDb({ raws: [{ rows }] });
     const columns = await svc.crossSellColumns(db, new Date('2026-10-31T12:00:00Z'), '2026-11-02');
     expect(db.calls.raw).toHaveLength(1);
-    expect(db.calls.raw[0].bindings).toEqual(['2026-10-31', '2026-10-31', '2026-10-31', '2026-10-31', '2026-10-31', '2026-10-31']);
+    expect(db.calls.raw[0].bindings).toEqual(Array(7).fill('2026-10-31'));
     expect(db.calls.raw[0].sql).toContain('JOIN customers c ON c.id = v.customer_id AND c.deleted_at IS NULL');
     expect(db.calls.raw[0].sql).toContain('CAST(c.churned_at AS date) > CAST(? AS date)');
     expect(db.calls.raw[0].sql).toContain("ss.status IS DISTINCT FROM 'cancelled'");
@@ -161,7 +161,7 @@ describe('pestOnlyCustomers', () => {
     expect(await svc.pestOnlyCustomers(db, '2026-11-26')).toEqual([
       { id: 'c1', firstName: 'Sample', lastName: 'Alpha', city: 'Parrish', pestServiceKey: 'pest_general_quarterly' },
     ]);
-    expect(db.calls.raw[0].bindings).toEqual(Array(8).fill('2026-11-26'));
+    expect(db.calls.raw[0].bindings).toEqual(Array(9).fill('2026-11-26'));
     expect(db.calls.raw[0].sql).toContain('LIMIT 500');
     expect(db.calls.raw[0].sql).toContain('ORDER BY LOWER(c.last_name)');
   });

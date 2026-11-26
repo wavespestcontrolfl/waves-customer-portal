@@ -31,6 +31,9 @@ const { etDateString } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS, INTERNAL_TEST_CUSTOMER_IDS } = require('./internal-test-customers');
 
 const WINDOW_DAYS = 95;
+// Annual and twice-a-year services: one visit a year (or half-year) plus the same ~5-day slack.
+const ANNUAL_WINDOW_DAYS = 370;
+const SEMIANNUAL_WINDOW_DAYS = 190;
 
 // Stored service key prefix -> family. Table-driven so the SQL below and the tests read one list.
 const FAMILY_BY_KEY_PREFIX = [
@@ -114,6 +117,9 @@ const COUNTED_VISITS_SQL = `
   plan_visits AS (
     SELECT ss.id, ss.customer_id, ss.scheduled_date, ss.created_at, ss.service_key_snapshot, ss.service_type,
            ss.source_estimate_id, ss.source, ss.source_call_log_id, ss.booking_source,
+           -- A service seen less often than quarterly stays held between its visits.
+           CASE ss.recurring_pattern WHEN 'annual' THEN ${ANNUAL_WINDOW_DAYS} WHEN 'semiannual' THEN ${SEMIANNUAL_WINDOW_DAYS}
+             ELSE ${WINDOW_DAYS} END AS window_days,
            -- A visit cancelled after the day was still held on it (a cancellation with no time stamp counts as cancelled).
            (ss.status IS DISTINCT FROM 'cancelled'
             OR ss.cancelled_at >= (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York') AS held_on_day
@@ -121,10 +127,18 @@ const COUNTED_VISITS_SQL = `
     -- A legacy series child carries recurring_parent_id with no is_recurring flag; a NULL status is open.
     WHERE (ss.is_recurring = true OR ss.recurring_parent_id IS NOT NULL)
       AND COALESCE(ss.is_callback, false) = false
+      -- A series stopped by the day (recurring-plan-decisions.js records 'cancel_series') no longer holds its family,
+      -- even through its visits that stay completed.
+      AND NOT EXISTS (
+        SELECT 1 FROM recurring_plan_alerts rpa
+        WHERE rpa.recurring_parent_id = COALESCE(ss.recurring_parent_id, ss.id)
+          AND rpa.resolved_action = 'cancel_series'
+          AND rpa.resolved_at < (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York'
+      )
   ),
   v AS (
     SELECT pv.id, pv.customer_id, pv.scheduled_date, pv.created_at, pv.service_key_snapshot, pv.service_type,
-           pv.source_estimate_id, pv.source, pv.source_call_log_id, pv.booking_source, pv.held_on_day, f.fam
+           pv.source_estimate_id, pv.source, pv.source_call_log_id, pv.booking_source, pv.held_on_day, pv.window_days, f.fam
     FROM plan_visits pv
     CROSS JOIN LATERAL unnest(${familiesSql('pv')}) AS f(fam)
     UNION ALL
@@ -133,7 +147,7 @@ const COUNTED_VISITS_SQL = `
     -- sold-once keys do not. An add-on records no channel of its own, so its source is the office.
     SELECT a.id, pv.customer_id, pv.scheduled_date, a.created_at, a.service_key_snapshot, a.service_name AS service_type,
            NULL::uuid AS source_estimate_id, NULL AS source, NULL::uuid AS source_call_log_id, NULL AS booking_source,
-           pv.held_on_day, f.fam
+           pv.held_on_day, pv.window_days, f.fam
     FROM scheduled_service_addons a
     JOIN plan_visits pv ON pv.id = a.scheduled_service_id
     CROSS JOIN LATERAL unnest(${familiesSql('a', 'service_name')}) AS f(fam)
@@ -149,12 +163,12 @@ const COUNTED_VISITS_SQL = `
     WHERE v.fam IS NOT NULL AND v.held_on_day
       -- Only visits already booked by the end of the day (ET): a later purchase never rewrites a closed month.
       AND v.created_at < (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York'
-      AND v.scheduled_date BETWEEN CAST(? AS date) - ${WINDOW_DAYS} AND CAST(? AS date) + ${WINDOW_DAYS}
+      AND v.scheduled_date BETWEEN CAST(? AS date) - v.window_days AND CAST(? AS date) + v.window_days
     GROUP BY v.customer_id, v.fam
   )`;
 
 function asOfBindings(asOf) {
-  return [asOf, asOf, asOf, asOf, asOf];
+  return [asOf, asOf, asOf, asOf, asOf, asOf];
 }
 
 function requireDate(value) {
@@ -258,7 +272,7 @@ async function pestOnlySummary(db, asOfDate) {
       WHERE v.fam = 'pest' AND v.held_on_day
         -- The same visits that made the family held: booked by the day, inside the window.
         AND v.created_at < (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York'
-        AND v.scheduled_date BETWEEN CAST(? AS date) - ${WINDOW_DAYS} AND CAST(? AS date) + ${WINDOW_DAYS}
+        AND v.scheduled_date BETWEEN CAST(? AS date) - v.window_days AND CAST(? AS date) + v.window_days
       ORDER BY v.customer_id, v.scheduled_date DESC, v.id
     )
     SELECT c.id, c.first_name, c.last_name, c.city, l.pest_service_key, COUNT(*) OVER () AS total_count
