@@ -1,11 +1,11 @@
-import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { AuthContext } from './authContext';
 import api from '../utils/api';
 import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
 import { clearNativeBadge } from '../native/nativeBadge';
 import { endVisitCards } from '../native/visitCard';
 import { clearSavedHome, homeIdentityKey, readHomeSnapshot, snapshotEligible, writeHomeSnapshot } from '../lib/homeSnapshot';
 
-const AuthContext = createContext(null);
 
 // Contact session (GATE_CONTACT_LOGIN): /auth/me names an on-location contact
 // signed in with their own number as actor.kind 'contact'. One reader for the
@@ -656,6 +656,9 @@ export function AuthProvider({ children }) {
         api.request('/auth/logout', {
           method: 'POST',
           body: JSON.stringify({ refreshToken }),
+          // The Face ID lock's phone code path opens /login right after
+          // logout resolves; keepalive lets the revocation outlive that unload.
+          keepalive: true,
         }).catch(() => {});
       }
     })();
@@ -663,6 +666,9 @@ export function AuthProvider({ children }) {
     tokenRelease.finally(() => {
       if (logoutTokenReleaseRef.current === tokenRelease) logoutTokenReleaseRef.current = null;
     });
+    // Resolves once the saved credentials are gone (the Face ID lock waits on
+    // it before it opens /login; existing callers ignore it).
+    return tokenRelease;
   };
 
   // Stable identity (uncapped codex r1t P1): the tabs re-read the list from

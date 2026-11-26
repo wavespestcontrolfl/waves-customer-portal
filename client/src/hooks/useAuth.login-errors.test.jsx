@@ -185,6 +185,7 @@ describe('logout', () => {
     expect(api.request).toHaveBeenLastCalledWith('/auth/logout', {
       method: 'POST',
       body: JSON.stringify({ refreshToken: 'refresh-1' }),
+      keepalive: true,
     });
   });
 });

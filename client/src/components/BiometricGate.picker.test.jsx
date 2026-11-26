@@ -11,6 +11,7 @@ vi.mock('../native/platform', () => ({
   hasSessionToken: () => true,
 }));
 vi.mock('../native/biometric', () => ({
+  NEEDS_PHONE_CODE: 'needs-phone-code',
   authenticateBiometric: vi.fn(async () => true),
 }));
 vi.mock('@capacitor/app', () => ({

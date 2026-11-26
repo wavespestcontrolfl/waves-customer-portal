@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { isNativeApp, hasSessionToken } from '../native/platform';
-import { authenticateBiometric } from '../native/biometric';
+import { authenticateBiometric, NEEDS_PHONE_CODE } from '../native/biometric';
+import { useOptionalAuth } from '../hooks/authContext';
 import { NATIVE_PICKER_EVENT } from '../native/camera';
 import { COLORS, FONTS } from '../theme-brand';
 import { useGlassMotion } from '../glass/glass-motion';
@@ -74,6 +75,11 @@ const PICKER_GRACE_MS = 3 * 60 * 1000;
 export default function BiometricGate({ children }) {
   const [locked, setLocked] = useState(() => isNativeApp() && hasSessionToken());
   const [checking, setChecking] = useState(false);
+  // Face ID cannot run in this app build: the lock offers the phone number
+  // code sign-in instead (owner 11-26). It never opens without a check.
+  const [needsPhoneCode, setNeedsPhoneCode] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const auth = useOptionalAuth();
   useGlassMotion(locked);
   const contentRef = useRef(null);
   const unlockBtnRef = useRef(null);
@@ -131,7 +137,9 @@ export default function BiometricGate({ children }) {
       // listener has already re-locked — don't let a stale success overwrite that
       // newer lock and expose content on the next return.
       const stillForeground = typeof document === 'undefined' || document.visibilityState === 'visible';
-      const unlocked = ok && stillForeground;
+      const phoneCode = ok === NEEDS_PHONE_CODE;
+      setNeedsPhoneCode(phoneCode);
+      const unlocked = ok === true && stillForeground;
       setLocked(!unlocked);
       lockedRef.current = !unlocked;
       // Keep ignoring app-state changes briefly to swallow the trailing foreground
@@ -145,6 +153,21 @@ export default function BiometricGate({ children }) {
       }, 700);
     }
   }, []);
+
+  // Phone code fallback: sign out (the saved credentials go first, so the
+  // reload cannot land back on this lock), then open the code sign-in.
+  const usePhoneCode = useCallback(async () => {
+    setSigningOut(true);
+    try {
+      if (auth?.logout) {
+        await auth.logout();
+      } else {
+        localStorage.removeItem('waves_token');
+        localStorage.removeItem('waves_refresh_token');
+      }
+    } catch { /* the sign-in page still opens */ }
+    window.location.assign('/login');
+  }, [auth]);
 
   // Keep lockedRef in sync so the (stable) appStateChange listener reads current state.
   useEffect(() => { lockedRef.current = locked; }, [locked]);
@@ -291,7 +314,9 @@ export default function BiometricGate({ children }) {
         <div
           role="dialog"
           aria-modal="true"
-          aria-label="Waves is locked. Unlock with Face ID to view your account."
+          aria-label={needsPhoneCode
+            ? 'Waves is locked. Sign in with a text code to view your account.'
+            : 'Waves is locked. Unlock with Face ID to view your account.'}
           style={{
             position: 'fixed', inset: 0, zIndex: 99999, overflow: 'hidden',
             background: GLASS_SCENE_BG,
@@ -345,8 +370,8 @@ export default function BiometricGate({ children }) {
               <button
                 type="button"
                 ref={unlockBtnRef}
-                onClick={attempt}
-                disabled={checking}
+                onClick={needsPhoneCode ? usePhoneCode : attempt}
+                disabled={checking || signingOut}
                 data-glass-accent=""
                 style={{
                   position: 'relative', width: '100%', minHeight: 52,
@@ -355,10 +380,12 @@ export default function BiometricGate({ children }) {
                   fontFamily: FONTS.ui, fontSize: 17, fontWeight: 600,
                   // fallbacks only — the data-glass-accent rules repaint these
                   background: COLORS.yellow, color: COLORS.glassNavy,
-                  opacity: checking ? 0.65 : 1,
+                  opacity: checking || signingOut ? 0.65 : 1,
                 }}
               >
-                {checking ? 'Unlocking…' : 'Unlock'}
+                {needsPhoneCode
+                  ? (signingOut ? 'Opening sign-in…' : 'Sign in with a text code')
+                  : (checking ? 'Unlocking…' : 'Unlock')}
               </button>
             </div>
           </div>
