@@ -85,7 +85,7 @@ const {
 
 function chain(overrides = {}) {
   const q = {};
-  ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'select', 'orderBy', 'limit', 'forUpdate']
+  ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'whereExists', 'select', 'orderBy', 'limit', 'forUpdate']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => overrides.first);
   q.update = jest.fn(async () => (overrides.update !== undefined ? overrides.update : 1));

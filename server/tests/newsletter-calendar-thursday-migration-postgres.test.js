@@ -29,6 +29,8 @@ const PAST_THU = '2020-06-04';
         scheduled_for timestamptz,
         proof_approved_at timestamptz,
         proof_approval_email_id text,
+        proof_token text,
+        proof_sent_at timestamptz,
         updated_at timestamptz DEFAULT NOW()
       )`);
     await database.raw(`
@@ -126,5 +128,45 @@ const PAST_THU = '2020-06-04';
     await migration.up(database);
     await migration.down(database);
     expect(dateOf((await byId(row.id)).week_of)).toBe(FUTURE_TUE);
+  });
+
+  describe('rollback state', () => {
+    // Weeks are Thursdays here: the state the Thursday code leaves behind.
+    test('pending weeks go back to Tuesday 6:00 AM ET, and a proofed draft and a queued send become plain drafts a fresh proof can claim', async () => {
+      await database.raw('ALTER TABLE newsletter_calendar DROP CONSTRAINT chk_calendar_week_of_tuesday');
+      await database.raw('ALTER TABLE newsletter_calendar ADD CONSTRAINT chk_calendar_week_of_thursday CHECK (EXTRACT(ISODOW FROM week_of) = 4)');
+      const proofed = await send('draft', { proof_token: 'ab12cd34', proof_sent_at: new Date() });
+      const queued = await send('scheduled', {
+        scheduled_for: `${FUTURE_THU}T10:00:00Z`, proof_approved_at: new Date(), proof_approval_email_id: 'm1', proof_token: 'cd34ef56', proof_sent_at: new Date(),
+      });
+      const planned = await week('2099-06-11', 'planned');
+      const drafted = await week(FUTURE_THU, 'drafted', proofed.id);
+      const scheduled = await week('2099-06-18', 'scheduled', queued.id);
+      await migration.down(database);
+
+      expect(dateOf((await byId(planned.id)).week_of)).toBe('2099-06-09');
+      expect(dateOf((await byId(drafted.id)).week_of)).toBe(FUTURE_TUE);
+      expect((await byId(drafted.id)).target_send_at.toISOString()).toBe(`${FUTURE_TUE}T10:00:00.000Z`); // Tuesday 6:00 AM EDT
+      expect((await byId(planned.id)).target_send_at.toISOString()).toBe('2099-06-09T10:00:00.000Z');
+      // the queued week is a drafted week again, still linked
+      expect(await byId(scheduled.id)).toMatchObject({ status: 'drafted', send_id: queued.id });
+      const cleared = { status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null, proof_approval_email_id: null };
+      expect(await database('newsletter_sends').where({ id: proofed.id }).first()).toMatchObject(cleared);
+      expect(await database('newsletter_sends').where({ id: queued.id }).first()).toMatchObject(cleared);
+      // the Tuesday CHECK is back
+      await expect(week('2099-06-12', 'planned')).rejects.toThrow(/chk_calendar_week_of_tuesday/);
+    });
+
+    test('a past week and a send already sending keep their state', async () => {
+      await database.raw('ALTER TABLE newsletter_calendar DROP CONSTRAINT chk_calendar_week_of_tuesday');
+      await database.raw('ALTER TABLE newsletter_calendar ADD CONSTRAINT chk_calendar_week_of_thursday CHECK (EXTRACT(ISODOW FROM week_of) = 4)');
+      const sending = await send('sending', { proof_token: 'ab12cd34', proof_sent_at: new Date() });
+      const past = await week(PAST_THU, 'drafted');
+      const live = await week(FUTURE_THU, 'scheduled', sending.id);
+      await migration.down(database);
+      expect((await byId(past.id)).target_send_at.toISOString()).toBe(`${PAST_THU}T10:00:00.000Z`);
+      expect(await byId(live.id)).toMatchObject({ status: 'scheduled', send_id: sending.id });
+      expect(await database('newsletter_sends').where({ id: sending.id }).first()).toMatchObject({ status: 'sending', proof_token: 'ab12cd34' });
+    });
   });
 });

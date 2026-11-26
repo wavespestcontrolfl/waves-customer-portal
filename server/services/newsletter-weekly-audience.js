@@ -19,8 +19,10 @@
  * after the plan, is skipped. The weekly has no holdout group (the name is only how the sender
  * recognizes a planned audience), so nobody is held out here.
  *
- * Only issues that went out ('sent') count toward WARM_ISSUES. A held, skipped or failed issue
- * does not use up a warm step, so the widening waits for three issues readers actually got.
+ * Only issues that went out ('sent') and reached at least one reader (a delivery row passing the
+ * sender's reachedDelivery rule) count toward WARM_ISSUES. A held, skipped or failed issue, or a
+ * 'sent' one whose rows were all skipped or bounced, does not use up a warm step, so the
+ * widening waits for three issues readers actually got.
  *
  * The sender refuses a weekly issue whose phase is missing or whose warm list is missing
  * (newsletter-sender.js audienceRefusal), so a draft that never got a phase cannot reach the
@@ -30,7 +32,6 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { getFlagshipType } = require('../config/newsletter-types');
 const {
   WARM_DAYS, DAY_MS, addressKey, warmAudienceQuery,
 } = require('./newsletter-warm-audience');
@@ -42,12 +43,21 @@ const PHASE_ALL = 'all';
 /** The name the send's segment_filter gives the weekly warm audience (newsletter-sender.js SEND_HOLDOUTS). */
 const WEEKLY_WARM_PLAN = 'weekly-warm';
 
-const flagshipKey = () => getFlagshipType().key;
-
-/** Weekly issues readers already got in the warm phase. */
+/**
+ * Weekly issues readers already got in the warm phase: 'sent' issues of the warm phase with at
+ * least one delivery row that reached its reader by the sender's own rule (reachedDelivery). A
+ * 'sent' issue whose rows were all skipped, bounced or dropped reached nobody, so it does not use
+ * up a warm step. Counted by phase alone, not by type, so a legacy flagship row with no type
+ * (promoted by its calendar link) counts too.
+ */
 async function sentWarmIssueCount(knex = db) {
-  const row = await knex('newsletter_sends')
-    .where({ newsletter_type: flagshipKey(), audience_phase: PHASE_WARM, status: 'sent' })
+  // Loaded here, not at the top: newsletter-sender.js loads this module.
+  const { reachedDelivery } = require('./newsletter-sender');
+  const row = await knex('newsletter_sends as s')
+    .where({ 's.audience_phase': PHASE_WARM, 's.status': 'sent' })
+    .whereExists((sub) => {
+      reachedDelivery(sub.select(knex.raw('1')).from('newsletter_send_deliveries as d').whereRaw('d.send_id = s.id'));
+    })
     .count('* as c')
     .first();
   return Number(row?.c) || 0;
@@ -107,8 +117,11 @@ async function planWeeklyAudience({ asOf = new Date(), knex = db } = {}) {
  * Returns the row as stored afterwards.
  */
 async function ensureFlagshipAudience(send, { asOf = new Date(), knex = db } = {}) {
-  if (!send || send.newsletter_type !== flagshipKey()) return send;
-  if (send.audience_phase || send.status !== 'draft') return send;
+  if (!send || send.audience_phase || send.status !== 'draft') return send;
+  // Lazy: newsletter-event-selection pulls the event stack. A send with no type is a flagship when
+  // the flagship calendar links it, the same rule the sender and the lineup gates use.
+  const { isFlagshipSend } = require('./newsletter-event-selection');
+  if (!(await isFlagshipSend(send, { knex }))) return send;
   const plan = await planWeeklyAudience({ asOf, knex });
   const updated = await knex('newsletter_sends')
     .where({ id: send.id, status: 'draft' })

@@ -1,8 +1,12 @@
 const mockValidateSelection = jest.fn(async () => ({ valid: true, errors: [], flagship: true }));
 
 jest.mock('../models/db', () => jest.fn());
+// isFlagshipSend: the flagship type, or a NULL-type send the flagship calendar links (every
+// NULL-type fixture here is a linked one).
+const mockIsFlagshipSend = jest.fn(async (send) => send?.newsletter_type === 'local-weekly-fresh-events' || send?.newsletter_type === null);
 jest.mock('../services/newsletter-event-selection', () => ({
   validateFlagshipEventSelection: mockValidateSelection,
+  isFlagshipSend: mockIsFlagshipSend,
 }));
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: () => true,
@@ -101,6 +105,15 @@ describe('sendCampaign flagship final gates', () => {
       fetchOnly({ ...FLAGSHIP, ...fields });
       await expect(sendCampaign('send-legacy', { force: true })).rejects.toMatchObject({ code, audienceRefusal: true });
       expect(db).toHaveBeenCalledTimes(1);
+    });
+
+    test('a calendar-linked send with no type needs its audience phase too (it cannot reach the whole list)', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-07-23T10:00:00Z'));
+      fetchOnly({ ...FLAGSHIP, newsletter_type: null, audience_phase: null });
+      await expect(sendCampaign('send-legacy', { force: true })).rejects.toMatchObject({ code: 'UNPLANNED_AUDIENCE', audienceRefusal: true });
+      // a linked NULL-type send with a warm phase but no list is refused as well
+      fetchOnly({ ...FLAGSHIP, newsletter_type: null, audience_phase: 'warm', segment_filter: null });
+      await expect(sendCampaign('send-legacy', { force: true })).rejects.toMatchObject({ code: 'UNPLANNED_AUDIENCE' });
     });
 
     test.each([

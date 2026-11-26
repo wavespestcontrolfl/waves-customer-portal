@@ -1146,7 +1146,7 @@ describe('resumeCampaign — preconditions', () => {
       if (table === 'newsletter_sends') {
         return chain({
           first: {
-            id: 's', status: 'failed', newsletter_type: null, subject: 'Weekend events',
+            id: 's', status: 'failed', newsletter_type: null, audience_phase: 'all', subject: 'Weekend events',
             html_body: '<p>Tickets are $20 at the door.</p>', text_body: 'Tickets are $20 at the door.', event_ids: [],
           },
           onUpdate: (payload) => { sendUpdate = payload; },
@@ -1158,6 +1158,23 @@ describe('resumeCampaign — preconditions', () => {
     });
     await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
     expect(sendUpdate).toBeNull();
+  });
+
+  test('a promoted legacy flagship with no audience phase is refused on resume, as a typed flagship is (it could reach the whole list)', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        return chain({
+          first: {
+            id: 's', status: 'failed', newsletter_type: null, audience_phase: null, subject: 'Weekend events',
+            html_body: '<p>Events.</p>', text_body: 'Events.', event_ids: [],
+          },
+        });
+      }
+      if (table === 'newsletter_send_deliveries') return chain({ count: 1 });
+      if (table === 'newsletter_calendar') return chain({ first: { id: 'cal-1' } });
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'UNPLANNED_AUDIENCE', audienceRefusal: true });
   });
 
   test('a ZERO-ledger failed campaign that fails the claim scan goes back to an editable draft — nobody received it (codex round 13 P2)', async () => {

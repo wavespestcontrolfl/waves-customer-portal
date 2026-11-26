@@ -15,10 +15,14 @@ jest.mock('../services/newsletter-warm-audience', () => {
   const actual = jest.requireActual('../services/newsletter-warm-audience');
   return { ...actual, warmAudienceQuery: jest.fn() };
 });
+jest.mock('../services/newsletter-event-selection', () => ({ isFlagshipSend: jest.fn() }));
+jest.mock('../services/newsletter-sender', () => ({ reachedDelivery: jest.fn((q) => q) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const NewsletterSubscribers = require('../services/newsletter-subscribers');
 const warm = require('../services/newsletter-warm-audience');
+const { isFlagshipSend } = require('../services/newsletter-event-selection');
+const { reachedDelivery } = require('../services/newsletter-sender');
 const {
   WARM_ISSUES, PHASE_WARM, PHASE_ALL, WEEKLY_WARM_PLAN, phaseForSentWarmIssues,
   planWeeklyAudience, ensureFlagshipAudience, recordFlagshipAudience, warmPhaseNote, sentWarmIssueCount,
@@ -29,9 +33,16 @@ const FLAGSHIP = 'local-weekly-fresh-events';
 // A knex stand-in: counts come from `state.sentWarm`; the update records its where/patch.
 function fakeKnex(state) {
   const knex = jest.fn((table) => {
-    expect(table).toBe('newsletter_sends');
+    expect(['newsletter_sends', 'newsletter_sends as s']).toContain(table);
     const q = {
       where: jest.fn((cond) => { q.cond = cond; return q; }),
+      whereExists: jest.fn((build) => {
+        // the delivery sub-query: select 1 from newsletter_send_deliveries as d where d.send_id = s.id
+        const sub = { select: jest.fn(() => sub), from: jest.fn(() => sub), whereRaw: jest.fn(() => sub) };
+        build(sub);
+        q.sub = sub;
+        return q;
+      }),
       whereNull: jest.fn(() => q),
       count: jest.fn(() => q),
       first: jest.fn(async () => (state.patch ? state.row : { c: state.sentWarm })),
@@ -39,11 +50,14 @@ function fakeKnex(state) {
     };
     return q;
   });
+  knex.raw = jest.fn(() => '1');
   return knex;
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
+  isFlagshipSend.mockImplementation(async (send) => send?.newsletter_type === FLAGSHIP);
+  reachedDelivery.mockImplementation((q) => q);
   warm.warmAudienceQuery.mockResolvedValue([
     { id: 7, email: 'a@example.com' },
     { id: 9, email: 'B@Example.com ' },
@@ -57,12 +71,18 @@ describe('which phase an issue uses', () => {
     expect([3, 4, 10].map(phaseForSentWarmIssues)).toEqual([PHASE_ALL, PHASE_ALL, PHASE_ALL]);
   });
 
-  test('only sent warm issues count: the count query names type, phase and status', async () => {
+  test('only sent warm issues that reached a reader count: phase, status and the sender\'s reachedDelivery on the issue\'s delivery rows', async () => {
     const state = { sentWarm: '2' };
     const knex = fakeKnex(state);
     await expect(sentWarmIssueCount(knex)).resolves.toBe(2);
     const q = knex.mock.results[0].value;
-    expect(q.cond).toEqual({ newsletter_type: FLAGSHIP, audience_phase: 'warm', status: 'sent' });
+    expect(q.cond).toEqual({ 's.audience_phase': 'warm', 's.status': 'sent' });
+    // the existence check runs reachedDelivery over this issue's rows (d.send_id = s.id)
+    expect(q.whereExists).toHaveBeenCalledTimes(1);
+    expect(reachedDelivery).toHaveBeenCalledTimes(1);
+    expect(reachedDelivery).toHaveBeenCalledWith(q.sub);
+    expect(q.sub.from).toHaveBeenCalledWith('newsletter_send_deliveries as d');
+    expect(q.sub.whereRaw).toHaveBeenCalledWith('d.send_id = s.id');
   });
 });
 
@@ -112,6 +132,15 @@ describe('ensureFlagshipAudience', () => {
     expect(row.audience_phase).toBe('warm');
   });
 
+  test('a send with no type that the flagship calendar links gets a phase too', async () => {
+    isFlagshipSend.mockResolvedValue(true);
+    const state = { sentWarm: '0', row: { id: 'send-1', audience_phase: 'warm' } };
+    await ensureFlagshipAudience(draft({ newsletter_type: null }), { knex: fakeKnex(state) });
+    expect(isFlagshipSend).toHaveBeenCalledWith(expect.objectContaining({ id: 'send-1', newsletter_type: null }), expect.any(Object));
+    expect(state.patch.audience_phase).toBe('warm');
+    expect(JSON.parse(state.patch.segment_filter).holdout).toBe(WEEKLY_WARM_PLAN);
+  });
+
   test('the widened phase stores a null segment', async () => {
     const state = { sentWarm: '3', row: { id: 'send-1', audience_phase: 'all' } };
     await ensureFlagshipAudience(draft(), { knex: fakeKnex(state) });
@@ -122,7 +151,7 @@ describe('ensureFlagshipAudience', () => {
     ['a draft that already has a phase', draft({ audience_phase: 'all' })],
     ['a send that is not a draft', draft({ status: 'scheduled' })],
     ['a Waves Pest Insider send', draft({ newsletter_type: 'pest-insider-monthly' })],
-    ['a send with no type', draft({ newsletter_type: null })],
+    ['a send with no type and no calendar link', draft({ newsletter_type: null })],
   ])('leaves %s as it is', async (_label, send) => {
     const knex = fakeKnex({ sentWarm: '0' });
     await expect(ensureFlagshipAudience(send, { knex })).resolves.toBe(send);
