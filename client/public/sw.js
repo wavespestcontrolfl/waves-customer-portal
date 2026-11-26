@@ -362,7 +362,11 @@ function withShellRefresh(fn) {
   return serializeOn(SHELL_REFRESH_LOCK, shellRefreshChain, fn);
 }
 async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq, { supersedable = true, startedAt = Date.now(), customerShell = false, advanceLive = true } = {}) {
-  return withShellRefresh(() => replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, startedAt, { customerShell, advanceLive }));
+  const warm = await withShellRefresh(() => replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, startedAt, { customerShell, advanceLive }));
+  // The optional chunk warm runs after the lock is released: a stalled
+  // fetch there must never queue a later refresh or an install. The caller's
+  // event.waitUntil still covers it, since this promise settles after it.
+  if (warm) await warm().catch(() => {});
 }
 
 // The customer app's own saved copy, kept apart from '/': every page load
@@ -646,9 +650,11 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   // shell's direct assets — not the routes that page already loaded.
   if (previousBuildId !== buildId) await pruneStaleAssets(cache, [buildId, previousBuildId, liveBuildId]);
   // Last, once the prune has freed what the older build held: the copy is
-  // committed and stays a valid slow-network copy whatever happens here. The
-  // install leaves this to the first refresh, so it is never slowed by it.
-  await cacheCustomerFiles(cache, buildId, supersedable ? customerFiles : null, assets).catch(() => {});
+  // committed and stays a valid slow-network copy whatever happens after. The
+  // chunk warm is handed back to run outside the shell-refresh lock
+  // (cacheCompleteShellResponse). The install leaves it to the first refresh,
+  // so it is never slowed by it.
+  return customerWarm(supersedable ? customerFiles : null, buildId, assets);
 }
 
 // The build's list of customer files. Like the build's file list, it is
@@ -677,18 +683,47 @@ async function fetchCustomerAssets(customerShell, assets, owned) {
 // is the same bytes in every build) is only claimed for this build. A file
 // that fails is left for the next refresh; the copy stays unserved-first until
 // every file is there (freshCompleteCopy).
-async function cacheCustomerFiles(cache, buildId, listed, shellAssets) {
-  if (!listed) return;
-  await Promise.allSettled(listed.filter(file => !shellAssets.includes(file)).map(async file => {
+//
+// It runs outside the shell-refresh lock, so a slow or hung fetch (each ends
+// at CUSTOMER_FILE_TIMEOUT_MS) delays no refresh and no install. The warm can
+// finish long after its commit: before it writes, it checks that the customer
+// copy still names this build, and a build the copy has moved past is never
+// written (the next prune would only have to drop it).
+const CUSTOMER_FILE_TIMEOUT_MS = 20000;
+function customerWarm(listed, buildId, shellAssets) {
+  if (!listed) return undefined;
+  return () => cacheCustomerFiles(buildId, listed.filter(file => !shellAssets.includes(file)));
+}
+async function copyKeepsBuild(cache, buildId) {
+  const keep = await customerShellKeep(cache).catch(() => null);
+  return Boolean(keep) && keep.buildId === buildId;
+}
+function fetchWithin(url, ms) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      if (controller) controller.abort();
+      reject(new Error(`Customer file timed out: ${url}`));
+    }, ms);
+  });
+  const request = new Request(url, controller ? { signal: controller.signal } : undefined);
+  return Promise.race([fetch(request), timeout]).finally(() => clearTimeout(timer));
+}
+async function cacheCustomerFiles(buildId, files) {
+  const cache = await caches.open(CACHE_NAME);
+  if (!files.length || !(await copyKeepsBuild(cache, buildId))) return;
+  await Promise.allSettled(files.map(async file => {
     const have = await cache.match(file);
     if (have && rawTagsOf(have).includes(buildId)) return;
     let response = null;
     if (!have) {
-      response = await fetch(new Request(file));
+      response = await fetchWithin(file, CUSTOMER_FILE_TIMEOUT_MS);
       if (!response.ok) throw new Error(`Customer file failed (${response.status}): ${file}`);
       if (response.redirected) throw new Error(`Customer file redirected: ${file}`);
     }
     await withAssetWrites(async () => {
+      if (!(await copyKeepsBuild(cache, buildId))) return;
       const latest = (await cache.match(file)) || response;
       if (!latest) throw new Error(`Customer file gone: ${file}`);
       await cache.put(file, tagWithBuild(latest, [buildId]));
@@ -968,17 +1003,23 @@ async function answerNavigation(request, attempt, { customer, networkOnly }, dec
       }
     });
     if (!networkOnly) {
-      // A copy that is young and whole answers now, on any signal; the fetch
-      // above keeps running and the refresh saves the new build for the next
-      // open. Everything else waits for the network, up to SLOW_NAV_MS.
-      const fresh = await freshCompleteCopy();
-      if (fresh) {
-        decide('saved');
-        await noteServedCopy(fresh, navSeq);
-        return fresh;
-      }
+      // The deadline and the network fetch start with the navigation. A copy
+      // that is young and whole answers now, on any signal; the fetch keeps
+      // running and the refresh saves the new build for the next open. The
+      // check reads the cache, which can be slow: it races the network's
+      // whole page and the deadline instead of holding them back, so a ready
+      // page wins over a check still pending, and SLOW_NAV_MS counts from
+      // the start of the navigation.
       const slow = new Promise(resolve => { timer = setTimeout(resolve, SLOW_NAV_MS, 'slow'); });
-      const first = await Promise.race([bodyReady, slow]);
+      const checked = freshCompleteCopy().then(fresh => ({ fresh }));
+      const early = await Promise.race([checked, bodyReady, slow]);
+      if (early.fresh) {
+        decide('saved');
+        await noteServedCopy(early.fresh, navSeq);
+        return early.fresh;
+      }
+      // No usable copy (the check ended), or the network or the deadline came first.
+      const first = early.fresh === null ? await Promise.race([bodyReady, slow]) : early;
       // Slow, a body that broke off, or no answer at all: the customer copy.
       if (first === 'slow' || first.bodyFailed || !first.response) {
         const shell = await savedShell();

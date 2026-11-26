@@ -2380,6 +2380,70 @@ describe('service-worker saved-first customer copy', () => {
     expect(await servedFirst(load())).toBe(true);
   });
 
+  it('answers with a ready network page while the cache check is still reading', async () => {
+    const { cache, net, load } = await start({ savedAt: HOUR });
+    let releaseCache;
+    cache.matchGate = new Promise(resolve => { releaseCache = resolve; });
+    net.release();
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(nav.done).toBe(true);
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+    releaseCache();
+  });
+
+  it('counts the 3 s deadline from the start of the navigation, not from the end of a slow cache check', async () => {
+    const { cache, net, load } = await start({ savedAt: null });
+    let releaseCache;
+    cache.matchGate = new Promise(resolve => { releaseCache = resolve; });
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(2000);
+    releaseCache();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(nav.done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(savedHtml);
+    net.release();
+    await result.settled();
+  });
+
+  it('releases the shell-refresh lock before the chunk warm, so a hung chunk fetch holds back no install', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR });
+    worker.setFetch(async (request) => (request.url.endsWith('Portal-NEW.js') ? new Promise(() => {}) : net.serve(request)));
+    net.release();
+    const nav = await load('/?waves-network=1').promise;
+    const settled = nav.settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    // The new copy is committed; the warm of Portal-NEW.js is still hanging.
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(networkHtml);
+    // An install takes the same lock: it finishes while the warm hangs.
+    worker.setFetch(async (request) => (request.url.endsWith('Portal-NEW.js') ? new Promise(() => {}) : net.serve(request.url === '/' ? { ...request, mode: 'navigate' } : request)));
+    await worker.dispatchInstall();
+    // Each warm fetch ends at its own limit, and the event's work then settles.
+    await vi.advanceTimersByTimeAsync(20000);
+    await settled;
+    expect(await cache.match('/assets/Portal-NEW.js')).toBeUndefined();
+  });
+
+  it('writes no chunk for a build the customer copy has moved past', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR });
+    let releaseChunk;
+    const chunkGate = new Promise(resolve => { releaseChunk = resolve; });
+    worker.setFetch(async (request) => {
+      if (request.url.endsWith('Portal-NEW.js')) { await chunkGate; return fakeResponse('late chunk'); }
+      return net.serve(request);
+    });
+    net.release();
+    const settled = (await load('/?waves-network=1').promise).settled();
+    await vi.advanceTimersByTimeAsync(10);
+    // A newer build's copy lands while the old build's chunk is still on its way.
+    await cache.put(CUSTOMER_SHELL_URL, new FakeResponse(shellHtml(['/assets/index-NEWER.js']), { headers: { 'x-waves-saved-at': String(Date.now()) } }));
+    releaseChunk();
+    await settled;
+    expect(await cache.match('/assets/Portal-NEW.js')).toBeUndefined();
+  });
+
   it('does not fetch a chunk it already holds, and only claims it for the new build', async () => {
     const { cache, worker, net, load } = await start({ savedAt: HOUR, cached: [...OLD_FILES, '/assets/Portal-NEW.js'] });
     const fetched = [];

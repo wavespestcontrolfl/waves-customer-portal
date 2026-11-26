@@ -19,8 +19,17 @@ export function customerAssetFiles(bundle, base = '/') {
   const entry = chunks.find((item) => item.isEntry);
   if (!portal || !entry) return null;
   const files = new Set();
-  const visit = (chunk, { lazy }) => {
-    if (!chunk || files.has(chunk.fileName)) return;
+  // A chunk is walked once for its static imports and once more for its lazy
+  // ones. The entry's walk follows imports only, and a chunk the entry shares
+  // with PortalPage must still have its own dynamic imports followed when
+  // PortalPage reaches it. A lazy walk covers the static one.
+  const staticSeen = new Set();
+  const lazySeen = new Set();
+  const visit = (chunk, { lazy: wanted }) => {
+    // The entry is a boundary: its own lazy imports are every page of the app.
+    const lazy = wanted && !chunk?.isEntry;
+    if (!chunk || lazySeen.has(chunk.fileName) || (!lazy && staticSeen.has(chunk.fileName))) return;
+    (lazy ? lazySeen : staticSeen).add(chunk.fileName);
     files.add(chunk.fileName);
     for (const css of chunk.viteMetadata?.importedCss || []) files.add(css);
     for (const name of chunk.imports || []) visit(bundle[name], { lazy });

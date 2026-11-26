@@ -4,7 +4,7 @@ import { CUSTOMER_BUILD_ASSETS_FILE, customerAssetFiles, customerBuildAssetsPlug
 // A Rollup output bundle as Vite hands it to generateBundle: the entry (which
 // lazy-loads every page, staff pages included), the PortalPage chunk with a
 // shared chunk and a lazy native fallback, a staff page, and an asset.
-function bundleWith({ portal = true } = {}) {
+function bundleWith({ portal = true, shared = false } = {}) {
   const chunk = (fileName, moduleId, extra = {}) => ({
     type: 'chunk', fileName, moduleIds: [`/w/client/src/${moduleId}`], imports: [], dynamicImports: [], viteMetadata: { importedCss: new Set() }, ...extra,
   });
@@ -15,6 +15,9 @@ function bundleWith({ portal = true } = {}) {
     chunk('assets/web-d4.js', 'native/web.js'),
     chunk('assets/CustomersPageV2-e5.js', 'pages/admin/CustomersPageV2.jsx', { imports: ['assets/index-a1.js'] }),
     { type: 'asset', fileName: 'assets/logo-f6.png' },
+    // A chunk the entry and PortalPage both import, which lazy-loads one more.
+    shared && chunk('assets/Shared-g7.js', 'components/Shared.jsx', { dynamicImports: ['assets/Lazy-h8.js'] }),
+    shared && chunk('assets/Lazy-h8.js', 'components/Lazy.jsx', { viteMetadata: { importedCss: new Set(['assets/Lazy-h8.css']) } }),
   ].filter(Boolean);
   return Object.fromEntries(items.map((item) => [item.fileName, item]));
 }
@@ -24,6 +27,15 @@ describe('customerAssetFiles (the files a customer screen can load)', () => {
     expect(customerAssetFiles(bundleWith())).toEqual([
       '/assets/Card-c3.css', '/assets/Card-c3.js', '/assets/PortalPage-b2.js', '/assets/index-a1.css', '/assets/index-a1.js', '/assets/web-d4.js',
     ]);
+  });
+
+  it('follows the lazy imports of a chunk the entry shares with PortalPage, and still skips the entry\'s own pages', () => {
+    const bundle = bundleWith({ shared: true });
+    bundle['assets/index-a1.js'].imports = ['assets/Shared-g7.js'];
+    bundle['assets/PortalPage-b2.js'].imports = ['assets/index-a1.js', 'assets/Card-c3.js', 'assets/Shared-g7.js'];
+    const files = customerAssetFiles(bundle);
+    expect(files).toEqual(expect.arrayContaining(['/assets/Shared-g7.js', '/assets/Lazy-h8.js', '/assets/Lazy-h8.css']));
+    expect(files).not.toContain('/assets/CustomersPageV2-e5.js');
   });
 
   it('lists nothing when the build has no PortalPage chunk', () => {
