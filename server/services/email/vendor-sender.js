@@ -58,20 +58,19 @@ async function registryHasSender(mailbox, reg, shared) {
   return !!row;
 }
 
-// Earlier vendor mail from this sender.
-// Unsubscribe path: any mailbox on a vendor-owned registrable domain counts
-// (receipts and promos come from different mailboxes); on a shared provider
-// only the same mailbox.
-// strict (spam-block path): only the SAME mailbox, and only a booked expense
-// (expense_created / expense_duplicate). A classifier label, a rejected
-// invoice, or another merchant on the same billing platform never exempts a
-// sender from the block list.
+// Earlier vendor mail from this sender. Scope: on a shared provider or a
+// billing platform only the SAME mailbox; on a vendor-owned registrable
+// domain any mailbox (receipts come from billing@, promos from offers@).
+// strict (spam-block path) narrows the EVIDENCE, not the scope: only a booked
+// expense (expense_created / expense_duplicate) whose expense row still
+// exists. A classifier label or a rejected invoice never exempts a sender
+// from the block list.
 async function historyHasSender(email, mailbox, reg, shared, strict) {
   const q = db('emails');
-  if (shared || strict) {
-    // Stored senders are bare addresses (display forms: 2 of ~89k rows), so
-    // one exact comparison — no LIKE, so no wildcard can widen the match.
-    q.whereRaw('lower(from_address) = ?', [mailbox]);
+  if (shared) {
+    // Exact mailbox, bare or display form ("Name <a@x.com>"). strpos, not
+    // LIKE: no character in the mailbox can act as a wildcard.
+    q.whereRaw('(lower(from_address) = ? OR strpos(lower(from_address), ?) > 0)', [mailbox, `<${mailbox}>`]);
   } else {
     q.whereRaw(
       '(lower(from_address) LIKE ? OR lower(from_address) LIKE ? OR lower(from_address) LIKE ? OR lower(from_address) LIKE ?)',
@@ -99,8 +98,7 @@ async function historyHasSender(email, mailbox, reg, shared, strict) {
  *
  * Unsubscribe path (default): a failed lookup answers true — keeping a promo
  * subscription is the safe side.
- * Spam-block path ({ strict: true }): history needs a booked expense from the
- * same mailbox, and a
+ * Spam-block path ({ strict: true }): history needs a live booked expense, and a
  * failed lookup THROWS, so settleDeferredBlock keeps the row pending and
  * retries instead of marking the block done.
  */
