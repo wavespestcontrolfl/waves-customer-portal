@@ -652,13 +652,15 @@ const NAMED_SERVICE_ASK_RE = /\bhow many\s+(?!(?:prepaid|more|total|remaining|vi
 const NAMED_PLAN_ASK_RE = /\b(?:my|our|the)\s+(?!(?:prepaid|current|whole|entire|annual|yearly|monthly|quarterly|regular|same|new|old|existing|service|payment|waveguard|wave|pay|own|last|next|other|first)\b)[a-z-]+\s+plan\b/i;
 const FOR_SERVICE_ASK_RE = /\b(?:visits?|appointments?|applications?|treatments?|services?)\s+(?:for|of|on)\s+(?!(?:my|our|the|this|next|that|me|us|you|a|an|any|each|every|plan)\b)[a-z-]+/i;
 // A cadence the customer named ("monthly", "quarterly") must be in the plan's own label too: a quarterly plan's count never answers a monthly one.
-const PLAN_CADENCES = [/\bmonthly\b/i, /\bquarterly\b/i, /\bbi-?monthly\b/i, /\bweekly\b/i, /\bannual(?:ly)?\b/i];
+// (paired with the applications a year it means: an estimate sentence carries its cadence as that count, a prepaid plan's label names it)
+const PLAN_CADENCES = [[/\bmonthly\b/i, 12], [/\bquarterly\b/i, 4], [/\bbi-?monthly\b/i, 6], [/\bweekly\b/i, 52], [/\bannual(?:ly)?\b/i, 1]];
 // The service a copied estimate or prepaid sentence is about: its own label.
 const sentenceServiceLabel = (sentence) => String((/^Your prepaid (.+) plan has /.exec(sentence) || /^Your estimate lists (.+) at \$/.exec(sentence))?.[1] || '');
 const FOR_PRICE_ASK_RE = /\bhow much\b[^.?!]{0,20}\bfor\s+(?!(?:my|our|the|this|it|that|a|an|each|every|one|everything|all|both|me|us)\b)[a-z-]+/i;
 function planServiceOffTarget(sentence, inbound) {
   const label = sentenceServiceLabel(sentence);
-  if (PLAN_CADENCES.some((cadence) => cadence.test(inbound) && !cadence.test(label))) return true;
+  const applications = /per application, (\d{1,2}) applications? a year\.$/.exec(sentence)?.[1];
+  if (PLAN_CADENCES.some(([cadence, perYear]) => cadence.test(inbound) && !(applications ? Number(applications) === perYear : cadence.test(label)))) return true;
   const asked = PLAN_SERVICES.filter((service) => service.test(inbound));
   if (asked.length === 0) return NAMED_SERVICE_ASK_RE.test(inbound) || FOR_SERVICE_ASK_RE.test(inbound) || NAMED_PLAN_ASK_RE.test(inbound) || FOR_PRICE_ASK_RE.test(inbound); // an unrecognized service name needs a person
   return !asked.every((service) => service.test(label)); // naming two services ("Lawn Pest Control") needs a plan that names both

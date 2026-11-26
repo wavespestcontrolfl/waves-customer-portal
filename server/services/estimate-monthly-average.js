@@ -197,7 +197,7 @@ async function perApplicationAverageFor(estimate, { rethrow = false } = {}) {
     // place), so it works on a deep copy: the caller's row (hashed into the
     // review's editVersion) must never change (#6360 pre-push P1).
     const copy = structuredClone(estimate);
-    const ctx = await resolveProposalBillingContext(copy);
+    const ctx = await resolveProposalBillingContext(copy, { rethrow });
     if (!ctx || ctx.billsPerApplication !== true) return null;
     const proposal = normalizeProposal(copy, { recurringMode: 'per_application', livePricing: ctx.livePricing || null });
     const bundle = ctx.livePricing?.bundle || parseData(copy.estimate_data ?? copy.estimateData)?.sendSnapshot?.pricingBundle || null;

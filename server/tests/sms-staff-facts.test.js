@@ -64,6 +64,10 @@ describe('the open estimate\'s price (payment-status contract)', () => {
     expect(check(LAWN, 'How much is the pest control?')).toBe(false);
     expect(check(LAWN, 'What does the lawn cost on the quote?')).toBe(true);
     expect(check(PRICE, 'How much is it?')).toBe(true);
+    // the estimate's cadence is its application count (4 a year = quarterly), never a word in the label
+    expect(check(PRICE, 'How much is quarterly pest control?')).toBe(true);
+    expect(check(PRICE, 'How much is monthly pest control?')).toBe(false);
+    expect(check(LAWN, 'How much is monthly lawn care?')).toBe(false);
     expect(check(PRICE, 'Did you receive my payment?')).toBe(false);
     // not an invoice, balance or past-charge question unless it also names the estimate
     expect(check(PRICE, 'How much do I owe on my invoice?')).toBe(false);

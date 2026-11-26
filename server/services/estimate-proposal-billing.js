@@ -356,7 +356,7 @@ async function perApplicationBillingColumnsExist() {
   return perApplicationColumnsKnownPresent;
 }
 
-async function estimateBillsPerApplication(estimate) {
+async function estimateBillsPerApplication(estimate, { rethrow = false } = {}) {
   try {
     if (!(await perApplicationBillingColumnsExist())) return false;
     const customer = estimate?.customer_id
@@ -374,6 +374,7 @@ async function estimateBillsPerApplication(estimate) {
     // Same fail direction as estimateCustomerPreservesMonthlyBilling in
     // estimate-public.js.
     logger.warn(`[estimate-proposal-billing] billing-lane lookup failed for estimate ${estimate?.id}: ${err.message}`);
+    if (rethrow) throw err;
     return false;
   }
 }
@@ -391,7 +392,7 @@ async function estimateBillsPerApplication(estimate) {
 // Returns null for UNKNOWN (lookup failed) — never false. A transient DB or
 // schema error must not read as "definitely not prepaid" and unlock
 // per-application copy for a plan that may be prepaid (pre-push r6).
-async function estimateSoldAsAnnualPrepay(estimate) {
+async function estimateSoldAsAnnualPrepay(estimate, { rethrow = false } = {}) {
   if (!estimate?.id) return false;
   try {
     if (!(await db.schema.hasTable('annual_prepay_terms'))) return false;
@@ -399,6 +400,7 @@ async function estimateSoldAsAnnualPrepay(estimate) {
     return !!term;
   } catch (err) {
     logger.warn(`[estimate-proposal-billing] prepay lookup failed for estimate ${estimate?.id}: ${err.message}`);
+    if (rethrow) throw err;
     return null;
   }
 }
@@ -451,7 +453,7 @@ function estimateIsPriceLocked(estimate) {
 //
 // Null for a locked estimate and null on any failure: both land on the frozen
 // pricing, which is always safe to render.
-async function resolveLivePricing(estimate) {
+async function resolveLivePricing(estimate, { rethrow = false } = {}) {
   if (estimateIsPriceLocked(estimate)) return null;
   try {
     const {
@@ -459,12 +461,12 @@ async function resolveLivePricing(estimate) {
       defaultFrequencyFromList,
       reconcileFrozenMembershipSnapshot,
     } = require('../routes/estimate-public');
-    if (typeof buildPricingBundle !== 'function') return UNRESOLVED_PRICING;
+    if (typeof buildPricingBundle !== 'function') throw new Error('buildPricingBundle unavailable');
     if (typeof reconcileFrozenMembershipSnapshot === 'function') {
       await reconcileFrozenMembershipSnapshot(estimate);
     }
     const bundle = await buildPricingBundle(estimate);
-    if (!bundle || typeof bundle !== 'object') return UNRESOLVED_PRICING;
+    if (!bundle || typeof bundle !== 'object') throw new Error('pricing bundle unavailable');
     const sellable = (Array.isArray(bundle.frequencies) ? bundle.frequencies : [])
       .filter((entry) => entry && entry.quoteRequired !== true);
     const defaultCandidate = typeof defaultFrequencyFromList === 'function'
@@ -476,6 +478,7 @@ async function resolveLivePricing(estimate) {
     return { bundle, defaultCandidate: defaultCandidate || null, snapshotHit: bundle.snapshotHit === true };
   } catch (err) {
     logger.warn(`[estimate-proposal-billing] live pricing failed for estimate ${estimate?.id}: ${err.message}`);
+    if (rethrow) throw err;
     return UNRESOLVED_PRICING;
   }
 }
@@ -488,18 +491,21 @@ async function resolveLivePricing(estimate) {
  * unlocked estimate: it is the one expensive call here, and every other case
  * renders from frozen pricing exactly as it did before.
  *
+ * `rethrow`: a caller that must tell a FAILED lookup from a conclusive "no" (the texting AI's price facts, so a failure stays retryable at send) gets the
+ * lookup's own error instead of the fail-soft answer; every other caller keeps the fail-soft one.
+ *
  * @returns {Promise<{ billsPerApplication: boolean,
  *   livePricing: { bundle: object, defaultCandidate: object|null }|null }>}
  */
-async function resolveProposalBillingContext(estimate) {
+async function resolveProposalBillingContext(estimate, { rethrow = false } = {}) {
   const [perApplication, prepaid] = await Promise.all([
-    estimateBillsPerApplication(estimate),
-    estimateSoldAsAnnualPrepay(estimate),
+    estimateBillsPerApplication(estimate, { rethrow }),
+    estimateSoldAsAnnualPrepay(estimate, { rethrow }),
   ]);
   const billsPerApplication = perApplication === true && prepaid === false;
   return {
     billsPerApplication,
-    livePricing: billsPerApplication ? await resolveLivePricing(estimate) : null,
+    livePricing: billsPerApplication ? await resolveLivePricing(estimate, { rethrow }) : null,
   };
 }
 
