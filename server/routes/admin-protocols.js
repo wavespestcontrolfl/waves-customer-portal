@@ -78,6 +78,7 @@ const PROGRAM_KEYS = [
   'mosquito',
   'palm_injection',
   'cockroach',
+  'flea',
   'bed_bug',
   'termite',
 ];
@@ -2001,6 +2002,7 @@ router.get('/programs', async (req, res, next) => {
       mosquito: programSummary('mosquito', protocols.mosquito),
       palm_injection: programSummary('palm_injection', protocols.palm_injection),
       cockroach: programSummary('cockroach', protocols.cockroach),
+      flea: programSummary('flea', protocols.flea),
       bed_bug: programSummary('bed_bug', protocols.bed_bug),
       termite: programSummary('termite', protocols.termite),
     }));

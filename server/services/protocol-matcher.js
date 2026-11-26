@@ -7,6 +7,27 @@ const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = requ
 // ("Termite Installation Setup", "… Cartridge Replacement") are station work,
 // not the inspection their names fall to.
 const MATCH_RULES = [
+  // Bed bug cards (2026-11-25): 1 inspection, 2 treatment 1, 3 treatment 2 (day 14), 4 clearance check,
+  // 5 treatment 3 (heavy jobs). The numbered treatments sit above the plain "bed bug treatment" rule, whose
+  // terms would claim them. A booked follow-up of a treatment is treatment 2 (the one `_followup` rule).
+  {
+    programKey: 'bed_bug',
+    visit: 5,
+    reason: 'bed_bug_third_treatment',
+    terms: ['bed bug treatment 3', 'bed bug third treatment', 'third bed bug', 'bed bug heavy'],
+  },
+  {
+    programKey: 'bed_bug',
+    visit: 4,
+    reason: 'bed_bug_clearance',
+    terms: ['bed bug clearance', 'bed bug recheck', 'post treatment inspection'],
+  },
+  {
+    programKey: 'bed_bug',
+    visit: 3,
+    reason: 'bed_bug_followup',
+    terms: ['bed bug follow', 'bed bug treatment 2', 'bed bug second treatment', 'second bed bug'],
+  },
   {
     programKey: 'bed_bug',
     visit: 2,
@@ -24,15 +45,24 @@ const MATCH_RULES = [
   },
   {
     programKey: 'bed_bug',
-    visit: 3,
-    reason: 'bed_bug_followup',
-    terms: ['bed bug follow', 'bed bug recheck', 'post treatment inspection'],
-  },
-  {
-    programKey: 'bed_bug',
     visit: 1,
     reason: 'bed_bug_inspection',
     terms: ['bed bug', 'bedbug', 'bed bugs', 'mattress', 'box spring', 'fecal spotting'],
+  },
+  // Flea: treatment 1, then treatment 2 at day 14 (no third, owner 2026-11-23). A booked follow-up of a flea
+  // visit resolves to treatment 2 through the `_followup` rule, so the growth regulator is never prefilled twice.
+  {
+    programKey: 'flea',
+    visit: 2,
+    reason: 'flea_followup',
+    terms: ['flea follow', 'flea recheck', 'flea treatment 2', 'flea second treatment', 'second flea'],
+  },
+  {
+    programKey: 'flea',
+    visit: 1,
+    reason: 'flea_service',
+    serviceKeys: ['flea_tick'],
+    terms: ['flea', 'fleas'],
   },
   {
     programKey: 'cockroach',
@@ -209,26 +239,13 @@ const MATCH_RULES = [
   },
   {
     programKey: 'pest',
-    visit: 2,
-    reason: 'german_roach',
-    terms: ['german roach', 'german cockroach', 'roach cleanout', 'cockroach', 'cleanout'],
-  },
-  {
-    programKey: 'pest',
     visit: 3,
     reason: 'ant_service',
     terms: ['ant', 'ants', 'ghost ant', 'ghost ants', 'fire ant', 'fire ants', 'carpenter ant', 'carpenter ants'],
   },
-  // Flea and tick share the pest visit-4 broadcast protocol but are separate
-  // catalog services (flea_tick is flea-only "Flea Control Service" since the
-  // 2026-07 rebrand; ticks are tick_control) — keep their match reasons split
-  // so downstream labeling never calls a tick request a flea service.
-  {
-    programKey: 'pest',
-    visit: 4,
-    reason: 'flea_service',
-    terms: ['flea', 'fleas'],
-  },
+  // Ticks keep the pest visit-4 card. Flea has its own program (below, 2026-11-25); flea_tick is the
+  // flea-only "Flea Control Service" since the 2026-07 rebrand and ticks are tick_control, so their match
+  // reasons stay split and downstream labeling never calls a tick request a flea service.
   {
     programKey: 'pest',
     visit: 4,
@@ -312,6 +329,12 @@ function isPestPrimaryCompanion(normalized) {
   return /\bpest\b.*\brodent\b/.test(normalized) && !/\b(lawn|turf|grass|weed|fertil|mosquito)\b/.test(normalized);
 }
 
+// A flea job has its own card. "Flea & Tick" names a tick request too, and ticks stay on the pest tick card.
+function isFleaOnly(normalized) {
+  const names = (token) => hasToken(normalized, token);
+  return (names('flea') || names('fleas')) && !names('tick') && !names('ticks');
+}
+
 function programKeyForService(serviceType) {
   const normalized = normalize(serviceType);
   // The misting SYSTEM's plan phrase is its own program (a keyless row); bare "misting" below stays the barrier program.
@@ -323,6 +346,7 @@ function programKeyForService(serviceType) {
   if (normalized.includes('bed bug') || normalized.includes('bedbug')) return 'bed_bug';
   if (normalized.includes('cockroach') || normalized.includes('roach') || normalized.includes('palmetto bug')) return 'cockroach';
   if (isPestPrimaryCompanion(normalized)) return 'pest';
+  if (isFleaOnly(normalized)) return 'flea';
   if (
     hasToken(normalized, 'rodent') ||
     hasToken(normalized, 'rat') ||

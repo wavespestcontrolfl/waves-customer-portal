@@ -2210,7 +2210,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     ]);
     // A general pest cleanout add-on follows its key to the perimeter visit, never the German-roach cleanout its name matches (r7 P1); a keyless row keeps the name path.
     const cleanout = await run({ addons: [{ name: 'Initial Pest Cleanout', category: 'pest_control', serviceKey: 'pest_initial_cleanout' }, { name: 'Initial Pest Cleanout', category: 'pest_control' }] });
-    expect(cleanout.addons.map((a) => a.visit.number)).toEqual([1, 2]);
+    // (The pest program's German-roach copy is retired, so the keyless row is general pest work as well.)
+    expect(cleanout.addons.map((a) => a.visit.number)).toEqual([1, 1]);
     // The same identity as the primary line.
     const fireAnt = await run({ serviceType: 'Fire Ant Treatment', serviceCategory: 'specialty', serviceKey: 'fire_ant' });
     expect([fireAnt.visit.visit, fireAnt.lines.map((l) => l.product.id)]).toEqual([3, ['ant']]);
