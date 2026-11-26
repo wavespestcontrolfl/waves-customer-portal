@@ -5047,7 +5047,12 @@ function prepGuideSection(context) {
     if (room.length) lines.push(...(heading ? [`${heading}:`] : []), ...room.map((sentence) => `- ${sentence}`));
     if (room.length < kept.length) break;
   }
-  return lines.length ? `PREP GUIDE (our written prep guide for this customer's booked ${sanitizeSingleLine(guide.label, 60)}; repeat its sentences as written, for the section they sit under and this service only, never for another service):\n${lines.join('\n')}\n` : '';
+  // anything not shown (a capped tail, a screened-out heading or line) makes this a PARTIAL guide, and the model is told so: a general prep question must not
+  // be answered as if these were every step (a heat guide's "everyone leaves during treatment" can sit past the cap)
+  const shown = lines.filter((line) => line.startsWith('- ')).length;
+  const total = guide.sections.reduce((sum, section) => sum + (Array.isArray(section?.sentences) ? section.sentences.length : 0), 0);
+  const partial = shown < total ? '\n(PARTIAL: the full guide holds more steps than these - never say this is the whole list, and never leave out that there is more)' : '';
+  return lines.length ? `PREP GUIDE (our written prep guide for this customer's booked ${sanitizeSingleLine(guide.label, 60)}; repeat its sentences as written, for the section they sit under and this service only, never for another service):\n${lines.join('\n')}${partial}\n` : '';
 }
 
 function paymentHistoryFactLines(context, billingKnown) {

@@ -76,6 +76,7 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(ask('Three.', 'How many visits are still covered?')).toBe(false);
     // availability questions are not plan-count questions (unless the plan is named)
     expect(ask('We can move it to Friday.', 'Do you have any appointments left on Friday?')).toBe(true);
+    expect(ask('Three.', 'Do I have any visits left?')).toBe(false);
     expect(ask('Three.', 'How many appointments do I have left on my prepaid plan?')).toBe(false);
     // a complaint about the last visit is not a count question
     expect(ask('I am sorry about the gate, we will make sure it is closed.', 'At the last visit you left the gate open')).toBe(true);
@@ -105,6 +106,7 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(check(LEFT, 'How many Lawn Pest Control visits do I have left?')).toBe(false);
     // a count answers a count question, never a payment or receipt question
     expect(check(LEFT, 'Did you receive my payment?')).toBe(false);
+    expect(check(LEFT, 'Did you receive the payment for my prepaid plan?')).toBe(false);
     expect(check(LEFT, 'Do I still have prepaid visits on my plan?')).toBe(true);
     expect(check(LAWN, 'How many visits are left on my street?')).toBe(true);
     expect(check(`${LEFT} ${LAWN}`, 'How many pest control visits do I have left?')).toBe(false);
@@ -151,6 +153,10 @@ describe('PREP GUIDE section', () => {
     const block = buildFactsBlock({ summary: 'X', billing, prepGuide: guide });
     const text = section(block);
     expect(text).toContain('booked Flea Treatment');
+    // two lines were screened out, so even this short guide is partial; a guide shown whole is not marked
+    expect(text).toContain('(PARTIAL:');
+    const whole = { key: 'flea', label: 'Flea Treatment', sections: [{ heading: 'How to prepare', sentences: ['Vacuum every carpet before we arrive.'] }] };
+    expect(section(buildFactsBlock({ summary: 'X', billing, prepGuide: whole }))).not.toContain('PARTIAL');
     expect(text).toContain('Step 2: Vacuum:\n- Vacuum every carpet, rug and hard floor before we arrive.');
     expect(text).toContain('- Move small items off the floor so we can treat the baseboards.');
     expect(text.indexOf('Step 1: Treat the pets:')).toBeLessThan(text.indexOf('Step 2: Vacuum:'));
@@ -177,6 +183,8 @@ describe('PREP GUIDE section', () => {
     const lines = text.split('\n').filter((l) => l.startsWith('- '));
     expect(lines.length).toBeLessThanOrEqual(24);
     expect(lines.join('').length).toBeLessThanOrEqual(2600);
+    // the cut tail is said out loud: this is a PARTIAL guide
+    expect(text).toContain('(PARTIAL: the full guide holds more steps');
     expect(text).toContain('Step number 0-0');
     expect(text).not.toContain('Step number 7-4');
     expect(buildFactsBlock({ summary: 'X', billing })).not.toContain('PREP GUIDE');

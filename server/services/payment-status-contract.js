@@ -637,8 +637,8 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   if (!inbound || !copied.length) return false;
   // a question about the customer's own remaining count is answered only by a prepaid-count copy, never by another true billing sentence
   if (asksCount(inbound) && !copied.some((t) => SHAPES.prepaid_visits_left.test(t))) return true;
-  // ...and a prepaid count answers only a question about the plan's count, never a payment, receipt or invoice question
-  if (copied.some((t) => SHAPES.prepaid_visits_left.test(t)) && !asksCount(inbound) && !/\bprepaid\b/i.test(inbound)) return true;
+  // ...and a prepaid count answers only a question about the plan's count or visit coverage, never a payment, receipt or invoice question (even one that says "prepaid")
+  if (copied.some((t) => SHAPES.prepaid_visits_left.test(t)) && !asksCount(inbound)) return true;
   const { invoiceNumbersNamed } = require('./zelle-target-invoice');
   const named = invoiceNumbersNamed(inbound);
   const stripZeros = (v) => String(v).replace(/^0+/, '') || '0';
@@ -697,13 +697,13 @@ const COUNT_NUM = '(?:\\d{1,3}|zero|one|two|three|four|five|six|seven|eight|nine
 const PREPAID_COUNT_RE = new RegExp(`\\b(?:visits?|appointments?|applications?|treatments?)\\s+(?:are\\s+|is\\s+)?(?:still\\s+)?(?:left|remaining|remain)\\b|\\b(?:left|remaining)\\s+(?:prepaid\\s+)?(?:visits?|appointments?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+prepaid\\s+(?:\\w+\\s+)?(?:visits?|appointments?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+more\\s+(?:visits?|appointments?|applications?|treatments?)\\b`, 'i');
 // ...and a short answer to a question that ASKS for the count ("Three more.", "Three.", "3.", "None left.") carries no
 // count word in its own words either. The question decides: an unknown customer message counts as asking (unknown is scoped).
-const COUNT_ASK_RE = /\b(?:how many|number of)\b[^.?!]{0,30}\b(?:prepaid|visits?|appointments?|applications?|treatments?|services?|times)\b[^.?!]{0,40}\b(?:left|remaining|remain|prepaid|paid|used|covered|more|on (?:my|our|the) (?:plan|account)|(?:do|did|have|has) (?:i|we)\b|(?:i|we) (?:have|get|got))|\b(?:visits?|appointments?|applications?|treatments?)\s+(?:(?:are|is|do i have|do we have)\s+)?(?:still\s+)?(?:left|remaining|remain|covered)\b|\b(?:left|remaining)\s+(?:prepaid\s+)?(?:visits?|appointments?|applications?|treatments?)\b|\bprepaid\b[^.?!]{0,40}\b(?:left|remaining|remain)\b|\b(?:left|remaining)\b[^.?!]{0,40}\bprepaid\b|\b(?:how many|number of)\b[^.?!]{0,20}\bprepaid\b/i;
+const COUNT_ASK_RE = /\b(?:how many|number of)\b[^.?!]{0,30}\b(?:prepaid|visits?|appointments?|applications?|treatments?|services?|times)\b[^.?!]{0,40}\b(?:left|remaining|remain|prepaid|paid|used|covered|more|on (?:my|our|the) (?:plan|account)|(?:do|did|have|has) (?:i|we)\b|(?:i|we) (?:have|get|got))|\b(?:visits?|appointments?|applications?|treatments?)\s+(?:(?:are|is|do i have|do we have)\s+)?(?:still\s+)?(?:left|remaining|remain|covered)\b|\b(?:left|remaining)\s+(?:prepaid\s+)?(?:visits?|appointments?|applications?|treatments?)\b|\bprepaid\b[^.?!]{0,40}\b(?:left|remaining|remain)\b|\b(?:left|remaining)\b[^.?!]{0,40}\bprepaid\b|\b(?:how many|number of)\b[^.?!]{0,20}\bprepaid\b|\b(?:do|does|did|have|has|are there|is there)\b[^.?!]{0,20}\b(?:any|still|more)\b[^.?!]{0,20}\b(?:visits?|appointments?|applications?|treatments?)\b[^.?!]{0,30}\b(?:left|remaining|remain|covered|on (?:my|our|the) (?:plan|account)|prepaid)\b/i;
 const COUNT_ANSWER_RE = new RegExp(`\\b${COUNT_NUM}\\s+(?:more|left|remaining|total|(?:\\w+\\s+)?(?:visits?|appointments?|applications?|treatments?|services?|times))\\b|\\b(?:no|none|nothing)\\s+(?:more|left|remaining)\\b|(?:^|[.!?]\\s+)(?:(?:about|just|only)\\s+)?${COUNT_NUM}\\s*(?:[.!?]|$)`, 'i');
 // A question that asks for the count is answered by the rendered sentence ALONE: once the copies are removed only inert text (a greeting,
 // thanks) may remain, whatever words an invented count would use ("You have three.", "Three.", "a couple left"). With the question unknown,
 // the count words themselves are the detector.
 // "Do you have any appointments left on Friday?" asks for an open slot, not for the visits left on the plan, unless it also names the plan.
-const SLOT_ASK_RE = /\b(?:any|openings?|slots?|available|availability|open)\b[^.?!]{0,30}\b(?:appointments?|visits?)\b|\b(?:appointments?|visits?)\b[^.?!]{0,30}\b(?:available|open|(?:on |this |next )?(?:mon|tues|wednes|thurs|fri|satur|sun)day|today|tomorrow|this week|next week)\b/i;
+const SLOT_ASK_RE = /\b(?:openings?|slots?|available|availability|open)\b[^.?!]{0,30}\b(?:appointments?|visits?)\b|\b(?:appointments?|visits?)\b[^.?!]{0,30}\b(?:available|open|(?:on |this |next )?(?:mon|tues|wednes|thurs|fri|satur|sun)day|today|tomorrow|this week|next week)\b/i;
 const PLAN_WORD_RE = /\b(?:prepaid|my plan|my account|paid for|covered|remaining)\b/i;
 const asksCount = (inbound) => COUNT_ASK_RE.test(String(inbound ?? '')) && !(SLOT_ASK_RE.test(String(inbound)) && !PLAN_WORD_RE.test(String(inbound)));
 const claimsPrepaidCount = (text, inboundText = null) => {
