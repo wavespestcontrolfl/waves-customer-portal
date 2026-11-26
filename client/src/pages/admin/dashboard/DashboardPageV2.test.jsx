@@ -214,6 +214,15 @@ const FIXTURES = {
     pnlIncompleteMonths: [],
     officeCategories: ["Office Expenses"],
   },
+  "/admin/dashboard/cross-sell": {
+    series: [
+      { month: "2026-09-01", recurringCustomers: 250, multiServiceCustomers: 30, share: 0.12 },
+      { month: "2026-10-01", recurringCustomers: 260, multiServiceCustomers: 31, share: 0.1192 },
+    ],
+    now: { asOf: "2026-11-26", recurringCustomers: 275, multiServiceCustomers: 33, share: 0.12 },
+    sources: { app: 2, office: 31 },
+    pestOnly: [{ id: "c1", firstName: "Sample", lastName: "Customer", city: "Parrish", pestServiceKey: "pest_general_quarterly" }],
+  },
   "/admin/dashboard/ops-buyer-metrics": {
     errors: {},
     ownerReliance: null,

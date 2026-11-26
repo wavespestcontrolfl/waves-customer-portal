@@ -20,6 +20,7 @@ const response = (path) => {
   if (path.endsWith('/aging')) return { path, aging: {} };
   if (path.endsWith('/review-trend')) return { path, trend: [] };
   if (path.includes('/office-cost-per-stop')) return { path, months: [] };
+  if (path.includes('/cross-sell')) return { path, series: [], now: {} };
   if (path.includes('/ops-buyer-metrics')) return { path, errors: {} };
   if (path.endsWith('/buyer-view')) return { path, months: {}, revenue: {}, recurring: {}, planRevenueKept: {}, grossMargin: {}, ownerProfit: {}, officeCost: {} };
   return { path };
@@ -84,6 +85,7 @@ describe('dashboard request recovery', () => {
       '/admin/dashboard/service-mix',
       '/admin/dashboard/ebitda-bridge',
       '/admin/dashboard/office-cost-per-stop?months=12',
+      '/admin/dashboard/cross-sell?months=12',
       '/admin/dashboard/ops-buyer-metrics',
       '/admin/revenue/overview?period=month',
     ]);
@@ -92,11 +94,11 @@ describe('dashboard request recovery', () => {
     expect(result.current.values.staleVisits).toBeUndefined();
     rerender({ tab: 'today' });
     expect(result.current.values.staleVisits).toEqual({ visits: [] });
-    expect(adminFetch).toHaveBeenCalledTimes(12);
+    expect(adminFetch).toHaveBeenCalledTimes(13);
     rerender({ tab: 'profit' });
     expect(result.current.values.ebitda).toBeTruthy();
     expect(result.current.values.kpis).toBe(retainedKpis);
-    expect(adminFetch).toHaveBeenCalledTimes(12);
+    expect(adminFetch).toHaveBeenCalledTimes(13);
   });
 
   it('refreshes a stale hidden section while reusing shared feeds refreshed more recently', async () => {
@@ -167,7 +169,7 @@ describe('dashboard request recovery', () => {
 
     await act(async () => newCycle.resolve());
     await waitFor(() => expect(result.current.refreshing).toBe(false));
-    expect(adminFetch).toHaveBeenCalledTimes(12);
+    expect(adminFetch).toHaveBeenCalledTimes(13);
     expect(result.current.values.kpis.path).toContain('period=mtd');
     expect(result.current.values.ebitda).toBeTruthy();
     expect(result.current.pending.kpis).toBe(false);
@@ -305,7 +307,7 @@ describe('dashboard request recovery', () => {
 
     await act(async () => newCycle.resolve());
     await waitFor(() => expect(result.current.refreshing).toBe(false));
-    expect(adminFetch).toHaveBeenCalledTimes(35);
+    expect(adminFetch).toHaveBeenCalledTimes(36);
     expect(adminFetch.mock.calls.slice(4, 14).map(([path]) => path)).toEqual([
       '/admin/dashboard/alerts',
       '/admin/dashboard/today-completion',
