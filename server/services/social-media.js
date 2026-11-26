@@ -1484,7 +1484,7 @@ function facebookPreviewSettleMs() {
 }
 
 // Never rejects.
-async function readFacebookLinkPreview(link, token) {
+async function readFacebookLinkPreview(link, token, { settleMs } = {}) {
   try {
     const res = await fetch('https://graph.facebook.com/v25.0/', {
       method: 'POST',
@@ -1499,7 +1499,7 @@ async function readFacebookLinkPreview(link, token) {
     const data = await res.json();
     // updated_time means Facebook read the page just now; its picture fetch
     // starts after that read.
-    if (data && data.updated_time) await sleep(facebookPreviewSettleMs());
+    if (data && data.updated_time) await sleep(settleMs === undefined ? facebookPreviewSettleMs() : settleMs);
   } catch (err) {
     logger.warn(`[social] Facebook link preview refresh failed: ${err.name}`);
   }
@@ -1538,25 +1538,123 @@ async function postToFacebook(message, link, imageUrl) {
     return { platform: 'facebook', postId: data.post_id || data.id, success: true, imageUrl };
   }
 
-  const body = { message, access_token: token };
-  if (link) {
-    body.link = link;
-    await refreshFacebookLinkPreview(link, token);
+  if (!link) {
+    const id = await createFacebookFeedPost({ message, access_token: token });
+    logger.info(`[social] Facebook post created: ${id}`);
+    return { platform: 'facebook', postId: id, success: true };
   }
 
+  await refreshFacebookLinkPreview(link, token);
+  const body = { message, link, access_token: token, published: false };
+  let id = await createFacebookFeedPost(body);
+  let size = await readFacebookLinkPictureSize(id, token);
+  if (size && isSmallFacebookPicture(size)) {
+    // Facebook gave the hidden post the small side thumbnail. Nobody has seen
+    // it: delete it, ask Facebook to read the page again, wait, try once more.
+    logger.warn(`[social] Facebook link picture came back ${size.width}x${size.height}; trying once more`);
+    if (await deleteFacebookPost(id, token)) {
+      await readFacebookLinkPreview(link, token, { settleMs: FACEBOOK_PICTURE_RETRY_SETTLE_MS });
+      id = await createFacebookFeedPost(body);
+      size = await readFacebookLinkPictureSize(id, token);
+      if (size && isSmallFacebookPicture(size)) {
+        logger.warn(`[social] Facebook link picture still ${size.width}x${size.height}; publishing anyway`);
+      }
+    }
+  }
+  await publishFacebookPost(id, token);
+  logger.info(`[social] Facebook post created: ${id}${size ? ` (picture ${size.width}x${size.height})` : ''}`);
+  return { platform: 'facebook', postId: id, success: true };
+}
+
+// A link post Facebook draws with the small side thumbnail reports a picture of
+// about 200x200 (8 of 88 blog shares 2026-08..11-20, and 2 of 6 after the read
+// above went live). A full card reports 630 px or more.
+const FACEBOOK_SMALL_PICTURE_PX = 300;
+const FACEBOOK_PICTURE_RETRY_SETTLE_MS = 4000;
+
+function isSmallFacebookPicture({ width, height }) {
+  return Math.max(width, height) <= FACEBOOK_SMALL_PICTURE_PX;
+}
+
+async function createFacebookFeedPost(body) {
   const res = await fetch(`https://graph.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/feed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-
   if (!res.ok) {
     const err = await res.text();
     throw new Error(`Facebook API ${res.status}: ${err}`);
   }
   const data = await res.json();
-  logger.info(`[social] Facebook post created: ${data.id}`);
-  return { platform: 'facebook', postId: data.id, success: true };
+  return data.id;
+}
+
+// The picture Facebook attached to a post, or null when it cannot be read.
+// Never rejects: a failed read publishes the post as it is.
+async function readFacebookLinkPictureSize(postId, token) {
+  try {
+    const url = `https://graph.facebook.com/v25.0/${postId}?fields=attachments{media}&access_token=${encodeURIComponent(token)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const image = data?.attachments?.data?.[0]?.media?.image;
+    const width = Number(image?.width);
+    const height = Number(image?.height);
+    return width > 0 && height > 0 ? { width, height } : null;
+  } catch (err) {
+    logger.warn(`[social] Facebook link picture read failed: ${err.name}`); // never the message: the URL carries the token
+    return null;
+  }
+}
+
+// True only when Facebook confirms the delete.
+async function deleteFacebookPost(postId, token) {
+  try {
+    const res = await fetch(`https://graph.facebook.com/v25.0/${postId}?access_token=${encodeURIComponent(token)}`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return data?.success === true;
+  } catch (err) {
+    logger.warn(`[social] Facebook hidden post delete failed: ${err.name}`);
+    return false;
+  }
+}
+
+async function readFacebookPostPublished(postId, token) {
+  try {
+    const url = `https://graph.facebook.com/v25.0/${postId}?fields=is_published&access_token=${encodeURIComponent(token)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS) });
+    if (!res.ok) return false;
+    return (await res.json())?.is_published === true;
+  } catch {
+    return false;
+  }
+}
+
+// Make the hidden post public. If the answer is lost but the post went public,
+// that counts as done, so a retry never makes a second public post. If it did
+// not go public, the hidden post is deleted before the error goes up, so a
+// retry leaves no hidden copy behind.
+async function publishFacebookPost(postId, token) {
+  let failure = null;
+  try {
+    const res = await fetch(`https://graph.facebook.com/v25.0/${postId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_published: true, access_token: token }),
+    });
+    if (res.ok) return;
+    failure = new Error(`Facebook publish API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  } catch (err) {
+    failure = new Error(`Facebook publish failed: ${err.name}`);
+  }
+  if (await readFacebookPostPublished(postId, token)) return;
+  await deleteFacebookPost(postId, token);
+  throw failure;
 }
 
 function sleep(ms) {

@@ -268,11 +268,15 @@ describe('blogHeroSocialImageUrl', () => {
 
       expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
       // Facebook reads the page first, so the post gets the full-size picture.
-      expect(calls).toHaveLength(2);
+      // The post is made hidden, its picture read, then it is made public.
+      expect(calls).toHaveLength(4);
       expect(calls[0].url).toBe('https://graph.facebook.com/v25.0/');
       expect(calls[0].body).toMatchObject({ id: PAGE, scrape: true });
       expect(calls[1].url).toContain('/page-1/feed');
-      expect(calls[1].body).toMatchObject({ message: 'Lizard droppings caption', link: PAGE });
+      expect(calls[1].body).toMatchObject({ message: 'Lizard droppings caption', link: PAGE, published: false });
+      expect(calls[2].url).toContain('/fb-1?fields=attachments{media}');
+      expect(calls[3].url).toBe('https://graph.facebook.com/v25.0/fb-1');
+      expect(calls[3].body).toMatchObject({ is_published: true });
       // The caption must NOT have the raw URL pasted into it.
       expect(calls[1].body.message).not.toContain('https://');
     });
@@ -343,7 +347,7 @@ describe('blogHeroSocialImageUrl', () => {
         if (u === 'https://graph.facebook.com/v25.0/') {
           return { ok: true, json: async () => ({ id: PAGE }), text: async () => '' };
         }
-        feedAttempts += 1;
+        if (u.includes('/page-1/feed')) feedAttempts += 1;
         // The first feed attempt fails with a transient error; withRetry tries again after 1 s.
         if (feedAttempts === 1) return { ok: false, status: 500, text: async () => 'temporary' };
         return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
@@ -373,7 +377,7 @@ describe('blogHeroSocialImageUrl', () => {
           readDoneAt = Date.now();
           return { ok: true, json: async () => ({ id: PAGE, updated_time: '2026-11-21T02:06:03+0000' }), text: async () => '' };
         }
-        postedAt.push(Date.now());
+        if (String(url).includes('/page-1/feed')) postedAt.push(Date.now());
         return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
       });
       const share = () => social.publishToAll({
@@ -406,7 +410,7 @@ describe('blogHeroSocialImageUrl', () => {
           reads += 1;
           throw new Error('socket hang up');
         }
-        feedAttempts += 1;
+        if (String(url).includes('/page-1/feed')) feedAttempts += 1;
         if (feedAttempts === 1) return { ok: false, status: 500, text: async () => 'temporary' };
         return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
       });
@@ -430,7 +434,7 @@ describe('blogHeroSocialImageUrl', () => {
       const posted = [];
       global.fetch = jest.fn(async (url, opts = {}) => {
         if (String(url) === 'https://graph.facebook.com/v25.0/') return refresh();
-        posted.push(String(url));
+        if (String(url).includes('/page-1/feed')) posted.push(String(url));
         return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
       });
 
@@ -444,6 +448,119 @@ describe('blogHeroSocialImageUrl', () => {
       expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
       expect(posted).toEqual([expect.stringContaining('/page-1/feed')]);
     });
+
+    // Graph mock for the hidden-post picture check. `sizes` are the pictures
+    // Facebook reports for each hidden post, in order.
+    function mockPictureGraph({ sizes, publish = () => ({ ok: true, json: async () => ({ success: true }) }), published = false }) {
+      const calls = [];
+      let made = 0;
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        const u = String(url);
+        const method = opts.method || 'GET';
+        calls.push({ method, url: u, body: opts.body ? JSON.parse(opts.body) : null });
+        const ok = (json) => ({ ok: true, json: async () => json, text: async () => '' });
+        if (u === 'https://graph.facebook.com/v25.0/') return ok({ id: PAGE, updated_time: '2026-11-26T05:00:00+0000' });
+        if (u.includes('/page-1/feed')) { made += 1; return ok({ id: `fb-${made}` }); }
+        if (u.includes('fields=attachments')) {
+          const n = Number(u.match(/fb-(\d+)/)[1]);
+          const size = sizes[n - 1];
+          return ok(size ? { attachments: { data: [{ media: { image: size } }] } } : {});
+        }
+        if (u.includes('fields=is_published')) return ok({ is_published: published });
+        if (method === 'DELETE') return ok({ success: true });
+        if (method === 'POST') return publish();
+        throw new Error(`unexpected fetch: ${u}`);
+      });
+      return calls;
+    }
+    const share = () => social.publishToAll({
+      title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+      channels: ['facebook'], customContent: { facebook: 'Caption' }, noAiImage: true,
+    });
+
+    test('a full picture on the hidden post publishes it at once', async () => {
+      const calls = mockPictureGraph({ sizes: [{ width: 720, height: 720 }] });
+      const res = await share();
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', postId: 'fb-1', success: true })]);
+      expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
+      expect(calls.filter((c) => c.url.includes('/page-1/feed'))).toHaveLength(1);
+    });
+
+    test('a small picture: the hidden post is deleted, the page read again, and the second post published', async () => {
+      process.env.FACEBOOK_PREVIEW_SETTLE_MS = '0';
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      try {
+        const calls = mockPictureGraph({ sizes: [{ width: 200, height: 200 }, { width: 720, height: 720 }] });
+        const pending = share();
+        await jest.advanceTimersByTimeAsync(5000);
+        const res = await pending;
+        expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', postId: 'fb-2', success: true })]);
+        const seq = calls.map((c) => `${c.method} ${c.url.replace('https://graph.facebook.com/v25.0/', '/').replace(/[?&]access_token=[^&]*/, '')}`);
+        expect(seq).toEqual([
+          'POST /', 'POST /page-1/feed', 'GET /fb-1?fields=attachments{media}', 'DELETE /fb-1',
+          'POST /', 'POST /page-1/feed', 'GET /fb-2?fields=attachments{media}', 'POST /fb-2',
+        ]);
+        // Both posts were made hidden; only the second was made public.
+        expect(calls.filter((c) => c.url.includes('/page-1/feed')).every((c) => c.body.published === false)).toBe(true);
+      } finally {
+        jest.useRealTimers();
+        delete process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+      }
+    });
+
+    test('still small after the second try: publishes the second post anyway (never a third)', async () => {
+      process.env.FACEBOOK_PREVIEW_SETTLE_MS = '0';
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      try {
+        const calls = mockPictureGraph({ sizes: [{ width: 200, height: 200 }, { width: 210, height: 210 }] });
+        const pending = share();
+        await jest.advanceTimersByTimeAsync(5000);
+        const res = await pending;
+        expect(res.platforms).toEqual([expect.objectContaining({ postId: 'fb-2', success: true })]);
+        expect(calls.filter((c) => c.url.includes('/page-1/feed'))).toHaveLength(2);
+      } finally {
+        jest.useRealTimers();
+        delete process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+      }
+    });
+
+    test('an unreadable picture publishes the post as it is', async () => {
+      const calls = mockPictureGraph({ sizes: [] });
+      const res = await share();
+      expect(res.platforms).toEqual([expect.objectContaining({ postId: 'fb-1', success: true })]);
+      expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
+    });
+
+    test('a lost publish answer on a post that went public counts as done (no second post)', async () => {
+      const calls = mockPictureGraph({
+        sizes: [{ width: 720, height: 720 }],
+        publish: () => { throw new Error('socket hang up'); },
+        published: true,
+      });
+      const res = await share();
+      expect(res.platforms).toEqual([expect.objectContaining({ postId: 'fb-1', success: true })]);
+      expect(calls.filter((c) => c.url.includes('/page-1/feed'))).toHaveLength(1);
+      expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
+    });
+
+    test('a refused publish deletes the hidden post and reports the failure', async () => {
+      const calls = mockPictureGraph({
+        sizes: [{ width: 720, height: 720 }],
+        publish: () => ({ ok: false, status: 400, text: async () => 'bad request' }),
+      });
+      const res = await share();
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: false, error: expect.stringMatching(/Facebook publish API 400/) })]);
+      expect(calls.filter((c) => c.method === 'DELETE').map((c) => c.url)).toEqual([expect.stringContaining('/fb-1?')]);
+    });
+
+    test('the access token never reaches a log line', async () => {
+      const logger = require('../services/logger');
+      mockPictureGraph({ sizes: [{ width: 200, height: 200 }, { width: 720, height: 720 }] });
+      global.fetch.mockImplementationOnce(async () => { throw new Error('boom https://graph.facebook.com/?access_token=tok'); });
+      await share();
+      const lines = [...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls].flat().map(String);
+      expect(lines.some((l) => l.includes('access_token=tok'))).toBe(false);
+    }, 15000);
 
     test('non-blog sources with an image keep the /photos post (caption carries the link — unchanged behavior)', async () => {
       const calls = mockGraph();
