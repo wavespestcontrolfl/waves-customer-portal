@@ -109,7 +109,11 @@ describe('cut-off blog share resumes without posting twice', () => {
     let savedAtX = null;
     xSpy.mockImplementation(async () => { savedAtX = JSON.parse(mockRows[0].platforms_posted); throw new Error('process killed'); });
     await share();
-    expect(savedAtX).toEqual([expect.objectContaining({ platform: 'facebook', postId: 'fb-new', success: true })]);
+    // Facebook's result, then the in-flight mark for X saved before X was called.
+    expect(savedAtX).toEqual([
+      expect.objectContaining({ platform: 'facebook', postId: 'fb-new', success: true }),
+      { platform: 'twitter', inFlight: true },
+    ]);
   });
 
   test('an earlier failed row is reused, not duplicated', async () => {
@@ -148,11 +152,44 @@ describe('cut-off blog share resumes without posting twice', () => {
       db.mockImplementation(realImpl);
     }
     expect(xSpy).not.toHaveBeenCalled();
-    // The first progress write (after Facebook) holds both sites.
-    expect(snapshots[0]).toEqual(expect.arrayContaining([
+    // The progress write after Facebook's result still holds the X success.
+    const afterFacebook = snapshots.find((snap) => snap.some((r) => r.platform === 'facebook' && r.success === true));
+    expect(afterFacebook).toEqual(expect.arrayContaining([
       expect.objectContaining({ platform: 'facebook', postId: 'fb-new', success: true }),
       expect.objectContaining({ platform: 'twitter', postId: 'tw-early' }),
     ]));
+  });
+
+  test('a site cut off mid-post (in-flight mark, no result) is never posted again', async () => {
+    mockRows.push({ id: 'row-old', source_url: social.normalizeUrl(LINK), source_type: 'rss', status: 'publishing',
+      platforms_posted: JSON.stringify([{ platform: 'facebook', inFlight: true }]) });
+    await share();
+    expect(global.fetch.mock.calls.some(([u]) => String(u).includes('/page-1/feed'))).toBe(false);
+    expect(xSpy).toHaveBeenCalledTimes(1);
+    const pp = JSON.parse(mockRows[0].platforms_posted);
+    expect(pp).toEqual(expect.arrayContaining([expect.objectContaining({ platform: 'facebook', inFlight: true, success: false })]));
+  });
+
+  test('a site with an in-flight mark AND a later result uses the result', async () => {
+    mockRows.push({ id: 'row-old', source_url: social.normalizeUrl(LINK), source_type: 'rss', status: 'publishing',
+      platforms_posted: JSON.stringify([{ platform: 'facebook', inFlight: true }, { platform: 'facebook', success: false, error: 'Facebook API 400' }]) });
+    await share();
+    expect(global.fetch.mock.calls.some(([u]) => String(u).includes('/page-1/feed'))).toBe(true);
+  });
+
+  test('when the share record cannot be read, nothing posts (the next run retries)', async () => {
+    const db = require('../models/db');
+    const realImpl = db.getMockImplementation();
+    db.mockImplementation((t) => { const b = realImpl(t); b.first = async () => { throw new Error('connection reset'); }; return b; });
+    let res;
+    try {
+      res = await share();
+    } finally {
+      db.mockImplementation(realImpl);
+    }
+    expect(res.success).toBe(false);
+    expect(xSpy).not.toHaveBeenCalled();
+    expect(global.fetch.mock.calls.some(([u]) => String(u).includes('/page-1/feed'))).toBe(false);
   });
 
   test('the admin Share button source (blog) resumes too', async () => {
@@ -170,6 +207,8 @@ describe('cut-off blog share resumes without posting twice', () => {
     expect(global.fetch.mock.calls.some(([u]) => String(u).includes('/page-1/feed'))).toBe(false);
     expect(mockRows).toHaveLength(1);
     expect(mockRows[0].status).toBe('published');
+    // Saved under the new URL, so a later URL-only lookup finds it.
+    expect(mockRows[0].source_url).toBe(social.normalizeUrl(LINK));
   });
 
   test('a dry run never overwrites a cut-off live share', async () => {
