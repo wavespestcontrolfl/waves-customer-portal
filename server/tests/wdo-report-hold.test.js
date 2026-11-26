@@ -108,6 +108,10 @@ jest.mock('../services/customer-credit', () => ({
   runPostFullCoverageSideEffects: jest.fn(async () => {}),
   round2: (n) => Math.round(Number(n || 0) * 100) / 100,
 }));
+jest.mock('../services/collections/collection-hold', () => ({
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+  holdExemptionApplies: jest.fn((exempt) => exempt === 'operator' || exempt === 'customer'),
+}));
 jest.mock('../services/payer', () => ({
   attachToInvoice: jest.fn(async () => {}),
   payerRecipient: jest.fn(() => null),
@@ -753,7 +757,8 @@ describe('releaseHeldProjectReport', () => {
   });
 
   test('later failed attempts of the same hold do not ring again', async () => {
-    const project = wdoProject({ report_hold_status: 'held', report_hold_attempts: 1 });
+    // the first failure's bell was recorded (the marker on the row): later failures stay quiet
+    const project = wdoProject({ report_hold_status: 'held', report_hold_attempts: 1, delivery_channels: { release_bell: true } });
     project.wdo_signature = JSON.stringify({ image: PNG_DATA_URL, signer_name: 'Adam B', content_hash: 'stale-hash-mismatch' });
     const { updates } = mockTables({ project, invoice: invoiceRow({ status: 'paid' }) });
 
@@ -1475,7 +1480,7 @@ describe('audit fixes', () => {
     });
 
     test('an invoice email that ends in an error (outcome unknown) keeps the hold, finalizes the invoice and rings the one bell', async () => {
-      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, error: 'provider timeout' });
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, error: 'provider timeout', deliveryOutcome: 'uncertain' });
       const { updates } = mockTables();
       await withServer(async (baseUrl) => {
         const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
@@ -1535,6 +1540,131 @@ describe('audit fixes', () => {
         return res.json();
       });
       expect(out.project.report_hold_invoice_status).toBe('processing');
+    });
+  });
+
+  describe('round 13: one invoice handoff path, definite vs uncertain, confirmed amount, bell retry', () => {
+    const gateOf = async () => {
+      mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const args = ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls[0][0];
+      expect(typeof args.beforeHandoff).toBe('function');
+      return args.beforeHandoff;
+    };
+
+    test('the held invoice email carries the provider-boundary gate: it passes when nothing applies', async () => {
+      expect(await (await gateOf())()).toBe(true);
+    });
+
+    test('a wrong-party or wrong-number fallback hold refuses the handoff, and an operator send exempts a plain dispute hold only', async () => {
+      const collectionHold = require('../services/collections/collection-hold');
+      const gate = await gateOf();
+      collectionHold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reason: 'hold' });
+      expect(await gate()).toBe(false);
+      collectionHold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false });
+      await gate();
+      // the operator exemption is asked for, so a plain dispute hold is skipped and a fallback hold is not
+      expect(collectionHold.messagingHeldByCollectionHold).toHaveBeenLastCalledWith('customer-1', expect.anything(), { ignoreDisputeHold: true });
+      // an unreadable hold fails closed (the shared read answers held)
+      collectionHold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reason: 'lookup_failed' });
+      expect(await gate()).toBe(false);
+    });
+
+    test('the gate refuses when the invoice changed or became a payer bill after the send read it', async () => {
+      const gate = await gateOf();
+      mockTables({ invoice: invoiceRow({ total: 250 }) });
+      expect(await gate()).toBe(false);
+      mockTables({ invoice: invoiceRow({ payer_id: 'payer-1' }) });
+      expect(await gate()).toBe(false);
+    });
+
+    test('the billing-contact copy carries the same gate', async () => {
+      mockTables();
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'notification_prefs'
+        ? chain({ first: jest.fn(async () => ({ billing_email: 'billing@example.com' })) })
+        : base(table)));
+      await withServer(async (baseUrl) => { await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor()); });
+      const calls = ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls.map(([a]) => a);
+      expect(calls.length).toBe(2);
+      calls.forEach((a) => expect(typeof a.beforeHandoff).toBe('function'));
+    });
+
+    test('a handoff refused at the boundary (blocked) is a definite failure: the hold is taken back, no bell', async () => {
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, blocked: true, reason: 'handoff_refused' });
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const projectUpdates = updates.projects || [];
+      const stampIdx = projectUpdates.findIndex((u) => u.report_hold_status === 'held');
+      expect(projectUpdates.findIndex((u, i) => i > stampIdx && u.report_hold_status === null)).toBeGreaterThan(stampIdx);
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('an error before the provider handoff (deliveryOutcome not_sent) is a definite failure: the hold is taken back', async () => {
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, error: 'template render failed', deliveryOutcome: 'not_sent' });
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const projectUpdates = updates.projects || [];
+      const stampIdx = projectUpdates.findIndex((u) => u.report_hold_status === 'held');
+      expect(projectUpdates.findIndex((u, i) => i > stampIdx && u.report_hold_status === null)).toBeGreaterThan(stampIdx);
+      expect(InvoiceService.markDeliverySent).not.toHaveBeenCalled();
+    });
+
+    test('only an error after the provider handoff (deliveryOutcome uncertain) keeps the hold', async () => {
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, error: 'timeout', deliveryOutcome: 'uncertain' });
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const projectUpdates = updates.projects || [];
+      const stampIdx = projectUpdates.findIndex((u) => u.report_hold_status === 'held');
+      expect(projectUpdates.findIndex((u, i) => i > stampIdx && u.report_hold_status === null)).toBe(-1);
+    });
+
+    test('the dry run hands back a fingerprint of the invoice the operator confirms, and the send refuses a changed bill', async () => {
+      mockTables();
+      const fingerprint = await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), { dry_run: true, hold_report_until_paid: true, invoice_id: 'inv-1' });
+        return (await res.json()).invoice.billing_fingerprint;
+      });
+      expect(fingerprint).toMatch(/^[0-9a-f]{16}$/);
+      // the same bill goes through
+      mockTables();
+      await withServer(async (baseUrl) => {
+        expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor({ expected_billing_fingerprint: fingerprint }))).status).toBe(200);
+      });
+      // the bill changed while the dialog was open: both reads see the new amount, the confirmed fingerprint does not match
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockClear();
+      mockTables({ invoice: invoiceRow({ total: 250, line_items: [{ description: 'WDO inspection', quantity: 1, unit_price: 250, amount: 250 }] }) });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor({ expected_billing_fingerprint: fingerprint }));
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('hold_invoice_changed');
+      });
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+    });
+
+    test('a release-failure alert that could not be recorded is tried again on the next failure, and a recorded one is not repeated', async () => {
+      const failing = () => ({ project: wdoProject({ report_hold_status: 'held', report_hold_attempts: 1 }), invoice: invoiceRow({ status: 'paid' }) });
+      const stale = (project) => { project.wdo_signature = JSON.stringify({ image: PNG_DATA_URL, signer_name: 'Adam B', content_hash: 'stale-hash-mismatch' }); return project; };
+      // the insert did not record (muted): no marker, so the next failure tries again
+      NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
+      const first = failing(); stale(first.project);
+      const { updates } = mockTables(first);
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      expect((updates.projects || []).some((u) => u.delivery_channels?.sql?.includes('release_bell'))).toBe(false);
+      // the next failure rings and records
+      NotificationService.notifyAdmin.mockClear();
+      const second = failing(); stale(second.project);
+      const next = mockTables(second);
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      expect((next.updates.projects || []).some((u) => u.delivery_channels?.sql?.includes('release_bell'))).toBe(true);
+      // with the marker on the row, a later failure stays quiet
+      NotificationService.notifyAdmin.mockClear();
+      const third = failing(); stale(third.project); third.project.delivery_channels = { release_bell: true };
+      mockTables(third);
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     });
   });
 

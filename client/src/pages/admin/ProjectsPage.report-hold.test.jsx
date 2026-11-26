@@ -49,7 +49,7 @@ function stubProject(project) {
     if (path.endsWith("/send-with-invoice")) {
       const body = JSON.parse(opts.body);
       return body.dry_run
-        ? response({ dry_run: true, invoice: { id: "inv-1", invoice_number: "WPC-1", total: 175, created: false }, email_routing: { recipient: "synthetic@example.invalid" }, report_hold_release: { recipient: "synthetic@example.invalid", copies: ["closing@example.invalid"] } })
+        ? response({ dry_run: true, invoice: { id: "inv-1", invoice_number: "WPC-1", total: 175, created: false, billing_fingerprint: "0123456789abcdef" }, email_routing: { recipient: "synthetic@example.invalid" }, report_hold_release: { recipient: "synthetic@example.invalid", copies: ["closing@example.invalid"] } })
         : response({ sent: true, report_held: !!body.hold_report_until_paid, invoice: { invoice_number: "WPC-1" }, channels: { email: { ok: true } } });
     }
     throw new Error("Unexpected synthetic project request: " + path);
@@ -108,7 +108,8 @@ describe("WDO report hold on the project page", () => {
     await waitFor(() => expect(invoiceCalls()).toHaveLength(2));
     const [preview, send] = invoiceCalls();
     expect(preview).toEqual(expect.objectContaining({ dry_run: true, hold_report_until_paid: true }));
-    expect(send).toEqual(expect.objectContaining({ invoice_id: "inv-1", hold_report_until_paid: true }));
+    // the send hands back the fingerprint of the amount the operator confirmed
+    expect(send).toEqual(expect.objectContaining({ invoice_id: "inv-1", hold_report_until_paid: true, expected_billing_fingerprint: "0123456789abcdef" }));
     expect(await screen.findByText(/The report is held and goes out by itself once the invoice is paid/)).toBeInTheDocument();
   });
 

@@ -2210,7 +2210,7 @@ export function ProjectDetail({
           // Only an existing invoice carries an id from the preview; a new WDO
           // (id null) routes to the server's locked create path on send.
           ...(inv.id ? { invoice_id: inv.id } : {}),
-          ...holdBody(holdReport),
+          ...holdBody(holdReport, inv.billing_fingerprint),
           ...(overrideReason ? { override_reason: overrideReason } : {}),
         },
       });
@@ -3908,8 +3908,9 @@ function HoldInvoiceButton({ canAdminActions, project, actionsBlocked, wdoSendBl
   );
 }
 
-function holdBody(holdReport) {
-  return holdReport ? { hold_report_until_paid: true } : {};
+function holdBody(holdReport, billingFingerprint) {
+  // The send hands back the fingerprint of the invoice amount the operator confirmed in the preview.
+  return holdReport ? { hold_report_until_paid: true, ...(billingFingerprint ? { expected_billing_fingerprint: billingFingerprint } : {}) } : {};
 }
 
 function heldSendNote(preview) {

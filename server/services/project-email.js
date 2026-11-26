@@ -252,12 +252,16 @@ async function sendProjectTemplate({
   triggerEventId,
   recipient: explicitRecipient = null,
   attachments = [],
+  // An extra gate run at the provider boundary, with the contact's own email switch: it answers true to go, anything
+  // else (or a throw) refuses, and the email is NOT handed to the provider (blocked, a definite non-delivery).
+  beforeHandoff = null,
 }) {
   const recipient = explicitRecipient || await resolveProjectEmailRecipientForSend(customer);
   if (!isEmailLike(recipient.email)) {
     return { ok: false, skipped: true, reason: 'missing_email' };
   }
   const customerId = customer?.id || project?.customer_id || null;
+  const gate = { refused: false };
 
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
@@ -271,30 +275,43 @@ async function sendProjectTemplate({
       categories,
       suppressionGroupKey,
       attachments,
-      // The contact's OWN email switch as of the provider handoff (codex
-      // #6363 r22 P2): the recipient resolved above, but a contact who turns
-      // email off while the library resolves the template, idempotency and
-      // suppression is not emailed. Address-wide, deny wins across the slots
-      // carrying the address; fails closed on an unreadable table; a
-      // recipient RESOLVED as a service contact must still occupy a slot
-      // (codex r26 security P2): one the holder removed in between is a
-      // former contact and is held. Only a recipient resolved AS a service
-      // contact is asked (codex r32 security P2): the holder's own address,
-      // a report copy, the payer and the billing contact are independently
-      // authorized recipients — a contact's switch must never veto the
-      // payer's invoice because the two share an address.
-      onQueued: async () => !isServiceContactRole(recipient.role)
-        || !(await require('./contact-notification-prefs').contactEmailDeclines(customerId, recipient.email, { requireSlot: true })),
+      // The checks at the provider handoff (see dispatchBoundaryCheck).
+      onQueued: () => dispatchBoundaryCheck({ beforeHandoff, recipient, customerId, gate }),
     });
-    if (result?.aborted) {
-      logger.info(`[project-email] ${templateKey} for project ${project?.id || 'unknown'} held at the dispatch boundary — the contact declined email`);
-      return { ok: false, blocked: true, deduped: false, reason: 'contact_declined', messageId: null };
-    }
+    if (result?.aborted) return abortedSendResult({ templateKey, project, gate });
     return normalizeTemplateResult(result);
   } catch (err) {
     logger.error(`[project-email] ${templateKey} failed for project ${project?.id || 'unknown'}: ${err.message}`);
-    return { ok: false, error: err.message };
+    return { ok: false, error: err.message, deliveryOutcome: thrownDeliveryOutcome(err) };
   }
+}
+
+// The checks at the provider handoff. The caller's own gate first (it answers true to go; anything else, or a throw,
+// refuses), then the contact's OWN email switch as of the handoff (codex #6363 r22 P2): a contact who turns email off
+// while the library resolves the template, idempotency and suppression is not emailed. Address-wide, deny wins across
+// the slots carrying the address; fails closed on an unreadable table; a recipient RESOLVED as a service contact must
+// still occupy a slot (codex r26 security P2). Only a recipient resolved AS a service contact is asked (codex r32
+// security P2): the holder's own address, a report copy, the payer and the billing contact are independently
+// authorized recipients, so a contact's switch never vetoes the payer's invoice because the two share an address.
+async function dispatchBoundaryCheck({ beforeHandoff, recipient, customerId, gate }) {
+  if (beforeHandoff) {
+    gate.refused = !(await Promise.resolve().then(beforeHandoff).then((answer) => answer === true, () => false));
+    if (gate.refused) return false;
+  }
+  return !isServiceContactRole(recipient.role)
+    || !(await require('./contact-notification-prefs').contactEmailDeclines(customerId, recipient.email, { requireSlot: true }));
+}
+
+// A send the boundary stopped before the provider: blocked, a definite non-delivery.
+function abortedSendResult({ templateKey, project, gate }) {
+  logger.info(`[project-email] ${templateKey} for project ${project?.id || 'unknown'} held at the dispatch boundary — ${gate.refused ? 'a send hold applies' : 'the contact declined email'}`);
+  return { ok: false, blocked: true, deduped: false, reason: gate.refused ? 'handoff_refused' : 'contact_declined', messageId: null };
+}
+
+// What the library knows about the provider handoff: 'uncertain' only after the request was handed over and not
+// conclusively rejected; any earlier failure (template, render, lookup) is a definite non-delivery.
+function thrownDeliveryOutcome(err) {
+  return (EmailTemplateLibrary.thrownSendDeliveryOutcome && EmailTemplateLibrary.thrownSendDeliveryOutcome(err)) || 'not_sent';
 }
 
 function prepTemplateForProjectType(projectType) {
@@ -489,6 +506,8 @@ async function sendProjectInvoiceBeforeReport({
   idempotencyKey,
   // Explicit recipient override (payer AP inbox / billing-contact copy).
   recipient = null,
+  // The invoice handoff gate (collection holds, ownership, an unchanged amount) the route supplies.
+  beforeHandoff = null,
 } = {}) {
   const resolvedRecipient = await reportRecipient(customer, recipient);
   const payload = {
@@ -512,6 +531,7 @@ async function sendProjectInvoiceBeforeReport({
       || `project.invoice_before_report:${project?.id || 'unknown'}:${safeKey(invoice?.id || invoice?.invoice_number)}:${sendAttemptKey()}`,
     attachments,
     recipient: resolvedRecipient,
+    beforeHandoff,
   });
 }
 

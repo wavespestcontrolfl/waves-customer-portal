@@ -198,7 +198,7 @@ async function raiseReleaseFailedBell({ project, customer, reason }) {
     const { raiseAdminAlert } = require('./admin-alert-compose');
     const { fitAction } = require('./admin-alert-names');
     const name = [customer?.first_name, customer?.last_name].filter(Boolean).join(' ').trim() || 'this customer';
-    await raiseAdminAlert(BELL_CATEGORY, {
+    const rung = await raiseAdminAlert(BELL_CATEGORY, {
       area: 'Customers',
       action: fitAction('Customers', name, [
         (n) => `send ${n} the paid WDO report`,
@@ -218,8 +218,11 @@ async function raiseReleaseFailedBell({ project, customer, reason }) {
       detail: `The invoice for this WDO inspection is paid and the report is held. The automatic release failed: ${String(reason || '').slice(0, 500)}. It retries by itself with a growing wait. Open the project and press Send report to send it now.`,
       metadata: { projectId: String(project.id) },
     });
+    // Recorded = a new row, or the open row this project's key already has (deduped). A muted or failed insert is not.
+    return Boolean(rung && (rung.id || rung.deduped));
   } catch (err) {
     logger.error(`[report-hold] release-failed bell not raised for ${project?.id}: ${err.message}`);
+    return false;
   }
 }
 
