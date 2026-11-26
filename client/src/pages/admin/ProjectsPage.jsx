@@ -2064,6 +2064,8 @@ export function ProjectDetail({
           ...(overrideReason ? { override_reason: overrideReason } : {}),
           // A held report's early release: if payment released it meanwhile, the server sends no second copy.
           expected_hold: pv.releases_payment_hold ? "held" : "none",
+          // The dialog said "Send", not "Resend": a report sent meanwhile is not sent a second time.
+          expected_sent: project.status === "sent",
         },
       });
       const d = await readJsonResponse(r, "Could not send report");

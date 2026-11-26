@@ -3694,6 +3694,12 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     if (req.body?.expected_hold === 'held' && project.report_hold_status === 'released') {
       return res.status(409).json({ code: 'hold_already_released', error: 'The invoice was paid and the report was already sent by itself. Nothing new was sent. Use Resend report if the customer needs another copy.' });
     }
+    // Staff confirmed a FIRST send, and the report went out meanwhile (another admin, or a hold armed and released by
+    // payment while the dialog was open): sending now would be a second copy nobody confirmed as a resend.
+    const confirmedFirstSend = req.body?.expected_sent === false;
+    if (confirmedFirstSend && (project.sent_at || project.status === 'sent')) {
+      return res.status(409).json({ code: 'report_already_sent', error: 'This report was sent while you were confirming. Nothing new was sent. Press Send report again to resend it.' });
+    }
 
     // Send claim: /send previously had NO concurrency guard, so two
     // overlapping POSTs (double-click, impatient retry) each passed the gates
@@ -3720,6 +3726,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // A report held (or being released) since the read above sends only through the release: this plain send
     // must not claim it.
     if ('report_hold_status' in project) sendClaimQuery.whereRaw("coalesce(report_hold_status, '') NOT IN ('held', 'releasing')");
+    if (confirmedFirstSend) sendClaimQuery.whereNull('sent_at').whereRaw("status IS DISTINCT FROM 'sent'");
     const sendClaim = await sendClaimQuery
       .update({ delivery_status: 'sending', delivery_claim_token: sendClaimToken, updated_at: db.fn.now() });
     if (!sendClaim) {
@@ -4254,10 +4261,11 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep', a
     // A definite non-send takes back the link this attempt minted; an email of unknown outcome may carry it.
     if (!sent.channels.email.ok) {
       // Unsettled at the handoff (a refund or reversal): not due yet, as before the stamp.
-      const reverted = sent.channels.email.unsettled
-        ? await revertToHeld('invoice_not_settled', { countAttempt: false, unmintToken: link.mintedToken })
-        : await revertToHeld(`Report email failed: ${sent.channels.email.error || 'unknown'}`, {
-          unmintToken: link.mintedToken && !sent.channels.email.uncertain,
+      const email = sent.channels.email;
+      const reverted = email.unsettled || email.relink
+        ? await revertToHeld(email.unsettled ? 'invoice_not_settled' : email.error, { countAttempt: false, unmintToken: link.mintedToken || email.relink })
+        : await revertToHeld(`Report email failed: ${email.error || 'unknown'}`, {
+          unmintToken: link.mintedToken && !email.uncertain,
         });
       return { ...reverted, channels: sent.channels };
     }
@@ -4337,7 +4345,9 @@ function makeHeldReverter({ project, claim, ctx, source }) {
       ...(countAttempt ? { report_hold_last_error: String(reason || 'release failed').slice(0, 500) } : {}),
       delivery_status: previousDeliveryStatus,
       delivery_claim_token: null,
+      // The link binding belongs to the link: a link taken back takes its binding with it.
       ...(unmintToken ? { report_token: null } : {}),
+      ...(unmintToken && heldLinkBinding(project) ? { delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) - 'release_link_binding'") } : {}),
       updated_at: db.fn.now(),
     }).catch((err) => logger.warn(`[projects] hold revert failed for ${project.id}: ${err.message}`));
     if (countAttempt && reverted) await ringReleaseFailedOnce({ hold, project, customer: ctx.customer, reason, attemptsSoFar, source });
@@ -4464,6 +4474,17 @@ async function resumableReleaseFiling(project, invoice) {
   const buffer = await streamToBuffer(object.Body);
   if (!buffer.length) throw new Error('the archived filing is empty');
   return { buffer, attachment: pdfEmailAttachment('FDACS-13645-WDO-Inspection-Report.pdf', buffer), filing };
+}
+
+// The filing and recipient a kept held link went out with (set by an email of unknown outcome), or null.
+function heldLinkBinding(project) {
+  const channels = typeof project.delivery_channels === 'string' ? safeJsonParse(project.delivery_channels) : project.delivery_channels;
+  return channels?.release_link_binding || null;
+}
+
+// The email key part naming the report email's recipient.
+function recipientKeyPart(email) {
+  return crypto.createHash('sha1').update(String(email).toLowerCase()).digest('hex').slice(0, 12);
 }
 
 // The email key part naming WHICH filing the report email carries: findings, signature revision and photo set.
@@ -4627,7 +4648,7 @@ function heldUnknownOutcomeMessage(staffSend) {
 // earlier email of unknown outcome keeps its key for the automatic retry; a staff press after that, once staff have
 // checked with the customer, moves the counter first: a new copy.
 async function heldReportEmailKey({ refreshed, invoice, wdoFiling, recipientEmail, ownClaim, staffSend }) {
-  const recipientHash = crypto.createHash('sha1').update(String(recipientEmail).toLowerCase()).digest('hex').slice(0, 12);
+  const recipientHash = recipientKeyPart(recipientEmail);
   // ...and the link it carries: a link taken back after a refusal before dispatch and minted again is a different email.
   const linkHash = crypto.createHash('sha1').update(String(refreshed.report_token || '')).digest('hex').slice(0, 8);
   const stored = typeof refreshed.delivery_channels === 'string' ? safeJsonParse(refreshed.delivery_channels) : refreshed.delivery_channels;
@@ -4650,7 +4671,7 @@ async function heldReportEmailKey({ refreshed, invoice, wdoFiling, recipientEmai
 // - keep: a plain error. The key stays: an earlier attempt with it may have been accepted, and the next retry finds it.
 const HELD_EMAIL_OUTCOME_MARKS = {
   rekey: "coalesce(delivery_channels, '{}'::jsonb) || jsonb_build_object('release_email_blocks', coalesce((delivery_channels->>'release_email_blocks')::int, 0) + 1)",
-  unknown: "coalesce(delivery_channels, '{}'::jsonb) || '{\"release_email_unknown\": true}'::jsonb",
+  unknown: "coalesce(delivery_channels, '{}'::jsonb) || jsonb_build_object('release_email_unknown', true, 'release_link_binding', ?::text)",
 };
 function heldReportEmailOutcome(result, handoffState) {
   if (result.ok) return 'ok';
@@ -4661,6 +4682,14 @@ function heldReportEmailOutcome(result, handoffState) {
 
 async function sendHeldReportEmail({ refreshed, reportUrl, customer, invoice, wdoPdf, wdoFiling, ownClaim, staffSend, emailRecipient }) {
   const handoffState = { boundaryBlock: null };
+  // A link kept after an email of unknown outcome belongs to that email's filing and recipient. A changed filing (an
+  // edit and re-sign) or address never goes out on it, since the earlier recipient may hold the link: the release takes
+  // the link back and the next attempt mints a new one.
+  const linkBinding = `${filingKeyPart(wdoFiling)}:${recipientKeyPart(emailRecipient.email)}`;
+  const bound = heldLinkBinding(refreshed);
+  if (bound && bound !== linkBinding) {
+    return { ok: false, relink: true, error: 'The report or its email address changed after an email of unknown outcome. A new link is sent on the next try.' };
+  }
   const result = await ProjectEmail.sendProjectReportReady({
     project: refreshed,
     customer,
@@ -4674,7 +4703,7 @@ async function sendHeldReportEmail({ refreshed, reportUrl, customer, invoice, wd
   });
   const outcome = heldReportEmailOutcome(result, handoffState);
   if (HELD_EMAIL_OUTCOME_MARKS[outcome]) {
-    await db('projects').where(ownClaim).update({ delivery_channels: db.raw(HELD_EMAIL_OUTCOME_MARKS[outcome]) })
+    await db('projects').where(ownClaim).update({ delivery_channels: db.raw(HELD_EMAIL_OUTCOME_MARKS[outcome], outcome === 'unknown' ? [linkBinding] : []) })
       .catch((err) => logger.warn(`[projects] release email outcome (${outcome}) not recorded for ${refreshed.id}: ${err.message}`));
   }
   if (outcome === 'ok') return { ok: true, messageId: result.messageId || null };
@@ -5638,13 +5667,21 @@ async function heldInvoiceEmailRecipient(customer, invoice) {
 // closeout); the office bell asks staff to check with the customer. A first delivery parks the invoice for review the
 // way a stale send is (still payable from the link the customer may hold, so payment still releases the report). An
 // invoice already sent (sent, viewed, overdue) keeps its status: its earlier delivery still stands.
-async function settleUnverifiedHeldInvoice(invoice, previousInvoiceStatus) {
+// The combined send's invoice claim: a held send's claim carries its own token (see the claim), a plain send's none.
+function invoiceClaimWhere(id, claimToken) {
+  return { id, status: 'sending', ...(claimToken ? { send_claim_token: claimToken } : {}) };
+}
+function invoiceClaimRelease(claimToken) {
+  return claimToken ? { send_claim_token: null } : {};
+}
+
+async function settleUnverifiedHeldInvoice(invoice, previousInvoiceStatus, claimToken) {
   const firstDelivery = ['draft', 'scheduled'].includes(String(previousInvoiceStatus || '').toLowerCase());
   const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
   const update = firstDelivery
     ? { status: 'scheduled', scheduled_send_at: null, scheduled_send_error: STALE_SEND_PARK_ERROR, send_claim_token: null }
-    : { status: previousInvoiceStatus };
-  await db('invoices').where({ id: invoice.id, status: 'sending' }).update({ ...update, updated_at: db.fn.now() })
+    : { status: previousInvoiceStatus, send_claim_token: null };
+  await db('invoices').where(invoiceClaimWhere(invoice.id, claimToken)).update({ ...update, updated_at: db.fn.now() })
     .catch((err) => logger.error(`[projects] unverified held invoice not settled for ${invoice.id}: ${err.message}`));
 }
 
@@ -6030,17 +6067,20 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // deliver duplicate report/pay-link messages (mirrors the InvoiceService
     // send-claim). Released below if nothing is delivered.
     const previousInvoiceStatus = invoice.status;
+    // A held send owns its claim by token: an unknown-outcome park, a restore or the finalize touch only this
+    // episode, never a newer sender's claim taken after a stale recovery.
+    const invoiceClaimToken = hold.active ? crypto.randomBytes(12).toString('hex') : null;
     const claimedRows = await db('invoices')
       .where({ id: invoice.id })
       // Mirror InvoiceService SEND_CLAIMABLE_STATUSES so resending a report for
       // an opened/overdue invoice works (getByToken flips sent → viewed once
       // the customer opens the pay link).
       .whereIn('status', ['draft', 'scheduled', 'sent', 'viewed', 'overdue'])
-      .update({ status: 'sending', updated_at: db.fn.now() });
+      .update({ status: 'sending', ...(invoiceClaimToken ? { send_claim_token: invoiceClaimToken } : {}), updated_at: db.fn.now() });
     if (!claimedRows) {
       return res.status(409).json({ error: 'Invoice send already in progress', invoice_id: invoice.id });
     }
-    claimedInvoice = { id: invoice.id, previousStatus: previousInvoiceStatus };
+    claimedInvoice = { id: invoice.id, previousStatus: previousInvoiceStatus, claimToken: invoiceClaimToken };
 
     // Shared project delivery claim (see hoist comment): one claim namespace
     // across /send and /send-with-invoice so the two routes can't race each
@@ -6065,8 +6105,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const deliveryClaimRows = await deliveryClaimQuery
       .update({ delivery_status: 'sending', delivery_claim_token: deliveryClaimToken, updated_at: db.fn.now() });
     if (!deliveryClaimRows) {
-      await db('invoices').where({ id: invoice.id, status: 'sending' })
-        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
+      await db('invoices').where(invoiceClaimWhere(invoice.id, invoiceClaimToken))
+        .update({ status: previousInvoiceStatus, ...invoiceClaimRelease(invoiceClaimToken), updated_at: db.fn.now() })
         .catch((err) => logger.warn(`[projects] invoice claim release after lost delivery claim failed for ${invoice.id}: ${err.message}`));
       claimedInvoice = null;
       return res.status(409).json({
@@ -6104,8 +6144,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const stamped = await stampSend({ hold, project, invoice, customer, expectedFingerprint: req.body?.expected_billing_fingerprint, tokenUpdate, deliveryClaimToken });
     if (stamped && hold.active) armedHold = { hold, project, deliveryClaimToken };
     if (!stamped) {
-      await db('invoices').where({ id: invoice.id, status: 'sending' })
-        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
+      await db('invoices').where(invoiceClaimWhere(invoice.id, invoiceClaimToken))
+        .update({ status: previousInvoiceStatus, ...invoiceClaimRelease(invoiceClaimToken), updated_at: db.fn.now() })
         .catch((err) => logger.warn(`[projects] invoice claim release after superseded stamp failed for ${invoice.id}: ${err.message}`));
       claimedInvoice = null;
       await reverseProjectCreditOnAbort();
@@ -6185,8 +6225,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         if (hold.active) throw err;
       }
     } catch (e) {
-      await db('invoices').where({ id: invoice.id, status: 'sending' })
-        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+      await db('invoices').where(invoiceClaimWhere(invoice.id, invoiceClaimToken))
+        .update({ status: previousInvoiceStatus, ...invoiceClaimRelease(invoiceClaimToken), updated_at: db.fn.now() }).catch(() => {});
       await reverseProjectCreditOnAbort();
       // The hold stamp is fenced on the claim token, so it is taken back before the claim is given back.
       await takeBackHoldStamp({ hold, project, deliveryClaimToken });
@@ -6214,8 +6254,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       .where({ id: project.id, delivery_claim_token: deliveryClaimToken })
       .update({ updated_at: db.fn.now() });
     if (!stillOwned) {
-      await db('invoices').where({ id: invoice.id, status: 'sending' })
-        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
+      await db('invoices').where(invoiceClaimWhere(invoice.id, invoiceClaimToken))
+        .update({ status: previousInvoiceStatus, ...invoiceClaimRelease(invoiceClaimToken), updated_at: db.fn.now() })
         .catch((err) => logger.warn(`[projects] invoice claim release after superseded delivery failed for ${invoice.id}: ${err.message}`));
       claimedInvoice = null;
       await reverseProjectCreditOnAbort();
@@ -6400,7 +6440,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       && (isPayerInvoice ? !!channels.payer_email?.ok : delivered);
     const unverifiedHeld = invoiceDelivered && hold.active && !isPayerInvoice && Boolean(channels.email?.uncertain);
     if (unverifiedHeld) {
-      await settleUnverifiedHeldInvoice(invoice, previousInvoiceStatus);
+      await settleUnverifiedHeldInvoice(invoice, previousInvoiceStatus, invoiceClaimToken);
     } else if (invoiceDelivered) {
       await InvoiceService.markDeliverySent(invoice.id, {
         sms: !!channels.sms?.ok,
@@ -6408,6 +6448,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         source: 'project_report_with_invoice',
         payUrl,
         actorTechnicianId: req.technicianId || null,
+        ...(invoiceClaimToken ? { claimToken: invoiceClaimToken } : {}),
       }).catch((err) => logger.error(`[projects] markDeliverySent failed for ${invoice.id}: ${err.message}`));
       // Invoice is delivered + finalized — now run the full-coverage side effects we
       // deferred at apply time (stop dunning followups + activate the annual-prepay
@@ -6430,8 +6471,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     } else {
       // Nothing went out — release the 'sending' claim back to its prior status
       // so the invoice isn't stranded and can be retried.
-      await db('invoices').where({ id: invoice.id, status: 'sending' })
-        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+      await db('invoices').where(invoiceClaimWhere(invoice.id, invoiceClaimToken))
+        .update({ status: previousInvoiceStatus, ...invoiceClaimRelease(invoiceClaimToken), updated_at: db.fn.now() }).catch(() => {});
       await reverseProjectCreditOnAbort();
     }
 
@@ -6474,8 +6515,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // Release the 'sending' claim on any abort so the invoice isn't stranded
     // (and retries don't 409). No-op if it was already finalized to 'sent'.
     if (claimedInvoice) {
-      await db('invoices').where({ id: claimedInvoice.id, status: 'sending' })
-        .update({ status: claimedInvoice.previousStatus, updated_at: db.fn.now() })
+      await db('invoices').where(invoiceClaimWhere(claimedInvoice.id, claimedInvoice.claimToken))
+        .update({ status: claimedInvoice.previousStatus, ...invoiceClaimRelease(claimedInvoice.claimToken), updated_at: db.fn.now() })
         .catch((e) => logger.warn(`[projects] claim release on error failed for ${claimedInvoice.id}: ${e.message}`));
     }
     // An exception before any customer message leaves no promise to keep: take the armed hold back, while this

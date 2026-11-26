@@ -9061,14 +9061,11 @@ form instead of a blank template. Same long-lived report token + format gate as
 the sibling `/api/reports/project/:token/data` viewer
 (`extractProjectReportTokenLookup`), inherits the router-level 20 req/min
 `reportLimiter`, `no-store`/`noindex`/`no-referrer` privacy headers. Serves ONLY
-an archived, signed filing streamed from private S3 — never live/unsigned
-content: the last filing recorded as emailed (`wdo_sent_filings`), else, for a
-report held until paid (`GATE_WDO_REPORT_HOLD`), the signed filing its release
-archived BEFORE the report email (`delivery_channels.release_filing`). That
-second case covers an email the provider may have accepted with no delivery yet
-recorded (a crash after the handoff, or an unknown outcome); the held link
-exists only then, since a proven non-send takes it back. The sibling `/data`
-viewer shows the same filing's findings and date by the same rule. Returns a
+the already-emailed archived filing streamed from private S3 — never
+live/unsigned content. A report held until paid (`GATE_WDO_REPORT_HOLD`) whose
+release has not finished (`report_hold_status` held or releasing) serves
+nothing here or on the sibling `/data` viewer: its link can exist only because
+a release email's outcome is unknown. Returns a
 generic 404 for non-WDO projects, reports with no archived filing, or malformed
 tokens).
 `/api/reports/project/:token/ask` (POST; Waves AI on project reports — owner

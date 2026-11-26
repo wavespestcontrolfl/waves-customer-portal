@@ -2333,18 +2333,67 @@ describe('audit fixes', () => {
       }
     });
 
-    test('the report viewer and its PDF serve the signed filing a held release saved before its email', () => {
-      const { servedWdoFiling } = require('../routes/reports-public');
-      const saved = { s3_key: 'wdo/release.pdf', findings: { a: 1 } };
-      // the email may have arrived (a crash after the handoff, or an unknown outcome) with nothing recorded as sent
-      expect(servedWdoFiling({ wdo_sent_filings: [], delivery_channels: { release_filing: saved } })).toEqual(saved);
-      expect(servedWdoFiling({ wdo_sent_filings: null, delivery_channels: JSON.stringify({ release_filing: saved }) })).toEqual(saved);
-      // a filing recorded as sent always wins
-      const sent = { s3_key: 'wdo/sent.pdf' };
-      expect(servedWdoFiling({ wdo_sent_filings: JSON.stringify([sent]), delivery_channels: { release_filing: saved } })).toEqual(sent);
-      expect(servedWdoFiling({ wdo_sent_filings: null, delivery_channels: null })).toBeNull();
+    test('a held report whose release has not finished shows nothing on its public link', () => {
+      const { heldReportUnreleased, servedWdoFiling } = require('../routes/reports-public');
+      expect(heldReportUnreleased({ report_hold_status: 'held' })).toBe(true);
+      expect(heldReportUnreleased({ report_hold_status: 'releasing' })).toBe(true);
+      expect(heldReportUnreleased({ report_hold_status: 'released' })).toBe(false);
+      expect(heldReportUnreleased({ report_hold_status: null })).toBe(false);
+      // only a filing recorded as emailed is ever served
+      expect(servedWdoFiling({ wdo_sent_filings: [], delivery_channels: { release_filing: { s3_key: 'x' } } })).toBeNull();
       const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
-      expect(source.match(/const lastFiling = servedWdoFiling\(project\);/g)).toHaveLength(2);
+      expect(source).toContain("if (!project || heldReportUnreleased(project)) return res.status(404).json({ error: 'Report not found' });");
+      expect(source).toContain("if (!project || project.project_type !== 'wdo_inspection' || heldReportUnreleased(project)) {");
+    });
+
+    test('P0: a link kept after an unknown-outcome email never carries a changed filing or address', async () => {
+      // the unknown outcome records which filing and recipient the kept link went out with
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'email send held by provider_retry_ambiguous' });
+      let { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: null }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const mark = (updates.projects || []).find((u) => String(u.delivery_channels?.sql || '').includes('release_link_binding'));
+      const binding = mark.delivery_channels.bindings[0];
+      expect(binding).toMatch(/^[0-9a-f]{8}:[0-9a-f]{12}$/);
+      // the same filing and address: the retry goes out on the same link
+      ProjectEmail.sendProjectReportReady.mockClear();
+      mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: 'k'.repeat(32), delivery_channels: { release_email_unknown: true, release_link_binding: binding } }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const releaseEmails = () => ProjectEmail.sendProjectReportReady.mock.calls.filter(([a]) => String(a.idempotencyKey || '').includes(':hold_release:'));
+      expect(releaseEmails()).toHaveLength(1);
+      // staff corrected the address (or re-signed an edit): nothing goes out on the old link, which is taken back
+      ProjectEmail.sendProjectReportReady.mockClear();
+      ({ updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: 'k'.repeat(32), delivery_channels: { release_email_unknown: true, release_link_binding: 'deadbeef:000000000000' } }), invoice: invoiceRow({ status: 'paid' }) }));
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(releaseEmails()).toHaveLength(0);
+      const revert = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+      expect(revert).toEqual(expect.objectContaining({ report_token: null }));
+      expect(revert.delivery_channels.sql).toContain("- 'release_link_binding'");
+      expect(revert).not.toHaveProperty('report_hold_last_error');
+    });
+
+    test('a plain Send report confirmed as a first send refuses a report sent meanwhile', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'released', status: 'sent', sent_at: '2026-11-26T10:00:00Z' }) });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, '/admin/projects/project-1/send', { expected_hold: 'none', expected_sent: false });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('report_already_sent');
+      });
+      expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+      const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
+      expect(source).toContain("if (confirmedFirstSend) sendClaimQuery.whereNull('sent_at').whereRaw(\"status IS DISTINCT FROM 'sent'\");");
+      const client = require('fs').readFileSync(require('path').join(__dirname, '../../client/src/pages/admin/ProjectsPage.jsx'), 'utf8');
+      expect(client).toContain('expected_sent: project.status === "sent",');
+    });
+
+    test('a held send claims the invoice with its own token, and settles or finalizes only that claim', async () => {
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const claim = (updates.invoices || []).find((u) => u.status === 'sending');
+      expect(claim.send_claim_token).toMatch(/^[0-9a-f]{24}$/);
+      expect(InvoiceService.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({ claimToken: claim.send_claim_token }));
+      const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
+      expect(source).toContain("await db('invoices').where(invoiceClaimWhere(invoice.id, claimToken)).update({ ...update, updated_at: db.fn.now() })");
+      expect(source).not.toMatch(/db\('invoices'\)\.where\(\{ id: invoice\.id, status: 'sending' \}\)/);
     });
 
     test('the filing is saved before the report email goes out', async () => {

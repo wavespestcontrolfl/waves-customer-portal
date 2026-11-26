@@ -813,18 +813,16 @@ async function buildServiceReportV1ResponseData(service, token, {
   };
 }
 
-// The FDACS filing a WDO report link shows: the last one emailed, else (a report held until paid, whose release email
-// may have gone out with no outcome recorded yet: a crash after the provider accepted it, or an unknown outcome) the
-// signed filing that release saved BEFORE its email. Never live findings edited later. A held release's link exists
-// only while that email may have reached the customer: a proven non-send takes the link back.
+// The FDACS filing a WDO report link shows: the last one emailed. A report held until paid (GATE_WDO_REPORT_HOLD) whose
+// release has not finished shows nothing: its link may exist only because a release email's outcome is unknown, and
+// the report is not recorded as delivered until the release finishes.
 function servedWdoFiling(project) {
-  const parse = (v) => {
-    if (typeof v !== 'string') return v;
-    try { return JSON.parse(v); } catch { return null; }
-  };
-  const filings = parse(project.wdo_sent_filings);
-  if (Array.isArray(filings) && filings.length) return filings[filings.length - 1];
-  return parse(project.delivery_channels)?.release_filing || null;
+  let filings = project.wdo_sent_filings;
+  if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
+  return Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
+}
+function heldReportUnreleased(project) {
+  return ['held', 'releasing'].includes(project?.report_hold_status);
 }
 
 async function findProjectByReportSegment(segment) {
@@ -867,7 +865,7 @@ router.get('/project/:token/data', async (req, res, next) => {
   }
   try {
     const project = await findProjectByReportSegment(req.params.token);
-    if (!project) return res.status(404).json({ error: 'Report not found' });
+    if (!project || heldReportUnreleased(project)) return res.status(404).json({ error: 'Report not found' });
 
     if (!project.report_viewed_at) {
       await db('projects').where({ id: project.id }).update({ report_viewed_at: db.fn.now() });
@@ -1155,7 +1153,7 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
   }
   try {
     const project = await findProjectByReportSegment(req.params.token);
-    if (!project || project.project_type !== 'wdo_inspection') {
+    if (!project || project.project_type !== 'wdo_inspection' || heldReportUnreleased(project)) {
       return res.status(404).json({ error: 'Report not found' });
     }
     const lastFiling = servedWdoFiling(project);
@@ -2630,6 +2628,7 @@ async function ensureReportToken(serviceRecordId) {
 module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
 module.exports.servedWdoFiling = servedWdoFiling;
+module.exports.heldReportUnreleased = heldReportUnreleased;
 module.exports.reportLimiter = reportLimiter;
 module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
