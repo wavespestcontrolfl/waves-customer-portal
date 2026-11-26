@@ -51,7 +51,7 @@ describe('prepaid visits left (payment-status contract)', () => {
     // the claim detector uses the question's visit nouns: appointments count too
     expect(check('You have three appointments left.')).toBe(false);
     // an explicit coverage claim is a count claim whatever the customer asked
-    for (const claim of ['Your plan still covers three visits.', 'The plan has four visits.', 'You have three services left.']) {
+    for (const claim of ['Your plan still covers three visits.', 'The plan has four visits.', 'You still have three visits on your plan.', 'You have three services left.']) {
       expect(paymentStatus.checkPaymentStatusReply({ reply: claim, sentences, inboundText: 'When is my next visit?' }).ok).toBe(false);
     }
     for (const own of ['You have 3 visits left.', 'Three treatments remain on your plan.', 'You have two prepaid visits.', 'There are 3 left visits.',
@@ -87,6 +87,8 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(ask('Three.', 'Do I have any visits left?')).toBe(false);
     // time is excluded only when it is the thing counted
     expect(ask('Three.', 'How many visits do I have left this year?')).toBe(false);
+    // a balance question beside the count question does not disable the count check
+    expect(ask('Three.', 'How many visits do I have left and is there a balance?')).toBe(false);
     // an open-slot answer to an availability question is a scheduling reply, not a plan count
     expect(ask('We have two appointments left on Friday.', 'Do you have any appointments left for Friday?')).toBe(true);
     expect(ask('We can come Friday morning.', 'Do you have any appointments remaining on Friday?')).toBe(true);
@@ -127,6 +129,9 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(check(LAWN, 'How many more visits do I have left?')).toBe(true);
     // two services named: only a plan that names both answers ("Lawn Pest Control" is turf service, not the pest plan)
     expect(check(LEFT, 'How many Lawn Pest Control visits do I have left?')).toBe(false);
+    // a named cadence must be in the plan's label: the quarterly plan's count never answers a monthly plan's question
+    expect(check(LEFT, 'How many monthly pest control visits do I have left?')).toBe(false);
+    expect(check(LEFT, 'How many quarterly pest control visits do I have left?')).toBe(true);
     // a count answers a count question, never a payment or receipt question
     expect(check(LEFT, 'Did you receive my payment?')).toBe(false);
     expect(check(LEFT, 'Did you receive the payment for my prepaid plan?')).toBe(false);
