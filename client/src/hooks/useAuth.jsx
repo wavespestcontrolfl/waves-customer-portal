@@ -656,6 +656,9 @@ export function AuthProvider({ children }) {
         api.request('/auth/logout', {
           method: 'POST',
           body: JSON.stringify({ refreshToken }),
+          // The Face ID lock's phone code path opens /login right after
+          // logout resolves; keepalive lets the revocation outlive that unload.
+          keepalive: true,
         }).catch(() => {});
       }
     })();

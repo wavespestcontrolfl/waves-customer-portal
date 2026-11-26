@@ -1,4 +1,13 @@
+import { Capacitor } from '@capacitor/core';
 import { isNativeApp } from './platform';
+
+// An older app build can lack the native side while the JS package still
+// imports; the probe then never settles. Cap it so the lock cannot hang.
+const PROBE_TIMEOUT_MS = 5000;
+
+function nativePluginPresent() {
+  try { return Capacitor.isPluginAvailable('BiometricAuthNative'); } catch { return false; }
+}
 
 /**
  * Face ID / Touch ID app-lock helper (native only).
@@ -26,8 +35,14 @@ export async function authenticateBiometric(reason = 'Unlock Waves') {
   if (pluginBroken) return NEEDS_PHONE_CODE;
   if (biometryUnavailable) return true;
 
-  // Load the plugin. Missing in this build (older binary, newer web code) →
+  // Native side missing in this build (older binary, newer web code) →
   // phone code sign-in.
+  if (!nativePluginPresent()) {
+    pluginBroken = true;
+    return NEEDS_PHONE_CODE;
+  }
+
+  // Load the plugin.
   let BiometricAuth;
   let BiometryErrorType;
   try {
@@ -41,7 +56,11 @@ export async function authenticateBiometric(reason = 'Unlock Waves') {
   // build → phone code sign-in.
   let info;
   try {
-    info = await BiometricAuth.checkBiometry();
+    let timer;
+    info = await Promise.race([
+      BiometricAuth.checkBiometry(),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('probe timeout')), PROBE_TIMEOUT_MS); }),
+    ]).finally(() => clearTimeout(timer));
   } catch {
     pluginBroken = true;
     return NEEDS_PHONE_CODE;
