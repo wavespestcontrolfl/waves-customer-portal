@@ -125,6 +125,8 @@ describe('accountSavedProperties — the unified list', () => {
     const { properties } = await accountSavedProperties({ customerId: 'cust-1', accountId: 'acct-1', propertyId: null });
     expect(properties.map((e) => e.key)).toEqual(['cust-1:prop-a', 'cust-1:prop-b', 'cust-1:prop-c']);
     expect(properties.some((e) => e.customerId === 'cust-9')).toBe(false);
+    const retired = await accountSavedProperties({ customerId: 'cust-9', accountId: 'acct-1', propertyId: null });
+    expect(retired.selected).toEqual({ key: null, propertyId: null, customerId: 'cust-9', closed: true });
   });
 
   test('selected follows a validated claim; a claim that is not among the profile\'s entries falls back to the primary', async () => {

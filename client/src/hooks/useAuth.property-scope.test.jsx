@@ -243,6 +243,16 @@ describe('cross-tab saved-property switch', () => {
     api.getAuthProperties.mockResolvedValue(SAVED);
   });
 
+  it('retains the retired-profile marker after loading the saved-property list', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    const selected = { customerId: 'cust-1', propertyId: null, key: null, closed: true };
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: null, closed: true } });
+    api.getAuthProperties.mockResolvedValueOnce({ scope: 'saved', properties: [], selected });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(api.getAuthProperties).toHaveBeenCalled();
+    expect(authApi.selectedProperty).toEqual(selected);
+  });
+
   it('a claim the server IGNORED (retired house / gate off) never becomes the selection: /auth/me says null → the primary from retained entries', async () => {
     stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
     api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: 'prop-a' } });
