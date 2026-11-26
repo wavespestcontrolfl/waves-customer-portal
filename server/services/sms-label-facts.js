@@ -1441,9 +1441,15 @@ const BANK_SENTENCES_MAX = 80;
 // One sentence of a bank line, on its own. The language screens run HERE, before a copy is ever masked: a bank line may be written in
 // another language, and the unsupported-language timing words ("trocken") are seen only by hasUnsupportedLanguage, which reads a masked
 // copy as one inert marker.
+// Answer force is read like the reply guard reads a reply: on the sentence, on every clause of it, and on each with the friendly ends
+// (greeting, thanks, apology) peeled off, so "Thanks, absolutely." and "Hello, yes." carry their answer past no screen.
+function carriesAnswerForce(text) {
+  const clauses = text.split(/\s*[,;:]\s*|\s+[-\u2013\u2014]+\s+/).filter((c) => c.trim());
+  return [text, ...clauses].some((part) => hasAnswerForce(part) || hasAnswerForce(peelFriendlyEnds(part)));
+}
 function isNeutralBankPiece(piece) {
   const text = canonText(piece).toLowerCase();
-  return !/\?/.test(text) && !hasAnswerForce(text) && !LABEL_CONTEXT_RE.test(text) && !hasDuration(text) && !hasClockTime(text)
+  return !/\?/.test(text) && !carriesAnswerForce(text) && !LABEL_CONTEXT_RE.test(text) && !hasDuration(text) && !hasClockTime(text)
     && !CLEARANCE_ANY_RE.test(text) && !RAINFAST_RE.test(text) && !UNTIL_DRY_HOLD_RE.test(text)
     && !looksNonEnglish(piece) && !hasUnsupportedLanguage(piece) && !nonEnglishTimingWords(text);
 }

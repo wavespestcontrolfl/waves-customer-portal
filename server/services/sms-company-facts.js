@@ -326,12 +326,33 @@ function bankFactsRangeInLines(lines, limit = lines.length) {
  * Returns the section text, header first, one "- " line per fact, no trailing newline.
  */
 function exactBankFactsSection(factsBlock) {
+  const found = locateBankSection(factsBlock);
+  return found ? found.lines.slice(found.range.start, found.range.end).join('\n') : '';
+}
+// The bank section of a stored block by exact structure: { before, lines, range } (the text before the first BILLING:, its lines, and the
+// section's line range) or null.
+function locateBankSection(factsBlock) {
   const before = textBeforeFirstBilling(factsBlock);
-  if (before === null || !before.includes(SMS_BANK_FACTS_HEADER)) return '';
-  if (!new RegExp(exactStructureRegexSource('optional', { anyRender: true })).test(before)) return '';
+  if (before === null || !before.includes(SMS_BANK_FACTS_HEADER)) return null;
+  if (!new RegExp(exactStructureRegexSource('optional', { anyRender: true })).test(before)) return null;
   const lines = before.split('\n');
   const range = bankFactsRangeInLines(lines);
-  return range ? lines.slice(range.start, range.end).join('\n') : '';
+  return range ? { before, lines, range } : null;
+}
+
+/**
+ * The block as the models may read it: a bank section that does not verify (every line exact owner wording the bank knew at `opts.at`,
+ * the time of the draft; omitted = now) is removed before the drafter and the verifier see it, because under the owner-approved heading
+ * it would read as company policy. Multi-line free text (a visit window, a note) can reproduce the section shape. Only the section's
+ * own lines go: the rest of the block stays byte-identical, and a block with no section, or a verified one, is returned unchanged.
+ */
+function withoutUnverifiedBankSection(factsBlock, opts = {}) {
+  if (typeof factsBlock !== 'string') return factsBlock;
+  const found = locateBankSection(factsBlock);
+  if (!found) return factsBlock;
+  const { before, lines, range } = found;
+  if (lines.slice(range.start + 1, range.end).every((l) => isOwnerBankLine(l.slice(2), opts))) return factsBlock;
+  return `${[...lines.slice(0, range.start), ...lines.slice(range.end)].join('\n')}${factsBlock.slice(before.length)}`;
 }
 
 const bankLineHash = (text) => require('crypto').createHash('sha256').update(String(text).trim()).digest('hex');
@@ -503,6 +524,7 @@ module.exports = {
   exactBankFactsSection,
   bankFactLinesFrom,
   isOwnerBankLine,
+  withoutUnverifiedBankSection,
   COMPANY_FACTS,
   FACT_CLOSED_HOLIDAY_KEYS,
   closedHolidaysMatchFactsLine,
