@@ -81,7 +81,11 @@ const NOT_BOOKED_TAGS = new Set(['objection']);
 // with a provider the caller had. Shopping labels alone ("comparison
 // shopping", "quote comparison") are not.
 const SHOPPING_TOPIC = /shopping|comparison|competitor pricing|second opinion|quote|estimate|bid/;
-const RELATIONSHIP_TOPIC = /^(current|previous|prior|existing|former|old|other pest|lawn) (pest )?provider$|^provider (dissatisfaction|switch(ing)?|cancellation)$|^switching providers?$|^replacement provider$|^service cancellation$/;
+const RELATIONSHIP_TOPIC = /^(current|previous|prior|existing|former|old|other pest|lawn) (pest )?provider$|^provider (dissatisfaction|switch(ing)?|cancellation)$|^switching providers?$|^service cancellation$/;
+// The OLD provider specifically: a rival named next to one of these labels is
+// the company the caller left. "switching providers" or "replacement
+// provider" can name the NEW one, so they never qualify a rival.
+const OLD_PROVIDER_TOPIC = /^(current|previous|prior|existing|former|old) (pest )?provider$|^provider (dissatisfaction|cancellation)$/;
 
 // Each reason = labels that state it. The reason a lead gets is the one with
 // the most matching labels across its chunks; a tie goes to the earlier entry.
@@ -156,7 +160,8 @@ const isShopping = (c) => labels(c).some((t) => SHOPPING_TOPIC.test(t));
 // A rival counts only from a chunk that itself states the relationship and is
 // not about shopping ("current provider" + "orkin"); a rival named in a quote
 // chunk elsewhere on the call is a competitor, not the old provider.
-const rivalsIn = (chunkList) => [...new Set(chunkList.filter((c) => isRelationship(c) && !isShopping(c)).flatMap(labels)
+const isOldProvider = (c) => labels(c).some((t) => OLD_PROVIDER_TOPIC.test(t));
+const rivalsIn = (chunkList) => [...new Set(chunkList.filter((c) => isOldProvider(c) && !isShopping(c)).flatMap(labels)
   .flatMap((t) => RIVALS.filter(([, re]) => re.test(t)).map(([name]) => name)))];
 
 // Switch evidence for one call: the caller's switch-tag chunks on a call where
@@ -224,11 +229,16 @@ const stampState = (c) => {
 async function candidateCalls(conn, leads) {
   const sids = [...new Set(leads.map((l) => l.twilio_call_sid).filter(Boolean))];
   const ids = leads.map((l) => l.id);
-  const customerIds = asUuidList(leads, 'customer_id');
   const rows = await conn('call_log').where((w) => {
     w.whereIn(conn.raw("metadata->>'lead_id'"), ids);
     if (sids.length) w.orWhereIn('twilio_call_sid', sids).orWhereIn('call_sid', sids);
-    if (customerIds.length) w.orWhereIn('customer_id', customerIds);
+    // Same-customer calls only inside each lead's window, bounded in SQL.
+    for (const l of leads) {
+      if (!l.customer_id) continue;
+      const t = new Date(l.created_at).getTime();
+      w.orWhere((c) => c.where('customer_id', l.customer_id)
+        .whereBetween('created_at', [new Date(t - CALL_WINDOW_BEFORE_DAYS * DAY_MS), new Date(t + CALL_WINDOW_AFTER_DAYS * DAY_MS)]));
+    }
   }).select(CALL_COLS(conn));
   return [...new Map(rows.map((r) => [r.id, r])).values()];
 }

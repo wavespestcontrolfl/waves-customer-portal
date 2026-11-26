@@ -22,12 +22,15 @@ function leadLinkedVisits(conn, lead) {
           .where('la.activity_type', 'appointment_scheduled')
           .whereRaw("la.metadata->>'appointmentId' = ss.id::text"),
       ).orWhereExists(
-        // A phone booking: call-recording-processor.js records the visit as an
-        // appointment_booked activity keyed by metadata.scheduledServiceId.
+        // A phone booking: call-recording-processor.js keys the visit by
+        // metadata.scheduledServiceId on an appointment_booked activity
+        // (assessment / quote still owed) or on the converted activity of an
+        // ordinary booking (triggerSource 'appointment_booked').
         conn('lead_activities as la')
           .select(conn.raw('1'))
           .where('la.lead_id', lead.id)
-          .where('la.activity_type', 'appointment_booked')
+          .where((t) => t.where('la.activity_type', 'appointment_booked')
+            .orWhere((c) => c.where('la.activity_type', 'converted').whereRaw("la.metadata->>'triggerSource' = 'appointment_booked'")))
           .whereRaw("la.metadata->>'scheduledServiceId' = ss.id::text"),
       ).orWhereExists(
         conn('ad_service_attribution as asa')

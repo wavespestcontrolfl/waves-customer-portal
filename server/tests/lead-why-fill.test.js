@@ -69,6 +69,11 @@ describe('switch_reason labels', () => {
     expect(planLeadWhy(lead(), chunks)).toEqual({ switch_reason: 'no_show' });
   });
 
+  test('a replacement provider is not the company the caller left', () => {
+    const chunks = [chunk('competitor_mention', ['replacement provider', 'orkin']), chunk('churn_signal', ['switching providers', 'monthly price'])];
+    expect(planLeadWhy(lead(), chunks).previous_company).toBeUndefined();
+  });
+
   test('agent chunks are ignored', () => {
     expect(planLeadWhy(lead(), [switchChunk(['pricing'], { speaker: 'agent' })])).toEqual({});
   });
