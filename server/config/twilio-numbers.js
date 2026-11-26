@@ -249,12 +249,14 @@ const TWILIO_NUMBERS = {
       process.env.OFFICE_MANAGER_PHONE,
       process.env.WAVES_OFFICE_MANAGER_PHONE,
     ].forEach((raw) => add(raw));
-    // WAVES_CSR_NUMBER_MAP entries are "<number>:<name>" — the key is the number.
+    // WAVES_CSR_NUMBER_MAP entries are "<number>:<name>" — the key is the number. `add` also gets the entry's
+    // trimmed name: '' when the entry has none (a bare number, or nothing after the colon). The call router reads
+    // only an entry with both (getCsrNumberMap), so a caller that must agree with it can tell the two apart.
     String(process.env.WAVES_CSR_NUMBER_MAP || '').split(',').forEach((pair) => {
       const p = pair.trim();
       if (!p) return;
       const idx = p.lastIndexOf(':');
-      add(idx > 0 ? p.slice(0, idx) : p);
+      add(idx > 0 ? p.slice(0, idx) : p, idx > 0 ? p.slice(idx + 1).trim() : '');
     });
   },
 
@@ -300,7 +302,10 @@ const TWILIO_NUMBERS = {
     const caller = typeof phoneNumber === 'string' ? phoneNumber : '';
     if (!/^\+[1-9]\d{7,14}$/.test(caller)) return false;
     let match = false;
-    this.eachStaffForwardRaw((raw) => {
+    this.eachStaffForwardRaw((raw, csrName) => {
+      // A CSR map entry the call router ignores (no name) names nobody here either: a stale or half-typed entry
+      // must not make its number a staff phone.
+      if (csrName === '') return;
       if (this.staffNumberE164(raw) === caller) match = true;
     });
     return match;

@@ -146,6 +146,17 @@ describe('isStaffForwardE164: the whole number, never its last ten digits', () =
     expect(TWILIO_NUMBERS.isStaffForwardE164(STAFF_PHONE)).toBe(false);
   });
 
+  // The call router reads a WAVES_CSR_NUMBER_MAP entry only when it has a number AND a name (getCsrNumberMap). An
+  // entry it ignores (a stale bare number, a name deleted but the colon left) must not make that number a staff phone.
+  test('a CSR map entry counts only with a number and a name, as the call router reads it', () => {
+    delete process.env.WAVES_FALLBACK_FORWARD_NUMBERS;
+    process.env.WAVES_CSR_NUMBER_MAP = '+19415550142, +19415550143:, +19415550144:  ,+19415550145:Pat, :Sam';
+    for (const unnamed of ['+19415550142', '+19415550143', '+19415550144']) expect(TWILIO_NUMBERS.isStaffForwardE164(unnamed)).toBe(false);
+    expect(TWILIO_NUMBERS.isStaffForwardE164('+19415550145')).toBe(true);
+    // The last-ten-digit set that marks a leg internal is unchanged: it still holds every number written there.
+    expect([...TWILIO_NUMBERS.staffForwardLast10()].sort()).toEqual(['9415550142', '9415550143', '9415550144', '9415550145']);
+  });
+
   // The configured side is read as strictly as the caller's side. Guessing here would let a staff entry that is not a
   // plain number authorize a DIFFERENT caller, whom the carrier then truthfully vouches for.
   test('a configured value is read only when it is one unambiguous number', () => {
@@ -637,12 +648,13 @@ describe('POST /relay-sandbox/cell', () => {
     });
     // One cell callback over a sandbox row with this metadata (stamped true unless overridden).
     const stamped = (value) => ({ relay_sandbox: true, [RECORDING_STAMP]: value });
-    const render = async ({ metadata = stamped(true), signed = true, tamper = null, From = '+19415550100', asText = false, readFails = false } = {}) => {
+    const render = async ({ metadata = stamped(true), signed = true, tamper = null, From = '+19415550100', asText = false } = {}) => {
       const update = jest.fn().mockResolvedValue(1);
-      const first = jest.fn(async (...columns) => {
-        if (readFails && columns.includes('metadata')) throw new Error('pool down');
-        return { source: VOICE_RELAY_SANDBOX_SOURCE, metadata: asText ? JSON.stringify(metadata) : metadata };
-      });
+      // The row as the query asked for it: metadata only when the handler selected it.
+      const first = jest.fn(async (...columns) => ({
+        source: VOICE_RELAY_SANDBOX_SOURCE,
+        ...(columns.includes('metadata') ? { metadata: asText ? JSON.stringify(metadata) : metadata } : {}),
+      }));
       db.mockImplementation(() => ({ where: jest.fn(() => ({ update, first })) }));
       db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
       const req = twilioReq('/relay-sandbox/cell', { CallSid: 'CA-sb-rec', To: SANDBOX, From, Digits: '09' }, { signed });
@@ -658,10 +670,12 @@ describe('POST /relay-sandbox/cell', () => {
     };
 
     test('a stamped call is recorded after the replayed disclosure and before the relay, once, with no status callback', async () => {
-      const { xml } = await render();
+      const { xml, first } = await render();
       expect(xml).toMatch(RECORDED);
       expect(xml.split('<Recording')).toHaveLength(2);
       expect(xml).not.toMatch(/recordingStatusCallback/i);
+      // The stamp rides the ownership read: one query for the row, never a second one the call would wait on.
+      expect(first.mock.calls).toEqual([['source', 'metadata']]);
       expect((await render({ asText: true })).xml).toMatch(RECORDED); // metadata read back as text
     });
 
@@ -680,21 +694,21 @@ describe('POST /relay-sandbox/cell', () => {
         for (const opts of [{ signed: false }, { tamper: { Digits: '10' } }]) {
           const { xml, first } = await render(opts);
           expect(xml).not.toMatch(/<Start|<Recording/);
-          expect(first).toHaveBeenCalledTimes(1); // the ownership read only
+          expect(first.mock.calls).toEqual([['source']]); // the ownership read as it was: the stamp is not even selected
         }
       }
     });
 
-    test('a relay that cannot take the call, a failed stamp read, or the gate off: the same document as before, no recording', async () => {
+    test('a relay that cannot take the call, or the gate off: the same document and the same row read as before, no recording', async () => {
       isRelayAttached.mockImplementation(() => false);
-      expectRelayNotRecorded((await render()).xml);
+      const detached = await render();
+      expectRelayNotRecorded(detached.xml);
+      expect(detached.first.mock.calls).toEqual([['source']]);
       isRelayAttached.mockImplementation(() => true);
-      expectRelayNotRecorded((await render({ readFails: true })).xml);
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/recording stamp not read/));
       delete process.env.GATE_VOICE_SANDBOX_RECORDING;
       const off = await render();
       expectRelayNotRecorded(off.xml);
-      expect(off.first).toHaveBeenCalledTimes(1); // gate off adds no read
+      expect(off.first.mock.calls).toEqual([['source']]); // gate off: the query is what it was
     });
   });
 

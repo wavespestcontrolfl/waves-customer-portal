@@ -2403,8 +2403,8 @@ function isSandboxCall(req) {
 // the answer webhook (sandboxRecordingDecision), and stamped on the sandbox
 // row. A redelivery reuses that stamp and never replaces it (a staff-number
 // change between two deliveries must not turn a refusal into a recording), and
-// the cell continuation only honours it (sandboxCellRecordingXml). All of
-// these must hold:
+// the cell continuation only honours it (sandboxCellMayRecord, then the stamp
+// on its ownership read). All of these must hold:
 //   - the gate is on;
 //   - Twilio verifiably signed the request. The shared middleware lets an
 //     unsigned request through in its `log` and `disabled` modes, and an
@@ -2449,23 +2449,14 @@ function storedSandboxRecordingStamp(metadata) {
   return typeof value === 'boolean' ? value : null;
 }
 
-// The cell continuation never decides again. It reads the answer webhook's
-// stamp from the sandbox row, and only on its own verified signature, with the
-// gate still on and a relay that can take the call (a recording must not start
-// ahead of a <Connect> nothing will answer). Any doubt, a failed read
-// included, means no recording; it never costs the caller the call.
-async function sandboxCellRecordingXml(req, callSid) {
-  try {
-    if (!require('../config/feature-gates').voiceSandboxRecordingLive?.()) return '';
-    if (!gptLiveRequestSigned(req) || !isRelayAttached()) return '';
-    const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
-    const row = await db('call_log').where({ twilio_call_sid: callSid }).first('source', 'metadata');
-    if (!row || row.source !== VOICE_RELAY_SANDBOX_SOURCE) return '';
-    return storedSandboxRecordingStamp(row.metadata) === true ? SANDBOX_RECORDING_XML : '';
-  } catch (err) {
-    logger.warn(`[relay-sandbox] recording stamp not read for ${maskSid(callSid)}: no recording (code=${String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32)})`);
-    return '';
-  }
+// The cell continuation never decides again: it honours the answer webhook's
+// stamp. Whether THIS cell request may record at all is settled before the row
+// is read: the gate still on, its own verified signature, and a relay that can
+// take the call (a recording must not start ahead of a <Connect> nothing will
+// answer). The stamp itself then rides the handler's one ownership read
+// (sandboxRowOwned), so the cell never waits on a second query.
+function sandboxCellMayRecord(req) {
+  return Boolean(require('../config/feature-gates').voiceSandboxRecordingLive?.()) && gptLiveRequestSigned(req) && isRelayAttached();
 }
 
 // The relay socket must open on THIS deploy: a branch bake-off on a Railway
@@ -2551,11 +2542,13 @@ async function stampRelayProfile(callSid, opts, { clearWhenEmpty = false } = {})
 }
 
 // The call_log row for this CallSid exists AND carries the sandbox source —
-// the row-level proof the WS upgrade will later trust.
-async function sandboxRowOwned(callSid) {
+// the row-level proof the WS upgrade will later trust. Returns that row, or
+// null. `withMetadata` reads its metadata in the same query, for the cell
+// handler that goes on to read the recording stamp from it.
+async function sandboxRowOwned(callSid, { withMetadata = false } = {}) {
   const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
-  const row = await db('call_log').where({ twilio_call_sid: callSid }).first('source');
-  return Boolean(row) && row.source === VOICE_RELAY_SANDBOX_SOURCE;
+  const row = await db('call_log').where({ twilio_call_sid: callSid }).first(...(withMetadata ? ['source', 'metadata'] : ['source']));
+  return row && row.source === VOICE_RELAY_SANDBOX_SOURCE ? row : null;
 }
 
 function refuseSandbox(req, res, why) {
@@ -2892,7 +2885,7 @@ function gptLiveStreamXml(req, callSid, token, recordingXml = '') {
   return twiml.toString().replace('<Connect', `${recordingXml}<Connect`);
 }
 
-async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
+async function respondGptLiveCell(req, res, callSid, { cell, voice }, recordingXml = '') {
   if (!isRelayAttached()) {
     logger.warn(`[gpt-live] relay not attached — hanging up ${maskSid(callSid)}`);
     return gptLiveSayAndHangup(res, 'The voice relay is not attached on this deploy. Goodbye.');
@@ -2908,7 +2901,7 @@ async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
     }
     capGptLiveCall(callSid);
     logger.info(`[gpt-live] cell ${cell} voice ${voice} ${maskSid(callSid)}`);
-    return res.type('text/xml').send(gptLiveStreamXml(req, callSid, token, await sandboxCellRecordingXml(req, callSid)));
+    return res.type('text/xml').send(gptLiveStreamXml(req, callSid, token, recordingXml));
   } catch (err) {
     // A bounded code only: the stamp update binds the caller's numbers, and a database error message can echo bindings.
     logger.error(`[gpt-live] refused ${maskSid(callSid)} (fail closed) code=${String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32)}`);
@@ -2931,8 +2924,13 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     const { CallSid } = req.body || {};
     if (!CallSid) return refuseSandbox(req, res, 'no CallSid');
     // The same ownership check the answer handler applies: no relay renders
-    // over a row that is not sandbox-sourced.
-    if (!(await sandboxRowOwned(CallSid))) return refuseSandbox(req, res, 'call_log row is not sandbox-sourced');
+    // over a row that is not sandbox-sourced. GATE_VOICE_SANDBOX_RECORDING: a
+    // request that may record reads the answer webhook's stamp in this same
+    // query; any other request reads exactly what it read before the gate.
+    const mayRecord = sandboxCellMayRecord(req);
+    const ownedRow = await sandboxRowOwned(CallSid, { withMetadata: mayRecord });
+    if (!ownedRow) return refuseSandbox(req, res, 'call_log row is not sandbox-sourced');
+    const recordingXml = mayRecord && storedSandboxRecordingStamp(ownedRow.metadata) === true ? SANDBOX_RECORDING_XML : '';
     const digits = String(req.body?.Digits || '').trim();
     // GATE_VOICE_GPT_LIVE_TEST: 71 / 72 hand the call to the GPT-Live bridge.
     // Gate off (or any other digits) ⇒ the production code path below.
@@ -2941,7 +2939,7 @@ router.post('/relay-sandbox/cell', async (req, res) => {
       logger.warn(`[gpt-live] unsigned or invalid Twilio signature — refused ${maskSid(CallSid)}`);
       return gptLiveSayAndHangup(res, 'The GPT-Live test is not available right now. Goodbye.');
     }
-    if (liveCell) return await respondGptLiveCell(req, res, CallSid, liveCell);
+    if (liveCell) return await respondGptLiveCell(req, res, CallSid, liveCell, recordingXml);
     const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
     const cell = resolveSandboxCell(digits);
     logger.info(`[relay-sandbox] cell "${digits}" → ${cell ? cell.relayProfileId : 'production profile'} ${maskSid(CallSid)}`);
@@ -2953,7 +2951,7 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     const replay = new VoiceResponse();
     replay.play(wavesGreetingUrl());
     const replayInner = replay.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
-    return res.type('text/xml').send(sandboxRelayXml({ callSid: CallSid, cell, req }).replace('<Response>', `<Response>${replayInner}${await sandboxCellRecordingXml(req, CallSid)}`));
+    return res.type('text/xml').send(sandboxRelayXml({ callSid: CallSid, cell, req }).replace('<Response>', `<Response>${replayInner}${recordingXml}`));
   } catch (err) {
     logger.error(`[relay-sandbox] cell error: ${err.message}`);
     return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');

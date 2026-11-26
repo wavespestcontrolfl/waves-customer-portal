@@ -9196,10 +9196,11 @@ posted `StirVerstat` is a passed full attestation (the carrier vouches for
 the number, so a spoofed caller ID does not count) and the posted `From`,
 in strict E.164, is a configured staff forward number as a whole
 (`twilio-numbers.isStaffForwardE164`; never a last-ten-digit match, and a
-configured value that is not one unambiguous number authorizes nobody).
+configured value that is not one unambiguous number, or a CSR map entry
+with no name, authorizes nobody).
 `/relay-sandbox/cell` does not decide again: it honours that stamp only on
 its own validly signed request, with the gate still on and the relay
-attached. A recorded call's document, the GPT-Live cell document below
+attached, and reads it in its one ownership read of the row. A recorded call's document, the GPT-Live cell document below
 included, adds
 `<Start><Recording channels="dual" trim="do-not-trim"/></Start>` after the
 recording disclosure and before its `<Connect>`: at most one recording a
@@ -9208,8 +9209,8 @@ call-recording pipeline never see it. An answer document that records also
 sets `finishOnKey=""` on its cell `<Gather>`, so no key press (a lone `#`
 under Twilio's default) can end the disclosure early and fall through to
 the recording: every key press reaches `/relay-sandbox/cell`, which replays
-the disclosure first. Any other caller, a refused call, an unreadable
-stamp, or the gate off gets the unchanged document. The CallSid recovery
+the disclosure first. Any other caller, a refused call, or the gate off
+gets the unchanged document. The CallSid recovery
 lookup never brings the recording onto the sandbox row: `/call-status` and
 the lookup itself each refuse an internal row by its stored source, not by
 the callback's `To`. Any change to the
