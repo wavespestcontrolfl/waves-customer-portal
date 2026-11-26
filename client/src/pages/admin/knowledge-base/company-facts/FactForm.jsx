@@ -22,20 +22,22 @@ const startingValues = (mode, fact) => ({
 // For an edit, `loadCurrent()` reads the fact as it is saved now (used to recover from a 409 STALE_TEXT).
 // The baseline (the fields and wording hash the editor opened) is fixed at open: a list reload behind the form never moves it,
 // so an untouched field is never sent and never overwrites another admin's edit. Only a STALE_TEXT recovery replaces it.
-export default function FactForm({ mode, initial = {}, onSubmit, onCancel, loadCurrent }) {
-  const [baseline, setBaseline] = useState(() => ({ values: startingValues(mode, initial), hash: initial.text_sha256 }));
+export default function FactForm({ mode, initial = {}, onSubmit, onCancel, loadCurrent, onStale }) {
+  const [baseline, setBaseline] = useState(() => ({ values: startingValues(mode, initial), hash: initial.text_sha256, updatedAt: initial.updated_at }));
   const [fields, setFields] = useState(baseline.values);
   const [current, setCurrent] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const setField = (key) => (event) => setFields((prev) => ({ ...prev, [key]: event.target.value }));
 
-  // A new draft sends everything. An edit sends only what the editor changed, plus the hash of the wording it opened,
-  // so a concurrent change of the wording is refused (409).
+  // A new draft sends everything. An edit sends only what the editor changed, plus what it opened: the wording hash, the row's
+  // updated_at and the kind of fact (draft or approved). The server refuses a concurrent change of the wording (STALE_TEXT), of any
+  // field (STALE_FACT), or of the status, such as an approval meanwhile (STATUS_CHANGED).
+  const openedState = { baseTextSha256: baseline.hash, baseUpdatedAt: baseline.updatedAt, expectStatus: mode === "approved" ? "approved" : "draft" };
   const valuesToSend = (now) => {
     if (mode === "new") return now;
     const changed = Object.fromEntries(Object.entries(now).filter(([key, value]) => value !== baseline.values[key]));
-    return Object.keys(changed).length ? { ...changed, baseTextSha256: baseline.hash } : null;
+    return Object.keys(changed).length ? { ...changed, ...openedState } : null;
   };
 
   // The wording was changed by someone else. Show it, keep what the editor typed (to copy), and move the baseline to the
@@ -44,7 +46,7 @@ export default function FactForm({ mode, initial = {}, onSubmit, onCancel, loadC
     const saved = await loadCurrent();
     const fresh = startingValues(mode, saved.fact);
     setFields((prev) => Object.fromEntries(Object.keys(prev).map((key) => [key, prev[key] === baseline.values[key] ? fresh[key] : prev[key]])));
-    setBaseline({ values: fresh, hash: saved.fact.text_sha256 });
+    setBaseline({ values: fresh, hash: saved.fact.text_sha256, updatedAt: saved.fact.updated_at });
     setCurrent(saved.fact.fact_text);
   };
 
@@ -66,15 +68,17 @@ export default function FactForm({ mode, initial = {}, onSubmit, onCancel, loadC
       await onSubmit(values);
     } catch (requestError) {
       setCurrent(null);
-      if (requestError.code === "STALE_TEXT" && loadCurrent) {
+      if (["STALE_TEXT", "STALE_FACT"].includes(requestError.code) && loadCurrent) {
         try {
           await recover();
-          setError("Someone changed this wording while you had it open. Your text is still in the box. Compare it with the saved wording below, then save again.");
+          setError(`Someone changed this ${requestError.code === "STALE_TEXT" ? "wording" : "fact"} while you had it open. Your text is still in the box. Compare it with the saved wording below, then save again.`);
         } catch {
-          setError("Someone changed this wording, and the saved wording could not be loaded. Copy your text, close this, and reload the list.");
+          setError("Someone changed this fact, and the saved wording could not be loaded. Copy your text, close this, and reload the list.");
         }
       } else {
         setError(errorMessage(requestError, "The fact could not be saved."));
+        // The fact moved on (approved, say): refresh the list behind this form. The form and what was typed stay.
+        if (requestError.code === "STATUS_CHANGED") onStale?.();
       }
       setBusy(false);
     }

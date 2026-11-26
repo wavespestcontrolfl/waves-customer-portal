@@ -22,6 +22,7 @@ const fact = (over = {}) => ({
   owner_words: null,
   supersedes_id: null,
   created_at: "2026-11-25T15:00:00Z",
+  updated_at: "2026-11-25T15:00:00.000Z",
   approved_at: null,
   retired_at: null,
   retire_reason: null,
@@ -319,7 +320,7 @@ describe("Company facts tab", () => {
     expect(patches).toEqual([]);
     fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "Service area, renamed" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-    await waitFor(() => expect(patches).toEqual([{ topic: "Service area, renamed", baseTextSha256: sha }]));
+    await waitFor(() => expect(patches).toEqual([{ topic: "Service area, renamed", baseTextSha256: sha, baseUpdatedAt: "2026-11-25T15:00:00.000Z", expectStatus: "draft" }]));
   });
 
   it("starts a replacement of an approved fact with empty owner's words", async () => {
@@ -378,11 +379,11 @@ describe("Company facts tab", () => {
     fireEvent.change(screen.getByLabelText(/Question it answers/), { target: { value: "New question" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(patches).toHaveLength(2));
-    expect(patches[1][1]).toEqual({ question: "New question", baseTextSha256: oldHash });
+    expect(patches[1][1]).toEqual({ question: "New question", baseTextSha256: oldHash, baseUpdatedAt: "2026-11-25T15:00:00.000Z", expectStatus: "draft" });
   });
 
   it("recovers from a stale wording: shows the saved wording, keeps the typed text, and retries on the new hash", async () => {
-    const savedNow = fact({ fact_text: "We service Parrish and Palmetto.", text_sha256: "d".repeat(64), topic: "Topic by other" });
+    const savedNow = fact({ fact_text: "We service Parrish and Palmetto.", text_sha256: "d".repeat(64), topic: "Topic by other", updated_at: "2026-11-25T16:00:00.000Z" });
     const patches = [];
     serve({
       owner: true,
@@ -403,7 +404,7 @@ describe("Company facts tab", () => {
     expect(screen.getByLabelText(/Topic/)).toHaveValue("Topic by other");
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(patches).toHaveLength(2));
-    expect(patches[1]).toEqual({ factText: "My own wording of it.", baseTextSha256: "d".repeat(64) });
+    expect(patches[1]).toEqual({ factText: "My own wording of it.", baseTextSha256: "d".repeat(64), baseUpdatedAt: "2026-11-25T16:00:00.000Z", expectStatus: "draft" });
   });
 
   it("lets the owner check a draft again after the conflict is gone", async () => {
@@ -419,7 +420,7 @@ describe("Company facts tab", () => {
     expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled());
-    expect(patches).toEqual([{ baseTextSha256: "a".repeat(64) }]);
+    expect(patches).toEqual([{ baseTextSha256: "a".repeat(64), baseUpdatedAt: "2026-11-25T15:00:00.000Z", expectStatus: "draft" }]);
     expect(screen.queryByText(/Another fact in the bank/)).not.toBeInTheDocument();
   });
 
@@ -477,5 +478,112 @@ describe("Company facts tab", () => {
     expect(await screen.findByText(/Could not load the preview/)).toBeInTheDocument();
     expect(screen.queryByText(/not in this list/)).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Try again" }).length).toBeGreaterThan(0);
+  });
+
+  it("keeps every loaded page, and an open editor on an older card, when another card's action refreshes the list", async () => {
+    const pageOne = [fact({ id: ID_A, topic: "Topic A" })];
+    const pageTwo = [fact({ id: ID_B, topic: "Topic B (page two)" })];
+    const reads = [];
+    serve({
+      owner: true,
+      pages: { draft: { first: { facts: pageOne, nextCursor: "C2" }, C2: { facts: pageTwo, nextCursor: null } } },
+      onRequest: () => {},
+    });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation(async (path, options) => { reads.push(path); return base(path, options); });
+    mount();
+    await screen.findByText("Topic A");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText("Topic B (page two)");
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]);
+    fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "Half-typed on page two" } });
+    reads.length = 0;
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(reads.filter((path) => path.startsWith("/admin/company-facts?"))).toHaveLength(2));
+    expect(screen.getByLabelText(/Topic/)).toHaveValue("Half-typed on page two");
+    expect(screen.getByText("Topic A")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the list and an open editor when a quiet refresh fails", async () => {
+    let failList = false;
+    serve({ owner: true, pages: { draft: { first: { facts: [fact({ id: ID_A, topic: "Topic A" }), fact({ id: ID_B, topic: "Topic B" })], nextCursor: null } } } });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation(async (path, options) => {
+      if (failList && path.startsWith("/admin/company-facts?")) throw Object.assign(new Error("OFFLINE"), { code: "OFFLINE", status: 503 });
+      return base(path, options);
+    });
+    mount();
+    await screen.findByText("Topic A");
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]);
+    fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "Half-typed" } });
+    failList = true;
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    expect(await screen.findByText("The facts could not be loaded.")).toBeInTheDocument();
+    expect(screen.getByText("Topic A")).toBeInTheDocument();
+    expect(screen.getByLabelText(/Topic/)).toHaveValue("Half-typed");
+  });
+
+  it("keeps an open editor on a card that left the list, and says nothing was saved when the save is refused (STATUS_CHANGED)", async () => {
+    const live = { facts: [fact({ id: ID_A, topic: "Topic A" })] };
+    const patches = [];
+    serve({
+      owner: true,
+      pages: Object.defineProperty({}, "draft", { get: () => ({ first: { facts: live.facts, nextCursor: null } }), enumerable: true }),
+      failWith: (method) => (method === "PATCH" ? { code: "STATUS_CHANGED", status: 409 } : null),
+      onRequest: (path, options) => { if (options.method === "PATCH") patches.push(JSON.parse(options.body)); },
+    });
+    mount();
+    await screen.findByText("Topic A");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "My new topic" } });
+    live.facts = []; // approved meanwhile: it is no longer a draft
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText(/changed state while you had it open/)).toBeInTheDocument();
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).toMatchObject({ topic: "My new topic", expectStatus: "draft" });
+    expect(screen.getByLabelText(/Topic/)).toHaveValue("My new topic");
+  });
+
+  it("recovers from a changed field the same way as a changed wording (STALE_FACT)", async () => {
+    const patches = [];
+    serve({
+      owner: true,
+      pages: { draft: { first: { facts: [fact()], nextCursor: null } } },
+      single: () => fact({ owner_words: "the other admin's quote", updated_at: "2026-11-25T17:00:00.000Z" }),
+      failWith: (method) => (method === "PATCH" && patches.length === 1 ? { code: "STALE_FACT", status: 409 } : null),
+      onRequest: (path, options) => { if (options.method === "PATCH") patches.push(JSON.parse(options.body)); },
+    });
+    mount();
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "My topic" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText(/Someone changed this fact while you had it open/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Owner's words/)).toHaveValue("the other admin's quote");
+    expect(screen.getByLabelText(/Topic/)).toHaveValue("My topic");
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(patches).toHaveLength(2));
+    expect(patches[1]).toMatchObject({ topic: "My topic", baseUpdatedAt: "2026-11-25T17:00:00.000Z" });
+    expect(patches[1]).not.toHaveProperty("ownerWords");
+  });
+
+  it("reads the history again after a change moved the fact's version", async () => {
+    let version = "2026-11-25T15:00:00.000Z";
+    const historyReads = [];
+    serve({
+      owner: true,
+      pages: Object.defineProperty({}, "draft", { get: () => ({ first: { facts: [fact({ updated_at: version })], nextCursor: null } }), enumerable: true }),
+      onRequest: (path, options) => { if (options.method === "PATCH") version = "2026-11-25T18:00:00.000Z"; },
+    });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation(async (path, options) => { if (path.endsWith("/history")) historyReads.push(path); return base(path, options); });
+    mount();
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    await screen.findByLabelText("Fact history");
+    expect(historyReads).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(historyReads).toHaveLength(2));
   });
 });

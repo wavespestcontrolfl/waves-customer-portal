@@ -14,17 +14,21 @@ function detailLine(event) {
 // Who did what and when, oldest first, from GET /admin/company-facts/:id/history.
 export default function FactHistory({ fact }) {
   const [open, setOpen] = useState(false);
-  const [events, setEvents] = useState(null);
+  // The events read, with the fact version (updated_at) they were read at. Every edit, check, approve or retire moves updated_at,
+  // so a list reload after a change makes the cache stale and the open panel reads again.
+  const [loaded, setLoaded] = useState(null);
   const [error, setError] = useState("");
+  const events = loaded && loaded.version === fact.updated_at ? loaded.events : null;
 
   useEffect(() => {
     if (!open || events) return;
     let live = true;
+    const version = fact.updated_at;
     adminFetch(`/admin/company-facts/${fact.id}/history`)
-      .then((body) => live && setEvents(body.events || []))
+      .then((body) => { if (live) { setError(""); setLoaded({ version, events: body.events || [] }); } })
       .catch(() => live && setError("The history could not be loaded."));
     return () => { live = false; };
-  }, [open, events, fact.id]);
+  }, [open, events, fact.id, fact.updated_at]);
 
   return (
     <div className="mt-3 border-t-hairline border-zinc-200 pt-2">

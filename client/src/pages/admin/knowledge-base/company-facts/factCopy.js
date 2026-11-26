@@ -31,6 +31,8 @@ export const WARNING_REASONS = {
 
 const ERROR_REASONS = {
   STALE_TEXT: "The wording changed after you opened it. The list was reloaded: read the new wording, then approve again.",
+  STALE_FACT: "Someone changed this fact while you had it open. The list was reloaded: read it again, then try again.",
+  STATUS_CHANGED: "This fact changed state while you had it open (for example, it was approved). The list was reloaded. Nothing was saved.",
   HASH_MISMATCH: "The saved wording does not match its record. Do not approve it. Edit it and save again.",
   REVIEWED_TEXT_REQUIRED: "Approve needs the exact wording you read. Reload the page and try again.",
   ORIGINAL_NOT_APPROVED: "The fact this draft replaces is no longer approved. Discard this draft, or restore the old fact as a new draft.",

@@ -11,8 +11,9 @@
  *   GET    /:id             one fact
  *   GET    /:id/history     its events, oldest first, each with actor_name (the staff member's name, null when gone)
  *   PATCH  /:id             edit a draft in place; an edit of an approved fact makes a NEW draft that supersedes it. Send only the
- *                           fields that changed; baseTextSha256 (the hash of the wording the editor opened) is refused 409 STALE_TEXT
- *                           when the wording changed since
+ *                           fields that changed, plus what the editor opened: baseTextSha256 (409 STALE_TEXT when the wording changed),
+ *                           baseUpdatedAt (the fact's updated_at; 409 STALE_FACT when any field changed) and expectStatus 'draft' or
+ *                           'approved' (409 STATUS_CHANGED, so a draft approved meanwhile is not edited into a replacement)
  *   DELETE /:id             discard a draft
  *   POST   /:id/approve     OWNER ACCOUNT ONLY (requireFullAccess); { textSha256 (the hash the page showed; 409 STALE_TEXT
  *                           when the wording changed since), ownerWords?, acknowledgeWarnings (literal true), reviewedWarnings? (the codes

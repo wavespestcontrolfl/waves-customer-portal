@@ -36,7 +36,7 @@ function useAction(onDone, onStale) {
       onDone(doneMessage, switchTo);
     } catch (requestError) {
       setError(errorMessage(requestError));
-      if (requestError.code === "STALE_TEXT") onStale();
+      if (["STALE_TEXT", "STALE_FACT", "STATUS_CHANGED"].includes(requestError.code)) onStale();
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -73,7 +73,7 @@ export function DraftActions({ fact, ownerActions, onDone, onStale, onEditing })
   }, "Fact approved.", "approved");
 
   // Saving the draft with nothing changed makes the server run every check again and store the new result (PATCH with just the wording hash).
-  const checkAgain = () => run(() => send(`/${fact.id}`, "PATCH", { baseTextSha256: fact.text_sha256 }), "Checked again.");
+  const checkAgain = () => run(() => send(`/${fact.id}`, "PATCH", { baseTextSha256: fact.text_sha256, baseUpdatedAt: fact.updated_at, expectStatus: "draft" }), "Checked again.");
 
   if (mode === "edit") {
     return (
@@ -81,6 +81,7 @@ export function DraftActions({ fact, ownerActions, onDone, onStale, onEditing })
         mode="draft"
         initial={fact}
         loadCurrent={() => send(`/${fact.id}`, "GET")}
+        onStale={onStale}
         onCancel={() => setMode("view")}
         onSubmit={async (values) => { await send(`/${fact.id}`, "PATCH", values); setMode("view"); onDone("Draft saved."); }}
       />
@@ -123,6 +124,7 @@ export function ApprovedActions({ fact, onDone, onStale, onEditing }) {
         mode="approved"
         initial={fact}
         loadCurrent={() => send(`/${fact.id}`, "GET")}
+        onStale={onStale}
         onCancel={() => setMode("view")}
         onSubmit={async (values) => { await send(`/${fact.id}`, "PATCH", values); setMode("view"); onDone("New draft saved. The approved fact is unchanged until it is approved.", "draft"); }}
       />

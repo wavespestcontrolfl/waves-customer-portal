@@ -414,12 +414,20 @@ async function editApprovedRow(trx, row, f, actor) {
 /** A draft is edited in place; an approved row is never touched: its edit is a NEW draft that supersedes it. */
 async function editFact(id, patch, actor, { dbi = db } = {}) {
   const f = cleanFields(patch, { requireAll: false });
-  const base = patch && typeof patch.baseTextSha256 === 'string' ? patch.baseTextSha256.trim().toLowerCase() : '';
+  const open = patch && typeof patch === 'object' ? patch : {};
+  const base = typeof open.baseTextSha256 === 'string' ? open.baseTextSha256.trim().toLowerCase() : '';
+  const baseUpdatedAt = typeof open.baseUpdatedAt === 'string' ? Date.parse(open.baseUpdatedAt) : NaN;
+  const expectStatus = ['draft', 'approved'].includes(open.expectStatus) ? open.expectStatus : '';
   return dbi.transaction(async (trx) => {
     const row = await lockFact(trx, id);
     if (row.status === 'retired') throw new FactError('RETIRED_USE_RESTORE', 409);
-    // The editor sends the hash of the wording it opened: a concurrent edit of the wording is refused, never overwritten.
+    // What the editor opened, compared under the row lock. A draft that was approved meanwhile is never "edited" into a replacement draft.
+    if (expectStatus && expectStatus !== row.status) throw new FactError('STATUS_CHANGED', 409, { status: row.status });
+    // The wording it opened: a concurrent edit of the wording is refused, never overwritten.
     if (base && base !== row.text_sha256) throw new FactError('STALE_TEXT', 409);
+    // The row as it was when opened (its updated_at, which every write moves; milliseconds, the precision JSON carries): a concurrent edit of
+    // any field, such as the owner's words, is refused too.
+    if (!Number.isNaN(baseUpdatedAt) && baseUpdatedAt !== new Date(row.updated_at).getTime()) throw new FactError('STALE_FACT', 409);
     return row.status === 'draft' ? editDraftRow(trx, row, f, actor) : editApprovedRow(trx, row, f, actor);
   });
 }

@@ -51,14 +51,14 @@ function FactList({ list, status, onDone, onStale, onEditing }) {
 export default function CompanyFactsTab({ showFeedback }) {
   const [statusKey, setStatusKey] = useState("draft");
   const [adding, setAdding] = useState(false);
-  const list = useFactList(statusKey);
+  const editing = useRef(new Set());
+  const list = useFactList(statusKey, (id) => editing.current.has(id));
   const status = STATUSES.find((item) => item.key === statusKey);
 
   // An action reports back later, from the render it started in. These refs hold what is true NOW: the status on screen,
   // that status's reload, and the cards with an edit form open.
   const nowRef = useRef({});
   nowRef.current = { statusKey, reload: list.reload };
-  const editing = useRef(new Set());
   const onEditing = useCallback((id, open) => { if (open) editing.current.add(id); else editing.current.delete(id); }, []);
 
   // A finished action: say so, then refresh the list on screen. It switches to the status the fact moved to only when the admin is still

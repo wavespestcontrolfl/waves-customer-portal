@@ -317,7 +317,7 @@ describe('the reviewed text hash the page sends', () => {
 
   // A fake transaction that serves the locked row, then fails the first check read (CATALOG_UNAVAILABLE): getting that far means the hash gate passed.
   const dbFor = (text) => {
-    const row = { id: ID, status: 'draft', fact_text: text, text_sha256: sha256(String(text).trim()) };
+    const row = { id: ID, status: 'draft', fact_text: text, text_sha256: sha256(String(text).trim()), updated_at: new Date('2026-11-25T15:00:00.123Z') };
     const trx = (table) => {
       if (table !== 'company_fact_bank') throw new Error('past the hash gate');
       return { where: () => ({ forUpdate: () => ({ first: async () => row }) }) };
@@ -337,6 +337,19 @@ describe('the reviewed text hash the page sends', () => {
     await expect(Bank.editFact(ID, { topic: 'Areas', baseTextSha256: opened.toUpperCase() }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
     // No base hash (an older caller): nothing to compare, the edit goes on.
     await expect(Bank.editFact(ID, { topic: 'Areas' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
+  });
+
+  test('an edit carries the row version and status it opened: a concurrent change of any field, or an approval meanwhile, is refused under the lock', async () => {
+    const text = 'We service Parrish.';
+    const opened = { baseTextSha256: sha256(text), baseUpdatedAt: '2026-11-25T15:00:00.123Z', expectStatus: 'draft' };
+    // Another admin saved the owner's words after this editor opened the draft: the text hash is unchanged, the version is not.
+    await expect(Bank.editFact(ID, { topic: 'Areas', ...opened, baseUpdatedAt: '2026-11-25T14:59:00.000Z' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STALE_FACT', status: 409 });
+    // The owner approved it meanwhile: this is not an in-place edit any more, and must not become a replacement draft.
+    await expect(Bank.editFact(ID, { topic: 'Areas', ...opened, expectStatus: 'approved' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STATUS_CHANGED', status: 409, detail: { status: 'draft' } });
+    // Unchanged row and status (microseconds in the sent time are beyond what JSON carries): the edit goes on.
+    await expect(Bank.editFact(ID, { topic: 'Areas', ...opened, baseUpdatedAt: '2026-11-25T15:00:00.123456Z' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
+    // A changed wording is still reported as STALE_TEXT first.
+    await expect(Bank.editFact(ID, { topic: 'Areas', ...opened, baseTextSha256: VECTORS[3][1], baseUpdatedAt: '2026-11-25T14:59:00.000Z' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STALE_TEXT' });
   });
 
   // A transaction that answers every read with "nothing" and the locked draft with `row`, enough to reach the approve checks.
