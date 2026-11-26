@@ -176,6 +176,14 @@ describe('completion estimate evidence', () => {
     expect(quote(lawnRow(), silver([engineLawn()], { tier: 'silver', amount: 0.15 }))).toEqual(oneLine);
     expect(quote(lawnRow(), silver([engineLawn({ discount: { appliedDiscounts: [...waveguard('silver', 0.1).appliedDiscounts,
       { type: 'military', amount: 0.05 }] } })]))).toEqual(oneLine);
+    // The engine's WaveGuard records name two tiers at one rate: no record.
+    expect(quote(lawnRow(), silver([engineLawn({ discount: { appliedDiscounts: [...waveguard('silver', 0.1).appliedDiscounts,
+      ...waveguard('gold', 0.1).appliedDiscounts] } })]))).toEqual(oneLine);
+    // The per-visit share comes from whole cents: $600.30 over 4 visits is $150.08 (a float divide gives $150.07), and
+    // 10% off is $135.07.
+    const fourVisits = lawnRow({ annual: 540.27, annualAfterDiscount: 540.27, visitsPerYear: 4 }, 135.07);
+    expect(quote(fourVisits, silver([engineLawn({ frequency: 4, annual: 600.3, annualBeforeDiscount: 600.3, annualAfterDiscount: 540.27 })])))
+      .toEqual([150.08, 135.07, [['WaveGuard Silver', 15.01, 10, true]]]);
     // Two engine lines of the service, none, or no tier the estimate itself names (a staff discount on recurring work,
     // a Bronze estimate).
     expect(quote(lawnRow(), silver([engineLawn(), engineLawn({ annual: 1200, annualBeforeDiscount: 1200 })]))).toEqual(oneLine);

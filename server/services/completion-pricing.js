@@ -201,7 +201,9 @@ function engineTierRecord(lineItems, serviceKey) {
   const priced = (Array.isArray(applied) ? applied : []).filter((d) => Number(d?.amount) > 0);
   const [rate, ...otherRates] = [...new Set(priced.map((d) => Number(d.amount)))];
   if (otherRates.length || !(rate > 0 && rate <= 1) || priced.some((d) => d.type !== 'waveguard')) return null;
-  // The engine names the tier on the applied discount (discount-engine.js getEffectiveDiscount).
+  // The engine names the tier on the applied discount (discount-engine.js getEffectiveDiscount); records that name
+  // different tiers name none.
+  if (new Set(priced.map((d) => tierWord(d.tier))).size !== 1) return null;
   return { rate, tier: tierWord(priced[0].tier) };
 }
 
@@ -241,7 +243,7 @@ function tierPricedRow(raw, base, savings, rate) {
   const annual = money(raw.annualAfterDiscount);
   if (!visits || !(annual > 0) || Math.round((annual / visits) * 100) !== netCents) return false;
   const savedLists = [raw.annualBeforeDiscount, raw.annual].map(money)
-    .filter((list) => list !== null && Math.round((list / visits) * 100) === baseCents);
+    .filter((list) => list !== null && Math.round(Math.round(list * 100) / visits) === baseCents);
   return [baseCents * visits, ...savedLists.map((list) => Math.round(list * 100))]
     .some((listCents) => tierNetCents(listCents, rate).includes(Math.round(annual * 100)));
 }
@@ -352,7 +354,7 @@ function engineListCents(raw, item, rate, amount) {
   const netAnnual = money(item.annualAfterDiscount);
   if (!visits || visitCount(item) !== visits || !(listAnnual > 0) || netAnnual === null) return null;
   const cents = (value) => Math.round(value * 100);
-  const listCents = Math.round((listAnnual / visits) * 100);
+  const listCents = Math.round(cents(listAnnual) / visits);
   const agrees = money(raw.annualAfterDiscount) === netAnnual && tierNetCents(cents(listAnnual), rate).includes(cents(netAnnual))
     && tierNetCents(listCents, rate).includes(cents(amount));
   return agrees ? listCents : null;
