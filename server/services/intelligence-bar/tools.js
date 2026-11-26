@@ -4528,6 +4528,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // The technician on the COMMITTED row (the CAS does not pin technician_id,
   // so the pre-read `appt` may name a tech who was swapped out meanwhile).
   let committedTechId = null;
+  // The length the committed row carries (a Duration edit may have landed since the card): the shift line's block.
+  let committedMinutes = null;
   let overlapAdvisory = null;
   let routeAdvisories = [];
   // A package visit 1 with a live visit 2: the card shows one visit, so the
@@ -4637,9 +4639,10 @@ async function rescheduleAppointment(input, actionContext = {}) {
           ...liveReset,
           updated_at: new Date(),
         })
-        .returning(['id', 'technician_id']);
+        .returning(['id', 'technician_id', 'estimated_duration_minutes']);
       updatedRows = committed.length;
       committedTechId = committed[0]?.technician_id || null;
+      committedMinutes = committed[0]?.estimated_duration_minutes ?? null;
       // The probe above was scoped to the technician read before this
       // transaction. The CAS does not pin technician_id (the notice follows
       // the stop), so a concurrent reassignment can commit the row onto
@@ -4673,7 +4676,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
       }
       if (updatedRows) {
         routeAdvisories.push(...await ibShiftLines(trx, committedTechId, dateStr, {
-          window_start: newStart, window_end: newWindowEnd, estimated_duration_minutes: appt.estimated_duration_minutes,
+          window_start: newStart, window_end: newWindowEnd, estimated_duration_minutes: committedMinutes,
         }));
       }
   }).catch((err) => {

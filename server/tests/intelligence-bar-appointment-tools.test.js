@@ -2895,14 +2895,16 @@ describe('the shift line on a visit the bar books or moves (GATE_TECH_SHIFT_HOUR
     expect(failed.result.warning).toBeUndefined();
   });
 
-  test('move: the line is asked for the new day and hours on the technician the committed row carries, and joins the warning', async () => {
+  test('move: the line is asked for the new day and hours on the technician and length the committed row carries, and joins the warning', async () => {
     lines = jest.spyOn(eligibility, 'dayWarningsFor').mockResolvedValue([LINE]);
     const appt = {
       id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-07-01',
       window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control', technician_id: 'tech-7', estimated_duration_minutes: 45,
     };
+    // The committed row carries 90 minutes: a Duration edit landed after the card read 45.
+    const committed = () => chain({ update: jest.fn(() => updateResult(1, [{ id: 'svc-1', technician_id: 'tech-1', estimated_duration_minutes: 90 }])) });
     wireDb({
-      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), chain(), chain()],
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), committed(), committed()],
       customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
       reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
     });
@@ -2916,7 +2918,7 @@ describe('the shift line on a visit the bar books or moves (GATE_TECH_SHIFT_HOUR
     // The harness's committed row is on tech-1 (the row the update returned), not the tech-7 the card read.
     expect(techId).toBe('tech-1');
     expect(dates).toEqual(['2099-01-15']);
-    expect(options).toMatchObject({ shiftOnly: true, block: { window_start: '16:00', estimated_duration_minutes: 45 } });
+    expect(options).toMatchObject({ shiftOnly: true, block: { window_start: '16:00', estimated_duration_minutes: 90 } });
     expect(String(options.block.window_end).slice(0, 5)).toBe('17:00');
   });
 
