@@ -96,6 +96,16 @@ environment that carries the row (prod does), **editing
   made before it keep the flat top (`pricingMetadata.legacyPestAboveTable`,
   an unstamped priced estimate reads the same). The `pest_footprint` row still
   ends at 5,500; editing it does not change the above-table step.
+- **Specialty prices of 2026-11-26 (evening, new quotes only; no gate, ships live)**: three CODE constants, not
+  Settings, behind ONE estimate stamp `pricingMetadata.legacySpecialty1126` (true = priced before; a priced
+  estimate with no stamp, or inputs-only asking for bed bug, mosquito or a stinging insect, reads true and keeps
+  its old price). (1) Bed bug chemical: room 1 as before (cost ratio or the $400 minimum, with the severity, prep,
+  occupancy, story, footprint and urgency factors), each added room a flat $349
+  (`BED_BUG.chemical.addedRoomPrice`) on that FINAL price; added rooms take no factor. (2) Mosquito above 2 acres (87,120 sq ft): priced, the 2-acre
+  per-visit price plus $85 per added acre, pro-rated, no cap; monthly keeps its ratio to seasonal; one-time
+  mosquito keeps its own ladder. (3) Wasp / hornet / yellow jacket level 2 is $275 (`SPECIALTY.wasp.tiers`, was
+  $250; `legacyTiers` keeps it): level 2 plus the $75 small removal = $350. Yellow jackets price through the
+  same `priceStingingInsect` levels as every species. A change of these numbers is a new code rule with its own stamp.
 - **One-time mosquito ladder** (owner 2026-10-25): starts at $199 and each
   extra 5,000 sq ft adds a little less than the one before. Keep the
   per-segment slope non-increasing, over-acre step included, when repricing.

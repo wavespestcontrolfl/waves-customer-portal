@@ -1839,7 +1839,7 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Treated exterior perimeter band\nApplied repellent solution with surfactant to perimeter\nApplied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 18-in band at openings) + crack & crevice\nTreated interior cracks & crevices (activity present)\nSwept eaves, window frames, door frames, and lanai",
+        "primary": "Treated exterior perimeter band\nApplied repellent solution with surfactant to perimeter\nApplied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice\nTreated interior cracks & crevices (activity present)\nSwept eaves, window frames, door frames, and lanai",
         "secondary": "Applied WDG or granular bait in landscape beds\nPlaced glue boards in garage or utility areas\nDocumented moisture, exclusion, or sanitation conditions",
         "lineMeta": {
           "Treated exterior perimeter band": {
@@ -1856,7 +1856,7 @@
               "LESCO Crosscheck Plus"
             ]
           },
-          "Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 18-in band at openings) + crack & crevice": {
+          "Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice": {
             "scope": "exterior",
             "treatmentApplied": true
           },
@@ -2963,7 +2963,8 @@
               "amount": 2,
               "unit": "fl_oz",
               "use": "cockroaches",
-              "epa": "53883-335"
+              "epa": "53883-335",
+              "carrierGalPer1000": 1
             }
           }
         },
@@ -3018,7 +3019,7 @@
         "visit": 3,
         "month": "Any",
         "primary": "Cockroach Follow-Up\nInspect monitors, bait consumption, live activity, egg cases, droppings, and customer prep progress\nRefresh bait only where consumed or contaminated\nSpot treat cracks, crevices, or harborages as needed",
-        "secondary": "Adjust plan if monitor counts are not dropping\nReinforce sanitation, moisture, and food-source corrections\nEscalate severe or multi-unit activity for office review",
+        "secondary": "Adjust plan if monitor counts are not dropping\nReinforce sanitation, moisture, and food-source corrections\nEscalate severe or multi-unit activity for office review\nOn a vehicle: the first visit's limits still apply (no bait on the dash, in a vent or in direct sun; no spray on electrical parts; do not wet carpet or seats)",
         "material_cost": "inventory",
         "labor_cost": "follow_up",
         "tiers": {
@@ -3027,7 +3028,166 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Progress should be measured by monitor counts and live sightings, not just product applied. No growth regulator at the follow-up: the first visit's gives up to 6 months of activity on roach nymphs."
+        "notes": "Progress should be measured by monitor counts and live sightings, not just product applied. No growth regulator at the follow-up: the first visit's gives up to 6 months of activity on roach nymphs.",
+        "lineMeta": {
+          "On a vehicle: the first visit's limits still apply (no bait on the dash, in a vent or in direct sun; no spray on electrical parts; do not wet carpet or seats)": {
+            "scope": "interior",
+            "treatmentApplied": false
+          }
+        }
+      },
+      {
+        "visit": 4,
+        "month": "Any",
+        "primary": "Vehicle German Roach Treatment\nAsk where the vehicle parks and whether the home or workplace has roaches; record the answer\nConfirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in\nVacuum seats, seat tracks, under seats, console, door pockets and trunk before any product\nApply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams\nUse non-repellent crack-and-crevice treatment in seat tracks, under-seat frames and trunk seams\nApply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft\nPlace 2 monitors (under a front seat, in the trunk) and record the count\nLeave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then\nTell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up",
+        "secondary": "",
+        "lineMeta": {
+          "Vehicle German Roach Treatment": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Ask where the vehicle parks and whether the home or workplace has roaches; record the answer": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Confirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Vacuum seats, seat tracks, under seats, console, door pockets and trunk before any product": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Place 2 monitors (under a front seat, in the trunk) and record the count": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Leave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Tell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Apply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Advion Evolution Cockroach Gel Bait"
+            ],
+            "completionApplicationMethod": "bait_placement"
+          },
+          "Use non-repellent crack-and-crevice treatment in seat tracks, under-seat frames and trunk seams": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Atticus Antapex WSG"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          },
+          "Apply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Tekko Pro IGR"
+            ],
+            "completionApplicationMethod": "spot_treatment",
+            "labelRatePerGallon": {
+              "amount": 2,
+              "unit": "fl_oz",
+              "use": "cockroaches",
+              "epa": "53883-335",
+              "carrierGalPer1000": 1
+            }
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "elevated",
+        "tiers": {
+          "bronze": false,
+          "silver": false,
+          "enhanced": true,
+          "premium": true
+        },
+        "notes": "Label limits inside a vehicle. Gel bait (Advion, EPA 100-1484): never where a child or pet can reach it, never on a surface food touches, never on the dash, in a vent or in direct sun (above 120 F the bait turns liquid and stops working). Growth regulator (Tekko Pro, EPA 53883-335, lists automobiles): never on wiring, switches, screens or other electrical parts; do not wet carpet or seats; test a hidden spot of fabric first. Non-repellent (Antapex WSG, EPA 91234-401, lists autos): never on electrical parts, never to the point of drip or run. Never spray a surface that carries bait and never bait a sprayed surface. The growth regulator goes down once: its label gives up to 6 months of activity on roach nymphs, so the follow-up visit has none. Book the follow-up for day 14: the price covers both visits.",
+        "completionDefaultProducts": [
+          "Atticus Antapex WSG",
+          "Tekko Pro IGR",
+          "Advion Evolution Cockroach Gel Bait"
+        ]
+      },
+      {
+        "visit": 5,
+        "month": "Any",
+        "primary": "Vehicle Roach Add-On\nAsk where the vehicle parks and whether the home or workplace has roaches; record the answer\nConfirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in\nVacuum seats, seat tracks, under seats, console, door pockets and trunk before any product\nApply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams\nApply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft\nPlace 2 monitors (under a front seat, in the trunk) and record the count\nLeave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then\nTell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up",
+        "secondary": "",
+        "lineMeta": {
+          "Vehicle Roach Add-On": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Ask where the vehicle parks and whether the home or workplace has roaches; record the answer": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Confirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Vacuum seats, seat tracks, under seats, console, door pockets and trunk before any product": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Place 2 monitors (under a front seat, in the trunk) and record the count": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Leave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Tell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Apply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Advion Evolution Cockroach Gel Bait"
+            ],
+            "completionApplicationMethod": "bait_placement"
+          },
+          "Apply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Tekko Pro IGR"
+            ],
+            "completionApplicationMethod": "spot_treatment",
+            "labelRatePerGallon": {
+              "amount": 2,
+              "unit": "fl_oz",
+              "use": "cockroaches",
+              "epa": "53883-335",
+              "carrierGalPer1000": 1
+            }
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "elevated",
+        "tiers": {
+          "bronze": false,
+          "silver": false,
+          "enhanced": true,
+          "premium": true
+        },
+        "notes": "The rider on a home German roach job: gel bait and growth regulator only, no non-repellent spray in the vehicle. Label limits inside a vehicle. Gel bait (Advion, EPA 100-1484): never where a child or pet can reach it, never on a surface food touches, never on the dash, in a vent or in direct sun (above 120 F the bait turns liquid and stops working). Growth regulator (Tekko Pro, EPA 53883-335, lists automobiles): never on wiring, switches, screens or other electrical parts; do not wet carpet or seats; test a hidden spot of fabric first. Never spray a surface that carries bait and never bait a sprayed surface. The growth regulator goes down once: its label gives up to 6 months of activity on roach nymphs, so the follow-up visit has none.",
+        "completionDefaultProducts": [
+          "Tekko Pro IGR",
+          "Advion Evolution Cockroach Gel Bait"
+        ]
       }
     ]
   },
@@ -3072,9 +3232,13 @@
               "Tekko Pro IGR"
             ],
             "completionApplicationMethod": "spot_treatment",
-            "tankRatePerGallon": {
+            "labelRatePerGallon": {
               "amount": 0.66,
-              "unit": "fl_oz"
+              "unit": "fl_oz",
+              "use": "fleas, in the shared tank at 1 gallon per 1,000 sq ft",
+              "epa": "53883-335",
+              "weakerMix": true,
+              "carrierGalPer1000": 1
             }
           },
           "Exterior, shaded pet zones only when pets rest outside: the same tank mix, 1 gallon per 1,000 sq ft": {

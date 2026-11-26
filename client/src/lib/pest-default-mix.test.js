@@ -19,7 +19,16 @@ describe('isPestDefaultMixVisit: trap-only retainer plans (owner 2026-11-19)', (
     expect(isPestDefaultMixVisit({ serviceType })).toBe(true);
   });
 
-  it('the house mix: Taurus SC 1.6 (0.03% in a 4-gal tank, owner 2026-11-19), Crosscheck 4, surfactant 0.25', () => {
-    expect(PEST_DEFAULT_MIX.map((entry) => entry.totalAmount)).toEqual([1.6, 4, 0.25]);
+  it('the house mix: Taurus SC 1.6 (0.03% in a 4-gal tank, owner 2026-11-19), Crosscheck 2.5, surfactant 0.25', () => {
+    expect(PEST_DEFAULT_MIX.map((entry) => entry.totalAmount)).toEqual([1.6, 2.5, 0.25]);
+  });
+
+  // Crosscheck Plus label (EPA 10404-120): at most 1 fl oz per 1,000 sq ft. The tank goes out at the Taurus label's volume,
+  // 2 qt per 160 ft of a 2-ft band (owner 2026-11-25, protocols page D21).
+  it('the Crosscheck in a 4-gal tank stays at or under 1 fl oz per 1,000 sq ft at the tank\'s spray volume', () => {
+    const gallonsPer1000 = 0.5 / ((160 * 2) / 1000);
+    const crosscheck = PEST_DEFAULT_MIX.find((entry) => entry.pattern.test('LESCO Crosscheck Plus')).totalAmount;
+    expect(gallonsPer1000).toBeCloseTo(1.5625, 4);
+    expect((crosscheck / 4) * gallonsPer1000).toBeLessThanOrEqual(1);
   });
 });

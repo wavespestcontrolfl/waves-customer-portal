@@ -2389,7 +2389,11 @@ const SPECIALTY = {
     },
   },
   wasp: {
-    tiers: [r(150), r(250), r(435), r(775)],
+    // Second level $250 -> $275 (owner 2026-11-26): a tier-2 nest with the $75 small removal is $350. Yellow jackets, hornets and
+    // paper wasps price through this one table (the species only names the line). CODE constants, not Settings: a quote sent before
+    // the change keeps the table it was priced with (estimate stamp legacySpecialty1126 -> legacyTiers), so nothing can move it.
+    tiers: [r(150), r(275), r(435), r(775)],
+    legacyTiers: [r(150), r(250), r(435), r(775)],
     addons: {
       aggressiveness: [r(75), r(150), r(200)],
       height: [r(75), r(150)],
@@ -2503,6 +2507,9 @@ const BED_BUG = {
     label: 'Bed Bug Chemical/IPM Program',
     includedVisits: 2,
     followUpDays: 14,
+    // Each room after the first adds this flat amount to the FINAL first-room price (owner 2026-11-26: room 1 as today, every added room $349;
+    // CODE constant: a quote sent before it keeps the old per-room cost curve, estimate stamp legacySpecialty1126).
+    addedRoomPrice: 349,
     materialPerRoomVisit1: 50.42,
     materialPerRoomVisit2Factor: 0.50,
     extraFollowUpMaterialFactor: 0.25,

@@ -38,6 +38,7 @@ const { awayWatchCardLines } = require('./away-watch');
 
 const { redactAccessCodes } = contextAggregator;
 const { matchServiceProtocol, followupVisitMatch, monthVisit } = require('./protocol-matcher');
+const { isLaterPackageVisit } = require('./protocol-package-stage');
 const { stripPriceTokensFromText } = require('./protocol-reader');
 const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = require('../utils/mosquito-misting-system');
 const {
@@ -55,7 +56,7 @@ const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
 const { resolveProductIn, noProductSentence, governedRateFor, addOnKeyOfVisit } = require('./area-addon-governed-rate');
-const { labelUseRate } = require('../utils/protocol-label-rate');
+const { labelUseRate, labelRateCarrier, labelRateHoldText } = require('../utils/protocol-label-rate');
 
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
@@ -567,6 +568,8 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     .where('ss.id', serviceId)
     .select(
       'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes', 'ss.technician_id', 'ss.followup_source_service_id',
+      // A later visit of a package booked up front is linked only by these (protocol-package-stage.js).
+      'ss.recurring_parent_id', 'ss.recurring_ongoing',
       // The primary line's catalog identity (booking snapshot, else the live
       // row); null on legacy rows booked before the catalog link existed.
       dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
@@ -626,8 +629,9 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     serviceType: svc.service_type,
     serviceCategory: svc.service_category || null,
     serviceKey: svc.service_key || null,
-    // Booked as a follow-up of a finished visit: the card is the program's follow-up card, not the first visit's.
-    isFollowup: svc.followup_source_service_id != null,
+    // Booked as a follow-up of a finished visit, or a later visit of a package booked up front: the card is the program's
+    // follow-up card, not the first visit's.
+    isFollowup: svc.followup_source_service_id != null || await isLaterPackageVisit(dbh, svc, { protocols: deps.protocols }),
     // What the estimate sold for an area add-on that IS this visit (null for any other visit).
     areaAddOnScope: soldScopeOf(svc.area_addon_scope),
     serviceLine,
@@ -1588,7 +1592,16 @@ function seasonalVisit(program, scheduledDate) {
 function declaredTankRate(meta, hints, product) {
   if (hints.length !== 1) return {};
   const labelUse = labelUseRate(meta, product);
-  if (labelUse) return { declaredRate: { lo: labelUse.amount, hi: labelUse.amount, unit: labelUse.unit }, labelUseRate: true };
+  if (labelUse) {
+    // The spray volume that rate is stated over rides with it (mixForProduct checks a named rig against it).
+    const carrier = labelRateCarrier(meta, product);
+    return { declaredRate: { lo: labelUse.amount, hi: labelUse.amount, unit: labelUse.unit }, labelUseRate: true, ...(carrier ? { labelCarrierGalPer1000: carrier } : {}) };
+  }
+  // A weaker-mix line (the flea card's Tekko Pro at 0.66) whose row has another or no registration number, or a catalog rate that
+  // cannot be compared: the catalog band may be the stronger rate, so the tank search withholds the dose (labelHold) and no rate
+  // comes from the card or the catalog.
+  const hold = labelRateHoldText(meta, product);
+  if (hold) return { labelRateRefused: true, labelHold: hold };
   // The line names a label rate for another registration: its text states that rate too, so no rate is read from it (rateOf below
   // honors this) and the resolved product keeps its catalog band.
   if (meta?.labelRatePerGallon) return { labelRateRefused: true };
@@ -2186,7 +2199,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
         .where('ss.id', serviceId)
         .select(
           'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
-          'ss.followup_source_service_id',
+          'ss.followup_source_service_id', 'ss.recurring_parent_id', 'ss.recurring_ongoing',
           // The primary line's catalog identity, by the card's own rule.
           dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
           dbh.raw('COALESCE(ss.service_key_snapshot, s.service_key) as service_key'),
@@ -2254,6 +2267,18 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // leaves the label band standing.
   const protocolPerGallon = protocolBand(labelPerGallon, protocolLine);
   const perGallon = protocolPerGallon || labelPerGallon;
+  // A card's label rate is stated over its own spray volume (Tekko Pro on cockroaches: 2 fl oz per gallon at 1 gallon per
+  // 1,000 sq ft). The mix per gallon is the label amount per area only at that volume, so:
+  //   - the answer names the volume and the area the tank covers at it;
+  //   - a rig NAMED for this dose (picked in the Tank section, or assigned to the visit) whose own calibration puts out another
+  //     volume gets no amount: the same mix would put down more than the label amount (more water per area) or less than it
+  //     (less water). With no rig named, `tank` is whichever calibration is on file and says nothing of the sprayer in the
+  //     tech's hand, so it is not judged.
+  const lineCarrier = protocolPerGallon && protocolLine?.labelUse && Number(protocolLine.carrier) > 0 ? Number(protocolLine.carrier) : null;
+  const namedRig = Boolean(pickedRig || rigAssignment(svc).equipmentSystemId || rigAssignment(svc).calibrationId);
+  const rigCarrier = namedRig && tank.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? Number(tank.carrierGalPer1000) : null;
+  // No tolerance: the card's volume is the one volume at which the mix is the label amount (the difference guard is for float noise only).
+  const rigOffVolume = Boolean(lineCarrier && rigCarrier && Math.abs(rigCarrier - lineCarrier) > 1e-9);
   // Plan-wide blocks first; then THIS product through the same guards the
   // closeout applies (manager approvals: off-protocol, unselected
   // conditional, PGR on stressed turf, label max rate, rotation) plus the
@@ -2315,6 +2340,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     // planBlocks, so the card shows it, and the amount is still given. Every other product check withholds it.
     [Boolean(withholdingBlock), clean(withholdingBlock?.message, 160)],
     [Boolean(lineFacts.labelHold), lineFacts.labelHold],
+    [rigOffVolume, `The card's rate is for ${fmtGal(lineCarrier)} gal per 1,000 sq ft. ${pickedRig?.name || tank.systemName || 'This rig'} sprays ${fmtGal(tank.carrierGalPer1000)}: the same mix would put down ${rigCarrier > lineCarrier ? 'more' : 'less'} than the label amount. Use a sprayer at the card's volume`],
     // An area add-on dose follows the treated area sold, so it is the label rate on
     // the card, never a tank amount off the catalog default rate.
     [Boolean(lineFacts.governed), 'Area add-on — apply the label rate on the card over the area sold; no tank amount'],
@@ -2330,7 +2356,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   ].find(([applies]) => applies);
   const mix = withheld
     ? { amount: null, unit: rateUnit || null, reason: withheld[1] }
-    : (perGallon ? buildPerGallonAmount(perGallon, volume) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume }));
+    : (perGallon ? buildPerGallonAmount(perGallon, volume, lineCarrier) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume }));
   const packSizes = await loadPackSizes(dbh, [product.id]);
   // The label rate is itself a dosing instruction: it rides only with a
   // permitted amount, never alongside a withheld one.
@@ -2390,8 +2416,10 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // products off the catalog past the plan's guards.
   const lawnAddon = addons.find((a) => a.programKey === 'lawn')?.addon || null;
   const found = (line, owners = []) => ({ line, treatment, primaryIsLawn, lawnAddon, owners });
+  // The card's own follow-up rule (loadJobCardFacts): a booked follow-up, or a later visit of a package booked up front.
+  const isFollowup = svc.followup_source_service_id != null || await isLaterPackageVisit(dbh, { ...svc, id: serviceId }, { protocols: deps.protocols });
   const candidates = [
-    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null, isFollowup: svc.followup_source_service_id != null }] : []),
+    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null, isFollowup }] : []),
     ...addons.filter((a) => a.programKey && a.programKey !== 'lawn'),
   ];
   if (!candidates.length) return found(null);
@@ -2414,12 +2442,16 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     // 2 fl oz per gallon, plus a flea add-on at 0.66 in the shared tank). The request names only the product, so no one rate is the
     // right one: the dose is withheld. Each service's line goes along (conflictLines) so the hold can name the rates that pass the
     // same label check a single dose does (conflictText).
-    const lineOf = (h) => ({ rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate) });
+    const lineOf = (h) => ({ rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}) });
     const rates = new Set(selectedHits.map((h) => JSON.stringify(rateOf(h))));
     // Only a card that carries its label's rate (labelUseRate) can disagree: another product's lines keep the first card's rate
     // narrowed by the label band, as before.
     const ratesDisagree = rates.size > 1 && selectedHits.some((h) => h.hit.labelUseRate) ? { conflictLines: selectedHits.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
-    return found({ addon: selected.c.addon, selected: true, ...lineOf(selected), governed: Boolean(selected.hit.governed), ...ratesDisagree }, owners);
+    // A hold on any selected service's line holds the dose: the request names only the product, so another service's rate
+    // (the mosquito card's 1 fl oz per gallon beside a held flea add-on) must not stand in for it.
+    const heldHit = selectedHits.find((h) => h.hit.labelHold);
+    const held = heldHit ? { labelHold: heldHit.hit.labelHold } : {};
+    return found({ addon: selected.c.addon, selected: true, ...lineOf(selected), governed: Boolean(selected.hit.governed), ...held, ...ratesDisagree }, owners);
   }
   const [conditional] = hits;
   return found(conditional ? { addon: conditional.c.addon, selected: false, rate: null, ...(conditional.hit.labelHold ? { labelHold: conditional.hit.labelHold } : {}) } : null, owners);
@@ -2442,9 +2474,11 @@ function protocolBand(label, protocolLine) {
 function conflictText(product, label, conflictLines) {
   if (!conflictLines) return null;
   const rateText = (rate) => `${rate.lo === rate.hi ? rate.lo : `${rate.lo}-${rate.hi}`} ${String(rate.unit).replace('_', ' ')} per gallon`;
+  // A label rate is the label amount only at its spray volume, so the volume goes beside the rate.
+  const volumeText = (line) => (line.labelUse && Number(line.carrier) > 0 ? ` at ${fmtGal(line.carrier)} gal per 1,000 sq ft` : '');
   const each = conflictLines.map((line) => {
     const band = protocolBand(label, line);
-    return `${line.name} ${band ? rateText(band) : 'see its card'}`;
+    return `${line.name} ${band ? `${rateText(band)}${volumeText(line)}` : 'see its card'}`;
   });
   return `${product.name} has a different rate on each service on this visit: ${each.join('; ')}. Mix a separate tank for each`;
 }
@@ -2467,12 +2501,19 @@ function perGallonRate(product) {
   return { lo, hi: hi > lo ? hi : lo, unit: m[1] };
 }
 
-function buildPerGallonAmount(rate, gallons) {
+// `carrierGalPer1000`: the spray volume a card's label rate is stated over, when it has one. The answer then names it
+// (sprayVolumeGalPer1000) and the area the tank covers at that volume, so the amount is tied to a treated area. (A named rig at
+// another volume never gets here: mixForProduct withholds its dose.)
+function buildPerGallonAmount(rate, gallons, carrierGalPer1000 = null) {
   const gal = Number(gallons);
   if (!Number.isFinite(gal) || gal <= 0) return { amount: null, unit: rate.unit, reason: 'Pick a tank volume' };
   const round = (v) => Math.round(v * 10000) / 10000;
-  return { amount: round(rate.lo * gal), amountMax: rate.hi > rate.lo ? round(rate.hi * gal) : null, unit: rate.unit, gallons: gal, basis: 'per_gallon', reason: null };
+  const carrier = Number(carrierGalPer1000);
+  const bound = carrier > 0 && Number.isFinite(carrier) ? { sprayVolumeGalPer1000: carrier, coversSqft: Math.round((gal / carrier) * 1000) } : {};
+  return { amount: round(rate.lo * gal), amountMax: rate.hi > rate.lo ? round(rate.hi * gal) : null, unit: rate.unit, gallons: gal, basis: 'per_gallon', ...bound, reason: null };
 }
+
+const fmtGal = (value) => String(Math.round(Number(value) * 100) / 100);
 
 // The month guide names products by their short label ("Mainspring GNL",
 // "Floramite SC") while the catalog carries the full name ("Mainspring GNL

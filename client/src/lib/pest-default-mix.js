@@ -10,14 +10,21 @@
 // row it matched no longer exists as such), and (c) extends coverage to
 // the one-time pest control visit, which the 2026-08-29 list deliberately
 // left off. The visit STARTS with all three recorded, at the house
-// totals — 4 oz of Crosscheck, 1.6 fl oz of Taurus SC (see below), 0.25 oz of
-// surfactant.
+// totals — 2.5 fl oz of Crosscheck (see below), 1.6 fl oz of Taurus SC (see
+// below), 0.25 oz of surfactant.
 //
 // Owner ruling 2026-11-19: Taurus SC is 1.6 fl oz per 4-gal tank = 0.03%, the
 // label's 0.4 fl oz/gal rate (EPA 53883-279: 0.03% up to 4 times a calendar
-// year). Crosscheck (4) and the surfactant (0.25) are unchanged. Counting
-// Taurus applications per home, to leave it out of the prefill after 4 in a
-// calendar year, is a later change.
+// year). The surfactant (0.25) is unchanged.
+//
+// Owner 2026-11-25 (protocols page, D21 "fix the label failures"): Crosscheck
+// Plus goes from 4 fl oz to 2.5 fl oz per 4-gal tank. Its label (EPA 10404-120)
+// allows at most 1 fl oz per 1,000 sq ft. The shared tank goes out at the
+// Taurus label's volume, 2 qt per 160 ft of a 2-ft band = 1.5625 gal per
+// 1,000 sq ft, so 4 fl oz per tank put down 1.56 fl oz per 1,000. The most the
+// tank may carry is 0.64 fl oz per gallon (2.56 per tank); 2.5 is the amount a
+// tech can measure under it (0.98 fl oz per 1,000). The page's own figure, 2.6
+// per tank, is 3% over the label at that volume.
 //
 // Owner ruling 2026-11-18: the house bifenthrin is now LESCO Crosscheck Plus
 // (EPA 10404-120) instead of Atticus Talak 7.9 F. Talak stays a valid catalog
@@ -36,7 +43,7 @@
 // surfactant as the applied chemical at the pest total).
 export const PEST_DEFAULT_MIX = [
   { pattern: /^taurus\s*sc\b/i, totalAmount: 1.6 },
-  { pattern: /^lesco\s*cross-?check\s*plus\b/i, totalAmount: 4 },
+  { pattern: /^lesco\s*cross-?check\s*plus\b/i, totalAmount: 2.5 },
   { pattern: /^lesco\s*90\s*\/?\s*10\s*non-?ionic\s+surfactant$/i, totalAmount: 0.25 },
 ];
 

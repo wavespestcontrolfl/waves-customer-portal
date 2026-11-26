@@ -91,6 +91,7 @@
  */
 
 const { matchServiceProtocol, followupVisitMatch } = require('./protocol-matcher');
+const { isLaterPackageVisit } = require('./protocol-package-stage');
 const { filterTreeShrubDefaults } = require('./tree-shrub-completion-defaults');
 const { inferTreeShrubOrdinanceZone } = require('./tree-shrub-closeout');
 const { completionRateFields } = require('../utils/protocol-label-rate');
@@ -382,6 +383,19 @@ async function propertyOrdinanceZone(db, propertyId) {
   return inferTreeShrubOrdinanceZone(place || {});
 }
 
+// The visit's catalog key as the job card reads it: the booking snapshot, else the live catalog row (a visit booked before the
+// snapshot existed). A failed read leaves the snapshot's null, as before.
+async function catalogKeyOf(db, scheduled) {
+  if (scheduled.service_key_snapshot) return scheduled.service_key_snapshot;
+  if (!scheduled.service_id) return null;
+  try {
+    const row = await db('services').where({ id: scheduled.service_id }).first('service_key');
+    return row?.service_key || null;
+  } catch {
+    return null;
+  }
+}
+
 // The route-facing orchestrator: loads the scheduled service + its
 // service_key/service_type/month, resolves the default product NAMES
 // (pure, above), then resolves each name to an active catalog row.
@@ -396,7 +410,7 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       .where({ id: serviceId })
       .first(
         'id', 'customer_id', 'property_id', 'service_id', 'service_type', 'service_key_snapshot',
-        'scheduled_date', 'followup_source_service_id',
+        'scheduled_date', 'followup_source_service_id', 'recurring_parent_id', 'recurring_ongoing',
       );
     if (!scheduled) return empty;
 
@@ -410,11 +424,12 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     const resolved = resolveCompletionDefaultProductNames({
       protocols: protocolSet,
       serviceType: scheduled.service_type,
-      serviceKey: scheduled.service_key_snapshot || null,
+      serviceKey: await catalogKeyOf(db, scheduled),
       month,
       // A row this IS a follow-up child of (Codex r3 P1, PR #5049) — see
       // resolveCompletionDefaultProductNames' own isFollowup doc above.
-      isFollowup: !!scheduled.followup_source_service_id,
+      // A later visit of a package booked up front counts too (protocol-package-stage.js).
+      isFollowup: !!scheduled.followup_source_service_id || await isLaterPackageVisit(db, scheduled, { protocols: protocolSet }),
     });
 
     let holds = [];

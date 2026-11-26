@@ -43,7 +43,9 @@ describe('estimator rejects failed monetary calculations', () => {
 
   test('supported numeric input strings retain the valid price', () => {
     expect(estimate({ plugging: { area: '1000', spacing: '12' } }).lineItems[0].price).toBe(3542);
-    expect(estimate({ stinging: { tier: '2' } }).lineItems[0].price).toBe(250);
+    // The string tier normalizes to the numeric tier (second level: $275 since 2026-11-26).
+    expect(estimate({ stinging: { tier: '2' } }).lineItems[0].price).toBe(estimate({ stinging: { tier: 2 } }).lineItems[0].price);
+    expect(estimate({ stinging: { tier: '2' } }).lineItems[0].price).toBe(275);
   });
 
   test('one-time lawn rejects an unsupported treatment instead of taking the cheapest multiplier', () => {

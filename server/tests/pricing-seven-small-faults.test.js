@@ -255,7 +255,7 @@ describe('fix 1: the palm per-visit minimum holds after the per-palm credit', ()
 
   test('adding a service to a palm estimate keeps the sold minimum (revision builder applies the saved signals)', () => {
     const request = require('fs').readFileSync(require('path').join(__dirname, '../services/estimate-add-service-request.js'), 'utf8');
-    expect(request).toContain("for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'legacyOneTimePestBuffer', 'legacyPestAboveTable', 'oneTimePestCurrentServices', 'currentRulesServices', 'palmMinPerVisitReplay'])");
+    expect(request).toContain("for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'legacyOneTimePestBuffer', 'legacyPestAboveTable', 'legacySpecialty1126', 'specialty1126CurrentServices', 'oneTimePestCurrentServices', 'currentRulesServices', 'palmMinPerVisitReplay'])");
   });
 
   test('an estimate priced before the fix keeps the credit it was quoted with', () => {
@@ -434,39 +434,42 @@ describe('fix 4: commercial pest interior work scales with total interior area',
 
 describe('fix 5: wasp urgent covers the removal and wins over same-day', () => {
   test('urgent multiplies base plus removal', () => {
-    // Tier 2 is $250. Large removal is $250. Urgent is x1.5 on the sum.
-    expect(sp.priceWasp({}, { tier: 2, urgent: true, removalType: 'large' }).price).toBe(750);
-    expect(sp.priceWasp({}, { tier: 2, urgent: true, removalType: 'small' }).price).toBe(488);
+    // Tier 2 is $275 (owner 2026-11-26 evening; it was $250). Large removal is $250. Urgent is x1.5 on the sum.
+    expect(sp.priceWasp({}, { tier: 2, urgent: true, removalType: 'large' }).price).toBe(788);
+    expect(sp.priceWasp({}, { tier: 2, urgent: true, removalType: 'small' }).price).toBe(525);
   });
 
   test('URGENT wins over same-day when both are set', () => {
-    expect(sp.priceWasp({}, { tier: 2, urgency: 'URGENT', sameDay: true }).price).toBe(375);
-    expect(sp.priceWasp({}, { tier: 2, urgent: true, sameDay: true }).price).toBe(375);
+    expect(sp.priceWasp({}, { tier: 2, urgency: 'URGENT', sameDay: true }).price).toBe(413);
+    expect(sp.priceWasp({}, { tier: 2, urgent: true, sameDay: true }).price).toBe(413);
   });
 
   test('non-urgent prices do not change', () => {
-    expect(sp.priceWasp({}, { tier: 2 }).price).toBe(250);
-    expect(sp.priceWasp({}, { tier: 2, sameDay: true }).price).toBe(325);
-    expect(sp.priceWasp({}, { tier: 2, urgency: 'SOON' }).price).toBe(325);
-    expect(sp.priceWasp({}, { tier: 2, sameDay: true, removalType: 'large' }).price).toBe(575);
-    expect(sp.priceWasp({}, { tier: 2, removalType: 'large' }).price).toBe(500);
+    expect(sp.priceWasp({}, { tier: 2 }).price).toBe(275);
+    expect(sp.priceWasp({}, { tier: 2, sameDay: true }).price).toBe(350);
+    expect(sp.priceWasp({}, { tier: 2, urgency: 'SOON' }).price).toBe(350);
+    expect(sp.priceWasp({}, { tier: 2, sameDay: true, removalType: 'large' }).price).toBe(600);
+    expect(sp.priceWasp({}, { tier: 2, removalType: 'large' }).price).toBe(525);
   });
 
   test('the live stinging pricer (the one generateEstimate calls) covers the removal too', () => {
+    // legacySpecialty1126 keeps the $250 second level these urgency figures were written at (the $275 level is pinned in
+    // specialty-prices-20261126.test.js).
     const quote = (legacy) => generateEstimate({
       ...HOME,
+      legacySpecialty1126: true,
       ...(legacy ? { legacyPricingRules: true } : {}),
       services: { stinging: { tier: 2, removal: 'LARGE', urgency: 'URGENT' } },
     }).lineItems.find((line) => line.service === 'stinging_insect').price;
     expect(quote(false)).toBe(750);
     // An estimate priced before the fix keeps the $625 it was quoted.
     expect(quote(true)).toBe(625);
-    expect(sp.priceStingingInsect({ tier: 2, removal: 'NONE', urgency: 'URGENT' }).price).toBe(375);
-    expect(sp.priceStingingInsect({ tier: 2, removal: 'LARGE', urgency: 'SOON' }).price).toBe(575);
+    expect(sp.priceStingingInsect({ tier: 2, removal: 'NONE', urgency: 'URGENT', legacySpecialty1126: true }).price).toBe(375);
+    expect(sp.priceStingingInsect({ tier: 2, removal: 'LARGE', urgency: 'SOON', legacySpecialty1126: true }).price).toBe(575);
   });
 
   test('urgent without removal is the same as before', () => {
-    expect(sp.priceWasp({}, { tier: 2, urgent: true }).price).toBe(375);
+    expect(sp.priceWasp({}, { tier: 2, urgent: true }).price).toBe(413);
   });
 
   test('priceWasp has no quote caller, so no stored price depends on its old order', () => {
@@ -480,7 +483,7 @@ describe('fix 5: wasp urgent covers the removal and wins over same-day', () => {
     const result = sp.priceWasp({}, { tier: 2, urgent: true, removalType: 'large' });
     expect(result.addOns.filter((addOn) => addOn.name === 'removal_large')).toHaveLength(1);
     expect(result.pricingBreakdown.removal).toBe(250);
-    expect(result.pricingBreakdown.subtotal).toBe(750);
+    expect(result.pricingBreakdown.subtotal).toBe(788);
   });
 });
 
@@ -523,6 +526,7 @@ describe('fix 6: dead settings', () => {
   test('the live stinging pricer matches urgency upper-case for a new quote; an older quote keeps the old match', () => {
     const quote = (legacy) => generateEstimate({
       ...HOME,
+      legacySpecialty1126: true,
       ...(legacy ? { legacyPricingRules: true } : {}),
       services: { stinging: { tier: 2, removal: 'LARGE', urgency: 'urgent' } },
     }).lineItems.find((line) => line.service === 'stinging_insect').price;

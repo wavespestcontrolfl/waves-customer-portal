@@ -916,6 +916,13 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // resend alike, so the email total, the link and a failed-build readback all show the price staff saved.
   const priorTwoStory = require('../services/estimate-floor-signal-replay').savedLegacyTwoStoryRoofSignal(estimateData).legacyTwoStoryRoof;
   if (typeof priorTwoStory === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyTwoStoryRoof: priorTwoStory };
+  // The same for the specialty prices (bed bug added rooms, mosquito above 2 acres, wasp level 2; 2026-11-26): ONE stamp, read before the
+  // snapshot is dropped. An unstamped estimate that kept only its inputs and asks for one of the three is a quote saved before them.
+  const priorSpecialty = require('../services/estimate-floor-signal-replay').savedLegacySpecialty1126Signal(estimateData).legacySpecialty1126;
+  if (typeof priorSpecialty === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacySpecialty1126: priorSpecialty };
+  // The services of the three a revision priced under the new prices on an otherwise old estimate ride the snapshot too.
+  const priorSpecialtyCurrent = require('../services/estimate-floor-signal-replay').savedSpecialty1126CurrentServices(estimateData);
+  if (priorSpecialtyCurrent.length) estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), specialty1126CurrentServices: priorSpecialtyCurrent };
   // The same for the one-time pest rule (new quotes only, 2026-11-26): its own stamp, read before the snapshot is dropped. An
   // unstamped estimate that kept only its inputs and asks for pest is a quote saved before the rule, on a first send and a resend alike.
   const priorPestBuffer = require('../services/estimate-floor-signal-replay').savedLegacyOneTimePestBufferSignal(estimateData).legacyOneTimePestBuffer;
@@ -974,6 +981,8 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
     // live only in the snapshot and replays them under these rules. No evidence on the estimate = current rules (false).
     sendSnapshot.legacyPricingRules = priorRules === true;
     sendSnapshot.legacyTwoStoryRoof = priorTwoStory === true;
+    sendSnapshot.legacySpecialty1126 = priorSpecialty === true;
+    if (priorSpecialtyCurrent.length) sendSnapshot.specialty1126CurrentServices = priorSpecialtyCurrent;
     sendSnapshot.legacyOneTimePestBuffer = priorPestBuffer === true;
     sendSnapshot.legacyPestAboveTable = priorPestAboveTable === true;
     // Carry the frozen one-time pest evidence onto the new bundle when there were no rows to recompute it from (never frozen -> absent).

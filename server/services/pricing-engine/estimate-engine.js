@@ -1084,6 +1084,37 @@ function ageFreeQuarterly(planLine, floor) {
   return quarterlyPerAppWithoutHomeAge(planLine?.basePrice, planLine?.pestAgeAdj, floor);
 }
 
+// Specialty prices of 2026-11-26 (owner, evening): bed bug chemical $349 for each added room, a mosquito lot above 2 acres priced
+// ($85 per visit per added acre) instead of held for a hand price, and the wasp / hornet / yellow jacket second level $275.
+// ONE estimate-level stamp (pricingMetadata.legacySpecialty1126) rides the same replay mechanism as the rules above:
+// input.legacySpecialty1126 is derived from the estimate's own stamp (estimate-floor-signal-replay.js
+// savedLegacySpecialty1126Signal), a priced estimate with no stamp, or one that kept only inputs asking for one of the three
+// services, predates the rule, and a legacy quote runs the old code path unchanged. A fresh quote never sets it. A service this
+// revision adds (input.addedServiceKeys), or whose saved line carries legacySpecialty1126=false (input.specialty1126CurrentServices,
+// read from those line stamps), is on the new prices. The flat currentRulesServices history PREDATES this rule and is never read
+// here (an older revision's entry is no evidence), the same as legacyOneTimePestBuffer.
+const SPECIALTY_1126_SERVICES = new Set(['bed_bug', 'mosquito', 'stinging_insect']);
+function legacySpecialty1126(input, serviceKey = null) {
+  return input?.legacySpecialty1126 === true
+    && !(serviceKey && [input.addedServiceKeys, input.specialty1126CurrentServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
+}
+
+// The same home on a lot of exactly 2 acres (87,120 sq ft), for the recurring mosquito price of a bigger lot: the lot is capped, an
+// explicit treatable area is capped with it, and the profile re-derives hardscape, treatable area and category from there.
+// Null when the lot is not above 2 acres. `base` is the input generateEstimate gave calculatePropertyProfile for the real property.
+const MOSQUITO_TWO_ACRES_SQFT = 87120;
+function mosquitoTwoAcreProperty(property, base) {
+  const lot = Number(property?.lotSqFt ?? base?.lotSqFt) || 0;
+  const treatable = Number(property?.mosquitoTreatableSqFt) || 0;
+  if (!(Math.max(lot, treatable) > MOSQUITO_TWO_ACRES_SQFT)) return null;
+  const explicit = Number(base.mosquitoTreatableSqFt);
+  return calculatePropertyProfile({
+    ...base,
+    lotSqFt: Math.min(Number(base.lotSqFt) || 0, MOSQUITO_TWO_ACRES_SQFT),
+    mosquitoTreatableSqFt: explicit > 0 ? Math.min(explicit, MOSQUITO_TWO_ACRES_SQFT) : base.mosquitoTreatableSqFt,
+  });
+}
+
 function generateEstimate(input) {
   const services = input.services || {};
   // Lawn cost-floor ENFORCEMENT arm state (owner ruling 2026-07-17: floors
@@ -1193,7 +1224,7 @@ function generateEstimate(input) {
 
   // ── 1. Calculate property profile ──────────────────────────
   const propertyTypeForProfile = profileIsCommercial ? 'commercial' : input.propertyType;
-  const property = calculatePropertyProfile({
+  const propertyProfileInput = {
     homeSqFt: input.homeSqFt,
     stories: input.stories,
     storiesSource: input.storiesSource,
@@ -1272,7 +1303,8 @@ function generateEstimate(input) {
     foundationSqFt: input.foundationSqFt,
     buildingSlabSqFt: input.buildingSlabSqFt,
     newConstructionSlabSqFt: input.newConstructionSlabSqFt,
-  });
+  };
+  const property = calculatePropertyProfile(propertyProfileInput);
 
   // ── 2. Derive property-driven pricing modifiers (v2 port) ─
   const modifiers = deriveModifiers(property);
@@ -1325,6 +1357,17 @@ function generateEstimate(input) {
     legacyOneTimePestBuffer: legacyOneTimePestBuffer(input),
     // Pest-above-table stamp (see legacyPestAboveTable above): true = priced before the rule (flat above 5,500 sq ft).
     legacyPestAboveTable: legacyPestAboveTable(input),
+    // Specialty prices stamp (see legacySpecialty1126 above): true = priced before them (old room curve, hand-priced lots above 2
+    // acres, $250 wasp level).
+    legacySpecialty1126: legacySpecialty1126(input),
+    // On an estimate priced before the specialty prices: the services of the three priced under them (added by this or an earlier
+    // revision), so the next revision and replay keep them there while the older lines keep theirs.
+    ...(legacySpecialty1126(input)
+      ? {
+        specialty1126CurrentServices: [...new Set([...(input.specialty1126CurrentServices || []), ...(input.addedServiceKeys || [])]
+          .filter((key) => SPECIALTY_1126_SERVICES.has(key)))],
+      }
+      : {}),
     // On a legacy estimate: the services priced under the CURRENT rules (added by this or an earlier revision), so the
     // next revision and replay keep them there while the older lines keep theirs.
     ...(legacyPricingRules(input) || legacyTwoStoryRoof(input)
@@ -1727,6 +1770,11 @@ function generateEstimate(input) {
         // synthesized lot arrives as lotSizeMeasured:false and routes the
         // line to review. Undefined = admin / measured lot, unchanged.
         lotSizeMeasured: input.lotSizeMeasured,
+        // A quote priced before the specialty prices keeps the flat curve and the hand-price hold above 2 acres.
+        legacySpecialty1126: legacySpecialty1126(input, 'mosquito'),
+        // A lot above 2 acres is priced from the SAME home at exactly 2 acres (its own hardscape, lot category and treatable area),
+        // plus $85 per added acre. Built here because the profile owns those derivations.
+        twoAcreProperty: mosquitoTwoAcreProperty(property, propertyProfileInput),
       });
       result.annual = Math.round(result.annual);
       result.monthly = Math.round(result.annual / 12 * 100) / 100;
@@ -2299,6 +2347,8 @@ function generateEstimate(input) {
       afterHours: bedBugOptions.afterHours ?? input.afterHours ?? false,
       includeInternalCostBasis: includeInternalPricing && bedBugOptions.includeInternalCostBasis === true,
       isInternal: includeInternalPricing,
+      // A quote priced before the specialty prices keeps the per-room cost curve it was sold with.
+      legacySpecialty1126: legacySpecialty1126(input, 'bed_bug'),
     });
     lineItems.push(includeInternalPricing ? result : stripBedBugInternalPricing(result));
   }
@@ -2501,6 +2551,8 @@ function generateEstimate(input) {
       afterHours: services.stinging.afterHours || false,
       hasRecurringPest: activeServiceKeys.includes('pest_control'),
       legacyUrgentRemoval: legacyPricingRules(input),
+      // A quote priced before the specialty prices keeps the $250 second level (and its species names).
+      legacySpecialty1126: legacySpecialty1126(input, 'stinging_insect'),
     });
     lineItems.push(result);
   }
@@ -3540,6 +3592,7 @@ function generateEstimate(input) {
   // the rules that priced them.
   for (const line of lineItems) {
     if (line && TWO_STORY_ROOF_SERVICES.has(line.service)) line.legacyTwoStoryRoof = legacyTwoStoryRoof(input, line.service);
+    if (line && SPECIALTY_1126_SERVICES.has(line.service)) line.legacySpecialty1126 = legacySpecialty1126(input, line.service);
     if (line && ONE_TIME_PEST_RULE_SERVICES.has(line.service)) line.legacyOneTimePestBuffer = legacyOneTimePestBuffer(input, line.service);
     if (line && PEST_ABOVE_TABLE_SERVICES.has(line.service)) line.legacyPestAboveTable = legacyPestAboveTable(input);
     if (line && PRICE_RULE_FIX_SERVICES.has(line.service)) line.legacyPricingRules = legacyPricingRules(input, line.service === 'commercial_pest' ? 'pest_control' : null);

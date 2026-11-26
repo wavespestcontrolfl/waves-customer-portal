@@ -53,8 +53,17 @@ it('asks for the phone code when the probe never answers', async () => {
   const { authenticateBiometric, NEEDS_PHONE_CODE } = await import('./biometric');
   // Load the plugin first, then stall the probe on a fake clock.
   await import('@aparajita/capacitor-biometric-auth');
+  const realSetTimeout = globalThis.setTimeout;
   vi.useFakeTimers();
-  const result = authenticateBiometric();
-  for (let i = 0; i < 12; i += 1) await vi.advanceTimersByTimeAsync(500);
+  let settled = false;
+  const result = authenticateBiometric().finally(() => { settled = true; });
+  // The plugin import inside authenticateBiometric resolves on the real event loop, so on a busy runner the probe timer can
+  // start after any fixed count of fake-clock steps and then never fire. Step the fake clock and yield to the real loop
+  // until the call settles (3 s of real time at most).
+  for (let i = 0; i < 600 && !settled; i += 1) {
+    await vi.advanceTimersByTimeAsync(500);
+    await new Promise((resolve) => realSetTimeout(resolve, 5));
+  }
+  expect(settled).toBe(true);
   expect(await result).toBe(NEEDS_PHONE_CODE);
-});
+}, 15000);

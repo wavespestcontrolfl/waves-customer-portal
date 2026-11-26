@@ -23,7 +23,7 @@ describe('prefillRateCeiling', () => {
     const crosscheck = { name: 'LESCO Crosscheck Plus', category: 'Insecticide' };
     const other = { name: 'Fixture pest liquid', category: 'Insecticide' };
     expect(resolveRatePrefill(TAURUS, perimeter)).toMatchObject({ rate: 1.6, rateUnit: 'oz', amountUnit: 'oz' });
-    expect(resolveRatePrefill(crosscheck, perimeter)).toMatchObject({ rate: 4, rateUnit: 'oz', usePestSprayDefault: true });
+    expect(resolveRatePrefill(crosscheck, perimeter)).toMatchObject({ rate: 2.5, rateUnit: 'oz', usePestSprayDefault: true });
     expect(resolveRatePrefill(other, perimeter)).toMatchObject({ rate: 4, rateUnit: 'oz', usePestSprayDefault: true });
     expect(prefillRateCeiling(resolveRatePrefill(crosscheck, perimeter), crosscheck)).toBeNull();
     // A catalog rate still wins over the house default, house-mix product or not.
