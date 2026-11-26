@@ -45,6 +45,10 @@ describe('parseTechArgs', () => {
     expect(parseTechArgs(['--execute', '--tech', 'adam', '--tech=maria'])).toEqual(['adam', 'maria']);
   });
 
+  test.each([['--excute'], ['--tech-adam'], ['adam'], ['--dry-run']])('an unknown argument %j is refused', (arg) => {
+    expect(() => parseTechArgs(['--tech', 'adam', arg])).toThrow(/unknown argument/);
+  });
+
   test('no flag gives none', () => {
     expect(parseTechArgs(['--execute'])).toEqual([]);
   });

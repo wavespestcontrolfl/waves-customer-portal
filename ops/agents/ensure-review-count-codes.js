@@ -44,7 +44,7 @@ function planRows({ offices, techs, techSlugRe, fallbackOfficeId }) {
   return wanted;
 }
 
-// --tech <slug> and --tech=<slug>, repeatable. A flag with no value is an error, never silently skipped.
+// --tech <slug> and --tech=<slug>, repeatable, plus --execute. A flag with no value or any other argument is an error.
 function parseTechArgs(argv) {
   const techs = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -56,6 +56,9 @@ function parseTechArgs(argv) {
       i += 1;
     } else if (arg.startsWith('--tech=')) {
       techs.push(arg.slice('--tech='.length));
+    } else if (arg !== '--execute') {
+      // A typo (--excute, --tech-adam) must stop the run, never provision a partial set.
+      throw Object.assign(new Error('unknown argument: use only --tech <slug>, --tech=<slug> and --execute'), { code: 'BAD_TECH' });
     }
   }
   return techs;
@@ -63,18 +66,23 @@ function parseTechArgs(argv) {
 
 async function main() {
   const argv = process.argv.slice(2);
+  const techs = parseTechArgs(argv); // throws on any unknown argument before the database is touched
   const EXECUTE = argv.includes('--execute');
 
   // From the Mac the private database host does not resolve: use the public URL the Postgres service provides, and
   // stop with a clear message when only the private one is set. Set BEFORE any server module loads the database model.
-  if (process.env.DATABASE_PUBLIC_URL) process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
+  // An explicitly chosen non-private DATABASE_URL is kept; the public URL only replaces a missing or private one.
+  const current = process.env.DATABASE_URL || '';
+  if (process.env.DATABASE_PUBLIC_URL && (!current || /\.railway\.internal\b/.test(current))) {
+    process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
+  }
   if (/\.railway\.internal\b/.test(process.env.DATABASE_URL || '')) {
     throw Object.assign(new Error('only the private database URL is set: run it with the nested Postgres command above'), { code: 'PRIVATE_DB_URL' });
   }
 
   const { WAVES_LOCATIONS } = require(server('config/locations'));
   const { TECH_SLUG_RE, REVIEW_GEO_FALLBACK_OFFICE_ID } = require(server('routes/review-geo-link'));
-  const wanted = planRows({ offices: WAVES_LOCATIONS, techs: parseTechArgs(argv), techSlugRe: TECH_SLUG_RE, fallbackOfficeId: REVIEW_GEO_FALLBACK_OFFICE_ID });
+  const wanted = planRows({ offices: WAVES_LOCATIONS, techs, techSlugRe: TECH_SLUG_RE, fallbackOfficeId: REVIEW_GEO_FALLBACK_OFFICE_ID });
 
   const db = require(server('models/db'));
   try {
