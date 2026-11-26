@@ -63,6 +63,18 @@ describe('ProfileEditCard', () => {
     expect(screen.getByRole('status')).toHaveTextContent(/^Saved\.$/);
   });
 
+  // Regression: the opening snapshot held the raw /auth/me values while the submitted ones were trimmed, so a stored
+  // name with outer spaces read as edited and rode along on an email-only save.
+  it('a stored name with outer spaces is not an edit: an email-only save sends the email alone', async () => {
+    api.updateCustomerProfile.mockResolvedValue({ changed: [], emailPending: { email: 'new.address@example.test', expiresInMinutes: 15 } });
+    renderCard({ customer: { ...customer, firstName: ' Pat ', lastName: 'Sample ' } });
+    fireEvent.click(screen.getByTestId('profile-edit-open'));
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'new.address@example.test' } });
+    fireEvent.click(screen.getByTestId('profile-edit-save'));
+    await waitFor(() => expect(api.updateCustomerProfile).toHaveBeenCalledTimes(1));
+    expect(api.updateCustomerProfile).toHaveBeenCalledWith({ email: 'new.address@example.test' });
+  });
+
   it('a customer with no email on file can change a name without entering one', async () => {
     api.updateCustomerProfile.mockResolvedValue({ changed: ['lastName'] });
     renderCard({ customer: { ...customer, email: '' } });

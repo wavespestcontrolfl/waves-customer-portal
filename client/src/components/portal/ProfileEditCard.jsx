@@ -94,7 +94,9 @@ export default function ProfileEditCard({ customer, refreshCustomer }) {
   if (!profileEditAvailable(customer)) return null;
 
   const begin = () => {
-    const current = { firstName: customer?.firstName || '', lastName: customer?.lastName || '', email: customer?.email || '' };
+    // Trimmed, as the submitted values are: a stored value with outer spaces must not read as edited (an email-only
+    // save would then send the name too, and could put back a name another session corrected meanwhile).
+    const current = { firstName: (customer?.firstName || '').trim(), lastName: (customer?.lastName || '').trim(), email: (customer?.email || '').trim() };
     setOpened(current);
     setForm(current);
     setError('');

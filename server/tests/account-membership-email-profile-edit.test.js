@@ -57,3 +57,32 @@ test('without greetingName the greeting is the contact name or the customer firs
   await Email.sendAccountUpdated({ customerId: 'c1', actorCustomerId: 'c1', alwaysNotify: true, changedItems: items });
   expect(mockSendTemplate.mock.calls[0][0].payload.first_name).toBe('Pat');
 });
+
+// A send failure's message can carry the recipient address (a provider body, or a failed insert's bound values), and the
+// sender logged and returned it. The profile edit asks for the code only; every other caller keeps the message.
+describe('suppressProviderErrorLog', () => {
+  const logger = require('../services/logger');
+  const leak = () => Object.assign(new Error('insert into "email_messages" ("to_email") values (\'old@example.test\') - connection lost'), { code: '08006' });
+  const send = (extra) => Email.sendAccountUpdated({
+    customerId: 'c1', actorCustomerId: 'c1', alwaysNotify: true, changedItems: [{ key: 'profile', label: 'Account profile' }],
+    contactOverride: { email: 'old@example.test', name: '' }, idempotencyKey: 'k-safe', ...extra,
+  });
+  beforeEach(() => logger.error.mockClear());
+
+  test('on: the library is told to keep the provider body out of the log, and a failure is logged and returned by its code', async () => {
+    mockSendTemplate.mockRejectedValueOnce(leak());
+    const res = await send({ suppressProviderErrorLog: true });
+    expect(mockSendTemplate.mock.calls[0][0].suppressProviderErrorLog).toBe(true);
+    expect(res).toEqual({ ok: false, error: '08006' });
+    const logged = logger.error.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toContain('08006');
+    expect(logged).not.toContain('old@example.test');
+  });
+
+  test('off (the default): unchanged, the message is logged and returned', async () => {
+    mockSendTemplate.mockRejectedValueOnce(leak());
+    const res = await send();
+    expect(mockSendTemplate.mock.calls[0][0].suppressProviderErrorLog).toBe(false);
+    expect(res.error).toContain('connection lost');
+  });
+});

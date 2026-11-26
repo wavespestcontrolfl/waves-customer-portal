@@ -212,6 +212,9 @@ function sendChangeNotices({ customerId, before, after, changes }) {
       contactOverride: { email, name: '' },
       greetingName: NOTICE_GREETING,
       idempotencyKey: `account.profile_edit:${customerId}:${stamp}:${index}`,
+      // The recipient is an address the customer typed or just left: the sender logs and stores a failure by its
+      // code only, and the provider's own error body is not logged.
+      suppressProviderErrorLog: true,
     })).catch((err) => logger.warn(`[customer-profile] account.updated email failed for ${customerId}: ${err.status || err.code || err.name || 'send_failed'}`));
   });
 }
@@ -251,18 +254,27 @@ async function requestEmailCode(trx, { customerId, locked, typedEmail, req }) {
   return { requestId: issued.id, code: issued.code, email: newEmail, expiresInMinutes: issued.expiresInMinutes };
 }
 
-// After commit: mail the code to the NEW address. A failed send drops the request (the customer asks again).
+// After commit: mail the code to the NEW address. A send that did not happen drops the request (the customer asks
+// again). Answers 'sent', 'suppressed' (the address joined the suppression list after the request was stored: sendCode
+// reads the list again at the provider handoff) or 'failed'.
 async function deliverEmailCode(pending, customerId) {
   try {
     await EmailCode.sendCode({ to: pending.email, code: pending.code });
   } catch (err) {
     logger.warn(`[customer-profile] email code send failed for ${customerId}: ${err.status || err.code || err.name || 'send_failed'}`);
     await EmailCode.dropRequest(db, pending.requestId).catch(() => {});
-    return false;
+    return err.code === 'address_suppressed' ? 'suppressed' : 'failed';
   }
   await EmailCode.markSent(db, pending.requestId).catch(() => {});
-  return true;
+  return 'sent';
 }
+
+// Why no code went out, as [status, words, code]. 'suppressed' is one answer, whether the list was read before the
+// request was stored or again at the provider handoff.
+const CODE_NOT_SENT = {
+  suppressed: [409, CODE_SUPPRESSED, 'email_unavailable_for_code'],
+  failed: [502, 'We could not send the code. Please try again in a moment.', 'code_send_failed'],
+};
 
 router.put('/', gateOn, authenticateAllowInactive, async (req, res, next) => {
   try {
@@ -295,16 +307,16 @@ router.put('/', gateOn, authenticateAllowInactive, async (req, res, next) => {
     const { before, after, changes, emailSync, pending, suppressed } = outcome;
     runPostCommitFanout(emailSync, customerId);
     if (Object.keys(changes).length) sendChangeNotices({ customerId, before, after, changes });
-    if (suppressed) {
-      return res.status(409).json({ error: CODE_SUPPRESSED, code: 'email_unavailable_for_code', profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
-    }
-    if (pending && !(await deliverEmailCode(pending, customerId))) {
-      return res.status(502).json({ error: 'We could not send the code. Please try again in a moment.', code: 'code_send_failed', profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
+    // What was saved, in every answer below: a name saved in this request stays saved when its code did not go out.
+    const saved = { profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) };
+    const delivery = suppressed ? 'suppressed' : (pending && await deliverEmailCode(pending, customerId));
+    if (CODE_NOT_SENT[delivery]) {
+      const [status, error, code] = CODE_NOT_SENT[delivery];
+      return res.status(status).json({ error, code, ...saved });
     }
 
     return res.json({
-      profile: profilePayload(after),
-      changed: Object.keys(changes).map((k) => FIELD_NAMES[k]),
+      ...saved,
       ...(pending ? { emailPending: { email: pending.email, expiresInMinutes: pending.expiresInMinutes } } : {}),
     });
   } catch (err) {

@@ -158,6 +158,7 @@ const NOTICE_SUMMARY = 'Your Waves account details were changed in the app. If t
 const expectGenericNotice = (notice, email) => {
   expect(notice).toMatchObject({
     alwaysNotify: true,
+    suppressProviderErrorLog: true,
     changeSummary: NOTICE_SUMMARY,
     changedItems: [{ key: 'profile', label: 'Account profile' }],
     greetingName: 'there',
@@ -343,7 +344,6 @@ describe('PUT /api/customer/profile', () => {
       ['a conclusive provider rejection', { status: 400 }],
       ['a 5xx', { status: 503 }],
       ['a network failure with no status', {}],
-      ['a suppression found at the provider handoff', { code: 'address_suppressed' }],
     ])('%s: 502, the request is dropped, and the code request keeps its quota unit (no second audit row)', async (_label, props) => {
       mockCode.sendCode.mockRejectedValueOnce(Object.assign(new Error('not sent or unknown'), props));
       const res = await put({ email: NEW_EMAIL });
@@ -351,6 +351,21 @@ describe('PUT /api/customer/profile', () => {
       expect(mockCode.dropRequest).toHaveBeenCalledWith(mockDb, 'req-1');
       expect(savedAudits()).toEqual(['customer.profile_email_code_requested']);
       expect(mockAudit.mock.calls[0][0].metadata).toEqual({ outcome: 'issued', source: 'customer_portal' });
+    });
+
+    // Regression: the address joined the suppression list after its request was stored, so sendCode refused at the
+    // provider handoff. The route answered 502 "try again in a moment"; the documented answer is the 409 of the first check.
+    test('a suppression found at the provider handoff: the same 409 as the first check (with the saved name), the request is dropped, the quota unit stays', async () => {
+      mockCode.sendCode.mockRejectedValueOnce(Object.assign(new Error('address suppressed'), { code: 'address_suppressed' }));
+      const res = await put({ firstName: 'Sam', email: NEW_EMAIL });
+      expect(res).toMatchObject({
+        status: 409,
+        body: { code: 'email_unavailable_for_code', error: "We can't send email to that address. Please call or text the office.", changed: ['firstName'], profile: { firstName: 'Sam', email: OLD_EMAIL } },
+      });
+      expect(res.body.emailPending).toBeUndefined();
+      expect(mockCode.dropRequest).toHaveBeenCalledWith(mockDb, 'req-1');
+      expect(mockCode.markSent).not.toHaveBeenCalled();
+      expect(savedAudits()).toEqual(['customer.profile_edit', 'customer.profile_email_code_requested']);
     });
 
     test('a failed send drops the request and answers 502; nothing else changed', async () => {
