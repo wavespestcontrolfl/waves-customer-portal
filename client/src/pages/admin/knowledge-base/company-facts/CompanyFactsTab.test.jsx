@@ -884,12 +884,13 @@ describe("Company facts tab", () => {
     expect(screen.getByLabelText(/Topic/)).toHaveValue("Typed since"); // the editor is still open
   });
 
-  it("labels the preview as read by voice calls and email drafts, not texting", async () => {
+  it("labels the preview as read by voice calls, email drafts and texting drafts", async () => {
     serve({ owner: true, pages: { approved: { first: { facts: [fact({ status: "approved", approved_at: "2026-11-25T16:00:00Z" })], nextCursor: null } } } });
     mount();
     fireEvent.click(screen.getByRole("button", { name: "Approved" }));
-    expect(await screen.findByText("Preview — voice calls and email drafts use these facts")).toBeInTheDocument();
-    expect(screen.getByText(/Texting does not use them yet/)).toBeInTheDocument();
+    expect(await screen.findByText("Preview — voice calls, email drafts and texting drafts use these facts")).toBeInTheDocument();
+    expect(screen.getByText(/Texting drafts use them too/)).toBeInTheDocument();
+    expect(screen.queryByText(/Texting does not use them yet/)).not.toBeInTheDocument();
     expect(screen.queryByText(/agents do not read/)).not.toBeInTheDocument();
     expect(screen.queryByText(/as the agents get them now/)).not.toBeInTheDocument();
   });

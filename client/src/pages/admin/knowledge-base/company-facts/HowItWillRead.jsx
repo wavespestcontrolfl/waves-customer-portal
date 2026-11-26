@@ -28,11 +28,11 @@ export default function HowItWillRead({ facts }) {
   return (
     <Card className="mb-4">
       <CardHeader>
-        <CardTitle className="text-18">Preview — voice calls and email drafts use these facts</CardTitle>
+        <CardTitle className="text-18">Preview — voice calls, email drafts and texting drafts use these facts</CardTitle>
       </CardHeader>
       <CardBody className="space-y-2">
         <p className="text-ui-caption text-ink-secondary">
-          This is how the list reads to them: the approved facts in the order approved, after the built-in facts. Texting does not use them yet; it comes later.
+          This is how the list reads to them: the approved facts in the order approved, after the built-in facts. Texting drafts use them too: staff still review every text draft before it goes out.
         </p>
         {error && <ActionFeedback error onRetry={() => setAttempt((n) => n + 1)}>{error}</ActionFeedback>}
         {!error && !preview && <ActionFeedback>Loading the preview…</ActionFeedback>}
