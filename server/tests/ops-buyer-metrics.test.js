@@ -29,17 +29,21 @@ describe('standard stop minutes', () => {
   const stop = (...members) => ({ members });
   test('pest 25 and lawn 20 on site, plus 20 minutes of drive for each stop', () => {
     const stops = [stop({ serviceType: 'Pest Control Visit' }), stop({ serviceType: 'Lawn Care Visit' })];
-    expect(svc.standardStopMinutes(stops, std)).toBe(25 + 20 + 20 + 20);
+    expect(svc.standardStopMinutes(stops, std, 20)).toBe(25 + 20 + 20 + 20);
   });
   test('a grouped visit sums the on-site minutes of every member and drives once', () => {
     const grouped = stop({ serviceType: 'Pest Control Visit' }, { serviceType: 'Lawn Care Visit' });
-    expect(svc.standardStopMinutes([grouped], std)).toBe(25 + 20 + 20);
+    expect(svc.standardStopMinutes([grouped], std, 20)).toBe(25 + 20 + 20);
   });
   test('a type with no standard keeps its costed labor hours', () => {
-    expect(svc.standardStopMinutes([stop({ serviceType: 'Rodent Exclusion', laborHours: '1.5' })], std)).toBe(90 + 20);
+    expect(svc.standardStopMinutes([stop({ serviceType: 'Rodent Exclusion', laborHours: '1.5' })], std, 20)).toBe(90 + 20);
   });
   test('no stops is 0 minutes', () => {
-    expect(svc.standardStopMinutes([], std)).toBe(0);
+    expect(svc.standardStopMinutes([], std, 20)).toBe(0);
+  });
+  test('the drive is the configured minutes passed in, once per stop', () => {
+    const stops = [stop({ serviceType: 'Pest Control Visit' }, { serviceType: 'Lawn Care Visit' }), stop({ serviceType: 'Pest Control Visit' })];
+    expect(svc.standardStopMinutes(stops, std, 35)).toBe(25 + 20 + 35 + 25 + 35);
   });
 });
 

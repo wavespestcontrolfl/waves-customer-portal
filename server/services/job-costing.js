@@ -1201,6 +1201,8 @@ module.exports = {
   computeServiceRecordFinancials,
   JOB_COST_STANDARD,
   standardLaborMinutesFor,
+  refreshDriveTimeSetting,
+  standardDriveMinutes,
   DEFAULT_DRIVE_MINUTES_PER_STOP,
   DEFAULT_DRIVE_MILES_PER_STOP,
   _resetVisitGpsLegsCache: () => { visitGpsLegsTableKnown = false; visitGpsLegsMissingAt = 0; },

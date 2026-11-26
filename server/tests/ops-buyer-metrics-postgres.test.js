@@ -27,6 +27,7 @@ jest.setTimeout(60000);
 const NOW = new Date('2037-11-26T15:00:00Z');
 const OWNER_PHONE = '+19415550100';
 const GATE = 'GATE_TECH_WORK_DAYS';
+const DRIVE_KEY = 'global_drive_time';
 
 postgres('ops buyer metrics (live Postgres)', () => {
   let database;
@@ -35,6 +36,8 @@ postgres('ops buyer metrics (live Postgres)', () => {
   let owner;
   let other;
   const OLD_GATE = process.env[GATE];
+  const pricingConstants = require('../services/pricing-engine/constants');
+  const OLD_DRIVE = pricingConstants.GLOBAL.DRIVE_TIME;
 
   const technician = async (fields) => {
     const id = randomUUID();
@@ -68,6 +71,13 @@ postgres('ops buyer metrics (live Postgres)', () => {
   const upcoming = (date, fields = {}) => trx('scheduled_services').insert({
     customer_id: customerId, scheduled_date: date, service_type: 'Pest Control Visit', status: 'pending', ...fields,
   });
+  // The configured Average Drive Time job-costing reads (pricing_config global_drive_time), set inside the transaction and
+  // loaded by the same refresh job-costing runs (the sync is due once the cache is invalidated).
+  const setDrive = async (minutes) => {
+    await trx('pricing_config').insert({ config_key: DRIVE_KEY, name: 'Average drive time', category: 'global', data: JSON.stringify({ value: minutes }) })
+      .onConflict('config_key').merge(['data']);
+    require('../services/pricing-engine').invalidatePricingConfigCache();
+  };
   const setting = (key, value) => trx.raw(
     'INSERT INTO system_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', [key, value],
   );
@@ -105,12 +115,15 @@ postgres('ops buyer metrics (live Postgres)', () => {
     customerId = randomUUID();
     await trx('customers').insert({ id: customerId, first_name: 'Sample', last_name: 'Customer', phone: '+19415550143' });
     delete process.env[GATE];
+    await setDrive(20);
     owner = await technician({ role: 'admin', phone: OWNER_PHONE });
     other = await technician({ role: 'technician', work_days: [1, 2, 3, 4] });
   });
   afterEach(async () => {
     await trx.rollback();
     if (OLD_GATE === undefined) delete process.env[GATE]; else process.env[GATE] = OLD_GATE;
+    pricingConstants.GLOBAL.DRIVE_TIME = OLD_DRIVE;
+    require('../services/pricing-engine').invalidatePricingConfigCache();
   });
 
   // Owner: 11-02 two pest stops (100, 120), 11-03 one lawn stop (80), 11-06 an included follow-up ($0).
@@ -179,6 +192,17 @@ postgres('ops buyer metrics (live Postgres)', () => {
       const { ownerReliance } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
       // Grouped stop: pest 25 + lawn 20 + one drive 20 = 65. Plain stop: pest 25 + drive 20 = 45. Total 110 minutes.
       expect(ownerReliance.ownerFieldHoursPerWeek.stopsStandard).toEqual({ last4Weeks: 0.5, last12Weeks: 0.2 });
+    });
+
+    it('the drive minutes are the configured Average Drive Time, shown in the basis', async () => {
+      await setDrive(30);
+      await seedYear();
+      const { ownerReliance } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      const hours = ownerReliance.ownerFieldHoursPerWeek;
+      expect(hours.driveMinutesPerStop).toBe(30);
+      // 4 owner stops: 95 on-site + 4 x 30 drive = 215 minutes
+      expect(hours.stopsStandard).toEqual({ last4Weeks: 0.9, last12Weeks: 0.3 });
+      expect(hours.basis).toContain('30 minutes now');
     });
 
     it('the non-owner share counts a grouped visit once and leaves unassigned stops out', async () => {
@@ -324,6 +348,43 @@ postgres('ops buyer metrics (live Postgres)', () => {
       expect(routeFill.fillRatio).toBe(0.0135); // 6 / (37 x 12)
       expect(routeFill.closedDays).toContain('2037-11-26');
       expect(routeFill.closedDays).toContain('2037-11-28');
+    });
+
+    it('placement follows stops-ahead: a windowless row waiting on a pick-by or dispatch date is not a stop; a placed or legacy date-only row is', async () => {
+      await upcoming('2037-12-01', { technician_id: owner, window_start: null, customer_pick_by: new Date('2037-11-30T00:00:00Z') }); // waiting: out
+      await upcoming('2037-12-02', { technician_id: owner, window_start: null, recurring_dispatch_due_date: '2037-11-29' }); // waiting: out
+      await upcoming('2037-12-03', { technician_id: owner, window_start: null }); // legacy date-only: in
+      await upcoming('2037-12-04', { technician_id: owner, window_start: '09:00', customer_pick_by: new Date('2037-11-30T00:00:00Z') }); // placed: in
+      await upcoming('2037-12-07', { technician_id: owner, window_start: '09:00', recurring_dispatch_due_date: '2037-11-29' }); // placed: in
+      await upcoming('2037-12-08', { technician_id: owner, track_state: 'cancelled' }); // a cancelled track: out
+      const { routeFill } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      expect(routeFill.scheduledStops).toBe(3);
+    });
+
+    it('ungrouped siblings of one slot (same technician, customer, date and window) count once; another window or technician is another stop', async () => {
+      await upcoming('2037-12-01', { technician_id: owner, window_start: '09:00' });
+      await upcoming('2037-12-01', { technician_id: owner, window_start: '09:00', service_type: 'Lawn Care Visit' }); // sibling: same stop
+      await upcoming('2037-12-01', { technician_id: owner, window_start: '11:00' }); // another window
+      await upcoming('2037-12-01', { technician_id: other, window_start: '09:00' }); // another technician
+      await upcoming('2037-12-02', { technician_id: owner }); // no window, same slot twice
+      await upcoming('2037-12-02', { technician_id: owner, service_type: 'Lawn Care Visit' });
+      const { routeFill } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      expect(routeFill.scheduledStops).toBe(4);
+    });
+
+    it('two unassigned appointments for one customer at different properties in the same slot are two stops', async () => {
+      const homes = [randomUUID(), randomUUID()];
+      for (const [i, propertyId] of homes.entries()) {
+        await trx('customer_properties').insert({
+          id: propertyId, customer_id: customerId, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: i === 0,
+          address_line1: `${100 + i} Example Lane`, city: 'Lakewood Ranch', zip: '34211', active: true, address_key: randomUUID(),
+        });
+      }
+      await upcoming('2037-12-01', { technician_id: null, window_start: '09:00', property_id: homes[0] });
+      await upcoming('2037-12-01', { technician_id: null, window_start: '09:00', property_id: homes[1] }); // another home: another stop
+      await upcoming('2037-12-01', { technician_id: null, window_start: '09:00', property_id: homes[1], service_type: 'Lawn Care Visit' }); // sibling
+      const { routeFill } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      expect(routeFill.scheduledStops).toBe(2);
     });
 
     it('an unclaimed estimate slot hold is not a stop, live or expired; claiming it adds exactly one stop', async () => {
