@@ -355,16 +355,16 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
 // senders' own (upcomingFamilyVisits: the family keywords and exclusions, the 'upcoming' page state, the ET date), asked once per guide
 // family and merged soonest first (date, window, id), so the texting AI's PREP GUIDE (sms-staff-facts) never reads a visit the senders
 // would not prep. A service-name match alone is not enough ("Quarterly Pest Control" is also an exterior-only plan): only a visit whose
-// prep_template_key already names a live visit guide counts, the guide the prep lane chose for it. A how-to guide never matches.
+// prep_template_key already names THAT family's visit guide counts, the guide the prep lane chose for it. A how-to guide never matches.
 // THROWS on a lookup error.
 const sortKey = (visit) => [dateOnlyString(visit.scheduled_date), String(visit.window_start || ''), String(visit.id).padStart(12, '0')].join('|');
 async function nextGuideVisit(customerId) {
-  const visitGuides = Object.entries(PREP_CONFIG).filter(([, config]) => !config.guide && config.serviceKeywords?.length);
-  const assignedGuideKeys = visitGuides.map(([, config]) => config.emailTemplateKey);
   let best = null;
-  for (const [, config] of visitGuides) {
-    const [visit] = await upcomingFamilyVisits([customerId], config, 1, { assignedGuideKeys });
-    if (visit && (!best || sortKey(visit) < sortKey(best.visit))) best = { key: visitGuides.find(([, c]) => c.emailTemplateKey === visit.prep_template_key)[0], visit };
+  for (const [key, config] of Object.entries(PREP_CONFIG)) {
+    if (config.guide || !config.serviceKeywords?.length) continue;
+    // the family's OWN guide: a bed bug visit changed to heat still carries prep.bed_bug, and must not read as a heat visit's
+    const [visit] = await upcomingFamilyVisits([customerId], config, 1, { assignedGuideKeys: [config.emailTemplateKey] });
+    if (visit && (!best || sortKey(visit) < sortKey(best.visit))) best = { key, visit };
   }
   return best;
 }

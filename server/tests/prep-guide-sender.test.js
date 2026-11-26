@@ -1038,14 +1038,18 @@ describe('sendPrepToCustomer', () => {
       expect(await nextGuideVisit('cust-1')).toBeNull();
     });
 
-    test('the assigned guide names the key even when another family found the visit; a how-to key and a visit underway never count', async () => {
-      const { nextGuideVisit } = require('../services/prep-guide-sender');
-      visitsFor([liveVisit({ id: 'svc-1', service_type: 'Pest Control', scheduled_date: day(2), prep_template_key: 'prep.cockroach' })]);
+    test('each family asks only for its OWN guide: a visit carrying another family\'s guide is not read by the wrong family; a how-to key and a visit underway never count', async () => {
+      const { nextGuideVisit, PREP_CONFIG } = require('../services/prep-guide-sender');
+      visitsFor([liveVisit({ id: 'svc-1', service_type: 'Cockroach Treatment', scheduled_date: day(2), prep_template_key: 'prep.cockroach' })]);
       expect(await nextGuideVisit('cust-1')).toMatchObject({ key: 'cockroach', visit: { id: 'svc-1' } });
-      visitsFor([liveVisit({ id: 'svc-2', service_type: 'Pest Control', scheduled_date: day(2), prep_template_key: 'prep.sprinkler_timer' })]);
+      // a "Pest Control" visit that already carries the cockroach guide matches the pest family's keyword but not its guide
+      visitsFor([liveVisit({ id: 'svc-2', service_type: 'Pest Control', scheduled_date: day(2), prep_template_key: 'prep.cockroach' })]);
       expect(await nextGuideVisit('cust-1')).toBeNull();
-      visitsFor([liveVisit({ id: 'svc-3', service_type: 'Pest Control', status: 'en_route', prep_template_key: 'prep.interior_pest' })]);
+      visitsFor([liveVisit({ id: 'svc-3', service_type: 'Pest Control', scheduled_date: day(2), prep_template_key: 'prep.sprinkler_timer' })]);
       expect(await nextGuideVisit('cust-1')).toBeNull();
+      visitsFor([liveVisit({ id: 'svc-4', service_type: 'Pest Control', status: 'en_route', prep_template_key: 'prep.interior_pest' })]);
+      expect(await nextGuideVisit('cust-1')).toBeNull();
+      expect(PREP_CONFIG.bed_bug.emailTemplateKey).not.toBe(PREP_CONFIG.bed_bug_heat.emailTemplateKey);
     });
 
     test('no covered visit is null; a lookup error throws (the caller fails soft)', async () => {

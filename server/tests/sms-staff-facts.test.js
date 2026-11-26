@@ -68,6 +68,9 @@ describe('prepaid visits left (payment-status contract)', () => {
     for (const own of ['You have three.', 'A couple left, I think.', `${LEFT} Your next visit is Tuesday.`, 'Your plan is almost used up.']) expect(ask(own)).toBe(false);
     // a package or cadence question is not a question about the customer's own count: the published answer stands
     for (const q of ['How many visits are included in the cockroach treatment?', 'How many times a year do you treat for pests?']) expect(ask('We include two visits in that package.', q)).toBe(true);
+    expect(ask('Three.', 'How many appointments do I have left?')).toBe(false);
+    // asking to reschedule a prepaid visit is a scheduling question, not a count question
+    expect(ask('We can come Tuesday.', 'Can I reschedule my prepaid visit?')).toBe(true);
   });
 
   test('a copied count answers the plan the customer named, never another plan\'s', () => {
@@ -140,10 +143,14 @@ describe('PREP GUIDE section', () => {
 
 describe('sms-staff-facts loaders', () => {
   const blocks = [
-    { type: 'paragraph', content: 'Hi {{first_name}}, your flea treatment is booked.' },
-    { type: 'heading', content: 'Step one for the heading text' },
+    { type: 'paragraph', content: 'Hi {{first_name}}, your flea treatment is booked, and fleas are hard to beat.' },
+    { type: 'heading', content: 'Why fleas are different in Florida' },
+    { type: 'paragraph', content: 'Fleas thrive in warm, humid homes all year long.' },
+    { type: 'heading', content: 'How to prepare' },
     { type: 'paragraph', content: 'Vacuum every carpet before we arrive. Reply to this email with questions. See [the brand](https://example.com/x) for more.' },
     { type: 'list', items: ['Wash all pet bedding on the hottest cycle the fabric allows.', 'Call (941) 555-0100 or mail someone@example.com.'] },
+    { type: 'heading', content: 'What we do on the day' },
+    { type: 'paragraph', content: 'Our technician treats baseboards and cracks along the floor.' },
     { type: 'signature', content: 'The team signs here with a sentence.' },
   ];
   // the published version the guide page serves: { activeVersion: { blocks } } from the template library, or null (no template / no published version)
@@ -172,16 +179,25 @@ describe('sms-staff-facts loaders', () => {
     ]);
   });
 
-  test('the steps that tell the customer what to do come before the background, each in the guide\'s own order', async () => {
-    const background = { type: 'list', items: ['Fleas live in carpets, pet bedding and cracks in the floor.', 'The flea life cycle has four stages from egg to adult.', 'Vacuum every carpet before we arrive.', 'Do not mop for two days after treatment.', 'Wash all pet bedding on the hottest cycle.'] };
-    const { guide } = await loadWith({ key: 'flea', visit: {} }, { activeVersion: { blocks: [background] } });
+  test('only the prep sections, in the guide\'s own order: background, the day itself and a guide with no prep heading add nothing', async () => {
+    const sections = [
+      { type: 'heading', content: 'Before we arrive' },
+      { type: 'paragraph', content: 'Heat-sensitive items include candles, vinyl records and aerosol cans.' },
+      { type: 'list', items: ['Take them out of the home before we arrive.', 'Bag clean laundry in sealed plastic bags.'] },
+      { type: 'heading', content: 'What to expect after' },
+      { type: 'paragraph', content: 'Expect a few weeks for activity to stop completely.' },
+      { type: 'heading', content: 'Step 2: Clear the floors' },
+      { type: 'paragraph', content: 'Move small items off the floor so we can reach the baseboards.' },
+    ];
+    const { guide } = await loadWith({ key: 'flea', visit: {} }, { activeVersion: { blocks: sections } });
     expect(guide.sentences).toEqual([
-      'Vacuum every carpet before we arrive.',
-      'Do not mop for two days after treatment.',
-      'Wash all pet bedding on the hottest cycle.',
-      'Fleas live in carpets, pet bedding and cracks in the floor.',
-      'The flea life cycle has four stages from egg to adult.',
+      'Heat-sensitive items include candles, vinyl records and aerosol cans.',
+      'Take them out of the home before we arrive.',
+      'Bag clean laundry in sealed plastic bags.',
+      'Move small items off the floor so we can reach the baseboards.',
     ]);
+    const noPrep = [{ type: 'heading', content: 'What to expect after' }, { type: 'paragraph', content: 'Expect a few weeks for activity to stop completely.' }];
+    expect((await loadWith({ key: 'flea', visit: {} }, { activeVersion: { blocks: noPrep } })).guide).toBeNull();
   });
 
   test('no booked visit with a guide, no active template, a failed lookup or no customer: no guide, never a throw', async () => {

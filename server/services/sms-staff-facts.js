@@ -29,22 +29,23 @@ async function loadPrepaidPlanFacts(customerId, { db } = {}) {
 
 // ---- Prep guides ---------------------------------------------------------------------------------------------------------------------
 
-// The text parts of a published guide's blocks that read as prose: paragraphs, callouts and list items (never a heading, the service
-// details rows, the button or the signature).
+// The prose of a published guide's PREP sections, in the guide's own order: the paragraphs, callouts and list items under a heading that
+// reads as what to do before the visit ("How to prepare", "Before we arrive", "Step 2: ...", "Prep for ..."). Background sections ("Why
+// fleas are different"), what happens on the day and after, the service details rows, the button and the signature are left out, and no
+// sentence moves away from the heading, list or sentence that gives it its subject. A guide with no such heading yields none.
+const PREP_HEADING_RE = /\b(?:how to prepare|before (?:we|the|your|treatment|service|our)|prep(?:are|aration)?\b|step \d|get (?:the |your )?(?:home|house|yard) ready)/i;
 function proseOfBlocks(blocks) {
   const parts = [];
+  let inPrep = false;
   for (const block of Array.isArray(blocks) ? blocks : []) {
     if (!block || typeof block !== 'object') continue;
-    if (['paragraph', 'callout'].includes(block.type) && typeof block.content === 'string') parts.push(block.content);
-    if (block.type === 'list' && Array.isArray(block.items)) parts.push(...block.items.filter((item) => typeof item === 'string'));
+    if (block.type === 'heading') inPrep = PREP_HEADING_RE.test(String(block.content || ''));
+    else if (!inPrep) continue;
+    else if (['paragraph', 'callout'].includes(block.type) && typeof block.content === 'string') parts.push(block.content);
+    else if (block.type === 'list' && Array.isArray(block.items)) parts.push(...block.items.filter((item) => typeof item === 'string'));
   }
   return parts;
 }
-
-// A guide opens with background (what the service is, how fleas live); the drafter keeps only the first few sentences, so the ones that TELL
-// the customer what to do ("Vacuum ...", "Keep pets ...", "Do not ...") come first, each group in the guide's own order.
-const ACTION_RE = /^(?:please |be sure to |make sure (?:you |to )?)?(?:vacuum|wash|launder|move|clear|remove|keep|bring|unlock|empty|store|cover|mow|turn|shut|secure|wipe|put|open|leave|take|place|pick|clean|dispose|dry|water|trim|rake|stack|lift|unplug|set|avoid|coordinate|do not|don't|plan|have|check|close|lock|gather|collect|run|sweep|mop)\b/i;
-const actionableFirst = (sentences) => [...sentences.filter((s) => ACTION_RE.test(s)), ...sentences.filter((s) => !ACTION_RE.test(s))];
 
 /**
  * The prep guide of the customer's booked visit: the soonest upcoming visit a guide covers, chosen by the prep senders' own eligibility
@@ -76,7 +77,7 @@ async function loadPrepGuideFacts(customerId, { db } = {}) {
         sentences.push(sentence);
       }
     }
-    return sentences.length ? { key, label: config.label, sentences: actionableFirst(sentences) } : null;
+    return sentences.length ? { key, label: config.label, sentences } : null;
   } catch (err) {
     logger.warn(`[sms-staff-facts] prep guide unavailable for customer ${customerId}${key ? ` (guide ${key})` : ''}: ${err.message}`);
     return null;
