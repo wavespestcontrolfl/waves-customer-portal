@@ -49,7 +49,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { getNwsHourlyRain } = require('../weather-forecast');
+const { getNwsHourlyRain, getNwsHourlyRainPatient } = require('../weather-forecast');
 const { fetchMrmsDailyRain } = require('../mrms-qpe');
 const rainPass = require('../auto-dispatch/rain-pass');
 const rainMode = require('../ads/rain-mode');
@@ -100,13 +100,8 @@ function targetDay(now) {
   return { day, kind, today };
 }
 
-// NWS only, asked once more when it does not answer, with the long wait of the ads rain record (nobody waits on this cron).
-function nwsReader(read) {
-  const once = (lat, lng) => Promise.resolve()
-    .then(() => read(lat, lng, { fetchTimeoutMs: rainMode.NWS_WAIT_MS }))
-    .catch(() => null);
-  return async (lat, lng) => (await once(lat, lng)) || (await once(lat, lng));
-}
+// NWS only, the patient read (long wait, one retry; nobody waits on this cron).
+const nwsReader = (read) => (lat, lng) => getNwsHourlyRainPatient(lat, lng, { read });
 
 const overlaps = (a, b) => a.start < b.end && b.start < a.end;
 const techOf = (row) => (row.visit.technician_id == null ? null : String(row.visit.technician_id));

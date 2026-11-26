@@ -62,12 +62,10 @@ const toHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${Stri
 // The forecast, from the free NWS feed only (owner 2026-11-26): the booking
 // pages' boundedHourlyRain gives NWS 1.2 s and then falls back to the paid
 // Open-Meteo key, which an hourly cron with no one waiting must never spend.
-// Each NWS fetch may run NWS_WAIT_MS, and an area NWS does not answer is asked
-// once more (the ads rain-mode record does the same: its first prod ticks lost
-// 4 of 6 areas to the 2.5 s default). An area still unread is null, which the
-// verdict reads as no_forecast: never dry. One read per forecast area (the NWS
-// grid, 2 decimals) per run, a failed one included.
-const NWS_WAIT_MS = 10000;
+// The patient NWS read (getNwsHourlyRainPatient: long wait, one retry, shared
+// with both rain records). An area still unread is null, which the verdict
+// reads as no_forecast: never dry. One read per forecast area (the NWS grid,
+// 2 decimals) per run, a failed one included.
 // NWS down: after this many areas stay unread in one run, the rest of the run
 // asks NWS no more and reads no_forecast, so an outage cannot hold the hourly
 // run for 20 s per area.
@@ -77,14 +75,11 @@ const areaKey = (lat, lng) => `${Number(lat).toFixed(2)},${Number(lng).toFixed(2
 function nwsOnlyReader(read) {
   const reads = new Map();
   let failed = 0;
-  const once = (lat, lng) => Promise.resolve()
-    .then(() => read(lat, lng, { fetchTimeoutMs: NWS_WAIT_MS }))
-    .catch(() => null);
-  const twice = (lat, lng) => once(lat, lng)
-    .then((hours) => hours || once(lat, lng))
+  const { getNwsHourlyRainPatient } = require('../weather-forecast');
+  const twice = (lat, lng) => getNwsHourlyRainPatient(lat, lng, { read })
     .then((hours) => {
       if (!hours) failed += 1;
-      return hours || null;
+      return hours;
     });
   return (lat, lng) => {
     const key = areaKey(lat, lng);

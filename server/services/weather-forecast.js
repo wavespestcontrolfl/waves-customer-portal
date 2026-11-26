@@ -459,6 +459,17 @@ async function nwsHourly(latNum, lngNum, deadlineAt, fetchTimeoutMs = FETCH_TIME
   return hours.length === 0 ? null : hours;
 }
 
+// The patient NWS read for crons no one waits on (the ads rain record, the schedule rain record, the hourly rain
+// pass): each NWS fetch may run NWS_PATIENT_WAIT_MS, and a read that fails or answers nothing is asked once more.
+// Still NWS only: null when both tries fail, never the paid backup. `read` stands in for getNwsHourlyRain in tests.
+const NWS_PATIENT_WAIT_MS = 10000;
+async function getNwsHourlyRainPatient(lat, lng, { read = getNwsHourlyRain } = {}) {
+  const once = () => Promise.resolve()
+    .then(() => read(lat, lng, { fetchTimeoutMs: NWS_PATIENT_WAIT_MS }))
+    .catch(() => null);
+  return (await once()) || (await once()) || null;
+}
+
 /**
  * Customer-facing forecast link for their own area. NWS zipcity page —
  * official, ad-free, loads fine on mobile.
@@ -473,6 +484,8 @@ module.exports = {
   getDailyRainOutlookBounded,
   getHourlyRainOutlook,
   getNwsHourlyRain,
+  getNwsHourlyRainPatient,
+  NWS_PATIENT_WAIT_MS,
   getOpenMeteoDaytime,
   forecastLinkForZip,
   _test: { cachePut, CACHE_MAX_ENTRIES, dailyFromHours, daytimeFromHours, _backupInFlight, _nwsHourlyInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },

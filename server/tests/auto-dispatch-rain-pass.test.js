@@ -8,7 +8,11 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 // The default forecast read is NWS only: the paid Open-Meteo backup must never be reached.
-jest.mock('../services/weather-forecast', () => ({ getNwsHourlyRain: jest.fn(), getHourlyRainOutlook: jest.fn() }));
+jest.mock('../services/weather-forecast', () => ({
+  getNwsHourlyRain: jest.fn(),
+  getHourlyRainOutlook: jest.fn(),
+  getNwsHourlyRainPatient: (...args) => jest.requireActual('../services/weather-forecast').getNwsHourlyRainPatient(...args),
+}));
 const weather = require('../services/weather-forecast');
 
 const { runRainPass, planRainPass, _test } = require('../services/auto-dispatch/rain-pass');

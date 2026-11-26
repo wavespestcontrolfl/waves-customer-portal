@@ -37,18 +37,19 @@ const RODENT_CHECK = /check|monitor|inspect/i;
 // (admin-customers scheduleLinesFromEstimate): treatment work, not an
 // estimate visit (Codex #6102 r4). Treatment words win over an inspection
 // word: "Termite Inspection & Spot Treatment" applies product (r8).
-const OUTDOOR_WORDS = 'exclu|mesh|seal|remediat|accepted|liquid|spot|applicat|spray|fumigat';
-const OUTDOOR = new RegExp(`exterior|${OUTDOOR_WORDS}|treat`, 'i');
-// Termite foam goes into wall voids and is rain-OK by key (foam_drill,
-// foam_recurring: owner 2026-11-01, #7381), so the words agree. Its names
-// say "Foam Treatment" / "Foam Drill Treatment": "treat" does not make a
-// foam service outdoor, but every other outdoor word still does.
-// The bare legacy label "Termite Foam" is the spot treatment
-// (service-completion-profiles: termite_foam -> termite_spot_treatment), which
-// needs a dry slot, so it stays outdoor.
-const FOAM = /\bfoam\b/i;
-const LEGACY_SPOT_FOAM = /^\s*termite\s+foam\s*$/i;
-const OUTDOOR_BESIDE_FOAM = new RegExp(`exterior|${OUTDOOR_WORDS}`, 'i');
+const OUTDOOR = /exterior|exclu|mesh|seal|remediat|accepted|treat|liquid|spot|applicat|spray|fumigat|foam/i;
+// Termite foam drill and recurring foam are rain-OK by key (foam_drill,
+// foam_recurring: owner 2026-11-01, #7381). A visit with no key reads the
+// same only under their exact labels, old and renamed (the foam aliases in
+// service-completion-profiles). Every other foam name stays outdoor: the
+// legacy "Termite Foam" / "Termite Foam Treatment" is the spot treatment
+// (termite_foam -> termite_spot_treatment), which needs a dry slot.
+const FOAM_DRILL_OR_RECURRING = new RegExp([
+  String.raw`^(?:recurring\s+)?termite\s+foam\s+service(?:\s*\(.*\))?$`,
+  String.raw`^recurring\s+foam\s+treatment(?:\s*\(.*\))?$`,
+  String.raw`^drill[\s-]*(?:and[\s-]*)?foam\s+termite(?:\s+treatment)?$`,
+  String.raw`^termite\s+foam\s+drill\s+treatment$`,
+].join('|'), 'i');
 
 // Interior-only lanes whose catalog names say "treatment" without saying
 // "interior" (trace-eligibility.js: bed_bug, german_roach_knockdown,
@@ -59,7 +60,7 @@ const INDOOR_TREATMENT = /bed ?bugs?|german (cock)?roach|cockroach treatment/i;
 function rainOkService(name) {
   if (/exterior/i.test(name)) return false;
   if (INDOOR_TREATMENT.test(name)) return true;
-  if (FOAM.test(name) && !LEGACY_SPOT_FOAM.test(name)) return !OUTDOOR_BESIDE_FOAM.test(name);
+  if (FOAM_DRILL_OR_RECURRING.test(String(name).trim())) return true;
   if (OUTDOOR.test(name)) return false;
   if (RAIN_OK.test(name)) return true;
   return RODENT.test(name) && RODENT_CHECK.test(name);
