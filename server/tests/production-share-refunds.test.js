@@ -49,11 +49,11 @@ describe('the refund bell', () => {
   it('lists the flagged stop of the own week and the paid stop to set, nothing else', () => {
     expect(flagsOf(week)).toEqual([
       { kind: 'own', visitId: 'v1', signals: ['pay:x:100', 'kind:refund_flagged'] },
-      { kind: 'paid', visitId: 'v3', signals: ['orphan:y', 'pay:x:100', 'answer:none'] },
+      { kind: 'paid', visitId: 'v3', signals: ['orphan:y', 'pay:x:100', 'answer:none', 'signals:none'] },
     ]);
     // A refund the owner answered that changed rings as its own kind.
     expect(flagsOf({ takeBackToSet: [{ visitId: 'v4', newSignals: [], reason: 'changed', answerRevision: '7:t' }] }))
-      .toEqual([{ kind: 'changed', visitId: 'v4', signals: ['answer:7:t'] }]);
+      .toEqual([{ kind: 'changed', visitId: 'v4', signals: ['answer:7:t', 'signals:none'] }]);
   });
 
   it('keys a flag by visit and sorted signals, so the same refund is one bell and a new signal is another', () => {
@@ -163,5 +163,24 @@ describe('historical lookups bind one array, never a parameter for each id', () 
     const lists = [...source.matchAll(/whereIn\('([^']+)'/g)].map((match) => match[1]);
     expect(lists.filter((column) => column !== 'status')).toEqual([]);
     expect(source).toMatch(/id = ANY\(\?::uuid\[\]\)/);
+  });
+});
+
+describe('a paid-stop prompt is keyed by its signal revision', () => {
+  const settings = { id: 1, rateBps: 1500, barType: 'per_shift', barCents: 10000, callbackStopValueCents: 9500 };
+  const toSet = (signalRevision) => ({ checkId: 'c', visitId: 'v9', paidWeekStart: '2026-09-07', creditCents: 100, newSignals: [], reason: 'changed', previousCents: 300, signalRevision });
+  const revision = (one) => payShare.revisionOf(new Map([['t1', { settings, stops: [], takeBackOwed: [], takeBackToSet: [one], takeBackAnswers: [] }]]));
+
+  it('changes the revision and the stored signature when only the signal revision differs', () => {
+    expect(revision(toSet('r1'))).not.toBe(revision(toSet('r2')));
+    const snapshot = (one) => ({ settingsId: 1, rateBps: 1500, barType: 'per_shift', barPerUnitCents: 10000, shifts: 0, creditedCents: 0, barCents: 0, aboveBarCents: 0, shareCents: 0, stops: [], takeBackToSet: [one] });
+    const sig = (one) => payShare.signature({ production_share_cents: 0, production_share: snapshot(one) });
+    expect(sig(toSet('r1'))).not.toEqual(sig(toSet('r2')));
+  });
+
+  it('keys the paid-stop bell by it, so each new state rings once', () => {
+    const key = (rev) => flagsOf({ takeBackToSet: [{ ...toSet(rev), answerRevision: '7:t' }] })[0].signals;
+    expect(key('r1')).not.toEqual(key('r2'));
+    expect(flagKeyOf('v9', key('r1'))).toBe(flagKeyOf('v9', key('r1')));
   });
 });

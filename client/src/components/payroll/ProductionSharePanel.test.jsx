@@ -177,6 +177,28 @@ describe('Production share preview', () => {
       expect(call.mock.calls.find(([path]) => path === '/production-share/refund-take-back')[1].body).toEqual({ checkId: 'check-1', visitId: 'v-paid', signalRevision: 'sig-1', answerRevision: '7:2026-09-20T10:00:00.000001' });
     });
 
+    it('remounts a take-back row with an empty box when the refunds changed, even though the answer revision did not', async () => {
+      const answered = { ...toSet, cents: 30000, note: null, signals: ['pay:x:3000'], newSignals: [], answerRevision: '7:t', signalRevision: 'sig-old' };
+      let calls = 0;
+      const call = vi.fn(async (path) => {
+        if (!path.startsWith('/production-share/preview')) return {};
+        calls += 1;
+        return answerFor(path, calls === 1
+          ? { takeBackToSet: [], takeBackAnswers: [answered], takeBacks: [] }
+          : { takeBackToSet: [{ ...toSet, newSignals: ['pay:y:500'], reason: 'new', previousCents: 30000, answerRevision: '7:t', signalRevision: 'sig-new' }], takeBackAnswers: [{ ...answered, newSignals: ['pay:y:500'], signalRevision: 'sig-new' }], takeBacks: [] });
+      });
+      render(<ProductionSharePanel call={call} technicians={TECHS} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Open the production share preview' }));
+      fireEvent.change(screen.getByLabelText('Employee'), { target: { value: 'tech-a' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+      await screen.findByLabelText('Refunds on paid stops');
+      expect(screen.getByLabelText('Take back ($, up to the credit paid)')).toHaveValue('300.00');
+      fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+      await screen.findByText('New refund');
+      // The same answer revision, another refund set: the old total is not carried into the box, and the save sends the new revision only.
+      expect(screen.getByLabelText('Take back ($, up to the credit paid)')).toHaveValue('');
+    });
+
     it('shows no section for a week with no refunds on paid stops', async () => {
       const call = vi.fn(async (path) => answerFor(path, { takeBackToSet: [], takeBackAnswers: [], takeBacks: [] }));
       render(<ProductionSharePanel call={call} technicians={TECHS} />);

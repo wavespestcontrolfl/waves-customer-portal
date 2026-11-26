@@ -87,7 +87,7 @@ function snapshotOf({ weekStart, settings, result, stops, degraded = false, take
     ...(takeBackToSet.length ? {
       takeBackToSet: takeBackToSet.map((one) => ({
         checkId: one.checkId, visitId: one.visitId, workDate: one.workDate || null, paidWeekStart: one.paidWeekStart, creditCents: one.creditCents,
-        newSignals: [...one.newSignals].sort(), reason: one.reason, previousCents: one.previousCents == null ? null : one.previousCents,
+        newSignals: [...one.newSignals].sort(), signalRevision: one.signalRevision || null, reason: one.reason, previousCents: one.previousCents == null ? null : one.previousCents,
       })),
     } : {}),
     stops: stops.map((stop) => ({
@@ -191,7 +191,7 @@ function basesSignature(bases, invoices) {
 const sortedJson = (rows) => rows.map((one) => JSON.stringify(one)).sort();
 const takeBackSignature = (takeBacks, toSet, answers = []) => [
   sortedJson((takeBacks || []).map((one) => [one.sourceCheckId || null, one.visitId, one.paidWeekStart, one.workDate || null, Number(one.cents), [...(one.dependsOnRuns || [])].sort()])),
-  sortedJson((toSet || []).map((one) => [one.checkId, one.visitId, one.paidWeekStart, Number(one.creditCents), [...one.newSignals].sort(), one.reason || null, one.previousCents == null ? null : Number(one.previousCents)])),
+  sortedJson((toSet || []).map((one) => [one.checkId, one.visitId, one.paidWeekStart, Number(one.creditCents), [...one.newSignals].sort(), one.reason || null, one.previousCents == null ? null : Number(one.previousCents), one.signalRevision || null])),
   sortedJson(answers.map((one) => [one.sourceCheckId, one.visitId, Number(one.cents), one.revision])),
 ];
 // A stop's refund signals and, for a paid stop (credit above $0), the sorted invoice ids they were read from: both are frozen with the check.

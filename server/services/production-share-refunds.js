@@ -48,7 +48,10 @@
  *                                              lost dispute stays open and keeps flagging;
  *                                            statement_pay_webhook rows (a partial refund before settlement, or a stale or orphan success on
  *                                              a statement charge): MATCHED; the table cannot tell the two apart without reading free text,
- *                                              so both are kept (over-detecting on purpose);
+ *                                              so both are kept (over-detecting on purpose). The case is keyed by the bare PaymentIntent and inserted with
+ *                                              onConflict ignore: a SECOND partial refund before settlement changes nothing on the row, so its
+ *                                              signal ('orphan-stmt:<id>:<cents>:<updated_at>') is UNCLEAR: a source holding one is listed every
+ *                                              week (reason 'unclear'), while an answer already in force keeps applying;
  *                                            '<pi>:dispute-won:<dispute id>:<invoice id>' (reinstated funds after a won dispute): EXCLUDED,
  *                                              the money came back to Waves;
  *                                            '<pi>:<invoice id>' residual shares and provisional cash of a combined debit, the card-hold and
@@ -104,6 +107,12 @@ const REFUND_IDENTITY_SQL = `COALESCE((SELECT ':' || left(md5(string_agg(x.id, '
 // refunded, so the state stands in for the cents.
 // A refund amount beside a 'disputed' or 'refunded' status is a different state from the same amount on a 'paid' row (a chargeback after a
 // partial refund keeps the amount): the status is in the id then. A row with no amount already carries its status above.
+// A statement charge's parked case (source statement_pay_webhook, keyed by the bare PaymentIntent) is an UNCLEAR signal: the statement webhook
+// inserts it with onConflict ignore, so a SECOND partial refund before settlement changes nothing on the row (no amount, no updated_at, no refund
+// id), and the signal cannot tell the refunds apart. Its id still carries the row's amount and updated_at (anything that does change shows), and
+// a source holding such a signal is listed again EVERY week (reason 'unclear', the answer shown as the previous total) so the owner re-checks it; the
+// answer he saved keeps being applied meanwhile (see addSource).
+const UNCLEAR_SIGNAL_PREFIX = 'orphan-stmt:';
 const STATUS_SUFFIX_SQL = "CASE WHEN COALESCE(p.refund_amount, 0) > 0 AND p.status IN ('refunded', 'disputed') THEN ':' || p.status ELSE '' END";
 const AMOUNT_OR_STATE_SQL = "CASE WHEN COALESCE(p.refund_amount, 0) > 0 THEN round(p.refund_amount * 100)::bigint::text ELSE p.status END";
 
@@ -195,10 +204,12 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
       JOIN invoices i ON i.id = v.invoice_id AND i.payer_statement_id IS NOT NULL
       JOIN payments p ON p.statement_id = i.payer_statement_id AND ${paymentRefundShownSql('p')}
       UNION
-      -- Parked refunds, by the exact key or source the webhook writes: a partial refund on a combined charge (source combined_pay_webhook,
+      -- Parked refunds, by the exact key or source the webhook writes (a statement case is an 'orphan-stmt' signal, see UNCLEAR_SIGNAL_PREFIX): a partial refund on a combined charge (source combined_pay_webhook,
       -- key '<pi>:partial-refund:<refund id>'), and a statement charge's parked case (source statement_pay_webhook). A won dispute parks under
       -- its own key (':dispute-won:') and is no refund. A refund the bank bounced is fenced in stripe_failed_refunds and is no refund either.
-      SELECT v.origin, 'orphan:' || o.id::text
+      SELECT v.origin, CASE WHEN o.source = 'statement_pay_webhook'
+          THEN '${UNCLEAR_SIGNAL_PREFIX}' || o.id::text || ':' || round(o.amount * 100)::bigint::text || ':' || (extract(epoch FROM o.updated_at) * 1000000)::bigint::text
+          ELSE 'orphan:' || o.id::text END
       FROM invs v
       JOIN stripe_orphan_charges o ON (o.invoice_id = v.invoice_id
         OR (o.stripe_charge_id IS NOT NULL AND o.stripe_charge_id IN (SELECT k.ch FROM keys k WHERE k.invoice_id = v.invoice_id))
@@ -371,7 +382,9 @@ function addSource(mine, row, { signals, answer, history, visit }) {
     creditCents: Number(row.credit_cents), answerRevision: answer ? answer.revision : NO_ANSWER, signalRevision: signalRevisionOf(current), visit: visit || null,
   };
   const reopen = reopenOf(current, answer, baseline);
-  if (reopen) mine.toSet.push({ ...where, newSignals: fresh, ...reopen });
+  // A signal that cannot tell refunds apart asks again every week, but never stops an answer already in force (reopen stays what equality says).
+  const unclear = !reopen && current.some((id) => id.startsWith(UNCLEAR_SIGNAL_PREFIX)) ? { reason: 'unclear', previousCents: answer ? answer.cents : null } : null;
+  if (reopen || unclear) mine.toSet.push({ ...where, newSignals: fresh, ...(reopen || unclear) });
   if (answer) mine.answers.push({ ...where, id: answer.id, cents: answer.cents, note: answer.note, signals: answer.signals, newSignals: fresh, updatedAt: answer.updatedAt, revision: answer.revision, inForce: !reopen });
   if (!answer && !history) return;
   const delta = deltaOf(answer, !reopen, history);

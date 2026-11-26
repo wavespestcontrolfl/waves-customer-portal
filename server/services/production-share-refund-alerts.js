@@ -38,7 +38,7 @@ function flagsOf({ stops = [], takeBackToSet = [] }) {
     // The stop's kind and the answer revision are in the key, so the same refund rings once and a changed state rings again.
     ...stops.filter((stop) => OWN_KINDS.has(stop.kind)).map((stop) => ({ kind: 'own', visitId: stop.visitId, signals: [...(stop.refundSignals || []), `kind:${stop.kind}`] })),
     ...takeBackToSet.map((one) => ({
-      kind: one.reason === 'changed' ? 'changed' : 'paid', visitId: one.visitId, signals: [...(one.newSignals || []), `answer:${one.answerRevision || 'none'}`],
+      kind: one.reason === 'changed' ? 'changed' : 'paid', visitId: one.visitId, signals: [...(one.newSignals || []), `answer:${one.answerRevision || 'none'}`, `signals:${one.signalRevision || 'none'}`],
     })),
   ];
 }

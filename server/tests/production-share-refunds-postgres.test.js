@@ -1049,6 +1049,83 @@ postgres('production share refunds', () => {
     });
   });
 
+  describe('round eight: statement cases are unclear, revisions in tokens', () => {
+    it('reads a statement charge\'s parked case as an unclear signal: listed every week while an answer in force keeps applying', async () => {
+      const world = await paidWorld('stmt');
+      const [payer] = await trx('payers').insert({ display_name: 'Sample Payer' }).returning('id');
+      const [stmt] = await trx('payer_statements').insert({
+        payer_id: payer.id, period_start: '2026-09-01', period_end: '2026-09-30', terms_snapshot: 'due_on_receipt', token: randomUUID(), stripe_payment_intent_id: 'pi_stmt_pre',
+      }).returning('id');
+      await trx('invoices').where({ id: world.invoiceId }).update({ payer_statement_id: stmt.id });
+      const [parked] = await trx('stripe_orphan_charges').insert({
+        stripe_payment_intent_id: 'pi_stmt_pre', stripe_charge_id: 'ch_stmt_pre', amount: '30.00', source: 'statement_pay_webhook',
+        original_db_error: `statement S-${stmt.id}: partial refund $30.00 before settlement`,
+      }).returning('id');
+      const found = (await signals([world.visit])).get(world.visit);
+      expect(found).toEqual([expect.stringMatching(new RegExp(`^orphan-stmt:${parked.id}:3000:\\d+$`))]);
+      const open = await week(world, W2, '500.00');
+      expect(open.takeBackToSet).toEqual([expect.objectContaining({ reason: 'new' })]);
+      expect((await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 30000, signalRevision: open.takeBackToSet[0].signalRevision })).status).toBe(200);
+      // A second partial refund changes nothing on the row (the webhook ignores the conflict): the source is asked about again, and the answer still applies.
+      const again = await preview(world.id, W2);
+      expect(again.takeBackToSet).toEqual([expect.objectContaining({ reason: 'unclear', previousCents: 30000 })]);
+      expect(again.takeBackAnswers).toEqual([expect.objectContaining({ cents: 30000, inForce: true })]);
+      expect(again.takeBacks).toEqual([expect.objectContaining({ cents: 30000 })]);
+    });
+
+    it('refuses a stale resubmit after a frozen refund reverses (the page\'s old signal revision), and accepts the current one', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      for (const weekStart of [W1, W2]) await worked(id, weekStart, 40);
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_payment_intent_id: 'pi_stale' });
+      const a = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_stale', refund_amount: '10.00' });
+      expect((await override({ technicianId: id, visitId: visit, weekStart: W1, creditCents: 20000, reason: 'Refund was $10' })).status).toBe(200);
+      const { done } = await finalWeek(W1);
+      const checkId = byName(done, 'Sample Alpha').id;
+      await stop(id, W2, '500.00', customerId);
+      await paymentOf(customerId, { stripe_payment_intent_id: 'pi_stale', refund_amount: '5.00' });
+      const first = (await preview(id, W2)).takeBackToSet[0];
+      expect((await takeBack({ checkId, visitId: visit, cents: 3000, signalRevision: first.signalRevision })).status).toBe(200);
+      await trx('payments').where({ id: a }).update({ refund_amount: '0.00' });
+      const reopened = (await preview(id, W2)).takeBackToSet[0];
+      expect(reopened.signalRevision).not.toBe(first.signalRevision);
+      // The page that still shows the old total resubmits it with the old revision: refused.
+      const stale = await takeBack({ checkId, visitId: visit, cents: 3000, signalRevision: first.signalRevision });
+      expect(stale.status).toBe(409);
+      expect((await takeBack({ checkId, visitId: visit, cents: 3000, signalRevision: reopened.signalRevision })).status).toBe(200);
+    });
+
+    it('freezes signalRevision on a prompt so a second reversal makes the draft stale and rings again', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      for (const weekStart of [W1, W2]) await worked(id, weekStart, 40);
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_payment_intent_id: 'pi_two' });
+      const a = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_two', refund_amount: '10.00' });
+      const b = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_two', refund_amount: '5.00' });
+      expect((await override({ technicianId: id, visitId: visit, weekStart: W1, creditCents: 20000, reason: 'Both refunds seen' })).status).toBe(200);
+      await finalWeek(W1);
+      await stop(id, W2, '500.00', customerId);
+      // Refund A reverses before the draft: the prompt says 'changed' with no new signals.
+      await trx('payments').where({ id: a }).update({ refund_amount: '0.00' });
+      const draftRun = (await draft(W2)).body.run;
+      const stored = await trx('payroll_checks').where({ id: byName(draftRun, 'Sample Alpha').id }).first('calc_snapshot');
+      const prompt = stored.calc_snapshot.productionShare.takeBackToSet[0];
+      expect(prompt).toMatchObject({ reason: 'changed', newSignals: [], signalRevision: expect.stringMatching(/^[0-9a-f]{64}$/) });
+      const before = await bells();
+      expect((await api('GET', `/runs/${draftRun.id}`)).body.run.stale).toBe(false);
+      // Refund B reverses afterwards: same words (changed, no new signals, same previous total), but another revision.
+      await trx('payments').where({ id: b }).update({ refund_amount: '0.00' });
+      expect((await api('GET', `/runs/${draftRun.id}`)).body.run.stale).toBe(true);
+      expect((await finalize(draftRun.id, draftRun.token)).status).toBe(409);
+      await preview(id, W2);
+      expect(await bells()).toBe(before + 1);
+    });
+  });
+
   describe('a parked refund the bank bounced is not a refund signal', () => {
     it('skips a parked refund whose id is fenced as failed, and keeps a reconciled one', async () => {
       const id = await tech('Sample Alpha');

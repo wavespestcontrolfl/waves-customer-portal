@@ -204,6 +204,8 @@ function PaidVisitReference({ row }) {
   </p>;
 }
 
+const TAKE_BACK_STATE_WORDS = { changed: 'A refund you answered changed', unclear: 'Check this refund again: its refunds cannot be told apart' };
+
 function RefundTakeBackRow({ call, row, generation, onChanged }) {
   // A stop that needs an answer starts empty: the owner saves a new total against the refunds now.
   const [text, setText] = useState(row.cents == null || row.isNew ? '' : centsToPlain(row.cents));
@@ -230,9 +232,11 @@ function RefundTakeBackRow({ call, row, generation, onChanged }) {
     <TD>{dayLabel(row.paidWeekStart)}</TD>
     <TD nums align="right">{centsToDollars(row.creditCents)}</TD>
     <TD>
-      {row.isNew ? <span className="text-warn-fg">{row.reason === 'changed' ? 'A refund you answered changed' : 'New refund'}</span> : 'Answered'}
+      {row.isNew ? <span className="text-warn-fg">{TAKE_BACK_STATE_WORDS[row.reason] || 'New refund'}</span> : 'Answered'}
       {row.isNew && row.previousCents != null && <p className="m-0 text-ui-caption text-ink-secondary">
-        Previous total {centsToDollars(row.previousCents)}. Nothing more is taken from this stop until you save a new total.
+        {row.reason === 'unclear'
+          ? `Current total ${centsToDollars(row.previousCents)}. It keeps being taken while you check; save it again when it is right.`
+          : `Previous total ${centsToDollars(row.previousCents)}. Nothing more is taken from this stop until you save a new total.`}
       </p>}
     </TD>
     <TD>
@@ -261,7 +265,7 @@ function RefundTakeBacks({ call, preview, generation, onChanged }) {
     {rows.size > 0 && <Table aria-label="Paid stops with a refund">
       <THead><TR><TH>Visit day</TH><TH>Paid in week of</TH><TH align="right">Credit paid</TH><TH>State</TH><TH>Take-back</TH></TR></THead>
       <TBody>
-        {[...rows.values()].map(row => <RefundTakeBackRow key={`${row.checkId}:${row.visitId}:${row.answerRevision}:${(row.newSignals || []).join(',')}`}
+        {[...rows.values()].map(row => <RefundTakeBackRow key={`${row.checkId}:${row.visitId}:${row.answerRevision}:${row.signalRevision}:${(row.newSignals || []).join(',')}`}
           call={call} row={row} generation={generation} onChanged={onChanged} />)}
       </TBody>
     </Table>}
