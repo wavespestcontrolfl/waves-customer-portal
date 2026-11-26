@@ -759,7 +759,7 @@ describe('technician shift hours', () => {
   test('a shift sets the day: it opens at the first whole hour inside the shift and closes at the shift end', async () => {
     shifts({ [TECH]: { startMin: 9 * 60 + 30, endMin: 15 * 60, source: 'roster' } });
     const { options, conn } = await run();
-    expect(options).toMatchObject({ firstHour: 10, closeMin: 15 * 60 });
+    expect(options).toMatchObject({ firstHour: 10, closeMin: 15 * 60, closeByWork: true });
     expect(load).toHaveBeenCalledTimes(1);
     expect(load).toHaveBeenCalledWith(conn, { now: NOW });
   });
@@ -775,20 +775,40 @@ describe('technician shift hours', () => {
 
   test('no set hours, or another technician\'s, leave the night pass\'s day', async () => {
     shifts({ [OTHER_TECH]: { startMin: 10 * 60, endMin: 12 * 60, source: 'roster' } });
-    expect((await run()).options).toMatchObject({ firstHour: 8, closeMin: 17 * 60 });
+    const { options } = await run();
+    expect(options).toMatchObject({ firstHour: 8, closeMin: 17 * 60 });
+    expect(options).not.toHaveProperty('closeByWork');
   });
 
-  test('a stop the shift does not hold is never moved, and nothing is moved out of the shift', async () => {
-    // The shift ends at 10:00: the 10:00 and 11:00 stops are outside it and have no hour to take.
-    shifts({ [TECH]: { startMin: 8 * 60, endMin: 10 * 60, source: 'roster' } });
-    const { out, inserts } = await run();
+  test('a stop the office placed outside the shift keeps its hour, though an hour inside the shift is free', async () => {
+    // The shift ends at 11:00. The 13:00 stop is outside it; 10:00 inside the shift is free.
+    shifts({ [TECH]: { startMin: 8 * 60, endMin: 11 * 60, source: 'roster' } });
+    const rows = [row('a', 0.30, 8), row('b', 0.02, 9), row('late', 0.31, 13)];
+    const { out, inserts } = await run(rows);
     expect(out.status).toBe('completed');
-    const changes = JSON.parse(inserts[0].row.changes);
-    for (const change of changes) {
-      expect(['a', 'b']).toContain(change.id);
-      expect(change.to < '10:00').toBe(true);
-    }
-    expect(changes.some((change) => ['c', 'd'].includes(change.id))).toBe(false);
+    const plan = inserts[0].row;
+    expect(JSON.parse(plan.fixed)).toEqual([{ id: 'late', why: 'outside_shift' }]);
+    expect(JSON.parse(plan.changes).some((change) => change.id === 'late')).toBe(false);
+    // Every hour the plan writes is inside the shift.
+    for (const change of JSON.parse(plan.changes)) expect(change.to < '11:00').toBe(true);
+    // A stop with its own fixed reason keeps that reason in the list.
+    jest.clearAllMocks();
+    const locked = await run([row('a', 0.30, 8), row('b', 0.02, 9), row('late', 0.31, 13, { auto_dispatch_locked: true })]);
+    const [fixed] = JSON.parse(locked.inserts[0].row.fixed);
+    expect(fixed.id).toBe('late');
+    expect(fixed.why).not.toBe('outside_shift');
+  });
+
+  test('outsideShift: the block is the longer of the window and the work; another fixed reason comes first', () => {
+    const shift = { startMin: 8 * 60, endMin: 11 * 60 };
+    const { outsideShift } = _internals;
+    expect(outsideShift(row('a', 0, 10), shift)).toBeNull();
+    expect(outsideShift(row('a', 0, 8), shift)).toBeNull();
+    expect(outsideShift(row('a', 0, 7), shift)).toBe('outside_shift');
+    expect(outsideShift(row('a', 0, 11), shift)).toBe('outside_shift');
+    expect(outsideShift(row('a', 0, 10, { estimated_duration_minutes: 61 }), shift)).toBe('outside_shift');
+    expect(outsideShift(row('a', 0, 10, { window_start: null }), shift)).toBe('outside_shift');
+    expect(outsideShift(row('a', 0, 13), null)).toBeNull();
   });
 
   test('a failed read of the hours plans nothing', async () => {

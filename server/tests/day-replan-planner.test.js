@@ -447,6 +447,17 @@ describe('the day closes with the night pass bound', () => {
     expect(planDay(input(wide)).reason).toBe('no_feasible_order');
   });
 
+  test('closeByWork (a shift set the close): a stop whose work is longer than its window must end its work by the close', () => {
+    // A 60-minute window with 90 minutes of work, wanted at 16:00. The close is 17:00.
+    const long = [stop('m', 0, 9, { workMin: 90, pref: { startMin: 16 * 60, endMin: 17 * 60 } }), stop('z', 0, 18, { movable: false })];
+    expect(planDay(input(long)).best.slots.m).toBe(16 * 60);
+    expect(planDay(input(long, { options: { closeByWork: true } })).reason).toBe('no_feasible_order');
+    expect(planDay(input(long, { options: { closeByWork: 'yes' } })).best.slots.m).toBe(16 * 60);
+    // Work no longer than the window: the same answer with and without it.
+    const short = [stop('m', 0, 9, { workMin: 60, pref: { startMin: 16 * 60, endMin: 17 * 60 } }), stop('z', 0, 18, { movable: false })];
+    expect(planDay(input(short, { options: { closeByWork: true } })).best.slots.m).toBe(16 * 60);
+  });
+
   test('firstHour is the earliest start', () => {
     const r = planDay(input([stop('m', 0, 9), stop('n', 0, 10)], { options: { firstHour: 9 } }));
     for (const slot of Object.values(r.best.slots)) expect(slot).toBeGreaterThanOrEqual(9 * 60);
