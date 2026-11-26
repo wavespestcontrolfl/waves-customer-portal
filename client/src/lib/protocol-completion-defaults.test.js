@@ -39,6 +39,23 @@ describe('protocol completion defaults: a card line with its own label rate', ()
     );
     expect(row).toMatchObject({ rate: '', labelMaxRate: null });
   });
+
+  // The flea card's Tekko Pro rate is held when the row's registration or catalog rate does not match the card (server
+  // labelRateHeld): the rate starts blank whatever the catalog keeps, a per-1,000 rate included.
+  it('a held rate starts blank on a row that keeps a per-1,000 catalog rate or an unreadable band', () => {
+    for (const catalogRow of [
+      { ...tekkoRow, default_rate: '1/2' },
+      { ...tekkoRow, default_unit: 'fl_oz/1000sf', default_rate_per_1000: '0.67' },
+      { ...tekkoRow, defaultRatePer1000: 0.67 },
+    ]) {
+      const [row] = protocolCompletionDefaultSelections(
+        { programKey: 'flea', source: 'protocol_visit', products: [{ id: 't', name: 'Tekko Pro IGR', defaultRate: '', labelUseRate: true, completionApplicationMethod: 'spot_treatment' }] },
+        [catalogRow],
+        build,
+      );
+      expect(row).toMatchObject({ rate: '', labelMaxRate: null });
+    }
+  });
 });
 
 describe('withLabelUseRates', () => {
