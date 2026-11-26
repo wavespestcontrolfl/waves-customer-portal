@@ -40,6 +40,7 @@ const {
   normalizeOptionList,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol, followupVisitMatch } = require('../services/protocol-matcher');
+const { isLaterPackageVisit } = require('../services/protocol-package-stage');
 const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
 const { fertilizerSafetyRules } = require('../services/lawn-fertilizer-safety');
 const jobCard = require('../services/job-card');
@@ -839,16 +840,21 @@ async function bookedAddonHints(req, protocols) {
 
 // The card for a service name, read the way the job card reads it. ?visitId= names the booked visit the screen is open on (one this
 // viewer may see): its catalog service key decides the program before its name does, and a visit booked as a follow-up of a finished
-// visit (its name is a copy of that visit's) gets the program's follow-up card. With no visit, the name alone decides, as before.
+// visit (its name is a copy of that visit's) gets the program's follow-up card, as does a later visit of a package booked up front
+// (protocol-package-stage.js). With no visit, the name alone decides, as before.
 async function matchForBookedVisit(req, protocols, serviceType) {
   const id = String(req.query.visitId || '');
   const visit = UUID_RE.test(id)
     ? await technicianCurrentVisitFilter(req, db('scheduled_services').where({ 'scheduled_services.id': id }))
       .leftJoin('services', 'scheduled_services.service_id', 'services.id')
-      .first('scheduled_services.followup_source_service_id', db.raw('COALESCE(scheduled_services.service_key_snapshot, services.service_key) as service_key'))
+      .first(
+        'scheduled_services.id',
+        'scheduled_services.followup_source_service_id', 'scheduled_services.recurring_parent_id', 'scheduled_services.recurring_ongoing',
+        db.raw('COALESCE(scheduled_services.service_key_snapshot, services.service_key) as service_key'),
+      )
     : null;
   const match = matchServiceProtocol(protocols, serviceType, { serviceKey: visit?.service_key || null, month: req.query.month || null });
-  return followupVisitMatch(match, visit?.followup_source_service_id != null);
+  return followupVisitMatch(match, visit?.followup_source_service_id != null || await isLaterPackageVisit(db, visit, { protocols }));
 }
 
 // GET /api/admin/protocols/match — best service template plus full program fallback.

@@ -38,6 +38,7 @@ const { awayWatchCardLines } = require('./away-watch');
 
 const { redactAccessCodes } = contextAggregator;
 const { matchServiceProtocol, followupVisitMatch, monthVisit } = require('./protocol-matcher');
+const { isLaterPackageVisit } = require('./protocol-package-stage');
 const { stripPriceTokensFromText } = require('./protocol-reader');
 const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = require('../utils/mosquito-misting-system');
 const {
@@ -567,6 +568,8 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     .where('ss.id', serviceId)
     .select(
       'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes', 'ss.technician_id', 'ss.followup_source_service_id',
+      // A later visit of a package booked up front is linked only by these (protocol-package-stage.js).
+      'ss.recurring_parent_id', 'ss.recurring_ongoing',
       // The primary line's catalog identity (booking snapshot, else the live
       // row); null on legacy rows booked before the catalog link existed.
       dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
@@ -626,8 +629,9 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     serviceType: svc.service_type,
     serviceCategory: svc.service_category || null,
     serviceKey: svc.service_key || null,
-    // Booked as a follow-up of a finished visit: the card is the program's follow-up card, not the first visit's.
-    isFollowup: svc.followup_source_service_id != null,
+    // Booked as a follow-up of a finished visit, or a later visit of a package booked up front: the card is the program's
+    // follow-up card, not the first visit's.
+    isFollowup: svc.followup_source_service_id != null || await isLaterPackageVisit(dbh, svc, { protocols: deps.protocols }),
     // What the estimate sold for an area add-on that IS this visit (null for any other visit).
     areaAddOnScope: soldScopeOf(svc.area_addon_scope),
     serviceLine,
@@ -2191,7 +2195,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
         .where('ss.id', serviceId)
         .select(
           'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
-          'ss.followup_source_service_id',
+          'ss.followup_source_service_id', 'ss.recurring_parent_id', 'ss.recurring_ongoing',
           // The primary line's catalog identity, by the card's own rule.
           dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
           dbh.raw('COALESCE(ss.service_key_snapshot, s.service_key) as service_key'),
@@ -2395,8 +2399,10 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // products off the catalog past the plan's guards.
   const lawnAddon = addons.find((a) => a.programKey === 'lawn')?.addon || null;
   const found = (line, owners = []) => ({ line, treatment, primaryIsLawn, lawnAddon, owners });
+  // The card's own follow-up rule (loadJobCardFacts): a booked follow-up, or a later visit of a package booked up front.
+  const isFollowup = svc.followup_source_service_id != null || await isLaterPackageVisit(dbh, { ...svc, id: serviceId }, { protocols: deps.protocols });
   const candidates = [
-    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null, isFollowup: svc.followup_source_service_id != null }] : []),
+    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null, isFollowup }] : []),
     ...addons.filter((a) => a.programKey && a.programKey !== 'lawn'),
   ];
   if (!candidates.length) return found(null);
