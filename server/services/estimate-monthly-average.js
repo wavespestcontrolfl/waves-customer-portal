@@ -183,14 +183,11 @@ function monthlyAverageFor({ estimate, proposal, bundle = null, livePricing = nu
 }
 
 /**
- * The delivery email's pieces for an estimate row (async: it asks the same
- * billing authority the PDF asks). Null whenever the
- * average may not be shown; never throws, so an email falls back to its
- * existing wording.
- *
- * @returns {Promise<null | {priceLine: string, note: string}>}
+ * The per-application average of an estimate row (async: it asks the same billing authority the PDF asks): the same result
+ * monthlyAverageFor returns, or null whenever the average may not be shown; never throws, unless `rethrow` (a caller that must tell a failed
+ * read from "not shown", the texting AI's price facts, so a failure stays retryable at send).
  */
-async function emailAverageParts(estimate) {
+async function perApplicationAverageFor(estimate, { rethrow = false } = {}) {
   if (!estimate) return null;
   try {
     const { normalizeProposal } = require('./estimate-proposal');
@@ -200,16 +197,29 @@ async function emailAverageParts(estimate) {
     // place), so it works on a deep copy: the caller's row (hashed into the
     // review's editVersion) must never change (#6360 pre-push P1).
     const copy = structuredClone(estimate);
-    const ctx = await resolveProposalBillingContext(copy);
+    const ctx = await resolveProposalBillingContext(copy, { rethrow });
     if (!ctx || ctx.billsPerApplication !== true) return null;
     const proposal = normalizeProposal(copy, { recurringMode: 'per_application', livePricing: ctx.livePricing || null });
     const bundle = ctx.livePricing?.bundle || parseData(copy.estimate_data ?? copy.estimateData)?.sendSnapshot?.pricingBundle || null;
-    const result = monthlyAverageFor({ estimate: copy, proposal, bundle, livePricing: ctx.livePricing || null });
-    return result ? shared.emailParts(result.model, result.inputs.oneTime) : null;
+    return monthlyAverageFor({ estimate: copy, proposal, bundle, livePricing: ctx.livePricing || null });
   } catch (err) {
-    logger.warn(`[estimate-monthly-average] email parts unavailable for estimate ${estimate?.id}: ${err.message}`);
+    logger.warn(`[estimate-monthly-average] average unavailable for estimate ${estimate?.id}: ${err.message}`);
+    if (rethrow) throw err;
     return null;
   }
+}
+
+/**
+ * The delivery email's pieces for an estimate row (async: it asks the same
+ * billing authority the PDF asks). Null whenever the
+ * average may not be shown; never throws, so an email falls back to its
+ * existing wording.
+ *
+ * @returns {Promise<null | {priceLine: string, note: string}>}
+ */
+async function emailAverageParts(estimate) {
+  const result = await perApplicationAverageFor(estimate);
+  return result ? shared.emailParts(result.model, result.inputs.oneTime) : null;
 }
 
 // The exact customer copy the average adds to the delivery email (the price
@@ -249,4 +259,4 @@ function averageDiffersFromReview(reviewedMessages, parts) {
   return (reviewedEmail.monthlyAverage ?? null) !== averageText(parts);
 }
 
-module.exports = { monthlyAverageFor, emailAverageParts, averageText, reviewedAverageStale, averageDiffersFromReview };
+module.exports = { monthlyAverageFor, perApplicationAverageFor, emailAverageParts, averageText, reviewedAverageStale, averageDiffersFromReview };

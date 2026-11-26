@@ -436,6 +436,47 @@ describe('fail-closed on an inconclusive lookup', () => {
 });
 
 
+// The texting AI's price facts must tell a FAILED lookup from a conclusive "no" (a failure stays retryable at send): `rethrow` gives each lookup's
+// own error; without it every answer above is unchanged.
+describe('rethrow: a failed lookup is an error, not a fail-soft answer', () => {
+  it('the billing-lane, prepay and live-pricing lookups throw, and resolveProposalBillingContext passes it on', async () => {
+    mockDb.schema.hasColumn.mockRejectedValue(new Error('lane down'));
+    await expect(estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' }, { rethrow: true })).rejects.toThrow('lane down');
+    expect(await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' })).toBe(false);
+    await expect(resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }, { rethrow: true })).rejects.toThrow('lane down');
+
+    mockDb.mockImplementation((table) => {
+      if (table === 'customers') return { where: () => ({ first: async () => ({ pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: 'per_application' }) }) };
+      return { where: () => ({ first: async () => { throw new Error('prepay down'); } }) };
+    });
+    mockDb.schema.hasColumn.mockResolvedValue(true);
+    mockDb.schema.hasTable.mockResolvedValue(true);
+    await expect(estimateSoldAsAnnualPrepay({ id: 'e1' }, { rethrow: true })).rejects.toThrow('prepay down');
+    expect(await estimateSoldAsAnnualPrepay({ id: 'e1' })).toBeNull();
+  });
+
+  it('a failed live rebuild throws in rethrow mode and stays UNRESOLVED otherwise', async () => {
+    const perAppCustomer = { pipeline_stage: 'lead', monthly_rate: 45 };
+    stubTables({ customer: perAppCustomer });
+    mockBuildPricingBundle.mockRejectedValue(new Error('pricing engine down'));
+    await expect(resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }, { rethrow: true })).rejects.toThrow('pricing engine down');
+    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' })).toEqual({ billsPerApplication: true, livePricing: { unresolved: true } });
+    mockBuildPricingBundle.mockResolvedValue(null);
+    await expect(resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }, { rethrow: true })).rejects.toThrow('pricing bundle unavailable');
+    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' })).toEqual({ billsPerApplication: true, livePricing: { unresolved: true } });
+    // strict membership: asked strictly in rethrow mode, an unsuccessful result is a failure; the default call is unchanged
+    mockBuildPricingBundle.mockResolvedValue({ frequencies: [], source: 'live_rebuild' });
+    mockReconcileMembership.mockClear();
+    mockReconcileMembership.mockResolvedValue({ ok: false, error: 'membership_lookup_failed' });
+    await expect(resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }, { rethrow: true })).rejects.toThrow('membership snapshot unverified: membership_lookup_failed');
+    expect(mockReconcileMembership).toHaveBeenLastCalledWith(expect.anything(), { strictMembership: true });
+    mockReconcileMembership.mockClear();
+    await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' });
+    expect(mockReconcileMembership).toHaveBeenLastCalledWith(expect.anything(), undefined);
+    mockReconcileMembership.mockReset();
+  });
+});
+
 // #3120 r6/r7: the pricing authority depends on whether the price is locked.
 describe('pricing authority', () => {
   const perAppCustomer = { pipeline_stage: 'lead', monthly_rate: 45 };

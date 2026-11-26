@@ -750,6 +750,21 @@ describe('paymentStatusSendBlockReason - the prepaid visits left sentence', () =
   });
 });
 
+describe('outgoingAmountsStale - a revalidated retained estimate price is not an amount owed', () => {
+  const PRICE = 'Your estimate lists Pest Control at $125.00 per application, 4 applications a year.';
+  const SNAP = { customer_id: 'c1', sentences: [PRICE] };
+  const ctx = (cents) => ({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], recentPaymentsTruncated: false, hasDepositActivity: false }, estimateFacts: { perApplication: [{ label: 'Pest Control', cents, applications: 4 }] } });
+  const run = (body) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, humanEditedBody: true, paymentStatusSnapshot: SNAP, dbh: dbWithCustomer({ id: 'c1' }) });
+
+  test('a greeting around a still-live estimate price passes with no balance owed; a changed price, or a figure staff typed that is not owed, does not', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(12500));
+    await expect(run(`Hi Dana! ${PRICE}`)).resolves.toMatchObject({ stale: false });
+    await expect(run(`Hi Dana! ${PRICE} We also owe you $20.00.`)).resolves.toMatchObject({ stale: true, reason: 'amount_no_longer_authorized' });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(13000));
+    await expect(run(`Hi Dana! ${PRICE}`)).resolves.toEqual({ stale: true, reason: 'payment_status_changed' });
+  });
+});
+
 describe('outgoingAmountsStale - a staff-edited body keeps rechecking a copied prepaid sentence it retains', () => {
   const LEFT = 'Your prepaid Quarterly Pest Control plan has 3 of 4 prepaid visits left.';
   const SNAP = { customer_id: 'c1', sentences: [LEFT] };
@@ -770,6 +785,36 @@ describe('outgoingAmountsStale - a staff-edited body keeps rechecking a copied p
   test('the staff member\'s own wording (no retained copy) needs no plan read', async () => {
     await expect(run('Hi Dana, we will see you Tuesday.')).resolves.toMatchObject({ stale: false });
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+});
+
+// The open estimate's per-application price (owner 2026-11-25): re-rendered from the live estimate at send; the standalone terms the contract never
+// renders (the applications a year in the model's own words, a setup-fee waiver) are held whatever the customer asked.
+describe('paymentStatusSendBlockReason - the estimate price sentence', () => {
+  const PRICE = 'Your estimate lists Pest Control at $125.00 per application, 4 applications a year.';
+  const SNAP = { customer_id: 'c1', sentences: [PRICE] };
+  const ctx = (estimateFacts) => ({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], recentPaymentsTruncated: false, hasDepositActivity: false }, estimateFacts });
+  const listed = (cents = 12500, applications = 4) => ({ perApplication: [{ label: 'Pest Control', cents, applications }] });
+  const run = (body, extra = {}) => paymentStatusSendBlockReason({ customerId: 'c1', body, snapshot: SNAP, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'How much is the estimate?', ...extra });
+
+  test('the copy goes out while the estimate still lists it, read with only the estimate facts; a changed price or a withdrawn estimate is payment_status_changed; an unreadable one is retryable', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(listed()));
+    await expect(run(PRICE)).resolves.toBeNull();
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith({ id: 'c1' }, { includeSmsStaffFacts: { estimate: true } });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(listed(13000)));
+    await expect(run(PRICE)).resolves.toBe('payment_status_changed');
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx({ perApplication: [] }));
+    await expect(run(PRICE)).resolves.toBe('payment_status_changed');
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(null));
+    await expect(run(PRICE)).resolves.toBe('payment_status_recheck_failed');
+  });
+
+  test('a price in the model\'s own words, a count a year, or a fee waiver is unauthorized; the copy answers a price question only', async () => {
+    for (const body of ['It is about $125 a visit.', 'That is four applications a year.', 'The setup fee is waived when you prepay.', 'We waive the one-time setup fee for prepaid plans.']) {
+      expect({ body, r: await run(body) }).toEqual({ body, r: 'payment_status_unauthorized' });
+    }
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(listed()));
+    await expect(run(PRICE, { inboundMessage: 'Did you receive my payment?' })).resolves.toBe('payment_status_unauthorized');
   });
 });
 

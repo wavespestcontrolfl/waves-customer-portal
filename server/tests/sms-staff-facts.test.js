@@ -1,5 +1,6 @@
 /**
- * Texting AI facts, step 2 (owner 2026-11-25): the prepaid visits left and the prep guide of the customer's booked visit. The prepaid
+ * Texting AI facts, step 2 (owner 2026-11-25; owner ruling 2026-09-30, price questions are explained from the estimate on file): the open
+ * estimate's per-application price and the prepaid visits left and the prep guide of the customer's booked visit. The prepaid
  * count reaches the model ONLY as a finished sentence of the payment-status contract (a count the model writes itself is held, at draft
  * and at send); guide text only as a screened PREP GUIDE section for that one service. Opt-in: other context callers carry neither.
  */
@@ -14,10 +15,131 @@ const billing = { outstandingBalance: 0, recentPayments: [], hasProcessingPaymen
 const withFacts = (extra = {}) => ({
   summary: 'X',
   billing,
+  estimateFacts: { perApplication: [{ label: 'Pest Control', cents: 12500, applications: 4 }] },
   prepaidPlans: [{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }],
   ...extra,
 });
+const PRICE = 'Your estimate lists Pest Control at $125.00 per application, 4 applications a year.';
 const LEFT = 'Your prepaid Quarterly Pest Control plan has 3 of 4 prepaid visits left.';
+
+describe('the open estimate\'s price (payment-status contract)', () => {
+  const kinds = (extra) => paymentStatus.renderPaymentStatusSentences(withFacts(extra)).filter((x) => x.kind === 'estimate_application_price').map((x) => x.text);
+
+  test('each priced line renders one exact sentence of a known shape: the listed price and the applications a year, never a total', () => {
+    expect(kinds({})).toEqual([PRICE]);
+    expect(kinds({ estimateFacts: { perApplication: [{ label: 'Lawn Care', cents: 6000, applications: 1 }] } })).toEqual(['Your estimate lists Lawn Care at $60.00 per application, 1 application a year.']);
+    for (const { kind, text } of paymentStatus.renderPaymentStatusSentences(withFacts())) expect(paymentStatus.SHAPES[kind].test(text)).toBe(true);
+    for (const estimateFacts of [null, undefined, { perApplication: [] }]) expect(kinds({ estimateFacts })).toEqual([]);
+  });
+
+  test('a label that could split or fake a sentence, a shared label, a bad count or a bad amount renders nothing', () => {
+    const line = (over) => ({ estimateFacts: { perApplication: [{ label: 'Pest Control', cents: 12500, applications: 4, ...over }] } });
+    expect(kinds(line({ label: 'Pest. Your balance is $0.00' }))).toEqual([]);
+    expect(kinds(line({ cents: 0 }))).toEqual([]);
+    expect(kinds(line({ cents: -5 }))).toEqual([]);
+    expect(kinds(line({ applications: 0 }))).toEqual([]);
+    expect(kinds(line({ applications: 100 }))).toEqual([]);
+    expect(kinds({ estimateFacts: { perApplication: [{ label: 'Pest Control', cents: 12500, applications: 4 }, { label: 'pest control', cents: 9000, applications: 6 }] } })).toEqual([]);
+  });
+
+  test('a price or the applications a year outside a verbatim copy are held, in any wording; a setup fee waiver is never stated', () => {
+    const sentences = paymentStatus.renderPaymentStatusSentences(withFacts());
+    const check = (reply, inboundText = 'How much is the estimate?') => paymentStatus.checkPaymentStatusReply({ reply, sentences, inboundText }).ok;
+    expect(check(`Happy to help. ${PRICE}`)).toBe(true);
+    for (const own of ['Your estimate lists Pest Control at $130.00 per application, 4 applications a year.', 'It is about $125 a visit.',
+      'You get four applications a year.', 'That is six visits per year.', 'We treat quarterly, so 4 treatments annually.', 'You get visits a year.',
+      // a setup fee waiver has no rendered sentence: any claim of one is held
+      'The setup fee is waived when you prepay.', 'We waive the one-time setup fee.', 'There is no enrollment fee for prepaid plans.', 'Your initial fee is free.']) {
+      expect({ own, ok: check(own) }).toEqual({ own, ok: false });
+    }
+    // an ordinary answer with none of those stays
+    expect(check('Your estimate has everything we talked about.')).toBe(true);
+  });
+
+  test('a copied price answers a price question, for the service the customer named, never a payment or count question', () => {
+    const two = paymentStatus.renderPaymentStatusSentences(withFacts({ estimateFacts: { perApplication: [{ label: 'Pest Control', cents: 12500, applications: 4 }, { label: 'Lawn Care', cents: 6000, applications: 6 }] } }));
+    const LAWN = 'Your estimate lists Lawn Care at $60.00 per application, 6 applications a year.';
+    const check = (reply, inboundText) => paymentStatus.checkPaymentStatusReply({ reply, sentences: two, inboundText }).ok;
+    expect(check(PRICE, 'How much is the pest control?')).toBe(true);
+    expect(check(LAWN, 'How much is the pest control?')).toBe(false);
+    expect(check(LAWN, 'What does the lawn cost on the quote?')).toBe(true);
+    expect(check(PRICE, 'How much is it?')).toBe(true);
+    // the estimate's cadence is its application count (4 a year = quarterly), never a word in the label
+    expect(check(PRICE, 'How much is quarterly pest control?')).toBe(true);
+    expect(check(PRICE, 'How much is monthly pest control?')).toBe(false);
+    // bi-monthly is its own cadence (6 a year), not monthly plus bi-monthly
+    const SIX = 'Your estimate lists Pest Control at $90.00 per application, 6 applications a year.';
+    const six = paymentStatus.renderPaymentStatusSentences(withFacts({ estimateFacts: { perApplication: [{ label: 'Pest Control', cents: 9000, applications: 6 }] } }));
+    for (const q of ['How much is bi-monthly pest control?', 'How much is bimonthly pest control?']) expect(paymentStatus.checkPaymentStatusReply({ reply: SIX, sentences: six, inboundText: q }).ok).toBe(true);
+    expect(paymentStatus.checkPaymentStatusReply({ reply: SIX, sentences: six, inboundText: 'How much is monthly pest control?' }).ok).toBe(false);
+    // a service the alias table does not know, in any price grammar, is held for a person
+    for (const q of ['How much is ant control?', 'What does ant control cost?', 'What is the price of wasp removal?']) expect({ q, ok: check(PRICE, q) }).toEqual({ q, ok: false });
+    expect(check(PRICE, 'How much is the service?')).toBe(true);
+    expect(check(LAWN, 'How much is monthly lawn care?')).toBe(false);
+    expect(check(PRICE, 'Did you receive my payment?')).toBe(false);
+    // not an invoice, balance or past-charge question unless it also names the estimate
+    expect(check(PRICE, 'How much do I owe on my invoice?')).toBe(false);
+    // the application line is not the setup fee, a prepay price or a total
+    for (const q of ['How much is the setup fee on my estimate?', 'How much to prepay my estimate?', 'What is the total on the quote?', 'How much is the deposit for the estimate?']) expect({ q, ok: check(PRICE, q) }).toEqual({ q, ok: false });
+    expect(check(PRICE, 'How much was I charged last month?')).toBe(false);
+    expect(check(PRICE, 'How much is the estimate, and what do I owe on my invoice?')).toBe(true);
+    expect(check(PRICE, 'How many visits do I have left?')).toBe(false);
+    // a service the alias table does not know is held for a person
+    expect(check(PRICE, 'How much for ant control?')).toBe(false);
+  });
+
+  test('the facts block renders it under BILLING and the PENDING ESTIMATE line points at it', () => {
+    const { buildFactsBlock } = require('../services/sms-shadow-drafter');
+    const block = buildFactsBlock(withFacts({ pendingEstimate: { status: 'sent' } }));
+    expect(block).toContain(`  - ${PRICE}`);
+    expect(paymentStatus.sentencesFromFactsBlock(block).map((x) => x.text)).toContain(PRICE);
+    expect(block).toMatch(/PENDING ESTIMATE: sent .*copying a matching sentence from Payment status sentences word for word.*say nothing about a setup fee or a prepay discount/);
+    delete process.env[GATE];
+    expect(buildFactsBlock(withFacts({ pendingEstimate: { status: 'sent' } }))).not.toMatch(/Your estimate lists|copying a matching sentence/);
+  });
+});
+
+describe('loadEstimateFacts', () => {
+  afterEach(() => { jest.dontMock('../services/estimate-monthly-average'); jest.dontMock('../utils/estimate-claim-sql'); jest.resetModules(); });
+  const perApplicationAverageFor = jest.fn();
+  // the customer's open estimates (sent or viewed, not archived): one by default
+  const dbWithOpen = (rows) => () => { const q = { where: () => q, whereIn: () => q, whereNull: () => q, limit: () => q, select: async () => { if (rows instanceof Error) throw rows; return rows; } }; return q; };
+  const oneOpen = dbWithOpen([{ id: 'e1' }]);
+  const load = async (estimate, { average, offSurface = false, db = oneOpen } = {}) => {
+    jest.resetModules();
+    jest.doMock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
+    perApplicationAverageFor.mockReset().mockImplementation(async () => { if (average instanceof Error) throw average; return average; });
+    jest.doMock('../services/estimate-monthly-average', () => ({ perApplicationAverageFor }));
+    jest.doMock('../utils/estimate-claim-sql', () => ({
+      estimateOffCustomerSurface: jest.fn(() => { if (offSurface instanceof Error) throw offSurface; return offSurface; }),
+    }));
+    return require('../services/sms-staff-facts').loadEstimateFacts(estimate, { db });
+  };
+  const est = { id: 'e1', status: 'sent', estimate_data: '{}' };
+  const average = { model: { services: [{ label: 'Pest Control \u2014 4 applications/yr', perApplication: 125, visits: 4 }, { label: 'Odd', perApplication: 0, visits: 4 }] } };
+
+  test('the per-application lines of the estimate page\'s own model: a clean label, the price in cents, the applications a year', async () => {
+    expect(await load(est, { average })).toEqual({ perApplication: [{ label: 'Pest Control', cents: 12500, applications: 4 }] });
+    // a failed pricing read must surface as a failure (the caller keeps it retryable), not as "nothing listed"
+    expect(perApplicationAverageFor).toHaveBeenCalledWith(est, { rethrow: true });
+  });
+
+  test('no estimate, one off the customer\'s own page or one that lists nothing is a successful read of nothing; a failed read or no db is null', async () => {
+    expect(await load(null, { average })).toEqual({ perApplication: [] });
+    expect(await load(est, { average, offSurface: true })).toEqual({ perApplication: [] });
+    // an estimate whose visibility also depends on OTHER rows (its call and lead, or its move) renders no price: the send fingerprint hashes the estimate row only
+    expect(await load({ ...est, estimate_data: { estimatorEngine: { callLogId: 'call-1' } } }, { average })).toEqual({ perApplication: [] });
+    expect(await load({ ...est, estimate_data: JSON.stringify({ move: { moveId: 'move-1' } }) }, { average })).toEqual({ perApplication: [] });
+    expect(await load({ ...est, expires_at: '2020-01-01T00:00:00Z' }, { average })).toEqual({ perApplication: [] });
+    expect(await load(est, { average: null })).toEqual({ perApplication: [] });
+    expect(await load(est, { average: new Error('boom') })).toBeNull();
+    expect(await load(est, { average, offSurface: new Error('boom') })).toBeNull();
+    expect(await load(est, { average, db: null })).toBeNull();
+    expect(await load(est, { average, db: dbWithOpen(new Error('boom')) })).toBeNull();
+    // two open estimates (two properties, two quotes for one service): which one does the customer mean? a person answers
+    expect(await load(est, { average, db: dbWithOpen([{ id: 'e1' }, { id: 'e2' }]) })).toEqual({ perApplication: [] });
+  });
+});
 
 describe('prepaid visits left (payment-status contract)', () => {
   test('a plan renders one exact sentence of a known shape; singular count; nothing when absent', () => {
