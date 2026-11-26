@@ -511,6 +511,22 @@ const ADDON_PROGRAMS = Object.freeze({
   // flea_tick is the flea service ("Flea Control Service"): its own program since 2026-11-25. Ticks stay on the pest tick card.
   specialty: { any: ['bed_bug', 'flea'], fallback: null, keys: { fire_ant: 'pest', flea_tick: 'flea', tick_control: 'pest', bed_bug_treatment: 'bed_bug' } },
 });
+// Rodent trap, check and exclusion work is nonChemical above (no product lines, no tank dosing), but the tech still needs its card's
+// steps: trap count and placement, report-only checks, the final trap check at exclusion (owner 2026-11-23/25, D9 + D15a). These keys
+// get the rodent procedure with no lines. Sanitation, the bundles, the guarantee and dead-animal removal keep no card.
+const RODENT_PROCEDURE_ONLY_KEYS = new Set([
+  'rodent_trapping', 'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'rodent_trap_check_additional',
+  'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
+  'rodent_inspection', 'rodent_exclusion_only',
+]);
+// The card's procedure (no product lines) for such a key, else null.
+function procedureOnlyResolve({ category, name, serviceKey, scheduledDate, isFollowup = false }, protocols) {
+  if (category !== 'rodent' || !RODENT_PROCEDURE_ONLY_KEYS.has(serviceKey) || !protocols?.rodent) return null;
+  const resolved = resolveProtocolLines(name, scheduledDate, protocols, [], { programKey: 'rodent', serviceKey, isFollowup });
+  return resolved.visit && resolved.procedure ? { visit: resolved.visit, procedure: resolved.procedure } : null;
+}
+const PROCEDURE_ONLY_NOTE = 'Trap and exclusion work: steps only, no products on this card';
+
 function addonProgramKey(category, name, protocols, serviceKey = null) {
   const rule = ADDON_PROGRAMS[category];
   if (!rule) return null;
@@ -1342,7 +1358,11 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
   // name reads as lawn or pest. A legacy row without identity keeps the
   // name-based classification.
   const identityKey = facts.serviceCategory ? addonProgramKey(facts.serviceCategory, facts.serviceType, protocols, facts.serviceKey) : undefined;
-  if (identityKey === null) return { visit: null, lines: [], blocks: [], note: `No treatment protocol for this service (${facts.serviceCategory})` };
+  if (identityKey === null) {
+    const stepsOnly = procedureOnlyResolve({ category: facts.serviceCategory, name: facts.serviceType, serviceKey: facts.serviceKey, scheduledDate: facts.scheduledDate, isFollowup: facts.isFollowup === true }, protocols);
+    if (stepsOnly) return { ...stepsOnly, lines: [], blocks: [], note: PROCEDURE_ONLY_NOTE };
+    return { visit: null, lines: [], blocks: [], note: `No treatment protocol for this service (${facts.serviceCategory})` };
+  }
   const isLawn = identityKey === undefined ? facts.isLawn : identityKey === 'lawn';
   if (isLawn) {
     if (facts.facts?.alternateAddress) return { visit: null, lines: [], blocks: [ALTERNATE_ADDRESS_BLOCK] };
@@ -1410,8 +1430,9 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
  */
 // The safety rules of the misting, mosquito, flea and bed bug programs as a procedure field ({ safety: [...] }), or {} for any other
 // program (they keep their procedure). Flea and bed bug are indoor sprays: people and pets out until dry, fish tanks covered, nothing
-// fogged. Mosquito: the wind limit, the strips from water and storm drains, and no fogger (owner 2026-11-25, D7).
-const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug'];
+// fogged. Mosquito: the wind limit, the strips from water and storm drains, and no fogger (owner 2026-11-25, D7). Rodent: gloves, the
+// bleach spray before bagging, the P100 fit test, no glue boards, bats before sealing (D9).
+const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug', 'rodent'];
 function mistingSafetyField(program, effectiveProgramKey) {
   if (!SAFETY_ON_CARD_PROGRAMS.includes(effectiveProgramKey) || !program?.safety_rules?.length) return {};
   return { safety: program.safety_rules.map((rule) => String(rule)) };
@@ -1441,7 +1462,7 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
     ...(fieldGuide ? { fieldGuide, safetyRules: program.safety_rules || [] } : {}),
     // The misting program has no field guide, so its weather-shutdown, nozzle-placement and exposure-response rules ride the generic
     // procedure as a Safety section (the SOP and its text download). Keyed to the misting program on purpose: other programs that
-    // declare safety_rules without a field guide (mosquito, rodent, palm injection ...) keep their procedure exactly as it was.
+    // declare safety_rules without a field guide get it only when SAFETY_ON_CARD_PROGRAMS lists them (palm injection does not).
     ...(fieldGuide ? {} : mistingSafetyField(program, programKey || match?.programKey)),
     source: 'Service template',
     title: visit.visit_type || `Visit ${visit.visit}${visit.month && visit.month !== 'Any' ? ` · ${visit.month}` : ''}`,
@@ -1490,7 +1511,11 @@ const ownVisitLine = (line, ownKey, scope) => ({
 // One add-on attached to the visit: its lines and its row of the card's add-on report.
 function resolveAddOnLines({ name, category, serviceKey = null, areaAddOnScope = null }, { facts, protocols, catalog }) {
   const programKey = addonProgramKey(category, name, protocols, serviceKey);
-  if (!programKey) return { lines: [], report: { name, products: 0, visit: null, note: `No treatment protocol for this add-on (${category || 'no catalog identity'})` } };
+  if (!programKey) {
+    const stepsOnly = procedureOnlyResolve({ category, name, serviceKey, scheduledDate: facts.scheduledDate }, protocols);
+    if (stepsOnly) return { lines: [], report: { name, products: 0, visit: { number: stepsOnly.visit.visit || null, month: stepsOnly.visit.month || null }, note: PROCEDURE_ONLY_NOTE, procedure: stepsOnly.procedure } };
+    return { lines: [], report: { name, products: 0, visit: null, note: `No treatment protocol for this add-on (${category || 'no catalog identity'})` } };
+  }
   if (programKey === 'lawn') return { lines: [], report: { name, products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' } };
   const resolved = resolveProtocolLines(name, facts.scheduledDate, protocols, catalog, { programKey, serviceKey });
   // A chemical area add-on's lines are their own cards, apart from the host's lines for the same product (Snapshot on a

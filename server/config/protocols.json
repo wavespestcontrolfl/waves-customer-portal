@@ -2110,10 +2110,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Bait stations manage outdoor pressure; interior activity still needs trapping and exclusion. Homes get Tomcat Bromethalin, never Contrac (owner 2026-11-25, D15b).",
-        "completionDefaultProducts": [
-          "Tomcat Bait Chunx with Bromethalin"
-        ]
+        "notes": "Bait stations manage outdoor pressure; interior activity still needs trapping and exclusion. Homes get Tomcat Bromethalin, never Contrac (owner 2026-11-25, D15b). The tech picks the bait placed on the close-out: none is pre-filled (commercial sites use Contrac, a monitoring visit may place only non-toxic blocks)."
       }
     ]
   },

@@ -2316,7 +2316,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const rodentProtocols = { ...protocols, rodent: { visits: [{ visit: 1, month: 'Any', primary: 'Inspect and assess activity' }, { visit: 2, month: 'Any', primary: 'Set snap traps in attic zones' }, { visit: 5, month: 'Any', primary: 'Install exterior bait stations — Contrac Blox' }] } };
     const rodent = await jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: 'Rodent Trapping Service', category: 'rodent', serviceKey: 'rodent_trapping' }, { name: 'Quarterly Rodent Bait Station Service', category: 'rodent', serviceKey: 'rodent_bait_quarterly' }] }, protocols: rodentProtocols, catalog: [...catalog, { id: 'blox', name: 'Contrac Blox' }], dbh: () => ({}) });
     expect(rodent.addons).toMatchObject([
-      { name: 'Rodent Trapping Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (rodent)' },
+      // Trapping is steps only (owner 2026-11-23, D9): its card, no product line and no Contrac.
+      { name: 'Rodent Trapping Service', products: 0, visit: { number: 2, month: 'Any' }, note: 'Trap and exclusion work: steps only, no products on this card', procedure: { steps: ['Set snap traps in attic zones'] } },
       { name: 'Quarterly Rodent Bait Station Service', products: 1, visit: { number: 5, month: 'Any' }, note: null },
     ]);
     const mechanicalAddon = await run({ addons: [{ name: 'Lawn Dethatching', category: 'lawn_care', serviceKey: 'dethatching' }, { name: 'Lawn Care', category: 'lawn_care', serviceKey: 'lawn_care_recurring' }, { name: 'Rodent Sanitation — Light', category: 'rodent', serviceKey: 'rodent_sanitation_light' }] });
@@ -2867,5 +2868,36 @@ describe('field guide mix check reuses the visit line product', () => {
 
   test('the same row listed on two lines still counts once', () => {
     expect(fieldGuideLineProduct('Mainspring GNL', [mainspring, mainspring])).toBe(mainspring);
+  });
+});
+
+// Owner 2026-11-23/25 (protocols page D9, D15a/b): rodent trap and check work is steps only on the job card, with the rodent safety rules.
+describe('rodent trap work: steps only, with the safety rules', () => {
+  const realProtocols = require('../config/protocols.json');
+  const trapCatalog = [{ id: 'victor', name: 'Victor Expanded Trigger Rat Snap Trap' }, { id: 'tomcat', name: 'Tomcat Bait Chunx with Bromethalin' }, { id: 'blox', name: 'Contrac Blox' }];
+  const card = (facts) => jobCard.resolveVisitLines({ facts: { isLawn: false, scheduledDate: '2026-11-27', addons: [], serviceCategory: 'rodent', ...facts }, protocols: realProtocols, catalog: trapCatalog, dbh: () => ({}) });
+
+  test('a trap check and a retainer show the check card and its safety rules, with no product line', async () => {
+    for (const [serviceType, serviceKey] of [['Rodent Trap Check - Additional', 'rodent_trap_check_additional'], ['Standard Retainer Service', 'trap_only_retainer_standard']]) {
+      const out = await card({ serviceType, serviceKey });
+      expect([serviceKey, out.visit.visit, out.lines, out.note]).toEqual([serviceKey, 4, [], 'Trap and exclusion work: steps only, no products on this card']);
+      expect(out.procedure.steps[0]).toBe("Rodent Trap Check (on the customer's report)");
+      expect(out.procedure.safety.join(' ')).toMatch(/P100/);
+    }
+    const setup = await card({ serviceType: 'Rodent Trapping Service', serviceKey: 'rodent_trapping' });
+    expect([setup.visit.visit, setup.lines]).toEqual([2, []]);
+    expect(setup.procedure.steps.join(' ')).toMatch(/up to 8 Victor M326/);
+    // Sanitation keeps no card.
+    expect((await card({ serviceType: 'Rodent Sanitation — Light', serviceKey: 'rodent_sanitation_light' })).visit).toBeNull();
+  });
+
+  test('a follow-up keeps the trap check only after trapping; a bait-station follow-up keeps the bait card', async () => {
+    const trapFollow = await card({ serviceType: 'Rodent Trapping Service', serviceKey: 'rodent_trapping', isFollowup: true });
+    expect(trapFollow.visit.visit).toBe(4);
+    const baitFollow = await card({ serviceType: 'Quarterly Rodent Bait Station Service', serviceKey: 'rodent_bait_quarterly', isFollowup: true });
+    expect(baitFollow.visit.visit).toBe(5);
+    // The bait card lists Tomcat at homes and Contrac for commercial sites as lines; the tech picks the one placed.
+    expect(baitFollow.lines.map((line) => line.product.id).sort()).toEqual(['blox', 'tomcat']);
+    expect(baitFollow.lines.map((line) => line.selected)).not.toContain(undefined);
   });
 });

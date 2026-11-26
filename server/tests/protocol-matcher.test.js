@@ -95,10 +95,11 @@ describe('protocol matcher specialty routing', () => {
       visit: 4,
       reason: 'rodent_followup',
     });
+    // The traps came out at exclusion (D15a): an exclusion follow-up re-inspects, never resets traps.
     expect(match('Rodent Exclusion Follow Up')).toEqual({
       programKey: 'rodent',
-      visit: 4,
-      reason: 'rodent_followup',
+      visit: 1,
+      reason: 'rodent_exclusion_recheck',
     });
   });
 

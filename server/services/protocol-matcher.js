@@ -106,21 +106,28 @@ const MATCH_RULES = [
     programKey: 'rodent',
     visit: 4,
     reason: 'rodent_followup',
+    // A visit booked as a follow-up (it carries the source visit's name) gets this card only after a trapping visit: a follow-up of a
+    // bait-station service or an exclusion keeps its own card (no attic traps to reset).
+    followupOf: ['rodent_trapping_baiting', 'rodent_followup'],
     serviceKeys: [
       'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'rodent_trap_check_additional',
       'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
     ],
     terms: [
       'trap check',
-      'rodent exclusion follow up',
-      'rodent exclusion followup',
       'rodent trapping follow up',
       'rodent trapping followup',
       'rodent follow up',
       'rodent followup',
-      'exclusion follow up',
-      'exclusion followup',
     ],
+  },
+  // An exclusion follow-up: the traps came out at the exclusion visit (owner 2026-11-25, D15a), so it is a re-inspection of the sealed
+  // entries, never a trap reset. Not named *_followup: followupVisitMatch takes the program's one *_followup rule.
+  {
+    programKey: 'rodent',
+    visit: 1,
+    reason: 'rodent_exclusion_recheck',
+    terms: ['rodent exclusion follow up', 'rodent exclusion followup', 'exclusion follow up', 'exclusion followup'],
   },
   {
     programKey: 'rodent',
