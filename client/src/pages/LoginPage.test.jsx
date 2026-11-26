@@ -48,13 +48,6 @@ describe('customer login recovery', () => {
     await waitFor(() => expect(screen.getByLabelText('Verification code')).toBeInTheDocument());
   }
 
-  // The first code starts the 30-second wait too: jump the clock past it.
-  async function passCooldown() {
-    const later = Date.now() + 31000;
-    const spy = vi.spyOn(Date, 'now').mockReturnValue(later);
-    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
-    spy.mockRestore();
-  }
 
   it('uses account-neutral copy after a success-shaped send response', async () => {
     await reachCodeStep();
@@ -67,8 +60,6 @@ describe('customer login recovery', () => {
     await reachCodeStep();
 
     expect(screen.getByText(/didn.t receive a code/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Resend code in 30s/ })).toBeDisabled();
-    await passCooldown();
     expect(screen.getByRole('button', { name: 'Resend code' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Use a different number' })).toBeEnabled();
     expect(screen.getAllByRole('link', { name: /call/i }).some((link) => link.getAttribute('href') === 'tel:+19412975749')).toBe(true);
@@ -80,7 +71,6 @@ describe('customer login recovery', () => {
 
     expect(screen.getByRole('alert')).toHaveTextContent('That verification code is not valid.');
 
-    await passCooldown();
     fireEvent.click(screen.getByRole('button', { name: 'Resend code' }));
     await waitFor(() => expect(authMocks.sendCode).toHaveBeenCalledTimes(2));
     expect(authMocks.sendCode).toHaveBeenNthCalledWith(2, '+19415550123');
@@ -142,62 +132,17 @@ describe('customer login recovery', () => {
       expect(authMocks.verifyCode).toHaveBeenCalledTimes(1);
     });
 
-    it('promises a code only conditionally and holds Resend for 30 seconds', async () => {
+    it('promises a new code only conditionally after a resend', async () => {
       await reachCodeStep();
-      await passCooldown();
-      vi.useFakeTimers({ shouldAdvanceTime: false });
-      try {
-        await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Resend code' })); });
-        expect(authMocks.sendCode).toHaveBeenCalledTimes(2);
-        expect(screen.getByText(/If this number is on a Waves account, a new code is on its way/)).toBeInTheDocument();
-        const wait = screen.getByRole('button', { name: /Resend code in 30s/ });
-        expect(wait).toBeDisabled();
-        fireEvent.click(wait);
-        expect(authMocks.sendCode).toHaveBeenCalledTimes(2);
-
-        for (let i = 0; i < 29; i += 1) {
-          await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-        }
-        expect(screen.getByRole('button', { name: /Resend code in 1s/ })).toBeDisabled();
-        await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-        expect(screen.getByRole('button', { name: 'Resend code' })).toBeEnabled();
-      } finally {
-        vi.useRealTimers();
-      }
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Resend code' })); });
+      expect(authMocks.sendCode).toHaveBeenCalledTimes(2);
+      expect(screen.getByText(/If this number is on a Waves account, a new code is on its way/)).toBeInTheDocument();
     });
 
-    it('counts time the app spent suspended when it comes back to the foreground', async () => {
-      await reachCodeStep();
-      await passCooldown();
-      vi.useFakeTimers({ shouldAdvanceTime: false });
-      try {
-        await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Resend code' })); });
-        expect(screen.getByRole('button', { name: /Resend code in 30s/ })).toBeDisabled();
-        // The app is suspended: the clock moves 29 s but no timer runs.
-        vi.setSystemTime(Date.now() + 29000);
-        await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
-        expect(screen.getByRole('button', { name: /Resend code in 1s/ })).toBeDisabled();
-        vi.setSystemTime(Date.now() + 2000);
-        await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
-        expect(screen.getByRole('button', { name: 'Resend code' })).toBeEnabled();
-      } finally {
-        vi.useRealTimers();
-      }
-    });
 
-    it('keeps the wait when the customer switches number and comes back to the same one', async () => {
-      await reachCodeStep();
-      fireEvent.click(screen.getByRole('button', { name: 'Use a different number' }));
-      const send = screen.getByRole('button', { name: /Send code in \d+s/ });
-      expect(send).toBeDisabled();
-      fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '9415550199' } });
-      expect(screen.getByRole('button', { name: 'Send code' })).toBeEnabled();
-      expect(authMocks.sendCode).toHaveBeenCalledTimes(1);
-    });
 
     it('does not claim a new code was sent when the resend fails', async () => {
       await reachCodeStep();
-      await passCooldown();
       authMocks.sendCode.mockResolvedValueOnce(false);
       fireEvent.click(screen.getByRole('button', { name: 'Resend code' }));
       await waitFor(() => expect(authMocks.sendCode).toHaveBeenCalledTimes(2));

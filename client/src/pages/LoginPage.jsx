@@ -35,7 +35,6 @@ function normalizeAuthError(error) {
   return error;
 }
 
-const RESEND_COOLDOWN_SECONDS = 30;
 
 // One phone normalizer for the sign-in form. An iOS autofill of
 // "+1 (941) 555-0147" arrives as 11 digits; US area codes never start with 1,
@@ -102,16 +101,16 @@ function StoreBadges() {
   );
 }
 
-function ResendButton({ cooldownLeft, sending, onResend }) {
+function ResendButton({ sending, onResend }) {
   return (
     <button
       type="button"
       className="portal-login-secondary"
       onClick={onResend}
-      disabled={sending || cooldownLeft > 0}
+      disabled={sending}
     >
       <Icon name="refresh" size={15} strokeWidth={2} />
-      {cooldownLeft > 0 ? `Resend code in ${cooldownLeft}s` : 'Resend code'}
+      Resend code
     </button>
   );
 }
@@ -125,38 +124,6 @@ function ResendNotice() {
   );
 }
 
-// The Resend button's wait. It stores when the wait ends and recomputes the
-// seconds left from the clock on every tick and when the app comes back to the
-// foreground, so time spent suspended (the customer went to Messages for the
-// code) counts.
-function useResendCooldown() {
-  const [until, setUntil] = useState(0);
-  const [left, setLeft] = useState(0);
-  const refresh = useCallback(() => {
-    const remaining = Math.max(0, Math.ceil((until - Date.now()) / 1000));
-    setLeft(remaining);
-    if (remaining === 0) setUntil(0);
-  }, [until]);
-  useEffect(() => {
-    if (!until) return undefined;
-    refresh();
-    const timer = setInterval(refresh, 1000);
-    document.addEventListener('visibilitychange', refresh);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener('visibilitychange', refresh);
-    };
-  }, [until, refresh]);
-  // The wait belongs to the number the code went to.
-  const phoneRef = useRef('');
-  const start = useCallback((digits) => {
-    phoneRef.current = digits;
-    setUntil(Date.now() + RESEND_COOLDOWN_SECONDS * 1000);
-    setLeft(RESEND_COOLDOWN_SECONDS);
-  }, []);
-  const leftFor = (digits) => (digits === phoneRef.current ? left : 0);
-  return { left, start, leftFor };
-}
 
 // A full 6-digit code (typed, or filled by the iOS one-time-code suggestion)
 // signs in by itself, once. A code that just failed is not sent again: the
@@ -182,8 +149,6 @@ export default function LoginPage() {
   const [step, setStep] = useState('phone');
   const [sending, setSending] = useState(false);
   const [resendNotice, setResendNotice] = useState(false);
-  const cooldown = useResendCooldown();
-  const cooldownLeft = cooldown.left;
   const verifyingRef = useRef(false);
   const lastSubmittedCodeRef = useRef('');
   useGlassSurface(true);
@@ -202,9 +167,6 @@ export default function LoginPage() {
   const handleSendCode = async (resend = false) => {
     const digits = phoneDigits(phone);
     if (digits.length !== 10 || sending) return;
-    // The wait covers this number whichever button sends: switching to
-    // "Use a different number" and back must not skip it.
-    if ((resend ? cooldownLeft : cooldown.leftFor(digits)) > 0) return;
     setSending(true);
     setResendNotice(false);
     const success = await sendCode(`+1${digits}`);
@@ -213,8 +175,6 @@ export default function LoginPage() {
       setCode('');
       lastSubmittedCodeRef.current = '';
       setStep('code');
-      // Every sent code starts the wait, the first one too.
-      cooldown.start(digits);
       if (resend) setResendNotice(true);
     }
   };
@@ -253,9 +213,7 @@ export default function LoginPage() {
 
   const phoneReady = phoneDigits(phone).length === 10;
   const codeReady = code.length === 6;
-  // Seconds left before this phone number can get another code (phone step).
-  const sameNumberLeft = cooldown.leftFor(phoneDigits(phone));
-  const submitDisabled = step === 'phone' ? !phoneReady || sending || sameNumberLeft > 0 : !codeReady || sending;
+  const submitDisabled = step === 'phone' ? !phoneReady || sending : !codeReady || sending;
   const friendlyError = normalizeAuthError(error);
   const busyLabel = step === 'phone' ? 'Sending code...' : 'Verifying code...';
 
@@ -731,12 +689,12 @@ export default function LoginPage() {
               >
                 {sending
                   ? busyLabel
-                  : (step === 'phone' ? (sameNumberLeft ? `Send code in ${sameNumberLeft}s` : 'Send code') : 'Sign in')}
+                  : (step === 'phone' ? 'Send code' : 'Sign in')}
               </button>
 
               {step === 'code' && (
                 <>
-                  <ResendButton cooldownLeft={cooldownLeft} sending={sending} onResend={() => handleSendCode(true)} />
+                  <ResendButton sending={sending} onResend={() => handleSendCode(true)} />
                   <button
                     type="button"
                     className="portal-login-secondary"
