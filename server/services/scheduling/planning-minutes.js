@@ -99,7 +99,7 @@ function isRecurring(stop, name) {
 // Sized jobs (owner 2026-11-26: "big jobs use the minutes written on the
 // job"): the table names none of them, so they keep the legacy
 // window/estimate rule, and a stored estimate above the hour is always kept.
-const SIZED_JOB = /exclusion|sanitation|wire mesh|roof[- ]entry|bird box|wildlife|bed ?bug|fumigat|trench|liquid|bora[- ]?care|pre[- ]?treat|installation|install\b|setup|set-up|dethatch|aerat|plugging|top dressing|sod\b|misting|guarantee|membership/;
+const SIZED_JOB = /exclusion|sanitation|wire mesh|roof[- ]entry|bird box|wildlife|bed ?bug|fumigat|trench|liquid|bora[- ]?care|pre[- ]?treat|installation|install\b|setup|set-up|dethatch|aerat|renovat|overseed|plugging|top dressing|sod\b|misting|guarantee|membership/;
 const LAWN_SPOT = /fire ant|insect spot|spot treatment|weed|soil test|pre-?emergent/;
 
 function pestMinutes(stop, name) {
@@ -136,6 +136,12 @@ function specialtyMinutes(stop, name) {
 
 function tableMinutes(stop) {
   const name = String(stop.service_type || '').toLowerCase();
+  // A joined label ("Quarterly Lawn Care Service + Flea Control Service")
+  // holds several services: no single row fits it.
+  if (/\s\+\s/.test(name)) return null;
+  // A rodent trap check is flagged is_callback by the scheduler; it still
+  // plans the trap-check row, not the 15-minute re-service.
+  if (/rodent/.test(name) && /follow-?up|trap check/.test(name)) return PLANNING_MINUTES.rodentCheck;
   if (stop.is_callback === true || /re-?service|callback/.test(name)) {
     return /lawn|turf/.test(name) ? PLANNING_MINUTES.lawnSpot : PLANNING_MINUTES.reService;
   }
@@ -148,7 +154,7 @@ function tableMinutes(stop) {
   // pest + mosquito) is a combined visit: no single row fits it.
   const programs = [pest, lawn, /tree|shrub|palm/.test(name), /mosquito/.test(name)].filter(Boolean).length;
   if (programs > 1) return null;
-  if (LAWN_SPOT.test(name)) return PLANNING_MINUTES.lawnSpot;
+  if (LAWN_SPOT.test(name) && !/fertiliz/.test(name)) return PLANNING_MINUTES.lawnSpot;
   if (lawn) return isRecurring(stop, name) ? PLANNING_MINUTES.recurringLawn : PLANNING_MINUTES.lawnRound;
   const special = specialtyMinutes(stop, name);
   if (special != null) return special;

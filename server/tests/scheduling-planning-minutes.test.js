@@ -51,6 +51,8 @@ describe('planning minutes table', () => {
     ['Lawn Insect Spot Treatment', {}, 15],
     ['Shell, Rock & Paver Weed Control', {}, 15],
     ['Lawn Soil Test Service', {}, 15],
+    ['Lawn Fertilization & Weed Control', {}, 25],
+    ['Rodent Trapping Follow-Up Visit Service', { is_callback: true }, 20],
     ['Lawn Assessment', {}, 30],
     ['Waves Assessment', {}, 30],
     ['Termite Inspection', {}, 30],
@@ -88,7 +90,8 @@ describe('planning minutes table', () => {
   test.each(['Bed Bug Treatment', 'Rodent Exclusion Service', 'Rodent Trapping, Exclusion & Sanitation Service',
     'Termite Liquid Treatment Service', 'Slab Pre-Treat Termite Service', 'Lawn Dethatching Service',
     'Mosquito Misting System Installation', 'Wildlife Trapping Service', 'Pest & Lawn Combo',
-    'Lawn + Tree & Shrub Service', 'Pest + Mosquito Service', 'Lawn Aeration Service', 'Lawn Plugging Service', null])(
+    'Lawn + Tree & Shrub Service', 'Pest + Mosquito Service', 'Lawn Aeration Service', 'Lawn Plugging Service',
+    'Quarterly Lawn Care Service + Flea Control Service', 'Lawn Renovation', null])(
     '%s keeps the legacy window/estimate rule (sized by its own estimate)', (name) => {
       expect(plannedWorkMinutes(row(name))).toBeNull();
       expect(workDuration(row(name))).toBe(60);
