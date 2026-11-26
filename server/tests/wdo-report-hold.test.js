@@ -2557,9 +2557,11 @@ describe('audit fixes', () => {
       expect(sms?.to).toMatch(/9415550177$/);
     });
 
-    test('the paid-report text is allowed its locked handoff by the sender', () => {
+    test('both hold texts are allowed their locked handoff by the sender, and only as hold texts', () => {
       const source = require('fs').readFileSync(require('path').join(__dirname, '../services/messaging/send-customer-message.js'), 'utf8');
-      expect(source).toMatch(/input\.entryPoint === 'project_report_hold_release'\s*\n\s*&& input\.metadata\?\.original_message_type === 'project_report'/);
+      expect(source).toContain("{ purpose: 'support_resolution', entryPoint: 'project_report_hold_release', messageType: 'project_report', heldMark: false },");
+      expect(source).toContain("{ purpose: 'payment_link', entryPoint: 'admin_project_report_with_invoice', messageType: 'invoice', heldMark: true },");
+      expect(source).toContain('|| reportHoldSmsHandoffAllowed(input);');
     });
 
     test('a failure bell raised just after a release finished is closed again', async () => {
