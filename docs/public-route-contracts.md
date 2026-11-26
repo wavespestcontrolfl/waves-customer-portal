@@ -7316,23 +7316,24 @@ never changes the row's status or date. The customer-wide fallback that
 OFFERS an unlinked same-family row stays behind
 `GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE`.
 A visit staff booked from the estimate's hold for this customer is a booking
-even while it carries its old hold timestamp: it stays offered and adoptable
-after the timestamp lapses, and it is never committed as a hold. A body that
-adopts it sends `existingAppointmentWasHold` (boolean: whether this page showed
-a hold). `true`, or no boolean when the visit was made from this estimate and
-has a customer, answers 409 `SLOT_UNAVAILABLE` so the page re-reads instead of
-rewriting a visit the customer never saw. When the boolean was missing the 409
-carries the stale-page code `LAWN_LIMITS_STALE` (both deployed pages already
-answer it), a message asking for a page reload, and `reloadRequired: true` (a
-page loaded before the field cannot send it on a retry). A body with a `slotId` whose slot is now a visit staff
-booked for this estimate's own customer adopts that one visit when it is
-unambiguous (no second booking, no live unclaimed hold beside it, proven again
-under the date lock) and the locked visit is still at the picked slot, from
-this estimate, for this customer, and passes the usual adoption checks;
-otherwise it answers 409 `RESERVATION_EXPIRED`. `commitReservation` (accept and one-tap) never
-graduates or replays a visit that already has a customer: another customer's
-visit reads as a missing hold, and the same customer's visit answers 409
-`SLOT_UNAVAILABLE`.
+even while it carries its old hold timestamp: a hold is a row with a timestamp
+AND no customer. The booking stays offered and adoptable after the timestamp
+lapses, and it is never committed as a hold. A body that adopts it sends
+`existingAppointmentWasHold` (boolean: whether this page showed a hold). The
+boolean is checked both ways. `true` when the row is now a booking answers 409
+`SLOT_UNAVAILABLE`, so the page re-reads instead of rewriting a visit the
+customer never saw. `false` when the row is now an unclaimed hold, or no boolean
+when the visit was made from this estimate and has a customer, answers 409
+with the stale-page code `LAWN_LIMITS_STALE` (both deployed pages already answer
+it: the server-rendered page reloads itself), a message asking for a page reload,
+and, for a missing boolean, `reloadRequired: true`. A body with a `slotId` whose
+slot is a visit staff booked is not adopted: it answers 409 `SLOT_UNAVAILABLE`
+(timestamp still live) or `RESERVATION_EXPIRED` (lapsed or cleared), and the
+page re-reads and offers the booked visit. `commitReservation` (accept and
+one-tap) never graduates or replays a visit that already has a customer:
+another customer's visit reads as a missing hold, the same customer's visit
+answers 409 `SLOT_UNAVAILABLE`, and a row with no customer and no timestamp
+answers `RESERVATION_EXPIRED`.
 `/data` carries an optional `lawnCalendar` block behind
 `GATE_ESTIMATE_LAWN_CALENDAR` (dev-open, prod dark): `{ programs: {
 [frequencyKey]: { visitsPerYear } } }` for each of the recurring lawn

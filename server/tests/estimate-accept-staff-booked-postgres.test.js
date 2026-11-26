@@ -3,8 +3,8 @@
  * migrated Postgres (real router and accept transaction).
  *
  * Staff can attach the customer to a hold without clearing its timestamp. The
- * accept must then treat the row as a booking: offer it, adopt it when the
- * customer picked that slot, and never rewrite it for a page that showed a hold.
+ * accept must then treat the row as a booking: offer it, and never commit it as a
+ * hold or rewrite it for a page that showed a hold.
  *
  * Needs DATABASE_URL pointing at a local, migrated, disposable database.
  * Every fixture rolls back; all data is synthetic.
@@ -170,7 +170,8 @@ postgres('estimate accept — a visit staff booked from the hold', () => {
       id, customer_id: customerId, source_estimate_id: estimateId, service_id: serviceRow.id,
       service_type: 'Monthly Lawn Care Service', scheduled_date: BOOKED_DATE,
       window_start: '09:00', window_end: '11:00', status: 'confirmed', estimated_price: STAFF_PRICE,
-      reservation_expires_at: stamp === 'lapsed' ? trx.raw("NOW() - INTERVAL '1 hour'") : null,
+      reservation_expires_at: stamp === 'cleared' ? null
+        : trx.raw(stamp === 'live' ? "NOW() + INTERVAL '10 minutes'" : "NOW() - INTERVAL '1 hour'"),
     });
     return id;
   }
@@ -215,75 +216,6 @@ postgres('estimate accept — a visit staff booked from the hold', () => {
     expect(await estimateStatus(estimateId)).toBe('sent');
   });
 
-  test('accept by slot is refused when a second booking sits at the same slot', async () => {
-    const { customerId, estimateId, token } = await fixture(mockTransaction);
-    const id = await staffBookedHold(mockTransaction, { customerId, estimateId });
-    await staffBookedHold(mockTransaction, { customerId, estimateId });
-    const before = await visitRow(id);
-    expect((await putAccept(token, { slotId: SLOT_ID })).status).toBe(409);
-    expect(await visitRow(id)).toEqual(before);
-  });
-
-  test('accept by an unassigned slot is refused when two technicians each have a booking at that start', async () => {
-    const { customerId, estimateId, token } = await fixture(mockTransaction);
-    const first = await staffBookedHold(mockTransaction, { customerId, estimateId });
-    const second = await staffBookedHold(mockTransaction, { customerId, estimateId });
-    const techs = await mockTransaction('technicians').limit(2).select('id');
-    if (techs.length === 2) {
-      await mockTransaction('scheduled_services').where({ id: first }).update({ technician_id: techs[0].id });
-      await mockTransaction('scheduled_services').where({ id: second }).update({ technician_id: techs[1].id });
-    }
-    const before = await visitRow(first);
-    expect((await putAccept(token, { slotId: SLOT_ID })).status).toBe(409);
-    expect(await visitRow(first)).toEqual(before);
-    expect(await visitRow(second)).toBeTruthy();
-  });
-
-  test('accept by slot recovers the staff booking the customer picked and keeps it as the first visit', async () => {
-    const { customerId, estimateId, token } = await fixture(mockTransaction);
-    const id = await staffBookedHold(mockTransaction, { customerId, estimateId });
-    const res = await putAccept(token, { slotId: SLOT_ID });
-    expect(res.status).toBe(200);
-    const row = await visitRow(id);
-    expect(row.customer_id).toBe(customerId);
-    expect(row.reservation_expires_at).toBeNull();
-    expect(dateOnly(row.scheduled_date)).toBe(BOOKED_DATE);
-    expect(await estimateStatus(estimateId)).toBe('accepted');
-    expect(await mockTransaction('scheduled_services').where({ source_estimate_id: estimateId, scheduled_date: BOOKED_DATE, window_start: '09:00' })).toHaveLength(1);
-  });
-
-  test('accept by slot after cleanup cleared the timestamp recovers the booking too', async () => {
-    const { customerId, estimateId, token } = await fixture(mockTransaction);
-    const id = await staffBookedHold(mockTransaction, { customerId, estimateId, stamp: 'cleared' });
-    expect((await putAccept(token, { slotId: SLOT_ID })).status).toBe(200);
-    expect((await visitRow(id)).customer_id).toBe(customerId);
-  });
-
-  test('accept by slot is refused, and the visit untouched, when the booking belongs to another customer', async () => {
-    const { estimateId, token } = await fixture(mockTransaction);
-    const other = await newCustomer(mockTransaction, 'Other');
-    const id = await staffBookedHold(mockTransaction, { customerId: other, estimateId });
-    const before = await visitRow(id);
-    const res = await putAccept(token, { slotId: SLOT_ID });
-    expect(res.status).toBe(409);
-    expect((await res.json()).code).toBe('RESERVATION_EXPIRED');
-    expect(await visitRow(id)).toEqual(before);
-    expect(await estimateStatus(estimateId)).toBe('sent');
-  });
-
-  test('accept by slot is refused when a live unclaimed hold sits beside the booking', async () => {
-    const { customerId, estimateId, token } = await fixture(mockTransaction);
-    const id = await staffBookedHold(mockTransaction, { customerId, estimateId });
-    await mockTransaction('scheduled_services').insert({
-      source_estimate_id: estimateId, scheduled_date: BOOKED_DATE, window_start: '09:00', window_end: '11:00',
-      service_type: 'Lawn Care', status: 'pending', reservation_expires_at: mockTransaction.raw("NOW() + INTERVAL '10 minutes'"),
-    });
-    const before = await visitRow(id);
-    const res = await putAccept(token, { slotId: SLOT_ID });
-    expect(res.status).toBe(409);
-    expect(await visitRow(id)).toEqual(before);
-  });
-
   test('accept by appointment id from a page that showed a booked visit is refused when the row is now an unclaimed hold', async () => {
     const { estimateId, token } = await fixture(mockTransaction);
     const holdId = randomUUID();
@@ -295,25 +227,45 @@ postgres('estimate accept — a visit staff booked from the hold', () => {
     const before = await visitRow(holdId);
     const res = await putAccept(token, { existingAppointmentId: holdId, existingAppointmentWasHold: false });
     expect(res.status).toBe(409);
-    expect((await res.json()).code).toBe('SLOT_UNAVAILABLE');
+    // The stale-page code: the server-rendered page cannot clear an adopted visit
+    // with its slot-conflict handler, so it reloads to re-read the row.
+    expect((await res.json()).code).toBe('LAWN_LIMITS_STALE');
     expect(await visitRow(holdId)).toEqual(before);
     expect(await estimateStatus(estimateId)).toBe('sent');
   });
 
-  test('accept by slot is refused, and the stamp kept, when another visit overlaps the booking later in its window', async () => {
+  test.each([
+    ['lapsed', 'RESERVATION_EXPIRED'],
+    ['cleared', 'RESERVATION_EXPIRED'],
+    ['live', 'SLOT_UNAVAILABLE'],
+  ])('accept by slot of a staff-booked visit (%s timestamp) is refused and the visit untouched', async (stamp, code) => {
     const { customerId, estimateId, token } = await fixture(mockTransaction);
-    const id = await staffBookedHold(mockTransaction, { customerId, estimateId });
-    const other = await newCustomer(mockTransaction, 'Neighbor');
-    await mockTransaction('scheduled_services').insert({
-      customer_id: other, scheduled_date: BOOKED_DATE, window_start: '10:00', window_end: '11:00',
-      service_type: 'Lawn Care', status: 'confirmed',
-    });
+    const id = await staffBookedHold(mockTransaction, { customerId, estimateId, stamp });
     const before = await visitRow(id);
     const res = await putAccept(token, { slotId: SLOT_ID });
     expect(res.status).toBe(409);
-    expect((await res.json()).code).toBe('RESERVATION_EXPIRED');
+    expect((await res.json()).code).toBe(code);
     expect(await visitRow(id)).toEqual(before);
     expect(await estimateStatus(estimateId)).toBe('sent');
+  });
+
+  test('accept by slot of another customer\'s booked visit is refused and the visit untouched', async () => {
+    const { estimateId, token } = await fixture(mockTransaction);
+    const other = await newCustomer(mockTransaction, 'Other');
+    const id = await staffBookedHold(mockTransaction, { customerId: other, estimateId, stamp: 'live' });
+    const before = await visitRow(id);
+    const res = await putAccept(token, { slotId: SLOT_ID });
+    expect(res.status).toBe(409);
+    expect(await visitRow(id)).toEqual(before);
+    expect(await estimateStatus(estimateId)).toBe('sent');
+  });
+
+  test('control: adopting a stamped booking by appointment id, from a page that showed it booked, succeeds', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await staffBookedHold(mockTransaction, { customerId, estimateId });
+    const res = await putAccept(token, { existingAppointmentId: id, existingAppointmentWasHold: false });
+    expect(res.status).toBe(200);
+    expect((await visitRow(id)).reservation_expires_at).toBeNull();
   });
 
   test('control: an unclaimed hold still graduates for its own estimate', async () => {

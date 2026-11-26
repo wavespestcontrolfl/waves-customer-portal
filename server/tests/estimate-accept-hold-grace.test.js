@@ -169,18 +169,6 @@ describe('findLinkedUpcomingAppointment hold grace', () => {
 });
 
 describe('accept-path wiring (source pins)', () => {
-  test('a recovered staff booking is rechecked on the locked row before sign-before-pay records it as the requested first visit', () => {
-    const at = src.indexOf('let recoveredVisitForPreference = null;');
-    expect(at).toBeGreaterThan(0);
-    const guard = src.slice(at, src.indexOf('if (reservationRow && customerId && !isTermiteAnnualSignBeforePay)', at));
-    expect(guard).toContain('recoveredSlot && isTermiteAnnualSignBeforePay');
-    expect(guard).toContain('.forUpdate().first()');
-    expect(guard).toContain('!recoveredVisitIsStillPicked(recoveredVisitForPreference)');
-    expect(guard).toContain("code: 'RESERVATION_EXPIRED'");
-    // The preference is built from the locked row, not the preflight copy.
-    expect(src).toContain('requestedFirstVisitFromRow(reservationRow || recoveredVisitForPreference || existingAppointmentRow)');
-  });
-
   test('the accept preflight reads the commit grace from the reservation service and threads it into the adoption lookup', () => {
     expect(src).toMatch(/const holdGraceMinutes = typeof slotReservation\.commitGraceMinutes === 'function'/);
     expect(src).toMatch(/adoptableStatuses: acceptAdoptableStatuses,\s*\n\s*holdGraceMinutes,\s*\n\s*\}\)/);
