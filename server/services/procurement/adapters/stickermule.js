@@ -42,7 +42,8 @@
  *     dispatcher parks needs_review and never re-POSTs.
  *
  * Money moves through the account's saved payment method — the adapter never
- * sees card data. Timeout 30 s per call, no retry.
+ * sees card data. Timeout 30 s per call, no retry; one bindingQuote lookup
+ * (up to 51 GETs) has 90 s in all.
  */
 // The production origin is FIXED: the bearer key is only ever sent here. No
 // env override — a typo'd or compromised value would exfiltrate the vendor
@@ -57,9 +58,9 @@ class RefusedError extends Error {
 function apiKey() { return String(process.env.STICKERMULE_API_KEY || '').trim(); }
 function configured() { return !!apiKey(); }
 
-async function call(method, path, body, { fetchImpl = fetch } = {}) {
+async function call(method, path, body, { fetchImpl = fetch, timeoutMs = TIMEOUT_MS } = {}) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetchImpl(`${BASE_URL}${path}`, {
       method,
@@ -91,11 +92,27 @@ function orderLines(order) {
   return lines?.length && lines.every(isLine) ? lines.map((l) => ({ id: l.id, quantity: l.quantity })) : null;
 }
 
-// One order as the vendor has it now, by its number. null = the answer is not that order; a
-// failed read throws.
-async function readOrder(number, { fetchImpl }) {
-  const order = await call('GET', `/api/orders/${encodeURIComponent(String(number))}`, null, { fetchImpl });
+// One order as the vendor has it now, by its number, read with `get` (path → body). null = the
+// answer is not that order; a failed read throws.
+async function readOrder(number, get) {
+  const order = await get(`/api/orders/${encodeURIComponent(String(number))}`);
   return order && String(order.number) === String(number) ? order : null;
+}
+
+// The GETs of one lookup share ONE deadline (the list and every order read, up to 51 calls). The
+// dispatcher works one request at a time: without it a slow vendor could hold every other restock
+// for 51 full timeouts. Past the deadline nothing more is read and the lookup throws — the
+// dispatcher parks it as a failed lookup, nothing is ordered. A read still running then is cut off.
+const LOOKUP_MS = 90000;
+function lookupReader({ fetchImpl, now }) {
+  const deadline = now() + LOOKUP_MS;
+  const expired = () => new Error(`Sticker Mule order history lookup did not finish in ${LOOKUP_MS / 1000} s`);
+  return async (path) => {
+    const left = deadline - now();
+    if (left <= 0) throw expired();
+    try { return await call('GET', path, null, { fetchImpl, timeoutMs: Math.min(TIMEOUT_MS, left) }); }
+    catch (err) { throw now() >= deadline ? expired() : err; }
+  };
 }
 
 // The only binding pre-POST total the API offers: what the account was
@@ -105,7 +122,7 @@ async function readOrder(number, { fetchImpl }) {
 // first, up to the latest identical order. Fail-closed: no match in the
 // newest PAGE_MAX orders, a shape we cannot read, a latest identical order
 // that was not charged, or a tie for latest that may go on past the page →
-// null. A failed read throws: nothing is ordered.
+// null. A failed read, or the lookup deadline, throws: nothing is ordered.
 const PAGE_MAX = 50; // the largest page the API serves
 // The live list stamps `placedAt`; the other keys are kept for older shapes.
 const placedMs = (o) => Date.parse(o?.placedAt || o?.createdAt || o?.created_at || o?.date || '') || 0;
@@ -120,9 +137,9 @@ const chargedCents = (order) => (order?.paymentState === 'paid' && PLACED_STATES
 
 // One order of the list, read in full: its item lines and what it was charged. null = not readable
 // as THIS order with its item and count on every line.
-async function readListedOrder(listed, { fetchImpl }) {
+async function readListedOrder(listed, get) {
   if (!listed?.number) return null;
-  const order = await readOrder(listed.number, { fetchImpl });
+  const order = await readOrder(listed.number, get);
   const lines = orderLines(order);
   return lines ? { number: order.number, lines, cents: chargedCents(order) } : null;
 }
@@ -130,11 +147,11 @@ const isOnlyLine = (lines, sku, qty) => lines.length === 1 && String(lines[0].id
 
 // The latest order of exactly this item and count among the listed orders (newest first), each
 // read in full: { number, cents, at }. null = there is none, or it cannot be told.
-async function latestIdentical(orders, { vendorSku, qty, fetchImpl }) {
+async function latestIdentical(orders, { vendorSku, qty, get }) {
   let last = null;
   for (const listed of orders) {
     if (last && placedMs(listed) !== last.at) break; // older than the latest identical order
-    const order = await readListedOrder(listed, { fetchImpl });
+    const order = await readListedOrder(listed, get);
     // Every order up to the match must be readable: behind an unreadable one a newer identical
     // order could hide. Refuse.
     if (!order) return null;
@@ -146,17 +163,18 @@ async function latestIdentical(orders, { vendorSku, qty, fetchImpl }) {
   return last;
 }
 
-async function bindingQuote({ vendorSku, quantity }, { fetchImpl = fetch } = {}) {
+async function bindingQuote({ vendorSku, quantity }, { fetchImpl = fetch, now = Date.now } = {}) {
   if (!configured()) return null;
   const qty = Math.round(Number(quantity));
   if (!Number.isFinite(qty) || qty <= 0) return null;
-  const page = await call('GET', `/api/orders?limit=${PAGE_MAX}`, null, { fetchImpl });
+  const get = lookupReader({ fetchImpl, now });
+  const page = await get(`/api/orders?limit=${PAGE_MAX}`);
   const orders = listOf(page, 'orders');
   // Newest first is the documented order. It is verified, because the walk stops at the first
   // match: an undated order, or one out of order, means the latest cannot be told apart.
   const stamps = orders.map(placedMs);
   if (stamps.some((t, i) => !t || (i > 0 && t > stamps[i - 1]))) return null;
-  const last = await latestIdentical(orders, { vendorSku, qty, fetchImpl });
+  const last = await latestIdentical(orders, { vendorSku, qty, get });
   if (!last) return null;
   // The tie for latest ran to the end of a page that is not known to be the last one: an order of
   // the same moment with another total could sit on the next page. Refuse.

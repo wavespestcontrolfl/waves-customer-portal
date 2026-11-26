@@ -150,6 +150,40 @@ test('bindingQuote: a tie for latest that runs to the end of a page that may not
   expect(await page([other('N', '2026-10-01T00:00:00Z')], true)).toBeNull();
 });
 
+test('bindingQuote: the whole lookup has ONE deadline — past it nothing more is read and the lookup throws', async () => {
+  // 50 orders, none of this item: the list and 50 order reads when the vendor is quick.
+  const orders = Array.from({ length: 50 }, (_, i) => order(`R${50 - i}`, new Date(Date.UTC(2026, 8, 1) - i * 86400000).toISOString(), 900, [line('7', 1)]));
+  const quick = fakeFetch(history(orders));
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl: quick.fetchImpl })).toBeNull();
+  expect(quick.calls).toHaveLength(51);
+  // A slow vendor: every answer takes 10 s. The lookup has 90 s in all, not 51 timeouts.
+  let t = 0;
+  const slow = fakeFetch(history(orders));
+  const fetchImpl = async (...args) => { const r = await slow.fetchImpl(...args); t += 10000; return r; };
+  await expect(sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl, now: () => t })).rejects.toThrow(/Sticker Mule order history lookup did not finish in 90 s/);
+  expect(slow.calls).toHaveLength(9); // the reads that started inside the 90 s; the 10th was never sent
+});
+
+test('bindingQuote: a read still running at the deadline is cut off then, not after its own 30 s', async () => {
+  jest.useFakeTimers();
+  try {
+    // The match is the 3rd order. Every answer takes 28 s: the list, R3, R2, then R1 with 6 s left.
+    const base = fakeFetch(history([order('R3', '2026-09-03T00:00:00Z', 900, [line('7', 1)]), order('R2', '2026-09-02T00:00:00Z', 900, [line('7', 1)]), order('R1', '2026-09-01T00:00:00Z', 100, [line()])]));
+    const fetchImpl = (url, init) => new Promise((resolve, reject) => {
+      const answer = setTimeout(() => resolve(base.fetchImpl(url, init)), 28000);
+      init.signal.addEventListener('abort', () => { clearTimeout(answer); reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })); });
+    });
+    const start = Date.now();
+    let endedAfter = null;
+    const lookup = sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl }).finally(() => { endedAfter = Date.now() - start; });
+    const refused = expect(lookup).rejects.toThrow(/Sticker Mule order history lookup did not finish in 90 s/);
+    await jest.advanceTimersByTimeAsync(200000);
+    await refused;
+    expect(endedAfter).toBe(90000);
+    expect(base.calls.map((c) => c.path)).toEqual(['/api/orders', '/api/orders/R3', '/api/orders/R2']); // R1 was cut off before its answer
+  } finally { jest.useRealTimers(); }
+});
+
 test('a malformed total (true, an array, exponent text) is unreadable, never a charge', async () => {
   const q = (total) => quote([order('A', '2026-09-01T00:00:00Z', total, [line()])]);
   for (const bad of [true, [1], '1e3', '', ' ', '-5', '0', 0, -5]) expect(await q(bad)).toBeNull();

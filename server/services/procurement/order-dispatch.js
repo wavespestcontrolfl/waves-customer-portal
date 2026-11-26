@@ -663,7 +663,13 @@ function parkBellText({ reason, status, product, vendor, request, amountCents, m
   if (POST_SUBMIT_REASONS.has(reason)) {
     return { title, body: `${message} Do NOT re-order: check the ${vendor.name} account${placed?.externalOrderNumber ? ` (order ${placed.externalOrderNumber})` : ''} and reconcile by hand — receive the stock, or cancel with the vendor and then use Record vendor cancellation on the Restock tab.` };
   }
-  return { title, body: `${message} The restock request stays open — order manually, then mark it ordered.` };
+  // A pre-submit park: no order was sent. One reason has its own next step: with no usable prior
+  // order, an order of the item may already be in at the vendor (placed by hand, not paid yet),
+  // and "order manually" alone could buy it twice.
+  const next = reason === 'no_binding_total'
+    ? `check the ${vendor.name} account first: if an order of this item is already in, mark the request ordered; if not, place one identical order by hand, then mark it ordered.`
+    : 'order manually, then mark it ordered.';
+  return { title, body: `${message} The restock request stays open — ${next}` };
 }
 
 // The ledger row's parked state. placed_at = when the vendor call was
@@ -998,7 +1004,7 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
   let bq;
   try { bq = await adapter.bindingQuote({ vendorSku, quantity }); }
   catch (err) { return { parked: await park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: `binding total lookup failed: ${err.message}` }) }; }
-  if (!bq || !Number.isFinite(bq.cents) || bq.cents <= 0) return { parked: await park(conn, { ...ctx, reason: 'no_binding_total', message: `${vendor.name} has no usable prior order of item ${vendorSku} at ${quantity} (the latest order of exactly that item and count must be paid, with a total that can be read), so there is no binding total to cap; place one identical order by hand first.` }) };
+  if (!bq || !Number.isFinite(bq.cents) || bq.cents <= 0) return { parked: await park(conn, { ...ctx, reason: 'no_binding_total', message: `${vendor.name} has no usable prior order of item ${vendorSku} at ${quantity}: there is none among its newest orders, or the latest one is not paid yet, was canceled, or cannot be read. So there is no binding total to cap.` }) };
   const quoteCents = bq.cents;
   const cap = await reserveUnderCaps(conn, ctx.ledger.id, quoteCents, { env });
   if (!cap.ok) return { parked: await park(conn, { ...ctx, reason: cap.reason, message: `${cap.message} (${vendor.name} total for the last identical order${bq.source ? `, ${bq.source}` : ''})`, amountCents: quoteCents }) };
