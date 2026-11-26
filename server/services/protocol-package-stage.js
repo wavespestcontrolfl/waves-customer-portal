@@ -29,6 +29,7 @@
 // card on an unknown stage.
 
 const { MATCH_RULES, matchServiceProtocol } = require('./protocol-matcher');
+const { dateOnlyString } = require('../utils/date-only');
 
 const PACKAGE_PROGRAMS = new Set(['cockroach', 'flea', 'bed_bug']);
 // The catalog services sold as a package of treatments, and the program of each: the two-treatment set the booking side
@@ -49,10 +50,7 @@ const NO_FOLLOWUP_CARDS = new Set(['american_roach_exterior']);
 // An earlier visit in one of these states happened or is still planned.
 const VISIT_STANDS = new Set(['pending', 'confirmed', 'en_route', 'on_site', 'completed', 'complete']);
 
-function dayOf(value) {
-  if (!value) return '';
-  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
-}
+const dayOf = (value) => dateOnlyString(value) || '';
 
 function keyOf(row) {
   return row.service_key_snapshot || row.catalog_service_key || null;
