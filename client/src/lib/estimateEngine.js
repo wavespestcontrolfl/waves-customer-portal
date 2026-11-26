@@ -2155,8 +2155,8 @@ export function calculateEstimate(inputs) {
     legacyOneTimePestBuffer: false,
     // Pest above the 5,500 sq ft table (2026-11-26): the premium is server-only (its rate and start are code constants there; this
     // mirror keeps the table as a literal, so it cannot price the premium in step with the server). At or below 5,500 the premium is
-    // zero and the fallback is the new rule (false). Above it with pest requested the stamp is left MISSING, so the save guard
-    // refuses the browser's pest rows (409) and the server prices them.
+    // zero and the fallback is the new rule (false). Above it with pest requested the fallback priced the flat top, so it does not
+    // claim the new rule (the stamp is left MISSING). The server refuses that save by the home size (409) and prices it itself.
     ...((svcPest || svcOnetimePest) && footprint > 5500 ? {} : { legacyPestAboveTable: false }),
     // Resolved program minimum for THIS run (0 = disarmed) — same replay
     // rule: estimate-public and the converter clamp/protect a saved fallback

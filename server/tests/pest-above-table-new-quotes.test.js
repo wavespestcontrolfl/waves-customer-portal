@@ -93,7 +93,7 @@ describe('a fresh quote keeps rising above 5,500 sq ft', () => {
     expect(line(run(10000, { pest: { frequency: 'quarterly' }, oneTimePest: {} }), 'one_time_pest').legacyPestAboveTable).toBe(false);
   });
 
-  test('the $4 is a code constant: a Settings-shaped edit of the footprint table never moves the step', () => {
+  test('the $8 is a code constant: a Settings-shaped edit of the footprint table never moves the step', () => {
     expect(PEST.aboveTablePer1000).toBe(8);
     const before = PEST.footprintBrackets.map((b) => ({ ...b }));
     try {
@@ -261,66 +261,145 @@ describe('the stamp rides every save shape', () => {
   });
 });
 
-describe('the fallback save: the new-rule stamp (admin-estimate-persistence)', () => {
-  const { assertLivePestBaseForClientPayload } = require('../services/admin-estimate-persistence');
-  const meta = (extra = {}) => ({ pestBasePerVisit: Math.round(constants.PEST.base), legacyOneTimePestBuffer: false, ...extra });
-  const payload = (pa, pricingMetadata) => ({
+describe('a save the server cannot price: no pest row above 5,500 sq ft (admin-estimate-persistence)', () => {
+  const {
+    assertPestAboveTableClientFallbackSave: assertFallback, stampPestAboveTableOnClientFallbackSave: stampFallback,
+    resolveServerAuthoritativePricing,
+  } = require('../services/admin-estimate-persistence');
+  const NOW = () => new Date('2026-11-26T12:00:00Z');
+  const row = (pa) => ({ pa, apps: 4, ann: pa * 4, mo: pa / 3, label: 'Quarterly' });
+  // The browser's real output shape for a pest plan, with whatever stamp it posts.
+  const browser = (pa, carriers = {}, pricingMetadata = {}) => ({
     result: {
-      recurring: { discount: 0, pestProgramFloorApplied: false },
-      pricingMetadata,
-      results: { pestTiers: [{ pa, apps: 4, ann: pa * 4, mo: pa / 3, label: 'Quarterly' }], pest: { pa, apps: 4, ann: pa * 4, mo: pa / 3, label: 'Quarterly' } },
+      recurring: { discount: 0, pestProgramFloorApplied: false, services: [{ name: 'Pest (Quarterly)', service: 'pest_control', mo: pa / 3 }] },
+      pricingMetadata: { pestBasePerVisit: Math.round(constants.PEST.base), ...pricingMetadata },
+      results: { pestTiers: [row(pa)], pest: row(pa) },
       oneTime: { items: [] },
     },
+    ...carriers,
   });
-  const save = (p, extra = {}) => assertLivePestBaseForClientPayload(p, { liveConfigVerified: true, ...extra });
+  const refused = (data, opts) => {
+    let error = null;
+    try { assertFallback(data, opts); } catch (err) { error = err; }
+    expect(error && error.statusCode).toBe(409);
+    expect(error.message).toMatch(/above 5,500 sq ft.*reload the page and regenerate/);
+  };
+  const passes = (data, opts) => expect(() => assertFallback(data, opts)).not.toThrow();
+  const price = (data, stored = null, recompute = async () => ({ recomputed: false, reason: 'NO_INPUTS' })) => resolveServerAuthoritativePricing({
+    estimateData: data, clientPreview: { monthlyTotal: 42.67, annualTotal: 512, onetimeTotal: 0 }, quoteRequired: false, now: NOW, recompute, storedEstimateData: stored,
+  });
 
-  test('a newly priced client pest row must say it was priced under the new rule: no stamp (stale browser) or true is a 409', () => {
-    expect(() => save(payload(164, meta({ legacyPestAboveTable: false })))).not.toThrow();
-    for (const stale of [meta(), meta({ legacyPestAboveTable: true })]) {
-      let error;
-      try { save(payload(128, stale)); } catch (e) { error = e; }
-      expect(error && error.statusCode).toBe(409);
-      expect(error.message).toMatch(/reload the page and regenerate/);
+  test('a pest row for a home above 5,500 sq ft is refused, whatever stamp the browser posts; at or under it the save passes', () => {
+    for (const meta of [{}, { legacyPestAboveTable: false }, { legacyPestAboveTable: true }]) {
+      refused(browser(128, { inputs: { homeSqFt: 10000, stories: '1' } }, meta));
+      refused(browser(128, { inputs: { homeSqFt: 5501, stories: '1' } }, meta));
+      passes(browser(128, { inputs: { homeSqFt: 5500, stories: '1' } }, meta));
+      // 10,000 sq ft of living area on two floors is a 5,000 sq ft footprint: no premium, so nothing to refuse.
+      passes(browser(126, { inputs: { homeSqFt: 10000, stories: '2' } }, meta));
     }
   });
 
-  test('identical rows keep the stored stamp: an old browser resaving a new quote without the stamp stays new, and a legacy quote stays legacy', () => {
-    const stored = payload(164, meta({ legacyPestAboveTable: false }));
-    const resave = payload(164, meta());
-    expect(() => save(resave, { storedEstimateData: stored })).not.toThrow();
-    expect(resave.result.pricingMetadata.legacyPestAboveTable).toBe(false);
-    // A forged false on a stored legacy quote's identical rows is overwritten by the stored value.
-    const legacyStored = { ...payload(128, meta()), engineInputs: { services: { pest: {} } } };
-    const forged = payload(128, meta({ legacyPestAboveTable: false }));
-    expect(() => save(forged, { storedEstimateData: legacyStored })).not.toThrow();
-    expect(forged.result.pricingMetadata.legacyPestAboveTable).toBe(true);
+  test('the size is read from every field and carrier that can name it, the builder\'s squareFootage included', () => {
+    for (const carriers of [
+      { engineInputs: { homeSqFt: 10000, stories: 1 } }, { engineInput: { homeSqFt: 10000 } },
+      { engineRequest: { profile: { squareFootage: 10000, stories: 1 } } }, { engineRequest: { profile: { footprint: 10000 } } },
+      { engineRequest: { options: { termiteFootprintSqFt: 9000 } } }, { engineRequest: { inputs: { livingAreaSqFt: 9000 } } },
+      // A stale measured footprint beside a smaller typed size: the larger reading decides (it can refuse a save, never pass one).
+      { engineRequest: { profile: { homeSqFt: 4000, stories: 1, footprintSqFt: 9000 } } },
+      { inputs: { homeSqFt: 4000 }, engineInputs: { buildingSqFt: 9000 } },
+    ]) refused(browser(128, carriers, { legacyPestAboveTable: false }));
+    // Text that is not a size, a zero and a missing value name nothing.
+    passes(browser(128, { inputs: { homeSqFt: '', stories: '1' }, engineInputs: { homeSqFt: 0, footprintSource: 'manual', footprintUnknown: true } }));
   });
 
-  test('equal rows are not enough: a home-size edit that leaves the browser rows unchanged is a new price and takes the stamp check', () => {
-    // 5,500 sq ft priced under the rule ($128, premium zero). Staff correct the size to 10,000 sq ft: the browser still prices the flat
-    // $128 and leaves the stamp off above 5,500, so the save is refused and the server prices it ($164).
-    const refused = (data, stored) => {
-      let error;
-      try { save(data, { storedEstimateData: stored }); } catch (e) { error = e; }
-      expect(error && error.statusCode).toBe(409);
-    };
-    const sized = (pricingMetadata, carriers) => ({ ...payload(128, pricingMetadata), ...carriers });
-    const stored = sized(meta({ legacyPestAboveTable: false }), { inputs: { homeSqFt: 5500, stories: '1' } });
-    refused(sized(meta(), { inputs: { homeSqFt: 10000, stories: '1' } }), stored);
-    // A story-count edit moves the footprint too, and every carrier of the size is compared.
-    refused(sized(meta(), { inputs: { homeSqFt: 5500, stories: '2' } }), sized(meta({ legacyPestAboveTable: false }), { inputs: { homeSqFt: 5500, stories: '1' } }));
-    for (const carrier of ['engineInputs', 'engineInput']) {
-      refused(sized(meta(), { [carrier]: { homeSqFt: 10000, stories: 1 } }), sized(meta({ legacyPestAboveTable: false }), { [carrier]: { homeSqFt: 5500, stories: 1 } }));
+  test('a pest row is found in every shape and container: plan rows, a recurring or one-time row, an engine line, engineResult alone', () => {
+    const big = { inputs: { homeSqFt: 9000, stories: '1' } };
+    refused({ result: { results: { pest: row(128) } }, ...big });
+    refused({ result: { results: { pestTiers: [row(128)] } }, ...big });
+    refused({ result: { recurring: { services: [{ name: 'Pest (Quarterly)', mo: 42.67 }] } }, ...big });
+    refused({ result: { results: { recurring: { services: [{ service: 'pest_control', monthly: 42.67 }] } } }, ...big });
+    refused({ result: { oneTime: { items: [{ service: 'one_time_pest', price: 250 }] } }, ...big });
+    refused({ result: { results: { oneTime: [{ service: 'one_time_pest', price: 250 }] } }, ...big });
+    refused({ result: { lineItems: [{ service: 'pest_control', price: 128 }] }, ...big });
+    refused({ engineResult: { lineItems: [{ service: 'pest_control', price: 128 }] }, ...big });
+    refused({ result: { results: {} }, engineResult: { lineItems: [{ service: 'one_time_pest', price: 250 }] }, ...big });
+    refused({ results: { pest: row(128) }, ...big });
+    // No pest row: a big home is not a reason to refuse (the browser prices the other services as it does on main).
+    passes({ result: { results: { lawn: [{ mo: 60 }] }, recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 60 }] } }, ...big });
+    // A pest REQUEST in the inputs is not a priced row.
+    passes({ result: { results: {} }, inputs: { homeSqFt: 9000, svcPest: true }, engineInputs: { homeSqFt: 9000, services: { pest: { frequency: 'quarterly' } } } });
+  });
+
+  test('there is no unchanged-resave exception: the same rows and size as the stored estimate are refused too', () => {
+    const stored = browser(128, { inputs: { homeSqFt: 10000, stories: '1' } }, { legacyPestAboveTable: true });
+    refused(browser(128, { inputs: { homeSqFt: 10000, stories: '1' } }, { legacyPestAboveTable: true }), { storedEstimateData: stored });
+    refused(JSON.parse(JSON.stringify(stored)), { storedEstimateData: stored });
+  });
+
+  test('a save that names no size is read at the stored estimate\'s size; with no size anywhere it passes as on main', () => {
+    const stored = browser(128, { inputs: { homeSqFt: 10000, stories: '1' } });
+    refused(browser(128), { storedEstimateData: stored });
+    // A size the stored estimate holds decides even when the save names a smaller one.
+    refused(browser(126, { inputs: { homeSqFt: 5000, stories: '1' } }), { storedEstimateData: stored });
+    passes(browser(128), { storedEstimateData: browser(128) });
+    passes(browser(128));
+  });
+
+  test('the stamp of a browser-priced save is the server\'s: a first save is new, a revision keeps the stored estimate\'s rule', () => {
+    const stampOf = (data, stored) => { stampFallback(data, { storedEstimateData: stored }); return data.result.pricingMetadata.legacyPestAboveTable; };
+    const small = { inputs: { homeSqFt: 5000, stories: '1' } };
+    // A first save: new, whatever the browser posted (an old browser posts nothing, a forged one could post true).
+    for (const meta of [{}, { legacyPestAboveTable: true }, { legacyPestAboveTable: false }]) expect(stampOf(browser(126, small, meta), null)).toBe(false);
+    // A revision of a quote saved before the rule (stamped true, or priced with no stamp) stays on it; a posted false never moves it.
+    for (const stored of [browser(126, small, { legacyPestAboveTable: true }), browser(126, small)]) {
+      expect(stampOf(browser(126, small, { legacyPestAboveTable: false }), stored)).toBe(true);
     }
-    refused(sized(meta(), { engineRequest: { profile: { footprint: 10000 } } }),
-      sized(meta({ legacyPestAboveTable: false }), { engineRequest: { profile: { footprint: 5500 } } }));
-    // The same rows with the same size are still the stored estimate's own: the stored stamp is copied, as before.
-    const same = sized(meta(), { inputs: { homeSqFt: 5500, stories: '1' } });
-    expect(() => save(same, { storedEstimateData: stored })).not.toThrow();
-    expect(same.result.pricingMetadata.legacyPestAboveTable).toBe(false);
-    // A legacy quote resized through the fallback is not kept flat either: it reloads and the server re-prices it on current rules.
-    const legacyStored = sized(meta(), { inputs: { homeSqFt: 10000, stories: '1', svcPest: true }, engineInputs: { homeSqFt: 10000, services: { pest: {} } } });
-    refused(sized(meta(), { inputs: { homeSqFt: 12000, stories: '1', svcPest: true }, engineInputs: { homeSqFt: 12000, services: { pest: {} } } }), legacyStored);
+    // A revision of a new quote stays new; a stored estimate with nothing priced pins nothing, so the save is new.
+    expect(stampOf(browser(126, small, { legacyPestAboveTable: true }), browser(126, small, { legacyPestAboveTable: false }))).toBe(false);
+    expect(stampOf(browser(126, small), { result: { results: {} } })).toBe(false);
+    // Every result container gets it, so the reader finds it whichever one it picks; the other metadata stays.
+    const both = { ...browser(126, small), engineResult: { lineItems: [{ service: 'pest_control', price: 126, legacyPestAboveTable: true }] } };
+    stampFallback(both, {});
+    expect(both.result.pricingMetadata).toEqual({ pestBasePerVisit: Math.round(constants.PEST.base), legacyPestAboveTable: false });
+    expect(both.engineResult.pricingMetadata).toEqual({ legacyPestAboveTable: false });
+    expect(replay.savedLegacyPestAboveTableSignal(both).legacyPestAboveTable).toBe(false);
+    const bare = { results: { pest: row(126) } };
+    stampFallback(bare, {});
+    expect(replay.savedLegacyPestAboveTableSignal(bare).legacyPestAboveTable).toBe(false);
+  });
+
+  test('both sit on the CLIENT_FALLBACK decision: refused on an engine error or with no replayable input, stamped when it passes, and a server price is untouched', async () => {
+    const logger = require('../services/logger');
+    for (const reason of ['NO_INPUTS', 'ENGINE_ERROR']) {
+      const recompute = async () => ({ recomputed: false, reason, ...(reason === 'ENGINE_ERROR' ? { error: new Error('down') } : {}) });
+      logger.error.mockClear();
+      await expect(price(browser(128, { inputs: { homeSqFt: 10000, stories: '1' } }, { legacyPestAboveTable: false }), null, recompute))
+        .rejects.toMatchObject({ statusCode: 409 });
+      // A refused save commits nothing, so the route's engine-error bell never rings: the error-level line is still written.
+      if (reason === 'ENGINE_ERROR') expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('reason=ENGINE_ERROR'));
+      const small = browser(126, { inputs: { homeSqFt: 5000, stories: '1' } }, { legacyPestAboveTable: true });
+      const out = await price(small, null, recompute);
+      expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
+      expect(small.result.pricingMetadata.legacyPestAboveTable).toBe(false);
+      expect(small.result.results.pest.pa).toBe(126);
+    }
+    // An engine that throws is the same refusal.
+    await expect(price(browser(128, { inputs: { homeSqFt: 10000 } }), null, async () => { throw new Error('boom'); })).rejects.toMatchObject({ statusCode: 409 });
+    // The server priced it: no refusal for a big home, and the server's own result (with the engine's stamp) stands.
+    const big = browser(128, { inputs: { homeSqFt: 10000, stories: '1' } });
+    const priced = await price(big, null, async () => ({
+      recomputed: true, serverResult: { pricingMetadata: { legacyPestAboveTable: false }, results: { pest: row(164) } },
+      serverTotals: { monthlyTotal: 54.67, annualTotal: 656, onetimeTotal: 0 }, rawEngineResult: {},
+    }));
+    expect(priced.audit.pricing_authority).toBe('SERVER');
+    expect(big.result.results.pest.pa).toBe(164);
+  });
+
+  test('main\'s own pest check for a browser payload is unchanged by this rule: it reads no above-table stamp', () => {
+    const { assertLivePestBaseForClientPayload } = require('../services/admin-estimate-persistence');
+    const data = browser(128, { inputs: { homeSqFt: 5000, stories: '1' } }, { legacyOneTimePestBuffer: false });
+    expect(() => assertLivePestBaseForClientPayload(data, { liveConfigVerified: true })).not.toThrow();
+    expect(Object.prototype.hasOwnProperty.call(data.result.pricingMetadata, 'legacyPestAboveTable')).toBe(false);
   });
 });
 
@@ -372,11 +451,9 @@ describe('the client fallback estimator: the premium is server-only', () => {
     landscapeComplexity: 'MODERATE', treeDensity: 'MODERATE', hasLargeDriveway: false, svcPest: true, pestFreq: 4,
     urgency: 'NONE', isAfterHours: false, isRecurringCustomer: false, ...extra,
   });
-  const { assertLivePestBaseForClientPayload } = require('../services/admin-estimate-persistence');
-  const save = (estimate) => assertLivePestBaseForClientPayload(
-    { result: { ...estimate, pricingMetadata: { ...estimate.pricingMetadata, pestBasePerVisit: Math.round(constants.PEST.base) } } },
-    { liveConfigVerified: true },
-  );
+  const { assertPestAboveTableClientFallbackSave } = require('../services/admin-estimate-persistence');
+  // The page posts its form inputs beside the browser's result; that is the save the server refuses or keeps.
+  const save = (estimate, inputs) => assertPestAboveTableClientFallbackSave({ result: estimate, inputs });
 
   test('at or below 5,500 sq ft the fallback is unchanged: same quarterly visit as the server, stamp false, the save passes', () => {
     const calculateEstimate = load();
@@ -384,21 +461,26 @@ describe('the client fallback estimator: the premium is server-only', () => {
       const client = calculateEstimate(input(sqft));
       expect(client.results.pest.pa).toBe(plan(sqft, 'quarterly').basePrice);
       expect(client.pricingMetadata.legacyPestAboveTable).toBe(false);
-      expect(() => save(client)).not.toThrow();
+      expect(() => save(client, input(sqft))).not.toThrow();
     }
   });
 
-  test('above 5,500 sq ft with pest the fallback leaves the stamp MISSING, so the save is a 409 and the server prices it', () => {
+  test('above 5,500 sq ft with pest the fallback prices the flat top and leaves the stamp MISSING; the save is a 409 and the server prices it', () => {
     const calculateEstimate = load();
     for (const extra of [{}, { svcPest: false, svcOnetimePest: true }]) {
       const client = calculateEstimate(input(8000, extra));
       expect(Object.prototype.hasOwnProperty.call(client.pricingMetadata, 'legacyPestAboveTable')).toBe(false);
       let error;
-      try { save(client); } catch (e) { error = e; }
+      try { save(client, input(8000, extra)); } catch (e) { error = e; }
       expect(error && error.statusCode).toBe(409);
     }
+    // The refusal reads the real browser rows, not the stamp: the same result with a forged stamp is refused too.
+    const forged = calculateEstimate(input(8000));
+    forged.pricingMetadata.legacyPestAboveTable = false;
+    expect(() => save(forged, input(8000))).toThrow(/above 5,500 sq ft/);
     // A fallback with no pest above the table has nothing to refuse: it keeps the stamp.
     const lawnOnly = calculateEstimate(input(8000, { svcPest: false }));
     expect(lawnOnly.pricingMetadata.legacyPestAboveTable).toBe(false);
+    expect(() => save(lawnOnly, input(8000, { svcPest: false }))).not.toThrow();
   });
 });

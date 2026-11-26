@@ -1494,7 +1494,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld, fleaRecord }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld, fleaRecord, storedEstimateData = null }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -1583,6 +1583,12 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   // fallbackReason rides OUTSIDE audit (audit spreads into the row): the
   // route rings the admin bell for ENGINE_ERROR only after the save's
   // transaction committed, never from a dryRun preflight (pre-push codex P1).
+  // The server could not price this save, so the browser's price stands. The browser prices the flat top of the pest table, so the
+  // save may not hold a pest row for a home above 5,500 sq ft (assertPestAboveTableClientFallbackSave), and its rule stamp is the
+  // server's. Both sit AFTER the log lines above: a refused save commits nothing, so the route's engine-error bell never rings, and
+  // the error-level line is then the only trace of a broken engine.
+  assertPestAboveTableClientFallbackSave(estimateData, { storedEstimateData });
+  stampPestAboveTableOnClientFallbackSave(estimateData, { storedEstimateData });
   // No server price, so the client's totals are stored: the returning-customer rule only confirms what those
   // totals already say (returningWaiverForUnpricedSave). A result priced without the fee by the rule (a fresh
   // preview, or a reopened estimate's stored result), for a customer the rule no longer waives, would store
@@ -1996,23 +2002,8 @@ function pestRowsSignature(estimateData) {
   ].filter((item) => item && item.service === 'one_time_pest');
   // The rule stamps are not part of the comparison (an older browser sends none); they are copied from the stored row when equal.
   const unstamped = (row) => (row && typeof row === 'object' && !Array.isArray(row)
-    ? Object.fromEntries(Object.entries(row).filter(([key]) => key !== 'legacyOneTimePestBuffer' && key !== 'legacyPestAboveTable')) : row);
+    ? Object.fromEntries(Object.entries(row).filter(([key]) => key !== 'legacyOneTimePestBuffer')) : row);
   return [unstamped(results.pest) ?? null, results.pestTiers ?? null, oneTime.map(unstamped)];
-}
-
-// The inputs that decide the pest footprint (resolvePestFootprint: an explicit footprint, else living area over stories), from every
-// carrier the replay and the editor read. Above 5,500 sq ft the browser's pest rows do not move with the home size (it prices the
-// flat top of the table), so equal rows alone cannot show that a stored price is still right: the size must be unchanged too.
-const PEST_FOOTPRINT_INPUT_KEY = /^(footprint|homeSqFt$|stories$|buildingSqFt$|livingAreaSqFt$)/i;
-function pestFootprintInputsSignature(estimateData) {
-  const data = estimateData && typeof estimateData === 'object' ? estimateData : {};
-  const container = (() => { try { return require('./estimate-result-container').storedEstimateContainer(data) || null; } catch { return null; } })();
-  const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
-  // A carrier that is absent and one that holds no size key say the same thing (no size), so both read as {}.
-  const pick = (carrier) => Object.fromEntries(Object.entries(carrier && typeof carrier === 'object' ? carrier : {})
-    .filter(([key]) => PEST_FOOTPRINT_INPUT_KEY.test(key)));
-  return [data.inputs, data.engineInputs, data.engineInput, container && container.inputs,
-    request && request.profile, request && request.options, request && request.inputs].map(pick);
 }
 
 // Identical pest rows are the stored estimate's own: they keep the stored rule, never the browser's (an older browser sends no stamp,
@@ -2023,11 +2014,6 @@ function copyStoredPestRuleStamps(estimateData, storedEstimateData) {
   const flag = require('./estimate-floor-signal-replay').savedLegacyOneTimePestBufferSignal(storedEstimateData).legacyOneTimePestBuffer;
   if (typeof flag === 'boolean') root.pricingMetadata = { ...(root.pricingMetadata || {}), legacyOneTimePestBuffer: flag };
   else if (root.pricingMetadata) delete root.pricingMetadata.legacyOneTimePestBuffer;
-  // The estimate-wide pest-above-table stamp (new quotes only, 2026-11-26) is copied the same way: identical rows keep the stored rule,
-  // so an older browser that sends no stamp never flips a new quote onto the flat rule on a re-save.
-  const aboveTableFlag = require('./estimate-floor-signal-replay').savedLegacyPestAboveTableSignal(storedEstimateData).legacyPestAboveTable;
-  if (typeof aboveTableFlag === 'boolean') root.pricingMetadata = { ...(root.pricingMetadata || {}), legacyPestAboveTable: aboveTableFlag };
-  else if (root.pricingMetadata) delete root.pricingMetadata.legacyPestAboveTable;
   const stampOf = (row) => (row && typeof row.legacyOneTimePestBuffer === 'boolean' ? row.legacyOneTimePestBuffer : undefined);
   const copy = (target, source) => {
     if (!target || typeof target !== 'object') return;
@@ -2087,20 +2073,85 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
   // not a new pest price: it saves unchanged. Only newly priced pest rows need the stamp (the new rule's multiple, buffer and floor are
   // code constants shared by the browser and the server, so no price check is needed beside it).
   // Key-order independent (a re-serialized stored row can reorder keys), array order kept.
-  // The home size must be unchanged as well (pestFootprintInputsSignature): a 5,500 sq ft quote corrected to 10,000 sq ft keeps the
-  // same browser rows, and it is a new price ($164, not $128), so it takes the stamp checks below and the server prices it.
-  if (storedEstimateData && isDeepStrictEqual(pestRowsSignature(estimateData), pestRowsSignature(storedEstimateData))
-    && isDeepStrictEqual(pestFootprintInputsSignature(estimateData), pestFootprintInputsSignature(storedEstimateData))) {
+  if (storedEstimateData && isDeepStrictEqual(pestRowsSignature(estimateData), pestRowsSignature(storedEstimateData))) {
     copyStoredPestRuleStamps(estimateData, storedEstimateData);
     return;
   }
   if (root?.pricingMetadata?.legacyOneTimePestBuffer !== false) {
     throw errorWithStatus('This estimator is out of date for one-time pest pricing — reload the page and regenerate the estimate.', 409);
   }
-  // Pest above the 5,500 sq ft table (new quotes only, 2026-11-26): the same check. A browser bundle that predates the rule priced
-  // the flat top and sends no stamp (or true); it must not be saved as a new quote, so it reloads and regenerates.
-  if (root?.pricingMetadata?.legacyPestAboveTable !== false) {
-    throw errorWithStatus('This estimator is out of date for pest pricing above 5,500 sq ft — reload the page and regenerate the estimate.', 409);
+}
+
+// Pest above the 5,500 sq ft footprint table (owner 2026-11-26, new quotes only: +$8 per visit at quarterly for each 1,000 sq ft above
+// it). The browser fallback prices the flat top of the table. So a save the server could not price (the CLIENT_FALLBACK authority: no
+// replayable engine input, or an engine error) is refused when it holds a pest row for a home above the table: whatever stamp it
+// posts, and whether or not it changed (no unchanged-resave exception, so nothing to compare). At or under 5,500 sq ft the premium is
+// zero and the browser's price is the server's price. The check sits where the pricing authority is decided, not behind a
+// browser-shape test.
+const PEST_ROW_SERVICES = new Set(['pest_control', 'one_time_pest']);
+const SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$/;
+const isPlainRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
+// True when the saved blob holds a pest row anywhere outside its input carriers: the browser's plan rows (results.pest, pestTiers),
+// a recurring or one-time row, or an engine line, in `result`, `engineResult`, the bare data or the send snapshot.
+function saveHoldsPestRow(estimateData) {
+  const seen = new Set();
+  const walk = (node) => {
+    if (!node || typeof node !== 'object' || seen.has(node)) return false;
+    seen.add(node);
+    if (Array.isArray(node)) return node.some(walk);
+    if (PEST_ROW_SERVICES.has(String(node.service || '')) || /^(pest\b|one[- ]time pest)/i.test(String(node.name || ''))) return true;
+    return Object.entries(node).some(([key, value]) => {
+      if (SAVE_INPUT_CARRIER_KEY.test(key)) return false;
+      if (key === 'results' && isPlainRecord(value)
+        && (isPlainRecord(value.pest) || (Array.isArray(value.pestTiers) && value.pestTiers.length > 0))) return true;
+      return walk(value);
+    });
+  };
+  return walk(estimateData);
+}
+// Every footprint the saved blob names, anywhere in it (inputs, engine inputs and request, a result's own property or line): a key
+// that names a footprint or a building area as it is, a living area over the stories beside it (the engine's own arithmetic; the
+// builder profile calls the living area squareFootage). All readings are kept, so a stale field can refuse a save and never pass one.
+const PEST_LIVING_AREA_KEY = /^(home_?sq_?ft|square_?footage|living_?area(_?sq_?ft)?|living_?sq_?ft|heated_?sq_?ft)$/i;
+const PEST_FOOTPRINT_KEY = /footprint|^buildingSqFt$/i;
+function savedPestFootprints(estimateData) {
+  const { resolvePestFootprint } = require('./pricing-engine/service-pricing');
+  const sizeOf = (value) => (['number', 'string'].includes(typeof value) && Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null);
+  const found = [];
+  const seen = new Set();
+  const walk = (node) => {
+    if (!node || typeof node !== 'object' || seen.has(node)) return;
+    seen.add(node);
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    for (const [key, value] of Object.entries(node)) {
+      const size = sizeOf(value);
+      if (size !== null && PEST_FOOTPRINT_KEY.test(key)) found.push(size);
+      else if (size !== null && PEST_LIVING_AREA_KEY.test(key)) found.push(resolvePestFootprint({ homeSqFt: size, stories: node.stories }).footprint);
+      else walk(value);
+    }
+  };
+  walk(estimateData);
+  return found;
+}
+
+function assertPestAboveTableClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
+  if (!isPlainRecord(estimateData) || !saveHoldsPestRow(estimateData)) return;
+  // The stored estimate's size counts beside the posted one (revise only): a save that drops or shrinks its size fields is still
+  // read at the size the server already holds.
+  const footprints = [...savedPestFootprints(estimateData), ...savedPestFootprints(storedEstimateData)];
+  if (!footprints.some((footprint) => footprint > Number(pricingEngine.constants.PEST.aboveTableStartSqFt))) return;
+  throw errorWithStatus('This home is above 5,500 sq ft, and the browser cannot price pest for it — reload the page and regenerate the estimate so the server prices it.', 409);
+}
+// The stamp of a browser-priced save is the server's, never the browser's: a revision keeps the stored estimate's (a quote sold before
+// the rule stays on it), a first save is new. A save that passed the check above holds no pest row the two rules price differently,
+// so both are true to its prices. Written on every result container, so the reader finds it whichever one it picks.
+function stampPestAboveTableOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
+  if (!isPlainRecord(estimateData)) return;
+  const legacy = !!storedEstimateData
+    && require('./estimate-floor-signal-replay').savedLegacyPestAboveTableSignal(storedEstimateData).legacyPestAboveTable === true;
+  const containers = [estimateData.result, estimateData.engineResult].filter(isPlainRecord);
+  for (const container of containers.length ? containers : [estimateData]) {
+    container.pricingMetadata = { ...(isPlainRecord(container.pricingMetadata) ? container.pricingMetadata : {}), legacyPestAboveTable: legacy };
   }
 }
 
@@ -2351,6 +2402,8 @@ async function resolveEstimateWritePayload({
     areaAddOnHistory: await require('./area-addon-limits').quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body, { technicianId }),
     returningVisitHistory,
     returningAnswerHeld,
+    // Revise only: the stored estimate, for the stamp and the size of a save the server cannot price (pest above 5,500 sq ft).
+    storedEstimateData,
   });
   if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
   // The rule's answer, stored as the operator waiver every setup-fee reader honors, with its evidence.
@@ -4188,6 +4241,8 @@ module.exports = {
   estimateEditVersion,
   detectUnlinkedMemberAddress,
   assertLivePestBaseForClientPayload,
+  assertPestAboveTableClientFallbackSave,
+  stampPestAboveTableOnClientFallbackSave,
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
   assertNoDarkTermiteRentalPayload,
