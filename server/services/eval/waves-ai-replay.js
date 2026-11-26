@@ -90,7 +90,11 @@ const ACTION_TYPES = ['none', 'escalate', 'book_appointment', 'send_payment_link
 // 200 characters, with or without a "<kind>: <detail>" shape), so it can hold a name, a phone number or
 // an email address. No part of a note is ever printed or exported: a note that does not open with one of
 // these kinds counts as "escalate:other". A test keeps this list equal to the kinds in the drafter's source.
-const ESCALATION_KINDS = ['send_reservice_link', 'reservice_times', 'followup_promised', 'cancel_request'];
+// followup_promised is RETIRED (owner 2026-11-25: drafts promise no follow-up; a hand-off is an ABSTAIN that escalates needs_person), but rows
+// drafted before that still carry it, so the report keeps counting it under its own name.
+const CURRENT_ESCALATION_KINDS = ['send_reservice_link', 'reservice_times', 'needs_person', 'cancel_request'];
+const RETIRED_ESCALATION_KINDS = ['followup_promised'];
+const ESCALATION_KINDS = [...CURRENT_ESCALATION_KINDS, ...RETIRED_ESCALATION_KINDS];
 
 // The kind an escalation note opens with, or null. Never any other part of the note.
 function escalationKind(action) {
@@ -246,4 +250,4 @@ function caseOf(row) {
   };
 }
 
-module.exports = { summarize, caseOf, actionsOf, actionLabel, restrictedOf, SMALL_SAMPLE, ACTION_TYPES, ESCALATION_KINDS, FIRST_JUDGE };
+module.exports = { summarize, caseOf, actionsOf, actionLabel, restrictedOf, SMALL_SAMPLE, ACTION_TYPES, ESCALATION_KINDS, CURRENT_ESCALATION_KINDS, FIRST_JUDGE };
