@@ -43,6 +43,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { dateOnlyString } = require('../utils/date-only');
 const { ledgerCall } = require('./llm-dispatch-metrics');
 const { anthropicText } = require('./llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
@@ -128,7 +129,8 @@ const dailyCap = () => {
   const n = Number(process.env.ALERT_CLEAR_AGENT_DAILY_CAP);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_DAILY_CAP;
 };
-const dateText = (value) => String(value?.toISOString?.() || value || '').slice(0, 10);
+// A pg DATE arrives as a UTC-midnight Date: read it with the shared helper, never a string slice.
+const dateText = (value) => dateOnlyString(value) || 'an unknown date';
 const gateMode = () => require('../config/feature-gates').alertClearAgentMode();
 
 function isOwedAlert(alert) {
