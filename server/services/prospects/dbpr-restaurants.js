@@ -881,11 +881,13 @@ function judgeRead(last, read, now) {
   return { problem, save: save ? { fiscalYear: read.fiscalYear, rows: read.rows } : null };
 }
 
-// Loads the three files. Returns the keys of the visits whose report pages the run reads (firstVisitKeys), taken only
+// Loads the three files. Returns the keys of the visits whose report pages the run reads (firstVisitKeys) and their
+// current license id and date (currentVisits), taken only
 // from a read of the inspection file that loaded and passed: a failed, short or stale read names none, since it may
 // list a visit a newer file corrected or dropped.
 async function syncFiles(deps, result) {
   let keys = [];
+  let visits = new Map();
   for (const kind of Object.keys(FILES)) {
     try {
       const { records, malformed, rows, fiscalYear, newest, laterVisits } = await loadFile(kind, deps.fetchText, deps.now);
@@ -903,6 +905,7 @@ async function syncFiles(deps, result) {
         logger.warn(`[dbpr-prospects] ${kind} file ${problem.text}`);
       } else if (kind === 'inspection') {
         keys = firstVisitKeys(unique, reportCutoff(deps.now));
+        visits = currentVisits(unique, keys);
       }
     } catch (err) {
       result.failures += 1;
@@ -910,7 +913,7 @@ async function syncFiles(deps, result) {
       logger.warn(`[dbpr-prospects] ${kind} file failed (${err.code || err.name})`);
     }
   }
-  return keys;
+  return { keys, visits };
 }
 
 // The public report page of one inspection visit, or null when either id is not digits only.
@@ -931,6 +934,15 @@ function firstVisitKeys(records, cutoff) {
     .map((record) => record.source_key);
 }
 
+// The same visits' license id and date as the run's own read lists them (source_key -> { license_id, visitDate }).
+// The stored row keeps its first license id and date, so a visit the newer file corrected is read with the file's
+// values: the right page's address, checked against the right date.
+function currentVisits(records, keys) {
+  const wanted = new Set(keys);
+  return new Map(records.filter((record) => wanted.has(record.source_key))
+    .map((record) => [record.source_key, { license_id: record.license_id, visitDate: record.event_date }]));
+}
+
 // Downloads and reads one report page for a pendingInspections row (its names are the parser's options). A failed
 // download, an id that is not digits only, or a page that cannot answer returns null: a failed read.
 async function readOneReport(row, deps) {
@@ -948,11 +960,11 @@ async function readOneReport(row, deps) {
 // A failed read adds one attempt (pendingInspections stops at REPORT_MAX_ATTEMPTS) and leaves pest_evidence NULL. An
 // answer the store does not save (the row changed after it was picked) is left for a later run, at no attempt. A
 // database failure is not a failed read: it stops the reads (the caller counts it) and costs the row no attempt.
-async function readReports(deps, result, keys) {
+async function readReports(deps, result, keys, visits = new Map()) {
   const pending = await deps.store.pendingInspections({ cutoff: reportCutoff(deps.now), limit: REPORT_MAX_PER_RUN, keys });
   for (let i = 0; i < pending.length; i += 1) {
     if (i > 0) await deps.sleep(REPORT_GAP_MS);
-    const report = await readOneReport(pending[i], deps);
+    const report = await readOneReport({ ...pending[i], ...visits.get(pending[i].source_key) }, deps);
     if (!report) {
       result.reportsFailed += 1;
       await deps.store.bumpAttempts(pending[i].id);
@@ -965,7 +977,7 @@ async function readReports(deps, result, keys) {
   }
   // Every read failing (the site down, or a changed page) is a failed run, not a quiet week. Some failed reads beside
   // a good one are not.
-  if (result.reportsFailed > 0 && result.reportsRead === 0) {
+  if (result.reportsFailed > 0 && result.reportsRead === 0 && result.reportsLeft === 0) {
     result.failures += 1;
     logger.warn(`[dbpr-prospects] every report read failed (${result.reportsFailed})`);
   }
@@ -982,9 +994,9 @@ async function syncRestaurantProspects(deps = {}) {
   const result = { failures: 0, files: {}, reportsRead: 0, reportsFailed: 0, reportsLeft: 0, pestFound: 0, elapsedMs: 0 };
   if (syncDisabled()) return { ...result, skipped: 'disabled' };
   const ctx = { fetchText: defaultFetchText, sleep: defaultSleep, store: defaultStore, now: new Date(), ...deps };
-  const keys = await syncFiles(ctx, result);
+  const { keys, visits } = await syncFiles(ctx, result);
   try {
-    await readReports(ctx, result, keys);
+    await readReports(ctx, result, keys, visits);
   } catch (err) {
     result.failures += 1;
     logger.warn(`[dbpr-prospects] report reads stopped early (${err.code || err.name})`);

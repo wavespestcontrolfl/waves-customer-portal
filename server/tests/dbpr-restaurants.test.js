@@ -840,7 +840,8 @@ describe('syncRestaurantProspects', () => {
 
   // The inspection file listing these visits as cited first visits of Nov 16, 2026, and a pending row as the store
   // gives one. Report pages by visit id: a 35A page and a 35B-only page of Nov 16.
-  const visitsFile = (visits) => ({ '7fdinspi.csv': () => inspCsv(visits.map((visit) => inspRow({ visit }))) });
+  // A visit is its id, or { visit, ...inspRow options } for a row with its own license id or date.
+  const visitsFile = (visits) => ({ '7fdinspi.csv': () => inspCsv(visits.map((v) => inspRow(typeof v === 'string' ? { visit: v } : v))) });
   const pendingRow = (id, sourceKey, over = {}) => ({
     id, source_key: sourceKey, license_id: '5001', violation35: 1, visitNumber: 1, visitDate: '2026-11-16', ...over,
   });
@@ -874,32 +875,50 @@ describe('syncRestaurantProspects', () => {
     expect(fetchText.mock.calls.findIndex(([url]) => url.includes('inspectionDetail.asp'))).toBe(3);
   });
 
-  test('a failed download, a page that cannot answer or a bad id adds one attempt and saves nothing; a bad id makes no request', async () => {
+  test('a failed download or a page that cannot answer adds one attempt and saves nothing', async () => {
     store = makeStore([
-      pendingRow('a', '9000'), pendingRow('b', '9001'), pendingRow('c', '9002', { license_id: '5001; DROP' }), pendingRow('d', '9003'),
+      pendingRow('a', '9000'), pendingRow('b', '9001'), pendingRow('c', '9002'), pendingRow('d', '9003'),
     ]);
+    // A bad id never reaches a request: the file reader refuses it, and reportUrl too (its own test).
     fetchText = fetchWith(visitsFile(['9000', '9001', '9002', '9003']), {
-      9000: new Error('HTTP 503'), 9001: '<html>error page</html>', 9003: DOOR_PAGE,
+      9000: new Error('HTTP 503'), 9001: '<html>error page</html>', 9002: new Error('timeout'), 9003: DOOR_PAGE,
     });
     const result = await sync({ fetchText, store });
     expect(store.bumpAttempts.mock.calls.map(([id]) => id)).toEqual(['a', 'b', 'c']);
     expect(store.saveReport.mock.calls.map(([read]) => read.id)).toEqual(['d']);
-    expect(reportCalls()).toHaveLength(3);
+    expect(reportCalls()).toHaveLength(4);
     expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 3, reportsLeft: 0, pestFound: 0 });
   });
 
   test('each page is read against its own row: the file\'s count, the visit\'s date and its number', async () => {
     store = makeStore([
       pendingRow('a', '9000', { violation35: 2 }), // the page lists one 35 row: fewer than the file counted
-      pendingRow('b', '9001', { visitDate: '2026-11-17' }), // another visit's page
+      pendingRow('b', '9001'), // the file dates it Nov 17: the Nov 16 page is another visit's
       pendingRow('c', '9002', { visitNumber: 2 }), // a later visit
       pendingRow('d', '9003'),
     ]);
-    fetchText = fetchWith(visitsFile(['9000', '9001', '9002', '9003']), { 9000: DOOR_PAGE, 9001: DOOR_PAGE, 9002: DOOR_PAGE, 9003: DOOR_PAGE });
+    fetchText = fetchWith(visitsFile(['9000', { visit: '9001', date: '11/17/2026' }, '9002', '9003']), { 9000: DOOR_PAGE, 9001: DOOR_PAGE, 9002: DOOR_PAGE, 9003: DOOR_PAGE });
     const result = await sync({ fetchText, store });
     expect(store.bumpAttempts.mock.calls.map(([id]) => id)).toEqual(['a', 'b', 'c']);
     expect(store.saveReport.mock.calls.map(([read, report]) => [read.id, report.pestEvidence])).toEqual([['d', false]]);
     expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 3 });
+  });
+
+  test('a visit the newer file corrected is read with the file\'s license id and date, not the stored ones', async () => {
+    // The stored row kept its first license id (4999) and date (Nov 10); the file now says 5001 and Nov 16.
+    store = makeStore([pendingRow('a', '9000', { license_id: '4999', visitDate: '2026-11-10' })]);
+    fetchText = fetchWith(visitsFile(['9000']), { 9000: PEST_PAGE });
+    const result = await sync({ fetchText, store });
+    expect(reportCalls()[0][0]).toBe('https://www.myfloridalicense.com/inspectionDetail.asp?InspVisitID=9000&id=5001');
+    expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 0, pestFound: 1 });
+  });
+
+  test('a failed read beside a page whose save was skipped is not a failed run: a page did read', async () => {
+    store = makeStore([pendingRow('a', '9000'), pendingRow('b', '9001')]);
+    store.saveReport.mockResolvedValueOnce(false);
+    fetchText = fetchWith(visitsFile(['9000', '9001']), { 9000: PEST_PAGE, 9001: '<html>a changed page</html>' });
+    const result = await sync({ fetchText, store });
+    expect(result).toMatchObject({ failures: 0, reportsRead: 0, reportsFailed: 1, reportsLeft: 1 });
   });
 
   test('an answer the store does not save (its row changed after it was picked) is left for a later run, at no attempt', async () => {
