@@ -256,16 +256,20 @@ function mergeChances(prior, next) {
  * sells Monday all day, only its 2 PM and later runs count) that has a settled call in force, kept or new. A run with no
  * settled call freezes nothing: a later run before the day starts may still take it (2026-11-26: the first post-2 PM run
  * that failed to settle used to freeze 'unknown'). cutoff_at marks it taken, so a later call never replaces it.
- * `chances`: the forecast numbers, kept as latest_chances every run and copied to cutoff_chances with the cutoff.
+ * `chances`: the forecast numbers. latest_chances merges every run (an hour the feed dropped keeps its reading); call_chances
+ * holds the unmerged readings of the run that supplied the call, and cutoff_chances copies those with the cutoff, so the
+ * numbers match the call that was graded.
  */
 function nextDayRow(prior, { day, forecast, call, cutoffRun, at }) {
   const next = { ...(prior || {}), day };
   if (forecast.call !== 'unknown') {
     Object.assign(next, { call: forecast.call, at, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) });
   }
+  // The readings behind the call in force, unmerged: the run that settled it (this one, or an earlier one carried forward).
+  if (forecast.call !== 'unknown' && forecast.chances) next.call_chances = forecast.chances;
   if (forecast.chances && Object.keys(forecast.chances).length) next.latest_chances = mergeChances(next.latest_chances, forecast.chances);
   if (!next.cutoff_at && cutoffRun && call !== 'unknown') {
-    Object.assign(next, { cutoff_call: call, cutoff_at: at, cutoff_chances: next.latest_chances || null });
+    Object.assign(next, { cutoff_call: call, cutoff_at: at, cutoff_chances: next.call_chances || null });
   }
   return next.call || next.cutoff_at || next.latest_chances ? next : null;
 }

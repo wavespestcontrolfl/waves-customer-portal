@@ -338,6 +338,28 @@ describe('recordRun', () => {
     expect(row.cutoff_chances[ZONES[0]]).toEqual([80, 80, 80, 80, 80, 80, 10, 10, 10]);
   });
 
+  test('cutoff_chances are the unmerged readings of the run that supplied the call, also when the cutoff carries an earlier call forward', async () => {
+    const conn = fakeConn({ campaigns });
+    const at = (h) => new Date(`2026-11-29T${String(h + 5).padStart(2, '0')}:00:00Z`); // Sunday, ET hour h; sells Monday
+    // 10 AM: a settled rain call. 2 PM: the feed answers with fewer hours and no settled call (open areas): the call is
+    // carried forward and becomes the cutoff, with the 10 AM readings, not a merge with the 2 PM ones.
+    await rainMode.recordRun({ now: at(10), conn, read: readerFor('2026-11-30', [6, 6, 6, 6, 0, 0]), fetchRain: jest.fn() });
+    const partial = jest.fn(async () => hours('2026-11-30', 0).slice(6).map((h) => ({ ...h, rainChance: 33 })));
+    await rainMode.recordRainMode({ now: at(14), conn, read: partial, fetchRain: jest.fn() }).catch(() => {});
+    const row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-30'];
+    expect(row).toMatchObject({ cutoff_call: 'rain', cutoff_at: at(14).toISOString() });
+    expect(row.cutoff_chances[ZONES[0]]).toEqual([80, 80, 80, 80, 80, 80, 10, 10, 10]);
+    // latest_chances may merge: the 2 PM readings land on the hours they cover.
+    expect(row.latest_chances[ZONES[0]]).toEqual([80, 80, 80, 80, 80, 80, 33, 33, 33]);
+    // A settled 2 PM run supplies its own readings (nothing merged in from before).
+    const conn2 = fakeConn({ campaigns });
+    await rainMode.recordRun({ now: at(10), conn: conn2, read: readerFor('2026-11-30', [6, 6, 6, 6, 0, 0]), fetchRain: jest.fn() });
+    await rainMode.recordRun({ now: at(14), conn: conn2, read: readerFor('2026-11-30', [2, 2, 2, 2, 0, 0]), fetchRain: jest.fn() });
+    const row2 = JSON.parse(conn2.store[rainMode.DAYS_KEY])['2026-11-30'];
+    expect(row2.cutoff_call).toBe('dry');
+    expect(row2.cutoff_chances[ZONES[0]]).toEqual([80, 80, 10, 10, 10, 10, 10, 10, 10]);
+  });
+
   test('LSA and Facebook campaigns are classified and recorded too: rain_class by hand only, never a route line', async () => {
     const more = [
       { id: 10, platform: 'google_lsa', campaign_name: 'LSA', status: 'active', metadata: { rain_class: 'indoor' } },

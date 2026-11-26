@@ -32,7 +32,10 @@ const hoursFor = (wet = {}) => ['2026-11-24', WED, THU, '2026-11-27'].flatMap((d
   startTime: `${date}T${String(h).padStart(2, '0')}:00:00-05:00`,
   rainChance: wet[date] === 'all' || (wet[date] || []).includes(h) ? 80 : 10,
 })));
-// Wednesday rain from 13:00 to 17:00 only: a dry morning exists. Wednesday all day: no dry hour and a wholly wet day.
+// Wednesday rain from 8:00 to 11:00 only: a dry afternoon exists (a reorder goes LATER the same day, never earlier).
+// Wednesday all day: no dry hour and a wholly wet day.
+const MORNING = { [WED]: [8, 9, 10, 11] };
+// Rain at 13:00 to 17:00 only: a dry morning exists, but a visit at 14:00 has no later dry hour.
 const AFTERNOON = { [WED]: [13, 14, 15, 16, 17] };
 const ALL_DAY = { [WED]: 'all' };
 
@@ -42,7 +45,7 @@ const stop = (extra = {}) => {
   return {
     id: `v${String(n).padStart(2, '0')}`, customer_id: `c${n}`, service_type: 'Quarterly Pest Control Service',
     service_key_snapshot: 'pest_general_quarterly', technician_id: `t${n}`, status: 'confirmed', scheduled_date: WED,
-    window_start: '14:00:00', window_end: '15:00:00', point: { lat: 27.4 + n / 1000, lng: -82.4 },
+    window_start: '09:00:00', window_end: '10:00:00', point: { lat: 27.4 + n / 1000, lng: -82.4 },
     ...extra,
   };
 };
@@ -97,10 +100,30 @@ describe('targetDay', () => {
 describe('proposals', () => {
   test('a wet visit with a dry open hour is a same-day reorder', async () => {
     const conn = fakeConn();
-    const out = await run({ now: TUE_CUTOFF, conn, read: jest.fn(async () => hoursFor(AFTERNOON)), deps: deps([stop()]) });
+    const out = await run({ now: TUE_CUTOFF, conn, read: jest.fn(async () => hoursFor(MORNING)), deps: deps([stop()]) });
     expect(out.problems).toEqual([]);
-    expect(out.proposals).toEqual([{ id: 'v01', start: '14:00', span: expect.any(Array), peak: 80, decision: 'reorder', to_start: '10:00' }]);
+    // Rain 8 to 11 and the visit at 9: the nearest dry hours after it are 12:00 (its own hours and the 2 drying hours read dry).
+    expect(out.proposals).toEqual([{ id: 'v01', start: '09:00', span: expect.any(Array), peak: 80, decision: 'reorder', to_start: '12:00' }]);
     expect(daysOf(conn)[WED].cutoff.proposals).toEqual(out.proposals);
+  });
+
+  test('a reorder is LATER the same day only: a visit with only an earlier dry hour goes on to the next work day, never earlier', async () => {
+    // Rain 13 to 17, the visit at 14:00: rain-pass finds dry hours before it (10:00) and none after.
+    const late = () => stop({ window_start: '14:00:00', window_end: '15:00:00' });
+    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps([late()]), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    expect(out.proposals[0]).toMatchObject({ id: 'v01', start: '14:00', decision: 'day_move', to_date: THU });
+    expect(out.proposals[0].to_start).toBe('08:00');
+    // The same visit when the next work day is wet too: the call list.
+    n = 0;
+    const wet = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps([late()]), read: jest.fn(async () => hoursFor({ ...AFTERNOON, [THU]: 'all' })) });
+    expect(wet.proposals[0]).toMatchObject({ decision: 'call_list' });
+  });
+
+  test('when an earlier proposal holds the nearest later hour the next later hour is taken, never an earlier one', async () => {
+    const rows = [stop({ technician_id: 'tx' }), stop({ technician_id: 'tx' })];
+    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(rows), read: jest.fn(async () => hoursFor(MORNING)) });
+    expect(out.proposals.map((p) => p.to_start)).toEqual(['12:00', '13:00']);
+    expect(out.proposals.every((p) => p.to_start > '09:00')).toBe(true);
   });
 
   test('a visit whose whole day is wet, with no dry hour, is a move to the next work day at a free dry start', async () => {
@@ -109,7 +132,7 @@ describe('proposals', () => {
     const out = await run({ now: TUE_CUTOFF, conn, read: jest.fn(async () => hoursFor(ALL_DAY)), deps: d });
     // Thursday is the next work day; 08:00 is the day's first start. Not a recurring visit: it moves alone.
     expect(out.proposals).toEqual([{
-      id: 'v01', start: '14:00', span: expect.any(Array), peak: 80, decision: 'day_move', to_date: THU, to_start: '08:00', plan_moves: 'one_visit',
+      id: 'v01', start: '09:00', span: expect.any(Array), peak: 80, decision: 'day_move', to_date: THU, to_start: '08:00', plan_moves: 'one_visit',
     }]);
     expect(d.blackoutDates).toHaveBeenCalledWith(THU, '2026-12-03');
   });
@@ -119,7 +142,7 @@ describe('proposals', () => {
       now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()]),
       read: jest.fn(async () => hoursFor({ ...ALL_DAY, [THU]: 'all' })),
     });
-    expect(out.proposals).toEqual([{ id: 'v01', start: '14:00', span: expect.any(Array), peak: 80, decision: 'call_list', reason: 'no_dry_slot' }]);
+    expect(out.proposals).toEqual([{ id: 'v01', start: '09:00', span: expect.any(Array), peak: 80, decision: 'call_list', reason: 'no_dry_slot' }]);
     expect(out.proposals[0].to_date).toBeUndefined();
   });
 
@@ -167,10 +190,32 @@ describe('proposals', () => {
     });
 
     test('a lawn round moved 7 days or less inside its round stays one visit; a pest plan does not', async () => {
-      const lawn = { id: 'v01', scheduled_date: WED, recurring_pattern: 'lawn_rounds_9', date_exception: false, date_exception_cadence_date: null };
-      const pest = { id: 'v02', scheduled_date: WED, recurring_pattern: 'quarterly', date_exception: false, date_exception_cadence_date: null };
+      const lawn = { id: 'v01', is_recurring: true, scheduled_date: WED, recurring_pattern: 'lawn_rounds_9', date_exception: false, date_exception_cadence_date: null };
+      const pest = { id: 'v02', is_recurring: true, scheduled_date: WED, recurring_pattern: 'quarterly', date_exception: false, date_exception_cadence_date: null };
       const out = await go([recurring(), recurring()], { loadSeries: jest.fn(async () => new Map([['v01', lawn], ['v02', pest]])) });
       expect(out.proposals.map((p) => p.plan_moves)).toEqual(['one_visit', 'whole_plan']);
+    });
+
+    test('a grouped stop: every member service is read, the move is whole_plan if any member is recurring, and each member is recorded', async () => {
+      // Two services at one stop (a shared visit_id): the anchor is one-time, the second is a recurring pest plan.
+      const rows = [stop({ visit_id: 'g1', service_type: 'Quarterly Pest Control Service' }), stop({ visit_id: 'g1', service_type: 'Quarterly Pest Control Service' })];
+      const loadSeries = jest.fn(async () => new Map([
+        ['v01', { id: 'v01', is_recurring: false, scheduled_date: WED }],
+        ['v02', { id: 'v02', is_recurring: true, scheduled_date: WED, recurring_pattern: 'quarterly' }],
+      ]));
+      const out = await go(rows.map((r) => ({ ...r, technician_id: 't1' })), { loadSeries });
+      expect(loadSeries.mock.calls[0][1].sort()).toEqual(['v01', 'v02']);
+      expect(out.proposals[0]).toMatchObject({ decision: 'day_move', plan_moves: 'whole_plan', plan_moves_by_service: { v01: 'one_visit', v02: 'whole_plan' } });
+    });
+
+    test('a grouped stop whose recurring member is a lawn round moved within 7 days stays one_visit', async () => {
+      const rows = [stop({ visit_id: 'g1', technician_id: 't1' }), stop({ visit_id: 'g1', technician_id: 't1' })];
+      const loadSeries = jest.fn(async () => new Map([
+        ['v01', { id: 'v01', is_recurring: false, scheduled_date: WED }],
+        ['v02', { id: 'v02', is_recurring: true, scheduled_date: WED, recurring_pattern: 'lawn_rounds_9', date_exception: false, date_exception_cadence_date: null }],
+      ]));
+      const out = await go(rows, { loadSeries });
+      expect(out.proposals[0]).toMatchObject({ plan_moves: 'one_visit', plan_moves_by_service: { v01: 'one_visit', v02: 'one_visit' } });
     });
 
     test('a failed recurrence read leaves a recurring visit whole_plan, and still records', async () => {
@@ -263,19 +308,19 @@ describe('proposals', () => {
   test('a wet visit with no dry open hour on a day that is not wholly wet is none', async () => {
     const d = deps([stop()]);
     d.rainOut.conflictsForTarget = jest.fn(() => [{ id: 'other' }]); // every other hour is taken
-    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hoursFor({ [WED]: [13, 14, 15] })) });
-    expect(out.proposals).toEqual([{ id: 'v01', start: '14:00', span: expect.any(Array), peak: 80, decision: 'none', reason: 'no_dry_hour' }]);
+    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hoursFor({ [WED]: [8, 9, 10] })) });
+    expect(out.proposals).toEqual([{ id: 'v01', start: '09:00', span: expect.any(Array), peak: 80, decision: 'none', reason: 'no_dry_hour' }]);
     expect(d.blackoutDates).not.toHaveBeenCalled();
   });
 
   test('a visit with no point is none with its reason; a dry visit is stored as forecast_dry so a miss can score', async () => {
-    const rows = [stop({ point: null }), stop({ window_start: '09:00:00', window_end: '10:00:00' })];
+    const rows = [stop({ point: null }), stop({ window_start: '14:00:00', window_end: '15:00:00' })];
     const conn = fakeConn();
-    const out = await run({ now: TUE_CUTOFF, conn, deps: deps(rows), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    const out = await run({ now: TUE_CUTOFF, conn, deps: deps(rows), read: jest.fn(async () => hoursFor(MORNING)) });
     // A dry visit keeps its peak too (10%), so the forecast can be replayed against what fell.
     expect(out.proposals).toEqual([
-      { id: 'v02', start: '09:00', span: expect.any(Array), peak: 10, decision: 'none', reason: 'forecast_dry' },
-      { id: 'v01', start: '14:00', span: expect.any(Array), decision: 'none', reason: 'no_point' },
+      { id: 'v01', start: '09:00', span: expect.any(Array), decision: 'none', reason: 'no_point' },
+      { id: 'v02', start: '14:00', span: expect.any(Array), peak: 10, decision: 'none', reason: 'forecast_dry' },
     ]);
     expect(daysOf(conn)[WED].cutoff).toMatchObject({ checked: 2, dry: 1 });
   });
@@ -284,7 +329,7 @@ describe('proposals', () => {
     process.env.GATE_MULTI_TECH_CONFIRM = 'true'; // each visit has its own technician: hours are not shared
     const rows = Array.from({ length: 11 }, () => stop());
     const conn = fakeConn();
-    const out = await run({ now: TUE_CUTOFF, conn, deps: deps(rows), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    const out = await run({ now: TUE_CUTOFF, conn, deps: deps(rows), read: jest.fn(async () => hoursFor(MORNING)) });
     const decisions = out.proposals.map((p) => [p.id, p.decision]);
     expect(decisions.filter(([, d]) => d === 'reorder')).toHaveLength(10);
     expect(decisions[10]).toEqual(['v11', 'cap']);
@@ -294,17 +339,17 @@ describe('proposals', () => {
 
   test('an earlier start takes a slot before a later one, whatever the id', async () => {
     process.env.GATE_MULTI_TECH_CONFIRM = 'true';
-    const rows = [...Array.from({ length: 10 }, () => stop()), stop({ window_start: '13:00:00', window_end: '14:00:00' })];
-    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(rows), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    const rows = [...Array.from({ length: 10 }, () => stop()), stop({ window_start: '08:00:00', window_end: '09:00:00' })];
+    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(rows), read: jest.fn(async () => hoursFor(MORNING)) });
     const byId = Object.fromEntries(out.proposals.map((p) => [p.id, p.decision]));
-    expect(byId.v11).toBe('reorder'); // 13:00 sorts first
-    expect(byId.v10).toBe('cap'); // the last of the 14:00 visits by id
+    expect(byId.v11).toBe('reorder'); // 08:00 sorts first
+    expect(byId.v10).toBe('cap'); // the last of the 09:00 visits by id
   });
 });
 
 describe('the NWS forecast', () => {
   test('is read from NWS only: never the paid-backup reader, and asked with the long wait', async () => {
-    const read = jest.fn(async () => hoursFor(AFTERNOON));
+    const read = jest.fn(async () => hoursFor(MORNING));
     await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()]), read });
     expect(read).toHaveBeenCalled();
     expect(read.mock.calls.every(([, , opts]) => opts && opts.fetchTimeoutMs === 10000)).toBe(true);
@@ -320,7 +365,7 @@ describe('the NWS forecast', () => {
     await expect(record.runScheduleRainRecord({ now: TUE_RETRY, conn, deps: deps([stop()]), read, fetchObs: jest.fn(async () => null) }))
       .rejects.toThrow(/schedule rain record: forecast unread/);
     // The 15:06 retry takes the cutoff once the forecast answers.
-    const retry = await run({ now: TUE_RETRY, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    const retry = await run({ now: TUE_RETRY, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor(MORNING)) });
     expect(retry.problems).toEqual([]);
     expect(daysOf(conn)[WED].cutoff.proposals[0].decision).toBe('reorder');
   });
@@ -337,7 +382,7 @@ describe('the NWS forecast', () => {
 describe('the cutoff is frozen', () => {
   test('a later run on the same day before never replaces it; the 6 AM recheck sits beside it', async () => {
     const conn = fakeConn();
-    await run({ now: TUE_CUTOFF, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    await run({ now: TUE_CUTOFF, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor(MORNING)) });
     const frozen = daysOf(conn)[WED].cutoff;
     expect(frozen.proposals[0]).toMatchObject({ decision: 'reorder' });
 
@@ -352,13 +397,13 @@ describe('the cutoff is frozen', () => {
     await run({ now: WED_RECHECK, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor({})) });
     const row = daysOf(conn)[WED];
     expect(row.cutoff).toEqual(frozen);
-    expect(row.recheck.proposals).toEqual([{ id: 'v01', start: '14:00', span: expect.any(Array), peak: 10, decision: 'none', reason: 'forecast_dry' }]);
+    expect(row.recheck.proposals).toEqual([{ id: 'v01', start: '09:00', span: expect.any(Array), peak: 10, decision: 'none', reason: 'forecast_dry' }]);
     expect(row.recheck.dry).toBe(1);
   });
 
   test('a recheck with no cutoff before it (a missed 2 PM) is kept as a recheck, not as a cutoff', async () => {
     const conn = fakeConn();
-    await run({ now: WED_RECHECK, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    await run({ now: WED_RECHECK, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor(MORNING)) });
     const row = daysOf(conn)[WED];
     expect(row.cutoff).toBeUndefined();
     expect(row.recheck.proposals[0].decision).toBe('reorder');
@@ -374,8 +419,8 @@ describe('scoring against the measured rain in each visit\'s hours', () => {
         cutoff: {
           at: '2026-11-24T19:06:00.000Z', checked: 5, dry: 0,
           proposals: proposals || [
-            { id: 'a', start: '14:00', span: [840, 900], decision: 'reorder', to_start: '10:00' },
-            { id: 'b', start: '14:00', span: [840, 900], decision: 'reorder', to_start: '10:00' },
+            { id: 'a', start: '14:00', span: [840, 900], decision: 'reorder', to_start: '16:00' },
+            { id: 'b', start: '14:00', span: [840, 900], decision: 'reorder', to_start: '16:00' },
             { id: 'c', start: '14:00', span: [840, 900], decision: 'none', reason: 'no_dry_hour' },
             { id: 'd', start: '14:00', span: [840, 900], decision: 'none', reason: 'no_dry_hour' },
             { id: 'e', start: '14:00', span: [840, 900], decision: 'none', reason: 'no_point' },
@@ -434,7 +479,7 @@ describe('scoring against the measured rain in each visit\'s hours', () => {
   });
 
   test('a visit stored before spans were kept is read for one hour from its start', async () => {
-    const conn = seeded({}, [{ id: 'a', start: '14:00', decision: 'reorder', to_start: '10:00' }]);
+    const conn = seeded({}, [{ id: 'a', start: '14:00', decision: 'reorder', to_start: '16:00' }]);
     await run({ now: FRI, conn, fetchObs: fetchObs({ VNC: [14], SRQ: [] }), deps: deps([], { loadPoints: pointsWithoutE }) });
     expect(daysOf(conn)[WED].score.visits.a).toMatchObject({ wet: true, cutoff: 'hit' });
   });
@@ -467,6 +512,42 @@ describe('scoring against the measured rain in each visit\'s hours', () => {
     await run({ now: FRI, conn, fetchObs: fetchObs({ VNC: [14], SRQ: [] }), deps: deps([], { loadPoints: pointsWithoutE }) });
     expect(daysOf(conn)[WED].score.visits.a).toMatchObject({ cutoff: 'hit', recheck: 'miss' });
     expect(daysOf(conn)[WED].score.recheck).toMatchObject({ miss: 1 });
+  });
+
+  test('the cutoff and the recheck are each graded against their own span: a stop re-timed between them', async () => {
+    // The cutoff judged the visit at 14:00 (rain at 14 hits); the recheck re-judged it at 08:00 (hours 8 to 10 read dry).
+    const conn = seeded({ recheck: { at: '2026-11-25T11:06:00.000Z', checked: 1, dry: 0, proposals: [{ id: 'a', start: '08:00', span: [480, 540], decision: 'none', reason: 'no_dry_hour' }] } });
+    await run({ now: FRI, conn, fetchObs: fetchObs({ VNC: [14], SRQ: [] }), deps: deps([], { loadPoints: pointsWithoutE }) });
+    const v = daysOf(conn)[WED].score.visits.a;
+    expect(v).toMatchObject({ wet: true, cutoff: 'hit', recheck: 'ok', recheck_wet: false });
+    expect(daysOf(conn)[WED].score.recheck).toMatchObject({ ok: 1, miss: 0 });
+  });
+
+  test('a recheck whose own span has an unread hour waits, even when the cutoff span read fully', async () => {
+    const conn = seeded({ recheck: { at: '2026-11-25T11:06:00.000Z', checked: 1, dry: 0, proposals: [{ id: 'a', start: '08:00', span: [480, 540], decision: 'none', reason: 'no_dry_hour' }] } });
+    const gapped = jest.fn(async () => { const o = obsWith({ VNC: [14], SRQ: [] }); delete o.VNC[9]; delete o.SRQ[9]; return o; });
+    const out = await run({ now: FRI, conn, fetchObs: gapped, deps: deps([], { loadPoints: pointsWithoutE }) });
+    expect(out.scored).toEqual([]);
+  });
+
+  describe('a day with no outdoor visit', () => {
+    const emptyDay = () => fakeConn({ [record.DAYS_KEY]: JSON.stringify({ [WED]: { day: WED, recheck: { at: 'x', checked: 0, dry: 0, proposals: [] } } }) });
+
+    test('an IEM outage does not freeze a final score with no day grade: it waits, then is marked partial', async () => {
+      const conn = emptyDay();
+      const down = jest.fn(async () => null);
+      expect((await run({ now: FRI, conn, fetchObs: down, deps: deps([]) })).scored).toEqual([]);
+      expect(daysOf(conn)[WED].score).toBeUndefined();
+      const late = await run({ now: parseETDateTime('2026-12-02T06:06'), conn, fetchObs: down, deps: deps([]) });
+      expect(late.scored).toEqual([WED]);
+      expect(daysOf(conn)[WED].score).toMatchObject({ partial: true, day: { wet_day: null } });
+    });
+
+    test('a day read in full is scored final with its wet day', async () => {
+      const conn = emptyDay();
+      await run({ now: FRI, conn, fetchObs: jest.fn(async () => allHours(0.5)), deps: deps([]) });
+      expect(daysOf(conn)[WED].score).toMatchObject({ partial: false, day: { wet_day: true } });
+    });
   });
 
   test('the day is also graded per forecast area: rain before work does not make a wet day (2026-11-25)', async () => {
@@ -502,29 +583,33 @@ describe('scoring against the measured rain in each visit\'s hours', () => {
 describe('the forecast numbers are kept', () => {
   test('each entry holds the per-area NWS chance of every work hour of the target day, for a replay', async () => {
     const conn = fakeConn();
-    await run({ now: TUE_CUTOFF, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    await run({ now: TUE_CUTOFF, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor(MORNING)) });
     const { chances } = daysOf(conn)[WED].cutoff;
     expect(Object.keys(chances)).toHaveLength(6);
-    // 8 AM to 4 PM: the wet hours of the afternoon rain are 13 to 17, so hours 13, 14, 15 and 16 read 80.
-    expect(chances.parrish).toEqual([10, 10, 10, 10, 10, 80, 80, 80, 80]);
+    // 8 AM to 4 PM: the morning rain is 8 to 11, so the first four work hours read 80.
+    expect(chances.parrish).toEqual([80, 80, 80, 80, 10, 10, 10, 10, 10]);
     n = 0;
     await run({ now: WED_RECHECK, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor({})) });
     expect(daysOf(conn)[WED].recheck.chances.parrish).toEqual(Array(9).fill(10));
-    expect(daysOf(conn)[WED].cutoff.chances.parrish).toEqual([10, 10, 10, 10, 10, 80, 80, 80, 80]);
+    expect(daysOf(conn)[WED].cutoff.chances.parrish).toEqual([80, 80, 80, 80, 10, 10, 10, 10, 10]);
   });
 });
+
+// A full set of work-hour readings at every gauge: the day by area settles.
+const allHours = (inches) => Object.fromEntries(['SRQ', 'VNC', 'PGD', 'SPG'].map((st) => [st, Object.fromEntries(Array.from({ length: 24 }, (_, h) => [h, inches]))]));
 
 describe('it changes nothing', () => {
   test('a cutoff with a day move, a recheck and a score write only system_settings, and touch no visit table', async () => {
     const conn = fakeConn();
-    const d = () => deps([stop()]);
+    // The recurrence read (a plain select of the stop's services) is stubbed: this test is about what is written and asked for.
+    const d = () => deps([stop()], { loadSeries: jest.fn(async () => new Map()) });
     const read = jest.fn(async () => hoursFor(ALL_DAY));
     await run({ now: TUE_CUTOFF, conn, deps: d(), read });
     n = 0;
     await run({ now: WED_RECHECK, conn, deps: d(), read });
     await run({
       now: parseETDateTime('2026-11-27T06:06'), conn, deps: d(),
-      read, fetchObs: jest.fn(async () => ({ VNC: { 14: 0.5 }, SRQ: { 14: 0.5 }, PGD: {}, SPG: {} })),
+      read, fetchObs: jest.fn(async () => allHours(0.5)),
     });
     expect(daysOf(conn)[WED].score).toBeDefined();
     expect(conn.writes.length).toBeGreaterThan(0);
@@ -537,7 +622,7 @@ describe('it changes nothing', () => {
 
   test('what it stores holds visit ids and decisions only: no name, address or coordinates', async () => {
     const conn = fakeConn();
-    await run({ now: TUE_CUTOFF, conn, deps: deps([stop({ service_address_line1: '1 Main St', point: { lat: 27.4, lng: -82.4 } })]), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    await run({ now: TUE_CUTOFF, conn, deps: deps([stop({ service_address_line1: '1 Main St', point: { lat: 27.4, lng: -82.4 } })]), read: jest.fn(async () => hoursFor(MORNING)) });
     const text = Object.values(conn.store).join(' ');
     expect(text).not.toMatch(/Main St|27\.4|-82\.4|c1"|customer/i);
   });
@@ -557,22 +642,22 @@ describe('audit fixes', () => {
 
   test('two wet stops of one technician never take the same dry hour; two technicians may', async () => {
     const same = [stop({ technician_id: 'tx' }), stop({ technician_id: 'tx' })];
-    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(same), read: jest.fn(async () => hoursFor(AFTERNOON)) });
-    expect(out.proposals.map((p) => [p.id, p.decision, p.to_start])).toEqual([['v01', 'reorder', '10:00'], ['v02', 'reorder', '09:00']]);
+    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(same), read: jest.fn(async () => hoursFor(MORNING)) });
+    expect(out.proposals.map((p) => [p.id, p.decision, p.to_start])).toEqual([['v01', 'reorder', '12:00'], ['v02', 'reorder', '13:00']]);
     n = 0;
     // With GATE_MULTI_TECH_CONFIRM on the probe is scoped to the technician's own route (see the gate tests below).
     process.env.GATE_MULTI_TECH_CONFIRM = 'true';
     const two = [stop({ technician_id: 'tx' }), stop({ technician_id: 'ty' })];
-    const apart = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(two), read: jest.fn(async () => hoursFor(AFTERNOON)) });
-    expect(apart.proposals.map((p) => p.to_start)).toEqual(['10:00', '10:00']);
+    const apart = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(two), read: jest.fn(async () => hoursFor(MORNING)) });
+    expect(apart.proposals.map((p) => p.to_start)).toEqual(['12:00', '12:00']);
   });
 
   test('a span with an hour the forecast did not read is unread, not dry', async () => {
     const conn = fakeConn();
-    // 14:00 reads 10%; 15:00 and 16:00 (the rest of the visit and its drying time) have no reading.
-    const hours = hoursFor({}).filter((h) => !(h.startTime.startsWith(`${WED}T15`) || h.startTime.startsWith(`${WED}T16`)));
+    // 09:00 reads 10%; 10:00 and 11:00 (the rest of the visit and its drying time) have no reading.
+    const hours = hoursFor({}).filter((h) => !(h.startTime.startsWith(`${WED}T10`) || h.startTime.startsWith(`${WED}T11`)));
     const out = await run({ now: TUE_CUTOFF, conn, deps: deps([stop()]), read: jest.fn(async () => hours) });
-    expect(out.proposals).toEqual([{ id: 'v01', start: '14:00', span: expect.any(Array), peak: 10, decision: 'none', reason: 'unread_forecast' }]);
+    expect(out.proposals).toEqual([{ id: 'v01', start: '09:00', span: expect.any(Array), peak: 10, decision: 'none', reason: 'unread_forecast' }]);
     expect(daysOf(conn)[WED]).toBeUndefined(); // the only visit is unread: no forecast, nothing frozen
     const read = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()]), read: jest.fn(async () => hoursFor({})) });
     expect(read.proposals[0]).toMatchObject({ decision: 'none', reason: 'forecast_dry' });
@@ -598,7 +683,7 @@ describe('audit fixes', () => {
   test('the Saturday 2 PM run does not freeze Monday; the Sunday 2 PM run does', async () => {
     const MON = '2026-11-30';
     const monday = () => deps([stop({ scheduled_date: MON })]);
-    const read = jest.fn(async () => hoursOn(MON, [13, 14, 15, 16, 17]));
+    const read = jest.fn(async () => hoursOn(MON, [8, 9, 10, 11]));
     const conn = fakeConn();
     const sat = monday();
     await run({ now: parseETDateTime('2026-11-28T14:06'), conn, deps: sat, read });
@@ -612,7 +697,7 @@ describe('audit fixes', () => {
   test('the catalog resolver is used for every service, whatever the rain-pass gate says', async () => {
     const d = deps([stop()]);
     delete process.env.GATE_AUTO_DISPATCH_RAIN_PASS;
-    await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hoursFor(MORNING)) });
     expect(d.withCatalogKeys.mock.calls[0][2]).toEqual({ gate: null, strict: true });
   });
 
@@ -625,7 +710,7 @@ describe('audit fixes', () => {
     expect(out.proposals).toEqual([]);
     expect(daysOf(conn)[WED]).toBeUndefined();
     n = 0;
-    const retry = await run({ now: TUE_RETRY, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    const retry = await run({ now: TUE_RETRY, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor(MORNING)) });
     expect(retry.problems).toEqual([]);
     expect(daysOf(conn)[WED].cutoff.proposals[0].decision).toBe('reorder');
   });
@@ -644,7 +729,7 @@ describe('audit fixes', () => {
 
   describe('over the cap', () => {
     // Visits 1 to 10 sit in afternoon rain (a dry morning); visit 11 sits in an all-day rain.
-    const readBy = jest.fn(async (lat) => hoursFor(lat > 27.4105 ? ALL_DAY : AFTERNOON));
+    const readBy = jest.fn(async (lat) => hoursFor(lat > 27.4105 ? ALL_DAY : MORNING));
     const ten = () => Array.from({ length: 11 }, () => stop());
     beforeEach(() => { process.env.GATE_MULTI_TECH_CONFIRM = 'true'; });
 
@@ -661,18 +746,18 @@ describe('audit fixes', () => {
     test('a reorder over the cap never names an hour an accepted proposal of the same technician holds', async () => {
       process.env.GATE_MULTI_TECH_CONFIRM = 'true';
       const rows = [stop({ technician_id: 'tx' }), ...Array.from({ length: 9 }, () => stop()), stop({ technician_id: 'tx' })];
-      const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(rows), read: jest.fn(async () => hoursFor(AFTERNOON)) });
-      expect(out.proposals[0]).toMatchObject({ id: 'v01', decision: 'reorder', to_start: '10:00' });
-      expect(out.proposals[10]).toMatchObject({ id: 'v11', decision: 'cap', would: 'reorder', to_start: '09:00' });
+      const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(rows), read: jest.fn(async () => hoursFor(MORNING)) });
+      expect(out.proposals[0]).toMatchObject({ id: 'v01', decision: 'reorder', to_start: '12:00' });
+      expect(out.proposals[10]).toMatchObject({ id: 'v11', decision: 'cap', would: 'reorder', to_start: '13:00' });
     });
   });
 
   test('a scoring failure never drops the day decision: the cutoff is saved and the error recorded', async () => {
     const SAT = '2026-11-28';
-    const old = { day: WED, cutoff: { at: 'x', checked: 1, dry: 0, proposals: [{ id: 'a', start: '14:00', decision: 'reorder', to_start: '10:00' }] } };
+    const old = { day: WED, cutoff: { at: 'x', checked: 1, dry: 0, proposals: [{ id: 'a', start: '14:00', decision: 'reorder', to_start: '16:00' }] } };
     const conn = fakeConn({ [record.DAYS_KEY]: JSON.stringify({ [WED]: old }) });
     const d = deps([stop({ scheduled_date: SAT })], { loadPoints: jest.fn(async () => { throw new Error('points down'); }) });
-    const hours = Array.from({ length: 24 }, (_, h) => ({ startTime: `${SAT}T${String(h).padStart(2, '0')}:00:00-05:00`, rainChance: h >= 13 && h <= 17 ? 80 : 10 }));
+    const hours = Array.from({ length: 24 }, (_, h) => ({ startTime: `${SAT}T${String(h).padStart(2, '0')}:00:00-05:00`, rainChance: h >= 8 && h <= 11 ? 80 : 10 }));
     const out = await run({ now: parseETDateTime('2026-11-27T14:06'), conn, deps: d, read: jest.fn(async () => hours) });
     expect(out.problems).toEqual(['scoring failed: points down']);
     expect(daysOf(conn)[SAT].cutoff.proposals[0]).toMatchObject({ decision: 'reorder' });
@@ -684,7 +769,7 @@ describe('audit fixes', () => {
     const d = deps([stop()]);
     d.rainOut.conflictsForTarget = jest.fn(() => [{ id: 'other' }]); // no open hour
     // 3 wet work hours and the 16:00 hour unread: 3 + 1 reaches 4.
-    const hours = hoursFor({ [WED]: [13, 14, 15] }).filter((h) => !h.startTime.startsWith(`${WED}T16`));
+    const hours = hoursFor({ [WED]: [8, 9, 10] }).filter((h) => !h.startTime.startsWith(`${WED}T11`));
     const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hours) });
     expect(out.proposals[0]).toMatchObject({ decision: 'none', reason: 'unread_forecast' });
     expect(d.blackoutDates).not.toHaveBeenCalled();
@@ -693,7 +778,7 @@ describe('audit fixes', () => {
   test('a catalog read that fails stops the run: nothing is frozen and no name rule is used instead', async () => {
     const conn = fakeConn();
     const broken = deps([stop(), stop()], { withCatalogKeys: jest.fn(async () => { throw new Error('catalog down'); }) });
-    const out = await run({ now: TUE_CUTOFF, conn, deps: broken, read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    const out = await run({ now: TUE_CUTOFF, conn, deps: broken, read: jest.fn(async () => hoursFor(MORNING)) });
     expect(out.problems).toEqual(['the run failed: catalog down']);
     expect(daysOf(conn)[WED]).toBeUndefined();
   });
@@ -702,14 +787,14 @@ describe('audit fixes', () => {
     const conn = fakeConn();
     const broken = deps([stop(), stop()]);
     broken.rainOut.conflictsForTarget = jest.fn(() => { throw new Error('occupancy rows unreadable'); });
-    const out = await run({ now: TUE_CUTOFF, conn, deps: broken, read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    const out = await run({ now: TUE_CUTOFF, conn, deps: broken, read: jest.fn(async () => hoursFor(MORNING)) });
     expect(out.problems[0]).toMatch(/forecast unread for all 2 outdoor visit/);
     expect(daysOf(conn)[WED]).toBeUndefined();
     // A visit with no point stays out of the count: one error and one no-point visit is still every readable visit.
     n = 0;
     const mixed = deps([stop({ point: null }), stop()]);
     mixed.rainOut.conflictsForTarget = jest.fn(() => { throw new Error('occupancy rows unreadable'); });
-    const two = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: mixed, read: jest.fn(async () => hoursFor(AFTERNOON)) });
+    const two = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: mixed, read: jest.fn(async () => hoursFor(MORNING)) });
     expect(two.problems[0]).toMatch(/forecast unread for all 1 outdoor visit/);
   });
 });
