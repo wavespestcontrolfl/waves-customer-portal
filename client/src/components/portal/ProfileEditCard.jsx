@@ -123,6 +123,14 @@ export default function ProfileEditCard({ customer, refreshCustomer }) {
         setOpen(false);
       }
     } catch (err) {
+      // A name that saved before the code email failed is saved: show it, make it the new baseline, and let the
+      // retry send only what is still outstanding (the email).
+      if (Array.isArray(err?.changed) && err.changed.length && err.profile) {
+        await reload();
+        const saved = { firstName: err.profile.firstName ?? '', lastName: err.profile.lastName ?? '' };
+        setOpened((o) => ({ ...o, ...saved }));
+        setForm((f) => ({ ...f, ...saved }));
+      }
       setError(err?.message || 'We could not save that. Please try again.');
     } finally {
       setBusy(false);

@@ -21,7 +21,7 @@ test('up creates the table, the attempts check and the one-open-request-per-cust
   await migration.up(knex);
   expect(calls).toContainEqual(['createTable', 'customer_email_change_requests']);
   const cols = calls.filter((c) => c[0] === 'col').map((c) => c[2]);
-  expect(cols).toEqual(expect.arrayContaining(['id', 'customer_id', 'new_email', 'code_hash', 'attempts', 'expires_at', 'consumed_at', 'sent_at', 'created_at', 'updated_at']));
+  expect(cols).toEqual(expect.arrayContaining(['id', 'customer_id', 'new_email', 'from_email', 'code_hash', 'attempts', 'expires_at', 'consumed_at', 'sent_at', 'created_at', 'updated_at']));
   const sql = calls.filter((c) => c[0] === 'raw').map((c) => c[1]).join('\n');
   expect(sql).toMatch(/CHECK \(attempts >= 0\)/);
   expect(sql).toMatch(/CREATE UNIQUE INDEX customer_email_change_requests_open_uidx ON customer_email_change_requests \(customer_id\) WHERE consumed_at IS NULL/);

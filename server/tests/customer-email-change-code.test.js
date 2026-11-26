@@ -37,7 +37,9 @@ let trx;
 beforeEach(() => { trx = makeTrx(); mockSendOne.mockClear(); jest.useRealTimers(); });
 afterAll(() => jest.useRealTimers());
 
-const issue = (email = 'New.Address@Example.test') => Code.issueRequest(trx, { customerId: CUSTOMER, newEmail: email });
+const ON_FILE = 'On.File@Example.test';
+const issue = (email = 'New.Address@Example.test', fromEmail = ON_FILE) => Code.issueRequest(trx, { customerId: CUSTOMER, newEmail: email, fromEmail });
+const check = (code, currentEmail = ON_FILE) => Code.checkCode(trx, { customerId: CUSTOMER, code, currentEmail });
 
 describe('issueRequest', () => {
   test('a 6-digit code, 15 minutes, only an HMAC stored, address trimmed and lower-cased', async () => {
@@ -45,7 +47,7 @@ describe('issueRequest', () => {
     expect(code).toMatch(/^\d{6}$/);
     expect(expiresInMinutes).toBe(15);
     const [row] = trx.rows;
-    expect(row).toMatchObject({ id, customer_id: CUSTOMER, new_email: 'new.address@example.test', attempts: 0, consumed_at: null });
+    expect(row).toMatchObject({ id, customer_id: CUSTOMER, new_email: 'new.address@example.test', from_email: 'on.file@example.test', attempts: 0, consumed_at: null });
     expect(row.code_hash).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(row)).not.toContain(code);
     expect(row.code_hash).toBe(Code.hashCode(id, code));
@@ -65,12 +67,12 @@ describe('issueRequest', () => {
     const second = await issue('second@example.test');
     expect(trx.rows).toHaveLength(1);
     expect(trx.rows[0].id).toBe(second.id);
-    expect((await Code.checkCode(trx, { customerId: CUSTOMER, code: first.code })).outcome).toBe('wrong');
+    expect((await check(first.code)).outcome).toBe('wrong');
   });
 
   test('another customer cannot use a code, and a hash is bound to its own request id', async () => {
     const { id, code } = await issue();
-    expect((await Code.checkCode(trx, { customerId: 'c2222222-2222-4222-8222-222222222222', code })).outcome).toBe('missing');
+    expect((await Code.checkCode(trx, { customerId: 'c2222222-2222-4222-8222-222222222222', code, currentEmail: ON_FILE })).outcome).toBe('missing');
     expect(Code.hashCode('other-id', code)).not.toBe(Code.hashCode(id, code));
   });
 });
@@ -78,7 +80,7 @@ describe('issueRequest', () => {
 describe('checkCode', () => {
   test('the right code is ok and reports the address it was sent to', async () => {
     const { id, code } = await issue();
-    const res = await Code.checkCode(trx, { customerId: CUSTOMER, code: ` ${code} ` });
+    const res = await check(` ${code} `);
     expect(res.outcome).toBe('ok');
     expect(res.request).toMatchObject({ id, new_email: 'new.address@example.test' });
   });
@@ -86,20 +88,20 @@ describe('checkCode', () => {
   test('a wrong code adds one attempt and says how many are left', async () => {
     const { code } = await issue();
     const wrong = code === '000000' ? '111111' : '000000';
-    const res = await Code.checkCode(trx, { customerId: CUSTOMER, code: wrong });
+    const res = await check(wrong);
     expect(res).toMatchObject({ outcome: 'wrong', attemptsLeft: 4 });
     expect(trx.rows[0].attempts).toBe(1);
-    expect((await Code.checkCode(trx, { customerId: CUSTOMER, code })).outcome).toBe('ok');
+    expect((await check(code)).outcome).toBe('ok');
   });
 
   test('attempt cap: after 5 wrong codes even the right code is refused', async () => {
     const { code } = await issue();
     const wrong = code === '000000' ? '111111' : '000000';
     const lefts = [];
-    for (let i = 0; i < 5; i += 1) lefts.push((await Code.checkCode(trx, { customerId: CUSTOMER, code: wrong })).attemptsLeft);
+    for (let i = 0; i < 5; i += 1) lefts.push((await check(wrong)).attemptsLeft);
     expect(lefts).toEqual([4, 3, 2, 1, 0]);
     expect(Code.MAX_ATTEMPTS).toBe(5);
-    expect((await Code.checkCode(trx, { customerId: CUSTOMER, code })).outcome).toBe('attempts');
+    expect((await check(code)).outcome).toBe('attempts');
     expect(trx.rows[0].attempts).toBe(5);
   });
 
@@ -107,24 +109,48 @@ describe('checkCode', () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-11-26T12:00:00Z'));
     const { code } = await issue();
     jest.setSystemTime(new Date('2026-11-26T12:14:00Z'));
-    expect((await Code.checkCode(trx, { customerId: CUSTOMER, code })).outcome).toBe('ok');
+    expect((await check(code)).outcome).toBe('ok');
     jest.setSystemTime(new Date('2026-11-26T12:15:00Z'));
-    expect((await Code.checkCode(trx, { customerId: CUSTOMER, code })).outcome).toBe('expired');
+    expect((await check(code)).outcome).toBe('expired');
+  });
+
+  test('stale: if the address on file moved after the code was sent, even the right code is refused and the request is consumed', async () => {
+    const { code } = await issue();
+    const res = await check(code, 'staff.corrected@example.test');
+    expect(res.outcome).toBe('stale');
+    expect(trx.rows[0].consumed_at).toBe('NOW');
+    expect((await check(code)).outcome).toBe('missing');
+  });
+
+  test('stale is judged before the code: a wrong code on a moved address also reads stale and costs no attempt', async () => {
+    await issue();
+    expect((await check('000000', 'staff.corrected@example.test')).outcome).toBe('stale');
+    expect(trx.rows[0].attempts).toBe(0);
+  });
+
+  test('the address on file compares trimmed and case-insensitively; none on file matches none', async () => {
+    const a = await issue('n@example.test', '  ON.file@EXAMPLE.test ');
+    expect((await check(a.code)).outcome).toBe('ok');
+    const b = await issue('n@example.test', null);
+    expect(trx.rows[0].from_email).toBeNull();
+    expect((await check(b.code, '')).outcome).toBe('ok');
+    const c = await issue('n@example.test', null);
+    expect((await check(c.code, 'someone@example.test')).outcome).toBe('stale');
   });
 
   test('reuse: once consumed, the same code finds no open request', async () => {
     const { id, code } = await issue();
-    expect((await Code.checkCode(trx, { customerId: CUSTOMER, code })).outcome).toBe('ok');
+    expect((await check(code)).outcome).toBe('ok');
     await Code.consume(trx, id);
     expect(trx.rows[0].consumed_at).toBe('NOW');
-    expect((await Code.checkCode(trx, { customerId: CUSTOMER, code })).outcome).toBe('missing');
+    expect((await check(code)).outcome).toBe('missing');
   });
 
   test('no request at all is missing; a non-digit or empty code is just wrong', async () => {
-    expect((await Code.checkCode(trx, { customerId: CUSTOMER, code: '123456' })).outcome).toBe('missing');
+    expect((await check('123456')).outcome).toBe('missing');
     await issue();
-    expect((await Code.checkCode(trx, { customerId: CUSTOMER, code: '' })).outcome).toBe('wrong');
-    expect((await Code.checkCode(trx, { customerId: CUSTOMER, code: 'abcdef' })).outcome).toBe('wrong');
+    expect((await check('')).outcome).toBe('wrong');
+    expect((await check('abcdef')).outcome).toBe('wrong');
   });
 
   test('dropRequest and markSent', async () => {

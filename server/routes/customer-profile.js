@@ -195,24 +195,32 @@ function runPostCommitFanout(emailSync, customerId) {
 // address; a name-only change goes to the same address as before, so it can show old and new.
 function noticeItems(kind, items) {
   if (kind === 'old') return [{ key: 'email', label: 'Email address' }];
+  if (kind === 'generic') return [{ key: 'profile', label: 'Account profile' }];
   if (kind === 'new') return items.map(({ oldValue, old_value, ...rest }) => rest);
   return items;
 }
 const OLD_ADDRESS_SUMMARY = 'The email address on your Waves account was changed in the customer app. If this was not you, call or text us right away.';
 const OLD_ADDRESS_GREETING = 'there';
+// A name saved while an email change still waits for its code: the current address may be the one being replaced
+// (a mistyped or abandoned mailbox), so it learns that something changed and nothing else: no name, no values.
+const PENDING_EMAIL_SUMMARY = 'Your account profile on your Waves account was changed in the customer app. If this was not you, call or text us right away.';
 const CHANGE_SUMMARY = 'Your name or email address on your Waves account was changed in the customer app.';
 
 // Fire-and-forget after the save: a notice that fails to send never undoes the change. Every recipient is the
 // address of the COMMITTED edit, passed as a contactOverride, so a later edit cannot redirect a notice to a
 // third mailbox.
-function sendChangeNotices({ customerId, before, after, changes, items }) {
+function sendChangeNotices({ customerId, before, after, changes, items, emailPending = false }) {
   const stamp = Date.now();
   const emailMoved = changes.email !== undefined;
   const name = clean(after.first_name);
   const recipients = [];
   const oldEmail = clean(before.email);
   if (emailMoved && oldEmail) recipients.push({ key: 'old', kind: 'old', email: oldEmail, summary: OLD_ADDRESS_SUMMARY, greeting: OLD_ADDRESS_GREETING });
-  if (clean(after.email)) recipients.push({ key: 'current', kind: emailMoved ? 'new' : 'same', email: clean(after.email), summary: CHANGE_SUMMARY, greeting: null });
+  if (clean(after.email) && emailPending && !emailMoved) {
+    recipients.push({ key: 'current', kind: 'generic', email: clean(after.email), summary: PENDING_EMAIL_SUMMARY, greeting: OLD_ADDRESS_GREETING });
+  } else if (clean(after.email)) {
+    recipients.push({ key: 'current', kind: emailMoved ? 'new' : 'same', email: clean(after.email), summary: CHANGE_SUMMARY, greeting: null });
+  }
   for (const { key, kind, email, summary, greeting } of recipients) {
     void Promise.resolve(AccountMembershipEmail.sendAccountUpdated({
       customerId,
@@ -252,7 +260,7 @@ async function requestEmailCode(trx, { customerId, locked, typedEmail, req }) {
   if (!typedEmail || typedEmail.toLowerCase() === clean(locked.email).toLowerCase()) return null;
   await assertUnderQuota(trx, customerId);
   const newEmail = typedEmail.toLowerCase();
-  const issued = await EmailCode.issueRequest(trx, { customerId, newEmail });
+  const issued = await EmailCode.issueRequest(trx, { customerId, newEmail, fromEmail: locked.email });
   await recordAuditEvent({
     actor_type: 'customer',
     actor_id: customerId,
@@ -307,7 +315,7 @@ router.put('/', gateOn, authenticateAllowInactive, async (req, res, next) => {
 
     const { before, after, changes, items, emailSync, pending } = outcome;
     runPostCommitFanout(emailSync, customerId);
-    if (items.length) sendChangeNotices({ customerId, before, after, changes, items });
+    if (items.length) sendChangeNotices({ customerId, before, after, changes, items, emailPending: Boolean(pending) });
     if (pending && !(await deliverEmailCode(pending, customerId))) {
       return res.status(502).json({ error: 'We could not send the code. Please try again in a moment.', code: 'code_send_failed', profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
     }
@@ -325,6 +333,7 @@ router.put('/', gateOn, authenticateAllowInactive, async (req, res, next) => {
 const CODE_REFUSALS = {
   missing: [400, 'That code has expired. Ask for a new code.', 'code_expired'],
   expired: [400, 'That code has expired. Ask for a new code.', 'code_expired'],
+  stale: [400, 'That code has expired. Ask for a new code.', 'code_expired'],
   attempts: [429, 'Too many wrong codes. Ask for a new code.', 'code_attempts'],
   wrong: [400, 'That code is not right. Check the newest email and try again.', 'code_wrong'],
 };
@@ -335,7 +344,7 @@ const CODE_REFUSALS = {
 async function confirmInTransaction(trx, { customerId, code, req }) {
   const locked = await lockOwnedCustomer(trx, { customerId, req });
   if (!locked) return { gone: true };
-  const check = await EmailCode.checkCode(trx, { customerId, code });
+  const check = await EmailCode.checkCode(trx, { customerId, code, currentEmail: locked.email });
   if (check.outcome !== 'ok') return { refused: check };
   const { request } = check;
   try {

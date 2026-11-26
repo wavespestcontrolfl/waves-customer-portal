@@ -209,7 +209,7 @@ describe('PUT /api/customer/profile', () => {
       expect(mockLockEmails).not.toHaveBeenCalled();
       expect(mockConflict).not.toHaveBeenCalled();
       expect(mockEmailFanout).not.toHaveBeenCalled();
-      expect(mockCode.issueRequest.mock.calls[0][1]).toEqual({ customerId: CUSTOMER_ID, newEmail: NEW_EMAIL });
+      expect(mockCode.issueRequest.mock.calls[0][1]).toEqual({ customerId: CUSTOMER_ID, newEmail: NEW_EMAIL, fromEmail: OLD_EMAIL });
       expect(mockCode.sendCode).toHaveBeenCalledWith({ to: NEW_EMAIL, code: '123456' });
       expect(mockCode.markSent).toHaveBeenCalledWith(mockDb, 'req-1');
       await flush();
@@ -232,7 +232,7 @@ describe('PUT /api/customer/profile', () => {
       expect(mockAudit).not.toHaveBeenCalled();
     });
 
-    test('a name and an email together: the name saves now (with its notice), the email waits for its code', async () => {
+    test('a name and an email together: the name saves now; the CURRENT mailbox gets only a generic alert (no name, no values) and the code goes to the new one', async () => {
       const res = await put({ firstName: 'Sam', email: NEW_EMAIL });
       expect(res).toMatchObject({ status: 200, body: { changed: ['firstName'], emailPending: { email: NEW_EMAIL } } });
       expect(mockUpdates).toEqual([{ first_name: 'Sam', updated_at: 'NOW' }]);
@@ -240,7 +240,30 @@ describe('PUT /api/customer/profile', () => {
       expect(savedAudits().sort()).toEqual(['customer.profile_edit', 'customer.profile_email_code_sent']);
       await flush();
       expect(mockSend).toHaveBeenCalledTimes(1);
-      expect(mockSend.mock.calls[0][0].contactOverride.email).toBe(OLD_EMAIL);
+      const notice = mockSend.mock.calls[0][0];
+      expect(notice).toMatchObject({
+        greetingName: 'there',
+        contactOverride: { email: OLD_EMAIL, name: '' },
+        changedItems: [{ key: 'profile', label: 'Account profile' }],
+        alwaysNotify: true,
+      });
+      // Recipient, greeting and every detail together: neither the old nor the new name, nor the new address, reach the old mailbox.
+      expect(JSON.stringify(notice)).not.toMatch(/Sam|Pat|Sample|new\.address/);
+      expect(notice.changeSummary).toMatch(/call or text us/);
+      expect(mockCode.sendCode).toHaveBeenCalledWith({ to: NEW_EMAIL, code: '123456' });
+    });
+
+    test('an email-only request sends no notice at all (nothing changed yet)', async () => {
+      await put({ email: NEW_EMAIL });
+      await flush();
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    test('a combined edit whose code email fails still saved the name: 502 carries the saved name so the app can show it', async () => {
+      mockCode.sendCode.mockRejectedValue(Object.assign(new Error('provider down'), { status: 503 }));
+      const res = await put({ firstName: 'Sam', email: NEW_EMAIL });
+      expect(res).toMatchObject({ status: 502, body: { code: 'code_send_failed', changed: ['firstName'], profile: { firstName: 'Sam', email: OLD_EMAIL } } });
+      expect(mockUpdates).toEqual([{ first_name: 'Sam', updated_at: 'NOW' }]);
     });
 
     test('a customer with no email on file asks for a code for the first address too', async () => {
@@ -388,6 +411,17 @@ describe('POST /api/customer/profile/confirm-email', () => {
     expect(toOld.idempotencyKey).not.toBe(toNew.idempotencyKey);
   });
 
+  test('the code check is given the address on file under the lock, so a request issued for another address is judged stale', async () => {
+    mockCode.checkCode.mockResolvedValue(okCheck());
+    await confirm('123456');
+    expect(mockCode.checkCode.mock.calls[0][1]).toMatchObject({ customerId: CUSTOMER_ID, code: '123456', currentEmail: OLD_EMAIL });
+  });
+
+  test('the request records the address on file when the code is issued', async () => {
+    await put({ email: NEW_EMAIL });
+    expect(mockCode.issueRequest.mock.calls[0][1]).toEqual({ customerId: CUSTOMER_ID, newEmail: NEW_EMAIL, fromEmail: OLD_EMAIL });
+  });
+
   test('the address that gets written is the one the code was SENT to, never one in the confirm request', async () => {
     mockCode.checkCode.mockResolvedValue(okCheck('sent.to@example.test'));
     const res = await fetch(`${baseUrl}/api/customer/profile/confirm-email`, {
@@ -400,6 +434,7 @@ describe('POST /api/customer/profile/confirm-email', () => {
   test.each([
     ['wrong', { outcome: 'wrong', attemptsLeft: 3 }, 400, 'code_wrong', { attemptsLeft: 3 }],
     ['expired', { outcome: 'expired' }, 400, 'code_expired', {}],
+    ['stale (the address on file moved since the code was sent)', { outcome: 'stale' }, 400, 'code_expired', {}],
     ['missing (never asked, or already used)', { outcome: 'missing' }, 400, 'code_expired', {}],
     ['too many attempts', { outcome: 'attempts' }, 429, 'code_attempts', {}],
   ])('%s: refused, nothing written, no notice, and the transaction COMMITS (the attempt count must persist)', async (_l, check, status, code, extra) => {

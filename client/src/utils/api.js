@@ -73,6 +73,15 @@ function isTrustedCustomerRequestUrl(url) {
   }
 }
 
+// A save that partly worked before failing (PUT /customer/profile: the name saved, the email code did not send)
+// names what was saved, so the screen can show it and retry only the rest.
+function partialSaveFields(errorBody) {
+  const out = {};
+  if (Array.isArray(errorBody?.changed)) out.changed = errorBody.changed;
+  if (errorBody?.profile && typeof errorBody.profile === 'object') out.profile = errorBody.profile;
+  return out;
+}
+
 export class ApiClient {
   constructor() {
     this.token = localStorage.getItem('waves_token');
@@ -235,6 +244,7 @@ export class ApiClient {
         // partial batches use this to know which fields must never be
         // retried, same way `code` is a machine-readable discriminator.
         if (Array.isArray(errorBody?.rejected)) requestErr.rejected = errorBody.rejected;
+        Object.assign(requestErr, partialSaveFields(errorBody));
         throw requestErr;
       }
 

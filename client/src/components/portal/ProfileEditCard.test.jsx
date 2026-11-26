@@ -150,6 +150,38 @@ describe('ProfileEditCard', () => {
       expect(refreshCustomer).toHaveBeenCalledTimes(1);
     });
 
+    it('a combined save whose code email fails: the saved name is shown, the baseline resets, and the retry sends only the email', async () => {
+      const failure = Object.assign(new Error('We could not send the code. Please try again in a moment.'), {
+        status: 502, code: 'code_send_failed', changed: ['firstName'], profile: { firstName: 'Sam', lastName: 'Sample', email: 'pat.sample@example.test' },
+      });
+      api.updateCustomerProfile.mockRejectedValueOnce(failure);
+      const refreshCustomer = vi.fn().mockResolvedValue(undefined);
+      renderCard({ refreshCustomer });
+      fireEvent.click(screen.getByTestId('profile-edit-open'));
+      fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Sam' } });
+      fireEvent.change(screen.getByLabelText('Email'), { target: { value: NEW } });
+      fireEvent.click(screen.getByTestId('profile-edit-save'));
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('could not send the code'));
+      expect(refreshCustomer).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId('profile-edit-form')).toBeInTheDocument();
+      // Retry: the name is no longer an outstanding edit.
+      api.updateCustomerProfile.mockResolvedValueOnce({ changed: [], emailPending: { email: NEW, expiresInMinutes: 15 } });
+      fireEvent.click(screen.getByTestId('profile-edit-save'));
+      await screen.findByTestId('profile-code-form');
+      expect(api.updateCustomerProfile).toHaveBeenLastCalledWith({ email: NEW });
+    });
+
+    it('a failure that saved nothing does not refresh the customer', async () => {
+      api.updateCustomerProfile.mockRejectedValueOnce(Object.assign(new Error('We could not send the code.'), { status: 502, changed: [], profile: {} }));
+      const refreshCustomer = vi.fn();
+      renderCard({ refreshCustomer });
+      fireEvent.click(screen.getByTestId('profile-edit-open'));
+      fireEvent.change(screen.getByLabelText('Email'), { target: { value: NEW } });
+      fireEvent.click(screen.getByTestId('profile-edit-save'));
+      await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+      expect(refreshCustomer).not.toHaveBeenCalled();
+    });
+
     it('Cancel closes the code step without confirming', async () => {
       await startEmailChange();
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));

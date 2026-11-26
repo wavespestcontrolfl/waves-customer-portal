@@ -6,6 +6,9 @@
 //
 //   customer_id  who asked; the row goes with the customer (ON DELETE CASCADE)
 //   new_email    the typed address, trimmed and lower-cased
+//   from_email   the customer's stored email when the code was issued (lower-cased; null = none on file). A code is
+//                good only while customers.email still equals it: staff or another path moving the address
+//                in between makes the request stale (answered as expired and consumed)
 //   code_hash    HMAC-SHA256 hex of "<id>:<code>" under the server secret; the code itself exists only in the email
 //   attempts     wrong codes typed so far; the route refuses at 5 and the customer asks for a new code
 //   expires_at   created or re-sent time + 15 minutes
@@ -21,6 +24,7 @@ exports.up = async function up(knex) {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.uuid('customer_id').notNullable().references('id').inTable('customers').onDelete('CASCADE');
     t.text('new_email').notNullable();
+    t.text('from_email').nullable();
     t.text('code_hash').notNullable();
     t.smallint('attempts').notNullable().defaultTo(0);
     t.timestamp('expires_at', { useTz: true }).notNullable();

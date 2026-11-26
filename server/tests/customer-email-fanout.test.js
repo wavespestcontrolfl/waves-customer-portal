@@ -353,6 +353,9 @@ describe('propagateCustomerEmailChange', () => {
     await propagateSelfServiceEmailChange({ before: BEFORE, after: AFTER, reviewReasonCodes: ['customer_email_missing'] }, conn);
     const subUpdates = conn.__updates('newsletter_subscribers');
     expect(subUpdates).toHaveLength(2);
+    // The opt-out is written on the MAILBOX (the sender's mailbox key), not on the linked row: no customer_id filter on it.
+    const mailboxCall = conn.__calls.find((c) => c.table === 'newsletter_subscribers' && c.op === 'whereRaw' && /CASE WHEN/.test(c.arg.sql));
+    expect(mailboxCall.arg.bindings).toEqual(['chris.w.sample@example.com']);
     expect(subUpdates[0].arg).toMatchObject({ status: 'unsubscribed' });
     expect(subUpdates[0].arg.unsubscribed_at).toBeInstanceOf(Date);
     expect(Object.keys(subUpdates[0].arg).sort()).toEqual(['status', 'unsubscribed_at', 'updated_at']);
@@ -361,6 +364,22 @@ describe('propagateCustomerEmailChange', () => {
       && c.arg.col === 'status' && String(c.arg.vals) === 'pending,active')).toBe(true);
     expect(subUpdates[1].arg).toMatchObject({ customer_id: null, quote_lead_automation_pending: false, quote_lead_id: null });
     expect(subUpdates[1].arg.status).toBeUndefined();
+  });
+
+  test('self-service, opt-out, old address is a Gmail alias: the mailbox key is the Gmail identity, so an unlinked alias row is covered too', async () => {
+    const conn = makeConn({ notification_prefs: { firstQueue: [{ customer_id: 'cust-1' }] }, newsletter_subscribers: { firstQueue: [null] } });
+    await propagateSelfServiceEmailChange({
+      before: { ...BEFORE, email: 'Chris.W+Quotes@Gmail.com' }, after: { ...AFTER, email: 'chris.new@example.com' }, reviewReasonCodes: ['customer_email_missing'],
+    }, conn);
+    const mailboxCall = conn.__calls.find((c) => c.table === 'newsletter_subscribers' && c.op === 'whereRaw' && /CASE WHEN/.test(c.arg.sql));
+    expect(mailboxCall.arg.bindings).toEqual(['chrisw@gmail.com']);
+    expect(conn.__updates('newsletter_subscribers')[0].arg.status).toBe('unsubscribed');
+  });
+
+  test('self-service, opt-out: nothing is inserted for either address', async () => {
+    const conn = makeConn({ notification_prefs: { firstQueue: [{ customer_id: 'cust-1' }] }, newsletter_subscribers: { firstQueue: [null] } });
+    await propagateSelfServiceEmailChange({ before: BEFORE, after: AFTER, reviewReasonCodes: ['customer_email_missing'] }, conn);
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'insert')).toBe(false);
   });
 
   test('self-service, no opt-out: the row keeps its status (a single unlink write)', async () => {
