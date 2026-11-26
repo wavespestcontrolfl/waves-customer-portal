@@ -91,6 +91,7 @@
  */
 
 const { matchServiceProtocol, followupVisitMatch } = require('./protocol-matcher');
+const { isLaterPackageVisit } = require('./protocol-package-stage');
 const { filterTreeShrubDefaults } = require('./tree-shrub-completion-defaults');
 const { inferTreeShrubOrdinanceZone } = require('./tree-shrub-closeout');
 const { completionRateFields } = require('../utils/protocol-label-rate');
@@ -396,7 +397,7 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       .where({ id: serviceId })
       .first(
         'id', 'customer_id', 'property_id', 'service_id', 'service_type', 'service_key_snapshot',
-        'scheduled_date', 'followup_source_service_id',
+        'scheduled_date', 'followup_source_service_id', 'recurring_parent_id', 'recurring_ongoing',
       );
     if (!scheduled) return empty;
 
@@ -414,7 +415,8 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       month,
       // A row this IS a follow-up child of (Codex r3 P1, PR #5049) — see
       // resolveCompletionDefaultProductNames' own isFollowup doc above.
-      isFollowup: !!scheduled.followup_source_service_id,
+      // A later visit of a package booked up front counts too (protocol-package-stage.js).
+      isFollowup: !!scheduled.followup_source_service_id || await isLaterPackageVisit(db, scheduled),
     });
 
     let holds = [];
