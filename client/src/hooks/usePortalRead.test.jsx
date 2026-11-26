@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import usePortalRead, { PortalReadProvider, READ_TIMEOUT_MS, usePortalRefresh } from './usePortalRead';
 import { PortalRefreshArea } from '../components/portal/PortalRefresh';
+import { HOME_READS_KEY, HOME_SNAPSHOT_KEY, homeIdentityKey, readHomeSnapshot, writeHomeRead, writeHomeSnapshot } from '../lib/homeSnapshot';
 
 const native = vi.hoisted(() => ({ enabled: false, callback: null, remove: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../native/platform', () => ({ isNativeApp: () => native.enabled }));
@@ -599,5 +600,197 @@ describe('customer portal reads', () => {
     fireEvent.touchCancel(target);
     fireEvent.touchEnd(target);
     expect(load).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Saved home reads (owner 2026-11-25): only 'next-visit' and 'latest-service'
+// reach browser storage, under the login + property they were read for.
+describe('saved home reads', () => {
+  const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const tokenFor = (claims) => `${b64u({ alg: 'none' })}.${b64u(claims)}.sig`;
+  const TOKEN = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1' });
+  const identity = homeIdentityKey(TOKEN);
+  const visit = { id: 'v1', serviceType: 'Pest Control', date: '2026-12-01', windowStart: '09:00', reportUrl: 'https://example.test/report/secret' };
+
+  function HomeReads({ nextLoad, lastLoad, otherLoad, who = identity, property = 'cust-1:p1' }) {
+    return <PortalReadProvider enabled persistIdentity={who} persistProperty={property}>
+      <Probe name="next-visit" load={nextLoad} />
+      <Probe name="latest-service" load={lastLoad} />
+      <Probe name="documents" load={otherLoad} />
+    </PortalReadProvider>;
+  }
+  function Probe({ name, load }) {
+    const read = usePortalRead(name, load);
+    return <div data-testid={name}>{`${read.data ? JSON.stringify(read.data) : 'none'}|${read.verified}|${read.saved}`}</div>;
+  }
+  const never = () => new Promise(() => {});
+  const seed = (property = 'cust-1:p1') => {
+    writeHomeRead(identity, property, 'next-visit', { next: visit, propertyScope: { enabled: true, propertyId: 'p1' } }, Date.now() - 60000);
+    writeHomeRead(identity, property, 'latest-service', { services: [visit] }, Date.now() - 60000);
+  };
+
+  beforeEach(() => { localStorage.clear(); localStorage.setItem('waves_token', TOKEN); });
+  afterEach(() => localStorage.clear());
+
+  it('hydrates the two reads at mount as unverified saved data before any load answers', () => {
+    seed();
+    render(<HomeReads nextLoad={never} lastLoad={never} otherLoad={never} />);
+    const next = screen.getByTestId('next-visit').textContent;
+    expect(next).toContain('Pest Control');
+    expect(next).toMatch(/\|false\|true$/);
+    expect(next).not.toContain('reportUrl');
+    expect(screen.getByTestId('latest-service').textContent).toMatch(/Pest Control.*\|false\|true$/);
+    // Nothing else is ever hydrated.
+    expect(screen.getByTestId('documents').textContent).toBe('none|false|false');
+  });
+
+  it('a successful refresh verifies the read and persists only the two home reads, cut to the card fields', async () => {
+    seed();
+    const fresh = { next: { ...visit, serviceType: 'Lawn Care' }, propertyScope: null };
+    render(<HomeReads nextLoad={async () => fresh} lastLoad={async () => ({ services: [visit] })} otherLoad={async () => ({ documents: [{ id: 'd1', name: 'Private doc' }] })} />);
+    await waitFor(() => expect(screen.getByTestId('next-visit').textContent).toMatch(/Lawn Care.*\|true\|false$/));
+    const raw = localStorage.getItem(HOME_READS_KEY);
+    expect(raw).toContain('Lawn Care');
+    for (const word of ['Private doc', 'documents', 'reportUrl', 'secret']) expect(raw).not.toContain(word);
+    expect(Object.keys(JSON.parse(raw).reads).sort()).toEqual(['latest-service', 'next-visit']);
+  });
+
+  it('a failed refresh keeps the saved read on screen and in storage', async () => {
+    seed();
+    render(<HomeReads nextLoad={async () => { throw new Error('weak signal'); }} lastLoad={never} otherLoad={never} />);
+    await waitFor(() => expect(screen.getByTestId('next-visit').textContent).toMatch(/Pest Control.*\|false\|true$/));
+    expect(JSON.parse(localStorage.getItem(HOME_READS_KEY)).reads['next-visit']).toBeTruthy();
+  });
+
+  it('a 401 clears the saved reads from memory and storage', async () => {
+    seed();
+    render(<HomeReads nextLoad={async () => { throw Object.assign(new Error('no'), { status: 401 }); }} lastLoad={never} otherLoad={never} />);
+    await waitFor(() => expect(screen.getByTestId('next-visit').textContent).toBe('none|false|false'));
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('serves nothing, and deletes the entry, for another property or another login', () => {
+    seed('cust-1:p1');
+    render(<HomeReads nextLoad={never} lastLoad={never} otherLoad={never} property="cust-1:p2" />);
+    expect(screen.getByTestId('next-visit').textContent).toBe('none|false|false');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+    cleanup();
+    seed('cust-1:p1');
+    const other = homeIdentityKey(tokenFor({ customerId: 'cust-1', sessionId: 'fam-2' }));
+    render(<HomeReads nextLoad={never} lastLoad={never} otherLoad={never} who={other} />);
+    expect(screen.getByTestId('next-visit').textContent).toBe('none|false|false');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('writes nothing without a login identity (contact or cancelled sessions) and hydrates nothing', async () => {
+    seed();
+    render(<HomeReads nextLoad={async () => ({ next: null })} lastLoad={async () => ({ services: [] })} otherLoad={never} who={null} />);
+    expect(screen.getByTestId('next-visit').textContent).toBe('none|false|false');
+    await waitFor(() => expect(screen.getByTestId('next-visit').textContent).toMatch(/\|true\|false$/));
+    // The entry from before is untouched by this identity-less provider.
+    expect(JSON.parse(localStorage.getItem(HOME_READS_KEY)).reads['next-visit'].data.next.id).toBe('v1');
+  });
+
+  it('never persists when the provider is disabled', async () => {
+    seed();
+    render(<PortalReadProvider enabled={false} persistIdentity={identity} persistProperty="cust-1:p1"><Probe name="next-visit" load={async () => ({ next: { id: 'x', serviceType: 'Disabled' } })} /></PortalReadProvider>);
+    await waitFor(() => expect(screen.getByTestId('next-visit').textContent).toContain('Disabled'));
+    expect(localStorage.getItem(HOME_READS_KEY)).not.toContain('Disabled');
+  });
+
+  it('a denied read empties every mounted sibling, in memory and on disk', async () => {
+    seed();
+    render(<HomeReads nextLoad={async () => { throw Object.assign(new Error('no'), { status: 403 }); }} lastLoad={never} otherLoad={never} />);
+    // latest-service never answers, yet it must not keep its hydrated data.
+    await waitFor(() => expect(screen.getByTestId('latest-service').textContent).toBe('none|false|false'));
+    expect(screen.getByTestId('next-visit').textContent).toBe('none|false|false');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('an answer that was already on the way when a sibling was denied is discarded and writes nothing', async () => {
+    seed();
+    let release;
+    const lateLast = () => new Promise((resolve) => { release = resolve; });
+    render(<HomeReads nextLoad={async () => { throw Object.assign(new Error('no'), { status: 401 }); }} lastLoad={lateLast} otherLoad={never} />);
+    await waitFor(() => expect(localStorage.getItem(HOME_READS_KEY)).toBeNull());
+    await act(async () => { release({ services: [{ id: 'late', serviceType: 'Late Visit', date: '2026-12-02' }] }); });
+    expect(screen.getByTestId('latest-service').textContent).not.toContain('Late Visit');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('saves nothing when the login that started the read is not the provider\'s login', async () => {
+    const otherToken = tokenFor({ customerId: 'cust-1', sessionId: 'fam-2' });
+    let release;
+    // The read starts while another login's token is stored, and answers after this provider's login is back.
+    localStorage.setItem('waves_token', otherToken);
+    render(<HomeReads nextLoad={() => new Promise((resolve) => { release = resolve; })} lastLoad={never} otherLoad={never} />);
+    localStorage.setItem('waves_token', TOKEN);
+    await act(async () => { release({ next: { id: 'x', serviceType: 'Wrong Login Visit' } }); });
+    expect(screen.getByTestId('next-visit').textContent).toContain('Wrong Login Visit');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('a denied read also deletes the saved account, so an offline relaunch adopts nothing', async () => {
+    seed();
+    const me = { id: 'cust-1', firstName: 'Pat', lastName: 'Customer', actor: { kind: 'holder' }, cancelled: false };
+    expect(writeHomeSnapshot({ token: TOKEN, requestIdentity: identity, me, propertyPayload: { scope: 'saved', properties: [], selected: null } })).toBe(true);
+    expect(readHomeSnapshot(TOKEN)).not.toBeNull();
+    render(<HomeReads nextLoad={async () => { throw Object.assign(new Error('no'), { status: 401 }); }} lastLoad={never} otherLoad={never} />);
+    await waitFor(() => expect(localStorage.getItem(HOME_READS_KEY)).toBeNull());
+    expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).toBeNull();
+    expect(readHomeSnapshot(TOKEN)).toBeNull();
+  });
+
+  it('a denial that lands after its reader unmounted still deletes the saved reads and the saved account', async () => {
+    seed();
+    const me = { id: 'cust-1', firstName: 'Pat', lastName: 'Customer', actor: { kind: 'holder' }, cancelled: false };
+    writeHomeSnapshot({ token: TOKEN, requestIdentity: identity, me, propertyPayload: { scope: 'saved', properties: [], selected: null } });
+    let reject;
+    const late = () => new Promise((_, no) => { reject = no; });
+    const Harness = ({ show }) => <PortalReadProvider enabled persistIdentity={identity} persistProperty="cust-1:p1">
+      {show && <Probe name="next-visit" load={late} />}
+    </PortalReadProvider>;
+    const view = render(<Harness show />);
+    view.rerender(<Harness show={false} />);
+    await act(async () => { reject(Object.assign(new Error('revoked'), { status: 403 })); });
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+    expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).toBeNull();
+  });
+
+  it('evicting a saved read key deletes the saved reads; evicting another key leaves them', async () => {
+    seed();
+    let evictFor;
+    function Evictor({ name }) {
+      const read = usePortalRead(name, never);
+      evictFor = read.evict;
+      return null;
+    }
+    const view = render(<PortalReadProvider enabled persistIdentity={identity} persistProperty="cust-1:p1"><Evictor name="documents" /></PortalReadProvider>);
+    act(() => { evictFor({ message: 'scope changed' }); });
+    expect(localStorage.getItem(HOME_READS_KEY)).not.toBeNull();
+    view.unmount();
+    render(<PortalReadProvider enabled persistIdentity={identity} persistProperty="cust-1:p1"><Evictor name="next-visit" /></PortalReadProvider>);
+    act(() => { evictFor({ message: 'scope changed' }); });
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('a denial that lands after its provider unmounted deletes only ITS login\'s saved entries, never another login\'s', async () => {
+    seed();
+    const me = { id: 'cust-1', firstName: 'Pat', lastName: 'Customer', actor: { kind: 'holder' }, cancelled: false };
+    const props = { scope: 'saved', properties: [], selected: null };
+    writeHomeSnapshot({ token: TOKEN, requestIdentity: identity, me, propertyPayload: props });
+    let reject;
+    const late = () => new Promise((_, no) => { reject = no; });
+    const view = render(<PortalReadProvider enabled persistIdentity={identity} persistProperty="cust-1:p1"><Probe name="next-visit" load={late} /></PortalReadProvider>);
+    view.unmount();
+    // Meanwhile another login on this browser saves its own screen.
+    const otherToken = tokenFor({ customerId: 'cust-2', sessionId: 'fam-5' });
+    const otherIdentity = homeIdentityKey(otherToken);
+    localStorage.setItem('waves_token', otherToken);
+    writeHomeSnapshot({ token: otherToken, requestIdentity: otherIdentity, me: { ...me, id: 'cust-2', firstName: 'Sam' }, propertyPayload: props });
+    writeHomeRead(otherIdentity, 'cust-2:p1', 'next-visit', { next: { id: 'o1', serviceType: 'Other Login Visit' } }, Date.now());
+    await act(async () => { reject(Object.assign(new Error('revoked'), { status: 401 })); });
+    expect(readHomeSnapshot(otherToken)).not.toBeNull();
+    expect(localStorage.getItem(HOME_READS_KEY)).toContain('Other Login Visit');
   });
 });

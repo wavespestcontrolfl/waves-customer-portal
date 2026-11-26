@@ -77,10 +77,11 @@ const farCutoff = (nowDate) => etDateString(addETDays(nowDate, FAR_DAYS));
 const PROBLEM = {
   overlap: ['overlaps another stop', 'still overlaps another stop'],
   closed_day: ['is on a closed day', 'is still on a closed day'],
+  customer_blackout: ['is inside the customer\'s blackout dates', 'is still inside the customer\'s blackout dates'],
 };
 
 function problemOf(conflict) {
-  return conflict.kind === 'closed_day' ? 'closed_day' : 'overlap';
+  return conflict.kind === 'closed_day' || conflict.kind === 'customer_blackout' ? conflict.kind : 'overlap';
 }
 
 // Remember a visit in conflict for the end-of-run notice. `bucket` is the run's Map.
@@ -118,6 +119,9 @@ function whyFor(item, subject) {
 function actionFor(item) {
   if (item.kind === 'move_limit') {
     return [[(who) => `move ${who}'s visit; auto-dispatch cannot`, (who) => `move ${who}'s visit`], 'move a visit auto-dispatch cannot move again'];
+  }
+  if (item.problem === 'customer_blackout') {
+    return [[(who) => `move ${who}'s visit out of their blackout dates`, (who) => `move ${who}'s visit`], 'move a visit out of the customer\'s blackout dates'];
   }
   if (item.problem === 'closed_day') {
     return [[(who) => `move ${who}'s visit off a closed day`, (who) => `move ${who}'s visit`], 'move a visit off a closed day'];

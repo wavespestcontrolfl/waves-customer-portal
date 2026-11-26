@@ -16,6 +16,8 @@ const postgres = SKIP ? describe.skip : describe;
 jest.mock('../models/db', () => {
   const db = (...args) => db.connection(...args);
   db.raw = (...args) => db.connection.raw(...args);
+  // A writer's own transaction is a savepoint of the test's transaction, so its rows roll back with the test.
+  db.transaction = (...args) => db.connection.transaction(...args);
   return db;
 });
 
@@ -206,6 +208,57 @@ postgres('returning customer setup fee: the visit history (real Postgres)', () =
     await db('scheduled_services').where({ id: moved }).update({ date_exception: false, date_exception_cadence_date: null });
     // September to October (35 days), never October to February.
     expect((await history(account)).mosquito).toEqual({ lastVisitKey: '2026-10-14', cycleDays: 35 });
+  });
+
+  // The call and text drafter stores its own row (estimator-engine createDraftEstimate), and that row goes out
+  // with one click and no staff save. The rule's answer has to be on it in the shape the readers already read.
+  test('a call draft decided inside the window is stored with the waiver: the page maps no fee and the accept bills none', async () => {
+    const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const Returning = require('../services/returning-setup-fee-waiver');
+    const { createDraftEstimate, deriveTotals } = require('../services/estimator-engine/draft-builder');
+    const { setupFeeApplies } = require('../services/estimate-accept-effects');
+    const pest = await catalogService('Quarterly Pest Control');
+    const engineInput = { homeSqFt: 2200, stories: 1, lotSqFt: 12000, propertyType: 'single_family', services: { pest: { frequency: 'quarterly' } } };
+    // One draft for one caller, as the pipeline makes it: price, decide on the linked customer's visits, insert.
+    const draftFor = async (customerId, phone) => {
+      const engineResult = generateEstimate(engineInput);
+      const visits = await loadReturningVisitHistory(db, { customerId, now: NOW });
+      const { waiver } = Returning.mapWithReturningWaiver(engineResult, mapV1ToLegacyShape, { history: visits });
+      const draft = await createDraftEstimate({
+        intent: {
+          address: `${phone.slice(-4)} Example St, Testville, FL 34200`, customer_name: 'Synthetic Fixture', customer_phone: phone,
+          category: 'RESIDENTIAL', services: { pest: { frequency: 'quarterly' } }, service_interest_label: 'Pest Control',
+          evidence: [], constraint_flags: [], confidence: 'high',
+        },
+        engineInput, engineResult, totals: deriveTotals(engineResult), lane: 'green', laneReasons: [], propertyFacts: {},
+        comps: null, calibration: [], model: 'fixture', call: null,
+        context: { phone, customer: { id: customerId }, customerPhoneAmbiguous: false },
+        returningSetupFeeWaiver: waiver,
+      });
+      const row = await db('estimates').where({ id: draft.estimate.id }).first('customer_id', 'source', 'estimate_data');
+      return { waiver, row, data: typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data };
+    };
+    // Back 54 days after a quarterly pest visit (Oct 1 to Nov 24): inside 91 + 30.
+    const returning = await customer();
+    await closeout(returning, await visit(returning, { service_id: pest.id, scheduled_date: '2026-10-01' }),
+      { completedServiceKey: pest.service_key, completedServiceName: 'Pest Control Service', completedAddonLines: [] }, { service_date: '2026-10-01' });
+    const waived = await draftFor(returning, '+19415550101');
+    expect(waived.waiver).toEqual(expect.objectContaining({ rule: 'returning_customer_gap', family: 'pest_control', gapDays: 54, windowDays: 121 }));
+    expect(waived.row).toEqual(expect.objectContaining({ customer_id: returning, source: 'estimator_engine' }));
+    // Stored as a staff save stores it, so a later save or service change finds and re-decides it.
+    expect(Returning.returningSetupFeeWaiverOf(waived.data)).toEqual(waived.waiver);
+    expect(waived.data.operatorPriceAdjustment.waiveSetupFee).toBe(true);
+    // The page maps the stored engine result; the accept reads the stored waiver (its own reader).
+    expect(mapV1ToLegacyShape(waived.data.engineResult).oneTime.membershipFee).toBe(0);
+    expect(setupFeeApplies(waived.data, 'monthly')).toBe(false);
+    expect(waived.data.estimatorEngine.reviewNotes).toContain('Setup fee: waived, returning customer (last plan visit 2026-10-01, 54 days ago; window 121 days).');
+    // The same caller with no plan visit on file: the fee is on the page and on the bill.
+    const fresh = await draftFor(await customer(), '+19415550102');
+    expect(fresh.waiver).toBeNull();
+    expect(fresh.data.operatorPriceAdjustment).toBeUndefined();
+    expect(mapV1ToLegacyShape(fresh.data.engineResult).oneTime.membershipFee).toBeGreaterThan(0);
+    expect(setupFeeApplies(fresh.data, 'monthly')).toBe(true);
   });
 
   test('an account with an active plan is never under the rule; the cancelled account is', async () => {
