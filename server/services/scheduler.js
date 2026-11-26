@@ -4488,6 +4488,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:05AM ET — Lead "why" filler (no LLM). Fills leads.previous_company /
+  // switch_reason / not_booked_reason from call_research_chunks with fixed
+  // keyword rules; the job owns the fields and recomputes them (it replaces or
+  // clears a stale value). Runs an hour
+  // after the 3:05 call-research miner. Kill switch: LEAD_WHY_FILL=off (not a gate).
+  // =========================================================================
+  cron.schedule('5 4 * * *', async () => {
+    if (process.env.LEAD_WHY_FILL === 'off') return;
+    logger.info('Running: Lead why filler');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { fillLeadWhy } = require('./lead-why-fill');
+      await runExclusive('lead-why-fill', () => fillLeadWhy());
+    } catch (err) {
+      logger.error(`Lead why filler failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // HOURLY :40 — Call re-transcription backfill (voice-corpus training).
   // Upgrades consented legacy recordings to diarized transcripts (batch-
   // capped); the nightly miner then folds them into the voice corpus. One
