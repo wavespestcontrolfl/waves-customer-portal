@@ -248,14 +248,20 @@ function flagLine(status, saved) {
 }
 
 function AccessFlagCard({ flag, serviceId, request, onChanged }) {
-  const [tap, setTap] = useState({ busy: false, status: flag.status === 'right' ? 'right' : null, saved: false, error: '' });
+  // The server's answer decides what shows on every refresh; local state only covers a tap on THIS card (the section
+  // keys it by visit, question and evidence) that has been answered but not yet read back.
+  const [tap, setTap] = useState({ busy: false, status: null, saved: false, error: '' });
   const amber = flag.tone === 'amber';
-  const answered = tap.status === 'right' || tap.status === 'wrong';
+  const shownStatus = flag.status === 'right' ? 'right' : tap.status;
+  const answered = shownStatus === 'right' || shownStatus === 'wrong';
   async function send(verdict) {
     setTap((t) => ({ ...t, busy: true, error: '' }));
     try {
       const out = await request(`/admin/schedule/${encodeURIComponent(serviceId)}/access-flags/${encodeURIComponent(flag.questionId)}`, { method: 'POST', body: JSON.stringify({ verdict, subjectHash: flag.subjectHash }) });
-      setTap({ busy: false, status: out?.status === 'wrong' || out?.status === 'right' ? out.status : verdict, saved: out?.saved === true, error: '' });
+      // Only an explicit answer counts: an empty 2xx leaves the outcome unknown, so the buttons stay.
+      const status = out?.status === 'right' || out?.status === 'wrong' ? out.status : (out?.saved === true ? 'right' : null);
+      if (!status) throw new Error('Could not save. Try again.');
+      setTap({ busy: false, status, saved: out?.saved === true, error: '' });
     } catch (err) {
       // The evidence moved (a newer read, or someone already answered): read the brief again.
       if (err?.status === 409) onChanged?.();
@@ -281,7 +287,7 @@ function AccessFlagCard({ flag, serviceId, request, onChanged }) {
         </div>
       </div>
       {answered ? (
-        <p role="status" style={{ ...factMutedStyle, margin: '10px 0 0' }}>{flagLine(tap.status, tap.saved)}</p>
+        <p role="status" style={{ ...factMutedStyle, margin: '10px 0 0' }}>{flagLine(shownStatus, tap.saved)}</p>
       ) : (
         <>
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
@@ -312,14 +318,13 @@ function collectAccessFlags(services, byService) {
 
 function AccessFlagsSection({ flags, request, onChanged }) {
   if (!request || !flags.length) return null;
-  const readAt = flags.map((f) => f.readAt).filter(Boolean).sort().pop();
   return (
     <div data-testid="visit-brief-access-flags">
       <div style={{ ...sectionLabelStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
         <span>Before you go in</span>
-        {readAt && <span style={{ fontWeight: 400, color: DARK.muted }}>{`Read by AI \u00B7 ${formatETTime(readAt)} ET`}</span>}
+        <span style={{ fontWeight: 400, color: DARK.muted }}>Read by AI</span>
       </div>
-      {flags.map((f) => <AccessFlagCard key={f.questionId} flag={f} serviceId={f.serviceId} request={request} onChanged={onChanged} />)}
+      {flags.map((f) => <AccessFlagCard key={`${f.serviceId}:${f.questionId}:${f.subjectHash}`} flag={f} serviceId={f.serviceId} request={request} onChanged={onChanged} />)}
     </div>
   );
 }

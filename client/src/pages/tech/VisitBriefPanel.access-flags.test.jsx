@@ -26,11 +26,11 @@ const stop = { key: 'row:svc-1', isVisit: false, services: [SERVICE], primary: S
 const HASH = 'a'.repeat(64);
 const DOG = {
   questionId: 'dog_on_property', title: 'Dog or other animal may be loose', tone: 'amber', status: 'open',
-  readAt: '2026-10-06T14:05:00.000Z', subjectHash: HASH, quote: 'Our dog Biscuit will be in the yard', source: 'Customer text', saveToFile: 'pets',
+  subjectHash: HASH, quote: 'Our dog Biscuit will be in the yard', source: 'Customer text', saveToFile: 'pets',
 };
 const CALL = {
   questionId: 'contact_before_arrival', title: 'Customer asked for a call or text before you arrive', tone: 'plain', status: 'open',
-  readAt: '2026-10-06T14:05:00.000Z', subjectHash: HASH, quote: null, source: 'Read: customer text', saveToFile: null,
+  subjectHash: HASH, quote: null, source: 'Read: customer text', saveToFile: null,
 };
 
 function renderWith(brief, request = vi.fn(async () => ({ status: 'right' })), onRetry = vi.fn()) {
@@ -46,11 +46,12 @@ function renderWith(brief, request = vi.fn(async () => ({ status: 'right' })), o
 }
 
 describe('Visit Brief: Before you go in', () => {
-  it('shows each flag with its title, quote, source and the read time in Eastern time', () => {
+  it('shows each flag with its title, quote and source, labeled Read by AI with no time', () => {
     renderWith({ brief: null, accessFlags: [DOG, CALL] });
     const section = screen.getByTestId('visit-brief-access-flags');
     expect(section).toHaveTextContent('Before you go in');
-    expect(section).toHaveTextContent('Read by AI · 10:05 AM ET');
+    expect(section).toHaveTextContent('Read by AI');
+    expect(section).not.toHaveTextContent(/\d:\d\d/);
     const dog = screen.getByTestId('access-flag-dog_on_property');
     expect(dog).toHaveTextContent('Dog or other animal may be loose');
     expect(dog).toHaveTextContent('“Our dog Biscuit will be in the yard”');
@@ -99,6 +100,36 @@ describe('Visit Brief: Before you go in', () => {
 
   it('a flag already marked right shows its line on load, with no buttons', () => {
     renderWith({ brief: null, accessFlags: [{ ...CALL, status: 'right' }] });
+    expect(screen.getByText('Marked right. Thanks.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Right' })).toBeNull();
+  });
+
+  it('an empty or unreadable 2xx is not a success: the buttons stay and the tech is told to try again', async () => {
+    renderWith({ brief: null, accessFlags: [CALL] }, vi.fn(async () => ({})));
+    fireEvent.click(screen.getByRole('button', { name: 'Right' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Could not save. Try again.'));
+    expect(screen.queryByText('Marked right. Thanks.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Wrong' })).not.toBeDisabled();
+  });
+
+  it('a refresh with new evidence starts a fresh card, and the server status decides what shows', async () => {
+    const view = (flag) => (
+      <VisitBriefPanel
+        stop={stop}
+        detail={{ status: 'ready', byService: { 'svc-1': { estimate: null, brief: { brief: null, accessFlags: [flag] } } } }}
+        request={vi.fn(async () => ({ status: 'wrong' }))}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />
+    );
+    const { rerender } = render(view(CALL));
+    fireEvent.click(screen.getByRole('button', { name: 'Wrong' }));
+    await waitFor(() => expect(screen.getByText('Marked wrong. Hidden for this visit.')).toBeInTheDocument());
+    // New evidence (another hash) for the same question: the old answer does not hide the new card.
+    rerender(view({ ...CALL, subjectHash: 'b'.repeat(64) }));
+    expect(screen.queryByText('Marked wrong. Hidden for this visit.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Right' })).toBeInTheDocument();
+    // The server now says right (answered elsewhere): no buttons, whatever this card held before.
+    rerender(view({ ...CALL, subjectHash: 'b'.repeat(64), status: 'right' }));
     expect(screen.getByText('Marked right. Thanks.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Right' })).toBeNull();
   });

@@ -3,34 +3,44 @@
  *
  * The hourly sweep (typed-decisions/visit-access-shadow.js) stores, per visit,
  * the redacted state the providers read (visit_access_states) and one
- * decision_reviews row per provider and question. This module reads those
- * rows back as flags for the technician and takes their Right / Wrong tap:
+ * decision_reviews row per provider and question. This module reads those back
+ * as flags for the technician and takes their Right / Wrong tap:
  *
  *   accessFlagsFor(dbh, visit)   flags for the visit's NEWEST stored state
- *   tapAccessFlag(dbh, tap, who) Right / Wrong: labels the question's rows
+ *   tapAccessFlag(dbh, tap, who) Right / Wrong, as one verdict row
  *
- * Nothing here calls a model. A question is flagged when ANY provider said yes
- * (a missed dog is worse than an extra flag) and no one has marked it wrong.
- * A Right confirmation on an EARLIER state of the same visit carries forward
- * (the pet save itself changes the state, and the warning must survive it); a
- * Wrong does not (new evidence should show again).
+ * Nothing here calls a model. A card shows when ANY provider said yes on the
+ * newest state (a missed dog is worse than an extra flag) and the technician
+ * has not marked it Wrong on that state, or when a Right they gave on an
+ * EARLIER state of the same visit carries forward (the pet save itself changes
+ * the state, and a confirmed warning must survive it). A Wrong never carries:
+ * new evidence shows the card again.
  *
- * A tap is bound to the evidence the technician saw (`subjectHash`) and runs
- * in one transaction that holds a FOR SHARE lock on the visit row, so the
- * assignment check and every write after it see the same assignment: a
- * reassignment cannot land in between. The labels go through the shared label
- * write (typed-decisions/label-write.js). The only write beside them is the pet
- * save: an accepted Right on a dog flag, while the profile holds no pets,
- * writes one pet_details line. Neither write sends anything to a customer.
+ * The tap writes ONE row to visit_access_verdicts, keyed by visit, question and
+ * the evidence digest (`subjectHash`) the card was read from. It never touches
+ * decision_reviews, so the providers' answers and the review lane's labels stay
+ * as the sweep and the reviewers left them. The tap runs in one transaction
+ * that holds a FOR SHARE lock on the visit row, so a reassignment cannot land
+ * between the assignment check and the writes. Only the tap whose insert
+ * created a Right on a dog flag saves the pet line, on the locked profile row
+ * and only while it holds no pets; a replay writes nothing. Neither write
+ * sends anything to a customer. Both paths re-prove the visit is still at its
+ * customer's one premises, because the profile, texts and notes the state was
+ * built from are keyed on the customer.
  */
 const logger = require('./logger');
 const { packageFor } = require('./typed-decisions/packages');
-const { writeLabel, correctValueFor, CONFIRMED } = require('./typed-decisions/label-write');
-const { PACKAGE_ID, SUBJECT_TYPE } = require('./typed-decisions/visit-access-shadow');
+const { PACKAGE_ID, SUBJECT_TYPE, visitSinglePremises } = require('./typed-decisions/visit-access-shadow');
 
 const REVIEWS = 'decision_reviews';
 const STATES = 'visit_access_states';
+const VERDICTS = 'visit_access_verdicts';
 const QUOTE_CHARS = 160;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Everything redactForState (and the text window) generates is a bracketed
+// marker: "[access detail withheld: ...]", "[redacted]", "[follow-up to ...]".
+// It is the sweep's wording, never the customer's, so it is never quoted.
+const MARKER_RE = /\[[^\]]*\]/;
 
 const TEXTS = { field: 'recent_texts', label: 'Customer text' };
 const NOTES = { field: 'notes_text', label: 'Notes on file' };
@@ -58,7 +68,7 @@ const FLAGS = {
   },
   past_access_problem: {
     title: 'Access problem on an earlier visit', tone: 'amber', sources: [LAST_TECH, NOTES, TEXTS],
-    words: /\b(?:locked|couldn['’]?t|could\s+not|no\s+one\s+home|nobody\s+home|not\s+home|no\s+access|unable|blocked|no\s+answer|reports\s+a\s+problem\s+getting\s+in)\b/i,
+    words: /\b(?:locked|couldn['’]?t|could\s+not|no\s+one\s+home|nobody\s+home|not\s+home|no\s+access|unable|blocked|no\s+answer)\b/i,
   },
   access_fact_not_on_file: {
     title: 'Customer texted an access fact that is not on file', tone: 'plain', sources: [TEXTS],
@@ -73,14 +83,15 @@ const parse = (value) => {
 };
 
 // The line the model most likely read the answer from: the first sentence in
-// the first field (in the question's order) that holds one of its words. No
-// match: quote null, and `source` names the fields that were read.
+// the first field (in the question's order) that holds one of its words and is
+// the writer's own (no generated marker). No match: quote null, and `source`
+// names the fields that were read.
 function pickQuote(state, questionId) {
   const flag = FLAGS[questionId];
   for (const { field, label } of flag.sources) {
     const lines = String(state?.[field] || '').split('\n');
     for (const line of lines) {
-      const sentence = line.replace(/^\s*-\s*/, '').split(/(?<=[.!?])\s+/).find((part) => flag.words.test(part));
+      const sentence = line.replace(/^\s*-\s*/, '').split(/(?<=[.!?])\s+/).find((part) => flag.words.test(part) && !MARKER_RE.test(part));
       if (sentence) return { quote: sentence.trim().slice(0, QUOTE_CHARS), source: label };
     }
   }
@@ -88,53 +99,33 @@ function pickQuote(state, questionId) {
   return { quote: null, source: read.length ? `Read: ${read.join(', ')}` : 'Read: nothing written on file' };
 }
 
-// What a technician (or reviewer) has said is true for a question, from its
-// confirmed rows: a confirmed-correct row confirms its own answer; a
-// confirmed-error row says the opposite. 'right' beats 'wrong' if they differ.
-function humanStatus(rows) {
-  const truths = rows.filter((row) => CONFIRMED.includes(row.label_status)).map((row) => {
-    const said = parse(row.jev_answer)?.yes;
-    const stated = parse(row.label)?.correct_value;
-    if (row.label_status === 'confirmed_correct') return said;
-    return typeof stated === 'boolean' ? stated : !said;
-  }).filter((truth) => typeof truth === 'boolean');
-  if (truths.includes(true)) return 'right';
-  return truths.length ? 'wrong' : 'open';
-}
-
 const saidYes = (row) => parse(row.jev_answer)?.yes === true;
-const newestAt = (rows) => rows.reduce((best, row) => (row.created_at && (!best || new Date(row.created_at) > best) ? new Date(row.created_at) : best), null);
 
-// Everything one visit's flags are read from: the newest stored state and
-// every review row of the visit (all states: an earlier state's Right carries).
+// Everything one visit's flags are read from: the newest stored state, its
+// provider answers, and every verdict the technicians gave on the visit.
 async function loadEvidence(dbh, visitId) {
-  const stored = await dbh(STATES).where({ scheduled_service_id: visitId }).orderBy('created_at', 'desc').first('subject_hash', 'state', 'created_at');
+  const stored = await dbh(STATES).where({ scheduled_service_id: visitId }).orderBy('created_at', 'desc').first('subject_hash', 'state');
   if (!stored) return null;
-  const rows = await dbh(REVIEWS)
-    .where({ package_id: PACKAGE_ID, subject_type: SUBJECT_TYPE, subject_id: visitId })
-    .select('id', 'provider', 'question_id', 'subject_hash', 'jev_answer', 'label', 'label_status', 'package_id', 'created_at');
-  const atNewest = rows.filter((row) => row.subject_hash === stored.subject_hash);
-  return { stored, state: parse(stored.state) || {}, rows, atNewest, readAt: newestAt(atNewest) || new Date(stored.created_at) };
+  const answers = await dbh(REVIEWS)
+    .where({ package_id: PACKAGE_ID, subject_type: SUBJECT_TYPE, subject_id: visitId, subject_hash: stored.subject_hash })
+    .select('question_id', 'jev_answer');
+  const verdicts = await dbh(VERDICTS).where({ scheduled_service_id: visitId }).select('question_id', 'subject_hash', 'verdict');
+  return { hash: stored.subject_hash, state: parse(stored.state) || {}, answers, verdicts };
 }
 
-// One question as the technician sees it: its status, and whether a card shows.
-// Newest state: any provider yes, not marked wrong. A Right confirmed on an
-// earlier state of the visit carries forward while the newest state's rows are
-// unlabeled; a Wrong never does.
+// One question as the technician sees it: a verdict on the newest evidence
+// wins; else a Right on any earlier evidence carries forward (a Wrong never
+// does). A card shows for a Right, or for an open question any provider
+// answered yes.
 function questionView(ev, questionId) {
-  const mine = ev.atNewest.filter((row) => row.question_id === questionId);
-  let status = humanStatus(mine);
-  if (status === 'open') {
-    const earlier = new Map();
-    for (const row of ev.rows) {
-      if (row.question_id === questionId && row.subject_hash !== ev.stored.subject_hash) earlier.set(row.subject_hash, [...(earlier.get(row.subject_hash) || []), row]);
-    }
-    if ([...earlier.values()].some((rows) => humanStatus(rows) === 'right')) status = 'right';
-  }
-  return { mine, status, shown: status === 'right' || (status === 'open' && mine.some(saidYes)) };
+  const mine = ev.verdicts.filter((v) => v.question_id === questionId);
+  const newest = mine.find((v) => v.subject_hash === ev.hash);
+  let status = 'open';
+  if (newest) status = newest.verdict;
+  else if (mine.some((v) => v.verdict === 'right')) status = 'right';
+  const yes = ev.answers.some((row) => row.question_id === questionId && saidYes(row));
+  return { status, newestVerdict: newest ? newest.verdict : null, shown: status === 'right' || (status === 'open' && yes) };
 }
-
-const shownQuestionIds = (ev) => Object.keys(packageFor(PACKAGE_ID).questions).filter((id) => questionView(ev, id).shown);
 
 // Pets are "on file" when the profile has a count or any detail text.
 async function petsOnFile(dbh, customerId) {
@@ -143,21 +134,23 @@ async function petsOnFile(dbh, customerId) {
 }
 
 /**
- * The flags for one visit's newest stored state. Never throws: any failure
- * logs and answers null, so the brief still serves.
+ * The flags for one visit's newest stored state. A visit no longer proven to be
+ * at its customer's one premises has none. Never throws: any failure logs and
+ * answers null, so the brief still serves.
  * @returns {Promise<Array<object> | null>}
  */
 async function accessFlagsFor(dbh, visit) {
   try {
+    if (!(await visitSinglePremises(visit.id, dbh))) return [];
     const ev = await loadEvidence(dbh, visit.id);
     if (!ev) return [];
     const flags = [];
-    for (const questionId of shownQuestionIds(ev)) {
+    for (const questionId of Object.keys(packageFor(PACKAGE_ID).questions)) {
       const view = questionView(ev, questionId);
+      if (!view.shown) continue;
       const flag = FLAGS[questionId];
       flags.push({
-        questionId, title: flag.title, tone: flag.tone, status: view.status, subjectHash: ev.stored.subject_hash,
-        readAt: (newestAt(view.mine) || ev.readAt).toISOString(), ...pickQuote(ev.state, questionId),
+        questionId, title: flag.title, tone: flag.tone, status: view.status, subjectHash: ev.hash, ...pickQuote(ev.state, questionId),
         saveToFile: questionId === 'dog_on_property' && view.status === 'open' && !(await petsOnFile(dbh, visit.customer_id)) ? 'pets' : null,
       });
     }
@@ -168,11 +161,10 @@ async function accessFlagsFor(dbh, visit) {
   }
 }
 
-// Right on a dog flag: one pet_details line, written in the tap's transaction.
-// The profile row is locked, and the write itself holds the condition (no pet
-// count, no pet text): nothing read earlier stands in for it, so a profile
-// that gained pets since the card was shown is never overwritten. Says only
-// what the technician confirmed: an animal is on the property.
+// The pet line, written in the tap's transaction by the tap whose verdict row
+// was just created. The profile row is locked, and the write itself holds the
+// condition (no pet count, no pet text): nothing read earlier stands in for it.
+// Says only what the technician confirmed: an animal is on the property.
 async function savePet(trx, visit, who) {
   const { recordAuditEvent } = require('./audit-log');
   const { etParts } = require('../utils/datetime-et');
@@ -196,27 +188,6 @@ async function savePet(trx, visit, who) {
   return true;
 }
 
-// One row's verdict from what the technician says is true: its answer
-// matches (right) or not (wrong, carrying the true answer).
-function rowRequest(row, truth) {
-  const seen = parse(row.jev_answer);
-  if (!seen || typeof seen.yes !== 'boolean') return null;
-  return { verdict: seen.yes === truth ? 'jev_right' : 'jev_wrong', seen, seenSubject: row.subject_hash, note: null, reason: null, force: false };
-}
-
-async function labelRows(trx, rows, truth, who) {
-  const labeler = { labeledBy: who.labeledBy, machine: false, actorType: 'technician', actorId: who.actorId, ip: who.ip, userAgent: who.userAgent };
-  for (const row of rows) {
-    if (CONFIRMED.includes(row.label_status)) continue;
-    const request = rowRequest(row, truth);
-    const correct = request && correctValueFor(row, request, truth);
-    if (!correct || correct.error) continue;
-    const written = await writeLabel(row.id, request, correct, labeler, trx);
-    // Another writer got there first: that row stays as it is.
-    if (!written.row && written.status !== 409) throw new Error(`label write failed (${written.status})`);
-  }
-}
-
 /**
  * A technician's tap on one flag, as one transaction.
  *
@@ -224,37 +195,38 @@ async function labelRows(trx, rows, truth, who) {
  * query; the visit row is read under FOR SHARE with it, so a reassignment
  * waits for this transaction and the check holds for every write below.
  *
- * Results: { notFound } (not this technician's visit), { conflict } (the flag
- * is not one that shows now, or the evidence moved since the card was read),
- * else { status, saved }: the question's status after the tap. A tap that
- * contradicts a confirmed answer is refused with nothing written (the first
- * confirmation stands), and only an accepted Right saves the pet line.
+ * Results: { notFound } (not this technician's visit, or no longer proven to be
+ * at one premises), { conflict } (the evidence moved since the card was read,
+ * or the question shows no card), else { status, saved }: the stored verdict.
+ * A second tap on the same visit, question and evidence returns the stored
+ * verdict and writes nothing. `saved` is true only for the tap that created the
+ * Right and wrote the pet line.
  *
  * @param {{visitId:string, scope:Function, questionId:string, verdict:'right'|'wrong', subjectHash:string}} tap
  * @param {{labeledBy:string, actorId:string|null, ip:string|null, userAgent:string|null}} who
  */
 async function tapAccessFlag(dbh, tap, who) {
   const { visitId, scope, questionId, verdict, subjectHash } = tap;
-  const truth = verdict === 'right';
-  const out = await dbh.transaction(async (trx) => {
+  return dbh.transaction(async (trx) => {
     const visit = await scope(trx('scheduled_services').where({ 'scheduled_services.id': visitId }))
       .forShare().first('scheduled_services.id', 'scheduled_services.customer_id');
-    if (!visit) return { notFound: true };
+    if (!visit || !(await visitSinglePremises(visit.id, trx))) return { notFound: true };
     const ev = await loadEvidence(trx, visit.id);
-    if (!ev || ev.stored.subject_hash !== subjectHash) return { conflict: true };
+    if (!ev || ev.hash !== subjectHash) return { conflict: true };
     const view = questionView(ev, questionId);
-    if (!view.shown) return view.status === verdict ? { status: view.status, saved: false } : { conflict: true };
-    if (view.status !== 'open' && view.status !== verdict) return { status: view.status, saved: false };
-    await labelRows(trx, view.mine, truth, who);
-    const after = questionView(await loadEvidence(trx, visit.id), questionId);
-    const saved = truth && questionId === 'dog_on_property' && after.status === 'right' ? await savePet(trx, visit, who) : false;
-    return { status: after.status, saved, labeled: true };
+    if (view.newestVerdict) return { status: view.newestVerdict, saved: false };
+    if (!view.shown) return { conflict: true };
+    const [created] = await trx(VERDICTS)
+      .insert({ scheduled_service_id: visit.id, question_id: questionId, subject_hash: subjectHash, verdict, technician_id: UUID_RE.test(String(who.actorId)) ? who.actorId : null })
+      .onConflict(['scheduled_service_id', 'question_id', 'subject_hash']).ignore().returning('id');
+    // A concurrent tap on the same evidence won: its verdict stands.
+    if (!created) {
+      const stored = await trx(VERDICTS).where({ scheduled_service_id: visit.id, question_id: questionId, subject_hash: subjectHash }).first('verdict');
+      return { status: stored.verdict, saved: false };
+    }
+    const saved = verdict === 'right' && questionId === 'dog_on_property' ? await savePet(trx, visit, who) : false;
+    return { status: verdict, saved };
   });
-  if (out.labeled) {
-    await require('./typed-decisions/daily-review-item').closeIfQueueEmpty()
-      .catch((err) => logger.warn(`[visit-access-flags] review item close failed: ${err.message}`));
-  }
-  return out.labeled ? { status: out.status, saved: out.saved } : out;
 }
 
-module.exports = { FLAGS, accessFlagsFor, tapAccessFlag, pickQuote, humanStatus };
+module.exports = { FLAGS, accessFlagsFor, tapAccessFlag, pickQuote };

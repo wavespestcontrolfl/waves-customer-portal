@@ -1,28 +1,31 @@
 /**
  * Visit access flags for the technician (services/visit-access-flags.js). Behavior under proof:
- *  - a question is flagged when ANY provider answered yes for the visit's NEWEST stored state, and not once
- *    it is marked wrong; an older state's rows never show, except that an earlier Right carries forward
- *    (a Wrong does not); each flag names the evidence it came from and the time the provider answered;
- *  - the quote and its source are picked from the stored redacted state by fixed keyword lists, no model;
- *  - a tap is bound to that evidence (a moved state, or a question that shows no card, writes nothing), runs in one
- *    transaction under a FOR SHARE lock on the visit row, labels every unlabeled row of the question through the
- *    shared label write, twice changes nothing, and a tap that contradicts a confirmed answer writes nothing;
- *  - only an accepted Right on a dog flag saves one pet_details line, in the same transaction as its labels, and
- *    only while the locked profile row holds no pets.
+ *  - a card shows when ANY provider answered yes on the visit's NEWEST stored state and the technician has not
+ *    marked it Wrong on that evidence; an older state's yes never shows, but a Right on an earlier state carries
+ *    forward and a Wrong does not; a visit no longer proven to be at one premises has no flags;
+ *  - the quote and its source are picked from the stored redacted state by fixed keyword lists, no model, and a
+ *    generated redaction marker is never quoted;
+ *  - a tap writes ONLY one visit_access_verdicts row (decision_reviews is untouched), bound to the evidence the
+ *    card came from, in one transaction under a FOR SHARE lock on the visit row; a second tap returns the stored
+ *    verdict and writes nothing;
+ *  - the pet line is saved only by the tap that created the Right on a dog flag, on the locked profile row and
+ *    only while it holds no pets, so a replay never restores a field staff cleared.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockAudit = jest.fn(async () => 'audit-1');
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: (...a) => mockAudit(...a) }));
-const mockCloseIfEmpty = jest.fn(async () => 0);
-jest.mock('../services/typed-decisions/daily-review-item', () => ({ closeIfQueueEmpty: (...a) => mockCloseIfEmpty(...a) }));
-// label-write reads the shared db module for its default connection; the suite points it at its own schema.
-let mockDatabase;
-jest.mock('../models/db', () => (...args) => mockDatabase(...args));
+// The single-premises proof has its own suite (typed-decisions-visit-access.test.js); here only its answer.
+const mockPremises = jest.fn(async () => true);
+jest.mock('../services/typed-decisions/visit-access-shadow', () => ({
+  ...jest.requireActual('../services/typed-decisions/visit-access-shadow'),
+  visitSinglePremises: (...a) => mockPremises(...a),
+}));
 
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
 const statesMigration = require('../models/migrations/20261003140000_visit_access_states');
+const verdictsMigration = require('../models/migrations/20261126170000_visit_access_verdicts');
 const flags = require('../services/visit-access-flags');
 
 jest.setTimeout(60000);
@@ -54,6 +57,15 @@ describe('visit access flags: the quote a technician reads', () => {
     expect(flags.pickQuote({}, 'dog_on_property')).toEqual({ quote: null, source: 'Read: nothing written on file' });
   });
 
+  test('a generated redaction marker is never quoted: the card falls back to the source line', () => {
+    const marked = { recent_texts: '- [access detail withheld: mentions code, gate]\n- [follow-up to an access detail withheld]\n- Our dog [redacted] is friendly.' };
+    expect(flags.pickQuote(marked, 'needs_code_key_or_person')).toEqual({ quote: null, source: 'Read: customer text' });
+    expect(flags.pickQuote(marked, 'dog_on_property')).toEqual({ quote: null, source: 'Read: customer text' });
+    // a real sentence next to a marker line is still quoted
+    expect(flags.pickQuote({ recent_texts: '- [access detail withheld: mentions gate]\n- Our dog Biscuit is in the yard.' }, 'dog_on_property'))
+      .toEqual({ quote: 'Our dog Biscuit is in the yard.', source: 'Customer text' });
+  });
+
   test('a long line is cut to a short quote', () => {
     const out = flags.pickQuote({ recent_texts: `- dog ${'x'.repeat(400)}` }, 'dog_on_property');
     expect(out.quote.length).toBe(160);
@@ -69,7 +81,8 @@ describe('visit access flags: the quote a technician reads', () => {
   const schema = `visit_flags_${randomUUID().replaceAll('-', '')}`;
   let database;
   const customerId = randomUUID();
-  const who = { labeledBy: 'tech@example.test', actorId: 'tech-1', ip: '127.0.0.1', userAgent: 'jest' };
+  const techId = randomUUID();
+  const who = { labeledBy: 'tech@example.test', actorId: techId, ip: '127.0.0.1', userAgent: 'jest' };
   const QUESTIONS = ['dog_on_property', 'needs_code_key_or_person', 'contact_before_arrival', 'person_home_needs_notice', 'past_access_problem', 'access_fact_not_on_file'];
   const PET_LINE = /^Animal on property \(tech confirmed \d{1,2}\/\d{1,2}\)$/;
   let visitId;
@@ -78,7 +91,7 @@ describe('visit access flags: the quote a technician reads', () => {
 
   const visit = () => ({ id: visitId, customer_id: customerId });
   // One stored state and its rows: answers = { provider: { question: boolean } }, unlisted = no.
-  async function seed({ state = { recent_texts: '- Our dog Biscuit will be in the yard' }, answers = { typesafe: { dog_on_property: true } }, at = new Date('2026-10-06T10:00:00Z'), rowsAt = new Date('2026-10-06T10:20:00Z') } = {}) {
+  async function seed({ state = { recent_texts: '- Our dog Biscuit will be in the yard' }, answers = { typesafe: { dog_on_property: true } }, at = new Date('2026-10-06T10:00:00Z') } = {}) {
     seq += 1;
     const hash = `${String(seq).padStart(2, '0')}`.padEnd(64, 'a');
     await database('visit_access_states').insert({ scheduled_service_id: visitId, subject_hash: hash, state: JSON.stringify(state), created_at: at });
@@ -86,7 +99,7 @@ describe('visit access flags: the quote a technician reads', () => {
       for (const q of QUESTIONS) {
         await database('decision_reviews').insert({
           capability: 'visit_access', package_id: 'visit_access.v1', provider, subject_type: 'scheduled_services', subject_id: visitId,
-          question_id: q, jev_answer: JSON.stringify({ p: said[q] ? 0.95 : 0.03, yes: Boolean(said[q]), confident: true }), subject_hash: hash, created_at: rowsAt,
+          question_id: q, jev_answer: JSON.stringify({ p: said[q] ? 0.95 : 0.03, yes: Boolean(said[q]), confident: true }), subject_hash: hash,
         });
       }
     }
@@ -96,13 +109,13 @@ describe('visit access flags: the quote a technician reads', () => {
   const tap = (questionId, verdict, over = {}) => flags.tapAccessFlag(database, {
     visitId, scope: (q) => q, questionId, verdict, subjectHash: lastHash, ...over,
   }, who);
-  const review = (provider, q, hash) => database('decision_reviews').where({ subject_id: visitId, provider, question_id: q, ...(hash ? { subject_hash: hash } : {}) }).first();
+  const verdicts = () => database('visit_access_verdicts').where({ scheduled_service_id: visitId }).orderBy('created_at');
   const pets = () => database('property_preferences').where({ customer_id: customerId }).first();
-  const labeledCount = async () => Number((await database('decision_reviews').where({ subject_id: visitId }).whereNot({ label_status: 'unreviewed' }).count('* as n').first()).n);
+  const unlabeled = async () => Number((await database('decision_reviews').where({ subject_id: visitId, label_status: 'unreviewed' }).count('* as n').first()).n);
+  const reviewCount = async () => Number((await database('decision_reviews').where({ subject_id: visitId }).count('* as n').first()).n);
 
   beforeAll(async () => {
-    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 4 } });
-    mockDatabase = database;
+    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 5 } });
     await database.raw('CREATE SCHEMA ??', [schema]);
     await database.raw(`CREATE TABLE ??.decision_reviews (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), capability varchar(60) NOT NULL,
       package_id varchar(80) NOT NULL, provider varchar(30) NOT NULL, subject_type varchar(30) NOT NULL, subject_id uuid NOT NULL,
@@ -112,6 +125,7 @@ describe('visit access flags: the quote a technician reads', () => {
       pet_count integer, pet_details text, updated_at timestamptz DEFAULT now(), irrigation_revision integer DEFAULT 0)`, [schema]);
     await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY, customer_id uuid, technician_id text)', [schema]);
     await statesMigration.up(database);
+    await verdictsMigration.up(database);
   });
   afterAll(async () => {
     if (!database) return;
@@ -121,31 +135,26 @@ describe('visit access flags: the quote a technician reads', () => {
   beforeEach(async () => {
     mockAudit.mockReset();
     mockAudit.mockResolvedValue('audit-1');
-    mockCloseIfEmpty.mockClear();
+    mockPremises.mockReset();
+    mockPremises.mockResolvedValue(true);
     visitId = randomUUID();
-    for (const t of ['visit_access_states', 'decision_reviews', 'property_preferences', 'scheduled_services']) await database(t).del();
+    for (const t of ['visit_access_verdicts', 'visit_access_states', 'decision_reviews', 'property_preferences', 'scheduled_services']) await database(t).del();
     await database('scheduled_services').insert({ id: visitId, customer_id: customerId, technician_id: 'tech-1' });
   });
 
-  test('any provider saying yes flags the question; the flag names its evidence and the time the provider answered', async () => {
+  test('any provider saying yes shows a card that names its evidence; the quote comes from the stored state', async () => {
     const hash = await seed({
       state: { recent_texts: '- Our dog Biscuit will be in the yard\n- Please text first' },
       answers: { typesafe: { dog_on_property: true }, cloudflare: { dog_on_property: false, contact_before_arrival: true } },
     });
     const out = await flags.accessFlagsFor(database, visit());
     expect(out.map((f) => f.questionId)).toEqual(['dog_on_property', 'contact_before_arrival']);
-    // readAt is when the providers answered (10:20), not when the state was stored (10:00).
     expect(out[0]).toEqual({
-      questionId: 'dog_on_property', title: 'Dog or other animal may be loose', tone: 'amber', status: 'open', subjectHash: hash, readAt: '2026-10-06T10:20:00.000Z',
+      questionId: 'dog_on_property', title: 'Dog or other animal may be loose', tone: 'amber', status: 'open', subjectHash: hash,
       quote: 'Our dog Biscuit will be in the yard', source: 'Customer text', saveToFile: 'pets',
     });
+    expect(out[0]).not.toHaveProperty('readAt');
     expect(out[1]).toMatchObject({ tone: 'plain', title: 'Customer asked for a call or text before you arrive', quote: 'Please text first', saveToFile: null, subjectHash: hash });
-  });
-
-  test('the read time is the newest answer among the question\'s rows', async () => {
-    await seed({ answers: { typesafe: { dog_on_property: true }, cloudflare: { dog_on_property: false } }, rowsAt: new Date('2026-10-06T10:20:00Z') });
-    await database('decision_reviews').where({ provider: 'cloudflare', question_id: 'dog_on_property' }).update({ created_at: new Date('2026-10-06T11:45:00Z') });
-    expect((await flags.accessFlagsFor(database, visit()))[0].readAt).toBe('2026-10-06T11:45:00.000Z');
   });
 
   test('only the newest stored state counts: an older state\'s yes does not show', async () => {
@@ -156,77 +165,66 @@ describe('visit access flags: the quote a technician reads', () => {
     expect(out[0].tone).toBe('amber');
   });
 
-  test('a visit with no stored state has no flags', async () => {
+  test('a visit with no stored state has no flags, and one no longer proven to be at one premises has none either', async () => {
+    await expect(flags.accessFlagsFor(database, visit())).resolves.toEqual([]);
+    await seed();
+    expect(await flags.accessFlagsFor(database, visit())).toHaveLength(1);
+    mockPremises.mockResolvedValue(false);
     await expect(flags.accessFlagsFor(database, visit())).resolves.toEqual([]);
   });
 
-  test('Right labels every row of the question and saves only what the tech confirmed; a replay changes nothing', async () => {
+  test('Right writes one verdict row and the pet line, touches no provider answer, and a replay writes nothing', async () => {
     await seed({ answers: { typesafe: { dog_on_property: true }, cloudflare: { dog_on_property: false } } });
+    const before = await reviewCount();
     await expect(tap('dog_on_property', 'right')).resolves.toEqual({ status: 'right', saved: true });
-    expect(await review('typesafe', 'dog_on_property')).toMatchObject({ label_status: 'confirmed_correct', labeled_by: 'tech@example.test' });
-    const clef = await review('cloudflare', 'dog_on_property');
-    expect(clef).toMatchObject({ label_status: 'confirmed_error', labeled_by: 'tech@example.test' });
-    expect(clef.label).toMatchObject({ verdict: 'jev_wrong', correct_value: true });
-    expect(await review('typesafe', 'contact_before_arrival')).toMatchObject({ label_status: 'unreviewed' });
-    const labelAudits = mockAudit.mock.calls.filter(([e]) => e.action === 'typed_decision.labeled');
-    expect(labelAudits).toHaveLength(2);
-    // inside the tap's transaction, so a failed audit takes the label back
-    expect(labelAudits[0][0]).toMatchObject({ actor_type: 'technician', actor_id: 'tech-1', critical: true, trx: expect.anything() });
-    expect(mockAudit.mock.calls.find(([e]) => e.action === 'visit_access_flag.pet_saved')[0]).toMatchObject({ resource_type: 'property_preferences', critical: true, trx: expect.anything() });
+    expect(await verdicts()).toMatchObject([{ question_id: 'dog_on_property', subject_hash: lastHash, verdict: 'right', technician_id: techId }]);
+    // decision_reviews is exactly as the sweep left it
+    expect(await reviewCount()).toBe(before);
+    expect(await unlabeled()).toBe(before);
     expect((await pets()).pet_details).toMatch(PET_LINE);
     expect((await pets()).pet_details).not.toMatch(/dog|customer text/i);
+    expect(mockAudit.mock.calls.map(([e]) => e.action)).toEqual(['visit_access_flag.pet_saved']);
+    expect(mockAudit.mock.calls[0][0]).toMatchObject({ resource_type: 'property_preferences', critical: true, trx: expect.anything() });
 
     expect((await flags.accessFlagsFor(database, visit()))[0]).toMatchObject({ questionId: 'dog_on_property', status: 'right', saveToFile: null });
+
+    // Staff clear the pet field; a replay (a retry, or a second tap) must not bring it back.
+    await database('property_preferences').update({ pet_details: null });
     mockAudit.mockClear();
-    const saved = (await pets()).pet_details;
     await expect(tap('dog_on_property', 'right')).resolves.toEqual({ status: 'right', saved: false });
+    expect(await verdicts()).toHaveLength(1);
+    expect((await pets()).pet_details).toBeNull();
     expect(mockAudit).not.toHaveBeenCalled();
-    expect((await pets()).pet_details).toBe(saved);
   });
 
-  test('Wrong labels the yes rows wrong (true answer no), hides the flag and saves nothing; a replay is a no-op', async () => {
+  test('Wrong writes one verdict row, hides the card and saves nothing; a replay returns the stored verdict, even a different one', async () => {
     await seed({ answers: { typesafe: { dog_on_property: true }, cloudflare: { dog_on_property: false } } });
     await expect(tap('dog_on_property', 'wrong')).resolves.toEqual({ status: 'wrong', saved: false });
-    const jev = await review('typesafe', 'dog_on_property');
-    expect(jev).toMatchObject({ label_status: 'confirmed_error' });
-    expect(jev.label).toMatchObject({ verdict: 'jev_wrong', correct_value: false });
-    expect(await review('cloudflare', 'dog_on_property')).toMatchObject({ label_status: 'confirmed_correct' });
     expect(await flags.accessFlagsFor(database, visit())).toEqual([]);
     expect(await pets()).toBeUndefined();
-    expect(mockCloseIfEmpty).toHaveBeenCalled();
-    mockAudit.mockClear();
     await expect(tap('dog_on_property', 'wrong')).resolves.toEqual({ status: 'wrong', saved: false });
+    await expect(tap('dog_on_property', 'right')).resolves.toEqual({ status: 'wrong', saved: false });
+    expect(await verdicts()).toHaveLength(1);
+    expect(await pets()).toBeUndefined();
     expect(mockAudit).not.toHaveBeenCalled();
+  });
+
+  test('two taps at once leave one verdict and one pet save', async () => {
+    await seed();
+    const both = await Promise.all([tap('dog_on_property', 'right'), tap('dog_on_property', 'right')]);
+    expect(both.map((r) => r.status)).toEqual(['right', 'right']);
+    expect(both.filter((r) => r.saved)).toHaveLength(1);
+    expect(await verdicts()).toHaveLength(1);
   });
 
   test('a tap for evidence that moved, or for a question that shows no card, is a conflict and writes nothing', async () => {
     const old = await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T09:00:00Z') });
     await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T10:00:00Z') });
     await expect(tap('dog_on_property', 'right', { subjectHash: old })).resolves.toEqual({ conflict: true });
-    // no yes answer for this question: no card, so no verdict
     await expect(tap('needs_code_key_or_person', 'right')).resolves.toEqual({ conflict: true });
     await expect(tap('dog_on_property', 'right', { subjectHash: 'f'.repeat(64) })).resolves.toEqual({ conflict: true });
-    expect(await labeledCount()).toBe(0);
+    expect(await verdicts()).toEqual([]);
     expect(await pets()).toBeUndefined();
-  });
-
-  test('a Right that loses to an already-confirmed Wrong saves nothing and labels nothing', async () => {
-    await seed({ answers: { typesafe: { dog_on_property: true }, cloudflare: { dog_on_property: true } } });
-    await database('decision_reviews').where({ provider: 'typesafe', question_id: 'dog_on_property' }).update({
-      label_status: 'confirmed_error', labeled_by: 'owner@example.test', label: JSON.stringify({ verdict: 'jev_wrong', correct_value: false }),
-    });
-    expect(await flags.accessFlagsFor(database, visit())).toEqual([]);
-    await expect(tap('dog_on_property', 'right')).resolves.toEqual({ conflict: true });
-    expect(await review('cloudflare', 'dog_on_property')).toMatchObject({ label_status: 'unreviewed' });
-    expect(await review('typesafe', 'dog_on_property')).toMatchObject({ labeled_by: 'owner@example.test' });
-    expect(await pets()).toBeUndefined();
-  });
-
-  test('a Wrong after a confirmed Right is refused: the first confirmation stands', async () => {
-    await seed({ answers: { typesafe: { dog_on_property: true }, cloudflare: { dog_on_property: true } } });
-    await database('decision_reviews').where({ provider: 'typesafe', question_id: 'dog_on_property' }).update({ label_status: 'confirmed_correct', labeled_by: 'owner@example.test' });
-    await expect(tap('dog_on_property', 'wrong')).resolves.toEqual({ status: 'right', saved: false });
-    expect(await review('cloudflare', 'dog_on_property')).toMatchObject({ label_status: 'unreviewed' });
   });
 
   test('the pet line is written only while the locked profile holds no pets, whatever the card said', async () => {
@@ -237,7 +235,7 @@ describe('visit access flags: the quote a technician reads', () => {
     expect(await pets()).toMatchObject({ pet_count: 2, pet_details: null });
 
     // The card was read while nothing was on file; the profile gained a pet before the tap.
-    await database('decision_reviews').update({ label_status: 'unreviewed', label: null, labeled_by: null });
+    await database('visit_access_verdicts').del();
     await database('property_preferences').update({ pet_count: 0, pet_details: null });
     expect((await flags.accessFlagsFor(database, visit()))[0]).toMatchObject({ saveToFile: 'pets', status: 'open' });
     await database('property_preferences').update({ pet_details: 'Cat, indoors' });
@@ -251,35 +249,37 @@ describe('visit access flags: the quote a technician reads', () => {
     await expect(tap('dog_on_property', 'right')).resolves.toEqual({ status: 'right', saved: true });
     expect((await pets()).pet_details).toMatch(PET_LINE);
 
+    await database('visit_access_verdicts').del();
     await database('property_preferences').del();
-    await database('decision_reviews').update({ label_status: 'unreviewed', label: null, labeled_by: null });
     await expect(tap('dog_on_property', 'right')).resolves.toEqual({ status: 'right', saved: true });
     expect((await pets()).pet_details).toMatch(PET_LINE);
   });
 
-  test('the labels and the pet save commit together: a failed save audit takes the labels back', async () => {
-    await seed({ answers: { typesafe: { dog_on_property: true }, cloudflare: { dog_on_property: false } } });
-    mockAudit.mockImplementation(async (event) => { if (event.action === 'visit_access_flag.pet_saved') throw new Error('audit down'); return 'audit-1'; });
+  test('the verdict and the pet save commit together: a failed save audit takes the verdict back', async () => {
+    await seed();
+    mockAudit.mockRejectedValue(new Error('audit down'));
     await expect(tap('dog_on_property', 'right')).rejects.toThrow('audit down');
-    expect(await labeledCount()).toBe(0);
-    expect(await pets()).toBeFalsy();
-    expect((await database('property_preferences').where({ customer_id: customerId }).first())).toBeUndefined();
+    expect(await verdicts()).toEqual([]);
+    expect(await database('property_preferences').where({ customer_id: customerId }).first()).toBeUndefined();
   });
 
-  test('a Right confirmed on an earlier state carries forward to the newest; a Wrong does not', async () => {
-    await seed({ answers: { typesafe: { dog_on_property: true, past_access_problem: true } }, at: new Date('2026-10-06T09:00:00Z') });
+  test('a Right carries forward to newer evidence; a Wrong does not; a verdict on the newest evidence wins', async () => {
+    await seed({ answers: { typesafe: { dog_on_property: true, past_access_problem: true, contact_before_arrival: true } }, at: new Date('2026-10-06T09:00:00Z') });
     await tap('dog_on_property', 'right');
     await tap('past_access_problem', 'wrong');
-    // The pet save changed the state: a newer read asks again, both questions unlabeled and yes.
-    const second = await seed({ answers: { typesafe: { dog_on_property: true, past_access_problem: true } }, at: new Date('2026-10-06T10:00:00Z') });
+    // The pet save changed the state: a newer read asks again.
+    const second = await seed({ answers: { typesafe: { dog_on_property: true, past_access_problem: true, contact_before_arrival: true } }, at: new Date('2026-10-06T10:00:00Z') });
     const out = await flags.accessFlagsFor(database, visit());
     expect(out.map((f) => [f.questionId, f.status, f.subjectHash])).toEqual([
-      ['dog_on_property', 'right', second], ['past_access_problem', 'open', second],
-    ]);
-    expect(out[0].saveToFile).toBeNull();
+      ['dog_on_property', 'right', second], ['contact_before_arrival', 'open', second], ['past_access_problem', 'open', second],
+    ].sort((a, b) => QUESTIONS.indexOf(a[0]) - QUESTIONS.indexOf(b[0])));
+    expect(out.find((f) => f.questionId === 'dog_on_property').saveToFile).toBeNull();
+    // a Wrong on the newest evidence beats the carried Right
+    await tap('dog_on_property', 'wrong');
+    expect((await flags.accessFlagsFor(database, visit())).map((f) => f.questionId)).not.toContain('dog_on_property');
   });
 
-  test('a carried Right still shows when the newest state holds no row for the question (labeled rows are never re-asked)', async () => {
+  test('a carried Right still shows when the newest state holds no yes for the question', async () => {
     await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T09:00:00Z') });
     await tap('dog_on_property', 'right');
     const second = await seed({ answers: {}, at: new Date('2026-10-06T10:00:00Z') });
@@ -288,16 +288,23 @@ describe('visit access flags: the quote a technician reads', () => {
     expect(out[0]).toMatchObject({ questionId: 'dog_on_property', status: 'right', subjectHash: second });
   });
 
-  test('a tap is refused for a visit that is not the technician\'s, and the lock holds a reassignment until the tap is done', async () => {
-    await seed({ answers: { typesafe: { dog_on_property: true } } });
+  test('a visit that is not the technician\'s, or no longer at one premises, is not found and writes nothing', async () => {
+    await seed();
     const mine = (q) => q.where('scheduled_services.technician_id', 'tech-1');
     await expect(tap('dog_on_property', 'right', { visitId: randomUUID(), scope: mine })).resolves.toEqual({ notFound: true });
     await database('scheduled_services').update({ technician_id: 'tech-2' });
     await expect(tap('dog_on_property', 'right', { scope: mine })).resolves.toEqual({ notFound: true });
-    expect(await labeledCount()).toBe(0);
-
-    // A reassignment already holding the row waits the tap out, and the tap then sees the new assignment.
     await database('scheduled_services').update({ technician_id: 'tech-1' });
+    mockPremises.mockResolvedValue(false);
+    await expect(tap('dog_on_property', 'right', { scope: mine })).resolves.toEqual({ notFound: true });
+    expect(await verdicts()).toEqual([]);
+    expect(await pets()).toBeUndefined();
+  });
+
+  test('the lock holds a reassignment until the tap is done, and a tap waits for a reassignment already under way', async () => {
+    await seed();
+    const mine = (q) => q.where('scheduled_services.technician_id', 'tech-1');
+    // A reassignment already holding the row waits the tap out, and the tap then sees the new assignment.
     const mover = await database.transaction();
     await mover('scheduled_services').where({ id: visitId }).update({ technician_id: 'tech-2' });
     let settled = false;
@@ -306,7 +313,7 @@ describe('visit access flags: the quote a technician reads', () => {
     expect(settled).toBe(false);
     await mover.commit();
     await expect(racing).resolves.toEqual({ notFound: true });
-    expect(await labeledCount()).toBe(0);
+    expect(await verdicts()).toEqual([]);
 
     // The other way round: a tap that holds its share lock makes the reassignment wait.
     await database('scheduled_services').update({ technician_id: 'tech-1' });

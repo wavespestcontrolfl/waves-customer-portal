@@ -45,6 +45,7 @@ const { visitAccessSweepLive, typedDecisionsClefLive } = require('../../config/f
 const PACKAGE_ID = 'visit_access.v1';
 const SUBJECT_TYPE = 'scheduled_services';
 const STATES_TABLE = 'visit_access_states';
+const VERDICTS_TABLE = 'visit_access_verdicts';
 // Visits asked per pass; the rest wait for the next hourly pass. Visits whose
 // state is already answered cost reads only and never count against it.
 const MAX_ASKED_VISITS = 80;
@@ -199,6 +200,21 @@ async function singlePremises(svc, dbh) {
   const primary = linkage.normalizedStampedStreet(svc.customer_address_line1, svc.customer_address_line2, svc.customer_city, svc.customer_zip);
   if (!primary || linkage.scopeKeyLacksLocality(primary)) return false;
   return customerHasOnlyPrimaryPremises(dbh, svc.customer_id, { has_multi_home: svc.has_multi_home }, primary, { unresolvedFails: true });
+}
+
+// Whether a visit is still PROVEN to be at its customer's one premises: what the
+// sweep requires before it judges a visit, asked again by the technician's flags
+// (a stored state outlives the proof when the customer gains a second property
+// or the visit moves). Any failure to prove it, or an error, is false.
+async function visitSinglePremises(visitId, dbh) {
+  try {
+    const svc = await dbh('scheduled_services as s').join('customers as c', 's.customer_id', 'c.id')
+      .whereNull('c.deleted_at').where('s.id', visitId).first(VISIT_COLUMNS);
+    return Boolean(svc) && await singlePremises(svc, dbh);
+  } catch (err) {
+    logger.warn(`[typed-decisions] visit access premises check failed for ${visitId}: ${err.message}`);
+    return false;
+  }
 }
 
 // What is saved for the property: the structured facts, the two baselines
@@ -608,11 +624,16 @@ async function storedVisitAccess(pairs, dbh) {
 const STATE_RETENTION_DAYS = 180;
 
 // Retention is NOT gated: the stored states hold customer words, so they are
-// dropped on schedule even after the shadow is switched off. Never throws.
+// dropped on schedule even after the shadow is switched off. The technicians'
+// verdicts on those states (visit_access_verdicts) go on the same day count.
+// Never throws.
 async function pruneVisitAccessStates({ dbh = null, now = new Date() } = {}) {
   try {
     const conn = dbh || require('../../models/db');
-    return await conn(STATES_TABLE).where('created_at', '<', new Date(now.getTime() - STATE_RETENTION_DAYS * 24 * 60 * 60 * 1000)).del();
+    const cutoff = new Date(now.getTime() - STATE_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const dropped = await conn(STATES_TABLE).where('created_at', '<', cutoff).del();
+    await conn(VERDICTS_TABLE).where('created_at', '<', cutoff).del();
+    return dropped;
   } catch (err) {
     logger.warn(`[typed-decisions] visit access state prune failed: ${err.message}`);
     return 0;
@@ -621,5 +642,5 @@ async function pruneVisitAccessStates({ dbh = null, now = new Date() } = {}) {
 
 module.exports = {
   runVisitAccessSweep, pruneVisitAccessStates, buildVisitAccessState, storedVisitAccess, renderVisitAccessState, visitAccessSubjectHash,
-  redactForState, stateCutoff, PACKAGE_ID, SUBJECT_TYPE,
+  redactForState, stateCutoff, visitSinglePremises, PACKAGE_ID, SUBJECT_TYPE,
 };

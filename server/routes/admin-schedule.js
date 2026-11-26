@@ -24954,10 +24954,11 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
 // POST /api/admin/schedule/:id/access-flags/:questionId   body { verdict: 'right' | 'wrong', subjectHash }
 // The technician's tap on one visit access flag (GATE_VISIT_ACCESS_FLAGS=on; off or shadow = 404). `subjectHash` is
 // the evidence the card was read from: when it is no longer the visit's newest stored state, or the question no longer
-// shows a card, the answer is 409 flag_changed and nothing is written. Labels the question's review rows through the
-// shared label write, and on an accepted Right for a dog flag with no pets on file saves one pet line to the profile,
-// all in one transaction that holds a FOR SHARE lock on the visit row (services/visit-access-flags.js). Sends nothing
-// to a customer. Same assignment check as GET /:id/visit-brief: a technician reaches only a visit assigned to them.
+// shows a card, the answer is 409 flag_changed and nothing is written. Writes one visit_access_verdicts row (never a
+// decision_reviews label), and when that insert created a Right for a dog flag with no pets on file, one pet line on the
+// profile, all in one transaction that holds a FOR SHARE lock on the visit row (services/visit-access-flags.js). Sends
+// nothing to a customer. Same assignment check as GET /:id/visit-brief: a technician reaches only a visit assigned to
+// them; a visit no longer proven to be at one premises is 404.
 router.post('/:id/access-flags/:questionId', async (req, res, next) => {
   try {
     const { visitAccessCardsLive } = require('../config/feature-gates');
@@ -24971,11 +24972,10 @@ router.post('/:id/access-flags/:questionId', async (req, res, next) => {
     if (verdict !== 'right' && verdict !== 'wrong') return res.status(400).json({ error: "verdict must be 'right' or 'wrong'" });
     const subjectHash = req.body && req.body.subjectHash;
     if (typeof subjectHash !== 'string' || !/^[0-9a-f]{64}$/.test(subjectHash)) return res.status(400).json({ error: 'subjectHash is required' });
-    const { labelerName } = require('../services/typed-decisions/label-write');
     const result = await require('../services/visit-access-flags').tapAccessFlag(db, {
       visitId: req.params.id, scope: (q) => technicianCurrentVisitFilter(req, q), questionId, verdict, subjectHash,
     }, {
-      labeledBy: labelerName(req), actorId: req.technicianId ? String(req.technicianId) : null, ip: req.ip, userAgent: req.get('user-agent') || null,
+      labeledBy: String(req.technician?.email || req.technicianId || 'admin').slice(0, 120), actorId: req.technicianId ? String(req.technicianId) : null, ip: req.ip, userAgent: req.get('user-agent') || null,
     });
     if (result.notFound) return res.status(404).json({ error: 'Scheduled service not found' });
     if (result.conflict) return res.status(409).json({ error: 'flag_changed', code: 'flag_changed' });

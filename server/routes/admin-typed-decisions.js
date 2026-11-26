@@ -22,9 +22,9 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { recordAuditEvent } = require('../services/audit-log');
 const { typedDecisionsLive } = require('../config/feature-gates');
-const { packageFor, providerLabel } = require('../services/typed-decisions/packages');
-const { VERDICT_STATUS, labelerName, correctValueFor, writeLabel } = require('../services/typed-decisions/label-write');
+const { packageFor, answerInDomain, providerLabel } = require('../services/typed-decisions/packages');
 const { askWavesSubjectHash, callSubjectHash, callTranscriptSpan, smsSubjectHash, socialPostCaption, socialPostSubjectHash, lawnDiagnosisSubjectHash, lawnDiagnosisSummaryText } = require('../services/typed-decisions/subject-hash');
 const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
@@ -43,6 +43,8 @@ const CHAT_SUBJECT = 'agent_messages';
 const LAWN_DIAGNOSIS_SUBJECT = 'lawn_diagnostics';
 const LABEL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disagreement', 'confirmed_correct'];
 const SAMPLED_FOR = ['disagreement', 'random_audit', 'heldout'];
+const VERDICT_STATUS = { jev_right: 'confirmed_correct', jev_wrong: 'confirmed_error', unclear: 'disagreement' };
+const CONFIRMED = ['confirmed_correct', 'confirmed_error'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_NOTE_CHARS = 2000;
 
@@ -59,6 +61,15 @@ function clampLimit(value) {
 
 function csv(value) {
   return String(value || '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+// A stable identifier for who labeled: the admin's email, else their id.
+// A request the labeler-token router verified (routes/typed-decisions-labeler.js)
+// carries req.machineLabeler; it is stamped with this fixed name.
+const MACHINE_LABELER = 'claude-labeler';
+function labeler(req) {
+  if (req.machineLabeler) return MACHINE_LABELER;
+  return String(req.technician?.email || req.technicianId || 'admin').slice(0, 120);
 }
 
 function mapReview(row, subject) {
@@ -285,6 +296,24 @@ function readLabelRequest(body) {
   return { verdict, seen, seenSubject, note, reason: reasonRead.reason, force: body.force === true };
 }
 
+// jev_wrong must say what the right answer was, in the question's own domain
+// (a boolean for a yes/no question) and different from what Jev said: a label
+// without one can never be scored, and "wrong, the answer is Jev's" would
+// export as a case Jev scores correct on. Other verdicts carry no
+// correct_value. Returns { error } or { correctValue }.
+function correctValueFor(target, { verdict, seen }, value) {
+  if (verdict !== 'jev_wrong') return { correctValue: null };
+  const question = packageFor(target.package_id)?.questions?.[target.question_id] || null;
+  if (!answerInDomain(question, value)) {
+    return { error: 'jev_wrong needs correct_value: the right answer for this question (true or false for a yes/no question)' };
+  }
+  const shown = typeof seen.yes === 'boolean' ? seen.yes : (seen.choice ?? seen.score);
+  if (value === shown) return { error: 'jev_wrong needs a correct_value different from Jev\'s answer' };
+  return { correctValue: value };
+}
+
+// Why a guarded update matched no row: gone (404), already confirmed without
+// force, or the Jev answer / transcript version moved since the page loaded (409, by code).
 // The subject changed after Jev answered: the live digest (a call's transcript,
 // a text plus the previous Waves text, a chat reply plus the visitor message
 // it answered, or a social post's photo URL and caption, rebuilt exactly as the shadow built the model's state) no longer matches the one stored with the decision, so a label
@@ -331,6 +360,18 @@ async function subjectMoved(target) {
   return (await liveSubjectHash(target)) !== target.subject_hash;
 }
 
+async function unwrittenLabel(id, force, machine = false) {
+  const existing = await db(TABLE).where({ id }).first('id', 'label_status');
+  if (!existing) return [404, { error: 'Review not found' }];
+  if (machine && existing.label_status !== 'unreviewed') {
+    return [409, { error: 'A person has already labeled this review', code: 'already_labeled', labelStatus: existing.label_status }];
+  }
+  if (!force && CONFIRMED.includes(existing.label_status)) {
+    return [409, { error: 'This review already has a confirmed label; send force: true to replace it', code: 'already_confirmed', labelStatus: existing.label_status }];
+  }
+  return [409, { error: "This review's answer or transcript changed since it was loaded; reload it", code: 'answer_changed', labelStatus: existing.label_status }];
+}
+
 // One label write for both callers: a signed-in admin (this router) and the
 // labeler token (routes/typed-decisions-labeler.js, narrower: no force, only
 // rows still unreviewed).
@@ -348,20 +389,41 @@ async function labelReview(req, res, next) {
     if (await subjectMoved(target)) {
       return res.status(409).json({ error: 'This message or call changed after Jev answered; it is not what Jev judged', code: 'subject_changed' });
     }
-    const { force } = request;
+    const { verdict, seen, seenSubject, note, reason, force } = request;
     // The machine labeler never replaces a label: no force, and only a row
     // still unreviewed (a person's 'unclear' stays a person's).
     if (req.machineLabeler && force) return res.status(403).json({ error: 'The labeler token cannot replace a label', code: 'labeler_no_force' });
-    const written = await writeLabel(id, request, correct, {
-      labeledBy: labelerName(req),
-      machine: Boolean(req.machineLabeler),
-      actorType: req.machineLabeler ? 'system' : 'technician',
-      actorId: req.machineLabeler ? null : (req.technicianId || null),
-      ip: req.ip,
-      userAgent: req.get('user-agent') || null,
+    const labelStatus = VERDICT_STATUS[verdict];
+
+    const update = db(TABLE).where({ id }).update({
+      label: JSON.stringify({ verdict, correct_value: correct.correctValue, note, reason }),
+      label_status: labelStatus,
+      labeled_by: labeler(req),
+      labeled_at: new Date(),
     });
-    if (!written.row) return res.status(written.status).json(written.payload);
-    const { row } = written;
+    // A confirmed label is only replaced on purpose.
+    if (!force) update.whereNotIn('label_status', CONFIRMED);
+    if (req.machineLabeler) update.where('label_status', 'unreviewed');
+    update.whereRaw('jev_answer = ?::jsonb', [JSON.stringify(seen)]);
+    // ...and the same transcript version: a nightly re-record after a
+    // reprocess can replace subject_hash while leaving an identical answer.
+    update.whereRaw('subject_hash IS NOT DISTINCT FROM ?', [seenSubject]);
+    const [row] = await update.returning('*');
+    if (!row) {
+      const [status, payload] = await unwrittenLabel(id, force, req.machineLabeler);
+      return res.status(status).json(payload);
+    }
+
+    await recordAuditEvent({
+      actor_type: req.machineLabeler ? 'system' : 'technician',
+      actor_id: req.machineLabeler ? null : (req.technicianId || null),
+      action: 'typed_decision.labeled',
+      resource_type: 'decision_review',
+      resource_id: id,
+      metadata: { capability: row.capability, question_id: row.question_id, verdict, reason, label_status: labelStatus, forced: force, has_correct_value: correct.correctValue !== null, labeled_by: labeler(req) },
+      ip_address: req.ip,
+      user_agent: req.get('user-agent') || null,
+    });
     // The daily review item is done once nothing sampled is still waiting.
     await require('../services/typed-decisions/daily-review-item').closeIfQueueEmpty()
       .catch((err) => logger.warn(`[typed-decisions] review item close failed: ${err.message}`));

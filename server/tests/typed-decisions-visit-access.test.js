@@ -17,6 +17,7 @@ const knex = require('knex');
 const { randomUUID } = require('crypto');
 const subjectMigration = require('../models/migrations/20261003101500_decision_reviews_scheduled_services_subject');
 const statesMigration = require('../models/migrations/20261003140000_visit_access_states');
+const verdictsMigration = require('../models/migrations/20261126170000_visit_access_verdicts');
 const { packageFor, packageHash } = require('../services/typed-decisions/packages');
 const access = require('../services/typed-decisions/visit-access-shadow');
 
@@ -169,6 +170,7 @@ describe('visit access shadow: rules that need no database', () => {
       CONSTRAINT decision_reviews_subject_type_check CHECK (subject_type IN ('call_log','sms_log','social_post')))`, [schema]);
     await subjectMigration.up(database);
     await statesMigration.up(database);
+    await verdictsMigration.up(database);
     await database('customers').insert({ id: customerId, address_line1: '100 Example St', zip: '34200', city: 'Bradenton' });
   });
   afterAll(async () => {
@@ -180,7 +182,21 @@ describe('visit access shadow: rules that need no database', () => {
     gates(true);
     mockAsk.mockReset();
     mockAsk.mockResolvedValue(reply());
-    for (const t of ['visit_access_states', 'decision_reviews', 'sms_log', 'service_records', 'property_preferences', 'scheduled_services', 'customer_properties', 'neighborhood_access', 'neighborhoods']) await database(t).del();
+    for (const t of ['visit_access_verdicts', 'visit_access_states', 'decision_reviews', 'sms_log', 'service_records', 'property_preferences', 'scheduled_services', 'customer_properties', 'neighborhood_access', 'neighborhoods']) await database(t).del();
+  });
+
+  test('the verdicts table takes one verdict per visit, question and evidence, only right or wrong, and its down drops it', async () => {
+    const visitId = await visit();
+    const row = { scheduled_service_id: visitId, question_id: 'dog_on_property', subject_hash: 'a'.repeat(64), verdict: 'right' };
+    await database('visit_access_verdicts').insert(row);
+    await expect(database('visit_access_verdicts').insert({ ...row, verdict: 'wrong' })).rejects.toThrow(/uniq/);
+    await expect(database('visit_access_verdicts').insert({ ...row, subject_hash: 'b'.repeat(64), verdict: 'maybe' })).rejects.toThrow(/verdict_check/);
+    await database('visit_access_verdicts').insert({ ...row, subject_hash: 'b'.repeat(64), verdict: 'wrong' });
+    await verdictsMigration.up(database); // a second run changes nothing
+    expect(await database('visit_access_verdicts').where({ scheduled_service_id: visitId })).toHaveLength(2);
+    await verdictsMigration.down(database);
+    expect(await database.schema.hasTable('visit_access_verdicts')).toBe(false);
+    await verdictsMigration.up(database);
   });
 
   test('the migration keeps a value another migration added, and its down refuses while a visit row exists', async () => {
@@ -381,6 +397,16 @@ describe('visit access shadow: rules that need no database', () => {
     await database('customers').where({ id: customerId }).update({ has_multi_home: true });
     expect(await build(home)).toBeNull();
     await database('customers').where({ id: customerId }).update({ has_multi_home: false });
+  });
+
+  test('visitSinglePremises is the sweep\'s own proof, asked again for the technician: false once a second home appears, for an unknown visit, and on an error', async () => {
+    const home = await visit({ service_address_line1: '100 Example Street', service_address_zip: '34200', service_address_city: 'Bradenton' });
+    expect(await access.visitSinglePremises(home, database)).toBe(true);
+    expect(await access.visitSinglePremises(randomUUID(), database)).toBe(false);
+    const rental = await visit({ service_address_line1: '77 Sample Rd', service_address_zip: '34201', service_address_city: 'Bradenton' });
+    expect(await access.visitSinglePremises(home, database)).toBe(false);
+    expect(await access.visitSinglePremises(rental, database)).toBe(false);
+    expect(await access.visitSinglePremises(home, () => { throw new Error('db down'); })).toBe(false);
   });
 
   test('long preference notes never push out the visit note or the sensitivity', async () => {
@@ -631,10 +657,15 @@ describe('visit access shadow: rules that need no database', () => {
     const rows = await database('visit_access_states').where({ scheduled_service_id: visitId }).orderBy('created_at', 'desc');
     expect(rows).toHaveLength(2);
     expect(rows[0].subject_hash).toBe(first.subject_hash);
-    // Retention is its own, ungated step.
+    // Retention is its own, ungated step, and covers the technicians' verdicts on those states too.
     await database('visit_access_states').update({ created_at: new Date('2026-01-01T00:00:00Z') });
+    await database('visit_access_verdicts').insert([
+      { scheduled_service_id: visitId, question_id: 'dog_on_property', subject_hash: first.subject_hash, verdict: 'right', created_at: new Date('2026-01-01T00:00:00Z') },
+      { scheduled_service_id: visitId, question_id: 'past_access_problem', subject_hash: first.subject_hash, verdict: 'wrong', created_at: new Date('2026-10-04T00:00:00Z') },
+    ]);
     gates(false);
     expect(await access.pruneVisitAccessStates({ dbh: database, now: NOW })).toBe(2);
     expect(await database('visit_access_states')).toHaveLength(0);
+    expect((await database('visit_access_verdicts')).map((v) => v.question_id)).toEqual(['past_access_problem']);
   });
 });
