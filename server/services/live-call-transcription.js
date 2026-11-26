@@ -30,8 +30,7 @@
 const twilio = require('twilio');
 const db = require('../models/db');
 const logger = require('./logger');
-const featureGates = require('../config/feature-gates');
-const { isEnabled } = featureGates;
+const { isEnabled } = require('../config/feature-gates');
 const { createEditTracker, scrubPansTracked, trackedEditList } = require('../utils/pan-scrub');
 // A sandbox (voice relay test) call never has live text; its rows stay out of the sweep like every other reader.
 const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
@@ -332,25 +331,6 @@ async function storeUtterance(callSid, body) {
   return result;
 }
 
-// A stored staff line may be the staff putting the caller on hold (GATE_CALL_HOLD_VOICE). Gate off: nothing is
-// required, read or called. Fire and forget: a failure is logged by code only and the webhook's answer never changes.
-// Read through the module object at call time: a suite that mocks feature-gates as a bare object reads off.
-const holdVoiceLive = () => typeof featureGates.callHoldVoiceLive === 'function' && featureGates.callHoldVoiceLive();
-
-function handStaffLineToHoldVoice(callSid, body) {
-  if (SPEAKER_BY_TRACK[body.Track] !== 'staff' || !holdVoiceLive()) return;
-  const failed = (err) => logger.warn(`[live-transcription] hold voice hook failed for ${maskSid(callSid)} (${err?.code || err?.name || 'error'})`);
-  try {
-    // The speech time is Twilio's own Timestamp (null when it has none: a line with no time asks for no hold).
-    const at = new Date(body?.Timestamp);
-    const spokenAt = Number.isNaN(at.getTime()) ? null : at;
-    Promise.resolve(require('./call-hold-voice').afterStaffUtterance(callSid, utteranceText(parseJson(body.TranscriptionData)), { spokenAt }))
-      .catch(failed);
-  } catch (err) {
-    failed(err);
-  }
-}
-
 /**
  * Record one Twilio Real-Time Transcription callback (transcription-started / -content / -stopped
  * / -error). Only a call this module claimed is written to; anything else is ignored.
@@ -365,7 +345,6 @@ async function recordLiveTranscriptionEvent(body = {}) {
     if (result.stored && SPEAKER_BY_TRACK[body.Track] === 'caller' && isEnabled('liveCallUpsetAlert')) {
       require('./live-call-upset-alert').afterCallerUtterance(callSid);
     }
-    if (result.stored) handStaffLineToHoldVoice(callSid, body);
     return result;
   }
   const at = eventTime(body).toISOString();

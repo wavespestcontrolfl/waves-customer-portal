@@ -973,10 +973,9 @@ async function hasCommercialCall(database, customerId, managed) {
 }
 
 // A day-agreement decision of the account whose judge named the commercial
-// blocker (BLOCKERS in prompts/day-agreement-v1.js). The judge read a call or
-// a text thread of this customer as commercial work, and the app saved that
-// with the decision (day-agreement-rules.js keeps the judge's blockers as a
-// list of the vocabulary's words).
+// blocker. The judge read a call or a text thread of this customer as commercial
+// work, and the app saved that with the decision (a list of blocker words). The
+// judge no longer runs; the decisions it saved stay and are still read here.
 // (The lookup has its index since migration 20261120200000.)
 const COMMERCIAL_DAY_BLOCKER = 'commercial';
 async function hasCommercialDayAgreement(database, customerId) {

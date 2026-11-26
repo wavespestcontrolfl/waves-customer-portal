@@ -2076,10 +2076,6 @@ describe('planStartBlocker', () => {
         expect(await blocker(withDecisions(judgedList))).toBeNull();
       });
 
-      test("the judge's vocabulary names the blocker the rule reads", () => {
-        expect(require('../services/prompts/day-agreement-v1').BLOCKERS).toContain('commercial');
-      });
-
       // A jsonb column: a text in it is a valid value with no blocker, never a failed read.
       test('a decision that is one text carries no blocker: not commercial', async () => {
         expect(await blocker(withDecisions(['not judged', '']))).toBeNull();

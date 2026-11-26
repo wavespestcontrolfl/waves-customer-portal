@@ -1324,12 +1324,10 @@ describe('r17: every generateGroundedDraft caller that has a sender passes inbou
     const i = src.search(/generateGroundedDraft\(\{/);
     return i < 0 ? '' : src.slice(i, src.indexOf('});', i));
   };
-  test('the live drafter, the estimate review drafter and the backfill pass the sender phone', () => {
+  test('the live drafter and the estimate review drafter pass the sender phone', () => {
     expect(callBlock(read('services/sms-shadow-drafter.js').slice(read('services/sms-shadow-drafter.js').indexOf('async function draftShadowReply')))).toMatch(/inboundPhone:\s*fromPhone/);
     expect(callBlock(read('services/estimate-conversion-agent.js'))).toMatch(/inboundPhone/);
     expect(read('services/estimate-conversion-agent.js')).toMatch(/generateLlmReviewDraft\(\{[^}]*inboundPhone:\s*from\b/);
-    expect(callBlock(read('services/sms-shadow-backfill.js'))).toMatch(/inboundPhone:\s*inbound\.from_phone/);
-    expect(read('services/sms-shadow-backfill.js').match(/'i\.from_phone'/g)).toHaveLength(2);
   });
   test('the frozen-facts replay callers have no thread to inherit (preset facts / fixture context), so they pass none on purpose', () => {
     expect(callBlock(read('services/sms-sealed-eval.js'))).toMatch(/factsBlock:\s*item\.facts_block/);

@@ -20,7 +20,6 @@
  *   GATE_TECH_ESTIMATES=true (owner 2026-11-09, "GO, FOR ALL": a technician prices and, in later steps, sends an estimate from the phone. It has a gate because the later steps text and email customers and because the price preview runs the paid property lookup. Off, every /api/tech/estimates route answers 404 {enabled:false} before any customer read. On, a route also needs the technician's own Can create estimates switch (technicians.can_create_estimates, off by default); an admin login always passes. Steps 1 and 2a price and save a draft estimate (sold by = the creator) and read his own; nothing is sent. Pest lines only (general pest, mosquito, rodent, termite), each open to a technician only when his job type for it is Qualified. Strict `=== 'true'`, read at call time via techEstimatesLive(); dark by default. Kill: unset.)
  *   GATE_LIVE_CALL_TRANSCRIPTION=true (owner 2026-11-16 "ok build all", live-call suite PR 1: when a staff member presses 1 to take an inbound call, Twilio Real-Time Transcription starts on the caller's call, both sides, and each final utterance is saved card-number scrubbed in call_live_utterances through POST /api/webhooks/twilio/live-transcription. It collects text only; the features that read it come later. Read via isEnabled('liveCallTranscription') at boot, strict 'true', dark by default; off = no transcription starts and the press-1 TwiML is unchanged. Spends money when on (Twilio, $0.027 a call minute): owner flip only. Kill: delete the variable.)
  *   GATE_LIVE_CALL_UPSET_ALERT=true (owner 2026-11-16 "ok build all", live-call suite: while a call is live, when the caller sounds upset and the owner is not the one on the call, one bell row and one phone banner tell him so he can step in. After a caller utterance is saved, a Claude Haiku 5.5 read of the last two minutes runs when the caller has 3 or more new utterances, at most once per 45 seconds and 8 times per call; mood upset or angry raises one alert per call. Needs GATE_LIVE_CALL_TRANSCRIPTION data. Read via isEnabled('liveCallUpsetAlert') at boot, strict 'true', dark by default; off = no model call, no new read, behavior byte-identical. Spends money when on (a Haiku call per check): owner flip only. Kill: delete the variable.)
- *   GATE_CALL_SCREEN_EXCHANGE_HISTORY=true (owner 2026-11-16 "build", spam-call audit: robodialers moved to STIR attestation A, so the press-1 screen also challenges an unknown caller when 2+ other unknown numbers from its 6-digit exchange hung up with no message or failed the screen in 14 days; a caller who fails the screen keeps the missed-call alert row but no push. Off = shadow stamps only. Kill: unset)
  *   GATE_CALL_SCREEN_ALL_UNKNOWN=true (owner 2026-11-24 "trial", 14-day trial; needs GATE_CALL_PRECONNECT_SCREEN: every caller not on a customer record hears the press-1 prompt on any attestation, except a staff phone, a number on a live lead, or a remembered caller who talked with the office 30 s or more or left a message over 10 s on an earlier call; a failed-screen call writes its missed-call bell without a push. Named risk: a real caller who does not press 1 goes to voicemail. Kill = unset, instant off. Off = today's behavior, no extra read.)
  *   GATE_MISSED_CALL_SPAM_REPEAT=true (owner 2026-11-19 "YES BUILD", missed-call spam check: an unknown caller on a Google listing line whose same number already hung up with no message on another Google line, or twice on any line, in 14 days keeps the missed-call alert row, titled "likely robocall", but gets no push or re-push. Off = shadow stamp only. Kill: unset)
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
@@ -181,7 +180,6 @@
  *   GATE_TECH_JOB_TYPE_CHECKS=true (owner 2026-10-25, second technician starts early 2027: job type from the service catalog. The capability checks (slot offers, automatic technician pick, tech-out auto-move, auto-dispatch apply, the save-time fences) today read a visit's job type from its NAME, so "Palm Tree Nutritional Treatment", "Semiannual Palm", "Palm Fert" and "Top Dress" read as general pest and a technician set to Off for Lawn can still get them. On, the category comes from the service library first (the visit's service_id, else its service key, to services.category, mapped onto the five capability categories by the same table the service-line map uses) and falls back to the name only when the catalog names none. Office saves (schedule create and edit, board assign and drag, lead booking, Dispatch New Appointment) also add a plain warning, never a block, when the chosen technician is set to Off for the visit's job type; "needs review" never warns. Strict opt-in: exactly 'true', read at call time via techJobTypeChecksLive(). Ships DARK; off = name-only classification and no extra warning, byte-identical. Sends nothing to a customer.)
  *   GATE_CALL_HOLD=true (owner 2026-11-16 "ok build all", live-call suite: on a conference-path call (GATE_CALL_CONFERENCE_PATH), the staff press star to put the caller on hold. The caller hears a short script of pest facts, the call recording pauses, and the staff press 1 to go back. Strict opt-in, read at call time via callHoldLive(); off = byte-identical staff TwiML and no new route is reached. Spends money: Twilio bills the portal's neural Say voice (TWILIO_SAY_VOICE, default Polly.Joanna-Neural) per character of the script and prompts, so the owner flips it with his yes to the cost. Sends nothing to a customer. Kill: unset.)
  *   GATE_CALL_RING_FACT=true (owner 2026-11-16 "ok build all", live-call suite part 8: on half of the conference-path calls (GATE_CALL_CONFERENCE_PATH), chosen from the CallSid, the caller hears one pest fact from the hold script (call-hold-script.js FACTS) and then the ring, instead of the ring alone; the other half hear the ring as today. Each call is stamped conference_path.ring_fact {arm, fact} so ringFactReport() can compare hang-ups before the answer between the arms over 2 weeks. Strict opt-in, read at call time via callRingFactLive(); off = today's ring, byte for byte. Spends money (Twilio bills the Polly neural Say voice per character, about $1 a month) and the caller hears new audio, so the owner flips it; sends nothing to a customer. Kill: unset)
- *   GATE_CALL_HOLD_VOICE=true (owner 2026-11-16 "ok build all", live-call suite part 7: when a staff member says "please hold", "hold please" or "let me put you on hold" on a conference-path call, the caller is put on hold exactly as if the staff had pressed star; "hold on a second" does not start a hold. Named risk: a false match puts a caller on hold, so it has its own off switch. Strict opt-in, read at call time via callHoldVoiceLive(). Needs GATE_CALL_HOLD, GATE_LIVE_CALL_TRANSCRIPTION and GATE_CALL_CONFERENCE_PATH. Spends nothing beyond the hold's own Say voice. Sends nothing to a customer. Kill: unset.)
  *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
  *   GATE_PROMISE_RECORD_EVIDENCE=shadow|true (owner 2026-10-29, fix F4 "Stuck Alert Fixes": three false overdue bells on promises and asks the records had already answered. On, (1) an invoice Waves sent the customer after a staff promise ("I'll adjust the payment terms") is evidence the model may cite, (2) an estimate the customer accepted after a send-estimate ask counts even if it was sent before the ask, and (3) a waves row (promise or customer request) of kind other, callback or technician_follow_up whose customer has a live, non-series visit booked after the promise text and with its window end still ahead does not ring as overdue until that window end. `shadow` = change nothing; write audit_log rows for what it would have changed (sms_commitment.fulfillment.shadow, sms_commitment.on_track.shadow). Anything else = off, byte-identical. Read at call time via promiseRecordEvidenceMode(). See docs/gates-and-env.md.)
  *   GATE_SETTINGS_GATE_FLIP=true (owner 2026-11-06: Settings → Advanced → Features gets an on/off switch on every gate the portal can flip (a plain on/off gate with a description line here). Owner login only (requireFullAccess); turning a gate on asks for its name to be typed, turning it off is one click and writes 'false'; every flip writes an audit_log row (gate.flip) and goes through the same Railway variable write as the Intelligence Bar's set_railway_gate (compare-and-swap on the prior value; Railway redeploys the portal, so it restarts briefly). This gate itself, mode/timestamp gates and gates with no description stay Railway-only. Strict opt-in, read at call time via settingsGateFlipLive(); off = the page is read-only exactly as before and the flip routes answer 404)
@@ -1702,14 +1700,6 @@ const gates = {
   // Spend rails: SEALED_EXAM_AUTO_MIN_ITEMS / SEALED_EXAM_AUTO_MAX_ITEMS.
   smsSealedExamAutoRun: process.env.GATE_SMS_SEALED_EXAM_AUTORUN === 'true',
 
-  // Shadow Backfill (brand-voice loop accelerator) — drafts house-voice
-  // replies for HISTORICAL inbound SMS that already have a human reply and
-  // feeds them to the existing judge, compressing months of per-intent
-  // score accumulation into days. Hourly batches, self-terminating once
-  // history is exhausted. Burns ~2 Anthropic calls per sample, so prod
-  // requires explicit opt-in; flip off (or leave — it no-ops) when done.
-  shadowBackfill: isProd ? process.env.GATE_SHADOW_BACKFILL === 'true' : true,
-
   // SMS Pathology Ledger (brand-voice loop diagnostics) — nightly classifies
   // each draft_unsafe judgment into a fixed (harness surface × failure mode)
   // cell, and weekly parks a harness-patch PROPOSAL card when a cell
@@ -2056,14 +2046,6 @@ const gates = {
   // call_log.metadata.preconnect_screen='would_gate' (shadow daily counters,
   // zero caller impact).
   callPreconnectScreen: process.env.GATE_CALL_PRECONNECT_SCREEN === 'true',
-  // Press-1 screen exchange trigger + failed-screen push quiet (owner 2026-11-16
-  // "build", spam-call audit). On: an unknown caller on any attestation is
-  // challenged when 2+ other unknown numbers from its 6-digit exchange hung up
-  // with no message or failed the screen in 14 days (missed-call-bell.js
-  // exchangeHangupScreenHit), and a failed-screen call's missed-call bell row is
-  // written without a push (stamped 'screen_quiet'). Off = shadow:
-  // preconnect_screen_exchange='shadow' and missed_call_screen_quiet_shadow.
-  callScreenExchangeHistory: process.env.GATE_CALL_SCREEN_EXCHANGE_HISTORY === 'true',
   // Press-1 screen for every unknown caller (owner 2026-11-24 "trial", 14-day
   // trial; needs GATE_CALL_PRECONNECT_SCREEN). On: an unknown caller on any
   // attestation hears the press-1 prompt unless the number is a staff phone, on
@@ -2507,14 +2489,6 @@ const gates = {
   sameQuestionCheck: process.env.GATE_SAME_QUESTION_CHECK === 'true',
   // GATE_ROUTE_ENGINE_SUMMARY (engine summary block on the admin Day Scorecard, read-only, dark). Boot-log entry only; the call-time reader is routeEngineSummaryLive().
   routeEngineSummary: process.env.GATE_ROUTE_ENGINE_SUMMARY === 'true',
-  // Day-only agreement shadow (owner 2026-10-20, PR 1 of 2): every 10 minutes a
-  // sweep reads recent two-party calls and quiet text threads where only a DAY
-  // was agreed for a visit (or a move of one), asks the model what the office
-  // should do, and records what the agent WOULD do in day_agreement_decisions
-  // so a week of shadow can be scored against what staff did. Books nothing,
-  // moves nothing, texts no one. The act step is a later PR.
-  // Off -> the cron tick returns before it reads anything.
-  dayAgreementShadow: process.env.GATE_DAY_AGREEMENT_SHADOW === 'true',
   // Shared-writer cancellation notice (job-status.js): when a visit whose
   // reminders already went out is cancelled through ANY path (cascade,
   // track, IB, raw transition), text the customer the existing
@@ -4374,10 +4348,6 @@ const gates = {
   // callRingFactLive(); this entry is for logGateStatus. Off = byte-identical caller TwiML.
   callRingFact: process.env.GATE_CALL_RING_FACT === 'true',
 
-  // Spoken "please hold" trigger for the star-key hold (services/call-hold-voice.js). Read at CALL time by
-  // callHoldVoiceLive(); this entry is for logGateStatus. Off = nothing reads the staff's words for a hold.
-  callHoldVoice: process.env.GATE_CALL_HOLD_VOICE === 'true',
-
   // Customer location line (services/twilio.js deriveOutboundNumber →
   // config/locations.js resolveServiceLocation). ON: a customer whose city is
   // blank or unmapped gets the line of the office their ZIP, then geocode,
@@ -5817,15 +5787,6 @@ function ibGeneralEditLive() {
 // keeps the ordinary list. Kill: unset.
 function ibToolSearchLive() {
   return process.env.GATE_IB_TOOL_SEARCH === 'true';
-}
-
-// GATE_IB_OPENAI_BACKUP read at CALL time — strict `=== 'true'`, dark. When the
-// Intelligence Bar's Anthropic call fails with a provider error (usage limit,
-// auth, overloaded, 5xx, timeout), the request finishes on OpenAI with tool
-// calling (services/intelligence-bar/openai-tool-adapter.js). Off = no
-// fallback, today's behavior. Kill: unset.
-function ibOpenaiBackupLive() {
-  return process.env.GATE_IB_OPENAI_BACKUP === 'true';
 }
 
 // GATE_IB_FAST_MODE read at CALL time — strict `=== 'true'`, dark. SPEND GATE:
@@ -8328,11 +8289,6 @@ function callHoldLive() {
   return process.env.GATE_CALL_HOLD === 'true';
 }
 
-// GATE_CALL_HOLD_VOICE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-16, "ok build all"). Kill = unset.
-function callHoldVoiceLive() {
-  return process.env.GATE_CALL_HOLD_VOICE === 'true';
-}
-
 function smsBareYesReplyLive() {
   return process.env.GATE_SMS_BARE_YES_REPLY === 'true';
 }
@@ -8358,8 +8314,6 @@ module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.callHoldLive = callHoldLive;
 // GATE_CALL_RING_FACT reader, on its own line so gate PRs never conflict.
 module.exports.callRingFactLive = callRingFactLive;
-// GATE_CALL_HOLD_VOICE reader, on its own line so gate PRs never conflict.
-module.exports.callHoldVoiceLive = callHoldVoiceLive;
 module.exports.ibSeriesMoveLive = ibSeriesMoveLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
 // GATE_CALL_CONFERENCE_PATH reader, on its own line so gate PRs never conflict.
@@ -8837,8 +8791,6 @@ module.exports.ibGeneralReadLive = ibGeneralReadLive;
 module.exports.ibGeneralEditLive = ibGeneralEditLive;
 // GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.
 module.exports.ibToolSearchLive = ibToolSearchLive;
-// GATE_IB_OPENAI_BACKUP reader, on its own line so gate PRs never conflict.
-module.exports.ibOpenaiBackupLive = ibOpenaiBackupLive;
 // GATE_IB_FAST_MODE reader, on its own line so gate PRs never conflict.
 module.exports.ibFastModeLive = ibFastModeLive;
 // GATE_IB_BILLING_MODE_EDIT reader, on its own line so gate PRs never conflict.

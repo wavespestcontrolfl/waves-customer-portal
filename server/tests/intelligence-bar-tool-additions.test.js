@@ -1,10 +1,9 @@
 /**
- * Tool additions helpers (tool-additions.js) and the OpenAI backup's
- * fold of them (ib-openai-backup.js backupRequestState). The route-level
+ * Tool additions helpers (tool-additions.js) and their fold into `tools`
+ * (foldAdditions). The route-level
  * request shapes are in admin-intelligence-bar-tool-additions.test.js.
  */
 const ToolAdditions = require('../services/intelligence-bar/tool-additions');
-const { backupRequestState } = require('../services/intelligence-bar/ib-openai-backup');
 
 const tool = (name, description = `${name} tool`) => ({ name, description, input_schema: { type: 'object', properties: {} } });
 const results = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: '{}' }] };
@@ -147,17 +146,14 @@ describe('withoutTrailingAddition (resume)', () => {
   });
 });
 
-describe('OpenAI backup switch (backupRequestState)', () => {
-  test('the backup gets the added and waiting tools in `tools` and a history without addition messages', () => {
-    const next = backupRequestState({
+describe('foldAdditions', () => {
+  test('added and waiting tools go back into `tools` and the history loses its addition messages', () => {
+    const next = ToolAdditions.foldAdditions({
       tools: [tool('discover_capabilities')],
       messages: [question, call, results, ToolAdditions.additionMessage([tool('cancel_plan')])],
-      pendingTools: [tool('get_review_stats')],
-      context: 'dashboard',
-      actionScope: { role: 'admin', context: 'dashboard', fullAccess: true },
+      pending: [tool('get_review_stats')],
     });
     expect(next.tools.map(t => t.name)).toEqual(['discover_capabilities', 'cancel_plan', 'get_review_stats']);
     expect(next.messages.some(m => m.role === 'system')).toBe(false);
-    expect(next.toolSearch).toBe(false);
   });
 });

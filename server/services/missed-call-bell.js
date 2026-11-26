@@ -200,35 +200,23 @@ async function classifySpamWave(row) {
   return { block, burst };
 }
 
-// The press-1 screen's exchange trigger (owner 2026-11-16 "build", after the
-// spam-call audit): robodialers moved from STIR attestation B to A, so the
-// B-only screen stopped 86% of silent hang-ups in the week of Aug 10 and 8% in
-// the week of Nov 9. A caller is a candidate when EXCHANGE_MIN_NUMBERS or more
-// OTHER unknown numbers from its 6-digit block (area code + exchange) hung up
-// on us in the last EXCHANGE_DAYS: nobody answered (or the caller failed the
-// screen) and no message was left. "No message" is proven, never assumed
-// (Codex #7893 r1): no recording once the call ended and VOICEMAIL_GRACE_MS
-// passed (the bell's own rule), or a recording whose length is known and is
-// MAX_SILENT_RECORDING_SECONDS or less. A failed screen's recorder captures a
-// few silent seconds, so it counts up to FAILED_SCREEN_SILENT_SECONDS: in the
-// 110 days to 2026-11-16, 64 of its recordings ran 4-8 s and the 3 real
-// messages 58-94 s. Without failed screens the rule would stop counting the
-// very calls it screens. A recording still waiting for its length never
-// counts. A member whose number got
-// through later, is on a customer phone slot or is on a live lead is a real
-// caller and does not count. The caller itself must be on no live lead (the
-// webhook checks the customer slots). Any line. Read on the ring path, so
-// bounded by a statement timeout; the webhook fails open on any error.
-const EXCHANGE_MIN_NUMBERS = 2;
-const EXCHANGE_DAYS = 14;
+// Silent hang-up reads (the repeat-caller rule below) are read in front of a
+// delivery, so they are bounded by a statement timeout and the caller fails open.
+// "No message" is proven, never assumed (Codex #7893 r1): no recording once the
+// call ended and VOICEMAIL_GRACE_MS passed (the bell's own rule), or a recording
+// whose length is known and is MAX_SILENT_RECORDING_SECONDS or less. A failed
+// screen's recorder captures a few silent seconds, so it counts up to
+// FAILED_SCREEN_SILENT_SECONDS: in the 110 days to 2026-11-16, 64 of its
+// recordings ran 4-8 s and the 3 real messages 58-94 s. A recording still
+// waiting for its length never counts.
 const EXCHANGE_TIMEOUT_MS = 1500;
 const MAX_SILENT_RECORDING_SECONDS = 3;
 const FAILED_SCREEN_SILENT_SECONDS = 10;
 const FAILED_SCREEN_SQL = "metadata->>'preconnect_screen' = 'failed'";
 const NOT_ON_LIVE_LEAD_SQL = `NOT EXISTS (SELECT 1 FROM leads ld WHERE ld.deleted_at IS NULL AND ${phoneKeySql('ld.phone')} = ${phoneKeySql('call_log.from_phone')})`;
 
-// The silent hang-ups of the `days` before `at` that the exchange trigger and
-// the repeat-caller rule count: an unknown North American caller nobody
+// The silent hang-ups of the `days` before `at` that the repeat-caller rule
+// counts: an unknown North American caller nobody
 // answered (or who failed the screen), no message proven as described above,
 // never got through later, on no customer slot and no live lead. The voicemail
 // grace runs to `checkedAt`, the time of the check, not to `at`: a redial a
@@ -261,38 +249,13 @@ function whereSilentHangupBefore(qb, at, days, checkedAt) {
     .whereRaw(NOT_ON_LIVE_LEAD_SQL);
 }
 
-function silentHangupsBefore(at, days, checkedAt = new Date()) {
-  return db('call_log').modify((qb) => whereSilentHangupBefore(qb, at, days, checkedAt))
-    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true });
-}
-
-async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
-  const raw = String(fromPhone || '').replace(/\D/g, '');
-  const plus = String(fromPhone || '').trim().startsWith('+');
-  if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return false;
-  const digits = raw.slice(-10);
-  const found = await silentHangupsBefore(at, EXCHANGE_DAYS, at)
-    .whereRaw(`substr(${LAST10_SQL('from_phone')}, 1, 6) = ?`, [digits.slice(0, 6)])
-    .whereRaw(`${LAST10_SQL('from_phone')} <> ?`, [digits])
-    .select(db.raw(`COUNT(DISTINCT ${LAST10_SQL('from_phone')}) AS n`))
-    .first();
-  if (Number(found?.n || 0) < EXCHANGE_MIN_NUMBERS) return false;
-  const lead = await db('leads')
-    .whereNull('deleted_at')
-    .whereRaw(`${phoneKeySql('phone')} = ?`, [`1${digits}`])
-    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
-    .first('id');
-  return !lead;
-}
-
 // A repeat silent caller (owner 2026-11-19 "YES BUILD", after the missed-call
 // spam check): from 2026-11-02 two numbers in one 941 exchange called the
 // Parrish, Sarasota and Venice Google Business Profile lines 10 times, about
 // 24 s each with no message, and pushed 8 bells in 14 days. Two numbers are too
-// few for the block wave (3), the burst (3) or the exchange trigger (2 OTHER
-// numbers). This rule reads only the caller's own history, so nobody can prime
+// few for the block wave (3) or the burst (3). This rule reads only the caller's own history, so nobody can prime
 // it without calling from that very number. A repeat = an unknown caller on a
-// GBP line whose same number made a silent hang-up (silentHangupsBefore) on a
+// GBP line whose same number made a silent hang-up (whereSilentHangupBefore) on a
 // DIFFERENT GBP line, or REPEAT_MIN_PRIOR silent hang-ups on any line, in the
 // last REPEAT_DAYS. The first call from a number never matches. Only history
 // the carrier fully attested (STIR/SHAKEN 'TN-Validation-Passed-A', stored as
@@ -924,8 +887,8 @@ function leaseStale(token, now = Date.now()) {
 //  - Burst: stamped 'burst_quiet'.
 //  - A repeat silent caller with GATE_MISSED_CALL_SPAM_REPEAT on: stamped 'repeat_quiet'.
 //  - An unknown caller who failed the press-1 screen (no key; owner 2026-11-16
-//    "build") with GATE_CALL_SCREEN_EXCHANGE_HISTORY or GATE_CALL_SCREEN_ALL_UNKNOWN
-//    (owner 2026-11-24 "trial") on: stamped 'screen_quiet'.
+//    "build") with GATE_CALL_SCREEN_ALL_UNKNOWN (owner 2026-11-24 "trial") on:
+//    stamped 'screen_quiet'.
 //    Since October 12 of 16 such calls pushed; the screen kept them off the
 //    staff phones but not off the admin app.
 //  - A flagged repeat or screen call whose gate is off rings as before, stamped with the
@@ -937,7 +900,7 @@ const QUIET_RULES = [
   { flag: 'block', quiet: 'block_quiet' },
   { flag: 'burst', quiet: 'burst_quiet' },
   { flag: 'repeat', gate: 'missedCallSpamRepeat', quiet: 'repeat_quiet', shadow: 'missed_call_spam_repeat_shadow' },
-  { flag: 'screen', gate: ['callScreenExchangeHistory', 'callScreenAllUnknown'], quiet: 'screen_quiet', shadow: 'missed_call_screen_quiet_shadow' },
+  { flag: 'screen', gate: 'callScreenAllUnknown', quiet: 'screen_quiet', shadow: 'missed_call_screen_quiet_shadow' },
 ];
 // The stamps one pass writes: the quiet marker and each gated rule's shadow.
 const PASS_STAMP_KEYS = ['missed_call_spam_wave', ...QUIET_RULES.filter((rule) => rule.shadow).map((rule) => rule.shadow)];
@@ -1453,7 +1416,6 @@ module.exports = {
   isRepeatSilentCaller,
   quietRobodialerPush,
   classifySpamWave,
-  exchangeHangupScreenHit,
   sweepMissedCalls,
   outcomeUnanswered,
   CALLED_BACK_ANSWERED_SQL,
