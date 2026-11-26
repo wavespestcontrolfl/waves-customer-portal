@@ -3685,6 +3685,9 @@ async function setEstimatePresentation(input, actionContext = {}) {
     // the payload rebuilds from the relabeled rows on next view.
     if (lockedData.sendSnapshot && typeof lockedData.sendSnapshot === 'object'
       && lockedData.sendSnapshot.pricingBundle) {
+      // The bundle may be the only record of what the quote sold for: freeze the rule stamps it was priced under first.
+      require('../estimate-floor-signal-replay').freezeSnapshotRuleStamps(lockedData);
+      lockedData.sendSnapshot = { ...lockedData.sendSnapshot };
       delete lockedData.sendSnapshot.pricingBundle;
     }
     lockedData.presentationOverrides = [

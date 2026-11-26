@@ -10206,9 +10206,18 @@ function priceRodentExclusionV2(options = {}) {
   const softLF = Math.max(0, Number(meshSoftLF) || 0);
   const hardLF = Math.max(0, Number(meshConcreteLF) || 0);
 
+  // Two-story factor (owner 2026-11-26, "fix this"): the roof/high points of a home of two or more stories take
+  // RODENT.exclusionV2.modifiers.twoStory on top of the roof-style multiplier. Roof/high points ONLY: ground points,
+  // bird boxes, linear mesh, the barrel closure, the job floor and the inspection never take it. A quote priced before
+  // the rule keeps its price: options.legacyTwoStory (from input.legacyTwoStoryRoof, the estimate-level rule stamp the
+  // estimate engine reads, see estimate-floor-signal-replay.js) drops the factor. Stories come from the inputs being priced.
+  const twoStoryRaw = Number(cfg.modifiers && cfg.modifiers.twoStory);
+  const twoStoryFactor = options.legacyTwoStory !== true && Number(options.stories) >= 2 && twoStoryRaw > 0 ? twoStoryRaw : 1;
+  const advancedPointRate = cfg.wireMeshPoints.advancedRoofHigh * (roof ? roof.multiplier : 1) * twoStoryFactor;
+
   const wireMeshPointSubtotal =
     stdPts * cfg.wireMeshPoints.standard +
-    advPts * cfg.wireMeshPoints.advancedRoofHigh * (roof ? roof.multiplier : 1);
+    advPts * advancedPointRate;
 
   const birdBoxSubtotal =
     stdBoxes * cfg.birdBoxes.standard +
@@ -10340,8 +10349,10 @@ function priceRodentExclusionV2(options = {}) {
       unitParts([
         [stdPts, `standard @ $${cfg.wireMeshPoints.standard}/pt`],
         [advPts, roof && roof.tile
-          ? `roof/high tile @ $${(cfg.wireMeshPoints.advancedRoofHigh * roof.multiplier).toFixed(2)}/pt`
-          : `roof/high @ $${cfg.wireMeshPoints.advancedRoofHigh}/pt`],
+          ? `roof/high tile${twoStoryFactor > 1 ? ' two-story' : ''} @ $${advancedPointRate.toFixed(2)}/pt`
+          : (twoStoryFactor > 1
+            ? `roof/high two-story @ $${advancedPointRate.toFixed(2)}/pt`
+            : `roof/high @ $${cfg.wireMeshPoints.advancedRoofHigh}/pt`)],
       ]));
   }
   if (birdBoxSubtotal > 0) {

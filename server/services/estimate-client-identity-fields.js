@@ -52,6 +52,8 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   // Which price rules a saved quote was priced with (the 2026-11-26 fixes): server-derived from its own stamp, so a
   // posted false must never switch a sent quote onto the new rules, nor a posted true freeze a new one.
   'legacyPricingRules',
+  // Two-story roof-point stamp (rodent exclusion, 2026-11-26): server-derived from its own stamp, same rule.
+  'legacyTwoStoryRoof',
   // The per-visit palm minimum a saved quote was priced with: server-derived from its own palm row.
   'palmMinPerVisitReplay',
   // The services a legacy estimate priced under the current rules (added by a revision): server-derived from its stamp.

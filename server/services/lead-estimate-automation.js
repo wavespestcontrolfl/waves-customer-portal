@@ -438,6 +438,7 @@ function compactLineItem(item = {}) {
     name: item.name || item.label || item.displayName,
     // Which price rules priced this line (the 2026-11-26 fixes): the saved-estimate reader replays under them.
     ...(typeof item.legacyPricingRules === 'boolean' ? { legacyPricingRules: item.legacyPricingRules } : {}),
+    ...(typeof item.legacyTwoStoryRoof === 'boolean' ? { legacyTwoStoryRoof: item.legacyTwoStoryRoof } : {}),
     annual: item.annualAfterDiscount ?? item.annual ?? null,
     monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
     price: item.priceAfterDiscount ?? item.price ?? null,
@@ -679,7 +680,12 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
         engineResult: {
           summary: estimate?.summary || {},
           ...(typeof estimate?.pricingMetadata?.legacyPricingRules === 'boolean'
-            ? { pricingMetadata: { legacyPricingRules: estimate.pricingMetadata.legacyPricingRules } }
+            ? { pricingMetadata: {
+              legacyPricingRules: estimate.pricingMetadata.legacyPricingRules,
+              ...(typeof estimate.pricingMetadata.legacyTwoStoryRoof === 'boolean'
+                ? { legacyTwoStoryRoof: estimate.pricingMetadata.legacyTwoStoryRoof }
+                : {}),
+            } }
             : {}),
           lineItems: (estimate?.lineItems || []).map(compactLineItem),
           waveGuard: estimate?.waveGuard || null,

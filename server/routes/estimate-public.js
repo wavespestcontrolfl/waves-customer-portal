@@ -30060,6 +30060,8 @@ function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}) {
 
 function invalidateSendSnapshotPricingBundle(estData = {}) {
   if (!estData || typeof estData !== 'object' || !estData.sendSnapshot?.pricingBundle) return false;
+  // The bundle may be the only record of what the quote sold for: freeze the rule stamps it was priced under first.
+  require('../services/estimate-floor-signal-replay').freezeSnapshotRuleStamps(estData);
   estData.sendSnapshot = { ...estData.sendSnapshot };
   delete estData.sendSnapshot.pricingBundle;
   delete estData.sendSnapshot.pricingBundleError;
@@ -34047,6 +34049,7 @@ module.exports.attachCommercialInteriorSelector = attachCommercialInteriorSelect
 // Test hooks (audit 2026-07-28): curve resolution for unstamped pest replays
 // and the mirrored-section label rule.
 module.exports.extractEngineInputs = extractEngineInputs;
+module.exports.invalidateSendSnapshotPricingBundle = invalidateSendSnapshotPricingBundle;
 module.exports.estimateFamilyKeysForAdoption = estimateFamilyKeysForAdoption;
 module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFamily;
 module.exports.serviceFamilyKeyForAdoption = serviceFamilyKeyForAdoption;

@@ -3355,12 +3355,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // Which price rules priced this quote (the 2026-11-26 fixes): the saved-estimate reader replays under them
           // (estimate-floor-signal-replay.js), so a wizard quote priced under the fixes never replays on the old rules.
           ...(typeof estimate?.pricingMetadata?.legacyPricingRules === 'boolean'
-            ? { pricingMetadata: { legacyPricingRules: estimate.pricingMetadata.legacyPricingRules } }
+            ? { pricingMetadata: {
+              legacyPricingRules: estimate.pricingMetadata.legacyPricingRules,
+              // Two-story roof-point stamp (rodent exclusion, 2026-11-26).
+              ...(typeof estimate.pricingMetadata.legacyTwoStoryRoof === 'boolean'
+                ? { legacyTwoStoryRoof: estimate.pricingMetadata.legacyTwoStoryRoof }
+                : {}),
+            } }
             : {}),
           lineItems: (estimate?.lineItems || []).map(item => ({
             service: item.service,
             name: item.name || item.label || item.displayName,
             ...(typeof item.legacyPricingRules === 'boolean' ? { legacyPricingRules: item.legacyPricingRules } : {}),
+            ...(typeof item.legacyTwoStoryRoof === 'boolean' ? { legacyTwoStoryRoof: item.legacyTwoStoryRoof } : {}),
             annual: item.annualAfterDiscount ?? item.annual ?? null,
             monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
             price: item.priceAfterDiscount ?? item.price ?? null,
