@@ -88,9 +88,10 @@ function countyMeasurements(lookup) {
   // The record's story count rides with its home size: pest prices on the footprint (living area over the stories), and above the
   // 5,500 sq ft table every 1,000 sq ft of footprint is priced (owner 2026-11-26), so a two-story 8,000 sq ft home read as one
   // floor was quoted for twice its footprint. Only a count the estimator itself prices as a looked-up fact is carried (the same
-  // grader, draft-builder storiesSourceForPricing): the AI fallback's estimate is not.
+  // grader, draft-builder storiesSourceForPricing): the AI fallback's estimate is not. A count outside 1 to 3 is no count.
   const { storiesSourceForPricing } = require('./estimator-engine/draft-builder');
-  const stories = storiesSourceForPricing(facts) === 'lookup' ? Number(facts.stories) : null;
+  const { statedStoryCount } = require('./voice-agent/story-count');
+  const stories = storiesSourceForPricing(facts) === 'lookup' ? statedStoryCount(facts.stories) : null;
   return { homeSqFt, lotSqFt, ...(stories ? { stories } : {}), source: MEASUREMENTS_SOURCE };
 }
 

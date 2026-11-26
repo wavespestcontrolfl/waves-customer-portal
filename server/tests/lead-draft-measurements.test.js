@@ -94,6 +94,12 @@ describe('county sizes a lead draft may use', () => {
     expect(countyMeasurements(lookupOf(countyRecord({
       squareFootage: 8000, stories: 2, _storiesEvidence: { basis: 'direct', confidence: 'high', sourceUrl: 'https://example.com/parcel', sourceType: 'county' },
     })))).toMatchObject({ stories: 2 });
+    // A count outside 1 to 3 is no count (a 12-story "home" is another building's record); a split level is kept.
+    for (const stories of [12, 4, 0.5]) {
+      expect(countyMeasurements(lookupOf(countyRecord({ squareFootage: 8000, stories }))))
+        .toEqual({ homeSqFt: 8000, lotSqFt: 9200, source: 'county_assessed' });
+    }
+    expect(countyMeasurements(lookupOf(countyRecord({ squareFootage: 8000, stories: 1.5 })))).toMatchObject({ stories: 1.5 });
   });
 
   test('only an address with no unit, in any position, describes one house', () => {
@@ -241,6 +247,38 @@ describe('the draft builder\'s cache read', () => {
     expect(small.automation.engineInput).not.toHaveProperty('storiesSource');
     expect(small.quoteRequired).toBe(false);
     expect(pest(small).perApp).toBe(128);
+  });
+
+  test('a story count is a number from 1 to 3 or it is no count: junk never clears the big-home hold or shrinks the footprint', async () => {
+    const pest = (draft) => draft.estimateData.engineResult.lineItems.find((l) => l.service === 'pest_control');
+    const draftFor = (stories, homeSqFt = 12000) => buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt, lotSqFt: 16000, stories } }));
+    // The webhook body is unauthenticated. Read as a count, 12 (or [12]) priced a 12,000 sq ft home as a 1,000 sq ft footprint.
+    for (const junk of [12, [12], '12', [2], true, 0.5, 0, -2, 4, '2 stories', {}, 'abc', '0x10']) {
+      const draft = await draftFor(junk);
+      expect(draft.automation.engineInput).toMatchObject({ homeSqFt: 12000, stories: 1, storiesSource: 'default' });
+      expect(draft.automation).toMatchObject({ status: 'manual_review_required', quoteRequired: true, quoteRequiredReason: 'stories_estimated' });
+      expect([draft.monthly, draft.annual]).toEqual([0, 0]);
+    }
+    // A real count prices, whole or split level, as a number or as form text: 12,000 sq ft on 1, 1.5, 2 and 3 floors.
+    for (const [stories, perApp] of [[1, 180], ['1', 180], [1.5, 148], ['1.5', 148], [2, 132], [' 2 ', 132], [3, 122]]) {
+      const draft = await draftFor(stories);
+      expect(draft.automation.engineInput).toMatchObject({ stories: Number(stories) });
+      expect(draft.automation.engineInput).not.toHaveProperty('storiesSource');
+      expect(draft.quoteRequired).toBe(false);
+      expect(pest(draft).perApp).toBe(perApp);
+    }
+    // A county count from the background lookup is held to the same bounds.
+    const countyJunk = await buildAutomatedLeadDraftEstimate({
+      ...readyLead(), measurements: { homeSqFt: 8000, lotSqFt: 12000, stories: 12, source: 'county_assessed' },
+    });
+    expect(countyJunk.automation.engineInput).toMatchObject({ stories: 1, storiesSource: 'default' });
+    expect(countyJunk.automation).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'stories_estimated' });
+    // At or under the table junk is no count either: the draft prices one floor, as it does with no count at all.
+    const smallJunk = await draftFor(12, 3000);
+    expect(smallJunk.automation.engineInput).toMatchObject({ stories: 1 });
+    expect(smallJunk.automation.engineInput).not.toHaveProperty('storiesSource');
+    expect(smallJunk.quoteRequired).toBe(false);
+    expect(pest(smallJunk).perApp).toBe(pest(await draftFor(undefined, 3000)).perApp);
   });
 
   test('measurements passed in (the background lookup) skip the cache read', async () => {

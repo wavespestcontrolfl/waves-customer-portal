@@ -220,16 +220,18 @@ const TRUSTED_STORIES_SOURCES = new Set(['ai', 'permit', 'verified', 'manual']);
 // fieldVerifyFlags entry on squareFootage or stories (conflicting evidence)
 // — or the global address flag — means "verify before pricing", and a
 // footprint derived from either is not trusted (Codex #6398 r24 P1).
+// The three story-count tests above as one answer: does the SERVER-SIDE lookup vouch for its own story count?
+function lookupStoriesAreTrusted(trustedTurf = {}, propertyRecord = null) {
+  const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
+  if (!TRUSTED_STORIES_SOURCES.has(t.storiesSource) || !lookupDimensionIsTrustworthy(t, 'stories')) return false;
+  if (t.storiesSource !== 'ai') return true;
+  const { storiesSourceForPricing } = require('../services/estimator-engine/draft-builder');
+  return storiesSourceForPricing({ stories: t.stories, storiesEvidence: propertyRecord?._storiesEvidence || null }) === 'lookup';
+}
 function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) {
   const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
   if (t.footprintUnknown === true) return null;
-  if (!TRUSTED_STORIES_SOURCES.has(t.storiesSource)) return null;
-  if (!lookupDimensionIsTrustworthy(t, 'homeSqFt') || !lookupDimensionIsTrustworthy(t, 'stories')) return null;
-  if (t.storiesSource === 'ai') {
-    const { storiesSourceForPricing } = require('../services/estimator-engine/draft-builder');
-    const graded = storiesSourceForPricing({ stories: t.stories, storiesEvidence: propertyRecord?._storiesEvidence || null });
-    if (graded !== 'lookup') return null;
-  }
+  if (!lookupDimensionIsTrustworthy(t, 'homeSqFt') || !lookupStoriesAreTrusted(t, propertyRecord)) return null;
   const stories = Math.max(1, Math.min(3, Number(t.stories) || 1));
   const perStory = (v) => Math.max(1, Math.round(Number(v) / stories));
   if (Number(t.footprint) > 0) return Number(t.footprint);
@@ -1258,6 +1260,8 @@ async function sendQuoteRequestEmail({
 const RESIDENTIAL_VERIFICATION_REASONS = new Set([
   'lot_size_requires_verification',
   'home_size_above_public_limit',
+  // A home above the pest footprint table whose story count no record confirms (the engine's own review reason).
+  'stories_estimated',
   'mosquito_treatable_area_unverified',
   'unit_in_multi_unit_building',
   'low_confidence_turf_requires_field_verification',
@@ -1858,6 +1862,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const fleaMeasuredHomeSqFt = !commercialDetected && services?.flea && homeSizeIsDefault
       ? trustedFleaHomeSqFt(trustedTurf, trustedRecord)
       : null;
+    // Pest above the 5,500 sq ft table (owner 2026-11-26, new quotes): the price rises with the footprint, the living area over
+    // the stories, so the story count sets it. The count the engine gets (storiesNum) is the body's, as before: the wizard
+    // echoing a lookup, or anything a direct caller typed. Above the table it is a known count only when the server's own lookup vouches for the
+    // same number. Otherwise storiesSource 'default' puts the engine's stories_estimated review on the pest line and the quote
+    // goes to the team. The mark is set whatever the services, so pest added to this draft later is held too. A home above the
+    // 20,000 sq ft ceiling is already held for the team under its own reason.
+    const storiesUnknownAboveTable = !commercialDetected && !homeSizeAbovePublicLimit
+      && resolvedHomeSqFt > Number(pricingConstants.PEST.aboveTableStartSqFt)
+      && !(lookupStoriesAreTrusted(trustedTurf, trustedRecord) && Number(trustedTurf.stories) === storiesNum);
     let engineInput = {
       // The posted size itself when it is above the ceiling (that quote parks for a hand price): a stored draft re-priced later by
       // staff reads the real size, never the clamped one.
@@ -1877,7 +1890,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // commercial lawn/tree can estimate, but commercial mosquito reads this flag
       // and falls back to manual rather than auto-pricing a fabricated area.
       lotSizeMeasured,
-      stories: Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1)),
+      stories: storiesNum,
+      ...(storiesUnknownAboveTable ? { storiesSource: 'default' } : {}),
       lotSqFt: lot,
       propertyType: commercialDetected ? 'commercial' : (propertyType || ep.propertyType || 'Single Family'),
       category: category || ep.category || null,
@@ -4506,7 +4520,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
-          : quoteRequiredReason === 'home_size_above_public_limit'
+          : (quoteRequiredReason === 'home_size_above_public_limit' || quoteRequiredReason === 'stories_estimated')
           ? 'A home this size is priced by our team — we\'ll review it and send your exact price shortly.'
           : quoteRequiredReason === 'mosquito_lot_above_2_acres'
           ? 'Mosquito control for a property this size is priced by our team — we\'ll review your lot and send your exact price shortly.'

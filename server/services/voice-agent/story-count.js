@@ -8,4 +8,13 @@ function storyCount(value) {
   return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.max(1, Math.min(3, n)) : null;
 }
 
-module.exports = { storyCount };
+// A count from a web form body or a property record (a lead draft: lead-estimate-automation.js, lead-draft-measurements.js). Nobody
+// can be asked again there, and a number outside the bounds is a wrong field, not a tall home: 12 read as a count priced a 12,000
+// sq ft home as a 1,000 sq ft footprint. So it is a count only as a number or a numeric string from 1 to 3 (1.5 kept); anything
+// else (12, 0.2, true, [2], text) is no count, and the draft treats the story count as unknown.
+function statedStoryCount(value) {
+  const n = typeof value === 'string' && value.trim() !== '' ? Number(value.trim()) : value;
+  return typeof n === 'number' && Number.isFinite(n) && n >= 1 && n <= 3 ? n : null;
+}
+
+module.exports = { storyCount, statedStoryCount };

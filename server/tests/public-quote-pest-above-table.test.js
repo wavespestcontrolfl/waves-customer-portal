@@ -54,6 +54,12 @@ jest.mock('../services/sendgrid-mail', () => ({
 jest.mock('../services/newsletter-subscribers', () => ({ subscribeOrResubscribe: jest.fn(async () => ({ action: 'noop' })) }));
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn(async () => ({ enrolled: false })) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u) }));
+// The route re-reads its own cached lookup for the address. null = no record (a direct caller, or an address nobody looked up).
+let mockServerLookup = null;
+jest.mock('../routes/property-lookup-v2', () => ({
+  ...jest.requireActual('../routes/property-lookup-v2'),
+  performPropertyLookup: jest.fn(async () => mockServerLookup),
+}));
 
 const express = require('express');
 const db = require('../models/db');
@@ -72,6 +78,14 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
     server = app.listen(0, () => { base = `http://127.0.0.1:${server.address().port}/api/public/quote`; done(); });
   });
   afterAll((done) => { server.closeAllConnections(); server.close(done); });
+  beforeEach(() => { mockServerLookup = null; });
+  // The server's own record of the home's story count (a staff-verified count unless the test names another source).
+  const recordSays = (stories, extra = {}) => { mockServerLookup = { enriched: { stories, storiesSource: 'verified', ...extra }, propertyRecord: null }; };
+  const storedEngineInput = () => {
+    const row = db.__recorded.find((w) => w.table === 'estimates' && w.op === 'insert');
+    const data = typeof row.row.estimate_data === 'string' ? JSON.parse(row.row.estimate_data) : row.row.estimate_data;
+    return data.engineInput;
+  };
 
   const calculate = async (homeSqFt, stories, services = { pest: { frequency: 'quarterly' } }, lotSqFt = 9000) => {
     db.__recorded.length = 0;
@@ -89,6 +103,7 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
   };
 
   test('a 12,000 sq ft one-story home prices its full footprint: $128 + $8 x 6.5 = $180 a visit, never the flat $128', async () => {
+    recordSays(1);
     const { status, json } = await calculate(12000, 1);
     expect(status).toBeLessThan(300);
     expect(json.quote_required).toBeFalsy();
@@ -185,6 +200,7 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
   });
 
   test('a size at the ceiling still prices (20,000 sq ft two-story = 10,000 footprint = $164)', async () => {
+    recordSays(2);
     const atLimit = await calculate(20000, 2);
     expect(atLimit.json.quote_required).toBeFalsy();
     expect(atLimit.json.per_application).toBe(164);
@@ -215,5 +231,106 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
     const lawnRow = db.__recorded.find((w) => w.table === 'estimates' && w.op === 'insert');
     const lawnData = typeof lawnRow.row.estimate_data === 'string' ? JSON.parse(lawnRow.row.estimate_data) : lawnRow.row.estimate_data;
     expect(lawnData.engineInput.homeSqFt).toBe(24000);
+  });
+
+  // Above the table the story count sets the price (12,000 sq ft: one floor $180, two floors $132). The website form has no
+  // story-count question: the count it posts is the lookup's echo, or anything a direct caller typed.
+  describe('a home above the table whose story count no record confirms goes to the team', () => {
+    const expectHeld = ({ status, json }) => {
+      expect(status).toBe(202);
+      expect(json.quote_required).toBe(true);
+      expect(json.reason).toBe('stories_estimated');
+      expect(json.service).toBe('pest_control');
+      expect(json.message).toMatch(/A home this size is priced by our team/);
+      expect(json.message).not.toMatch(/Commercial/);
+      ['per_application', 'monthly_total', 'annual_total', 'variance_low', 'variance_high'].forEach((field) => expect(json[field]).toBeUndefined());
+      expect(storedEngineInput().storiesSource).toBe('default');
+    };
+
+    test('no record of the address: a posted count of 1 or 2 prices nothing', async () => {
+      expectHeld(await calculate(12000, 1));
+      expectHeld(await calculate(12000, 2));
+      // A missing count is the one-floor default, held the same way.
+      expectHeld(await calculate(12000, undefined));
+    });
+
+    test.each([
+      ['the lookup fell back to one floor (nobody knew)', 1, { enriched: { stories: 1, storiesSource: 'default' }, propertyRecord: null }],
+      ['the record says two floors and the request says one', 1, { enriched: { stories: 2, storiesSource: 'verified' }, propertyRecord: null }],
+      ['the record says one floor and the request says three', 3, { enriched: { stories: 1, storiesSource: 'verified' }, propertyRecord: null }],
+      ['the lookup flagged its own story count for a check', 2, { enriched: { stories: 2, storiesSource: 'verified', fieldVerifyFlags: [{ field: 'stories', priority: 'HIGH' }] }, propertyRecord: null }],
+      ['the lookup may describe another address', 2, { enriched: { stories: 2, storiesSource: 'verified', fieldVerifyFlags: [{ field: 'address', priority: 'HIGH' }] }, propertyRecord: null }],
+      ['the count is an AI estimate with no direct source', 2, { enriched: { stories: 2, storiesSource: 'ai' }, propertyRecord: { _storiesEvidence: { basis: 'inferred', confidence: 'medium', sourceUrl: 'https://example.com/listing', sourceType: 'listing' } } }],
+    ])('%s', async (_name, posted, lookup) => {
+      mockServerLookup = lookup;
+      expectHeld(await calculate(12000, posted));
+    });
+
+    test('one-time pest is held the same way: its price is built from the same footprint', async () => {
+      const held = await calculate(12000, 1, { oneTimePest: {} });
+      expect(held.status).toBe(202);
+      expect(held.json).toMatchObject({ quote_required: true, service: 'one_time_pest', reason: 'stories_estimated' });
+      expect(held.json.message).toMatch(/A home this size is priced by our team/);
+      expect(held.json.per_application).toBeUndefined();
+      expect(held.json.onetime_total).toBeUndefined();
+    });
+
+    test('the office notice files it as a home to confirm, never as a commercial quote', async () => {
+      const { notifyAdmin } = require('../services/notification-service');
+      notifyAdmin.mockClear();
+      await calculate(12000, 1);
+      const bodies = notifyAdmin.mock.calls.map((call) => String(call[2]));
+      expect(bodies.some((body) => /needs property confirmation \(stories_estimated\)/.test(body))).toBe(true);
+      expect(bodies.some((body) => /commercial/i.test(body))).toBe(false);
+    });
+  });
+
+  describe('a home above the table prices when the server\'s own record confirms the posted story count', () => {
+    test.each([
+      ['a staff-verified count', 1, 180, { enriched: { stories: 1, storiesSource: 'verified' }, propertyRecord: null }],
+      ['a staff-verified two-story count', 2, 132, { enriched: { stories: 2, storiesSource: 'verified' }, propertyRecord: null }],
+      ['a building-permit count', 2, 132, { enriched: { stories: 2, storiesSource: 'permit' }, propertyRecord: null }],
+      ['a public-record count with a direct source', 2, 132, { enriched: { stories: 2, storiesSource: 'ai' }, propertyRecord: { _storiesEvidence: { basis: 'direct', confidence: 'high', sourceUrl: 'https://example.com/parcel/1', sourceType: 'county' } } }],
+    ])('%s', async (_name, posted, perVisit, lookup) => {
+      mockServerLookup = lookup;
+      const { status, json } = await calculate(12000, posted);
+      expect(status).toBe(200);
+      expect(json.quote_required).toBeFalsy();
+      expect(json.per_application).toBe(perVisit);
+      expect(storedEngineInput().storiesSource).toBeUndefined();
+    });
+  });
+
+  test('at or under 5,500 sq ft nothing changes: the posted count prices with no record, and across the line the quote is held', async () => {
+    const atTable = await calculate(5500, 1);
+    expect(atTable.status).toBe(200);
+    expect(atTable.json.per_application).toBe(128);
+    expect(storedEngineInput().storiesSource).toBeUndefined();
+    // Two floors at the same size is the lower footprint price, as on main.
+    const twoFloors = await calculate(5500, 2);
+    expect(twoFloors.status).toBe(200);
+    expect(twoFloors.json.per_application).toBeLessThan(128);
+    const over = await calculate(5501, 1);
+    expect(over.status).toBe(202);
+    expect(over.json.reason).toBe('stories_estimated');
+  });
+
+  test('a quote without pest for such a home prices now and carries the mark, so pest added to it later is held', async () => {
+    const baitOnly = await calculate(12000, 1, { rodentBait: {} });
+    expect(baitOnly.status).toBe(200);
+    expect(baitOnly.json.quote_required).toBeFalsy();
+    const input = storedEngineInput();
+    expect(input.storiesSource).toBe('default');
+    const { generateEstimate } = require('../services/pricing-engine');
+    const later = generateEstimate({ ...input, services: { ...input.services, pest: { frequency: 'quarterly' } } });
+    const pest = later.lineItems.find((line) => line.service === 'pest_control');
+    expect(pest.requiresManualReview).toBe(true);
+    expect(pest.manualReviewReasons).toContain('stories_estimated');
+  });
+
+  test('a home above the 20,000 sq ft ceiling keeps its own reason and takes no story-count mark', async () => {
+    const { json } = await calculate(24000, 2);
+    expect(json.reason).toBe('home_size_above_public_limit');
+    expect(storedEngineInput().storiesSource).toBeUndefined();
   });
 });

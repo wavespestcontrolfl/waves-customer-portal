@@ -344,11 +344,13 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   const homeSizeAboveLimit = !!statedHomeSqFt && statedHomeSqFt > LEAD_HOME_SQFT_LIMIT;
   const homeSqFt = (homeSizeAboveLimit ? Math.min(statedHomeSqFt, LEAD_HOME_SQFT_LIMIT * 10) : statedHomeSqFt) || county?.homeSqFt || null;
   const lotSqFt = statedLotSqFt || county?.lotSqFt || null;
-  // The story count: the lead's or the customer row's, else the county record's own count when that record gave the home size (a
-  // county count is never mixed with a stated size). Pest prices on the footprint (living area over the stories). Above the 5,500
-  // sq ft table that sets the price, so a big home with no known count is not priced as one floor: storiesSource 'default' puts the
+  // The story count: the lead's or the customer row's own, else the county record's own count when that record gave the home size
+  // (a county count is never mixed with a stated size). A count is a number or a numeric string from 1 to 3 (1.5 is a split
+  // level); 12, true, [2] or text is no count. Pest prices on the footprint (living area over the stories). Above the 5,500 sq ft
+  // table that sets the price, so a big home with no known count is not priced as one floor: storiesSource 'default' puts the
   // engine's own stories_estimated review on the line and the draft waits for a person (the phone price tool asks the caller).
-  const stories = numberOrNull(body.stories, customer.stories) || (county ? numberOrNull(county.stories) : null);
+  const { statedStoryCount } = require('./voice-agent/story-count');
+  const stories = [body.stories, customer.stories, county?.stories].map(statedStoryCount).find((count) => count !== null) || null;
   const storiesUnknownAboveTable = !stories && (homeSqFt || 0) > Number(require('./pricing-engine/constants').PEST.aboveTableStartSqFt);
   const review = [];
   if (!homeSqFt || !lotSqFt) review.push(DEFAULTED_REVIEW);
