@@ -3683,7 +3683,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // too): one claim, one set of locked pre-send checks, the link published only once the email is accepted.
     // Staff confirmed a plain send, and the report was held (by another admin) since the preview: ask again, so the
     // early-release warning is seen before payment is bypassed.
-    if (req.body?.expected_hold === 'none' && isReportHeld(project)) {
+    // Any caller that did not confirm the early release (an older client, the technician completion screen) is asked too.
+    if (req.body?.expected_hold !== 'held' && isReportHeld(project)) {
       return res.status(409).json({ code: 'hold_changed', error: 'This report was just held until its invoice is paid. Press Send report again to see the warning and send it early.' });
     }
     if (project.project_type === 'wdo_inspection' && isReportHeld(project)) {
@@ -4415,7 +4416,11 @@ async function heldReleaseBlocker(project, customer, { readinessChecked = false,
   // `database`: a caller inside a transaction reads the contact's choice on it.
   const emailRecipient = await ProjectEmail.resolveProjectEmailRecipientForSend(customer, { applyReportRule: true, ...(database ? { database } : {}) })
     .catch(() => ({ email: null }));
-  return emailRecipient?.email ? null : 'No email on file that accepts email, the FDACS-13645 PDF is delivered by email';
+  // ...and the address-wide rule the email's handoff applies (every contact slot sharing that address): a recipient it
+  // would stop never passes here, so a paid release is not blocked on every attempt. Unreadable refuses.
+  const accepted = emailRecipient?.email
+    && await ProjectEmail.dispatchBoundaryCheck({ recipient: emailRecipient, customerId: customer?.id, database }).catch(() => false);
+  return accepted ? null : 'No email on file that accepts email, the FDACS-13645 PDF is delivered by email';
 }
 
 // Report link and portal stamps, as /send does (a hold send minted no link).
@@ -5355,7 +5360,10 @@ function billingFingerprint(inv) {
 }
 
 // The short form of the fingerprint the preview hands the drawer and the send hands back.
-const billingFingerprintHash = (inv) => crypto.createHash('sha1').update(billingFingerprint(inv)).digest('hex').slice(0, 16);
+// The confirmed bill, and whether the report was already held when the operator saw it: a first held send whose
+// response was lost, replayed after it succeeded, would otherwise pass as a resend of the invoice.
+const billingFingerprintHash = (inv, reportHeld = false) => crypto.createHash('sha1')
+  .update(billingFingerprint(inv) + (reportHeld ? '|held' : '')).digest('hex').slice(0, 16);
 
 // Arming a hold is ONE transaction: the project row, then the invoice row (FOR UPDATE, always in that
 // order, with the customer's payment lock between them, as the pay paths take it), every precondition
@@ -5396,7 +5404,7 @@ async function armReportHold({ hold, project, invoice, expectedFingerprint, deli
     // ...and the locked invoice is the one the operator confirmed: a held send must carry the preview's fingerprint
     // (a send without one refuses, so an amount that changed before the request began cannot go out unconfirmed).
     if (billingFingerprint(lockedInvoice) !== billingFingerprint(invoice)
-      || String(expectedFingerprint || '') !== billingFingerprintHash(lockedInvoice)) {
+      || String(expectedFingerprint || '') !== billingFingerprintHash(lockedInvoice, locked.report_hold_status === 'held')) {
       throw holdRefusal(409, 'hold_invoice_changed', 'The invoice changed while this was being sent. Nothing was sent. Refresh and send again.');
     }
     const notReleasable = await holdReleasabilityRefusal(locked, currentCustomer, { database: trx });
@@ -6002,7 +6010,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           status: invoice.status,
           created,
           payer_billed: !!invoice.payer_id,
-          billing_fingerprint: billingFingerprintHash(invoice),
+          billing_fingerprint: billingFingerprintHash(invoice, isReportHeld(project)),
         },
       });
     }
@@ -6071,7 +6079,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           status: invoice.status,
           created,
           // What the operator is confirming: the send hands it back, and a held send refuses a changed invoice.
-          ...(holdRequested && invoice.id && !created ? { billing_fingerprint: billingFingerprintHash(invoice) } : {}),
+          ...(holdRequested && invoice.id && !created ? { billing_fingerprint: billingFingerprintHash(invoice, isReportHeld(project)) } : {}),
         },
         email_routing: isPayerBilledPreview ? {
           // Homeowner gets the report ONLY; the invoice + pay link go to the payer

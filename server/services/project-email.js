@@ -295,9 +295,11 @@ async function sendProjectTemplate({
 // still occupy a slot (codex r26 security P2). Only a recipient resolved AS a service contact is asked (codex r32
 // security P2): the holder's own address, a report copy, the payer and the billing contact are independently
 // authorized recipients, so a contact's switch never vetoes the payer's invoice because the two share an address.
-async function dispatchBoundaryCheck({ recipient, customerId }) {
+// `database`: a caller that must judge a send ahead of time (the WDO report hold's readiness) asks the same rule on its
+// transaction, so a recipient the boundary would stop is never accepted.
+async function dispatchBoundaryCheck({ recipient, customerId, database = undefined }) {
   return !isServiceContactRole(recipient.role)
-    || !(await require('./contact-notification-prefs').contactEmailDeclines(customerId, recipient.email, { requireSlot: true }));
+    || !(await require('./contact-notification-prefs').contactEmailDeclines(customerId, recipient.email, { requireSlot: true, ...(database ? { dbh: database } : {}) }));
 }
 
 // A send the boundary stopped before the provider: blocked, a definite non-delivery.
@@ -620,6 +622,8 @@ module.exports = {
   isPrepTemplateKey,
   prepTemplateForProjectType,
   resolveProjectEmailRecipient,
+  // The handoff's address-wide email rule, for a caller judging a send ahead of time.
+  dispatchBoundaryCheck,
   resolveProjectEmailRecipientForSend,
   resolvePortalInviteRecipient,
   sendProjectReportReady,
