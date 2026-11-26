@@ -161,7 +161,7 @@ describe('pest regular protocol products migration: names', () => {
   });
 
   // Crosscheck: the close-out mix went to 2.5 fl oz a tank (label cap, owner 2026-11-25 D21, client/src/lib/pest-default-mix.js). The
-  // usage rows this migration wrote still cost 4 fl oz a visit; they move with the catalog cost step, so the cost shown stays the higher one.
+  // usage rows this migration wrote at 4 fl oz are moved to 2.5 by 20261126220000_pest_crosscheck_tank_amount.
   test('the Taurus and surfactant amounts match the close-out house mix the client carries; its Crosscheck is the lower label-cap amount', () => {
     const fs = require('fs');
     const path = require('path');
