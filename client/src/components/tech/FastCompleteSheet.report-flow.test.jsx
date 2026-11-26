@@ -193,7 +193,7 @@ describe('the visit step', () => {
     expect(within(tracker).getAllByRole('button').map((button) => button.textContent)).toEqual(['1', '2', '3', '4', '5']);
     expect(screen.getByText('1 = very low · 2 = low · 3 = moderate · 4 = elevated · 5 = high')).toBeTruthy();
     // The products as one line, opened on Edit.
-    expect(screen.getByText(/Taurus SC 1.6 fl oz · LESCO Crosscheck Plus 4 fl oz/)).toBeTruthy();
+    expect(screen.getByText(/Taurus SC 1.6 fl oz · LESCO Crosscheck Plus 2.5 fl oz/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     expect(screen.getByRole('button', { name: /Taurus SC — 1.6 fl oz/ })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Hide' }));
