@@ -182,7 +182,7 @@ async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
     // No booked visit: the services that completed on the latest service day (the history is ordered by that date alone, so several can tie).
     // Each resolves to the guide it carried; they must all agree, else no guide is named.
     // (`lastRecords` null: the latest service day may run past the history page, so no completed service can be named)
-    const completed = booked || lastRecords === null ? [] : await Promise.all(completedRecords.map((record) => sender.completedPrepGuide({ scheduledServiceId: record?.scheduled_service_id, serviceType: record?.service_type })));
+    const completed = booked || lastRecords === null ? [] : await Promise.all(completedRecords.map((record) => sender.completedPrepGuide({ scheduledServiceId: record?.scheduled_service_id, serviceRecordId: record?.id, serviceType: record?.service_type })));
     const configs = new Set(completed.map((guide) => guide.config?.emailTemplateKey || null));
     const config = booked ? booked.config : (configs.size === 1 ? completed[0].config : null);
     if (!config) return none;

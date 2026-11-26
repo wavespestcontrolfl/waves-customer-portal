@@ -84,9 +84,9 @@ describe('loadPrepGuideFacts', () => {
   });
 
   test('no booked visit: the last completed service\'s family, by the sender\'s own match rule', async () => {
-    const { result, sender } = await load({ booked: null, family: ['flea', FLEA] }, { last: { service_type: 'Flea Treatment', scheduled_service_id: 'ss-1' } });
+    const { result, sender } = await load({ booked: null, family: ['flea', FLEA] }, { last: { id: 'rec-1', service_type: 'Flea Treatment', scheduled_service_id: 'ss-1' } });
     expect(result).toMatchObject({ source: 'last', key: 'prep.flea', label: 'Flea Treatment' });
-    expect(sender.completedPrepGuide).toHaveBeenCalledWith({ scheduledServiceId: 'ss-1', serviceType: 'Flea Treatment' }); // (the visit that completed: its assigned guide first)
+    expect(sender.completedPrepGuide).toHaveBeenCalledWith({ scheduledServiceId: 'ss-1', serviceRecordId: 'rec-1', serviceType: 'Flea Treatment' }); // (the visit that completed: its assigned guide first)
     expect((await load({ booked: null, family: null })).result).toEqual({ sections: [] }); // no guide covers it: a successful read of nothing
     const none = await load({ booked: null, family: ['flea', FLEA] }, { last: null }); // no completed service at all
     expect(none.result).toEqual({ sections: [] });

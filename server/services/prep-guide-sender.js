@@ -381,23 +381,38 @@ function prepFamilyForStoredKey(templateKey) {
   return Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === templateKey) || null;
 }
 
+// The guide a set of visits carries, as { pestType, config }: the guides ASSIGNED to them decide (a visit's own prep_template_key, or the one
+// a staff send stored on the project linked to it: admin-projects), and only with none assigned are their service types matched. An assigned
+// key that is not one of ours, or two different guides, name none (never a guess between them).
+function singleGuide(assignedKeys, serviceTypes) {
+  const families = new Set(assignedKeys.length
+    ? assignedKeys.map((key) => prepFamilyForStoredKey(key)?.[0] || null)
+    : serviceTypes.map((type) => prepFamilyForServiceType(type)?.[0]).filter(Boolean));
+  const [pestType] = families.size === 1 ? [...families] : [null];
+  return { pestType: pestType || null, config: pestType ? PREP_CONFIG[pestType] : null };
+}
+
 /**
- * The guide a COMPLETED service carried: the guide assigned to its visit row (prep_template_key) when it has one (unknown key: none),
- * else the family its service type belongs to. { pestType, config } or null. THROWS on a lookup error.
+ * The guide a COMPLETED service carried: the guide assigned to its visit row or to the project linked to the visit or the service record,
+ * else the family its service type belongs to. { pestType, config }. THROWS on a lookup error.
  */
-async function completedPrepGuide({ scheduledServiceId = null, serviceType = null } = {}) {
-  const row = scheduledServiceId ? await db('scheduled_services').where({ id: scheduledServiceId }).first('prep_template_key') : null;
-  const family = row?.prep_template_key ? prepFamilyForStoredKey(row.prep_template_key) : prepFamilyForServiceType(serviceType);
-  return { pestType: family?.[0] || null, config: family?.[1] || null };
+async function completedPrepGuide({ scheduledServiceId = null, serviceRecordId = null, serviceType = null } = {}) {
+  const visit = scheduledServiceId ? await db('scheduled_services').where({ id: scheduledServiceId }).first('prep_template_key') : null;
+  const projects = scheduledServiceId || serviceRecordId
+    ? await db('projects').where((qb) => {
+      if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
+      if (serviceRecordId) qb.orWhere({ service_record_id: serviceRecordId });
+    }).whereNotNull('prep_template_key').select('prep_template_key')
+    : [];
+  return singleGuide([visit, ...projects].map((row) => row?.prep_template_key).filter(Boolean), [serviceType]);
 }
 
 /**
  * The prep guide the customer's BOOKED visit gets: the soonest upcoming visit as the customer's own page lists it (upcomingFamilyVisits'
  * filters and order, across every service: a visit no guide covers is still THE booked visit, so an earlier completed service's guide is
  * never put in its place), and the guide its page shows. The page is one STOP: every live member of a grouped visit counts, read from the
- * snapshot the page state was judged on. A guide the
- * visit already carries (its stored prep_template_key) decides, on any member; only a stop with none is matched by its service types.
- * Members that point at two guides, or a stored key that is not one of ours, name no guide (never a guess between them).
+ * snapshot the page state was judged on. A guide assigned to a member or to a project linked to one decides (singleGuide); only a stop with
+ * none is matched by its service types.
  * { visit, pestType, config } or null with no booked visit; pestType and config are null when no single guide can be named. THROWS on a
  * lookup error, including a grouped stop whose members could not be read: a failed read is not "nothing booked".
  */
@@ -407,10 +422,8 @@ async function bookedPrepGuide(customerIds) {
   // (a sibling the booking query itself would hide, a dispatch-owned booking nobody confirmed, is not part of what the customer sees)
   const { dispatchOwnedUnreviewed } = require('../routes/appointment-public');
   const stop = (visit.stop_members || [visit]).filter((row) => !dispatchOwnedUnreviewed(row));
-  const storedKeys = new Set(stop.filter((row) => row.prep_template_key).map((row) => prepFamilyForStoredKey(row.prep_template_key)?.[0] || null));
-  const families = storedKeys.size ? storedKeys : new Set(stop.map((row) => prepFamilyForServiceType(row.service_type)?.[0] || undefined).filter(Boolean));
-  const [pestType] = families.size === 1 ? [...families] : [null];
-  return { visit, pestType: pestType || null, config: pestType ? PREP_CONFIG[pestType] : null };
+  const projects = await db('projects').whereIn('scheduled_service_id', stop.map((row) => row.id)).whereNotNull('prep_template_key').select('prep_template_key');
+  return { visit, ...singleGuide([...stop, ...projects].map((row) => row.prep_template_key).filter(Boolean), stop.map((row) => row.service_type)) };
 }
 
 // A visit's prep key is never MOVED between guides. The automated lanes
