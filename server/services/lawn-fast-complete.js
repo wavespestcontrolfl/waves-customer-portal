@@ -606,9 +606,8 @@ async function loadChinch({ loaded, sheet, svc, knex, readFailures }) {
 // and the wetting-agent rows, by what their staged rows say), as `{ guidedProductIds }` or `{}`. The
 // sheet holds their taps until the fresh guide has answered, so a card never finds its product
 // already on the sheet. Pure; no limit read.
-function guidedProductIds(loaded, sheet, holds = {}) {
-  // `holds`: fungicideHolds for the visit, or the Group 11 pass-over alone as a boolean (the older call).
-  const { takeAllMapped = false, successiveHeld = [], heldProductIds = [] } = typeof holds === 'boolean' ? { takeAllMapped: holds } : (holds || {});
+// `holds`: fungicideHolds for the visit.
+function guidedProductIds(loaded, sheet, { takeAllMapped = false, successiveHeld = [], heldProductIds = [] } = {}) {
   if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
   const guide = require('./lawn-treatment-guide');
   const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
@@ -893,6 +892,13 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures, tetrinoSc
     const weed = await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures });
     const chinch = await loadChinch({ loaded, sheet, svc, knex, readFailures });
     const holds = await fungicideHolds({ svc, knex });
+    const guided = readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet, holds);
+    const heldContext = await group11HeldContext({ loaded, sheet, svc, knex, holds });
+    // With the guide on, the sheet's search leaves out only a product it governs, and its governed set comes from the picks and
+    // takeAllProductIds. So every held id rides takeAllProductIds too, also when there are no picks (completion defaults not
+    // eligible for this property): held and not governed, the search would still list it.
+    const governedHeld = heldContext.group11HeldProductIds?.length && !readFailures.has('treatment_guide')
+      ? { takeAllProductIds: [...new Set([...(guided.takeAllProductIds || []), ...heldContext.group11HeldProductIds])] } : {};
     return {
       source: 'plan',
       unavailable: null,
@@ -906,8 +912,9 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures, tetrinoSc
       ...(loaded.tetrinoScout ? { tetrinoScout: loaded.tetrinoScout } : {}),
       ...weed,
       ...chinch,
-      ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet, holds)),
-      ...await group11HeldContext({ loaded, sheet, svc, knex, holds }),
+      ...guided,
+      ...heldContext,
+      ...governedHeld,
       // GATE_LAWN_TROUBLE_AREAS: what the places' limit read needs (stripped from the payload by the context).
       ...(featureGates.lawnTroubleAreasLive() ? { troubleSeed: troubleSeedOf({ loaded, sheet, weed, chinch }) } : {}),
     };

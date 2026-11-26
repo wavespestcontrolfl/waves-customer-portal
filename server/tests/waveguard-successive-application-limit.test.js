@@ -353,6 +353,21 @@ describe('Fast Complete and the treatment guide pass the Velista row over at its
     expect(await fastComplete.loadPlannedProducts(svc, fakeKnex({ catalog: CATALOG, history: [] }), 'one_time', new Set(), null)).toEqual({ source: null, items: [], addOns: [], unavailable: null });
   });
 
+  test('completion defaults not eligible for the property: no picks, and the held rows are still governed, so the search leaves them out', async () => {
+    jest.spyOn(featureGates, 'lawnTreatmentGuideLive').mockReturnValue(true);
+    jest.spyOn(featureGates, 'lawnV13Live').mockReturnValue(true);
+    jest.spyOn(require('../services/lawn-completion-defaults'), 'lawnCompletionDefaultsEnabled').mockReturnValue(true);
+    jest.spyOn(require('../services/waveguard-plan-engine'), 'v13ProtocolRows').mockReturnValue(rows);
+    // The plan as the engine returns it when its defaults do not apply to this property: no rows to offer.
+    jest.spyOn(require('../services/waveguard-plan-engine'), 'buildPlanForService').mockResolvedValue({ protocol: { structured: {} }, mixCalculator: { items: [], conditionalOptions: [] }, completionDefaults: { eligible: false } });
+    const out = await fastComplete.loadPlannedProducts(svc, fakeKnex({ catalog: CATALOG, history: fall }), 'recurring', new Set(), null);
+    // A plan, so the sheet runs with the guide on: there its governed set is the picks and takeAllProductIds.
+    expect(out.source).toBe('plan');
+    expect(out.guidedProductIds).toBeUndefined();
+    expect(out.group11HeldProductIds).toEqual(['vel']);
+    expect(out.takeAllProductIds).toEqual(['vel']);
+  });
+
   test('the guide\'s answer fails when the held catalog rows cannot be read, so the sheet keeps its own holds', async () => {
     await expect(fastComplete.fungicideHolds({ svc, knex: fakeKnex({ history: fall, failCatalog: true }), strict: true })).rejects.toThrow('catalog read failed');
   });
@@ -378,8 +393,8 @@ describe('Fast Complete and the treatment guide pass the Velista row over at its
     const holds = await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ catalog: CATALOG, history: fall }) });
     expect(fastComplete.guidedProductIds(loaded, sheet, holds)).toEqual({ guidedProductIds: ['art'], takeAllProductIds: ['vel'] });
     expect(await fastComplete.group11HeldContext({ loaded, sheet, svc, knex: fakeKnex({ history: fall }), holds })).toEqual({ group11HeldProductIds: ['vel'] });
-    // The older boolean call still reads as the Group 11 pass-over alone.
-    expect(fastComplete.guidedProductIds(loaded, sheet, true)).toEqual({ guidedProductIds: ['vel'], takeAllProductIds: ['art'] });
+    // The Group 11 pass-over alone, as before.
+    expect(fastComplete.guidedProductIds(loaded, sheet, { takeAllMapped: true })).toEqual({ guidedProductIds: ['vel'], takeAllProductIds: ['art'] });
   });
 });
 
