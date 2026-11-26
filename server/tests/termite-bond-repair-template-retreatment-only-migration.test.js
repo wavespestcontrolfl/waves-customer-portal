@@ -66,6 +66,11 @@ describe('repair bond becomes retreatment only (pure)', () => {
     expect(mig.toRetreatmentOnly(`${once}\n\n${SEEDED_BODY.split('\n')[4]}`)).toMatchObject({ reason: 'repair_remains' });
     expect(mig.toRetreatmentOnly(`${once}\n\nWe will repair the damage.`)).toMatchObject({ reason: 'repair_remains' });
     expect(mig.promisesRepair(once)).toBe(false);
+    // A sentence that merely contains "no" is still a promise.
+    expect(mig.toRetreatmentOnly(`${SEEDED_BODY}\n\nWaves will repair termite damage at no charge.`)).toMatchObject({ reason: 'repair_remains' });
+    expect(mig.promisesRepair('Termite Damage Repair Bond')).toBe(true);
+    expect(mig.promisesRepair('I agree to a repair bond.')).toBe(true);
+    expect(mig.promisesRepair('I agree to receive and sign this document electronically.')).toBe(false);
   });
 });
 

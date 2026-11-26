@@ -45,11 +45,16 @@ const NEW_NAME = 'Termite Retreatment Bond Agreement (former repair bond)';
 const OLD_DESCRIPTION_START = 'Signable termite bond covering retreatment plus repair of new covered termite damage.';
 const NEW_DESCRIPTION_START = 'Signable termite bond covering retreatment only (no repair of termite damage; repair coverage stopped 2026-11-25 until insurance confirms a cap).';
 
-// A sentence that mentions repair must deny it ("does NOT include repair", "no repair"). Anything else is a promise.
-function promisesRepair(body) {
-  return String(body || '')
-    .split(/(?<=[.;])\s+|\n/)
-    .some((sentence) => /repair/i.test(sentence) && !/\b(not|no|nor|without)\b/i.test(sentence));
+// The only denials of repair this migration writes. Anything else that mentions repair is treated as a promise.
+const APPROVED_DENIALS = [
+  'It does NOT include repair of any termite damage — existing, new, or otherwise — or replacement of any wood, structural, or other materials.',
+  'does NOT include repair of termite damage,',
+];
+
+function promisesRepair(text) {
+  let rest = String(text || '');
+  for (const denial of APPROVED_DENIALS) rest = rest.split(denial).join(' ');
+  return /repair/i.test(rest);
 }
 
 /**
@@ -90,7 +95,10 @@ exports.up = async function up(knex) {
   if (!active) return;
 
   const result = toRetreatmentOnly(active.body);
-  if (result.reason === 'anchor_missing' || result.reason === 'repair_remains') {
+  const title = active.title === OLD_TITLE ? NEW_TITLE : active.title;
+  // The title and the signer disclosure go out on every new bond too: an unrecognized repair reference pauses it.
+  const fieldsPromiseRepair = promisesRepair(title) || promisesRepair(active.signer_disclosure);
+  if (result.reason === 'anchor_missing' || result.reason === 'repair_remains' || fieldsPromiseRepair) {
     // The coverage paragraph was edited, or a repair promise sits outside the three phrases swapped here, so the
     // repair promise cannot be proven gone. Pause the template (the body stays as the admin left it) so no new
     // bond goes out with it; the retreatment bond stays available.
@@ -101,7 +109,6 @@ exports.up = async function up(knex) {
   }
   if (!result.changed) return;
 
-  const title = active.title === OLD_TITLE ? NEW_TITLE : active.title;
   const versions = await knex('document_template_versions')
     .where({ template_id: template.id })
     .orderBy('version_number', 'asc');
