@@ -142,7 +142,7 @@ postgres('monthly financial snapshot (live Postgres)', () => {
       expect(await svc.paidStopsForWindow(trx, '2026-10-01', '2026-10-31')).toBe(2);
       // The tile's formula: 100 x SUM(gross_profit) / SUM(revenue) over every visit with a revenue figure,
       // the $0 free return included: (60 + 100 - 20) / 300.
-      expect(await svc.jobRevenueForWindow(trx, '2026-10-01', '2026-10-31')).toEqual({ revenue: 300, grossMarginPct: 46.67 });
+      expect(await svc.jobRevenueForWindow(trx, '2026-10-01', '2026-10-31')).toEqual({ revenue: 300, grossMarginPct: 46.67, grossProfit: 140 });
     });
 
     it('free work without the callback flag is not a paid stop: a $0 included follow-up, one flagged on its visit, one marked free', async () => {
@@ -183,7 +183,7 @@ postgres('monthly financial snapshot (live Postgres)', () => {
 
     it('a month with no visits has 0 stops and no margin', async () => {
       expect(await svc.paidStopsForWindow(trx, '2026-10-01', '2026-10-31')).toBe(0);
-      expect(await svc.jobRevenueForWindow(trx, '2026-10-01', '2026-10-31')).toEqual({ revenue: 0, grossMarginPct: null });
+      expect(await svc.jobRevenueForWindow(trx, '2026-10-01', '2026-10-31')).toEqual({ revenue: 0, grossMarginPct: null, grossProfit: 0 });
     });
   });
 
@@ -203,6 +203,7 @@ postgres('monthly financial snapshot (live Postgres)', () => {
         month: '2026-10-01',
         completed_job_revenue: 300,
         gross_margin_pct: 46.67,
+        job_gross_profit: 140,
         office_cost: 300,
         owner_allowance: 0,
         paid_stops: 2,

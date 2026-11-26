@@ -193,8 +193,8 @@ router.get('/settings', async (req, res, next) => {
 //   operating overhead (Phase 5): ovhOfficePayroll, ovhRent, ovhInsurance,
 //     ovhSoftware, ovhVehicleFixed, ovhOtherGa — finite numbers ≥ 0 (null
 //     clears one); any overhead key present stamps overhead_entered_at.
-//   owner office time (office cost per stop): ownerOfficeHoursPerMonth,
-//     ownerOfficeHourlyRate — finite numbers ≥ 0 (null clears one). Null or 0 =
+//   owner time (office cost per stop, buyer view): ownerOfficeHoursPerMonth,
+//     ownerOfficeHourlyRate, ownerFieldHourlyRate — finite numbers ≥ 0 (null clears one). Null or 0 =
 //     the owner's time is not counted. These do not stamp overhead_entered_at:
 //     they are not part of the EBITDA bridge's overhead block.
 const SETTINGS_FIELDS = {
@@ -211,11 +211,13 @@ const OVH_FIELDS = {
   ovhVehicleFixed: 'ovh_vehicle_fixed',
   ovhOtherGa: 'ovh_other_ga',
 };
-// Owner office-time allowance inputs (services/monthly-financial-snapshot.js): the column and its largest value,
+// Owner-time allowance inputs (services/monthly-financial-snapshot.js): the column and its largest value,
 // numeric(6,2) and numeric(8,2). The Settings form (SettingsPage.jsx OWNER_OFFICE_FIELDS_UI) mirrors these limits.
+// The field wage is paid for the owner's completed stops (services/monthly-snapshot-buyer-columns.js).
 const OWNER_OFFICE_FIELDS = {
   ownerOfficeHoursPerMonth: { col: 'owner_office_hours_per_month', max: 9999.99 },
   ownerOfficeHourlyRate: { col: 'owner_office_hourly_rate', max: 999999.99 },
+  ownerFieldHourlyRate: { col: 'owner_field_hourly_rate', max: 999999.99 },
 };
 const OWNER_OFFICE_NUMBER = /^\d+(\.\d{1,2})?$/;
 

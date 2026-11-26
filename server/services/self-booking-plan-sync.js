@@ -1665,6 +1665,7 @@ module.exports = {
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isAutoDerivedTierLabelRow,
+  LABEL_ONLY_REALIGN_LANES,
   isCommercialServiceRow,
   isCommercialAccount,
   COMMERCIAL_PROPERTY_TYPES,
