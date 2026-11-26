@@ -80,7 +80,7 @@ describe('eventastic adapter', () => {
 describe('eventastic identity: a rescheduled post updates one row', () => {
   const source = { id: 's1', coverage_geo: ['bradenton'] };
   const nowMs = Date.parse('2026-11-26T12:00:00Z');
-  const keyOf = (it) => normalizeExtractedEvent(source, eventasticItemToExtractedEvent(it), nowMs).row.external_id;
+  const keyOf = (it) => normalizeExtractedEvent(source, eventasticItemToExtractedEvent(it), nowMs, { trustStableIds: true }).row.external_id;
 
   test('same post id keeps its key when the date, time, title and link change', () => {
     const before = item();
@@ -94,6 +94,18 @@ describe('eventastic identity: a rescheduled post updates one row', () => {
 
   test('different post ids keep different keys even for the same title and time', () => {
     expect(keyOf(item({}, { id: 1 }))).not.toBe(keyOf(item({}, { id: 2 })));
+  });
+
+  test('an externalId is ignored unless the caller opts in (model-written output keeps derived keys)', () => {
+    const ev = { ...eventasticItemToExtractedEvent(item()), externalId: 'model-chosen' };
+    expect(normalizeExtractedEvent(source, ev, nowMs).row.external_id).toMatch(/^christmas in cortez\|2026-12-12T10:00\|/);
+    expect(normalizeExtractedEvent(source, ev, nowMs, { trustStableIds: true }).row.external_id).toBe('model-chosen');
+  });
+
+  test('ignoreWindow keeps a far-future or past item that the normal window drops', () => {
+    const far = { ...eventasticItemToExtractedEvent(item({ eventastic_start_date: '2027-12-12' })), externalId: 'wp:1' };
+    expect(normalizeExtractedEvent(source, far, nowMs, { trustStableIds: true })).toBeNull();
+    expect(normalizeExtractedEvent(source, far, nowMs, { trustStableIds: true, ignoreWindow: true }).row.external_id).toBe('wp:1');
   });
 
   test('an item without an id falls back to the title/date/url key', () => {

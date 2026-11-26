@@ -800,6 +800,12 @@ function isWellFormedExtractedEvent(ev) {
   return !(typeof ev.startAt === 'string' && ev.startAt.trim() && !parseExtractedStartAt(ev.startAt));
 }
 
+// The dedup key a trusted item names for itself, or '' (derived key applies).
+function trustedStableId(ev, opts) {
+  if (!opts.trustStableIds || typeof ev?.externalId !== 'string') return '';
+  return ev.externalId.trim();
+}
+
 /**
  * Validate one Claude-extracted event and shape it for upsert.
  * Pure — returns null when the event should be dropped, else
@@ -813,6 +819,13 @@ function isWellFormedExtractedEvent(ev) {
  * digest but WOULD clutter the inbox/dashboard (the events endpoint
  * includes NULL start_at rows). Page mode keeps undated events —
  * ongoing exhibits/markets on real event pages are legitimate.
+ *
+ * opts.trustStableIds — honor ev.externalId as the dedup key. Only the JSON
+ * pull sets it (its adapters read the publisher's own item id); model-written
+ * scrape and news-RSS output never does, so a model-emitted externalId cannot
+ * pick or collide with a row key.
+ * opts.ignoreWindow — skip the forward/recap window. Used only to apply a
+ * publisher's reschedule to a row that already exists (see upsertExtractedEvents).
  */
 function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   const cutoffMs = nowMs + FORWARD_WINDOW_DAYS * 24 * 60 * 60 * 1000;
@@ -823,8 +836,8 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
 
   const start = parseExtractedStartAt(ev.startAt);
   if (opts.requireStart && !start) return null;
-  if (start && start.getTime() > cutoffMs) return null;
-  if (start && start.getTime() < nowMs - 24 * 60 * 60 * 1000) return null;
+  if (!opts.ignoreWindow && start && start.getTime() > cutoffMs) return null;
+  if (!opts.ignoreWindow && start && start.getTime() < nowMs - 24 * 60 * 60 * 1000) return null;
 
   // Compute canonicalized fields BEFORE the dedup key so the key is
   // stable across pulls. Claude's raw startAt/eventUrl strings can
@@ -845,8 +858,7 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   // don't have a UID/guid, so we key on the post-normalization fields.
   // Title is lowercased so casing drift from Claude (e.g. "Boat Parade" vs
   // "BOAT PARADE") doesn't create duplicates either.
-  const stableId = typeof ev.externalId === 'string' ? ev.externalId.trim() : '';
-  const { externalId, legacyExternalId } = extractedEventDedupKeys(title, start, eventUrl || '', stableId);
+  const { externalId, legacyExternalId } = extractedEventDedupKeys(title, start, eventUrl || '', trustedStableId(ev, opts));
 
   // Clamp to varchar(128) — events_raw.city per migration
   // 20260427000003. Claude can return long location strings; without
@@ -1030,6 +1042,13 @@ async function quarantineShiftedLegacyRows(sourceId, pulledRows, batchStartedAt)
   return quarantined;
 }
 
+async function normalizeRescheduleOfKnownItem(source, ev, nowMs, opts) {
+  const stableId = trustedStableId(ev, opts);
+  if (!stableId) return null;
+  const known = await db('events_raw').where({ source_id: source.id, external_id: stableId.slice(0, 256) }).first('id');
+  return known ? normalizeExtractedEvent(source, ev, nowMs, { ...opts, ignoreWindow: true }) : null;
+}
+
 async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
   const nowMs = Date.now();
   // Rows this batch refreshes get pulled_at >= this; a small margin absorbs
@@ -1040,7 +1059,13 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
   let dropped = 0;
 
   for (const ev of claudeEvents) {
-    const normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
+    let normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
+    if (!normalized) {
+      // A publisher that moves an item it already gave us outside the window
+      // (or into the past) must still update that row, or it stays eligible
+      // under its old date. New items outside the window stay dropped.
+      normalized = await normalizeRescheduleOfKnownItem(source, ev, nowMs, opts);
+    }
     if (!normalized) { dropped += 1; continue; }
     const { row, legacyExternalId } = normalized;
     // Only the exact-instant legacy key is migrated automatically; rows at a
@@ -1443,7 +1468,8 @@ async function pullJsonSource(source) {
   const adapter = JSON_ADAPTERS[source.scrape_config?.jsonAdapter];
   if (!adapter) throw new Error(`Unknown scrape_config.jsonAdapter '${source.scrape_config?.jsonAdapter}'`);
   const events = adapter(await fetchJsonPages(source)).slice(0, MAX_ITEMS_PER_FEED);
-  const { upserted, dropped } = await upsertExtractedEvents(source, events);
+  // Adapter items carry the publisher's own id, so their keys are trusted.
+  const { upserted, dropped } = await upsertExtractedEvents(source, events, { trustStableIds: true });
   return { upserted, dropped, total: events.length };
 }
 
