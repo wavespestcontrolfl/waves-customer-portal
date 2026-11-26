@@ -8,10 +8,19 @@
 // and every chunk any of them loads lazily (the native-plugin fallbacks).
 // The walk never enters the entry chunk again: the router in it lazy-loads
 // every staff page, report and link page, and the customer app loads none of
-// them. Null when the bundle has no PortalPage chunk (a rename): the build
+// them. The entry also lazy-loads the native plugins (camera, push,
+// biometric app lock): those chunks are in the list too. They are told apart
+// from the route pages by their source module: a plugin is a package under
+// node_modules, and every route page is a module of this app's own src. A
+// plugin the app lock needs must be cached, since a failed import there is
+// not a missing plugin but a missing file. Null when the bundle has no PortalPage chunk (a rename): the build
 // then writes no list, and no copy of it is ever opened first.
 const PORTAL_PAGE_MODULE = '/src/pages/PortalPage.jsx';
 export const CUSTOMER_BUILD_ASSETS_FILE = 'customer-build-assets.json';
+
+function isPackageChunk(chunk) {
+  return /[\\/]node_modules[\\/]/.test(String(chunk.facadeModuleId || ''));
+}
 
 export function customerAssetFiles(bundle, base = '/') {
   const chunks = Object.values(bundle || {}).filter((item) => item?.type === 'chunk');
@@ -39,6 +48,10 @@ export function customerAssetFiles(bundle, base = '/') {
     }
   };
   visit(entry, { lazy: false });
+  for (const name of entry.dynamicImports || []) {
+    const chunk = bundle[name];
+    if (chunk && isPackageChunk(chunk)) visit(chunk, { lazy: true });
+  }
   visit(portal, { lazy: true });
   return [...files].sort().map((file) => `${base}${file}`);
 }
