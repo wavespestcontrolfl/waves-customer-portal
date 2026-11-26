@@ -60,3 +60,20 @@ describe('notifications admin dedupe key hash index migration', () => {
     ]);
   });
 });
+
+const rollbackSafe = require('../models/migrations/20261125120000_notifications_admin_dedupe_key_rollback_safe');
+
+describe('notifications admin dedupe key rollback-safe migration', () => {
+  test('up does nothing', async () => {
+    const knex = knexWith();
+    await rollbackSafe.up(knex);
+    expect(knex.raw).not.toHaveBeenCalled();
+  });
+  test('down leaves a size-unlimited hash index under the B-tree name, so the next down skips the rebuild', async () => {
+    const knex = knexWith();
+    await rollbackSafe.down(knex);
+    expect(knex.raw.mock.calls.map((c) => c[0])).toEqual([
+      "CREATE INDEX IF NOT EXISTS notifications_admin_dedupe_key_idx ON notifications USING hash ((metadata->>'dedupeKey')) WHERE recipient_type = 'admin'",
+    ]);
+  });
+});

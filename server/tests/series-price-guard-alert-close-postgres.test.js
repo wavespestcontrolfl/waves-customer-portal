@@ -19,7 +19,8 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
   beforeAll(() => {
     // A disposable CI database or this worktree's private QA database only: the suite writes and deletes rows.
     const url = new URL(process.env.DATABASE_URL);
-    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    // CI's own database (tests.yml: CI=true, localhost, waves_test); a plain localhost URL is not enough.
+    const localCI = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
     const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
       && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
