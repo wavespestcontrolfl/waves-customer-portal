@@ -383,7 +383,6 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
       // (textCallbackAsk). Every other ask reads outbound calls only, with
       // exactly the fields it read before, so its evidence hash is unchanged.
       const callIn = textCallbackAsk(commitment);
-      const { callEndedAtSql } = require('./sms-pending-conversations');
       const { POST_CALL_ROW_SOURCES } = require('../utils/call-timeline');
       const rows = await conn('call_log').where({ customer_id: customerId })
         .where((q) => (callIn
@@ -396,12 +395,14 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
             // can mark it done. A row a status callback or a recording
             // recovery wrote (call-timeline.js POST_CALL_ROW_SOURCES, on any
             // status) was inserted after the call began, so its insert time
-            // says nothing about the start and it never counts; nor does a
-            // row whose end stamp is before the text (callEndedAtSql, the
-            // Messages reader's definition).
+            // says nothing about the start and it never counts. The call
+            // must carry the end Twilio reported (metadata.ended_at, stamped
+            // by /call-status), after the text: a row with none (a call-sheet
+            // import, which marks every row answered) proves no live call.
             .orWhere((w) => w.where({ direction: 'inbound', status: 'completed', answered_by: 'human' })
               .whereRaw(`COALESCE(call_log.metadata->>'source', '') NOT IN (${[...POST_CALL_ROW_SOURCES].map((source) => `'${source}'`).join(', ')})`)
-              .whereRaw(`${callEndedAtSql('call_log')} > ?`, [after]))
+              .whereRaw(`CASE WHEN call_log.metadata->>'ended_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
+                THEN CAST(call_log.metadata->>'ended_at' AS timestamptz) END > ?`, [after]))
           : q.where('direction', 'outbound')))
         // A call back reaches the customer on ANY of their phones (primary,
         // alternate, service contact), and a call in may come from any of

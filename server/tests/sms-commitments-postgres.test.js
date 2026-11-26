@@ -2949,6 +2949,8 @@ postgres('SMS commitments on PostgreSQL', () => {
       await callIn(after, { metadata: { ended_at: new Date(message.created_at.getTime() - 60000).toISOString() } });
       // A recovered row with no end stamp has no trustworthy end.
       await callIn(after, { metadata: { source: 'twilio_recording_status_recovered' } });
+      // A call-sheet import marks every row answered and carries no Twilio end stamp.
+      await callIn(after, { metadata: null, duration_seconds: null });
       const now = new Date(after.getTime() + 120000);
       const evidence = await loadSmsFulfillmentEvidence(mockPg, await mockPg('call_commitments').first(), message, now);
       expect(evidence.records.filter((r) => r.type === 'call')).toHaveLength(0);
