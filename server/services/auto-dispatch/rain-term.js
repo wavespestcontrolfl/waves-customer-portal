@@ -70,6 +70,8 @@ const POP_SPAN = 50;
 const FLOOR_HOURS_PENDING = 73;
 // At most this many drier-date searches per run: each is a read-only slot search.
 const MAX_SEARCHES_PER_RUN = 60;
+// Occupancy probes asked per answer before the rest stay unverified.
+const MAX_OCCUPANCY_CHECKS = 4;
 // The search lifts the legacy first-80 cap (candidate-slots.js SCORE_CAP) to this; reaching it means the list may be cut.
 const SEARCH_SCORE_CAP = 1000;
 const HOUR_MIN = 60;
@@ -86,6 +88,7 @@ const REASONS = {
   NONE: 'no_drier_date',
   CAPPED: 'uncertain_capped',
   GROUPED: 'grouped_unverified',
+  OCCUPANCY: 'occupancy_unverified',
   FOUND: 'drier_date_found',
   FOUND_73H: 'drier_date_only_with_73h_floor',
 };
@@ -175,15 +178,22 @@ function areaOf(service) {
   });
 }
 
-// Outdoor = rain-fit.js's own class for everything that moves with the visit:
-// bookingRainPlan, the reader the move screens use, gives the visit's stored
-// primary service, its add-ons and every live service that shares the stop.
+// Outdoor = rain-fit.js's own class for everything that moves with the visit: the stored
+// primary service, its add-ons and every live service that shares the stop. The services
+// come from the move screens' own pieces (storedVisitServices, bookingServiceList, withCatalogKeys), in
+// bookingRainPlan's order but STRICT: bookingRainPlan falls back to the primary name when
+// a read fails, and a partial list could call a stop with a spray add-on indoor. An
+// unread service list throws, and the row says `error`, never `not_outdoor`.
 async function isOutdoor(service) {
-  const { rainFitFor, bookingRainPlan } = require('../scheduling/rain-fit');
-  const plan = await bookingRainPlan({
-    bestRows: true, serviceType: service.service_type, serviceTypes: [], serviceKeys: [], serviceId: service.id, moveAlone: false,
-  }, db);
-  return rainFitFor(plan.services) === 'avoid';
+  const {
+    rainFitFor, storedVisitServices, bookingServiceList, withCatalogKeys, OVERFLOW_SERVICE,
+  } = require('../scheduling/rain-fit');
+  const stored = await storedVisitServices(service.id, { moveAlone: false }, db);
+  if (!stored) throw Object.assign(new Error('visit services unreadable'), { code: 'SERVICES_UNREAD' });
+  const list = [...stored.own, ...stored.siblings];
+  const { services: listed, overflow } = bookingServiceList(list.map((item) => ({ name: item.name, key: item.key })), service.service_type);
+  const services = await withCatalogKeys(listed, db, { strict: true });
+  return rainFitFor(overflow ? [...services, OVERFLOW_SERVICE] : services) === 'avoid';
 }
 
 // The earliest start a 73-hour floor allows, and the ET date it falls on.
@@ -245,7 +255,7 @@ function drierOptions(candidates, {
     const expected = expectedWetness(wet, lead);
     if (currentWet - expected < DRIER_MARGIN) continue;
     out.push({
-      slot, date, wetness: round2(wet), lead_days: lead, expected: round2(expected), dist: Math.abs(daysBetween(orig, date)),
+      slot, date, wet, lead_days: lead, expected, dist: Math.abs(daysBetween(orig, date)),
     });
   }
   return out.sort((a, b) => a.expected - b.expected || a.dist - b.dist || String(a.slot.start_time).localeCompare(String(b.slot.start_time)));
@@ -268,9 +278,10 @@ async function movesWithOthers(service) {
   }
 }
 
-const shownSlot = (opt) => opt && {
-  date: opt.date, start_time: opt.slot.start_time, wetness: opt.wetness, lead_days: opt.lead_days, expected: opt.expected,
-};
+// Audit fields only are rounded; every comparison and sort above reads full-precision values.
+const shownSlot = (opt) => (opt ? {
+  date: opt.date, start_time: opt.slot.start_time, wetness: round2(opt.wet), lead_days: opt.lead_days, expected: round2(opt.expected),
+} : null);
 
 // Free slots in the wider window (same technician only when the visit has one), read-only.
 async function freeSlots(service, prefs, ctx, bands) {
@@ -294,6 +305,42 @@ function rowFor(service, area, lead, wet, extra) {
   };
 }
 
+// Whether the slot is free by the writer's own read-only occupancy probe (candidate-slots.js
+// filterAndScoreSharedModelCandidates: rebooker probeMoveConflicts over the destination date,
+// the visit's own unit excluded, the moving unit's windows, then the shared model's scoring
+// reads). With GATE_AUTO_DISPATCH_SHARED_MODEL on the search already ran it on every
+// candidate. Reads only: no write, no road lookup. true = free, false = taken, null = unreadable.
+async function slotFree(slot, { service, ctx, memo }) {
+  const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
+  if (typeof autoDispatchSharedModelLive === 'function' && autoDispatchSharedModelLive()) return true;
+  const key = `${slot.date}|${slot.start_time}|${slot.technician_id}`;
+  if (!memo.has(key)) {
+    try {
+      const { _internals } = require('./candidate-slots');
+      const { resolveGeo } = require('./geo');
+      const kept = await _internals.filterAndScoreSharedModelCandidates(service, resolveGeo(service), [slot], ctx, null);
+      memo.set(key, kept.length > 0);
+    } catch {
+      memo.set(key, null);
+    }
+  }
+  return memo.get(key);
+}
+
+// The first option whose slot is free. `unverified` = the probe could not be read (or too many
+// slots were taken to keep asking): the slot stays a candidate and nothing would move.
+async function firstFree(options, check) {
+  let asked = 0;
+  for (const opt of options) {
+    if (asked >= MAX_OCCUPANCY_CHECKS) return { unverified: opt };
+    asked += 1;
+    const free = await slotFree(opt.slot, check);
+    if (free === true) return { opt };
+    if (free === null) return { unverified: opt };
+  }
+  return {};
+}
+
 function verdictReason({
   best5, best73, capped, candidate,
 }) {
@@ -315,23 +362,40 @@ async function searchVerdict({
   state.searches += 1;
   const { slots, capped } = await freeSlots(service, prefs, ctx, bands);
   const common = {
-    service, run, currentWet: base.current.wetness, wetByDate,
+    service, run, currentWet: wetByDate.get(base.current.date), wetByDate,
   };
-  const top5 = drierOptions(slots, { ...common, band: bands.current })[0] || null;
-  let top73 = drierOptions(slots, { ...common, band: bands.pending73h, afterFloor: true })[0] || null;
+  const opts5 = drierOptions(slots, { ...common, band: bands.current });
+  const opts73 = drierOptions(slots, { ...common, band: bands.pending73h, afterFloor: true });
+  if (grouped) return groupedVerdict({ base, opts5, opts73, capped });
+  const check = {
+    service, ctx, run, memo: new Map(),
+  };
+  const r5 = await firstFree(opts5, check);
+  let r73 = await firstFree(opts73, check);
   // Any slot valid under the 5-day floor is valid under 73 hours when it also starts 73 hours out.
-  if (!top73 && top5 && startsAfterFloor(top5.slot, run)) top73 = top5;
-  if (grouped) {
-    const first = top5 || top73;
-    const candidate = first && { floor: top5 ? '5day' : '73h', ...shownSlot(first) };
+  if (!r73.opt && r5.opt && startsAfterFloor(r5.opt.slot, run)) r73 = r5;
+  const unverified = !r5.opt && !r73.opt && (r5.unverified || r73.unverified);
+  if (unverified) {
     return {
-      ...base, would_move_73h: false, ...(candidate ? { candidate } : {}), reason: verdictReason({ capped, candidate }),
+      ...base, would_move_73h: false, candidate: { floor: r5.unverified ? '5day' : '73h', ...shownSlot(r5.unverified || r73.unverified) }, reason: REASONS.OCCUPANCY,
     };
   }
-  const best5 = shownSlot(top5);
-  const best73 = shownSlot(top73);
+  const best5 = shownSlot(r5.opt);
+  const best73 = shownSlot(r73.opt);
   return {
     ...base, best_5day: best5, best_73h: best73, would_move: !!best5, would_move_73h: !!best73, reason: verdictReason({ best5, best73, capped }),
+  };
+}
+
+// A visit that moves with others cannot be verified: its best drier slot is a candidate only.
+function groupedVerdict({
+  base, opts5, opts73, capped,
+}) {
+  const top5 = opts5[0] || null;
+  const first = top5 || opts73[0] || null;
+  const candidate = first && { floor: top5 ? '5day' : '73h', ...shownSlot(first) };
+  return {
+    ...base, would_move_73h: false, ...(candidate ? { candidate } : {}), reason: verdictReason({ capped, candidate }),
   };
 }
 
@@ -415,5 +479,5 @@ async function finish(state, run) {
 
 module.exports = {
   start, note, carry, kept, finish, dayWetness, expectedWetness, modeOf,
-  MODE_SHADOW, LEAD_TRUST, WET_SCORE, DRIER_MARGIN, PRIOR_WETNESS, FLOOR_HOURS_PENDING, MAX_SEARCHES_PER_RUN, REASONS,
+  _test: { drierOptions }, MODE_SHADOW, LEAD_TRUST, WET_SCORE, DRIER_MARGIN, PRIOR_WETNESS, FLOOR_HOURS_PENDING, MAX_SEARCHES_PER_RUN, REASONS,
 };

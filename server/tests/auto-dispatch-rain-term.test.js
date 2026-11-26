@@ -4,11 +4,15 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({
   DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60, findValidCandidateSlots: jest.fn(),
+  // The writer's own read-only occupancy probe: keeps the slots it is given unless a test says taken.
+  _internals: { filterAndScoreSharedModelCandidates: jest.fn(async (_svc, _geo, slots) => slots) },
 }));
 // The visit's stored services read is faked (no database here); rainFitFor stays the real classifier.
+let mockCurrentType = 'Pest Control Service';
 jest.mock('../services/scheduling/rain-fit', () => ({
   ...jest.requireActual('../services/scheduling/rain-fit'),
-  bookingRainPlan: jest.fn(async ({ serviceType }) => ({ services: [serviceType], rainSpan: null })),
+  storedVisitServices: jest.fn(async () => ({ own: [{ name: mockCurrentType, key: '' }], siblings: [], span: null })),
+  withCatalogKeys: jest.fn(async (items) => items.map((i) => i.name)),
 }));
 // A shadow never calls apply.js (its grouped-move guard writes): every export is a spy the tests expect untouched.
 jest.mock('../services/auto-dispatch/apply', () => ({
@@ -52,6 +56,7 @@ const run = {
 };
 
 function visit(over = {}) {
+  mockCurrentType = over.service_type || 'Pest Control Service';
   return {
     id: 'v1', scheduled_date: VISIT_DATE, technician_id: 't1', zone: 'sarasota', service_type: 'Pest Control Service', ...over,
   };
@@ -249,7 +254,8 @@ describe('per-visit verdict', () => {
       return evalResult.audit.constraints.rain_term;
     };
     expect((await run1(dry, visit(), flexGuard(visit()))).reason).toBe('dry_enough');
-    expect((await run1(wet, visit({ service_type: 'WaveGuard Assessment' }), flexGuard(visit()))).reason).toBe('not_outdoor');
+    const assessment = visit({ service_type: 'WaveGuard Assessment' });
+    expect((await run1(wet, assessment, flexGuard(assessment))).reason).toBe('not_outdoor');
     expect((await run1(unread, visit(), flexGuard(visit()))).reason).toBe('no_forecast');
     expect((await run1(wet, visit(), { window: null, meta: null })).reason).toBe('no_flex_band');
     // A stop no forecast rule places has no area (forecast-zones.js stopForecastZone).
@@ -320,16 +326,74 @@ describe('review fixes (Codex pre-push)', () => {
   test('the whole visit is classified: add-ons and live siblings count, read by the move screens\' own reader', async () => {
     const state = await allWet();
     // The visit's own service is rain-OK, a sibling on the same stop is a spray: the stop is outdoor.
-    rainFit.bookingRainPlan.mockResolvedValueOnce({ services: ['WaveGuard Assessment', 'Exterior Pest Spray'], rainSpan: null });
+    rainFit.storedVisitServices.mockResolvedValueOnce({
+      own: [{ name: 'WaveGuard Assessment', key: '' }], siblings: [{ name: 'Exterior Pest Spray', key: '' }], span: null,
+    });
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-12-02')] });
     const row = await noteVisit(state, visit({ service_type: 'WaveGuard Assessment' }));
     expect(row.reason).toBe('drier_date_found');
-    expect(rainFit.bookingRainPlan).toHaveBeenCalledWith(expect.objectContaining({
-      bestRows: true, serviceId: 'v1', serviceTypes: [], moveAlone: false,
-    }), expect.anything());
+    expect(rainFit.storedVisitServices).toHaveBeenCalledWith('v1', { moveAlone: false }, expect.anything());
     // Every service rain-OK: not outdoor.
-    rainFit.bookingRainPlan.mockResolvedValueOnce({ services: ['WaveGuard Assessment', 'Interior Inspection'], rainSpan: null });
+    rainFit.storedVisitServices.mockResolvedValueOnce({
+      own: [{ name: 'WaveGuard Assessment', key: '' }], siblings: [{ name: 'Interior Inspection', key: '' }], span: null,
+    });
     expect((await noteVisit(state, visit({ service_type: 'WaveGuard Assessment' }))).reason).toBe('not_outdoor');
+  });
+
+  test('a service list that cannot be read in full is an error, never not_outdoor', async () => {
+    const state = await allWet();
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-12-02')] });
+    rainFit.storedVisitServices.mockResolvedValueOnce(null);
+    expect(await noteVisit(state, visit({ service_type: 'WaveGuard Assessment' }))).toMatchObject({ reason: 'error', would_move: false, error: 'SERVICES_UNREAD' });
+    // A failed catalog read (strict) is an error too.
+    rainFit.withCatalogKeys.mockRejectedValueOnce(new Error('catalog down'));
+    expect((await noteVisit(state, visit())).reason).toBe('error');
+    expect(rainFit.withCatalogKeys).toHaveBeenLastCalledWith(expect.any(Array), expect.anything(), { strict: true });
+    expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+  });
+
+  test('the writer\'s occupancy probe vets the slot: a taken slot is skipped, an unreadable probe leaves a candidate only', async () => {
+    const state = await allWet();
+    const probe = candidateSlots._internals.filterAndScoreSharedModelCandidates;
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-11-30'), cand('2026-12-02')] });
+    // 12-02 is taken: the 5-day answer is none, and the 73-hour answer is the 11-30 slot.
+    probe.mockImplementation(async (_svc, _geo, slots) => slots.filter((slot) => slot.date !== '2026-12-02'));
+    const taken = await noteVisit(state, visit());
+    expect(taken.best_5day).toBeNull();
+    expect(taken.best_73h).toMatchObject({ date: '2026-11-30' });
+    const [asked, , slotsAsked, , drops] = probe.mock.calls[0];
+    expect(asked.id).toBe('v1');
+    expect(slotsAsked).toEqual([expect.objectContaining({ date: '2026-12-02' })]);
+    expect(drops).toBeNull();
+    // An unreadable probe: unverified, nothing would move, the slot is kept as a candidate.
+    probe.mockRejectedValue(new Error('probe read failed'));
+    const unread = await noteVisit(state, visit());
+    expect(unread).toMatchObject({
+      would_move: false, would_move_73h: false, best_5day: null, best_73h: null, reason: 'occupancy_unverified', candidate: { floor: '5day', date: '2026-12-02' },
+    });
+    // With the shared model on, the search already ran the probe on every slot: it is not asked again.
+    probe.mockClear();
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    try {
+      expect(gates.autoDispatchSharedModelLive()).toBe(true);
+      expect((await noteVisit(state, visit())).would_move).toBe(true);
+      expect(probe).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+    }
+    probe.mockReset().mockImplementation(async (_svc, _geo, slots) => slots);
+  });
+
+  test('options compare and sort on full-precision values; only the audit fields are rounded', () => {
+    const wetByDate = new Map([['2026-11-30', 0.186286], ['2026-12-01', 0.099]]);
+    const slots = [cand('2026-11-30'), cand('2026-12-01')];
+    const band = { dateFrom: '2026-11-29', dateTo: '2026-12-04' };
+    const options = rainTerm._test.drierOptions(slots, {
+      service: visit(), band, run, currentWet: 1, wetByDate,
+    });
+    // Both read 0.22 once rounded, and 11-30 is nearer the visit's date; at full precision 12-01 is drier.
+    expect(options.map((o) => o.date)).toEqual(['2026-12-01', '2026-11-30']);
+    expect(options[0].expected).toBeLessThan(options[1].expected);
   });
 
   // The row is for a visit whose stop has another live member.

@@ -2477,4 +2477,19 @@ describe('rain term shadow (GATE_AUTO_DISPATCH_RAIN_TERM, owner 2026-11-26)', ()
       process.env.AUTO_DISPATCH_ALLOW_APPLY = prevApply;
     }
   });
+  test('shadow: the estimate row for a partner that moves after the overlapping visit keeps the rain row', async () => {
+    process.env[ENV] = 'shadow';
+    servicesResult = ['a1', 'b1'].map((id) => svc({ id, scheduled_date: day3, zone: 'sarasota', service_type: 'Pest Control Service' }));
+    const OVERLAP = { kind: 'overlap', date: CURRENT.date, with: ['other-1'] };
+    const SAME_DAY = { ...CAND_SMALL, date: CURRENT.date, start_time: '14:00' };
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({
+      current: { ...CURRENT, conflict: { ...OVERLAP, with: [service.id === 'a1' ? 'b1' : 'a1'] } },
+      candidates: service.id === 'a1' ? [SAME_DAY] : [SAME_DAY, CAND_BIG],
+    }));
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    const recs = audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action === 'recommended');
+    const b = recs.find((d) => d.service.id === 'b1');
+    expect(b.reason_description).toMatch(/after the overlapping visit moves/);
+    expect(b.constraints.rain_term).toMatchObject({ mode: 'shadow', lead_days: 3 });
+  });
 });

@@ -660,6 +660,7 @@ async function recommendOverlapFixes(run) {
       // again after that move and may pick another slot or none. The row
       // says so (Codex #6207 r12 P2).
       for (const id of unitIdsOf(pm)) estimated.add(id);
+      rainTerm.carry(pm.result, pm.result.withoutConflict);
       await logDryRunRecommendation(run, pm.service, pm.result.withoutConflict, ' after the overlapping visit moves (estimate: scored before that move)');
     } else if (cleared) {
       await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'The overlapping visit is already recommended to move; this one stays', ...pm.result.audit });
