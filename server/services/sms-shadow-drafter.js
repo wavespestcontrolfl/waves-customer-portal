@@ -5040,28 +5040,48 @@ function paymentOptionsFactLine(context, extras) {
 
 // PREP GUIDE (owner 2026-11-25, texting AI fix step 2C): the written prep guide of the customer's booked visit (else the last completed
 // service), in the guide's own published words, for THAT service only. sms-staff-facts.loadPrepGuideFacts picked the guide the way
-// prep-guide-sender does and already dropped links, merge tags, prices, email wording and product names; every sentence also passes the
-// prompt-control and banned-claim screens here (no "safe" claim, no re-entry or dry-time claim: only a LABEL FACTS sentence may make
-// those), and the section is capped so the facts around it keep their room. The model may repeat these sentences and nothing else as prep
-// advice. The section sits after LAWN HEALTH, outside every structural marker the sealed exam reads. Gate off, no guide, or a failed read:
-// no section.
+// prep-guide-sender does and kept only lines that pass the company facts bank's text rules (no link, price, brand name or safety claim);
+// every sentence and heading also passes the prompt-control and banned-claim screens here (no re-entry or dry-time claim: only a LABEL
+// FACTS sentence may make those), and the section is capped so the facts around it keep their room. Each step stays under the heading of
+// the case it holds for ("Prep for a German roach cleanout"): the header tells the model to use a group only when the customer's case is
+// known to match it. The model may repeat these sentences and nothing else as prep advice. The section sits after LAWN HEALTH, outside
+// every structural marker the sealed exam reads. Gate off, no guide, or a failed read: no section.
 const PREP_GUIDE_MAX_SENTENCES = 90;
-const PREP_GUIDE_MAX_CHARS = 7500;
+const PREP_GUIDE_MAX_CHARS = 8000;
+function prepGuideLines(sections) {
+  const lines = [];
+  let sentences = 0;
+  let used = 0;
+  const clean = (raw, cap) => {
+    const text = sanitizeSingleLine(raw, cap);
+    return text && !EXEMPLAR_INJECTION_RE.test(text) && !hasBannedCustomerCopy(text, { rainTimeGuard: true }) ? text : '';
+  };
+  for (const section of sections) {
+    const heading = section?.heading ? clean(section.heading, 120) : '';
+    if (section?.heading && !heading) continue; // a group whose heading is screened out would sit under the wrong case
+    const kept = [];
+    for (const raw of Array.isArray(section?.sentences) ? section.sentences : []) {
+      const sentence = clean(raw, 260);
+      if (!sentence) continue;
+      if (sentences + kept.length >= PREP_GUIDE_MAX_SENTENCES || used + sentence.length > PREP_GUIDE_MAX_CHARS) break;
+      kept.push(`- ${sentence}`);
+      used += sentence.length;
+    }
+    if (!kept.length) continue;
+    if (heading) lines.push(`${heading}:`);
+    lines.push(...kept);
+    sentences += kept.length;
+    used += heading.length;
+  }
+  return lines;
+}
 function prepGuideSection(context) {
   const guide = context.prepGuide;
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !guide || !Array.isArray(guide.sentences) || !guide.label) return '';
-  const lines = [];
-  let used = 0;
-  for (const raw of guide.sentences) {
-    const sentence = sanitizeSingleLine(raw, 260);
-    if (!sentence || EXEMPLAR_INJECTION_RE.test(sentence) || hasBannedCustomerCopy(sentence, { rainTimeGuard: true })) continue;
-    if (lines.length >= PREP_GUIDE_MAX_SENTENCES || used + sentence.length > PREP_GUIDE_MAX_CHARS) break;
-    lines.push(`- ${sentence}`);
-    used += sentence.length;
-  }
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !guide || !Array.isArray(guide.sections) || !guide.label) return '';
+  const lines = prepGuideLines(guide.sections);
   if (!lines.length) return '';
   const which = guide.source === 'booked' ? 'their booked' : 'their last';
-  return `PREP GUIDE (our written prep guide for ${which} ${sanitizeSingleLine(guide.label, 60)}; for prep questions about that service, repeat these sentences word for word and add no other step, time or rule; for any other service or a prep question these do not answer, give no prep advice):\n${lines.join('\n')}\n`;
+  return `PREP GUIDE (our written prep guide for ${which} ${sanitizeSingleLine(guide.label, 60)}; for prep questions about that service, repeat these sentences word for word and add no other step, time or rule; a line ending in a colon names the case the sentences under it are for, so use those sentences only when the customer's case is known to match it, and otherwise give no step from them; for any other service or a prep question these do not answer, give no prep advice):\n${lines.join('\n')}\n`;
 }
 
 function paymentHistoryFactLines(context, billingKnown) {

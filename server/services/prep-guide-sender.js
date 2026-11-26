@@ -283,6 +283,7 @@ function isSupportedChannel(channel) {
 // any number of taken ones is still found (GH Codex #3856 r27 P2). Empty
 // when nothing matches; THROWS on a lookup error (and, with `strict`, on a stop whose members could not be read).
 const VISIT_PAGE = 10;
+const CLOSED_VISIT_STATUSES = ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'];
 async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywords = [] }, max, { strict = false } = {}) {
   const ids = [].concat(customerIds).filter(Boolean);
   const { pageStateForVisit } = require('../routes/appointment-public');
@@ -303,7 +304,7 @@ async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywo
       q.whereRaw(`(LOWER(service_type) NOT LIKE ? OR ${unless.map(() => 'LOWER(service_type) LIKE ?').join(' OR ')})`, [`%${ex.keyword}%`, ...unless.map((u) => `%${u}%`)]);
     }
     const rows = await q
-      .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
+      .whereNotIn('status', CLOSED_VISIT_STATUSES)
       // The same null-safe dispatch-owned predicate /api/schedule uses.
       .where((qb) => qb
         .whereNull('source_action')
@@ -377,17 +378,24 @@ function prepFamilyForServiceType(serviceType) {
 /**
  * The prep guide the customer's BOOKED visit gets: the soonest upcoming visit as the customer's own page lists it (upcomingFamilyVisits'
  * filters and order, across every service: a visit no guide covers is still THE booked visit, so an earlier completed service's guide is
- * never put in its place), and the guide that visit's page shows: its stored prep_template_key when it names a guide here, else the
- * family its service type belongs to. { visit, pestType, config } or null with no booked visit; pestType and config are null when no guide
- * can be named. THROWS on a lookup error, including a grouped stop whose members could not be read: a failed read is not "nothing booked".
+ * never put in its place), and the guide its page shows. The page is one STOP: every live member of a grouped visit counts. A guide the
+ * visit already carries (its stored prep_template_key) decides, on any member; only a stop with none is matched by its service types.
+ * Members that point at two guides, or a stored key that is not one of ours, name no guide (never a guess between them).
+ * { visit, pestType, config } or null with no booked visit; pestType and config are null when no single guide can be named. THROWS on a
+ * lookup error, including a grouped stop whose members could not be read: a failed read is not "nothing booked".
  */
 async function bookedPrepGuide(customerIds) {
   const [visit] = await upcomingFamilyVisits(customerIds, { serviceKeywords: [''] }, 1, { strict: true });
   if (!visit) return null;
-  const family = visit.prep_template_key
-    ? Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === visit.prep_template_key)
-    : prepFamilyForServiceType(visit.service_type);
-  return { visit, pestType: family?.[0] || null, config: family?.[1] || null };
+  const members = visit.visit_id
+    ? await db('scheduled_services').where({ visit_id: visit.visit_id }).whereNotIn('status', CLOSED_VISIT_STATUSES).select('id', 'service_type', 'prep_template_key')
+    : [];
+  const stop = members.some((member) => member.id === visit.id) ? members : [visit, ...members];
+  const storedKeys = new Set(stop.filter((row) => row.prep_template_key).map((row) => (
+    Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === row.prep_template_key)?.[0] || null)));
+  const families = storedKeys.size ? storedKeys : new Set(stop.map((row) => prepFamilyForServiceType(row.service_type)?.[0] || undefined).filter(Boolean));
+  const [pestType] = families.size === 1 ? [...families] : [null];
+  return { visit, pestType: pestType || null, config: pestType ? PREP_CONFIG[pestType] : null };
 }
 
 // A visit's prep key is never MOVED between guides. The automated lanes

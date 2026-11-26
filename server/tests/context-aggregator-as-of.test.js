@@ -13,7 +13,7 @@ jest.mock('../services/visit-loops-facts', () => ({
 jest.mock('../services/sms-staff-facts', () => ({
   loadEstimateFacts: jest.fn(async () => ({ perApplication: [{ label: 'Pest Control', cents: 12500, applications: 4 }] })),
   loadPrepaidPlanFacts: jest.fn(async () => [{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]),
-  loadPrepGuideFacts: jest.fn(async () => ({ source: 'booked', key: 'prep.interior_pest', label: 'Interior Pest Treatment', sentences: ['Please clear the area under the sinks.'] })),
+  loadPrepGuideFacts: jest.fn(async () => ({ source: 'booked', key: 'prep.interior_pest', label: 'Interior Pest Treatment', sections: [{ heading: null, sentences: ['Please clear the area under the sinks.'] }] })),
 }));
 
 const db = require('../models/db');
@@ -130,7 +130,7 @@ describe('getContextForCustomer asOf', () => {
 describe('getContextForCustomer texting AI staff facts', () => {
   const staffFacts = require('../services/sms-staff-facts');
   const reads = () => staffFacts.loadEstimateFacts.mock.calls.length + staffFacts.loadPrepaidPlanFacts.mock.calls.length + staffFacts.loadPrepGuideFacts.mock.calls.length;
-  const GUIDE = { source: 'booked', key: 'prep.interior_pest', label: 'Interior Pest Treatment', sentences: ['Please clear the area under the sinks.'] };
+  const GUIDE = { source: 'booked', key: 'prep.interior_pest', label: 'Interior Pest Treatment', sections: [{ heading: null, sentences: ['Please clear the area under the sinks.'] }] };
 
   test('an opted-in live context carries all three, read for the customer (the estimate facts for the pending estimate, the guide for the customer\'s last service)', async () => {
     const context = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true });

@@ -43,23 +43,25 @@ test('a change to the prepaid visits left or to the open estimate\'s price chang
 });
 
 // PREP GUIDE (step 2C): the guide text in the draft's facts is part of the send-time fingerprint. The fake context carries what
-// sms-staff-facts.loadPrepGuideFacts returns: the guide's own sentences, its key and label (which guide the booked visit's page shows).
+// sms-staff-facts.loadPrepGuideFacts returns: the guide's own sentences under their headings, its key and label (which guide the booked visit's page shows).
 describe('the PREP GUIDE is part of the send-time fingerprint', () => {
-  const guide = (over = {}) => ({ prepGuide: { source: 'booked', key: 'prep.interior_pest', label: 'Interior Pest Treatment', sentences: ['Please clear the area under the sinks.', 'Pick up toys and pet bowls from the floor.'], ...over } });
+  const section = (sentences, heading = null) => ({ heading, sentences });
+  const guide = (over = {}) => ({ prepGuide: { source: 'booked', key: 'prep.interior_pest', label: 'Interior Pest Treatment', sections: [section(['Please clear the area under the sinks.', 'Pick up toys and pet bowls from the floor.'])], ...over } });
 
   test('a guide edited, unpublished or switched to another guide (the visit\'s assigned guide changed) between the draft and the send changes the hash', async () => {
     const drafted = await hashWith(guide());
     expect(await hashWith(guide())).toBe(drafted); // the same guide at send: the draft stands
-    expect(await hashWith(guide({ sentences: ['Please clear the area under the sinks.', 'Pick up toys and pet bowls from the floor and move the pet dishes.'] }))).not.toBe(drafted); // edited
-    expect(await hashWith(guide({ sentences: ['Please clear the area under the sinks.'] }))).not.toBe(drafted); // a step removed
-    expect(await hashWith({ prepGuide: { sentences: [] } })).not.toBe(drafted); // unpublished, or the guide no longer covers the visit
+    expect(await hashWith(guide({ sections: [section(['Please clear the area under the sinks.', 'Pick up toys and pet bowls from the floor and move the pet dishes.'])] }))).not.toBe(drafted); // edited
+    expect(await hashWith(guide({ sections: [section(['Please clear the area under the sinks.'])] }))).not.toBe(drafted); // a step removed
+    expect(await hashWith({ prepGuide: { sections: [] } })).not.toBe(drafted); // unpublished, or the guide no longer covers the visit
     expect(await hashWith(guide({ key: 'prep.flea', label: 'Flea Treatment' }))).not.toBe(drafted); // the visit's assigned guide changed, same words
+    expect(await hashWith(guide({ sections: [section(['Please clear the area under the sinks.', 'Pick up toys and pet bowls from the floor.'], 'Prep for palmetto bugs')] }))).not.toBe(drafted); // the same steps under another case
     expect(await hashWith(guide({ source: 'last' }))).not.toBe(drafted); // the booked visit was cancelled: the last service's guide instead
   });
 
   test('a draft written with no guide stands only while there is still none', async () => {
-    const none = await hashWith({ prepGuide: { sentences: [] } });
-    expect(await hashWith({ prepGuide: { sentences: [] } })).toBe(none);
+    const none = await hashWith({ prepGuide: { sections: [] } });
+    expect(await hashWith({ prepGuide: { sections: [] } })).toBe(none);
     expect(await hashWith(guide())).not.toBe(none); // a guide published since the draft
   });
 
@@ -71,7 +73,7 @@ describe('the PREP GUIDE is part of the send-time fingerprint', () => {
     process.env.GATE_SMS_UNANSWERED_REPLY = 'true';
     try {
       expect(await draftFactsFingerprint({ id: 'c1' })).toBeNull(); // no fingerprint: this lane never sends the draft
-      ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'X', billing, prepGuide: { sentences: [] } });
+      ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'X', billing, prepGuide: { sections: [] } });
       expect(await draftFactsFingerprint({ id: 'c1' })).toMatchObject({ hash: expect.any(String) }); // (the same call with a successful read of nothing does fingerprint)
     } finally { delete process.env.GATE_SMS_UNANSWERED_REPLY; }
   });
@@ -81,8 +83,8 @@ describe('the PREP GUIDE is part of the send-time fingerprint', () => {
     const stamp = { facts_fingerprint: await hashWith(guide()), facts_fingerprint_at: AT.toISOString() };
     const refusal = async (extra) => { ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'X', billing, ...extra }); return factsFingerprintRefusal(dbh, { customerId: 'c1', stamp }); };
     expect(await refusal(guide())).toBeNull();
-    expect(await refusal(guide({ sentences: ['Please clear the area under the sinks.'] }))).toBe('facts_changed');
-    expect(await refusal({ prepGuide: { sentences: [] } })).toBe('facts_changed');
+    expect(await refusal(guide({ sections: [section(['Please clear the area under the sinks.'])] }))).toBe('facts_changed');
+    expect(await refusal({ prepGuide: { sections: [] } })).toBe('facts_changed');
     expect(await refusal(guide({ key: 'prep.flea', label: 'Flea Treatment' }))).toBe('facts_changed');
     await expect(refusal({ prepGuide: null })).rejects.toThrow('prep guide could not be read');
   });

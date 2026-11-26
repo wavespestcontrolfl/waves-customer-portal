@@ -870,8 +870,6 @@ module.exports = {
   SOURCES,
   BANK_SECTION_HEADER,
   checkFactText,
-  productTokens,
-  mentionsProduct,
   readProductNames,
   splitSentences,
   createDraft,

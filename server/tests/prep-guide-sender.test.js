@@ -1087,6 +1087,37 @@ describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType,
     expect(scheduledQueries.flatMap((q) => q.whereRaw.mock.calls).some(([sql]) => /NOT LIKE/.test(String(sql)))).toBe(false);
   });
 
+  test('bookedPrepGuide reads the whole stop: a guide ANY live member carries decides, two guides or an unknown one name none, and only a stop with none is matched by its service types', async () => {
+    const appointmentPublic = require('../routes/appointment-public');
+    const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit').mockResolvedValue({ state: 'upcoming', phase: null });
+    // the first db('scheduled_services') call is the soonest-visit query, the second is the stop's members
+    const stop = async (visit, members) => {
+      const base = db.getMockImplementation();
+      let calls = 0;
+      db.mockImplementation((table) => {
+        if (table !== 'scheduled_services') return base(table);
+        calls += 1;
+        if (calls === 1) return base(table);
+        return { where: () => ({ whereNotIn: () => ({ select: async () => { if (members instanceof Error) throw members; return members; } }) }) };
+      });
+      upcomingVisitRow = { ...VISIT, visit_id: 'stop-1', ...visit };
+      try { return await sender.bookedPrepGuide(['cust-1']); } finally { db.mockImplementation(base); }
+    };
+    try {
+      const keyed = { id: 'svc-2', service_type: 'Pest Control', prep_template_key: 'prep.interior_pest' };
+      // the soonest row carries no key (inferred: a lawn service), its stop-mate carries the guide the customer received
+      expect(await stop({ id: 'svc-1', service_type: 'Lawn Care' }, [{ id: 'svc-1', service_type: 'Lawn Care', prep_template_key: null }, keyed])).toMatchObject({ pestType: 'interior_pest' });
+      // two assigned guides in one stop, or an assigned key that is not ours: no single guide
+      expect(await stop({ id: 'svc-1', service_type: 'Lawn Care' }, [{ id: 'svc-1', service_type: 'Lawn Care', prep_template_key: 'prep.lawn' }, keyed])).toMatchObject({ pestType: null, config: null });
+      expect(await stop({ id: 'svc-1', service_type: 'Lawn Care' }, [{ id: 'svc-1', service_type: 'Lawn Care', prep_template_key: 'prep.retired' }, keyed])).toMatchObject({ pestType: null, config: null });
+      // no key anywhere: the stop's service types (one family names it, two families name none, a service no guide covers is ignored)
+      expect(await stop({ id: 'svc-1', service_type: 'Pest Control' }, [{ id: 'svc-1', service_type: 'Pest Control' }, { id: 'svc-2', service_type: 'Termite Inspection' }])).toMatchObject({ pestType: 'interior_pest' });
+      expect(await stop({ id: 'svc-1', service_type: 'Pest Control' }, [{ id: 'svc-1', service_type: 'Pest Control' }, { id: 'svc-2', service_type: 'Lawn Care' }])).toMatchObject({ pestType: null, config: null });
+      // a failed member read is a failed pick, never a smaller stop
+      await expect(stop({ id: 'svc-1', service_type: 'Pest Control' }, new Error('members down'))).rejects.toThrow('members down');
+    } finally { spy.mockRestore(); }
+  });
+
   test('bookedPrepGuide throws on a failed lookup, and on a grouped stop whose members could not be read: a failed read is never "nothing booked"', async () => {
     visitLookupError = new Error('db down');
     await expect(sender.bookedPrepGuide(['cust-1'])).rejects.toThrow('db down');
