@@ -376,6 +376,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
         written: await bee({ updated_at: new Date('2026-08-01T12:00:00Z') }),
         // An address corrected 30 minutes after the import: the move stamps updated_at.
         corrected: await bee({ updated_at: new Date(day.getTime() + 30 * MIN) }),
+        // The edges of the run: its first and last rows are inside, the exclusive end is not.
+        first: await bee({ created_at: new Date('2026-04-19T11:41:06.249Z'), updated_at: new Date('2026-04-19T11:41:06.249Z') }),
+        last: await bee({ created_at: new Date('2026-04-19T11:44:55.258Z'), updated_at: new Date('2026-04-19T11:44:55.258Z') }),
+        atEnd: await bee({ created_at: new Date('2026-04-19T11:44:56Z'), updated_at: new Date('2026-04-19T11:44:56Z') }),
         // A Beehiiv-labelled row from a public sign-up later the same day: outside the run.
         sameDay: await bee({ created_at: new Date('2026-04-19T16:00:00Z'), updated_at: new Date('2026-04-19T16:00:00Z') }),
         lateLabel: await bee({ created_at: new Date('2026-06-01T12:00:00Z'), updated_at: new Date('2026-06-01T12:00:00Z') }),
@@ -392,7 +396,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       const after = {};
       for (const [name, r] of Object.entries(rows)) after[name] = await trx('newsletter_subscribers').where({ id: r.id }).first();
       const proofed = Object.keys(rows).filter((name) => after[name].reader_confirmed_at !== null);
-      expect(proofed.sort()).toEqual(['clicked', 'kept', 'orphan', 'upper']);
+      expect(proofed.sort()).toEqual(['clicked', 'first', 'kept', 'last', 'orphan', 'upper']);
       expect(after.kept.reader_confirmed_at.getTime()).toBe(confirmed.getTime());
       expect(after.kept.reader_confirmed_email).toBe(rows.kept.email.toLowerCase());
       expect(after.upper.reader_confirmed_email).toBe(rows.upper.email.toLowerCase());

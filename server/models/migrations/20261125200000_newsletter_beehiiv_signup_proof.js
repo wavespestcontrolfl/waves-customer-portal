@@ -10,7 +10,8 @@
  * one group: the rows the Beehiiv import wrote. So this one-time step writes the proof
  * for each import row that still holds that sign-up, and nothing else:
  *   - source is beehiiv_migration or beehiiv_migration_orphan, AND created_at is inside
- *     the import run: 2026-04-19 11:41:06Z to 11:44:56Z. Production read 2026-11-25: all
+ *     the import run: the first row at 2026-04-19 11:41:06.249Z, the last at
+ *     11:44:55.258Z, and the window is [11:41:06Z, 11:44:56Z). Production read 2026-11-25: all
  *     637 Beehiiv rows were created in that run, and no row of any other source was
  *     created within 10 minutes of it. A source label alone is not evidence: the public
  *     sign-up route stores the caller's source, and a re-signup rewrites it;
@@ -32,7 +33,8 @@
  * later real click with the same stamps, and clearing a real click would be wrong.
  */
 const IMPORT_SOURCES = ['beehiiv_migration', 'beehiiv_migration_orphan'];
-// The Beehiiv import run (first and last row it created, production, read 2026-11-25).
+// The Beehiiv import run, production (read 2026-11-25): first row 11:41:06.249Z, last row
+// 11:44:55.258Z. Start inclusive, end exclusive; both rows fall inside.
 const IMPORT_RUN_START = '2026-04-19T11:41:06Z';
 const IMPORT_RUN_END = '2026-04-19T11:44:56Z';
 
