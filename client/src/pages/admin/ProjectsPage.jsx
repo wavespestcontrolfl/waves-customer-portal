@@ -2182,6 +2182,7 @@ export function ProjectDetail({
       const routing = pv.email_routing || {};
       const routingLines = [
         routing.recipient ? `Email to: ${routing.recipient}` : null,
+        routing.recipient_refused ? "No invoice email: there is no billing email address that accepts email." : null,
         routing.billing_copy ? `Billing copy (same email): ${routing.billing_copy}` : null,
         routing.report_copies?.length
           ? `Report-only copy, no invoice: ${routing.report_copies.join(", ")}`

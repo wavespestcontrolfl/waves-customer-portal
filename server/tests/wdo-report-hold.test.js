@@ -412,7 +412,12 @@ function post(baseUrl, path, body = {}) {
   });
 }
 
-const holdBodyFor = (extra = {}) => ({ hold_report_until_paid: true, invoice_id: 'inv-1', ...extra });
+// A held send carries the fingerprint of the invoice the operator confirmed (the default invoice row's, unless a test
+// passes its own).
+const holdBodyFor = (extra = {}) => ({
+  hold_report_until_paid: true, invoice_id: 'inv-1',
+  expected_billing_fingerprint: projectsRouter._private.billingFingerprintHash(invoiceRow()), ...extra,
+});
 
 describe('gate off: today\'s behavior exactly', () => {
   beforeEach(() => { mockGates.hold = false; });
@@ -1794,6 +1799,65 @@ describe('audit fixes', () => {
       expect(result.released).toBe(true);
       const recipients = ProjectEmail.sendProjectReportReady.mock.calls.map(([args]) => args.recipient.email);
       expect(recipients).toEqual(expect.arrayContaining([CUSTOMER.email, 'billing@example.com', 'closing@abctitle.com']));
+    });
+  });
+
+  describe('round 18: account lookup, settlement at publish, confirmed amount, visit history', () => {
+    test('a secondary property whose account-holder lookup fails stays held (never emailed to the on-site contact)', async () => {
+      const secondary = { ...CUSTOMER, account_id: 'acct-1', is_primary_profile: false };
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }), customer: secondary });
+      const base = db.getMockImplementation();
+      let customerReads = 0;
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'customers') {
+          c.first = jest.fn(async () => { customerReads += 1; if (customerReads > 1) throw new Error('db down'); return secondary; });
+        }
+        return c;
+      });
+      const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(result.released).toBe(false);
+      expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+      expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(true);
+    });
+
+    test('an invoice that reopened during the PDF work keeps the report held: no link, no email, no attempt burned', async () => {
+      const { updates } = mockTables({
+        project: wdoProject({ report_hold_status: 'held' }),
+        // the first read (before the PDF) says paid; the locked read at publish says it reopened
+        invoiceFirstResults: [invoiceRow({ status: 'paid' }), invoiceRow({ status: 'sent' })],
+      });
+      const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(result).toMatchObject({ released: false, reason: 'invoice_not_settled' });
+      expect((updates.projects || []).some((u) => u.report_token)).toBe(false);
+      expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+      const revert = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+      expect(revert).not.toHaveProperty('report_hold_last_error');
+    });
+
+    test('a held send without the confirmed fingerprint is refused, and nothing is sent', async () => {
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor({ expected_billing_fingerprint: undefined }));
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('hold_invoice_changed');
+      });
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(false);
+    });
+
+    test('publishing a held report that was closed out gives the visit record its report link back', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held', service_record_id: 'sr-1', report_token: 'tok-1' }), invoice: invoiceRow({ status: 'paid' }) });
+      const base = db.getMockImplementation();
+      const srWrites = [];
+      db.mockImplementation((table) => (table === 'service_records'
+        ? chain({ update: jest.fn(async (payload) => { srWrites.push(payload); return 1; }) })
+        : base(table)));
+      const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(result.released).toBe(true);
+      expect(srWrites).toHaveLength(1);
+      expect(srWrites[0].structured_notes.sql).toMatch(/jsonb_set\(structured_notes, '\{projectReport\}'/);
+      expect(srWrites[0].structured_notes.bindings[0]).toBe('tok-1');
     });
   });
 

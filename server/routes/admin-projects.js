@@ -74,10 +74,12 @@ const { getInvoiceEmailRecipients, withAccountPrimaryContactStrict } = require('
 // with no email of its own takes the account primary's email and first name.
 // The phone stays the row's own (project texts are unchanged). An unreadable
 // account primary leaves the role unknown, which withholds.
-async function loadProjectCustomer(customerId) {
+// strict (the unattended hold release): a failed account-holder lookup throws instead of falling back to the property
+// row, which would lose the manager role that keeps reports from on-site occupants. The release stays held and retries.
+async function loadProjectCustomer(customerId, { strict = false } = {}) {
   const row = await db('customers').where({ id: customerId }).first();
   if (!row) return row;
-  const full = await withAccountPrimaryContactStrict(row).catch(() => null);
+  const full = await withAccountPrimaryContactStrict(row).catch((err) => { if (strict) throw err; return null; });
   if (!full || full === row) return row;
   return { ...row, email: full.email, first_name: full.first_name, account_contact_role: full.account_contact_role };
 }
@@ -3729,6 +3731,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const updatedProject = await db('projects').where({ id: req.params.id }).first();
     const reportPath = await projectReportPathForProject(db, updatedProject, customer || {});
     const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
+    await restoreHeldVisitReportLink(updatedProject, reportPath);
     const typeCfg = getProjectType(project.project_type);
     const typeLabel = typeCfg?.label || 'Service';
     const firstName = customer?.first_name || 'there';
@@ -4161,7 +4164,7 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
     const invoice = await loadSettledHoldInvoice(project);
     // Not due yet is not a delivery failure: no attempt is burned.
     if (!invoice) return await revertToHeld('invoice_not_settled', { countAttempt: false });
-    ctx.customer = project.customer_id ? await loadProjectCustomer(project.customer_id) : null;
+    ctx.customer = project.customer_id ? await loadProjectCustomer(project.customer_id, { strict: true }) : null;
     const blocked = await heldReleaseBlocker(project, ctx.customer);
     if (blocked) return await revertToHeld(blocked);
 
@@ -4169,8 +4172,9 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
     // and no portal visibility behind.
     const pdf = await buildAndArchiveHeldReportPdf({ project, customer: ctx.customer, invoice, source });
     if (pdf.error) return await revertToHeld(pdf.error);
-    const link = await stampHeldReportLink({ project, projectCols, ownClaim, customer: ctx.customer });
+    const link = await stampHeldReportLink({ project, projectCols, ownClaim, customer: ctx.customer, invoice });
     if (!link) return { released: false, reason: 'claim_superseded' };
+    if (link.unsettled) return await revertToHeld('invoice_not_settled', { countAttempt: false });
     // Lease renewal and ownership recheck right before the provider calls.
     // The archived filing's reference is written BEFORE the email goes, in the same fenced update: a retry
     // after a crash then records the filing that was actually sent.
@@ -4307,8 +4311,8 @@ async function heldReleaseBlocker(project, customer) {
 }
 
 // Report link and portal stamps, as /send does (a hold send minted no link).
-// Returns { token, refreshed, reportUrl }, or null when the claim was lost.
-async function stampHeldReportLink({ project, projectCols, ownClaim, customer }) {
+// Returns { token, refreshed, reportUrl }, { unsettled: true } when the invoice reopened, or null when the claim was lost.
+async function stampHeldReportLink({ project, projectCols, ownClaim, customer, invoice }) {
   const token = project.report_token || crypto.randomBytes(16).toString('hex');
   const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
     logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
@@ -4320,9 +4324,20 @@ async function stampHeldReportLink({ project, projectCols, ownClaim, customer })
   if (projectCols.portal_visibility) tokenUpdate.portal_visibility = profile?.portalVisibility || project.portal_visibility || 'token_only';
   if (projectCols.portal_attach_policy) tokenUpdate.portal_attach_policy = profile?.portalAttachPolicy || project.portal_attach_policy || 'active_portal_customer';
   if (projectCols.completion_profile_snapshot && profile) tokenUpdate.completion_profile_snapshot = JSON.stringify(profile);
-  if (!(await db('projects').where(ownClaim).update(tokenUpdate))) return null;
+  // The link is published only while the bound invoice is still settled, read under its row lock in the same
+  // transaction: a credit reversal or refund that reopened it during the PDF work keeps the report held.
+  const published = await db.transaction(async (trx) => {
+    // Project row first, then the invoice: the order arming takes them in.
+    if (!(await trx('projects').where({ ...ownClaim, invoice_id: invoice.id }).forUpdate().first('id'))) return 'lost';
+    const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first('status');
+    if (!locked || !['paid', 'prepaid'].includes(String(locked.status || '').toLowerCase())) return 'unsettled';
+    return (await trx('projects').where({ ...ownClaim, invoice_id: invoice.id }).update(tokenUpdate)) ? 'ok' : 'lost';
+  });
+  if (published === 'unsettled') return { unsettled: true };
+  if (published !== 'ok') return null;
   const refreshed = await db('projects').where({ id: project.id }).first();
   const reportPath = await projectReportPathForProject(db, refreshed, customer);
+  await restoreHeldVisitReportLink(refreshed, reportPath);
   return { token, refreshed, reportUrl: `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}` };
 }
 
@@ -4366,6 +4381,24 @@ async function buildAndArchiveHeldReportPdf({ project, customer, invoice, source
   } catch (err) {
     return { error: `FDACS PDF build or archive failed: ${err.message}` };
   }
+}
+
+// A held report closed out with no link: the visit's record says so (structured_notes.projectReport, read by the
+// customer's service history). When the report is published (the release or a manual Send report), the record gets
+// the link the closeout would have written: the URL only for a visit the closeout attached to the portal, else the
+// token alone. Best effort: a failed write leaves the visit without its history link, never stops the delivery.
+async function restoreHeldVisitReportLink(project, reportPath) {
+  if (!isReportHeld(project) || !project.service_record_id || !project.report_token) return;
+  await db('service_records')
+    .where({ id: project.service_record_id })
+    .whereRaw("structured_notes->>'projectId' = ?", [String(project.id)])
+    .update({
+      structured_notes: db.raw(
+        "jsonb_set(structured_notes, '{projectReport}', jsonb_build_object('token', ?::text, 'url', CASE WHEN coalesce((structured_notes->>'portalAttached')::boolean, false) THEN ?::text END, 'tokenOnly', NOT coalesce((structured_notes->>'portalAttached')::boolean, false)))",
+        [project.report_token, reportPath || null],
+      ),
+    })
+    .catch((err) => logger.warn(`[projects] visit report link not restored for ${project.id}: ${err.message}`));
 }
 
 // A manual Send report of a held (or releasing) WDO report: the held invoice and this send's claim, or null.
@@ -4976,9 +5009,10 @@ async function armReportHold({ hold, project, invoice, customer, expectedFingerp
     assertHoldArmable({ locked, lockedInvoice, intendedCustomerIds: [project.customer_id, invoice.customer_id] });
     // The email, the PDF and the pay link all show the invoice as it is NOW: if it changed since this send read it,
     // nothing is sent (a stale amount in the email beside a different amount on the pay link).
-    // ...and, when the drawer sent the fingerprint of the amount the operator confirmed, the locked invoice is that one.
+    // ...and the locked invoice is the one the operator confirmed: a held send must carry the preview's fingerprint
+    // (a send without one refuses, so an amount that changed before the request began cannot go out unconfirmed).
     if (billingFingerprint(lockedInvoice) !== billingFingerprint(invoice)
-      || (expectedFingerprint && String(expectedFingerprint) !== billingFingerprintHash(lockedInvoice))) {
+      || String(expectedFingerprint || '') !== billingFingerprintHash(lockedInvoice)) {
       throw holdRefusal(409, 'hold_invoice_changed', 'The invoice changed while this was being sent. Nothing was sent. Refresh and send again.');
     }
     const notReleasable = await holdReleasabilityRefusal(locked, customer);
@@ -6570,6 +6604,7 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
 });
 
 router._private = {
+  billingFingerprintHash,
   filingKeyPart,
   resumableReleaseFiling,
   pretreatSentSnapshot,
