@@ -2154,8 +2154,8 @@
       {
         "visit": 2,
         "month": "Any",
-        "primary": "Source Reduction / Larval Support\nWalk the yard: count the containers that hold water and the ones with larvae\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nLarvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond\nOr an Altosid 30-day briquet in the same water, when dunks are out",
-        "secondary": "Recheck the breeding sources from the last visit\nFlag drainage, irrigation, screen or gutter problems\nExplain that adults can still fly in when the water is off the property",
+        "primary": "Source Reduction / Larval Support\nWalk the yard: count the containers that hold water and the ones with larvae\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nLarvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond",
+        "secondary": "Or an Altosid 30-day briquet in the same water, when dunks are out\nRecheck the breeding sources from the last visit\nFlag drainage, irrigation, screen or gutter problems\nExplain that adults can still fly in when the water is off the property",
         "material_cost": "inventory",
         "labor_cost": "standard",
         "tiers": {
@@ -2250,8 +2250,8 @@
       {
         "visit": 4,
         "month": "Any",
-        "primary": "Mosquito Callback\nAsk the customer where and when they are bitten\nWalk the yard: count the containers that hold water and the ones with larvae\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nLarvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond\nOr an Altosid 30-day briquet in the same water, when dunks are out",
-        "secondary": "Spray only if adults are resting: LESCO Crosscheck Plus at its low rate, on shaded resting sites, with no repeat inside 7 days. No PolyZone or Tekko Pro before day 21\nNote why pressure came back: new water, a neighbor's yard, rain, or a missed area",
+        "primary": "Mosquito Callback\nAsk the customer where and when they are bitten\nWalk the yard: count the containers that hold water and the ones with larvae\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nLarvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond",
+        "secondary": "Or an Altosid 30-day briquet in the same water, when dunks are out\nSpray only if adults are resting: LESCO Crosscheck Plus at its low rate, on shaded resting sites, with no repeat inside 7 days. No PolyZone or Tekko Pro before day 21\nNote why pressure came back: new water, a neighbor's yard, rain, or a missed area",
         "lineMeta": {
           "Spray only if adults are resting: LESCO Crosscheck Plus at its low rate, on shaded resting sites, with no repeat inside 7 days. No PolyZone or Tekko Pro before day 21": {
             "scope": "exterior",

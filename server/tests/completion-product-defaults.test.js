@@ -437,6 +437,11 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
       expect([serviceType, result.programKey, result.source, result.names]).toEqual([serviceType, 'mosquito', 'protocol_visit', ['Suspend Polyzone', 'Tekko Pro IGR']]);
     }
     // Source reduction prefills nothing: the tech picks the dunk or the briquet.
+    // The briquet is the fallback when dunks are out: never base work beside the dunk on any card (Codex #8615 r1).
+    for (const visit of realProtocols.mosquito.visits) {
+      const briquet = Object.keys(visit.lineMeta || {}).find((line) => line.startsWith('Or an Altosid'));
+      if (briquet) expect([visit.visit, visit.primary.split('\n').includes(briquet), visit.secondary.split('\n').includes(briquet)]).toEqual([visit.visit, false, true]);
+    }
     expect(realProtocols.mosquito.visits.find((v) => v.visit === 2).completionDefaultProducts).toBeUndefined();
     // A callback (booked from a finished visit, or named so) prefills no spray: PolyZone repeats only at 21 days, Tekko Pro outdoors not inside 14.
     for (const args of [{ serviceType: 'Monthly Mosquito Control Service', serviceKey: 'mosquito_monthly', isFollowup: true }, { serviceType: 'Mosquito Callback' }, { serviceType: 'Mosquito Control Re-Service' }]) {
